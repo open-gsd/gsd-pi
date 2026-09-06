@@ -21,6 +21,7 @@ import { GsdGitIntegration } from "./git-integration.js";
 import { GsdPermissionManager } from "./permissions.js";
 import { GsdPlanViewerProvider } from "./plan-viewer.js";
 import { GsdCheckpointProvider } from "./checkpoints.js";
+import { registerCopilotTools } from "./copilot-tools.js";
 import {
 	formatSessionStatsLines,
 	getBashExitCode,
@@ -298,6 +299,7 @@ export function activate(context: vscode.ExtensionContext): void {
 	// -- Chat participant ---------------------------------------------------
 
 	context.subscriptions.push(registerChatParticipant(context, client));
+	registerCopilotTools(context, client);
 
 	// -- Conversation history panel ----------------------------------------
 

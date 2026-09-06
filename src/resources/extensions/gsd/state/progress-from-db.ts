@@ -148,8 +148,11 @@ async function readProgressFromDbInternal(
   // Read-only surface: never mutate. The queue-order projection sync stays a
   // runtime derive/dispatch repair (see docs/user-docs/auto-mode.md); read
   // paths report the DB-authoritative order as-is even when the file is newer.
-  ensureExistingWorkflowDbOpen(basePath, { throwOnOpenFailure, syncQueueOrder: false });
-  if (!isDbAvailable()) return null;
+  const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath, {
+    throwOnOpenFailure,
+    syncQueueOrder: false,
+  });
+  if (!openedRequestedDb || !isDbAvailable()) return null;
 
   invalidateStateCache();
   for (let attempt = 1; ; attempt++) {

@@ -24,6 +24,11 @@ import {
   type OpenQuestionRow,
   type VerificationSummaryCounts,
 } from "../gsd-db.js";
+import {
+  closeWorkflowDatabase as closeDatabase,
+  getWorkflowDatabasePath as getDbPath,
+  openWorkflowDatabasePath as openDatabase,
+} from "../db-workspace.js";
 import type { GSDState } from "../types.js";
 
 const MAX_REVISION_ATTEMPTS = 3;
@@ -68,6 +73,10 @@ export interface DbProjectSnapshot {
   verification: VerificationSummaryCounts;
   milestones: { items: DbProjectSnapshotMilestone[]; truncated: boolean };
   capturedAt: string;
+}
+
+export interface ReadProjectSnapshotOptions {
+  preserveGlobalDbHandle?: boolean;
 }
 
 interface SnapshotStabilityToken {
@@ -182,24 +191,38 @@ function buildCurrent(state: GSDState): DbProjectSnapshotCurrent {
  * derive/dispatch repair, so the snapshot reports DB-authoritative order
  * as-is even when QUEUE-ORDER.json is newer.
  */
-export async function readProjectSnapshotFromDb(basePath: string): Promise<DbProjectSnapshot | null> {
-  ensureExistingWorkflowDbOpen(basePath, { syncQueueOrder: false });
-  if (!isDbAvailable()) return null;
+export async function readProjectSnapshotFromDb(
+  basePath: string,
+  opts: ReadProjectSnapshotOptions = {},
+): Promise<DbProjectSnapshot | null> {
+  const previousDbPath = opts.preserveGlobalDbHandle ? getDbPath() : null;
+  try {
+    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath, { syncQueueOrder: false });
+    if (!openedRequestedDb || !isDbAvailable()) return null;
 
-  invalidateStateCache();
-  for (let attempt = 1; ; attempt++) {
-    const before = readStabilityToken();
-    const dbRead = readSnapshotDb();
-    const state = await deriveState(basePath, { syncQueueOrder: false });
-    const after = readStabilityToken();
-
-    if (stabilityTokensMatch(before, after) || attempt === MAX_REVISION_ATTEMPTS) {
-      return {
-        ...dbRead,
-        current: buildCurrent(state),
-        capturedAt: new Date().toISOString(),
-      };
-    }
     invalidateStateCache();
+    for (let attempt = 1; ; attempt++) {
+      const before = readStabilityToken();
+      const dbRead = readSnapshotDb();
+      const state = await deriveState(basePath, { syncQueueOrder: false });
+      const after = readStabilityToken();
+
+      if (stabilityTokensMatch(before, after) || attempt === MAX_REVISION_ATTEMPTS) {
+        return {
+          ...dbRead,
+          current: buildCurrent(state),
+          capturedAt: new Date().toISOString(),
+        };
+      }
+      invalidateStateCache();
+    }
+  } finally {
+    if (opts.preserveGlobalDbHandle && getDbPath() !== previousDbPath) {
+      if (previousDbPath) {
+        openDatabase(previousDbPath);
+      } else {
+        closeDatabase();
+      }
+    }
   }
 }

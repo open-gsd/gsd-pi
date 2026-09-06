@@ -3,7 +3,7 @@
 
 import type { GSDState } from '../../types.js';
 import { getAllMilestones, isDbAvailable, isSchemaTooNewError, setMilestoneQueueOrder } from '../../gsd-db.js';
-import { openExistingWorkflowDatabase, type WorkflowDatabaseOpenResult } from '../../db-workspace.js';
+import { getWorkflowDatabasePath as getDbPath, openExistingWorkflowDatabase, resolveProjectRootDbPath, type WorkflowDatabaseOpenResult } from '../../db-workspace.js';
 import { loadQueueOrder, sortByQueueOrder } from '../../queue-order.js';
 
 export function syncQueueOrderProjectionToDb(basePath: string): void {
@@ -22,7 +22,9 @@ export function ensureExistingWorkflowDbOpen(
   options: { throwOnOpenFailure?: boolean; syncQueueOrder?: boolean } = {},
 ): boolean {
   const syncQueueOrder = options.syncQueueOrder !== false;
-  if (isDbAvailable()) {
+  const requestedDbPath = resolveProjectRootDbPath(basePath);
+  const currentDbPath = getDbPath();
+  if (isDbAvailable() && (currentDbPath === requestedDbPath || currentDbPath === ":memory:")) {
     if (syncQueueOrder) syncQueueOrderProjectionToDb(basePath);
     return true;
   }

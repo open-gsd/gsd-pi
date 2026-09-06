@@ -11,7 +11,7 @@ import type { SessionStats } from "@gsd/agent-core";
 import type { BashResult } from "@gsd/agent-core";
 import type { CompactionResult } from "@gsd/agent-core/compaction/index.js";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.js";
-import type { ProjectProgress, RpcCommand, RpcInitResult, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.js";
+import type { ProjectProgress, ProjectSnapshot, RpcCommand, RpcInitResult, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.js";
 
 // ============================================================================
 // Types
@@ -243,6 +243,11 @@ export class RpcClient {
 
 	async getProjectProgress(): Promise<ProjectProgress | null> {
 		const response = await this.send({ type: "get_project_progress" });
+		return this.getData(response);
+	}
+
+	async getProjectSnapshot(): Promise<ProjectSnapshot | null> {
+		const response = await this.send({ type: "get_project_snapshot" });
 		return this.getData(response);
 	}
 

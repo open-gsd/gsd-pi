@@ -444,6 +444,11 @@ export class RpcClient {
 		return this.getData(response);
 	}
 
+	async getProjectSnapshot(): Promise<import("@opengsd/contracts").ProjectSnapshot | null> {
+		const response = await this.send({ type: "get_project_snapshot" });
+		return this.getData(response);
+	}
+
 	/**
 	 * Export session to HTML.
 	 */

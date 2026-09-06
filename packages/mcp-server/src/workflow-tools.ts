@@ -2946,7 +2946,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_project_snapshot",
-    "Read the full project snapshot from the GSD database (DB-authoritative, never projections). Returns requirements, decisions, milestones, and authority revision in one payload.",
+    "Read the project snapshot from the GSD database (DB-authoritative, never projections). Returns authority, current focus, progress, blockers, open questions, verification, and bounded milestones in one payload.",
     {
       projectDir: z
         .string()
@@ -2964,7 +2964,7 @@ export function registerWorkflowTools(
             await importWorkflowRuntimeModule<any>(
               "../../../src/resources/extensions/gsd/state/project-snapshot.js",
             )
-          ).readProjectSnapshotFromDb(projectDir);
+          ).readProjectSnapshotFromDb(projectDir, { preserveGlobalDbHandle: true });
           if (!snapshot) {
             throw new Error("Database adapter not available (db_unavailable)");
           }

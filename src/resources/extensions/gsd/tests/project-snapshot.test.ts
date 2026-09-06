@@ -7,9 +7,10 @@
 
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 
 import {
   _getAdapter,
@@ -505,4 +506,41 @@ test("readProjectSnapshotFromDb returns the last attempt during sustained revisi
     3,
     "sustained movement must stop at MAX_REVISION_ATTEMPTS and return the last attempt",
   );
+});
+
+test("readProjectSnapshotFromDb reopens the requested project instead of reusing another global DB", async (t) => {
+  const first = await createWorkflowAuthorityFixture();
+  const second = await createWorkflowAuthorityFixture();
+  t.after(() => {
+    first.cleanup();
+    second.cleanup();
+  });
+
+  first.reopen();
+  const firstAuthority = getProjectAuthorityRow();
+  assert.ok(firstAuthority);
+
+  const secondSnapshot = await readProjectSnapshotFromDb(second.root);
+  assert.ok(secondSnapshot);
+
+  assert.notEqual(secondSnapshot.authority.projectId, firstAuthority.projectId);
+  assert.equal(secondSnapshot.current.activeMilestone?.title, "Authority Fixture");
+});
+
+test("readProjectSnapshotFromDb returns null for a missing requested DB instead of reusing an open global DB", async (t) => {
+  const existing = await createWorkflowAuthorityFixture();
+  const missingRoot = join(tmpdir(), `gsd-project-snapshot-missing-${randomUUID()}`);
+  mkdirSync(join(missingRoot, ".gsd"), { recursive: true });
+  t.after(() => {
+    existing.cleanup();
+    rmSync(missingRoot, { recursive: true, force: true });
+  });
+
+  existing.reopen();
+  const existingAuthority = getProjectAuthorityRow();
+  assert.ok(existingAuthority);
+
+  const missingSnapshot = await readProjectSnapshotFromDb(missingRoot);
+
+  assert.equal(missingSnapshot, null);
 });

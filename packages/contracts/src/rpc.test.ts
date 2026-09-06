@@ -19,7 +19,7 @@ test("rpc contract version is stable and public", () => {
 
 test("rpc command constants cover the public v2 handshake and core commands", () => {
 	assert.deepEqual(
-		["init", "prompt", "get_state", "bash", "get_session_stats", "shutdown"].filter(
+		["init", "prompt", "get_state", "get_project_progress", "get_project_snapshot", "bash", "get_session_stats", "shutdown"].filter(
 			(command) => !RPC_COMMAND_TYPES.includes(command as (typeof RPC_COMMAND_TYPES)[number])
 		),
 		[]

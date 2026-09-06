@@ -45,7 +45,12 @@ export async function deriveState(
   const stopTimer = debugTime("derive-state-impl");
   let result: GSDState;
 
-  ensureExistingWorkflowDbOpen(basePath, { syncQueueOrder: opts?.syncQueueOrder });
+  // Resolve/open through the canonical read root, matching deriveStateFromDb
+  // below — otherwise a worktree basePath with projectRootForReads can open
+  // the wrong (or no) DB while deriveStateFromDb still reads the correct one.
+  ensureExistingWorkflowDbOpen(opts?.projectRootForReads ?? basePath, {
+    syncQueueOrder: opts?.syncQueueOrder,
+  });
 
   if (isDbAvailable()) {
     const stopDbTimer = debugTime("derive-state-db");

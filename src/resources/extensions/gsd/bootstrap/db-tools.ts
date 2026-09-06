@@ -3359,7 +3359,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
 			const snapshot = await withCanonicalReadAdapter(
 				basePath,
-				async () => readProjectSnapshotFromDb(basePath),
+				async () => readProjectSnapshotFromDb(basePath, { preserveGlobalDbHandle: true }),
 			);
 			if (!snapshot) {
 				// The adapter preflight succeeded but the reader could not open

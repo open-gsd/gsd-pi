@@ -5,7 +5,9 @@
 
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
@@ -201,6 +203,21 @@ test("readProgressFromDb reflects DB state, never stale projection files", async
   assert.equal(result.activeMilestone?.id, "M001");
   assert.notEqual(result.activeMilestone?.title, "Stale Projection");
   assert.notEqual(result.nextAction, "Stale action from projection");
+});
+
+test("readProgressFromDb returns null for a missing requested DB instead of reusing an open global DB", async (t) => {
+  const existing = await createWorkflowAuthorityFixture();
+  const missingRoot = join(tmpdir(), `gsd-progress-missing-${randomUUID()}`);
+  mkdirSync(join(missingRoot, ".gsd"), { recursive: true });
+  t.after(() => {
+    existing.cleanup();
+    rmSync(missingRoot, { recursive: true, force: true });
+  });
+
+  existing.reopen();
+  const result = await readProgressFromDb(missingRoot);
+
+  assert.equal(result, null);
 });
 
 test("readProgressFromDb retries when the authority revision moves", async (t) => {

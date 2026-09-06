@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { invokeProjectProgressRead } from "./rpc-mode.js";
+import { invokeProjectProgressRead, invokeProjectSnapshotRead } from "./rpc-mode.js";
 
 test("project progress read forwards the active session CWD and request ID", async () => {
 	let receivedInput: unknown;
@@ -38,5 +38,44 @@ test("project progress reader failures preserve the request ID", async () => {
 		command: "get_project_progress",
 		success: false,
 		error: "database unavailable",
+	});
+});
+
+test("project snapshot read forwards the active session CWD and request ID", async () => {
+	let receivedInput: unknown;
+	const response = await invokeProjectSnapshotRead(
+		async (input) => {
+			receivedInput = input;
+			return { capturedAt: "2026-09-06T00:00:00.000Z" };
+		},
+		"request-789",
+		"/workspace/project",
+	);
+
+	assert.deepEqual(receivedInput, { cwd: "/workspace/project" });
+	assert.deepEqual(response, {
+		id: "request-789",
+		type: "response",
+		command: "get_project_snapshot",
+		success: true,
+		data: { capturedAt: "2026-09-06T00:00:00.000Z" },
+	});
+});
+
+test("project snapshot reader failures preserve the request ID", async () => {
+	const response = await invokeProjectSnapshotRead(
+		async () => {
+			throw new Error("snapshot unavailable");
+		},
+		"request-987",
+		"/workspace/project",
+	);
+
+	assert.deepEqual(response, {
+		id: "request-987",
+		type: "response",
+		command: "get_project_snapshot",
+		success: false,
+		error: "snapshot unavailable",
 	});
 });

@@ -23,6 +23,7 @@ import type {
 	RpcProtocolVersion,
 	RpcSessionState,
 	ProjectProgress,
+	ProjectSnapshot,
 } from "./rpc-types.js";
 
 // ============================================================================
@@ -383,6 +384,72 @@ describe("v2 type shapes", () => {
 			"requirements",
 			"slices",
 			"tasks",
+		].sort());
+	});
+
+	it("project snapshot command preserves the bounded snapshot payload shape", () => {
+		const command: RpcCommand = { type: "get_project_snapshot" };
+		const snapshot: ProjectSnapshot = {
+			authority: {
+				projectId: "project-1",
+				schemaVersion: 1,
+				revision: 7,
+				authorityEpoch: 2,
+			},
+			current: {
+				activeMilestone: { id: "M001", title: "Milestone" },
+				activeSlice: { id: "S001", title: "Slice" },
+				activeTask: { id: "T001", title: "Task" },
+				phase: "execute",
+				nextAction: "Implement the task",
+			},
+			progress: {
+				milestones: { total: 1, done: 0, active: 1, pending: 0, parked: 0 },
+				slices: { total: 1, done: 0, active: 1, pending: 0 },
+				tasks: { total: 1, done: 0, pending: 1 },
+			},
+			blockers: [{
+				blockerId: "B001",
+				blockerKind: "approval",
+				resolutionOwner: "maintainer",
+				description: "Needs review",
+				requestedAction: "Review the plan",
+				openedAt: "2026-09-06T00:00:00.000Z",
+				openedProjectRevision: 7,
+			}],
+			openQuestions: [{
+				questionId: "Q001",
+				questionText: "Should the tool be enabled?",
+				createdAt: "2026-09-06T00:00:00.000Z",
+			}],
+			verification: {
+				assessments: { total: 1, pass: 1, fail: 0 },
+				evidence: { total: 1, passed: 1, failed: 0 },
+			},
+			milestones: {
+				items: [{ id: "M001", title: "Milestone", status: "active", sequence: 1 }],
+				truncated: false,
+			},
+			capturedAt: "2026-09-06T00:00:00.000Z",
+		};
+		const response: RpcResponse = {
+			type: "response",
+			command: command.type,
+			success: true,
+			data: snapshot,
+		};
+
+		assert.equal(command.type, "get_project_snapshot");
+		assert.deepEqual(response.data, snapshot);
+		assert.deepEqual(Object.keys(snapshot).sort(), [
+			"authority",
+			"blockers",
+			"capturedAt",
+			"current",
+			"milestones",
+			"openQuestions",
+			"progress",
+			"verification",
 		].sort());
 	});
 });
