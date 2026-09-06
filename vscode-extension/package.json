@@ -353,11 +353,7 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gsdProjectProgress",
         "icon": "$(graph)",
-        "tags": ["gsd", "project", "progress"],
-        "inputSchema": {
-          "type": "object",
-          "properties": {}
-        }
+        "tags": ["gsd", "project", "progress"]
       },
       {
         "name": "gsd_project_snapshot",
@@ -367,11 +363,7 @@
         "canBeReferencedInPrompt": true,
         "toolReferenceName": "gsdProjectSnapshot",
         "icon": "$(database)",
-        "tags": ["gsd", "project", "snapshot"],
-        "inputSchema": {
-          "type": "object",
-          "properties": {}
-        }
+        "tags": ["gsd", "project", "snapshot"]
       }
     ],
     "configuration": {

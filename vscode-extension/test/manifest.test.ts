@@ -30,7 +30,7 @@ function readPackage(): {
 			userDescription?: string;
 			canBeReferencedInPrompt?: boolean;
 			toolReferenceName?: string;
-			inputSchema?: { type?: string; properties?: Record<string, unknown> };
+			inputSchema?: unknown;
 			readOnlyHint?: boolean;
 		}>;
 		views: Record<string, Array<{ id: string }>>;
@@ -139,8 +139,7 @@ test("Copilot read tools are contributed and registered against the existing RPC
 		assert.equal(typeof tool.displayName, "string");
 		assert.equal(typeof tool.modelDescription, "string");
 		assert.equal(tool.canBeReferencedInPrompt, true);
-		assert.equal(tool.inputSchema?.type, "object");
-		assert.deepEqual(tool.inputSchema?.properties, {});
+		assert.equal(tool.inputSchema, undefined);
 		assert.equal("readOnlyHint" in tool, false);
 	}
 
@@ -150,6 +149,9 @@ test("Copilot read tools are contributed and registered against the existing RPC
 	assert.match(toolSource, /vscode\.lm\.registerTool\("gsd_project_snapshot", new ProjectSnapshotTool\(client\)\)/);
 	assert.match(toolSource, /The result is read-only, but it will be sent to the active chat\/model context/);
 	assert.match(toolSource, /GSD project read tools do not accept input parameters/);
+	assert.match(toolSource, /GSD project read tools require exactly one workspace folder/);
+	assert.match(toolSource, /GSD project read was cancelled/);
+	assert.match(toolSource, /GSD agent is not connected/);
 	assert.match(toolSource, /this\.client\.getProjectProgress\(\)/);
 	assert.match(toolSource, /this\.client\.getProjectSnapshot\(\)/);
 	assert.doesNotMatch(toolSource, /new GsdClient/);

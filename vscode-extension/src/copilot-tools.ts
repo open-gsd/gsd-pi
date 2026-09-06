@@ -15,9 +15,27 @@ function toJsonToolResult(value: unknown): vscode.LanguageModelToolResult {
 }
 
 function assertEmptyInput(input: unknown): void {
-	if (input && typeof input === "object" && Object.keys(input).length > 0) {
+	if (input === null || typeof input !== "object" || Array.isArray(input) || Object.keys(input).length > 0) {
 		throw new Error("GSD project read tools do not accept input parameters. They use the active workspace project.");
 	}
+}
+
+function assertSingleWorkspaceRoot(): void {
+	const workspaceFolders = vscode.workspace.workspaceFolders ?? [];
+	if (workspaceFolders.length !== 1) {
+		throw new Error("GSD project read tools require exactly one workspace folder. Open the target project in its own VS Code window.");
+	}
+}
+
+async function awaitWithCancellation<T>(operation: Promise<T>, token: vscode.CancellationToken): Promise<T> {
+	if (token.isCancellationRequested) {
+		throw new Error("GSD project read was cancelled.");
+	}
+
+	return await new Promise<T>((resolve, reject) => {
+		const cancellation = token.onCancellationRequested(() => reject(new Error("GSD project read was cancelled.")));
+		operation.then(resolve, reject).finally(() => cancellation.dispose());
+	});
 }
 
 function readConfirmationMessages(title: string, detail: string): vscode.LanguageModelToolConfirmationMessages {
@@ -42,10 +60,14 @@ export class ProjectProgressTool implements vscode.LanguageModelTool<EmptyToolIn
 
 	async invoke(
 		options: vscode.LanguageModelToolInvocationOptions<EmptyToolInput>,
-		_token: vscode.CancellationToken,
+		token: vscode.CancellationToken,
 	): Promise<vscode.LanguageModelToolResult> {
 		assertEmptyInput(options.input);
-		return toJsonToolResult(await this.client.getProjectProgress());
+		assertSingleWorkspaceRoot();
+		if (!this.client.isConnected) {
+			throw new Error("GSD agent is not connected. Start the GSD agent, then retry the project progress read.");
+		}
+		return toJsonToolResult(await awaitWithCancellation(this.client.getProjectProgress(), token));
 	}
 }
 
@@ -64,10 +86,14 @@ export class ProjectSnapshotTool implements vscode.LanguageModelTool<EmptyToolIn
 
 	async invoke(
 		options: vscode.LanguageModelToolInvocationOptions<EmptyToolInput>,
-		_token: vscode.CancellationToken,
+		token: vscode.CancellationToken,
 	): Promise<vscode.LanguageModelToolResult> {
 		assertEmptyInput(options.input);
-		return toJsonToolResult(await this.client.getProjectSnapshot());
+		assertSingleWorkspaceRoot();
+		if (!this.client.isConnected) {
+			throw new Error("GSD agent is not connected. Start the GSD agent, then retry the project snapshot read.");
+		}
+		return toJsonToolResult(await awaitWithCancellation(this.client.getProjectSnapshot(), token));
 	}
 }
 
