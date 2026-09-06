@@ -1,0 +1,74 @@
+{
+  "name": "@opengsd/openclaw-plugin",
+  "version": "1.17.0",
+  "description": "OpenClaw plugin for GSD Pi — /gsd commands, supervised headless runs, and chat notifications",
+  "license": "MIT",
+  "gsd": {
+    "linkable": true,
+    "scope": "@opengsd",
+    "name": "openclaw-plugin"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/open-gsd/gsd-pi.git",
+    "directory": "packages/openclaw-plugin"
+  },
+  "homepage": "https://github.com/open-gsd/gsd-pi/tree/main/packages/openclaw-plugin#readme",
+  "bugs": {
+    "url": "https://github.com/open-gsd/gsd-pi/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "npmSpec": "@opengsd/openclaw-plugin",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.8.1"
+    },
+    "compat": {
+      "pluginApi": ">=2026.8.1",
+      "minGatewayVersion": "2026.8.1"
+    },
+    "build": {
+      "openclawVersion": "2026.8.2",
+      "pluginSdkVersion": "2026.8.2"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false",
+    "test": "pnpm run build && node --test-force-exit --test dist/*.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "gsd",
+    "opengsd",
+    "coding-agent"
+  ]
+}

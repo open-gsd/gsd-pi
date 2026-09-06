@@ -1,0 +1,42 @@
+{
+  "id": "open-gsd-openclaw",
+  "name": "Open GSD",
+  "description": "GSD Pi structured delivery engine: /gsd commands, supervised headless runs, and chat notifications",
+  "version": "1.17.0",
+  "activation": {
+    "onStartup": true
+  },
+  "commandAliases": [
+    {
+      "name": "gsd",
+      "kind": "runtime-slash"
+    }
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "cliPath": {
+        "type": "string",
+        "description": "Path to the gsd CLI binary. Defaults to `gsd` on the Gateway PATH."
+      },
+      "defaultProject": {
+        "type": "string",
+        "description": "Absolute path of the GSD project used when a conversation has no /gsd bind."
+      }
+    }
+  },
+  "uiHints": {
+    "cliPath": {
+      "label": "gsd CLI path",
+      "help": "Leave empty to use `gsd` from the Gateway process PATH.",
+      "placeholder": "/usr/local/bin/gsd",
+      "advanced": true
+    },
+    "defaultProject": {
+      "label": "Default project",
+      "help": "Absolute path to a directory containing .gsd/. Conversations can override it with /gsd bind.",
+      "placeholder": "/home/me/code/myapp"
+    }
+  }
+}

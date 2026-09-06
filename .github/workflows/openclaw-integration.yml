@@ -1,0 +1,102 @@
+# OpenClaw × GSD plugin: package tests, read-seam contract test, and offline plugin compatibility check.
+name: OpenClaw Integration
+
+on:
+  pull_request:
+    paths:
+      - 'packages/openclaw-plugin/**'
+      - 'src/read-cli.ts'
+      - 'src/headless.ts'
+      - 'src/headless-ui.ts'
+      - 'src/headless-events.ts'
+      - '.github/workflows/openclaw-integration.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'packages/openclaw-plugin/**'
+      - 'src/read-cli.ts'
+      - 'src/headless.ts'
+      - 'src/headless-ui.ts'
+      - 'src/headless-events.ts'
+      - '.github/workflows/openclaw-integration.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openclaw-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin-tests:
+    name: plugin-tests
+    timeout-minutes: 20
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build core (gsd read CLI, plugin dist)
+        run: pnpm run build:core
+
+      - name: Compile and run plugin unit tests
+        run: |
+          pnpm run test:compile
+          node --test-force-exit --test "dist-test/packages/openclaw-plugin/src/*.test.js"
+
+      - name: Read-seam contract test (real gsd CLI)
+        run: |
+          mkdir -p /tmp/gsd-contract/.gsd
+          cat > /tmp/gsd-contract/.gsd/STATE.md <<'EOF'
+          # GSD State
+
+          **Active Milestone:** M001: OpenClaw Integration
+          **Active Slice:** S01: Read seam
+          **Active Task:** T01: Contract test
+          **Phase:** execution
+
+          ## Milestone Registry
+
+          - 🔄 **M001:** OpenClaw Integration
+          EOF
+          node dist/loader.js read progress --json --project /tmp/gsd-contract 2>/dev/null > /tmp/gsd-contract/progress.json
+          node -e '
+            const env = JSON.parse(require("fs").readFileSync("/tmp/gsd-contract/progress.json", "utf8"));
+            if (env.integration_version !== 1) throw new Error("integration_version drifted: " + env.integration_version);
+            if (env.data.activeMilestone?.id !== "M001") throw new Error("activeMilestone not parsed: " + JSON.stringify(env.data.activeMilestone));
+            console.log("read seam ok:", env.data.activeMilestone.id, env.data.phase);
+          '
+
+      - name: OpenClaw plugin compatibility (offline)
+        run: |
+          mkdir -p /tmp/plugin-inspector && cd /tmp/plugin-inspector
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund @openclaw/plugin-inspector@0.3.24
+          cd "$GITHUB_WORKSPACE/packages/openclaw-plugin"
+          /tmp/plugin-inspector/node_modules/.bin/plugin-inspector ci --no-openclaw --runtime --mock-sdk --allow-execute
+
+      - name: Upload plugin-inspector reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: plugin-inspector-reports
+          path: packages/openclaw-plugin/reports/plugin-inspector-*
+          if-no-files-found: ignore

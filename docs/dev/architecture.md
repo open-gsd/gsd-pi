@@ -259,3 +259,4 @@ Model routing (complexity classification, budget pressure, routing history, capa
 | Integration | Location | Description |
 |-------------|----------|-------------|
 | **Hermes Agent** | [`integrations/hermes/`](../../integrations/hermes/) | Open GSD plugin (`open-gsd-hermes`) — gateway slash commands, `pre_llm_call` project snapshots, background supervisor, cron headless, memory provider. Uses `gsd-mcp-server` for orchestration (not `gsd --mode mcp`). See [`hermes-integration-plan.md`](hermes-integration-plan.md). |
+| **OpenClaw** | [`packages/openclaw-plugin/`](../../packages/openclaw-plugin/) | Native OpenClaw plugin (`open-gsd-openclaw`, npm `@opengsd/openclaw-plugin`) — `/gsd` chat commands and per-conversation project binding backed by `gsd read --json`; supervised `gsd headless` runs and notifications follow in the next phase. See the package README. |

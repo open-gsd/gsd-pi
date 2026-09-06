@@ -298,6 +298,15 @@ importers:
 
   packages/native: {}
 
+  packages/openclaw-plugin:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.12.0
+        version: 24.12.4
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+
   packages/pi-agent-core:
     dependencies:
       '@earendil-works/pi-ai':
