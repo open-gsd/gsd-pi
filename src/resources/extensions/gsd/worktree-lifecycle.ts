@@ -86,6 +86,10 @@ import { teardownAutoWorktree } from "./auto-worktree-teardown.js";
 import { inspectUncommittedWorktreeState } from "./worktree-manager.js";
 import { resolveRoadmapForMilestoneMerge } from "./milestone-merge-roadmap.js";
 import type { MilestoneMergeTransactionRunner } from "./milestone-merge-transaction.js";
+import {
+  pushIntegrationBranchIfAhead,
+  type PushIfAheadResult,
+} from "./publication.js";
 
 const recentWorktreeMergeFailures = new Map<string, number>();
 const MERGE_FAILURE_DEDUPE_MS = 60_000;
@@ -388,6 +392,11 @@ export interface MergeStandaloneResult {
    * `merged === true`.
    */
   commitMessage?: string;
+  /**
+   * Set when an auto-push attempt at closeout failed (isolation=none skip
+   * path, #2153). Absent when no push ran or the push succeeded.
+   */
+  pushError?: string;
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────
@@ -1379,6 +1388,31 @@ function _mergeBranchModeImpl(
 }
 
 /**
+ * Closeout auto-push for the isolation=none merge skip (#2153). Resolves the
+ * integration branch (the current branch at the project root — isolation:none
+ * commits land there directly) and git preferences through the lifecycle
+ * seams, then delegates to the Publication module.
+ */
+function pushIfAheadAtCloseout(
+  deps: WorktreeLifecycleDeps,
+  basePath: string | undefined,
+  milestoneId: string,
+): PushIfAheadResult {
+  if (!basePath) return { pushed: false };
+  const gitPrefs = lifecycleLoadPreferences(deps, basePath)?.preferences?.git ?? {};
+  return pushIntegrationBranchIfAhead({
+    basePath,
+    branch: currentLifecycleBranch(deps, basePath),
+    milestoneId,
+    prefs: {
+      autoPush: gitPrefs.auto_push === true,
+      autoPr: gitPrefs.auto_pr === true,
+      remote: typeof gitPrefs.remote === "string" ? gitPrefs.remote : undefined,
+    },
+  });
+}
+
+/**
  * Session-less merge entry (ADR-016 phase 2 / A1, issue #5618).
  *
  * Runs the worktree-mode or branch-mode merge body without touching session
@@ -1482,11 +1516,17 @@ export function mergeMilestoneStandalone(
         /* best-effort */
       }
     }
+    // #2153: in isolation:none the milestone work is already committed to the
+    // current branch, so skipping the merge also skipped publication and
+    // auto_push silently never pushed. Honor it here when the branch is ahead
+    // of its upstream; push failure is non-fatal to the closeout.
+    const publication = pushIfAheadAtCloseout(deps, originalBasePath, milestoneId);
     return {
       merged: false,
       mode: "skipped",
       codeFilesChanged: false,
-      pushed: false,
+      pushed: publication.pushed,
+      ...(publication.pushError ? { pushError: publication.pushError } : {}),
     };
   }
 

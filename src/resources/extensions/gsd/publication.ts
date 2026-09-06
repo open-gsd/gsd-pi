@@ -11,11 +11,13 @@
 // logged and reported in the result, never thrown.
 
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 import {
   buildPullRequestEvidence,
   createDraftPullRequestFromEvidence,
 } from "./pull-request-process.js";
+import { emitJournalEvent } from "./journal.js";
 import { logWarning } from "./workflow-logger.js";
 
 export interface PublicationPrefs {
@@ -118,5 +120,88 @@ export function publishMilestone(request: PublicationRequest): PublicationResult
     }
   }
 
+  return result;
+}
+
+export interface PushIfAheadRequest {
+  basePath: string;
+  /** The integration branch to push (e.g. main). Empty disables the push. */
+  branch: string;
+  /** Optional milestone id for the journal event payload. */
+  milestoneId?: string;
+  prefs: PublicationPrefs;
+}
+
+export interface PushIfAheadResult {
+  pushed: boolean;
+  /** Set when a push was attempted and failed. Absent when no push ran. */
+  pushError?: string;
+}
+
+/**
+ * True when HEAD has commits not on its upstream. A branch with no upstream
+ * was never pushed, so it counts as ahead; other rev-list failures
+ * conservatively report not-ahead so closeout never wedges on inspection
+ * errors (#2153).
+ */
+function isAheadOfUpstream(basePath: string): boolean {
+  try {
+    return execFileSync("git", ["rev-list", "--count", "@{upstream}..HEAD"], {
+      cwd: basePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf-8",
+    }).trim() !== "0";
+  } catch (err) {
+    const errWithStderr = err as { stderr?: string | Buffer };
+    const stderr = errWithStderr.stderr?.toString() ?? "";
+    const message = err instanceof Error ? err.message : String(err);
+    return /no upstream configured/i.test(`${stderr}\n${message}`);
+  }
+}
+
+/**
+ * Auto-push tail-step for closeout paths that never reach `publishMilestone`
+ * (the isolation=none merge skip and the already-merged fast path — #2153).
+ * Mirrors publishMilestone's autoPush branch: `git push <remote> <branch>`
+ * with the same remote resolution (prefs.remote ?? "origin") and the same
+ * non-fatal failure contract. No-ops when auto-push is off (suppressed by
+ * auto-PR, as in publishMilestone), the branch is empty, the remote is
+ * missing, or the branch is not ahead of its upstream.
+ */
+export function pushIntegrationBranchIfAhead(
+  request: PushIfAheadRequest,
+): PushIfAheadResult {
+  const result: PushIfAheadResult = { pushed: false };
+  const { basePath, branch, prefs } = request;
+  if (!branch || !prefs.autoPush || prefs.autoPr) return result;
+  const remote = prefs.remote ?? "origin";
+  if (!gitRemoteExists(basePath, remote)) return result;
+  if (!isAheadOfUpstream(basePath)) return result;
+
+  try {
+    execFileSync("git", ["push", remote, branch], {
+      cwd: basePath,
+      stdio: ["ignore", "pipe", "pipe"],
+      encoding: "utf-8",
+    });
+    result.pushed = true;
+  } catch (err) {
+    // Push failure is non-fatal — closeout must not wedge on it (#2153)
+    result.pushError = err instanceof Error ? err.message : String(err);
+    logWarning("worktree", `git push failed: ${result.pushError}`);
+  }
+  emitJournalEvent(basePath, {
+    ts: new Date().toISOString(),
+    flowId: randomUUID(),
+    seq: 0,
+    eventType: "milestone-pushed",
+    data: {
+      milestoneId: request.milestoneId,
+      branch,
+      remote,
+      pushed: result.pushed,
+      error: result.pushError,
+    },
+  });
   return result;
 }

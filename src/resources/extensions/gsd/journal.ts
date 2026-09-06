@@ -66,6 +66,8 @@ export type JournalEventType =
   // #4765 — slice-cadence collapse
   | "slice-merged"
   | "milestone-resquash"
+  // #2153 — closeout auto-push for paths that skip the milestone merge
+  | "milestone-pushed"
   // dispatch telemetry — measure agent/subagent invocation frequency and shape
   | "subagent-invoked"
   | "subagent-completed"

@@ -856,6 +856,7 @@ test("rerootCommandSession refreshes command workspace to project root", async (
 
 test("stopAuto foreground completion closeout reroots session and preserves the transcript surface", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-completion-stop-"));
+  runGit(["init"], base);
   const previousCwd = process.cwd();
   const widgetCalls: Array<[string, unknown]> = [];
   const notifications: string[] = [];

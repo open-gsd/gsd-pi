@@ -13,6 +13,8 @@ import {
   nativeIsAncestor,
 } from "./native-git-bridge.js";
 import { cleanupMergedMilestoneWorktree } from "./auto-worktree-merge-cleanup.js";
+import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { pushIntegrationBranchIfAhead } from "./publication.js";
 import { logWarning } from "./workflow-logger.js";
 
 export interface AlreadyMergedMilestoneRequest {
@@ -26,7 +28,9 @@ export interface AlreadyMergedMilestoneRequest {
 
 export interface AlreadyMergedMilestoneResult {
   commitMessage: string;
-  pushed: false;
+  pushed: boolean;
+  /** Set when the closeout auto-push was attempted and failed (#2153). */
+  pushError?: string;
   prCreated: false;
   codeFilesChanged: true;
 }
@@ -68,7 +72,27 @@ export function finalizeAlreadyMergedMilestoneIfReachable(
     clearProjectRootState: true,
     chdirWarningContext: "after already-merged cleanup",
   });
-  return { commitMessage, pushed: false, prCreated: false, codeFilesChanged: true };
+  // #2153: the fast path skipped publication entirely, so a re-run after a
+  // manual merge never published. Push when auto_push is on and the
+  // integration branch is ahead of its upstream; failure is non-fatal.
+  const gitPrefs = loadEffectiveGSDPreferences(projectRoot)?.preferences?.git ?? {};
+  const publication = pushIntegrationBranchIfAhead({
+    basePath: projectRoot,
+    branch: mainBranch,
+    milestoneId,
+    prefs: {
+      autoPush: gitPrefs.auto_push === true,
+      autoPr: gitPrefs.auto_pr === true,
+      remote: gitPrefs.remote,
+    },
+  });
+  return {
+    commitMessage,
+    pushed: publication.pushed,
+    ...(publication.pushError ? { pushError: publication.pushError } : {}),
+    prCreated: false,
+    codeFilesChanged: true,
+  };
 }
 
 function assertNoUnanchoredRegularMergeCodeChanges(request: {

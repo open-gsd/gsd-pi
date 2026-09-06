@@ -15,6 +15,7 @@ import {
   type NotifyCtx,
 } from "../worktree-lifecycle.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
+import { queryJournal } from "../journal.js";
 import { AutoSession } from "../auto/session.js";
 import { openDatabase, closeDatabase, insertMilestone, _getAdapter } from "../gsd-db.js";
 import { registerAutoWorker } from "../db/auto-workers.js";
@@ -1156,4 +1157,161 @@ test("adoptOrphanWorktree restores prior paths when callback throws", () => {
   );
   assert.equal(s.basePath, "/prior");
   assert.equal(s.originalBasePath, "/prior-original");
+});
+
+// ─── mergeMilestoneStandalone — isolation:none auto-push closeout (#2153) ─────
+
+function makeBareRemote(prefix: string): string {
+  const bare = join(
+    realpathSync(mkdtempSync(join(tmpdir(), prefix))),
+    "remote.git",
+  );
+  execFileSync("git", ["init", "--bare", bare], { stdio: "pipe" });
+  return bare;
+}
+
+function gitIn(repo: string, ...args: string[]): string {
+  return execFileSync("git", args, {
+    cwd: repo,
+    stdio: "pipe",
+    encoding: "utf-8",
+  }).trim();
+}
+
+function commitMilestoneWork(repo: string, milestoneId: string): void {
+  writeFileSync(join(repo, `${milestoneId}.txt`), "milestone work\n");
+  gitIn(repo, "add", ".");
+  gitIn(repo, "commit", "-m", `feat: ${milestoneId} work`);
+}
+
+function autoPushDeps(): LegacyTestDeps {
+  return makeDeps({
+    loadEffectiveGSDPreferences: () => ({
+      preferences: { git: { auto_push: true } },
+    }),
+  });
+}
+
+function runNoneModeMerge(deps: LegacyTestDeps, repo: string): ReturnType<typeof mergeMilestoneStandalone> {
+  // isolationModeOverride pins the guard hermetically — the real
+  // getIsolationMode would otherwise merge machine-global preferences.
+  return mergeMilestoneStandalone(deps, {
+    originalBasePath: repo,
+    worktreeBasePath: repo,
+    milestoneId: "M001",
+    isolationModeOverride: "none",
+    notify: () => {},
+  });
+}
+
+test("isolation:none merge skip pushes the integration branch when auto_push is on and ahead (#2153)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  commitMilestoneWork(base, "M001"); // work lands directly on main in isolation:none
+
+  const result = runNoneModeMerge(autoPushDeps(), base);
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.merged, false);
+  assert.equal(result.pushed, true);
+  assert.equal(result.pushError, undefined);
+  const remoteHeads = gitIn(base, "ls-remote", "--heads", bare);
+  assert.match(remoteHeads, /refs\/heads\/main/);
+  assert.ok(
+    remoteHeads.startsWith(gitIn(base, "rev-parse", "HEAD")),
+    `remote main should equal local HEAD, got: ${remoteHeads}`,
+  );
+  const [pushEvent] = queryJournal(base, { eventType: "milestone-pushed" });
+  assert.ok(pushEvent, "expected a milestone-pushed journal event");
+  assert.equal(pushEvent.data?.pushed, true);
+  assert.equal(pushEvent.data?.branch, "main");
+  assert.equal(pushEvent.data?.remote, "origin");
+});
+
+test("isolation:none merge skip does not push when the branch is not ahead of upstream (#2153)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  gitIn(base, "push", "-u", "origin", "main"); // upstream configured, in sync
+  // Point origin at a dead path: an unwanted push attempt would fail loud
+  // instead of passing silently, so pushError staying undefined proves the
+  // ahead check suppressed the push.
+  gitIn(base, "remote", "set-url", "origin", join(bare, "..", "does-not-exist.git"));
+
+  const result = runNoneModeMerge(autoPushDeps(), base);
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.merged, false);
+  assert.equal(result.pushed, false);
+  assert.equal(result.pushError, undefined);
+  assert.equal(
+    queryJournal(base, { eventType: "milestone-pushed" }).length,
+    0,
+    "no push attempt, no journal event",
+  );
+});
+
+test("isolation:none merge skip surfaces push failure without throwing (#2153)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  gitIn(base, "remote", "set-url", "origin", join(bare, "..", "does-not-exist.git"));
+  commitMilestoneWork(base, "M001"); // ahead (no upstream) with an unwritable remote
+
+  const result = runNoneModeMerge(autoPushDeps(), base); // must not throw
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.merged, false);
+  assert.equal(result.pushed, false);
+  assert.ok(
+    typeof result.pushError === "string" && result.pushError.length > 0,
+    `expected pushError to describe the failure, got: ${String(result.pushError)}`,
+  );
+  const [pushEvent] = queryJournal(base, { eventType: "milestone-pushed" });
+  assert.ok(pushEvent, "expected a milestone-pushed journal event");
+  assert.equal(pushEvent.data?.pushed, false);
+  assert.equal(typeof pushEvent.data?.error, "string");
+});
+
+test("isolation:none merge skip leaves everything unpushed when auto_push is off (#2153)", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase();
+  const bare = makeBareRemote("gsd-lifecycle-remote-");
+  t.after(() => {
+    cleanupRepoBase(base, previousCwd);
+    rmSync(bare, { recursive: true, force: true });
+  });
+  gitIn(base, "remote", "add", "origin", bare);
+  commitMilestoneWork(base, "M001");
+
+  // Explicit auto_push:false override — the real loader would merge this
+  // machine's global preferences, which may enable auto_push.
+  const result = runNoneModeMerge(
+    makeDeps({
+      loadEffectiveGSDPreferences: () => ({ preferences: { git: { auto_push: false } } }),
+    }),
+    base,
+  );
+
+  assert.equal(result.mode, "skipped");
+  assert.equal(result.merged, false);
+  assert.equal(result.pushed, false);
+  assert.equal(result.pushError, undefined);
+  assert.equal(gitIn(base, "ls-remote", "--heads", bare).trim(), "");
 });

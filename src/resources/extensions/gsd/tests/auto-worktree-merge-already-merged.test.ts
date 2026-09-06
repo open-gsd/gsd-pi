@@ -81,6 +81,38 @@ function request(
   };
 }
 
+function createRepoWithBareRemote(): { repo: string; bare: string } {
+  const repo = createRepo();
+  const bare = join(
+    mkdtempSync(join(tmpdir(), "gsd-already-merged-remote-")),
+    "remote.git",
+  );
+  cleanupPaths.push(bare);
+  git(repo, ["init", "--bare", bare]);
+  git(repo, ["remote", "add", "origin", bare]);
+  return { repo, bare };
+}
+
+function enableAutoPush(repo: string): void {
+	mkdirSync(join(repo, ".gsd"), { recursive: true });
+	// Pin auto_pr and remote so machine-global preferences can't leak in and
+	// suppress or redirect the push this test asserts on.
+	writeFileSync(
+		join(repo, ".gsd", "preferences.md"),
+		["## Git", "- auto_push: true", "- auto_pr: false", "- remote: origin"].join("\n"),
+	);
+}
+
+function cleanupMocks(): void {
+  _setMilestoneCleanupDepsForTests({
+    removeWorktree: () => true,
+    nativeBranchDelete: () => {},
+    setActiveWorkspace: () => {},
+    nudgeGitBranchCache: () => {},
+    chdir: () => {},
+  });
+}
+
 describe("finalizeAlreadyMergedMilestoneIfReachable", () => {
   test("returns null when the milestone branch is not reachable from integration branch", () => {
     const repo = createRepo();
@@ -173,5 +205,68 @@ describe("finalizeAlreadyMergedMilestoneIfReachable", () => {
       realpathSync(previousCwd),
       "throws before cleanup but restores to the caller's previous cwd",
     );
+  });
+
+  test("pushes the integration branch when auto_push is on and main is ahead of upstream (#2153)", () => {
+    const { repo, bare } = createRepoWithBareRemote();
+    git(repo, ["push", "-u", "origin", "main"]); // upstream configured, in sync
+    enableAutoPush(repo);
+    const { milestoneBranch } = createRegularMergedMilestone(repo);
+    commitFile(repo, "hotfix.txt", "later main work\n", "fix: advance main");
+    cleanupMocks();
+
+    const result = finalizeAlreadyMergedMilestoneIfReachable(
+      request(repo, milestoneBranch, repo),
+    );
+
+    assert.equal(result?.pushed, true);
+    const remoteHeads = git(repo, ["ls-remote", "--heads", bare]);
+    assert.match(remoteHeads, /refs\/heads\/main/);
+    assert.ok(
+      remoteHeads.startsWith(git(repo, ["rev-parse", "HEAD"])),
+      `remote main should equal local HEAD, got: ${remoteHeads}`,
+    );
+  });
+
+  test("reports push failure without throwing when the remote is unreachable (#2153)", () => {
+    const { repo, bare } = createRepoWithBareRemote();
+    git(repo, ["remote", "set-url", "origin", join(bare, "..", "does-not-exist.git")]);
+    enableAutoPush(repo);
+    const { milestoneBranch } = createRegularMergedMilestone(repo);
+    cleanupMocks();
+
+    const result = finalizeAlreadyMergedMilestoneIfReachable(
+      request(repo, milestoneBranch, repo),
+    ); // must not throw
+
+    assert.equal(result?.pushed, false);
+    assert.ok(
+      typeof result?.pushError === "string" && result.pushError.length > 0,
+      `expected pushError to describe the failure, got: ${String(result?.pushError)}`,
+    );
+  });
+
+  test("does not push when auto_push is off even if main is ahead (#2153)", () => {
+    const { repo, bare } = createRepoWithBareRemote();
+    git(repo, ["push", "-u", "origin", "main"]); // upstream configured, in sync
+    // Pin auto_push: false explicitly — global prefs merge in per-key and this
+    // machine (or CI) may have auto_push: true globally.
+    mkdirSync(join(repo, ".gsd"), { recursive: true });
+    writeFileSync(
+      join(repo, ".gsd", "preferences.md"),
+      ["## Git", "- auto_push: false", "- auto_pr: false", "- remote: origin"].join("\n"),
+    );
+    const { milestoneBranch } = createRegularMergedMilestone(repo);
+    commitFile(repo, "hotfix.txt", "later main work\n", "fix: advance main");
+    cleanupMocks();
+
+    const result = finalizeAlreadyMergedMilestoneIfReachable(
+      request(repo, milestoneBranch, repo),
+    );
+
+    assert.equal(result?.pushed, false);
+    assert.equal(result?.pushError, undefined);
+    const remoteHeads = git(repo, ["ls-remote", "--heads", bare]);
+    assert.doesNotMatch(remoteHeads, new RegExp(git(repo, ["rev-parse", "HEAD"])));
   });
 });
