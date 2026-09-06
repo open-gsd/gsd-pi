@@ -24,7 +24,10 @@ impl SqliteFileIdentityLock {
             options
                 .read(true)
                 .write(create)
-                .share_mode(0x0000_0001 | 0x0000_0002);
+                // FILE_SHARE_DELETE (0x4) keeps deletion possible while the lock is held
+            // (#2158): an open-boundary delete then fails the open cleanly and
+            // identity correlation still rejects any delete+recreate race.
+            .share_mode(0x0000_0001 | 0x0000_0002 | 0x0000_0004);
             if create {
                 options.create(true);
             }
