@@ -1,6 +1,6 @@
 {
   "name": "@opengsd/daemon",
-  "version": "1.17.0",
+  "version": "1.18.0",
   "description": "GSD daemon — background process for project monitoring and Discord integration",
   "license": "MIT",
   "repository": {

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "open-gsd-hermes"
-version = "1.17.0"
+version = "1.18.0"
 description = "Hermes Agent plugin — GSD structured delivery engine integration"
 readme = "README.md"
 license = { text = "MIT" }

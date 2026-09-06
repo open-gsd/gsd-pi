@@ -8,6 +8,38 @@ This changelog starts from the `open-gsd/gsd-pi` ownership baseline. Earlier pro
 
 ## [Unreleased]
 
+## [1.18.0] - 2026-09-04
+
+### Added
+- **gsd**: refresh models and pricing in session (#2095)
+
+### Fixed
+- **issue**: bug: finalize/retry lease race + gsd_task_recovery_resume missing 'remediate' handler strands completed tasks (#2113)
+- **gsd**: make Copilot suggestions fail closed (#2093)
+- **gsd**: preserve GitHub Copilot catalog unknowns (#2092)
+- **gsd**: browser daemon warm-up burns its full timeout on an inherited stdio pipe (#2104)
+- **auto**: register liveness identity on rejected unit-run claim (#2097) (#2098)
+- **gsd**: route Copilot Kimi, Gemini 3.x, Grok 4.6, MAI Flash Picker, and GPT-5.4 Nano (#2133)
+- **pi-ai**: round catalog costs before writing JSON snapshot (#2122)
+- **ci**: exempt generated artifacts from require-tests gate (#2121)
+- **bug-2**: Milestone completion repairs only one pending gate per retry batch-repaired all evidence-authorized pending gates before canonical milestone completion.
+- **bug-1**: Gate save reports failure after a successful database commit separated committed gate writes from no-op or failed plan projection handling.
+- **gsd**: make progress reads database-authoritative (#2105)
+- restore native coverage and agent-core subpath resolution (#2109)
+- **issue**: unmerged-milestone-guard ignores prefs.main_branch when milestone has no <MID>-META.json, falsely blocks /gsd auto against master
+- **issue**: [Bug]: reassess-roadmap metadataCorrections.completedSlices adopts slice lifecycle but skips task lifecycles (#2083)
+- **issue**: [Bug]: auto-mode setModel persist:false is ignored — every unit dispatch rewrites the global settings.json default model (#2079)
+- **e2e**: invoke the bootstrap entry in the runtime-local container (#2084)
+- **cli**: self-repairing bin bootstrap resolves @gsd/* without lifecycle scripts (#2080)
+- **gsd**: sibling-corroborated adoption for bare legacy-complete shadow descendants (#2075)
+- **gsd**: repair evidence-backed lifecycle shadows before validation (#2002)
+- **issue**: [Bug]: Legacy completed slices can't be lifecycle-adopted — reopen guard dead-locks milestone closeout (#2070)
+- **issue**: [Bug]: milestone status 'cancelled' wedges auto-mode — roadmap-missing detector↔repairer asymmetry (#1651 class) (#2064)
+
+### Changed
+- **models**: refresh generated model catalog (#2120)
+- **gsd**: remove dead Copilot catalog classification (#2094)
+
 ## [1.16.2] - 2026-08-25
 
 ### Fixed

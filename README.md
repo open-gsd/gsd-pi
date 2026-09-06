@@ -28,16 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.16.2**
+Latest release: **v1.18.0**
 
-- **tui:** Hide completed project sentinel.
-- **headless:** Classify live workflow outcomes structurally.
-- **gsd:** Recover failed UAT closeout.
-- **legacy-import:** Take only the code span of a Verification bullet as the verify command (#1982).
-- **auto:** Abort the live host turn on permanent provider-error pause; completion gate names its recovery lever and admits blocker reports (#1977).
-- **state-reconciliation:** Stop mapping remediation slice ids onto other slices' plan files (#1976).
-- **auto:** Keep the verification auto-fix retry bound attempt-independent and pause loudly on durable abort (#1972).
-- **legacy-import:** Carry Verification/Inputs/Expected Output from a task's ### section into its import claim (#1970).
+- **gsd:** Refresh models and pricing in session (#2095).
+- **models:** Refresh generated model catalog (#2120).
+- **gsd:** Remove dead Copilot catalog classification (#2094).
+- **issue:** Bug: finalize/retry lease race + gsd_task_recovery_resume missing 'remediate' handler strands completed tasks (#2113).
+- **gsd:** Make Copilot suggestions fail closed (#2093).
+- **gsd:** Preserve GitHub Copilot catalog unknowns (#2092).
+- **gsd:** Browser daemon warm-up burns its full timeout on an inherited stdio pipe (#2104).
+- **auto:** Register liveness identity on rejected unit-run claim (#2097) (#2098).
 
 <!-- release-highlights:end -->
 
