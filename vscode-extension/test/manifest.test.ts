@@ -23,6 +23,16 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 function readPackage(): {
 	contributes: {
 		commands: Array<{ command: string; title: string }>;
+		languageModelTools?: Array<{
+			name: string;
+			displayName: string;
+			modelDescription: string;
+			userDescription?: string;
+			canBeReferencedInPrompt?: boolean;
+			toolReferenceName?: string;
+			inputSchema?: { type?: string; properties?: Record<string, unknown> };
+			readOnlyHint?: boolean;
+		}>;
 		views: Record<string, Array<{ id: string }>>;
 		configuration: {
 			properties: Record<string, unknown>;
@@ -113,6 +123,38 @@ test("project progress uses the existing RPC client and one sidebar refresh loop
 	assert.match(sidebarSource, /this\.refresh\(true\)/);
 	assert.match(sidebarSource, /stored\[id\] === 'open'/);
 	assert.equal((sidebarSource.match(/setInterval\(/g) ?? []).length, 1);
+});
+
+test("Copilot read tools are contributed and registered against the existing RPC client", () => {
+	const pkg = readPackage();
+	const extensionSource = readSource("extension.ts");
+	const toolSource = readSource("copilot-tools.ts");
+	const clientSource = readSource("gsd-client.ts");
+	const tools = pkg.contributes.languageModelTools ?? [];
+
+	assert.equal(tools.length, 2);
+	assert.deepEqual(tools.map((tool) => tool.name), ["gsd_project_progress", "gsd_project_snapshot"]);
+
+	for (const tool of tools) {
+		assert.equal(typeof tool.displayName, "string");
+		assert.equal(typeof tool.modelDescription, "string");
+		assert.equal(tool.canBeReferencedInPrompt, true);
+		assert.equal(tool.inputSchema?.type, "object");
+		assert.deepEqual(tool.inputSchema?.properties, {});
+		assert.equal("readOnlyHint" in tool, false);
+	}
+
+	assert.deepEqual(tools.map((tool) => tool.toolReferenceName), ["gsdProjectProgress", "gsdProjectSnapshot"]);
+	assert.match(extensionSource, /registerCopilotTools\(context, client\)/);
+	assert.match(toolSource, /vscode\.lm\.registerTool\("gsd_project_progress", new ProjectProgressTool\(client\)\)/);
+	assert.match(toolSource, /vscode\.lm\.registerTool\("gsd_project_snapshot", new ProjectSnapshotTool\(client\)\)/);
+	assert.match(toolSource, /The result is read-only, but it will be sent to the active chat\/model context/);
+	assert.match(toolSource, /GSD project read tools do not accept input parameters/);
+	assert.match(toolSource, /this\.client\.getProjectProgress\(\)/);
+	assert.match(toolSource, /this\.client\.getProjectSnapshot\(\)/);
+	assert.doesNotMatch(toolSource, /new GsdClient/);
+	assert.match(clientSource, /async getProjectSnapshot\(\): Promise<ProjectSnapshot \| null>/);
+	assert.match(clientSource, /type: "get_project_snapshot"/);
 });
 
 test("agent git helpers scope git output to tracked agent files", () => {

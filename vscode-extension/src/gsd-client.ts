@@ -9,6 +9,7 @@ import type {
 	RpcSessionState,
 	RpcSlashCommand,
 	ProjectProgress,
+	ProjectSnapshot,
 	SessionStats,
 	ThinkingLevel,
 } from "@opengsd/contracts" with { "resolution-mode": "import" };
@@ -18,7 +19,7 @@ import { buildGsdClientSpawnPlan } from "./gsd-client-spawn.js";
  * Mirrors the RPC command/response protocol from the GSD agent.
  * Shared command and response payloads come from @opengsd/contracts.
  */
-export type { BashResult, ModelInfo, ProjectProgress, SessionStats, ThinkingLevel };
+export type { BashResult, ModelInfo, ProjectProgress, ProjectSnapshot, SessionStats, ThinkingLevel };
 export type SlashCommand = RpcSlashCommand;
 
 export interface RpcResponse {
@@ -402,6 +403,12 @@ export class GsdClient implements vscode.Disposable {
 		const response = await this.send({ type: "get_project_progress" });
 		this.assertSuccess(response);
 		return response.data as ProjectProgress | null;
+	}
+
+	async getProjectSnapshot(): Promise<ProjectSnapshot | null> {
+		const response = await this.send({ type: "get_project_snapshot" });
+		this.assertSuccess(response);
+		return response.data as ProjectSnapshot | null;
 	}
 
 	/**

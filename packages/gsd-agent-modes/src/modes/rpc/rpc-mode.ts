@@ -31,6 +31,7 @@ import type {
 	RpcExtensionUIResponse,
 	RpcInitResult,
 	ProjectProgress,
+	ProjectSnapshot,
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
@@ -59,6 +60,20 @@ export async function invokeProjectProgressRead(
 	} catch (e) {
 		const message = e instanceof Error ? e.message : String(e);
 		return { id, type: "response", command: "get_project_progress", success: false, error: message };
+	}
+}
+
+export async function invokeProjectSnapshotRead(
+	handler: (input: unknown) => Promise<unknown>,
+	id: string | undefined,
+	cwd: string,
+): Promise<RpcResponse> {
+	try {
+		const data = await handler({ cwd });
+		return { id, type: "response", command: "get_project_snapshot", success: true, data: data as ProjectSnapshot | null };
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		return { id, type: "response", command: "get_project_snapshot", success: false, error: message };
 	}
 }
 
@@ -625,6 +640,17 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					return error(id, "get_project_progress", "Project progress is unavailable");
 				}
 				return await invokeProjectProgressRead(handler, id, session.sessionManager.getCwd());
+			}
+
+			case "get_project_snapshot": {
+				if (!extensionsReady) {
+					return error(id, "get_project_snapshot", "Extensions are still loading");
+				}
+				const handler = session.extensionRunner?.getRuntimeReadHandler("project_snapshot");
+				if (!handler) {
+					return error(id, "get_project_snapshot", "Project snapshot is unavailable");
+				}
+				return await invokeProjectSnapshotRead(handler, id, session.sessionManager.getCwd());
 			}
 
 			// =================================================================

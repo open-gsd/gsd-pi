@@ -55,6 +55,15 @@ Use `@gsd` in VS Code Chat (`Cmd+Shift+I`) to talk to the agent:
 - **Diagnostic context** — auto-includes errors/warnings when you mention "fix" or "error"
 - **Streaming** progress, file anchors, token usage footer
 
+### Copilot Chat Tools
+
+In Copilot Chat agent mode, GSD contributes two read-only tools that use the same long-lived RPC process as the extension:
+
+- `#gsdProjectProgress` reads the current DB-authoritative project progress: active milestone, slice, task, counts, blockers, and next action.
+- `#gsdProjectSnapshot` reads the bounded canonical project snapshot: authority, current state, progress, blockers, open questions, verification, milestone registry, and capture time.
+
+Tool results are read-only, but they are sent to the active chat/model context. The tools use the workspace's active GSD project and do not accept arbitrary filesystem paths.
+
 ### Source Control Integration
 
 Agent-modified files appear in a dedicated **"GSD Agent"** section of the Source Control panel:

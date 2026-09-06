@@ -114,6 +114,23 @@ describe("extension bootstrap isolation (#4168, #4172)", () => {
       `expected 'gsd' to be the first command registered, got ${JSON.stringify(calls)}`,
     );
   });
+
+  test("registers host-only project progress and snapshot runtime reads", async () => {
+    const runtimeReads = new Map<string, (input: unknown) => unknown>();
+    const { pi } = makePi({
+      registerRuntimeRead: (name: string, handler: (input: unknown) => unknown) => {
+        runtimeReads.set(name, handler);
+      },
+    });
+
+    await registerExtension(pi as any);
+
+    assert.deepEqual([...runtimeReads.keys()].sort(), ["project_progress", "project_snapshot"]);
+    await assert.rejects(
+      async () => runtimeReads.get("project_snapshot")?.({}),
+      /Project snapshot requires a session CWD/,
+    );
+  });
 });
 
 // Behavioural contract for registerGsdExtension itself: each non-core

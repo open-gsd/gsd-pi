@@ -344,6 +344,36 @@
         "isSticky": true
       }
     ],
+    "languageModelTools": [
+      {
+        "name": "gsd_project_progress",
+        "displayName": "GSD: Project Progress",
+        "modelDescription": "Reads the current GSD project progress from the workspace's active GSD project via the extension RPC process. Returns bounded JSON with active milestone, slice, task, counts, blockers, and next action. Use when the user asks for current GSD project status. Do not use for editing project state.",
+        "userDescription": "Read the current GSD project progress and send the result to chat.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gsdProjectProgress",
+        "icon": "$(graph)",
+        "tags": ["gsd", "project", "progress"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "gsd_project_snapshot",
+        "displayName": "GSD: Project Snapshot",
+        "modelDescription": "Reads the bounded canonical GSD project snapshot from the workspace's active GSD project via the extension RPC process. Returns deterministic JSON with authority, current state, progress, blockers, open questions, verification, bounded milestones, and capturedAt. Use when the user asks for broader project context. Do not use for editing project state.",
+        "userDescription": "Read the bounded GSD project snapshot and send the result to chat.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "gsdProjectSnapshot",
+        "icon": "$(database)",
+        "tags": ["gsd", "project", "snapshot"],
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
     "configuration": {
       "title": "GSD",
       "properties": {

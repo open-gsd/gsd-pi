@@ -13,6 +13,7 @@ export const RPC_COMMAND_TYPES = [
 	"new_session",
 	"get_state",
 	"get_project_progress",
+	"get_project_snapshot",
 	"set_model",
 	"cycle_model",
 	"get_available_models",
@@ -126,6 +127,56 @@ export interface ProjectProgress {
 	milestoneDetailsTasksTruncated?: boolean;
 }
 
+export interface ProjectSnapshotBlocker {
+	blockerId: string;
+	blockerKind: string;
+	resolutionOwner: string;
+	description: string;
+	requestedAction: string;
+	openedAt: string;
+	openedProjectRevision: number;
+}
+
+export interface ProjectSnapshotOpenQuestion {
+	questionId: string;
+	questionText: string;
+	createdAt: string;
+}
+
+export interface ProjectSnapshotVerification {
+	assessments: { total: number; pass: number; fail: number };
+	evidence: { total: number; passed: number; failed: number };
+}
+
+export interface ProjectSnapshot {
+	authority: {
+		projectId: string;
+		schemaVersion: number | null;
+		revision: number;
+		authorityEpoch: number;
+	};
+	current: {
+		activeMilestone: { id: string; title: string } | null;
+		activeSlice: { id: string; title: string } | null;
+		activeTask: { id: string; title: string } | null;
+		phase: string;
+		nextAction: string;
+	};
+	progress: {
+		milestones: { total: number; done: number; active: number; pending: number; parked: number };
+		slices: { total: number; done: number; active: number; pending: number };
+		tasks: { total: number; done: number; pending: number };
+	};
+	blockers: ProjectSnapshotBlocker[];
+	openQuestions: ProjectSnapshotOpenQuestion[];
+	verification: ProjectSnapshotVerification;
+	milestones: {
+		items: Array<{ id: string; title: string; status: string; sequence: number }>;
+		truncated: boolean;
+	};
+	capturedAt: string;
+}
+
 export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
@@ -143,6 +194,7 @@ export type RpcCommand =
 	| { id?: string; type: "new_session"; parentSession?: string }
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_project_progress" }
+	| { id?: string; type: "get_project_snapshot" }
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
@@ -207,6 +259,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
 	| { id?: string; type: "response"; command: "get_project_progress"; success: true; data: ProjectProgress | null }
+	| { id?: string; type: "response"; command: "get_project_snapshot"; success: true; data: ProjectSnapshot | null }
 	| { id?: string; type: "response"; command: "set_model"; success: true; data: ModelInfo }
 	| {
 			id?: string;
