@@ -89,7 +89,7 @@ GSD 会检测你本地的 Claude Code 安装，并把它作为已认证的 Anthr
 
 **自动配置（推荐）**
 
-当 GSD 在启动时检测到 Claude Code model，它会自动在项目根目录写入一个带有 GSD workflow MCP server 配置的 `.mcp.json` 文件。无需手动步骤，只要以 Claude Code 作为 provider 启动一次 GSD，配置就会自动生成。
+对于已有的 GSD 项目，MCP 自动准备不再依赖当前 provider。只要项目根目录已经包含 `.gsd/`，GSD 就会在启动时写入或更新 `.mcp.json`，其中包含 GSD workflow 和 `gsd-browser` MCP server；即使当前 GSD 会话使用 OpenAI、Codex、Cursor Agent 或其它 provider 也是如此。这样项目会自动准备好供 Claude Code 或直接的 `claude` CLI 使用，同时不会弄脏普通的非 GSD 仓库。
 
 你也可以在 GSD 会话中手动触发：
 

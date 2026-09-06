@@ -122,6 +122,8 @@ If both files exist, server names are merged and the first definition found wins
 - `.mcp.json` for repo-shared MCP configuration you may want to commit
 - `.gsd/mcp.json` for local-only MCP configuration you do **not** want to share
 
+For existing GSD projects, GSD also auto-prepares the repo-shared `.mcp.json` on session startup. The auto-prep runs regardless of the selected model provider, but only when the project root already contains `.gsd/`; non-GSD repositories are left untouched. It writes the managed `gsd-workflow` entry and, unless `GSD_BROWSER_MCP_ENABLED=0`, the managed `gsd-browser` entry for external MCP clients such as Claude Code.
+
 ### Supported transports
 
 | Transport | Config shape | Use when |

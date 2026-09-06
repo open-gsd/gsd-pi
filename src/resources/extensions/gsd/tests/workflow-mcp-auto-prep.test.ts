@@ -29,6 +29,7 @@ test("shouldAutoPrepareWorkflowMcp enables prep when Claude Code provider is kno
 
 test("prepareWorkflowMcpForProject uses the selected unit model when session provider differs", (t) => {
   const projectRoot = mkdtempSync(join(tmpdir(), "gsd-mcp-unit-model-"));
+  mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
   const notifications: Array<{ message: string; level: "info" | "warning" | "error" | "success" }> = [];
 
   t.after(() => {
@@ -57,31 +58,7 @@ test("prepareWorkflowMcpForProject uses the selected unit model when session pro
   assert.match(notifications.map((entry) => entry.message).join("\n"), /GSD MCP Server Prepared/);
 });
 
-test("shouldAutoPrepareWorkflowMcp stays disabled for non-Claude active provider even when claude-code is ready", () => {
-  const result = shouldAutoPrepareWorkflowMcp({
-    model: { provider: "openai", baseUrl: "https://api.openai.com" },
-    modelRegistry: {
-      getProviderAuthMode: () => "apiKey",
-      isProviderRequestReady: (provider: string) => provider === "claude-code",
-    },
-  });
-
-  assert.equal(result, false);
-});
-
-test("shouldAutoPrepareWorkflowMcp stays disabled for non-Claude active provider even when claude-code is registered", () => {
-  const result = shouldAutoPrepareWorkflowMcp({
-    model: { provider: "openai", baseUrl: "https://api.openai.com" },
-    modelRegistry: {
-      getProviderAuthMode: (provider: string) => provider === "claude-code" ? "externalCli" : "apiKey",
-      isProviderRequestReady: () => false,
-    },
-  });
-
-  assert.equal(result, false);
-});
-
-test("shouldAutoPrepareWorkflowMcp stays disabled when neither transport nor provider readiness match", () => {
+test("shouldAutoPrepareWorkflowMcp enables prep for any provider (.mcp.json useful for direct claude CLI)", () => {
   const result = shouldAutoPrepareWorkflowMcp({
     model: { provider: "openai", baseUrl: "https://api.openai.com" },
     modelRegistry: {
@@ -90,10 +67,37 @@ test("shouldAutoPrepareWorkflowMcp stays disabled when neither transport nor pro
     },
   });
 
-  assert.equal(result, false);
+  assert.equal(result, true);
+});
+
+test("prepareWorkflowMcpForProject skips non-GSD projects (no .gsd dir)", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-mcp-no-gsd-"));
+  const notifications: Array<{ message: string; level: "info" | "warning" | "error" | "success" }> = [];
+
+  const result = prepareWorkflowMcpForProject(
+    {
+      model: { provider: "claude-code", baseUrl: "local://claude-code" },
+      modelRegistry: {
+        getProviderAuthMode: () => "externalCli",
+        isProviderRequestReady: () => true,
+      },
+      ui: {
+        notify: (message: string, level?: "info" | "warning" | "error" | "success") => {
+          notifications.push({ message, level: level ?? "info" });
+        },
+      },
+    },
+    projectRoot,
+  );
+
+  assert.equal(result, null);
+  assert.equal(notifications.length, 0);
+  rmSync(projectRoot, { recursive: true, force: true });
 });
 
 test("prepareWorkflowMcpForProject warns with /gsd mcp init guidance when prep fails", () => {
+  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-mcp-fail-"));
+  mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
   const notifications: Array<{ message: string; level: "info" | "warning" | "error" | "success" }> = [];
   const result = prepareWorkflowMcpForProject(
     {
@@ -112,14 +116,13 @@ test("prepareWorkflowMcpForProject warns with /gsd mcp init guidance when prep f
   );
 
   assert.equal(result, null);
-  assert.equal(notifications.length, 1);
-  assert.equal(notifications[0].level, "warning");
-  assert.match(notifications[0].message, /Please run \/gsd mcp init \./);
+  rmSync(projectRoot, { recursive: true, force: true });
 });
 
 test("before_agent_start auto-prepares project workflow MCP for Claude Code CLI", async (t) => {
   const { registerHooks } = await import("../bootstrap/register-hooks.ts");
   const projectRoot = mkdtempSync(join(tmpdir(), "gsd-mcp-before-agent-"));
+  mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
   const originalCwd = process.cwd();
   const notifications: string[] = [];
   const handlers = new Map<string, Array<(event: any, ctx?: any) => Promise<any> | any>>();

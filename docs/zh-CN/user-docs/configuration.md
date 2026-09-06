@@ -94,6 +94,8 @@ GSD 会从以下项目本地路径读取 MCP client 配置：
 - 把你愿意提交到仓库的共享 MCP 配置放在 `.mcp.json`
 - 把仅本机使用、不希望共享的 MCP 配置放在 `.gsd/mcp.json`
 
+对于已有的 GSD 项目，GSD 也会在会话启动时自动准备仓库共享的 `.mcp.json`。这个自动准备不依赖当前选择的 model provider，但只会在项目根目录已经包含 `.gsd/` 时运行；非 GSD 仓库不会被改动。它会写入托管的 `gsd-workflow` 条目，并且在未设置 `GSD_BROWSER_MCP_ENABLED=0` 时写入托管的 `gsd-browser` 条目，供 Claude Code 等外部 MCP client 使用。
+
 ### 支持的 transport
 
 | Transport | 配置形状 | 适用场景 |
