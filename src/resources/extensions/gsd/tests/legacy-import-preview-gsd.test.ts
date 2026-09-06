@@ -792,6 +792,109 @@ describe("legacy .gsd captured-byte interpretation", () => {
     );
   });
 
+  test("routes a contradictory id-and-task summary through task-parent selection instead of preserving it", (t) => {
+    const interpretation = interpretLegacyGsdCapture(captureFiles(t, {
+      "phases/09-team/09-ROADMAP.md": [
+        "# M009-rfuh2h: Team milestone",
+        "",
+        "- [x] **S03: Third slice** `risk:low` `depends:[]`",
+        "",
+      ].join("\n"),
+      "phases/09-team/09-03-PLAN.md": [
+        "# S03: Third slice",
+        "",
+        "**Milestone:** M009-rfuh2h",
+        "**Slice:** S03",
+        "",
+        "## Tasks",
+        "",
+        "- [x] **T01**: Must not map from this summary",
+        "",
+      ].join("\n"),
+      // Self-contradictory frontmatter: `id: S03` claims a slice identity, but `task:
+      // T01` also claims task membership. The id-based guard must not preserve this as
+      // history just because id matches ^S\d+ — the task field takes it out of scope.
+      "phases/09-team/09-03-SUMMARY.md": [
+        "---",
+        "id: S03",
+        "task: T01",
+        "status: complete",
+        "---",
+        "",
+        "# S03 Summary: Contradicts its own id with a task field",
+        "",
+      ].join("\n"),
+    }));
+
+    assert.deepEqual(
+      interpretation.diagnoses.map((diagnosis) => diagnosis.code),
+      ["task-summary-parent-conflict"],
+    );
+    assert.deepEqual(
+      interpretation.candidates.filter((candidate) => candidate.reason_code === "flat-non-task-summary-preserved"),
+      [],
+    );
+  });
+
+  test("set milestone completion status from a matching milestone summary", (t) => {
+    const interpretation = interpretLegacyGsdCapture(captureFiles(t, {
+      "phases/09-team/09-ROADMAP.md": [
+        "# M009-rfuh2h: Team milestone",
+        "",
+        "- [x] **S01: First slice** `risk:low` `depends:[]`",
+        "",
+      ].join("\n"),
+      "phases/09-team/09-SUMMARY.md": [
+        "---",
+        "id: M009-rfuh2h",
+        "status: complete",
+        "---",
+        "",
+        "# M009: Must attest milestone completion",
+        "",
+      ].join("\n"),
+    }));
+
+    assert.deepEqual(interpretation.diagnoses, []);
+    assert.deepEqual(
+      interpretation.candidates
+        .filter((candidate) => candidate.target.kind === "milestone" && candidate.target.field === "status")
+        .map((candidate) => [candidate.target.key, candidate.normalized]),
+      [["M009-rfuh2h", "complete"]],
+    );
+  });
+
+  test("flags a mistmatch numeric milestone id when using unique id flag", (t) => {
+    const interpretation = interpretLegacyGsdCapture(captureFiles(t, {
+      "phases/09-team/09-ROADMAP.md": [
+        "# M009-rfuh2h: Team milestone",
+        "",
+        "- [x] **S01: First slice** `risk:low` `depends:[]`",
+        "",
+      ].join("\n"),
+      "phases/09-team/09-SUMMARY.md": [
+        "---",
+        "id: M009",
+        "status: complete",
+        "---",
+        "",
+        "# M009: Must not silently attest from an ambiguous bare id",
+        "",
+      ].join("\n"),
+    }));
+
+    assert.deepEqual(
+      interpretation.diagnoses.map((diagnosis) => diagnosis.code),
+      ["milestone-summary-id-ambiguous"],
+    );
+    assert.deepEqual(
+      interpretation.candidates.filter(
+        (candidate) => candidate.target.kind === "milestone" && candidate.target.field === "status",
+      ),
+      [],
+    );
+  });
+
   test("emits action-matrix decision candidates and complete anchors for present collections", (t) => {
     const base = temporaryDirectory(t);
     const physicalRoot = join(base, ".gsd");

@@ -733,7 +733,36 @@ function interpretFlatArtifact(
     const summaryId = frontmatterField(file, "id")?.value;
     const summarySlice = frontmatterField(file, "slice")?.value;
     const summaryTask = frontmatterField(file, "task")?.value;
-    if (summaryId !== undefined && /^(?:S\d+|M\d+)/u.test(summaryId)) {
+    if (summaryId !== undefined && summaryTask === undefined && /^M\d+/u.test(summaryId)) {
+      const claim = claimsByDirectory.get(directorySegment(file.entry.logical_path, "flat"));
+      const canonicalId = canonicalMilestoneId(summaryId);
+      const status = frontmatterField(file, "status");
+      if (claim !== undefined && canonicalId === claim.canonicalId && status !== undefined) {
+        addCandidate(
+          candidates,
+          file,
+          { kind: "milestone", key: claim.canonicalId, field: "status" },
+          status.value,
+          "flat-matching-milestone-summary-attestation",
+          { start: status.line.start, end: status.line.end },
+        );
+      }
+      else if (claim !== undefined && canonicalId !== undefined && canonicalId !== claim.canonicalId && status !== undefined) {
+        addDiagnosis(
+          diagnoses,
+          file,
+          "milestone-summary-id-ambiguous",
+          `Milestone summary id "${summaryId}" does not exactly match the containing phase's ROADMAP claim "${claim.canonicalId}" and cannot be attested automatically.`,
+          { start: status.line.start, end: status.line.end },
+        );
+      }
+      preserveHeading(file, candidates, "flat-non-task-summary-preserved", {
+        reason: "non-task-summary",
+        id: summaryId,
+      });
+      return;
+    }
+    if (summaryId !== undefined && summaryTask === undefined && /^S\d+/u.test(summaryId)) {
       preserveHeading(file, candidates, "flat-non-task-summary-preserved", {
         reason: "non-task-summary",
         id: summaryId,
