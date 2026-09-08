@@ -814,6 +814,33 @@ export class ToolExecutionComponent extends Container {
 		this.updateDisplay();
 	}
 
+	/**
+	 * Rows the transcript actually displays for this tool — used by the pinned
+	 * zone's offscreen measurement. render() returns the full body render
+	 * regardless of collapse state, which overstates the post-text height and
+	 * mirrors text that is still visible (duplicate "Working · Latest Output"
+	 * content).
+	 *
+	 * Assumption: both collapsed forms render exactly one row. render()'s two
+	 * non-expanded early returns delegate to renderCompactToolStrip() and
+	 * renderCommandCard(), and each of those returns a single-element array
+	 * (see transcript-design.ts). If either ever grows a header/detail split,
+	 * update this method to match.
+	 */
+	getDisplayedLineCount(width: number): number {
+		if (this.hideComponent) return 0;
+		// Bash collapsed (non-error): renderCommandCard() → one row.
+		if (this.normalizedToolName === "bash" && !this.showExpandedBody() && !this.result?.isError) {
+			return 1;
+		}
+		const hasImages = this.result?.content?.some((block) => block.type === "image") ?? false;
+		// Other tools collapsed (non-error, no images): renderCompactToolStrip() → one row.
+		if (!this.showExpandedBody() && !this.result?.isError && !hasImages) {
+			return 1;
+		}
+		return this.render(width).length;
+	}
+
 	override render(width: number): string[] {
 		if (this.hideComponent) {
 			return [];
