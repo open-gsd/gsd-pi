@@ -734,7 +734,7 @@ test("updateProgressWidget full mode keeps footer-owned signals out of auto deck
   assert.match(rendered, /GSD AUTO/);
   assert.match(rendered, /T01: Add repeat column via idempotent ALTER TABLE/);
   assert.match(rendered, /tools/);
-  assert.doesNotMatch(rendered, /claude-sonnet-4-6/, "footer owns provider/model display");
+  assert.match(rendered, /claude-sonnet-4-6/, "strip shows the dispatched model (#2207)");
   assert.doesNotMatch(rendered, /0\.2%|ctx|1\.0M/, "footer owns raw context meter display");
   assert.doesNotMatch(rendered, /\$/, "footer owns session cost display");
 });
@@ -806,6 +806,61 @@ test("updateProgressWidget small mode renders the dense horizontal grid", (t) =>
 
   for (const width of [40, 80, 120]) {
     assertLinesFit(renderProgressStripLines(progress!, width, { cwd: dir }), width);
+  }
+});
+
+test("updateProgressWidget carries the dispatched model into the strip", (t) => {
+  const dir = makeTempDir("dispatched-model");
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  const mocks: ReturnType<typeof createProgressStripUiMock>[] = [];
+
+  t.after(() => {
+    for (const mock of mocks) mock.disposeProgress();
+    _resetWidgetModeForTests();
+    clearSliceProgressCache();
+    cleanup(dir);
+  });
+
+  function capture(modelId: string | null) {
+    const mock = createProgressStripUiMock();
+    mocks.push(mock);
+    updateProgressWidget(
+      {
+        hasUI: true,
+        ui: mock.ui,
+      } as any,
+      "execute-task",
+      "M004/S01/T01",
+      {
+        phase: "executing",
+        activeSlice: { id: "S01", title: "Filter chip bar" },
+        activeTask: { id: "T01", title: "Add category filter" },
+      } as any,
+      {
+        getAutoStartTime: () => Date.now() - 12_000,
+        isStepMode: () => false,
+        getCmdCtx: () => null,
+        getBasePath: () => dir,
+        isVerbose: () => false,
+        isSessionSwitching: () => false,
+        getCurrentDispatchedModelId: () => modelId,
+      },
+    );
+    const progress = mock.getProgressState();
+    assert.ok(progress, "progress strip state should be published");
+    return progress;
+  }
+
+  const withModel = capture("openai/gpt-5.3-codex");
+  assert.equal(withModel.model, "openai/gpt-5.3-codex");
+
+  const withoutModel = capture(null);
+  assert.equal(withoutModel.model, undefined);
+
+  const rendered = renderProgressStrip(withModel, 120, { cwd: dir });
+  assert.match(rendered, /openai\/gpt-5\.3-codex/, "strip should show the dispatched model");
+  for (const width of [40, 80, 120]) {
+    assertLinesFit(renderProgressStripLines(withModel, width, { cwd: dir }), width);
   }
 });
 

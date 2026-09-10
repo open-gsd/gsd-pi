@@ -3222,18 +3222,7 @@ function updateProgressWidget(
   unitId: string,
   state: GSDState,
 ): void {
-  const badge = s.currentUnitRouting?.tier
-    ? ({ light: "L", standard: "S", heavy: "H" }[s.currentUnitRouting.tier] ??
-      undefined)
-    : undefined;
-  _updateProgressWidget(
-    ctx,
-    unitType,
-    unitId,
-    state,
-    widgetStateAccessors,
-    badge,
-  );
+  _updateProgressWidget(ctx, unitType, unitId, state, widgetStateAccessors);
 }
 
 /** State accessors for the widget — closures over module globals. */

@@ -88,19 +88,19 @@ function buildTaskProgressSegments(progress: GsdProgressState): string[] {
 function renderProgressHeadRight(progress: GsdProgressState): string {
 	const sep = theme.fg("dim", " · ");
 	const progressSegments = buildTaskProgressSegments(progress);
-	const timingParts = [progress.elapsed, progress.eta].filter(
+	const dimParts = [progress.model, progress.elapsed, progress.eta].filter(
 		(part): part is string => Boolean(part),
 	);
 
 	if (progressSegments.length > 0) {
 		const rightParts = [
-			...timingParts.map((part) => theme.fg("dim", part)),
+			...dimParts.map((part) => theme.fg("dim", part)),
 			...progressSegments,
 		];
 		return rightParts.join(sep);
 	}
-	if (timingParts.length > 0) {
-		return theme.fg("dim", timingParts.join(" · "));
+	if (dimParts.length > 0) {
+		return theme.fg("dim", dimParts.join(" · "));
 	}
 	return "";
 }

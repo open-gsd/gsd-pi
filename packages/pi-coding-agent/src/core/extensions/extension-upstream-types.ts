@@ -163,6 +163,8 @@ export interface GsdProgressState {
 	unitLabel?: string;
 	elapsed?: string;
 	eta?: string;
+	/** Fully-qualified dispatched model ID (provider/id) auto-mode is currently running, if any. */
+	model?: string;
 	healthSummary?: string;
 	path?: string;
 	widgetMode?: GsdProgressWidgetMode;

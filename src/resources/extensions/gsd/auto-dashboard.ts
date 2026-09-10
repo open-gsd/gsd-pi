@@ -715,7 +715,6 @@ export function updateProgressWidget(
   unitId: string,
   state: GSDState,
   accessors: WidgetStateAccessors,
-  tierBadge?: string,
 ): void {
   if (!ctx.hasUI) return;
 
@@ -1091,6 +1090,7 @@ function buildGsdProgressPayload(
     unitLabel,
     elapsed,
     eta: etaShort,
+    model: accessors.getCurrentDispatchedModelId() ?? undefined,
     healthSummary,
     path: accessors.getBasePath(),
     widgetMode: mode,

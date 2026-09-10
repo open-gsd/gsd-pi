@@ -122,4 +122,49 @@ describe("GsdStatusWidget", () => {
 		const head = lines[0] ?? "";
 		assert.ok(head.trimEnd().endsWith("S01"), "slice/task progress should sit on the far right of the header line");
 	});
+
+	test("renders the dispatched model ahead of timing in the head line", () => {
+		const widget = new GsdStatusWidget(() => ({
+			override: "auto",
+			activeToolCount: 1,
+			cwd: "/tmp/project",
+			manuallyExpanded: false,
+			gsdProgress: {
+				phase: "Executing T03 renderer polish",
+				modeTag: "AUTO",
+				elapsed: "14m",
+				eta: "~6m left",
+				model: "openai/gpt-5.3-codex",
+				widgetMode: "small",
+			},
+		}));
+		const lines = widget.render(120).map((line) => stripAnsi(line));
+		const plain = lines.join("\n");
+		assert.match(plain, /openai\/gpt-5\.3-codex/);
+		const head = lines[0] ?? "";
+		const modelIdx = head.indexOf("openai/gpt-5.3-codex");
+		const elapsedIdx = head.indexOf("14m");
+		assert.ok(modelIdx !== -1 && elapsedIdx !== -1 && modelIdx < elapsedIdx, "model segment should precede timing segments");
+		assert.match(head, /openai\/gpt-5\.3-codex · 14m · ~6m left/);
+	});
+
+	test("head line has no model segment artifacts when none is dispatched", () => {
+		const widget = new GsdStatusWidget(() => ({
+			override: "auto",
+			activeToolCount: 1,
+			cwd: "/tmp/project",
+			manuallyExpanded: false,
+			gsdProgress: {
+				phase: "Executing T03 renderer polish",
+				modeTag: "AUTO",
+				elapsed: "14m",
+				eta: "~6m left",
+				widgetMode: "small",
+			},
+		}));
+		const plain = widget.render(120).map((line) => stripAnsi(line)).join("\n");
+		assert.match(plain, /14m · ~6m left/);
+		assert.doesNotMatch(plain, /·\s*·/, "no empty separator artifacts from a missing model");
+		assert.doesNotMatch(plain, /·\s*14m/, "head-right should not start with an empty model segment");
+	});
 });
