@@ -1,9 +1,8 @@
 # Events — The Nervous System
 
-
 Events are the core of the extension system. They fall into five categories:
 
-### 7.1 Session Events
+## 7.1 Session Events
 
 | Event | When | Can Return |
 |-------|------|------------|
@@ -18,7 +17,7 @@ Events are the core of the extension system. They fall into five categories:
 | `session_tree` | After tree navigation | — |
 | `session_shutdown` | On exit (Ctrl+C, Ctrl+D, SIGTERM) | — |
 
-### 7.2 Agent Events
+## 7.2 Agent Events
 
 | Event | When | Can Return |
 |-------|------|------------|
@@ -33,13 +32,11 @@ Events are the core of the extension system. They fall into five categories:
 | `message_start/update/end` | Message lifecycle | — |
 
 Agent lifecycle, turn, and message events may include optional `sessionId` and
-`turnId` fields for correlating events from the same session turn. `agent_end`
-and `stop` may also include `abortOrigin`, one of `"session-transition"`,
-`"user"`, `"timeout"`, or `"unknown"`. Treat `"session-transition"` as internal
-session-control flow rather than a user/provider failure when settling work from
-`agent_end`.
+`turnId` fields for correlating events from the same session turn. See
+[Agent Event Metadata](../../extension-sdk/api-reference.md#agent-event-metadata)
+for optional abort-origin metadata and its handling.
 
-### 7.3 Tool Events
+## 7.3 Tool Events
 
 | Event | When | Can Return |
 |-------|------|------------|
@@ -51,25 +48,25 @@ session-control flow rather than a user/provider failure when settling work from
 
 `tool_call` and `tool_result` wrap tools the Pi loop executes itself. External engines may pre-execute tools and hand Pi an `externalResult`, which skips those two hooks; use `tool_execution_start` / `tool_execution_end` for cross-engine observation.
 
-### 7.4 Input Events
+## 7.4 Input Events
 
 | Event | When | Can Return |
 |-------|------|------------|
 | `input` | User input received (before skill/template expansion) | `{ action: "transform", text: "..." }` or `{ action: "handled" }` or `{ action: "continue" }` |
 
-### 7.5 Model Events
+## 7.5 Model Events
 
 | Event | When | Can Return |
 |-------|------|------------|
 | `model_select` | Model changes (`/model`, Ctrl+P, restore) | — |
 
-### 7.6 User Bash Events
+## 7.6 User Bash Events
 
 | Event | When | Can Return |
 |-------|------|------------|
 | `user_bash` | User runs `!` or `!!` commands | `{ operations: ... }` or `{ result: {...} }` |
 
-### 7.7 Git Lifecycle Events
+## 7.7 Git Lifecycle Events
 
 | Event | When | Can Return |
 |-------|------|------------|
@@ -80,20 +77,20 @@ session-control flow rather than a user/provider failure when settling work from
 | `before_pr` | Before a PR is opened | `{ cancel: true, reason: "..." }` or `{ title, body }` (rewrite) |
 | `pr_opened` | After a PR is opened | — |
 
-### 7.8 Verification Events
+## 7.8 Verification Events
 
 | Event | When | Can Return |
 |-------|------|------------|
 | `before_verify` | Before verification runs | `{ cancel: true, reason: "..." }` |
 | `verify_result` | After verification completes | — (payload includes `failures[]`) |
 
-### 7.9 Budget Events
+## 7.9 Budget Events
 
 | Event | When | Can Return |
 |-------|------|------------|
 | `budget_threshold` | Cost crossed a fraction of the budget | `{ action: "pause" \| "downgrade" \| "continue" }` |
 
-### 7.10 Orchestrator Events
+## 7.10 Orchestrator Events
 
 | Event | When | Can Return |
 |-------|------|------------|
@@ -103,7 +100,7 @@ session-control flow rather than a user/provider failure when settling work from
 | `unit_end` | Unit ends (completed / failed / cancelled / blocked) | — |
 | `session_end` | In-process session ends (distinct from `session_shutdown`) | — |
 
-### Emitting events from an extension
+## Emitting events from an extension
 
 Extensions can emit any of the post-plan events above via the
 `emitExtensionEvent` method on `ExtensionAPI`:
@@ -123,7 +120,7 @@ The GSD extension provides typed wrapper helpers in
 `emitVerifyResult`, `emitBudgetThreshold`, etc.) for call sites that don't
 have direct access to the `pi` API.
 
-### Event Handler Signature
+## Event Handler Signature
 
 ```typescript
 pi.on("event_name", async (event, ctx: ExtensionContext) => {
@@ -134,7 +131,7 @@ pi.on("event_name", async (event, ctx: ExtensionContext) => {
 });
 ```
 
-### Type Narrowing for Tool Events
+## Type Narrowing for Tool Events
 
 ```typescript
 import { isToolCallEventType, isToolResultEventType } from "@gsd/pi-coding-agent";

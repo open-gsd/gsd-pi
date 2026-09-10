@@ -304,16 +304,17 @@ Agent lifecycle events carry optional correlation metadata when the current prov
 |-------|------|--------|-------------|
 | `sessionId` | `string` | `agent_start`, `agent_end`, `stop`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end` | Current session identifier. Treat as optional for compatibility with older emitters and synthetic events. |
 | `turnId` | `string` | `agent_start`, `agent_end`, `stop`, `turn_start`, `turn_end`, `message_start`, `message_update`, `message_end`, `tool_execution_start`, `tool_execution_update`, `tool_execution_end` | Correlates events emitted for the same agent turn. Treat as optional. |
-| `abortOrigin` | `"session-transition" \| "user" \| "timeout" \| "unknown"` | `agent_end`, `stop` | Present when the agent loop ended because an abort was observed. |
+| `abortOrigin` | [`AgentAbortOrigin`](../../packages/pi-agent-core/src/types.ts) | `agent_end`, `stop` | Known origin of an abnormal end. Optional; normal ends and aborts with no known origin omit it. |
 
-`abortOrigin` lets consumers distinguish user-visible cancellation from internal control flow:
+The linked source type owns the accepted values. `Agent.abort(origin)` and
+`AgentSession.abort(origin)` carry an explicit origin through the terminal
+`agent_end` event and the session bridge. Calling `abort()` without an origin
+does not infer user cancellation.
 
-| Value | Meaning |
-|-------|---------|
-| `"session-transition"` | Internal abort used while switching, forking, or creating sessions. Extensions that settle work from `agent_end` should usually ignore this origin for the active unit/session. |
-| `"user"` | User-initiated cancellation, such as Escape, RPC `abort`, or `ctx.abort()`. |
-| `"timeout"` | Timeout-driven cancellation. |
-| `"unknown"` | Abort was observed but the caller did not provide a more specific origin. |
+Session-transition teardown uses `programmatic`. GSD ignores programmatic
+ends with an aborted final message when settling the active unit. An explicit
+`timeout` origin enters timeout recovery; an aborted end with empty content
+and no timeout origin retains its normal-completion behavior.
 
 ### Session Events
 
@@ -393,6 +394,7 @@ pi.on("tool_call", (event, ctx) => {
 | `bash_transform` | `BashTransformEvent` | `BashTransformEventResult` | Before bash tool executes a command. Can transform the command string. |
 
 `InputEventResult` is one of:
+
 - `{ action: "continue" }` — pass through unchanged
 - `{ action: "transform", text, images? }` — modify the input
 - `{ action: "handled" }` — input was fully consumed by the handler

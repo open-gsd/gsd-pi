@@ -80,10 +80,8 @@ const unsubscribe = client.onEvent((event) => {
 
 Agent events are delivered as `SdkAgentEvent` records. Lifecycle, turn, message,
 and tool-execution events may include optional `sessionId` and `turnId` fields
-for correlation. `agent_end` may also include `abortOrigin` with one of
-`"session-transition"`, `"user"`, `"timeout"`, or `"unknown"`; treat
-`"session-transition"` as internal session-control flow rather than a user
-cancel or provider failure.
+for correlation. See [Agent Event Metadata](../../docs/extension-sdk/api-reference.md#agent-event-metadata)
+for optional abort-origin metadata and its handling.
 
 ### Helpers
 

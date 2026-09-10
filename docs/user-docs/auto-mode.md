@@ -307,6 +307,9 @@ Interactive prompts that block waiting for human input (such as `ask_user_questi
 
 If a unit is abandoned, auto mode aborts its active turn, dismisses any pending question dialog, and clears its in-flight tool tracking. Transcript scrolling is restored, and the abandoned prompt no longer exempts later units from the idle or hard timeout.
 
+When a unit ends with `unit-hard-timeout`, its `unit_dispatches` ledger row
+records `status = failed` and `exit_reason = timeout`, rather than completion.
+
 For operator forensics, timeout recovery updates the unit runtime record with fields such as `phase`, `timeoutAt`, `lastProgressAt`, `lastProgressKind`, `recoveryAttempts`, and `lastRecoveryReason`. Finalize timeouts are recorded with `lastProgressKind` values like `finalize-pre-timeout` or `finalize-post-timeout`; successful finalization records `finalize-success`.
 
 The journal also closes every iteration explicitly. After a unit ends, auto mode emits `post-unit-finalize-start` before closeout and `post-unit-finalize-end` with a `status`, `action`, and optional `reason`. Every loop iteration then emits `iteration-end` with the final status and, when available, the failure class, unit type, unit id, and reason. Use these events to distinguish "agent never returned" from "agent returned but finalize/closeout stopped the loop."
