@@ -87,7 +87,7 @@ export const LEGACY_IMPORT_RESOLUTION_ENTRY_KEYS = [
 ] as const;
 
 export const LEGACY_IMPORT_PREVIEW_SCHEMA_VERSION = 1 as const;
-export const LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION = 48 as const;
+export const LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION = 49 as const;
 
 export type LegacyImportChangeAction = (typeof LEGACY_IMPORT_CHANGE_ACTIONS)[number];
 export type LegacyImportSourceOutcome = (typeof LEGACY_IMPORT_SOURCE_OUTCOMES)[number];

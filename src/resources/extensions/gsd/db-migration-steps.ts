@@ -9,7 +9,7 @@ import { createTaskVerificationRecoverySchemaV38 } from "./db-task-verification-
 import { createTaskRecoveryCurrentHeadSchemaV39 } from "./db-task-recovery-current-head-schema.js";
 import { createSliceCancellationSchemaV40 } from "./db-slice-cancellation-schema.js";
 import { createSliceCompletionSchemaV41 } from "./db-slice-completion-schema.js";
-import { createMilestoneValidationSchemaV42 } from "./db-milestone-validation-schema.js";
+import { createMilestoneValidationSchemaV42, createMilestoneVerdictScopeSchemaV49 } from "./db-milestone-validation-schema.js";
 import { createMilestoneCompletionSchemaV43 } from "./db-milestone-completion-schema.js";
 import { createMilestoneReopenSchemaV44 } from "./db-milestone-reopen-schema.js";
 import { createCanonicalFoundationSchemaV31 } from "./db-canonical-foundation-schema.js";
@@ -581,4 +581,8 @@ export function applyMigrationV48TaskToolRequirements(db: DbAdapter): void {
     "required_workflow_tools",
     "ALTER TABLE tasks ADD COLUMN required_workflow_tools TEXT NOT NULL DEFAULT '[]'",
   );
+}
+
+export function applyMigrationV49MilestoneVerdictScope(db: DbAdapter): void {
+  createMilestoneVerdictScopeSchemaV49(db);
 }

@@ -41,7 +41,7 @@
       "minimum": 0
     },
     "base_database_schema_version": {
-      "const": 48
+      "const": 49
     },
     "source_set_hash": {
       "$ref": "#/$defs/hash"
