@@ -4,6 +4,7 @@ import { SessionManager } from "@gsd/pi-coding-agent/core/session-manager.js";
 import { resolvePath } from "@gsd/pi-coding-agent/utils/paths.js";
 import { parseSkillBlock } from "./agent-session.ts";
 import { AgentSessionExtensionsModule } from "./session/agent-session-extensions.ts";
+import { AgentSessionEventsModule } from "./session/agent-session-events.ts";
 import { AgentSessionModelModule } from "./session/agent-session-model.ts";
 import { AgentSessionNavigationModule } from "./session/agent-session-navigation.ts";
 import { AgentSessionPromptModule } from "./session/agent-session-prompt.ts";
@@ -136,6 +137,26 @@ describe("AgentSessionModelModule", () => {
 });
 
 describe("AgentSessionNavigationModule", () => {
+  test("session-transition teardown aborts with the programmatic origin", async () => {
+    // #2218: the origin lets downstream classification tell an internal
+    // transition teardown apart from a user cancellation.
+    const aborts: Array<string | undefined> = [];
+    const host = {
+      agent: {
+        state: { isStreaming: true },
+        waitForIdle: async () => {},
+      },
+      abortRetry: () => {},
+      abort: async (origin?: string) => {
+        aborts.push(origin);
+      },
+    };
+
+    await new AgentSessionNavigationModule(host as any).settleCurrentTurnForSessionTransition();
+
+    assert.deepEqual(aborts, ["programmatic"]);
+  });
+
   test("records workspaceRoot as the new session header cwd", async () => {
     // Canonicalize with the same resolver the session code uses so the
     // expected cwd matches on Windows too (a bare POSIX path like
@@ -181,6 +202,50 @@ describe("AgentSessionNavigationModule", () => {
     assert.equal(sessionManager.getHeader()?.cwd, worktreeRoot);
     assert.equal(sessionManager.getCwd(), worktreeRoot);
     assert.equal(rebuiltRuntime, true);
+  });
+});
+
+describe("AgentSessionEventsModule", () => {
+  test("forwards abortOrigin on the extension agent_end event", async () => {
+    // #2218: a timeout kill must reach extension handlers with its origin.
+    const emitted: Array<Record<string, unknown>> = [];
+    const host = {
+      _extensionRunner: {
+        emit: async (event: Record<string, unknown>) => {
+          emitted.push(event);
+        },
+      },
+    };
+
+    await new AgentSessionEventsModule(host as any).emitExtensionEvent({
+      type: "agent_end",
+      messages: [{ role: "assistant", stopReason: "aborted" }],
+      abortOrigin: "timeout",
+    } as any, false);
+
+    assert.equal(emitted.length, 1);
+    assert.equal(emitted[0]?.type, "agent_end");
+    assert.equal(emitted[0]?.abortOrigin, "timeout");
+    assert.equal(emitted[0]?.willRetry, false);
+  });
+
+  test("omits abortOrigin when the run ends normally", async () => {
+    const emitted: Array<Record<string, unknown>> = [];
+    const host = {
+      _extensionRunner: {
+        emit: async (event: Record<string, unknown>) => {
+          emitted.push(event);
+        },
+      },
+    };
+
+    await new AgentSessionEventsModule(host as any).emitExtensionEvent({
+      type: "agent_end",
+      messages: [{ role: "assistant", stopReason: "stop" }],
+    } as any, false);
+
+    assert.equal(emitted.length, 1);
+    assert.equal("abortOrigin" in emitted[0], false);
   });
 });
 

@@ -221,9 +221,38 @@ test("markFailed records error_summary and retry metadata", (t) => {
   const row = getLatestForUnit("M001/S01")!;
   assert.equal(row.status, "failed");
   assert.equal(row.error_summary, "boom");
+  assert.equal(row.exit_reason, null);
   assert.equal(row.last_error_code, "test-fail");
   assert.equal(row.retry_after_ms, 5000);
   assert.ok(row.next_run_at, "next_run_at scheduled");
+});
+
+test("markFailed records a timeout exit_reason distinguishable from a clean completion (#2218)", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  const { workerId, leaseToken } = setup(base);
+
+  const claim = recordDispatchClaim({
+    traceId: "t-1",
+    workerId,
+    milestoneLeaseToken: leaseToken,
+    milestoneId: "M001",
+    unitType: "complete-slice",
+    unitId: "M001/S01",
+  });
+  assert.equal(claim.ok, true);
+  if (!claim.ok) return;
+  markRunning(claim.dispatchId);
+  assert.equal(markFailed(claim.dispatchId, {
+    errorSummary: "unit-hard-timeout",
+    exitReason: "timeout",
+  }), true);
+
+  const row = getLatestForUnit("M001/S01")!;
+  assert.equal(row.status, "failed");
+  assert.equal(row.exit_reason, "timeout");
+  assert.equal(row.error_summary, "unit-hard-timeout");
+  assert.notEqual(row.status, "completed");
 });
 
 test("markStuck and markCanceled set their respective statuses", (t) => {

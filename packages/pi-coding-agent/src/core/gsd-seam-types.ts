@@ -4,7 +4,9 @@
  */
 import type { AgentMessage } from "@gsd/pi-agent-core";
 
-export type AgentAbortOrigin = "user" | "timeout" | "error" | "extension" | "programmatic";
+/** Canonical union lives in @gsd/pi-agent-core (populated on `agent_end`). */
+export type { AgentAbortOrigin } from "@gsd/pi-agent-core";
+import type { AgentAbortOrigin } from "@gsd/pi-agent-core";
 
 export interface BashResult {
 	output: string;

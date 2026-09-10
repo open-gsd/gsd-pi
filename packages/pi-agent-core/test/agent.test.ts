@@ -277,6 +277,100 @@ describe("Agent", () => {
 		expect(receivedSignal?.aborted).toBe(true);
 	});
 
+	it("carries abortOrigin=timeout from abort(origin) to the terminal agent_end", async () => {
+		// Stream that mirrors a provider: a clean stop ends the run, an aborted
+		// signal produces a final assistant message with stopReason "aborted".
+		const createAbortAwareStreamFn = () => (_model: unknown, _context: unknown, options: { signal?: AbortSignal }) => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: createAssistantMessage("") });
+				const checkAbort = () => {
+					if (options?.signal?.aborted) {
+						stream.push({
+							type: "error",
+							reason: "aborted",
+							error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" as const },
+						});
+					} else {
+						setTimeout(checkAbort, 5);
+					}
+				};
+				checkAbort();
+			});
+			return stream;
+		};
+
+		const agentEnds: Array<{ abortOrigin?: string }> = [];
+		const agent = new Agent({ streamFn: createAbortAwareStreamFn() as never });
+		agent.subscribe((event) => {
+			if (event.type === "agent_end") {
+				agentEnds.push({ abortOrigin: event.abortOrigin });
+			}
+		});
+
+		const promptPromise = agent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+
+		// Simulate a timeout kill of a mid-reasoning run (#2218).
+		agent.abort("timeout");
+		await promptPromise;
+
+		expect(agentEnds).toHaveLength(1);
+		expect(agentEnds[0]?.abortOrigin).toBe("timeout");
+	});
+
+	it("omits abortOrigin on a normal end and on a bare abort", async () => {
+		const createAbortAwareStreamFn = (endCleanly: boolean) =>
+			(_model: unknown, _context: unknown, options: { signal?: AbortSignal }) => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					stream.push({ type: "start", partial: createAssistantMessage("") });
+					const checkAbort = () => {
+						if (options?.signal?.aborted) {
+							stream.push({
+								type: "error",
+								reason: "aborted",
+								error: { ...createAssistantMessage("Aborted"), stopReason: "aborted" as const },
+							});
+						} else if (endCleanly) {
+							stream.push({ type: "done", message: createAssistantMessage("done"), reason: "stop" });
+						} else {
+							setTimeout(checkAbort, 5);
+						}
+					};
+					checkAbort();
+				});
+				return stream;
+			};
+
+		const agentEnds: Array<{ abortOrigin?: string }> = [];
+		const collectAgentEnds = (target: Agent) => {
+			target.subscribe((event) => {
+				if (event.type === "agent_end") {
+					agentEnds.push({ abortOrigin: event.abortOrigin });
+				}
+			});
+		};
+
+		// Normal completion: no origin.
+		const normalAgent = new Agent({ streamFn: createAbortAwareStreamFn(true) as never });
+		collectAgentEnds(normalAgent);
+		await normalAgent.prompt("hello");
+		expect(agentEnds).toHaveLength(1);
+		expect(agentEnds[0]?.abortOrigin).toBeUndefined();
+
+		// Bare abort() has no known origin — behavior unchanged.
+		agentEnds.length = 0;
+		const abortedAgent = new Agent({ streamFn: createAbortAwareStreamFn(false) as never });
+		collectAgentEnds(abortedAgent);
+		const promptPromise = abortedAgent.prompt("hello");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		abortedAgent.abort();
+		await promptPromise;
+		expect(agentEnds).toHaveLength(1);
+		expect(agentEnds[0]?.abortOrigin).toBeUndefined();
+	});
+
 	it("should update state with mutators", () => {
 		const agent = new Agent();
 

@@ -599,6 +599,21 @@ export async function handleAgentEnd(
     return;
   }
 
+  // #2218 — A run killed by timeout carries the origin through the agent_end
+  // seam (pi-agent-core → session bridge). It must surface as a timeout
+  // cancellation — retryable, user-visible, ledger-recorded — instead of
+  // falling through to the success resolve as a clean completion. The #2695
+  // empty-content abort semantics below are untouched: they only apply to ends
+  // without a timeout origin.
+  if (event.abortOrigin === "timeout") {
+    resolveAgentEndCancelled({
+      message: "Unit ended by timeout before completing",
+      category: "timeout",
+      isTransient: true,
+    });
+    return;
+  }
+
   if (isBareClaudeCodeStreamAbortPlaceholder(lastMsg)) {
     if (isSessionSwitchAbortGraceActive()) {
       // Old turn leaking through after a session switch — drop it.

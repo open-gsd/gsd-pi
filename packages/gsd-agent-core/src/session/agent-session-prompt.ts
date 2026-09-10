@@ -1,4 +1,4 @@
-import type { AgentMessage, ThinkingLevel } from "@gsd/pi-agent-core";
+import type { AgentAbortOrigin, AgentMessage, ThinkingLevel } from "@gsd/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@gsd/pi-ai";
 import { isContextOverflow } from "@gsd/pi-ai";
 import { formatNoApiKeyFoundMessage, formatNoModelSelectedMessage } from "@gsd/pi-coding-agent/core/auth-guidance.js";
@@ -476,9 +476,9 @@ export class AgentSessionPromptModule {
 		return this.host._followUpMessages;
 	}
 
-	async abort(): Promise<void> {
+	async abort(origin?: AgentAbortOrigin): Promise<void> {
 		this.abortRetry();
-		this.host.agent.abort();
+		this.host.agent.abort(origin);
 		await this.host.agent.waitForIdle();
 	}
 

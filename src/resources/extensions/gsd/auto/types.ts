@@ -4,7 +4,7 @@
  * Leaf node in the import DAG — no imports from auto/.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
+import type { AgentAbortOrigin, ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import type { AutoSession } from "./session.js";
 import type { GSDPreferences } from "../preferences.js";
@@ -50,7 +50,8 @@ export interface AgentEndEvent {
   willRetry?: boolean;
   sessionId?: string;
   turnId?: string;
-  abortOrigin?: "session-transition" | "user" | "timeout" | "unknown";
+  /** Why the run ended abnormally, when the origin is known. Aligned with the seam's AgentAbortOrigin. */
+  abortOrigin?: AgentAbortOrigin;
 }
 
 /**

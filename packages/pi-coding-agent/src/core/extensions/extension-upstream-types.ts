@@ -4,6 +4,7 @@
  */
 
 import type {
+	AgentAbortOrigin,
 	AgentMessage,
 	AgentToolResult,
 	AgentToolUpdateCallback,
@@ -711,6 +712,12 @@ export interface AgentEndEvent {
 	messages: AgentMessage[];
 	/** Whether core will retry the failed turn after extension handlers finish. */
 	willRetry?: boolean;
+	/**
+	 * Why the run ended abnormally, when the origin is known (user abort,
+	 * timeout kill, error, ...). Omitted for normal ends and for aborts whose
+	 * origin could not be determined.
+	 */
+	abortOrigin?: AgentAbortOrigin;
 }
 
 /** Fired at the start of each turn */

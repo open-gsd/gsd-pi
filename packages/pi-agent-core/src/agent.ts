@@ -10,6 +10,7 @@ import {
 	type Transport,
 } from "@gsd/pi-ai";
 import { runAgentLoop, runAgentLoopContinue } from "./agent-loop.js";
+import { abortOriginFromSignal, type AgentAbortOrigin } from "./types.js";
 import type {
 	AfterToolCallContext,
 	AfterToolCallResult,
@@ -308,9 +309,15 @@ export class Agent {
 		return this.activeRun?.abortController.signal;
 	}
 
-	/** Abort the current run, if one is active. */
-	abort(): void {
-		this.activeRun?.abortController.abort();
+	/**
+	 * Abort the current run, if one is active.
+	 *
+	 * An optional origin is forwarded as the abort signal's reason and surfaces
+	 * on the terminal `agent_end` event as `abortOrigin` so consumers can
+	 * classify the end (e.g. timeout kills).
+	 */
+	abort(origin?: AgentAbortOrigin): void {
+		this.activeRun?.abortController.abort(origin);
 	}
 
 	/**
@@ -499,10 +506,15 @@ export class Agent {
 			errorMessage: error instanceof Error ? error.message : String(error),
 			timestamp: Date.now(),
 		} satisfies AgentMessage;
+		const abortOrigin = aborted ? abortOriginFromSignal(this.activeRun?.abortController.signal) : "error";
 		await this.processEvents({ type: "message_start", message: failureMessage });
 		await this.processEvents({ type: "message_end", message: failureMessage });
 		await this.processEvents({ type: "turn_end", message: failureMessage, toolResults: [] });
-		await this.processEvents({ type: "agent_end", messages: [failureMessage] });
+		await this.processEvents({
+			type: "agent_end",
+			messages: [failureMessage],
+			...(abortOrigin ? { abortOrigin } : {}),
+		});
 	}
 
 	private finishRun(): void {

@@ -57,6 +57,7 @@ export type {
 	VerifyFailure,
 	VerifyResultEvent,
 	AfterProviderResponseEvent,
+	AgentAbortOrigin,
 	AgentEndEvent,
 	AgentStartEvent,
 	// Re-exports

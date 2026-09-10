@@ -407,6 +407,30 @@ export interface AgentContext {
 }
 
 /**
+ * Why an agent run ended abnormally, when the origin is known.
+ *
+ * Carried on `agent_end` via `abortOrigin`. Omitted for normal ends and for
+ * aborts whose origin the loop cannot determine (e.g. a provider-side stream
+ * death or a bare `abort()` with no origin).
+ */
+export type AgentAbortOrigin = "user" | "timeout" | "error" | "extension" | "programmatic";
+
+const AGENT_ABORT_ORIGINS: readonly string[] = ["user", "timeout", "error", "extension", "programmatic"];
+
+/**
+ * Extract the abort origin from a run's abort signal, if the aborter passed
+ * one via `Agent.abort(origin)` (forwarded as the signal's abort reason).
+ */
+export function abortOriginFromSignal(signal: AbortSignal | undefined): AgentAbortOrigin | undefined {
+	if (!signal?.aborted) return undefined;
+	const reason: unknown = signal.reason;
+	if (typeof reason === "string" && AGENT_ABORT_ORIGINS.includes(reason)) {
+		return reason as AgentAbortOrigin;
+	}
+	return undefined;
+}
+
+/**
  * Events emitted by the Agent for UI updates.
  *
  * `agent_end` is the last event emitted for a run, but awaited `Agent.subscribe()`
@@ -416,7 +440,12 @@ export interface AgentContext {
 export type AgentEvent =
 	// Agent lifecycle
 	| { type: "agent_start" }
-	| { type: "agent_end"; messages: AgentMessage[] }
+	| {
+		type: "agent_end";
+		messages: AgentMessage[];
+		/** Why the run ended abnormally. Present only when the origin is known. */
+		abortOrigin?: AgentAbortOrigin;
+	}
 	// Turn lifecycle - a turn is one assistant response + any tool calls/results
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }

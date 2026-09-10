@@ -40,6 +40,21 @@ test("settleDispatchFailed writes failures and reports settled state", () => {
   assert.deepEqual(calls, [{ dispatchId: 42, errorSummary: "unit-break" }]);
 });
 
+test("settleDispatchFailed forwards the timeout exit reason to the ledger (#2218)", () => {
+  const calls: Array<{ dispatchId: number; errorSummary: string; exitReason?: string }> = [];
+
+  const settled = settleDispatchFailed(42, "unit-hard-timeout", {
+    markFailed: (dispatchId, details) => {
+      calls.push({ dispatchId, ...details });
+      return true;
+    },
+    logWriteFailure: () => assert.fail("logWriteFailure should not be called"),
+  }, "timeout");
+
+  assert.equal(settled, true);
+  assert.deepEqual(calls, [{ dispatchId: 42, errorSummary: "unit-hard-timeout", exitReason: "timeout" }]);
+});
+
 test("settleDispatchFailed reports a no-op failure write as unsettled", () => {
   const settled = settleDispatchFailed(42, "unit-break", {
     markFailed: () => false,

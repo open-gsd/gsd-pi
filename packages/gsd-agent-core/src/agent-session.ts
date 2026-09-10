@@ -15,6 +15,7 @@
 
 import type {
 	Agent,
+	AgentAbortOrigin,
 	AgentMessage,
 	AgentState,
 	AgentTool,
@@ -469,8 +470,8 @@ export class AgentSession implements AgentSessionHost {
 		return this._prompt.getFollowUpMessages();
 	}
 
-	abort(): Promise<void> {
-		return this._prompt.abort();
+	abort(origin?: AgentAbortOrigin): Promise<void> {
+		return this._prompt.abort(origin);
 	}
 
 	abortRetry(): void {

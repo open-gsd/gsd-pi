@@ -2,10 +2,15 @@
 
 import type { AgentEndEvent } from "./types.js";
 
+/**
+ * Session-transition teardowns abort the in-flight turn programmatically
+ * (agent-session-navigation settleCurrentTurnForSessionTransition), and that
+ * origin is carried on the terminal agent_end event.
+ */
 export function isInternalSessionTransitionAbortEvent(
   event: Pick<AgentEndEvent, "abortOrigin">,
 ): boolean {
-  return event.abortOrigin === "session-transition";
+  return event.abortOrigin === "programmatic";
 }
 
 export function shouldIgnoreAgentEndForActiveUnit(

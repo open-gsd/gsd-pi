@@ -326,6 +326,12 @@ export function markCompleted(dispatchId: number, opts?: CompleteOpts): boolean 
 export interface FailureOpts {
   errorSummary: string;
   errorCode?: string;
+  /**
+   * Structured outcome for the exit_reason column (e.g. "timeout" for a
+   * timeout-killed unit). Unlike error_summary this is a stable vocabulary,
+   * so ledger queries can classify exits without parsing prose.
+   */
+  exitReason?: string;
   /** Backoff before next attempt (used by stuck-detector retry suppression). */
   retryAfterMs?: number;
 }
@@ -344,6 +350,7 @@ export function markFailed(dispatchId: number, opts: FailureOpts): boolean {
     const result = db.prepare(
       `UPDATE unit_dispatches
        SET status = 'failed', ended_at = :ended_at,
+           exit_reason = :exit_reason,
            error_summary = :error_summary,
            last_error_code = :last_error_code,
            last_error_at = :last_error_at,
@@ -354,6 +361,7 @@ export function markFailed(dispatchId: number, opts: FailureOpts): boolean {
     ).run({
       ":id": dispatchId,
       ":ended_at": nowIso,
+      ":exit_reason": opts.exitReason ?? null,
       ":error_summary": opts.errorSummary,
       ":last_error_code": opts.errorCode ?? null,
       ":last_error_at": nowIso,

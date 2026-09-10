@@ -166,6 +166,7 @@ export class AgentSessionEventsModule {
 				type: "agent_end",
 				messages: event.messages,
 				willRetry: agentEndWillRetry ?? false,
+				...(event.abortOrigin ? { abortOrigin: event.abortOrigin } : {}),
 			});
 		} else if (event.type === "turn_start") {
 			const extensionEvent: TurnStartEvent = {

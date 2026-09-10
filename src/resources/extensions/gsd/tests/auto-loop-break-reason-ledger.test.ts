@@ -17,7 +17,10 @@ test("loop break branches settle the ledger with the resolved break reason", () 
     assert.notEqual(sentinel, -1, "expected a `break;` sentinel to terminate the break branch body");
     const body = branch.slice(0, sentinel);
     assert.match(body, /const breakReason = unitPhaseResult\.reason \?\? "unit-break";/);
-    assert.match(body, /closeRun\("failed", breakReason\)/);
+    // The optional third argument is the structured ledger exit_reason (#2218,
+    // e.g. "timeout" for mid-unit timeout kills) — derived from the same
+    // resolved breakReason, never hardcoded.
+    assert.match(body, /closeRun\("failed", breakReason(, exitReasonForBreak\(breakReason\))?\)/);
     // The trailing argument is the ADR-047 liveness guard id — a stable guard
     // identity, deliberately constant so repeat blocks hash to one signature.
     // It is not the break reason, which must stay the resolved reason.

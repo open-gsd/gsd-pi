@@ -39,7 +39,9 @@ export class AgentSessionNavigationModule {
 			await this.host.agent.waitForIdle();
 			return;
 		}
-		await this.host.abort();
+		// Carry the programmatic origin so the terminal agent_end classifies this
+		// teardown as an internal transition abort, not a user cancellation.
+		await this.host.abort("programmatic");
 	}
 
 	async newSession(options?: {

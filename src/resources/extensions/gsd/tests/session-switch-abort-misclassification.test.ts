@@ -166,10 +166,12 @@ test("mid-unit bare Claude Code stream-aborted placeholder resolves the unit", a
   assert.deepEqual(warnings, ["Claude Code stream aborted mid-unit (no diagnostic). Continuing."]);
 });
 
-test("typed session-transition abort events are classified as internal", () => {
+test("typed programmatic session-transition abort events are classified as internal", () => {
+  // #2218: the session bridge carries the abort origin; a transition teardown
+  // aborts programmatically, which the active-unit guard must ignore.
   assert.equal(
     shouldIgnoreAgentEndForActiveUnit({
-      abortOrigin: "session-transition",
+      abortOrigin: "programmatic",
       messages: [{ stopReason: "aborted" }],
     }),
     true,
@@ -177,7 +179,7 @@ test("typed session-transition abort events are classified as internal", () => {
 
   assert.equal(
     shouldIgnoreAgentEndForActiveUnit({
-      abortOrigin: "session-transition",
+      abortOrigin: "programmatic",
       messages: [{ stopReason: "end_turn" }],
     }),
     false,
@@ -195,6 +197,53 @@ test("typed session-transition abort events are classified as internal", () => {
     shouldIgnoreAgentEndForActiveUnit({ messages: [] }),
     false,
   );
+});
+
+test("timeout-origin agent_end cancels the unit as a timeout, not a completion (#2218)", async () => {
+  const results: Array<any> = [];
+  const warnings: string[] = [];
+  _setAutoActiveForTest(true);
+  _setCurrentResolve((result) => results.push(result));
+
+  const event = {
+    abortOrigin: "timeout",
+    messages: [{
+      stopReason: "aborted",
+      content: [{ type: "thinking", thinking: "mid-reasoning when the run was killed" }],
+    }],
+  };
+
+  await handleAgentEnd({} as any, event, {
+    ui: {
+      notify: (message: string, level: string) => {
+        if (level === "warning") warnings.push(message);
+      },
+    },
+  } as any);
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0]?.status, "cancelled");
+  assert.equal(results[0]?.errorContext?.category, "timeout");
+  assert.equal(results[0]?.errorContext?.isTransient, true);
+});
+
+test("timeout-origin agent_end is classified before the empty-abort completion path (#2695 boundary)", async () => {
+  // An aborted end with empty content and NO timeout origin still resolves as
+  // a normal completion (pinned #2695 semantics) — the timeout classification
+  // only applies to events that carry the origin.
+  const completed: Array<unknown> = [];
+  _setAutoActiveForTest(true);
+  _setCurrentResolve((result) => completed.push(result));
+
+  const event = {
+    messages: [{ stopReason: "aborted", content: [] }],
+  };
+
+  await handleAgentEnd({} as any, event, {
+    ui: { notify: () => {} },
+  } as any);
+
+  assert.deepEqual(completed, [{ status: "completed", event }]);
 });
 
 test("Claude Code session-switch abort detection is narrow", () => {

@@ -602,9 +602,15 @@ export async function autoLoop(
     let dispatchId: number | null = null;
     let dispatchSettled = false;
     let iterData: IterationData | undefined;
+    // #2218 — unit-phase break reasons that represent a mid-unit timeout kill
+    // record a structured exit_reason on the dispatch row, so a timeout is
+    // queryable without parsing error_summary prose.
+    const exitReasonForBreak = (breakReason: string): string | undefined =>
+      breakReason === "unit-hard-timeout" ? "timeout" : undefined;
     const closeRun = async (
       outcome: IterationRunOutcome,
       reason: string,
+      exitReason?: string,
     ): Promise<string | null> => {
       if (runClosed) return null;
       const unit = (observedUnitType && observedUnitId
@@ -632,6 +638,7 @@ export async function autoLoop(
           retryActiveUnit: s.orchestration?.retryActiveUnit?.bind(s.orchestration),
           abandonActiveUnit: s.orchestration?.abandonActiveUnit?.bind(s.orchestration),
         },
+        { ...(exitReason ? { exitReason } : {}) },
       );
       if (outcome === "retry" && s.orchestration?.getStatus().phase === "stopped") {
         // #2198: the finalize-retry guard tripped — the retry recurred with
@@ -1044,12 +1051,12 @@ export async function autoLoop(
             settleDispatchFailed(customDispatchId, breakReason, {
               markFailed: markDispatchFailed,
               logWriteFailure: logDispatchLedgerWriteFailure,
-            }));
+            }, exitReasonForBreak(breakReason)));
           if (customDispatchId !== null && !customDispatchSettled) {
             throw new Error(`Could not terminalize custom-engine dispatch ${customDispatchId} after unit break`);
           }
           dispatchSettled = customDispatchSettled;
-          await closeRun("failed", breakReason);
+          await closeRun("failed", breakReason, exitReasonForBreak(breakReason));
           await pauseForTaskRecoveryAbort(breakReason);
           finishIncompleteIteration({
             status: "stopped",
@@ -1978,7 +1985,7 @@ export async function autoLoop(
       }
       if (unitPhaseResult.action === "break") {
         const breakReason = unitPhaseResult.reason ?? "unit-break";
-        await closeRun("failed", breakReason);
+        await closeRun("failed", breakReason, exitReasonForBreak(breakReason));
         await pauseForTaskRecoveryAbort(breakReason);
         finishIncompleteIteration({
           status: "stopped",

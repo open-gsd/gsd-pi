@@ -1,5 +1,6 @@
 import type {
 	Agent,
+	AgentAbortOrigin,
 	AgentEvent,
 	AgentMessage,
 	AgentState,
@@ -166,7 +167,7 @@ export interface AgentSessionHost {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void>;
 	compact(customInstructions?: string): Promise<CompactionResult>;
-	abort(): Promise<void>;
+	abort(origin?: AgentAbortOrigin): Promise<void>;
 	abortRetry(): void;
 	setSessionName(name: string): void;
 	emitSessionStartWithLegacySwitch(event: SessionStartEvent & { reason: "new" | "resume" }): Promise<void>;

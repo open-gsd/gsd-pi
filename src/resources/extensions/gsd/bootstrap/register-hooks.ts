@@ -824,7 +824,9 @@ function recordRetryableHarnessToolError(toolName: string, result: unknown, erro
 
 function recordRetryableTurnAbort(event: { abortOrigin?: unknown; messages?: unknown[] }): void {
   const origin = typeof event.abortOrigin === "string" ? event.abortOrigin : undefined;
-  if (origin === "session-transition") return;
+  // Programmatic aborts are internal teardowns (e.g. session transitions), not
+  // unit-level turn aborts worth recording for retry bookkeeping.
+  if (origin === "programmatic") return;
 
   const messages = Array.isArray(event.messages) ? event.messages : [];
   const lastMsg = messages[messages.length - 1];

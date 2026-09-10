@@ -14,6 +14,7 @@ export {
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.js";
 // Extension system
 export type {
+	AgentAbortOrigin,
 	AgentEndEvent,
 	AgentStartEvent,
 	AgentToolResult,

@@ -16,12 +16,17 @@ export interface IterationRun {
 }
 
 export interface SettleIterationRunDeps {
-  markFailed: (dispatchId: number, details: { errorSummary: string }) => boolean;
+  markFailed: (dispatchId: number, details: { errorSummary: string; exitReason?: string }) => boolean;
   markCompleted: (dispatchId: number) => boolean;
   logWriteFailure: (err: unknown) => void;
   completeActiveUnit?: (unit: UnitRef) => Promise<void>;
   retryActiveUnit?: (unit: UnitRef) => Promise<void>;
   abandonActiveUnit?: (unit: UnitRef, reason: string) => Promise<void>;
+}
+
+export interface SettleIterationRunOpts {
+  /** Structured exit reason recorded on the dispatch row (e.g. "timeout"). */
+  exitReason?: string;
 }
 
 /**
@@ -35,6 +40,7 @@ export async function settleIterationRun(
   reason: string,
   alreadySettled: boolean,
   deps: SettleIterationRunDeps,
+  opts?: SettleIterationRunOpts,
 ): Promise<boolean> {
   const unit: UnitRef = { unitType: run.unitType, unitId: run.unitId };
   let settled = alreadySettled;
@@ -42,7 +48,7 @@ export async function settleIterationRun(
     if (outcome === "completed") {
       settled = settleDispatchCompleted(run.dispatchId, deps);
     } else {
-      settled = settleDispatchFailed(run.dispatchId, reason, deps);
+      settled = settleDispatchFailed(run.dispatchId, reason, deps, opts?.exitReason);
     }
   }
 
