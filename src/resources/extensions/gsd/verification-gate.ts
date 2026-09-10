@@ -83,13 +83,36 @@ export interface DiscoverCommandsOptions {
   cwd: string;
 }
 
+/** Description separators after which a verdict token carries only details (#2014). */
+const VERDICT_SEPARATORS = [":", "—", " – ", " - "];
+const PASSING_VERDICT_RE = /^(pass|passed)$/;
+
+/**
+ * Lenient verdict matching (#2014): the tool schema documents decorated and
+ * descriptive verdicts (e.g. '✅ pass', 'pass: all checks green'). Strip
+ * leading non-alphanumeric markers, then evaluate only the token before the
+ * first description separator, case-insensitively. pass/passed → true;
+ * fail/failed and any unknown token → false (fail-closed).
+ */
+function verdictQualifies(verdict: string): boolean {
+  const stripped = verdict.trim().replace(/^[^a-zA-Z0-9]+/, "");
+  let cut = stripped.length;
+  for (const separator of VERDICT_SEPARATORS) {
+    const index = stripped.indexOf(separator);
+    if (index !== -1 && index < cut) cut = index;
+  }
+  return PASSING_VERDICT_RE.test(stripped.slice(0, cut).trim().toLowerCase());
+}
+
 /**
  * Task-specific evidence qualifies when at least one record exists and every
  * record reports a passing outcome (#1591). The executor's staged verdict is
  * authoritative: negated verify idioms (`! grep -q`, `grep -v`,
  * `git diff --exit-code`) succeed on a non-zero exit, so a "pass" verdict
  * qualifies even with a non-zero exitCode. `exitCode === 0` is the fallback
- * for records staged without a verdict (#2213).
+ * for records staged without a verdict (#2213). Verdict matching is lenient
+ * (#2014): leading markers (`✅ pass`) and `pass: <details>` descriptions are
+ * accepted; unknown tokens fail closed.
  */
 export function hasQualifyingTaskEvidence(
   evidence: TaskVerificationEvidence[] | undefined,
@@ -97,7 +120,7 @@ export function hasQualifyingTaskEvidence(
   if (!evidence || evidence.length === 0) return false;
   return evidence.every((record) => {
     const verdict = (record.verdict ?? "").trim();
-    if (verdict) return /^(pass|passed)$/i.test(verdict);
+    if (verdict) return verdictQualifies(verdict);
     return record.exitCode === 0;
   });
 }

@@ -18,6 +18,7 @@ import {
   getTaskVerificationEvidence,
 } from "../gsd-db.ts";
 import { hasQualifyingTaskEvidence } from "../verification-gate.ts";
+import type { TaskVerificationEvidence } from "../verification-gate.ts";
 
 const MID = "m1";
 const SID = "s1";
@@ -208,5 +209,67 @@ describe("hasQualifyingTaskEvidence: negated verify idioms", () => {
     });
 
     assert.equal(hasQualifyingTaskEvidence(getTaskVerificationEvidence(MID, SID, TID)), false);
+  });
+});
+
+// ─── Lenient verdict matching at the gate (#2014) ───────────────────────────
+describe("hasQualifyingTaskEvidence: lenient verdict matching (#2014)", () => {
+  const record = (verdict: string, exitCode = 0): TaskVerificationEvidence => ({
+    command: "pnpm test",
+    exitCode,
+    verdict,
+    durationMs: 10,
+  });
+
+  test("bare pass/passed verdicts still qualify (case-insensitive)", () => {
+    assert.equal(hasQualifyingTaskEvidence([record("pass")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("passed")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("PASS")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("Passed")]), true);
+  });
+
+  test("bare fail/failed verdicts still disqualify", () => {
+    assert.equal(hasQualifyingTaskEvidence([record("fail")]), false);
+    assert.equal(hasQualifyingTaskEvidence([record("failed")]), false);
+    assert.equal(hasQualifyingTaskEvidence([record("FAIL")]), false);
+  });
+
+  test("decorated verdicts qualify (#2014)", () => {
+    assert.equal(hasQualifyingTaskEvidence([record("✅ pass")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("✅ Passed")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("❌ fail")]), false);
+    assert.equal(hasQualifyingTaskEvidence([record("❌ failed")]), false);
+  });
+
+  test("descriptive 'verdict: details' forms qualify on the leading token (#2014)", () => {
+    assert.equal(hasQualifyingTaskEvidence([record("pass: all checks green")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("✅ pass: all checks green")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("failed: x")]), false);
+  });
+
+  test("em/en-dash and spaced-hyphen description separators evaluate the leading token (#2014)", () => {
+    assert.equal(hasQualifyingTaskEvidence([record("pass — all checks green")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("pass – all checks green")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("pass - all checks green")]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("failed — suite B")]), false);
+  });
+
+  test("unknown verdict tokens fail closed even with exit 0 (#2014)", () => {
+    assert.equal(hasQualifyingTaskEvidence([record("partial")]), false);
+    assert.equal(hasQualifyingTaskEvidence([record("failure")]), false);
+    assert.equal(hasQualifyingTaskEvidence([record("ok")]), false);
+    assert.equal(hasQualifyingTaskEvidence([record("✅")]), false);
+  });
+
+  test("verdict-less records still fall back to exitCode === 0 (#2213)", () => {
+    assert.equal(hasQualifyingTaskEvidence([record("", 0)]), true);
+    assert.equal(hasQualifyingTaskEvidence([record("", 1)]), false);
+  });
+
+  test("one decorated failing record disqualifies an otherwise passing set", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([record("✅ pass"), record("❌ fail")]),
+      false,
+    );
   });
 });

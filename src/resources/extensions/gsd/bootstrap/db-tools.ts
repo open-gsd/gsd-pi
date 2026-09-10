@@ -1546,7 +1546,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 						}),
 						exitCode: Type.Number({ description: "Exit code of the command" }),
 						verdict: Type.String({
-							description: "Pass/fail verdict (e.g. '✅ pass', '❌ fail')",
+							description:
+								"Pass/fail verdict (e.g. '✅ pass', '❌ fail', 'pass: all checks green'). Bare 'pass'/'passed'/'fail'/'failed', leading markers, and 'verdict: <details>' descriptions are accepted.",
 						}),
 						durationMs: Type.Number({
 							description: "Duration of the command in milliseconds",
