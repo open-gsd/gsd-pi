@@ -43,6 +43,7 @@ import {
   resolveMilestoneFile,
   clearPathCache,
   resolveGsdRootFile,
+  normalizeRealPath,
 } from "./paths.js";
 import {
   existsSync,
@@ -480,15 +481,17 @@ export function writeBlockerPlaceholder(
   const artifactBase = resolveArtifactVerificationBase(unitId, base);
   const canonicalArtifactPath = resolveExpectedArtifactPath(unitType, unitId, artifactBase);
   if (!canonicalArtifactPath) return null;
-  const blockerArtifactPath = unitType === "execute-task"
+  const blockerArtifactPath = unitType === "execute-task" || unitType === "complete-milestone"
     ? canonicalArtifactPath.replace(/-SUMMARY\.md$/u, "-RECOVERY-BLOCKER.md")
     : unitType === "plan-slice"
       ? canonicalArtifactPath.replace(/-PLAN\.md$/u, "-RECOVERY-BLOCKER.md")
-      : canonicalArtifactPath;
-  // DB-backed Task and slice-plan blockers must never occupy their canonical
-  // completion projections.
+      : unitType === "validate-milestone"
+        ? canonicalArtifactPath.replace(/-VALIDATION\.md$/u, "-RECOVERY-BLOCKER.md")
+        : canonicalArtifactPath;
+  // DB-backed Task, slice-plan, milestone-validation, and milestone-summary
+  // blockers must never occupy their canonical projections.
   if (
-    (unitType === "execute-task" || unitType === "plan-slice") &&
+    (unitType === "execute-task" || unitType === "plan-slice" || unitType === "validate-milestone" || unitType === "complete-milestone") &&
     blockerArtifactPath === canonicalArtifactPath
   ) return null;
   const dir = dirname(blockerArtifactPath);
@@ -499,8 +502,9 @@ export function writeBlockerPlaceholder(
       ? "This diagnostic records a fail-closed planning gate; it is not a roadmap or completed milestone work."
       : unitType === "plan-slice"
         ? "This diagnostic does not complete slice planning; auto-mode must remain paused until a valid plan is persisted."
-
-      : "This placeholder was written by auto-mode so the pipeline can advance.";
+        : unitType === "validate-milestone" || unitType === "complete-milestone"
+          ? "This diagnostic is not a canonical result; no validation verdict or milestone completion was recorded."
+          : "This placeholder was written by auto-mode so the pipeline can advance.";
   const content = [
     `# BLOCKER — auto-mode recovery failed`,
     ``,
@@ -553,9 +557,17 @@ export function writeBlockerPlaceholder(
     }
   }
 
-  return unitType === "plan-slice"
-    ? relative(base, blockerArtifactPath)
-    : diagnoseExpectedArtifact(unitType, unitId, base);
+  // Sidecar diagnostics report the file actually written; placeholders that
+  // occupy their canonical path keep the expected-artifact description.
+  if (blockerArtifactPath === canonicalArtifactPath) {
+    return diagnoseExpectedArtifact(unitType, unitId, base);
+  }
+  const writtenRel = relative(base, blockerArtifactPath);
+  // Milestone resolvers realpath-anchor their results, so when base sits
+  // behind a symlink (e.g. /tmp) re-anchor the relative path to the real base.
+  return writtenRel.startsWith("..")
+    ? relative(normalizeRealPath(base), blockerArtifactPath)
+    : writtenRel;
 }
 
 // ─── Merge State Reconciliation ───────────────────────────────────────────────

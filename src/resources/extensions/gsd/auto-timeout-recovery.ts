@@ -293,7 +293,7 @@ export async function recoverTimedOutUnit(
   // #4175/#1995: Never replace canonical lifecycle projections with blocker
   // placeholders. They cannot update the required DB state, so finalization
   // rejects them and retries unchanged input indefinitely. Pause fail-closed.
-  if (unitType === "complete-milestone" || unitType === "plan-slice") {
+  if (unitType === "complete-milestone" || unitType === "plan-slice" || unitType === "validate-milestone") {
     writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnitStartedAt, {
       phase: "paused",
       recoveryAttempts: recoveryAttempts + 1,
@@ -301,7 +301,9 @@ export async function recoverTimedOutUnit(
     });
     const message = unitType === "complete-milestone"
       ? `Milestone ${unitId} ${reason}-recovery exhausted ${maxRecoveryAttempts} attempt(s) — worktree branch preserved. Re-run /gsd auto once blockers are resolved.`
-      : `Slice plan ${unitId} ${reason}-recovery exhausted ${maxRecoveryAttempts} attempt(s) — canonical PLAN preserved. Re-run /gsd auto once blockers are resolved.`;
+      : unitType === "validate-milestone"
+        ? `Milestone validation ${unitId} ${reason}-recovery exhausted ${maxRecoveryAttempts} attempt(s) — no canonical validation result was persisted; canonical VALIDATION preserved. Re-run /gsd auto once blockers are resolved.`
+        : `Slice plan ${unitId} ${reason}-recovery exhausted ${maxRecoveryAttempts} attempt(s) — canonical PLAN preserved. Re-run /gsd auto once blockers are resolved.`;
     ctx.ui.notify(
       message,
       "error",
