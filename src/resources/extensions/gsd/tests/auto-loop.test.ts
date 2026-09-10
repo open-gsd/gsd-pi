@@ -2372,12 +2372,12 @@ test("custom-engine recovery break and retry terminalize their dispatch", async 
       }
       assert.equal(
         dispatchStatusAtPause,
-        action === "break" ? "failed" : undefined,
+        action === "break" && reason === "task-recovery-abort" ? "failed" : undefined,
         "a terminal recovery abort must settle its dispatch before pausing",
       );
       assert.equal(
         releaseCallsAtPause,
-        action === "break" ? 1 : undefined,
+        action === "break" && reason === "task-recovery-abort" ? 1 : undefined,
         "a terminal recovery abort must release its active unit before pausing",
       );
       assert.equal(releaseCalls, 1);
