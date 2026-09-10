@@ -167,6 +167,166 @@ export function grantSliceCancellationWaiver(
   return { waiverId, waiverStatus: "active" };
 }
 
+export interface PlanReconciliationAuthorization {
+  taskId: string;
+  requirementId: string;
+  waiverId: string;
+}
+
+const PLAN_RECONCILIATION_OPERATION = "workflow.slice.plan";
+const PLAN_RECONCILIATION_AUTHORIZATION_OPERATION = "workflow.slice.plan.authorization";
+
+/**
+ * Mint the cancellation authorization the slice-completion invariant demands
+ * for a task that a plan-slice re-dispatch omits (#2217). Runs inside the
+ * `workflow.slice.plan` Domain Operation and stamps the Waiver with that
+ * operation's provenance; the matching waived Requirement Disposition is
+ * recorded by `recordPlanReconciliationDisposition` in the fenced
+ * authorization operation that follows, because the schema requires a Waiver
+ * to predate its waived Disposition by at least one project revision.
+ */
+export function grantPlanReconciliationWaiver(
+  context: Readonly<DomainOperationContext>,
+  input: SliceIdentity & { taskId: string },
+): PlanReconciliationAuthorization {
+  if (requireActiveDomainOperationContext(context) !== PLAN_RECONCILIATION_OPERATION) {
+    throw new Error("Plan reconciliation Waiver requires a workflow.slice.plan Domain Operation");
+  }
+  const slice = {
+    milestoneId: requireText(input.milestoneId, "milestoneId"),
+    sliceId: requireText(input.sliceId, "sliceId"),
+  };
+  const taskId = requireText(input.taskId, "taskId");
+  const lifecycle = getDb().prepare(`
+    SELECT lifecycle_id
+    FROM workflow_item_lifecycles
+    WHERE project_id = :project_id
+      AND item_kind = 'task'
+      AND milestone_id = :milestone_id
+      AND slice_id = :slice_id
+      AND task_id = :task_id
+  `).get({
+    ":project_id": context.projectId,
+    ":milestone_id": slice.milestoneId,
+    ":slice_id": slice.sliceId,
+    ":task_id": taskId,
+  }) as Record<string, unknown> | undefined;
+  if (!lifecycle) {
+    throw new Error(
+      `Plan reconciliation requires the cancelled Task lifecycle for ${slice.milestoneId}/${slice.sliceId}/${taskId}`,
+    );
+  }
+  const lifecycleId = String(lifecycle["lifecycle_id"]);
+  const requirementId = `plan-omission:${slice.milestoneId}/${slice.sliceId}/${taskId}`;
+  const requirement = getDb().prepare(`
+    SELECT id FROM requirements WHERE id = :id
+  `).get({ ":id": requirementId }) as Record<string, unknown> | undefined;
+  if (!requirement) {
+    getDb().prepare(`
+      INSERT INTO requirements (id, class, status, description, source)
+      VALUES (:id, 'cancellation', 'waived', :description, 'plan-slice')
+    `).run({
+      ":id": requirementId,
+      ":description": `Omission of task ${taskId} from slice ${slice.milestoneId}/${slice.sliceId} authorized by plan-slice reconciliation`,
+    });
+  }
+  const scope = `task:${slice.milestoneId}/${slice.sliceId}/${taskId}`;
+  const existing = getDb().prepare(`
+    SELECT waiver_id
+    FROM workflow_waivers
+    WHERE lifecycle_id = :lifecycle_id
+      AND requirement_id = :requirement_id
+      AND waiver_status = 'active'
+      AND scope = :scope
+  `).all({
+    ":lifecycle_id": lifecycleId,
+    ":requirement_id": requirementId,
+    ":scope": scope,
+  }) as Array<Record<string, unknown>>;
+  if (existing.length > 1) {
+    throw new Error("Plan reconciliation found multiple active cancellation Waivers for one task");
+  }
+  if (existing.length === 1) {
+    return { taskId, requirementId, waiverId: String(existing[0]!["waiver_id"]) };
+  }
+  const waiverId = randomUUID();
+  getDb().prepare(`
+    INSERT INTO workflow_waivers (
+      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_status, scope, rationale, granted_by_actor_type,
+      granted_by_actor_id, granted_at, expires_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :waiver_id, :project_id, :lifecycle_id, :requirement_id, NULL,
+      'active', :scope, :rationale, 'policy',
+      NULL, :granted_at, NULL,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ":waiver_id": waiverId,
+    ":project_id": context.projectId,
+    ":lifecycle_id": lifecycleId,
+    ":requirement_id": requirementId,
+    ":scope": scope,
+    ":rationale": `Plan-slice reconciliation omitted task ${taskId} from slice ${slice.milestoneId}/${slice.sliceId}; the omission is authorized for slice completion`,
+    ":granted_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  });
+  return { taskId, requirementId, waiverId };
+}
+
+/**
+ * Record the waived Requirement Disposition that binds a reconciliation
+ * Waiver into a current authorized cancellation for slice completion. The
+ * schema's waiver-authority trigger requires the Waiver's project revision to
+ * strictly precede the Disposition's, so this runs in its own fenced
+ * `workflow.slice.plan.authorization` Domain Operation after the plan
+ * operation commits.
+ */
+export function recordPlanReconciliationDisposition(
+  context: Readonly<DomainOperationContext>,
+  input: PlanReconciliationAuthorization,
+): void {
+  if (requireActiveDomainOperationContext(context) !== PLAN_RECONCILIATION_AUTHORIZATION_OPERATION) {
+    throw new Error("Plan reconciliation Disposition requires a workflow.slice.plan.authorization Domain Operation");
+  }
+  const requirementId = requireText(input.requirementId, "requirementId");
+  const waiverId = requireText(input.waiverId, "waiverId");
+  const head = getDb().prepare(`
+    SELECT disposition_id
+    FROM workflow_requirement_dispositions
+    WHERE requirement_id = :requirement_id
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_requirement_dispositions successor
+        WHERE successor.supersedes_disposition_id = workflow_requirement_dispositions.disposition_id
+      )
+  `).get({ ":requirement_id": requirementId }) as Record<string, unknown> | undefined;
+  getDb().prepare(`
+    INSERT INTO workflow_requirement_dispositions (
+      disposition_id, project_id, requirement_id, disposition, waiver_id,
+      supersedes_disposition_id, rationale, created_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :disposition_id, :project_id, :requirement_id, 'waived', :waiver_id,
+      :supersedes_id, :rationale, :created_at,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ":disposition_id": randomUUID(),
+    ":project_id": context.projectId,
+    ":requirement_id": requirementId,
+    ":waiver_id": waiverId,
+    ":supersedes_id": head ? String(head["disposition_id"]) : null,
+    ":rationale": "Waived by plan-slice reconciliation for the omitted task",
+    ":created_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  });
+}
+
 function revokeSliceCancellationWaivers(
   context: Readonly<DomainOperationContext>,
   lifecycleId: string,

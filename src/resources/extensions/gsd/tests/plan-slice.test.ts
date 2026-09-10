@@ -22,11 +22,15 @@ import {
   projectCanonicalStatusToLegacy,
   readDomainOperationFence,
 } from '../gsd-db.ts';
+import { appendKernelCheckpoint } from '../db/writers/lifecycle-commands.ts';
 import { handlePlanSlice as handlePlanSliceWithInvocation } from '../tools/plan-slice.ts';
 import { handlePlanTask as handlePlanTaskWithInvocation } from '../tools/plan-task.ts';
 import { internalPlanningInvocation } from '../planning-invocation.ts';
 import { parseProjectionPlan as parsePlan } from '../schemas/parsers.ts';
 import { deriveState, invalidateStateCache } from '../state.ts';
+import { claimTaskAttempt, settleTaskAttempt } from '../task-execution-domain-operation.ts';
+import { recordTaskTechnicalVerdict } from '../task-verification-domain-operation.ts';
+import { completeSlice } from '../slice-lifecycle-domain-operation.ts';
 
 function handlePlanSlice(
   params: Parameters<typeof handlePlanSliceWithInvocation>[0],
@@ -1116,6 +1120,31 @@ test('handlePlanSlice durably cancels omitted pending tasks when replanning a sm
       FROM workflow_item_lifecycles
       WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S02' AND task_id = 'T05'
     `).get(), { lifecycle_status: 'cancelled', state_version: 1 });
+    // Reconciled invariant (#2217): the re-dispatch runs over an all-pending
+    // set, so each omission it cancels carries its own cancellation Waiver
+    // with a current waived Disposition — slice completion needs no manual
+    // waiver for these rows.
+    for (const omittedTaskId of ['T04', 'T05']) {
+      const omittedLifecycle = adapter.prepare(`
+        SELECT lifecycle_id FROM workflow_item_lifecycles
+        WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S02' AND task_id = ?
+      `).get(omittedTaskId) as { lifecycle_id: string } | undefined;
+      assert.ok(omittedLifecycle, `omitted ${omittedTaskId} must keep its lifecycle row`);
+      const waiver = adapter.prepare(`
+        SELECT waiver_id, requirement_id FROM workflow_waivers
+        WHERE lifecycle_id = ? AND waiver_status = 'active'
+      `).get(omittedLifecycle.lifecycle_id) as { waiver_id: string; requirement_id: string } | undefined;
+      assert.ok(waiver, `omitted ${omittedTaskId} must carry an active cancellation Waiver`);
+      const disposition = adapter.prepare(`
+        SELECT disposition FROM workflow_requirement_dispositions
+        WHERE waiver_id = ? AND requirement_id = ?
+          AND NOT EXISTS (
+            SELECT 1 FROM workflow_requirement_dispositions successor
+            WHERE successor.supersedes_disposition_id = workflow_requirement_dispositions.disposition_id
+          )
+      `).get(waiver.waiver_id, waiver.requirement_id) as { disposition: string } | undefined;
+      assert.equal(disposition?.disposition, 'waived', `omitted ${omittedTaskId} must carry a current waived Disposition`);
+    }
     assert.doesNotMatch(readFileSync(slicePlanPath, 'utf-8'), /T04/, 'omitted T04 should be removed from plan');
 
     const beforeReopenAttempt = {
@@ -1320,6 +1349,315 @@ test('handlePlanSlice resolves relative task IO paths against worktree roots', a
     }, worktree);
 
     assert.ok(!('error' in result), `expected success, got: ${(result as { error?: string }).error}`);
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ── Interrupted plan-slice replay reconciliation (#2217) ─────────────────────
+//
+// When crash recovery re-fires plan-slice, the second planning run may emit
+// bare task ids (T01..) while the interrupted first run persisted
+// slice-prefixed rows (S02-T01..). Before #2217 the re-dispatch inserted a
+// duplicate bare-id set and durably cancelled the prefixed originals without
+// any cancellation Waiver, permanently blocking slice completion.
+
+function replayChainInvocation(step: string, taskId?: string): {
+  idempotencyKey: string;
+  sourceTransport: 'pi-tool';
+  actorType: string;
+  actorId: string;
+} {
+  return {
+    idempotencyKey: `test/replay-chain/${taskId ?? 'slice'}/${step}`,
+    sourceTransport: 'pi-tool',
+    actorType: 'agent',
+    actorId: 'plan-slice-replay-test',
+  };
+}
+
+function sliceCompletionCloseout() {
+  return {
+    sliceTitle: 'Planning slice',
+    oneLiner: 'Completed after an interrupted plan-slice replay.',
+    narrative: 'The replayed dispatch reconciled task rows without duplication.',
+    verification: 'Focused completion-chain tests pass.',
+    uatContent: '',
+    operationalReadiness: '',
+    deviations: 'None.',
+    knownLimitations: 'None.',
+    followUps: 'None.',
+    provides: [],
+    requires: [],
+    affects: [],
+    keyFiles: [],
+    keyDecisions: [],
+    patternsEstablished: [],
+    observabilitySurfaces: [],
+    drillDownPaths: [],
+    requirementsAdvanced: [],
+    requirementsValidated: [],
+    requirementsSurfaced: [],
+    requirementsInvalidated: [],
+    filesModified: [],
+  };
+}
+
+function seedExecutionFixtures(): void {
+  const adapter = _getAdapter();
+  assert.ok(adapter);
+  adapter.prepare(`
+    INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status,
+      project_root_realpath
+    ) VALUES (
+      'worker-1', 'test-host', 1, '2026-09-10T00:00:00.000Z', 'test',
+      '2026-09-10T00:00:00.000Z', 'active', '/tmp/project'
+    )
+  `).run();
+  adapter.prepare(`
+    INSERT INTO milestone_leases (
+      milestone_id, worker_id, fencing_token, acquired_at, expires_at, status
+    ) VALUES (
+      'M001', 'worker-1', 7, '2026-09-10T00:00:00.000Z',
+      '2099-09-10T00:00:00.000Z', 'held'
+    )
+  `).run();
+}
+
+function insertClaimedDispatch(taskId: string): number {
+  const adapter = _getAdapter();
+  assert.ok(adapter);
+  adapter.prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      :trace_id, :turn_id, 'worker-1', 7,
+      'M001', 'S02', :task_id, 'execute-task', :unit_id,
+      'claimed', 1, '2026-09-10T00:00:00.000Z'
+    )
+  `).run({
+    ':trace_id': `trace/${taskId}`,
+    ':turn_id': `turn/${taskId}`,
+    ':task_id': taskId,
+    ':unit_id': `M001/S02/${taskId}`,
+  });
+  return Number(adapter.prepare('SELECT MAX(id) AS id FROM unit_dispatches').get()?.id);
+}
+
+/**
+ * Drive one task through the durable completion chain (claim, settle,
+ * technical verdict, completion publish) so slice completion can accept it.
+ */
+function runTaskToCompleted(taskId: string): void {
+  const attemptId = claimTaskAttempt({
+    invocation: replayChainInvocation('claim', taskId),
+    task: { milestoneId: 'M001', sliceId: 'S02', taskId },
+    workerId: 'worker-1',
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: insertClaimedDispatch(taskId),
+  }).attemptId;
+  settleTaskAttempt({
+    invocation: replayChainInvocation('settle', taskId),
+    attemptId,
+    outcome: 'succeeded',
+    failureClass: 'none',
+    summary: 'Task implementation succeeded.',
+    output: { artifact: 'replay-chain-history' },
+  });
+  recordTaskTechnicalVerdict({
+    invocation: replayChainInvocation('verify', taskId),
+    attemptId,
+    testedSourceRevision: 'git:replay-chain-source-revision',
+    verdict: 'pass',
+    rationale: 'Focused verification passed.',
+    evidence: {
+      evidenceClass: 'command',
+      commandOrTool: 'node --test plan-slice.test.ts',
+      workingDirectory: '/tmp/project',
+      startedAt: '2026-09-10T00:01:00.000Z',
+      endedAt: '2026-09-10T00:01:01.000Z',
+      exitCode: 0,
+      observation: 'passed',
+      durableOutputRef: `db://fixture/${taskId}/verification`,
+      environment: { runner: 'node-test', fixture: 'plan-slice-replay' },
+    },
+  });
+
+  const adapter = _getAdapter();
+  assert.ok(adapter);
+  const lifecycleId = String(adapter.prepare(
+    'SELECT lifecycle_id FROM workflow_execution_attempts WHERE attempt_id = ?',
+  ).get(attemptId)?.lifecycle_id);
+  let previousCheckpointId = String(adapter.prepare(`
+    SELECT kernel_checkpoint_id FROM workflow_kernel_checkpoints
+    WHERE attempt_id = ? AND next_stage = 'verify'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id =
+          workflow_kernel_checkpoints.kernel_checkpoint_id
+      )
+  `).get(attemptId)?.kernel_checkpoint_id);
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: 'task.completion.publish',
+    idempotencyKey: `test/replay-chain/${taskId}/publish`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: 'test',
+    sourceTransport: 'test',
+    payload: { taskId, attemptId },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: 'task',
+      milestoneId: 'M001',
+      sliceId: 'S02',
+      taskId,
+      lifecycleStatus: 'completed',
+    });
+    for (const nextStage of ['route', 'closeout', 'settled'] as const) {
+      previousCheckpointId = appendKernelCheckpoint(context, {
+        lifecycleId,
+        attemptId,
+        nextStage,
+        previousKernelCheckpointId: previousCheckpointId,
+      }).kernelCheckpointId;
+    }
+    adapter.prepare(`
+      UPDATE tasks SET status = 'complete', completed_at = '2026-09-10T00:02:00.000Z'
+      WHERE milestone_id = 'M001' AND slice_id = 'S02' AND id = ?
+    `).run(taskId);
+    return {
+      events: [{
+        eventType: 'task.completion.published',
+        entityType: 'task',
+        entityId: `M001/S02/${taskId}`,
+        payload: { attemptId },
+        destinations: ['test'],
+      }],
+      projections: [{
+        projectionKey: `test/publish/${taskId.toLowerCase()}`,
+        projectionKind: 'test',
+        rendererVersion: '1',
+      }],
+    };
+  });
+}
+
+test('handlePlanSlice interrupted replay reuses existing prefixed rows instead of duplicating them (#2217)', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const first = await handlePlanSlice({
+      ...validParams(),
+      tasks: [
+        { ...validParams().tasks[0], taskId: 'S02-T01' },
+        { ...validParams().tasks[1], taskId: 'S02-T02' },
+      ],
+    }, base);
+    assert.ok(!('error' in first), `unexpected error: ${'error' in first ? first.error : ''}`);
+
+    // Recovery re-dispatch: the planner emits bare ids this time.
+    const second = await handlePlanSlice({
+      ...validParams(),
+      tasks: [
+        { ...validParams().tasks[0], taskId: 'T01', title: 'Rewritten slice handler' },
+        { ...validParams().tasks[1], taskId: 'T02' },
+      ],
+    }, base);
+    assert.ok(!('error' in second), `unexpected error: ${'error' in second ? second.error : ''}`);
+
+    assert.deepEqual(getSliceTasks('M001', 'S02').map((task) => [task.id, task.status]), [
+      ['S02-T01', 'pending'],
+      ['S02-T02', 'pending'],
+    ], 'the replay must reuse the prefixed rows instead of inserting bare-id duplicates');
+    assert.equal(getTask('M001', 'S02', 'T01') ?? null, null, 'bare-id duplicate rows must not be created');
+    assert.equal(getTask('M001', 'S02', 'S02-T01')?.title, 'Rewritten slice handler');
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanSlice interrupted replay completes the slice without manual waivers (#2217)', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const first = await handlePlanSlice({
+      ...validParams(),
+      tasks: [
+        { ...validParams().tasks[0], taskId: 'S02-T01' },
+        { ...validParams().tasks[1], taskId: 'S02-T02' },
+      ],
+    }, base);
+    assert.ok(!('error' in first), `unexpected error: ${'error' in first ? first.error : ''}`);
+
+    const second = await handlePlanSlice({
+      ...validParams(),
+      tasks: [
+        { ...validParams().tasks[0], taskId: 'T01' },
+        { ...validParams().tasks[1], taskId: 'T02' },
+      ],
+    }, base);
+    assert.ok(!('error' in second), `unexpected error: ${'error' in second ? second.error : ''}`);
+
+    assert.equal(getSliceTasks('M001', 'S02').length, 2, 'replay must not duplicate task rows');
+
+    seedExecutionFixtures();
+    for (const taskId of ['S02-T01', 'S02-T02']) {
+      runTaskToCompleted(taskId);
+    }
+    const receipt = completeSlice({
+      invocation: replayChainInvocation('complete-slice'),
+      slice: { milestoneId: 'M001', sliceId: 'S02' },
+      closeout: sliceCompletionCloseout(),
+    });
+    assert.equal(receipt.status, 'committed');
+    assert.deepEqual(receipt.cancelledTaskIds, [], 'no task should be cancelled by the reconciled replay');
+    assert.equal(getSlice('M001', 'S02')?.status, 'complete');
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handlePlanSlice reconciled omission mints its cancellation authorization in-operation (#2217)', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const first = await handlePlanSlice(validParams(), base);
+    assert.ok(!('error' in first), `unexpected error: ${'error' in first ? first.error : ''}`);
+
+    // Replay shrinks the task set: T02 is omitted and cancelled as today, but
+    // the reconciliation writer must mint the Waiver + waived Disposition the
+    // completion-side invariant demands.
+    const second = await handlePlanSlice({
+      ...validParams(),
+      tasks: [validParams().tasks[0]],
+    }, base);
+    assert.ok(!('error' in second), `unexpected error: ${'error' in second ? second.error : ''}`);
+
+    assert.deepEqual(getSliceTasks('M001', 'S02').map((task) => [task.id, task.status]), [
+      ['T01', 'pending'],
+      ['T02', 'skipped'],
+    ]);
+
+    seedExecutionFixtures();
+    runTaskToCompleted('T01');
+    const receipt = completeSlice({
+      invocation: replayChainInvocation('complete-slice-omission'),
+      slice: { milestoneId: 'M001', sliceId: 'S02' },
+      closeout: sliceCompletionCloseout(),
+    });
+    assert.equal(receipt.status, 'committed', 'completion must succeed without a manual waiver');
+    assert.deepEqual(receipt.cancelledTaskIds, ['T02']);
+    assert.equal(getSlice('M001', 'S02')?.status, 'complete');
   } finally {
     cleanup(base);
   }

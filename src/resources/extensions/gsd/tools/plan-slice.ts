@@ -37,6 +37,13 @@ import {
   PlanningGuardError,
   planningOperationPayload,
 } from "../planning-domain-operation.js";
+import { executeDomainOperation, type DomainOperationResult } from "../db/domain-operation.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
+import {
+  grantPlanReconciliationWaiver,
+  recordPlanReconciliationDisposition,
+  type PlanReconciliationAuthorization,
+} from "../db/writers/slice-lifecycle.js";
 import {
   type PlanningInvocation,
 } from "../planning-invocation.js";
@@ -325,6 +332,64 @@ function validateTaskPathsBeforePersist(
     .join("\n");
 }
 
+/**
+ * Record the waived Requirement Dispositions for the cancellation Waivers the
+ * plan operation minted for reconciled omissions (#2217). The schema's
+ * waiver-authority trigger requires a Waiver to precede its waived
+ * Disposition by at least one project revision, so this runs as its own
+ * fenced Domain Operation keyed to the plan operation's receipt — a replayed
+ * plan operation reuses the same key and therefore stays idempotent.
+ */
+function authorizeReconciliationOmissions(input: {
+  invocation: PlanningInvocation;
+  planReceipt: DomainOperationResult;
+  milestoneId: string;
+  sliceId: string;
+  authorizations: PlanReconciliationAuthorization[];
+}): void {
+  const idempotencyKey = `plan-authorization:${input.planReceipt.operationId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  const authorizationsPayload = input.authorizations.map((authorization) => ({
+    taskId: authorization.taskId,
+    requirementId: authorization.requirementId,
+    waiverId: authorization.waiverId,
+  }));
+  executeDomainOperation({
+    operationType: "workflow.slice.plan.authorization",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: planningOperationPayload({
+      milestoneId: input.milestoneId,
+      sliceId: input.sliceId,
+      authorizations: authorizationsPayload,
+    }),
+  }, (context) => {
+    for (const authorization of input.authorizations) {
+      recordPlanReconciliationDisposition(context, authorization);
+    }
+    return {
+      events: [{
+        eventType: "workflow.slice.plan.authorized",
+        entityType: "slice",
+        entityId: `${input.milestoneId}/${input.sliceId}`,
+        payload: { authorizations: authorizationsPayload },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `planning/${input.milestoneId}/${input.sliceId}`.toLowerCase(),
+        projectionKind: "markdown",
+        rendererVersion: "v1",
+      }],
+    };
+  });
+}
+
 export async function handlePlanSlice(
   rawParams: PlanSliceParams,
   basePath: string,
@@ -393,6 +458,10 @@ export async function handlePlanSlice(
   }
 
   let operationStatus: "committed" | "replayed";
+  // Cancellation authorizations minted for reconciled omissions (#2217).
+  // Empty on a replayed plan operation (the mutation does not re-run), which
+  // also skips the follow-up authorization operation.
+  const reconciliationAuthorizations: PlanReconciliationAuthorization[] = [];
   try {
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.slice.plan",
@@ -478,11 +547,43 @@ export async function handlePlanSlice(
 
         const newTaskIds = new Set(taskPayload.map((task) => task.taskId));
         const existingTasks = getSliceTasks(params.milestoneId, params.sliceId);
+        // #2217 scope guard: only a re-dispatch over a slice whose task rows
+        // are ALL still pending reconciles in place. First-run planning (no
+        // existing rows) and replans that touch non-pending rows keep the
+        // exact-id behavior below untouched.
+        const reconcileInPlace = hasTaskPayload &&
+          existingTasks.length > 0 &&
+          existingTasks.every((task) => task.status === "pending");
+        const existingTaskIds = new Set(existingTasks.map((task) => task.id));
+        // An interrupted plan-slice run may have persisted slice-prefixed ids
+        // (S02-T01..) while the re-dispatched planning run emits bare ids
+        // (T01..). In the all-pending replay case those resolve to the same
+        // work, so the incoming id is matched to the existing row and the row
+        // is reused (keeping its id and disposition) instead of duplicated.
+        const rowIdByIncomingTaskId = new Map<string, string | null>(taskPayload.map((task): [string, string | null] => {
+          if (existingTaskIds.has(task.taskId)) return [task.taskId, task.taskId];
+          const prefixedId = `${params.sliceId}-${task.taskId}`;
+          return [task.taskId, reconcileInPlace && existingTaskIds.has(prefixedId) ? prefixedId : null];
+        }));
+        const collidingIncomingTask = taskPayload.find((task) => {
+          if (rowIdByIncomingTaskId.get(task.taskId) === null) return false;
+          return taskPayload.some((other) =>
+            other.taskId !== task.taskId &&
+            rowIdByIncomingTaskId.get(other.taskId) === rowIdByIncomingTaskId.get(task.taskId));
+        });
+        if (collidingIncomingTask) {
+          throw new PlanningGuardError(
+            `tasks ${collidingIncomingTask.taskId} and its slice-prefixed alias both resolve to the same existing row — use one id per task`,
+          );
+        }
+        const matchedRowIds = new Set(
+          [...rowIdByIncomingTaskId.values()].filter((rowId): rowId is string => rowId !== null),
+        );
         if (hasTaskPayload) {
           for (const task of existingTasks) {
             const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
             const observedLifecycleStatus = legacyLifecycleStatus ?? "ready";
-            const omitted = !newTaskIds.has(task.id);
+            const omitted = !matchedRowIds.has(task.id);
             const lifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
               milestoneId: params.milestoneId,
@@ -494,7 +595,7 @@ export async function handlePlanSlice(
               ...(omitted ? { adoptedFromStatus: observedLifecycleStatus } : {}),
             });
             if (
-              newTaskIds.has(task.id) &&
+              matchedRowIds.has(task.id) &&
               (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled")
             ) {
               throw new PlanningGuardError(
@@ -513,7 +614,7 @@ export async function handlePlanSlice(
           throw new PlanningGuardError(`cannot re-plan cancelled task ${cancelledIncomingTask.id} — use gsd_task_reopen first`);
         }
         const omittedTasks = hasTaskPayload
-          ? existingTasks.filter((task) => !newTaskIds.has(task.id))
+          ? existingTasks.filter((task) => !matchedRowIds.has(task.id))
           : [];
         const completedOmission = omittedTasks.find((task) => isClosedStatus(task.status) && task.status !== "skipped");
         if (completedOmission) {
@@ -554,11 +655,21 @@ export async function handlePlanSlice(
               taskId: task.id,
               status: "skipped",
             });
+            // #2217: a reconciled omission must carry the cancellation
+            // authorization the completion-side invariant demands, so slice
+            // completion is not permanently blocked without a manual waiver.
+            if (reconcileInPlace) {
+              reconciliationAuthorizations.push(grantPlanReconciliationWaiver(context, {
+                milestoneId: params.milestoneId,
+                sliceId: params.sliceId,
+                taskId: task.id,
+              }));
+            }
           }
 
-          const existingTaskById = new Map(existingTasks.map((task) => [task.id, task]));
           for (const task of taskPayload) {
-            if (!existingTaskById.has(task.taskId)) {
+            const rowId = rowIdByIncomingTaskId.get(task.taskId) ?? null;
+            if (!rowId) {
               insertTask({
                 id: task.taskId,
                 sliceId: params.sliceId,
@@ -567,7 +678,8 @@ export async function handlePlanSlice(
                 status: "pending",
               });
             }
-            upsertTaskPlanning(params.milestoneId, params.sliceId, task.taskId, {
+            const persistedTaskId = rowId ?? task.taskId;
+            upsertTaskPlanning(params.milestoneId, params.sliceId, persistedTaskId, {
               title: task.title,
               description: task.description,
               estimate: task.estimate,
@@ -584,18 +696,18 @@ export async function handlePlanSlice(
               itemKind: "task",
               milestoneId: params.milestoneId,
               sliceId: params.sliceId,
-              taskId: task.taskId,
+              taskId: persistedTaskId,
               lifecycleStatus: "ready",
             });
             if (lifecycle.lifecycleStatus === "cancelled") {
-              throw new PlanningGuardError(`cannot re-plan cancelled task ${task.taskId} — use gsd_task_reopen first`);
+              throw new PlanningGuardError(`cannot re-plan cancelled task ${persistedTaskId} — use gsd_task_reopen first`);
             }
             if (lifecycle.lifecycleStatus === "pending") {
               adoptOrTransitionLifecycle(context, {
                 itemKind: "task",
                 milestoneId: params.milestoneId,
                 sliceId: params.sliceId,
-                taskId: task.taskId,
+                taskId: persistedTaskId,
                 lifecycleStatus: "ready",
               });
             }
@@ -616,14 +728,24 @@ export async function handlePlanSlice(
           insertGateRow({ milestoneId: params.milestoneId, sliceId: params.sliceId, gateId: gid, scope: "slice" });
         }
         for (const task of taskPayload) {
+          const persistedTaskId = rowIdByIncomingTaskId.get(task.taskId) ?? task.taskId;
           for (const gid of resolveTaskGates(gateEvaluation)) {
-            insertGateRow({ milestoneId: params.milestoneId, sliceId: params.sliceId, gateId: gid, scope: "task", taskId: task.taskId });
+            insertGateRow({ milestoneId: params.milestoneId, sliceId: params.sliceId, gateId: gid, scope: "task", taskId: persistedTaskId });
           }
         }
         ensurePendingSliceQ8(context, params);
       },
     });
     operationStatus = receipt.status;
+    if (receipt.status === "committed" && reconciliationAuthorizations.length > 0) {
+      authorizeReconciliationOmissions({
+        invocation,
+        planReceipt: receipt,
+        milestoneId: params.milestoneId,
+        sliceId: params.sliceId,
+        authorizations: reconciliationAuthorizations,
+      });
+    }
   } catch (err) {
     if (err instanceof PlanningGuardError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
