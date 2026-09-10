@@ -826,6 +826,19 @@ export function setSliceSummaryMd(milestoneId: string, sliceId: string, summaryM
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":summary_md": summaryMd, ":uat_md": uatMd }));
 }
 
+/**
+ * Update only the slice's UAT carrier column (full_uat_md), leaving the summary
+ * carrier untouched. Returns false when no matching slice row exists so callers
+ * can fail loudly instead of persisting a no-op.
+ */
+export function setSliceUatMd(milestoneId: string, sliceId: string, uatMd: string): boolean {
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
+  const updated = transaction(() => getDbOrNull()!.prepare(
+    `UPDATE slices SET full_uat_md = :uat_md WHERE milestone_id = :mid AND id = :sid`,
+  ).run({ ":mid": milestoneId, ":sid": sliceId, ":uat_md": uatMd }));
+  return Number((updated as { changes?: number }).changes ?? 0) === 1;
+}
+
 
 
 

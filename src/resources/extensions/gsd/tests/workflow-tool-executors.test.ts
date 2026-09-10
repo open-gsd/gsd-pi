@@ -11,12 +11,15 @@ import {
   _getAdapter,
   getArtifact,
   getAssessment,
+  getSlice,
   insertAssessment,
   insertGateRow,
   insertMilestone,
+  setSliceSummaryMd,
   upsertRequirement,
   getAllMilestones,
 } from "../gsd-db.ts";
+import { renderAllFromDb } from "../markdown-renderer.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
@@ -380,6 +383,131 @@ test("executeSummarySave persists UI-SPEC artifacts at the computed flat-phase p
     closeDatabase();
     cleanup(base);
   }
+});
+
+function completeSliceRow(milestoneId: string, sliceId: string): void {
+  const db = _getAdapter();
+  if (!db) throw new Error("DB not open");
+  db.prepare(
+    "UPDATE slices SET status = 'complete', completed_at = ? WHERE milestone_id = ? AND id = ?",
+  ).run(new Date().toISOString(), milestoneId, sliceId);
+}
+
+test("executeSummarySave persists UAT artifacts to the slice UAT carrier", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openTestDb(base);
+  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
+  seedSlice("M001", "S01", "in_progress");
+
+  const result = await inProjectDir(base, () => executeSummarySave({
+    milestone_id: "M001",
+    slice_id: "S01",
+    artifact_type: "UAT",
+    content: "# UAT\n\nAcceptance: 5 units verified\n",
+  }, base));
+
+  assert.notEqual(result.isError, true);
+  assert.equal(result.details.operation, "save_summary");
+  assert.equal(result.details.path, "phases/01-m001/01-01-UAT.md");
+  assert.equal(result.details.artifact_type, "UAT");
+
+  // CRITICAL: UAT content lands in the UAT carrier, never the summary carrier.
+  const slice = getSlice("M001", "S01");
+  assert.equal(slice?.full_uat_md, "# UAT\n\nAcceptance: 5 units verified\n");
+  assert.equal(slice?.full_summary_md, "", "UAT saves must not touch full_summary_md");
+
+  const filePath = join(base, ".gsd", "phases", "01-m001", "01-01-UAT.md");
+  assert.ok(existsSync(filePath), "UAT artifact should be written to disk");
+  assert.match(readFileSync(filePath, "utf-8"), /Acceptance: 5 units/);
+  assert.equal(getArtifact("phases/01-m001/01-01-UAT.md")?.artifact_type, "UAT");
+});
+
+test("executeSummarySave UAT correction re-renders a completed slice's UAT projection", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openTestDb(base);
+  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
+  seedSlice("M001", "S01", "in_progress");
+  // Simulate completion output: the carriers hold the pre-correction UAT text.
+  setSliceSummaryMd(
+    "M001",
+    "S01",
+    "# Slice summary",
+    "# UAT\n\nAcceptance: 5 units verified\n\n## Evidence\n- unit A: pass\n- unit B: pass\n",
+  );
+  completeSliceRow("M001", "S01");
+
+  // Initial flush: the DB-owned projection renders the pre-correction text.
+  const firstFlush = await renderAllFromDb(base);
+  assert.deepEqual(firstFlush.errors, []);
+  const uatPath = join(base, ".gsd", "phases", "01-foundation", "01-01-UAT.md");
+  assert.ok(existsSync(uatPath), "completed slice should project its UAT file");
+  assert.match(readFileSync(uatPath, "utf-8"), /Acceptance: 5 units/);
+
+  const result = await inProjectDir(base, () => executeSummarySave({
+    milestone_id: "M001",
+    slice_id: "S01",
+    artifact_type: "UAT",
+    content: "# UAT\n\nAcceptance: 7 units verified (superseded by S02)\n\n## Evidence\n- unit A: pass\n- unit B: pass\n- unit C: pass\n",
+  }, base));
+  assert.notEqual(result.isError, true);
+  assert.equal(result.details.path, "phases/01-foundation/01-01-UAT.md");
+
+  // Post-completion flush: the correction must survive — no silent revert.
+  const secondFlush = await renderAllFromDb(base);
+  assert.deepEqual(secondFlush.errors, []);
+  const rendered = readFileSync(uatPath, "utf-8");
+  assert.match(rendered, /Acceptance: 7 units verified/);
+  assert.doesNotMatch(rendered, /Acceptance: 5 units/);
+
+  const slice = getSlice("M001", "S01");
+  assert.match(slice?.full_uat_md ?? "", /Acceptance: 7 units verified/);
+  assert.equal(slice?.full_summary_md, "# Slice summary", "summary carrier must be untouched");
+});
+
+test("executeSummarySave rejects UAT saves without a usable slice target", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openTestDb(base);
+  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
+  seedSlice("M001", "S01", "in_progress");
+
+  const noSliceId = await inProjectDir(base, () => executeSummarySave({
+    milestone_id: "M001",
+    artifact_type: "UAT",
+    content: "# UAT\n",
+  }, base));
+  assert.equal(noSliceId.isError, true);
+  assert.equal(noSliceId.details.error, "missing_slice_id");
+
+  const withTaskId = await inProjectDir(base, () => executeSummarySave({
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: "T01",
+    artifact_type: "UAT",
+    content: "# UAT\n",
+  }, base));
+  assert.equal(withTaskId.isError, true);
+  assert.equal(withTaskId.details.error, "unexpected_task_id");
+
+  const unknownSlice = await inProjectDir(base, () => executeSummarySave({
+    milestone_id: "M001",
+    slice_id: "S09",
+    artifact_type: "UAT",
+    content: "# UAT\n",
+  }, base));
+  assert.equal(unknownSlice.isError, true);
+  assert.equal(unknownSlice.details.error, "slice_not_found");
 });
 
 test("executeSummarySave mirrors milestone artifacts into the active worktree projection", async () => {

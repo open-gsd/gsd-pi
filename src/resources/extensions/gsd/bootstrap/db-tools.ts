@@ -597,16 +597,18 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		name: "gsd_summary_save",
 		label: "Save Summary",
 		description:
-			"Save a summary, research, UI spec, context, or assessment artifact to the GSD database and write it to disk. " +
-			"Computes the file path from milestone/slice/task IDs automatically.",
+			"Save a summary, research, UI spec, context, assessment, or UAT artifact to the GSD database and write it to disk. " +
+			"Computes the file path from milestone/slice/task IDs automatically. " +
+			"UAT artifacts are slice-scoped (milestone_id + slice_id, no task_id) and persist to the slice's UAT record, which re-renders the slice's UAT markdown after the slice completes.",
 		promptSnippet:
-			"Save a GSD artifact (summary/research/UI spec/context/assessment) to DB and disk",
+			"Save a GSD artifact (summary/research/UI spec/context/assessment/UAT) to DB and disk",
 		promptGuidelines: [
-			"Use gsd_summary_save to persist structured artifacts (SUMMARY, RESEARCH, UI-SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT).",
+			"Use gsd_summary_save to persist structured artifacts (SUMMARY, RESEARCH, UI-SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT).",
 			"milestone_id is required for milestone/slice/task artifacts. Omit milestone_id only for root-level PROJECT/PROJECT-DRAFT/REQUIREMENTS/REQUIREMENTS-DRAFT.",
 			"The tool computes the relative path automatically: milestones/M001/M001-SUMMARY.md, milestones/M001/slices/S01/S01-SUMMARY.md, etc.",
 			"Root-level artifact paths are PROJECT.md, PROJECT-DRAFT.md, REQUIREMENTS.md, and REQUIREMENTS-DRAFT.md.",
-			"artifact_type must be one of: SUMMARY, RESEARCH, UI-SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT.",
+			"artifact_type must be one of: SUMMARY, RESEARCH, UI-SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT.",
+			"UAT (despite the tool name) saves the slice's UAT acceptance document: pass milestone_id + slice_id and no task_id; it persists to the slice's UAT record, so corrections to a completed slice's UAT markdown survive projection flushes.",
 			"Use CONTEXT-DRAFT for incremental draft persistence; use CONTEXT for the final milestone context after depth verification.",
 			`Keep each content payload under ${SUMMARY_SAVE_CONTENT_MAX_LENGTH} characters; save large context incrementally with CONTEXT-DRAFT/PROJECT-DRAFT/REQUIREMENTS-DRAFT instead of one oversized call.`,
 		],
@@ -635,6 +637,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					"PROJECT-DRAFT",
 					"REQUIREMENTS",
 					"REQUIREMENTS-DRAFT",
+					"UAT",
 				],
 				{ description: "Artifact type to save" },
 			),

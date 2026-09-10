@@ -19,6 +19,7 @@ import {
   insertGateRun,
   readTransaction,
   saveGateResult,
+  setSliceUatMd,
   upsertMilestonePlanning,
   upsertQualityGate,
 } from "../gsd-db.js";
@@ -137,6 +138,7 @@ export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = [
   "PROJECT-DRAFT",
   "REQUIREMENTS",
   "REQUIREMENTS-DRAFT",
+  "UAT",
 ] as const;
 
 export function isSupportedSummaryArtifactType(
@@ -491,6 +493,20 @@ export async function executeSummarySave(
       isError: true,
     };
   }
+  if (params.artifact_type === "UAT" && !params.slice_id) {
+    return {
+      content: [{ type: "text", text: `Error: slice_id is required for artifact_type "UAT". UAT saves are slice-scoped and persist to the slice's UAT record (full_uat_md).` }],
+      details: { operation: "save_summary", error: "missing_slice_id" },
+      isError: true,
+    };
+  }
+  if (params.artifact_type === "UAT" && params.task_id) {
+    return {
+      content: [{ type: "text", text: `Error: task_id is not supported for artifact_type "UAT". UAT saves are slice-scoped; omit task_id.` }],
+      details: { operation: "save_summary", error: "unexpected_task_id" },
+      isError: true,
+    };
+  }
   const writeGateSnapshot = loadWriteGateSnapshot(basePath);
   const prefs = loadEffectiveGSDPreferences(basePath)?.preferences;
   const rootArtifactGuard = shouldBlockRootArtifactSaveInSnapshot(
@@ -698,6 +714,19 @@ export async function executeSummarySave(
       relativePath = projection.artifactPath;
       projectedContent = projection.content;
     } else {
+      if (params.artifact_type === "UAT") {
+        // UAT must land in the slice's UAT carrier (full_uat_md), never the
+        // summary carrier: after slice completion the UAT projection re-renders
+        // from this column, so post-completion corrections survive flushes.
+        const updated = setSliceUatMd(params.milestone_id!, params.slice_id!, contentToSave);
+        if (!updated) {
+          return {
+            content: [{ type: "text", text: `Error: no slice "${params.slice_id}" found in milestone "${params.milestone_id}". UAT saves require an existing slice row.` }],
+            details: { operation: "save_summary", error: "slice_not_found" },
+            isError: true,
+          };
+        }
+      }
       await saveArtifactToDb(
         {
           path: relativePath,
