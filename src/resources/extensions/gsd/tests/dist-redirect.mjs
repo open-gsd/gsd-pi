@@ -1,10 +1,135 @@
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const require = createRequire(import.meta.url);
 
 const ROOT = new URL("../../../../../", import.meta.url);
+
+// Fresh worktrees often run focused tests before workspace packages are built.
+// Node then surfaces a bare ERR_MODULE_NOT_FOUND for the missing dist output.
+// These helpers attribute that failure to the workspace package and name the
+// exact build command that fixes it.
+
+function isWorkspacePackageLink(pkgDir) {
+  // Workspace links point at packages/<name>; registry installs live under
+  // some node_modules directory. Only the former get the build hint.
+  try {
+    return !realpathSync(pkgDir).split(sep).includes('node_modules');
+  } catch {
+    return false;
+  }
+}
+
+function exportsFileTarget(exportsMap, subpath) {
+  if (exportsMap == null || Array.isArray(exportsMap)) return null;
+  let entry;
+  let capture = null;
+  if (typeof exportsMap === 'string') {
+    if (subpath !== '') return null;
+    entry = exportsMap;
+  } else {
+    const key = subpath === '' ? '.' : `./${subpath}`;
+    if (Object.hasOwn(exportsMap, key)) {
+      entry = exportsMap[key];
+    } else {
+      // Single-star pattern fallback (e.g. "./*": "./dist/*.js").
+      for (const [pattern, value] of Object.entries(exportsMap)) {
+        const star = pattern.indexOf('*');
+        if (!pattern.startsWith('./') || star === -1) continue;
+        const prefix = pattern.slice(2, star);
+        const suffix = pattern.slice(star + 1);
+        if (
+          subpath.startsWith(prefix) &&
+          subpath.endsWith(suffix) &&
+          subpath.length >= prefix.length + suffix.length
+        ) {
+          entry = value;
+          capture = subpath.slice(prefix.length, subpath.length - suffix.length);
+          break;
+        }
+      }
+      if (entry === undefined) return null;
+    }
+  }
+
+  // Pick the ESM-relevant condition; "types"-only entries resolve to nothing.
+  const toFileTarget = (node) => {
+    if (typeof node === 'string') return capture === null ? node : node.replaceAll('*', capture);
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = toFileTarget(item);
+        if (found) return found;
+      }
+      return null;
+    }
+    if (node && typeof node === 'object') {
+      for (const condition of ['import', 'node', 'default']) {
+        if (condition in node) {
+          const found = toFileTarget(node[condition]);
+          if (found) return found;
+        }
+      }
+    }
+    return null;
+  };
+
+  const target = toFileTarget(entry);
+  return target !== null && target.startsWith('./') ? target.slice(2) : null;
+}
+
+function missingWorkspaceDistError(specifier, context) {
+  if (
+    specifier.startsWith('.') || specifier.startsWith('/') ||
+    specifier.startsWith('#') || specifier.startsWith('node:') ||
+    specifier.startsWith('file:')
+  ) {
+    return null;
+  }
+  if (!context?.parentURL?.startsWith('file:')) return null;
+  const segments = specifier.split('/');
+  const nameLength = segments[0].startsWith('@') ? 2 : 1;
+  if (segments.length < nameLength) return null;
+  const packageName = segments.slice(0, nameLength).join('/');
+  const subpath = segments.slice(nameLength).join('/');
+
+  // Find the nearest node_modules link for the package, mirroring Node's
+  // resolution walk (covers nested links like packages/*/node_modules/@opengsd/*).
+  const manifestRel = join('node_modules', ...packageName.split('/'), 'package.json');
+  let dir = dirname(fileURLToPath(context.parentURL));
+  let visited = null;
+  let pkgDir = null;
+  let manifest = null;
+  while (dir !== visited) {
+    visited = dir;
+    const manifestPath = join(dir, manifestRel);
+    if (!existsSync(manifestPath)) {
+      dir = dirname(dir);
+      continue;
+    }
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, 'utf-8'));
+    } catch {
+      return null;
+    }
+    pkgDir = join(dir, 'node_modules', ...packageName.split('/'));
+    break;
+  }
+  if (!manifest) return null;
+
+  const target = exportsFileTarget(manifest.exports, subpath);
+  if (!target) return null;
+  if (!target.startsWith('dist/') && !target.includes('/dist/')) return null;
+  if (isWorkspacePackageLink(pkgDir) && !existsSync(join(pkgDir, target))) {
+    const name = typeof manifest.name === 'string' ? manifest.name : packageName;
+    return new Error(
+      `Workspace package "${name}" dist not found (missing ${target}). ` +
+      `Build it first: pnpm --filter ${name} build`,
+    );
+  }
+  return null;
+}
 
 export function resolve(specifier, context, nextResolve) {
   if (specifier.startsWith('node:')) {
@@ -110,7 +235,14 @@ export function resolve(specifier, context, nextResolve) {
     }
   }
 
-  return nextResolve(specifier, context);
+  // Happy path: delegate untouched. Only when resolution fails do we check
+  // whether a workspace package's dist output is missing, so the developer
+  // sees the build command instead of a bare ERR_MODULE_NOT_FOUND.
+  try {
+    return nextResolve(specifier, context);
+  } catch (error) {
+    throw missingWorkspaceDistError(specifier, context) ?? error;
+  }
 }
 
 export function load(url, context, nextLoad) {
