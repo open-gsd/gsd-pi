@@ -2309,7 +2309,11 @@ test("custom-engine recovery break and retry terminalize their dispatch", async 
     },
   }) as any);
 
-  for (const action of ["break", "retry"] as const) {
+  for (const { action, reason } of [
+    { action: "break", reason: "task-recovery-abort" },
+    { action: "retry", reason: "task-recovery-abort" },
+    { action: "break", reason: "unit-hard-timeout" },
+  ] as const) {
     _resetPendingResolve();
     const basePath = realpathSync(makeLoopTestBase(`gsd-custom-task-recovery-${action}-`));
     mkdirSync(join(basePath, ".gsd"), { recursive: true });
@@ -2348,7 +2352,7 @@ test("custom-engine recovery break and retry terminalize their dispatch", async 
         isDbAvailable: () => true,
         taskExecutionBoundary: async () => {
           if (action === "retry") s.active = false;
-          return { action, reason: "task-recovery-abort" };
+          return { action, reason };
         },
         pauseAuto: async () => {
           dispatchStatusAtPause = getLatestForUnit("M001/S01/T01")?.status;
@@ -2363,6 +2367,9 @@ test("custom-engine recovery break and retry terminalize their dispatch", async 
         "failed",
         `${action} must not leave an active dispatch that blocks a later resume`,
       );
+      if (reason === "unit-hard-timeout") {
+        assert.equal(getLatestForUnit("M001/S01/T01")?.exit_reason, "timeout");
+      }
       assert.equal(
         dispatchStatusAtPause,
         action === "break" ? "failed" : undefined,

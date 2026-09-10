@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import { agentLoop, agentLoopContinue } from "../src/agent-loop.ts";
+import { agentLoop, agentLoopContinue, runAgentLoop } from "../src/agent-loop.ts";
 import type { AgentContext, AgentEvent, AgentLoopConfig, AgentMessage, AgentTool, AgentToolResult } from "../src/types.ts";
 
 // Mock stream for testing - mimics MockAssistantStream
@@ -81,6 +81,37 @@ function identityConverter(messages: AgentMessage[]): Message[] {
 }
 
 describe("agentLoop with AgentMessage", () => {
+	it.each([
+		{ stopReason: "stop" as const, stopHook: false },
+		{ stopReason: "stop" as const, stopHook: true },
+		{ stopReason: "error" as const, stopHook: false },
+	])("preserves a turn-end timeout with $stopReason and stopHook=$stopHook", async ({ stopReason, stopHook }) => {
+		const controller = new AbortController();
+		const events: AgentEvent[] = [];
+		await runAgentLoop(
+			[createUserMessage("Hello")],
+			{ systemPrompt: "", messages: [], tools: [] },
+			{ model: createModel(), convertToLlm: identityConverter, shouldStopAfterTurn: () => stopHook },
+			(event) => {
+				events.push(event);
+				if (event.type === "turn_end") controller.abort("timeout");
+			},
+			controller.signal,
+			() => {
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					const message = { ...createAssistantMessage([{ type: "text", text: "Done" }]), stopReason };
+					if (stopReason === "error") stream.push({ type: "error", reason: "error", error: message });
+					else stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		);
+		const ends = events.filter((event) => event.type === "agent_end");
+		expect(ends).toHaveLength(1);
+		expect(ends[0].abortOrigin).toBe("timeout");
+	});
+
 	it("should emit events with AgentMessage types", async () => {
 		const context: AgentContext = {
 			systemPrompt: "You are helpful.",
