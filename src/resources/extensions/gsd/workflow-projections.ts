@@ -273,9 +273,9 @@ key_files:
 ${keyFilesYaml}
 key_decisions:
 ${keyDecisionsYaml}
-duration: ${taskRow.duration || ""}
+duration:${taskRow.duration ? ` ${taskRow.duration}` : ""}
 verification_result: ${verificationResult}
-completed_at: ${taskRow.completed_at || ""}
+completed_at:${taskRow.completed_at ? ` ${taskRow.completed_at}` : ""}
 blocker_discovered: ${taskRow.blocker_discovered ? "true" : "false"}
 ---
 

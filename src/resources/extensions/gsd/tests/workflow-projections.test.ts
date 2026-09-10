@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { existsSync, mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { regenerateIfMissing, renderPlanContent, renderPlanProjection, renderStateProjection, renderSummaryProjection } from '../workflow-projections.ts';
+import { regenerateIfMissing, renderPlanContent, renderPlanProjection, renderStateProjection, renderSummaryContent, renderSummaryProjection } from '../workflow-projections.ts';
 import type { SliceRow, TaskRow } from '../gsd-db.ts';
 import { closeDatabase, getArtifactsByPathPrefix, insertMilestone, insertSlice, insertTask, openDatabase } from '../gsd-db.ts';
 import { clearPathCache, _clearGsdRootCache, normalizeRealPath, resolveMilestoneFile, resolveTaskFile } from '../paths.ts';
@@ -184,6 +184,32 @@ test('workflow-projections: multiple tasks rendered in order', () => {
   const idxT1 = content.indexOf('**T01:');
   const idxT2 = content.indexOf('**T02:');
   assert.ok(idxT1 < idxT2, 'T01 should appear before T02');
+});
+
+// ─── renderSummaryContent: frontmatter whitespace (#2253) ────────────────
+
+// #2253: empty duration/completed_at must emit bare `duration:` / `completed_at:`
+// lines (valid YAML null, whitespace-clean). The old `key: ${value || ""}`
+// template left a trailing space that tripped `git diff --check` and gsd
+// doctor's whitespace guard on every pre-completion T##-SUMMARY.md.
+test('renderSummaryContent: empty duration and completed_at emit bare frontmatter keys with no trailing space', () => {
+  const task = makeTask({ duration: '', completed_at: null });
+  const content = renderSummaryContent(task, 'S01', 'M001');
+  const lines = content.split('\n');
+  assert.ok(lines.includes('duration:'),
+    `expected bare "duration:" line, got: ${JSON.stringify(lines.find(l => l.startsWith('duration')))}`);
+  assert.ok(lines.includes('completed_at:'),
+    `expected bare "completed_at:" line, got: ${JSON.stringify(lines.find(l => l.startsWith('completed_at')))}`);
+  assert.ok(!content.includes('duration: \n'), 'no trailing space after bare duration:');
+  assert.ok(!content.includes('completed_at: \n'), 'no trailing space after bare completed_at:');
+});
+
+test('renderSummaryContent: populated duration and completed_at render values unchanged', () => {
+  const task = makeTask({ duration: '5m 30s', completed_at: '2026-01-15T10:30:00.000Z' });
+  const content = renderSummaryContent(task, 'S01', 'M001');
+  const lines = content.split('\n');
+  assert.ok(lines.includes('duration: 5m 30s'), `expected "duration: 5m 30s", got: ${JSON.stringify(lines.find(l => l.startsWith('duration')))}`);
+  assert.ok(lines.includes('completed_at: 2026-01-15T10:30:00.000Z'), `expected timestamp, got: ${JSON.stringify(lines.find(l => l.startsWith('completed_at')))}`);
 });
 
 test('workflow-projections: renderPlanProjection preserves an unowned obsolete plan', () => {
