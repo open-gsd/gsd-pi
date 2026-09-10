@@ -206,7 +206,7 @@ test("timeout-origin agent_end cancels the unit as a timeout, not a completion (
   _setCurrentResolve((result) => results.push(result));
 
   const event = {
-    abortOrigin: "timeout",
+    abortOrigin: "timeout" as const,
     messages: [{
       stopReason: "aborted",
       content: [{ type: "thinking", thinking: "mid-reasoning when the run was killed" }],
