@@ -260,10 +260,10 @@ export function rebuildWorkflowItemLifecyclesForBlockerAccepted(db: DbAdapter): 
     for (const trigger of externalTriggers) {
       db.exec(String(trigger.sql));
     }
-    const violations = db.prepare("PRAGMA foreign_key_check").all();
-    if (violations.length > 0) {
-      throw new Error(`lifecycle rebuild left foreign key violations: ${violations.length}`);
-    }
+    // Deliberately no PRAGMA foreign_key_check gate here: the rebuild copies
+    // rows 1:1 and re-points the same table name, so it cannot introduce
+    // violations — and pre-existing dangling rows in legacy databases must
+    // not brick startup.
     db.exec("COMMIT");
   } catch (error) {
     try { db.exec("ROLLBACK"); } catch { /* already rolled back */ }

@@ -55,6 +55,7 @@ const TYPED_DB_WRITER_FILES = new Set([
 
 const SCHEMA_DB_WRITER_FILES = new Set([
   "db-authority-recovery-schema.ts",
+  "db-blocker-accepted-closeout-schema.ts",
   "db-canonical-foundation-schema.ts",
   "db-attempt-recovery-schema.ts",
   "db-conversation-foundation-schema.ts",
