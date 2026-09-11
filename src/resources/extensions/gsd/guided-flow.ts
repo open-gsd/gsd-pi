@@ -1879,7 +1879,14 @@ async function handleMilestoneActions(
       : reason === "needs_rethink" ? "Needs rethinking — approach needs reconsideration"
       : "Parked by user";
 
-    const success = parkMilestone(basePath, milestoneId, reasonText);
+    let success: boolean;
+    try {
+      success = parkMilestone(basePath, milestoneId, reasonText);
+    } catch (err) {
+      // #2255: the park did not take (e.g. DB sync failed) — surface it as an error.
+      ctx.ui.notify(`Could not park ${milestoneId}: ${(err as Error).message}`, "error");
+      return true;
+    }
     if (success) {
       ctx.ui.notify(`Parked ${milestoneId}. Run /gsd unpark ${milestoneId} to reactivate.`, "info");
     } else {
@@ -2461,7 +2468,14 @@ export async function showSmartEntry(
       const { fireStatusViaCommand } = await import("./commands.js");
       await fireStatusViaCommand(ctx);
     } else if (choice === "park") {
-      const success = parkMilestone(basePath, milestoneId, "Validation attention deferred by user");
+      let success: boolean;
+      try {
+        success = parkMilestone(basePath, milestoneId, "Validation attention deferred by user");
+      } catch (err) {
+        // #2255: the park did not take (e.g. DB sync failed) — surface it as an error.
+        ctx.ui.notify(`Could not park ${milestoneId}: ${(err as Error).message}`, "error");
+        return;
+      }
       ctx.ui.notify(
         success ? `Parked ${milestoneId}. Run /gsd unpark ${milestoneId} to reactivate.` : `Could not park ${milestoneId} — milestone not found.`,
         success ? "info" : "warning",

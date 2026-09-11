@@ -52,9 +52,13 @@ function assertNotAutoActive(action: string): void {
 // ─── Park ──────────────────────────────────────────────────────────────────
 
 /**
- * Park a milestone — creates a PARKED.md marker file with reason and timestamp.
- * Parked milestones are skipped during active-milestone discovery but stay on disk.
+ * Park a milestone — records status='parked' in the DB, then creates a
+ * PARKED.md marker file with reason and timestamp. Parked milestones are
+ * skipped during active-milestone discovery but stay on disk.
  * Returns true if successfully parked, false if milestone not found, already parked, or complete.
+ * Throws if the DB sync fails (#2255): no marker file is written in that case,
+ * so the caller never reports success for a park that did not take, and a
+ * later retry starts clean instead of short-circuiting as already parked (#2256).
  */
 export function parkMilestone(basePath: string, milestoneId: string, reason: string): boolean {
   assertNotAutoActive("park milestone");
@@ -86,15 +90,21 @@ export function parkMilestone(basePath: string, milestoneId: string, reason: str
     "",
   ].join("\n");
 
-  atomicWriteSync(parkedPath, content, "utf-8");
-  // Sync DB status so deriveStateFromDb also skips this milestone (#2694)
+  // DB write FIRST (#2256): if the sync fails, no marker file is written, so
+  // the park can be retried instead of being stuck as file-parked/DB-active.
+  // The failure propagates (#2255) — callers must not report success.
   if (dbAvailable) {
     try {
       updateMilestoneStatus(milestoneId, "parked");
     } catch (err) {
-      logWarning("engine", `parkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
+      throw new Error(`parkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
     }
   }
+  // If the marker write fails after the DB sync, the row is parked with no
+  // marker on disk. That state is recoverable in both directions: a retry
+  // re-runs the idempotent DB write and rewrites the marker, and
+  // unparkMilestone repairs DB-parked-without-marker (#3707).
+  atomicWriteSync(parkedPath, content, "utf-8");
   invalidateAllCaches();
   return true;
 }

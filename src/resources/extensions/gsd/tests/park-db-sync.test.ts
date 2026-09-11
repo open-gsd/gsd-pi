@@ -17,6 +17,7 @@ import {
   closeDatabase,
   insertMilestone,
   getMilestone,
+  _getAdapter,
 } from "../gsd-db.ts";
 
 function createBase(): string {
@@ -154,4 +155,62 @@ test("park/unpark are safe when DB is not available (#2694 guard)", () => {
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("parkMilestone throws when DB sync fails and does not claim success (#2255)", (t) => {
+  const base = createBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  openDatabase(":memory:");
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+
+  // Make every UPDATE on milestones fail (SELECTs keep working, so the
+  // pre-park closed-status guard still runs).
+  _getAdapter()!.exec(
+    "CREATE TRIGGER fail_milestone_update BEFORE UPDATE ON milestones BEGIN SELECT RAISE(ABORT, 'simulated park DB failure'); END;",
+  );
+
+  assert.throws(
+    () => parkMilestone(base, "M001", "test"),
+    /parkMilestone DB sync failed for M001/,
+    "DB sync failure must propagate, not return true",
+  );
+  assert.equal(
+    existsSync(join(base, ".gsd", "milestones", "M001", "M001-PARKED.md")),
+    false,
+    "PARKED.md must not be written when the DB sync fails",
+  );
+  assert.equal(getMilestone("M001")!.status, "active", "DB status must stay unchanged");
+});
+
+test("park completes on retry after a DB sync failure (#2256)", (t) => {
+  const base = createBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  openDatabase(":memory:");
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+
+  _getAdapter()!.exec(
+    "CREATE TRIGGER fail_milestone_update BEFORE UPDATE ON milestones BEGIN SELECT RAISE(ABORT, 'simulated park DB failure'); END;",
+  );
+  assert.throws(() => parkMilestone(base, "M001", "test"));
+  assert.equal(
+    existsSync(join(base, ".gsd", "milestones", "M001", "M001-PARKED.md")),
+    false,
+    "failed attempt must not leave the marker behind (retry would short-circuit)",
+  );
+
+  // DB recovers — the retry must complete the park instead of failing.
+  _getAdapter()!.exec("DROP TRIGGER fail_milestone_update;");
+  const parked = parkMilestone(base, "M001", "test");
+  assert.ok(parked, "retried parkMilestone succeeds");
+  assert.equal(getMilestone("M001")!.status, "parked", "DB update completes on retry");
+  assert.ok(
+    existsSync(join(base, ".gsd", "milestones", "M001", "M001-PARKED.md")),
+    "PARKED.md written on retry",
+  );
 });

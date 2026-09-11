@@ -649,7 +649,14 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     }
     const reasonParts = arg.replace(targetId, "").trim().replace(/^["']|["']$/g, "");
     const reason = reasonParts || "Parked via /gsd park";
-    const success = parkMilestone(basePath, targetId, reason);
+    let success: boolean;
+    try {
+      success = parkMilestone(basePath, targetId, reason);
+    } catch (err) {
+      // #2255: the park did not take (e.g. DB sync failed) — surface it as an error.
+      ctx.ui.notify(`Could not park ${targetId}: ${(err as Error).message}`, "error");
+      return true;
+    }
     ctx.ui.notify(
       success ? `Parked ${targetId}. Run /gsd unpark ${targetId} to reactivate.` : `Could not park ${targetId} — milestone not found.`,
       success ? "info" : "warning",
