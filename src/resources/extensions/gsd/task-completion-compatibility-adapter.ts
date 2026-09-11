@@ -27,7 +27,10 @@ import {
   settleTaskAttempt,
   type StagedTaskCompletionMutation,
 } from "./task-execution-domain-operation.js";
-import { readTaskRecoveryRoute } from "./task-recovery-domain-operation.js";
+import {
+  readTaskRecoveryRoute,
+  type TaskRecoveryRouteSnapshot,
+} from "./task-recovery-domain-operation.js";
 import { readTaskTechnicalVerdict } from "./task-verification-domain-operation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
@@ -150,6 +153,23 @@ export interface TaskCompletionAuthorityOptions {
 }
 
 /**
+ * Name the recorded recovery action and its sanctioned next move so a caller
+ * never has to guess the recoveryActionId (#2267). Shared by the
+ * running-attempt gate rejections and the canonical blocker receipt.
+ */
+export function recoveryRouteLever(route: TaskRecoveryRouteSnapshot): string {
+  if (route.resumeAuthorized) {
+    return ` Recovery action ${route.recoveryActionId} (${route.action}) already authorizes its successor — ` +
+      "rerun `/gsd auto` to continue from the repair checkpoint.";
+  }
+  if (route.resumeEligibility?.eligible) {
+    return ` Recovery action ${route.recoveryActionId} (${route.action}) is eligible for resume — ` +
+      `call gsd_task_recovery_resume with recoveryActionId "${route.recoveryActionId}".`;
+  }
+  return ` Recovery action ${route.recoveryActionId} (${route.action}) is recorded for this Attempt.`;
+}
+
+/**
  * Describe the latest Attempt's settled state and any recorded recovery
  * action so a session rejected by the running-attempt gate learns the
  * sanctioned exit instead of a bare rejection (#1973). Best-effort: an empty
@@ -164,15 +184,7 @@ function latestAttemptRecoveryContext(task: TaskCompletionIdentity): string {
         attempt.resultFailureClass ? ` failureClass=${attempt.resultFailureClass}` : ""}`
       : " still marked running";
     const route = readTaskRecoveryRoute(attempt.attemptId);
-    const lever = route
-      ? route.resumeAuthorized
-        ? ` Recovery action ${route.recoveryActionId} (${route.action}) already authorizes its successor — ` +
-          "rerun `/gsd auto` to continue from the repair checkpoint."
-        : route.resumeEligibility?.eligible
-          ? ` Recovery action ${route.recoveryActionId} (${route.action}) is eligible for resume — ` +
-          `call gsd_task_recovery_resume with recoveryActionId "${route.recoveryActionId}".`
-          : ` Recovery action ${route.recoveryActionId} (${route.action}) is recorded for this Attempt.`
-      : "";
+    const lever = route ? recoveryRouteLever(route) : "";
     return ` Latest Attempt ${attempt.attemptId} is${settled}.${lever}`;
   } catch {
     return "";

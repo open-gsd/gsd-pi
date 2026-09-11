@@ -55,12 +55,17 @@ import {
   unresolvedReworkError,
 } from "./complete-task.js";
 import {
+  recoveryRouteLever,
   resolveTaskCompletionAuthority,
   stageTaskCompletion,
 } from "../task-completion-compatibility-adapter.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import type { DomainJsonValue } from "../db/domain-operation.js";
-import { resumeTaskRecovery } from "../task-recovery-domain-operation.js";
+import {
+  readTaskRecoveryRoute,
+  resumeTaskRecovery,
+  type TaskRecoveryRouteSnapshot,
+} from "../task-recovery-domain-operation.js";
 import { applyTaskSettle, planTaskSettle } from "../task-settle.js";
 import type { CompleteSliceParams, EscalationOption } from "../types.js";
 import { handleCompleteSlice } from "./complete-slice.js";
@@ -1045,12 +1050,27 @@ export async function executeTaskComplete(
           verificationEvidence,
         },
       });
+      // A routed blocker must leave the worker with the recoveryActionId that
+      // gsd_task_recovery_resume requires instead of forcing it to guess ids
+      // or read the database (#2267). Best-effort: a fresh blocker report
+      // precedes recovery routing, so no action exists yet and the plain
+      // routing notice stands.
+      let recoveryRoute: TaskRecoveryRouteSnapshot | null = null;
+      if (staged.nextStage === "route") {
+        try {
+          recoveryRoute = readTaskRecoveryRoute(staged.attemptId);
+        } catch {
+          recoveryRoute = null;
+        }
+      }
       return {
         content: [{
           type: "text",
           text: staged.nextStage === "verify"
             ? `Staged task ${params.taskId}; awaiting host verification before completion.`
-            : `Recorded blocker for task ${params.taskId}; awaiting recovery routing.`,
+            : `Recorded blocker for task ${params.taskId}; awaiting recovery routing.${
+              recoveryRoute ? recoveryRouteLever(recoveryRoute) : ""
+            }`,
         }],
         details: {
           operation: "complete_task",
@@ -1061,6 +1081,13 @@ export async function executeTaskComplete(
           resultId: staged.resultId,
           summaryPath: staged.summaryPath,
           nextStage: staged.nextStage,
+          ...(recoveryRoute ? {
+            recoveryActionId: recoveryRoute.recoveryActionId,
+            action: recoveryRoute.action,
+            ...(recoveryRoute.resumeEligibility
+              ? { resumeEligible: recoveryRoute.resumeEligibility.eligible }
+              : {}),
+          } : {}),
         },
       };
     }

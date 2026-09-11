@@ -1429,13 +1429,13 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		description:
 			"Record a Task execution result and verification input in SQLite. Canonical Tasks advance to host verification or recovery and publish completion only after a current passing Technical Verdict; legacy Tasks complete directly and refresh readable projections.",
 		promptSnippet:
-			"Record a GSD Task result and advance verification or recovery",
+			"Record a GSD Task result and advance verification or recovery; a blocker receipt includes recoveryActionId for gsd_task_recovery_resume when a recovery action is recorded",
 		promptGuidelines: [
 			"Use gsd_task_complete (or gsd_complete_task) when a task is finished and needs to be recorded.",
 			"Include verification whenever possible. If verification is omitted, the executor derives it from verificationEvidence when possible.",
 			"verificationEvidence is an array of objects with command, exitCode, verdict, durationMs.",
 			"The tool validates required fields and returns an error message if verification cannot be derived.",
-			"Canonical success returns attemptId, resultId, nextStage, and summaryPath while completion awaits host verification; a blocker routes to recovery.",
+			"Canonical success returns attemptId, resultId, nextStage, and summaryPath while completion awaits host verification; a blocker routes to recovery and returns recoveryActionId for gsd_task_recovery_resume when a recovery action is recorded.",
 			"Legacy success returns summaryPath and may report stale projection repair or a duplicate non-mutating retry; matching parameters alone do not make a replay.",
 		],
 		parameters: Type.Object({
