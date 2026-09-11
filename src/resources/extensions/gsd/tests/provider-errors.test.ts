@@ -1323,6 +1323,25 @@ test("classifyError treats a status-only '400 Bad Request' as transient network"
   }
 });
 
+// Regression (2026-09-11): when the turn's errorMessage is empty/useless the
+// recovery path classifies the assistant content text, which arrives with the
+// provider adapter's "Provider error:" prefix baked in ("Provider error: 400 Bad
+// Request\n"). The anchored bare-400 regex must tolerate that wrapper (and the
+// adapter's "Provider error: : …" stray-colon form) or the status-only 400 falls
+// through to `unknown` and hard-pauses auto-mode — the exact wedge W-a8123253.
+test("classifyError treats a provider-prefixed status-only '400 Bad Request' as transient network", () => {
+  for (const message of [
+    "Provider error: 400 Bad Request",
+    "Provider error: 400 Bad Request\n",
+    "Provider error: : 400 Bad Request",
+    ": 400 Bad Request",
+  ]) {
+    const result = classifyError(message);
+    assert.ok(isTransient(result), `${JSON.stringify(message)} must be transient`);
+    assert.equal(result.kind, "network");
+  }
+});
+
 test("classifyError keeps 400 with diagnostic body on the non-transient path", () => {
   // Known request-shape rejection phrasing stays model-error (fallback-eligible).
   const withInvalidParams = classifyError('400 {"error":{"message":"invalid params: max_tokens"}}');

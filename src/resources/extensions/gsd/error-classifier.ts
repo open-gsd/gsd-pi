@@ -96,17 +96,25 @@ const MODEL_ERROR_RE =
 // Genuine auth rejections (401 unauthorized, forbidden, …) still classify as
 // permanent earlier and keep precedence.
 const NO_API_KEY_RE = /no api key (?:available )?(?:for|found)(?: provider)?:?/i;
-// Bare status-line 400 with no diagnostic body — the message is exactly
-// "400 Bad Request" (plus whitespace/newline). Gateways (observed: GitHub
-// Copilot's model router, 2026-09-11) occasionally reject an otherwise-valid
-// request with a status-only 400 and an empty body; the identical request
-// then succeeds on retry. Genuine request-shape rejections carry a JSON error
-// body, so they either match MODEL_ERROR_RE above or keep the conservative
-// `unknown` pause below. Only the status-only form is treated as transient:
-// the bounded same-model retry (MAX_NETWORK_RETRIES) disambiguates — a
-// deterministic 400 re-fails cheaply and still reaches the fallback/pause
-// path, while a gateway hiccup recovers on the first retry.
-const BARE_400_STATUS_RE = /^\s*400\s+Bad Request\s*$/i;
+// Bare status-line 400 with no diagnostic body — the message is effectively
+// "400 Bad Request" (plus whitespace/newline), OPTIONALLY wrapped by the
+// provider adapter's generic "Provider error:" prefix. Gateways (observed:
+// GitHub Copilot's model router, 2026-09-11) occasionally reject an otherwise-
+// valid kimi-k3 request with a status-only 400 and an empty body; the identical
+// request then succeeds on retry. When the turn's errorMessage is empty/useless,
+// the recovery path classifies the assistant content text instead, which arrives
+// as "Provider error: 400 Bad Request\n" — so the prefix (and a stray leading
+// colon, as in the adapter's "Provider error: : …" timeout form) MUST be
+// tolerated or the status-only 400 is misclassified as `unknown` and hard-pauses
+// auto-mode. Genuine request-shape rejections carry a JSON error body, so they
+// either match MODEL_ERROR_RE above or keep the conservative `unknown` pause
+// below (the anchored `$` after "Bad Request" rejects any trailing body). Only
+// the status-only form is treated as transient: the bounded same-model retry
+// (MAX_NETWORK_RETRIES) disambiguates — a deterministic 400 re-fails cheaply and
+// still reaches the fallback/pause path, while a gateway hiccup recovers on the
+// first retry.
+const BARE_400_STATUS_RE =
+  /^\s*(?:provider error\s*:?\s*)?:?\s*400\s+Bad Request\s*$/i;
 
 // Provider-side model entitlement rejection: the SDK accepted the model switch,
 // but the provider refused at request time because the current account/plan/tier
