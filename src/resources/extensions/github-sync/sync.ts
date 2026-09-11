@@ -522,8 +522,10 @@ async function syncSliceComplete(
   // Mark PR ready for review, then merge
   if (sliceRecord.prNumber) {
     ghMarkPRReady(basePath, mapping.repo, sliceRecord.prNumber);
-    // Squash-merge into milestone branch
-    ghMergePR(basePath, mapping.repo, sliceRecord.prNumber, "squash");
+    // Merge honors the git.merge_strategy preference (#2279); squash is the default.
+    const gitPrefs = loadEffectiveGSDPreferences(basePath)?.preferences?.git ?? {};
+    const effectiveStrategy = gitPrefs.merge_strategy === "merge" ? "merge" : "squash";
+    ghMergePR(basePath, mapping.repo, sliceRecord.prNumber, effectiveStrategy);
   }
 
   sliceRecord.state = "closed";
