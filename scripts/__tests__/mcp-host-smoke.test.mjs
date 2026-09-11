@@ -12,9 +12,9 @@ const progress = {
 	activeSlice: null,
 	activeTask: null,
 	phase: "execute",
-	milestones: { total: 1, done: 0, active: 1, pending: 0, parked: 0 },
+		milestones: { total: 1, done: 0, active: 1, pending: 0, parked: 0 },
 	slices: { total: 0, done: 0, active: 0, pending: 0 },
-	tasks: { total: 0, done: 0, pending: 0 },
+		tasks: { total: 0, done: 0, active: 0, pending: 0 },
 	requirements: null,
 	blockers: [],
 	nextAction: "Continue",
@@ -24,13 +24,17 @@ const progress = {
 const snapshot = {
 	authority: { projectId: "project-1", schemaVersion: 1, revision: 42, authorityEpoch: 2 },
 	current: { activeMilestone: null, activeSlice: null, activeTask: null, phase: "execute", nextAction: "Continue" },
-	progress: { milestones: { total: 1 }, slices: { total: 0 }, tasks: { total: 0 } },
+	progress: {
+		milestones: { total: 1, done: 0, active: 1, pending: 0, parked: 0 },
+		slices: { total: 0, done: 0, active: 0, pending: 0 },
+		tasks: { total: 0, done: 0, active: 0, pending: 0 },
+	},
 	blockers: [],
 	blockersTruncated: false,
 	openQuestions: [],
 	openQuestionsTruncated: false,
-	verification: { assessments: { total: 0 }, evidence: { total: 0 } },
-	milestones: { items: [{ id: "M001" }], truncated: false },
+	verification: { assessments: { total: 0, pass: 0, fail: 0 }, evidence: { total: 0, passed: 0, failed: 0 } },
+		milestones: { items: [{ id: "M001", title: "Authority Fixture", status: "active", sequence: 1 }], truncated: false },
 	capturedAt: "2026-09-11T00:00:00.000Z",
 };
 
@@ -62,6 +66,9 @@ test("progress accepts current DB provenance and additive fields", () => {
 test("progress rejects errors, malformed text, null/array payloads, and projection provenance", () => {
 	expectFailure(() => assertProgressResult({ isError: true, content: [{ type: "text", text: "{}" }] }), "MCP error envelope");
 	expectFailure(() => assertProgressResult({ content: [{ type: "text", text: "{}" }], structuredContent: { operation: "read_progress", error: "db_unavailable" } }), "structured canonical error");
+	expectFailure(() => assertProgressResult({ content: [{ type: "text", text: JSON.stringify(progress) }], structuredContent: { error: null } }), "malformed structured canonical error");
+	expectFailure(() => parseToolTextPayload({ content: [{ type: "text", text: "{}" }, { type: "text", text: "{" }] }, "progress"), "exactly one text content block");
+	expectFailure(() => parseToolTextPayload({ content: [{ type: "json", text: "{}" }] }, "progress"), "exactly one text content block");
 	expectFailure(() => parseToolTextPayload({ content: [{ type: "text", text: "{" }] }, "progress"), "invalid JSON");
 	expectFailure(() => parseToolTextPayload(resultFor(null), "progress"), "non-null object");
 	expectFailure(() => parseToolTextPayload(resultFor([]), "progress"), "non-null object");
@@ -88,5 +95,10 @@ test("snapshot rejects invalid authority, operation, revision, truncation, and o
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, openQuestionsTruncated: undefined }, { operation: "read_project_snapshot", revision: 42, snapshot })), "openQuestionsTruncated");
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, blockersTruncated: "no" }, { operation: "read_project_snapshot", revision: 42, snapshot })), "blockersTruncated");
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, capturedAt: "September 11, 2026" }, { operation: "read_project_snapshot", revision: 42, snapshot })), "ISO-8601");
+	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, capturedAt: "2026-02-30T00:00:00.000Z" }, { operation: "read_project_snapshot", revision: 42, snapshot })), "ISO-8601");
+	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, current: {} }, { operation: "read_project_snapshot", revision: 42, snapshot })), "current.activeMilestone");
+	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, milestones: { items: [null], truncated: false } }, { operation: "read_project_snapshot", revision: 42, snapshot })), "object items");
+	expectFailure(() => assertProgressResult(resultFor({ ...progress, milestones: {} })), "gsd_progress.milestones.total");
+	expectFailure(() => assertProgressResult(resultFor({ ...progress, blockers: [42] })), "string array");
 	expectFailure(() => assertSnapshotResult(resultFor({ ...snapshot, milestones: { items: Array(51).fill({}), truncated: true } }, { operation: "read_project_snapshot", revision: 42, snapshot })), "output cap");
 });

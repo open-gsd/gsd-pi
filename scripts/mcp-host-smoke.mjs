@@ -51,6 +51,18 @@ function requireNonNegativeSafeInteger(value, name) {
 	if (value < 0) throw new Error(`${name}: expected non-negative safe integer, got ${describe(value)}`);
 }
 
+function requireCountGroup(value, fields, name) {
+	const group = requireRecord(value, name);
+	for (const field of fields) requireNonNegativeSafeInteger(group[field], `${name}.${field}`);
+}
+
+function requireNullableReference(value, name) {
+	if (value === null) return;
+	const reference = requireRecord(value, name);
+	requireString(reference.id, `${name}.id`);
+	requireString(reference.title, `${name}.title`);
+}
+
 function canonicalize(value) {
 	if (Array.isArray(value)) return value.map(canonicalize);
 	if (!isRecord(value)) return value;
@@ -61,8 +73,10 @@ export function parseToolTextPayload(result, name) {
 	if (!isRecord(result) || !Array.isArray(result.content) || result.content.length === 0) {
 		throw new Error(`${name}: missing content envelope`);
 	}
-	const text = result.content.find((block) => isRecord(block) && typeof block.text === "string")?.text;
-	if (text === undefined) throw new Error(`${name}: missing text content`);
+	if (result.content.length !== 1 || !isRecord(result.content[0]) || result.content[0].type !== "text" || typeof result.content[0].text !== "string") {
+		throw new Error(`${name}: expected exactly one text content block`);
+	}
+	const text = result.content[0].text;
 	let payload;
 	try {
 		payload = JSON.parse(text);
@@ -79,7 +93,10 @@ export function assertSuccessEnvelope(result, name) {
 	if (result.isError !== undefined && typeof result.isError !== "boolean") {
 		throw new Error(`${name}: isError must be boolean when present`);
 	}
-	if (isRecord(result.structuredContent) && typeof result.structuredContent.error === "string") {
+	if (isRecord(result.structuredContent) && "error" in result.structuredContent) {
+		if (typeof result.structuredContent.error !== "string" || result.structuredContent.error.length === 0) {
+			throw new Error(`${name}: malformed structured canonical error`);
+		}
 		throw new Error(`${name}: structured canonical error (${result.structuredContent.error})`);
 	}
 	return result;
@@ -87,15 +104,13 @@ export function assertSuccessEnvelope(result, name) {
 
 export function assertProgressPayload(payload) {
 	const progress = requireRecord(payload, "gsd_progress payload");
-	for (const field of ["activeMilestone", "activeSlice", "activeTask"]) {
-		if (progress[field] !== null) requireRecord(progress[field], `gsd_progress.${field}`);
-	}
+	for (const field of ["activeMilestone", "activeSlice", "activeTask"]) requireNullableReference(progress[field], `gsd_progress.${field}`);
 	requireString(progress.phase, "gsd_progress.phase");
-	requireRecord(progress.milestones, "gsd_progress.milestones");
-	requireRecord(progress.slices, "gsd_progress.slices");
-	requireRecord(progress.tasks, "gsd_progress.tasks");
-	if (progress.requirements !== null) requireRecord(progress.requirements, "gsd_progress.requirements");
-	if (!Array.isArray(progress.blockers)) throw new Error("gsd_progress.blockers: expected array");
+	requireCountGroup(progress.milestones, ["total", "done", "active", "pending", "parked"], "gsd_progress.milestones");
+	requireCountGroup(progress.slices, ["total", "done", "active", "pending"], "gsd_progress.slices");
+	requireCountGroup(progress.tasks, ["total", "done", "active", "pending"], "gsd_progress.tasks");
+	if (progress.requirements !== null) requireCountGroup(progress.requirements, ["active", "validated", "deferred", "outOfScope", "blocked", "total"], "gsd_progress.requirements");
+	if (!Array.isArray(progress.blockers) || progress.blockers.some((blocker) => typeof blocker !== "string")) throw new Error("gsd_progress.blockers: expected string array");
 	requireString(progress.nextAction, "gsd_progress.nextAction");
 	const metadata = requireRecord(progress.readMetadata, "gsd_progress.readMetadata");
 	if (metadata.source !== "database") {
@@ -114,6 +129,7 @@ function assertBoundedCollection(value, name) {
 		throw new Error(`${name}.items: exceeds output cap ${MAX_OUTPUT_ITEMS}`);
 	}
 	requireBoolean(collection.truncated, `${name}.truncated`);
+	if (collection.items.some((item) => !isRecord(item))) throw new Error(`${name}.items: expected object items`);
 }
 
 export function assertSnapshotPayload(payload, structuredContent) {
@@ -123,18 +139,23 @@ export function assertSnapshotPayload(payload, structuredContent) {
 	if (authority.schemaVersion !== null) requireNonNegativeSafeInteger(authority.schemaVersion, "gsd_project_snapshot.authority.schemaVersion");
 	requireNonNegativeSafeInteger(authority.revision, "gsd_project_snapshot.authority.revision");
 	requireNonNegativeSafeInteger(authority.authorityEpoch, "gsd_project_snapshot.authority.authorityEpoch");
-	requireRecord(snapshot.current, "gsd_project_snapshot.current");
-	requireRecord(snapshot.progress, "gsd_project_snapshot.progress");
-	if (!Array.isArray(snapshot.blockers)) throw new Error("gsd_project_snapshot.blockers: expected array");
+	for (const field of ["activeMilestone", "activeSlice", "activeTask"]) requireNullableReference(snapshot.current?.[field], `gsd_project_snapshot.current.${field}`);
+	requireString(snapshot.current?.phase, "gsd_project_snapshot.current.phase");
+	requireString(snapshot.current?.nextAction, "gsd_project_snapshot.current.nextAction");
+	requireCountGroup(snapshot.progress?.milestones, ["total", "done", "active", "pending", "parked"], "gsd_project_snapshot.progress.milestones");
+	requireCountGroup(snapshot.progress?.slices, ["total", "done", "active", "pending"], "gsd_project_snapshot.progress.slices");
+	requireCountGroup(snapshot.progress?.tasks, ["total", "done", "active", "pending"], "gsd_project_snapshot.progress.tasks");
+	if (!Array.isArray(snapshot.blockers) || snapshot.blockers.some((item) => !isRecord(item))) throw new Error("gsd_project_snapshot.blockers: expected object array");
 	if (snapshot.blockers.length > MAX_OUTPUT_ITEMS) throw new Error("gsd_project_snapshot.blockers: exceeds output cap 50");
 	requireBoolean(snapshot.blockersTruncated, "gsd_project_snapshot.blockersTruncated");
-	if (!Array.isArray(snapshot.openQuestions)) throw new Error("gsd_project_snapshot.openQuestions: expected array");
+	if (!Array.isArray(snapshot.openQuestions) || snapshot.openQuestions.some((item) => !isRecord(item))) throw new Error("gsd_project_snapshot.openQuestions: expected object array");
 	if (snapshot.openQuestions.length > MAX_OUTPUT_ITEMS) throw new Error("gsd_project_snapshot.openQuestions: exceeds output cap 50");
 	requireBoolean(snapshot.openQuestionsTruncated, "gsd_project_snapshot.openQuestionsTruncated");
-	requireRecord(snapshot.verification, "gsd_project_snapshot.verification");
+	requireCountGroup(snapshot.verification?.assessments, ["total", "pass", "fail"], "gsd_project_snapshot.verification.assessments");
+	requireCountGroup(snapshot.verification?.evidence, ["total", "passed", "failed"], "gsd_project_snapshot.verification.evidence");
 	assertBoundedCollection(snapshot.milestones, "gsd_project_snapshot.milestones");
 	requireString(snapshot.capturedAt, "gsd_project_snapshot.capturedAt");
-	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(snapshot.capturedAt) || Number.isNaN(Date.parse(snapshot.capturedAt))) {
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(snapshot.capturedAt) || Number.isNaN(Date.parse(snapshot.capturedAt)) || new Date(snapshot.capturedAt).toISOString() !== snapshot.capturedAt) {
 		throw new Error("gsd_project_snapshot.capturedAt: expected ISO-8601 UTC timestamp");
 	}
 
@@ -189,9 +210,9 @@ async function main() {
 		env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: realpathSync(tmpdir()), GSD_NON_INTERACTIVE: "1" },
 		stderr: "pipe",
 	});
-	const stderrChunks = [];
+	let serverStderr = "";
 	transport.stderr?.on("data", (chunk) => {
-		stderrChunks.push(String(chunk));
+		serverStderr = `${serverStderr}${String(chunk)}`.slice(-2000);
 	});
 	const results = [];
 	function record(name, fn) {
@@ -223,8 +244,8 @@ async function main() {
 	} catch (error) {
 		record("probe completed without transport/protocol error", () => {
 			const detail = error instanceof Error ? error.message : String(error);
-			const serverStderr = stderrChunks.join("").trim();
-			throw new Error(serverStderr ? `${detail}; server stderr: ${serverStderr.slice(-2000)}` : detail);
+			serverStderr = serverStderr.trim();
+			throw new Error(serverStderr ? `${detail}; server stderr: ${serverStderr}` : detail);
 		});
 	} finally {
 		await client.close().catch(() => {});
@@ -236,4 +257,4 @@ async function main() {
 	process.exitCode = failed === 0 ? 0 : 1;
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1]).href) await main();
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
