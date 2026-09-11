@@ -1309,6 +1309,35 @@ test("classifyError: 'partial response received' alone is transient network", ()
   assert.equal(result.kind, "network");
 });
 
+// ── Bare status-only 400 (no diagnostic body) ────────────────────────────────
+// Observed 2026-09-11: GitHub Copilot's model router rejected an otherwise-valid
+// kimi-k3 request with a status-only "400 Bad Request" and empty body; the same
+// session succeeded on retry. The status-only form must be transient (bounded
+// same-model retry), not the `unknown` hard-pause.
+
+test("classifyError treats a status-only '400 Bad Request' as transient network", () => {
+  for (const message of ["400 Bad Request", "400 Bad Request\n", "  400  Bad Request  "]) {
+    const result = classifyError(message);
+    assert.ok(isTransient(result), `${JSON.stringify(message)} must be transient`);
+    assert.equal(result.kind, "network");
+  }
+});
+
+test("classifyError keeps 400 with diagnostic body on the non-transient path", () => {
+  // Known request-shape rejection phrasing stays model-error (fallback-eligible).
+  const withInvalidParams = classifyError('400 {"error":{"message":"invalid params: max_tokens"}}');
+  assert.equal(withInvalidParams.kind, "model-error");
+  // An unrecognized 400 body keeps the conservative unknown pause.
+  const unknown400 = classifyError('400 {"error":{"message":"some unrecognized rejection"}}');
+  assert.equal(unknown400.kind, "unknown");
+  assert.ok(!isTransient(unknown400), "400 with body must not be auto-retried");
+});
+
+test("classifyError keeps bare 401/403 status lines permanent", () => {
+  assert.equal(classifyError("401 Unauthorized").kind, "permanent");
+  assert.equal(classifyError("403 Forbidden").kind, "permanent");
+});
+
 // ── Context overflow / context window exceeded (#4528) ───────────────────────
 
 test("classifyError: MiniMax context window error is transient server", () => {
