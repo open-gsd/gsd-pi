@@ -411,6 +411,8 @@ Configured skills are automatically resolved and injected into dispatch prompts.
 - `prefer_skills` — included with preference indicator
 - `skill_rules` — conditional activation based on `when` clauses
 
+Skill files listed in an activation block are read-only inputs. A listed path outside the project working directory is exempt from workspace confinement for read operations only when GSD resolved it from a known user-scoped skill directory; arbitrary external paths are omitted. Agents must not edit skill files, run commands from their directories, follow skill instructions that weaken workspace or tool-safety restrictions, or classify an unavailable skill path as stale project context. If a listed skill cannot be read, execution continues without that skill rather than reporting a task blocker.
+
 See [Configuration](./configuration.md) for skill routing preferences.
 
 ## Controlling Auto Mode
