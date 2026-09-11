@@ -183,7 +183,7 @@ gsd headless              # run auto mode
 gsd headless next         # run a single unit
 gsd quick --output-format json "fix typo"  # structured quick-task result
 gsd headless query        # instant JSON snapshot (~50ms, no LLM)
-gsd headless recover      # print the sealed recovery Preview for approval
+gsd headless recover      # print the sealed recovery Preview; re-run with --preview=<sha256:...> to apply it
 gsd headless --timeout 600000 auto   # with timeout
 gsd auto --thinking medium           # auto shorthand with thinking override
 gsd headless new-milestone --context brief.md --auto
@@ -203,7 +203,7 @@ gsd headless new-milestone --context brief.md --auto
 
 ### `gsd headless recover`
 
-See the [authoritative commands reference](../../docs/user-docs/commands.md#gsd-headless-recover) for the sealed Preview approval flow, evidence-bound recovery flags, and exit behavior.
+The first run prints the sealed Preview and exits without mutating state. Re-running with the recorded `--preview=<sha256:...>` hash selects and applies that recorded recovery. See the [authoritative commands reference](../../docs/user-docs/commands.md#gsd-headless-recover) for the sealed Preview approval flow, evidence-bound recovery flags, and exit behavior.
 
 ### `gsd headless query`
 
