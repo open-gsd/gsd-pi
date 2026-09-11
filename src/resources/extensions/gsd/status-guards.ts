@@ -29,11 +29,14 @@ const CANONICAL_STATUS_SET: ReadonlySet<string> = new Set(CANONICAL_STATUSES);
 /**
  * Raw status values that mean a unit is closed — the single source of truth.
  * Includes legacy/imported aliases ("done", "closed", "cancelled") alongside
- * canonical "complete"/"skipped" because the DB column is free-form and older
+ * canonical "complete"/"skipped" and the operator closeout disposition
+ * "blocker-accepted" (#2202) because the DB column is free-form and older
  * rows / imports still carry them. Order matters: `TERMINAL_STATUS_SQL` is
  * derived from this array verbatim.
  */
-export const RAW_CLOSED_STATUSES = ["complete", "done", "skipped", "closed", "cancelled"] as const;
+export const RAW_CLOSED_STATUSES = [
+  "complete", "done", "skipped", "closed", "cancelled", "blocker-accepted",
+] as const;
 const RAW_CLOSED_SET: ReadonlySet<string> = new Set(RAW_CLOSED_STATUSES);
 
 /** Free-form aliases mapped to their canonical Status on read. */

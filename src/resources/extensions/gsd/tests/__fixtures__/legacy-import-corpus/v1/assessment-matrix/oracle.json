@@ -5,7 +5,7 @@
   "importer_version": "v1-test",
   "base_project_revision": 0,
   "base_authority_epoch": 0,
-  "base_database_schema_version": 49,
+  "base_database_schema_version": 50,
   "source_set_hash": "sha256:d6be2fe9ebe133715e4ae55ae69020b27dd3dcef3f741121a86ecf0e3d2eba80",
   "change_set_hash": "sha256:70462a42ec24f89007b6a86625122192bb2e407098f0dec12be6fd62ec4857ad",
   "counts": {

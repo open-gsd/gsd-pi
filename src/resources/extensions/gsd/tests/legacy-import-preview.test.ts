@@ -328,7 +328,7 @@ describe("legacy preview identity", () => {
       ...input.base,
       database_schema_version: 44 as typeof LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION,
     };
-    assert.throws(() => sealLegacyImportPreview(input), /database schema 49/);
+    assert.throws(() => sealLegacyImportPreview(input), /database schema 50/);
   });
 
   test("legacy preview identity rejects import kinds the application receipt cannot store", () => {

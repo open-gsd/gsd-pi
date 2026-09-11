@@ -1,7 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Operator Task settle — human-gated, dry-run-first reconciliation
 // of a running Task Attempt whose executor is gone, plus optional lifecycle
-// adopt after an interrupted Attempt or succeeded completion (#1749, #2018).
+// adopt after an interrupted Attempt or succeeded completion (#1749, #2018),
+// and the `blocker-accepted` operator closeout disposition (#2202).
 
 import { executeDomainOperation } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
@@ -14,6 +15,8 @@ import {
 import { normalizeLegacyLifecycleStatus } from "./db/lifecycle-shadow-comparison.js";
 import {
   adoptOrTransitionLifecycle,
+  appendKernelCheckpoint,
+  closeLegacyTaskAsBlockerAccepted,
   readDomainOperationFence,
   type CanonicalLifecycleStatus,
 } from "./db/writers/lifecycle-commands.js";
@@ -23,6 +26,7 @@ import {
   readLatestTaskAttempt,
   settleTaskAttempt,
 } from "./task-execution-domain-operation.js";
+import { readTaskRecoveryRoute } from "./task-recovery-domain-operation.js";
 
 export interface TaskSettleTask {
   milestoneId: string;
@@ -504,5 +508,267 @@ export function applyTaskSettle(input: {
     settled,
     reconciled,
     ...(resultId ? { resultId } : {}),
+  };
+}
+
+// ── blocker-accepted operator closeout (#2202) ──────────────────────────────
+//
+// A Task whose execute-task Attempt settled as failed/blocker-discovered at the
+// route stage with no running Attempt has no supported closeout: replan rejects
+// it (not closed), settle has nothing to settle, and resume only authorizes a
+// repaired retry. The `blocker-accepted` disposition accepts the discovered
+// blocker explicitly: it closes the Task as terminal `blocker-accepted` in both
+// vocabularies, records the blocker provenance on the canonical plan, and
+// consumes the route Kernel head with a terminal closeout decision so the
+// historical failure can never be re-routed. It never fabricates success
+// evidence and never satisfies verdict-gated completion.
+
+export type TaskSettleDisposition = "blocker-accepted";
+
+export interface TaskBlockerAcceptedRow {
+  attemptId: string;
+  resultId: string;
+  /** The discovered-blocker summary carried by the failed Result. */
+  blockerSummary: string;
+  currentStatus: string;
+  targetStatus: "blocker-accepted";
+  lifecycleFrom: CanonicalLifecycleStatus;
+  /** True when the route Kernel head is consumed with a closeout decision. */
+  routeConsumed: boolean;
+  supersededRecoveryActionId: string | null;
+  blockerId: string | null;
+  rationale: string;
+}
+
+export interface TaskBlockerAcceptedPlan {
+  task: TaskSettleTask;
+  /** Zero rows means an apply is a no-op (the disposition already committed). */
+  rows: TaskBlockerAcceptedRow[];
+  alreadyAccepted: boolean;
+}
+
+export interface TaskBlockerAcceptedApplyResult {
+  task: TaskSettleTask;
+  accepted: boolean;
+  alreadyAccepted: boolean;
+  attemptId: string | null;
+  resultId: string | null;
+  routeConsumed: boolean;
+}
+
+interface RouteHeadRow {
+  kernel_checkpoint_id: string;
+  lifecycle_id: string;
+  attempt_id: string;
+  next_stage: string;
+}
+
+function readRouteHead(task: TaskSettleTask): RouteHeadRow | null {
+  return (getDb().prepare(`
+    SELECT head.kernel_checkpoint_id, head.lifecycle_id, head.attempt_id, head.next_stage
+    FROM workflow_kernel_checkpoints head
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = head.lifecycle_id
+     AND lifecycle.project_id = head.project_id
+    WHERE lifecycle.item_kind = 'task'
+      AND lifecycle.milestone_id = :milestone_id
+      AND lifecycle.slice_id = :slice_id
+      AND lifecycle.task_id = :task_id
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id = head.kernel_checkpoint_id
+      )
+  `).get({
+    ":milestone_id": task.milestoneId,
+    ":slice_id": task.sliceId,
+    ":task_id": task.taskId,
+  }) ?? null) as RouteHeadRow | null;
+}
+
+/**
+ * Read-only disposition plan: the exact Attempt, lifecycle, legacy status, and
+ * route-head transitions an apply would write. Guards fail closed with the
+ * exact prerequisite and the supported next action.
+ */
+export function planBlockerAcceptedDisposition(
+  task: TaskSettleTask,
+  reason: string,
+): TaskBlockerAcceptedPlan {
+  const state = readTaskLifecycleState(task);
+  if (state.lifecycleStatus === "blocker-accepted" || state.legacyStatus === "blocker-accepted") {
+    return { task, rows: [], alreadyAccepted: true };
+  }
+  const running = readRunningAttempts(task);
+  if (running.length > 0) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires no running Attempt for ${unitId(task)} — ` +
+      "settle the running Attempt first (gsd_task_settle without settleDisposition).",
+    );
+  }
+  if (state.lifecycleStatus !== "in_progress") {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the Task lifecycle in_progress; found ` +
+      `${state.lifecycleStatus ?? "none"} for ${unitId(task)} — only an active Task with a ` +
+      "discovered blocker can be closed by accepting the blocker.",
+    );
+  }
+  const attempt = readLatestTaskAttempt(task);
+  if (
+    !attempt || attempt.state !== "settled" || attempt.outcome !== "failed" ||
+    attempt.nextStage !== "route" || attempt.resultFailureClass !== "blocker-discovered"
+  ) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the latest Attempt of ${unitId(task)} settled ` +
+      `as failed/blocker-discovered at the route stage; found ` +
+      `${attempt ? `${attempt.state}/${attempt.outcome ?? "no-result"}` : "no Attempt"} at ` +
+      `${attempt?.nextStage ?? "no Kernel head"}${attempt?.resultFailureClass ? ` (${attempt.resultFailureClass})` : ""}. ` +
+      "Repair-and-retry is the separate successor-Attempt path (gsd_task_recovery_resume).",
+    );
+  }
+  if (!attempt.resultId) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the failed Result identity of Attempt ` +
+      `${attempt.attemptId} for ${unitId(task)}; the Attempt has no Result to preserve.`,
+    );
+  }
+  const head = readRouteHead(task);
+  if (!head || head.next_stage !== "route" || head.attempt_id !== attempt.attemptId) {
+    throw new Error(
+      `gsd_task_settle: blocker-accepted requires the route Kernel head of ${unitId(task)} on ` +
+      `Attempt ${attempt.attemptId}; found ${head ? `next_stage ${head.next_stage}` : "no Kernel head"}. ` +
+      "The disposition consumes the route head with a terminal closeout decision.",
+    );
+  }
+  const route = readTaskRecoveryRoute(attempt.attemptId);
+  return {
+    task,
+    rows: [{
+      attemptId: attempt.attemptId,
+      resultId: attempt.resultId,
+      blockerSummary: attempt.resultSummary ?? "",
+      currentStatus: state.legacyStatus,
+      targetStatus: "blocker-accepted",
+      lifecycleFrom: state.lifecycleStatus,
+      routeConsumed: true,
+      supersededRecoveryActionId: route?.recoveryActionId ?? null,
+      blockerId: route?.blocker?.blockerId ?? null,
+      rationale: reason,
+    }],
+    alreadyAccepted: false,
+  };
+}
+
+/**
+ * Apply the `blocker-accepted` disposition: one Domain Operation writes the
+ * terminal `blocker-accepted` status to both vocabularies, the blocker
+ * provenance event on the canonical plan, and the terminal closeout Kernel
+ * decision that consumes the route head. A repeated applied run is a no-op.
+ */
+export function applyBlockerAcceptedDisposition(input: {
+  invocation: ExecutionInvocation;
+  task: TaskSettleTask;
+  reason: string;
+}): TaskBlockerAcceptedApplyResult {
+  const plan = planBlockerAcceptedDisposition(input.task, input.reason);
+  if (plan.alreadyAccepted || plan.rows.length === 0) {
+    return {
+      task: input.task,
+      accepted: false,
+      alreadyAccepted: true,
+      attemptId: null,
+      resultId: null,
+      routeConsumed: false,
+    };
+  }
+  const row = plan.rows[0];
+  const entityId = unitId(input.task);
+  const acceptedAt = new Date().toISOString();
+  const fence = readDomainOperationFence(input.invocation.idempotencyKey);
+  executeDomainOperation({
+    operationType: "task.settle.blocker-accepted",
+    idempotencyKey: input.invocation.idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: {
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      attemptId: row.attemptId,
+      resultId: row.resultId,
+      disposition: "blocker-accepted",
+      rationale: input.reason,
+    },
+  }, (context) => {
+    // Consume the route head first: the terminal closeout decision makes the
+    // historical failure unreachable for recovery routing.
+    const head = readRouteHead(input.task);
+    if (!head || head.next_stage !== "route" || head.attempt_id !== row.attemptId) {
+      throw new Error(
+        `gsd_task_settle: the route Kernel head of ${entityId} changed after the dry-run plan; ` +
+        "retry the operation",
+      );
+    }
+    const closeout = appendKernelCheckpoint(context, {
+      lifecycleId: head.lifecycle_id,
+      attemptId: row.attemptId,
+      nextStage: "closeout",
+      previousKernelCheckpointId: head.kernel_checkpoint_id,
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      lifecycleStatus: "blocker-accepted",
+    });
+    closeLegacyTaskAsBlockerAccepted(context, input.task);
+    return {
+      events: [{
+        eventType: "task.blocker.accepted",
+        entityType: "task",
+        entityId,
+        payload: {
+          disposition: "blocker-accepted",
+          from: row.lifecycleFrom,
+          to: "blocker-accepted",
+          attemptId: row.attemptId,
+          resultId: row.resultId,
+          blockerSummary: row.blockerSummary,
+          ...(row.supersededRecoveryActionId
+            ? { supersededRecoveryActionId: row.supersededRecoveryActionId }
+            : {}),
+          ...(row.blockerId ? { blockerId: row.blockerId } : {}),
+          rationale: input.reason,
+          acceptedAt,
+          closeoutKernelCheckpointId: closeout.kernelCheckpointId,
+        },
+        destinations: ["projection"],
+      }],
+      projections: [
+        {
+          projectionKey: `task.blocker.accepted/${entityId}`.toLowerCase(),
+          projectionKind: "task-recovery",
+          rendererVersion: "1",
+        },
+        {
+          projectionKey: `lifecycle/${entityId}`.toLowerCase(),
+          projectionKind: TASK_LIFECYCLE_PROJECTION_KIND,
+          rendererVersion: "1",
+        },
+      ],
+    };
+  });
+  return {
+    task: input.task,
+    accepted: true,
+    alreadyAccepted: false,
+    attemptId: row.attemptId,
+    resultId: row.resultId,
+    routeConsumed: row.routeConsumed,
   };
 }

@@ -69,5 +69,5 @@ export const CURRENT_TASK_RECOVERY_CAUSAL_AUTHORITY_SQL = `(
  *  prevent an upsert from reopening a completed slice/task. Derived from the
  *  single source `RAW_CLOSED_STATUSES` (ADR-030) so the SQL fragment cannot
  *  drift from `isClosedStatus()`. Renders as `'complete', 'done', 'skipped',
- *  'closed', 'cancelled'`. */
+ *  'closed', 'cancelled', 'blocker-accepted'`. */
 export const TERMINAL_STATUS_SQL = RAW_CLOSED_STATUSES.map((s) => `'${s}'`).join(", ");

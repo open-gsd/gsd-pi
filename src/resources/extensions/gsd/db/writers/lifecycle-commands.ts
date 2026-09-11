@@ -221,9 +221,14 @@ function isValidLifecycleTransition(
     return to === "in_progress" || to === "paused" || to === "cancelled" ||
       ((itemKind === "slice" || itemKind === "milestone") && to === "completed");
   }
-  if (from === "in_progress") return to === "paused" || to === "completed" || to === "cancelled";
+  if (from === "in_progress") {
+    return to === "paused" || to === "completed" || to === "cancelled" ||
+      // #2202: operator closeout — accept a discovered blocker instead of
+      // fabricating a completion or cancelling the Task.
+      (itemKind === "task" && to === "blocker-accepted");
+  }
   if (from === "paused") return to === "ready" || to === "in_progress" || to === "cancelled";
-  return (from === "completed" || from === "cancelled") && to === "ready";
+  return (from === "completed" || from === "cancelled" || from === "blocker-accepted") && to === "ready";
 }
 
 function requireHierarchyRow(input: LifecycleCommandInput): void {
@@ -616,6 +621,35 @@ export function completeLegacyTaskForVerifiedAttempt(
   });
   if (changes(result) !== 1) {
     throw new Error("Verified Task publication did not complete exactly one legacy Task");
+  }
+}
+
+/**
+ * Close the legacy Task row as `blocker-accepted` (#2202). The replan gate
+ * reads legacy `tasks.status`, so the canonical-only write cannot unlock
+ * replan on its own — both vocabularies move in the same Domain Operation.
+ * No SUMMARY or completion timestamp is fabricated: the Task is closed, not
+ * completed.
+ */
+export function closeLegacyTaskAsBlockerAccepted(
+  context: Readonly<DomainOperationContext>,
+  identity: { milestoneId: string; sliceId: string; taskId: string },
+): void {
+  requireActiveDomainOperationContext(context);
+  requireNonBlank(identity.milestoneId, "milestoneId");
+  requireNonBlank(identity.sliceId, "sliceId");
+  requireNonBlank(identity.taskId, "taskId");
+  const result = getDb().prepare(`
+    UPDATE tasks
+    SET status = 'blocker-accepted'
+    WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND id = :task_id
+  `).run({
+    ":milestone_id": identity.milestoneId,
+    ":slice_id": identity.sliceId,
+    ":task_id": identity.taskId,
+  });
+  if (changes(result) !== 1) {
+    throw new Error("Blocker-accepted closeout did not close exactly one legacy Task");
   }
 }
 

@@ -2630,6 +2630,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Settles under the Attempt's held lease, or safely reclaims an expired/released lease when its worker is no longer live; never steals a live peer's lease.",
 			"A second apply is a no-op — the tool is idempotent.",
 			"reconcileLifecycle adopts ready/completed after an interrupted Attempt, or completed after a succeeded Attempt, without deleting SUMMARYs.",
+			"settleDisposition 'blocker-accepted' closes a Task whose latest Attempt failed as blocker-discovered at the route stage: terminal closeout, blocker provenance recorded, then replan with gsd_replan_slice — never re-executes the Task and fabricates no success evidence.",
 		],
 		parameters: Type.Object(
 			{
@@ -2649,6 +2650,14 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					Type.Boolean({
 						description:
 							"After settling or an interrupted Attempt, adopt ready/completed; after a succeeded Attempt, adopt completed. Preserve SUMMARYs.",
+					}),
+				),
+				settleDisposition: Type.Optional(
+					Type.Union([
+						Type.Literal("blocker-accepted"),
+					], {
+						description:
+							"#2202 operator closeout: accept a discovered blocker and close the Task terminal (no rerun, no fabricated success). Requires the latest Attempt settled failed/blocker-discovered at the route stage and no running Attempt. Mutually exclusive with reconcileLifecycle. Then replan the slice with this task as blockerTaskId.",
 					}),
 				),
 			},

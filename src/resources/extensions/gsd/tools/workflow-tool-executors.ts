@@ -66,7 +66,12 @@ import {
   resumeTaskRecovery,
   type TaskRecoveryRouteSnapshot,
 } from "../task-recovery-domain-operation.js";
-import { applyTaskSettle, planTaskSettle } from "../task-settle.js";
+import {
+  applyBlockerAcceptedDisposition,
+  applyTaskSettle,
+  planBlockerAcceptedDisposition,
+  planTaskSettle,
+} from "../task-settle.js";
 import type { CompleteSliceParams, EscalationOption } from "../types.js";
 import { handleCompleteSlice } from "./complete-slice.js";
 import type { PlanMilestoneParams } from "./plan-milestone.js";
@@ -875,6 +880,8 @@ export interface TaskSettleExecutorParams {
   reason: string;
   apply?: boolean;
   reconcileLifecycle?: boolean;
+  /** #2202: operator closeout disposition for a discovered blocker. */
+  settleDisposition?: "blocker-accepted";
 }
 export type ReopenSliceExecutorParams = ReopenSliceParams;
 export type SkipSliceExecutorParams = SkipSliceParams;
@@ -1212,7 +1219,14 @@ export async function executeTaskRecoveryResume(
   try {
     const result = resumeTaskRecovery({ invocation, ...params });
     return {
-      content: [{ type: "text", text: `Authorized one repaired Task continuation for ${result.attemptId}.` }],
+      content: [{
+        type: "text",
+        text:
+          `Authorized one repaired Task continuation for ${result.attemptId}. ` +
+          `Queued durable continuation ${result.workCheckpointId} for recovery action ${result.recoveryActionId} — ` +
+          "the next execute-task dispatch of this Task atomically claims the successor Attempt (one-shot); " +
+          "re-enter `/gsd auto` to consume it.",
+      }],
       details: { operation: "task_recovery_resume", ...result },
     };
   } catch (err) {
@@ -1249,7 +1263,83 @@ export async function executeTaskSettle(
   };
   const unit = `${task.milestoneId}/${task.sliceId}/${task.taskId}`;
   const settleOptions = { reconcileLifecycle: params.reconcileLifecycle === true };
+  const blockerAccepted = params.settleDisposition === "blocker-accepted";
+  if (blockerAccepted && settleOptions.reconcileLifecycle) {
+    return {
+      content: [{
+        type: "text",
+        text: "Error settling task attempt: settleDisposition 'blocker-accepted' and reconcileLifecycle are mutually exclusive — blocker-accepted closes the Task terminal without adopting ready/completed.",
+      }],
+      details: { operation: "task_settle", error: "conflicting-disposition" },
+      isError: true,
+    };
+  }
   try {
+    if (blockerAccepted) {
+      if (!params.apply) {
+        const plan = planBlockerAcceptedDisposition(task, params.reason);
+        if (plan.alreadyAccepted) {
+          return {
+            content: [{ type: "text", text: `gsd_task_settle (dry run): ${unit} is already closed as blocker-accepted — nothing to do.` }],
+            details: { operation: "task_settle", dryRun: true, settleDisposition: "blocker-accepted", rows: [], alreadyAccepted: true },
+          };
+        }
+        const row = plan.rows[0];
+        const lines = [
+          `  lifecycle ${row.lifecycleFrom} → blocker-accepted (terminal; legacy tasks.status ${row.currentStatus} → blocker-accepted)`,
+          `  attempt ${row.attemptId} Result ${row.resultId} preserved as history — route Kernel head consumed with a closeout decision`,
+          `  provenance: ${row.blockerSummary || "(failed Result carries no summary)"}` +
+            `${row.supersededRecoveryActionId ? `; supersedes Recovery Action ${row.supersededRecoveryActionId}` : ""}`,
+          `  next: gsd_replan_slice with blockerTaskId ${task.taskId} — replan the remaining work without re-executing this Task`,
+        ];
+        return {
+          content: [{
+            type: "text",
+            text: `gsd_task_settle (dry run) — blocker-accepted disposition, no changes made:\n${lines.join("\n")}\nRe-run with apply: true to accept the blocker.`,
+          }],
+          details: {
+            operation: "task_settle",
+            dryRun: true,
+            settleDisposition: "blocker-accepted",
+            rows: plan.rows,
+          },
+        };
+      }
+      const result = applyBlockerAcceptedDisposition({
+        invocation,
+        task,
+        reason: params.reason,
+      });
+      if (result.alreadyAccepted) {
+        return {
+          content: [{ type: "text", text: `gsd_task_settle: ${unit} is already closed as blocker-accepted — nothing to do.` }],
+          details: {
+            operation: "task_settle",
+            dryRun: false,
+            settleDisposition: "blocker-accepted",
+            accepted: false,
+            alreadyAccepted: true,
+          },
+        };
+      }
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Accepted blocker for ${unit}: Task closed as blocker-accepted; Attempt ${result.attemptId} and its failed Result remain history and the route head is consumed (no re-route). ` +
+            `Replan with gsd_replan_slice (blockerTaskId ${task.taskId}) — the Task will not execute again.`,
+        }],
+        details: {
+          operation: "task_settle",
+          dryRun: false,
+          settleDisposition: "blocker-accepted",
+          accepted: true,
+          attemptId: result.attemptId,
+          resultId: result.resultId,
+          routeConsumed: result.routeConsumed,
+        },
+      };
+    }
     if (!params.apply) {
       const plan = planTaskSettle(task, params.reason, settleOptions);
       if (plan.rows.length === 0 && plan.lifecycleRows.length === 0) {

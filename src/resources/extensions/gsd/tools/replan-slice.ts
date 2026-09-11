@@ -66,6 +66,45 @@ export interface ReplanSliceResult {
   planPath: string;
 }
 
+/**
+ * Provenance of a `blocker-accepted` closeout for the blocker task (#2202).
+ * When the requested blockerTaskId was closed by accepting a discovered
+ * blocker, the durable replan event carries the accepted blocker's provenance
+ * so the revised plan is attributed to the accepted blocker explicitly instead
+ * of an arbitrary closed task in the slice.
+ */
+function readBlockerAcceptedProvenance(
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): Record<string, string> | null {
+  const blockerTask = getTask(milestoneId, sliceId, taskId);
+  if (!blockerTask || blockerTask.status !== "blocker-accepted") return null;
+  const event = getLatestWorkflowDomainEvent(
+    "task.blocker.accepted",
+    "task",
+    `${milestoneId}/${sliceId}/${taskId}`,
+  );
+  if (!event) return null;
+  const payload = event.payload;
+  const accepted: Record<string, string> = {
+    disposition: "blocker-accepted",
+    acceptedAt: typeof payload["acceptedAt"] === "string" ? payload["acceptedAt"] : event.createdAt,
+  };
+  for (const key of [
+    "attemptId",
+    "resultId",
+    "blockerSummary",
+    "supersededRecoveryActionId",
+    "blockerId",
+    "rationale",
+  ] as const) {
+    const value = payload[key];
+    if (typeof value === "string" && value.length > 0) accepted[key] = value as string;
+  }
+  return accepted;
+}
+
 function validateParams(params: ReplanSliceParams): ReplanSliceParams {
   if (!isNonEmptyString(params?.milestoneId)) throw new Error("milestoneId is required");
   if (!isNonEmptyString(params?.sliceId)) throw new Error("sliceId is required");
@@ -124,6 +163,11 @@ export async function handleReplanSlice(
   }
 
   let operationStatus: "committed" | "replayed";
+  const blockerAcceptedProvenance = readBlockerAcceptedProvenance(
+    params.milestoneId,
+    params.sliceId,
+    params.blockerTaskId,
+  );
   try {
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.slice.replan",
@@ -142,6 +186,7 @@ export async function handleReplanSlice(
           whatChanged: params.whatChanged,
           removedTaskIds: params.removedTaskIds,
           updatedTaskIds: params.updatedTasks.map((task) => task.taskId),
+          ...(blockerAcceptedProvenance ? { blockerAccepted: blockerAcceptedProvenance } : {}),
         },
         destinations: ["projection"],
       },
@@ -198,6 +243,8 @@ export async function handleReplanSlice(
             `blockerTaskId ${params.blockerTaskId} is canonically cancelled — explicitly reopen it before using it as a completed blocker`,
           );
         }
+        // #2202: a `blocker-accepted` Task counts as the closed blocker for the
+        // replan gate; `skipped`/`cancelled` remain rejected.
         if (!isClosedStatus(blockerTask.status) || blockerTask.status === "skipped") {
           throw new PlanningGuardError(`blockerTaskId ${params.blockerTaskId} is not complete (status: ${blockerTask.status}) — the blocker task must be finished before a replan is triggered`);
         }

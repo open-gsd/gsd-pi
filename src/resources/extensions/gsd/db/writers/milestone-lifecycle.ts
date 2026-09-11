@@ -172,6 +172,28 @@ function requireTerminalState(row: HierarchyRow, identity: string): "completed" 
   );
 }
 
+/**
+ * Task-level terminal classification for Milestone completion (#2202): a
+ * `blocker-accepted` Task is terminal in both vocabularies without a fabricated
+ * completion — it counts as closed work, and the Milestone closeout verdict
+ * gate (criteria + validation attempt) is unaffected.
+ */
+function taskTerminalState(
+  row: HierarchyRow,
+  identity: string,
+): "completed" | "cancelled" | "blocker-accepted" {
+  requireMatchingShadow(row, identity);
+  const legacyStatus = normalizeLegacyLifecycleStatus(row.legacyStatus);
+  if (legacyStatus === "completed" && row.lifecycleStatus === "completed") return "completed";
+  if (legacyStatus === "cancelled" && row.lifecycleStatus === "cancelled") return "cancelled";
+  if (legacyStatus === "blocker-accepted" && row.lifecycleStatus === "blocker-accepted") {
+    return "blocker-accepted";
+  }
+  throw new MilestoneLifecycleValidationError(
+    `${identity} is not terminal with canonical and legacy parity`,
+  );
+}
+
 function requireNoActiveAttempts(milestoneId: string): void {
   const active = getDb().prepare(`
     SELECT lifecycle.item_kind, lifecycle.slice_id, lifecycle.task_id,
@@ -582,8 +604,12 @@ export function completeMilestoneHierarchy(
 
   for (const task of tasks) {
     const taskIdentity = `${task.sliceId}/${task.taskId}`;
-    const state = requireTerminalState(task, `Task ${taskIdentity}`);
-    if (state === "completed") {
+    const state = taskTerminalState(task, `Task ${taskIdentity}`);
+    if (state === "blocker-accepted") {
+      // Closed by accepting a discovered blocker — no completion proof exists
+      // and none is fabricated.
+      completedTaskIds.push(taskIdentity);
+    } else if (state === "completed") {
       completedTaskIds.push(taskIdentity);
     } else {
       cancelledTaskIds.push(taskIdentity);

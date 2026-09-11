@@ -51,6 +51,7 @@ import { buildExecuteTaskPrompt, buildTaskRecoveryReplanPrompt } from "../auto-p
 import { buildCustomEngineIterationData } from "../auto/workflow-custom-engine-iteration.ts";
 import { runWithTaskExecutionAttempt } from "../auto/task-execution-cutover.ts";
 import { handleReplanTask } from "../tools/replan-task.ts";
+import { applyBlockerAcceptedDisposition } from "../task-settle.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import { verifyExpectedArtifact, readTerminalTaskRecoveryAbort } from "../artifact-verification.ts";
 import { formatTextStatus } from "../commands/handlers/core.ts";
@@ -86,7 +87,7 @@ function invocation(key: string, actorType = "agent"): ExecutionInvocation {
   };
 }
 
-function seedFailedAttempt(): {
+function seedFailedAttempt(failureClass = "tool-unavailable"): {
   basePath: string;
   dbPath: string;
   lifecycleId: string;
@@ -177,8 +178,10 @@ function seedFailedAttempt(): {
     invocation: invocation("fixture/settle"),
     attemptId: claim.attemptId,
     outcome: "failed",
-    failureClass: "tool-unavailable",
-    summary: "tool surface unavailable",
+    failureClass,
+    summary: failureClass === "blocker-discovered"
+      ? "API contract invalidates the slice plan"
+      : "tool surface unavailable",
     output: {},
   });
   const current = row(`
@@ -2858,4 +2861,148 @@ test("reopenTask rejects closed parents without changing terminal Task history",
   `, { ":lifecycle_id": completed.lifecycleId }).lifecycle_status, "completed");
   assert.equal(count("workflow_execution_attempts"), 1);
   assert.equal(count("workflow_attempt_results"), 1);
+});
+
+// ── blocker-accepted closeout + atomic-resume invariant (#2202) ─────────────
+
+test("blocker-accepted closeout consumes the route so the old abort can never resume or re-route", () => {
+  const failed = seedFailedAttempt("blocker-discovered");
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+
+  // The wedge variant where auto already minted an agent abort for the failure.
+  const aborted = recordFailureAndSelectRecovery({
+    invocation: invocation("recovery/blocker-accepted/abort"),
+    attemptId: failed.attemptId,
+    resultId: failed.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "The executor stopped after the discovered blocker.",
+    evidence: { source: "executor" },
+    rationale: "Require an explicit operator disposition.",
+  });
+  assert.equal(aborted.action, "abort");
+  assert.deepEqual(readTaskRecoveryResumeEligibility(aborted.recoveryActionId), {
+    recoveryActionId: aborted.recoveryActionId,
+    eligible: true,
+    attemptId: failed.attemptId,
+    resultId: failed.resultId,
+  });
+
+  db().prepare(
+    `UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'`,
+  ).run();
+  const applied = applyBlockerAcceptedDisposition({
+    invocation: invocation("recovery/blocker-accepted/apply"),
+    task,
+    reason: "operator accepts the plan-invalidating blocker",
+  });
+  assert.equal(applied.accepted, true);
+
+  const provenance = JSON.parse(String(row(`
+    SELECT payload_json AS payload_json FROM workflow_domain_events
+    WHERE event_type = 'task.blocker.accepted'
+  `).payload_json)) as Record<string, unknown>;
+  assert.equal(provenance["supersededRecoveryActionId"], aborted.recoveryActionId);
+
+  // Resume of the old abort stays rejected — the lifecycle guard names the
+  // accepted state and the route head is consumed beneath it.
+  const eligibility = readTaskRecoveryResumeEligibility(aborted.recoveryActionId);
+  assert.equal(eligibility.eligible, false);
+  assert.match(eligibility.detail ?? "", /blocker-accepted/);
+  assert.throws(() => resumeTaskRecovery({
+    invocation: invocation("recovery/blocker-accepted/resume"),
+    recoveryActionId: aborted.recoveryActionId,
+    repairSummary: "attempted resume of an accepted blocker",
+    evidence: { command: "pnpm test", exitCode: 0 },
+  }), /lifecycle-in-progress guard.*blocker-accepted/s);
+
+  // The historical failure cannot be re-routed: the consumed route head is gone.
+  assert.throws(
+    () => recordFailureAndSelectRecovery({
+      invocation: invocation("recovery/blocker-accepted/reroute"),
+      attemptId: failed.attemptId,
+      resultId: failed.resultId,
+      owner: "agent",
+      classification: { failureKind: "fatal" },
+      summary: "re-route after closeout must fail",
+      evidence: { source: "executor" },
+      rationale: "no legal route remains",
+    }),
+    /route head/,
+  );
+
+  // No successor can be silently authorized either: the terminal lifecycle
+  // refuses every re-claim at the transition guard (blocker-accepted only
+  // reopens through the explicit reopen operations).
+  assert.throws(
+    () => claimTaskAttempt({
+      invocation: invocation("recovery/blocker-accepted/claim"),
+      task,
+      workerId: "worker-1",
+      milestoneLeaseToken: 7,
+      coordinationDispatchId: insertClaimedDispatch(2),
+      retryOfAttemptId: failed.attemptId,
+    }),
+    /invalid workflow lifecycle transition/,
+  );
+
+  // The old abort is not advertised as a pending exit anymore.
+  assert.equal(readTerminalTaskRecoveryAbort("M001", "S01", "T01"), null);
+  assert.equal(count("workflow_attempt_results"), 1, "the failed Result stays immutable history");
+});
+
+test("a successful resume always carries the durable queued-dispatch identity that the successor claim consumes", () => {
+  const failed = seedFailedAttempt();
+  const aborted = recordFailureAndSelectRecovery({
+    invocation: invocation("recovery/resume-identity/abort"),
+    attemptId: failed.attemptId,
+    resultId: failed.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "The executor stopped before the Task could complete.",
+    evidence: { source: "executor" },
+    rationale: "Require an explicit repaired retry.",
+  });
+  assert.equal(aborted.action, "abort");
+
+  const resumed = resumeTaskRecovery({
+    invocation: invocation("recovery/resume-identity/resume"),
+    recoveryActionId: aborted.recoveryActionId,
+    repairSummary: "Repaired the executor and verified that it can claim the Task again.",
+    evidence: { command: "pnpm test", exitCode: 0 },
+  });
+  assert.equal(resumed.status, "committed");
+  // The queued-dispatch identity: a durable Work Checkpoint bound to the resume
+  // authorization, committed in the same Domain Operation.
+  assert.ok(resumed.workCheckpointId, "resume must return an actionable queued-dispatch identity");
+  const checkpoint = row(`
+    SELECT suggested_next_action FROM workflow_work_checkpoints
+    WHERE checkpoint_id = '${resumed.workCheckpointId}'
+  `);
+  assert.match(String(checkpoint.suggested_next_action), /Claim one new Task Attempt/);
+  // The durable queue auto consumes: the recovery context reads as an
+  // authorized continuation until the one-shot successor claim consumes it.
+  const pending = readPendingTaskRecoveryContext({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+  });
+  assert.equal(pending?.action, "continue");
+  assert.equal(pending?.resumeAuthorized, true);
+
+  const claimed = claimTaskAttempt({
+    invocation: invocation("recovery/resume-identity/claim"),
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: insertClaimedDispatch(2),
+    retryOfAttemptId: failed.attemptId,
+  });
+  assert.equal(claimed.attemptNumber, 2);
+  // One-shot: after the successor claim, the authorization is consumed.
+  assert.equal(readPendingTaskRecoveryContext({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+  }), null);
 });

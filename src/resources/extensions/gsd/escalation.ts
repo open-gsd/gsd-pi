@@ -250,6 +250,11 @@ export function resolveEscalation(
   clearTaskEscalationFlags(milestoneId, sliceId, taskId);
 
   if (choice === "reject-blocker") {
+    // Pre-dispatch plan-gate path, NOT a closeout (#2202): this only flags the
+    // Task for replanning on the next auto pass and presumes a live escalation
+    // artifact. Closing a Task whose failed Attempt is already parked at the
+    // route stage is the separate operator disposition
+    // gsd_task_settle settleDisposition "blocker-accepted".
     setTaskBlockerSource(milestoneId, sliceId, taskId, "reject-escalation");
     emitUokAuditEvent(basePath, buildAuditEnvelope({
       traceId: `escalation:${milestoneId}:${sliceId}:${taskId}`,

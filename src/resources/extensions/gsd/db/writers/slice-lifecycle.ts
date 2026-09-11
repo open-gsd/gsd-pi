@@ -662,6 +662,12 @@ export function completeSliceHierarchy(
       }
       completedTaskIds.push(taskId);
       proofs.push(proof);
+    } else if (legacyStatus === "blocker-accepted" && state.lifecycleStatus === "blocker-accepted") {
+      // #2202: the operator accepted a discovered blocker. Terminal in both
+      // vocabularies, but deliberately NOT verdict-gated completion — no
+      // completion proof is minted and slice closeout still requires every
+      // verdict-backed task to carry its own passing proof.
+      completedTaskIds.push(taskId);
     } else if (legacyStatus === "cancelled" && state.lifecycleStatus === "cancelled") {
       if (!hasCurrentCancellationAuthorization(lifecycleId, completedAt)) {
         throw new SliceLifecycleValidationError(

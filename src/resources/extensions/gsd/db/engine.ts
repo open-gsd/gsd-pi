@@ -92,6 +92,7 @@ import {
   applyMigrationV47SameLeaseAttemptSettlement,
   applyMigrationV48TaskToolRequirements,
   applyMigrationV49MilestoneVerdictScope,
+  applyMigrationV50BlockerAcceptedCloseout,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -99,6 +100,7 @@ import {
   hasCanonicalOutboxInvariantsV31,
 } from "../db-canonical-foundation-schema.js";
 import { createConversationFoundationSchemaV33 } from "../db-conversation-foundation-schema.js";
+import { rebuildWorkflowItemLifecyclesForBlockerAccepted } from "../db-blocker-accepted-closeout-schema.js";
 import { createLifecycleFoundationSchemaV32 } from "../db-lifecycle-foundation-schema.js";
 import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "../db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "../db-recovery-evidence-foundation-schema.js";
@@ -161,7 +163,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 49;
+export const SCHEMA_VERSION = 50;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -411,6 +413,7 @@ function initSchema(
         applyMigrationV47SameLeaseAttemptSettlement(db);
         applyMigrationV48TaskToolRequirements(db);
         applyMigrationV49MilestoneVerdictScope(db);
+        applyMigrationV50BlockerAcceptedCloseout(db);
 
         // Fresh install — all tables are created above with the full current schema,
         // so it is safe to create all migration-specific indexes here.  For existing
@@ -530,6 +533,15 @@ function migrateSchema(
       copyFileSync,
       logWarning,
     });
+  }
+
+  // V50 (#2202) is hoisted above the migration transaction: relaxing the
+  // lifecycle CHECK requires SQLite's foreign-keys-off table rebuild, and
+  // PRAGMA foreign_keys cannot change inside a transaction. Fresh installs
+  // skip the rebuild (their V32 DDL already carries the extended CHECK). The
+  // trigger/index layer runs in the normal V50 step below.
+  if (currentVersion < 50 && !startupTransactionOpen) {
+    rebuildWorkflowItemLifecyclesForBlockerAccepted(db);
   }
 
   db.exec(startupTransactionOpen ? "SAVEPOINT schema_migration" : "BEGIN");
@@ -804,6 +816,17 @@ function migrateSchema(
       applyMigrationV49MilestoneVerdictScope(db);
       stampStateCutoverPragmas(db, 49);
       recordSchemaVersion(db, 49);
+    }
+
+    if (currentVersion < 50) {
+      // V50 — blocker-accepted operator closeout (#2202): the terminal Task
+      // status enters the lifecycle CHECK (the table rebuild ran hoisted
+      // above when needed) and the transition trigger gains the disposition
+      // edges. When startupTransactionOpen is true the rebuild could not run;
+      // the schema stays functional and blocker-accepted writes fail closed.
+      applyMigrationV50BlockerAcceptedCloseout(db);
+      stampStateCutoverPragmas(db, 50);
+      recordSchemaVersion(db, 50);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

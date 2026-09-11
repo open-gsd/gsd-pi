@@ -48,7 +48,7 @@ export const SUPPORTED_LEGACY_SURFACES = [
     pathPatterns: [".gsd/gsd.db", ".gsd/gsd.db-wal", ".gsd/gsd.db-shm", "$GSD_STATE_DIR/projects/*/gsd.db"],
     sourceKinds: ["sqlite-database", "sqlite-wal", "sqlite-shm"],
     aliases: ["unversioned populated database", "external state database"],
-    requiredScenarios: ["schema-v49", "historical-schema", "unversioned-populated", "future-schema", "corrupt", "wal-present"],
+    requiredScenarios: ["schema-v50", "historical-schema", "unversioned-populated", "future-schema", "corrupt", "wal-present"],
     expectedDispositions: ["mapped", "preserved", "unparsed"],
     interpreter: { id: "gsd-sqlite-target", version: 1, implementations: ["sqlite"] },
   },

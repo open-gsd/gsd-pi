@@ -19,8 +19,19 @@ import {
   readTaskAttempt,
   settleTaskAttempt,
 } from "../task-execution-domain-operation.ts";
-import { applyTaskSettle, planTaskSettle } from "../task-settle.ts";
+import {
+  applyBlockerAcceptedDisposition,
+  applyTaskSettle,
+  planBlockerAcceptedDisposition,
+  planTaskSettle,
+} from "../task-settle.ts";
 import { resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.ts";
+import { isClosedStatus } from "../status-guards.ts";
+import {
+  normalizeLegacyLifecycleStatus,
+  compareLifecycleShadow,
+} from "../db/lifecycle-shadow-comparison.ts";
+import { readTaskRecoveryRoute } from "../task-recovery-domain-operation.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 
 const tempDirs = new Set<string>();
@@ -507,3 +518,208 @@ test("reconcileLifecycle reports when completed repair still lacks passing proof
     /gsd_slice_complete will still refuse/,
   );
 });
+
+// ── blocker-accepted closeout disposition (#2202) ───────────────────────────
+
+function seedBlockerDiscoveredResidue(): { attemptId: string; resultId: string } {
+  const { attemptId } = seedRunningAttempt();
+  const settlement = settleTaskAttempt({
+    invocation: invocation("fixture/blocker-settle"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "blocker-discovered",
+    summary: "API contract invalidates the slice plan; no SUMMARY produced",
+    output: { blocker: "plan-invalidating" },
+  });
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  return { attemptId, resultId: settlement.resultId };
+}
+
+test("blocker-accepted dry-run reports the exact transitions and mutates nothing", () => {
+  const { attemptId, resultId } = seedBlockerDiscoveredResidue();
+  const before = row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count;
+
+  const plan = planBlockerAcceptedDisposition(TASK, "accept the discovered plan blocker");
+
+  assert.equal(plan.rows.length, 1);
+  assert.equal(plan.alreadyAccepted, false);
+  assert.equal(plan.rows[0].attemptId, attemptId);
+  assert.equal(plan.rows[0].resultId, resultId);
+  assert.equal(plan.rows[0].currentStatus, "in_progress");
+  assert.equal(plan.rows[0].targetStatus, "blocker-accepted");
+  assert.equal(plan.rows[0].lifecycleFrom, "in_progress");
+  assert.equal(plan.rows[0].routeConsumed, true);
+  assert.match(plan.rows[0].blockerSummary, /plan blocker|API contract/);
+  assert.equal(
+    row("SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE task_id = 'T01'").status,
+    "in_progress",
+    "dry-run must not move the canonical lifecycle",
+  );
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "dry-run must not close the legacy Task",
+  );
+  assert.equal(
+    readTaskRecoveryRoute(attemptId),
+    null,
+    "dry-run must not consume the route head",
+  );
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count,
+    before,
+    "dry-run must not write a Result",
+  );
+});
+
+test("blocker-accepted apply closes both vocabularies, records provenance, consumes the route head, and is idempotent", () => {
+  const { attemptId, resultId } = seedBlockerDiscoveredResidue();
+
+  const applied = applyBlockerAcceptedDisposition({
+    invocation: invocation("blocker-accepted/apply/1"),
+    task: TASK,
+    reason: "accept the discovered plan blocker",
+  });
+  assert.equal(applied.accepted, true);
+  assert.equal(applied.alreadyAccepted, false);
+  assert.equal(applied.attemptId, attemptId);
+  assert.equal(applied.resultId, resultId);
+  assert.equal(applied.routeConsumed, true);
+
+  assert.equal(
+    row("SELECT lifecycle_status AS status FROM workflow_item_lifecycles WHERE task_id = 'T01'").status,
+    "blocker-accepted",
+    "canonical lifecycle must move to terminal blocker-accepted",
+  );
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "blocker-accepted",
+    "the replan gate reads legacy tasks.status",
+  );
+  assert.equal(isClosedStatus("blocker-accepted"), true);
+  assert.equal(normalizeLegacyLifecycleStatus("blocker-accepted"), "blocker-accepted");
+  assert.equal(
+    compareLifecycleShadow("blocker-accepted", "blocker-accepted").kind,
+    "match",
+    "both vocabularies must agree so closeout reads no shadow drift",
+  );
+  assert.equal(readLatestTaskAttemptSnapshotStage(), "closeout", "the route head must be consumed");
+
+  const provenance = row(`
+    SELECT payload_json FROM workflow_domain_events WHERE event_type = 'task.blocker.accepted'
+  `);
+  assert.ok(provenance.payload_json, "the disposition must record its provenance event");
+  const payload = JSON.parse(String(provenance.payload_json)) as Record<string, unknown>;
+  assert.equal(payload["disposition"], "blocker-accepted");
+  assert.equal(payload["attemptId"], attemptId);
+  assert.equal(payload["resultId"], resultId);
+  assert.equal(payload["rationale"], "accept the discovered plan blocker");
+  assert.equal(
+    payload["blockerSummary"],
+    "API contract invalidates the slice plan; no SUMMARY produced",
+  );
+
+  // The failed Attempt/Result remain immutable history.
+  const settled = readTaskAttempt(attemptId);
+  assert.equal(settled?.state, "settled");
+  assert.equal(settled?.outcome, "failed");
+  assert.equal(settled?.resultId, resultId);
+  assert.equal(settled?.resultFailureClass, "blocker-discovered");
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count,
+    1,
+    "the disposition must not fabricate a second Result",
+  );
+
+  const again = applyBlockerAcceptedDisposition({
+    invocation: invocation("blocker-accepted/apply/2"),
+    task: TASK,
+    reason: "accept the discovered plan blocker",
+  });
+  assert.equal(again.accepted, false);
+  assert.equal(again.alreadyAccepted, true);
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'task.blocker.accepted'").count,
+    1,
+    "a repeated applied run is a no-op",
+  );
+});
+
+test("blocker-accepted refuses a running Attempt with the exact prerequisite", () => {
+  seedRunningAttempt();
+  assert.throws(
+    () => planBlockerAcceptedDisposition(TASK, "accept"),
+    /blocker-accepted requires no running Attempt.*settle the running Attempt first \(gsd_task_settle without settleDisposition\)/s,
+  );
+});
+
+test("blocker-accepted refuses when the latest Attempt is not a discovered blocker at route", () => {
+  const { attemptId } = seedRunningAttempt();
+  settleTaskAttempt({
+    invocation: invocation("fixture/plain-failure"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "executor-error",
+    summary: "plain executor failure",
+    output: {},
+  });
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+
+  assert.throws(
+    () => planBlockerAcceptedDisposition(TASK, "accept"),
+    /failed\/blocker-discovered at the route stage.*Repair-and-retry is the separate successor-Attempt path \(gsd_task_recovery_resume\)/s,
+  );
+});
+
+test("blocker-accepted preserves a completed sibling Task and refuses after other closure", () => {
+  seedBlockerDiscoveredResidue();
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+    VALUES ('M001', 'S01', 'T02', 'Completed sibling', 'complete');
+  `);
+
+  const applied = applyBlockerAcceptedDisposition({
+    invocation: invocation("blocker-accepted/apply/sibling"),
+    task: TASK,
+    reason: "accept",
+  });
+  assert.equal(applied.accepted, true);
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T02'").status,
+    "complete",
+    "completed sibling tasks remain intact",
+  );
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "blocker-accepted",
+  );
+
+  // A task closed some other way is not a disposition candidate.
+  const other = { milestoneId: "M001", sliceId: "S01", taskId: "T02" };
+  assert.throws(
+    () => applyBlockerAcceptedDisposition({
+      invocation: invocation("blocker-accepted/apply/wrong-lifecycle"),
+      task: other,
+      reason: "accept",
+    }),
+    /blocker-accepted requires the Task lifecycle in_progress; found none/,
+  );
+});
+
+function readLatestTaskAttemptSnapshotStage(): string | null {
+  const head = row(`
+    SELECT head.next_stage AS stage
+    FROM workflow_kernel_checkpoints head
+    JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = head.lifecycle_id
+    WHERE lifecycle.task_id = 'T01'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id = head.kernel_checkpoint_id
+      )
+  `);
+  return head.stage ? String(head.stage) : null;
+}

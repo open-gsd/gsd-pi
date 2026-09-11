@@ -14,8 +14,11 @@ import {
   getSliceTasks,
   getTask,
   getReplanHistory,
+  getLatestWorkflowDomainEvent,
   _getAdapter,
 } from '../gsd-db.ts';
+import { executeDomainOperation } from '../db/domain-operation.ts';
+import { readDomainOperationFence } from '../db/writers/lifecycle-commands.ts';
 import { handleReplanSlice as handleReplanSliceWithInvocation } from '../tools/replan-slice.ts';
 import { internalPlanningInvocation } from '../planning-invocation.ts';
 import { parseProjectionPlan as parsePlan } from '../schemas/parsers.ts';
@@ -509,6 +512,100 @@ test('handleReplanSlice rejects ambiguous task mutations without residue', async
       assert.match(result.error, contract.message);
       assert.deepEqual(snapshot(), before, 'rejected structural input must leave no database residue');
     }
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ─── blocker-accepted closeout feeds the replan gate (#2202) ───────────────
+
+function seedBlockerAcceptedEvent(): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: 'test.task.blocker.accepted',
+    idempotencyKey: 'fixture/blocker-accepted',
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: 'user',
+    sourceTransport: 'test',
+    payload: { taskId: 'T01' },
+  }, () => {
+    return {
+      events: [{
+        eventType: 'task.blocker.accepted',
+        entityType: 'task',
+        entityId: 'M001/S01/T01',
+        payload: {
+          disposition: 'blocker-accepted',
+          from: 'in_progress',
+          to: 'blocker-accepted',
+          attemptId: 'attempt-blocker-1',
+          resultId: 'result-blocker-1',
+          blockerSummary: 'API contract invalidates the plan-invalidating slice scope',
+          rationale: 'operator accepts the blocker',
+          acceptedAt: '2026-09-10T00:00:00.000Z',
+        },
+        destinations: ['projection'],
+      }],
+      projections: [{
+        projectionKey: 'task.blocker.accepted/m001/s01/t01',
+        projectionKind: 'task-recovery',
+        rendererVersion: '1',
+      }],
+    };
+  });
+}
+
+function getLatestWorkflowDomainEventForSlice() {
+  return getLatestWorkflowDomainEvent('workflow.slice.replanned', 'slice', 'M001/S01');
+}
+
+test('handleReplanSlice accepts a blocker-accepted blocker task and attributes its provenance', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedSliceWithTasks({ t01Status: 'blocker-accepted', t03Status: 'pending' });
+    seedBlockerAcceptedEvent();
+
+    const result = await handleReplanSlice(validReplanParams(), base);
+    assert.ok(!('error' in result), `replan must accept a blocker-accepted blocker: ${'error' in result ? result.error : ''}`);
+
+    const durable = getLatestWorkflowDomainEventForSlice();
+    const accepted = durable?.payload['blockerAccepted'] as Record<string, string> | undefined;
+    assert.ok(accepted, 'the durable replan event must attribute the accepted blocker provenance');
+    assert.equal(accepted['disposition'], 'blocker-accepted');
+    assert.equal(accepted['attemptId'], 'attempt-blocker-1');
+    assert.equal(accepted['resultId'], 'result-blocker-1');
+    assert.match(accepted['blockerSummary'], /plan-invalidating/);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test('handleReplanSlice still refuses to modify or remove a blocker-accepted task', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedSliceWithTasks({ t01Status: 'blocker-accepted' });
+    seedBlockerAcceptedEvent();
+
+    const modified = validReplanParams();
+    modified.updatedTasks[0] = {
+      ...modified.updatedTasks[0]!,
+      taskId: 'T01',
+      title: 'Rewrite the closed blocker',
+    };
+    const modifyResult = await handleReplanSlice(modified, base);
+    assert.ok('error' in modifyResult);
+    assert.match(modifyResult.error, /cannot modify completed task T01/);
+
+    const removed = validReplanParams();
+    removed.removedTaskIds = ['T01'];
+    const removeResult = await handleReplanSlice(removed, base);
+    assert.ok('error' in removeResult);
+    assert.match(removeResult.error, /cannot remove completed task T01/);
   } finally {
     cleanup(base);
   }

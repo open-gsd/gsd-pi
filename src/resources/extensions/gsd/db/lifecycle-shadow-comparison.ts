@@ -14,7 +14,8 @@ export type CanonicalLifecycleStatus =
   | "in_progress"
   | "paused"
   | "completed"
-  | "cancelled";
+  | "cancelled"
+  | "blocker-accepted";
 
 export interface LifecycleShadowComparison {
   kind: LifecycleShadowComparisonKind;
@@ -38,6 +39,9 @@ const LEGACY_STATUS_MAP: Readonly<Record<string, CanonicalLifecycleStatus>> = {
   closed: "completed",
   skipped: "cancelled",
   deferred: "cancelled",
+  // #2202: operator closeout disposition — the Task closed by accepting a
+  // discovered blocker; terminal in both vocabularies.
+  "blocker-accepted": "blocker-accepted",
 };
 
 const CANONICAL_STATUSES: ReadonlySet<string> = new Set([
@@ -47,6 +51,7 @@ const CANONICAL_STATUSES: ReadonlySet<string> = new Set([
   "paused",
   "completed",
   "cancelled",
+  "blocker-accepted",
 ]);
 
 export function normalizeLegacyLifecycleStatus(status: string | null): CanonicalLifecycleStatus | null {

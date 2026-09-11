@@ -172,7 +172,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd recover           Preview an evidence-bound DB import after loss/corruption",
     "  /gsd recover <id>      Resume one repaired Task recovery abort (prompts for repair evidence)",
     "  /gsd db restore-backup List or restore a verified pre-migration database backup (destructive)",
-    "  /gsd task settle  Settle an orphaned running task Attempt (dry-run first)  <M001/S01/T01> --reason \"...\" [--apply] [--reconcile-lifecycle]",
+    "  /gsd task settle  Settle an orphaned running task Attempt (dry-run first)  <M001/S01/T01> --reason \"...\" [--apply] [--reconcile-lifecycle] [--blocker-accepted]",
     "  /gsd worktree       Manage worktrees from the TUI  [list|merge|clean|remove]",
     "  /gsd migrate        Migrate .planning/ (v1) to DB-backed .gsd/ with backup + audit",
     "  /gsd remote         Control remote auto-mode  [slack|discord|status|disconnect]",
