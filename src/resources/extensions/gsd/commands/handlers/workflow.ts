@@ -91,6 +91,21 @@ function parseDiscussArgs(args: string): { target: string | null; error: string 
 export const _parseDiscussArgsForTest = parseDiscussArgs;
 
 /**
+ * Parse optional `/gsd park` args.
+ *
+ * Documented form is `/gsd park [id] [reason]`. `--flag` tokens are extracted
+ * so they cannot be swallowed into the milestone id; the first positional
+ * token is the id and the remaining positionals form the reason (#2257).
+ */
+function parseParkArgs(args: string): { id: string | null; reason: string } {
+  const positionals = args.split(/\s+/).filter((t) => t && !t.startsWith("--"));
+  const id = positionals[0] ?? null;
+  const reason = positionals.slice(1).join(" ").replace(/^["']|["']$/g, "");
+  return { id, reason };
+}
+export const _parseParkArgsForTest = parseParkArgs;
+
+/**
  * Refuses interactive commands that mutate durable .gsd/ planning state while
  * auto-mode holds the worktree. Returns true if the command was blocked and
  * the caller should return immediately; false if it is safe to proceed.
@@ -634,7 +649,8 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     if (requireNotAutoActive("/gsd park", ctx)) return true;
     const basePath = projectRoot();
     const arg = trimmed.replace(/^park\s*/, "").trim();
-    let targetId = arg;
+    const { id: parsedId, reason: parsedReason } = parseParkArgs(arg);
+    let targetId = parsedId ?? "";
     if (!targetId) {
       const state = await deriveState(basePath);
       if (!state.activeMilestone) {
@@ -647,8 +663,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
       ctx.ui.notify(`${targetId} is already parked. Use /gsd unpark ${targetId} to reactivate.`, "info");
       return true;
     }
-    const reasonParts = arg.replace(targetId, "").trim().replace(/^["']|["']$/g, "");
-    const reason = reasonParts || "Parked via /gsd park";
+    const reason = parsedReason || "Parked via /gsd park";
     let success: boolean;
     try {
       success = parkMilestone(basePath, targetId, reason);
