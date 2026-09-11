@@ -34,9 +34,21 @@ function makeProject(t: TestContext, files: Record<string, string>): string {
   return dir;
 }
 
+// The disk_space check samples live free space separately in the sync and
+// async paths, so its message embeds a size ("71.3GB free") that can shift
+// between the two samples (CI run 34550581124: 71.2GB vs 71.3GB). Mask the
+// volatile size before comparing; check id, status and detail stay verbatim.
+function maskVolatileDiskSize(r: EnvironmentCheckResult): EnvironmentCheckResult {
+  if (r.name !== "disk_space") return r;
+  return { ...r, message: r.message.replace(/\d+(\.\d+)?(MB|GB) free/, "<size> free") };
+}
+
 // Stable, order-independent signature of a check-result set for comparison.
 function normalize(results: EnvironmentCheckResult[]): string[] {
-  return results.map((r) => `${r.name}|${r.status}|${r.message}|${r.detail ?? ""}`).sort();
+  return results
+    .map(maskVolatileDiskSize)
+    .map((r) => `${r.name}|${r.status}|${r.message}|${r.detail ?? ""}`)
+    .sort();
 }
 
 test("runEnvironmentChecksAsync returns the same results as runEnvironmentChecks", async (t) => {
