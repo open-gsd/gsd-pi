@@ -226,6 +226,29 @@ function isTransientProjectionRootLockError(error: unknown): boolean {
   return false;
 }
 
+function projectionErrorMessage(error: unknown): string | null {
+  return error instanceof Error ? error.message : null;
+}
+
+// Deterministic exchange/deletion protocol failures, classified by error
+// class rather than a single error-message substring: a native wording change
+// must not turn a recoverable retention into a permanent journal wedge.
+function isUnexpectedOccupantError(error: unknown): boolean {
+  const message = projectionErrorMessage(error);
+  return message !== null
+    && /unexpected occupant retained in guard|retained unexpected occupants/u.test(message);
+}
+
+function isJournaledExchangeIdentityChangedError(error: unknown): boolean {
+  const message = projectionErrorMessage(error);
+  return message !== null
+    && message.includes("projection identity changed during journaled exchange");
+}
+
+function isDeterministicExchangeIdentityError(error: unknown): boolean {
+  return isUnexpectedOccupantError(error) || isJournaledExchangeIdentityChangedError(error);
+}
+
 function openManagedProjectionRootWithRetry<T>(
   open: () => T,
   wait: (delayMs: number) => void = (delayMs) => {
@@ -268,6 +291,15 @@ export function _withManagedProjectionRootForTest<T>(
   operation: (handle: ProjectionRootIdentityLock) => T,
 ): T {
   return withManagedProjectionRoot("", operation, open);
+}
+
+export function _recoverManagedProjectionMutationsForTest(
+  open: (targetRoot: string) => ProjectionRootIdentityLock,
+  targetRoot: string,
+): void {
+  withManagedProjectionRoot(targetRoot, (handle) => {
+    recoverManagedProjectionMutations(targetRoot, handle);
+  }, open);
 }
 
 function parseManagedProjectionPaths(value: unknown): string[] {
@@ -1120,11 +1152,157 @@ function exchangeMutationPaths(
   persistMutation(handle, mutation);
 }
 
+const ABSENT_PROJECTION_IDENTITY = "-";
+
+function projectedIdentity(handle: ProjectionRootIdentityLock, path: string): string {
+  return handle.pathExists(path) ? handle.pathIdentity(path) : ABSENT_PROJECTION_IDENTITY;
+}
+
+function retainExchangeParticipants(
+  handle: ProjectionRootIdentityLock,
+  mutation: PersistedManagedProjectionMutation,
+): void {
+  const retain = (evidencePath: string | null, kind: "temporary" | "quarantine" | "canonical"): void => {
+    if (evidencePath === null || !handle.pathExists(evidencePath)) return;
+    const scope = handle.pathKind(evidencePath) === "directory" ? "tree" : "file";
+    recordUnboundProjectionEvidence(handle, {
+      evidencePath,
+      evidenceIdentity: handle.pathIdentity(evidencePath),
+      kind,
+      logicalPath: mutation.logicalPath,
+      scope,
+    });
+  };
+  retain(mutation.logicalPath, "canonical");
+  retain(mutation.temporaryPath, "temporary");
+  retain(mutation.replacementPath, "quarantine");
+  retain(mutation.quarantinePath, "quarantine");
+  retain(mutation.exchangeGuardPath, "quarantine");
+}
+
+// Degrades a contradictory journaled exchange to reviewable evidence and
+// retires the journal entry (the semantics the remove path already ships)
+// instead of re-throwing raw and wedging every later projection operation.
+function retireExchangeWithRetainedEvidence(
+  handle: ProjectionRootIdentityLock,
+  mutation: PersistedManagedProjectionMutation,
+): never {
+  retainExchangeParticipants(handle, mutation);
+  handle.removeFile(`${JOURNAL_LOGICAL_ROOT}/${basename(mutation.journalPath)}`);
+  throw new Error("managed projection target identity changed; recovery evidence retained");
+}
+
+function reconcileProjectionExchange(
+  handle: ProjectionRootIdentityLock,
+  mutation: PersistedManagedProjectionMutation,
+): PersistedProjectionExchange | null {
+  const exchange = mutation.exchangeState;
+  if (exchange === null) return null;
+  // The swap landed before the clearing persist ran: only the journal needs
+  // to converge. Retire the entry instead of re-issuing the exchange.
+  if (exchange.rightIdentity !== ABSENT_PROJECTION_IDENTITY
+    && projectedIdentity(handle, exchange.leftPath) === exchange.rightIdentity) {
+    mutation.exchangeState = null;
+    mutation.exchangeGuardIdentity = null;
+    persistMutation(handle, mutation);
+    return null;
+  }
+  // Anything other than a converged or staging-only drift is a contradiction
+  // between the persisted exchange and disk that replay cannot resolve.
+  if (projectedIdentity(handle, exchange.leftPath) !== exchange.leftIdentity
+    || projectedIdentity(handle, exchange.guardPath) !== exchange.guardIdentity) {
+    retireExchangeWithRetainedEvidence(handle, mutation);
+  }
+  if (projectedIdentity(handle, exchange.rightPath) === exchange.rightIdentity) return exchange;
+  return restageProjectionExchangeRight(handle, mutation, exchange);
+}
+
+function restageProjectionExchangeRight(
+  handle: ProjectionRootIdentityLock,
+  mutation: PersistedManagedProjectionMutation,
+  exchange: PersistedProjectionExchange,
+): PersistedProjectionExchange {
+  const role = exchange.rightPath === mutation.temporaryPath
+    ? "temporary"
+    : exchange.rightPath === mutation.replacementPath
+      ? "replacement"
+      : "quarantine";
+  const directory = dirname(exchange.rightPath).replaceAll("\\", "/");
+  const prefix = directory === "." ? "" : `${directory}/`;
+  if (handle.pathExists(exchange.rightPath)) {
+    const scope = handle.pathKind(exchange.rightPath) === "directory" ? "tree" : "file";
+    // The right slot is protocol-owned staging we created. If it still holds
+    // the intended content under a drifted identity (the volume-serial flip
+    // shape), re-bind the journal to the actual identity and replay.
+    const intendedContent = role === "temporary"
+      ? Buffer.from(mutation.content!, mutation.encoding!)
+      : Buffer.alloc(0);
+    if (projectionContentDigest(handle, exchange.rightPath, scope)
+      === `sha256:${createHash("sha256").update(intendedContent).digest("hex")}`) {
+      const actualIdentity = handle.pathIdentity(exchange.rightPath);
+      if (role === "temporary") mutation.temporaryIdentity = actualIdentity;
+      else mutation.placeholderIdentity = actualIdentity;
+      const rebound = { ...exchange, rightIdentity: actualIdentity };
+      mutation.exchangeState = rebound;
+      persistMutation(handle, mutation);
+      return rebound;
+    }
+    recordUnboundProjectionEvidence(handle, {
+      evidencePath: exchange.rightPath,
+      evidenceIdentity: handle.pathIdentity(exchange.rightPath),
+      kind: role === "temporary" ? "temporary" : "quarantine",
+      logicalPath: mutation.logicalPath,
+      scope,
+    });
+  }
+  // The staging slot no longer holds the intended content (or is gone):
+  // re-stage under a fresh random name — reusing the diverged deterministic
+  // name is what makes the wedge restart-proof — and keep any displaced
+  // protocol artifact the rename orphans as reviewable evidence.
+  let rightPath: string;
+  if (role === "temporary") {
+    if (handle.pathExists(mutation.replacementPath!)) {
+      recordUnboundProjectionEvidence(handle, {
+        evidencePath: mutation.replacementPath!,
+        evidenceIdentity: handle.pathIdentity(mutation.replacementPath!),
+        kind: "quarantine",
+        logicalPath: mutation.logicalPath,
+        scope: "file",
+      });
+    }
+    mutation.temporaryPath = `${prefix}.gsd-projection-tmp-${randomUUID()}`;
+    mutation.replacementPath = `${mutation.temporaryPath}.replaced`;
+    mutation.temporaryIdentity = handle.prepareFileTemporary(
+      mutation.temporaryPath,
+      Buffer.from(mutation.content!, mutation.encoding!),
+    );
+    rightPath = mutation.temporaryPath;
+  } else if (role === "replacement") {
+    mutation.replacementPath = `${prefix}.gsd-projection-remove-${randomUUID()}`;
+    mutation.placeholderIdentity = handle.prepareFileTemporary(mutation.replacementPath, Buffer.alloc(0));
+    rightPath = mutation.replacementPath;
+  } else {
+    mutation.quarantinePath = `${prefix}.gsd-projection-remove-${randomUUID()}`;
+    mutation.placeholderIdentity = mutation.operation === "remove-tree"
+      ? handle.prepareDirectoryPlaceholder(mutation.quarantinePath)
+      : handle.prepareFileTemporary(mutation.quarantinePath, Buffer.alloc(0));
+    rightPath = mutation.quarantinePath!;
+  }
+  const restaged: PersistedProjectionExchange = {
+    ...exchange,
+    rightPath,
+    rightIdentity: role === "temporary" ? mutation.temporaryIdentity! : mutation.placeholderIdentity!,
+  };
+  mutation.exchangeState = restaged;
+  persistMutation(handle, mutation);
+  return restaged;
+}
+
 function resumeProjectionExchange(
   handle: ProjectionRootIdentityLock,
   mutation: PersistedManagedProjectionMutation,
 ): void {
-  const exchange = mutation.exchangeState;
+  const exchange = reconcileProjectionExchange(handle, mutation);
   if (exchange === null) return;
   try {
     handle.exchangePaths(
@@ -1150,28 +1328,11 @@ function retainFailedExchangeEvidence(
   error: unknown,
   _directory: boolean,
 ): void {
-  if (!(error instanceof Error) || !error.message.includes("unexpected occupant retained in guard")) return;
-  const exchange = mutation.exchangeState;
-  if (exchange === null || !handle.pathExists(exchange.guardPath)) return;
-  const actual = handle.pathIdentity(exchange.guardPath);
-  if (actual === exchange.guardIdentity || actual === exchange.rightIdentity) return;
-  const retain = (evidencePath: string | null, kind: "temporary" | "quarantine" | "canonical"): void => {
-    if (evidencePath === null || !handle.pathExists(evidencePath)) return;
-    const scope = handle.pathKind(evidencePath) === "directory" ? "tree" : "file";
-    recordUnboundProjectionEvidence(handle, {
-      evidencePath,
-      evidenceIdentity: handle.pathIdentity(evidencePath),
-      kind,
-      logicalPath: mutation.logicalPath,
-      scope,
-    });
-  };
-  retain(mutation.logicalPath, "canonical");
-  retain(mutation.temporaryPath, "temporary");
-  retain(mutation.replacementPath, "quarantine");
-  retain(mutation.quarantinePath, "quarantine");
-  retain(exchange.guardPath, "quarantine");
-  handle.removeFile(`${JOURNAL_LOGICAL_ROOT}/${basename(mutation.journalPath)}`);
+  // Only deterministic identity contradictions convert to retained evidence.
+  // Transient classes (EBUSY / sharing violation / EXDEV) keep the entry and
+  // rethrow so the existing outer retry schedules keep ownership.
+  if (!isDeterministicExchangeIdentityError(error)) return;
+  retireExchangeWithRetainedEvidence(handle, mutation);
 }
 
 function applyWriteMutation(
@@ -1930,9 +2091,7 @@ function applyEvidenceResolution(
       true,
     );
   } catch (error) {
-    if (!(error instanceof Error)
-      || !error.message.includes("retained unexpected occupants")
-      || !handle.pathExists(source)) throw error;
+    if (!isUnexpectedOccupantError(error) || !handle.pathExists(source)) throw error;
     const pending: PersistedUnboundProjectionEvidence = {
       evidenceId: evidenceId(source, "quarantine", evidence.logicalPath, "tree"),
       evidencePath: source,

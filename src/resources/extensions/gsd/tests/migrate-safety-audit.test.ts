@@ -1333,7 +1333,10 @@ test("exchange racer recovery closes its journal after retaining every participa
       },
     })}\n`);
 
-    assert.throws(() => loadManagedProjectionPaths(base), /unexpected occupant retained in guard/i);
+    assert.throws(
+      () => loadManagedProjectionPaths(base),
+      /managed projection target identity changed; recovery evidence retained/u,
+    );
     assert.equal(existsSync(journal), false);
     assert.equal(existsSync(join(rootPath, temporaryPath)), true);
     assert.equal(existsSync(join(rootPath, replacementPath)), true);
