@@ -108,8 +108,8 @@ export function assertProgressPayload(payload) {
 	requireString(progress.phase, "gsd_progress.phase");
 	requireCountGroup(progress.milestones, ["total", "done", "active", "pending", "parked"], "gsd_progress.milestones");
 	requireCountGroup(progress.slices, ["total", "done", "active", "pending"], "gsd_progress.slices");
-	requireCountGroup(progress.tasks, ["total", "done", "active", "pending"], "gsd_progress.tasks");
-	if (progress.requirements !== null) requireCountGroup(progress.requirements, ["active", "validated", "deferred", "outOfScope", "blocked", "total"], "gsd_progress.requirements");
+	requireCountGroup(progress.tasks, ["total", "done", "pending"], "gsd_progress.tasks");
+	if (progress.requirements !== null) requireCountGroup(progress.requirements, ["active", "validated", "deferred", "outOfScope"], "gsd_progress.requirements");
 	if (!Array.isArray(progress.blockers) || progress.blockers.some((blocker) => typeof blocker !== "string")) throw new Error("gsd_progress.blockers: expected string array");
 	requireString(progress.nextAction, "gsd_progress.nextAction");
 	const metadata = requireRecord(progress.readMetadata, "gsd_progress.readMetadata");
@@ -144,7 +144,7 @@ export function assertSnapshotPayload(payload, structuredContent) {
 	requireString(snapshot.current?.nextAction, "gsd_project_snapshot.current.nextAction");
 	requireCountGroup(snapshot.progress?.milestones, ["total", "done", "active", "pending", "parked"], "gsd_project_snapshot.progress.milestones");
 	requireCountGroup(snapshot.progress?.slices, ["total", "done", "active", "pending"], "gsd_project_snapshot.progress.slices");
-	requireCountGroup(snapshot.progress?.tasks, ["total", "done", "active", "pending"], "gsd_project_snapshot.progress.tasks");
+	requireCountGroup(snapshot.progress?.tasks, ["total", "done", "pending"], "gsd_project_snapshot.progress.tasks");
 	if (!Array.isArray(snapshot.blockers) || snapshot.blockers.some((item) => !isRecord(item))) throw new Error("gsd_project_snapshot.blockers: expected object array");
 	if (snapshot.blockers.length > MAX_OUTPUT_ITEMS) throw new Error("gsd_project_snapshot.blockers: exceeds output cap 50");
 	requireBoolean(snapshot.blockersTruncated, "gsd_project_snapshot.blockersTruncated");

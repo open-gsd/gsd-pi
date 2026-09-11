@@ -14,7 +14,7 @@ const progress = {
 	phase: "execute",
 		milestones: { total: 1, done: 0, active: 1, pending: 0, parked: 0 },
 	slices: { total: 0, done: 0, active: 0, pending: 0 },
-		tasks: { total: 0, done: 0, active: 0, pending: 0 },
+		tasks: { total: 0, done: 0, pending: 0 },
 	requirements: null,
 	blockers: [],
 	nextAction: "Continue",
@@ -27,7 +27,7 @@ const snapshot = {
 	progress: {
 		milestones: { total: 1, done: 0, active: 1, pending: 0, parked: 0 },
 		slices: { total: 0, done: 0, active: 0, pending: 0 },
-		tasks: { total: 0, done: 0, active: 0, pending: 0 },
+		tasks: { total: 0, done: 0, pending: 0 },
 	},
 	blockers: [],
 	blockersTruncated: false,
