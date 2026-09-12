@@ -1134,8 +1134,19 @@ export async function handleProfileUser(args: string, ctx: ExtensionCommandConte
 
 /** /gsd settings */
 export async function handleSettings(_args: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
+  const { formatConfigText, buildCollectConfigOptions } = await import("./config-overlay.js");
+  const { getPreferencesReferencePath } = await import("./prompt-loader.js");
+  const configOptions = buildCollectConfigOptions(ctx, projectRoot());
   dispatchPrompt(
-    { prompt: "settings", customType: "gsd-settings", verb: "Settings" },
+    {
+      prompt: "settings",
+      customType: "gsd-settings",
+      verb: "Settings",
+      vars: {
+        effectiveConfig: formatConfigText(configOptions),
+        preferencesReferencePath: getPreferencesReferencePath(),
+      },
+    },
     ctx,
     pi,
   );
