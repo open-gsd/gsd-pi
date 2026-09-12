@@ -10,137 +10,266 @@
 //   node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types scripts/mcp-host-smoke.mjs
 // Optional: --project <absolute dir> to probe a real project instead of the fixture.
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import process from "node:process";
+import { pathToFileURL } from "node:url";
 
 const repoRoot = resolve(import.meta.dirname, "..");
-const cliJs = resolve(repoRoot, "packages/mcp-server/dist/cli.js");
+const MAX_OUTPUT_ITEMS = 50;
 
-if (!existsSync(cliJs)) {
-	console.error("Packaged MCP server not built. Run: pnpm run build:core");
-	process.exit(1);
+function isRecord(value) {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-// gsd_progress serves DbProgressResult (bridge path) — 10 keys; optional
-// hierarchy extensions from #2143 are additive and not asserted here.
-const PROGRESS_KEYS = [
-	"activeMilestone", "activeSlice", "activeTask", "phase",
-	"milestones", "slices", "tasks", "requirements",
-	"blockers", "nextAction",
-].sort();
-
-const SNAPSHOT_KEYS = [
-	"authority", "current", "progress", "blockers", "openQuestions",
-	"verification", "milestones", "capturedAt",
-].sort();
-
-const results = [];
-function record(name, ok, detail) {
-	results.push({ name, ok, detail });
-	console.log(`${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
+function describe(value) {
+	return value === undefined ? "missing" : JSON.stringify(value);
 }
 
-function keysetOf(value) {
-	return value && typeof value === "object" ? Object.keys(value).sort() : null;
+function requireRecord(value, name) {
+	if (!isRecord(value)) throw new Error(`${name}: expected object, got ${describe(value)}`);
+	return value;
 }
 
-function sameMembers(a, b) {
-	return JSON.stringify(a) === JSON.stringify(b);
+function requireString(value, name) {
+	if (typeof value !== "string" || value.length === 0) {
+		throw new Error(`${name}: expected non-empty string, got ${describe(value)}`);
+	}
 }
 
-// Resolve a seeded fixture in-process (same loader runs this file).
-const { createWorkflowAuthorityFixture } = await import(
-	"../src/resources/extensions/gsd/tests/workflow-authority-fixture.ts"
-);
-
-const argProject = process.argv.includes("--project")
-	? process.argv[process.argv.indexOf("--project") + 1]
-	: null;
-
-const fixture = argProject
-	? null
-	: await createWorkflowAuthorityFixture();
-const projectDir = argProject
-	? realpathSync(argProject)
-	: fixture.root;
-
-const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
-const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
-
-const client = new Client({ name: "gsd-mcp-host-smoke", version: "0.0.0" });
-const transport = new StdioClientTransport({
-	command: process.execPath,
-	args: [cliJs],
-	cwd: projectDir,
-	env: {
-		PATH: process.env.PATH,
-		HOME: process.env.HOME,
-		TMPDIR: realpathSync(tmpdir()),
-		GSD_NON_INTERACTIVE: "1",
-	},
-	stderr: "pipe",
-});
-
-try {
-	await client.connect(transport);
-
-	// --- Discovery -----------------------------------------------------------
-	const listed = await client.listTools();
-	const names = listed.tools.map((t) => t.name);
-	record("tools/list: gsd_progress advertised", names.includes("gsd_progress"));
-	record("tools/list: gsd_project_snapshot advertised", names.includes("gsd_project_snapshot"));
-
-	// --- gsd_progress invocation ----------------------------------------------
-	const progress = await client.callTool({ name: "gsd_progress", arguments: { projectDir } });
-	const progressPayload = JSON.parse(progress.content[0].text);
-	record(
-		"gsd_progress: exact keyset",
-		!progress.isError && sameMembers(keysetOf(progressPayload), PROGRESS_KEYS),
-		`keys=${keysetOf(progressPayload)?.join(",")}`,
-	);
-	record(
-		"gsd_progress: payload is DB-authoritative (phase present, no projection fallback)",
-		typeof progressPayload.phase === "string" && progressPayload.phase.length > 0,
-		`phase=${progressPayload.phase}`,
-	);
-
-	// --- gsd_project_snapshot invocation ---------------------------------------
-	const snapshot = await client.callTool({ name: "gsd_project_snapshot", arguments: { projectDir } });
-	const snapshotPayload = JSON.parse(snapshot.content[0].text);
-	const structured = snapshot.structuredContent;
-	record(
-		"gsd_project_snapshot: exact keyset",
-		!snapshot.isError && sameMembers(keysetOf(snapshotPayload), SNAPSHOT_KEYS),
-		`keys=${keysetOf(snapshotPayload)?.join(",")}`,
-	);
-	record(
-		"gsd_project_snapshot: structuredContent mirrors details",
-		structured?.operation === "read_project_snapshot"
-			&& structured?.snapshot
-			&& sameMembers(keysetOf(structured.snapshot), SNAPSHOT_KEYS),
-		`operation=${structured?.operation}`,
-	);
-	record(
-		"gsd_project_snapshot: authority revision is numeric",
-		Number.isSafeInteger(snapshotPayload.authority?.revision),
-		`revision=${snapshotPayload.authority?.revision}`,
-	);
-	record(
-		"gsd_project_snapshot: milestone registry bounded with truncated flag",
-		Array.isArray(snapshotPayload.milestones?.items)
-			&& snapshotPayload.milestones.items.length <= 50
-			&& typeof snapshotPayload.milestones.truncated === "boolean",
-		`items=${snapshotPayload.milestones?.items?.length}, truncated=${snapshotPayload.milestones?.truncated}`,
-	);
-} catch (err) {
-	record("probe completed without transport/protocol error", false, err.message);
-} finally {
-	await client.close().catch(() => {});
-	fixture?.cleanup();
+function requireBoolean(value, name) {
+	if (typeof value !== "boolean") throw new Error(`${name}: expected boolean, got ${describe(value)}`);
 }
 
-const failed = results.filter((r) => !r.ok).length;
-console.log(`\n${results.length - failed}/${results.length} checks passed`);
-process.exit(failed === 0 ? 0 : 1);
+function requireSafeInteger(value, name) {
+	if (!Number.isSafeInteger(value)) throw new Error(`${name}: expected safe integer, got ${describe(value)}`);
+}
+
+function requireNonNegativeSafeInteger(value, name) {
+	requireSafeInteger(value, name);
+	if (value < 0) throw new Error(`${name}: expected non-negative safe integer, got ${describe(value)}`);
+}
+
+function requireCountGroup(value, fields, name) {
+	const group = requireRecord(value, name);
+	for (const field of fields) requireNonNegativeSafeInteger(group[field], `${name}.${field}`);
+}
+
+function requireNullableReference(value, name) {
+	if (value === null) return;
+	const reference = requireRecord(value, name);
+	requireString(reference.id, `${name}.id`);
+	requireString(reference.title, `${name}.title`);
+}
+
+function canonicalize(value) {
+	if (Array.isArray(value)) return value.map(canonicalize);
+	if (!isRecord(value)) return value;
+	return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
+}
+
+export function parseToolTextPayload(result, name) {
+	if (!isRecord(result) || !Array.isArray(result.content) || result.content.length === 0) {
+		throw new Error(`${name}: missing content envelope`);
+	}
+	if (result.content.length !== 1 || !isRecord(result.content[0]) || result.content[0].type !== "text" || typeof result.content[0].text !== "string") {
+		throw new Error(`${name}: expected exactly one text content block`);
+	}
+	const text = result.content[0].text;
+	let payload;
+	try {
+		payload = JSON.parse(text);
+	} catch (error) {
+		throw new Error(`${name}: invalid JSON text (${error instanceof Error ? error.message : String(error)})`);
+	}
+	if (!isRecord(payload)) throw new Error(`${name}: payload must be a non-null object`);
+	return payload;
+}
+
+export function assertSuccessEnvelope(result, name) {
+	if (!isRecord(result)) throw new Error(`${name}: result must be an object`);
+	if (result.isError === true) throw new Error(`${name}: MCP error envelope`);
+	if (result.isError !== undefined && typeof result.isError !== "boolean") {
+		throw new Error(`${name}: isError must be boolean when present`);
+	}
+	if (isRecord(result.structuredContent) && "error" in result.structuredContent) {
+		if (typeof result.structuredContent.error !== "string" || result.structuredContent.error.length === 0) {
+			throw new Error(`${name}: malformed structured canonical error`);
+		}
+		throw new Error(`${name}: structured canonical error (${result.structuredContent.error})`);
+	}
+	return result;
+}
+
+export function assertProgressPayload(payload) {
+	const progress = requireRecord(payload, "gsd_progress payload");
+	for (const field of ["activeMilestone", "activeSlice", "activeTask"]) requireNullableReference(progress[field], `gsd_progress.${field}`);
+	requireString(progress.phase, "gsd_progress.phase");
+	requireCountGroup(progress.milestones, ["total", "done", "active", "pending", "parked"], "gsd_progress.milestones");
+	requireCountGroup(progress.slices, ["total", "done", "active", "pending"], "gsd_progress.slices");
+	requireCountGroup(progress.tasks, ["total", "done", "pending"], "gsd_progress.tasks");
+	if (progress.requirements !== null) requireCountGroup(progress.requirements, ["active", "validated", "deferred", "outOfScope"], "gsd_progress.requirements");
+	if (!Array.isArray(progress.blockers) || progress.blockers.some((blocker) => typeof blocker !== "string")) throw new Error("gsd_progress.blockers: expected string array");
+	requireString(progress.nextAction, "gsd_progress.nextAction");
+	const metadata = requireRecord(progress.readMetadata, "gsd_progress.readMetadata");
+	if (metadata.source !== "database") {
+		throw new Error(`gsd_progress.readMetadata.source: expected database, got ${describe(metadata.source)}`);
+	}
+	if (metadata.authority !== "db-authoritative") {
+		throw new Error(`gsd_progress.readMetadata.authority: expected db-authoritative, got ${describe(metadata.authority)}`);
+	}
+	return progress;
+}
+
+function assertBoundedCollection(value, name) {
+	const collection = requireRecord(value, name);
+	if (!Array.isArray(collection.items)) throw new Error(`${name}.items: expected array`);
+	if (collection.items.length > MAX_OUTPUT_ITEMS) {
+		throw new Error(`${name}.items: exceeds output cap ${MAX_OUTPUT_ITEMS}`);
+	}
+	requireBoolean(collection.truncated, `${name}.truncated`);
+	if (collection.items.some((item) => !isRecord(item))) throw new Error(`${name}.items: expected object items`);
+}
+
+export function assertSnapshotPayload(payload, structuredContent) {
+	const snapshot = requireRecord(payload, "gsd_project_snapshot payload");
+	const authority = requireRecord(snapshot.authority, "gsd_project_snapshot.authority");
+	requireString(authority.projectId, "gsd_project_snapshot.authority.projectId");
+	if (authority.schemaVersion !== null) requireNonNegativeSafeInteger(authority.schemaVersion, "gsd_project_snapshot.authority.schemaVersion");
+	requireNonNegativeSafeInteger(authority.revision, "gsd_project_snapshot.authority.revision");
+	requireNonNegativeSafeInteger(authority.authorityEpoch, "gsd_project_snapshot.authority.authorityEpoch");
+	for (const field of ["activeMilestone", "activeSlice", "activeTask"]) requireNullableReference(snapshot.current?.[field], `gsd_project_snapshot.current.${field}`);
+	requireString(snapshot.current?.phase, "gsd_project_snapshot.current.phase");
+	requireString(snapshot.current?.nextAction, "gsd_project_snapshot.current.nextAction");
+	requireCountGroup(snapshot.progress?.milestones, ["total", "done", "active", "pending", "parked"], "gsd_project_snapshot.progress.milestones");
+	requireCountGroup(snapshot.progress?.slices, ["total", "done", "active", "pending"], "gsd_project_snapshot.progress.slices");
+	requireCountGroup(snapshot.progress?.tasks, ["total", "done", "pending"], "gsd_project_snapshot.progress.tasks");
+	if (!Array.isArray(snapshot.blockers) || snapshot.blockers.some((item) => !isRecord(item))) throw new Error("gsd_project_snapshot.blockers: expected object array");
+	if (snapshot.blockers.length > MAX_OUTPUT_ITEMS) throw new Error("gsd_project_snapshot.blockers: exceeds output cap 50");
+	requireBoolean(snapshot.blockersTruncated, "gsd_project_snapshot.blockersTruncated");
+	if (!Array.isArray(snapshot.openQuestions) || snapshot.openQuestions.some((item) => !isRecord(item))) throw new Error("gsd_project_snapshot.openQuestions: expected object array");
+	if (snapshot.openQuestions.length > MAX_OUTPUT_ITEMS) throw new Error("gsd_project_snapshot.openQuestions: exceeds output cap 50");
+	requireBoolean(snapshot.openQuestionsTruncated, "gsd_project_snapshot.openQuestionsTruncated");
+	requireCountGroup(snapshot.verification?.assessments, ["total", "pass", "fail"], "gsd_project_snapshot.verification.assessments");
+	requireCountGroup(snapshot.verification?.evidence, ["total", "passed", "failed"], "gsd_project_snapshot.verification.evidence");
+	assertBoundedCollection(snapshot.milestones, "gsd_project_snapshot.milestones");
+	requireString(snapshot.capturedAt, "gsd_project_snapshot.capturedAt");
+	if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(snapshot.capturedAt) || Number.isNaN(Date.parse(snapshot.capturedAt)) || new Date(snapshot.capturedAt).toISOString() !== snapshot.capturedAt) {
+		throw new Error("gsd_project_snapshot.capturedAt: expected ISO-8601 UTC timestamp");
+	}
+
+	const envelope = requireRecord(structuredContent, "gsd_project_snapshot structuredContent");
+	if (envelope.operation !== "read_project_snapshot") {
+		throw new Error(`gsd_project_snapshot structuredContent.operation: expected read_project_snapshot, got ${describe(envelope.operation)}`);
+	}
+	if (envelope.revision !== authority.revision) {
+		throw new Error(`gsd_project_snapshot structuredContent.revision: expected ${authority.revision}, got ${describe(envelope.revision)}`);
+	}
+	if (!isRecord(envelope.snapshot)) throw new Error("gsd_project_snapshot structuredContent.snapshot: expected object");
+	if (JSON.stringify(canonicalize(envelope.snapshot)) !== JSON.stringify(canonicalize(snapshot))) {
+		throw new Error("gsd_project_snapshot structuredContent.snapshot: deep value parity mismatch");
+	}
+	return snapshot;
+}
+
+export function assertProgressResult(result) {
+	assertSuccessEnvelope(result, "gsd_progress");
+	return assertProgressPayload(parseToolTextPayload(result, "gsd_progress"));
+}
+
+export function assertSnapshotResult(result) {
+	assertSuccessEnvelope(result, "gsd_project_snapshot");
+	const payload = parseToolTextPayload(result, "gsd_project_snapshot");
+	return assertSnapshotPayload(payload, result.structuredContent);
+}
+
+export function assertFixtureDbValues(progress, snapshot) {
+	if (progress.activeMilestone?.id !== "M001" || progress.activeMilestone?.title !== "Authority Fixture") {
+		throw new Error("fixture DB evidence: progress did not return the seeded M001 Authority Fixture");
+	}
+	if (snapshot.current.activeMilestone?.id !== "M001" || snapshot.current.activeMilestone?.title !== "Authority Fixture") {
+		throw new Error("fixture DB evidence: snapshot did not return the seeded M001 Authority Fixture");
+	}
+}
+
+async function main() {
+	const cliJs = resolve(repoRoot, "packages/mcp-server/dist/cli.js");
+	if (!existsSync(cliJs)) {
+		console.error("Packaged MCP server not built. Run: pnpm run build:core");
+		process.exitCode = 1;
+		return;
+	}
+
+	const { createWorkflowAuthorityFixture } = await import(
+		"../src/resources/extensions/gsd/tests/workflow-authority-fixture.ts"
+	);
+	const argProject = process.argv.includes("--project")
+		? process.argv[process.argv.indexOf("--project") + 1]
+		: null;
+	const fixture = argProject ? null : await createWorkflowAuthorityFixture();
+	if (fixture) {
+		writeFileSync(resolve(fixture.root, ".gsd", "STATE.md"), "**Active Milestone:** M999: Projection Only\n**Phase:** plan\n");
+	}
+	const projectDir = argProject ? realpathSync(argProject) : fixture.root;
+	const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+	const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+	const client = new Client({ name: "gsd-mcp-host-smoke", version: "0.0.0" });
+	const transport = new StdioClientTransport({
+		command: process.execPath,
+		args: [cliJs],
+		cwd: projectDir,
+		env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: realpathSync(tmpdir()), GSD_NON_INTERACTIVE: "1" },
+		stderr: "pipe",
+	});
+	let serverStderr = "";
+	transport.stderr?.on("data", (chunk) => {
+		serverStderr = `${serverStderr}${String(chunk)}`.slice(-2000);
+	});
+	const results = [];
+	function record(name, fn) {
+		try {
+			fn();
+			results.push({ name, ok: true });
+			console.log(`PASS  ${name}`);
+		} catch (error) {
+			const detail = error instanceof Error ? error.message : String(error);
+			results.push({ name, ok: false });
+			console.log(`FAIL  ${name} — ${detail}`);
+		}
+	}
+
+	try {
+		await client.connect(transport);
+		const listed = await client.listTools();
+		const names = listed.tools.map((tool) => tool.name);
+		record("tools/list: gsd_progress advertised", () => {
+			if (!names.includes("gsd_progress")) throw new Error("tool missing");
+		});
+		record("tools/list: gsd_project_snapshot advertised", () => {
+			if (!names.includes("gsd_project_snapshot")) throw new Error("tool missing");
+		});
+		const progress = await client.callTool({ name: "gsd_progress", arguments: { projectDir } });
+		const progressPayload = assertProgressResult(progress);
+		record("gsd_progress: DB-authoritative payload", () => progressPayload);
+		const snapshot = await client.callTool({ name: "gsd_project_snapshot", arguments: { projectDir } });
+		const snapshotPayload = assertSnapshotResult(snapshot);
+		record("gsd_project_snapshot: bounded authoritative parity", () => snapshotPayload);
+		if (fixture) record("fixture: DB values override mismatched projection", () => assertFixtureDbValues(progressPayload, snapshotPayload));
+	} catch (error) {
+		record("probe completed without transport/protocol error", () => {
+			const detail = error instanceof Error ? error.message : String(error);
+			serverStderr = serverStderr.trim();
+			throw new Error(serverStderr ? `${detail}; server stderr: ${serverStderr}` : detail);
+		});
+	} finally {
+		await client.close().catch(() => {});
+		fixture?.cleanup();
+	}
+
+	const failed = results.filter((result) => !result.ok).length;
+	console.log(`\n${results.length - failed}/${results.length} checks passed`);
+	process.exitCode = failed === 0 ? 0 : 1;
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) await main();
