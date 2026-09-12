@@ -527,7 +527,7 @@ def test_supervisor_notifies_new_blocker_while_already_blocked() -> None:
     fsm._tick()
 
     assert ctx.pending_blocker_id == "b2"
-    notifications.notify_blocker.assert_called_once_with(client._status)
+    notifications.notify_blocker.assert_called_once_with(client._status, target=None)
 
 
 def test_supervisor_terminal_status_notifies_even_when_progress_fails() -> None:
@@ -555,7 +555,7 @@ def test_supervisor_terminal_status_notifies_even_when_progress_fails() -> None:
     assert ctx.state == SupervisorState.COMPLETE
     assert ctx.notified_terminal
     assert stored == [ctx]
-    notifications.notify_terminal.assert_called_once_with("complete", None)
+    notifications.notify_terminal.assert_called_once_with("complete", None, target=None)
 
 
 def test_supervisor_terminal_notification_failure_still_stops() -> None:

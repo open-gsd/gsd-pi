@@ -18,7 +18,7 @@ import pytest
 
 from open_gsd_hermes.config import GsdConfig
 from open_gsd_hermes.gsd_client import GsdMcpClient
-from open_gsd_hermes.types import ProgressSnapshot
+from open_gsd_hermes.types import DeliveryTarget, ProgressSnapshot
 
 
 def _config() -> GsdConfig:
@@ -227,13 +227,38 @@ def test_stream_loop_notifies_terminal_on_process_exit() -> None:
                     client._milestone_stream_loop(fake_proc)
 
     notifications.notify_milestone_complete.assert_called_once_with(
-        "✅ Milestone M001 ready — 2 slices, 5 tasks. Run `/gsd auto` to start."
+        "✅ Milestone M001 ready — 2 slices, 5 tasks. Run `/gsd auto` to start.",
+        target=None,
     )
     notifications.notify_terminal.assert_not_called()
     assert client.milestone_active() is False
     assert client.milestone_session_id() is None
     assert client.milestone_pending_blocker_id() is None
     assert client._milestone_pending_blocker_method is None
+
+
+def test_milestone_reader_forwards_target_captured_at_spawn() -> None:
+    """The reader passes the command-thread target snapshot to its notifies.
+
+    The reader thread has no session binding, so create_milestone's caller
+    captures the delivery target on the bound command thread and the
+    snapshot is forwarded verbatim (issue #2288).
+    """
+    client = GsdMcpClient(_config())
+    notifications = MagicMock()
+    target = DeliveryTarget("slack", "channel", "C_A")
+    fake_proc = _FakeProc()
+    fake_proc.poll.return_value = 0
+    fake_proc.stdout.readline.side_effect = [b""]
+
+    with patch.object(client, "_milestone_proc", fake_proc):
+        with patch.object(client, "_milestone_project_dir", "/proj"):
+            with patch.object(client, "_milestone_notifications", notifications):
+                with patch.object(client, "_milestone_notify_target", target):
+                    client._milestone_stream_loop(fake_proc)
+
+    call = notifications.notify_milestone_complete.call_args
+    assert call.kwargs["target"] is target
 
 
 def test_stream_loop_failure_reports_drained_stderr() -> None:
@@ -251,7 +276,7 @@ def test_stream_loop_failure_reports_drained_stderr() -> None:
             client._milestone_stream_loop(fake_proc)
 
     notifications.notify_terminal.assert_called_once_with(
-        "failed", "fatal diagnostics"
+        "failed", "fatal diagnostics", target=None
     )
 
 
@@ -269,7 +294,9 @@ def test_stream_loop_releases_blocked_exit_with_pending_blocker() -> None:
             with patch.object(client, "_milestone_notifications", notifications):
                 client._milestone_stream_loop(fake_proc)
 
-    notifications.notify_terminal.assert_called_once_with("failed", "Planning blocked")
+    notifications.notify_terminal.assert_called_once_with(
+        "failed", "Planning blocked", target=None
+    )
     assert client.milestone_active() is False
     assert client.milestone_session_id() is None
 
@@ -287,7 +314,9 @@ def test_stream_loop_releases_noninteractive_blocked_exit() -> None:
         with patch.object(client, "_milestone_notifications", notifications):
             client._milestone_stream_loop(fake_proc)
 
-    notifications.notify_terminal.assert_called_once_with("failed", "Planning blocked")
+    notifications.notify_terminal.assert_called_once_with(
+        "failed", "Planning blocked", target=None
+    )
     assert client.milestone_active() is False
     assert client.milestone_session_id() is None
 
@@ -309,7 +338,7 @@ def test_stream_loop_retains_running_proc_on_stream_loss() -> None:
                 client._milestone_stream_loop(fake_proc)
 
                 notifications.notify_terminal.assert_called_once_with(
-                    "failed", "stream lost — run /gsd cancel"
+                    "failed", "stream lost — run /gsd cancel", target=None
                 )
                 on_terminal.assert_called_once_with("failed")
                 assert client.milestone_active() is True
@@ -351,6 +380,7 @@ def test_stream_loop_handles_blocking_command_block() -> None:
     notifications.notify_terminal.assert_called_with(
         "failed",
         "/gsd auto cannot run because the active milestone is blocked by validation.",
+        target=None,
     )
     notifications.notify_milestone_complete.assert_not_called()
     assert client.milestone_active() is False

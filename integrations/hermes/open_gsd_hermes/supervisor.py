@@ -12,7 +12,7 @@ from open_gsd_hermes.config import GsdConfig
 from open_gsd_hermes.formatting import format_ref
 from open_gsd_hermes.gsd_client import GsdMcpClient
 from open_gsd_hermes.notifications import NotificationService
-from open_gsd_hermes.types import ProgressSnapshot, SessionStatus
+from open_gsd_hermes.types import DeliveryTarget, ProgressSnapshot, SessionStatus
 
 
 class SupervisorState(str, Enum):
@@ -62,10 +62,14 @@ class SupervisorFsm:
         self._set_context = set_context
         self._thread: threading.Thread | None = None
         self._stop = threading.Event()
+        # Captured in start() on the bound command thread; the loop thread
+        # has no session binding, so its sends must use this snapshot.
+        self._target: DeliveryTarget | None = None
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
             return
+        self._target = self._notifications.resolve_target()
         self._stop = threading.Event()
         self._thread = threading.Thread(
             target=self._loop,
@@ -144,9 +148,13 @@ class SupervisorFsm:
             stop_event.set()
         self._set_context(ctx)
         if blocker_notification:
-            self._notifications.notify_blocker(blocker_notification)
+            self._notifications.notify_blocker(
+                blocker_notification, target=self._target
+            )
         if terminal_notification:
-            self._notifications.notify_terminal(*terminal_notification)
+            self._notifications.notify_terminal(
+                *terminal_notification, target=self._target
+            )
 
     def _map_status(self, raw: str) -> SupervisorState:
         mapping = {
@@ -176,5 +184,7 @@ class SupervisorFsm:
             if old != new and new:
                 parts.append(f"{label} → {format_ref(new, include_title=False)}")
         if parts:
-            self._notifications.notify_transition(", ".join(parts))
+            self._notifications.notify_transition(
+                ", ".join(parts), target=self._target
+            )
             self._client.invalidate_cache(ctx.project_dir)

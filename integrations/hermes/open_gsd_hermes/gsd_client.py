@@ -53,6 +53,7 @@ class GsdMcpClient:
         self._milestone_pending_blocker_method: str | None = None
         self._milestone_command_block_failure: str | None = None
         self._milestone_notifications: Any = None  # NotificationService | None
+        self._milestone_notify_target: Any = None  # DeliveryTarget | None
         self._milestone_project_dir: str | None = None
         self._milestone_on_terminal: Callable[[str], None] | None = None
         self._milestone_notified_terminal: bool = False
@@ -470,6 +471,7 @@ class GsdMcpClient:
         context_file: str | None = None,
         notifications: Any = None,
         on_terminal: Callable[[str], None] | None = None,
+        notify_target: Any = None,
     ) -> str:
         """Spawn `gsd headless --supervised new-milestone` and return a session id.
 
@@ -477,6 +479,10 @@ class GsdMcpClient:
         stream-json stdout and drives the supplied NotificationService on
         blocker/terminal events. Returns a local session id immediately
         (headless does not emit init_result on stdout).
+
+        notify_target must be captured by the caller on the bound command
+        thread (e.g. NotificationService.resolve_target()): the reader
+        thread has no session binding of its own.
 
         Raises ValueError if neither (or both) of context_text/context_file
         is supplied.
@@ -519,6 +525,7 @@ class GsdMcpClient:
         self._milestone_pending_blocker_method = None
         self._milestone_command_block_failure = None
         self._milestone_notifications = notifications
+        self._milestone_notify_target = notify_target
         self._milestone_project_dir = project_dir
         self._milestone_on_terminal = on_terminal
         self._milestone_notified_terminal = False
@@ -582,7 +589,9 @@ class GsdMcpClient:
             if not self._milestone_notified_terminal:
                 if self._milestone_notifications is not None:
                     self._milestone_notifications.notify_terminal(
-                        "failed", "Planning blocked"
+                        "failed",
+                        "Planning blocked",
+                        target=self._milestone_notify_target,
                     )
                 if self._milestone_on_terminal is not None:
                     self._milestone_on_terminal("failed")
@@ -608,9 +617,13 @@ class GsdMcpClient:
                 summary = self._build_milestone_completion_message(
                     self._milestone_project_dir or ""
                 )
-                self._milestone_notifications.notify_milestone_complete(summary)
+                self._milestone_notifications.notify_milestone_complete(
+                    summary, target=self._milestone_notify_target
+                )
             else:
-                self._milestone_notifications.notify_terminal(status, error)
+                self._milestone_notifications.notify_terminal(
+                    status, error, target=self._milestone_notify_target
+                )
         if self._milestone_on_terminal is not None:
             self._milestone_on_terminal(status)
         self._milestone_notified_terminal = True
@@ -671,7 +684,9 @@ class GsdMcpClient:
             self._milestone_command_block_failure = failure
             if not self._milestone_notified_terminal:
                 if self._milestone_notifications is not None:
-                    self._milestone_notifications.notify_terminal("failed", failure)
+                    self._milestone_notifications.notify_terminal(
+                        "failed", failure, target=self._milestone_notify_target
+                    )
                 if self._milestone_on_terminal is not None:
                     self._milestone_on_terminal("failed")
                 self._milestone_notified_terminal = True
@@ -689,7 +704,8 @@ class GsdMcpClient:
                     status="blocked",
                     pending_blocker=event,
                     session_id=self._milestone_session_id,
-                )
+                ),
+                target=self._milestone_notify_target,
             )
 
     def cancel_milestone(self) -> None:
@@ -763,6 +779,7 @@ class GsdMcpClient:
         self._milestone_pending_blocker_id = None
         self._milestone_pending_blocker_method = None
         self._milestone_command_block_failure = None
+        self._milestone_notify_target = None
 
     def respond_to_milestone_blocker(self, response: str) -> None:
         """Write an extension_ui_response to the milestone subprocess stdin.
