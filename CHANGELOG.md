@@ -8,6 +8,9 @@ This changelog starts from the `open-gsd/gsd-pi` ownership baseline. Earlier pro
 
 ## [Unreleased]
 
+### Fixed
+- **gsd**: surface the subjective-UAT answer binding in gsd_prepare_milestone_subjective_uat text output
+
 ## [1.19.0] - 2026-09-09
 
 ### Added

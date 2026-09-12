@@ -1883,6 +1883,52 @@ export async function executeValidateMilestone(
   }
 }
 
+/**
+ * Render the prepared subjective-UAT binding into the text channel.
+ *
+ * The structured `details` payload already carries the binding, but the model
+ * only sees `content[].text`. Without the IDs in the text the model cannot
+ * satisfy gsd_answer_milestone_subjective_uat's exact-binding check and the
+ * milestone validation gate becomes unreachable.
+ */
+export function formatPreparedSubjectiveUatText(
+  result: PreparedSubjectiveUatBinding,
+  focusedPrompt: string,
+): string {
+  const optionLines = result.options
+    .map((option) =>
+      `  - optionId=${option.optionId} label="${option.label}" ` +
+      `(${option.disposition}${option.recommended ? ", recommended" : ""})`)
+    .join("\n");
+  const lines = [
+    `Prepared subjective UAT for ${result.milestoneId}: ${focusedPrompt}`,
+    "",
+    "Binding for gsd_answer_milestone_subjective_uat (pass these values exactly):",
+    `  criterionId=${result.criterionId}`,
+    `  questionId=${result.questionId}`,
+    `  interactionId=${result.interactionId}`,
+    `  testedSourceRevision=${result.testedSourceRevision}`,
+    "  options:",
+    optionLines,
+    "  selectedOptionId must be one of the optionIds above; verbatimResponse must equal that option's label.",
+  ];
+  if (result.withdrawnQuestionIds.length > 0) {
+    lines.push(`Withdrawn prior open questions: ${result.withdrawnQuestionIds.join(", ")}`);
+  }
+  return lines.join("\n");
+}
+
+type PreparedSubjectiveUatBinding = Pick<
+  Awaited<ReturnType<typeof prepareMilestoneSubjectiveUat>>,
+  | "milestoneId"
+  | "criterionId"
+  | "questionId"
+  | "interactionId"
+  | "testedSourceRevision"
+  | "withdrawnQuestionIds"
+  | "options"
+>;
+
 export async function executePrepareMilestoneSubjectiveUat(
   params: PrepareMilestoneSubjectiveUatExecutorParams,
   basePath: string,
@@ -1900,7 +1946,7 @@ export async function executePrepareMilestoneSubjectiveUat(
     return {
       content: [{
         type: "text",
-        text: `Prepared subjective UAT for ${result.milestoneId}: ${params.focusedPrompt}`,
+        text: formatPreparedSubjectiveUatText(result, params.focusedPrompt),
       }],
       details: {
         operation: "prepare_milestone_subjective_uat",

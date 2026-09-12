@@ -2,7 +2,7 @@
 // File Purpose: Canonical subjective-UAT question, answer, provenance, replay, and rollback contracts.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -19,6 +19,10 @@ import {
   answerMilestoneSubjectiveUat,
   prepareMilestoneSubjectiveUat,
 } from "../milestone-subjective-uat-domain-operation.ts";
+import {
+  executePrepareMilestoneSubjectiveUat,
+  formatPreparedSubjectiveUatText,
+} from "../tools/workflow-tool-executors.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -58,8 +62,9 @@ function userInvocation(idempotencyKey: string) {
 }
 
 function setup(): void {
-  basePath = mkdtempSync(join(tmpdir(), "gsd-milestone-subjective-uat-"));
-  assert.equal(openDatabase(join(basePath, "gsd.db")), true);
+  basePath = realpathSync(mkdtempSync(join(tmpdir(), "gsd-milestone-subjective-uat-")));
+  mkdirSync(join(basePath, ".gsd"), { recursive: true });
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
   insertMilestone({ id: "M001", title: "Subjective UAT", status: "active" });
   const fence = readDomainOperationFence();
   executeDomainOperation({
@@ -552,4 +557,65 @@ test("subjective UAT replay rejects shape-valid option binding corruption", () =
     () => prepareMilestoneSubjectiveUat(input),
     /subjective UAT receipt.*options.*invalid|corrupt/i,
   );
+});
+
+test("prepare executor surfaces the answer binding in its text output", async () => {
+  setup();
+  const { invocation, ...params } = prepareInput("subjective/prepare/executor-text");
+  const result = await executePrepareMilestoneSubjectiveUat(
+    params,
+    basePath!,
+    invocation as never,
+  );
+
+  assert.equal(result.isError, undefined, result.content[0]!.text);
+  const details = result.details as {
+    criterionId: string;
+    questionId: string;
+    interactionId: string;
+    acceptedOptionId: string;
+    rejectedOptionId: string;
+    testedSourceRevision: string;
+  };
+  const text = result.content[0]!.text;
+
+  // Every value the answer tool binds on must be readable from the text channel:
+  // the model never sees `details`, only `content[].text`.
+  assert.match(text, /Prepared subjective UAT for M001: Does the guided flow feel natural and clear\?/);
+  assert.ok(text.includes(`criterionId=${details.criterionId}`));
+  assert.ok(text.includes(`questionId=${details.questionId}`));
+  assert.ok(text.includes(`interactionId=${details.interactionId}`));
+  assert.ok(text.includes(`testedSourceRevision=${details.testedSourceRevision}`));
+  assert.ok(text.includes(`optionId=${details.acceptedOptionId} label="Accept (Recommended)" (accepted, recommended)`));
+  assert.ok(text.includes(`optionId=${details.rejectedOptionId} label="Reject" (rejected)`));
+
+  // And those values round-trip through the answer tool unchanged.
+  const answered = answerMilestoneSubjectiveUat({
+    invocation: userInvocation("subjective/answer/executor-text"),
+    criterionId: details.criterionId,
+    questionId: details.questionId,
+    interactionId: details.interactionId,
+    selectedOptionId: details.acceptedOptionId,
+    verbatimResponse: "Accept (Recommended)",
+    rationale: "Copied from the prepare text output.",
+    testedSourceRevision: details.testedSourceRevision,
+  });
+  assert.equal(answered.disposition, "accepted");
+});
+
+test("formatPreparedSubjectiveUatText lists withdrawn questions when present", () => {
+  const text = formatPreparedSubjectiveUatText({
+    milestoneId: "M009",
+    criterionId: "crit",
+    questionId: "q2",
+    interactionId: "i2",
+    testedSourceRevision: "sha256:abc",
+    withdrawnQuestionIds: ["q1"],
+    options: [
+      { optionId: "a", disposition: "accepted", label: "Accept (Recommended)", description: "", recommended: true },
+      { optionId: "r", disposition: "rejected", label: "Reject", description: "", recommended: false },
+    ],
+  }, "Prompt?");
+  assert.ok(text.endsWith("Withdrawn prior open questions: q1"));
+  assert.ok(text.includes("optionId=a label=\"Accept (Recommended)\" (accepted, recommended)"));
 });
