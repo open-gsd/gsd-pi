@@ -1897,10 +1897,27 @@ export async function executePrepareMilestoneSubjectiveUat(
   }
   try {
     const result = prepareMilestoneSubjectiveUat({ ...params, invocation });
+    // The answer tool binds on these exact values, and the text channel is the
+    // only surface the model sees — render the full binding verbatim (#2296).
+    const optionLines = result.options
+      .map((option) =>
+        `  optionId: ${option.optionId} | disposition: ${option.disposition}` +
+        `${option.recommended ? " | recommended" : ""} | label: "${option.label}"`
+      )
+      .join("\n");
     return {
       content: [{
         type: "text",
-        text: `Prepared subjective UAT for ${result.milestoneId}: ${params.focusedPrompt}`,
+        text: [
+          `Prepared subjective UAT for ${result.milestoneId}: ${params.focusedPrompt}`,
+          "Answer binding for gsd_answer_milestone_subjective_uat:",
+          `  criterionId: ${result.criterionId}`,
+          `  questionId: ${result.questionId}`,
+          `  interactionId: ${result.interactionId}`,
+          `  testedSourceRevision: ${result.testedSourceRevision}`,
+          "Options (verbatimResponse must equal the label text exactly — the double quotes below are delimiters, not part of the value):",
+          optionLines,
+        ].join("\n"),
       }],
       details: {
         operation: "prepare_milestone_subjective_uat",
