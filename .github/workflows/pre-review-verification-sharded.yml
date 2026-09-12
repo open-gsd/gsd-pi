@@ -1,0 +1,555 @@
+# Optional sharded pre-review verification. This workflow is manually dispatched
+# and intentionally does not replace ci.yml or any merge-protection signal.
+name: Pre-review verification (sharded)
+
+run-name: "Pre-review sharded verify: ${{ inputs.source_repo }}:${{ inputs.source_ref }} @ ${{ inputs.expected_sha }}"
+
+"on":
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Public repository to verify, for example pimmink/gsd-pi"
+        required: true
+        type: string
+      source_ref:
+        description: "Branch in source_repo to verify"
+        required: true
+        type: string
+      expected_sha:
+        description: "Full 40-character commit SHA that source_ref must resolve to"
+        required: true
+        type: string
+      shard_count:
+        description: "Number of parallel test:unit:compiled shards"
+        required: false
+        type: string
+        default: "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pre-review-sharded-${{ inputs.source_repo }}-${{ inputs.source_ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build once
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      shard_matrix: ${{ steps.matrix.outputs.shard_matrix }}
+      manifest_total: ${{ steps.expand.outputs.total }}
+    steps:
+      - name: Validate inputs and remote ref before checkout
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2153 # GitHub Actions injects SOURCE_REPO from step env.
+          if [[ ! "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]]; then
+            echo "::error::source_repo must be owner/repo, got: $SOURCE_REPO"
+            exit 1
+          fi
+          if [[ -z "$SOURCE_REF" || "$SOURCE_REF" == -* || "$SOURCE_REF" == refs/* ]]; then
+            echo "::error::source_ref must be a plain branch name"
+            exit 1
+          fi
+          if ! git check-ref-format --branch "$SOURCE_REF" >/dev/null; then
+            echo "::error::source_ref is not a valid Git branch name"
+            exit 1
+          fi
+          if [[ ! "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::expected_sha must be exactly 40 lowercase hexadecimal characters"
+            exit 1
+          fi
+          if [[ ! "$SHARD_COUNT" =~ ^[0-9]+$ || "$SHARD_COUNT" -lt 1 || "$SHARD_COUNT" -gt 16 ]]; then
+            echo "::error::shard_count must be an integer between 1 and 16"
+            exit 1
+          fi
+
+          target_ref="refs/heads/${SOURCE_REF}"
+          repo_url="https://github.com/${SOURCE_REPO}.git"
+          remote_matches="$(git ls-remote "$repo_url" "$target_ref")"
+          match_count="$(printf '%s\n' "$remote_matches" | grep -c .)" || match_count=0
+          if [[ "$match_count" -ne 1 ]]; then
+            echo "::error::Expected exactly one match for ${target_ref} on ${repo_url}, found ${match_count}."
+            exit 1
+          fi
+          remote_sha="$(printf '%s\n' "$remote_matches" | cut -f1)"
+          if [[ "$remote_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::${target_ref} on ${repo_url} points at ${remote_sha}, not ${EXPECTED_SHA}."
+            exit 1
+          fi
+
+      - name: Checkout exact source commit without credentials
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2153 # GitHub Actions injects SOURCE_REPO from step env.
+          repo_url="https://github.com/${SOURCE_REPO}.git"
+          target_ref="refs/heads/${SOURCE_REF}"
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+${target_ref}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+
+      - name: Assert checked-out SHA
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          head_sha="$(git rev-parse HEAD)"
+          if [[ "$head_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::HEAD is ${head_sha}, expected ${EXPECTED_SHA}."
+            exit 1
+          fi
+
+      - name: Write initial summary
+        run: |
+          {
+            echo "### Sharded pre-review verification"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| source repo | ${{ inputs.source_repo }} |"
+            echo "| source ref | ${{ inputs.source_ref }} |"
+            echo "| expected sha | ${{ inputs.expected_sha }} |"
+            echo "| shard count | ${{ inputs.shard_count }} |"
+            echo "| authority | advisory pre-review signal; upstream ci.yml remains merge authority |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Compute shard matrix
+        id: matrix
+        env:
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          matrix="$(node -e "console.log(JSON.stringify(Array.from({length: Number(process.env.SHARD_COUNT)}, (_, i) => i + 1)))")"
+          echo "shard_matrix=${matrix}" >> "$GITHUB_OUTPUT"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          GSD_SKIP_RTK_INSTALL: "1"
+          GSD_SKIP_DEP_REPAIR: "1"
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: pre-review-sharded-native-linux-x64-gnu
+          workspaces: native -> target
+
+      - name: Build native addon from source
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64"
+        run: pnpm run build:native:test
+
+      - name: Build core and compile tests
+        env:
+          RUSTFLAGS: "-C target-cpu=x86-64"
+        run: |
+          set -euo pipefail
+          pnpm run build:core
+          pnpm run typecheck:extensions
+          pnpm run test:compile
+
+      - name: Mirror native addon into dist-test
+        run: |
+          set -euo pipefail
+          mkdir -p dist-test/native/addon
+          shopt -s nullglob
+          addons=(native/addon/*.node)
+          if [[ ${#addons[@]} -eq 0 ]]; then
+            echo "::error::No compiled .node addon found under native/addon/."
+            exit 1
+          fi
+          cp "${addons[@]}" dist-test/native/addon/
+
+      - name: Derive canonical compiled-test manifest
+        id: expand
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require("fs");
+          const path = require("path");
+          const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+          const script = pkg.scripts?.["test:unit:compiled"];
+          if (!script) {
+            console.error("::error::package.json has no test:unit:compiled script.");
+            process.exit(1);
+          }
+          const globs = [...script.matchAll(/"(dist-test\/[^"]+)"/g)].map((match) => match[1]);
+          if (globs.length === 0) {
+            console.error("::error::Could not extract dist-test globs from test:unit:compiled.");
+            process.exit(1);
+          }
+          const files = new Set();
+          for (const pattern of globs) {
+            const dir = path.dirname(pattern);
+            const base = path.basename(pattern);
+            const regex = new RegExp("^" + base.split("*").map((part) => part.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$");
+            if (!fs.existsSync(dir)) {
+              console.error(`::error::Manifest directory does not exist: ${dir}`);
+              process.exit(1);
+            }
+            for (const entry of fs.readdirSync(dir)) {
+              if (regex.test(entry)) files.add(path.join(dir, entry));
+            }
+          }
+          const sorted = [...files].sort();
+          if (sorted.length === 0) {
+            console.error("::error::Compiled-test manifest is empty.");
+            process.exit(1);
+          }
+          fs.writeFileSync("test-manifest.txt", sorted.join("\n") + "\n");
+          console.log(`Canonical manifest: ${sorted.length} compiled test files.`);
+          NODE
+          total="$(wc -l < test-manifest.txt | tr -d ' ')"
+          echo "total=${total}" >> "$GITHUB_OUTPUT"
+          sha256sum test-manifest.txt > test-manifest.sha256
+
+      - name: Partition canonical manifest
+        env:
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require("fs");
+          const shardCount = Number(process.env.SHARD_COUNT);
+          const files = fs.readFileSync("test-manifest.txt", "utf8").trim().split("\n").filter(Boolean);
+          const base = Math.floor(files.length / shardCount);
+          const extra = files.length % shardCount;
+          let cursor = 0;
+          for (let index = 0; index < shardCount; index++) {
+            const size = base + (index < extra ? 1 : 0);
+            const chunk = files.slice(cursor, cursor + size);
+            cursor += size;
+            fs.writeFileSync(`test-manifest-shard-${index + 1}.txt`, chunk.length ? chunk.join("\n") + "\n" : "");
+            console.log(`shard ${index + 1}/${shardCount}: ${chunk.length} files`);
+          }
+          if (cursor !== files.length) process.exit(1);
+          NODE
+
+      - name: Package build output for shard jobs
+        run: tar czf build-output.tar.gz dist dist-test packages/*/dist
+
+      - name: Upload build output
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: pre-review-sharded-build-output
+          path: build-output.tar.gz
+          retention-days: 1
+
+      - name: Upload test manifest
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: pre-review-sharded-test-manifest
+          path: |
+            test-manifest.txt
+            test-manifest.sha256
+            test-manifest-shard-*.txt
+          retention-days: 3
+
+  test-shard:
+    name: test-shard (${{ matrix.shard }}/${{ inputs.shard_count }})
+    needs: build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.build.outputs.shard_matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact source commit without credentials
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2153 # GitHub Actions injects SOURCE_REPO from step env.
+          repo_url="https://github.com/${SOURCE_REPO}.git"
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "$repo_url"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+refs/heads/${SOURCE_REF}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          GSD_SKIP_RTK_INSTALL: "1"
+          GSD_SKIP_DEP_REPAIR: "1"
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build output
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: pre-review-sharded-build-output
+
+      - name: Extract build output
+        run: tar xzf build-output.tar.gz
+
+      - name: Download test manifest
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: pre-review-sharded-test-manifest
+
+      - name: Verify manifest checksum
+        run: sha256sum -c test-manifest.sha256
+
+      - name: Run this shard partition
+        env:
+          GSD_NATIVE_PREFER_LOCAL: "1"
+        run: |
+          set -o pipefail
+          shard_file="test-manifest-shard-${{ matrix.shard }}.txt"
+          if [[ ! -s "$shard_file" ]]; then
+            echo "shard=${{ matrix.shard }} passed=0 failed=0 skipped=0" | tee "shard-${{ matrix.shard }}-summary.txt"
+            exit 0
+          fi
+          mapfile -t shard_files < "$shard_file"
+          node --import ./scripts/dist-test-resolve.mjs \
+            --experimental-test-isolation=process \
+            --test-reporter=./scripts/test-reporter-compact.mjs \
+            --test "${shard_files[@]}" \
+            2>&1 | tee "shard-${{ matrix.shard }}.log"
+          summary_line="$(grep -E '^(✔|✖) [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' "shard-${{ matrix.shard }}.log" | tail -1)"
+          if [[ -z "$summary_line" ]]; then
+            echo "::error::Could not find compact-reporter summary for shard ${{ matrix.shard }}."
+            exit 1
+          fi
+          passed="$(echo "$summary_line" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+')"
+          failed="$(echo "$summary_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')"
+          skipped="$(echo "$summary_line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+')"
+          echo "shard=${{ matrix.shard }} passed=${passed} failed=${failed} skipped=${skipped}" | tee "shard-${{ matrix.shard }}-summary.txt"
+
+      - name: Upload shard summary
+        if: always()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: shard-${{ matrix.shard }}-summary
+          path: shard-${{ matrix.shard }}-summary.txt
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Upload shard diagnostic log on failure
+        if: failure()
+        uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+        with:
+          name: shard-${{ matrix.shard }}-diagnostics
+          path: shard-${{ matrix.shard }}.log
+          if-no-files-found: ignore
+          retention-days: 3
+
+  lifecycle-gate:
+    name: lifecycle shadow gate once
+    needs: build
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout exact source commit without credentials
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2153 # GitHub Actions injects SOURCE_REPO from step env.
+          git init "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          git remote add origin "https://github.com/${SOURCE_REPO}.git"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
+            "+refs/heads/${SOURCE_REF}:refs/checkout-ref"
+          git checkout --force --detach refs/checkout-ref
+          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+          GSD_SKIP_RTK_INSTALL: "1"
+          GSD_SKIP_DEP_REPAIR: "1"
+        run: pnpm install --frozen-lockfile
+
+      - name: Download build output
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: pre-review-sharded-build-output
+
+      - name: Extract build output
+        run: tar xzf build-output.tar.gz
+
+      - name: Run lifecycle shadow gate
+        env:
+          GSD_NATIVE_PREFER_LOCAL: "1"
+        run: pnpm run gate:lifecycle-shadow-no-cutover 2>&1 | tee lifecycle-shadow-gate.log
+
+  aggregate:
+    name: aggregate shard results
+    needs: [build, test-shard, lifecycle-gate]
+    if: always()
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Fail if any shard job failed
+        if: needs.test-shard.result != 'success'
+        run: |
+          echo "::error::One or more test-shard jobs did not succeed: ${{ needs.test-shard.result }}"
+          exit 1
+
+      - name: Fail if lifecycle gate failed
+        if: needs.lifecycle-gate.result != 'success'
+        run: |
+          echo "::error::lifecycle-gate did not succeed: ${{ needs.lifecycle-gate.result }}"
+          exit 1
+
+      - name: Download test manifest
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          name: pre-review-sharded-test-manifest
+
+      - name: Download shard summaries
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
+        with:
+          pattern: shard-*-summary
+          path: summaries
+          merge-multiple: true
+
+      - name: Prove manifest coverage
+        env:
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          node - <<'NODE'
+          const fs = require("fs");
+          const shardCount = Number(process.env.SHARD_COUNT);
+          const canonical = fs.readFileSync("test-manifest.txt", "utf8").trim().split("\n").filter(Boolean);
+          const reassembled = [];
+          for (let index = 1; index <= shardCount; index++) {
+            const file = `test-manifest-shard-${index}.txt`;
+            if (!fs.existsSync(file)) {
+              console.error(`::error::Missing shard manifest: ${file}`);
+              process.exit(1);
+            }
+            reassembled.push(...fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean));
+          }
+          if (reassembled.length !== new Set(reassembled).size) {
+            console.error("::error::Duplicate file assignment across shards.");
+            process.exit(1);
+          }
+          const left = [...canonical].sort();
+          const right = [...reassembled].sort();
+          if (left.length !== right.length || left.some((value, index) => value !== right[index])) {
+            console.error("::error::Shard partitions do not exactly reassemble the canonical manifest.");
+            process.exit(1);
+          }
+          console.log(`Manifest coverage proven: ${left.length} files assigned exactly once.`);
+          NODE
+
+      - name: Sum shard results
+        env:
+          SHARD_COUNT: ${{ inputs.shard_count }}
+        run: |
+          set -euo pipefail
+          total_passed=0
+          total_failed=0
+          total_skipped=0
+          shard_files=(summaries/shard-*-summary.txt)
+          if [[ ${#shard_files[@]} -ne ${SHARD_COUNT} ]]; then
+            echo "::error::Expected ${SHARD_COUNT} shard summaries, found ${#shard_files[@]}."
+            exit 1
+          fi
+          for file in "${shard_files[@]}"; do
+            cat "$file"
+            passed="$(grep -oE 'passed=[0-9]+' "$file" | cut -d= -f2)"
+            failed="$(grep -oE 'failed=[0-9]+' "$file" | cut -d= -f2)"
+            skipped="$(grep -oE 'skipped=[0-9]+' "$file" | cut -d= -f2)"
+            total_passed=$((total_passed + passed))
+            total_failed=$((total_failed + failed))
+            total_skipped=$((total_skipped + skipped))
+          done
+          echo "Aggregate: ${total_passed} passed, ${total_failed} failed, ${total_skipped} skipped"
+          if [[ "$total_failed" -ne 0 ]]; then
+            echo "::error::Aggregate reports ${total_failed} test failure(s)."
+            exit 1
+          fi
+
+      - name: Write final summary
+        if: always()
+        run: |
+          {
+            echo "### Sharded pre-review verification aggregate"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| source repo | ${{ inputs.source_repo }} |"
+            echo "| source ref | ${{ inputs.source_ref }} |"
+            echo "| expected sha | ${{ inputs.expected_sha }} |"
+            echo "| shard count | ${{ inputs.shard_count }} |"
+            echo "| authority | advisory pre-review signal only |"
+          } >> "$GITHUB_STEP_SUMMARY"
