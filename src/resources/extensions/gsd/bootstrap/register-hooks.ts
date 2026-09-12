@@ -20,6 +20,7 @@ import { getIsolationMode, resolveEffectiveUnitIsolationMode } from "../preferen
 import { isBlockedStateFile, isBashWriteToStateFile, BLOCKED_WRITE_ERROR } from "../write-intercept.js";
 import { loadFile, saveFile, formatContinue } from "../files.js";
 import {
+  autoSession,
   clearAutoCompletionStopInProgress,
   clearToolInvocationError,
   getAutoRuntimeSnapshot,
@@ -89,6 +90,7 @@ import { resolveWorkflowToolBasePath } from "./dynamic-tools.js";
 import { getRequiredWorkflowToolsForUnit } from "../unit-tool-contracts.js";
 import { flushAllManifests } from "../workflow-manifest.js";
 import { clearUnitHarnessAbort, recordUnitHarnessAbort, type UnitHarnessAbortRecord } from "../unit-runtime.js";
+import { captureAssistantRoutingStart, clearPendingModelRouting, consumeAssistantRoutingEnd } from "../model-attribution.js";
 import { clearNativeMilestoneStatusSourceRevisions } from "./query-tools.js";
 
 let approvalQuestionAbortInFlight = false;
@@ -1180,6 +1182,7 @@ export function registerHooks(
     resetWriteGateState(basePath);
     resetToolCallLoopGuard();
     clearNativeMilestoneStatusSourceRevisions();
+    clearPendingModelRouting();
     await applyToolCallLoopGuardConfig(basePath);
     approvalQuestionAbortInFlight = false;
     clearDeferredApprovalGate();
@@ -1275,6 +1278,7 @@ export function registerHooks(
     resetWriteGateState(basePath);
     resetToolCallLoopGuard();
     clearNativeMilestoneStatusSourceRevisions();
+    clearPendingModelRouting();
     await applyToolCallLoopGuardConfig(basePath);
     clearDeferredApprovalGate();
     clearDeferredDestructiveConfirmationPause();
@@ -1397,6 +1401,7 @@ export function registerHooks(
     recordRetryableTurnAbort(event);
     resetToolCallLoopGuard();
     resetPendingGatePauseGuard();
+    clearPendingModelRouting();
     await resetAskUserQuestionsTurnCache();
     const { handleAgentEnd } = await import("./agent-end-recovery.js");
     const agentEndBasePath = contextBasePath(ctx);
@@ -1434,12 +1439,23 @@ export function registerHooks(
     }
   });
 
+  // ADR-049 (#2208): snapshot the auto unit's routing at assistant message
+  // start so a unit transition mid-stream cannot relabel the in-flight
+  // response, then attach it on the matching message_end.
+  pi.on("message_start", async (event) => {
+    captureAssistantRoutingStart(event.message, autoSession.currentUnitRouting, isAutoActive());
+  });
+
   pi.on("message_end", async (event) => {
     const { suppressTerminalDeletedWorktreeMessageEnd } = await import("./agent-end-recovery.js");
     suppressTerminalDeletedWorktreeMessageEnd(event);
     if (isAutoActive()) {
       const { sanitizePrematureCloseoutMessageEnd } = await import("../auto-closeout-messaging.js");
       sanitizePrematureCloseoutMessageEnd(event);
+    }
+    const attributed = consumeAssistantRoutingEnd(event.message);
+    if (attributed) {
+      return { message: attributed };
     }
   });
 
@@ -1601,6 +1617,7 @@ export function registerHooks(
   });
 
   pi.on("session_shutdown", async (_event, ctx: ExtensionContext) => {
+    clearPendingModelRouting();
     const { isParallelActive, shutdownParallel } = await import("../parallel-orchestrator.js");
     if (isParallelActive()) {
       try {

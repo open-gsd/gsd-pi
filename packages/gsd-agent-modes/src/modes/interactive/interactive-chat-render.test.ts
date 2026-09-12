@@ -3,9 +3,13 @@
 
 import { describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentMessage } from "@gsd/pi-agent-core";
 import type { AssistantMessage } from "@gsd/pi-ai";
 import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
+import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "@gsd/pi-coding-agent/core/session-manager.js";
 import { Container } from "@gsd/pi-tui";
 import stripAnsi from "strip-ansi";
 
@@ -167,5 +171,103 @@ describe("interactive chat replay: aborted turns preserve completed tool results
 			/Operation aborted/,
 			"a tool with no result on an aborted turn should render as interrupted",
 		);
+	});
+});
+
+describe("model attribution survives session persistence and replay (ADR-049)", () => {
+	function routedAssistant(index: number, overrides: Record<string, unknown>): AgentMessage {
+		return {
+			id: `a-routed-${index}`,
+			role: "assistant",
+			provider: "openrouter",
+			model: "openrouter/auto",
+			timestamp: index,
+			stopReason: "stop",
+			content: [{ type: "text", text: `Routed answer ${index}` }],
+			...overrides,
+		} as unknown as AgentMessage;
+	}
+
+	function usage(): Record<string, unknown> {
+		return {
+			input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+	}
+
+	test("each reopened message keeps its own original attribution across a later model change", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "model-routing-replay-"));
+		try {
+			const session = SessionManager.create(process.cwd(), tempDir);
+			session.appendMessage(
+				routedAssistant(1, {
+					responseModel: "anthropic/claude-opus-4.7",
+					modelRouting: { source: "gsd-dynamic", tier: "heavy", modelDowngraded: true },
+				}) as AssistantMessage,
+			);
+			session.appendModelChange("openrouter", "gpt-5.6-luna");
+			session.appendMessage(
+				routedAssistant(2, {
+					model: "gpt-5.6-luna",
+					modelRouting: { source: "gsd-dynamic", tier: "light", modelDowngraded: false },
+				}) as AssistantMessage,
+			);
+
+			const sessionFile = findMostRecentSession(tempDir);
+			assert.ok(sessionFile, "session file must exist on disk");
+
+			// No schema-version bump: the additive field rides the v3 format.
+			const entries = loadEntriesFromFile(sessionFile);
+			const header = entries.find((e) => e.type === "session") as { version?: number };
+			assert.equal(header.version, 3);
+			const stored = entries.filter((e) => e.type === "message").map((e) => (e as { message: AssistantMessage }).message);
+			assert.deepEqual(stored[0].modelRouting, { source: "gsd-dynamic", tier: "heavy", modelDowngraded: true });
+			assert.deepEqual(stored[1].modelRouting, { source: "gsd-dynamic", tier: "light", modelDowngraded: false });
+
+			const reopened = SessionManager.open(sessionFile);
+			const host = createHost();
+			renderSessionContext(host, reopened.buildSessionContext());
+			const rendered = stripAnsi(host.chatContainer.render(120).join("\n"));
+
+			assert.match(rendered, /anthropic\/claude-opus-4\.7 ← openrouter\/auto \(dynamic\/heavy\)/);
+			assert.match(rendered, /gpt-5\.6-luna \(dynamic\/light\)/);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	test("legacy v3 JSONL messages without modelRouting render unchanged", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "model-routing-legacy-"));
+		try {
+			const sessionFile = join(tempDir, "legacy.jsonl");
+			const legacyMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "legacy answer" }],
+				api: "openai-completions",
+				provider: "openrouter",
+				model: "openrouter/auto",
+				usage: usage(),
+				stopReason: "stop",
+				timestamp: 1,
+			};
+			writeFileSync(
+				sessionFile,
+				'{"type":"session","version":3,"id":"legacy","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}\n' +
+					`${JSON.stringify({ type: "message", id: "1", parentId: null, timestamp: "2026-01-01T00:00:01.000Z", message: legacyMessage })}\n`,
+			);
+			assert.equal(readFileSync(sessionFile, "utf8").includes("modelRouting"), false);
+
+			const entries = loadEntriesFromFile(sessionFile);
+			const messages = entries.filter((e) => e.type === "message").map((e) => (e as { message: AgentMessage }).message);
+			const host = createHost();
+			renderSessionContext(host, { messages } as any);
+			const rendered = stripAnsi(host.chatContainer.render(120).join("\n"));
+
+			assert.match(rendered, /╭─ GSD · openrouter\/auto · /);
+			assert.doesNotMatch(rendered, /←/);
+			assert.doesNotMatch(rendered, /dynamic/);
+		} finally {
+			rmSync(tempDir, { recursive: true, force: true });
+		}
 	});
 });
