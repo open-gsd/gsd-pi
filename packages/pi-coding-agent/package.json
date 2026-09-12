@@ -33,8 +33,14 @@
     "copy-assets": "node scripts/copy-assets.cjs"
   },
   "dependencies": {
+    "@gsd/agent-core": "workspace:*",
+    "@gsd/native": "workspace:*",
+    "@gsd/pi-agent-core": "workspace:*",
+    "@gsd/pi-ai": "workspace:*",
+    "@gsd/pi-tui": "workspace:*",
     "@mariozechner/jiti": "^2.6.2",
     "@silvia-odwyer/photon-node": "0.3.4",
+    "@sinclair/typebox": "^0.34.41",
     "chalk": "5.6.2",
     "cross-spawn": "7.0.6",
     "diff": "8.0.4",
@@ -49,25 +55,19 @@
     "strip-ansi": "^7.1.0",
     "typebox": "1.1.38",
     "undici": "7.28.0",
-    "yaml": "2.9.0",
-    "@gsd/agent-core": "workspace:*",
-    "@gsd/native": "workspace:*",
-    "@gsd/pi-agent-core": "workspace:*",
-    "@gsd/pi-ai": "workspace:*",
-    "@gsd/pi-tui": "workspace:*",
-    "@sinclair/typebox": "^0.34.41"
+    "yaml": "2.9.0"
   },
   "devDependencies": {
-    "@types/sql.js": "^1.4.9",
     "@types/cross-spawn": "6.0.6",
     "@types/diff": "7.0.2",
     "@types/hosted-git-info": "3.0.5",
     "@types/ms": "2.1.0",
     "@types/node": "24.12.4",
     "@types/proper-lockfile": "4.1.4",
+    "@types/sql.js": "^1.4.9",
     "shx": "0.4.0",
     "typescript": "5.9.3",
-    "vitest": "4.1.0"
+    "vitest": "4.1.11"
   },
   "optionalDependencies": {
     "@mariozechner/clipboard": "0.3.6"
