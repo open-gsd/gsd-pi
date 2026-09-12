@@ -131,6 +131,46 @@ export {
 } from "./pending-auto-start.js";
 export { checkAutoStartAfterDiscuss } from "./discussion-handoff.js";
 
+/**
+ * Cap on how many quarantined file paths are listed by name in the self-heal
+ * notification before collapsing the rest into a "…and N more" summary line
+ * -- purely a display limit (e.g. a mass-rebuild quarantining 90 files
+ * shouldn't dump 90 lines into one notification), not a meaningful count.
+ */
+const MAX_QUARANTINED_PATHS_SHOWN = 5;
+
+/**
+ * Format the self-heal auto-rebuild success notification, including a note
+ * about any quarantined pre-rebuild bytes. rebuildMarkdownProjectionsFromDb
+ * already preserves externally-edited content into .gsd/quarantine/projections/
+ * before overwriting it with the DB's rendered version, but the auto-rebuild
+ * notification previously never mentioned this — a user could lose track of
+ * richer hand-authored content that got silently replaced with a sparser
+ * DB-derived render, with no visible pointer to where the original bytes went.
+ */
+export function formatMarkdownSelfHealNotification(rebuild: {
+  rendered: number;
+  errors: readonly string[];
+  quarantined: number;
+  quarantinedPaths: readonly string[];
+}): { message: string; level: "info" | "warning" } {
+  const quarantineNote = rebuild.quarantined > 0
+    ? `\n${rebuild.quarantined} file(s) had content that differed from the last DB-rendered version — `
+      + `the pre-rebuild bytes were preserved, not discarded, under:\n`
+      + rebuild.quarantinedPaths.slice(0, MAX_QUARANTINED_PATHS_SHOWN).map((p) => `  ${p}`).join("\n")
+      + (rebuild.quarantinedPaths.length > MAX_QUARANTINED_PATHS_SHOWN
+        ? `\n  …and ${rebuild.quarantinedPaths.length - MAX_QUARANTINED_PATHS_SHOWN} more`
+        : "")
+      + "\nReview those files before assuming the rebuilt markdown is complete — "
+      + "the DB row may be sparser than what was quarantined."
+    : "";
+  const message = `Self-heal: rebuilt markdown projections from the authoritative DB `
+    + `(${rebuild.rendered} rendered${rebuild.errors.length > 0 ? `, ${rebuild.errors.length} error(s)` : ""}).`
+    + quarantineNote;
+  const level = rebuild.errors.length > 0 || rebuild.quarantined > 0 ? "warning" : "info";
+  return { message, level };
+}
+
 export function shouldSkipGitBootstrapAfterInit(result: { gitEnabled?: boolean }): boolean {
   return result.gitEnabled === false;
 }
@@ -2074,11 +2114,8 @@ export async function showSmartEntry(
               const after = await checkMarkdownHierarchyAgainstDb(basePath);
               if (after.action === "none") {
                 clearMarkdownAutoRebuildBackoff();
-                ctx.ui.notify(
-                  `Self-heal: rebuilt markdown projections from the authoritative DB ` +
-                    `(${rebuild.rendered} rendered${rebuild.errors.length > 0 ? `, ${rebuild.errors.length} error(s)` : ""}).`,
-                  rebuild.errors.length > 0 ? "warning" : "info",
-                );
+                const { message, level } = formatMarkdownSelfHealNotification(rebuild);
+                ctx.ui.notify(message, level);
               } else {
                 if (after.recoveryCommand === "/gsd rebuild markdown") {
                   recordMarkdownAutoRebuildFailure(after);
