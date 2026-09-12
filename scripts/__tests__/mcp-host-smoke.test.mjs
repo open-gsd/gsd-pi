@@ -4,6 +4,7 @@ import test from "node:test";
 import {
 	assertProgressResult,
 	assertSnapshotResult,
+	assertFixtureDbValues,
 	parseToolTextPayload,
 } from "../mcp-host-smoke.mjs";
 
@@ -61,6 +62,17 @@ test("import exposes assertions without starting the MCP runtime", () => {
 
 test("progress accepts current DB provenance and additive fields", () => {
 	assert.deepEqual(assertProgressResult(resultFor({ ...progress, futureField: true })), { ...progress, futureField: true });
+});
+
+test("fixture evidence requires the seeded DB value rather than projection text", () => {
+	assert.doesNotThrow(() => assertFixtureDbValues(
+		{ activeMilestone: { id: "M001", title: "Authority Fixture" } },
+		{ current: { activeMilestone: { id: "M001", title: "Authority Fixture" } } },
+	));
+	expectFailure(() => assertFixtureDbValues(
+		{ activeMilestone: { id: "M999", title: "Projection Only" } },
+		{ current: { activeMilestone: { id: "M001", title: "Authority Fixture" } } },
+	), "seeded M001");
 });
 
 test("progress rejects errors, malformed text, null/array payloads, and projection provenance", () => {

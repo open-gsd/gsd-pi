@@ -10,7 +10,7 @@
 //   node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types scripts/mcp-host-smoke.mjs
 // Optional: --project <absolute dir> to probe a real project instead of the fixture.
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import process from "node:process";
@@ -184,6 +184,15 @@ export function assertSnapshotResult(result) {
 	return assertSnapshotPayload(payload, result.structuredContent);
 }
 
+export function assertFixtureDbValues(progress, snapshot) {
+	if (progress.activeMilestone?.id !== "M001" || progress.activeMilestone?.title !== "Authority Fixture") {
+		throw new Error("fixture DB evidence: progress did not return the seeded M001 Authority Fixture");
+	}
+	if (snapshot.current.activeMilestone?.id !== "M001" || snapshot.current.activeMilestone?.title !== "Authority Fixture") {
+		throw new Error("fixture DB evidence: snapshot did not return the seeded M001 Authority Fixture");
+	}
+}
+
 async function main() {
 	const cliJs = resolve(repoRoot, "packages/mcp-server/dist/cli.js");
 	if (!existsSync(cliJs)) {
@@ -199,6 +208,9 @@ async function main() {
 		? process.argv[process.argv.indexOf("--project") + 1]
 		: null;
 	const fixture = argProject ? null : await createWorkflowAuthorityFixture();
+	if (fixture) {
+		writeFileSync(resolve(fixture.root, ".gsd", "STATE.md"), "**Active Milestone:** M999: Projection Only\n**Phase:** plan\n");
+	}
 	const projectDir = argProject ? realpathSync(argProject) : fixture.root;
 	const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 	const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
@@ -238,9 +250,12 @@ async function main() {
 			if (!names.includes("gsd_project_snapshot")) throw new Error("tool missing");
 		});
 		const progress = await client.callTool({ name: "gsd_progress", arguments: { projectDir } });
-		record("gsd_progress: DB-authoritative payload", () => assertProgressResult(progress));
+		const progressPayload = assertProgressResult(progress);
+		record("gsd_progress: DB-authoritative payload", () => progressPayload);
 		const snapshot = await client.callTool({ name: "gsd_project_snapshot", arguments: { projectDir } });
-		record("gsd_project_snapshot: bounded authoritative parity", () => assertSnapshotResult(snapshot));
+		const snapshotPayload = assertSnapshotResult(snapshot);
+		record("gsd_project_snapshot: bounded authoritative parity", () => snapshotPayload);
+		if (fixture) record("fixture: DB values override mismatched projection", () => assertFixtureDbValues(progressPayload, snapshotPayload));
 	} catch (error) {
 		record("probe completed without transport/protocol error", () => {
 			const detail = error instanceof Error ? error.message : String(error);
