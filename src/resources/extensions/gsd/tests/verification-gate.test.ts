@@ -1116,6 +1116,61 @@ test("validateVerificationCommand allows grep patterns with quoted pipes", () =>
   assert.equal(validateVerificationCommand("grep -c '^## SectionA\\|^### Sub1\\|^### Sub2' notes.md").ok, true);
 });
 
+test("isLikelyCommand: quoted segments are shell data, not prose (issue #2290)", () => {
+  // The reporter's verify: the quoted grep pattern contains prose marker
+  // words ("from", "the"), but quoted text is shell data — it must not flip
+  // a runnable command to prose.
+  assert.equal(
+    isLikelyCommand("bash scripts/hello-seat.sh && test -x scripts/hello-seat.sh && grep -q 'hello from the localnodes seat' scripts/hello-seat.sh"),
+    true,
+  );
+  // Minimal case: the quoted segment is the only content beside the prefix.
+  assert.equal(isLikelyCommand("grep -q 'hello from the localnodes seat' scripts/hello-seat.sh"), true);
+  assert.equal(isLikelyCommand('grep -q "the pattern contains that" file.txt'), true);
+});
+
+test("isLikelyCommand: unquoted prose after a command word is still rejected (issue #2290 control)", () => {
+  assert.equal(isLikelyCommand("bash scripts/x.sh and then verify the outcome manually"), false);
+});
+
+test("isLikelyCommand: escaped quote inside double quotes stays shell data (issue #2290)", () => {
+  // `\"` does not close the double-quoted segment, so "and the rest" stays
+  // quoted data instead of leaking into the prose heuristic.
+  assert.equal(isLikelyCommand('grep -q "say \\"from\\" and the rest" file.txt'), true);
+});
+
+test("isLikelyCommand: unterminated quote is left intact for prose detection (issue #2290)", () => {
+  // A quote that never closes leaves the quoting state unresolved, so nothing
+  // is stripped and the prose heuristic still sees the remainder — this
+  // protects #1671-style prose that contains an apostrophe (dell'esempio).
+  assert.equal(validateVerificationCommand("grep 'hello from the that").ok, false);
+  // A clean remainder still validates as a command; if the quote is genuinely
+  // malformed the shell fails loudly at execution (unexpected EOF). The
+  // shell-syntax rule does not flag unterminated quotes.
+  assert.equal(isLikelyCommand("grep 'needle in haystack file.txt"), true);
+});
+
+test("isLikelyCommand: backtick segments are not stripped (issue #2290)", () => {
+  // Backticks are command substitution, not quoted data — their content still
+  // feeds the prose heuristic. Backtick commands are already rejected earlier
+  // by the shell-syntax rule in validateVerificationCommand.
+  assert.equal(isLikelyCommand("echo `from the that` file"), false);
+});
+
+test("isLikelyCommand: token-count guard uses the full command, not the stripped stream (issue #2290)", () => {
+  // Stripping leaves "contains" as the only marker word and drops the stream
+  // below four tokens — the minimum must be measured on the original stream
+  // so unquoted prose is still rejected.
+  assert.equal(isLikelyCommand('./report.txt contains "hello world"'), false);
+});
+
+test("isLikelyCommand: escaped quotes outside quoted segments stay in the token stream (issue #2290)", () => {
+  // `\'` is an escaped literal quote, not a quote delimiter — the pair must
+  // not vanish from the stripped stream, or the inner word ("the") would be
+  // misread as an unquoted prose marker.
+  assert.equal(isLikelyCommand("grep -q \\'the\\' file.txt"), true);
+});
+
 test("validateVerificationCommand allows exit-code echo diagnostic suffix", () => {
   assert.equal(validateVerificationCommand('python3 tools/check-status.py; echo "exit:$?"').ok, true);
   assert.equal(validateVerificationCommand("python3 tools/check-status.py; echo 'exit:$?'").ok, true);

@@ -643,14 +643,68 @@ const PROSE_MARKER_WORDS = new Set([
 ]);
 
 /**
+ * Remove quoted segments from a command string. Quoted text is shell data,
+ * not prose (#2290). Single quotes contain no escapes; `\"` and `\\` escape
+ * inside double quotes. Escaped pairs outside quotes (e.g. `\'`) are literals
+ * and are kept verbatim. Backticks are command substitution, not quoted data,
+ * and are left intact. If a quote never closes, the string is returned
+ * unchanged: the remainder is ambiguous shell input, so the prose heuristic
+ * keeps seeing it (protects #1671-style prose containing apostrophes).
+ */
+function stripQuotedSegments(cmd: string): string {
+  let out = "";
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (let i = 0; i < cmd.length; i += 1) {
+    const ch = cmd[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      if (inDouble) {
+        // Inside double quotes the pair is quoted data — drop it, and make
+        // sure an escaped quote cannot close the segment.
+        escaped = true;
+        continue;
+      }
+      // Outside quotes the pair is a literal: keep both characters so the
+      // token stream keeps its shape (e.g. \' is data, not a quote delimiter).
+      out += ch;
+      if (i + 1 < cmd.length) {
+        out += cmd[i + 1];
+        i += 1;
+      }
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === "\"" && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (!inSingle && !inDouble) out += ch;
+  }
+
+  if (inSingle || inDouble || escaped) return cmd;
+  return out;
+}
+
+/**
  * Does a known-command-prefixed string read as prose rather than a command?
  * True when there are English function words after the command word —
  * e.g. "git log shows the scaffold commit authored by ...".
  * Flags after the command word do not suppress this check (#1671).
+ * The token-count minimum runs on the full token stream; `proseTokens` (with
+ * quoted segments stripped, #2290) is only used for marker-word matching.
  */
-function readsAsProseAfterCommandWord(tokens: string[]): boolean {
+function readsAsProseAfterCommandWord(tokens: string[], proseTokens: string[]): boolean {
   if (tokens.length < 4) return false;
-  return tokens
+  return proseTokens
     .slice(1)
     .some(t => PROSE_MARKER_WORDS.has(t.toLowerCase().replace(/[.,;:!?]+$/, "")));
 }
@@ -684,16 +738,24 @@ export function isLikelyCommand(cmd: string): boolean {
   const effectiveTokens = firstToken === "!" ? tokens.slice(1) : tokens;
   if (firstToken === "!" && effectiveTokens.length === 0) return false;
 
+  // Quoted segments are shell data, not prose (#2290): words inside quotes
+  // (e.g. a `grep 'hello from the seat'` pattern) must not reach the prose
+  // heuristic. Only the prose-word evaluation sees the stripped stream —
+  // prefix, path, and flag detection still run on the full command.
+  const stripped = stripQuotedSegments(trimmed).trim();
+  const strippedTokens = stripped ? stripped.split(/\s+/) : [];
+  const proseTokens = firstToken === "!" ? strippedTokens.slice(1) : strippedTokens;
+
   // Known command prefix → command, unless the rest reads as English prose
   if (KNOWN_COMMAND_PREFIXES.has(effectiveFirstToken)) {
-    return !readsAsProseAfterCommandWord(effectiveTokens);
+    return !readsAsProseAfterCommandWord(effectiveTokens, proseTokens);
   }
 
   // Path-like first token → command, unless the rest reads as English prose.
   // "./out/report.txt exists and contains the summary" is a description of a
   // file, not an invocation of it.
   if (effectiveFirstToken.startsWith("/") || effectiveFirstToken.startsWith("./") || effectiveFirstToken.startsWith("../")) {
-    return !readsAsProseAfterCommandWord(effectiveTokens);
+    return !readsAsProseAfterCommandWord(effectiveTokens, proseTokens);
   }
 
   // Has flag-like tokens → command
@@ -716,7 +778,7 @@ export function isLikelyCommand(cmd: string): boolean {
   // — `greet/hello.txt exists and contains "hello"` ran the .txt file as a
   // program and failed with exit 126 "Permission denied", failing the gate for
   // a task that had in fact succeeded. English function words are the tell.
-  return !readsAsProseAfterCommandWord(effectiveTokens);
+  return !readsAsProseAfterCommandWord(effectiveTokens, proseTokens);
 }
 
 /**
