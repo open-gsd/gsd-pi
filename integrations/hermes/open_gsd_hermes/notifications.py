@@ -40,9 +40,9 @@ class NotificationService:
         if level == "verbose":
             return True
         if level == "quiet":
-            return kind in ("blocker", "failure", "complete")
+            return kind in ("blocker", "failure", "complete", "stall")
         # normal
-        return kind in ("blocker", "transition", "failure", "complete")
+        return kind in ("blocker", "transition", "failure", "complete", "stall")
 
     def send(
         self,
@@ -97,6 +97,22 @@ class NotificationService:
         self, message: str, target: DeliveryTarget | None = None
     ) -> None:
         self.send(f"📋 GSD: {message}", kind="transition", target=target)
+
+    def notify_stall(
+        self,
+        where: str,
+        idle_minutes: int,
+        doctor_head: str = "",
+        target: DeliveryTarget | None = None,
+    ) -> None:
+        msg = (
+            f"⏳ GSD looks stalled: still running on {where} with no progress for "
+            f"{idle_minutes} min."
+        )
+        if doctor_head:
+            msg += f" gsd doctor: {doctor_head}"
+        msg += " Check `/gsd status`; `/gsd cancel` to stop the session."
+        self.send(msg, kind="stall", target=target)
 
     def notify_milestone_complete(
         self, message: str, target: DeliveryTarget | None = None

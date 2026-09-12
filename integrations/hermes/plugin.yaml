@@ -40,3 +40,7 @@ config_schema:
           type: string
           enum: [quiet, normal, verbose]
           default: normal
+        stall_minutes:
+          type: integer
+          default: 20
+          description: Minutes a running session may go without a progress change before one stall notification is sent
