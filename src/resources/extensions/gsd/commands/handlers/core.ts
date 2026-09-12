@@ -5,7 +5,7 @@ import { createRequire } from "node:module";
 
 import { computeProgressScore, formatProgressLine } from "../../progress-score.js";
 import { isRepositoryDirty } from "../../git-service.js";
-import { loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath, getProjectGSDPreferencesPath, availableModelIdsFromRegistry, modelIdsForProfileResolution, resolveProfileAnchorProvider, resolveDisabledModelProvidersFromPreferences } from "../../preferences.js";
+import { loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath, getProjectGSDPreferencesPath } from "../../preferences.js";
 import { createRepositoryRegistryFromPreferences } from "../../repository-registry.js";
 import { ensurePreferencesFile, handlePrefs, handlePrefsMode, handlePrefsWizard, handleLanguage } from "../../commands-prefs-wizard.js";
 import { runEnvironmentChecks } from "../../doctor-environment.js";
@@ -586,16 +586,8 @@ export async function handleCoreCommand(
     return true;
   }
   if (trimmed === "show-config") {
-    const { GSDConfigOverlay, formatConfigText } = await import("../../config-overlay.js");
-    const basePath = projectRoot();
-    const anchorProvider = resolveProfileAnchorProvider(ctx.model?.provider);
-    const disabledProviders = resolveDisabledModelProvidersFromPreferences();
-    const availableModelIds = modelIdsForProfileResolution(ctx.modelRegistry, anchorProvider, disabledProviders);
-    const configOptions = {
-      basePath,
-      ...(availableModelIds && availableModelIds.length > 0 ? { availableModelIds } : {}),
-      ...(ctx.model ? { preferredModelId: `${ctx.model.provider}/${ctx.model.id}` } : {}),
-    };
+    const { GSDConfigOverlay, formatConfigText, buildCollectConfigOptions } = await import("../../config-overlay.js");
+    const configOptions = buildCollectConfigOptions(ctx, projectRoot());
     const result = await ctx.ui.custom<boolean>(
       (tui, theme, _kb, done) => new GSDConfigOverlay(tui, theme, () => done(true), configOptions),
       {

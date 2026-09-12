@@ -89,6 +89,11 @@ export function getTemplatesDir(): string {
   return templatesDir;
 }
 
+/** Shipped preferences field guide (exists under the resolved extension dir). */
+export function getPreferencesReferencePath(): string {
+  return join(__extensionDir, "docs", "preferences-reference.md");
+}
+
 // Cache all templates from a startup snapshot — a running session uses the
 // template versions that were on disk near startup, immune to later overwrites.
 const templateCache = new Map<string, string>();
