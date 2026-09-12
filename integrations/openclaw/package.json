@@ -1,0 +1,70 @@
+{
+  "name": "@opengsd/open-gsd-openclaw",
+  "version": "1.19.0",
+  "description": "GSD Pi over MCP with automatic OpenClaw project, TaskFlow, and Workboard synchronization",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/open-gsd/gsd-pi.git",
+    "directory": "integrations/openclaw"
+  },
+  "homepage": "https://github.com/open-gsd/gsd-pi/tree/main/integrations/openclaw#readme",
+  "bugs": {
+    "url": "https://github.com/open-gsd/gsd-pi/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.test.*",
+    "openclaw.plugin.json",
+    "skills",
+    "README.md"
+  ],
+  "openclaw": {
+    "extensions": [
+      "./dist/index.js"
+    ],
+    "install": {
+      "npmSpec": "@opengsd/open-gsd-openclaw",
+      "defaultChoice": "npm",
+      "minHostVersion": ">=2026.9.2"
+    },
+    "compat": {
+      "pluginApi": ">=2026.9.2",
+      "minGatewayVersion": "2026.9.2"
+    },
+    "build": {
+      "openclawVersion": "2026.9.2",
+      "pluginSdkVersion": "2026.9.2"
+    }
+  },
+  "scripts": {
+    "build": "node ../../scripts/clean-package-dist.cjs && tsc -p tsconfig.json --incremental false",
+    "test": "pnpm run build && node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.12.0",
+    "typescript": "^5.4.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "openclaw",
+    "openclaw-plugin",
+    "gsd",
+    "opengsd",
+    "coding-agent"
+  ]
+}

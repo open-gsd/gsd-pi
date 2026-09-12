@@ -1,0 +1,95 @@
+# OpenClaw × GSD: native host contracts, read seam, and offline package compatibility.
+name: OpenClaw Integration
+
+on:
+  pull_request:
+    paths:
+      - 'integrations/openclaw/**'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'scripts/clean-package-dist.cjs'
+      - 'scripts/lib/version-sync.cjs'
+      - 'src/read-cli.ts'
+      - 'src/headless.ts'
+      - 'src/headless-ui.ts'
+      - 'src/headless-events.ts'
+      - 'packages/mcp-server/**'
+      - 'packages/rpc-client/**'
+      - '.github/workflows/openclaw-integration.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'integrations/openclaw/**'
+      - 'package.json'
+      - 'pnpm-workspace.yaml'
+      - 'scripts/clean-package-dist.cjs'
+      - 'scripts/lib/version-sync.cjs'
+      - 'src/read-cli.ts'
+      - 'src/headless.ts'
+      - 'src/headless-ui.ts'
+      - 'src/headless-events.ts'
+      - 'packages/mcp-server/**'
+      - 'packages/rpc-client/**'
+      - '.github/workflows/openclaw-integration.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: openclaw-integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin-tests:
+    name: plugin-tests
+    timeout-minutes: 20
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.12.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24.15.0'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+          GSD_SKIP_RTK_INSTALL: '1'
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Build core (gsd read CLI)
+        run: pnpm run build:core
+
+      - name: Build host integrations (plugin dist)
+        run: pnpm run build:integrations
+
+      - name: Install isolated OpenClaw host
+        run: npm install --prefix "$RUNNER_TEMP/openclaw-host" --ignore-scripts --no-audit --no-fund --package-lock=false openclaw@2026.9.2
+
+      - name: Native host contract tests (no model calls)
+        run: OPENCLAW_BIN="$RUNNER_TEMP/openclaw-host/node_modules/.bin/openclaw" pnpm --filter @opengsd/open-gsd-openclaw test
+
+      - name: OpenClaw plugin compatibility (offline)
+        run: |
+          mkdir -p /tmp/plugin-inspector && cd /tmp/plugin-inspector
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund @openclaw/plugin-inspector@0.3.24
+          cd "$GITHUB_WORKSPACE/integrations/openclaw"
+          /tmp/plugin-inspector/node_modules/.bin/plugin-inspector ci --no-openclaw --runtime --mock-sdk --allow-execute
+
+      - name: Upload plugin-inspector reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: plugin-inspector-reports
+          path: integrations/openclaw/reports/plugin-inspector-*
+          if-no-files-found: ignore

@@ -208,6 +208,15 @@ importers:
         specifier: ^0.34.41
         version: 0.34.49
 
+  integrations/openclaw:
+    devDependencies:
+      '@types/node':
+        specifier: ^24.12.0
+        version: 24.12.4
+      typescript:
+        specifier: ^5.4.0
+        version: 5.9.3
+
   packages/contracts: {}
 
   packages/daemon:
