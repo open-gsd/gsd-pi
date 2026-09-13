@@ -318,7 +318,10 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
   if (!isDbAvailable()) return { ok: false, error: 'workflow database unavailable' };
   try {
     const db = _getAdapter()!;
-    const { milestone, slice, task } = parseUnitId(unitId);
+    const { milestone, slice, task: rawTask } = parseUnitId(unitId);
+    // gate-evaluate dispatch ids end in `gates+<gate-ids>` — a gate list, not
+    // a task id. Strip it so the unit resolves to its milestone/slice target.
+    const task = rawTask?.startsWith('gates+') ? undefined : rawTask;
     if (!milestone) return { ok: true, hash: null };
     const rows: unknown[] = [];
     const strip = (r: Record<string, unknown>): Record<string, unknown> => {
@@ -351,6 +354,18 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
              FROM quality_gates
             WHERE milestone_id = :m AND slice_id = :s AND gate_id = 'UAT'
             ORDER BY task_id`,
+          { ':m': milestone, ':s': slice },
+        );
+      } else if (unitType === 'gate-evaluate') {
+        // gate-evaluate's target rows are the slice's quality_gates verdicts:
+        // persisting them is the unit's entire job, so a saved verdict (or a
+        // newly inserted gate row) must move this hash or the unit can never
+        // clear a completed-no-advance wedge (#2310).
+        collect(
+          `SELECT milestone_id, slice_id, gate_id, scope, task_id, status, verdict
+             FROM quality_gates
+            WHERE milestone_id = :m AND slice_id = :s
+            ORDER BY gate_id, task_id`,
           { ':m': milestone, ':s': slice },
         );
       }

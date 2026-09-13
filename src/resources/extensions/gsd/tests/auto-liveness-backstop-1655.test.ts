@@ -15,6 +15,8 @@ import {
   insertSlice,
   insertTask,
   insertAssessment,
+  insertGateRow,
+  saveGateResult,
   updateTaskStatus,
 } from '../gsd-db.ts';
 import {
@@ -345,6 +347,92 @@ test('ADR-047: run-uat target advances when a retried assessment changes verdict
     passed,
     'new attempt metadata without a verdict change is not target advancement',
   );
+});
+
+test('#2310: gate-evaluate target advances when a gate verdict is saved', (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'S', status: 'complete', depends: [] });
+  insertGateRow({ milestoneId: 'M001', sliceId: 'S01', gateId: 'Q3', scope: 'slice', status: 'pending' });
+  insertGateRow({ milestoneId: 'M001', sliceId: 'S01', gateId: 'Q4', scope: 'slice', status: 'pending' });
+
+  // Dispatch-shape unit id: gate list in the final segment, no task.
+  const unitId = 'M001/S01/gates+Q3,Q4';
+  const wedged = readTargetSnapshot('gate-evaluate', unitId);
+  assert.ok(wedged, 'snapshot available for a gate-evaluate unit id');
+
+  // What gsd_save_gate_result does: persist one verdict.
+  saveGateResult({
+    milestoneId: 'M001',
+    sliceId: 'S01',
+    gateId: 'Q3',
+    verdict: 'pass',
+    rationale: 'ok',
+    findings: '',
+  });
+  assert.notEqual(
+    readTargetSnapshot('gate-evaluate', unitId),
+    wedged,
+    'a persisted gate verdict must move the gate-evaluate target hash',
+  );
+
+  // A newly appearing gate row is target work too.
+  const afterSave = readTargetSnapshot('gate-evaluate', unitId);
+  insertGateRow({ milestoneId: 'M001', sliceId: 'S01', gateId: 'Q5', scope: 'slice', status: 'pending' });
+  assert.notEqual(
+    readTargetSnapshot('gate-evaluate', unitId),
+    afterSave,
+    'a newly inserted gate row must move the gate-evaluate target hash',
+  );
+});
+
+test('#2310: unchanged gate rows keep the gate-evaluate target hash stable', (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'S', status: 'complete', depends: [] });
+  insertGateRow({ milestoneId: 'M001', sliceId: 'S01', gateId: 'Q3', scope: 'slice', status: 'pending' });
+  insertGateRow({ milestoneId: 'M001', sliceId: 'S01', gateId: 'Q4', scope: 'slice', status: 'pending' });
+
+  const unitId = 'M001/S01/gates+Q3,Q4';
+  const first = readTargetSnapshot('gate-evaluate', unitId);
+  assert.equal(readTargetSnapshot('gate-evaluate', unitId), first, 'untouched gate rows keep the hash');
+
+  // After verdicts land, the hash pins at the new value until further work.
+  saveGateResult({
+    milestoneId: 'M001',
+    sliceId: 'S01',
+    gateId: 'Q3',
+    verdict: 'flag',
+    rationale: 'needs attention',
+    findings: '',
+  });
+  const afterVerdict = readTargetSnapshot('gate-evaluate', unitId);
+  assert.notEqual(afterVerdict, first);
+  assert.equal(readTargetSnapshot('gate-evaluate', unitId), afterVerdict, 'unchanged post-verdict rows keep the hash');
+});
+
+test('#2310: run-uat target hash stays pinned while its rows are untouched', (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'S', status: 'complete', depends: [] });
+  insertAssessment({
+    path: '.gsd/phases/01-fixture/01-01-ASSESSMENT.md',
+    milestoneId: 'M001',
+    sliceId: 'S01',
+    status: 'fail',
+    scope: 'run-uat',
+    fullContent: 'attempt failed',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  });
+
+  const first = readTargetSnapshot('run-uat', 'M001/S01');
+  assert.equal(readTargetSnapshot('run-uat', 'M001/S01'), first, 'untouched run-uat rows keep the hash');
 });
 
 test('ADR-047: stable guard identity isolates identical payloads from different guards', (t) => {
