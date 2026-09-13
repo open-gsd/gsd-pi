@@ -28,16 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.19.0**
+Latest release: **v1.20.0**
 
-- **vscode:** Add Copilot project read tools.
-- **gsd:** Expose progress read metadata.
-- **mcp:** GSD-side smoke probe and per-host checklist for canonical read tools (#2174).
-- **vscode:** Show DB-authoritative project progress in sidebar (#2136) (#2143).
-- **gsd:** Add gsd_project_snapshot canonical DB read tool (#2170).
-- **gsd:** Delete dead planner-handoff module (#2149).
-- **gsd:** Stop husk-task gates from wedging milestone closeout.
-- **gsd:** Rebuild markdown projections at the invocation root.
+- **hermes:** Notify on a stalled running session (#2210).
+- **gsd:** Preserve effective model and routing provenance on assistant messages (#2285).
+- **gsd:** Show current dispatched model in the AUTO status strip (#2262).
+- **deps:** Bump sharp to 0.35.4 and vitest to 4.1.11.
+- **models:** Reconcile model-router registry with the 2026-09 catalog refresh.
+- **models:** Refresh generated model catalog.
+- **deps:** Bump next from 16.2.11 to 16.3.3.
+- **gsd:** Scope external skill activation reads.
 
 <!-- release-highlights:end -->
 

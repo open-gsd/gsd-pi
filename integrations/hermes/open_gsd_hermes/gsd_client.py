@@ -219,7 +219,7 @@ class GsdMcpClient:
                 "params": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "open-gsd-hermes", "version": "1.19.0"},
+                    "clientInfo": {"name": "open-gsd-hermes", "version": "1.20.0"},
                 },
             }
         )

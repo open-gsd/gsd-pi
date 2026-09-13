@@ -8,6 +8,56 @@ This changelog starts from the `open-gsd/gsd-pi` ownership baseline. Earlier pro
 
 ## [Unreleased]
 
+## [1.20.0] - 2026-09-12
+
+### Added
+- **hermes**: notify on a stalled running session (#2210)
+- **gsd**: preserve effective model and routing provenance on assistant messages (#2285)
+- **gsd**: show current dispatched model in the AUTO status strip (#2262)
+
+### Fixed
+- **gsd**: scope external skill activation reads
+- **gsd**: embed effective config in /gsd settings prompt (#2303)
+- **gsd**: tolerate "Provider error:" prefix on status-only 400 (wedge W-a8123253)
+- **gsd**: classify status-only '400 Bad Request' as transient network error
+- **gsd**: omit legacy verdict override from adopted milestone blockers
+- **hermes**: mark MCP sidecar GSD_MCP_CLIENT_MANAGED to survive executor spawn
+- **gsd**: render the subjective UAT answer binding in the prepare tool text (#2298)
+- **hermes**: capture the delivery target per run so async notifications arrive (#2293)
+- **gsd**: quoted shell arguments no longer feed the verify prose heuristic (#2292)
+- **gsd**: stop launch cleanup from deleting user-owned skill directories (#2289)
+- **github-sync**: honor git.merge_strategy when merging slice PRs (#2280)
+- **gsd**: stop emitting trailing whitespace in summary frontmatter (#2254)
+- **gsd**: pause recovery-exhausted validate-milestone instead of clobbering VALIDATION.md (#2252)
+- **gsd**: surface quarantined bytes in self-heal message
+- **gsd**: surface unresolved recover diagnoses with file/line
+- **gsd**: surface foreign-key violations in recover errors
+- **gsd**: explain missing-PLAN lifecycle recover failures
+- **gsd**: add consistent baseline formatting for legacy-import errors
+- **mcp**: verify DB values against mismatched projections
+- **tui**: stop pinned zone mirroring text still visible in the transcript
+- **gsd**: add blocker-accepted closeout disposition with no-rerun replan (#2284)
+- **gsd**: converge journaled exchange replay before replaying identities (#2283)
+- **gsd**: surface the recovery action id on blocker receipts (#2271)
+- **gsd**: parse flags out of the /gsd park milestone id (#2270)
+- **gsd**: surface park DB-sync failures and make failed parks retryable (#2269)
+- **mcp**: match smoke counts to producer contract
+- **mcp**: tighten smoke probe payload validation
+- **mcp**: validate canonical read evidence in host smoke probe
+- **gsd**: make plan-slice re-dispatch idempotent over existing pending rows (#2266)
+- preserve abort origins and record timeout dispatch failures (#2265)
+- **gsd**: let milestone.validate persist non-pass verdicts (V49) (#2264)
+- **gsd**: accept UAT in gsd_summary_save (#2263)
+- **gsd**: actionable error when test resolver hits an unbuilt workspace dist (#2261)
+- **gsd**: accept decorated and descriptive verdict strings at the gate (#2260)
+- **gsd**: disable _desiredSegmentsCache to fix streaming regression
+
+### Changed
+- **deps**: bump sharp to 0.35.4 and vitest to 4.1.11
+- **models**: reconcile model-router registry with the 2026-09 catalog refresh
+- **models**: refresh generated model catalog
+- **deps**: bump next from 16.2.11 to 16.3.3
+
 ## [1.19.0] - 2026-09-09
 
 ### Added

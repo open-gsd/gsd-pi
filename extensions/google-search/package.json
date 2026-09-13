@@ -1,6 +1,6 @@
 {
   "name": "@gsd-extensions/google-search",
-  "version": "1.19.0",
+  "version": "1.20.0",
   "description": "Web search via Google with AI-synthesized answers and source citations",
   "type": "module",
   "keywords": [
