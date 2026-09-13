@@ -216,6 +216,48 @@ test("enterMilestone returns ok:true mode:none when isolation disabled", () => {
   assert.equal(s.basePath, "/project");
 });
 
+test("enterMilestone classifies a stale worktree registration as stale-worktree-registration (#2317)", (t) => {
+  // Issue #2317: after a reconcile-removal, git's .git/worktrees/<name> admin
+  // metadata can survive (locked entry). On resume, enterMilestone must
+  // classify this failure so auto-mode can STOP instead of resuming onto the
+  // project root and operating on the wrong tree.
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  t.after(() => cleanupRepoBase(base, previousCwd));
+
+  // First entry (fresh session) creates the worktree for real.
+  const first = new WorktreeLifecycle(
+    makeSession({ basePath: base, originalBasePath: base }),
+    makeDeps(),
+  ).enterMilestone("M001", makeCtx());
+  assert.equal(first.ok, true, `fixture precondition: first entry should succeed: ${JSON.stringify(first)}`);
+
+  // Orphan the worktree: lock the registration, remove the directory.
+  const wtPath = join(base, ".gsd-worktrees", "M001");
+  execFileSync("git", ["worktree", "lock", wtPath], { cwd: base, stdio: "pipe" });
+  rmSync(wtPath, { recursive: true, force: true });
+
+  // Resume = fresh session re-entering the milestone.
+  const s2 = makeSession({ basePath: base, originalBasePath: base });
+  const ctx2 = makeCtx();
+  const result = new WorktreeLifecycle(s2, makeDeps()).enterMilestone("M001", ctx2);
+
+  assert.equal(result.ok, false, "expected ok:false");
+  if (!result.ok) {
+    assert.equal(
+      result.reason,
+      "stale-worktree-registration",
+      `expected reason stale-worktree-registration, got: ${result.reason}`,
+    );
+  }
+  // Interactive session-level degrade is preserved (established pattern).
+  assert.equal(s2.isolationDegraded, true, "isolation should be flagged degraded for the session");
+  assert.ok(
+    ctx2.messages.some((m) => m.level === "warning" && m.msg.includes("stale worktree registration")),
+    `warning with remediation expected, got: ${JSON.stringify(ctx2.messages)}`,
+  );
+});
+
 test("adoptStrandedMilestone forces branch recovery even when normal preferences differ", (t) => {
   const previousCwd = process.cwd();
   const base = makeGitRepoBase({ isolation: "worktree" });

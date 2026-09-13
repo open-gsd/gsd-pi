@@ -83,7 +83,7 @@ import {
 } from "./auto-worktree-entry.js";
 import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
 import { teardownAutoWorktree } from "./auto-worktree-teardown.js";
-import { inspectUncommittedWorktreeState } from "./worktree-manager.js";
+import { inspectUncommittedWorktreeState, isStaleWorktreeRegistrationError } from "./worktree-manager.js";
 import { resolveRoadmapForMilestoneMerge } from "./milestone-merge-roadmap.js";
 import type { MilestoneMergeTransactionRunner } from "./milestone-merge-transaction.js";
 import {
@@ -237,7 +237,8 @@ export type EnterResult =
         | "isolation-degraded"
         | "lease-conflict"
         | "creation-failed"
-        | "invalid-milestone-id";
+        | "invalid-milestone-id"
+        | "stale-worktree-registration";
       cause?: unknown;
     };
 
@@ -1011,8 +1012,13 @@ export function _enterMilestoneCore(
     // Degrade isolation for the rest of this session so mergeAndExit
     // doesn't try to merge a nonexistent worktree branch (#2483)
     s.isolationDegraded = true;
-    // Do NOT update s.basePath — stay in project root
-    return { ok: false, reason: "creation-failed", cause: err };
+    // Do NOT update s.basePath — stay in project root.
+    // #2317 — a stale worktree registration gets its own reason so the
+    // auto-mode resume path can STOP instead of resuming onto the wrong tree.
+    const reason = isStaleWorktreeRegistrationError(err)
+      ? "stale-worktree-registration"
+      : "creation-failed";
+    return { ok: false, reason, cause: err };
   }
 }
 

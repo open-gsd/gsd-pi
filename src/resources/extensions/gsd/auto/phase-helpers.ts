@@ -7,10 +7,39 @@ import { decideVerificationRetry, verificationRetryKey } from "./verification-re
 import type { AutoSession } from "./session.js";
 import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
 import type { Phase } from "../types.js";
+import type { EnterResult } from "../worktree-lifecycle.js";
 
 /** Compare two paths for physical identity, tolerating trailing slashes and symlinks. */
 export function isSamePathLocal(a: string, b: string): boolean {
   return normalizeWorktreePathForCompare(a) === normalizeWorktreePathForCompare(b);
+}
+
+/**
+ * Which enterMilestone failures must STOP the auto-mode resume instead of
+ * degrading to project root. Resuming after a lease conflict or a stale
+ * worktree registration (#2317) would run every subsequent operation against
+ * the wrong tree. Returns null when the resume may continue.
+ */
+export function autoResumeEnterFailureStop(
+  enterResult: EnterResult,
+  milestoneId: string,
+): { notify: string; detail: string } | null {
+  if (enterResult.ok) return null;
+  if (enterResult.reason === "lease-conflict") {
+    return {
+      notify: `Cannot resume milestone ${milestoneId}: lease is held by another worker.`,
+      detail: "lease-conflict during resume",
+    };
+  }
+  if (enterResult.reason === "stale-worktree-registration") {
+    return {
+      notify:
+        `Cannot resume milestone ${milestoneId}: a stale git worktree registration still claims the milestone branch. ` +
+        `Follow the remediation in the worktree warning above (git worktree unlock + git worktree prune), then run /gsd auto to resume.`,
+      detail: "stale worktree registration during resume",
+    };
+  }
+  return null;
 }
 
 export function isIsolatedWorktreeSession(s: AutoSession): boolean {
