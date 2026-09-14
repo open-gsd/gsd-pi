@@ -107,6 +107,12 @@ jobs:
       - name: Build core
         run: pnpm run build:core
 
+      # integrations/openclaw is a publishable workspace package that builds
+      # outside build:core, so build it before verify-workspace-dist.cjs checks
+      # its dist/.
+      - name: Build host integrations
+        run: pnpm run build:integrations
+
       # The main @opengsd/gsd-pi tarball bundles packages/*/dist via its `files`
       # globs, so an unbuilt workspace package ships broken
       # inside this dev tarball too — guard the built dist before publishing.
@@ -507,7 +513,7 @@ jobs:
             echo "::error::Re-run NPM Publish so the release includes the latest main."
             exit 1
           fi
-          git add package.json pnpm-lock.yaml CHANGELOG.md README.md native/Cargo.toml native/Cargo.lock native/npm/*/package.json pkg/package.json packages/*/package.json extensions/google-search/package.json integrations/hermes/pyproject.toml integrations/hermes/open_gsd_hermes/gsd_client.py
+          git add package.json pnpm-lock.yaml CHANGELOG.md README.md native/Cargo.toml native/Cargo.lock native/npm/*/package.json pkg/package.json packages/*/package.json extensions/google-search/package.json integrations/openclaw/package.json integrations/openclaw/openclaw.plugin.json integrations/hermes/pyproject.toml integrations/hermes/open_gsd_hermes/gsd_client.py
           git commit -m "release: v${RELEASE_VERSION}"
           git tag "v${RELEASE_VERSION}"
 
