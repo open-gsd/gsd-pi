@@ -51,7 +51,7 @@ const PERMANENT_RE = /auth|unauthorized|forbidden|invalid.*key|invalid.*api|bill
 // - "You've hit your limit"
 // - "You've reached your limit"
 // - "usage limit" / "quota reached"
-// - "out of extra usage"
+// - "out of extra usage" / "draw from your extra usage" (#2314, #4397)
 const RATE_LIMIT_RE = /rate.?limit|too many requests|429|(?:hit|reached) your (?:\w+ )?limit|(?:usage|session|weekly|daily|monthly|quota) limit|(?:out of|from your) extra usage|claude\.ai\/settings\/usage|quota (?:reached|hit)|limit.*resets?/i;
 // OpenRouter affordability-style quota errors should be treated as transient
 // so core retry logic can lower maxTokens and continue in-session.

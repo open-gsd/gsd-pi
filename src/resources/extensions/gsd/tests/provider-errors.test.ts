@@ -82,6 +82,33 @@ test("zero-tool provider classifier treats weekly limit wording as transient rat
   assert.equal(result.kind, "rate-limit");
 });
 
+test("zero-tool provider classifier treats Anthropic 'draw from your extra usage' 400 as transient rate-limit (#2314)", () => {
+  for (const message of [
+    // Canonical provider payload (both markers; gates via the message marker).
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going."}}',
+    // 'from your extra usage' marker alone (gates via the prefix regex).
+    "Third-party apps now draw from your extra usage, not your plan limits. Keep going.",
+    // claude.ai/settings/usage marker alone (gates via signal + error carrier).
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"Add more at claude.ai/settings/usage and keep going."}}',
+  ]) {
+    const result = _classifyZeroToolProviderMessageForTest(message);
+    assert.ok(result, `extra-usage wording should be recognized: ${message}`);
+    assert.ok(isTransient(result));
+    assert.equal(result.kind, "rate-limit");
+  }
+});
+
+test("zero-tool provider classifier ignores prose that merely links the settings/usage URL (#2314)", () => {
+  const result = _classifyZeroToolProviderMessageForTest(
+    "You can view your usage at https://claude.ai/settings/usage.",
+  );
+  assert.equal(
+    result,
+    null,
+    "informational prose mentioning the URL must not classify as a provider error",
+  );
+});
+
 test("zero-tool pseudo tool-call detector identifies serialization drift", () => {
   const snippet = _zeroToolPseudoToolCallSnippetForTest(
     'bash<arg_key>command</arg_key><arg_value>ls -la /tmp && echo "---SRC---"</arg_value></tool_call>',
@@ -104,13 +131,33 @@ test("classifyError treats extra-usage phrasing as transient rate-limit (#4397)"
   assert.ok("retryAfterMs" in result && result.retryAfterMs === 60_000);
 });
 
-test("classifyError treats Anthropic subscription extra-usage 400 as transient rate-limit (#2314)", () => {
-  const result = classifyError(
+// Regression (#2314): Anthropic subscription extra-usage exhaustion returns a
+// 400 invalid_request_error whose message no longer says "out of extra usage".
+// The current phrasing ("draw from your extra usage", plus the
+// claude.ai/settings/usage marker) must still classify as rate-limit so
+// auto-mode fails over to the configured fallback instead of pausing forever.
+test("classifyError treats Anthropic 'draw from your extra usage' 400 as transient rate-limit (#2314)", () => {
+  for (const message of [
+    // Canonical provider payload (both markers).
     '400 {"type":"error","error":{"type":"invalid_request_error","message":"Third-party apps now draw from your extra usage, not your plan limits. Add more at claude.ai/settings/usage and keep going."}}',
+    // 'from your extra usage' marker alone.
+    "Third-party apps now draw from your extra usage, not your plan limits. Keep going.",
+    // claude.ai/settings/usage marker alone.
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"Add more at claude.ai/settings/usage and keep going."}}',
+  ]) {
+    const result = classifyError(message);
+    assert.ok(isTransient(result), `${message} must be transient`);
+    assert.equal(result.kind, "rate-limit");
+    assert.ok("retryAfterMs" in result && result.retryAfterMs === 60_000);
+  }
+});
+
+test("classifyError keeps generic invalid_request_error 400 bodies out of the rate-limit bucket (#2314)", () => {
+  const result = classifyError(
+    '400 {"type":"error","error":{"type":"invalid_request_error","message":"max_tokens: Field required"}}',
   );
-  assert.ok(isTransient(result));
-  assert.equal(result.kind, "rate-limit");
-  assert.ok("retryAfterMs" in result && result.retryAfterMs === 60_000);
+  assert.equal(result.kind, "unknown");
+  assert.ok(!isTransient(result));
 });
 
 test("classifyError does not treat benign usage prose as rate-limit (#2314)", () => {
