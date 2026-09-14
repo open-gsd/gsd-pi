@@ -4502,6 +4502,9 @@ export async function buildGateEvaluatePrompt(
       slicePlanContent: planContent,
       gateCount: String(pending.length),
       gateList: gateListLines.join("\n"),
+      // #2309: the synchronous-dispatch contract names every gate id the unit
+      // owns so the turn cannot end while one is missing its persisted verdict.
+      gateIdList: pending.map((g) => g.gate_id).join(", "),
       subagentPrompts: subagentSections.join("\n\n---\n\n"),
     }),
   );

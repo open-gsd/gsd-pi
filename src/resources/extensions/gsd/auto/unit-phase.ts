@@ -23,7 +23,8 @@ import {
   refreshRecoveryDbForArtifact,
 } from "../auto-recovery.js";
 import { writeUnitRuntimeRecord } from "../unit-runtime.js";
-import { isDbAvailable, getTask } from "../gsd-db.js";
+import { isDbAvailable, getTask, getGateResults } from "../gsd-db.js";
+import { getGateIdsForTurn } from "../gate-registry.js";
 import { getLatestForUnit } from "../db/unit-dispatches.js";
 import { markWorkerStopping } from "../db/auto-workers.js";
 import { releaseMilestoneLease } from "../db/milestone-leases.js";
@@ -956,10 +957,23 @@ export async function runUnitPhase(
   }
 
   const skipArtifactVerification = unitType.startsWith("hook/") || unitType === "custom-step";
-  const artifactVerified =
+  let artifactVerified =
     skipArtifactVerification ||
     isTaskExecutionReadyForHostVerification(unitType, unitId) ||
     verifyExpectedArtifact(unitType, unitId, s.basePath);
+
+  // #2309: verifyExpectedArtifact's gate-evaluate branch fails OPEN (a gate
+  // query error returns true), so its verdict is not authoritative for
+  // completion. Completion for a gate-evaluate unit is decided by the
+  // fail-closed scoped-verdict check: every gate the turn owns in the unit's
+  // scope must have a persisted terminal verdict.
+  let missingGateIds: string[] = [];
+  if (unitType === "gate-evaluate") {
+    missingGateIds = missingGateResultIds(unitId);
+    if (missingGateIds.length > 0) {
+      artifactVerified = false;
+    }
+  }
   if (s.currentUnitRouting) {
     deps.recordOutcome(
       unitType,
@@ -1079,5 +1093,74 @@ export async function runUnitPhase(
     }
   }
 
+  // #2309: a gate-evaluate unit that ended without persisting a verdict for
+  // every gate in its scope must not pass through as done. Fail the unit with
+  // corrective context naming the missing gate ids, mirroring the
+  // complete-slice no-artifact retry above.
+  if (unitEndStatus === "no-artifact" && unitType === "gate-evaluate" && missingGateIds.length > 0) {
+    const retryKey = verificationRetryKey(unitType, unitId);
+    const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
+    s.verificationRetryCount.set(retryKey, attempt);
+    const missing = missingGateIds.join(", ");
+    const failureContext =
+      `gate-evaluate ${unitId} ended without a persisted verdict for: ${missing}. ` +
+      `Dispatch gate evaluations synchronously (subagent with run_in_background: false) and call ` +
+      `gsd_save_gate_result for every gate still missing a verdict (${missing}) before finishing.`;
+    s.pendingVerificationRetry = {
+      unitId,
+      failureContext,
+      attempt,
+    };
+    rememberRetryDispatch(s, { type: unitType, id: unitId }, iterData);
+    ctx.ui.notify(
+      `gate-evaluate ${unitId} did not persist verdicts for: ${missing}. Retrying with the missing-gate context.`,
+      "warning",
+    );
+    return {
+      action: "retry",
+      reason: "gate-evaluate-missing-gate-results",
+      data: {
+        unitStartedAt: _resolveCurrentUnitStartedAtForTest(s.currentUnit),
+        requestDispatchedAt: unitResult.requestDispatchedAt,
+      },
+    };
+  }
+
   return { action: "next", data: { unitStartedAt: _resolveCurrentUnitStartedAtForTest(s.currentUnit), requestDispatchedAt: unitResult.requestDispatchedAt } };
+}
+
+/**
+ * Gate ids in a gate-evaluate unit's scope (`<mid>/<sid>/gates+Q3,Q4`) that
+ * lack a persisted terminal quality_gates verdict (#2309). A row that is
+ * absent entirely counts as missing, as does a row still `pending`. Stale
+ * cross-turn ids in the scope (e.g. Q8, owned by complete-slice) are ignored,
+ * matching the gate-evaluate branch of verifyExpectedArtifact. The DB check
+ * fails closed: an unavailable DB or a query error makes every owned scoped
+ * id missing.
+ */
+function missingGateResultIds(unitId: string): string[] {
+  const { milestone: mid, slice: sid, task: batchPart } = parseUnitId(unitId);
+  if (!mid || !sid || !batchPart) return [];
+  const plusIdx = batchPart.indexOf("+");
+  if (plusIdx === -1) return [];
+  const ownedIds: Set<string> = getGateIdsForTurn("gate-evaluate");
+  const scopedIds = batchPart
+    .slice(plusIdx + 1)
+    .split(",")
+    .filter(Boolean)
+    .filter((gid) => ownedIds.has(gid));
+  if (scopedIds.length === 0) return [];
+  if (!isDbAvailable()) return scopedIds;
+  let terminalIds: Set<string>;
+  try {
+    terminalIds = new Set(
+      getGateResults(mid, sid)
+        .filter((row) => row.status === "complete")
+        .map((row) => row.gate_id),
+    );
+  } catch (err) {
+    logWarning("engine", `gate-evaluate missing-result check failed: ${err instanceof Error ? err.message : String(err)}`);
+    return scopedIds;
+  }
+  return scopedIds.filter((gid) => !terminalIds.has(gid));
 }

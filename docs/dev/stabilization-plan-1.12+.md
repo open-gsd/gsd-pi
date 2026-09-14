@@ -24,29 +24,17 @@ Most post-1.12 bugs fall into six recurring classes:
 | **Lifecycle / import** | Missing canonical lifecycle rows block progression | #2313, #2070, #1914 |
 | **Platform / test debt** | Windows PATH, non-hermetic tests, pi-agent-core harness | #2086, #2139, #2140 |
 
-<<<<<<< HEAD
 ## Wave 1 — Auto-mode wedge recovery (P0, shipped)
-=======
-## Wave 1 — Auto-mode wedge recovery (P0, in progress)
->>>>>>> origin/main
 
 These bugs block `/gsd auto` with no sanctioned recovery path. Highest user impact.
 
 | Issue | Title | Status | Branch |
 |-------|-------|--------|--------|
-<<<<<<< HEAD
 | #2314 | Anthropic 400 "extra usage" pauses instead of failing over | **fixed** | `cursor/stabilization-wave1-3f39` |
 | #2310 | `recheckWedge` never clears gate-evaluate `completed-no-advance` wedges | **fixed** | `cursor/stabilization-wave1-3f39` |
 | #2309 | gate-evaluate background Agent dispatch drops second gate | **fixed** | `cursor/stabilization-wave1-3f39` |
 | #2159 | False stale liveness wedges from interrupted closeouts | **fixed** | `cursor/stabilization-wave6-3f39` |
 | #2267 | Manual blocker route omits `recoveryActionId` (regression of #1593) | **fixed** | `cursor/stabilization-wave2-3f39` |
-=======
-| #2314 | Anthropic 400 "extra usage" pauses instead of failing over | **fixing** | `cursor/stabilization-wave1-3f39` |
-| #2310 | `recheckWedge` never clears gate-evaluate `completed-no-advance` wedges | **fixing** | `cursor/stabilization-wave1-3f39` |
-| #2309 | gate-evaluate background Agent dispatch drops second gate | **fixing** | `cursor/stabilization-wave1-3f39` |
-| #2159 | False stale liveness wedges from interrupted closeouts | open | — |
-| #2267 | Manual blocker route omits `recoveryActionId` (regression of #1593) | open | — |
->>>>>>> origin/main
 
 ### Wave 1 exit criteria
 

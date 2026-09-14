@@ -489,6 +489,407 @@ test("runUnitPhase retries complete-slice tool errors with their failure context
   assert.equal((endEvents[0].data as any).artifactVerified, false);
 });
 
+test("runUnitPhase fails a gate-evaluate unit whose scope has gates without persisted verdicts", async (t) => {
+  const { closeDatabase, insertGateRow, insertMilestone, insertSlice, openDatabase, saveGateResult } =
+    await import("../gsd-db.ts");
+  const base = makeTestBase("gsd-gate-eval-missing-");
+  t.after(() => {
+    try { closeDatabase(); } catch { /* noop */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active", depends_on: [] });
+  insertSlice({
+    id: "S01",
+    milestoneId: "M001",
+    title: "Test Slice",
+    status: "planned",
+    risk: "low",
+    depends: [],
+    demo: "",
+    sequence: 1,
+  });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", scope: "slice" });
+  // Unit scope is Q3+Q4 but only Q3 was persisted — the #2309 failure mode
+  // (background subagent dispatch drops Q4 and nobody relays its completion).
+  saveGateResult({
+    milestoneId: "M001",
+    sliceId: "S01",
+    gateId: "Q3",
+    verdict: "pass",
+    rationale: "ok",
+    findings: "",
+  });
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const deps = makeMockDeps(capture);
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "gate-evaluate",
+    unitId: "M001/S01/gates+Q3,Q4",
+    prompt: "evaluate gates",
+    finalPrompt: "evaluate gates",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "evaluating-gates",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  const unitPromise = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+
+  const result = await unitPromise;
+  assert.equal(result.action, "retry", "missing gate verdicts must fail the unit, not complete it");
+  assert.equal((result as { reason?: string }).reason, "gate-evaluate-missing-gate-results");
+  const failureContext = ic.s.pendingVerificationRetry?.failureContext ?? "";
+  assert.ok(failureContext.includes("Q4"), "corrective message must name the unpersisted gate Q4");
+  assert.ok(
+    failureContext.includes("gsd_save_gate_result"),
+    "corrective message must instruct persisting via gsd_save_gate_result",
+  );
+  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitType, "gate-evaluate");
+  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitId, "M001/S01/gates+Q3,Q4");
+
+  const endEvents = capture.events.filter(e => e.eventType === "unit-end");
+  assert.equal(endEvents.length, 1);
+  assert.equal((endEvents[0].data as any).status, "no-artifact");
+  assert.equal((endEvents[0].data as any).artifactVerified, false);
+});
+
+test("runUnitPhase completes a gate-evaluate unit when every scoped gate has a persisted verdict", async (t) => {
+  const { closeDatabase, insertGateRow, insertMilestone, insertSlice, openDatabase, saveGateResult } =
+    await import("../gsd-db.ts");
+  const base = makeTestBase("gsd-gate-eval-complete-");
+  t.after(() => {
+    try { closeDatabase(); } catch { /* noop */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active", depends_on: [] });
+  insertSlice({
+    id: "S01",
+    milestoneId: "M001",
+    title: "Test Slice",
+    status: "planned",
+    risk: "low",
+    depends: [],
+    demo: "",
+    sequence: 1,
+  });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
+  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", scope: "slice" });
+  saveGateResult({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", verdict: "pass", rationale: "ok", findings: "" });
+  saveGateResult({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", verdict: "flag", rationale: "concerns", findings: "" });
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const deps = makeMockDeps(capture);
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "gate-evaluate",
+    unitId: "M001/S01/gates+Q3,Q4",
+    prompt: "evaluate gates",
+    finalPrompt: "evaluate gates",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "evaluating-gates",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  const unitPromise = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+
+  const result = await unitPromise;
+  assert.equal(result.action, "next", "all scoped gates persisted — unit completes as today");
+  assert.equal(ic.s.pendingVerificationRetry, null);
+
+  const endEvents = capture.events.filter(e => e.eventType === "unit-end");
+  assert.equal(endEvents.length, 1);
+  assert.equal((endEvents[0].data as any).status, "completed");
+  assert.equal((endEvents[0].data as any).artifactVerified, true);
+});
+
+/** Gate-row seed state for a gate-evaluate fixture. */
+type GateSeed = "pending" | "complete" | "absent";
+
+/**
+ * Temp git repo with an open DB seeding milestone M001 / slice S01 and the
+ * Q3/Q4 gate rows in the requested states. Closes the DB and removes the
+ * repo on test exit.
+ */
+async function setupGateEvaluateFixture(
+  t: { after(cb: () => void): void },
+  prefix: string,
+  seed: { q3: GateSeed; q4: GateSeed },
+): Promise<string> {
+  const { closeDatabase, insertGateRow, insertMilestone, insertSlice, openDatabase, saveGateResult } =
+    await import("../gsd-db.ts");
+  const base = makeTestBase(prefix);
+  t.after(() => {
+    try { closeDatabase(); } catch { /* noop */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active", depends_on: [] });
+  insertSlice({
+    id: "S01",
+    milestoneId: "M001",
+    title: "Test Slice",
+    status: "planned",
+    risk: "low",
+    depends: [],
+    demo: "",
+    sequence: 1,
+  });
+  const seedGate = (gateId: "Q3" | "Q4", state: GateSeed): void => {
+    if (state === "absent") return;
+    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId, scope: "slice" });
+    if (state === "complete") {
+      saveGateResult({ milestoneId: "M001", sliceId: "S01", gateId, verdict: "pass", rationale: "ok", findings: "" });
+    }
+  };
+  seedGate("Q3", seed.q3);
+  seedGate("Q4", seed.q4);
+  return base;
+}
+
+function gateEvaluateIterData(): IterationData {
+  return {
+    unitType: "gate-evaluate",
+    unitId: "M001/S01/gates+Q3,Q4",
+    prompt: "evaluate gates",
+    finalPrompt: "evaluate gates",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "evaluating-gates",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+}
+
+test("runUnitPhase fails a gate-evaluate unit when the gate query errors at verify time", async (t) => {
+  // Both verdicts ARE persisted — the query error itself must fail the unit
+  // closed instead of verifyExpectedArtifact's fail-open `return true`.
+  const base = await setupGateEvaluateFixture(t, "gsd-gate-eval-dberr-", { q3: "complete", q4: "complete" });
+  const { _getAdapter } = await import("../gsd-db.ts");
+  _getAdapter()!.exec("DROP TABLE quality_gates");
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const deps = makeMockDeps(capture);
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData = gateEvaluateIterData();
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  const unitPromise = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+
+  const result = await unitPromise;
+  assert.equal(result.action, "retry", "a gate query error must fail the unit closed, not complete it");
+  assert.equal((result as { reason?: string }).reason, "gate-evaluate-missing-gate-results");
+  const failureContext = ic.s.pendingVerificationRetry?.failureContext ?? "";
+  assert.ok(failureContext.includes("Q3"), "corrective message must name scoped gate Q3");
+  assert.ok(failureContext.includes("Q4"), "corrective message must name scoped gate Q4");
+
+  const endEvents = capture.events.filter(e => e.eventType === "unit-end");
+  assert.equal(endEvents.length, 1);
+  assert.equal((endEvents[0].data as any).status, "no-artifact");
+  assert.equal((endEvents[0].data as any).artifactVerified, false);
+});
+
+test("runUnitPhase fails a gate-evaluate unit whose scoped gate has no quality_gates row at all", async (t) => {
+  // Q3 persisted; Q4 has NO row — an absent row must count as missing.
+  const base = await setupGateEvaluateFixture(t, "gsd-gate-eval-absent-", { q3: "complete", q4: "absent" });
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const deps = makeMockDeps(capture);
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData = gateEvaluateIterData();
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  const unitPromise = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+
+  const result = await unitPromise;
+  assert.equal(result.action, "retry", "an unseeded scoped gate must fail the unit, not complete it");
+  assert.equal((result as { reason?: string }).reason, "gate-evaluate-missing-gate-results");
+  const failureContext = ic.s.pendingVerificationRetry?.failureContext ?? "";
+  assert.ok(failureContext.includes("Q4"), "corrective message must name the unseeded gate Q4");
+
+  const endEvents = capture.events.filter(e => e.eventType === "unit-end");
+  assert.equal(endEvents.length, 1);
+  assert.equal((endEvents[0].data as any).status, "no-artifact");
+  assert.equal((endEvents[0].data as any).artifactVerified, false);
+});
+
+test("runUnitPhase fails a gate-evaluate unit whose scoped gates are all still pending", async (t) => {
+  const base = await setupGateEvaluateFixture(t, "gsd-gate-eval-pending-", { q3: "pending", q4: "pending" });
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const deps = makeMockDeps(capture);
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData = gateEvaluateIterData();
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  const unitPromise = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+
+  const result = await unitPromise;
+  assert.equal(result.action, "retry", "gates still pending must fail the unit");
+  assert.equal((result as { reason?: string }).reason, "gate-evaluate-missing-gate-results");
+  const failureContext = ic.s.pendingVerificationRetry?.failureContext ?? "";
+  assert.ok(failureContext.includes("Q3"), "corrective message must name pending gate Q3");
+  assert.ok(failureContext.includes("Q4"), "corrective message must name pending gate Q4");
+});
+
+test("runUnitPhase retry dispatch receives the missing-gate corrective context and then completes", async (t) => {
+  const base = await setupGateEvaluateFixture(t, "gsd-gate-eval-retry-", { q3: "pending", q4: "pending" });
+  const { closeDatabase, saveGateResult } = await import("../gsd-db.ts");
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const sentPrompts: string[] = [];
+  const deps = makeMockDeps(capture);
+  const ic = makeIC(deps, {
+    pi: {
+      sendMessage: (msg: { content?: unknown }) => {
+        sentPrompts.push(String(msg?.content ?? ""));
+      },
+      setModel: async () => true,
+      getThinkingLevel: () => "off",
+      setThinkingLevel: () => {},
+    } as any,
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData = gateEvaluateIterData();
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  // Attempt 1: nothing persisted — the unit must fail with corrective context.
+  const firstRun = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+  const firstResult = await firstRun;
+  assert.equal(firstResult.action, "retry");
+  assert.equal(sentPrompts.length, 1, "attempt 1 dispatches exactly one prompt");
+  assert.ok(
+    !sentPrompts[0].includes("VERIFICATION FAILED"),
+    "the first dispatch must not carry retry context",
+  );
+
+  // Attempt 2: persist both verdicts; the retry prompt must carry the
+  // corrective missing-gate context and the unit must then complete.
+  saveGateResult({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", verdict: "pass", rationale: "ok", findings: "" });
+  saveGateResult({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", verdict: "flag", rationale: "concerns", findings: "" });
+  _resetPendingResolve();
+  const secondRun = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+  const secondResult = await secondRun;
+
+  assert.equal(secondResult.action, "next", "the retry completes once every scoped gate is persisted");
+  assert.equal(ic.s.pendingVerificationRetry, null, "the retry marker is consumed by the retry dispatch");
+  assert.ok(sentPrompts.length >= 2, "attempt 2 dispatches a prompt");
+  const retryPrompt = sentPrompts[sentPrompts.length - 1];
+  assert.ok(retryPrompt.includes("VERIFICATION FAILED"), "retry prompt must carry the verification-failure header");
+  assert.ok(retryPrompt.includes("Q4"), "retry prompt must name the missing gate");
+  assert.ok(retryPrompt.includes("gsd_save_gate_result"), "retry prompt must instruct persisting via gsd_save_gate_result");
+  assert.ok(retryPrompt.includes("evaluate gates"), "retry prompt must retain the original unit prompt");
+
+  try { closeDatabase(); } catch { /* already closed by t.after ordering */ }
+});
+
 test("runUnitPhase increments unitDispatchCount for repeated artifact-missing retries", async () => {
   const capture = createEventCapture();
   const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
