@@ -90,7 +90,7 @@ If you already have a Claude Pro or Max subscription and want to use GSD's plann
 
 **Automatic setup (recommended):**
 
-When GSD detects a Claude Code model during startup, it automatically writes a `.mcp.json` file in your project root with the GSD workflow and `gsd-browser` MCP servers configured. No manual steps needed — just start GSD once with Claude Code as the provider and the config is created for you.
+For existing GSD projects, automatic MCP prep is provider-independent. When the project root already contains `.gsd/`, GSD writes or updates `.mcp.json` with the GSD workflow and `gsd-browser` MCP servers during startup, even if the current GSD session is using OpenAI, Codex, Cursor Agent, or another provider. This keeps the project ready for Claude Code or direct `claude` CLI use without dirtying ordinary non-GSD repositories.
 
 You can also trigger this manually from inside a GSD session:
 

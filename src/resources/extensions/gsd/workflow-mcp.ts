@@ -348,6 +348,7 @@ export function detectWorkflowMcpLaunchConfig(
     return {
       name,
       command: binPath,
+      cwd: resolvedWorkflowProjectRoot,
       env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath),
     };
   }
