@@ -478,7 +478,7 @@ export class CommandSurfaceStore {
   loadDoctorDiagnostics = async (scope?: string): Promise<DoctorReport | null> => {
     this.patchDoctorState({ phase: "loading", error: null })
     try {
-      const url = scope ? `/api/doctor?scope=${encodeURIComponent(scope)}` : "/api/doctor"
+      const url = this.host.buildUrl(scope ? `/api/doctor?scope=${encodeURIComponent(scope)}` : "/api/doctor")
       const response = await authFetch(url, { method: "GET", cache: "no-store", headers: { Accept: "application/json" } })
       const payload = await response.json().catch(() => null)
       if (!response.ok || !payload) {
@@ -660,7 +660,7 @@ export class CommandSurfaceStore {
   loadExportData = async (format?: "markdown" | "json"): Promise<ExportResult | null> => {
     this.patchRemainingCommandsPhaseState("exportData", { phase: "loading", error: null })
     try {
-      const url = format ? `/api/export-data?format=${encodeURIComponent(format)}` : "/api/export-data"
+      const url = this.host.buildUrl(format ? `/api/export-data?format=${encodeURIComponent(format)}` : "/api/export-data")
       const response = await authFetch(url, { method: "GET", cache: "no-store", headers: { Accept: "application/json" } })
       const payload = await response.json().catch(() => null)
       if (!response.ok || !payload) {
