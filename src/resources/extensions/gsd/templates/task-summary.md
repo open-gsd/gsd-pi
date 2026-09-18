@@ -40,7 +40,10 @@ blocker_discovered: false
 ## Verification Evidence
 
 <!-- Populated from verification gate output. If the gate ran, fill in the table below.
-     If no gate ran (e.g., no verification commands discovered), note that. -->
+     If no gate ran (e.g., no verification commands discovered), note that.
+     Rows are chronological; the final row is authoritative for host-verification
+     rescue eligibility (#2338). Documenting a failing discovery run is fine, but
+     always end the table with a passing row (PASS verdict or exit 0). -->
 
 | # | Command | Exit Code | Verdict | Duration |
 |---|---------|-----------|---------|----------|
