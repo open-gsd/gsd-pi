@@ -143,8 +143,9 @@ Out of scope unless maintainers explicitly ask for it:
 - conditional Docker e2e parity;
 - claiming carbon or sustainability wins without energy evidence.
 
-The upstream slice intentionally does not run the lifecycle shadow gate. That gate remains an
-optional contributor-side check unless maintainers request a separate upstream decision for it.
+The upstream slice intentionally does not run the lifecycle shadow gate a second time. The gate
+itself remains part of the repository's normal `verify:pr` contract through
+`gate:lifecycle-shadow-no-cutover`; this optional workflow avoids duplicating that validation.
 
 The first reviewable version should stay conservative: optional, manual, documented, and easy to
 discard if maintainers prefer contributor-side tooling only.
@@ -160,7 +161,8 @@ Those pieces are useful locally, but they would make the initial PR much harder 
 - first-failure `triage` classification;
 - optional per-file timing collection and provenance validation;
 - a stable unsharded fallback workflow;
-- the optional lifecycle shadow gate;
+- a second lifecycle shadow-gate invocation; the normal `verify:pr` gate remains authoritative for
+   that check;
 - any merge-parity reproduction of Windows, Node 22 smoke, or Docker e2e jobs.
 
 The review question for maintainers is whether the core shape is useful. If yes, the helper and
