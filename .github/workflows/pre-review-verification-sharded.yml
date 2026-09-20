@@ -139,24 +139,8 @@ jobs:
           matrix="$(node -e "console.log(JSON.stringify(Array.from({length: Number(process.env.SHARD_COUNT)}, (_, i) => i + 1)))")"
           echo "shard_matrix=${matrix}" >> "$GITHUB_OUTPUT"
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
-        with:
-          version: 10.12.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: "24"
-          cache: pnpm
-
-      - name: Install dependencies
-        env:
-          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-          GSD_SKIP_RTK_INSTALL: "1"
-          GSD_SKIP_DEP_REPAIR: "1"
-        run: pnpm install --frozen-lockfile
+      - name: Setup Node and pnpm
+        uses: ./.github/actions/pre-review-node-setup
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
@@ -309,24 +293,8 @@ jobs:
           git checkout --force --detach refs/checkout-ref
           [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
-        with:
-          version: 10.12.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: "24"
-          cache: pnpm
-
-      - name: Install dependencies
-        env:
-          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-          GSD_SKIP_RTK_INSTALL: "1"
-          GSD_SKIP_DEP_REPAIR: "1"
-        run: pnpm install --frozen-lockfile
+      - name: Setup Node and pnpm
+        uses: ./.github/actions/pre-review-node-setup
 
       - name: Download build output
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
@@ -388,67 +356,9 @@ jobs:
           if-no-files-found: ignore
           retention-days: 3
 
-  lifecycle-gate:
-    name: lifecycle shadow gate once
-    needs: build
-    runs-on: blacksmith-4vcpu-ubuntu-2404
-    timeout-minutes: 15
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - name: Checkout exact source commit without credentials
-        env:
-          SOURCE_REPO: ${{ inputs.source_repo }}
-          SOURCE_REF: ${{ inputs.source_ref }}
-          EXPECTED_SHA: ${{ inputs.expected_sha }}
-        run: |
-          set -euo pipefail
-          # shellcheck disable=SC2153 # GitHub Actions injects SOURCE_REPO from step env.
-          git init "$GITHUB_WORKSPACE"
-          cd "$GITHUB_WORKSPACE"
-          git remote add origin "https://github.com/${SOURCE_REPO}.git"
-          git config --global --add safe.directory "$GITHUB_WORKSPACE"
-          git -c protocol.version=2 fetch --no-tags --prune --depth=1 origin \
-            "+refs/heads/${SOURCE_REF}:refs/checkout-ref"
-          git checkout --force --detach refs/checkout-ref
-          [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
-
-      - name: Setup pnpm
-        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
-        with:
-          version: 10.12.1
-
-      - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
-        with:
-          node-version: "24"
-          cache: pnpm
-
-      - name: Install dependencies
-        env:
-          ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
-          GSD_SKIP_RTK_INSTALL: "1"
-          GSD_SKIP_DEP_REPAIR: "1"
-        run: pnpm install --frozen-lockfile
-
-      - name: Download build output
-        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
-        with:
-          name: pre-review-sharded-build-output
-
-      - name: Extract build output
-        run: tar xzf build-output.tar.gz
-
-      - name: Run lifecycle shadow gate
-        env:
-          GSD_NATIVE_PREFER_LOCAL: "1"
-        run: pnpm run gate:lifecycle-shadow-no-cutover 2>&1 | tee lifecycle-shadow-gate.log
-
   aggregate:
     name: aggregate shard results
-    needs: [build, test-shard, lifecycle-gate]
+    needs: [build, test-shard]
     if: always()
     runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
@@ -460,12 +370,6 @@ jobs:
         if: needs.test-shard.result != 'success'
         run: |
           echo "::error::One or more test-shard jobs did not succeed: ${{ needs.test-shard.result }}"
-          exit 1
-
-      - name: Fail if lifecycle gate failed
-        if: needs.lifecycle-gate.result != 'success'
-        run: |
-          echo "::error::lifecycle-gate did not succeed: ${{ needs.lifecycle-gate.result }}"
           exit 1
 
       - name: Download test manifest

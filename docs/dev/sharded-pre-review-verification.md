@@ -37,7 +37,9 @@ as-is without maintainer direction:
 
 - `.github/workflows/pre-review-verification-sharded.yml` — optional manual workflow that validates
    a branch/SHA pair, builds once, compiles tests once, partitions a canonical compiled-test manifest,
-   runs deterministic shards, runs the lifecycle gate once, and aggregates totals fail-closed.
+   runs deterministic shards, and aggregates totals fail-closed.
+- `.github/actions/pre-review-node-setup/action.yml` — pinned composite action for the shared
+   pnpm, Node.js, and frozen-install setup used by the build and shard jobs.
 - `scripts/pre-review-verify.sh` — contributor helper for dispatching the workflow only after
    `git ls-remote` proves `source_ref` resolves to `expected_sha`. The first draft includes
    `dispatch` and `status`; richer `watch`, `resume`, `logs`, and `triage` commands can be added
@@ -100,6 +102,10 @@ Core properties:
 - aggregate job verifies coverage and fails on any failed test;
 - stable unsharded fallback remains available.
 
+The workflow accepts a public `source_repo` input and runs the exact requested commit on upstream
+runners. It is dispatch-gated, requests only `contents: read`, uses no repository secrets, and
+verifies the branch-to-SHA binding before checkout and the checked-out SHA after checkout.
+
 ## Cost and timing evidence
 
 The evidence supports a faster contributor feedback loop, not a blanket cost or sustainability
@@ -137,6 +143,9 @@ Out of scope unless maintainers explicitly ask for it:
 - conditional Docker e2e parity;
 - claiming carbon or sustainability wins without energy evidence.
 
+The upstream slice intentionally does not run the lifecycle shadow gate. That gate remains an
+optional contributor-side check unless maintainers request a separate upstream decision for it.
+
 The first reviewable version should stay conservative: optional, manual, documented, and easy to
 discard if maintainers prefer contributor-side tooling only.
 
@@ -151,6 +160,7 @@ Those pieces are useful locally, but they would make the initial PR much harder 
 - first-failure `triage` classification;
 - optional per-file timing collection and provenance validation;
 - a stable unsharded fallback workflow;
+- the optional lifecycle shadow gate;
 - any merge-parity reproduction of Windows, Node 22 smoke, or Docker e2e jobs.
 
 The review question for maintainers is whether the core shape is useful. If yes, the helper and

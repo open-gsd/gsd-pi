@@ -1,0 +1,31 @@
+name: Pre-review Node setup
+description: Install the pinned Node and pnpm toolchain for an exact-SHA pre-review job
+inputs:
+  node-version:
+    description: Node.js version to install
+    required: false
+    default: "24"
+  pnpm-version:
+    description: pnpm version to install
+    required: false
+    default: "10.12.1"
+runs:
+  using: composite
+  steps:
+    - name: Setup pnpm
+      uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320
+      with:
+        version: ${{ inputs.pnpm-version }}
+    - name: Setup Node.js
+      uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502f
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: pnpm
+    - name: Install dependencies
+      shell: bash
+      env:
+        ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+        PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+        GSD_SKIP_RTK_INSTALL: "1"
+        GSD_SKIP_DEP_REPAIR: "1"
+      run: pnpm install --frozen-lockfile
