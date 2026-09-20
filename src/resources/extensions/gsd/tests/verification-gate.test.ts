@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, hasQualifyingTaskEvidence, resolveVerificationShell } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -1964,5 +1964,67 @@ describe("verification-gate: python normalization (#4416)", () => {
     assert.equal(typeof result.passed, "boolean");
     assert.equal(result.checks.length, 1);
     assert.ok(result.checks[0].durationMs >= 0);
+  });
+});
+
+describe("verification-gate: evidence qualification (#2338)", () => {
+  const record = (exitCode: number, verdict?: string) => ({
+    command: "cmd",
+    exitCode,
+    verdict,
+    durationMs: 1,
+  });
+
+  test("documented failing discovery row followed by a passing final row qualifies", () => {
+    // The exact incident from #2338: the executor honestly recorded a first
+    // run that failed (exit 1, FAIL verdict) before fixing the issue and
+    // staging a green final run. The old all-records predicate rejected the
+    // set, silently disabling the command-not-found rescue (#2209) and
+    // stuck-looping the unit.
+    const evidence = [
+      record(1, "FAIL - 12 passed, 1 failed (adjacent-boundary exposed isConflictWith off-by-one)"),
+      record(0, "PASS - 13 passed, 28 assertions"),
+    ];
+    assert.equal(hasQualifyingTaskEvidence(evidence), true);
+  });
+
+  test("a regression that ends in a failing row still fails closed", () => {
+    const evidence = [
+      record(0, "pass"),
+      record(1, "FAIL - suite now red"),
+    ];
+    assert.equal(hasQualifyingTaskEvidence(evidence), false);
+  });
+
+  test("final row pass without a staged verdict counts via exit 0", () => {
+    assert.equal(hasQualifyingTaskEvidence([record(1, "pass"), record(0)]), true);
+    assert.equal(hasQualifyingTaskEvidence([record(0), record(1)]), false);
+  });
+
+  test("negated-idiom pass-with-exit-1 final row qualifies (#2213)", () => {
+    assert.equal(hasQualifyingTaskEvidence([record(1, "pass")]), true);
+  });
+
+  test("empty or undefined evidence never qualifies", () => {
+    assert.equal(hasQualifyingTaskEvidence([]), false);
+    assert.equal(hasQualifyingTaskEvidence(undefined), false);
+  });
+});
+
+describe("verification-gate: shell resolution (#2338)", () => {
+  test("win32 always routes verifies through bash -c (never cmd)", () => {
+    const shell = resolveVerificationShell(true, "vendor/bin/pest tests/Unit/Models/BookingTest.php");
+    assert.equal(shell.shellBin, "bash");
+    assert.deepStrictEqual(shell.shellArgs, ["-c", "vendor/bin/pest tests/Unit/Models/BookingTest.php"]);
+    assert.equal(shell.windowsVerbatimArguments, false);
+  });
+
+  test("POSIX keeps the bash-preferring sh wrapper", () => {
+    const shell = resolveVerificationShell(false, "npm test");
+    assert.equal(shell.shellBin, "sh");
+    assert.equal(shell.shellArgs[0], "-c");
+    assert.match(shell.shellArgs[1], /command -v bash/);
+    assert.equal(shell.shellArgs[shell.shellArgs.length - 1], "npm test");
+    assert.equal(shell.windowsVerbatimArguments, false);
   });
 });

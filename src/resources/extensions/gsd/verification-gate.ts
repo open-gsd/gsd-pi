@@ -106,24 +106,79 @@ function verdictQualifies(verdict: string): boolean {
 }
 
 /**
- * Task-specific evidence qualifies when at least one record exists and every
- * record reports a passing outcome (#1591). The executor's staged verdict is
- * authoritative: negated verify idioms (`! grep -q`, `grep -v`,
+ * Task-specific evidence qualifies when at least one record exists and the
+ * most recent record reports a passing outcome (#2338). The executor stages
+ * records chronologically, so the final row is authoritative for "did the
+ * task end green": earlier rows may legitimately document a failing
+ * discovery run that was then fixed, and a single such row must not
+ * invalidate the set (previously it silently disabled the command-not-found
+ * rescue, #2209, and stuck-looped the unit). The executor's staged verdict
+ * is authoritative: negated verify idioms (`! grep -q`, `grep -v`,
  * `git diff --exit-code`) succeed on a non-zero exit, so a "pass" verdict
  * qualifies even with a non-zero exitCode. `exitCode === 0` is the fallback
  * for records staged without a verdict (#2213). Verdict matching is lenient
  * (#2014): leading markers (`✅ pass`) and `pass: <details>` descriptions are
- * accepted; unknown tokens fail closed.
+ * accepted; unknown tokens fail closed. A regression that ends in a failing
+ * row still fails closed.
  */
 export function hasQualifyingTaskEvidence(
   evidence: TaskVerificationEvidence[] | undefined,
 ): boolean {
   if (!evidence || evidence.length === 0) return false;
-  return evidence.every((record) => {
-    const verdict = (record.verdict ?? "").trim();
-    if (verdict) return verdictQualifies(verdict);
-    return record.exitCode === 0;
-  });
+  const last = evidence[evidence.length - 1];
+  const verdict = (last.verdict ?? "").trim();
+  return verdict ? verdictQualifies(verdict) : last.exitCode === 0;
+}
+
+/**
+ * Probe whether bash actually runs on this host. Cached per process. On
+ * Windows the probe spawns `bash -c "true"` so the WindowsApps WSL stub
+ * (present in PATH but not runnable without a distribution) is not mistaken
+ * for a real bash; on POSIX bash is assumed available (the sh wrapper falls
+ * back anyway).
+ */
+let windowsBashProbe: boolean | undefined;
+export function hasWindowsBash(): boolean {
+  if (windowsBashProbe !== undefined) return windowsBashProbe;
+  if (process.platform !== "win32") return (windowsBashProbe = true);
+  const probe = spawnSync("bash", ["-c", "true"], { timeout: 5000 });
+  windowsBashProbe = !probe.error && probe.status === 0;
+  return windowsBashProbe;
+}
+
+/**
+ * Pure shell selection for running one verification command (exported for
+ * tests). POSIX keeps the existing bash-preferring sh wrapper. Windows always
+ * resolves to bash -c (letting Node quote argv so a command with spaces
+ * reaches bash as a single argument): verification commands must run under
+ * bash, never cmd.exe, so POSIX-idiom verifies (`vendor/bin/*` Composer
+ * shims, `! grep -q` absence checks, `&&` chains) execute instead of dying
+ * as command-not-found (#2338/#2339). If bash is not runnable on the host
+ * the spawn fails (ENOENT) and the check classifies command-not-found,
+ * which the #2209 evidence rescue or the "not runnable on this platform"
+ * pause surfaces with an actionable message.
+ */
+export function resolveVerificationShell(
+  isWindows: boolean,
+  command: string,
+): { shellBin: string; shellArgs: string[]; windowsVerbatimArguments: boolean } {
+  if (!isWindows) {
+    return {
+      shellBin: "sh",
+      shellArgs: [
+        "-c",
+        "if command -v bash >/dev/null 2>&1; then exec bash -o pipefail -c \"$1\" verification-gate; fi\nexec sh -c \"$1\" verification-gate",
+        "verification-gate",
+        command,
+      ],
+      windowsVerbatimArguments: false,
+    };
+  }
+  return {
+    shellBin: "bash",
+    shellArgs: ["-c", command],
+    windowsVerbatimArguments: false,
+  };
 }
 
 export interface DiscoveredCommands {
@@ -1009,16 +1064,16 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
     );
     // Pass the command string as an argument to the shell explicitly
     // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
+    // Verification commands always run under bash on Windows (never cmd), so
+    // POSIX-idiom verifies (`vendor/bin/*` Composer shims, `! grep -q`
+    // absence checks, `&&` chains) execute instead of dying as
+    // command-not-found (#2338/#2339). When bash is absent the spawn fails
+    // cleanly and the check classifies command-not-found, which the evidence
+    // rescue (#2209) or the "not runnable on this platform" pause surfaces.
     const isWindows = process.platform === "win32";
-    const shellBin = isWindows ? "cmd" : "sh";
-    const shellArgs = isWindows
-      ? ["/d", "/s", "/c", rewrittenCommand]
-      : [
-          "-c",
-          "if command -v bash >/dev/null 2>&1; then exec bash -o pipefail -c \"$1\" verification-gate; fi\nexec sh -c \"$1\" verification-gate",
-          "verification-gate",
-          rewrittenCommand,
-        ];
+    const shell = resolveVerificationShell(isWindows, rewrittenCommand);
+    const shellBin = shell.shellBin;
+    const shellArgs = shell.shellArgs;
     const outputDir = mkdtempSync(join(tmpdir(), "gsd-verification-"));
     const stdoutPath = join(outputDir, "stdout");
     const stderrPath = join(outputDir, "stderr");
@@ -1033,7 +1088,7 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
         env: verificationChildEnvironment(options.cwd),
         stdio: ["ignore", stdoutFd, stderrFd],
         timeout: options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-        windowsVerbatimArguments: isWindows,
+        windowsVerbatimArguments: shell.windowsVerbatimArguments,
       });
       stdout = readBoundedCommandOutput(stdoutPath);
       capturedStderr = readBoundedCommandOutput(stderrPath);
