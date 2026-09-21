@@ -176,6 +176,35 @@ describe("createWorktree", () => {
   });
 });
 
+test("stale worktree cleanup retries transient EPERM/EBUSY then succeeds (#1987)", () => {
+  let calls = 0;
+  removeStaleWorktreeDirectory("/project/.gsd-worktrees/M010", "M010", () => {
+    calls += 1;
+    if (calls < 3) {
+      throw Object.assign(new Error("busy"), { code: calls === 1 ? "EBUSY" : "EPERM" });
+    }
+  });
+  assert.equal(calls, 3);
+});
+
+test("stale worktree cleanup still fails after transient remove retries are exhausted (#1987)", () => {
+  const cause = Object.assign(new Error("locked"), { code: "EBUSY" });
+  let calls = 0;
+  assert.throws(
+    () => removeStaleWorktreeDirectory("/project/.gsd-worktrees/M010", "M010", () => {
+      calls += 1;
+      throw cause;
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof GSDError);
+      assert.equal(error.code, GSD_GIT_ERROR);
+      assert.match(error.message, /EBUSY/);
+      return true;
+    },
+  );
+  assert.equal(calls, 4);
+});
+
 test("stale worktree cleanup gives actionable guidance for EACCES", () => {
   const cause = Object.assign(new Error("permission denied"), { code: "EACCES" });
 

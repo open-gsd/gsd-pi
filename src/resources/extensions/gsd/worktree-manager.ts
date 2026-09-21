@@ -425,6 +425,17 @@ export function pruneEphemeralGhostWorktreeDirectories(basePath: string): string
   return removed;
 }
 
+const STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS = [20, 50, 100];
+
+function sleepMs(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function isTransientRemoveError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  return code === "EPERM" || code === "EBUSY";
+}
+
 export function removeStaleWorktreeDirectory(
   wtPath: string,
   name: string,
@@ -435,26 +446,35 @@ export function removeStaleWorktreeDirectory(
     `Removing stale worktree directory (not registered with git): ${wtPath}`,
     { worktree: name },
   );
-  try {
-    removeDirectory(wtPath, { recursive: true, force: true });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "EACCES") {
-      throw new GSDError(
-        GSD_GIT_ERROR,
-        `Cannot remove stale worktree directory at ${wtPath} (EACCES: permission denied). It may contain files owned by another user, such as files created with sudo or by a container. Fix the directory ownership or permissions, or remove it manually, then retry.`,
-        { cause: error as Error },
-      );
+  let lastError: unknown;
+  const attempts = STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      removeDirectory(wtPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      lastError = error;
+      if (!isTransientRemoveError(error) || attempt === attempts - 1) break;
+      sleepMs(STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt]!);
     }
-    if (code === "EPERM" || code === "EBUSY") {
-      throw new GSDError(
-        GSD_GIT_ERROR,
-        `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
-        { cause: error as Error },
-      );
-    }
-    throw error;
   }
+  const error = lastError;
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code === "EACCES") {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Cannot remove stale worktree directory at ${wtPath} (EACCES: permission denied). It may contain files owned by another user, such as files created with sudo or by a container. Fix the directory ownership or permissions, or remove it manually, then retry.`,
+      { cause: error as Error },
+    );
+  }
+  if (code === "EPERM" || code === "EBUSY") {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
+      { cause: error as Error },
+    );
+  }
+  throw error;
 }
 
 /**
