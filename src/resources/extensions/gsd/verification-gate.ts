@@ -105,25 +105,30 @@ function verdictQualifies(verdict: string): boolean {
   return PASSING_VERDICT_RE.test(stripped.slice(0, cut).trim().toLowerCase());
 }
 
+function recordQualifies(record: TaskVerificationEvidence): boolean {
+  const verdict = (record.verdict ?? "").trim();
+  if (verdict) return verdictQualifies(verdict);
+  return record.exitCode === 0;
+}
+
 /**
- * Task-specific evidence qualifies when at least one record exists and every
- * record reports a passing outcome (#1591). The executor's staged verdict is
- * authoritative: negated verify idioms (`! grep -q`, `grep -v`,
- * `git diff --exit-code`) succeed on a non-zero exit, so a "pass" verdict
- * qualifies even with a non-zero exitCode. `exitCode === 0` is the fallback
- * for records staged without a verdict (#2213). Verdict matching is lenient
- * (#2014): leading markers (`✅ pass`) and `pass: <details>` descriptions are
- * accepted; unknown tokens fail closed.
+ * Task-specific evidence qualifies when the staged set is non-empty and its
+ * final record reports a passing outcome (#2338). Records are chronological
+ * (`ORDER BY id` within a completion batch), so an earlier FAIL row may
+ * document a discovery run that was then fixed. A set that *ends* failing
+ * still fails closed. The executor's staged verdict is authoritative:
+ * negated verify idioms (`! grep -q`, `grep -v`, `git diff --exit-code`)
+ * succeed on a non-zero exit, so a "pass" verdict qualifies even with a
+ * non-zero exitCode. `exitCode === 0` is the fallback for records staged
+ * without a verdict (#2213). Verdict matching is lenient (#2014): leading
+ * markers (`✅ pass`) and `pass: <details>` descriptions are accepted;
+ * unknown tokens fail closed.
  */
 export function hasQualifyingTaskEvidence(
   evidence: TaskVerificationEvidence[] | undefined,
 ): boolean {
   if (!evidence || evidence.length === 0) return false;
-  return evidence.every((record) => {
-    const verdict = (record.verdict ?? "").trim();
-    if (verdict) return verdictQualifies(verdict);
-    return record.exitCode === 0;
-  });
+  return recordQualifies(evidence[evidence.length - 1]!);
 }
 
 export interface DiscoveredCommands {

@@ -296,4 +296,21 @@ describe("hasQualifyingTaskEvidence: lenient verdict matching (#2014)", () => {
       false,
     );
   });
+
+  test("an earlier FAIL row does not poison a set that ends passing (#2338)", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("FAIL - 12 passed, 1 failed"),
+        record("PASS - 13 passed, 28 assertions"),
+      ]),
+      true,
+    );
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("PASS - 13 passed"),
+        record("FAIL - regression"),
+      ]),
+      false,
+    );
+  });
 });
