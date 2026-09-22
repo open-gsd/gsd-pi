@@ -17,7 +17,7 @@
 
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync, copyFileSync } from "node:fs";
 import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
@@ -787,7 +787,8 @@ describe("verification-gate: execution", () => {
       "if exist dist\\index.js (exit 0) else (exit 1)",
       "if not exist build exit 1",
       "echo %CD% && dir src",
-      "npm run build && type dist\\out.txt",
+      "npm run build && copy dist\\out.txt out.txt",
+      'if exist "dist\\index.js" (exit 0) else (exit 1)',
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), true, cmd);
     }
@@ -797,9 +798,15 @@ describe("verification-gate: execution", () => {
       "printf '%s\\n' 'x;C:\\temp\\foo' | cat",
       "date +%Y%m%d",
       "set -e && npm test",
+      "test -f my\\ file.txt",
+      "grep -q foo\\.bar file.txt",
+      "find . -name \\*.ts",
+      "type -P node",
+      "grep -q 'foo|dir' package.json",
       "test -f package.json && npm test -- --runInBand",
       '"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest',
       "app/pnpm.cmd --version",
+      "python -c 'assert(False)'",
       "node -e \"process.exit(process.env.TYPE ? 0 : 1)\"",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), false, cmd);
@@ -837,6 +844,8 @@ describe("verification-gate: execution", () => {
     { skip: process.platform !== "win32" || !resolveGitBashExecutable(process.env) },
     () => {
       const tmpDir = makeTempDir("gsd-verify-git-bash-quotes");
+      const previousVirtualEnv = process.env.VIRTUAL_ENV;
+      delete process.env.VIRTUAL_ENV;
       try {
         writeFileSync(
           join(tmpDir, "package.json"),
@@ -845,6 +854,10 @@ describe("verification-gate: execution", () => {
         mkdirSync(join(tmpDir, "app"));
         writeFileSync(join(tmpDir, "app", "pnpm.cmd"), "@echo off\r\necho shim-ok\r\n");
         writeFileSync(join(tmpDir, "echo-arg.cmd"), "@echo off\r\necho arg=%1\r\n");
+        // A project venv whose interpreter is a copy of node.exe, so the
+        // injected native `...\.venv\Scripts\python.exe` path is exercised.
+        mkdirSync(join(tmpDir, ".venv", "Scripts"), { recursive: true });
+        copyFileSync(process.execPath, join(tmpDir, ".venv", "Scripts", "python.exe"));
         const result = withRtkDisabled(() => runVerificationGate({
           cwd: tmpDir,
           taskPlanVerify: [
@@ -855,9 +868,13 @@ describe("verification-gate: execution", () => {
             // Windows-authored text: backslash paths and cmd `set NAME=` stay on cmd.
             ".\\echo-arg.cmd sub\\dir",
             'set "GSD_PROBE=via-cmd" && node -e "console.log(process.env.GSD_PROBE)"',
+            // POSIX-authored python stays on bash even though the venv path is native.
+            "python -e 'console.log(\"venv \" + process.argv[1])' single-quoted",
+            // Windows-authored python keeps cmd, where the native venv path works.
+            'python -e "console.log(process.argv[1])" tests\\unit',
           ].join("\n"),
         }));
-        assert.equal(result.checks.length, 5);
+        assert.equal(result.checks.length, 7);
         for (const check of result.checks) {
           assert.equal(check.failureClass, undefined, check.stderr);
           assert.equal(check.exitCode, 0, `${check.command}: ${check.stderr}`);
@@ -866,8 +883,12 @@ describe("verification-gate: execution", () => {
         assert.match(result.checks[1].stdout, /shim-ok/);
         assert.match(result.checks[3].stdout, /arg=sub\\dir/);
         assert.match(result.checks[4].stdout, /via-cmd/);
+        assert.match(result.checks[5].stdout, /^venv single-quoted/m);
+        assert.match(result.checks[6].stdout, /^tests\\unit/m);
         assert.equal(result.passed, true);
       } finally {
+        if (previousVirtualEnv === undefined) delete process.env.VIRTUAL_ENV;
+        else process.env.VIRTUAL_ENV = previousVirtualEnv;
         rmSync(tmpDir, { recursive: true, force: true });
       }
     },

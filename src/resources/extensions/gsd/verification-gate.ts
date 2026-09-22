@@ -1061,23 +1061,36 @@ export function resolveVerificationShell(
   return CMD_VERIFICATION_SHELL;
 }
 
+/**
+ * Windows path shapes in unquoted text: a drive or `.\`/`..\` prefix, or a
+ * backslash between word characters (`tests\unit`, `dist\index.js`). POSIX
+ * escapes (`my\ file`, `foo\.txt`, `\*`) never have a word character on both
+ * sides, so they are left to bash.
+ */
+const WINDOWS_PATH_RE = /(?:^|[\s=(])(?:[A-Za-z]:|\.{1,2})\\|[A-Za-z0-9_)\]]\\[A-Za-z0-9_]/;
 /** `%NAME%` expansion; two-plus characters so `date +%Y%m%d` is not mistaken for one. */
 const CMD_VARIABLE_RE = /%[A-Za-z_][A-Za-z0-9_]+%/;
-/** cmd-only builtins in command position; `set -e` (POSIX) is excluded by requiring `NAME=`. */
-const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+"?[A-Za-z_][A-Za-z0-9_]*=|if\s+(?:not\s+)?exist\b|(?:dir|type|copy|del|erase|rd|md|move|ren|rename|call)\b)/i;
+/**
+ * cmd-only builtins in command position, matched on the unquoted stream so a
+ * quoted `'foo|type'` pattern cannot select cmd. `set` counts only as
+ * `set NAME=` or, once its quoted `"NAME=value"` has been stripped, as a bare
+ * `set` followed by a separator or the end; `set -e` (POSIX) never matches.
+ * `type` is omitted: it is also a bash builtin (`type -P node`).
+ */
+const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+(?:[A-Za-z_][A-Za-z0-9_]*=|(?=&&|\|\||\||$))|if\s+(?:not\s+)?exist\b|(?:dir|copy|del|erase|rd|md|move|ren|rename|call)\b)/i;
 
 /**
- * Verify text written for `cmd.exe` rather than a POSIX shell: unquoted
- * backslashes (`.\node_modules\.bin\tsc.cmd`, `pytest tests\unit`,
+ * Verify text written for `cmd.exe` rather than a POSIX shell: Windows path
+ * shapes (`.\node_modules\.bin\tsc.cmd`, `pytest tests\unit`,
  * `D:\proj\.venv\Scripts\python.exe`), `%VAR%` expansion, or cmd-only
- * builtins such as `set NAME=value` and `if exist`. Backslashes inside quotes
- * (`grep -q '\^1.19.0'`) are POSIX escapes and do not count.
+ * builtins such as `set NAME=value` and `if exist`. Quoted text is ignored:
+ * `grep -q '\^1.19.0'` and `grep -q 'foo|dir'` are POSIX.
  */
 export function looksLikeCmdCommand(command: string): boolean {
   const unquoted = stripQuotedSegments(command);
-  return unquoted.includes("\\")
+  return WINDOWS_PATH_RE.test(unquoted)
     || CMD_VARIABLE_RE.test(unquoted)
-    || CMD_BUILTIN_RE.test(command);
+    || CMD_BUILTIN_RE.test(unquoted);
 }
 
 /**
@@ -1190,10 +1203,16 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
 
   for (const command of commands) {
     const start = Date.now();
-    const pythonNormalized = normalizePythonCommand(rewriteCommandWithRtk(command), options.cwd);
-    // Route after the python rewrite so an injected native venv path
-    // (`D:\proj\.venv\Scripts\python.exe`) is seen by the cmd detector.
-    const shell = shellForCommand(hostShell, pythonNormalized);
+    const authoredCommand = rewriteCommandWithRtk(command);
+    // Route on the authored text, then format the injected venv interpreter
+    // for that shell — a native `D:\...\python.exe` must not drag a POSIX
+    // `python -c '...'` check onto cmd, where its quotes would be literal.
+    const shell = shellForCommand(hostShell, authoredCommand);
+    const pythonNormalized = normalizePythonCommand(
+      authoredCommand,
+      options.cwd,
+      shell.kind === "git-bash" ? "posix" : "native",
+    );
     // The `.\app\pnpm.cmd` rewrite is cmd-only; bash runs `app/pnpm.cmd` as is.
     const rewrittenCommand = shell.kind === "cmd"
       ? normalizeWindowsPackageManagerCommand(pythonNormalized)
