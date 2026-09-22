@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -667,10 +667,11 @@ describe("verification-gate: execution", () => {
 
   test("verificationChildEnvironment preserves Windows Path casing when prepending venv (#2086)", () => {
     const tmpDir = makeTempDir("gsd-verify-path-2086");
-    const venvDir = join(tmpDir, ".venv", "bin");
+    const isWindows = process.platform === "win32";
+    const venvDir = join(tmpDir, ".venv", isWindows ? "Scripts" : "bin");
     mkdirSync(venvDir, { recursive: true });
     writeFileSync(join(tmpDir, ".venv", "pyvenv.cfg"), "home = /usr/bin\n");
-    writeFileSync(join(venvDir, "python"), "#!/bin/sh\n");
+    writeFileSync(join(venvDir, isWindows ? "python.exe" : "python"), "#!/bin/sh\n");
 
     const previousPath = process.env.PATH;
     const previousPathCased = process.env.Path;
@@ -681,7 +682,8 @@ describe("verification-gate: execution", () => {
       const env = verificationChildEnvironment(tmpDir);
       assert.ok("Path" in env);
       assert.equal(env.PATH, undefined);
-      assert.match(env.Path ?? "", /^.*\.venv[\\/]+bin.*C:\\Windows\\System32/);
+      assert.match(env.Path ?? "", /^.*\.venv[\\/]+(bin|Scripts).*C:\\Windows\\System32/);
+      assert.equal(Object.keys(env).filter((key) => key.toUpperCase() === "PATH").length, 1);
     } finally {
       delete process.env.Path;
       if (previousPathCased !== undefined) process.env.Path = previousPathCased;
@@ -689,6 +691,45 @@ describe("verification-gate: execution", () => {
       rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  test("resolveGitPosixToolsDirectory derives Git usr\\bin from the Git cmd entry on PATH (#2087)", () => {
+    const tmpDir = makeTempDir("gsd-verify-git-posix");
+    try {
+      const gitCmd = join(tmpDir, "Git", "cmd");
+      const usrBin = join(tmpDir, "Git", "usr", "bin");
+      mkdirSync(gitCmd, { recursive: true });
+      mkdirSync(usrBin, { recursive: true });
+      writeFileSync(join(gitCmd, "git.exe"), "");
+      writeFileSync(join(usrBin, "grep.exe"), "");
+
+      assert.equal(resolveGitPosixToolsDirectory({ Path: [tmpDir, gitCmd].join(delimiter) }), usrBin);
+      assert.equal(resolveGitPosixToolsDirectory({ ProgramFiles: tmpDir }), usrBin);
+      assert.equal(resolveGitPosixToolsDirectory({ Path: tmpDir }), null);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test(
+    "Windows verify chains reach Git's bundled POSIX tools (#2087)",
+    { skip: process.platform !== "win32" || !resolveGitPosixToolsDirectory(process.env) },
+    () => {
+      const tmpDir = makeTempDir("gsd-verify-posix-chain");
+      try {
+        writeFileSync(join(tmpDir, "detail.py"), "No filings ingested\n");
+        const result = withRtkDisabled(() => runVerificationGate({
+          cwd: tmpDir,
+          taskPlanVerify: 'echo FIRST-HALF-OK && grep -q "No filings ingested" detail.py',
+        }));
+        assert.equal(result.checks.length, 1);
+        assert.equal(result.checks[0].failureClass, undefined, result.checks[0].stderr);
+        assert.equal(result.checks[0].exitCode, 0, result.checks[0].stderr);
+        assert.equal(result.passed, true);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("prependPathEntry avoids duplicate PATH keys on Windows (#2086)", () => {
     const env: NodeJS.ProcessEnv = { Path: "C:\\Windows\\System32" };

@@ -16,12 +16,12 @@ import {
   rmSync,
   type Dirent,
 } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, delimiter, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type { AuditWarning, RuntimeError, VerificationCheck, VerificationResult } from "./types.js";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
 import { rewriteCommandWithRtk } from "../shared/rtk.js";
-import { prependPathEntry } from "../shared/rtk-shared.js";
+import { getPathValue, prependPathEntry, resolvePathCandidates } from "../shared/rtk-shared.js";
 import { normalizePythonCommand, resolveVenvInterpreter, venvBinDirectory, formatPythonInvocation } from "./python-resolver.js";
 import {
   isWorkflowSurfaceAliasTool,
@@ -114,12 +114,20 @@ function verdictQualifies(verdict: string): boolean {
  * for records staged without a verdict (#2213). Verdict matching is lenient
  * (#2014): leading markers (`✅ pass`) and `pass: <details>` descriptions are
  * accepted; unknown tokens fail closed.
+ *
+ * Records are staged chronologically, so a command that was re-run is judged
+ * by its latest record: an honest "red, fixed, green" history qualifies, while
+ * a failing record for any distinct command still disqualifies the set (#2338).
  */
 export function hasQualifyingTaskEvidence(
   evidence: TaskVerificationEvidence[] | undefined,
 ): boolean {
   if (!evidence || evidence.length === 0) return false;
-  return evidence.every((record) => {
+  const latestByCommand = new Map<string, TaskVerificationEvidence>();
+  for (const record of evidence) {
+    latestByCommand.set((record.command ?? "").trim().replace(/\s+/g, " "), record);
+  }
+  return [...latestByCommand.values()].every((record) => {
     const verdict = (record.verdict ?? "").trim();
     if (verdict) return verdictQualifies(verdict);
     return record.exitCode === 0;
@@ -916,7 +924,46 @@ export function verificationChildEnvironment(cwd: string): NodeJS.ProcessEnv {
   if (venv) {
     prependPathEntry(env, venvBinDirectory(venv));
   }
+  if (process.platform === "win32") {
+    const posixTools = resolveGitPosixToolsDirectory(env);
+    if (posixTools) appendPathEntry(env, posixTools);
+  }
   return env;
+}
+
+/**
+ * Git for Windows ships grep/sed/awk/head/wc in `<Git>\usr\bin` but keeps that
+ * directory off the system PATH, so planner-written POSIX Verify fields fail
+ * under `cmd` even on machines with Git installed (#2087).
+ */
+export function resolveGitPosixToolsDirectory(env: NodeJS.ProcessEnv): string | null {
+  const roots: string[] = [];
+  for (const entry of resolvePathCandidates(getPathValue(env))) {
+    if (/^(cmd|bin)$/i.test(basename(entry)) && existsSync(join(entry, "git.exe"))) {
+      roots.push(dirname(entry));
+    }
+  }
+  for (const installRoot of [env.ProgramW6432, env.ProgramFiles, env["ProgramFiles(x86)"]]) {
+    if (installRoot) roots.push(join(installRoot, "Git"));
+  }
+  if (env.LOCALAPPDATA) roots.push(join(env.LOCALAPPDATA, "Programs", "Git"));
+  for (const root of roots) {
+    const candidate = join(root, "usr", "bin");
+    if (existsSync(join(candidate, "grep.exe"))) return candidate;
+  }
+  return null;
+}
+
+function appendPathEntry(env: NodeJS.ProcessEnv, entry: string): void {
+  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "Path";
+  const currentPath = env[pathKey] ?? "";
+  const normalizedEntry = entry.replace(/[\\/]+$/, "").toLowerCase();
+  const present = currentPath
+    .split(delimiter)
+    .some((part) => part.replace(/[\\/]+$/, "").toLowerCase() === normalizedEntry);
+  if (!present) {
+    env[pathKey] = [currentPath, entry].filter(Boolean).join(delimiter);
+  }
 }
 
 // When targets use different discovery methods, return the highest-priority
