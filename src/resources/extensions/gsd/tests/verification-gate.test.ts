@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, posixifyWindowsCommandPaths } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -777,27 +777,63 @@ describe("verification-gate: execution", () => {
     }
   });
 
-  test("posixifyWindowsCommandPaths rewrites native drive paths only in command position (#2399)", () => {
-    assert.equal(
-      posixifyWindowsCommandPaths("D:\\proj\\.venv\\Scripts\\python.exe -m pytest tests\\unit"),
-      "D:/proj/.venv/Scripts/python.exe -m pytest tests\\unit",
-    );
-    assert.equal(
-      posixifyWindowsCommandPaths("echo start && C:\\tools\\node.exe -e 1 || D:\\x\\y.exe"),
-      "echo start && C:/tools/node.exe -e 1 || D:/x/y.exe",
-    );
-    assert.equal(
-      posixifyWindowsCommandPaths('"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest'),
+  test("looksLikeCmdCommand keeps Windows-authored verify text on cmd and POSIX text off it (#2399)", () => {
+    for (const cmd of [
+      "D:\\proj\\.venv\\Scripts\\python.exe -m pytest",
+      "python -m pytest tests\\unit",
+      ".\\node_modules\\.bin\\tsc.cmd --noEmit",
+      'set "NODE_ENV=production" && npm test',
+      "set NODE_ENV=production && npm test",
+      "if exist dist\\index.js (exit 0) else (exit 1)",
+      "if not exist build exit 1",
+      "echo %CD% && dir src",
+      "npm run build && type dist\\out.txt",
+    ]) {
+      assert.equal(looksLikeCmdCommand(cmd), true, cmd);
+    }
+    for (const cmd of [
+      `rg -q '"@qdrant/js-client-rest": "\\^1.19.0"' package.json && echo OK`,
+      "grep -q \"\\^1.19.0\" package.json",
+      "printf '%s\\n' 'x;C:\\temp\\foo' | cat",
+      "date +%Y%m%d",
+      "set -e && npm test",
+      "test -f package.json && npm test -- --runInBand",
       '"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest',
-    );
-    assert.equal(
-      posixifyWindowsCommandPaths("grep -q 'a\\^b' package.json && npm test"),
-      "grep -q 'a\\^b' package.json && npm test",
-    );
+      "app/pnpm.cmd --version",
+      "node -e \"process.exit(process.env.TYPE ? 0 : 1)\"",
+    ]) {
+      assert.equal(looksLikeCmdCommand(cmd), false, cmd);
+    }
+  });
+
+  test("shellForCommand routes cmd-looking verify text to cmd only on a Git bash host (#2399)", () => {
+    const tmpDir = makeTempDir("gsd-verify-shell-route");
+    try {
+      mkdirSync(join(tmpDir, "Git", "bin"), { recursive: true });
+      writeFileSync(join(tmpDir, "Git", "bin", "bash.exe"), "");
+      const gitBash = resolveVerificationShell({ ProgramFiles: tmpDir }, "win32");
+      const posix = resolveVerificationShell({}, "linux");
+      const cmdOnly = resolveVerificationShell({ Path: tmpDir }, "win32");
+
+      assert.equal(shellForCommand(gitBash, "test -f package.json").kind, "git-bash");
+      assert.equal(shellForCommand(gitBash, "python -m pytest tests\\unit").kind, "cmd");
+      assert.equal(shellForCommand(posix, "python -m pytest tests\\unit").kind, "posix");
+      assert.equal(shellForCommand(cmdOnly, "test -f package.json").kind, "cmd");
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("normalizeCommandIdentity collapses whitespace between tokens but not inside quotes (#2338)", () => {
+    assert.equal(normalizeCommandIdentity("  npm   run\tlint "), "npm run lint");
+    assert.equal(normalizeCommandIdentity("grep -q 'a  b' file"), "grep -q 'a  b' file");
+    assert.notEqual(normalizeCommandIdentity("grep -q 'a  b' file"), normalizeCommandIdentity("grep -q 'a b' file"));
+    assert.equal(normalizeCommandIdentity('node -e "a  b"   x'), 'node -e "a  b" x');
+    assert.equal(normalizeCommandIdentity("echo a\\  b"), "echo a\\  b");
   });
 
   test(
-    "Windows verify with single-quoted regex escapes runs green under Git bash like the executor's run (#2399)",
+    "Windows verify runs POSIX text under Git bash and Windows-authored text under cmd (#2399)",
     { skip: process.platform !== "win32" || !resolveGitBashExecutable(process.env) },
     () => {
       const tmpDir = makeTempDir("gsd-verify-git-bash-quotes");
@@ -808,21 +844,28 @@ describe("verification-gate: execution", () => {
         );
         mkdirSync(join(tmpDir, "app"));
         writeFileSync(join(tmpDir, "app", "pnpm.cmd"), "@echo off\r\necho shim-ok\r\n");
+        writeFileSync(join(tmpDir, "echo-arg.cmd"), "@echo off\r\necho arg=%1\r\n");
         const result = withRtkDisabled(() => runVerificationGate({
           cwd: tmpDir,
           taskPlanVerify: [
+            // The #2399 reporter's shape: single quotes and a `\^` regex escape.
             `grep -q '"@qdrant/js-client-rest": "\\^1.19.0"' package.json && node -e "console.log('nested \\"ok\\"')"`,
             "app/pnpm.cmd --version",
             "test -f package.json",
+            // Windows-authored text: backslash paths and cmd `set NAME=` stay on cmd.
+            ".\\echo-arg.cmd sub\\dir",
+            'set "GSD_PROBE=via-cmd" && node -e "console.log(process.env.GSD_PROBE)"',
           ].join("\n"),
         }));
-        assert.equal(result.checks.length, 3);
+        assert.equal(result.checks.length, 5);
         for (const check of result.checks) {
           assert.equal(check.failureClass, undefined, check.stderr);
           assert.equal(check.exitCode, 0, `${check.command}: ${check.stderr}`);
         }
         assert.match(result.checks[0].stdout, /nested "ok"/);
         assert.match(result.checks[1].stdout, /shim-ok/);
+        assert.match(result.checks[3].stdout, /arg=sub\\dir/);
+        assert.match(result.checks[4].stdout, /via-cmd/);
         assert.equal(result.passed, true);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });

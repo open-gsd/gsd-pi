@@ -125,13 +125,49 @@ export function hasQualifyingTaskEvidence(
   if (!evidence || evidence.length === 0) return false;
   const latestByCommand = new Map<string, TaskVerificationEvidence>();
   for (const record of evidence) {
-    latestByCommand.set((record.command ?? "").trim().replace(/\s+/g, " "), record);
+    latestByCommand.set(normalizeCommandIdentity(record.command ?? ""), record);
   }
   return [...latestByCommand.values()].every((record) => {
     const verdict = (record.verdict ?? "").trim();
     if (verdict) return verdictQualifies(verdict);
     return record.exitCode === 0;
   });
+}
+
+/**
+ * Identity key for "the same command re-run": collapse whitespace runs
+ * between tokens, but leave quoted text untouched so `grep -q 'a  b'` and
+ * `grep -q 'a b'` stay distinct checks rather than one re-run.
+ */
+export function normalizeCommandIdentity(command: string): string {
+  let out = "";
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let pendingSpace = false;
+
+  for (const ch of command) {
+    if (!inSingle && !inDouble && !escaped && /\s/.test(ch)) {
+      pendingSpace = out.length > 0;
+      continue;
+    }
+    if (pendingSpace) {
+      out += " ";
+      pendingSpace = false;
+    }
+    out += ch;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) inSingle = !inSingle;
+    else if (ch === "\"" && !inSingle) inDouble = !inDouble;
+  }
+  return out;
 }
 
 export interface DiscoveredCommands {
@@ -992,6 +1028,12 @@ const POSIX_VERIFICATION_SHELL: VerificationShell = {
   ],
 };
 
+const CMD_VERIFICATION_SHELL: VerificationShell = {
+  kind: "cmd",
+  bin: "cmd",
+  argsFor: (command) => ["/d", "/s", "/c", command],
+};
+
 /**
  * Pick the shell that runs Verify commands on this host.
  *
@@ -1016,26 +1058,37 @@ export function resolveVerificationShell(
       argsFor: (command) => ["-o", "pipefail", "-c", command, "verification-gate"],
     };
   }
-  return {
-    kind: "cmd",
-    bin: "cmd",
-    argsFor: (command) => ["/d", "/s", "/c", command],
-  };
+  return CMD_VERIFICATION_SHELL;
+}
+
+/** `%NAME%` expansion; two-plus characters so `date +%Y%m%d` is not mistaken for one. */
+const CMD_VARIABLE_RE = /%[A-Za-z_][A-Za-z0-9_]+%/;
+/** cmd-only builtins in command position; `set -e` (POSIX) is excluded by requiring `NAME=`. */
+const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+"?[A-Za-z_][A-Za-z0-9_]*=|if\s+(?:not\s+)?exist\b|(?:dir|type|copy|del|erase|rd|md|move|ren|rename|call)\b)/i;
+
+/**
+ * Verify text written for `cmd.exe` rather than a POSIX shell: unquoted
+ * backslashes (`.\node_modules\.bin\tsc.cmd`, `pytest tests\unit`,
+ * `D:\proj\.venv\Scripts\python.exe`), `%VAR%` expansion, or cmd-only
+ * builtins such as `set NAME=value` and `if exist`. Backslashes inside quotes
+ * (`grep -q '\^1.19.0'`) are POSIX escapes and do not count.
+ */
+export function looksLikeCmdCommand(command: string): boolean {
+  const unquoted = stripQuotedSegments(command);
+  return unquoted.includes("\\")
+    || CMD_VARIABLE_RE.test(unquoted)
+    || CMD_BUILTIN_RE.test(command);
 }
 
 /**
- * Rewrite unquoted Windows-native absolute paths in command position
- * (`D:\proj\.venv\Scripts\python.exe -m pytest`) to forward slashes so bash
- * does not consume the backslashes as escapes. Plan-time venv rewrites and
- * `normalizePythonCommand` both emit native paths; forward-slash drive paths
- * are accepted by cmd and bash alike. Quoted paths are left alone — bash
- * preserves backslashes inside double quotes and execs them fine.
+ * Per-command shell choice. Existing Windows-authored Verify fields keep
+ * running through cmd, where their backslash paths and builtins already work;
+ * everything else on a Git-for-Windows host runs through bash. POSIX hosts and
+ * hosts without Git never change shell.
  */
-export function posixifyWindowsCommandPaths(command: string): string {
-  return command.replace(
-    /(^\s*|(?:&&|\|\||;|\|)\s*)([A-Za-z]:\\[^\s"'|&;<>]*)/g,
-    (_match, pre: string, path: string) => `${pre}${path.replaceAll("\\", "/")}`,
-  );
+export function shellForCommand(hostShell: VerificationShell, command: string): VerificationShell {
+  if (hostShell.kind === "git-bash" && looksLikeCmdCommand(command)) return CMD_VERIFICATION_SHELL;
+  return hostShell;
 }
 
 function appendPathEntry(env: NodeJS.ProcessEnv, entry: string): void {
@@ -1133,16 +1186,18 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
 
   const checks: VerificationCheck[] = [];
   const childEnv = verificationChildEnvironment(options.cwd);
-  const shell = resolveVerificationShell(childEnv);
+  const hostShell = resolveVerificationShell(childEnv);
 
   for (const command of commands) {
     const start = Date.now();
     const pythonNormalized = normalizePythonCommand(rewriteCommandWithRtk(command), options.cwd);
-    // The cmd-only rewrites (`.\app\pnpm.cmd`) would break under bash, and
-    // bash needs native drive paths in forward-slash form; apply per shell.
-    const rewrittenCommand = shell.kind === "git-bash"
-      ? posixifyWindowsCommandPaths(pythonNormalized)
-      : normalizeWindowsPackageManagerCommand(pythonNormalized);
+    // Route after the python rewrite so an injected native venv path
+    // (`D:\proj\.venv\Scripts\python.exe`) is seen by the cmd detector.
+    const shell = shellForCommand(hostShell, pythonNormalized);
+    // The `.\app\pnpm.cmd` rewrite is cmd-only; bash runs `app/pnpm.cmd` as is.
+    const rewrittenCommand = shell.kind === "cmd"
+      ? normalizeWindowsPackageManagerCommand(pythonNormalized)
+      : pythonNormalized;
     // Pass the command string as an argument to the shell explicitly
     // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
     const shellArgs = shell.argsFor(rewrittenCommand);

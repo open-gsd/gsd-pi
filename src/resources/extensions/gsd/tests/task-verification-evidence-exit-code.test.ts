@@ -324,6 +324,16 @@ describe("hasQualifyingTaskEvidence: re-run history (#2338)", () => {
     );
   });
 
+  test("whitespace inside quotes distinguishes commands, so a different pattern is not a re-run", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("grep -q 'a  b' file", "fail", 1),
+        record("grep -q 'a b' file", "pass", 0),
+      ]),
+      false,
+    );
+  });
+
   test("a command whose latest run failed still disqualifies", () => {
     assert.equal(
       hasQualifyingTaskEvidence([record(pest, "pass", 0), record(pest, "fail", 1)]),
