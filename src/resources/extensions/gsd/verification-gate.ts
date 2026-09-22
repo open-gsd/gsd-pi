@@ -937,6 +937,29 @@ export function verificationChildEnvironment(cwd: string): NodeJS.ProcessEnv {
  * under `cmd` even on machines with Git installed (#2087).
  */
 export function resolveGitPosixToolsDirectory(env: NodeJS.ProcessEnv): string | null {
+  for (const root of gitForWindowsInstallRoots(env)) {
+    const candidate = join(root, "usr", "bin");
+    if (existsSync(join(candidate, "grep.exe"))) return candidate;
+  }
+  return null;
+}
+
+/**
+ * Git for Windows' own `bash.exe`, or null when Git is not installed. The
+ * probe deliberately never consults `bash` on PATH: on Windows that name
+ * usually resolves to `System32\bash.exe`, the WSL launcher, which runs
+ * commands inside a Linux distribution rather than against the project.
+ */
+export function resolveGitBashExecutable(env: NodeJS.ProcessEnv): string | null {
+  for (const root of gitForWindowsInstallRoots(env)) {
+    for (const candidate of [join(root, "bin", "bash.exe"), join(root, "usr", "bin", "bash.exe")]) {
+      if (existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+function gitForWindowsInstallRoots(env: NodeJS.ProcessEnv): string[] {
   const roots: string[] = [];
   for (const entry of resolvePathCandidates(getPathValue(env))) {
     if (/^(cmd|bin)$/i.test(basename(entry)) && existsSync(join(entry, "git.exe"))) {
@@ -947,11 +970,72 @@ export function resolveGitPosixToolsDirectory(env: NodeJS.ProcessEnv): string | 
     if (installRoot) roots.push(join(installRoot, "Git"));
   }
   if (env.LOCALAPPDATA) roots.push(join(env.LOCALAPPDATA, "Programs", "Git"));
-  for (const root of roots) {
-    const candidate = join(root, "usr", "bin");
-    if (existsSync(join(candidate, "grep.exe"))) return candidate;
+  return roots;
+}
+
+export type VerificationShellKind = "posix" | "git-bash" | "cmd";
+
+export interface VerificationShell {
+  kind: VerificationShellKind;
+  bin: string;
+  argsFor(command: string): string[];
+}
+
+const POSIX_VERIFICATION_SHELL: VerificationShell = {
+  kind: "posix",
+  bin: "sh",
+  argsFor: (command) => [
+    "-c",
+    "if command -v bash >/dev/null 2>&1; then exec bash -o pipefail -c \"$1\" verification-gate; fi\nexec sh -c \"$1\" verification-gate",
+    "verification-gate",
+    command,
+  ],
+};
+
+/**
+ * Pick the shell that runs Verify commands on this host.
+ *
+ * Planners write Verify fields in POSIX shell (`test -f`, `grep -q '...'`,
+ * `&&` chains). Routing them through `cmd.exe` on Windows made the host gate
+ * fail commands the executor had just run green in bash — single quotes,
+ * `\^` regex escapes and `vendor/bin/*` shims all mean something else to cmd —
+ * so every re-attempt failed identically and the unit never converged
+ * (#635, #2338, #2399). Mirror the POSIX branch's bash preference: use Git
+ * for Windows' bash when it is installed and keep `cmd` only as the fallback.
+ */
+export function resolveVerificationShell(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): VerificationShell {
+  if (platform !== "win32") return POSIX_VERIFICATION_SHELL;
+  const bash = resolveGitBashExecutable(env);
+  if (bash) {
+    return {
+      kind: "git-bash",
+      bin: bash,
+      argsFor: (command) => ["-o", "pipefail", "-c", command, "verification-gate"],
+    };
   }
-  return null;
+  return {
+    kind: "cmd",
+    bin: "cmd",
+    argsFor: (command) => ["/d", "/s", "/c", command],
+  };
+}
+
+/**
+ * Rewrite unquoted Windows-native absolute paths in command position
+ * (`D:\proj\.venv\Scripts\python.exe -m pytest`) to forward slashes so bash
+ * does not consume the backslashes as escapes. Plan-time venv rewrites and
+ * `normalizePythonCommand` both emit native paths; forward-slash drive paths
+ * are accepted by cmd and bash alike. Quoted paths are left alone — bash
+ * preserves backslashes inside double quotes and execs them fine.
+ */
+export function posixifyWindowsCommandPaths(command: string): string {
+  return command.replace(
+    /(^\s*|(?:&&|\|\||;|\|)\s*)([A-Za-z]:\\[^\s"'|&;<>]*)/g,
+    (_match, pre: string, path: string) => `${pre}${path.replaceAll("\\", "/")}`,
+  );
 }
 
 function appendPathEntry(env: NodeJS.ProcessEnv, entry: string): void {
@@ -1048,24 +1132,20 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
   }
 
   const checks: VerificationCheck[] = [];
+  const childEnv = verificationChildEnvironment(options.cwd);
+  const shell = resolveVerificationShell(childEnv);
 
   for (const command of commands) {
     const start = Date.now();
-    const rewrittenCommand = normalizeWindowsPackageManagerCommand(
-      normalizePythonCommand(rewriteCommandWithRtk(command), options.cwd),
-    );
+    const pythonNormalized = normalizePythonCommand(rewriteCommandWithRtk(command), options.cwd);
+    // The cmd-only rewrites (`.\app\pnpm.cmd`) would break under bash, and
+    // bash needs native drive paths in forward-slash form; apply per shell.
+    const rewrittenCommand = shell.kind === "git-bash"
+      ? posixifyWindowsCommandPaths(pythonNormalized)
+      : normalizeWindowsPackageManagerCommand(pythonNormalized);
     // Pass the command string as an argument to the shell explicitly
     // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
-    const isWindows = process.platform === "win32";
-    const shellBin = isWindows ? "cmd" : "sh";
-    const shellArgs = isWindows
-      ? ["/d", "/s", "/c", rewrittenCommand]
-      : [
-          "-c",
-          "if command -v bash >/dev/null 2>&1; then exec bash -o pipefail -c \"$1\" verification-gate; fi\nexec sh -c \"$1\" verification-gate",
-          "verification-gate",
-          rewrittenCommand,
-        ];
+    const shellArgs = shell.argsFor(rewrittenCommand);
     const outputDir = mkdtempSync(join(tmpdir(), "gsd-verification-"));
     const stdoutPath = join(outputDir, "stdout");
     const stderrPath = join(outputDir, "stderr");
@@ -1075,12 +1155,15 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
     let stdout: string;
     let capturedStderr: string;
     try {
-      result = spawnSync(shellBin, shellArgs, {
+      result = spawnSync(shell.bin, shellArgs, {
         cwd: options.cwd,
-        env: verificationChildEnvironment(options.cwd),
+        env: childEnv,
         stdio: ["ignore", stdoutFd, stderrFd],
         timeout: options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS,
-        windowsVerbatimArguments: isWindows,
+        // cmd re-parses its command line itself; Node's quoting would mangle
+        // nested quotes (#1940). bash.exe follows the MSVCRT argv rules Node
+        // emits, so it needs the default quoting.
+        windowsVerbatimArguments: shell.kind === "cmd",
       });
       stdout = readBoundedCommandOutput(stdoutPath);
       capturedStderr = readBoundedCommandOutput(stderrPath);

@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, posixifyWindowsCommandPaths } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -724,6 +724,105 @@ describe("verification-gate: execution", () => {
         assert.equal(result.checks.length, 1);
         assert.equal(result.checks[0].failureClass, undefined, result.checks[0].stderr);
         assert.equal(result.checks[0].exitCode, 0, result.checks[0].stderr);
+        assert.equal(result.passed, true);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("resolveGitBashExecutable finds Git for Windows bash but never PATH's WSL launcher (#2399)", () => {
+    const tmpDir = makeTempDir("gsd-verify-git-bash");
+    try {
+      const gitCmd = join(tmpDir, "Git", "cmd");
+      const gitBin = join(tmpDir, "Git", "bin");
+      const system32 = join(tmpDir, "System32");
+      mkdirSync(gitCmd, { recursive: true });
+      mkdirSync(gitBin, { recursive: true });
+      mkdirSync(system32, { recursive: true });
+      writeFileSync(join(gitCmd, "git.exe"), "");
+      writeFileSync(join(gitBin, "bash.exe"), "");
+      writeFileSync(join(system32, "bash.exe"), "");
+
+      assert.equal(resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter) }), join(gitBin, "bash.exe"));
+      assert.equal(resolveGitBashExecutable({ ProgramFiles: tmpDir }), join(gitBin, "bash.exe"));
+      assert.equal(resolveGitBashExecutable({ Path: system32 }), null);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("resolveVerificationShell prefers Git bash on win32 and falls back to cmd (#2399)", () => {
+    const tmpDir = makeTempDir("gsd-verify-shell");
+    try {
+      const gitBin = join(tmpDir, "Git", "usr", "bin");
+      mkdirSync(gitBin, { recursive: true });
+      writeFileSync(join(gitBin, "bash.exe"), "");
+
+      const posix = resolveVerificationShell({ ProgramFiles: tmpDir }, "linux");
+      assert.equal(posix.kind, "posix");
+      assert.equal(posix.bin, "sh");
+      assert.equal(posix.argsFor("echo hi").at(-1), "echo hi");
+
+      const gitBash = resolveVerificationShell({ ProgramFiles: tmpDir }, "win32");
+      assert.equal(gitBash.kind, "git-bash");
+      assert.equal(gitBash.bin, join(gitBin, "bash.exe"));
+      assert.deepEqual(gitBash.argsFor("echo hi"), ["-o", "pipefail", "-c", "echo hi", "verification-gate"]);
+
+      const cmd = resolveVerificationShell({ Path: tmpDir }, "win32");
+      assert.equal(cmd.kind, "cmd");
+      assert.deepEqual(cmd.argsFor("echo hi"), ["/d", "/s", "/c", "echo hi"]);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  test("posixifyWindowsCommandPaths rewrites native drive paths only in command position (#2399)", () => {
+    assert.equal(
+      posixifyWindowsCommandPaths("D:\\proj\\.venv\\Scripts\\python.exe -m pytest tests\\unit"),
+      "D:/proj/.venv/Scripts/python.exe -m pytest tests\\unit",
+    );
+    assert.equal(
+      posixifyWindowsCommandPaths("echo start && C:\\tools\\node.exe -e 1 || D:\\x\\y.exe"),
+      "echo start && C:/tools/node.exe -e 1 || D:/x/y.exe",
+    );
+    assert.equal(
+      posixifyWindowsCommandPaths('"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest'),
+      '"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest',
+    );
+    assert.equal(
+      posixifyWindowsCommandPaths("grep -q 'a\\^b' package.json && npm test"),
+      "grep -q 'a\\^b' package.json && npm test",
+    );
+  });
+
+  test(
+    "Windows verify with single-quoted regex escapes runs green under Git bash like the executor's run (#2399)",
+    { skip: process.platform !== "win32" || !resolveGitBashExecutable(process.env) },
+    () => {
+      const tmpDir = makeTempDir("gsd-verify-git-bash-quotes");
+      try {
+        writeFileSync(
+          join(tmpDir, "package.json"),
+          JSON.stringify({ dependencies: { "@qdrant/js-client-rest": "^1.19.0" } }, null, 2),
+        );
+        mkdirSync(join(tmpDir, "app"));
+        writeFileSync(join(tmpDir, "app", "pnpm.cmd"), "@echo off\r\necho shim-ok\r\n");
+        const result = withRtkDisabled(() => runVerificationGate({
+          cwd: tmpDir,
+          taskPlanVerify: [
+            `grep -q '"@qdrant/js-client-rest": "\\^1.19.0"' package.json && node -e "console.log('nested \\"ok\\"')"`,
+            "app/pnpm.cmd --version",
+            "test -f package.json",
+          ].join("\n"),
+        }));
+        assert.equal(result.checks.length, 3);
+        for (const check of result.checks) {
+          assert.equal(check.failureClass, undefined, check.stderr);
+          assert.equal(check.exitCode, 0, `${check.command}: ${check.stderr}`);
+        }
+        assert.match(result.checks[0].stdout, /nested "ok"/);
+        assert.match(result.checks[1].stdout, /shim-ok/);
         assert.equal(result.passed, true);
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
