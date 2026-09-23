@@ -996,17 +996,23 @@ export function resolveGitBashExecutable(env: NodeJS.ProcessEnv): string | null 
 }
 
 function gitForWindowsInstallRoots(env: NodeJS.ProcessEnv): string[] {
-  const roots: string[] = [];
+  const roots = new Map<string, string>();
+  const addRoot = (root: string | undefined): void => {
+    if (!root) return;
+    const trimmed = root.replace(/[\\/]+$/, "");
+    if (!trimmed) return;
+    roots.set(trimmed.toLowerCase(), roots.get(trimmed.toLowerCase()) ?? trimmed);
+  };
   for (const entry of resolvePathCandidates(getPathValue(env))) {
     if (/^(cmd|bin)$/i.test(basename(entry)) && existsSync(join(entry, "git.exe"))) {
-      roots.push(dirname(entry));
+      addRoot(dirname(entry));
     }
   }
   for (const installRoot of [env.ProgramW6432, env.ProgramFiles, env["ProgramFiles(x86)"]]) {
-    if (installRoot) roots.push(join(installRoot, "Git"));
+    addRoot(installRoot ? join(installRoot, "Git") : undefined);
   }
-  if (env.LOCALAPPDATA) roots.push(join(env.LOCALAPPDATA, "Programs", "Git"));
-  return [...new Set(roots)];
+  addRoot(env.LOCALAPPDATA ? join(env.LOCALAPPDATA, "Programs", "Git") : undefined);
+  return [...roots.values()];
 }
 
 export type VerificationShellKind = "posix" | "git-bash" | "cmd";

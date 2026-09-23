@@ -746,7 +746,7 @@ describe("verification-gate: execution", () => {
 
       assert.equal(resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter) }), join(gitBin, "bash.exe"));
       assert.equal(
-        resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter), ProgramFiles: tmpDir, ProgramW6432: tmpDir }),
+        resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter), ProgramFiles: tmpDir, ProgramW6432: `${tmpDir}/` }),
         join(gitBin, "bash.exe"),
       );
       assert.equal(resolveGitBashExecutable({ ProgramFiles: tmpDir }), join(gitBin, "bash.exe"));
