@@ -1064,7 +1064,7 @@ export function resolveVerificationShell(
     return {
       kind: "git-bash",
       bin: bash,
-      argsFor: (command) => ["-o", "pipefail", "-c", "command=$1; shift; eval \"$command\"", "verification-gate", command],
+      argsFor: (command) => ["-o", "pipefail", "-c", "exec \"$0\" -o pipefail -c \"$1\" verification-gate", bash, command],
     };
   }
   return CMD_VERIFICATION_SHELL;
@@ -1089,6 +1089,7 @@ const CMD_VARIABLE_RE = /%[A-Za-z_][A-Za-z0-9_]+%/;
  * builtin (`type -P node`).
  */
 const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+(?:[A-Za-z_][A-Za-z0-9_]*=|(?=[&|]|$))|if\s+(?:not\s+)?exist\b|(?:dir|copy|del|erase|rd|md|move|ren|rename|call)\b)/i;
+const POSIX_AUTHORED_RE = /'[^']*'|(?:^|&&|\|\||[|&])\s*(?:test\s+-[A-Za-z]|\[\[?|\bgrep\b|\bfind\b|\bprintf\b|\bcat\b|\bcommand\s+-v\b|\bset\s+-e\b)/;
 
 /**
  * Verify text written for `cmd.exe` rather than a POSIX shell: Windows path
@@ -1102,6 +1103,10 @@ export function looksLikeCmdCommand(command: string): boolean {
   return WINDOWS_PATH_RE.test(unquoted)
     || CMD_VARIABLE_RE.test(unquoted)
     || CMD_BUILTIN_RE.test(unquoted);
+}
+
+export function looksLikePosixAuthoredCommand(command: string): boolean {
+  return POSIX_AUTHORED_RE.test(command);
 }
 
 /**
@@ -1215,6 +1220,17 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
   for (const command of commands) {
     const start = Date.now();
     const authoredCommand = rewriteCommandWithRtk(command);
+    if (hostShell.kind === "cmd" && !looksLikeCmdCommand(authoredCommand) && looksLikePosixAuthoredCommand(authoredCommand)) {
+      checks.push({
+        command: authoredCommand,
+        exitCode: 127,
+        stdout: "",
+        stderr: "Verify command requires a POSIX shell, but this Windows host does not have Git Bash available. Install Git for Windows or rewrite the command for cmd.exe.",
+        durationMs: Date.now() - start,
+        failureClass: "command-not-found",
+      });
+      continue;
+    }
     // Route on the authored text, then format the injected venv interpreter
     // for that shell — a native `D:\...\python.exe` must not drag a POSIX
     // `python -c '...'` check onto cmd, where its quotes would be literal.

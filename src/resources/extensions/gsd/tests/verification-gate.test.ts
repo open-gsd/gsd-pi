@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, looksLikePosixAuthoredCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -775,8 +775,8 @@ describe("verification-gate: execution", () => {
         "-o",
         "pipefail",
         "-c",
-        "command=$1; shift; eval \"$command\"",
-        "verification-gate",
+        "exec \"$0\" -o pipefail -c \"$1\" verification-gate",
+        join(gitBin, "bash.exe"),
         "echo hi",
       ]);
 
@@ -823,6 +823,24 @@ describe("verification-gate: execution", () => {
       "node -e \"process.exit(process.env.TYPE ? 0 : 1)\"",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), false, cmd);
+    }
+  });
+
+  test("looksLikePosixAuthoredCommand detects POSIX-only verify text (#2399)", () => {
+    for (const cmd of [
+      "test -f package.json && npm test -- --runInBand",
+      "grep -q 'foo|dir' package.json",
+      "set -e && npm test",
+      "command -v node >/dev/null 2>&1",
+    ]) {
+      assert.equal(looksLikePosixAuthoredCommand(cmd), true, cmd);
+    }
+    for (const cmd of [
+      "echo %CD% && dir src",
+      ".\\node_modules\\.bin\\tsc.cmd --noEmit",
+      "python -m pytest tests\\unit",
+    ]) {
+      assert.equal(looksLikePosixAuthoredCommand(cmd), false, cmd);
     }
   });
 
