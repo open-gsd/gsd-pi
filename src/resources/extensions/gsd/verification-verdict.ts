@@ -51,6 +51,21 @@ export interface DecideVerificationVerdictOptions {
   hasQualifyingEvidence?: boolean;
 }
 
+const UNRESOLVED_COMMAND_PATTERNS = [
+  /'([^']+)' is not recognized as an internal or external command/i,
+  /([^\s:'"]+): (?:command )?not found/i,
+];
+
+/** The specific tool a shell failed to resolve, so compound checks name the missing segment (#2087). */
+export function unresolvedCommandToken(stderr: string | undefined): string | null {
+  if (!stderr) return null;
+  for (const pattern of UNRESOLVED_COMMAND_PATTERNS) {
+    const match = pattern.exec(stderr);
+    if (match?.[1]) return match[1];
+  }
+  return null;
+}
+
 export function decideVerificationVerdict(
   unitType: string,
   result: VerificationGateResult,
@@ -73,11 +88,14 @@ export function decideVerificationVerdict(
         failureContext: "",
       };
     }
+    const missingTool = unresolvedCommandToken(unrunnableCheck.stderr);
     return {
       passed: false,
       reason: "command-not-found",
       retryable: false,
-      failureContext: `Verify command not runnable on this platform: \`${unrunnableCheck.command}\``,
+      failureContext: missingTool
+        ? `Verify command not runnable on this platform: \`${missingTool}\` was not found while running \`${unrunnableCheck.command}\``
+        : `Verify command not runnable on this platform: \`${unrunnableCheck.command}\``,
     };
   }
 

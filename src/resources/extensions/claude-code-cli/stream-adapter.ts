@@ -2411,11 +2411,11 @@ export function buildSdkOptions(
 let capturedClaudeCodeUIContext: ExtensionUIContext | undefined;
 
 /**
- * Capture the active extension UI context from `before_provider_request`. Core
- * invokes `streamSimple` with a plain `SimpleStreamOptions` (no
- * `extensionUIContext`), so without this the elicitation handler is never wired
- * and `ask_user_questions` immediately returns cancelled. See index.ts, which
- * registers the hook that calls this.
+ * Capture the active extension UI context. Core invokes `streamSimple` with a
+ * plain `SimpleStreamOptions` (no `extensionUIContext`), so without this the
+ * elicitation handler is never wired and `ask_user_questions` immediately
+ * returns cancelled. index.ts refreshes this from session_start,
+ * before_agent_start, and before_provider_request (#2118).
  */
 export function setClaudeCodeUIContext(ui: ExtensionUIContext | undefined): void {
 	capturedClaudeCodeUIContext = ui;
