@@ -355,6 +355,7 @@ test("unresolvedCommandToken extracts the missing tool from cmd, bash, and sh st
   assert.equal(unresolvedCommandToken("'grep' is not recognized as an internal or external command,"), "grep");
   assert.equal(unresolvedCommandToken("bash: line 1: rg: command not found"), "rg");
   assert.equal(unresolvedCommandToken("sh: 1: jq: not found"), "jq");
+  assert.equal(unresolvedCommandToken("dash: 12: sed: not found"), "sed");
   assert.equal(unresolvedCommandToken("spawnSync cmd ENOENT"), null);
   assert.equal(unresolvedCommandToken(undefined), null);
 });
