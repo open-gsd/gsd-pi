@@ -791,7 +791,6 @@ describe("verification-gate: execution", () => {
   test("looksLikeCmdCommand keeps Windows-authored verify text on cmd and POSIX text off it (#2399)", () => {
     for (const cmd of [
       "D:\\proj\\.venv\\Scripts\\python.exe -m pytest",
-      "python -m pytest tests\\unit",
       ".\\node_modules\\.bin\\tsc.cmd --noEmit",
       'set "NODE_ENV=production" && npm test',
       "set NODE_ENV=production && npm test",
@@ -801,7 +800,6 @@ describe("verification-gate: execution", () => {
       "npm run build && copy dist\\out.txt out.txt",
       'if exist "dist\\index.js" (exit 0) else (exit 1)',
       'set "NODE_ENV=test" & node script.js',
-      "node --test tests\\*.test.js",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), true, cmd);
     }
@@ -819,6 +817,8 @@ describe("verification-gate: execution", () => {
       "test -f package.json && npm test -- --runInBand",
       '"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest',
       "app/pnpm.cmd --version",
+      "python -m pytest tests\\unit",
+      "node --test tests\\*.test.js",
       "python -c 'assert(False)'",
       "node -e \"process.exit(process.env.TYPE ? 0 : 1)\"",
     ]) {
@@ -836,7 +836,7 @@ describe("verification-gate: execution", () => {
       const cmdOnly = resolveVerificationShell({ Path: tmpDir }, "win32");
 
       assert.equal(shellForCommand(gitBash, "test -f package.json").kind, "git-bash");
-      assert.equal(shellForCommand(gitBash, "python -m pytest tests\\unit").kind, "cmd");
+      assert.equal(shellForCommand(gitBash, "python -m pytest tests\\unit").kind, "git-bash");
       assert.equal(shellForCommand(posix, "python -m pytest tests\\unit").kind, "posix");
       assert.equal(shellForCommand(cmdOnly, "test -f package.json").kind, "cmd");
     } finally {

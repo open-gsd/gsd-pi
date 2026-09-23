@@ -1068,13 +1068,13 @@ export function resolveVerificationShell(
 }
 
 /**
- * Windows path shapes in unquoted text: a drive or `.\`/`..\` prefix, or a
- * backslash between a word character and a word character or wildcard
- * (`tests\unit`, `dist\index.js`, `tests\*.test.js`). POSIX escapes
- * (`my\ file`, `foo\.txt`, a standalone `\*`) never have a word character on
- * the left and a path character on the right, so they are left to bash.
+ * Windows path shapes in unquoted text that are specific enough to prefer
+ * `cmd.exe` on their own: a drive or `.\`/`..\` prefix. Bare backslash
+ * fragments such as `tests\unit` are intentionally not enough by themselves:
+ * POSIX-authored Verify commands can include those paths while still relying on
+ * bash semantics (`&&`, single quotes, globs, shims).
  */
-const WINDOWS_PATH_RE = /(?:^|[\s=(])(?:[A-Za-z]:|\.{1,2})\\|[A-Za-z0-9_)\]]\\[A-Za-z0-9_*?]/;
+const WINDOWS_PATH_RE = /(?:^|[\s=(])(?:[A-Za-z]:|\.{1,2})\\/;
 /** `%NAME%` expansion; two-plus characters so `date +%Y%m%d` is not mistaken for one. */
 const CMD_VARIABLE_RE = /%[A-Za-z_][A-Za-z0-9_]+%/;
 /**
@@ -1089,10 +1089,10 @@ const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+(?:[A-Za-z_][A-Za-z0-9_]*=
 
 /**
  * Verify text written for `cmd.exe` rather than a POSIX shell: Windows path
- * shapes (`.\node_modules\.bin\tsc.cmd`, `pytest tests\unit`,
- * `D:\proj\.venv\Scripts\python.exe`), `%VAR%` expansion, or cmd-only
- * builtins such as `set NAME=value` and `if exist`. Quoted text is ignored:
- * `grep -q '\^1.19.0'` and `grep -q 'foo|dir'` are POSIX.
+ * shapes (`.\node_modules\.bin\tsc.cmd`, `D:\proj\.venv\Scripts\python.exe`),
+ * `%VAR%` expansion, or cmd-only builtins such as `set NAME=value` and
+ * `if exist`. Quoted text is ignored: `grep -q '\^1.19.0'` and
+ * `grep -q 'foo|dir'` are POSIX.
  */
 export function looksLikeCmdCommand(command: string): boolean {
   const unquoted = stripQuotedSegments(command);
