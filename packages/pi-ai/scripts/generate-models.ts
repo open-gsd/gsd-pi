@@ -1081,9 +1081,19 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		// Process Kimi For Coding models (models.dev renamed `kimi-for-coding` → `kimi-code-plan-*`)
+		const kimiCodingModelsDevKeys = ["kimi-code-plan-global", "kimi-code-plan-cn", "kimi-for-coding"] as const;
+		const kimiModels: Record<string, ModelsDevModel> = {};
+		for (const sourceKey of kimiCodingModelsDevKeys) {
+			const sourceModels = data[sourceKey]?.models as Record<string, ModelsDevModel> | undefined;
+			if (!sourceModels) continue;
+			for (const [modelId, model] of Object.entries(sourceModels)) {
+				if (!(modelId in kimiModels)) {
+					kimiModels[modelId] = model;
+				}
+			}
+		}
+		if (Object.keys(kimiModels).length > 0) {
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
