@@ -109,6 +109,34 @@ test("handleRecoverableExtensionProcessError leaves non-read EIO unhandled", () 
   assert.equal(handled, false);
 });
 
+// macOS closed-stdout-pipe crash storm: 60 of the last 67 ~/.gsd/crash/*.log
+// entries were an unhandled "write EIO" escaping to uncaughtException and
+// killing the process. pi-tui's own writeStdout already swallows this at the
+// render layer (isStdoutClosedError in packages/pi-tui/src/terminal.ts), but
+// any instance that escapes to this top-level guard must be treated as the
+// same recoverable pipe-closed condition as EPIPE, not left to crash.
+test("handleRecoverableExtensionProcessError swallows write EIO (macOS closed-stdout-pipe crash storm)", () => {
+  let stderr = "";
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    const handled = handleRecoverableExtensionProcessError(
+      Object.assign(new Error("write EIO"), {
+        code: "EIO",
+        syscall: "write",
+      }),
+    );
+    assert.equal(handled, true);
+    assert.match(stderr, /swallowed EIO/);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+});
+
 test("handleRecoverableExtensionProcessError leaves unrelated errors unhandled", () => {
   const handled = handleRecoverableExtensionProcessError(
     Object.assign(new Error("permission denied"), {

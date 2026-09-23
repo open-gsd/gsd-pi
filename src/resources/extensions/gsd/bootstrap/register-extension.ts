@@ -61,12 +61,26 @@ function safeStderr(msg: string): void {
  *  otherwise the Windows EOF variant escapes to the uncaught-exception path
  *  and crashes auto-mode workers mid-iteration (#181). ECONNRESET is NOT
  *  included here: it commonly comes from network sockets (#182 follow-up) and
- *  is a real error that should surface rather than be silently swallowed. */
+ *  is a real error that should surface rather than be silently swallowed.
+ *
+ *  macOS additionally surfaces a detached/closed stdout pipe as `EIO` with
+ *  `syscall: "write"` (not `EPIPE`) — pi-tui's own ProcessTerminal.writeStdout
+ *  already recognizes this exact shape via isStdoutClosedError (see
+ *  packages/pi-tui/src/terminal.ts) and swallows it at the render layer, but
+ *  any `write EIO` that escapes that try/catch and reaches this top-level
+ *  uncaughtException handler was previously treated as fatal (code path fell
+ *  through to the unconditional `EIO` branch below, which only recovers
+ *  `syscall === "read"`). That accounted for the overwhelming majority of
+ *  ~/.gsd/crash/*.log entries (60 of the last 67) — a real user-facing crash
+ *  storm, not a rare edge case. Treat write-EIO as the same recoverable
+ *  pipe-closed condition as EPIPE/write-EOF instead of letting it kill the
+ *  process. */
 function isPipeClosedError(err: Error): boolean {
   const errno = (err as NodeJS.ErrnoException).code;
   if (errno === "EPIPE") return true;
+  if (errno === "EIO" && (err as NodeJS.ErrnoException).syscall === "write") return true;
   const message = err.message;
-  return message === "write EOF" || message === "read EOF";
+  return message === "write EOF" || message === "read EOF" || message === "write EIO";
 }
 
 export function handleRecoverableExtensionProcessError(err: Error): boolean {
