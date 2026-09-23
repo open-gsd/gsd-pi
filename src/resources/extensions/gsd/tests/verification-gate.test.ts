@@ -775,7 +775,7 @@ describe("verification-gate: execution", () => {
         "-o",
         "pipefail",
         "-c",
-        "exec bash -o pipefail -c \"$1\" verification-gate",
+        "command=$1; shift; eval \"$command\"",
         "verification-gate",
         "echo hi",
       ]);

@@ -124,8 +124,11 @@ export function hasQualifyingTaskEvidence(
 ): boolean {
   if (!evidence || evidence.length === 0) return false;
   const latestByCommand = new Map<string, TaskVerificationEvidence>();
-  for (const record of evidence) {
-    latestByCommand.set(normalizeCommandIdentity(record.command ?? ""), record);
+  for (const [index, record] of evidence.entries()) {
+    const normalizedCommand = record.command?.trim()
+      ? normalizeCommandIdentity(record.command)
+      : `__no_command__:${index}`;
+    latestByCommand.set(normalizedCommand, record);
   }
   return [...latestByCommand.values()].every((record) => {
     const verdict = (record.verdict ?? "").trim();
@@ -1061,7 +1064,7 @@ export function resolveVerificationShell(
     return {
       kind: "git-bash",
       bin: bash,
-      argsFor: (command) => ["-o", "pipefail", "-c", "exec bash -o pipefail -c \"$1\" verification-gate", "verification-gate", command],
+      argsFor: (command) => ["-o", "pipefail", "-c", "command=$1; shift; eval \"$command\"", "verification-gate", command],
     };
   }
   return CMD_VERIFICATION_SHELL;

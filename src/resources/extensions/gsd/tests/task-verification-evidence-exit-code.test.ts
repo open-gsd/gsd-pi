@@ -290,6 +290,13 @@ describe("hasQualifyingTaskEvidence: lenient verdict matching (#2014)", () => {
     assert.equal(hasQualifyingTaskEvidence([record("", 1)]), false);
   });
 
+  test("commandless records remain distinct instead of collapsing to one latest row (#2338)", () => {
+    assert.equal(hasQualifyingTaskEvidence([
+      { exitCode: 1, verdict: "", durationMs: 10 },
+      { exitCode: 0, verdict: "", durationMs: 10 },
+    ]), false);
+  });
+
   test("one decorated failing record disqualifies an otherwise passing set", () => {
     assert.equal(
       hasQualifyingTaskEvidence([record("✅ pass"), record("❌ fail")]),
