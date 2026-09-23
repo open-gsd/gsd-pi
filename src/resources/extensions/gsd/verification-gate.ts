@@ -1061,7 +1061,7 @@ export function resolveVerificationShell(
     return {
       kind: "git-bash",
       bin: bash,
-      argsFor: (command) => ["-o", "pipefail", "-c", command, "verification-gate"],
+      argsFor: (command) => ["-o", "pipefail", "-c", "exec bash -o pipefail -c \"$1\" verification-gate", "verification-gate", command],
     };
   }
   return CMD_VERIFICATION_SHELL;

@@ -771,7 +771,14 @@ describe("verification-gate: execution", () => {
       const gitBash = resolveVerificationShell({ ProgramFiles: tmpDir }, "win32");
       assert.equal(gitBash.kind, "git-bash");
       assert.equal(gitBash.bin, join(gitBin, "bash.exe"));
-      assert.deepEqual(gitBash.argsFor("echo hi"), ["-o", "pipefail", "-c", "echo hi", "verification-gate"]);
+      assert.deepEqual(gitBash.argsFor("echo hi"), [
+        "-o",
+        "pipefail",
+        "-c",
+        "exec bash -o pipefail -c \"$1\" verification-gate",
+        "verification-gate",
+        "echo hi",
+      ]);
 
       const cmd = resolveVerificationShell({ Path: tmpDir }, "win32");
       assert.equal(cmd.kind, "cmd");
