@@ -320,8 +320,8 @@ describe("CmuxClient stdio isolation", () => {
         "set-status command should be invoked",
       );
       assert.ok(
-        commandPrefixes.some((prefix) => JSON.stringify(prefix) === JSON.stringify(["list-surfaces", "--json"])),
-        "list-surfaces command should be invoked",
+        commandPrefixes.some((prefix) => JSON.stringify(prefix) === JSON.stringify(["list-pane-surfaces", "--json"])),
+        "list-pane-surfaces command should be invoked",
       );
     } finally {
       process.env.PATH = originalPath;

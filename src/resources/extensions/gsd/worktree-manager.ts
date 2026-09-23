@@ -425,40 +425,41 @@ export function pruneEphemeralGhostWorktreeDirectories(basePath: string): string
   return removed;
 }
 
-const STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS = [20, 50, 100];
+const STALE_WORKTREE_REMOVE_ATTEMPTS = 5;
+const STALE_WORKTREE_SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
 
-function sleepMs(ms: number): void {
-  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-function isTransientRemoveError(error: unknown): boolean {
-  const code = (error as NodeJS.ErrnoException)?.code;
-  return code === "EPERM" || code === "EBUSY";
+function sleepStaleWorktreeRetry(ms: number): void {
+  Atomics.wait(STALE_WORKTREE_SLEEP_VIEW, 0, 0, ms);
 }
 
 export function removeStaleWorktreeDirectory(
   wtPath: string,
   name: string,
   removeDirectory: typeof rmSync = rmSync,
+  sleep: (ms: number) => void = sleepStaleWorktreeRetry,
 ): void {
   logWarning(
     "reconcile",
     `Removing stale worktree directory (not registered with git): ${wtPath}`,
     { worktree: name },
   );
-  let lastError: unknown;
-  const attempts = STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS.length + 1;
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       removeDirectory(wtPath, { recursive: true, force: true });
       return;
     } catch (error) {
-      lastError = error;
-      if (!isTransientRemoveError(error) || attempt === attempts - 1) break;
-      sleepMs(STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt]!);
+      const code = (error as NodeJS.ErrnoException)?.code;
+      // Windows/OneDrive lock errors are routinely transient (#1987).
+      if ((code === "EPERM" || code === "EBUSY") && attempt < STALE_WORKTREE_REMOVE_ATTEMPTS) {
+        sleep(50 * 2 ** (attempt - 1));
+        continue;
+      }
+      throwStaleWorktreeRemovalError(wtPath, error);
     }
   }
-  const error = lastError;
+}
+
+function throwStaleWorktreeRemovalError(wtPath: string, error: unknown): never {
   const code = (error as NodeJS.ErrnoException)?.code;
   if (code === "EACCES") {
     throw new GSDError(
@@ -470,7 +471,7 @@ export function removeStaleWorktreeDirectory(
   if (code === "EPERM" || code === "EBUSY") {
     throw new GSDError(
       GSD_GIT_ERROR,
-      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
+      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process after ${STALE_WORKTREE_REMOVE_ATTEMPTS} attempts). Close editors/antivirus/git tools using this path and retry.`,
       { cause: error as Error },
     );
   }

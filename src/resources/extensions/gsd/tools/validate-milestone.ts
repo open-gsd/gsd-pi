@@ -34,6 +34,7 @@ import {
   applyBrowserEvidenceGate,
   browserEvidenceRequired,
   browserEvidenceGateRequiresAttention,
+  structuredBrowserEvidenceRejection,
 } from "../milestone-validation-evidence.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { repairMilestoneLifecycleShadowsForward } from "../lifecycle-shadow-repair-domain-operation.js";
@@ -405,14 +406,14 @@ export async function handleValidateMilestone(
   }
 
   const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, params.milestoneId);
-  const shouldApplyBrowserEvidenceGate = !opts?.skipBrowserEvidenceGate &&
-    await browserEvidenceGateRequiresAttention(params, artifactBasePath, {
-      structuredOnly: Boolean(canonicalInvocation),
-    });
-  if (canonicalInvocation && shouldApplyBrowserEvidenceGate) {
-    return {
-      error: "browser-required acceptance needs passed UAT browser/runtime evidence bound to every browser-required Slice",
-    };
+  let shouldApplyBrowserEvidenceGate = false;
+  if (!opts?.skipBrowserEvidenceGate) {
+    if (canonicalInvocation) {
+      const browserGateError = await structuredBrowserEvidenceRejection(params, artifactBasePath);
+      if (browserGateError) return { error: browserGateError };
+    } else {
+      shouldApplyBrowserEvidenceGate = await browserEvidenceGateRequiresAttention(params, artifactBasePath);
+    }
   }
   if (
     canonicalInvocation &&

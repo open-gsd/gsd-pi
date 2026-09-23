@@ -134,6 +134,61 @@ test("resolveExistingUnitRun cancels a different claimed unit before a fresh cla
   assert.equal(getActiveForWorker(workerId), null);
 });
 
+test("claimUnitRun stays blocked when a genuine takeover holds the fresh lease (does not mask a real conflict)", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  const { session } = setup(base);
+
+  // Simulate the original worker's cached token going stale AND a different
+  // live worker legitimately taking over the milestone lease in the
+  // meantime. The stale-lease retry must NOT paper over this by opening a
+  // claim anyway — it must surface as blocked. claimMilestoneLease is
+  // re-entrant for the same host/pid (a single orchestrator process
+  // shouldn't block on its own prior worker row), so a same-process worker
+  // can't model a genuine external takeover; stub the lease dep directly to
+  // report a real foreign holder instead.
+  session.milestoneLeaseToken = session.milestoneLeaseToken! + 1;
+
+  const result = claimUnitRun({
+    session,
+    flowId: "flow-conflict",
+    turnId: "turn-conflict",
+    iterData: {
+      unitType: "execute-task",
+      unitId: "M001/S01/T02",
+      prompt: "",
+      finalPrompt: "",
+      pauseAfterUatDispatch: false,
+      state,
+      mid: "M001",
+      midTitle: "Test",
+      isRetry: false,
+      previousTier: undefined,
+    },
+    leaseDeps: {
+      claimMilestoneLease: () => ({
+        ok: false,
+        error: "held_by",
+        byWorker: "auto-other-host-123-deadbeef",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      }),
+      logLeaseRecovered() {},
+      logLeaseRecoveryFailed() {},
+    },
+    claimDeps: {
+      getRecentDispatchesForUnit: () => [],
+      recordDispatchClaim,
+      markDispatchRunning: () => {},
+      logClaimRejected() {},
+      logClaimFailed() {},
+    },
+  });
+
+  assert.equal(result.kind, "blocked");
+  if (result.kind !== "blocked") throw new Error(`expected blocked, got ${JSON.stringify(result)}`);
+  assert.match(result.reason, /held by worker/);
+});
+
 test("claimUnitRun opens lease and claim in one transaction", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
@@ -178,6 +233,55 @@ test("claimUnitRun opens lease and claim in one transaction", (t) => {
   assert.ok(row);
   assert.equal(row.status, "claimed");
   assert.equal(row.unit_id, "M001/S01");
+});
+
+test("claimUnitRun recovers from a stale cached lease token instead of skipping terminally", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  const { session, workerId } = setup(base);
+
+  // Simulate a TTL-expired lease with a live worker still holding the
+  // in-memory (stale) token: mutate the cached token so the fast path in
+  // ensureDispatchLease still short-circuits, but recordDispatchClaim's
+  // fencing check rejects it as stale-lease.
+  session.milestoneLeaseToken = session.milestoneLeaseToken! + 999;
+
+  const result = claimUnitRun({
+    session,
+    flowId: "flow-stale",
+    turnId: "turn-stale",
+    iterData: {
+      unitType: "execute-task",
+      unitId: "M001/S01/T01",
+      prompt: "",
+      finalPrompt: "",
+      pauseAfterUatDispatch: false,
+      state,
+      mid: "M001",
+      midTitle: "Test",
+      isRetry: false,
+      previousTier: undefined,
+    },
+    leaseDeps: {
+      claimMilestoneLease,
+      logLeaseRecovered() {},
+      logLeaseRecoveryFailed() {},
+    },
+    claimDeps: {
+      getRecentDispatchesForUnit: () => [],
+      recordDispatchClaim,
+      markDispatchRunning: () => {},
+      logClaimRejected() {},
+      logClaimFailed() {},
+    },
+  });
+
+  assert.equal(result.kind, "opened");
+  if (result.kind !== "opened") throw new Error(`expected opened, got ${JSON.stringify(result)}`);
+  const row = getDispatchById(result.dispatchId);
+  assert.ok(row);
+  assert.equal(row.status, "claimed");
+  assert.equal(row.worker_id, workerId);
 });
 
 test("claimUnitRun degrades with a reason when the worker is missing", () => {
