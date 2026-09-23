@@ -195,23 +195,25 @@ test("stale worktree cleanup retries transient EPERM/EBUSY before succeeding (#1
 test("stale worktree cleanup surfaces the lock error once retries are exhausted (#1987)", () => {
   let calls = 0;
   const cause = Object.assign(new Error("resource busy"), { code: "EBUSY" });
+  const sleeps: number[] = [];
   assert.throws(
     () => removeStaleWorktreeDirectory(
       "/project/.gsd-worktrees/M010",
       "M010",
       () => { calls += 1; throw cause; },
-      () => {},
+      (ms) => { sleeps.push(ms); },
     ),
     (error: unknown) => {
       assert.ok(error instanceof GSDError);
       assert.equal(error.code, GSD_GIT_ERROR);
       assert.equal(error.cause, cause);
       assert.match(error.message, /EBUSY/);
-      assert.match(error.message, /after 5 attempts/);
+      assert.doesNotMatch(error.message, /after \d+ attempts/);
       return true;
     },
   );
-  assert.equal(calls, 5);
+  assert.deepEqual(sleeps, [20, 50, 100]);
+  assert.equal(calls, 4);
 });
 
 test("stale worktree cleanup does not retry EACCES (#1987)", () => {

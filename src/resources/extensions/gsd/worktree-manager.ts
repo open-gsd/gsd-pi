@@ -425,7 +425,7 @@ export function pruneEphemeralGhostWorktreeDirectories(basePath: string): string
   return removed;
 }
 
-const STALE_WORKTREE_REMOVE_ATTEMPTS = 5;
+const STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS = [20, 50, 100];
 const STALE_WORKTREE_SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
 
 function sleepStaleWorktreeRetry(ms: number): void {
@@ -443,15 +443,16 @@ export function removeStaleWorktreeDirectory(
     `Removing stale worktree directory (not registered with git): ${wtPath}`,
     { worktree: name },
   );
-  for (let attempt = 1; ; attempt++) {
+  const attempts = STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS.length + 1;
+  for (let attempt = 0; attempt < attempts; attempt++) {
     try {
       removeDirectory(wtPath, { recursive: true, force: true });
       return;
     } catch (error) {
       const code = (error as NodeJS.ErrnoException)?.code;
       // Windows/OneDrive lock errors are routinely transient (#1987).
-      if ((code === "EPERM" || code === "EBUSY") && attempt < STALE_WORKTREE_REMOVE_ATTEMPTS) {
-        sleep(50 * 2 ** (attempt - 1));
+      if ((code === "EPERM" || code === "EBUSY") && attempt < STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS.length) {
+        sleep(STALE_WORKTREE_REMOVE_RETRY_DELAYS_MS[attempt]!);
         continue;
       }
       throwStaleWorktreeRemovalError(wtPath, error);
@@ -471,7 +472,7 @@ function throwStaleWorktreeRemovalError(wtPath: string, error: unknown): never {
   if (code === "EPERM" || code === "EBUSY") {
     throw new GSDError(
       GSD_GIT_ERROR,
-      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process after ${STALE_WORKTREE_REMOVE_ATTEMPTS} attempts). Close editors/antivirus/git tools using this path and retry.`,
+      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
       { cause: error as Error },
     );
   }
