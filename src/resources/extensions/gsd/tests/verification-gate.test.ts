@@ -789,6 +789,8 @@ describe("verification-gate: execution", () => {
       "echo %CD% && dir src",
       "npm run build && copy dist\\out.txt out.txt",
       'if exist "dist\\index.js" (exit 0) else (exit 1)',
+      'set "NODE_ENV=test" & node script.js',
+      "node --test tests\\*.test.js",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), true, cmd);
     }

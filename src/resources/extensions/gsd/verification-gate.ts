@@ -1063,21 +1063,23 @@ export function resolveVerificationShell(
 
 /**
  * Windows path shapes in unquoted text: a drive or `.\`/`..\` prefix, or a
- * backslash between word characters (`tests\unit`, `dist\index.js`). POSIX
- * escapes (`my\ file`, `foo\.txt`, `\*`) never have a word character on both
- * sides, so they are left to bash.
+ * backslash between a word character and a word character or wildcard
+ * (`tests\unit`, `dist\index.js`, `tests\*.test.js`). POSIX escapes
+ * (`my\ file`, `foo\.txt`, a standalone `\*`) never have a word character on
+ * the left and a path character on the right, so they are left to bash.
  */
-const WINDOWS_PATH_RE = /(?:^|[\s=(])(?:[A-Za-z]:|\.{1,2})\\|[A-Za-z0-9_)\]]\\[A-Za-z0-9_]/;
+const WINDOWS_PATH_RE = /(?:^|[\s=(])(?:[A-Za-z]:|\.{1,2})\\|[A-Za-z0-9_)\]]\\[A-Za-z0-9_*?]/;
 /** `%NAME%` expansion; two-plus characters so `date +%Y%m%d` is not mistaken for one. */
 const CMD_VARIABLE_RE = /%[A-Za-z_][A-Za-z0-9_]+%/;
 /**
  * cmd-only builtins in command position, matched on the unquoted stream so a
  * quoted `'foo|type'` pattern cannot select cmd. `set` counts only as
  * `set NAME=` or, once its quoted `"NAME=value"` has been stripped, as a bare
- * `set` followed by a separator or the end; `set -e` (POSIX) never matches.
- * `type` is omitted: it is also a bash builtin (`type -P node`).
+ * `set` followed by a cmd separator (`&`, `&&`, `|`, `||`) or the end;
+ * `set -e` (POSIX) never matches. `type` is omitted: it is also a bash
+ * builtin (`type -P node`).
  */
-const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+(?:[A-Za-z_][A-Za-z0-9_]*=|(?=&&|\|\||\||$))|if\s+(?:not\s+)?exist\b|(?:dir|copy|del|erase|rd|md|move|ren|rename|call)\b)/i;
+const CMD_BUILTIN_RE = /(?:^|&&|\|\||[|&])\s*(?:set\s+(?:[A-Za-z_][A-Za-z0-9_]*=|(?=[&|]|$))|if\s+(?:not\s+)?exist\b|(?:dir|copy|del|erase|rd|md|move|ren|rename|call)\b)/i;
 
 /**
  * Verify text written for `cmd.exe` rather than a POSIX shell: Windows path
