@@ -1247,13 +1247,13 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
       : pythonNormalized;
     const outputDir = mkdtempSync(join(tmpdir(), "gsd-verification-"));
     // Git Bash runs authored Verify text from a temp script file so the
-    // selected absolute bash.exe sources the command in-process, without an
-    // extra shell that would re-resolve bash or alter shell state.
+    // selected absolute bash.exe executes the command as a script file in its
+    // own process, without re-resolving bash by name or re-parsing via eval.
     const shellArgs = shell.kind === "git-bash"
       ? (() => {
           const commandPath = join(outputDir, "verify.sh");
-          writeFileSync(commandPath, `${rewrittenCommand}\n`, "utf-8");
-          return ["-o", "pipefail", "-c", "command=$1; shift; source \"$command\"", "verification-gate", commandPath];
+          writeFileSync(commandPath, `set -o pipefail\n${rewrittenCommand}\n`, "utf-8");
+          return [commandPath];
         })()
       // Pass the command string as an argument to the shell explicitly
       // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
