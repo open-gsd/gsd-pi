@@ -775,9 +775,15 @@ describe("verification-gate: execution", () => {
         "-o",
         "pipefail",
         "-c",
-        "exec \"$0\" -o pipefail -c \"$1\" verification-gate",
-        join(gitBin, "bash.exe"),
         "echo hi",
+        "verification-gate",
+      ]);
+      assert.deepEqual(resolveVerificationShell({ ProgramFiles: tmpDir }, "win32").argsFor("printf '%s\\n' hi"), [
+        "-o",
+        "pipefail",
+        "-c",
+        "printf '%s\\n' hi",
+        "verification-gate",
       ]);
 
       const cmd = resolveVerificationShell({ Path: tmpDir }, "win32");

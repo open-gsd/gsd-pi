@@ -14,6 +14,7 @@ import {
   readSync,
   readdirSync,
   rmSync,
+  writeFileSync,
   type Dirent,
 } from "node:fs";
 import { join, basename, delimiter, dirname } from "node:path";
@@ -1064,7 +1065,7 @@ export function resolveVerificationShell(
     return {
       kind: "git-bash",
       bin: bash,
-      argsFor: (command) => ["-o", "pipefail", "-c", "exec \"$0\" -o pipefail -c \"$1\" verification-gate", bash, command],
+      argsFor: (command) => ["-o", "pipefail", "-c", command, "verification-gate"],
     };
   }
   return CMD_VERIFICATION_SHELL;
@@ -1244,10 +1245,19 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
     const rewrittenCommand = shell.kind === "cmd"
       ? normalizeWindowsPackageManagerCommand(pythonNormalized)
       : pythonNormalized;
-    // Pass the command string as an argument to the shell explicitly
-    // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
-    const shellArgs = shell.argsFor(rewrittenCommand);
     const outputDir = mkdtempSync(join(tmpdir(), "gsd-verification-"));
+    // Git Bash runs authored Verify text from a temp script file so the
+    // selected absolute bash.exe executes the command directly, without an
+    // extra `-c` wrapper that would re-resolve bash or alter shell state.
+    const shellArgs = shell.kind === "git-bash"
+      ? (() => {
+          const commandPath = join(outputDir, "verify.sh");
+          writeFileSync(commandPath, `${rewrittenCommand}\n`, "utf-8");
+          return ["-o", "pipefail", commandPath];
+        })()
+      // Pass the command string as an argument to the shell explicitly
+      // to avoid Node.js DEP0190 (spawnSync with shell: true and no args).
+      : shell.argsFor(rewrittenCommand);
     const stdoutPath = join(outputDir, "stdout");
     const stderrPath = join(outputDir, "stderr");
     const stdoutFd = openSync(stdoutPath, "w");
