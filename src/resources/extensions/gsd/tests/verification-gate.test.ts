@@ -745,6 +745,10 @@ describe("verification-gate: execution", () => {
       writeFileSync(join(system32, "bash.exe"), "");
 
       assert.equal(resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter) }), join(gitBin, "bash.exe"));
+      assert.equal(
+        resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter), ProgramFiles: tmpDir, ProgramW6432: tmpDir }),
+        join(gitBin, "bash.exe"),
+      );
       assert.equal(resolveGitBashExecutable({ ProgramFiles: tmpDir }), join(gitBin, "bash.exe"));
       assert.equal(resolveGitBashExecutable({ Path: system32 }), null);
     } finally {

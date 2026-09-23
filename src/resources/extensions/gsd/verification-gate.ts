@@ -1006,7 +1006,7 @@ function gitForWindowsInstallRoots(env: NodeJS.ProcessEnv): string[] {
     if (installRoot) roots.push(join(installRoot, "Git"));
   }
   if (env.LOCALAPPDATA) roots.push(join(env.LOCALAPPDATA, "Programs", "Git"));
-  return roots;
+  return [...new Set(roots)];
 }
 
 export type VerificationShellKind = "posix" | "git-bash" | "cmd";
