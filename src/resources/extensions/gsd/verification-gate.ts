@@ -105,19 +105,27 @@ function verdictQualifies(verdict: string): boolean {
   return PASSING_VERDICT_RE.test(stripped.slice(0, cut).trim().toLowerCase());
 }
 
+function recordQualifies(record: TaskVerificationEvidence): boolean {
+  const verdict = (record.verdict ?? "").trim();
+  if (verdict) return verdictQualifies(verdict);
+  return record.exitCode === 0;
+}
+
 /**
  * Task-specific evidence qualifies when at least one record exists and every
- * record reports a passing outcome (#1591). The executor's staged verdict is
- * authoritative: negated verify idioms (`! grep -q`, `grep -v`,
- * `git diff --exit-code`) succeed on a non-zero exit, so a "pass" verdict
- * qualifies even with a non-zero exitCode. `exitCode === 0` is the fallback
- * for records staged without a verdict (#2213). Verdict matching is lenient
- * (#2014): leading markers (`✅ pass`) and `pass: <details>` descriptions are
- * accepted; unknown tokens fail closed.
+ * distinct command's latest staged row reports a passing outcome (#1591,
+ * #2338). The executor's staged verdict is authoritative: negated verify
+ * idioms (`! grep -q`, `grep -v`, `git diff --exit-code`) succeed on a
+ * non-zero exit, so a "pass" verdict qualifies even with a non-zero
+ * exitCode. `exitCode === 0` is the fallback for records staged without a
+ * verdict (#2213). Verdict matching is lenient (#2014): leading markers
+ * (`✅ pass`) and `pass: <details>` descriptions are accepted; unknown
+ * tokens fail closed.
  *
  * Records are staged chronologically, so a command that was re-run is judged
- * by its latest record: an honest "red, fixed, green" history qualifies, while
- * a failing record for any distinct command still disqualifies the set (#2338).
+ * by its latest row: an earlier FAIL for the same command may be followed by a
+ * passing final row, while a failing latest row for any distinct command still
+ * disqualifies the set.
  */
 export function hasQualifyingTaskEvidence(
   evidence: TaskVerificationEvidence[] | undefined,
@@ -127,11 +135,7 @@ export function hasQualifyingTaskEvidence(
   for (const record of evidence) {
     latestByCommand.set(normalizeCommandIdentity(record.command ?? ""), record);
   }
-  return [...latestByCommand.values()].every((record) => {
-    const verdict = (record.verdict ?? "").trim();
-    if (verdict) return verdictQualifies(verdict);
-    return record.exitCode === 0;
-  });
+  return [...latestByCommand.values()].every(recordQualifies);
 }
 
 /**
