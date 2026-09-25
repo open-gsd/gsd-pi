@@ -1,0 +1,63 @@
+{
+  "id": "open-gsd-openclaw",
+  "name": "Open GSD",
+  "description": "GSD Pi over MCP with a native web UI portal and automatic project, TaskFlow, Workboard, and heartbeat synchronization",
+  "version": "1.20.1",
+  "activation": { "onStartup": true },
+  "mcpServers": {
+    "gsd": {
+      "transport": "stdio",
+      "command": "gsd-mcp-server",
+      "args": [],
+      "requestTimeoutMs": 120000
+    }
+  },
+  "skills": [
+    "./skills"
+  ],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "webUi": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean", "description": "Serve the existing GSD web UI in native OpenClaw Portals (default true)." },
+          "packageRoot": { "type": "string", "minLength": 1, "description": "Local GSD installation root; otherwise resolved from GSD_CLI_PATH or gsd on PATH." },
+          "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Optional loopback web host port; otherwise an available port is selected." }
+        }
+      },
+      "embeddedProjects": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "adminOnly": {
+            "type": "boolean"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "projectId": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "canonicalRoot": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "required": [
+                "projectId",
+                "canonicalRoot"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

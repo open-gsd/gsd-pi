@@ -428,10 +428,10 @@ jobs:
         with:
           version: 10.12.1
 
-      - name: Setup Node.js 22 (engines floor)
+      - name: Setup Node.js for dependency tooling
         uses: actions/setup-node@v7
         with:
-          node-version: '22.19.0'
+          node-version: '24.16.0'
           cache: 'pnpm'
 
       - name: Install dependencies
@@ -442,6 +442,13 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - uses: ./.github/actions/restore-ci-build-artifacts
+
+      # OpenClaw's development SDK needs Node 24.16+ during installation.
+      # Run every GSD smoke/SQLite assertion on the supported Node 22 floor.
+      - name: Setup Node.js 22 (engines floor)
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22.19.0'
 
       - name: Run smoke suite on Node 22
         shell: bash

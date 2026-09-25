@@ -1,6 +1,8 @@
 "use client"
 
 import Image from "next/image"
+import { embeddedStartup } from "@/lib/embedded-gate"
+import { shouldSuppressShutdownBeacon, embeddedShutdown } from "@/lib/embedded-gate"
 import dynamic from "next/dynamic"
 import { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react"
 import { Menu, X } from "lucide-react"
@@ -30,7 +32,7 @@ import { ScopeBadge } from "@/components/gsd/scope-badge"
 import { Badge } from "@/components/ui/badge"
 import { ProjectsPanel, ProjectSelectionGate } from "@/components/gsd/projects-view"
 import { UpdateBanner } from "@/components/gsd/update-banner"
-import { getAuthToken, authFetch } from "@/lib/auth"
+import { authFetch, getAuthToken, withBasePath } from "@/lib/auth"
 
 const KNOWN_VIEWS = new Set(["dashboard", "power", "chat", "roadmap", "files", "activity", "visualize"])
 
@@ -280,14 +282,14 @@ function WorkspaceChrome() {
     return (
       <div className="flex h-dvh flex-col items-center justify-center gap-6 bg-background p-8 text-center">
         <Image
-          src="/logo-black.svg"
+          src={withBasePath("/logo-black.svg")}
           alt="GSD-Pi Web"
           width={57}
           height={16}
           className="shrink-0 h-4 w-auto dark:hidden"
         />
         <Image
-          src="/logo-white.svg"
+          src={withBasePath("/logo-white.svg")}
           alt="GSD-Pi Web"
           width={57}
           height={16}
@@ -335,14 +337,14 @@ function WorkspaceChrome() {
           </button>
           <div className="flex items-center gap-2">
             <Image
-              src="/logo-black.svg"
+              src={withBasePath("/logo-black.svg")}
               alt="GSD-Pi Web"
               width={57}
               height={16}
               className="shrink-0 h-4 w-auto dark:hidden"
             />
             <Image
-              src="/logo-white.svg"
+              src={withBasePath("/logo-white.svg")}
               alt="GSD-Pi Web"
               width={57}
               height={16}
@@ -594,6 +596,31 @@ export function GSDAppShell() {
   // Must happen before any API calls fire.
   getAuthToken()
 
+  // Embedded startup gate: the opaque plugin-tab frame must complete bounded
+  // transport negotiation BEFORE any store boot, authFetch, or EventSource
+  // work. Denied or absent negotiation renders a bounded unavailable state -
+  // never a fallback to direct HTTP. Standalone resolves immediately.
+  const [embeddedReady, setEmbeddedReady] = useState<boolean | null>(null)
+  useEffect(() => {
+    let cancelled = false
+    void embeddedStartup().then((state) => {
+      if (!cancelled) setEmbeddedReady(state !== "embedded-unavailable")
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  if (embeddedReady === null) return null
+  if (embeddedReady === false) {
+    return (
+      <div style={{ display: "flex", height: "100vh", alignItems: "center", justifyContent: "center", padding: "2rem", textAlign: "center" }}>
+        <div>
+          <h2 style={{ fontSize: "1.1rem", fontWeight: 600, marginBottom: "0.5rem" }}>GSD is embedded without an authenticated transport</h2>
+          <p style={{ color: "#888", fontSize: "0.875rem" }}>This view requires the Control UI plugin connection. Reload the dashboard tab to retry.</p>
+        </div>
+      </div>
+    )
+  }
   return (
     <ProjectStoreManagerProvider>
       <ProjectAwareWorkspace />
@@ -646,6 +673,11 @@ function ProjectAwareWorkspace() {
       }
       // sendBeacon cannot set custom headers, so pass the auth token as a
       // query parameter instead (the proxy accepts `_token` as a fallback).
+      if (shouldSuppressShutdownBeacon()) {
+        // Embedded mode never sends the shutdown beacon; close the adapter only.
+        embeddedShutdown()
+        return
+      }
       const token = getAuthToken()
       const url = token ? `/api/shutdown?_token=${token}` : "/api/shutdown"
       navigator.sendBeacon(url, "")

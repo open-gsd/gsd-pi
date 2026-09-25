@@ -33,7 +33,15 @@ export async function GET(request: Request): Promise<Response> {
   }
 
   try {
-    await bridge.ensureStarted();
+    if (new URL(request.url).searchParams.get("require_existing") === "1") {
+      // Non-starting subscription mode for embedded RPC callers: never
+      // start services; refuse with 409 when the workspace is not running.
+      if (!bridge.isStarted()) {
+        return Response.json({ error: "workspace not started" }, { status: 409 });
+      }
+    } else {
+      await bridge.ensureStarted();
+    }
   } catch {
     // Keep the stream open and let the initial bridge_status event surface the failure state.
   }

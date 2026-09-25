@@ -344,6 +344,14 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		writePolicy: "read",
 		auditEvent: "workflow.project.snapshot",
 	},
+	{
+		canonicalName: "gsd_project_init",
+		aliases: [],
+		schemaId: "workflow.project.init",
+		executorId: "executeProjectInit",
+		writePolicy: "write",
+		auditEvent: "workflow.project.init",
+	},
 ] as const satisfies readonly WorkflowToolContractMetadata[];
 
 /** Literal union of canonical workflow tool names. Typing a name list with this union makes drift from WORKFLOW_TOOL_CONTRACTS a compile error. */

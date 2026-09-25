@@ -5,7 +5,7 @@
  * Workflow MCP tools — exposes the core GSD mutation/read handlers over MCP.
  */
 
-import { existsSync, readdirSync, realpathSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -29,6 +29,8 @@ interface GsdMcpBridge {
   shouldBlockPendingGateInSnapshot: (...args: any[]) => any;
   shouldBlockQueueExecutionInSnapshot: (...args: any[]) => any;
   ensureDbOpen: (...args: any[]) => any;
+  closeWorkflowDatabase: (...args: any[]) => any;
+  openWorkflowDatabase: (...args: any[]) => any;
   openExistingWorkflowDatabase: (projectDir: string) => WorkflowDatabaseOpenResult;
   _getAdapter: (...args: any[]) => any;
   checkpointDatabase: (...args: any[]) => any;
@@ -2730,6 +2732,68 @@ export interface RegisterWorkflowToolsOptions {
   advertiseAliases?: boolean;
 }
 
+export type ProjectInitResult = {
+  ok: boolean;
+  created: boolean;
+  projectDir: string;
+  gsdDir: string;
+  dbPath: string;
+  gitRepo: boolean;
+  reason?: string;
+};
+
+/**
+ * Minimal, idempotent, headless bootstrap for from-scratch projects: create
+ * `.gsd/` and the workflow database so DB-backed workflow tools can operate.
+ * The interactive wizard owns rich onboarding (git setup, mode, preferences);
+ * MCP-only clients need a scriptable subset, which this provides.
+ */
+export async function initProjectWorkflowState(rawProjectDir: string): Promise<ProjectInitResult> {
+  const projectDir = resolve(rawProjectDir);
+  const gsdDir = join(projectDir, ".gsd");
+  const dbPath = join(gsdDir, "gsd.db");
+  const gitRepo = existsSync(join(projectDir, ".git"));
+  if (!existsSync(projectDir) || !statSync(projectDir).isDirectory()) {
+    return { ok: false, created: false, projectDir, gsdDir, dbPath, gitRepo, reason: "project_dir_missing" };
+  }
+  if (!existsSync(gsdDir)) mkdirSync(gsdDir, { recursive: true });
+  const bridge = await importBridgeModule();
+  // openWorkflowDatabase fails while a global handle points at another
+  // project — the documented pairing is close-then-open for ad-hoc switches.
+  try { bridge.closeWorkflowDatabase(); } catch { /* nothing open yet */ }
+  const opened = bridge.openWorkflowDatabase(projectDir);
+  if (!opened?.ok) {
+    return {
+      ok: false,
+      created: false,
+      projectDir,
+      gsdDir,
+      dbPath,
+      gitRepo,
+      reason: `db_open_failed: ${opened?.reason ?? "unknown"}`,
+    };
+  }
+  // Flush WAL and release the per-project handle: init is a bootstrap
+  // utility, not a session. Pinning the global handle here would break
+  // callers that switch projects (or delete temp dirs) afterwards; the next
+  // DB-backed tool re-opens via ensureDbOpen anyway.
+  try { bridge.checkpointDatabase(); } catch { /* best effort flush */ }
+  try { bridge.closeWorkflowDatabase(); } catch { /* already closed */ }
+  return {
+    ok: true,
+    created: opened.reason === "created-empty",
+    projectDir,
+    gsdDir,
+    dbPath: opened.location.projectDb,
+    gitRepo,
+  };
+}
+
+const projectInitParams = {
+  projectDir: projectDirParam,
+};
+const projectInitSchema = z.object(projectInitParams);
+
 export function registerWorkflowTools(
   realServer: McpToolServer,
   options: RegisterWorkflowToolsOptions = {},
@@ -2747,6 +2811,22 @@ export function registerWorkflowTools(
           return wrapped.tool(name, description, params, handler);
         },
       };
+  // No write gate here: gsd_project_init targets projects with no workflow
+  // state yet, so there is no in-flight discussion gate to protect.
+  server.tool(
+    "gsd_project_init",
+    "Initialize GSD workflow state for a project with no .gsd directory: creates .gsd/ and the workflow database so DB-backed planning tools can write. Minimal, idempotent, headless bootstrap (rich onboarding stays with the interactive /gsd init).",
+    projectInitParams,
+    async (args: Record<string, unknown>) => {
+      const parsed = parseWorkflowArgs(projectInitSchema, args);
+      const result = await initProjectWorkflowState(parsed.projectDir);
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result, null, 2) }],
+        isError: !result.ok,
+      };
+    },
+  );
+
   server.tool(
     "gsd_decision_save",
     "Record a project decision to the GSD database and regenerate DECISIONS.md.",

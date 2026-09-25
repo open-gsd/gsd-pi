@@ -1,3 +1,5 @@
+import { embeddedApiFetch, embeddedModeActive } from "./embedded-gate.ts"
+
 /**
  * Client-side auth token management.
  *
@@ -96,19 +98,57 @@ export function authHeaders(extra?: Record<string, string>): Record<string, stri
   return headers
 }
 
+/** Deployment base path (inlined at build time by Next from NEXT_PUBLIC_BASE_PATH).
+ * Empty for unprefixed standalone/dev launches. */
+const BASE_PATH = process.env.NEXT_PUBLIC_BASE_PATH ?? ""
+
+/** Prefix a root-relative path with the deployment base path.
+ *
+ * Applies when the web app is mounted under a prefix (e.g. the OpenClaw
+ * Control UI plugin tab). Already-prefixed inputs, absolute URLs,
+ * protocol-relative URLs, and non-root-relative paths pass through
+ * unchanged, so callers may pass any request target safely. */
+export function withBasePath(path: string, base: string = BASE_PATH): string {
+  if (!base || typeof path !== "string" || !path.startsWith("/") || path.startsWith("//")) return path
+  if (path === base || path.startsWith(base + "/")) return path
+  return base + path
+}
+
 /**
  * Wrapper around `fetch()` that injects the auth token when one is available.
  * The server remains authoritative for unauthenticated requests: token-protected
  * launches return 401, while explicit no-auth launches accept the same request.
  */
 export async function authFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  // Embedded mode routes first-party string requests through the named-
+  // operation transport gate; unknown routes fail closed inside it.
+  if (typeof input === "string" && embeddedModeActive()) {
+    return embeddedApiFetch(input, init)
+  }
   const token = getAuthToken()
   const headers = new Headers(init?.headers)
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`)
   }
 
-  return fetch(input, { ...init, headers })
+  // Request and URL inputs keep their own credentials policy: a Request
+  // constructed with credentials carries it unless init explicitly overrides
+  // (fetch init members present in init replace the Request members), so no
+  // init is synthesized for them and headers only attach when a token exists.
+  if (typeof input !== "string") {
+    if (init) return token ? fetch(input, { ...init, headers }) : fetch(input, init)
+    return token ? fetch(input, { headers }) : fetch(input)
+  }
+  const target = withBasePath(input)
+  let credentials = init?.credentials
+  if (!credentials && input.startsWith("/") && !input.startsWith("//")) {
+    // First-party root-relative API paths run credentialed so the Control UI
+    // plugin tab opaque sandbox attaches the scoped gateway cookies.
+    // Absolute and non-root-relative strings keep the caller credentials
+    // mode, and explicit init.credentials always wins.
+    credentials = "include"
+  }
+  return credentials ? fetch(target, { ...init, headers, credentials }) : fetch(target, { ...init, headers })
 }
 
 /**
@@ -117,8 +157,9 @@ export async function authFetch(input: RequestInfo | URL, init?: RequestInit): P
  */
 export function appendAuthParam(url: string): string {
   const token = getAuthToken()
-  if (!token) return url
+  const target = withBasePath(url)
+  if (!token) return target
 
-  const separator = url.includes("?") ? "&" : "?"
-  return `${url}${separator}_token=${token}`
+  const separator = target.includes("?") ? "&" : "?"
+  return `${target}${separator}_token=${token}`
 }

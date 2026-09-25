@@ -10,6 +10,7 @@ import { buildProjectAbsoluteUrl, buildProjectPath } from "@/lib/project-url"
 import { authFetch, appendAuthParam } from "@/lib/auth"
 import { getXtermOptions, getXtermTheme } from "@/lib/xterm-theme"
 import "@xterm/xterm/css/xterm.css"
+import { createModeAwareEventSource } from "@/lib/embedded-gate"
 
 type XTerminal = import("@xterm/xterm").Terminal
 type XFitAddon = import("@xterm/addon-fit").FitAddon
@@ -280,7 +281,7 @@ function TerminalInstance({
       for (const arg of commandArgs ?? []) {
         streamUrl.searchParams.append("arg", arg)
       }
-      const es = new EventSource(appendAuthParam(streamUrl.toString()))
+      const es = createModeAwareEventSource(streamUrl.toString()) as unknown as EventSource
       eventSourceRef.current = es
 
       es.onmessage = (event) => {
