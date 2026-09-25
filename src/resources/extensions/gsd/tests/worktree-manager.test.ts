@@ -176,25 +176,6 @@ describe("createWorktree", () => {
   });
 });
 
-test("stale worktree cleanup gives actionable guidance for EACCES", () => {
-  const cause = Object.assign(new Error("permission denied"), { code: "EACCES" });
-
-  assert.throws(
-    () => removeStaleWorktreeDirectory("/project/.gsd-worktrees/M010", "M010", () => {
-      throw cause;
-    }),
-    (error: unknown) => {
-      assert.ok(error instanceof GSDError);
-      assert.equal(error.code, GSD_GIT_ERROR);
-      assert.equal(error.cause, cause);
-      assert.match(error.message, /EACCES/);
-      assert.match(error.message, /owned by another user/);
-      assert.match(error.message, /ownership or permissions/);
-      return true;
-    },
-  );
-});
-
 test("stale worktree cleanup retries transient EPERM/EBUSY before succeeding (#1987)", () => {
   let calls = 0;
   const sleeps: number[] = [];
@@ -214,23 +195,25 @@ test("stale worktree cleanup retries transient EPERM/EBUSY before succeeding (#1
 test("stale worktree cleanup surfaces the lock error once retries are exhausted (#1987)", () => {
   let calls = 0;
   const cause = Object.assign(new Error("resource busy"), { code: "EBUSY" });
+  const sleeps: number[] = [];
   assert.throws(
     () => removeStaleWorktreeDirectory(
       "/project/.gsd-worktrees/M010",
       "M010",
       () => { calls += 1; throw cause; },
-      () => {},
+      (ms) => { sleeps.push(ms); },
     ),
     (error: unknown) => {
       assert.ok(error instanceof GSDError);
       assert.equal(error.code, GSD_GIT_ERROR);
       assert.equal(error.cause, cause);
       assert.match(error.message, /EBUSY/);
-      assert.match(error.message, /after 5 attempts/);
+      assert.doesNotMatch(error.message, /after \d+ attempts/);
       return true;
     },
   );
-  assert.equal(calls, 5);
+  assert.deepEqual(sleeps, [20, 50, 100]);
+  assert.equal(calls, 4);
 });
 
 test("stale worktree cleanup does not retry EACCES (#1987)", () => {

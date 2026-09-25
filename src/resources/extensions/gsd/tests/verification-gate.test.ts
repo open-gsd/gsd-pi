@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, looksLikePosixAuthoredCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -745,6 +745,10 @@ describe("verification-gate: execution", () => {
       writeFileSync(join(system32, "bash.exe"), "");
 
       assert.equal(resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter) }), join(gitBin, "bash.exe"));
+      assert.equal(
+        resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter), ProgramFiles: tmpDir, ProgramW6432: `${tmpDir}/` }),
+        join(gitBin, "bash.exe"),
+      );
       assert.equal(resolveGitBashExecutable({ ProgramFiles: tmpDir }), join(gitBin, "bash.exe"));
       assert.equal(resolveGitBashExecutable({ Path: system32 }), null);
     } finally {
@@ -767,7 +771,20 @@ describe("verification-gate: execution", () => {
       const gitBash = resolveVerificationShell({ ProgramFiles: tmpDir }, "win32");
       assert.equal(gitBash.kind, "git-bash");
       assert.equal(gitBash.bin, join(gitBin, "bash.exe"));
-      assert.deepEqual(gitBash.argsFor("echo hi"), ["-o", "pipefail", "-c", "echo hi", "verification-gate"]);
+      assert.deepEqual(gitBash.argsFor("echo hi"), [
+        "-o",
+        "pipefail",
+        "-c",
+        "echo hi",
+        "verification-gate",
+      ]);
+      assert.deepEqual(resolveVerificationShell({ ProgramFiles: tmpDir }, "win32").argsFor("printf '%s\\n' hi"), [
+        "-o",
+        "pipefail",
+        "-c",
+        "printf '%s\\n' hi",
+        "verification-gate",
+      ]);
 
       const cmd = resolveVerificationShell({ Path: tmpDir }, "win32");
       assert.equal(cmd.kind, "cmd");
@@ -780,7 +797,6 @@ describe("verification-gate: execution", () => {
   test("looksLikeCmdCommand keeps Windows-authored verify text on cmd and POSIX text off it (#2399)", () => {
     for (const cmd of [
       "D:\\proj\\.venv\\Scripts\\python.exe -m pytest",
-      "python -m pytest tests\\unit",
       ".\\node_modules\\.bin\\tsc.cmd --noEmit",
       'set "NODE_ENV=production" && npm test',
       "set NODE_ENV=production && npm test",
@@ -790,7 +806,6 @@ describe("verification-gate: execution", () => {
       "npm run build && copy dist\\out.txt out.txt",
       'if exist "dist\\index.js" (exit 0) else (exit 1)',
       'set "NODE_ENV=test" & node script.js',
-      "node --test tests\\*.test.js",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), true, cmd);
     }
@@ -808,10 +823,30 @@ describe("verification-gate: execution", () => {
       "test -f package.json && npm test -- --runInBand",
       '"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest',
       "app/pnpm.cmd --version",
+      "python -m pytest tests\\unit",
+      "node --test tests\\*.test.js",
       "python -c 'assert(False)'",
       "node -e \"process.exit(process.env.TYPE ? 0 : 1)\"",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), false, cmd);
+    }
+  });
+
+  test("looksLikePosixAuthoredCommand detects POSIX-only verify text (#2399)", () => {
+    for (const cmd of [
+      "test -f package.json && npm test -- --runInBand",
+      "grep -q 'foo|dir' package.json",
+      "set -e && npm test",
+      "command -v node >/dev/null 2>&1",
+    ]) {
+      assert.equal(looksLikePosixAuthoredCommand(cmd), true, cmd);
+    }
+    for (const cmd of [
+      "echo %CD% && dir src",
+      ".\\node_modules\\.bin\\tsc.cmd --noEmit",
+      "python -m pytest tests\\unit",
+    ]) {
+      assert.equal(looksLikePosixAuthoredCommand(cmd), false, cmd);
     }
   });
 
@@ -825,7 +860,7 @@ describe("verification-gate: execution", () => {
       const cmdOnly = resolveVerificationShell({ Path: tmpDir }, "win32");
 
       assert.equal(shellForCommand(gitBash, "test -f package.json").kind, "git-bash");
-      assert.equal(shellForCommand(gitBash, "python -m pytest tests\\unit").kind, "cmd");
+      assert.equal(shellForCommand(gitBash, "python -m pytest tests\\unit").kind, "git-bash");
       assert.equal(shellForCommand(posix, "python -m pytest tests\\unit").kind, "posix");
       assert.equal(shellForCommand(cmdOnly, "test -f package.json").kind, "cmd");
     } finally {

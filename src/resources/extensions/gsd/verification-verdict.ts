@@ -53,7 +53,8 @@ export interface DecideVerificationVerdictOptions {
 
 const UNRESOLVED_COMMAND_PATTERNS = [
   /'([^']+)' is not recognized as an internal or external command/i,
-  /([^\s:'"]+): (?:command )?not found/i,
+  /(?:(?:[^\s:'"]+): (?:(?:line )?\d+: ))?(.+?): command not found/i,
+  /(?:(?:[^\s:'"]+): (?:(?:line )?\d+: ))?(.+?): not found/i,
 ];
 
 /** The specific tool a shell failed to resolve, so compound checks name the missing segment (#2087). */
@@ -61,7 +62,7 @@ export function unresolvedCommandToken(stderr: string | undefined): string | nul
   if (!stderr) return null;
   for (const pattern of UNRESOLVED_COMMAND_PATTERNS) {
     const match = pattern.exec(stderr);
-    if (match?.[1]) return match[1];
+    if (match?.[1]) return match[1].trim();
   }
   return null;
 }
