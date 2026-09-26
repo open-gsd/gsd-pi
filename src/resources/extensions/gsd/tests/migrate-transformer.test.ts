@@ -649,6 +649,34 @@ test('Scenario 13: Decisions content', () => {
   assert.ok(result.decisionsContent.includes('| # | When | Scope | Decision | Choice | Rationale | Revisable? | Made By |'), 'decisions: writes canonical table header');
 });
 
+test('Scenario 13b: #2422 — multi-line key-decision stays inside one table row', () => {
+  const base = makeSummary('01');
+  const project = emptyProject({
+    roadmap: flatRoadmap([roadmapEntry(1, 'decision-phase', true)]),
+    phases: {
+      '1-decision-phase': makePhase('1-decision-phase', 1, 'decision-phase', {
+        plans: { '01': makePlan('01') },
+        summaries: {
+          '01': makeSummary('01', {
+            frontmatter: {
+              ...base.frontmatter,
+              'key-decisions': ['para one.\n\npara two | with pipe.'],
+            },
+          }),
+        },
+      }),
+    },
+  });
+
+  const result = transformToGSD(project);
+  const rowLines = result.decisionsContent.split('\n').filter((l) => l.startsWith('| D001 |'));
+  assert.deepStrictEqual(rowLines.length, 1, '#2422: multi-line key-decision emits exactly one row');
+  assert.ok(
+    rowLines[0]?.includes('para one.<br><br>para two \\| with pipe.'),
+    '#2422: newlines become <br> and the pipe stays escaped',
+  );
+});
+
 // ─── Scenario 14: No undefined values in output ───────────────────────────
 
 test('Scenario 14: No undefined values', () => {

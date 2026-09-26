@@ -80,7 +80,9 @@ function generateDecisionsAppendBlock(decisions: Decision[]): string {
       d.rationale,
       d.revisable,
       d.made_by ?? 'agent',
-    ].map(cell => (cell ?? '').replace(/\|/g, '\\|'));
+    ].map(cell => (cell ?? '')
+      .replace(/\|/g, '\\|')
+      .replace(/\r\n|\r|\n/g, '<br>'));
     lines.push(`| ${cells.join(' | ')} |`);
   }
 
@@ -119,7 +121,9 @@ export function generateDecisionsMd(decisions: Decision[]): string {
       d.rationale,
       d.revisable,
       d.made_by ?? 'agent',
-    ].map(cell => (cell ?? '').replace(/\|/g, '\\|'));
+    ].map(cell => (cell ?? '')
+      .replace(/\|/g, '\\|')
+      .replace(/\r\n|\r|\n/g, '<br>'));
 
     lines.push(`| ${cells.join(' | ')} |`);
   }
