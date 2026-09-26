@@ -247,7 +247,7 @@ const DOCTOR_FIX_HINTS: Partial<Record<DoctorIssueCode, string>> = {
   state_file_missing: "Run `/gsd doctor fix` to rebuild the projection from the database.",
   projection_drift: "Run `/gsd doctor fix` to rebuild markdown projections from the database (DB is the source of truth).",
   validation_source_revision_mismatch:
-    "If GSD's pre-merge auto-commit captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry. Otherwise re-run `/gsd validate-milestone <id>` against the intended content before `/gsd auto`.",
+    "If GSD's pre-merge auto-commit captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry. Otherwise, once the tree holds the intended content, re-run validation with `/gsd dispatch validate <id>` — `/gsd auto` alone will not re-run milestone validation while a pass verdict from an older source revision stands.",
   artifact_user_content_missing:
     "Doctor cannot recreate user-authored content from the database. Re-run `/gsd discuss` for CONTEXT artifacts or `/gsd auto` for RESEARCH artifacts in that milestone.",
   uat_retry_exhausted: "Review the failing UAT criteria via `/gsd status`, fix the issue, then re-run `/gsd auto`.",

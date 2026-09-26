@@ -402,7 +402,7 @@ export function checkCloseoutConsistencyGate(
       const validationStatus = validation?.status ?? "absent";
       const recovery =
         validationStatus === "absent"
-          ? ` Run \`/gsd validate-milestone ${milestoneId}\` to create the validation, or set \`phases.skip_milestone_validation: true\` in .gsd/PREFERENCES.md to skip it.`
+          ? ` Run \`/gsd dispatch validate ${milestoneId}\` to create the validation, or set \`phases.skip_milestone_validation: true\` in .gsd/PREFERENCES.md to skip it.`
           : "";
       return blocked(
         "validation-not-pass",

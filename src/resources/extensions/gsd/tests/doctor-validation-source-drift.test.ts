@@ -23,9 +23,11 @@ test("doctor classifies validation source drift as fixable with cleanup and reva
 
   assert.equal(issue.fixable, true);
   assert.match(issue.message, /expected sha256:current; tested sha256:validated/);
+  assert.match(issue.message, /\/gsd dispatch validate M001/);
+  assert.doesNotMatch(issue.message, /\/gsd validate-milestone/);
   const formatted = formatDoctorReport(report);
   assert.match(formatted, /1 fixable/);
   assert.match(formatted, /ad-hoc-helper\.ps1/);
   assert.match(formatted, /git reset --mixed HEAD\^/);
-  assert.match(formatted, /validate-milestone <id>/);
+  assert.match(formatted, /\/gsd dispatch validate <id>/);
 });

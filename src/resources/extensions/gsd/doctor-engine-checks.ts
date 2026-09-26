@@ -642,7 +642,7 @@ export function createValidationSourceDriftDoctorIssue(
     message:
       `Milestone ${milestoneId} validation source revision does not match the current tree ` +
       `(expected ${mismatch.expectedSourceRevision}; tested ${mismatch.testedSourceRevision}).${paths}${recovery} ` +
-      `If the current content is intended, run \`/gsd validate-milestone ${milestoneId}\`, then \`/gsd auto\`.`,
+      `If the current content is intended, run \`/gsd dispatch validate ${milestoneId}\` — \`/gsd auto\` alone will not re-run milestone validation while a pass verdict from an older source revision stands.`,
     file: drift.paths[0],
     fixable: true,
   };

@@ -321,7 +321,7 @@ describe("complete phase dispatch guard (#5683)", () => {
     assert.equal(result?.level, "warning");
     assert.match(result?.reason ?? "", /closeout-consistency-blocked/);
     assert.match(result?.reason ?? "", /latest milestone validation is "absent"/);
-    assert.match(result?.reason ?? "", /\/gsd validate-milestone M001/);
+    assert.match(result?.reason ?? "", /\/gsd dispatch validate M001/);
   });
 });
 
