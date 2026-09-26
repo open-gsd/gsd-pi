@@ -37,7 +37,7 @@ import { isCanonicalStagedTaskSummaryProjection } from "../../task-summary-proje
 import { readLatestTaskAttempt } from "../../task-execution-domain-operation.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
 import { computeProjectionSha, deriveCompatProjectionKey, readCompatMarker } from "../../compat/compat-marker.js";
-import { stripProjectionStamp } from "../../markdown-renderer.js";
+import { comparableProjectionContent } from "../../markdown-renderer.js";
 import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
 
 type DiskSliceIdDivergenceDrift = Extract<
@@ -219,7 +219,7 @@ function isAbandonedStagedTaskSummary(
   }
   if (
     task.full_summary_md &&
-    stripProjectionStamp(content) === stripProjectionStamp(task.full_summary_md)
+    comparableProjectionContent(content) === comparableProjectionContent(task.full_summary_md)
   ) return true;
 
   const projectionKey = deriveCompatProjectionKey(

@@ -4,7 +4,7 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
-import { stripProjectionStamp } from "./markdown-renderer.js";
+import { comparableProjectionContent } from "./markdown-renderer.js";
 import { gsdProjectionRoot, gsdRoot, targetTaskFile } from "./paths.js";
 import { isGsdWorktreePath, resolveWorktreeProjectRoot } from "./worktree-root.js";
 import { isCanonicalStagedTaskSummaryState } from "./task-summary-projection-policy.js";
@@ -99,7 +99,7 @@ function hasCanonicalContent(
   // worktree-local file is absent, instead of fail-closing on the read (#1677).
   const diskContent = readFirstExisting([canonicalPath, ...candidates]);
   if (diskContent === null || diskContent !== artifact.fullContent) return false;
-  return stripProjectionStamp(artifact.fullContent) === stripProjectionStamp(task.fullSummaryMd);
+  return comparableProjectionContent(artifact.fullContent) === comparableProjectionContent(task.fullSummaryMd);
 }
 
 export function isCanonicalStagedTaskSummaryProjection(
