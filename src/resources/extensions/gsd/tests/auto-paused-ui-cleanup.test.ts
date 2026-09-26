@@ -17,9 +17,12 @@ import {
   stopAuto,
 } from "../auto.ts";
 import { autoSession } from "../auto-runtime-state.ts";
-import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.ts";
+import { recordDispatchClaim } from "../db/unit-dispatches.ts";
+import { claimTaskAttempt, readTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
+import { internalExecutionInvocation } from "../execution-invocation.ts";
 import { readPausedSessionMetadata } from "../interrupted-session.ts";
 import { WorktreeLifecycle } from "../worktree-lifecycle.ts";
 
@@ -415,6 +418,222 @@ test("pauseAuto preserves worker lease across transient provider auto-resume pau
     process.chdir(previousCwd);
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("pauseAuto preserves worker lease while a unit execution is in flight, letting its Attempt settle", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-pause-inflight-lease-"));
+  const previousCwd = process.cwd();
+  const dbPath = join(base, ".gsd", "gsd.db");
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  process.chdir(base);
+  openDatabase(dbPath);
+
+  autoSession.reset();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.originalBasePath = base;
+  autoSession.currentMilestoneId = "M001";
+  autoSession.unitExecutionInFlight = true;
+
+  t.after(() => {
+    autoSession.reset();
+    try {
+      closeDatabase();
+    } catch {
+      /* noop */
+    }
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  insertMilestone({ id: "M001", title: "Milestone 1", status: "active" });
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+
+  // The in-flight unit has already claimed its coordination dispatch and
+  // running Attempt when the watchdog fires — mirror that order here.
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active", risk: "low", depends: [], demo: "", sequence: 1 });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "active" });
+  const dispatch = recordDispatchClaim({
+    traceId: "pause-inflight-dispatch",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  assert.equal(dispatch.ok, true);
+  if (!dispatch.ok) return;
+  const claim = claimTaskAttempt({
+    invocation: internalExecutionInvocation("test:pause-inflight-lease:claim"),
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    workerId,
+    milestoneLeaseToken: lease.token,
+    coordinationDispatchId: dispatch.dispatchId,
+  });
+
+  autoSession.workerId = workerId;
+  autoSession.milestoneLeaseToken = lease.token;
+
+  // Watchdog shape (#2429): idle / hard-timeout pauses carry no errorContext,
+  // but the unit is still executing. Dropping the lease here would fence the
+  // in-flight Attempt's settlement out of the DB (LEASE_FENCING_LOST).
+  await pauseAuto();
+
+  assert.equal(autoSession.paused, true);
+  assert.equal(autoSession.workerId, workerId);
+  assert.equal(autoSession.milestoneLeaseToken, lease.token);
+  assert.equal(getAutoWorker(workerId)?.status, "active");
+  const row = getMilestoneLease("M001");
+  assert.equal(row?.worker_id, workerId);
+  assert.equal(row?.status, "held");
+  assert.equal(row?.fencing_token, lease.token);
+
+  // The payoff (#2429): the claimed Attempt settles cleanly under the
+  // preserved lease through the real fenced settle writer.
+  const settled = settleTaskAttempt({
+    invocation: internalExecutionInvocation("test:pause-inflight-lease:settle"),
+    attemptId: claim.attemptId,
+    outcome: "succeeded",
+    failureClass: "none",
+    summary: "executor succeeded",
+    output: {},
+  });
+  assert.equal(settled.status, "committed");
+  assert.equal(settled.nextStage, "verify");
+  const settledAttempt = readTaskAttempt(claim.attemptId);
+  assert.equal(settledAttempt?.state, "settled");
+  assert.equal(settledAttempt?.outcome, "succeeded");
+});
+
+test("pauseAuto releases the milestone lease when no unit execution is in flight", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-pause-idle-lease-"));
+  const previousCwd = process.cwd();
+  const dbPath = join(base, ".gsd", "gsd.db");
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  process.chdir(base);
+  openDatabase(dbPath);
+
+  autoSession.reset();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.originalBasePath = base;
+  autoSession.currentMilestoneId = "M001";
+
+  t.after(() => {
+    autoSession.reset();
+    try {
+      closeDatabase();
+    } catch {
+      /* noop */
+    }
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  insertMilestone({ id: "M001", title: "Milestone 1", status: "active" });
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+
+  autoSession.workerId = workerId;
+  autoSession.milestoneLeaseToken = lease.token;
+
+  await pauseAuto();
+
+  assert.equal(autoSession.paused, true);
+  assert.equal(autoSession.workerId, null);
+  assert.equal(autoSession.milestoneLeaseToken, null);
+  assert.equal(getAutoWorker(workerId)?.status, "stopping");
+  const row = getMilestoneLease("M001");
+  assert.equal(row?.worker_id, workerId);
+  assert.equal(row?.status, "released");
+  assert.equal(row?.fencing_token, lease.token);
+});
+
+test("settlement of an Attempt claimed before a lease-dropping pause hits the fencing trigger", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-pause-fencing-negative-"));
+  const previousCwd = process.cwd();
+  const dbPath = join(base, ".gsd", "gsd.db");
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  process.chdir(base);
+  openDatabase(dbPath);
+
+  autoSession.reset();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.originalBasePath = base;
+  autoSession.currentMilestoneId = "M001";
+
+  t.after(() => {
+    autoSession.reset();
+    try {
+      closeDatabase();
+    } catch {
+      /* noop */
+    }
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  insertMilestone({ id: "M001", title: "Milestone 1", status: "active" });
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+
+  // Negative control for #2429: the Attempt is claimed while the lease is
+  // held, then the pause releases it (old watchdog behavior — no in-flight
+  // unit recorded). The fenced settle writer must now reject the transition
+  // instead of silently settling against a dropped lease.
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active", risk: "low", depends: [], demo: "", sequence: 1 });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "active" });
+  const dispatch = recordDispatchClaim({
+    traceId: "pause-fencing-negative-dispatch",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  assert.equal(dispatch.ok, true);
+  if (!dispatch.ok) return;
+  const claim = claimTaskAttempt({
+    invocation: internalExecutionInvocation("test:pause-fencing-negative:claim"),
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    workerId,
+    milestoneLeaseToken: lease.token,
+    coordinationDispatchId: dispatch.dispatchId,
+  });
+
+  autoSession.workerId = workerId;
+  autoSession.milestoneLeaseToken = lease.token;
+
+  await pauseAuto();
+
+  assert.equal(getMilestoneLease("M001")?.status, "released");
+
+  assert.throws(
+    () =>
+      settleTaskAttempt({
+        invocation: internalExecutionInvocation("test:pause-fencing-negative:settle"),
+        attemptId: claim.attemptId,
+        outcome: "succeeded",
+        failureClass: "none",
+        summary: "executor succeeded",
+        output: {},
+      }),
+    /requires the current held lease/,
+    "settlement must be rejected by trg_workflow_attempt_transition_fencing once the lease is released",
+  );
+  assert.equal(readTaskAttempt(claim.attemptId)?.state, "running");
 });
 
 test("pauseAuto records the expected worktree path when paused from project root", async () => {
