@@ -211,6 +211,123 @@ describe('db-writer', () => {
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // Newline handling in table cells (#2422)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  test('generateDecisionsMd keeps multi-line rationale inside one table row (#2422)', () => {
+    const multiline: Decision = {
+      seq: 1,
+      id: 'D001',
+      when_context: 'M001',
+      scope: 'arch',
+      decision: 'Storage engine',
+      choice: 'SQLite',
+      rationale: ['para one.', '', 'para two | with pipe.'].join('\n'),
+      revisable: 'No',
+      made_by: 'agent',
+      superseded_by: null,
+    };
+    const md = generateDecisionsMd([multiline]);
+
+    const rowLines = md.split('\n').filter(l => l.startsWith('| D001 |'));
+    assert.deepStrictEqual(rowLines.length, 1, 'multi-line rationale emits exactly one table row');
+
+    const row = rowLines[0]!;
+    const structuralPipes = (row.replace(/\\\|/g, '').match(/\|/g) ?? []).length;
+    assert.deepStrictEqual(structuralPipes, 9, 'row keeps exactly 9 structural pipes for its 8 cells');
+    assert.ok(
+      row.includes('para one.<br><br>para two \\| with pipe.'),
+      'blank line becomes <br><br> and the pipe stays escaped',
+    );
+
+    const parsed = parseDecisionsTable(md);
+    assert.deepStrictEqual(parsed.length, 1, 'multi-line decision still parses as exactly one row');
+  });
+
+  test('generateDecisionsMd round-trips a newline-only decision field-by-field through parseDecisionsTable (#2422)', () => {
+    const multiline: Decision = {
+      ...SAMPLE_DECISIONS[0]!,
+      rationale: ['para one.', '', 'para two.'].join('\n'),
+      revisable: 'No',
+    };
+    const md = generateDecisionsMd([multiline]);
+
+    const [parsed] = parseDecisionsTable(md);
+    assert.ok(parsed, 'multi-line decision parses back as one row');
+    assert.deepStrictEqual(parsed!.id, multiline.id);
+    assert.deepStrictEqual(parsed!.when_context, multiline.when_context);
+    assert.deepStrictEqual(parsed!.scope, multiline.scope);
+    assert.deepStrictEqual(parsed!.decision, multiline.decision);
+    assert.deepStrictEqual(parsed!.choice, multiline.choice);
+    assert.deepStrictEqual(parsed!.rationale, 'para one.<br><br>para two.', 'rationale round-trips with <br> encoding, all columns aligned');
+    assert.deepStrictEqual(parsed!.revisable, 'No', 'revisable column is not shifted by the multi-line rationale');
+    assert.deepStrictEqual(parsed!.made_by, multiline.made_by);
+  });
+
+  test('generateDecisionsMd keeps the table contiguous when an earlier decision has a multi-line field (#2422)', () => {
+    const first: Decision = { ...SAMPLE_DECISIONS[0]!, rationale: ['para one.', '', 'para two.'].join('\n') };
+    const second: Decision = { ...SAMPLE_DECISIONS[1]! };
+    const md = generateDecisionsMd([first, second]);
+
+    const lines = md.split('\n');
+    const sepIdx = lines.findIndex(l => l.startsWith('| --- |'));
+    assert.ok(sepIdx >= 0, 'separator row present');
+    const afterSep = lines.slice(sepIdx + 1, -1); // drop trailing empty string from final \n
+    assert.deepStrictEqual(afterSep.length, 2, 'both decision rows follow the separator');
+    assert.ok(
+      afterSep.every(l => l.startsWith('| ')),
+      'no blank line terminates the table — every line after the separator is a row',
+    );
+  });
+
+  test('generateDecisionsMd converts CRLF to a single <br> with no stray carriage returns (#2422)', () => {
+    const crlf: Decision = { ...SAMPLE_DECISIONS[0]!, rationale: 'para one.\r\npara two' };
+    const md = generateDecisionsMd([crlf]);
+    assert.ok(md.includes('para one.<br>para two'), 'CRLF becomes a single <br>');
+    assert.ok(!md.includes('\r'), 'no stray \\r in output');
+  });
+
+  test('generateDecisionsMd escapes pipes before converting newlines (#2422)', () => {
+    const preBr: Decision = { ...SAMPLE_DECISIONS[0]!, rationale: 'a | b<br>c' };
+    const md = generateDecisionsMd([preBr]);
+    const row = md.split('\n').find(l => l.startsWith('| D001 |'));
+    assert.ok(row, 'decision row present');
+    assert.ok(row!.includes('a \\| b<br>c'), 'pipe stays escaped and pre-existing <br> survives untouched');
+    assert.ok(!row!.includes('<br><br>'), 'pre-existing <br> is not doubled');
+  });
+
+  test('freeform append block keeps a multi-line rationale inside one table row (#2422)', async t => {
+    const tmpDir = makeTmpDir();
+    openDatabase(path.join(tmpDir, '.gsd', 'gsd.db'));
+    t.after(() => {
+      closeDatabase();
+      cleanupDir(tmpDir);
+    });
+
+    fs.writeFileSync(
+      path.join(tmpDir, '.gsd', 'DECISIONS.md'),
+      '# Project Notes\n\nFreeform notes that must be preserved.\n',
+    );
+
+    await saveDecisionToDb({
+      scope: 'arch',
+      decision: 'Storage engine',
+      choice: 'SQLite',
+      rationale: ['para one.', '', 'para two | with pipe.'].join('\n'),
+      when_context: 'M001',
+    }, tmpDir);
+
+    const md = fs.readFileSync(path.join(tmpDir, '.gsd', 'DECISIONS.md'), 'utf-8');
+    assert.ok(md.includes('Freeform notes that must be preserved.'), 'freeform content preserved');
+    const rowLines = md.split('\n').filter(l => l.startsWith('| D001 |'));
+    assert.deepStrictEqual(rowLines.length, 1, 'append block emits exactly one row for the decision');
+    assert.ok(
+      rowLines[0]!.includes('para one.<br><br>para two \\| with pipe.'),
+      'appended row encodes newlines as <br> and escapes pipes',
+    );
+  });
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // Round-Trip Tests: Requirements
   // ═══════════════════════════════════════════════════════════════════════════
 
