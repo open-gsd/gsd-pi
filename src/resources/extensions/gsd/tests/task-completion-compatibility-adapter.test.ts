@@ -29,6 +29,7 @@ import {
   insertArtifact,
   openDatabase,
 } from "../gsd-db.js";
+import { readCompatMarker, writeCompatMarker } from "../compat/compat-marker.js";
 import { stripProjectionStamp } from "../markdown-renderer.js";
 import { clearPathCache } from "../paths.js";
 import {
@@ -1068,6 +1069,200 @@ test("#1726: an interrupted retry quarantines its abandoned staged SUMMARY witho
   assert.deepEqual(
     await taskSummaryDivergence(basePath),
     { doctorDivergence: false, reconciliationDivergence: false },
+  );
+});
+
+// ─── Trailing-newline stamp separator (issue #2427) ────────────────────────
+//
+// The stamper inserts a "\n" separator before the stamp when the render intent
+// does not end with a newline, and stripProjectionStamp cannot remove it (at
+// strip time it is indistinguishable from the content's own trailing newline).
+// Stamp-insensitive comparisons must therefore also be trailing-newline-
+// insensitive, or newline-less DB intents can never compare equal to their
+// own stamped projections.
+
+function stagedArtifactAndTask(): {
+  artifact: { path: string; fullContent: string };
+  task: { status: string; fullSummaryMd: string };
+} {
+  const artifact = row(
+    "SELECT path, full_content FROM artifacts WHERE artifact_type = 'SUMMARY' AND task_id = 'T01'",
+  );
+  const taskRow = row("SELECT status, full_summary_md FROM tasks WHERE id = 'T01'");
+  return {
+    artifact: {
+      path: String(artifact.path),
+      fullContent: String(artifact.full_content),
+    },
+    task: {
+      status: String(taskRow.status),
+      fullSummaryMd: String(taskRow.full_summary_md),
+    },
+  };
+}
+
+function forgetProjectionInCompatMarker(basePath: string): void {
+  const marker = readCompatMarker(basePath);
+  marker.projections = {};
+  writeCompatMarker(basePath, marker);
+}
+
+function interruptedRetryFixture(basePath: string, attemptId: string): void {
+  db().prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES (
+      'trace-dispatch-2', 'turn-dispatch-2', 'worker-1', 7,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'claimed', 2, '2026-07-12T00:10:00.000Z'
+    )
+  `).run();
+  const retry = claimTaskAttempt({
+    invocation: invocation("task-completion/interrupted-retry-claim"),
+    task: TASK,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id),
+    retryOfAttemptId: attemptId,
+  });
+  settleTaskAttempt({
+    invocation: invocation("task-completion/interrupted-retry-settle"),
+    attemptId: retry.attemptId,
+    outcome: "interrupted",
+    failureClass: "operator-cancelled",
+    summary: "The retry was cancelled",
+    output: { cancelled: true },
+  });
+}
+
+test("#2427: a staged SUMMARY whose DB intent lost its trailing newline stays canonical", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+
+  // Rewrite the DB render intent without its trailing newline — the stamped
+  // projection keeps the separator newline the stamper inserted.
+  const { artifact, task } = stagedArtifactAndTask();
+  const trimmed = task.fullSummaryMd.replace(/\n+$/u, "");
+  assert.notEqual(trimmed, task.fullSummaryMd, "fixture staged summary ends with a newline");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": trimmed });
+
+  const { isCanonicalStagedTaskSummaryProjection } = await import(
+    "../task-summary-projection-classification.js"
+  );
+  assert.equal(
+    isCanonicalStagedTaskSummaryProjection(basePath, {
+      path: artifact.path,
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      fullContent: artifact.fullContent,
+    }, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      status: "in_progress",
+      fullSummaryMd: trimmed,
+    }),
+    true,
+    "a trailing-newline-only difference must not declassify the staged SUMMARY",
+  );
+  assert.deepEqual(
+    await taskSummaryDivergence(basePath),
+    { doctorDivergence: false, reconciliationDivergence: false },
+    "doctor and reconciliation must accept the newline-less staged SUMMARY",
+  );
+});
+
+test("#2427: genuinely changed DB intent still classifies a staged SUMMARY as drift", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+
+  const changed = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md)
+    .replace("Implemented the compatibility seam", "Implemented an entirely different seam");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": changed });
+
+  const { artifact } = stagedArtifactAndTask();
+  const { isCanonicalStagedTaskSummaryProjection } = await import(
+    "../task-summary-projection-classification.js"
+  );
+  assert.equal(
+    isCanonicalStagedTaskSummaryProjection(basePath, {
+      path: artifact.path,
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      fullContent: artifact.fullContent,
+    }, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      status: "in_progress",
+      fullSummaryMd: changed,
+    }),
+    false,
+    "an interior content change is still classified as non-canonical",
+  );
+});
+
+test("#2427: an abandoned staged SUMMARY matches a newline-less DB intent without a blocker", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  const stagedMd = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md);
+
+  interruptedRetryFixture(basePath, attemptId);
+  assert.equal(existsSync(staged.summaryPath), true, "the abandoned disk projection awaits quarantine");
+
+  // Restore a DB intent that matches the projection except for the trailing
+  // newline, and forget the projection in the compat marker so the content
+  // comparison is the only acceptance path left.
+  const trimmed = stagedMd.replace(/\n+$/u, "");
+  assert.notEqual(trimmed, stagedMd, "fixture staged summary ends with a newline");
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({ ":md": trimmed });
+  forgetProjectionInCompatMarker(basePath);
+
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.equal(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }),
+    null,
+    "a trailing-newline-only difference must not fail-closed the abandoned staged SUMMARY",
+  );
+});
+
+test("#2427: an abandoned staged SUMMARY with genuinely different DB intent still blocks", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  const stagedMd = String(row("SELECT full_summary_md FROM tasks WHERE id = 'T01'").full_summary_md);
+
+  interruptedRetryFixture(basePath, attemptId);
+  assert.equal(existsSync(staged.summaryPath), true);
+
+  db().prepare("UPDATE tasks SET full_summary_md = :md WHERE id = 'T01'").run({
+    ":md": stagedMd.replace(
+      "Implemented the compatibility seam",
+      "Implemented an entirely different seam",
+    ),
+  });
+  forgetProjectionInCompatMarker(basePath);
+
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "genuinely different content must stay fail-closed",
   );
 });
 

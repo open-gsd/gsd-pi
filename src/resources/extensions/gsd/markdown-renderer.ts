@@ -189,6 +189,17 @@ export function stripProjectionStamp(content: string): string {
 }
 
 /**
+ * Comparable form of projection content for drift judgment: stamp-insensitive
+ * and trailing-newline-insensitive. The stamp separator adds a newline to
+ * newline-less render intent — indistinguishable from the content's own
+ * trailing newline at strip time — and trailing newline runs carry no semantic
+ * content, so neither can constitute drift (issue #2427).
+ */
+export function comparableProjectionContent(content: string): string {
+  return stripProjectionStamp(content).replace(/(?:\r\n|\r|\n)+$/u, "");
+}
+
+/**
  * Append the state-version stamp at the fixed end-of-file position. Any prior
  * trailing stamp is replaced, so re-renders of replayed artifact content stay
  * byte-stable instead of accumulating stamp lines.
@@ -1418,7 +1429,8 @@ function projectionRenderIntents(basePath: string): ProjectionRenderIntent[] {
 
 /**
  * Detect content drift between renderer-owned on-disk projections and current
- * DB render intent. State-version stamps do not participate in the comparison.
+ * DB render intent. Comparison uses comparableProjectionContent: state-version
+ * stamps and trailing newline runs do not participate.
  */
 export function detectProjectionDrift(basePath: string): StaleEntry[] {
   const stale: StaleEntry[] = [];
@@ -1426,7 +1438,7 @@ export function detectProjectionDrift(basePath: string): StaleEntry[] {
     if (!existsSync(intent.path)) continue;
     try {
       const actual = readFileSync(intent.path, "utf-8");
-      if (stripProjectionStamp(actual) !== stripProjectionStamp(intent.content)) {
+      if (comparableProjectionContent(actual) !== comparableProjectionContent(intent.content)) {
         stale.push({ path: intent.path, reason: intent.reason });
       }
     } catch (e) {
