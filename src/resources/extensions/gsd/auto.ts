@@ -1291,6 +1291,10 @@ function pauseAutoUnitIdentityMatches(expected: PauseAutoUnitIdentity | null): b
 }
 
 function shouldPreserveCoordinationForPause(errorContext?: ErrorContext): boolean {
+  // While a unit execution is in flight its Attempt settlement still needs the
+  // lease's fencing token — dropping it on a watchdog pause would fence the
+  // settlement out (LEASE_FENCING_LOST) and orphan the Attempt (#2429).
+  if (s.unitExecutionInFlight) return true;
   return errorContext?.category === "provider" && errorContext.isTransient === true;
 }
 
