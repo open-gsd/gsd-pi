@@ -276,3 +276,22 @@ test("closeout consistency persists evidence-backed gate closures before checkin
   if (!result.ok) assert.equal(result.reason, "quality-gate-pending");
   assert.equal(getGateResults("M001", "S01").find((gate) => gate.gate_id === "Q3")?.status, "complete");
 });
+
+test("validation-absent recovery names the dispatchable validation form (#2433)", (t) => {
+  t.after(() => closeDatabase());
+  try {
+    assert.equal(openDatabase(":memory:"), true);
+    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Done", status: "complete" });
+
+    const result = checkCloseoutConsistencyGate("M001");
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "validation-not-pass");
+    const formatted = formatCloseoutConsistencyBlock(result);
+    assert.match(formatted, /\/gsd dispatch validate M001/);
+    assert.doesNotMatch(formatted, /validate-milestone/);
+  } finally {
+    closeDatabase();
+  }
+});

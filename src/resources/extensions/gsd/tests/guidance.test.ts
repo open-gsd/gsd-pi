@@ -196,4 +196,14 @@ describe("doctor fix hints", () => {
     assert.match(hint, /\/gsd doctor/);
     assert.doesNotMatch(hint, /\/gsd doctor fix/);
   });
+
+  test("validation_source_revision_mismatch names the working dispatch form (#2433)", () => {
+    const hint = doctorFixHint("validation_source_revision_mismatch");
+    assert.ok(hint);
+    assert.match(hint, /git reset --mixed HEAD\^/);
+    assert.match(hint, /\/gsd dispatch validate <id>/);
+    assert.doesNotMatch(hint, /\/gsd validate-milestone/);
+    assert.doesNotMatch(hint, /\/gsd validate-phase/);
+    assert.match(hint, /`\/gsd auto` alone will not re-run milestone validation/);
+  });
 });
