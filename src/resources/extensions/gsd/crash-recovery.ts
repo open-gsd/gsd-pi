@@ -233,7 +233,18 @@ export function clearLock(basePath: string): void {
     const staleWorker = findStaleWorkerForProject(projectRoot);
     if (staleWorker) {
       markWorkerStopping(staleWorker.worker_id);
-      forceReleaseLeasesForWorker(staleWorker.worker_id);
+      // #kunnen-we-dit-in-de-toekomst-voorkomen: clearLock() previously released
+      // the milestone lease without settling any workflow_execution_attempts row
+      // still left `running` for this worker. That orphaned running Attempt then
+      // blocks the *next* `gsd auto` invocation with "dispatch claim skipped:
+      // stale-lease" / "Task Attempt claim must activate exactly one matching
+      // coordination dispatch", requiring a manual gsd_task_settle every time.
+      // Settle before releasing the lease, mirroring clearStaleWorkerLock().
+      try {
+        settleRunningAttemptsForWorker(staleWorker.worker_id);
+      } finally {
+        forceReleaseLeasesForWorker(staleWorker.worker_id);
+      }
       deleteRuntimeKv("worker", staleWorker.worker_id, SESSION_FILE_KV_KEY);
       return;
     }
@@ -244,7 +255,13 @@ export function clearLock(basePath: string): void {
           w.pid === legacyLock.pid
           && normalizeRealPath(w.project_root_realpath) === projectRoot,
       );
-      if (workerByLegacyPid) forceReleaseLeasesForWorker(workerByLegacyPid.worker_id);
+      if (workerByLegacyPid) {
+        try {
+          settleRunningAttemptsForWorker(workerByLegacyPid.worker_id);
+        } finally {
+          forceReleaseLeasesForWorker(workerByLegacyPid.worker_id);
+        }
+      }
     }
     const worker = findActiveWorkerForCurrentProcess(projectRoot);
     if (worker) deleteRuntimeKv("worker", worker.worker_id, SESSION_FILE_KV_KEY);
@@ -252,6 +269,7 @@ export function clearLock(basePath: string): void {
     const stale = findStaleWorkerForProject(projectRoot);
     if (stale) {
       markWorkerStopping(stale.worker_id);
+      settleRunningAttemptsForWorker(stale.worker_id);
       deleteRuntimeKv("worker", stale.worker_id, SESSION_FILE_KV_KEY);
     }
   } catch {
