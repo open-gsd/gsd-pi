@@ -51,18 +51,21 @@ parse_dispatch_args() {
   [[ "$SOURCE_REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--source-repo must be owner/repo"
   [[ -n "$SOURCE_REF" ]] || die "--source-ref is required"
   [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || die "--expected-sha must be a full 40-character lowercase SHA"
-  [[ "$SHARD_COUNT" =~ ^[0-9]+$ ]] || die "--shard-count must be an integer"
+  [[ "$SHARD_COUNT" =~ ^[0-9]+$ && "$SHARD_COUNT" -ge 1 && "$SHARD_COUNT" -le 16 ]] || die "--shard-count must be an integer between 1 and 16"
 }
 
 dispatch() {
   parse_dispatch_args "$@"
-  local remote_line remote_sha before_id run_id run_url
+  local remote_line remote_sha run_id run_url expected_title dispatch_started
   remote_line="$(git ls-remote "https://github.com/${SOURCE_REPO}.git" "refs/heads/${SOURCE_REF}")" || die "git ls-remote failed"
   [[ -n "$remote_line" ]] || die "refs/heads/${SOURCE_REF} does not exist on ${SOURCE_REPO}"
   remote_sha="$(printf '%s\n' "$remote_line" | cut -f1)"
   [[ "$remote_sha" == "$EXPECTED_SHA" ]] || die "${SOURCE_REPO}:${SOURCE_REF} is ${remote_sha}, not ${EXPECTED_SHA}"
 
-  before_id="$(gh run list --repo "$HARNESS_REPO" --workflow "$WORKFLOW_FILE" --limit 1 --json databaseId --jq '.[0].databaseId // "none"' 2>/dev/null || echo none)"
+  # Match the dispatched run by its exact run-name and dispatch time instead of
+  # the latest run id, which a concurrent unrelated dispatch could steal.
+  expected_title="Pre-review sharded verify: ${SOURCE_REPO}:${SOURCE_REF} @ ${EXPECTED_SHA}"
+  dispatch_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   gh workflow run "$WORKFLOW_FILE" --repo "$HARNESS_REPO" --ref "$WORKFLOW_REF" \
     -f "source_repo=${SOURCE_REPO}" \
     -f "source_ref=${SOURCE_REF}" \
@@ -71,8 +74,11 @@ dispatch() {
 
   for _ in {1..20}; do
     sleep 3
-    run_id="$(gh run list --repo "$HARNESS_REPO" --workflow "$WORKFLOW_FILE" --limit 1 --json databaseId --jq '.[0].databaseId // "none"' 2>/dev/null || echo none)"
-    if [[ "$run_id" != "none" && "$run_id" != "$before_id" ]]; then
+    run_id="$(gh run list --repo "$HARNESS_REPO" --workflow "$WORKFLOW_FILE" --limit 20 \
+      --json databaseId,displayTitle,createdAt \
+      --jq "[.[] | select(.displayTitle == \"${expected_title}\" and .createdAt >= \"${dispatch_started}\")] | sort_by(.createdAt) | last | .databaseId // \"none\"" \
+      2>/dev/null || echo none)"
+    if [[ "$run_id" != "none" && -n "$run_id" ]]; then
       run_url="$(gh run view "$run_id" --repo "$HARNESS_REPO" --json url --jq '.url')"
       echo "run-id: ${run_id}"
       echo "run-url: ${run_url}"

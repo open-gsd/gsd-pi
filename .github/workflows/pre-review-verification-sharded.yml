@@ -117,16 +117,21 @@ jobs:
           fi
 
       - name: Write initial summary
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
         run: |
           {
             echo "### Sharded pre-review verification"
             echo ""
             echo "| field | value |"
             echo "| --- | --- |"
-            echo "| source repo | ${{ inputs.source_repo }} |"
-            echo "| source ref | ${{ inputs.source_ref }} |"
-            echo "| expected sha | ${{ inputs.expected_sha }} |"
-            echo "| shard count | ${{ inputs.shard_count }} |"
+            echo "| source repo | ${SOURCE_REPO} |"
+            echo "| source ref | ${SOURCE_REF} |"
+            echo "| expected sha | ${EXPECTED_SHA} |"
+            echo "| shard count | ${SHARD_COUNT} |"
             echo "| authority | advisory pre-review signal; upstream ci.yml remains merge authority |"
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -140,7 +145,9 @@ jobs:
           echo "shard_matrix=${matrix}" >> "$GITHUB_OUTPUT"
 
       - name: Setup Node and pnpm
-        uses: ./.github/actions/pre-review-node-setup
+        # Pinned to the harness's own trusted repo; the untrusted checkout above
+        # replaced $GITHUB_WORKSPACE, so a local ./path would resolve from source_repo.
+        uses: open-gsd/gsd-pi/.github/actions/pre-review-node-setup@main
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8
@@ -294,7 +301,9 @@ jobs:
           [[ "$(git rev-parse HEAD)" == "$EXPECTED_SHA" ]]
 
       - name: Setup Node and pnpm
-        uses: ./.github/actions/pre-review-node-setup
+        # Pinned to the harness's own trusted repo; the untrusted checkout above
+        # replaced $GITHUB_WORKSPACE, so a local ./path would resolve from source_repo.
+        uses: open-gsd/gsd-pi/.github/actions/pre-review-node-setup@main
 
       - name: Download build output
         uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53
@@ -323,11 +332,14 @@ jobs:
             exit 0
           fi
           mapfile -t shard_files < "$shard_file"
+          set +e
           node --import ./scripts/dist-test-resolve.mjs \
             --experimental-test-isolation=process \
             --test-reporter=./scripts/test-reporter-compact.mjs \
             --test "${shard_files[@]}" \
             2>&1 | tee "shard-${{ matrix.shard }}.log"
+          node_status="${PIPESTATUS[0]}"
+          set -e
           summary_line="$(grep -E '^(✔|✖) [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' "shard-${{ matrix.shard }}.log" | tail -1)"
           if [[ -z "$summary_line" ]]; then
             echo "::error::Could not find compact-reporter summary for shard ${{ matrix.shard }}."
@@ -337,6 +349,7 @@ jobs:
           failed="$(echo "$summary_line" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+')"
           skipped="$(echo "$summary_line" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+')"
           echo "shard=${{ matrix.shard }} passed=${passed} failed=${failed} skipped=${skipped}" | tee "shard-${{ matrix.shard }}-summary.txt"
+          exit "$node_status"
 
       - name: Upload shard summary
         if: always()
@@ -445,15 +458,20 @@ jobs:
 
       - name: Write final summary
         if: always()
+        env:
+          SOURCE_REPO: ${{ inputs.source_repo }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          SHARD_COUNT: ${{ inputs.shard_count }}
         run: |
           {
             echo "### Sharded pre-review verification aggregate"
             echo ""
             echo "| field | value |"
             echo "| --- | --- |"
-            echo "| source repo | ${{ inputs.source_repo }} |"
-            echo "| source ref | ${{ inputs.source_ref }} |"
-            echo "| expected sha | ${{ inputs.expected_sha }} |"
-            echo "| shard count | ${{ inputs.shard_count }} |"
+            echo "| source repo | ${SOURCE_REPO} |"
+            echo "| source ref | ${SOURCE_REF} |"
+            echo "| expected sha | ${EXPECTED_SHA} |"
+            echo "| shard count | ${SHARD_COUNT} |"
             echo "| authority | advisory pre-review signal only |"
           } >> "$GITHUB_STEP_SUMMARY"
