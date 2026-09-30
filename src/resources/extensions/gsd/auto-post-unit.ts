@@ -78,7 +78,7 @@ import {
   runMilestoneCloseoutGitHub,
 } from "./milestone-closeout.js";
 import type { AutoSession, SidecarItem } from "./auto/session.js";
-import { getEvidence, clearEvidenceFromDisk, isExecutionToolName } from "./safety/evidence-collector.js";
+import { getEvidence, clearEvidenceFromDisk, archiveEvidenceToBlocked, isExecutionToolName } from "./safety/evidence-collector.js";
 import { removeProjectionFileSync } from "./atomic-write.js";
 import {
   validateFileChanges,
@@ -2087,11 +2087,13 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                   }
                   const routePresentation = resolveEvidenceRoutePresentation(routed, routeFailure);
                   s.lastSafetyBlockRecovery = routePresentation.recovery;
-                  // Clear the persisted evidence file on the blocked path too, so a
-                  // retry cross-references fresh execution instead of replaying the
-                  // same stale rows indefinitely (#1641).
+                  // Archive the persisted evidence file on the blocked path, so a
+                  // retry cross-references fresh execution instead of replaying
+                  // the same stale rows indefinitely (#1641) while the mismatch
+                  // that caused the block stays inspectable under
+                  // .gsd/safety/blocked/ (#2425).
                   try {
-                    clearEvidenceFromDisk(s.basePath, sMid, sSid, sTid);
+                    archiveEvidenceToBlocked(s.basePath, sMid, sSid, sTid);
                   } catch (clearError) {
                     debugLog("postUnit", { phase: "safety-evidence-clear", error: String(clearError) });
                   }
