@@ -2704,6 +2704,14 @@ async function pumpSdkMessages(
 					toolCompletionTargetsById,
 					emittedExternalToolResultIds,
 				} = createSdkAttemptMessageState();
+				// Per-call usage of the last main-loop assistant event, per attempt.
+				// The terminal `result.usage` is cumulative across the SDK's
+				// internal tool-use loop, while each assistant event carries the
+				// usage of its own API call — the last main-loop one reflects the
+				// live end-of-turn context (#2358, #2359). Reset per attempt so a
+				// readiness retry can never inherit the previous attempt's
+				// measurement.
+				let lastMainLoopAssistantUsage: SDKAssistantMessage["message"]["usage"] | null = null;
 				const controller = new AbortController();
 				const forwardAbort = (): void => controller.abort();
 				if (options?.signal) {
@@ -2832,6 +2840,13 @@ async function pumpSdkMessages(
 									lastThinkingContent = block.thinking;
 								}
 							}
+
+							// Subagent events carry their own (smaller) context; only
+							// main-loop events (parent_tool_use_id === null) see the
+							// conversation this turn's final usage must describe.
+							if (sdkAssistant.parent_tool_use_id === null) {
+								lastMainLoopAssistantUsage = sdkAssistant.message.usage;
+							}
 							break;
 						}
 
@@ -2956,13 +2971,28 @@ async function pumpSdkMessages(
 									result.subtype === "success" && result.result ? result.result : undefined,
 							});
 
+							const usage = mapUsage(result.usage, result.total_cost_usd);
+							if (lastMainLoopAssistantUsage) {
+								// Live end-of-turn context from the SDK's final main-loop
+								// call. The terminal result usage is cumulative across the
+								// internal loop, so overflow detection and the context
+								// gauge prefer this per-call value when present (#2358,
+								// #2359). Additive field: existing usage fields (and
+								// persisted sessions) stay untouched. Cache counts are
+								// nullable in the native API shape and read as 0.
+								usage.liveContextTokens =
+									lastMainLoopAssistantUsage.input_tokens +
+									(lastMainLoopAssistantUsage.cache_read_input_tokens ?? 0) +
+									(lastMainLoopAssistantUsage.cache_creation_input_tokens ?? 0);
+							}
+
 							const finalMessage: AssistantMessage = {
 								role: "assistant",
 								content: finalContent,
 								api: "anthropic-messages",
 								provider: "claude-code",
 								model: modelId,
-								usage: mapUsage(result.usage, result.total_cost_usd),
+								usage,
 								stopReason: result.is_error ? "error" : "stop",
 								timestamp: Date.now(),
 							};

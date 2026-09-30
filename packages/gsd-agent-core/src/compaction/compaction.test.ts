@@ -197,12 +197,34 @@ describe("chunkMessages", () => {
 });
 
 describe("calculateContextTokens", () => {
-	it("excludes cumulative output for claude-code totalTokens (de-cumulated live context)", () => {
-		// claude-code adapter reports totalTokens = input + output + cacheWrite
-		// (65 + 39_846 + 243_452), deliberately excluding the turn-cumulative
-		// cacheRead. Subtracting output yields input + cacheWrite = 243_517, the
-		// de-cumulated live-context proxy — not the inflated 283_363 nor the
-		// cumulative component sum.
+	it("prefers liveContextTokens for claude-code usage (#2359 pinned: 172,089 not 354,928)", () => {
+		// Real claude-code turn from the #2359 report. The terminal result usage
+		// is cumulative across the SDK's internal loop, so the old derivation
+		// totalTokens - output = (input + output + cacheWrite) - output =
+		// 360_495 - 5_567 = 354_928 over-reported live context 2.08x (36% vs
+		// 17.2%). The adapter now attaches liveContextTokens — the last
+		// main-loop assistant event's input + cacheRead + cacheWrite
+		// (2 + 168_082 + 4_005) — which calculateContextTokens must prefer.
+		const usage = {
+			input: 19_328,
+			output: 5_567,
+			cacheRead: 476_140,
+			cacheWrite: 335_600,
+			totalTokens: 360_495,
+			liveContextTokens: 172_089,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+
+		assert.equal(calculateContextTokens(usage), 172_089);
+	});
+
+	it("excludes cumulative output for claude-code totalTokens when liveContextTokens is absent (legacy persisted sessions)", () => {
+		// Fallback for claude-code usage without liveContextTokens (sessions
+		// persisted before the adapter attached it): totalTokens =
+		// input + output + cacheWrite (65 + 39_846 + 243_452), deliberately
+		// excluding the turn-cumulative cacheRead. Subtracting output yields
+		// input + cacheWrite = 243_517, the legacy de-cumulated proxy — not
+		// the inflated 283_363 nor the cumulative component sum.
 		const usage = {
 			input: 65,
 			output: 39_846,

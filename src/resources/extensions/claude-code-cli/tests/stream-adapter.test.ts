@@ -940,6 +940,189 @@ describe("stream-adapter — Claude Code external tool results", () => {
 		);
 	});
 
+	test("attaches the last main-loop per-call usage as liveContextTokens (#2358, #2359)", async () => {
+		// The terminal result.usage is cumulative across the SDK's internal
+		// tool-use loop; each assistant event carries its own call's usage.
+		// The final message must expose the last MAIN-LOOP event's
+		// input + cacheRead + cacheWrite as liveContextTokens (subagent
+		// events have their own context and must be ignored), while the
+		// mapUsage-derived cumulative fields keep their existing contract.
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Do the thing." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					// Earlier main-loop call of the internal loop.
+					yield {
+						type: "assistant",
+						uuid: "assistant-main-1",
+						session_id: "session-1",
+						parent_tool_use_id: null,
+						message: {
+							id: "msg-main-1",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "intermediate text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "tool_use" as const,
+							usage: {
+								input_tokens: 10,
+								output_tokens: 20,
+								cache_read_input_tokens: 30,
+								cache_creation_input_tokens: 40,
+							},
+						},
+					};
+					// Last main-loop call — its per-call usage is the live
+					// end-of-turn context (#2359 real-turn numbers).
+					yield {
+						type: "assistant",
+						uuid: "assistant-main-2",
+						session_id: "session-1",
+						parent_tool_use_id: null,
+						message: {
+							id: "msg-main-2",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "final text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "end_turn" as const,
+							usage: {
+								input_tokens: 2,
+								output_tokens: 5_567,
+								cache_read_input_tokens: 168_082,
+								cache_creation_input_tokens: 4_005,
+							},
+						},
+					};
+					// Subagent call AFTER the last main-loop event — its own
+					// (smaller) context must be ignored despite arriving last.
+					yield {
+						type: "assistant",
+						uuid: "assistant-sub-1",
+						session_id: "session-1",
+						parent_tool_use_id: "tool-task-1",
+						message: {
+							id: "msg-sub-1",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "subagent text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "end_turn" as const,
+							usage: {
+								input_tokens: 1,
+								output_tokens: 2,
+								cache_read_input_tokens: 3,
+								cache_creation_input_tokens: 4,
+							},
+						},
+					};
+					// Terminal result usage — cumulative across the loop.
+					yield {
+						...makeSdkSuccessResult("done"),
+						usage: {
+							input_tokens: 19_328,
+							output_tokens: 5_567,
+							cache_read_input_tokens: 476_140,
+							cache_creation_input_tokens: 335_600,
+						},
+					};
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const done = events.find((event) => event.type === "done");
+		assert.ok(done, "expected a terminal done event");
+		const message = done.message as AssistantMessage;
+		assert.equal(message.usage.liveContextTokens, 172_089);
+		assert.equal(message.usage.input, 19_328);
+		assert.equal(message.usage.output, 5_567);
+		assert.equal(message.usage.totalTokens, 360_495);
+	});
+
+	test("readiness retry does not inherit the previous attempt's assistant usage", async () => {
+		// The per-call usage capture resets per sdkAttemptLoop attempt: if a
+		// readiness retry starts a new SDK session whose attempt reaches a
+		// result without any main-loop assistant event, the final message must
+		// not carry the abandoned attempt's measurement.
+		let queryCalls = 0;
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-retry-usage-"));
+		const context: Context = {
+			systemPrompt: "UNIT: Run UAT",
+			messages: [{ role: "user", content: "Run UAT." } as Message],
+		};
+		_setAutoActiveForTest(true);
+		autoSession.currentUnit = { type: "run-uat", id: "M001/S001", startedAt: 0, workspaceRoot: cwd } as never;
+		try {
+			const stream = streamViaClaudeCode(
+				{ id: "claude-sonnet-4-6" } as any,
+				context,
+				{
+					cwd,
+					_skipWorkflowMcpPreflightForTest: true,
+					async *_sdkQueryForTest() {
+						queryCalls += 1;
+						if (queryCalls === 1) {
+							// Abandoned attempt: a main-loop assistant event whose
+							// per-call usage (sum 80) must NOT leak into attempt 2.
+							yield {
+								type: "assistant",
+								uuid: "assistant-attempt-1",
+								session_id: "session-1",
+								parent_tool_use_id: null,
+								message: {
+									id: "msg-attempt-1",
+									type: "message" as const,
+									role: "assistant" as const,
+									content: [{ type: "text", text: "stale attempt text" }],
+									model: "claude-sonnet-4-6",
+									stop_reason: "end_turn" as const,
+									usage: {
+										input_tokens: 10,
+										output_tokens: 20,
+										cache_read_input_tokens: 30,
+										cache_creation_input_tokens: 40,
+									},
+								},
+							};
+							// Same failing-init shape as the readiness-retry regression
+							// above — this init triggers the retry.
+							yield {
+								type: "system",
+								subtype: "init",
+								tools: ["Read"],
+								mcp_servers: [{ name: "gsd-workflow", status: "connected" }],
+							};
+							return;
+						}
+
+						// Retry attempt reaches a result with no assistant events.
+						yield makeSdkSuccessResult("fresh retry result");
+					},
+				} as any,
+			);
+
+			const message = await stream.result();
+
+			assert.equal(queryCalls, 2);
+			assert.equal(
+				(message.usage as AssistantMessage["usage"]).liveContextTokens,
+				undefined,
+				"result without assistant events must not inherit the abandoned attempt's usage",
+			);
+		} finally {
+			autoSession.currentUnit = null;
+			_setAutoActiveForTest(false);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("closes an in-flight interview when ask_user_questions reports timed_out first", async (t) => {
 		const notifications: Array<{ message: string; type?: string }> = [];
 		let elicitationPromise: Promise<unknown> | undefined;
