@@ -126,7 +126,17 @@ interface PersistedManagedProjectionMutation {
   exchangeGuardPath: string;
   exchangeGuardIdentity: string | null;
   exchangeState: PersistedProjectionExchange | null;
+  // Consecutive transient replay failures (EBUSY / sharing violation /
+  // os error 32). Persisted so the count survives process restarts; a
+  // journal entry that deterministically fails its exchange replay must
+  // escalate to retained evidence instead of wedging every render (#2108).
+  replayFailureCount: number | null;
 }
+
+// Retire a journal entry to retained evidence once its exchange replay has
+// failed transiently this many times: projections are regenerable from the
+// DB, so a bounded retry beats replaying forever.
+const MANAGED_PROJECTION_REPLAY_FAILURE_LIMIT = 3;
 
 interface PersistedProjectionExchange {
   readonly leftPath: string;
@@ -1003,6 +1013,14 @@ function validateMutation(value: unknown, targetRoot: string, path: string): Per
     : null);
   const exchangeGuardIdentity = mutation["exchangeGuardIdentity"] ?? null;
   const exchangeState = mutation["exchangeState"] ?? null;
+  // Bookkeeping field written only by recovery itself; a corrupted value must
+  // not brick the entry, so anything non-numeric reads as "no failures yet"
+  // (worst case: a few more replay attempts before retirement).
+  const rawReplayFailureCount = mutation["replayFailureCount"];
+  const replayFailureCount = typeof rawReplayFailureCount === "number"
+    && Number.isInteger(rawReplayFailureCount) && rawReplayFailureCount >= 0
+    ? rawReplayFailureCount
+    : null;
   const parsedExchange = exchangeState as Record<string, unknown> | null;
   const exchangeRightPaths = operation === "write"
     ? [temporaryPath, replacementPath]
@@ -1094,6 +1112,7 @@ function validateMutation(value: unknown, targetRoot: string, path: string): Per
     exchangeGuardPath: exchangeGuardPath as string,
     exchangeGuardIdentity: exchangeGuardIdentity as string | null,
     exchangeState: parsedExchange as unknown as PersistedProjectionExchange | null,
+    replayFailureCount,
   };
 }
 
@@ -1767,9 +1786,24 @@ function recoverManagedProjectionMutations(
       targetRoot,
       join(journalRoot(targetRoot), name),
     );
-    if (mutation.legacyCleanup) applyLegacyCleanupMutation(handle, mutation);
-    else if (mutation.operation === "write") applyWriteMutation(handle, mutation);
-    else applyRemoveMutation(handle, mutation);
+    try {
+      if (mutation.legacyCleanup) applyLegacyCleanupMutation(handle, mutation);
+      else if (mutation.operation === "write") applyWriteMutation(handle, mutation);
+      else applyRemoveMutation(handle, mutation);
+    } catch (error) {
+      // A transient class (EBUSY / sharing violation / os error 32) keeps the
+      // entry for the existing outer retry schedules, but a count persisted
+      // across restarts bounds the retries: an entry whose exchange replay
+      // fails deterministically every time must escalate to retained evidence
+      // instead of wedging every projection open forever (#2108).
+      if (!isTransientProjectionRootLockError(error)) throw error;
+      mutation.replayFailureCount = (mutation.replayFailureCount ?? 0) + 1;
+      if (mutation.replayFailureCount >= MANAGED_PROJECTION_REPLAY_FAILURE_LIMIT) {
+        retireExchangeWithRetainedEvidence(handle, mutation);
+      }
+      persistMutation(handle, mutation);
+      throw error;
+    }
     if (mutation.operation !== "remove-tree") {
       recordManagedProjectionLogicalPath(handle, mutation.logicalPath);
     }
@@ -2508,6 +2542,7 @@ export function beginManagedProjectionMutation(
       exchangeGuardPath: `${targetDirectory.length === 0 ? "" : `${targetDirectory}/`}.gsd-projection-exchange-${basename(name, ".json")}`,
       exchangeGuardIdentity: null,
       exchangeState: null,
+      replayFailureCount: null,
       handle,
     };
     persistMutation(handle, mutation);
@@ -2752,6 +2787,7 @@ export function removeLegacyProjectionTreeSync(targetRoot: string, directoryPath
       exchangeGuardPath: `${parent === "." ? "" : `${parent}/`}.gsd-projection-exchange-${id}`,
       exchangeGuardIdentity: null,
       exchangeState: null,
+      replayFailureCount: null,
     };
     persistMutation(handle, mutation);
     applyLegacyCleanupMutation(handle, mutation);
