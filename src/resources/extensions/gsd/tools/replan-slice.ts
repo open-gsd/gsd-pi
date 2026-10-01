@@ -29,6 +29,14 @@ import {
   PlanningGuardError,
   planningOperationPayload,
 } from "../planning-domain-operation.js";
+import { executeDomainOperation, type DomainOperationResult } from "../db/domain-operation.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
+import {
+  grantPlanReconciliationWaiver,
+  readActivePlanReconciliationWaiver,
+  recordPlanReconciliationDisposition,
+  type PlanReconciliationAuthorization,
+} from "../db/writers/slice-lifecycle.js";
 import { readLatestTaskAttempt } from "../task-execution-domain-operation.js";
 import { ensurePendingSliceQ8 } from "../db/writers/slice-companion-state.js";
 import { validateTaskToolRequirements } from "../task-tool-requirements.js";
@@ -148,6 +156,64 @@ function validateParams(params: ReplanSliceParams): ReplanSliceParams {
   }
 
   return { ...params, updatedTasks };
+}
+
+/**
+ * Record the waived Requirement Dispositions for the cancellation Waivers the
+ * replan operation minted for removed tasks (#2346/#2451). The schema's
+ * waiver-authority trigger requires a Waiver to precede its waived
+ * Disposition by at least one project revision, so this runs as its own
+ * fenced Domain Operation keyed to the replan operation's receipt — a replayed
+ * replan operation reuses the same key and therefore stays idempotent.
+ */
+function authorizeReconciliationOmissions(input: {
+  invocation: PlanningInvocation;
+  replanReceipt: DomainOperationResult;
+  milestoneId: string;
+  sliceId: string;
+  authorizations: PlanReconciliationAuthorization[];
+}): void {
+  const idempotencyKey = `replan-authorization:${input.replanReceipt.operationId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  const authorizationsPayload = input.authorizations.map((authorization) => ({
+    taskId: authorization.taskId,
+    requirementId: authorization.requirementId,
+    waiverId: authorization.waiverId,
+  }));
+  executeDomainOperation({
+    operationType: "workflow.slice.plan.authorization",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: planningOperationPayload({
+      milestoneId: input.milestoneId,
+      sliceId: input.sliceId,
+      authorizations: authorizationsPayload,
+    }),
+  }, (context) => {
+    for (const authorization of input.authorizations) {
+      recordPlanReconciliationDisposition(context, authorization);
+    }
+    return {
+      events: [{
+        eventType: "workflow.slice.plan.authorized",
+        entityType: "slice",
+        entityId: `${input.milestoneId}/${input.sliceId}`,
+        payload: { authorizations: authorizationsPayload },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `planning/${input.milestoneId}/${input.sliceId}`.toLowerCase(),
+        projectionKind: "markdown",
+        rendererVersion: "v1",
+      }],
+    };
+  });
 }
 
 export async function handleReplanSlice(
@@ -423,11 +489,41 @@ export async function handleReplanSlice(
             taskId: removedTask.id,
             status: "skipped",
           });
+          // #2346/#2451: a replan removal must carry the cancellation
+          // authorization the completion-side invariants demand, so slice and
+          // milestone closeout are not permanently blocked without a manual
+          // waiver.
+          grantPlanReconciliationWaiver(context, {
+            milestoneId: params.milestoneId,
+            sliceId: params.sliceId,
+            taskId: removedTask.id,
+          });
         }
         ensurePendingSliceQ8(context, params);
       },
     });
     operationStatus = receipt.status;
+    // Re-derive the authorizations from durable state — not from the mutation
+    // run, which a replayed replan operation skips — so an exact retry after a
+    // lost or failed authorization operation still records the waived
+    // Dispositions (#2346). The follow-up operation is fenced by the replan
+    // receipt's operation id, so re-running it stays idempotent.
+    const reconciliationAuthorizations = params.removedTaskIds
+      .map((taskId) => readActivePlanReconciliationWaiver({
+        milestoneId: params.milestoneId,
+        sliceId: params.sliceId,
+        taskId,
+      }))
+      .filter((authorization): authorization is PlanReconciliationAuthorization => authorization !== null);
+    if (reconciliationAuthorizations.length > 0) {
+      authorizeReconciliationOmissions({
+        invocation,
+        replanReceipt: receipt,
+        milestoneId: params.milestoneId,
+        sliceId: params.sliceId,
+        authorizations: reconciliationAuthorizations,
+      });
+    }
   } catch (err) {
     if (err instanceof PlanningGuardError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };

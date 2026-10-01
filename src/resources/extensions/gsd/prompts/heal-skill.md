@@ -39,6 +39,7 @@ Analyze the just-completed unit ({{unitId}}) for skill drift.
 Then write a brief summary of the finding to {{healArtifact}}.
 
 **Critical rules:**
+
 - Do NOT modify any skill files directly. Only write to the review queue.
 - The SkillsBench research (Feb 2026) shows curated skills beat auto-generated ones by +16.2pp. Human review is what makes this valuable.
 - Keep the analysis focused — don't flag stylistic preferences, only genuine errors or outdated content.

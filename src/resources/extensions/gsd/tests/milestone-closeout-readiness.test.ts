@@ -123,7 +123,7 @@ function makeFixture(): Fixture {
 
 function recordCanonicalValidation(
   verdict: "pass" | "fail" | "inconclusive" = "pass",
-  testedSourceRevision = "source-a",
+  testedSourceRevision = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 ): ValidateMilestoneReceipt {
   const runId = readDomainOperationFence().revision;
   let observation: "passed" | "failed" | "inconclusive" = "inconclusive";
@@ -275,7 +275,7 @@ test("readiness requires the exact canonical validation receipt, source, and des
 
   const ready = readMilestoneCloseoutReadiness({
     milestoneId: "M001",
-    sourceRevision: "source-a",
+    sourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   });
   assert.equal(ready.ready, true);
   if (ready.ready) {
@@ -292,7 +292,7 @@ test("readiness requires the exact canonical validation receipt, source, and des
     assert.deepEqual(wrongSource.blockers, [{
       kind: "validation-source-revision-mismatch",
       expectedSourceRevision: "source-b",
-      testedSourceRevision: "source-a",
+      testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     }]);
   }
 
@@ -585,7 +585,7 @@ test("readiness accepts an earlier genuine human acceptance that is still curren
     eventType: "milestone.subjective-uat.answered",
     payload: {
       humanAcceptanceId: "acceptance-uat",
-      testedSourceRevision: "source-a",
+      testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     },
   });
   const answerEvent = db.prepare(`
@@ -599,7 +599,7 @@ test("readiness accepts an earlier genuine human acceptance that is still curren
     event_type: "milestone.subjective-uat.answered",
     payload_json: JSON.stringify({
       humanAcceptanceId: "acceptance-uat",
-      testedSourceRevision: "source-a",
+      testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     }),
   });
   assert.equal(db.prepare(`
@@ -609,7 +609,7 @@ test("readiness accepts an earlier genuine human acceptance that is still curren
       ON answered.operation_id = acceptance.operation_id
      AND answered.event_type = 'milestone.subjective-uat.answered'
      AND json_extract(answered.payload_json, '$.humanAcceptanceId') = acceptance.human_acceptance_id
-     AND json_extract(answered.payload_json, '$.testedSourceRevision') = 'source-a'
+     AND json_extract(answered.payload_json, '$.testedSourceRevision') = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
     WHERE acceptance.human_acceptance_id = 'acceptance-uat'
   `).get()?.["count"], 1, "fixture acceptance must have a source-bound answer event");
 
@@ -673,7 +673,7 @@ test("readiness accepts an earlier genuine human acceptance that is still curren
         attemptId: "attempt-subjective",
         resultId,
         overallVerdict: "pass",
-        testedSourceRevision: "source-a",
+        testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         policyId: "test-policy",
         policyVersion: "1",
         criterionIds: ["criterion-subjective"],

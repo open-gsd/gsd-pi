@@ -26,6 +26,7 @@ import {
   resolveProfileAnchorProvider,
   resolveDisabledModelProvidersFromPreferences,
 } from "./preferences.js";
+import { fallbackModelId } from "./preferences-types.js";
 
 const DEFAULT_WIDGET_MODE = "small";
 
@@ -106,7 +107,7 @@ function collectConfigSections(options?: CollectConfigOptions): ConfigSection[] 
     if (resolved) {
       let val = resolved.primary;
       if (resolved.fallbacks.length > 0) {
-        val += ` \u2192 ${resolved.fallbacks.join(" \u2192 ")}`;
+        val += ` \u2192 ${resolved.fallbacks.map(fallbackModelId).join(" \u2192 ")}`;
       }
       modelRows.push({ label, value: val });
     } else {
@@ -172,7 +173,7 @@ function collectConfigSections(options?: CollectConfigOptions): ConfigSection[] 
     if (sup.model) {
       let modelVal = sup.model;
       if (sup.modelFallbacks && sup.modelFallbacks.length > 0) {
-        modelVal += ` \u2192 ${sup.modelFallbacks.join(" \u2192 ")}`;
+        modelVal += ` \u2192 ${sup.modelFallbacks.map(fallbackModelId).join(" \u2192 ")}`;
       }
       supRows.push({ label: "Model", value: modelVal });
     }

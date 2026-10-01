@@ -838,7 +838,12 @@ test("repairMilestoneLifecycleShadowsForward runs task repairs before slice repa
 
 function insertCanonicalCompletedSibling(milestoneId: string, sliceId: string, taskId: string): void {
   // The corroboration sibling is a canonical shadow row; FK targets
-  // (project_authority / workflow_operations) are not the subject here.
+  // (workflow_operations) are not the subject here. The row must carry the
+  // database's actual project id — candidate lookups are project-scoped
+  // (#2440), so a foreign-project sibling corroborates nothing.
+  const projectId = String(db().prepare(
+    "SELECT project_id FROM project_authority WHERE singleton = 1",
+  ).get()?.["project_id"]);
   db().exec("PRAGMA foreign_keys = OFF");
   db().prepare(`
     INSERT INTO workflow_item_lifecycles (
@@ -846,11 +851,11 @@ function insertCanonicalCompletedSibling(milestoneId: string, sliceId: string, t
       lifecycle_status, state_version, created_at, updated_at,
       last_operation_id, last_project_revision, last_authority_epoch
     ) VALUES (
-      'corroboration-' || :task_id, 'test-project', 'task', :milestone_id, :slice_id, :task_id,
+      'corroboration-' || :task_id, :project_id, 'task', :milestone_id, :slice_id, :task_id,
       'completed', 1, '2026-07-02T00:00:00.000Z', '2026-07-02T00:00:00.000Z',
       'fixture-adopt', 1, 0
     )
-  `).run({ ":milestone_id": milestoneId, ":slice_id": sliceId, ":task_id": taskId });
+  `).run({ ":project_id": projectId, ":milestone_id": milestoneId, ":slice_id": sliceId, ":task_id": taskId });
   db().exec("PRAGMA foreign_keys = ON");
 }
 

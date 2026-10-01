@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Auto-loop unit execution phase.
 
-import { importExtensionModule } from "@gsd/pi-coding-agent";
+import { importExtensionModule, setBeforeAgentStartContext } from "@gsd/pi-coding-agent";
 import type { SidecarItem, AutoSession } from "./session.js";
 import { resetEvidence, loadEvidenceFromDisk } from "../safety/evidence-collector.js";
 import { captureRootDirtySnapshot } from "../root-write-leak-guard.js";
@@ -476,6 +476,11 @@ export async function runUnitPhase(
     turnId: `iter-${ic.iteration}`,
     causedBy: "unit-start",
   });
+  // #1997: expose the dispatch context on before_agent_start events for the
+  // unit's agent turns; cleared again when the phase is cleared/deactivated.
+  // `phase` mirrors the value tracked by gsd-phase-state, whose canonical
+  // dispatch-phase identifier is the unit type (see setCurrentPhase above).
+  setBeforeAgentStartContext({ unitType, phase: unitType });
   s.lastToolInvocationError = null; // #2883: clear stale error from previous unit
   if (nextDispatchCount <= 1) {
     s.toolUnavailableRetries = 0;

@@ -307,7 +307,15 @@ function revokeCancellationWaivers(
           lifecycle.item_kind = 'task'
           AND lifecycle.slice_id IS NOT NULL
           AND lifecycle.task_id IS NOT NULL
-          AND waiver.scope = lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id || ' cancellation'
+          AND (
+            waiver.scope = lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id || ' cancellation'
+            OR (
+              -- #2432: the plan-reconciliation writer emits the task-scoped
+              -- "task:<M>/<S>/<T>" form; closeout must resolve it too.
+              waiver.scope = 'task:' || lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id
+              AND waiver.requirement_id = 'plan-omission:' || lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id
+            )
+          )
         )
       )
     ORDER BY waiver.project_revision, waiver.waiver_id
@@ -404,7 +412,6 @@ function currentTaskCancellationAuthorization(
     JOIN workflow_operations waiver_operation
       ON waiver_operation.operation_id = waiver.operation_id
      AND waiver_operation.project_id = waiver.project_id
-     AND waiver_operation.operation_type = 'task.waiver.grant'
     JOIN workflow_requirement_dispositions disposition
       ON disposition.project_id = waiver.project_id
      AND disposition.requirement_id = waiver.requirement_id
@@ -413,12 +420,26 @@ function currentTaskCancellationAuthorization(
     JOIN workflow_operations disposition_operation
       ON disposition_operation.operation_id = disposition.operation_id
      AND disposition_operation.project_id = disposition.project_id
-     AND disposition_operation.operation_type = 'task.disposition.record'
     WHERE waiver.project_id = :project_id
       AND waiver.lifecycle_id = :lifecycle_id
       AND waiver.waiver_status = 'active'
-      AND waiver.scope = :scope
       AND (waiver.expires_at IS NULL OR waiver.expires_at > :completed_at)
+      AND (
+        (
+          waiver.scope = :scope
+          AND waiver_operation.operation_type = 'task.waiver.grant'
+          AND disposition_operation.operation_type = 'task.disposition.record'
+        )
+        OR (
+          -- #2432: the plan-reconciliation writer's forms, pinned to its
+          -- requirement identity and writer provenance so an unrelated
+          -- recovery Waiver can neither authorize closeout nor survive reopen.
+          waiver.scope = :plan_reconciliation_scope
+          AND waiver.requirement_id = :plan_reconciliation_requirement
+          AND waiver_operation.operation_type IN ('workflow.slice.plan', 'workflow.slice.replan')
+          AND disposition_operation.operation_type = 'workflow.slice.plan.authorization'
+        )
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM workflow_requirement_dispositions successor
@@ -429,6 +450,8 @@ function currentTaskCancellationAuthorization(
     ":project_id": context.projectId,
     ":lifecycle_id": row.lifecycleId,
     ":scope": `${milestoneId}/${sliceId}/${taskId} cancellation`,
+    ":plan_reconciliation_scope": `task:${milestoneId}/${sliceId}/${taskId}`,
+    ":plan_reconciliation_requirement": `plan-omission:${milestoneId}/${sliceId}/${taskId}`,
     ":completed_at": completedAt,
   }) as unknown as CancellationAuthorizationRow[];
   if (authorizations.length === 0) {

@@ -123,7 +123,7 @@ export async function handleTaskSettle(
       );
       return;
     }
-    const settleOptions = { reconcileLifecycle: parsed.reconcileLifecycle };
+    const settleOptions = { reconcileLifecycle: parsed.reconcileLifecycle, basePath };
     if (!parsed.apply) {
       const plan = planTaskSettle(parsed.task, parsed.reason, settleOptions);
       if (plan.rows.length === 0 && plan.lifecycleRows.length === 0 && !plan.publication) {
@@ -155,7 +155,7 @@ export async function handleTaskSettle(
       invocation: cliInvocation(),
       task: parsed.task,
       reason: parsed.reason,
-      basePath,
+      // settleOptions carries basePath for the verification-paused receipt gate.
       ...settleOptions,
     });
     if (!result.settled && !result.reconciled && !result.published) {

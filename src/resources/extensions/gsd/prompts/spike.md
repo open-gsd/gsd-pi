@@ -40,6 +40,7 @@ For each experiment, run the validation question and record a verdict: `VALIDATE
 ### 7. Document
 
 Write `.gsd/spikes/{{spikeId}}/README.md` with:
+
 - The original idea and the experiments run
 - Per-experiment verdict + evidence
 - Conclusions and recommendations for the real build

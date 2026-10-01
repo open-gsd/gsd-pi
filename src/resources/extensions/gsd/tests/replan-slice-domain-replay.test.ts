@@ -20,6 +20,7 @@ import {
   projectCanonicalStatusToLegacy,
   readDomainOperationFence,
 } from "../gsd-db.ts";
+import { _setDomainOperationFaultForTest } from "../db/domain-operation.ts";
 import type { PlanningInvocation } from "../planning-invocation.ts";
 import { claimTaskAttempt } from "../task-execution-domain-operation.ts";
 import { handlePlanSlice } from "../tools/plan-slice.ts";
@@ -321,6 +322,107 @@ test("slice replan rejects removal of a Task with a running Attempt without resi
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("slice replan mints the plan-reconciliation cancellation authorization for removed tasks", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  await seedPlannedSlice(base);
+  const envelope = invocation("replan-slice/reconciliation-waiver");
+  const result = await handleReplanSlice(replanParams(), base, envelope);
+  assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
+
+  // #2346/#2451: the removal must carry the cancellation authorization the
+  // completion-side invariants demand — the same plan-reconciliation pair
+  // plan-slice mints (#2217).
+  const waivers = rows(`
+    SELECT waiver.waiver_id, waiver.scope, waiver.waiver_status,
+           operation.operation_type AS waiver_operation_type
+    FROM workflow_waivers waiver
+    JOIN workflow_operations operation ON operation.operation_id = waiver.operation_id
+    WHERE waiver.requirement_id = 'plan-omission:M001/S01/T02'
+  `);
+  assert.equal(waivers.length, 1);
+  assert.equal(waivers[0]!.scope, "task:M001/S01/T02");
+  assert.equal(waivers[0]!.waiver_status, "active");
+  assert.equal(waivers[0]!.waiver_operation_type, "workflow.slice.replan");
+
+  const dispositions = rows(`
+    SELECT disposition.disposition, disposition.waiver_id,
+           disposition.project_revision AS disposition_revision,
+           waiver.project_revision AS waiver_revision,
+           operation.operation_type AS disposition_operation_type
+    FROM workflow_requirement_dispositions disposition
+    JOIN workflow_waivers waiver ON waiver.waiver_id = disposition.waiver_id
+    JOIN workflow_operations operation ON operation.operation_id = disposition.operation_id
+    WHERE disposition.requirement_id = 'plan-omission:M001/S01/T02'
+  `);
+  assert.equal(dispositions.length, 1);
+  assert.equal(dispositions[0]!.disposition, "waived");
+  assert.equal(dispositions[0]!.waiver_id, waivers[0]!.waiver_id);
+  assert.equal(dispositions[0]!.disposition_operation_type, "workflow.slice.plan.authorization");
+  assert.ok(
+    Number(dispositions[0]!.disposition_revision) > Number(dispositions[0]!.waiver_revision),
+    "the waived Disposition must postdate its Waiver by at least one revision",
+  );
+
+  const operationsSnapshot = () => rows(`
+    SELECT operation_type, idempotency_key, resulting_revision
+    FROM workflow_operations ORDER BY resulting_revision
+  `);
+  const afterCommit = operationsSnapshot();
+  const replay = await handleReplanSlice(replanParams(), base, envelope);
+  assert.deepEqual(replay, result, "lost-response retry must preserve the public response exactly");
+  assert.deepEqual(operationsSnapshot(), afterCommit, "exact retry must not duplicate authorization operations");
+});
+
+test("slice replan re-records a lost authorization on exact retry after a failed follow-up", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    _setDomainOperationFaultForTest(null);
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  await seedPlannedSlice(base);
+  const envelope = invocation("replan-slice/authorization-recovery");
+  const activeWaiverCount = () => rows(`
+    SELECT waiver_id FROM workflow_waivers
+    WHERE requirement_id = 'plan-omission:M001/S01/T02' AND waiver_status = 'active'
+  `).length;
+  const waivedDispositionCount = () => rows(`
+    SELECT disposition_id FROM workflow_requirement_dispositions
+    WHERE requirement_id = 'plan-omission:M001/S01/T02' AND disposition = 'waived'
+  `).length;
+
+  // The replan commits (Waiver included); the follow-up authorization
+  // operation rolls back. The retry must still record the Disposition.
+  _setDomainOperationFaultForTest("after-projections", "workflow.slice.plan.authorization");
+  const failed = await handleReplanSlice(replanParams(), base, envelope);
+  _setDomainOperationFaultForTest(null);
+  assert.ok("error" in failed);
+  assert.match(failed.error, /domain operation fault: after-projections/);
+  assert.equal(activeWaiverCount(), 1, "the Waiver commits with the replan operation");
+  assert.equal(waivedDispositionCount(), 0, "the rolled-back Disposition leaves no residue");
+
+  // A lost response after the authorization operation committed must also
+  // converge on retry — the fenced operation replays instead of re-recording.
+  _setDomainOperationFaultForTest("after-commit", "workflow.slice.plan.authorization");
+  const lost = await handleReplanSlice(replanParams(), base, envelope);
+  _setDomainOperationFaultForTest(null);
+  assert.ok("error" in lost);
+  assert.match(lost.error, /domain operation fault: after-commit/);
+
+  const retry = await handleReplanSlice(replanParams(), base, envelope);
+  assert.ok(!("error" in retry), `unexpected error: ${"error" in retry ? retry.error : ""}`);
+  assert.equal(waivedDispositionCount(), 1, "exactly one waived Disposition survives the recovery");
+  assert.equal(activeWaiverCount(), 1);
+  assert.equal(rows(`
+    SELECT operation_id FROM workflow_operations
+    WHERE operation_type = 'workflow.slice.plan.authorization'
+  `).length, 1, "the fenced authorization operation commits exactly once");
 });
 
 test("slice replan preserves pending lifecycle provenance for existing tasks", async () => {

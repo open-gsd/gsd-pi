@@ -89,6 +89,7 @@ actual user-facing metrics.
    - If a fix doesn't help, revert it and say so.
 
 3. **Commit message format:**
+
    ```
    perf(<area>): <change summary>
 

@@ -14,6 +14,9 @@ import {
   getWorkerBatches,
   hasActiveWorkers,
   resetWorkerRegistry,
+  formatWorkerModelTokens,
+  formatWorkerElapsed,
+  formatWorkerIdentity,
 } from '../../subagent/worker-registry.ts';
 
 
@@ -142,5 +145,114 @@ console.log("\n=== Update non-existent worker ===");
   updateWorker("nonexistent-id", "completed");
   assert.deepStrictEqual(getActiveWorkers().length, 0, "no workers created by updating nonexistent");
 }
+
+// ─── Requested identity persistence (#2396) ───────────────────────────────────
+
+console.log("\n=== Requested identity persistence (#2396) ===");
+
+test("registerWorker persists requested model and thinking (#2396)", () => {
+  resetWorkerRegistry();
+  const id = registerWorker("scout", "Task A", 0, 2, "batch-id-1", {
+    model: "gpt-5.6-sol",
+    thinking: "high",
+  });
+  const w = getActiveWorkers().find(w => w.id === id);
+  assert.deepStrictEqual(w?.model, "gpt-5.6-sol", "requested model persisted");
+  assert.deepStrictEqual(w?.thinking, "high", "requested thinking persisted");
+  assert.deepStrictEqual(w?.completedAt, undefined, "no completedAt while running");
+});
+
+test("registerWorker tolerates missing identity fields (#2396)", () => {
+  resetWorkerRegistry();
+  const id = registerWorker("scout", "Task A", 0, 1, "batch-id-2");
+  const w = getActiveWorkers().find(w => w.id === id);
+  assert.deepStrictEqual(w?.model, undefined, "model absent without identity");
+  assert.deepStrictEqual(w?.thinking, undefined, "thinking absent without identity");
+});
+
+test("updateWorker stamps completedAt on terminal transitions (#2396)", () => {
+  resetWorkerRegistry();
+  const id = registerWorker("scout", "Task A", 0, 1, "batch-id-3");
+  updateWorker(id, "completed");
+  const w = getActiveWorkers().find(w => w.id === id);
+  assert.ok(typeof w?.completedAt === "number", "completedAt set on terminal update");
+  assert.ok(w!.completedAt! >= w!.startedAt, "completedAt does not precede startedAt");
+
+  resetWorkerRegistry();
+  const id2 = registerWorker("scout", "Task B", 0, 1, "batch-id-4");
+  updateWorker(id2, "failed");
+  const w2 = getActiveWorkers().find(w => w.id === id2);
+  assert.ok(typeof w2?.completedAt === "number", "completedAt set on failed update");
+});
+
+// ─── Identity formatters (#2396) ──────────────────────────────────────────────
+
+console.log("\n=== Identity formatters (#2396) ===");
+
+test("formatWorkerModelTokens renders the requested ← reported convention (#2396)", () => {
+  assert.deepStrictEqual(
+    formatWorkerModelTokens({ model: "anthropic/claude-opus-4.7", reportedModel: "openrouter/auto", thinking: "high" }),
+    "anthropic/claude-opus-4.7 ← openrouter/auto · high",
+    "requested ← reported when provider model differs",
+  );
+  assert.deepStrictEqual(
+    formatWorkerModelTokens({ model: "gpt-5.6-sol", reportedModel: "gpt-5.6-sol", thinking: "high" }),
+    "gpt-5.6-sol · high",
+    "no arrow when reported matches requested",
+  );
+  assert.deepStrictEqual(
+    formatWorkerModelTokens({ reportedModel: "openrouter/auto" }),
+    "openrouter/auto",
+    "reported-only model still renders",
+  );
+  assert.deepStrictEqual(
+    formatWorkerModelTokens({ model: "gpt-5.6-sol", thinking: undefined }),
+    "gpt-5.6-sol",
+    "missing thinking degrades",
+  );
+  assert.deepStrictEqual(formatWorkerModelTokens({}), "", "missing everything degrades to empty");
+});
+
+test("formatWorkerElapsed is deterministic and never negative (#2396)", () => {
+  assert.deepStrictEqual(
+    formatWorkerElapsed({ startedAt: 1000 }, "running", 64000),
+    "running 1m 3s",
+    "running elapsed uses the passed clock",
+  );
+  assert.deepStrictEqual(
+    formatWorkerElapsed({ startedAt: 1000, completedAt: 61000 }, "completed", 999999999),
+    "1m 0s",
+    "completed elapsed uses completedAt, not the wall clock",
+  );
+  assert.deepStrictEqual(
+    formatWorkerElapsed({ startedAt: 1000, completedAt: 88000 }, "failed", 999999999),
+    "failed after 1m 27s",
+    "failed wording uses completedAt",
+  );
+  assert.deepStrictEqual(
+    formatWorkerElapsed({ startedAt: 5000, completedAt: 1000 }, "completed", 999999999),
+    "0s",
+    "clock anomaly clamps to zero (no negative durations)",
+  );
+  assert.deepStrictEqual(formatWorkerElapsed({}, "running"), "", "no elapsed without startedAt");
+});
+
+test("formatWorkerIdentity composes model · thinking · elapsed (#2396)", () => {
+  assert.deepStrictEqual(
+    formatWorkerIdentity({ model: "gpt-5.6-sol", thinking: "high", startedAt: 0 }, "running", 63000),
+    "gpt-5.6-sol · high · running 1m 3s",
+    "identity line: model · thinking · running X",
+  );
+  assert.deepStrictEqual(
+    formatWorkerIdentity({ model: "gpt-5.6-luna", thinking: "medium", startedAt: 0, completedAt: 87000 }, "failed", 999999999),
+    "gpt-5.6-luna · medium · failed after 1m 27s",
+    "identity line retains attribution on failure",
+  );
+  assert.deepStrictEqual(
+    formatWorkerIdentity({}, "completed", 999999999),
+    "",
+    "legacy result without fields renders empty identity",
+  );
+});
 
 // ─── Summary ──────────────────────────────────────────────────────────────────

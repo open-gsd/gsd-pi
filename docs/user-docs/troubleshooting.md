@@ -9,6 +9,7 @@ The built-in diagnostic tool validates `.gsd/` integrity:
 ```
 
 It checks:
+
 - File structure and naming conventions
 - Roadmap ↔ slice ↔ task referential integrity
 - Completion state consistency
@@ -101,6 +102,7 @@ Replace the path with the exact global bin directory from your pnpm error messag
 **Symptoms:** The same unit (e.g., `research-slice` or `plan-slice`) dispatches repeatedly, then auto mode pauses with an "Artifact still missing..." error after 3 artifact verification retries.
 
 **Causes:**
+
 - Stale cache after a crash — the in-memory file listing doesn't reflect new artifacts
 - The LLM didn't produce the expected artifact file
 
@@ -149,6 +151,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 **Symptoms:** Auto mode reports a unit hard timeout, a finalize timeout, or a post-unit closeout failure. For `failed finalize twice with identical inputs`, follow [Repeated Finalize Failures](auto-mode.md#repeated-finalize-failures).
 
 **What to inspect:**
+
 - `.gsd/runtime/<unit-type>/<unit-id>.json` shows the latest runtime phase, timeout timestamp, recovery attempts, and progress marker. Timeout recovery uses progress kinds such as `idle-recovery-retry`, `hard-recovery-retry`, `finalize-pre-timeout`, `finalize-post-timeout`, and `finalize-success`.
 - `.gsd/journal/` shows the ordered loop events. Look for `unit-end`, then `post-unit-finalize-start`, `post-unit-finalize-end`, and `iteration-end`.
 - `post-unit-finalize-end.status` tells you whether closeout completed, retried, stopped, or failed. `iteration-end.status` and `iteration-end.reason` show the final loop outcome that caused auto mode to continue, retry, pause, or stop.
@@ -179,6 +182,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 **Current behavior:** When isolation is configured as `worktree`, GSD now attempts a safe fallback to milestone `branch` mode instead of hard-failing immediately. Bootstrap also surfaces a specific isolation-degraded notification so the cause is visible.
 
 **Fix:**
+
 - Close editors, terminals, or antivirus tools that may be locking `.gsd-worktrees/*` paths.
 - If the old worktree has salvageable changes, merge it with `/gsd worktree merge <MID>`.
 - If the old worktree is stale and should be discarded, remove it with `/gsd worktree remove <MID>`.
@@ -201,6 +205,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 **Current behavior:** GSD now fails with a targeted error explaining that file locks blocked cleanup and advising you to close locking tools before retrying.
 
 **Fix:**
+
 - Close apps that might hold file locks (editors, shells in old worktree paths, antivirus/indexers).
 - Retry the command after a short delay.
 
@@ -211,6 +216,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 **Cause:** The project still has the legacy nested `.gsd/milestones/` layout. On startup, GSD must migrate it to the flat `.gsd/phases/` layout before path resolvers and state checks run. Markdown for milestone, slice, and task identities already known to the database is archived in the migration backup and re-rendered from database authority; it is not imported during startup. An unknown or ambiguous identity, a database hierarchy gap, an unavailable database, a backup/rename/delete failure, or an unverifiable flat-phase render stops startup before GSD can continue against mixed or invented state.
 
 **Fix:**
+
 - Make sure you are starting GSD from the project root and that `.gsd/gsd.db*`, `.gsd/`, and `.gsd-backups/` are readable and writable on local disk.
 - Close editors, shells, sync tools, antivirus/indexers, or other processes that may be locking `.gsd/milestones/`, `.gsd/milestones.migrating/`, `.gsd/phases/`, or `.gsd-backups/`.
 - If the database is damaged or missing and rendered markdown is the state you intentionally want to import, use `/gsd recover` after database access is restored, then approve its exact Preview hash. It preserves existing rows absent from markdown and retains a verified pre-import backup; see [Migration from v1](./migration.md#post-migration) for the recovery contract.
@@ -239,6 +245,7 @@ source ~/.zshrc
 **Workaround:** Run `npx @opengsd/gsd-pi@latest` or `$(npm prefix -g)/bin/gsd` directly.
 
 **Common causes:**
+
 - **Homebrew Node** — `/opt/homebrew/bin` should be in PATH but sometimes isn't if Homebrew init is missing from your shell profile
 - **Version manager (nvm, fnm, mise)** — global bin is version-specific; ensure your version manager initializes in your shell config
 - **oh-my-zsh** — the `gitfast` plugin aliases `gsd` to `git svn dcommit`. Check with `alias gsd` and unalias if needed
@@ -246,6 +253,7 @@ source ~/.zshrc
 ### `npm install -g @opengsd/gsd-pi@latest` fails
 
 **Common causes:**
+
 - Missing workspace packages — fixed in a recent release
 - `postinstall` hangs on Linux (Playwright `--with-deps` triggering sudo) — fixed in a recent release
 - Node.js version too old — requires ≥ 22.18.0
@@ -260,11 +268,13 @@ Options:
 1. **Wait and retry** — check [npm for @opengsd/gsd-pi](https://www.npmjs.com/package/@opengsd/gsd-pi) to confirm whether a release has landed, then retry.
 
 2. **Use `npx` instead of a global install** — `npx @opengsd/gsd-pi@latest` fetches the package on demand and may pick up the most recently published version without a local cache:
+
    ```bash
    npx @opengsd/gsd-pi@latest
    ```
 
 3. **Build from source** — clone the repository and build locally:
+
    ```bash
    git clone https://github.com/open-gsd/gsd-pi.git
    cd gsd-pi
@@ -272,6 +282,7 @@ Options:
    pnpm run build
    npm install -g .
    ```
+
    Requires Node.js ≥ 22.18.0 and pnpm. If `pnpm` is not installed: `npm install -g pnpm`.
 
 ### Provider errors during auto mode
@@ -343,6 +354,7 @@ If recovery still fails, repair runtime state instead of manually deleting indiv
 **What happens:** Before most `/gsd` commands run, GSD probes the project root (and the active milestone worktree when present) for unmerged paths, conflict markers (`git diff --check`), and stale merge/rebase state. It auto-heals safe paths (`.gsd/` runtime files and build artifacts), aborts stale merge state when there are no unmerged paths, then blocks if product code conflicts remain.
 
 **Fix:**
+
 - Resolve remaining conflicts in your source files, then run `/gsd doctor`.
 - While conflicts remain, these commands still run: `/gsd doctor`, `/gsd closeout …`, and `/gsd dispatch complete-milestone …`.
 - Re-run your original command after `git status` is clean.
@@ -354,12 +366,14 @@ Auto mode **pauses** on product conflicts after heal; it **stops** when Git stat
 **Symptoms:** Auto mode stops with a pre-merge reason like unresolved Git conflicts or dirty working tree overlap.
 
 **What it means:** Milestone merge preflight now fail-closes before merge when either:
+
 - the repo already has unresolved conflict stages (`git diff --name-only --diff-filter=U` is non-empty), or
 - local dirty files overlap files modified by the milestone branch.
 
 In these states GSD does not auto-stash and does not auto-fix; it stops so you can resolve safely.
 
 **Fix:**
+
 - Resolve conflict markers and stage the resolved files.
 - Commit, stash, or discard overlapping local edits outside GSD.
 - Re-run `/gsd auto` after `git status` is clean (or at least free of overlapping/conflicted paths).
@@ -379,6 +393,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 **What it means:** The milestone's `.gsd/milestones/<MID>/<MID>-META.json` still points at the branch that was active when the milestone started, but that branch has since been renamed or deleted.
 
 **Current behavior:**
+
 - If GSD can deterministically recover to a safe branch, it no longer hard-stops auto mode.
 - Safe fallbacks are:
   - explicit `git.main_branch` when configured and present
@@ -387,6 +402,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 - GSD still blocks when no safe fallback branch can be determined.
 
 **Fix:**
+
 - Run `/gsd doctor fix` to rewrite the stale milestone metadata automatically when the fallback is obvious.
 - If GSD still blocks, recreate the missing branch or update your git preferences so `git.main_branch` points at a real branch.
 
@@ -441,6 +457,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLATION` (`os error 32`) as transient. Auto mode routes that typed failure through its existing transient-execution retry budget; other projection failures are not reclassified, and sustained handle contention still surfaces as an error after the budget is exhausted.
 
 **Fix:**
+
 - Re-run the operation; most transient lock races clear quickly.
 - If the error persists, close tools that may be holding the file open and then retry.
 - If repeated failures continue, run `/gsd doctor` to confirm the repo state is still healthy and report the exact path + error code.
@@ -484,11 +501,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** `mcp_servers` reports no servers configured.
 
 **Common causes:**
+
 - No `.mcp.json` or `.gsd/mcp.json` file exists in the current project
 - The config file is malformed JSON
 - The server is configured in a different project directory than the one where you launched GSD
 
 **Fix:**
+
 - Add the server to `.mcp.json` or `.gsd/mcp.json`
 - Verify the file parses as JSON
 - Re-run `mcp_servers(refresh=true)`
@@ -498,11 +517,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** `mcp_discover` fails with a timeout.
 
 **Common causes:**
+
 - The server process starts but never completes the MCP handshake
 - The configured command points to a script that hangs on startup
 - The server is waiting on an unavailable dependency or backend service
 
 **Fix:**
+
 - Run the configured command directly outside GSD and confirm the server actually starts
 - Check that any backend URLs or required services are reachable
 - For local custom servers, verify the implementation is using an MCP SDK or a correct stdio protocol implementation
@@ -512,12 +533,14 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** `mcp_discover` fails immediately with a connection-closed error.
 
 **Common causes:**
+
 - Wrong executable path
 - Wrong script path
 - Missing runtime dependency
 - The server crashes before responding
 
 **Fix:**
+
 - Verify `command` and `args` paths are correct and absolute
 - Run the command manually to catch import/runtime errors
 - Check that the configured interpreter or runtime exists on the machine
@@ -527,12 +550,14 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** A Claude Code-backed unit aborts before the first model turn with `workflow tool surface not ready`, often mentioning `gsd-workflow` as `pending`, `failed`, `disabled`, absent, or missing a required `gsd_*` tool.
 
 **Common causes:**
+
 - Claude Code has not connected the `gsd-workflow` MCP server yet
 - The server's workflow bridge failed during startup
 - `GSD_WORKFLOW_PROJECT_ROOT` points at the wrong project
 - A stale MCP server process is still registered for the project
 
 **Fix:**
+
 - Run `/gsd mcp init` from the project root, restart Claude Code, and retry the unit.
 - Check `/gsd mcp status` and confirm `gsd-workflow` is connected with workflow tools listed.
 - If you maintain MCP config manually, set `GSD_WORKFLOW_PROJECT_ROOT` to the canonical project root and rebuild or reinstall `gsd-mcp-server` after local package changes.
@@ -544,11 +569,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** A discovered MCP tool exists, but calling it fails validation because required fields are missing.
 
 **Common causes:**
+
 - The call shape is wrong
 - The target server's tool schema changed
 - You're calling a stale server definition or stale branch build
 
 **Fix:**
+
 - Re-run `mcp_discover(server="name")` and confirm the exact required argument names
 - Call the tool with `mcp_call(server="name", tool="tool_name", args={...})`
 - If you're developing GSD itself, rebuild after schema changes with `npm run build`
@@ -558,11 +585,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** Running the server command manually seems fine, but GSD can't connect.
 
 **Common causes:**
+
 - The server depends on shell state that GSD doesn't inherit
 - Relative paths only work from a different working directory
 - Required environment variables exist in your shell but not in the MCP config
 
 **Fix:**
+
 - Use absolute paths for `command` and script arguments
 - Set required environment variables in the MCP config's `env` block
 - If needed, set `cwd` explicitly in the server definition
@@ -696,6 +725,7 @@ For non-TTY environments (CI, cron, scripted automation), `gsd headless recover`
 GSD auto-detects language servers based on project files (e.g. `package.json` → TypeScript, `Cargo.toml` → Rust, `go.mod` → Go). If no servers are detected, the agent skips LSP features.
 
 **Check status:**
+
 ```
 lsp status
 ```

@@ -7,6 +7,7 @@ You are running the GSD **graphify** workflow — build, query, and inspect a li
 ## Process
 
 The knowledge graph is a set of Markdown + a JSON edge index under `.gsd/knowledge/`:
+
 - `nodes.md` — entities discovered in the codebase (modules, services, data models, external integrations), each with a stable id, type, file path, and one-line description.
 - `edges.json` — relationships between nodes (`depends-on`, `calls`, `implements`, `produces`, `consumes`).
 

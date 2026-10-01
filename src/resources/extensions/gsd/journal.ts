@@ -56,6 +56,9 @@ export type JournalEventType =
   | "pre-execution-retry"
   // #2119 — durable retry telemetry for execute-task deferred-closeout retries
   | "verification-retry"
+  // #2334 — durable verification-pause receipt written by the finalize pause
+  // branch; the receipt gate for the task-settle verification-paused reconcile
+  | "verification-paused"
   // #4764 — worktree lifespan / divergence telemetry
   | "worktree-created"
   | "worktree-merged"
