@@ -14,10 +14,10 @@ import { MODELS } from "../src/models.generated.ts";
 const packageRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function jsonMarked(): Set<string> {
-	const raw = JSON.parse(readFileSync(join(packageRoot, "src/models.generated.json"), "utf8")) as Record<
-		string,
-		Record<string, { id?: string; compat?: { strictRequestParams?: boolean } }>
-	>;
+	// Generated data file (JSON), not source — read as data for parity checking.
+	const raw = JSON.parse(
+		readFileSync(join(packageRoot, "src", "models.generated.json"), "utf8"),
+	) as Record<string, Record<string, { id?: string; compat?: { strictRequestParams?: boolean } }>>;
 	const marked = new Set<string>();
 	for (const models of Object.values(raw)) {
 		for (const entry of Object.values(models)) {
