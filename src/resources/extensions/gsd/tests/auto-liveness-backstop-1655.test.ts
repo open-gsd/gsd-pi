@@ -844,3 +844,227 @@ test('#2411: parallel-research sentinel target advances when slice or RESEARCH r
     'a wedge against the current state still blocks a genuine no-op',
   );
 });
+
+test('#2384: research-slice advances when its slice RESEARCH artifact lands', (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'S', status: 'active', depends: [] });
+
+  // Before the fix the slice-scoped branch hashed only the slice + task rows;
+  // a research-slice unit writes no row transition, so both completions of the
+  // repro hashed identically and the second one wedged with an unclearable
+  // completed-no-advance.
+  const before = readTargetSnapshot('research-slice', 'M001/S01');
+  assert.ok(before);
+  assert.equal(
+    readTargetSnapshot('research-slice', 'M001/S01'),
+    before,
+    'zero-work completion leaves the hash identical',
+  );
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: 'completed-no-advance',
+      unitType: 'research-slice',
+      unitId: 'M001/S01',
+      inputHash: hashBackstopInput(before),
+    }).blocking,
+    true,
+    'the wedge recheck blocks while the snapshot is unchanged',
+  );
+
+  insertArtifact({
+    path: '.gsd/milestones/M001/research-S01.md',
+    artifact_type: 'RESEARCH',
+    milestone_id: 'M001',
+    slice_id: 'S01',
+    task_id: null,
+    full_content: 'research for S01',
+  });
+  const afterArtifact = readTargetSnapshot('research-slice', 'M001/S01');
+  assert.notEqual(afterArtifact, before, 'the slice RESEARCH artifact row must advance the hash');
+  assert.ok(afterArtifact);
+
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: 'completed-no-advance',
+      unitType: 'research-slice',
+      unitId: 'M001/S01',
+      inputHash: hashBackstopInput(before),
+    }).blocking,
+    false,
+    '--resume-wedge recheck clears once the slice RESEARCH artifact row exists',
+  );
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: 'completed-no-advance',
+      unitType: 'research-slice',
+      unitId: 'M001/S01',
+      inputHash: hashBackstopInput(afterArtifact),
+    }).blocking,
+    true,
+    'a wedge against the current state still blocks a genuine no-op',
+  );
+
+  // Pins the explicit-column selection: a bookkeeping-only rewrite (same
+  // content, fresh imported_at) is not advancement.
+  _getAdapter()!.prepare(
+    "UPDATE artifacts SET imported_at = '2030-01-01T00:00:00.000Z' WHERE path = :path",
+  ).run({ ':path': '.gsd/milestones/M001/research-S01.md' });
+  assert.equal(
+    readTargetSnapshot('research-slice', 'M001/S01'),
+    afterArtifact,
+    'an imported_at touch must not change the hash',
+  );
+
+  // Task-level RESEARCH rows are not this unit's deliverable.
+  insertArtifact({
+    path: '.gsd/milestones/M001/slices/S01/tasks/S01-T01-RESEARCH.md',
+    artifact_type: 'RESEARCH',
+    milestone_id: 'M001',
+    slice_id: 'S01',
+    task_id: 'S01-T01',
+    full_content: 'task-level research',
+  });
+  assert.equal(
+    readTargetSnapshot('research-slice', 'M001/S01'),
+    afterArtifact,
+    'a task-level RESEARCH artifact must not change the hash',
+  );
+
+  // A CONTEXT artifact is the discuss deliverable, not the research one.
+  const discussBefore = readTargetSnapshot('discuss-slice', 'M001/S01');
+  assert.ok(discussBefore);
+  insertArtifact({
+    path: '.gsd/milestones/M001/slices/S01/context-S01.md',
+    artifact_type: 'CONTEXT',
+    milestone_id: 'M001',
+    slice_id: 'S01',
+    task_id: null,
+    full_content: 'context for S01',
+  });
+  assert.equal(
+    readTargetSnapshot('research-slice', 'M001/S01'),
+    afterArtifact,
+    'a slice CONTEXT artifact must not change the research-slice hash',
+  );
+  assert.notEqual(
+    readTargetSnapshot('discuss-slice', 'M001/S01'),
+    discussBefore,
+    'the discuss-slice hash moves when its CONTEXT artifact lands',
+  );
+});
+
+test('#2384: research-milestone completes twice without a completed-no-advance once its RESEARCH artifact lands', (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+
+  const reproSig = (payload: string) => ({
+    scopeId: SCOPE,
+    guardId: COMPLETED_NO_ADVANCE_GUARD_ID,
+    unitType: 'research-milestone',
+    unitId: 'M001',
+    inputPayload: payload,
+  });
+
+  // The #2384 second repro: research-milestone writes no milestone/slice row
+  // at all, so the row-only hash was constant and every second completed
+  // dispatch tripped the wedge — which its own recheck could then never clear.
+  const before = readTargetSnapshot('research-milestone', 'M001');
+  assert.ok(before);
+  assert.equal(recordNonAdvancingOutcome(reproSig(before)).tripped, false);
+  assert.equal(
+    recordNonAdvancingOutcome(reproSig(before)).tripped,
+    true,
+    'repro: the row-only hash trips at 2x for a milestone artifact unit',
+  );
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: COMPLETED_NO_ADVANCE_GUARD_ID,
+      unitType: 'research-milestone',
+      unitId: 'M001',
+      inputHash: hashBackstopInput(before),
+    }).blocking,
+    true,
+    'the wedge blocks while the snapshot is unchanged',
+  );
+
+  insertArtifact({
+    path: '.gsd/milestones/M001/research-M001.md',
+    artifact_type: 'RESEARCH',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: 'milestone research',
+  });
+  const afterArtifact = readTargetSnapshot('research-milestone', 'M001');
+  assert.notEqual(afterArtifact, before, 'the milestone RESEARCH artifact row must advance the hash');
+  assert.ok(afterArtifact);
+
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: COMPLETED_NO_ADVANCE_GUARD_ID,
+      unitType: 'research-milestone',
+      unitId: 'M001',
+      inputHash: hashBackstopInput(before),
+    }).blocking,
+    false,
+    '--resume-wedge recheck clears once the milestone RESEARCH artifact row exists',
+  );
+
+  // The user-visible contract: research-milestone completing again after its
+  // artifact landed is recorded against the advanced hash — the trip-at-2
+  // counter sees changed inputs and resets to 1 instead of accruing a
+  // recurrence.
+  const afterRecord = recordNonAdvancingOutcome(reproSig(afterArtifact));
+  assert.equal(
+    afterRecord.tripped,
+    false,
+    'a completed dispatch that landed its artifact does not accrue a recurrence',
+  );
+  assert.equal(
+    afterRecord.count,
+    1,
+    'the changed hash reset the recurrence counter to 1',
+  );
+
+  // A slice/task-level RESEARCH row is not this unit's deliverable.
+  insertArtifact({
+    path: '.gsd/milestones/M001/research-S01.md',
+    artifact_type: 'RESEARCH',
+    milestone_id: 'M001',
+    slice_id: 'S01',
+    task_id: null,
+    full_content: 'slice research noise',
+  });
+  assert.equal(
+    readTargetSnapshot('research-milestone', 'M001'),
+    afterArtifact,
+    'a slice-level RESEARCH artifact must not change the research-milestone hash',
+  );
+
+  // A CONTEXT artifact is the discuss deliverable, not the research one.
+  const discussBefore = readTargetSnapshot('discuss-milestone', 'M001');
+  assert.ok(discussBefore);
+  insertArtifact({
+    path: '.gsd/milestones/M001/context-M001.md',
+    artifact_type: 'CONTEXT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: 'milestone context',
+  });
+  assert.equal(
+    readTargetSnapshot('research-milestone', 'M001'),
+    afterArtifact,
+    'a milestone CONTEXT artifact must not change the research-milestone hash',
+  );
+  assert.notEqual(
+    readTargetSnapshot('discuss-milestone', 'M001'),
+    discussBefore,
+    'the discuss-milestone hash moves when its CONTEXT artifact lands',
+  );
+});

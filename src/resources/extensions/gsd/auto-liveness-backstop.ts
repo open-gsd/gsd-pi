@@ -457,6 +457,23 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
     } else if (slice) {
       collect('SELECT * FROM slices WHERE milestone_id = :m AND id = :s ORDER BY id', { ':m': milestone, ':s': slice });
       collect('SELECT * FROM tasks WHERE milestone_id = :m AND slice_id = :s ORDER BY id', { ':m': milestone, ':s': slice });
+      if (unitType === 'research-slice' || unitType === 'discuss-slice') {
+        // #2384 stage 1 — artifact-only units: a research/discuss slice writes
+        // its RESEARCH/CONTEXT artifact without transitioning slice or task
+        // rows, so the row-only hash never moved and every completed dispatch
+        // accrued a completed-no-advance recurrence. The unit's own artifact
+        // row is its advance (same explicit-column shape as the
+        // parallel-research branch above; task-level rows are not this unit's
+        // deliverable).
+        collect(
+          `SELECT path, artifact_type, slice_id, content_hash
+             FROM artifacts
+            WHERE milestone_id = :m AND artifact_type = :type
+              AND slice_id = :s AND task_id IS NULL
+            ORDER BY path`,
+          { ':m': milestone, ':s': slice, ':type': unitType === 'research-slice' ? 'RESEARCH' : 'CONTEXT' },
+        );
+      }
       if (unitType === 'run-uat') {
         collect(
           `SELECT milestone_id, slice_id, scope, status
@@ -507,6 +524,23 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
             WHERE milestone_id = :m AND gate_id LIKE 'MV%'
             ORDER BY gate_id, slice_id`,
           { ':m': milestone },
+        );
+      }
+      if (unitType === 'research-milestone' || unitType === 'discuss-milestone') {
+        // #2384 stage 1 — milestone-level artifact-only units: research/
+        // discuss-milestone writes its RESEARCH/CONTEXT artifact and moves no
+        // milestone/slice row at all, so the row-only hash never changed and
+        // the second completed dispatch tripped completed-no-advance with a
+        // wedge its recheck could never clear (#2384 second repro). The
+        // milestone-level artifact row is the unit's advance; slice/task-level
+        // rows are not this unit's deliverable.
+        collect(
+          `SELECT path, artifact_type, content_hash
+             FROM artifacts
+            WHERE milestone_id = :m AND artifact_type = :type
+              AND slice_id IS NULL AND task_id IS NULL
+            ORDER BY path`,
+          { ':m': milestone, ':type': unitType === 'research-milestone' ? 'RESEARCH' : 'CONTEXT' },
         );
       }
     }
