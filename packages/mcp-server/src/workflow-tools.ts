@@ -1365,6 +1365,72 @@ async function runSerializedCanonicalReadOperation(
   });
 }
 
+// #2445 — decision rows must be model-visible: ToolResultMessage carries
+// `content` only, so choice/rationale hidden in `details` never reach the
+// model. These formatters render the full row (get) and one compact line per
+// row (list). Kept textually identical to the native mirror in
+// src/resources/extensions/gsd/bootstrap/db-tools.ts (surface drift
+// prevention); canonical-read-tools.test.ts asserts both surfaces agree.
+const DECISION_LIST_RATIONALE_EXCERPT_CHARS = 120;
+
+type DecisionRowLike = {
+	id: unknown;
+	decision: unknown;
+	choice?: unknown;
+	rationale?: unknown;
+	scope?: unknown;
+	when_context?: unknown;
+	made_by?: unknown;
+	revisable?: unknown;
+	source?: unknown;
+	superseded_by?: unknown;
+};
+
+function decisionField(value: unknown): string {
+	return value === null || value === undefined ? "" : String(value);
+}
+
+// List lines must stay one physical line per row (#2445): collapse newlines
+// and whitespace runs that free-text fields can contain. get keeps original
+// values for full-row fidelity.
+function decisionListField(value: unknown): string {
+	return decisionField(value).replace(/\s+/g, " ").trim();
+}
+
+function formatDecisionGetContent(decision: DecisionRowLike): string {
+	const field = (value: unknown, fallback: string): string => decisionField(value) || fallback;
+	const source = decisionField(decision.source);
+	return [
+		`Decision ${field(decision.id, "?")}: ${field(decision.decision, "-")}`,
+		`Choice: ${field(decision.choice, "-")}`,
+		`Rationale: ${field(decision.rationale, "-")}`,
+		`Scope: ${field(decision.scope, "-")}`,
+		`When: ${field(decision.when_context, "-")}`,
+		`Made by: ${field(decision.made_by, "-")}`,
+		...(source ? [`Source: ${source}`] : []),
+		`Revisable: ${field(decision.revisable, "-")}`,
+		`Superseded by: ${field(decision.superseded_by, "none")}`,
+	].join("\n");
+}
+
+function formatDecisionListLine(decision: DecisionRowLike): string {
+	const rationale = decisionListField(decision.rationale);
+	const excerpt = rationale.length > DECISION_LIST_RATIONALE_EXCERPT_CHARS
+		? `${rationale.slice(0, DECISION_LIST_RATIONALE_EXCERPT_CHARS)}…`
+		: rationale;
+	const segments = [
+		`${decisionListField(decision.id) || "?"} [${decisionListField(decision.scope) || "-"}] ${decisionListField(decision.decision) || "-"}`,
+		decisionListField(decision.choice) ? `choice: ${decisionListField(decision.choice)}` : "",
+		excerpt ? `rationale: ${excerpt}` : "",
+	].filter(Boolean);
+	const supersededBy = decisionListField(decision.superseded_by);
+	return `- ${segments.join(" | ")}${supersededBy ? ` (superseded by ${supersededBy})` : ""}`;
+}
+
+function formatDecisionListContent(decisions: DecisionRowLike[]): string {
+  return [`Found ${decisions.length} decision(s).`, ...decisions.map(formatDecisionListLine)].join("\n");
+}
+
 function mapCanonicalReadError(
   operation:
     | "list_decisions"
@@ -2822,7 +2888,7 @@ export function registerWorkflowTools(
             adapter,
           );
           return {
-            content: [{ type: "text" as const, text: `Found ${results.length} decision(s).` }],
+            content: [{ type: "text" as const, text: formatDecisionListContent(results) }],
             details: { operation: "list_decisions", count: results.length, decisions: results },
           };
         });
@@ -2866,7 +2932,7 @@ export function registerWorkflowTools(
             };
           }
           return {
-            content: [{ type: "text" as const, text: `Decision ${decision.id}: ${decision.decision}` }],
+            content: [{ type: "text" as const, text: formatDecisionGetContent(decision) }],
             details: { operation: "get_decision", id: decision.id, decision },
           };
         });
