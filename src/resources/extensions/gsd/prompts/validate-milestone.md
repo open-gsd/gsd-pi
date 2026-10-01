@@ -40,6 +40,7 @@ Prompt: "Review milestone {{milestoneId}} assessment evidence and acceptance cri
 ### Step 2 - Synthesize Findings
 
 Aggregate reviewer verdicts:
+
 - ALL PASS -> `pass`
 - Any FAIL -> `needs-remediation`
 - Otherwise, any NEEDS-ATTENTION -> `needs-attention`
@@ -85,6 +86,7 @@ Set `verificationClasses` to the `Verification Classes` subsection from Reviewer
 **DB access safety:** Do NOT query `.gsd/gsd.db` directly via `sqlite3` or `node -e require('better-sqlite3')` - the engine owns the WAL connection. Use `gsd_milestone_status` for milestone and slice state. Data is already inlined or available via `gsd_*` tools. Direct DB access risks WAL corruption and bypasses validation.
 
 If verdict is `needs-remediation`:
+
 - First call `gsd_validate_milestone` to persist this failed validation verdict.
 - Then use `gsd_reassess_roadmap` to add remediation slices instead of editing `{{roadmapPath}}` manually.
 - Those slices will be planned and executed before validation re-runs.

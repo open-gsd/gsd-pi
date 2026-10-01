@@ -18,6 +18,7 @@ import { resolveUokFlags, type UokFlags } from "./flags.js";
 import { createTurnObserver } from "./loop-adapter.js";
 import { incrementLegacyTelemetry } from "../legacy-telemetry.js";
 import { logWarning } from "../workflow-logger.js";
+import { withGlobalIdleWatchdog } from "../auto-timers.js";
 
 interface RunAutoLoopWithUokArgs {
   ctx: ExtensionContext;
@@ -209,16 +210,22 @@ export async function runAutoLoopWithUok(args: RunAutoLoopWithUokArgs): Promise<
       auditHealthy,
     });
 
-    await executeKernelRunPlan({
-      plan,
-      ctx,
-      pi,
-      s,
-      deps,
-      kernelDeps,
-      runKernelLoop,
-      runLegacyLoop,
-    });
+    // The session-level idle watchdog (#2373) lives above whichever loop path
+    // runs: it observes unit presence across the whole loop run and is cleared
+    // when the loop promise settles. Disabled by default (global 0).
+    const resolvedPlan = plan;
+    await withGlobalIdleWatchdog(ctx, s, () =>
+      executeKernelRunPlan({
+        plan: resolvedPlan,
+        ctx,
+        pi,
+        s,
+        deps,
+        kernelDeps,
+        runKernelLoop,
+        runLegacyLoop,
+      }),
+    );
 
     writeParityEvent(s.basePath, {
       ts: new Date().toISOString(),

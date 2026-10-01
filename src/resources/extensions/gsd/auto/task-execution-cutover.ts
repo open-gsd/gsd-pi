@@ -52,6 +52,12 @@ export interface TaskExecutionCutoverDeps {
   readGrantedResumeGrace?(attemptId: string): boolean;
   /** #2416 grace bound: record that the grace was granted for the Attempt. */
   markResumeGraceGranted?(attemptId: string): void;
+  /**
+   * Fencing token of the lease currently held by this worker for the
+   * milestone, or null when no validly held lease can be read. Optional so
+   * non-loop callers and tests keep the session-cached token behavior.
+   */
+  resolveHeldMilestoneLeaseToken?(milestoneId: string, workerId: string): number | null;
   claimTaskAttempt(input: ClaimTaskAttemptInput): ClaimTaskAttemptReceipt;
   settleTaskAttempt(input: SettleTaskAttemptInput): SettleTaskAttemptReceipt;
   routeTaskFailure(input: RouteFailureInput): TaskRecoveryReceipt;
@@ -522,6 +528,18 @@ export async function runWithTaskExecutionAttempt(
   }
   const terminalAbort = deps.readTerminalTaskRecoveryAbort(task);
   if (terminalAbort) return taskRecoveryAbortResult(terminalAbort.recoveryActionId);
+  // #2443: re-read the currently held lease token immediately before the
+  // claim path. The session-cached token can lag the database once the lease
+  // TTL (60s) elapses during a long unit turn + finalize, and an Attempt
+  // claimed under a stale token aborts on every later state transition
+  // (attempt fencing trigger), orphaning the task in_progress with the
+  // artifact already on disk. When a validly held token resolves, the
+  // interrupt settlement and the claim carry it; when nothing valid is held,
+  // the cached token is kept so the claim fails closed exactly as before.
+  const heldLeaseToken = deps.resolveHeldMilestoneLeaseToken?.(task.milestoneId, identity.workerId);
+  const claimIdentity = typeof heldLeaseToken === "number" && heldLeaseToken > 0
+    ? { ...identity, milestoneLeaseToken: heldLeaseToken }
+    : identity;
   let claim: ClaimTaskAttemptReceipt | undefined;
   let result: UnitPhaseResult;
   try {
@@ -530,7 +548,7 @@ export async function runWithTaskExecutionAttempt(
       if (isClaimReplay(predecessor, identity)) {
         retryOfAttemptId = predecessor.retryOfAttemptId;
       } else {
-        const recovery = interruptStaleAttempt(input, predecessor, identity, deps);
+        const recovery = interruptStaleAttempt(input, predecessor, claimIdentity, deps);
         const decision = applyRecoveryDecision(recovery);
         if (decision.action === "break" || recovery.status === "committed") return decision;
         retryOfAttemptId = predecessor.attemptId;
@@ -602,15 +620,15 @@ export async function runWithTaskExecutionAttempt(
     }
     claim = deps.claimTaskAttempt({
       invocation: internalExecutionInvocation(
-        `internal:auto:attempt.claim:${identity.dispatchId}`,
+        `internal:auto:attempt.claim:${claimIdentity.dispatchId}`,
         {
-          actorId: identity.workerId,
+          actorId: claimIdentity.workerId,
         },
       ),
       task,
-      workerId: identity.workerId,
-      milestoneLeaseToken: identity.milestoneLeaseToken,
-      coordinationDispatchId: identity.dispatchId,
+      workerId: claimIdentity.workerId,
+      milestoneLeaseToken: claimIdentity.milestoneLeaseToken,
+      coordinationDispatchId: claimIdentity.dispatchId,
       ...(retryOfAttemptId ? { retryOfAttemptId } : {}),
     });
 

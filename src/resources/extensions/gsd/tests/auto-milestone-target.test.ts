@@ -1,10 +1,22 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 
-import { parseMilestoneTarget, parseModelFlag } from "../commands/handlers/auto.js";
+import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
+
+import { handleAutoCommand, parseMilestoneTarget, parseModelFlag, parseWedgeAckArgs } from "../commands/handlers/auto.js";
+import { isAutoActive } from "../auto.js";
+import { normalizeRealPath } from "../paths.js";
+import {
+  COMPLETED_NO_ADVANCE_GUARD_ID,
+  getOpenWedge,
+  recordNonAdvancingOutcome,
+  snapshotUnitTargetRows,
+} from "../auto-liveness-backstop.js";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -100,5 +112,119 @@ describe("parseModelFlag", () => {
     const result = parseModelFlag("auto --verbose M003");
     assert.equal(result.modelQuery, null);
     assert.equal(result.rest, "auto --verbose M003");
+  });
+});
+
+describe("parseWedgeAckArgs", () => {
+  it("extracts the wedge id from 'wedge ack <id>'", () => {
+    const result = parseWedgeAckArgs("wedge ack W-abc123");
+    assert.equal(result.wedgeId, "W-abc123");
+    assert.equal(result.usage, false);
+  });
+
+  it("is strict about the ack verb", () => {
+    assert.equal(parseWedgeAckArgs("wedge acknowledge W-abc123").usage, true);
+    assert.equal(parseWedgeAckArgs("wedge").usage, true);
+    assert.equal(parseWedgeAckArgs("wedge ack").usage, true);
+    assert.equal(parseWedgeAckArgs("wedge ack").wedgeId, null);
+  });
+});
+
+describe("handleAutoCommand wedge ack (#2159)", () => {
+  const notifications: Array<{ message: string; level: string }> = [];
+
+  function makeCtx(base: string): ExtensionCommandContext {
+    return {
+      ui: {
+        notify: (message: string, level?: string) => {
+          notifications.push({ message, level: level ?? "info" });
+        },
+      },
+      cwd: base,
+    } as unknown as ExtensionCommandContext;
+  }
+
+  it("acknowledges a tripped one-shot wedge via the real command surface without entering auto-mode", async (t) => {
+    const base = mkdtempSync(join(tmpdir(), "gsd-wedge-ack-handler-"));
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    const previousCwd = process.cwd();
+    t.after(() => {
+      process.chdir(previousCwd);
+      try { closeDatabase(); } catch { /* Best-effort cleanup only. */ }
+      try { rmSync(base, { recursive: true, force: true }); } catch { /* Best-effort cleanup only. */ }
+    });
+    process.chdir(base);
+    notifications.length = 0;
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const scope = normalizeRealPath(base) || base;
+    const record = () => recordNonAdvancingOutcome({
+      scopeId: scope,
+      guardId: "finalize-break",
+      unitType: "validate-milestone",
+      unitId: "M001",
+      inputPayload: "finalize-break: closeout refused terminally",
+    });
+    record();
+    const tripped = record();
+    assert.equal(tripped.tripped, true);
+    if (!tripped.tripped) return;
+
+    const pi = {} as ExtensionAPI;
+    const handled = await handleAutoCommand(`wedge ack ${tripped.wedge.wedgeId}`, makeCtx(base), pi);
+
+    assert.equal(handled, true, "the wedge verb should be handled");
+    const ackNotices = notifications.filter((n) => n.message.includes("acknowledged"));
+    assert.equal(ackNotices.length, 1, "the handler should confirm the acknowledgment");
+    assert.equal(ackNotices[0]!.level, "info");
+    const open = getOpenWedge(scope);
+    assert.equal(open.ok, true);
+    assert.equal(open.ok ? open.wedge : null, null, "the wedge record must be acknowledged");
+    assert.equal(isAutoActive(), false, "acknowledging a wedge must not start auto-mode");
+  });
+
+  it("refuses with the guard reason when the wedge still blocks", async (t) => {
+    const base = mkdtempSync(join(tmpdir(), "gsd-wedge-ack-blocked-"));
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    const previousCwd = process.cwd();
+    t.after(() => {
+      process.chdir(previousCwd);
+      try { closeDatabase(); } catch { /* Best-effort cleanup only. */ }
+      try { rmSync(base, { recursive: true, force: true }); } catch { /* Best-effort cleanup only. */ }
+    });
+    process.chdir(base);
+    notifications.length = 0;
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "T", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "S", status: "active", depends: [] });
+    const scope = normalizeRealPath(base) || base;
+    const atWedge = snapshotUnitTargetRows("complete-slice", "M001/S01");
+    assert.equal(atWedge.ok, true);
+    if (!atWedge.ok) return;
+    const record = () => recordNonAdvancingOutcome({
+      scopeId: scope,
+      guardId: COMPLETED_NO_ADVANCE_GUARD_ID,
+      unitType: "complete-slice",
+      unitId: "M001/S01",
+      inputPayload: atWedge.hash!,
+    });
+    record();
+    const tripped = record();
+    assert.equal(tripped.tripped, true);
+    if (!tripped.tripped) return;
+
+    const pi = {} as ExtensionAPI;
+    const handled = await handleAutoCommand(`wedge ack ${tripped.wedge.wedgeId}`, makeCtx(base), pi);
+
+    assert.equal(handled, true);
+    const refusals = notifications.filter(
+      (n) => n.level === "error" && n.message.includes("Cannot acknowledge wedge"),
+    );
+    assert.equal(refusals.length, 1, "a still-blocking wedge must be refused");
+    const open = getOpenWedge(scope);
+    assert.equal(open.ok, true);
+    assert.equal(open.ok ? open.wedge?.wedgeId : null, tripped.wedge.wedgeId, "the wedge stays open");
+    assert.equal(isAutoActive(), false);
   });
 });

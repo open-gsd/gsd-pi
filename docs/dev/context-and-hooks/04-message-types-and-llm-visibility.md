@@ -43,6 +43,7 @@ type AgentMessage = Message | CustomAgentMessages[keyof CustomAgentMessages];
 ## Custom Messages In Detail
 
 Custom messages are created by:
+
 1. `pi.sendMessage()` — extension-injected messages
 2. `before_agent_start` returning a `message` — per-prompt context injection
 
@@ -57,10 +58,12 @@ pi.sendMessage({
 ```
 
 **What `display` controls:**
+
 - `true`: Message appears in the TUI chat log (rendered via `registerMessageRenderer` if one exists, or default rendering)
 - `false`: Message is hidden from the TUI chat log
 
 **What `display` does NOT control:**
+
 - LLM visibility — the LLM ALWAYS receives the content as a `user` role message
 - Session persistence — the message is ALWAYS persisted to the session file
 
@@ -101,6 +104,7 @@ Created when the user runs commands via `!` or `!!` prefix.
 ```
 
 With exit code, cancellation, and truncation info appended as needed:
+
 - Non-zero exit: `\n\nCommand exited with code N`
 - Cancelled: `\n\n(command cancelled)`
 - Truncated: `\n\n[Output truncated. Full output: /path/to/file]`
@@ -191,18 +195,21 @@ For a typical conversation, the message array the LLM sees (after `context` even
 ## Implications for Extension Authors
 
 ### If you want the LLM to see something:
+
 - Use `before_agent_start` → `message` for per-prompt context
 - Use `context` event to inject into the message array per-turn
 - Use `pi.sendMessage` for standalone messages
 - Use `before_agent_start` → `systemPrompt` for system-level instructions
 
 ### If you want to hide something from the LLM:
+
 - Use `pi.appendEntry` — never reaches the message array
 - Use tool result `details` — stored in session but stripped before LLM
 - Use the `context` event to filter messages OUT of the array
 - There is NO way to inject UI-only messages that participate in the conversation flow — `display: false` only hides from the TUI, not from the LLM
 
 ### If you want something to survive compaction:
+
 - Store it in tool result `details` (survives in the kept entries)
 - Store it in `appendEntry` (survives as session data, not messages)
 - Re-inject it via `before_agent_start` every time (survives because you regenerate it)

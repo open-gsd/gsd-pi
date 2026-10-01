@@ -385,7 +385,7 @@ test("isTransientNetworkError rejects non-network errors", () => {
 
 test("getNextFallbackModel selects next fallback if current is a fallback", () => {
   const modelConfig = { primary: "model-a", fallbacks: ["model-b", "model-c"] };
-  assert.equal(getNextFallbackModel("model-b", modelConfig), "model-c");
+  assert.equal(getNextFallbackModel("model-b", modelConfig)?.id, "model-c");
 });
 
 test("getNextFallbackModel returns undefined if fallbacks exhausted", () => {
@@ -395,17 +395,45 @@ test("getNextFallbackModel returns undefined if fallbacks exhausted", () => {
 
 test("getNextFallbackModel finds current model with provider prefix", () => {
   const modelConfig = { primary: "p/model-a", fallbacks: ["p/model-b"] };
-  assert.equal(getNextFallbackModel("model-a", modelConfig), "p/model-b");
+  assert.equal(getNextFallbackModel("model-a", modelConfig)?.id, "p/model-b");
 });
 
 test("getNextFallbackModel returns primary if current is unknown", () => {
   const modelConfig = { primary: "model-a", fallbacks: ["model-b", "model-c"] };
-  assert.equal(getNextFallbackModel("model-x", modelConfig), "model-a");
+  assert.equal(getNextFallbackModel("model-x", modelConfig)?.id, "model-a");
 });
 
 test("getNextFallbackModel returns primary if current is undefined", () => {
   const modelConfig = { primary: "model-a", fallbacks: ["model-b", "model-c"] };
-  assert.equal(getNextFallbackModel(undefined, modelConfig), "model-a");
+  assert.equal(getNextFallbackModel(undefined, modelConfig)?.id, "model-a");
+});
+
+// ── getNextFallbackModel per-entry thinking (#1270) ──────────────────────────
+
+test("getNextFallbackModel surfaces the object entry's per-entry thinking (#1270)", () => {
+  const modelConfig = {
+    primary: "model-a",
+    fallbacks: ["model-b", { model: "model-c", thinking: "high" as const }],
+  };
+  assert.deepEqual(
+    getNextFallbackModel("model-a", modelConfig),
+    { id: "model-b" },
+    "plain-string entry carries no thinking",
+  );
+  assert.deepEqual(
+    getNextFallbackModel("model-b", modelConfig),
+    { id: "model-c", thinking: "high" },
+    "object entry carries its per-entry level",
+  );
+});
+
+test("getNextFallbackModel matches current model inside object entries (#1270)", () => {
+  const modelConfig = {
+    primary: "model-a",
+    fallbacks: [{ model: "model-b", thinking: "low" as const }, "model-c"],
+  };
+  assert.deepEqual(getNextFallbackModel("model-b", modelConfig), { id: "model-c" });
+  assert.deepEqual(getNextFallbackModel("model-c", modelConfig), undefined, "chain still exhausts after object entries");
 });
 
 // ── pauseAutoForProviderError ────────────────────────────────────────────────

@@ -43,18 +43,23 @@
 ## Root Causes (Priority Order)
 
 ### 1. Extension JIT compilation via jiti (~2.5s)
+
 Every launch compiles 17+ TypeScript extensions to JavaScript using jiti. No caching (`moduleCache: false` is explicitly set). This is the single largest cost.
 
 ### 2. Barrel import of @gsd/pi-coding-agent (~1s)
+
 `cli.js` line 1 does a barrel import pulling in ALL exports including all LLM provider SDKs, TUI components, theme system, compaction, blob store, etc.
 
 ### 3. Eager LLM SDK loading (~660ms inside barrel)
+
 All provider SDKs are imported at module evaluation time in `pi-ai/index.js`, even though only one provider is typically configured.
 
 ### 4. initResources copies files every launch (~128ms)
+
 `cpSync` with `force: true` copies all bundled resources to `~/.gsd/agent/` on every startup, even when nothing changed.
 
 ### 5. undici import (~200ms)
+
 Imported in loader.js for proxy support. Not needed for most users.
 
 ---
@@ -64,6 +69,7 @@ Imported in loader.js for proxy support. Not needed for most users.
 ### Phase 1: Quick Wins (est. save ~1-1.5s on --version, ~0.5s interactive)
 
 #### 1A. Fast-path for `--version` and `--help`
+
 Parse argv BEFORE importing cli.js. In loader.js, check for `--version`/`-v` and `--help`/`-h` and exit immediately without loading any dependencies.
 
 **File**: `src/loader.ts`
@@ -71,6 +77,7 @@ Parse argv BEFORE importing cli.js. In loader.js, check for `--version`/`-v` and
 **Impact**: `gsd --version` goes from 2.2s → ~0.2s
 
 #### 1B. Skip initResources when unchanged
+
 Compare `managed-resources.json` version against current `GSD_VERSION`. If they match, skip the `cpSync` entirely.
 
 **File**: `src/resource-loader.ts` → `initResources()`
@@ -78,6 +85,7 @@ Compare `managed-resources.json` version against current `GSD_VERSION`. If they 
 **Impact**: Save ~128ms per launch
 
 #### 1C. Lazy-load undici
+
 Only import undici when HTTP_PROXY/HTTPS_PROXY env vars are actually set.
 
 **File**: `src/loader.ts`
@@ -87,6 +95,7 @@ Only import undici when HTTP_PROXY/HTTPS_PROXY env vars are actually set.
 ### Phase 2: Lazy Provider Loading (est. save ~600ms interactive)
 
 #### 2A. Lazy-load LLM provider SDKs
+
 Instead of importing all providers at module level in `pi-ai/index.js`, use dynamic `import()` in the provider factory functions. Only load the SDK when a model from that provider is actually requested.
 
 **Files**: `packages/pi-ai/src/providers/*.ts`
@@ -94,6 +103,7 @@ Instead of importing all providers at module level in `pi-ai/index.js`, use dyna
 **Impact**: Save ~600ms (Mistral 369ms + Google 186ms + extras) for users who only use one provider
 
 #### 2B. Selective re-exports in pi-ai barrel
+
 Instead of `export * from "./providers/mistral.js"` etc., only export the registration function. Provider internals stay private.
 
 **File**: `packages/pi-ai/src/index.ts`
@@ -101,6 +111,7 @@ Instead of `export * from "./providers/mistral.js"` etc., only export the regist
 ### Phase 3: Extension Loading Optimization (est. save ~1.5-2s interactive)
 
 #### 3A. Enable jiti module caching
+
 Remove `moduleCache: false` from the jiti config, or use a persistent cache directory.
 
 **File**: `packages/pi-coding-agent/src/core/extensions/loader.ts`
@@ -108,6 +119,7 @@ Remove `moduleCache: false` from the jiti config, or use a persistent cache dire
 **Impact**: Second+ launches save ~1-2s on extension loading
 
 #### 3B. Pre-compile extensions at build time
+
 Instead of JIT-compiling TypeScript extensions at runtime, compile them to JavaScript during `npm run build`. The runtime loader can then just `import()` the .js files directly without jiti.
 
 **Files**: `package.json` build scripts, `src/resource-loader.ts`, extension loader
@@ -116,6 +128,7 @@ Instead of JIT-compiling TypeScript extensions at runtime, compile them to JavaS
 **Complexity**: HIGH — requires careful handling of extension resolution paths
 
 #### 3C. Parallel extension loading
+
 Currently extensions load sequentially in a `for` loop. Load them in parallel with `Promise.all()`.
 
 **File**: `packages/pi-coding-agent/src/core/extensions/loader.ts` → `loadExtensions()`
@@ -125,12 +138,14 @@ Currently extensions load sequentially in a `for` loop. Load them in parallel wi
 ### Phase 4: Bundle Optimization (est. save ~300-500ms)
 
 #### 4A. Use esbuild/tsup for the main CLI bundle
+
 Replace plain `tsc` with a bundler that does tree-shaking. A single-file bundle eliminates ESM resolution overhead and removes unused code.
 
 **Impact**: Faster module resolution, smaller output, tree-shaking removes unused exports
 **Complexity**: MEDIUM
 
 #### 4B. Split pi-coding-agent into entry-point chunks
+
 Instead of one barrel export, provide separate entry points for core, interactive, tools.
 
 **Impact**: cli.js can import only what it needs for each code path

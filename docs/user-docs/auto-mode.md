@@ -303,6 +303,8 @@ Three timeout tiers prevent runaway sessions:
 | Idle | 10 min | Detects stalls, intervenes |
 | Hard | 30 min | Starts timeout recovery; pauses auto mode only if recovery cannot make durable progress |
 
+All three tiers supervise a unit that is in flight. `global_idle_timeout_minutes` (#2373) covers the opposite case: auto mode is active but **no unit is in flight at all** — an idle session that no per-unit watchdog observes. When the threshold passes, it emits one notification per idle period (naming the idle time and the active milestone). It is notification-only: nothing is dispatched, retried, repaired, or mutated, and the ADR-047 liveness backstop is unaffected. The default `0` disables it.
+
 Recovery steering nudges the LLM to finish durable output before timing out. When idle or hard timeout recovery is actively writing durable progress, the unit failsafe records fresh runtime progress in `.gsd/runtime/` and defers its final cancellation check for another short recheck window. This prevents auto mode from pausing while a recovered unit is finalizing, but future-dated or stale runtime timestamps are ignored so clock skew cannot keep the unit alive forever.
 
 Interactive prompts that block waiting for human input (such as `ask_user_questions` during discuss-phase/milestone, or secure value entry) are exempt from the idle and hard timeouts: while one is in flight, the watchdogs re-arm instead of firing, so a long human deliberation never cancels the prompt or aborts its turn. A genuinely hung non-interactive unit still hits the hard cap as usual.
@@ -323,6 +325,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 60   # optional: notify when no unit is in flight this long (default: 0 = off)
 ```
 
 ### Cost Tracking

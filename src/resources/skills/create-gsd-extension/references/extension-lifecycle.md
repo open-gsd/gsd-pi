@@ -14,6 +14,7 @@ GSD starts
       └── pi.registerShortcut(...)     ← Register shortcuts
   └─► session_start fires
 ```
+
 </loading>
 
 <event_flow>
@@ -40,6 +41,7 @@ user sends prompt
   │
   └─► agent_end
 ```
+
 </event_flow>
 
 <session_events>
@@ -57,6 +59,7 @@ user sends prompt
 
 <hot_reload>
 Extensions in auto-discovered locations hot-reload with `/reload`:
+
 - `session_shutdown` fires for old runtime
 - Resources re-scanned
 - `session_start` fires for new runtime

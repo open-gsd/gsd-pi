@@ -93,6 +93,7 @@ git:
 When `collapse_cadence: "slice"`, each slice's commits are squash-merged to main as soon as the slice passes validation. The milestone branch is then fast-forwarded to main so the next slice starts from a clean base.
 
 Benefits:
+
 - **Shorter orphan window** — if a session is interrupted, only the active slice's work is at risk, not the whole milestone.
 - **Incremental conflicts** — merge conflicts surface per slice rather than all at once at milestone end.
 - **Parallel-friendly** — multiple milestones can safely merge their validated slices to main without waiting for the slowest one.

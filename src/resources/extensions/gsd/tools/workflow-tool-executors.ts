@@ -1347,7 +1347,7 @@ export async function executeTaskSettle(
     taskId: params.taskId,
   };
   const unit = `${task.milestoneId}/${task.sliceId}/${task.taskId}`;
-  const settleOptions = { reconcileLifecycle: params.reconcileLifecycle === true };
+  const settleOptions = { reconcileLifecycle: params.reconcileLifecycle === true, basePath };
   const blockerAccepted = params.settleDisposition === "blocker-accepted";
   if (blockerAccepted && settleOptions.reconcileLifecycle) {
     return {
@@ -1466,7 +1466,7 @@ export async function executeTaskSettle(
       invocation,
       task,
       reason: params.reason,
-      basePath,
+      // settleOptions carries basePath for the verification-paused receipt gate.
       ...settleOptions,
     });
     if (!result.settled && !result.reconciled && !result.published) {

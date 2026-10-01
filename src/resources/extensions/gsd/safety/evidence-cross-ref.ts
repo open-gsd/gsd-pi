@@ -7,6 +7,7 @@
  * Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
  */
 
+import { INCONCLUSIVE_EXIT_CODE } from "./evidence-collector.js";
 import type { BashEvidence, EvidenceEntry } from "./evidence-collector.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -67,10 +68,10 @@ export function crossReferenceEvidence(
     }
 
     // A shell-spawn/infra failure means the command never ran (e.g. on Windows
-    // `gsd_exec runtime=bash` resolves to a WSL with no /bin/bash). The LLM
-    // typically recovers by re-running via another runtime, and that genuine
-    // run may not even be in the match set. Such a failure is inconclusive, not
-    // a falsified pass — exclude it before judging the exit code.
+    // `gsd_exec runtime=bash` resolves to a WSL with no /bin/bash). A harness
+    // deadline (#2425) means the run's exit was never observed. Either way the
+    // outcome is inconclusive, not a falsified pass — exclude it before judging
+    // the exit code.
     const commandRuns = matches.filter((m) => !isInfraSpawnFailure(m));
     if (commandRuns.length === 0) {
       if (claimed.exitCode === 0) {
@@ -79,7 +80,7 @@ export function crossReferenceEvidence(
           claimed,
           actual: latestMatch(matches),
           reason:
-            `Matched execution failed to spawn (infrastructure error, not a command failure); ` +
+            `Matched execution never observed a real outcome (infrastructure error or harness deadline, not a command failure); ` +
             `treating as inconclusive`,
         });
       }
@@ -102,10 +103,10 @@ export function crossReferenceEvidence(
 }
 
 /**
- * Runtime-spawn / shell-infra failure signatures. When a bash-runtime call
- * fails to *spawn* (rather than the command running and exiting non-zero), the
- * recorded exitCode is an ordinary non-zero but the output carries one of these
- * markers. Such a call is not evidence that a verification failed.
+ * Runtime-spawn / harness-level inconclusive signatures. When a bash-runtime
+ * call fails to *spawn* (rather than the command running and exiting non-zero),
+ * the recorded outcome carries one of these markers. Such a call is not
+ * evidence that a verification failed.
  */
 const INFRA_SPAWN_FAILURE_SIGNATURES: readonly RegExp[] = [
   /execvpe\([^)]*\)\s+failed/i,   // WSL: execvpe(/bin/bash) failed: No such file or directory
@@ -113,15 +114,36 @@ const INFRA_SPAWN_FAILURE_SIGNATURES: readonly RegExp[] = [
   /command not found:\s*(?:bash|sh|zsh|dash|fish|ash|ksh|wsl)\b/i, // missing shell interpreter only
 ];
 
+/** The MCP workflow queue deadline rejection (#2425, workflow-tools.ts). */
+const WORKFLOW_DEADLINE_RE = /Workflow operation exceeded \d+ms deadline/;
+
+/**
+ * Markers of an exit the harness actually observed (mirrors the collector's
+ * resolveExitCode resolvers). A run with one of these must be judged on its
+ * recorded exit even if its output also mentions the deadline signature.
+ */
+const OBSERVED_EXIT_RE = /Command exited with code \d+|"exit_code"\s*:\s*-?\d+/;
+
 /**
  * True when a non-zero bash call looks like a shell-spawn/infra failure (the
- * command never started) rather than a real command failure. A successful run
- * (exitCode 0) is never an infra failure.
+ * command never started) or an unobserved outcome (#2425 sentinel) rather than
+ * a real command failure. A successful run (exitCode 0) is never an infra
+ * failure.
  */
 function isInfraSpawnFailure(call: BashEvidence): boolean {
   if (call.exitCode === 0) return false;
+  // Explicit inconclusive sentinel from the collector (#2425): the harness
+  // never observed a process exit, so there is no failure to judge.
+  if (call.exitCode === INCONCLUSIVE_EXIT_CODE) return true;
   const snippet = call.outputSnippet ?? "";
   if (snippet.length === 0) return false;
+  // Deadline text in the output is only inconclusive when no exit was
+  // observed (#2425): a run that exited on its own and merely printed the
+  // deadline signature (e.g. a test or grep over source) must be judged on
+  // its recorded exit. Covers pre-sentinel rows recorded as exit 1.
+  if (WORKFLOW_DEADLINE_RE.test(snippet)) {
+    return !OBSERVED_EXIT_RE.test(snippet);
+  }
   return INFRA_SPAWN_FAILURE_SIGNATURES.some((re) => re.test(snippet));
 }
 

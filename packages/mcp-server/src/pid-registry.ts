@@ -24,6 +24,16 @@ export interface RegisterMcpInstanceOptions {
   waitForExit?: () => void;
 }
 
+/**
+ * Returned by {@link registerMcpInstance} when a live registry holder could not
+ * be verified as this project's server. Carries the holder detail surfaced in
+ * the refusal stderr line and the startup-failure error (#2361).
+ */
+export interface McpInstanceRefusal {
+  refused: true;
+  detail: string;
+}
+
 export interface McpProcessSnapshot {
   pid: number;
   ppid: number;
@@ -574,7 +584,7 @@ export function registerMcpInstance(
   projectDir: string,
   registryPath = REGISTRY_PATH,
   options: RegisterMcpInstanceOptions = {},
-): boolean {
+): boolean | McpInstanceRefusal {
   const registry = readMcpRegistry(registryPath);
   const keys = projectRegistryKeys(projectDir);
   const key = keys[0];
@@ -595,7 +605,24 @@ export function registerMcpInstance(
             ? `ignored unverified stale pid=${existing.pid}`
             : `failed to kill pid=${existing.pid}: ${result.error}`;
     process.stderr.write(`[gsd-mcp-server] ${label} for ${key}\n`);
-    if (result === 'unverified') return false;
+    if (result === 'unverified') {
+      // Name the blocking process and the way out instead of leaving the
+      // operator to out-of-band process archaeology (#2361). Liveness needs no
+      // extra probe: killPid only returns 'unverified' after its own signal-0
+      // probe succeeded, so the holder was running when it was verified. The
+      // cwd lookup may observe a slightly later snapshot — close enough for a
+      // diagnostic line.
+      const cwd = (options.getProcessCwd ?? defaultGetProcessCwd)(existing.pid);
+      const detail = [
+        `holder pid=${existing.pid}`,
+        `cwd=${cwd ?? 'unknown'}`,
+        `startedAt=${existing.startedAt || 'unknown'}`,
+        'still running',
+        `remedy: kill pid ${existing.pid} if it is stale, or restart with GSD_MCP_CLIENT_MANAGED=1 to skip the per-project registry`,
+      ].join(', ');
+      process.stderr.write(`[gsd-mcp-server] refusal detail: ${detail}\n`);
+      return { refused: true, detail };
+    }
   }
   if (existingKey && existingKey !== key) delete registry[existingKey];
 

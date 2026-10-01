@@ -9,6 +9,7 @@ Parallel mode is off by default. Enable it in preferences to use `/gsd parallel`
 ## Quick Start
 
 1. Enable parallel mode:
+
    ```yaml
    parallel:
      enabled: true
@@ -16,17 +17,21 @@ Parallel mode is off by default. Enable it in preferences to use `/gsd parallel`
    ```
 
 2. Start parallel execution:
+
    ```
    /gsd parallel start
    ```
+
    GSD scans milestones, checks dependencies and file overlap, shows an eligibility report, and spawns workers.
 
 3. Monitor:
+
    ```
    /gsd parallel status
    ```
 
 4. Stop:
+
    ```
    /gsd parallel stop
    ```

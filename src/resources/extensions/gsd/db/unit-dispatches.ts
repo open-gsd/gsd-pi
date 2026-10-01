@@ -177,13 +177,22 @@ export function recordDispatchClaim(input: RecordClaimInput): RecordClaimResult 
   return transaction((): RecordClaimResult => {
     const db = _getAdapter()!;
 
+    // The expiry predicate mirrors the attempt fencing trigger
+    // (trg_workflow_attempt_transition_fencing), which requires a held lease
+    // with expires_at > now. Without it a token whose lease lapsed during a
+    // long unit + finalize (60s TTL) passes this check, the dispatch claim
+    // opens under an expired generation, and every later attempt state
+    // transition aborts on the fencing trigger (#2443). Rejecting here routes
+    // the caller into the existing stale-lease force-reclaim recovery, so the
+    // whole iteration re-arms on the fresh token.
     const lease = db.prepare(
       `SELECT fencing_token
        FROM milestone_leases
        WHERE milestone_id = :milestone_id
          AND worker_id = :worker_id
          AND fencing_token = :token
-         AND status = 'held'`,
+         AND status = 'held'
+         AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')`,
     ).get({
       ":milestone_id": input.milestoneId,
       ":worker_id": input.workerId,

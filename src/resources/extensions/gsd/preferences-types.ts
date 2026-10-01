@@ -299,6 +299,37 @@ export const GSD_MODEL_PHASE_KEYS = [
 export type GSDModelPhaseKey = (typeof GSD_MODEL_PHASE_KEYS)[number];
 
 /**
+ * A `fallbacks[]` entry: either a bare model ID or an object carrying a
+ * per-entry reasoning effort so a fallback chain can vary thinking per model
+ * (#1270). Plain strings keep the pre-#1270 behavior exactly.
+ */
+export interface GSDModelFallbackEntry {
+  model: string;
+  thinking?: GSDThinkingLevel;
+}
+
+export type GSDModelFallback = string | GSDModelFallbackEntry;
+
+/** The model ID of a fallback entry, regardless of form. */
+export function fallbackModelId(entry: GSDModelFallback): string {
+  return typeof entry === "string" ? entry : entry.model;
+}
+
+/** The per-entry reasoning effort of a fallback entry, when the object form carries one. */
+export function fallbackEntryThinking(entry: GSDModelFallback): GSDThinkingLevel | undefined {
+  return typeof entry === "string" ? undefined : entry.thinking;
+}
+
+/** Normalize a fallback entry to `{ id, thinking? }` for failover consumers (#1270). */
+export function fallbackCandidate(entry: GSDModelFallback): { id: string; thinking?: GSDThinkingLevel } {
+  return typeof entry === "string"
+    ? { id: entry }
+    : entry.thinking
+      ? { id: entry.model, thinking: entry.thinking }
+      : { id: entry.model };
+}
+
+/**
  * Model configuration for a single phase.
  * Supports primary model with optional fallbacks for resilience.
  */
@@ -307,8 +338,8 @@ export interface GSDPhaseModelConfig {
   model: string;
   /** Provider name to disambiguate when the same model ID exists across providers (e.g., "bedrock", "anthropic") */
   provider?: string;
-  /** Fallback models to try in order if primary fails (e.g., rate limits, credits exhausted) */
-  fallbacks?: string[];
+  /** Fallback models to try in order if primary fails (e.g., rate limits, credits exhausted). Entries accept a bare model ID or `{ model, thinking? }` (#1270). */
+  fallbacks?: GSDModelFallback[];
   /**
    * Reasoning effort for this phase (ADR-026). Travels with the model: an
    * explicit value here bypasses the `execute-task` thinking floor and is
@@ -360,7 +391,7 @@ export interface GSDModelConfigV2 {
 /** Normalized model selection with resolved fallbacks */
 export interface ResolvedModelConfig {
   primary: string;
-  fallbacks: string[];
+  fallbacks: GSDModelFallback[];
   /**
    * Per-field reasoning level carried from the object model form's `thinking`
    * sub-field (e.g. `{ model, thinking: high }` on `post_unit_hooks[].model`,
@@ -390,17 +421,26 @@ export interface AutoSupervisorConfig {
    * threshold.
    */
   stalled_tool_timeout_minutes?: number;
+  /**
+   * Session-level idle watchdog (#2373): fire one notification when auto-mode
+   * has had no unit in flight for this many minutes. Distinct from
+   * `idle_timeout_minutes`, which supervises a unit that is in flight. The
+   * watchdog is notification-only — no retry, no repair, no state mutation.
+   * `0` (the default) disables it.
+   */
+  global_idle_timeout_minutes?: number;
 }
 
 /**
  * The supervisor config after resolution by `resolveAutoSupervisorConfig`.
  * Identical to {@link AutoSupervisorConfig} except `model` is always the
  * normalized primary model ID string and `modelFallbacks` carries the ordered
- * fallback chain from the object form accepted in preferences (#1229).
+ * fallback chain from the object form accepted in preferences (#1229). Entries
+ * keep the widened `{ model, thinking? }` object form (#1270).
  */
 export type ResolvedAutoSupervisorConfig = Omit<AutoSupervisorConfig, "model"> & {
   model?: string;
-  modelFallbacks?: string[];
+  modelFallbacks?: GSDModelFallback[];
 };
 
 export interface RemoteQuestionsConfig {

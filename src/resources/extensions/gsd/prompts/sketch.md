@@ -40,6 +40,7 @@ Let the developer react to each mockup. Iterate quickly on the throwaway HTML. C
 ### 7. Document
 
 Write `.gsd/sketches/{{sketchId}}/README.md` with:
+
 - The design idea and the surfaces explored
 - The mockup files and what each demonstrates
 - Design decisions captured and their rationale

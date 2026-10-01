@@ -93,7 +93,7 @@ function combinedValidationInput(idempotencyKey: string): ValidateMilestoneInput
   return {
     invocation: invoke(idempotencyKey),
     milestoneId: "M001",
-    testedSourceRevision: "sha256:tested-source",
+    testedSourceRevision: `sha256:${"9".repeat(64)}`,
     policyId: "milestone-validation",
     policyVersion: "1",
     verdict: "pass",
@@ -525,4 +525,33 @@ test("Milestone validation rejects an aggregate verdict that hides failed eviden
   assert.equal(count("workflow_attempt_results"), 0);
   assert.equal(count("workflow_technical_verdicts"), 0);
   assert.equal(count("workflow_verification_evidence"), 0);
+});
+
+test("Milestone validation rejects a bare git SHA as testedSourceRevision (#2450)", () => {
+  setup();
+  // The unit in #2450 submitted evidence tested against a git SHA while the
+  // gate compares the sha256:<content hash> aggregate revision — the mismatch
+  // was only discovered at validate-milestone time. The writer must reject
+  // the wrong format up front, naming the expected form.
+  assert.throws(
+    () => validateMilestone({
+      ...combinedValidationInput("milestone-validation/revision-format/git-sha"),
+      testedSourceRevision: "ae8c6dd9f04c9e77ba09c8a1f4d26f1c2b3a4d5e",
+    }),
+    /sha256:.*64 lowercase hex/,
+  );
+  assert.equal(count("workflow_execution_attempts"), 0, "nothing may be persisted");
+});
+
+test("Milestone validation rejects a non-hex sha256-style testedSourceRevision (#2450)", () => {
+  setup();
+  // 64 characters of valid length but invalid hex — isolates character
+  // validation from length validation.
+  assert.throws(
+    () => validateMilestone({
+      ...combinedValidationInput("milestone-validation/revision-format/not-hex"),
+      testedSourceRevision: `sha256:${"g".repeat(64)}`,
+    }),
+    /sha256:.*64 lowercase hex/,
+  );
 });

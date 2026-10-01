@@ -3,6 +3,7 @@ You are executing GSD doctor heal mode.
 The doctor has already scanned the repo and optionally applied deterministic fixes. You are now responsible for resolving the remaining issues using the smallest safe set of changes.
 
 Rules:
+
 1. Prioritize the active milestone or the explicitly requested scope. Do not fan out across unrelated historical milestones unless the report explicitly scopes you there.
 2. Read before edit.
 3. Prefer fixing authoritative artifacts over masking warnings.
@@ -25,6 +26,7 @@ Rules:
 {{scopeLabel}}
 
 Then:
+
 - Repair the unresolved issues in scope
 - Keep changes minimal and targeted
 - If unresolved issues remain outside scope, leave them untouched and mention them briefly

@@ -18,6 +18,7 @@ GSD preferences live in YAML frontmatter markdown files. You can configure them 
 | Project | `.gsd/PREFERENCES.md` | Current project only |
 
 **How they merge:**
+
 - **Scalar fields** (`budget_ceiling`, `token_profile`): project wins if defined
 - **Array fields** (`always_use_skills`, etc.): concatenated (global first, then project)
 - **Object fields** (`models`, `git`, `auto_supervisor`): shallow-merged, project overrides per-key
