@@ -1873,10 +1873,11 @@ export async function resolveClaudePermissionMode(
 // NOTE: These helpers intentionally mirror @gsd/pi-ai anthropic-shared
 // behavior so this extension remains typecheck-stable even when the published
 // @gsd/pi-ai barrel lags behind monorepo source exports.
-/** Return true for model IDs that support the adaptive thinking API (Opus 4.6/4.7/4.8/5, Fable 5, Sonnet 4.6/4.7, Haiku 4.5). */
+/** Return true for model IDs that support the adaptive thinking API (Opus 4.6/4.7/4.8/5, Fable 5, Sonnet 4.6/4.7/5.5, Haiku 4.5). */
 function modelSupportsAdaptiveThinking(modelId: string): boolean {
 	return (
-		modelId.includes("opus-4-6")
+		isClaude55Model(modelId)
+		|| modelId.includes("opus-4-6")
 		|| modelId.includes("opus-4.6")
 		|| modelId.includes("opus-4-7")
 		|| modelId.includes("opus-4.7")
@@ -1893,6 +1894,15 @@ function modelSupportsAdaptiveThinking(modelId: string): boolean {
 		|| modelId.includes("haiku-4-5")
 		|| modelId.includes("haiku-4.5")
 	);
+}
+
+/**
+ * Sonnet 5.5 and Opus 5.5 reject `thinking: {type: "disabled"}` with a 400
+ * (mirrors @gsd/pi-ai claude-thinking-off). Thinking-off on these models is
+ * expressed as adaptive thinking at the lowest effort.
+ */
+function isClaude55Model(modelId: string): boolean {
+	return /(?:sonnet|opus)[-.]5[-.]5(?!\d)/i.test(modelId);
 }
 
 /** Map a GSD thinking level to the Anthropic effort value, clamping xhigh to max for models that lack native xhigh support. */
@@ -1915,6 +1925,7 @@ function mapThinkingLevelToAnthropicEffort(level: ThinkingLevel | undefined, mod
 				|| modelId.includes("opus.5")
 				|| modelId.includes("fable-5")
 				|| modelId.includes("fable.5")
+				|| isClaude55Model(modelId)
 			) return "xhigh";
 			if (modelId.includes("opus-4-6") || modelId.includes("opus-4.6")) return "max";
 			return "high";
@@ -2374,15 +2385,20 @@ export function buildSdkOptions(
 	// thinkingLevelMap entry wins over the legacy id-based effort map.
 	const supportsAdaptive = modelMetadata?.compat?.forceAdaptiveThinking === true
 		|| modelSupportsAdaptiveThinking(modelId);
+	const rejectsDisabledThinking = isClaude55Model(modelId);
 	const effort =
 		reasoning && supportsAdaptive
 			? (resolveCatalogEffort(modelMetadata?.thinkingLevelMap, reasoning)
 				?? mapThinkingLevelToAnthropicEffort(reasoning, modelId))
-			: undefined;
+			: rejectsDisabledThinking
+				? "low"
+				: undefined;
 
 	// Bug B: SDK requires thinking:{type:"adaptive"} alongside effort for adaptive thinking to activate.
 	// Bug C: SDK requires thinking:{type:"disabled"} to actually stop adaptive thinking when reasoning is off;
 	//        omitting the field leaves the SDK in its adaptive default (or persisted session state).
+	//        Sonnet/Opus 5.5 reject "disabled", so their effort falls back to "low" above and
+	//        thinking-off becomes adaptive at the lowest effort.
 	const thinkingConfig = supportsAdaptive
 		? effort
 			? { thinking: { type: "adaptive" } }

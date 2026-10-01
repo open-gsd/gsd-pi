@@ -37,6 +37,11 @@ import { sanitizeToolSchema } from "../utils/sanitize-tool-schema.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.js";
+import {
+	getClaudeThinkingOffMode,
+	rejectsClaudeForcedToolChoice,
+	rejectsClaudeSamplingParams,
+} from "./claude-thinking-off.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
@@ -1046,8 +1051,9 @@ function buildParams(
 		];
 	}
 
-	// Temperature is incompatible with extended thinking (adaptive or budget-based).
-	if (options?.temperature !== undefined && !options?.thinkingEnabled) {
+	// Temperature is incompatible with extended thinking (adaptive or budget-based),
+	// and Sonnet/Opus 5.5 reject sampling parameters outright.
+	if (options?.temperature !== undefined && !options?.thinkingEnabled && !rejectsClaudeSamplingParams(model.id)) {
 		params.temperature = options.temperature;
 	}
 
@@ -1089,7 +1095,19 @@ function buildParams(
 				};
 			}
 		} else if (options?.thinkingEnabled === false) {
-			params.thinking = { type: "disabled" };
+			const offMode = getClaudeThinkingOffMode(model.id);
+			if (offMode === "between-tools") {
+				// Sonnet 5.5 rejects "disabled"; "between_tools" is its lowest setting and
+				// accepts no other thinking fields. The SDK types can lag this value.
+				params.thinking = { type: "between_tools" } as unknown as NonNullable<
+					MessageCreateParamsStreaming["thinking"]
+				>;
+			} else if (offMode === "low-effort") {
+				// Opus 5.5 cannot turn thinking off at any effort: omit it and run at the lowest effort.
+				params.output_config = { effort: "low" };
+			} else {
+				params.thinking = { type: "disabled" };
+			}
 		}
 	}
 
@@ -1101,7 +1119,11 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		if (typeof options.toolChoice === "string") {
+		const forced = options.toolChoice === "any" || typeof options.toolChoice === "object";
+		if (forced && rejectsClaudeForcedToolChoice(model.id)) {
+			// Sonnet/Opus 5.5 reject forced tool choice ("any" / a named tool) with a 400.
+			params.tool_choice = { type: "auto" };
+		} else if (typeof options.toolChoice === "string") {
 			params.tool_choice = { type: options.toolChoice };
 		} else {
 			params.tool_choice = options.toolChoice;

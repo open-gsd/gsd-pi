@@ -1,3 +1,4 @@
+import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { type BedrockOptions, streamBedrock } from "../src/providers/amazon-bedrock.ts";
@@ -5,6 +6,8 @@ import type { Context, Model } from "../src/types.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
 
 interface BedrockThinkingPayload {
+	inferenceConfig?: { temperature?: number };
+	toolConfig?: { toolChoice?: Record<string, unknown> };
 	additionalModelRequestFields?: {
 		thinking?: { type: string; budget_tokens?: number; display?: string };
 		output_config?: { effort?: string };
@@ -19,20 +22,32 @@ class PayloadCaptured extends Error {
 	}
 }
 
-function makeContext(): Context {
+function makeContext(withTools = false): Context {
 	return {
 		messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
+		...(withTools
+			? {
+					tools: [
+						{
+							name: "lookup",
+							description: "Look something up",
+							parameters: Type.Object({ query: Type.String() }),
+						},
+					],
+				}
+			: {}),
 	};
 }
 
 async function capturePayload(
 	model: Model<"bedrock-converse-stream">,
-	options?: BedrockOptions,
+	options?: BedrockOptions & { tools?: boolean },
 ): Promise<BedrockThinkingPayload> {
 	let capturedPayload: BedrockThinkingPayload | undefined;
-	const s = streamBedrock(model, makeContext(), {
+	const reasoningOff = options !== undefined && "reasoning" in options && options.reasoning === undefined;
+	const s = streamBedrock(model, makeContext(options?.tools === true), {
 		...options,
-		reasoning: options?.reasoning ?? "high",
+		reasoning: reasoningOff ? undefined : (options?.reasoning ?? "high"),
 		onPayload: (payload) => {
 			capturedPayload = payload as BedrockThinkingPayload;
 			throw new PayloadCaptured();
@@ -101,6 +116,51 @@ describe("Bedrock thinking payload", () => {
 		expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
 		expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "xhigh" });
 		expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
+	});
+
+	it("uses adaptive thinking for Claude Sonnet 5.5 when reasoning is enabled and drops temperature", async () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-5-5");
+
+		const payload = await capturePayload(model, { reasoning: "xhigh", temperature: 0.5 });
+
+		expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "xhigh" });
+		expect(payload.inferenceConfig?.temperature).toBeUndefined();
+	});
+
+	it("sends between_tools for Claude Sonnet 5.5 when thinking is off", async () => {
+		const model = getModel("amazon-bedrock", "us.anthropic.claude-sonnet-5-5");
+
+		const payload = await capturePayload(model, { reasoning: undefined, temperature: 0 });
+
+		expect(payload.additionalModelRequestFields).toEqual({ thinking: { type: "between_tools" } });
+		expect(payload.inferenceConfig?.temperature).toBeUndefined();
+	});
+
+	it("lowers effort instead of disabling thinking for Claude Opus 5.5 when thinking is off", async () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-opus-5-5");
+
+		const payload = await capturePayload(model, { reasoning: undefined, temperature: 0 });
+
+		expect(payload.additionalModelRequestFields).toEqual({ output_config: { effort: "low" } });
+		expect(payload.inferenceConfig?.temperature).toBeUndefined();
+	});
+
+	it("downgrades forced tool choice to auto for Claude 5.5 models", async () => {
+		for (const id of ["anthropic.claude-sonnet-5-5", "global.anthropic.claude-opus-5-5"]) {
+			const payload = await capturePayload(getModel("amazon-bedrock", id), { toolChoice: "any", tools: true });
+			expect(payload.toolConfig?.toolChoice).toEqual({ auto: {} });
+		}
+	});
+
+	it("keeps Claude Sonnet 5 thinking-off and sampling behavior unchanged", async () => {
+		const model = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-5");
+
+		const payload = await capturePayload(model, { reasoning: undefined, temperature: 0, toolChoice: "any", tools: true });
+
+		expect(payload.additionalModelRequestFields).toBeUndefined();
+		expect(payload.inferenceConfig?.temperature).toBe(0);
+		expect(payload.toolConfig?.toolChoice).toEqual({ any: {} });
 	});
 
 	it("omits display for GovCloud model ids on non-adaptive Claude thinking", async () => {

@@ -1821,6 +1821,38 @@ describe("stream-adapter — catalog model metadata (#2437)", () => {
 	});
 });
 
+describe("claude-code-cli — Claude Sonnet 5.5 / Opus 5.5 support", () => {
+	test("Sonnet 5.5 is exposed in the Claude Code model picker list", () => {
+		const sonnet = CLAUDE_CODE_MODELS.find((m) => m.id === "claude-sonnet-5-5");
+		assert.ok(sonnet, "claude-sonnet-5-5 must appear in CLAUDE_CODE_MODELS");
+		assert.equal(sonnet!.reasoning, true);
+		assert.equal(sonnet!.contextWindow, 1_000_000);
+		assert.equal(sonnet!.maxTokens, 128_000);
+		const ids = CLAUDE_CODE_MODELS.map((m) => m.id);
+		assert.ok(ids.indexOf("claude-sonnet-5-5") < ids.indexOf("claude-sonnet-5"), "Sonnet 5.5 must be listed before Sonnet 5");
+	});
+
+	test("Sonnet 5.5 gets adaptive thinking with native xhigh effort", () => {
+		const options = buildSdkOptions("claude-sonnet-5-5", "test prompt", undefined, { reasoning: "xhigh" });
+		assert.equal(options.effort, "xhigh");
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	test("Sonnet 5.5 and Opus 5.5 never receive disabled thinking when reasoning is off", () => {
+		for (const modelId of ["claude-sonnet-5-5", "claude-opus-5-5"]) {
+			const options = buildSdkOptions(modelId, "test prompt");
+			assert.deepEqual(options.thinking, { type: "adaptive" }, `${modelId} must not send thinking.type=disabled`);
+			assert.equal(options.effort, "low", `${modelId} thinking-off must map to the lowest effort`);
+		}
+	});
+
+	test("older adaptive models still disable thinking when reasoning is off", () => {
+		const options = buildSdkOptions("claude-opus-5", "test prompt");
+		assert.deepEqual(options.thinking, { type: "disabled" });
+		assert.equal(options.effort, undefined);
+	});
+});
+
 describe("stream-adapter — print bg wait ceiling (#1855)", () => {
 	function withCeilingEnv(value: string | undefined): () => void {
 		const previous = process.env[CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS_ENV];

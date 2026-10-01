@@ -46,6 +46,11 @@ import { AssistantMessageEventStream } from "../utils/event-stream.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import {
+	getClaudeThinkingOffMode,
+	rejectsClaudeForcedToolChoice,
+	rejectsClaudeSamplingParams,
+} from "./claude-thinking-off.js";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.js";
 import { transformMessages } from "./transform-messages.js";
 
@@ -191,9 +196,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				system: buildSystemPrompt(context.systemPrompt, model, cacheRetention),
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
-					...(options.temperature !== undefined && { temperature: options.temperature }),
+					...(options.temperature !== undefined &&
+						!rejectsClaudeSamplingParams(model.id) && { temperature: options.temperature }),
 				},
-				toolConfig: convertToolConfig(context.tools, options.toolChoice),
+				toolConfig: convertToolConfig(
+					context.tools,
+					rejectsClaudeForcedToolChoice(model.id) && options.toolChoice !== "none" && options.toolChoice
+						? "auto"
+						: options.toolChoice,
+				),
 				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
 				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
 			};
@@ -926,7 +937,16 @@ function buildAdditionalModelRequestFields(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
 ): Record<string, any> | undefined {
-	if (!options.reasoning || !model.reasoning) {
+	if (!model.reasoning) {
+		return undefined;
+	}
+
+	if (!options.reasoning) {
+		// Sonnet/Opus 5.5 reject disabled thinking; express "off" as their lowest setting
+		// so it is not silently left at the model's adaptive default.
+		const offMode = isAnthropicClaudeModel(model) ? getClaudeThinkingOffMode(model.id) : undefined;
+		if (offMode === "between-tools") return { thinking: { type: "between_tools" } };
+		if (offMode === "low-effort") return { output_config: { effort: "low" } };
 		return undefined;
 	}
 
