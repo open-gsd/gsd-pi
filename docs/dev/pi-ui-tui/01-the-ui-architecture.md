@@ -40,6 +40,7 @@ Pi's TUI is a custom terminal rendering system. Understanding its architecture p
 ```
 
 **Key principles:**
+
 - Everything renders as **arrays of strings** (one per line)
 - Each line **must not exceed the `width` parameter** — this is enforced
 - **ANSI escape codes** are used for styling — they don't count toward visible width

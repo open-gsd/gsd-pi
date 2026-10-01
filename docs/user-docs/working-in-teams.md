@@ -44,6 +44,7 @@ Share planning artifacts (milestones, roadmaps, decisions) while keeping runtime
 ```
 
 **What gets shared** (committed to git):
+
 - `.gsd/PREFERENCES.md` — project preferences
 - `.gsd/PROJECT.md` — living project description
 - `.gsd/REQUIREMENTS.md` — requirement contract
@@ -52,6 +53,7 @@ Share planning artifacts (milestones, roadmaps, decisions) while keeping runtime
 - `.gsd/milestones/` — legacy milestone artifacts, if the project has not migrated yet
 
 **What stays local** (gitignored):
+
 - Database files, metrics, state projections, runtime records, worktrees, activity logs, and migration backups under `.gsd-backups/`. Stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the flat-phase `.gsd/phases/` migration is complete.
 
 ### 3. Commit the Preferences
@@ -80,6 +82,7 @@ If you have an existing project with `.gsd/` blanket-ignored:
 2. Update `.gitignore` to use the selective pattern above
 3. Add `unique_milestone_ids: true` to `.gsd/PREFERENCES.md`
 4. Optionally rename existing milestones to use unique IDs:
+
    ```
    I have turned on unique milestone ids, please update all old milestone
    ids to use this new format e.g. M001-abc123 where abc123 is a random
@@ -87,6 +90,7 @@ If you have an existing project with `.gsd/` blanket-ignored:
    .gsd file contents, file names and directory names. Validate your work
    once done to ensure referential integrity.
    ```
+
 5. Commit
 
 ## Plan Review Workflow

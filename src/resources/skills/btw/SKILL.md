@@ -35,6 +35,7 @@ If the question cannot be answered from current context (requires reading a file
 - `/btw what model does this use?` → answers from code or config already in context
 
 **Not a good fit for /btw (suggest normal prompt):**
+
 - Questions requiring reading a file not yet seen
 - Questions requiring running a command
 - Questions needing a multi-step answer or follow-up

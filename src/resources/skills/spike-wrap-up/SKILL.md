@@ -13,6 +13,7 @@ GSD's spike workflow (`src/resources/extensions/gsd/workflow-templates/spike.md`
 GSD already watches `.agents/skills/` (and `.claude/skills/` as a legacy compat path) at both user and project levels — see `src/resources/extensions/gsd/skill-discovery.ts`. Any skill written there is picked up on the next session without further wiring. This skill is the bridge from "spike done" to "skill available."
 
 Invocation points:
+
 - End of Phase 3 (synthesize) in `/gsd start spike` — prompt suggests running this skill
 - User has a spike directory and wants to harvest it
 - Pre-existing `RECOMMENDATION.md` that deserves a permanent home
@@ -35,6 +36,7 @@ Invocation points:
 3. If none exist, tell the user and stop. This skill requires a completed spike.
 
 Read the core files:
+
 - `<spike>/SCOPE.md` — the question that was asked
 - `<spike>/research/*.md` — the angles investigated
 - `<spike>/RECOMMENDATION.md` — the conclusion

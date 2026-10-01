@@ -1182,6 +1182,44 @@ describe('createMcpServer tool registration', () => {
     assert.equal(payload.status, 'running');
   });
 
+  it('gsd_execute discloses the client-connection session lifetime on a plain stdio connection', async () => {
+    // Regression for #2368: a session started through gsd_execute dies with the
+    // server's stdio connection, so both the tool description and the success
+    // result must say so instead of advertising a bare "started".
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const executeTool = (server as any)._registeredTools?.gsd_execute;
+
+    assert.ok(executeTool, 'gsd_execute should be registered');
+    assert.match(executeTool.description, /client-connection/);
+    assert.match(executeTool.description, /durable long-lived host/);
+
+    const result = await executeTool.handler({ projectDir: '/tmp/tool-exec-lifetime' });
+    assert.equal(result.isError, undefined);
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.status, 'started');
+    assert.ok(typeof payload.sessionId === 'string' && payload.sessionId.length > 0);
+    assert.equal(payload.lifetime, 'client-connection');
+    assert.match(payload.lifetimeGuidance, /client connection closes/);
+    assert.match(payload.lifetimeGuidance, /durable long-lived host/);
+  });
+
+  it('gsd_execute omits the lifetime disclosure when the client manages the server', async () => {
+    const { server } = await createMcpServer(sm, {
+      includeWorkflowTools: false,
+      clientManaged: true,
+    });
+    const executeTool = (server as any)._registeredTools?.gsd_execute;
+
+    assert.ok(executeTool, 'gsd_execute should be registered');
+    assert.doesNotMatch(executeTool.description, /client-connection/);
+
+    const result = await executeTool.handler({ projectDir: '/tmp/tool-exec-managed' });
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.status, 'started');
+    assert.equal(payload.lifetime, undefined);
+    assert.equal(payload.lifetimeGuidance, undefined);
+  });
+
   it('creates gsd --mode mcp workflow adapter tools from the workflow MCP surface', async () => {
     const tools = await createWorkflowMcpAdapterToolDefs(sm);
     const toolNames = new Set(tools.map((tool) => tool.name));

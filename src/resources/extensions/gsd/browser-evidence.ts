@@ -14,17 +14,24 @@ const BROWSER_TOOL_SIGNAL = `browser_(?:${
 // `snapshot` stays a bare browser signal: hasBrowserRequiredText scans physical
 // lines, so requiring nearby context broke wrapped ("Take a rendered page\nsnapshot")
 // and labeled ("Browser: take a snapshot") UAT lines, plus vocabulary like
-// "accessibility snapshot". Instead, drop the match when the snapshot is
-// database/backup work (#2081, #766 follow-up): a DB-CLI verb immediately follows
-// ("snapshot create", "snapshot restore-check"), or a database-ish word shares the
-// clause ("database snapshot", "purge / snapshot / export"). Clause-bounded like
-// NEGATED_BROWSER_CLAUSE_RE.
+// "accessibility snapshot". Instead, drop the match when the snapshot names
+// database/backup work (#2081, #766 follow-up) or LLM-runtime work (#2436): a
+// DB-CLI verb immediately follows ("snapshot create", "snapshot restore-check"),
+// a database-ish word shares the clause ("database snapshot", "purge / snapshot
+// / export"), or an unambiguous LLM word forms a compound directly before it
+// ("prompt snapshot"). Clause-bounded like NEGATED_BROWSER_CLAUSE_RE. LLM words
+// are adjacent-only — they double as browser vocabulary ("dismiss the prompt,
+// then take an accessibility snapshot") — and the ambiguous ones are left out
+// entirely: "browser/DOM state snapshot" and "browser context snapshot"
+// (Playwright) are genuine browser steps, so "state/context snapshot" stay
+// escalated (the conservative default; extend on evidence like #766→#2081→#2436).
 const DB_SNAPSHOT_TERMS = String.raw`(?:databases?|db|backups?|export)`;
+const LLM_SNAPSHOT_TERMS = String.raw`(?:prompts?|templates?|models?|conversations?|configs?)`;
 const DB_SNAPSHOT_VERB = String.raw`(?:create|restore|export|purge|import|prune|verify)`;
 
 export const BROWSER_REQUIREMENT_RE = new RegExp(
   String.raw`\b(?:file://|localhost|playwright|chrome|screenshot|${BROWSER_TOOL_SIGNAL})\b` +
-    String.raw`|(?<!\b${DB_SNAPSHOT_TERMS}\b[^.;:!?]{0,60})\bsnapshot\b(?!\s+(?:${DB_SNAPSHOT_VERB})\b)(?![^.;:!?]{0,60}\b${DB_SNAPSHOT_TERMS}\b)` +
+    String.raw`|(?<!\b${DB_SNAPSHOT_TERMS}\b[^.;:!?]{0,60})(?<!\b${LLM_SNAPSHOT_TERMS}\s+)\bsnapshot\b(?!\s+(?:${DB_SNAPSHOT_VERB})\b)(?![^.;:!?]{0,60}\b${DB_SNAPSHOT_TERMS}\b)` +
     String.raw`|\bin\s+(?:the\s+)?browser\b` +
     String.raw`|\b(?:open|launch|navigate|load|visit|serve|start)\b.{0,80}\b(?:browser|page|localhost|file://)\b|\bbrowser\s+(?:check|session|test|uat|tool|automation|interaction|flow)\b`,
   "i",

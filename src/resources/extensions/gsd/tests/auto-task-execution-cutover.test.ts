@@ -110,6 +110,7 @@ interface CutoverDeps {
     operationId: string;
     resultingRevision: number;
   } | null;
+  resolveHeldMilestoneLeaseToken?(milestoneId: string, workerId: string): number | null;
   claimTaskAttempt(input: {
     invocation: {
       idempotencyKey: string;
@@ -1866,6 +1867,81 @@ test("a retry claim links the immediately preceding settled Attempt", async () =
   assert.equal(domain.claims[0].retryOfAttemptId, undefined);
   assert.equal(domain.claims[1].retryOfAttemptId, "attempt-1");
   assert.equal(domain.claims[1].invocation.idempotencyKey, "internal:auto:attempt.claim:42");
+});
+
+test("a finalize retry claims under the currently held lease token (#2443)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const domain = fakeDomain();
+  domain.attempts.push({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    state: "running",
+    nextStage: "execute",
+    coordinationDispatchId: 41,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+  });
+
+  let runs = 0;
+  const result = await runWithTaskExecutionAttempt(input({
+    // The finalize-retry iteration re-dispatches the same worker under a new
+    // dispatch, but the held lease was re-armed to token 9 after the session
+    // cached token 7 (the lease TTL elapsed during finalize).
+    dispatchId: 42,
+  }), async () => {
+    runs += 1;
+    domain.completeSucceeded("attempt-2");
+    return { action: "next", data: {} };
+  }, {
+    ...domain.deps,
+    resolveHeldMilestoneLeaseToken() {
+      return 9;
+    },
+  });
+
+  assert.deepEqual(result, { action: "next", data: {} });
+  assert.equal(runs, 1);
+  // The interrupt settlement and the retry claim both carry the held token,
+  // so no later attempt transition can abort on lease fencing (#2443).
+  assert.equal(domain.settlements[0]?.outcome, "interrupted");
+  assert.equal(domain.settlements[0]?.recovery?.milestoneLeaseToken, 9);
+  assert.equal(domain.claims[0]?.milestoneLeaseToken, 9);
+  assert.equal(domain.claims[0]?.workerId, "worker-1");
+  assert.equal(domain.claims[0]?.retryOfAttemptId, "attempt-1");
+});
+
+test("a claim without a resolvable held lease keeps the cached session token (#2443)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const domain = fakeDomain();
+  domain.attempts.push({
+    attemptId: "attempt-1",
+    attemptNumber: 1,
+    state: "running",
+    nextStage: "execute",
+    coordinationDispatchId: 41,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+  });
+
+  let runs = 0;
+  await runWithTaskExecutionAttempt(input({
+    dispatchId: 42,
+  }), async () => {
+    runs += 1;
+    domain.completeSucceeded("attempt-2");
+    return { action: "next", data: {} };
+  }, {
+    ...domain.deps,
+    resolveHeldMilestoneLeaseToken() {
+      return null;
+    },
+  });
+
+  assert.equal(runs, 1);
+  // Same lease generation: the same-session interrupt keeps its plain
+  // settlement (no replacement recovery) and the claim keeps token 7.
+  assert.equal(domain.settlements[0]?.recovery, undefined);
+  assert.equal(domain.claims[0]?.milestoneLeaseToken, 7);
 });
 
 test("a replacement lease routes a stale running Attempt and redispatches before claiming its retry", async () => {

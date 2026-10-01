@@ -1,6 +1,5 @@
 # Custom Commands — User-Facing Actions
 
-
 Commands let users invoke your extension directly via `/mycommand`.
 
 ```typescript

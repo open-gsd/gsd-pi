@@ -49,6 +49,7 @@ User / gsd auto
 | `prompt-cache-optimizer.ts` | Tracks cache hit/miss rates per prompt; adjusts section ordering hints over time. |
 
 **Template resolution priority** (highest wins):
+
 1. `~/.agents/gsd/prompts/` (user-local, written by `initResources()`)
 2. Module-relative `prompts/` (npm package fallback)
 
@@ -487,7 +488,7 @@ Priority  Rule                                          Fires When
 
 - **Box** = a prompt file (`prompts/X.md`)
 - **Arrow →** = "produces" or "writes"
-- **Dashed →** = "reads from" 
+- **Dashed →** = "reads from"
 - **×N** = spawns N parallel subagents each running that prompt
 - **[gate]** = requires explicit user confirmation before proceeding
 - **DB** = persists to `gsd.db` via a `gsd_*` tool call

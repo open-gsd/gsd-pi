@@ -5,6 +5,7 @@ You are running the GSD **stats** workflow — display comprehensive project sta
 Read the canonical gsd-pi state and present a statistics summary. Use gsd-pi's own tooling to gather the data — do not hand-parse files when a command or query exists.
 
 Gather:
+
 - Active milestone id/title and overall milestone progress (completed/total).
 - Slice and task progress for the active milestone (completed/total per slice where available).
 - Requirements coverage if tracked.

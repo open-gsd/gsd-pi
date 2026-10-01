@@ -5,17 +5,20 @@
 ### The Onboarding Pipeline (All 4 Models Agree)
 
 #### Phase 1: Structural Analysis (Deterministic)
+
 - Dependency graph mapping
 - Module identification, LOC per component
 - Test coverage analysis, entry point discovery
 - Database schema mapping
 
 #### Phase 2: Convention Extraction (LLM-Assisted)
+
 - Sample representative files across modules
 - Identify: error handling patterns, naming conventions, API structure, DB access patterns, testing patterns
 - Output: a **conventions document** that becomes critical reference context
 
 #### Phase 3: Pattern Mining
+
 - Extract implicit "tribal knowledge" — workarounds for browser bugs, special customer cases, performance hacks that look like mistakes
 - Generate decision records into project state
 

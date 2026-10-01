@@ -26,6 +26,7 @@ partial.
 ## 2. Bucket each PR
 
 For each PR, compute:
+
 - **Age**: days since creation.
 - **Staleness**: days since last update.
 - **Size**: `additions + deletions` (small ≤ 100, medium ≤ 500, large > 500).

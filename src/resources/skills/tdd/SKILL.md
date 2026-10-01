@@ -11,11 +11,13 @@ Drive feature implementation through one red-green-refactor cycle per vertical s
 GSD already organizes work into slices (S##) and tasks (T##). This skill operates at the task level — inside a single T##-PLAN.md, it structures the execution as a sequence of tiny red-green-refactor cycles rather than write-all-then-test or write-all-without-tests.
 
 Invocation points:
+
 - Task plan calls out behavior with a clear external contract (pure function, API endpoint, module boundary)
 - Bug fix — write the failing repro test first, then fix
 - Refactor into a new module — write the tests against the new interface first
 
 Do not use this skill for:
+
 - Exploratory spikes (use `/gsd start spike` — no production code ships)
 - Pure UI polish where visual verification beats unit tests
 - Scripts that run once and are deleted

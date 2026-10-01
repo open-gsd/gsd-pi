@@ -237,6 +237,7 @@ Provider-specific exports (`streamAnthropic`, `streamGoogle`, etc.) are removed 
 ### 1. Full lazy provider loading (original ADR-005 proposal)
 
 Make all providers load on-demand via async dynamic imports, generalizing the Bedrock pattern. **Rejected** because:
+
 - SDK imports are already lazy — the heavy cost is handled
 - Provider implementation parsing is ~10-30ms total — not a bottleneck
 - Adds async complexity to the synchronous stream dispatch hot path
@@ -253,6 +254,7 @@ The current architecture works. This is a valid choice. The split is justified b
 ## Implementation Plan
 
 ### Wave 1: Split Model Catalog (Low-Medium Risk)
+
 1. Update `generate-models.ts` to emit per-provider files into `models/generated/`
 2. Create `models/index.ts` that imports all per-provider files and builds the same registry
 3. Extract `CAPABILITY_PATCHES` into `models/capability-patches.ts`
@@ -262,12 +264,14 @@ The current architecture works. This is a valid choice. The split is justified b
 7. Delete `models.generated.ts` and `models.custom.ts`
 
 ### Wave 2: Clean Up Barrel Export (Low Risk)
+
 1. Remove provider re-exports from `index.ts`
 2. Grep for direct provider imports from `"pi-ai"` across the codebase
 3. Migrate any found usages to use `stream()` / `streamSimple()` through the registry
 4. Verify build and tests
 
 ### Wave 3: Validate
+
 1. Run full test suite
 2. Verify extension registration (Ollama, Claude Code CLI) still works
 3. Verify `resetApiProviders()` test helper still works

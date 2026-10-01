@@ -697,6 +697,8 @@ export interface WidgetStateAccessors {
   isSessionSwitching(): boolean;
   /** Fully-qualified dispatched model ID (provider/id) set after model selection + hook overrides (#2899). */
   getCurrentDispatchedModelId(): string | null;
+  /** Dynamic-routing tier classifying the active unit ("light"|"standard"|"heavy"), if any (#2395). */
+  getCurrentUnitRoutingTier(): string | null;
 }
 
 function clearAutoOutcomeWidget(ctx: ExtensionContext): void {
@@ -1080,6 +1082,13 @@ function buildGsdProgressPayload(
 
   const unitLabel = unitId || [mid?.id, slice?.id, task?.id].filter(Boolean).join("/");
 
+  // Only known tiers cross the payload boundary — an unrecognized tier string
+  // is omitted rather than leaking into the typed widget state (#2395).
+  const routingTier = accessors.getCurrentUnitRoutingTier();
+  const dynamicRoutingTier = routingTier === "light" || routingTier === "standard" || routingTier === "heavy"
+    ? routingTier
+    : undefined;
+
   return {
     phase,
     modeTag,
@@ -1091,6 +1100,7 @@ function buildGsdProgressPayload(
     elapsed,
     eta: etaShort,
     model: accessors.getCurrentDispatchedModelId() ?? undefined,
+    dynamicRoutingTier,
     healthSummary,
     path: accessors.getBasePath(),
     widgetMode: mode,

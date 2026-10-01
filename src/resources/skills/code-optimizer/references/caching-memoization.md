@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Missing Memoization
+
 ```
 # Expensive computations without caching
 def\s+\w+\(.*\).*:\s*\n.*for.*for      (Python: expensive function without @lru_cache)
@@ -17,6 +18,7 @@ const\s+\w+\s*=\s*\w+\.sort\(          (sorting on every render)
 ```
 
 ### Cache Without Invalidation
+
 ```
 cache\s*=\s*\{\}                        (cache without TTL or max size)
 _cache\s*=\s*\{\}                       (module cache without eviction)
@@ -26,6 +28,7 @@ CACHE_TTL.*=.*(?:86400|3600.*24)       (very long TTL - stale data risk)
 ```
 
 ### Redundant API/DB Calls
+
 ```
 # Same query executed multiple times
 \.query\(.*same.*\.query\(             (duplicate queries)
@@ -37,6 +40,7 @@ componentDidMount.*fetch               (fetch without caching layer)
 ```
 
 ### Over-Caching
+
 ```
 # Caching things that change frequently
 cache.*user.*session                   (caching session-specific data)
@@ -47,6 +51,7 @@ cache\[.*\]\s*=\s*.*large             (large objects in cache)
 ```
 
 ### Missing HTTP Caching
+
 ```
 # API responses without cache headers
 res\.json\(                            (check if Cache-Control is set)
@@ -58,6 +63,7 @@ nginx.*location.*static               (check expires/cache-control)
 ```
 
 ### Computed Properties Recalculated
+
 ```
 # Getters that compute on every access
 get\s+\w+\(\)\s*\{.*return.*\.filter   (getter computing on each access)

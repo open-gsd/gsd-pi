@@ -69,6 +69,7 @@ export type {
 	LsToolCallEvent,
 	MessageRenderer,
 	MessageRenderOptions,
+	PhaseChangeEvent,
 	ProviderConfig,
 	ProviderModelConfig,
 	ReadToolCallEvent,
@@ -117,9 +118,11 @@ export {
 	isReadToolResult,
 	isToolCallEventType,
 	isWriteToolResult,
+	setBeforeAgentStartContext,
 	wrapRegisteredTool,
 	wrapRegisteredTools,
 } from "./core/extensions/index.js";
+export type { BeforeAgentStartDispatchContext } from "./core/extensions/index.js";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.js";
 export { convertToLlm } from "./core/messages.js";

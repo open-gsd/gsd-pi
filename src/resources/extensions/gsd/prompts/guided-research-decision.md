@@ -38,6 +38,7 @@ Once the answer is captured:
 
 1. Make sure `.gsd/runtime/` exists: `mkdir -p .gsd/runtime/`
 2. Write `.gsd/runtime/research-decision.json` containing:
+
    ```json
    {
      "decision": "research" | "skip",
@@ -45,19 +46,24 @@ Once the answer is captured:
      "source": "research-decision"
    }
    ```
+
    - Use `"research"` if the user picked "Yes" or answered yes/y in plain text
    - Use `"skip"` if the user picked "Skip" or answered no/n
    - Always include `"source": "research-decision"`
    - Optional for ambiguous or "Other / let me explain" answers: add an `inference_note` field to the JSON. Do not put inference text in chat.
 3. Print exactly one of these one-line confirmations in chat:
+
 ```text
 Research decision: research
 Research decision: skip
 ```
+
 4. Say exactly:
+
 ```text
 Research decision recorded.
 ```
+
 Nothing else.
 
 ---

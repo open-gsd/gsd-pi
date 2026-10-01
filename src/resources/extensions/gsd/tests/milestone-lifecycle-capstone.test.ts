@@ -34,6 +34,9 @@ import {
   type MilestoneCompletionCloseout,
 } from "../milestone-lifecycle-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
+import { handleCompleteSlice } from "../tools/complete-slice.ts";
+import { handlePlanSlice } from "../tools/plan-slice.ts";
+import { handleReplanSlice } from "../tools/replan-slice.ts";
 import {
   grantTaskWaiver,
   recordTaskRequirementDisposition,
@@ -43,6 +46,7 @@ import {
   type ValidateMilestoneParams,
 } from "../tools/validate-milestone.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
+import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
 
 interface CapstoneFixture {
   root: string;
@@ -201,7 +205,7 @@ function currentSourceRevision(root: string): string {
   return source.snapshot.aggregateRevision;
 }
 
-function createFixture(): CapstoneFixture {
+function createFixture(input: { taskWaiverScope?: string } = {}): CapstoneFixture {
   const root = mkdtempSync(join(tmpdir(), "gsd-milestone-capstone-"));
   tempDirs.add(root);
   mkdirSync(join(root, ".gsd", "milestones", "M001"), { recursive: true });
@@ -284,7 +288,7 @@ function createFixture(): CapstoneFixture {
     invocation: invocation("fixture/milestone-capstone/task-waiver"),
     lifecycleId: lifecycleId("task", "S01", "T02"),
     requirementId: "REQ-T02-CANCEL",
-    scope: "M001/S01/T02 cancellation",
+    scope: input.taskWaiverScope ?? "M001/S01/T02 cancellation",
     rationale: "T02 is intentionally omitted.",
     grantedByActorType: "policy",
   });
@@ -635,4 +639,129 @@ test("different-key multiprocess completion allows one winner and one typed reje
   assert.equal(rejected[0]?.error?.code, "GSD_REVISION_CONFLICT");
   assert.equal(row("SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'milestone.complete'").count, 1);
   assert.equal(row("SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'milestone.completed'").count, 1);
+});
+
+test("replan-cancelled task closes and reopens its milestone through the plan-reconciliation waiver", { concurrency: false }, async () => {
+  // #2346/#2432/#2451: a replan that removes a pending task must mint the
+  // task-cancellation authorization closeout demands, so the replanned slice
+  // completes and the milestone closes without manual waiver surgery.
+  const root = mkdtempSync(join(tmpdir(), "gsd-milestone-capstone-"));
+  tempDirs.add(root);
+  mkdirSync(join(root, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# M001\n");
+  writeFileSync(join(root, "src", "input.ts"), "export const input = true;\n");
+  writeFileSync(join(root, "source.ts"), "export const source = 'capstone-r1';\n");
+  runGit(root, ["init"]);
+  runGit(root, ["config", "user.email", "test@example.com"]);
+  runGit(root, ["config", "user.name", "Test"]);
+  runGit(root, ["add", "source.ts"]);
+  runGit(root, ["commit", "-m", "fixture r1"]);
+
+  const dbPath = join(root, ".gsd", "gsd.db");
+  assert.equal(openDatabase(dbPath), true);
+  insertMilestone({ id: "M001", title: "Milestone lifecycle capstone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Replanned Slice", status: "pending" });
+
+  const task = (taskId: string, title: string) => ({
+    taskId,
+    title,
+    description: `${title} description`,
+    estimate: "30m",
+    files: ["src/input.ts"],
+    verify: "node --test",
+    inputs: ["src/input.ts"],
+    expectedOutput: ["src/input.ts"],
+  });
+  const planned = await handlePlanSlice({
+    milestoneId: "M001",
+    sliceId: "S01",
+    goal: "Seed a slice whose pending work a replan will cancel.",
+    tasks: [task("T01", "Delivered blocker"), task("T02", "Superseded work")],
+  }, root, invocation("capstone/replan/plan"));
+  assert.ok(!("error" in planned), `planning failed: ${"error" in planned ? planned.error : ""}`);
+
+  // Publish T01 with a full verdict-backed completion proof, then remove T02
+  // through the replan removal path under test.
+  seedSliceCompletionAuthority({
+    milestoneId: "M001",
+    sliceId: "S01",
+    completedTaskIds: ["T01"],
+  });
+  const replanned = await handleReplanSlice({
+    milestoneId: "M001",
+    sliceId: "S01",
+    blockerTaskId: "T01",
+    blockerDescription: "The original approach is blocked.",
+    whatChanged: "Cancel superseded T02; T01 covers the remaining work.",
+    updatedTasks: [],
+    removedTaskIds: ["T02"],
+  }, root, invocation("capstone/replan/replan"));
+  assert.ok(!("error" in replanned), `replan failed: ${"error" in replanned ? replanned.error : ""}`);
+
+  const replanWaiver = row(`
+    SELECT waiver.waiver_id
+    FROM workflow_waivers waiver
+    JOIN workflow_operations operation ON operation.operation_id = waiver.operation_id
+    WHERE waiver.requirement_id = 'plan-omission:M001/S01/T02'
+      AND waiver.waiver_status = 'active'
+      AND operation.operation_type = 'workflow.slice.replan'
+  `);
+  assert.ok(replanWaiver.waiver_id, "the replan must mint an active plan-reconciliation Waiver");
+
+  // The replanned slice completes against the minted authorization…
+  const sliceCompleted = await handleCompleteSlice({
+    sliceId: "S01",
+    milestoneId: "M001",
+    sliceTitle: "Replanned Slice",
+    oneLiner: "Delivered the surviving work and cancelled the superseded task.",
+    narrative: "T01 delivered; T02 was removed by replan.",
+    verification: "Focused tests pass.",
+    uatContent: "## Smoke Test\n\nVerify happy path.",
+    operationalReadiness: "- Health signal: smoke check passes\n- Failure signal: test failure",
+  }, root, invocation("capstone/replan/complete-slice"));
+  assert.ok(!("error" in sliceCompleted), `slice completion failed: ${"error" in sliceCompleted ? sliceCompleted.error : ""}`);
+  // Plan-slice seeded the other owner turns' gates; this fixture exercises the
+  // waiver chain, not those turns, so drop their still-pending rows the way
+  // the pre-existing capstone fixture's gate-free shape does.
+  db().prepare(`
+    DELETE FROM quality_gates
+    WHERE milestone_id = 'M001' AND status = 'pending'
+  `).run();
+
+  // …and milestone closeout resolves the writer's authorization forms.
+  await validate(root, "capstone/replan/validate");
+  const completed = completeMilestone(
+    completionRequest("capstone/replan/complete", currentSourceRevision(root)),
+  );
+  assert.equal(completed.status, "committed");
+  assert.deepEqual(completed.cancelledTaskIds, ["S01/T02"]);
+  assert.deepEqual(completed.waiverIds, [String(replanWaiver.waiver_id)]);
+
+  // Full-redo reopen revokes the plan-reconciliation waiver forms too (#2432).
+  const reopened = reopenMilestone(reopenRequest("capstone/replan/reopen"));
+  assert.equal(reopened.status, "committed");
+  assert.equal(row(`
+    SELECT waiver_status FROM workflow_waivers WHERE waiver_id = '${String(replanWaiver.waiver_id)}'
+  `).waiver_status, "revoked");
+  assert.equal(row(`
+    SELECT disposition FROM workflow_requirement_dispositions
+    WHERE requirement_id = 'plan-omission:M001/S01/T02'
+    ORDER BY project_revision DESC LIMIT 1
+  `).disposition, "unsatisfied");
+});
+
+test("closeout rejects a task-recovery Waiver wearing the plan-reconciliation scope", { concurrency: false }, async () => {
+  // #2432 correlation guard: a task.waiver.grant Waiver scoped like the
+  // plan-reconciliation form but carrying an unrelated requirement must not
+  // authorize closeout — otherwise full-redo reopen (which pins the
+  // plan-omission requirement) would leave it active.
+  const fixture = createFixture({ taskWaiverScope: "task:M001/S01/T02" });
+  await validate(fixture.root, "capstone/decoy/validate");
+  assert.throws(
+    () => completeMilestone(
+      completionRequest("capstone/decoy/complete", fixture.sourceRevision),
+    ),
+    /Cancelled Task S01\/T02 requires a current Waiver disposition/,
+  );
 });

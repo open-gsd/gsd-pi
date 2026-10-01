@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### N+1 Query Problems
+
 ```
 # ORM loops - querying inside iterations
 for.*in.*\.all\(\)
@@ -23,6 +24,7 @@ await.*find.*inside.*loop
 ```
 
 ### Unoptimized Queries
+
 ```
 SELECT \*
 SELECT.*FROM.*WITHOUT.*WHERE  (full table scans)
@@ -36,6 +38,7 @@ COUNT\(\*\).*WHERE  (count with filter vs indexed count)
 ```
 
 ### Missing Indexes (Heuristic)
+
 ```
 WHERE.*=.*AND.*=    (composite queries without composite index)
 ORDER BY.*multiple columns
@@ -44,6 +47,7 @@ JOIN.*ON.*without index hint
 ```
 
 ### ORM Anti-patterns
+
 ```
 \.save\(\).*inside.*loop    (batch update instead)
 \.create\(\).*inside.*loop  (bulk_create instead)
@@ -55,6 +59,7 @@ if.*\.exists\(\).*\.first\(\)  (double query)
 ```
 
 ### Connection Management
+
 ```
 # Missing connection pooling
 create_engine\(.*pool_size  (check if pool is configured)

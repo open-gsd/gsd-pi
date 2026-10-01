@@ -96,13 +96,17 @@ completed_at: {{date}}
      Be specific and concrete — this is the most valuable context you can transfer. -->
 
 ### What the next slice should know
+
 - {{insightThatWouldHelpDownstreamWork}}
 
 ### What's fragile
+
 - {{fragileAreaOrThinImplementation}} — {{whyItMatters}}
 
 ### Authoritative diagnostics
+
 - {{whereAFutureAgentShouldLookFirst}} — {{whyThisSignalIsTrustworthy}}
 
 ### What assumptions changed
+
 - {{originalAssumption}} — {{whatActuallyHappened}}

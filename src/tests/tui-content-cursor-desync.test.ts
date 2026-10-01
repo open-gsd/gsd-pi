@@ -311,10 +311,15 @@ describe("TUI cursor tracking regression (#3764)", () => {
     (tui as any).doRender();
 
     assert.ok(terminal.writtenData.length >= 1, "shrink render should produce a differential buffer");
-    assert.ok(
-      terminal.writtenData[0].includes("\x1b[2J\x1b[22;1H"),
-      `short shrink should redraw at the bottom anchor, got ${JSON.stringify(terminal.writtenData[0])}`,
-    );
+    // #2415: clean repaints erase per-line instead of \x1b[2J. The shrink
+    // still homes to row 1 and erases every screen row exactly once
+    // (21 above the block + 3 written), leaving the block bottom-anchored
+    // on rows 22..24 of the 24-row terminal.
+    const shrinkBuffer = terminal.writtenData[0];
+    assert.ok(shrinkBuffer.includes("\x1b[1;1H"), `expected the repaint to home to row 1, got ${JSON.stringify(shrinkBuffer)}`);
+    assert.ok(!shrinkBuffer.includes("\x1b[2J"), `clean repaints must not emit \\x1b[2J, got ${JSON.stringify(shrinkBuffer)}`);
+    const eraseCount = (shrinkBuffer.match(/\x1b\[2K/g) ?? []).length;
+    assert.strictEqual(eraseCount, 24, `expected one \\x1b[2K per screen row, got ${eraseCount} in ${JSON.stringify(shrinkBuffer)}`);
 
     // After shrink, hardwareCursorRow should be at IME position again
     assert.strictEqual(

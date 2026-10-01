@@ -17,7 +17,12 @@ export interface BetaMessage {
 	content: BetaContentBlock[];
 	model: string;
 	stop_reason: "end_turn" | "max_tokens" | "stop_sequence" | "tool_use" | null;
-	usage: { input_tokens: number; output_tokens: number };
+	usage: {
+		input_tokens: number;
+		output_tokens: number;
+		cache_read_input_tokens: number | null;
+		cache_creation_input_tokens: number | null;
+	};
 }
 
 export type BetaContentBlock =

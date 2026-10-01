@@ -715,6 +715,16 @@ function parseModifyOtherKeysSequence(data: string): ParsedModifyOtherKeysSequen
 }
 
 /**
+ * True when data is an xterm modifyOtherKeys frame (CSI 27 ; modifiers ; codepoint ~).
+ * Used by ProcessTerminal to confirm the mode actually took effect: once
+ * modifyOtherKeys mode 2 is active, a modified printable key arrives in this
+ * format, so observing one frame is direct evidence the terminal honours it.
+ */
+export function isModifyOtherKeysFrame(data: string): boolean {
+	return parseModifyOtherKeysSequence(data) !== null;
+}
+
+/**
  * Match xterm modifyOtherKeys format: CSI 27 ; modifiers ; keycode ~
  * This is used by terminals when Kitty protocol is not enabled.
  * Modifier values are 1-indexed: 2=shift, 3=alt, 5=ctrl, etc.

@@ -19,7 +19,7 @@ import { shouldRedirectAutoToHeadless } from './cli-auto-routing.js'
 import { resolvePrintModeExitCode } from './print-mode-exit.js'
 import { printHelp, printSubcommandHelp } from './help-text.js'
 import { applySecurityOverrides } from './security-overrides.js'
-import { validateConfiguredModel } from './startup-model-validation.js'
+import { formatModelFallbackNotice, validateConfiguredModel } from './startup-model-validation.js'
 import { migrateAnthropicDefaultToClaudeCode, migrateGeminiCliDefaultToAntigravity } from './provider-migrations.js'
 import { applyModelOverride } from './cli-model-override.js'
 import {
@@ -814,7 +814,9 @@ if (isPrintMode) {
   // Validate configured model AFTER extensions have registered their models (#2626).
   // Before this, extension-provided models (e.g. claude-code/*) were not yet in the
   // registry, causing the user's valid choice to be silently overwritten.
-  validateConfiguredModel(modelRegistry, settingsManager)
+  const modelValidation = validateConfiguredModel(modelRegistry, settingsManager)
+  const modelFallbackNotice = formatModelFallbackNotice(modelValidation)
+  if (modelFallbackNotice) process.stderr.write(`${modelFallbackNotice}\n`)
   await reapplyValidatedModelOnFallback(session, modelRegistry, settingsManager, modelFallbackMessage)
   printExtensionErrors(extensionsResult.errors)
   printExtensionWarnings(extensionsResult.warnings)
@@ -954,7 +956,9 @@ markStartup('createAgentSession')
 // Validate configured model AFTER extensions have registered their models (#2626).
 // Before this, extension-provided models (e.g. claude-code/*) were not yet in the
 // registry, causing the user's valid choice to be silently overwritten.
-validateConfiguredModel(modelRegistry, settingsManager)
+const modelValidation = validateConfiguredModel(modelRegistry, settingsManager)
+const interactiveModelFallbackNotice = formatModelFallbackNotice(modelValidation)
+if (interactiveModelFallbackNotice) process.stderr.write(`${interactiveModelFallbackNotice}\n`)
 await reapplyValidatedModelOnFallback(session, modelRegistry, settingsManager, interactiveFallbackMsg)
 printExtensionErrors(extensionsResult.errors)
 printExtensionWarnings(extensionsResult.warnings)

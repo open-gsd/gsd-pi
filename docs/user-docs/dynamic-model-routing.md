@@ -183,6 +183,7 @@ score = Σ(weight × capability) / Σ(weights)
 | `complete-slice`, `run-uat` | instruction (0.8), speed (0.7) |
 
 For `execute-task`, requirements are further refined by task metadata signals:
+
 - Tags like `docs`, `config`, `readme` → boost instruction weight
 - Keywords like `concurrency`, `compatibility` → boost debugging and reasoning
 - Keywords like `migration`, `architecture` → boost reasoning and coding
@@ -230,6 +231,7 @@ Dynamic routing [S]: claude-sonnet-4-6 (standard complexity, multiple steps)
 ```
 
 The `selectionMethod` field in the routing decision indicates which path was taken:
+
 - `"capability-scored"` — capability scoring selected the winner
 - `"tier-only"` — cheapest in tier (or explicit pin) was used
 
