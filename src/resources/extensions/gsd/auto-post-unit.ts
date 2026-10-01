@@ -370,6 +370,11 @@ const UNSAFE_VERIFY_COMMAND_GUIDANCE = [
   "Rewrite the slice plan so every task has safe, mechanically runnable Verify commands.",
   "Verify commands must not use shell pipes, redirects, semicolons, backticks, command substitution, output trimming, or grep regex alternation with \"|\".",
   "Use package scripts, node:test files, or separate simple commands joined only with \"&&\" when multiple checks are needed.",
+  // The two rules behind the "does not look like a runnable command" rejection
+  // in isLikelyCommand (verification-gate.ts) — stated so the repaired plan
+  // stops repeating prose-pattern statements (#2290).
+  "When a Verify statement is rejected with \"does not look like a runnable command\", it lacked command evidence: start it with a known runnable command such as npm, node, tsx, python, pytest, grep, rg, git, gh, make, cargo, go, docker, curl, or test (illustrative, not exhaustive); a \"/\", \"./\" or \"../\" path prefix is evidence too but still goes through the same prose checks as a known command, a \"-\" flag token is evidence. Only short all-lowercase plain-word statements without marker words (see the next rule) may pass without a known prefix — do not rely on that fallback; use a known command.",
+  "Even with a known command prefix, a statement with three or more words after the command reads as prose when any unquoted word is a marker word such as \"the\", \"an\", \"is\", \"are\", \"that\", \"which\", \"returns\", or \"contains\" (quoted words are data and never match markers, but they still count toward the word minimum), or when four or more plain-word arguments follow the command (plain words are letters and digits plus apostrophes, hyphens, and underscores, with trailing punctuation ignored — a flag, path, dotted, or other shell-like token among them breaks the run and skips this second rule).",
 ];
 
 function isUnsafeVerifyCommandCheck(check: PreExecutionCheckJSON): boolean {

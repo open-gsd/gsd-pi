@@ -402,13 +402,114 @@ describe("TUI mid-buffer reflow", () => {
 			"same-length reflow reaching into committed scrollback must trigger a full repaint",
 		);
 
-		const currentFrame = terminal.getScrollBuffer().slice(-reflowedLines.length);
-		assert.deepStrictEqual(currentFrame, reflowedLines);
+		// The repaint is viewport-bounded (#2307): the flushed scrollback prefix is
+		// frozen — it keeps the pre-reflow snapshot and gains no re-committed
+		// copies — while the live region shows exactly the bottom of the reflowed
+		// frame, with the moved boundary line present exactly once.
 		assert.strictEqual(
-			currentFrame.filter((line) => line === "BOUNDARY").length,
-			1,
-			"moved boundary line should not be duplicated across the current frame",
+			terminal.getScrollBuffer().length,
+			reflowedLines.length,
+			"repaint must not append re-committed history to the scroll buffer",
 		);
+		assert.deepStrictEqual(terminal.getViewport(), reflowedLines.slice(-5));
+		assert.strictEqual(
+			terminal.getViewport().filter((line) => line === "BOUNDARY").length,
+			1,
+			"moved boundary line should not be duplicated in the live region",
+		);
+
+		tui.stop();
+	});
+});
+
+describe("TUI full repaint scrollback safety (issue #2307)", () => {
+	// A transcript taller than the screen has a committed scrollback prefix.
+	// \x1b[2J can only erase the visible screen, so a clean repaint that rewrites
+	// the transcript from its first row scrolls the terminal and re-commits the
+	// flushed prefix as duplicates (issue #2307). Repaints must touch only the
+	// visible viewport once history has been flushed.
+
+	function tallLines(): string[] {
+		return ["Line 0", "MARKER", ...Array.from({ length: 10 }, (_, i) => `Line ${i + 2}`)];
+	}
+
+	async function setupTallTranscript(): Promise<{
+		terminal: VirtualTerminal;
+		tui: TUI;
+		component: TestComponent;
+	}> {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = tallLines();
+		tui.start();
+		await terminal.waitForRender();
+		return { terminal, tui, component };
+	}
+
+	function countMarker(terminal: VirtualTerminal): number {
+		return terminal.getScrollBuffer().filter((line) => line === "MARKER").length;
+	}
+
+	it("repeated mid-buffer reflows never re-commit flushed scrollback", async () => {
+		const { terminal, tui, component } = await setupTallTranscript();
+		assert.strictEqual(
+			countMarker(terminal),
+			1,
+			"sanity: first render commits the marker to scrollback exactly once",
+		);
+
+		let lines = tallLines();
+		for (let round = 1; round <= 3; round++) {
+			const redrawsBefore = tui.fullRedraws;
+			// Re-insert a line inside committed scrollback (index 2 < viewportTop),
+			// the streaming word-wrap scenario from issue #2307.
+			lines = [...lines.slice(0, 2), `FENCE ${round}`, ...lines.slice(2)];
+			component.lines = lines;
+			tui.requestRender();
+			await terminal.waitForRender();
+
+			assert.ok(tui.fullRedraws > redrawsBefore, `round ${round}: reflow must take the clean-repaint path`);
+			assert.strictEqual(
+				countMarker(terminal),
+				1,
+				`round ${round}: repaint must not re-commit flushed scrollback`,
+			);
+		}
+
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 11"),
+			"latest content stays visible after bounded repaints",
+		);
+
+		tui.stop();
+	});
+
+	it("width resize in a tall transcript repaints only the viewport", async () => {
+		const { terminal, tui } = await setupTallTranscript();
+		assert.strictEqual(countMarker(terminal), 1);
+
+		const redrawsBefore = tui.fullRedraws;
+		terminal.resize(60, 5);
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "width change must still take the clean-repaint path");
+		assert.strictEqual(countMarker(terminal), 1, "resize repaint must not re-commit flushed scrollback");
+		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after resize");
+
+		tui.stop();
+	});
+
+	it("forced render with content on screen repaints only the viewport", async () => {
+		const { terminal, tui } = await setupTallTranscript();
+		assert.strictEqual(countMarker(terminal), 1);
+
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		assert.strictEqual(countMarker(terminal), 1, "forced repaint must not re-commit flushed scrollback");
+		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after forced render");
 
 		tui.stop();
 	});

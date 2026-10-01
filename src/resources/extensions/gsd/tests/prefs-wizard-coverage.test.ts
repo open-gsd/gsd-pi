@@ -12,7 +12,7 @@ import {
   serializePreferencesToFrontmatter,
 } from "../commands-prefs-wizard.ts";
 import { parsePreferencesMarkdown, validatePreferences } from "../preferences.ts";
-import { KNOWN_PREFERENCE_KEYS } from "../preferences-types.ts";
+import { KNOWN_PREFERENCE_KEYS, GSD_MODEL_PHASE_KEYS } from "../preferences-types.ts";
 
 const PREF_SAMPLE_VALUES: Record<string, unknown> = {
   version: 1,
@@ -434,6 +434,137 @@ test("workspace wizard does not save parent mode when no repository is declared"
 
     const saved = readFileSync(prefsPath, "utf-8");
     assert.doesNotMatch(saved, /mode: parent/, "parent mode must not persist without a declared repo");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("models wizard prompts for every canonical phase including uat", async () => {
+  // Regression: the wizard kept a hand-maintained phase list that omitted `uat`,
+  // so a uat model could only be set by hand-editing PREFERENCES.md. The list is
+  // now derived from GSD_MODEL_PHASE_KEYS; assert every canonical phase is prompted.
+  const dir = mkdtempSync(join(tmpdir(), "gsd-prefs-wizard-phases-"));
+  const prefsPath = join(dir, "PREFERENCES.md");
+
+  const providerPrompts: string[] = [];
+  let topMenuVisits = 0;
+
+  const ctx = {
+    ui: {
+      notify() {},
+      select: async (label: string, options: string[]) => {
+        if (label === "GSD Preferences") {
+          topMenuVisits += 1;
+          if (topMenuVisits === 1) {
+            const models = options.find((o) => o.startsWith("Models"));
+            assert.ok(models, "wizard menu must offer a Models category");
+            return models;
+          }
+          return "── Save & Exit ──";
+        }
+        // Record which phases the model picker asked about.
+        if (label.includes("choose provider:")) providerPrompts.push(label);
+        if (options.includes("(keep current)")) return "(keep current)";
+        return options[options.length - 1];
+      },
+      input: async () => null,
+    },
+    // A non-empty registry is required to take the provider/model picker branch
+    // rather than the free-text fallback.
+    modelRegistry: {
+      getAvailable: () => [{ provider: "test-provider", id: "test-model" }],
+    },
+    waitForIdle: async () => {},
+    reload: async () => {},
+  } as any;
+
+  try {
+    await handlePrefsWizard(ctx, "project", {}, { pathOverride: prefsPath });
+
+    for (const phase of GSD_MODEL_PHASE_KEYS) {
+      assert.ok(
+        providerPrompts.some((l) => l.includes(`Model for ${phase} phase`)),
+        `models wizard must prompt for the "${phase}" phase; prompts seen:\n${providerPrompts.join("\n")}`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("models wizard preserves the thinking sub-field when re-selecting a model", async () => {
+  // Regression: a phase configured as the object form `{ model, thinking }`
+  // (ADR-026 keeps model and thinking together) was rewritten as a bare string
+  // on every re-selection, silently dropping the user's thinking level. Drive the
+  // wizard to re-pick the `planning` model and assert `thinking: xhigh` survives.
+  const dir = mkdtempSync(join(tmpdir(), "gsd-prefs-wizard-thinking-"));
+  const prefsPath = join(dir, "PREFERENCES.md");
+
+  let topMenuVisits = 0;
+
+  const ctx = {
+    ui: {
+      notify() {},
+      select: async (label: string, options: string[]) => {
+        if (label === "GSD Preferences") {
+          topMenuVisits += 1;
+          if (topMenuVisits === 1) {
+            const models = options.find((o) => o.startsWith("Models"));
+            assert.ok(models, "wizard menu must offer a Models category");
+            return models;
+          }
+          return "── Save & Exit ──";
+        }
+        // Only change the `planning` phase; keep every other phase as-is.
+        // Step 1 label: "Model for planning phase (current: …) — choose provider:"
+        if (label.includes("Model for planning phase") && label.includes("choose provider:")) {
+          const provider = options.find((o) => o.startsWith("test-provider"));
+          assert.ok(provider, `expected the test provider in the picker; got:\n${options.join("\n")}`);
+          return provider;
+        }
+        // Step 2 label: "Model for planning phase (current: …) — test-provider:"
+        if (label.includes("Model for planning phase")) {
+          return "new-model";
+        }
+        if (options.includes("(keep current)")) return "(keep current)";
+        return options[options.length - 1];
+      },
+      input: async () => null,
+    },
+    modelRegistry: {
+      getAvailable: () => [{ provider: "test-provider", id: "new-model" }],
+    },
+    waitForIdle: async () => {},
+    reload: async () => {},
+  } as any;
+
+  try {
+    await handlePrefsWizard(
+      ctx,
+      "project",
+      { models: { planning: { model: "old-provider/old-model", thinking: "xhigh" } } },
+      { pathOverride: prefsPath },
+    );
+
+    const saved = readFileSync(prefsPath, "utf-8");
+    // The model half must be updated...
+    assert.match(saved, /planning:\s*\n\s*model: test-provider\/new-model/m);
+    // ...and the thinking half must survive the rewrite.
+    assert.match(
+      saved,
+      /planning:\s*\n\s*model: test-provider\/new-model\s*\n\s*thinking: xhigh/m,
+      `thinking: xhigh must be preserved when re-selecting a model; got:\n${saved}`,
+    );
+
+    // Round-trip: the parser must still see a well-formed object with thinking.
+    const parsed = parsePreferencesMarkdown(saved);
+    assert.notEqual(parsed, null);
+    const { errors, preferences } = validatePreferences(parsed!);
+    assert.deepEqual(errors, []);
+    assert.deepEqual(preferences.models?.planning, {
+      model: "test-provider/new-model",
+      thinking: "xhigh",
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

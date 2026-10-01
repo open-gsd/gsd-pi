@@ -124,6 +124,150 @@ test("evidence-xref: claimed pass with failing gsd_exec exit_code is still an er
   assert.match(mismatches[0].reason, /Claimed exitCode=0 but actual exitCode=1/);
 });
 
+test("evidence-xref: #2326 compound-script mismatch states execution provenance, not subcommand failure", () => {
+  resetEvidence();
+
+  // Issue #2326: one gsd_exec runs a compound script — the audit succeeds but
+  // Jest fails, so the execution's FINAL exit code is non-zero. Evidence claims
+  // the audit subcommand with exitCode 0. The rejection must stay fail-closed
+  // but its diagnostic must make the provenance explicit.
+  const script = [
+    "set -eu",
+    "npx audit-mjs",
+    "npx jest --coverage",
+  ].join("\n");
+  recordToolCall("tc-exec-compound-2326", "gsd_exec", {
+    script,
+    purpose: "T02: audit then test",
+  });
+  recordToolResult("tc-exec-compound-2326", "gsd_exec", gsdExecResult(1), true);
+
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npx audit-mjs", exitCode: 0, verdict: "passed" }],
+    getEvidence(),
+  );
+
+  // (a) still rejects, fail-closed.
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  // (b) includes the FULL persisted script text, not just the matched subcommand.
+  assert.match(mismatches[0].reason, /npx audit-mjs/);
+  assert.match(mismatches[0].reason, /npx jest --coverage/);
+  assert.match(mismatches[0].reason, /set -eu/);
+  // (c) identifies the backing execution reference.
+  assert.match(mismatches[0].reason, /tc-exec-compound-2326/);
+  // (d) states the exit code is the compound execution's FINAL exit code.
+  assert.match(mismatches[0].reason, /FINAL exit code of the whole script/);
+  assert.match(mismatches[0].reason, /not the exit code of/);
+  // Guidance line: passing evidence items must be independently executed.
+  assert.match(
+    mismatches[0].reason,
+    /each passing closeout evidence item must come from an independently executed command/i,
+  );
+});
+
+test("evidence-xref: #2326 single-command mismatch keeps the existing diagnostic", () => {
+  resetEvidence();
+
+  recordToolCall("tc-exec-single-2326", "gsd_exec", {
+    script: "node --test tests/verify-s01.test.js",
+    purpose: "verification",
+  });
+  recordToolResult("tc-exec-single-2326", "gsd_exec", gsdExecResult(1), true);
+
+  const mismatches = crossReferenceEvidence(
+    [{ command: "node --test tests/verify-s01.test.js", exitCode: 0, verdict: "passed" }],
+    getEvidence(),
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  // Control: exact single-command match keeps the original message — no
+  // compound provenance language, no guidance suffix.
+  assert.equal(mismatches[0].reason, "Claimed exitCode=0 but actual exitCode=1");
+});
+
+test("evidence-xref: #2326 codex — cd-chained command is not wrapper-equivalent; chain gets compound provenance", () => {
+  resetEvidence();
+
+  // Codex round: `cd <dir> && <claim> && other` must not be treated as
+  // wrapper-equivalent — the recorded exit code may belong to a later chain
+  // element, so the diagnostic must carry compound provenance.
+  const chain = "cd /tmp && npm test && false && npm test";
+  recordToolCall("tc-exec-codex-chain", "gsd_exec", {
+    script: chain,
+    purpose: "verify",
+  });
+  recordToolResult("tc-exec-codex-chain", "gsd_exec", gsdExecResult(1), true);
+
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm test", exitCode: 0, verdict: "passed" }],
+    getEvidence(),
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  assert.match(mismatches[0].reason, /compound script/);
+  assert.match(mismatches[0].reason, /FINAL exit code of the whole script/);
+  assert.match(mismatches[0].reason, /cd \/tmp && npm test && false && npm test/);
+  // A mid-chain remainder must not sneak through the wrapper check either.
+  const midChain = crossReferenceEvidence(
+    [{ command: "false && npm test", exitCode: 0, verdict: "passed" }],
+    getEvidence(),
+  );
+  assert.equal(midChain.length, 1);
+  assert.equal(midChain[0].severity, "error");
+  assert.match(midChain[0].reason, /compound script/);
+});
+
+test("evidence-xref: #2326 codex — labeled exact-copy claim keeps the original diagnostic", () => {
+  resetEvidence();
+
+  recordToolCall("tc-exec-codex-label", "gsd_exec", {
+    script: "node --test tests/verify-s01.test.js",
+    purpose: "verification",
+    runtime: "bash",
+  });
+  recordToolResult("tc-exec-codex-label", "gsd_exec", gsdExecResult(1), true);
+
+  // The agent copies the recorded command verbatim — label line included.
+  const mismatches = crossReferenceEvidence(
+    [{
+      command: "gsd_exec bash: verification\nnode --test tests/verify-s01.test.js",
+      exitCode: 0,
+      verdict: "passed",
+    }],
+    getEvidence(),
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  assert.equal(mismatches[0].reason, "Claimed exitCode=0 but actual exitCode=1");
+});
+
+test("evidence-xref: #2326 codex — single-command arg mismatch is uncertain, not compound", () => {
+  resetEvidence();
+
+  recordToolCall("tc-exec-codex-args", "gsd_exec", {
+    script: "npm test -- --runInBand",
+    purpose: "test",
+  });
+  recordToolResult("tc-exec-codex-args", "gsd_exec", gsdExecResult(1), true);
+
+  const mismatches = crossReferenceEvidence(
+    [{ command: "npm test", exitCode: 0, verdict: "passed" }],
+    getEvidence(),
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  assert.match(mismatches[0].reason, /does not exactly match the recorded command/);
+  assert.match(mismatches[0].reason, /recorded: npm test -- --runInBand/);
+  assert.match(mismatches[0].reason, /exit code 1 belongs to that recorded command/);
+  assert.match(mismatches[0].reason, /must match the executed command exactly/);
+  assert.doesNotMatch(mismatches[0].reason, /compound/);
+});
+
 test("evidence-collector: gsd_uat_exec and MCP-namespaced variants are execution tools", () => {
   assert.equal(isExecutionToolName("gsd_uat_exec"), true);
   assert.equal(isExecutionToolName("mcp__gsd-workflow__gsd_uat_exec"), true);

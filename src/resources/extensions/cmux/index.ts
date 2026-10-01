@@ -37,6 +37,13 @@ export interface CmuxSidebarProgress {
 
 export type CmuxLogLevel = "info" | "progress" | "success" | "warning" | "error";
 
+/** `cmux new-split` prints the new surface id. Ignore empty and stub "ok" output. */
+function parseCreatedSurfaceId(stdout: string | null): string | null {
+  const text = stdout?.trim() ?? "";
+  if (!text || text === "ok" || /\s/.test(text)) return null;
+  return text;
+}
+
 export function detectCmuxEnvironment(
   env: NodeJS.ProcessEnv = process.env,
   socketExists: (path: string) => boolean = existsSync,
@@ -295,7 +302,7 @@ export class CmuxClient {
   }
 
   async listSurfaceIds(): Promise<string[]> {
-    const stdout = await this.runAsync(this.appendWorkspace(["list-surfaces", "--json", "--id-format", "both"]));
+    const stdout = await this.runAsync(this.appendWorkspace(["list-pane-surfaces", "--json", "--id-format", "both"]));
     const parsed = stdout ? parseJson(stdout) : null;
     return extractSurfaceIds(parsed);
   }
@@ -312,7 +319,8 @@ export class CmuxClient {
     const before = new Set(await this.listSurfaceIds());
     const args = ["new-split", direction];
     const scopedArgs = this.appendSurface(this.appendWorkspace(args), sourceSurfaceId);
-    await this.runAsync(scopedArgs);
+    const created = parseCreatedSurfaceId(await this.runAsync(scopedArgs));
+    if (created) return created;
     const after = await this.listSurfaceIds();
     for (const id of after) {
       if (!before.has(id)) return id;
@@ -371,13 +379,13 @@ export class CmuxClient {
 
   async sendSurface(surfaceId: string, text: string): Promise<boolean> {
     const payload = text.endsWith("\n") ? text : `${text}\n`;
-    const stdout = await this.runAsync(["send-surface", "--surface", surfaceId, payload]);
+    const stdout = await this.runAsync(["send", "--surface", surfaceId, payload]);
     return stdout !== null;
   }
 
   // Send Ctrl-C (ETX) to a surface to interrupt the running command.
   async sendInterrupt(surfaceId: string): Promise<boolean> {
-    const stdout = await this.runAsync(["send-surface", "--surface", surfaceId, "\x03"]);
+    const stdout = await this.runAsync(["send", "--surface", surfaceId, "\x03"]);
     return stdout !== null;
   }
 }

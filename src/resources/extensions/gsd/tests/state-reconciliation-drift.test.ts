@@ -844,8 +844,7 @@ function makeStaleRoadmapContent(slices: Array<{ id: string; title: string; done
 }
 
 test("ADR-017 (#5702): stale-render drift detected and repaired end-to-end", async (t) => {
-  t.skip("TODO(flat-phase): stale-render detection temporarily disabled during layout transition"); return;
-  const base = "";
+  const base = mkdtempSync(join(tmpdir(), "gsd-adr017-render-e2e-"));
   const sliceDir = join(base, ".gsd", "phases", "01-test");
   mkdirSync(sliceDir, { recursive: true });
   t.after(() => {
@@ -1004,7 +1003,6 @@ test("#1034: validation-blocked milestone summary drift returns blocker instead 
 });
 
 test("ADR-017 (#5702): stale-render detector reason strings match repair contract", (t) => {
-  t.skip("TODO(flat-phase): stale-render detection temporarily disabled during layout transition"); return;
   const base = mkdtempSync(join(tmpdir(), "gsd-adr017-render-reasons-"));
   const sliceDir = join(base, ".gsd", "phases", "01-test");
   mkdirSync(sliceDir, { recursive: true });
@@ -1040,15 +1038,14 @@ test("ADR-017 (#5702): stale-render detector reason strings match repair contrac
   const reasons = detectStaleRenders(base).map((entry) => entry.reason).sort();
 
   assert.deepEqual(reasons, [
-    "S01 is closed in DB but unchecked in roadmap",
+    "plan for M001/S01 differs from DB render intent (content drift in plan)",
     "S01 is complete with UAT in DB but UAT.md missing on disk",
     "S01 is complete with summary in DB but SUMMARY.md missing on disk",
     "T01 is complete with summary in DB but SUMMARY.md missing on disk",
-    "T01 is done in DB but unchecked in plan",
   ].sort());
 });
 
-test("ADR-017 (#5702): missing UAT.md clears stale full_uat_md from DB", { skip: true }, async (t) => {
+test("ADR-017 (#5702): missing UAT.md clears stale full_uat_md from DB", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-adr017-clear-uat-"));
   const sliceDir = join(base, ".gsd", "phases", "01-test");
   mkdirSync(sliceDir, { recursive: true });
@@ -1079,7 +1076,6 @@ test("ADR-017 (#5702): missing UAT.md clears stale full_uat_md from DB", { skip:
 });
 
 test("ADR-017 (#5702): stale-render plan repair works with descriptor-layout milestone dir", async (t) => {
-  t.skip("TODO(flat-phase): stale-render detection temporarily disabled during layout transition"); return;
   // Regression for bugbot finding: repairStaleRenderFromBasePath was passing the
   // raw dir segment (e.g. M001-DESCRIPTOR) straight to renderPlanCheckboxes, which
   // queries the DB as getSliceTasks("M001-DESCRIPTOR", …) → empty → throws.

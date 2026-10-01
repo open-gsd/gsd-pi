@@ -206,8 +206,8 @@ jobs:
             DELAY=$((DELAY * 2))
             if [ "${DELAY}" -gt 60 ]; then DELAY=60; fi
           done
-          echo "::error::Publish step succeeded but @opengsd/gsd-pi@${VERSION} was not installable from npm after retries. Check registry tarball propagation before continuing."
-          exit 1
+          echo "::warning::Publish step succeeded but @opengsd/gsd-pi@${VERSION} was not installable from npm after retries."
+          echo "::warning::Continuing to the dedicated prerelease-verify job, which performs the authoritative post-publish install and regression validation."
 
   prerelease-verify:
     name: Verify @${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} package
@@ -229,17 +229,28 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: pnpm
 
-      - name: Install published @opengsd/gsd-pi@${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} globally (with registry propagation retry)
+      - name: Install published @opengsd/gsd-pi@${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }} globally (with extended registry propagation retry)
         env:
           PUBLISH_VERSION: ${{ needs.prerelease-publish.outputs.version }}
           CHANNEL: ${{ github.event.inputs.channel == 'latest' && 'dev' || github.event.inputs.channel }}
         run: |
-          for i in 1 2 3 4 5 6; do
-            npm install -g "@opengsd/gsd-pi@${PUBLISH_VERSION}" && exit 0
-            echo "Attempt $i failed - waiting 10s for npm registry propagation..."
-            sleep 10
+          DELAY=10
+          for i in $(seq 1 12); do
+            CACHE=$(mktemp -d "${RUNNER_TEMP:-/tmp}/gsd-npm-cache-XXXXXX")
+            if npm install -g "@opengsd/gsd-pi@${PUBLISH_VERSION}" --prefer-online --cache "${CACHE}"; then
+              rm -rf "${CACHE}"
+              exit 0
+            fi
+            rm -rf "${CACHE}"
+            if [ "${i}" = "12" ]; then
+              break
+            fi
+            echo "Attempt ${i} failed - waiting ${DELAY}s for npm registry propagation..."
+            sleep "${DELAY}"
+            DELAY=$((DELAY * 2))
+            if [ "${DELAY}" -gt 60 ]; then DELAY=60; fi
           done
-          echo "::error::Failed to install @opengsd/gsd-pi@${PUBLISH_VERSION} after 6 attempts."
+          echo "::error::Failed to install @opengsd/gsd-pi@${PUBLISH_VERSION} after 12 attempts."
           echo "::error::Recommended actions: (1) investigate the failing step above, (2) if the version exists on npm, deprecate it with 'npm deprecate @opengsd/gsd-pi@${PUBLISH_VERSION} \"broken ${CHANNEL} build; see Actions run\"', (3) cut a fix and re-run NPM Publish."
           exit 1
 

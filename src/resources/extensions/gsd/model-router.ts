@@ -172,6 +172,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "gemini-3-6-flash": "light",
   "gemini-3-7-flash": "light",
   "gemini-3-8-flash": "light",             // models.dev 2026-09 refresh: same class/pricing as Gemini 3.7 Flash
+  "gpt-5-6-luna": "light",              // GitHub Copilot: "fast help with simple/repetitive tasks", 5x cheaper than Sol; was misclassified heavy (fixed 2026-09-20)
 
   // Standard-tier models
   "claude-sonnet-4": "standard",
@@ -187,6 +188,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "gemini-3-1-pro-preview": "standard",
   "kimi-k2-7-code": "standard",
   "deepseek-chat": "standard",
+  "gpt-5-6-terra": "standard",          // GitHub Copilot: "balanced everyday interactive and agentic coding"; was misclassified heavy (fixed 2026-09-20)
 
   // Heavy-tier models (most capable)
   "claude-opus-4-5": "heavy",
@@ -194,6 +196,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "claude-opus-4-7": "heavy",
   "claude-opus-4-8": "heavy",
   "claude-opus-5": "heavy",
+  "claude-opus-5-5": "heavy",          // Opus 5.5: Opus-line successor to Opus 5, cheaper per token
   "claude-fable-5": "heavy",
   "claude-fable-5-1": "heavy",             // models.dev 2026-09 refresh: Fable 5.1 point release, same class/pricing as Fable 5
   "claude-3-opus-latest": "heavy",
@@ -207,8 +210,6 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "gpt-5-4": "heavy",
   "gpt-5-5": "heavy",
   "gpt-5-6-sol": "heavy",
-  "gpt-5-6-terra": "heavy",
-  "gpt-5-6-luna": "heavy",
   "gpt-6-astra": "heavy",
   "o1": "heavy",
   "o3": "heavy",
@@ -236,6 +237,7 @@ const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
   "claude-opus-4-7": 0.005,
   "claude-opus-4-8": 0.005,
   "claude-opus-5": 0.005,
+  "claude-opus-5-5": 0.004,
   "claude-fable-5": 0.010,
   "claude-fable-5-1": 0.010,
   "gpt-4o-mini": 0.00015,
@@ -291,6 +293,7 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   "claude-opus-4-7":              { coding: 95, debugging: 90, research: 85, reasoning: 95, speed: 30, longContext: 80, instruction: 90 },
   "claude-opus-4-8":              { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
   "claude-opus-5":                { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
+  "claude-opus-5-5":              { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
   "claude-fable-5":               { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
   // models.dev 2026-09 refresh: Fable 5.1 shares Fable 5's class and pricing; no published eval deltas yet.
   "claude-fable-5-1":             { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
@@ -956,7 +959,7 @@ export function defaultRoutingConfig(): DynamicRoutingConfig {
 const CANONICAL_TIER_MODELS: Record<ComplexityTier, string> = {
   light: "claude-haiku-4-5",
   standard: "claude-sonnet-4-6",
-  heavy: "claude-opus-4-6",
+  heavy: "claude-opus-5-5",
 };
 
 export function canonicalModelForTier(tier: ComplexityTier): string {

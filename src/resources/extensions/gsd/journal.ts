@@ -77,7 +77,9 @@ export type JournalEventType =
   | "orchestrator-dispatch-stop"
   | "orchestrator-guard-block"
   | "orchestrator-terminal"
-  | "orchestrator-iteration-end";
+  | "orchestrator-iteration-end"
+  // #2366 — a pending ScheduleWakeup was discarded because its unit ended non-completed
+  | "wakeup-discarded";
 
 /** A single structured event in the journal. */
 export interface JournalEntry {

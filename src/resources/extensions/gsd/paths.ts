@@ -688,8 +688,6 @@ function legacyMilestonesHasSubdirs(basePath: string): boolean {
  * (`milestones/<MID>/<MID>-CONTEXT.md` instead of `phases/NN-slug/NN-CONTEXT.md`),
  * trapping the unit in a finalize-retry loop (#852 follow-up).
  *
- * See the matching TODO in markdown-renderer.ts detectStaleRenders, which
- * disabled stale-render detection for the same reason.
  */
 const LEGACY_MILESTONE_RUNTIME_DIRS = new Set(["anchors"]);
 

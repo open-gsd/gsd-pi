@@ -38,16 +38,16 @@ class FakeNotifications:
         self.blockers: list[SessionStatus] = []
         self.terminals: list[tuple[str, str | None]] = []
 
-    def notify_stall(self, where: str, idle_minutes: int, doctor_head: str = "") -> None:
+    def notify_stall(self, where: str, idle_minutes: int, doctor_head: str = "", target=None) -> None:
         self.stalls.append((where, idle_minutes, doctor_head))
 
-    def notify_transition(self, message: str) -> None:
+    def notify_transition(self, message: str, target=None) -> None:
         self.transitions.append(message)
 
-    def notify_blocker(self, status) -> None:
+    def notify_blocker(self, status, target=None) -> None:
         self.blockers.append(status)
 
-    def notify_terminal(self, status, error=None) -> None:
+    def notify_terminal(self, status, error=None, target=None) -> None:
         self.terminals.append((status, error))
 
 

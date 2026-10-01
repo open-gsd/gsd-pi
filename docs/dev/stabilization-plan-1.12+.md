@@ -9,7 +9,7 @@ Since v1.12.0, GSD Pi shipped the state-DB cutover (#1627) and eight minor relea
 
 **Current version:** 1.20.0  
 **Open issues (total):** ~30  
-**Agent-ready bugs:** 0 (as of 2026-09-13) — stabilization waves 1–8 complete
+**Agent-ready bugs:** 0 (as of 2026-09-14) — stabilization waves 1–8 complete
 
 ## Failure Taxonomy
 
@@ -24,29 +24,17 @@ Most post-1.12 bugs fall into six recurring classes:
 | **Lifecycle / import** | Missing canonical lifecycle rows block progression | #2313, #2070, #1914 |
 | **Platform / test debt** | Windows PATH, non-hermetic tests, pi-agent-core harness | #2086, #2139, #2140 |
 
-<<<<<<< HEAD
 ## Wave 1 — Auto-mode wedge recovery (P0, shipped)
-=======
-## Wave 1 — Auto-mode wedge recovery (P0, in progress)
->>>>>>> origin/main
 
 These bugs block `/gsd auto` with no sanctioned recovery path. Highest user impact.
 
 | Issue | Title | Status | Branch |
 |-------|-------|--------|--------|
-<<<<<<< HEAD
-| #2314 | Anthropic 400 "extra usage" pauses instead of failing over | **fixed** | `cursor/stabilization-wave1-3f39` |
-| #2310 | `recheckWedge` never clears gate-evaluate `completed-no-advance` wedges | **fixed** | `cursor/stabilization-wave1-3f39` |
-| #2309 | gate-evaluate background Agent dispatch drops second gate | **fixed** | `cursor/stabilization-wave1-3f39` |
-| #2159 | False stale liveness wedges from interrupted closeouts | **fixed** | `cursor/stabilization-wave6-3f39` |
-| #2267 | Manual blocker route omits `recoveryActionId` (regression of #1593) | **fixed** | `cursor/stabilization-wave2-3f39` |
-=======
-| #2314 | Anthropic 400 "extra usage" pauses instead of failing over | **fixing** | `cursor/stabilization-wave1-3f39` |
-| #2310 | `recheckWedge` never clears gate-evaluate `completed-no-advance` wedges | **fixing** | `cursor/stabilization-wave1-3f39` |
-| #2309 | gate-evaluate background Agent dispatch drops second gate | **fixing** | `cursor/stabilization-wave1-3f39` |
-| #2159 | False stale liveness wedges from interrupted closeouts | open | — |
-| #2267 | Manual blocker route omits `recoveryActionId` (regression of #1593) | open | — |
->>>>>>> origin/main
+| #2314 | Anthropic 400 "extra usage" pauses instead of failing over | **fixed** | #2316 |
+| #2310 | `recheckWedge` never clears gate-evaluate `completed-no-advance` wedges | **fixed** | #2316 |
+| #2309 | gate-evaluate background Agent dispatch drops second gate | **fixed** | #2316 |
+| #2159 | False stale liveness wedges from interrupted closeouts | **fixed** | #2323 |
+| #2267 | Manual blocker route omits `recoveryActionId` (regression of #1593) | **fixed** | #2319 |
 
 ### Wave 1 exit criteria
 
@@ -114,8 +102,8 @@ These bugs block `/gsd auto` with no sanctioned recovery path. Highest user impa
 
 These require design decisions or timebox gates, not point fixes:
 
-- **ADR-046 wave-4 deletions** (T020–T023): 7 unowned `parsers-legacy` symbol offenders block zero-importer gate
-- **ADR-045 flat-phase migration** (plans 033–034): `detectStaleRenders` still stubbed; fixtures needed before re-enable
+- **ADR-046 wave-4 deletions** (T020–T023): zero-importer gate passes; remaining legacy-parser cleanup is structural
+- **ADR-045 flat-phase migration** (plans 033–034): `detectStaleRenders` re-enable in #2328 (draft)
 - **#1560** UAT-as-CLI RFC: blocked on external design
 - **#818** multi-repo parent workspace: large-scope feature
 - **#1754** Additional wedge/livelock class — tracked in taxonomy, no agent-ready fix scoped
@@ -129,6 +117,7 @@ Key stabilization themes already shipped:
 - **1.18.0**: Progress reads DB-authoritative, legacy adoption repairs
 - **1.19.0**: Husk-task gate closeout (#2197 area), blocker escalation at verify gate
 - **1.20.0**: gate-evaluate UAT binding, recovery action id on receipts, quoted-shell prose fix
+- **Next release (pending)**: stabilization waves 1–8 (wedge recovery, closeout, verification, platform); decisions register at plan time
 
 ## Verification gates per wave
 

@@ -154,6 +154,29 @@ test("gsd_validate_milestone — validates complete structured verification evid
   );
 });
 
+test("gsd_validate_milestone — evidence schema descriptions state their invariants", () => {
+  const tool = getTool("gsd_validate_milestone");
+  assert.ok(tool, "gsd_validate_milestone must be registered");
+  const item = tool.parameters.properties.verificationEvidence.items;
+
+  const sliceId: string = item.properties.sliceId.description ?? "";
+  assert.match(sliceId, /produced for/i);
+  assert.match(sliceId, /browser-required Slice/i);
+  assert.match(sliceId, /must equal that Slice's ID/i);
+
+  const evidenceClass: string = item.properties.evidenceClass.description ?? "";
+  assert.match(evidenceClass, /same evidence class/i);
+  assert.match(evidenceClass, /verification class/i);
+  assert.match(evidenceClass, /gsd_uat_exec/i);
+
+  const revision: string = item.properties.testedSourceRevision.description ?? "";
+  assert.match(revision, /sha256:/i);
+  assert.match(revision, /new validation attempt/i);
+  assert.match(revision, /every evidence entry/i);
+  assert.match(revision, /only when the evidence genuinely reflects the current source/i);
+  assert.match(revision, /re-produce the evidence/i);
+});
+
 test("milestone subjective UAT tools keep user identity out of model arguments", () => {
   const prepare = getTool("gsd_prepare_milestone_subjective_uat");
   const answer = getTool("gsd_answer_milestone_subjective_uat");

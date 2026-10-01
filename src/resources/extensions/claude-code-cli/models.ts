@@ -49,6 +49,15 @@ export const CLAUDE_CODE_MODELS = [
 		maxTokens: 128_000,
 	},
 	{
+		id: "claude-opus-5-5",
+		name: "Claude Opus 5.5 (via Claude Code)",
+		reasoning: true,
+		input: ["text", "image"] as ("text" | "image")[],
+		cost: ZERO_COST,
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	},
+	{
 		id: "claude-fable-5",
 		name: "Claude Fable 5 (via Claude Code)",
 		reasoning: true,

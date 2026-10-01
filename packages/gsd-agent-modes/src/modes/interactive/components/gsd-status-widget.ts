@@ -139,8 +139,14 @@ function renderProgressDrivenStrip(state: GsdStatusWidgetState, width: number): 
 	// "full" mode (or unspecified): full detail with health summary, task progress, and workflow line.
 	const isSmall = progress.widgetMode === "small";
 
-	if (!isSmall && progress.healthSummary) {
-		lines.push(padLine(theme.fg("dim", truncateToWidth(progress.healthSummary, width, "…")), width));
+	// Render the row even without a summary (#2333): a health-signal flip must not
+	// change the widget height, or the bottom-anchored viewport jumps.
+	if (!isSmall) {
+		lines.push(
+			progress.healthSummary
+				? padLine(theme.fg("dim", truncateToWidth(progress.healthSummary, width, "…")), width)
+				: padLine("", width),
+		);
 	}
 
 	if (!isSmall) {

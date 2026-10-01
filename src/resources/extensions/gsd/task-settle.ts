@@ -21,12 +21,15 @@ import {
   type CanonicalLifecycleStatus,
 } from "./db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { internalExecutionInvocation } from "./execution-invocation.js";
 import { TASK_LIFECYCLE_PROJECTION_KIND } from "./projection-identity.js";
+import { publishVerifiedTaskCompletion } from "./task-completion-compatibility-adapter.js";
 import {
   readLatestTaskAttempt,
   settleTaskAttempt,
 } from "./task-execution-domain-operation.js";
 import { readTaskRecoveryRoute } from "./task-recovery-domain-operation.js";
+import { readTaskTechnicalVerdict } from "./task-verification-domain-operation.js";
 
 export interface TaskSettleTask {
   milestoneId: string;
@@ -53,11 +56,21 @@ export interface TaskSettleProof {
   note: string;
 }
 
+export interface TaskPublicationPlanRow {
+  attemptId: string;
+  lifecycleStatus: string;
+  legacyStatus: string;
+  /** Recorded host Technical Verdict, or null when verification has not passed yet. */
+  verdict: string | null;
+  rationale: string;
+}
+
 export interface TaskSettlePlan {
   task: TaskSettleTask;
   rows: TaskSettleRow[];
   lifecycleRows: TaskLifecycleReconcileRow[];
   proof: TaskSettleProof | null;
+  publication: TaskPublicationPlanRow | null;
 }
 
 export interface TaskSettleOptions {
@@ -384,8 +397,44 @@ function applyLifecycleReconcile(
 }
 
 /**
+ * Detect a durable success stranded before publication (#2417): the latest
+ * Attempt is settled succeeded at the verify stage, no Attempt is running, the
+ * Task is not terminal in either vocabulary, and no abort route head owns the
+ * lineage. The vocabularies already agree on non-terminal here, so this is not
+ * a reconcile case — the only sanctioned writer is the verified publication
+ * pipeline. Returns null unless every structural predicate holds; evidence
+ * gates (passing verdict, source parity, UAT closure) stay inside publication
+ * and fail apply closed when unsatisfied.
+ */
+function planDurableSuccessPublication(task: TaskSettleTask): TaskPublicationPlanRow | null {
+  const state = readTaskLifecycleState(task);
+  const lifecycleStatus = state.lifecycleStatus;
+  if (lifecycleStatus !== "ready" && lifecycleStatus !== "in_progress") return null;
+  if (normalizeLegacyLifecycleStatus(state.legacyStatus) === "completed") return null;
+  const latest = readLatestTaskAttempt(task);
+  if (!latest || latest.state !== "settled" || latest.outcome !== "succeeded" || latest.nextStage !== "verify") {
+    return null;
+  }
+  const route = readTaskRecoveryRoute(latest.attemptId);
+  if (route && route.recoveryOwner === "agent" && route.action === "abort" && !route.resumeAuthorized) {
+    return null;
+  }
+  const verdict = readTaskTechnicalVerdict(latest.attemptId);
+  return {
+    attemptId: latest.attemptId,
+    lifecycleStatus,
+    legacyStatus: state.legacyStatus,
+    verdict: verdict?.verdict ?? null,
+    rationale:
+      `Attempt ${latest.attemptId} settled succeeded at the verify stage — apply runs the ` +
+      "verified publication pipeline (lifecycle → completed, tasks.status → complete)",
+  };
+}
+
+/**
  * Read-only settle plan: the exact Attempt and optional lifecycle rows an
- * apply would change. Zero rows of both kinds means an apply is a no-op.
+ * apply would change, including publication of a stranded succeeded Attempt.
+ * An apply is a no-op only when rows, lifecycle rows, and publication are empty.
  */
 export function planTaskSettle(
   task: TaskSettleTask,
@@ -393,11 +442,12 @@ export function planTaskSettle(
   options: TaskSettleOptions = {},
 ): TaskSettlePlan {
   const attempt = requireSingleRunningAttempt(task);
-  const lifecycleRows = options.reconcileLifecycle
+  const publication = attempt === null ? planDurableSuccessPublication(task) : null;
+  const lifecycleRows = options.reconcileLifecycle && !publication
     ? planLifecycleReconcile(task, reason, attempt !== null)
     : [];
   const proof = planCompletionProof(task, lifecycleRows);
-  if (!attempt) return { task, rows: [], lifecycleRows, proof };
+  if (!attempt) return { task, rows: [], lifecycleRows, proof, publication };
   const leaseHeld = readLeaseHeld(attempt, task.milestoneId);
   const rationale = leaseHeld
     ? reason
@@ -417,6 +467,7 @@ export function planTaskSettle(
     }],
     lifecycleRows,
     proof,
+    publication,
   };
 }
 
@@ -430,13 +481,25 @@ export function planTaskSettle(
  * Optional `reconcileLifecycle` then adopts ready/completed to match
  * tasks.status after an interrupted Attempt or succeeded completion, without
  * reopening or deleting SUMMARY projections (#1749).
+ *
+ * A durable success stranded before publication (#2417) is neither: apply
+ * runs the verified publication pipeline, which re-adopts the lifecycle to
+ * completed and completes the legacy Task row. Its evidence gates
+ * (passing host Technical Verdict, source parity, UAT closure) stay
+ * fail-closed; verification itself belongs to `/gsd auto`.
  */
-export function applyTaskSettle(input: {
+export async function applyTaskSettle(input: {
   invocation: ExecutionInvocation;
   task: TaskSettleTask;
   reason: string;
+  basePath: string;
   reconcileLifecycle?: boolean;
-}): TaskSettlePlan & { settled: boolean; reconciled: boolean; resultId?: string } {
+}): Promise<TaskSettlePlan & {
+  settled: boolean;
+  reconciled: boolean;
+  resultId?: string;
+  published?: { attemptId: string; status: "committed" | "replayed"; summaryPath: string };
+}> {
   const plan = planTaskSettle(input.task, input.reason, {
     reconcileLifecycle: input.reconcileLifecycle,
   });
@@ -492,7 +555,7 @@ export function applyTaskSettle(input: {
   let lifecycleRows = plan.lifecycleRows;
   let proof = plan.proof;
   let reconciled = false;
-  if (input.reconcileLifecycle) {
+  if (input.reconcileLifecycle && !plan.publication) {
     const after = planTaskSettle(input.task, input.reason, { reconcileLifecycle: true });
     lifecycleRows = after.lifecycleRows;
     proof = after.proof;
@@ -501,6 +564,23 @@ export function applyTaskSettle(input: {
       reconciled = true;
     }
   }
+  let published: { attemptId: string; status: "committed" | "replayed"; summaryPath: string } | undefined;
+  if (plan.publication) {
+    // The deterministic per-Attempt key makes a concurrent auto-mode
+    // publication of the same success serialize through the same fenced
+    // domain-operation seam instead of racing it.
+    const publication = await publishVerifiedTaskCompletion({
+      invocation: internalExecutionInvocation(`internal:auto:task.publish:${plan.publication.attemptId}`),
+      basePath: input.basePath,
+      task: input.task,
+      attemptId: plan.publication.attemptId,
+    });
+    published = {
+      attemptId: plan.publication.attemptId,
+      status: publication.status,
+      summaryPath: publication.summaryPath,
+    };
+  }
   return {
     ...plan,
     lifecycleRows,
@@ -508,6 +588,7 @@ export function applyTaskSettle(input: {
     settled,
     reconciled,
     ...(resultId ? { resultId } : {}),
+    ...(published ? { published } : {}),
   };
 }
 

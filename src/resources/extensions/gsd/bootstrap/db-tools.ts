@@ -1997,15 +1997,16 @@ export function registerDbTools(pi: ExtensionAPI): void {
 								Type.String({
 									minLength: 1,
 									description:
-										"Required Slice binding when this evidence satisfies a browser-required Slice",
+										"ID of the Slice this evidence was produced for; required when it satisfies a browser-required Slice and must equal that Slice's ID",
 								}),
 							),
-							evidenceClass: StringEnum([
-								"command",
-								"runtime",
-								"browser",
-								"artifact",
-							]),
+							evidenceClass: StringEnum(
+								["command", "runtime", "browser", "artifact"],
+								{
+									description:
+										"All entries for one verification class must use the same evidence class; browser-required Slices are satisfied by 'browser' entries or 'runtime' entries running gsd_uat_exec",
+								},
+							),
 							rationale: Type.String({ minLength: 1 }),
 							commandOrTool: Type.String({ minLength: 1 }),
 							workingDirectory: Type.String({ minLength: 1 }),
@@ -2014,7 +2015,11 @@ export function registerDbTools(pi: ExtensionAPI): void {
 							exitCode: Type.Optional(Type.Number()),
 							observation: StringEnum(["passed", "failed", "inconclusive"]),
 							durableOutputRef: Type.String({ minLength: 1 }),
-							testedSourceRevision: Type.String({ minLength: 1 }),
+							testedSourceRevision: Type.String({
+								minLength: 1,
+								description:
+									"Aggregate source revision the evidence was tested against, formatted sha256:<hex>; it must equal the source snapshot the tool computes for a new validation attempt — on a stale-revision error, copy the revision from the message into every evidence entry only when the evidence genuinely reflects the current source, otherwise re-produce the evidence against current source",
+							}),
 							environment: Type.Record(Type.String(), Type.Unknown(), {
 								minProperties: 1,
 							}),
@@ -2630,6 +2635,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Settles under the Attempt's held lease, or safely reclaims an expired/released lease when its worker is no longer live; never steals a live peer's lease.",
 			"A second apply is a no-op — the tool is idempotent.",
 			"reconcileLifecycle adopts ready/completed after an interrupted Attempt, or completed after a succeeded Attempt, without deleting SUMMARYs.",
+			"If the latest Attempt settled succeeded at the verify stage but the Task never completed (#2417 stranded publication), apply runs the verified publication pipeline instead — it fails closed until a passing host Technical Verdict is recorded; re-enter `/gsd auto` to run verification first.",
 			"settleDisposition 'blocker-accepted' closes a Task whose latest Attempt failed as blocker-discovered at the route stage: terminal closeout, blocker provenance recorded, then replan with gsd_replan_slice — never re-executes the Task and fabricates no success evidence.",
 		],
 		parameters: Type.Object(

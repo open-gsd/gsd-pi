@@ -14,7 +14,7 @@
  * src/mcp-server.ts in the main package).
  */
 
-import { readFile, readdir } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
@@ -30,7 +30,7 @@ import { readHistory } from './readers/metrics.js';
 import { readCaptures } from './readers/captures.js';
 import { readKnowledge } from './readers/knowledge.js';
 import { buildGraph, writeGraph, writeSnapshot, graphStatus, graphQuery, graphDiff } from './readers/graph.js';
-import { resolveGsdRoot, resolveMilestoneFile } from './readers/paths.js';
+import { resolveGsdRoot, findMilestoneIds, resolveMilestoneFile } from './readers/paths.js';
 import { runDoctorLite } from './readers/doctor-lite.js';
 import {
   hasWorkflowToolBridgeConfiguration,
@@ -307,17 +307,12 @@ async function readProjectState(projectDir: string, query: string | undefined): 
   }
 
   if (wanted.has('milestones')) {
-    const milestonesDir = join(gsdDir, 'milestones');
     try {
-      const entries = await readdir(milestonesDir, { withFileTypes: true });
-      const milestones: Array<{ id: string; hasRoadmap: boolean; hasSummary: boolean }> = [];
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        const hasRoadmap = !!resolveMilestoneFile(gsdDir, entry.name, 'ROADMAP');
-        const hasSummary = !!resolveMilestoneFile(gsdDir, entry.name, 'SUMMARY');
-        milestones.push({ id: entry.name, hasRoadmap, hasSummary });
-      }
-      result.milestones = milestones;
+      result.milestones = findMilestoneIds(gsdDir).map((id) => ({
+        id,
+        hasRoadmap: !!resolveMilestoneFile(gsdDir, id, 'ROADMAP'),
+        hasSummary: !!resolveMilestoneFile(gsdDir, id, 'SUMMARY'),
+      }));
     } catch {
       result.milestones = [];
     }

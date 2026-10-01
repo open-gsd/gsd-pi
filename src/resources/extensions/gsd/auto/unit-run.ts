@@ -138,17 +138,48 @@ export function claimUnitRun(input: {
     if (lease.kind === "degraded") {
       return { kind: "degraded" as const, reason: lease.reason };
     }
-    const claim = openDispatchClaim(
+    const claimDeps = {
+      isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
+      reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
+      ...input.claimDeps,
+    };
+    let claim = openDispatchClaim(
       input.session,
       input.flowId,
       input.turnId,
       input.iterData,
-      {
-        isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
-        reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
-        ...input.claimDeps,
-      },
+      claimDeps,
     );
+    if (claim.kind === "skip" && claim.reason === "stale-lease") {
+      // The cached in-memory lease token (ensureDispatchLease's fast path
+      // above skips the DB re-check when a token is already cached) can go
+      // stale if the TTL (60s) elapses between iterations without an
+      // intervening heartbeat refresh — e.g. a long post-unit-finalize step.
+      // The same live worker almost always still owns the milestone at this
+      // point, so force-reclaim once and retry, mirroring the recovery the
+      // inline loop.ts dispatch path already performs (#2199/#2265 lineage).
+      // Only a genuine takeover by another live worker should surface as a
+      // terminal blocked/conflict outcome.
+      const leaseRecovery = ensureDispatchLease(
+        input.session,
+        input.iterData.mid,
+        input.leaseDeps,
+        { forceReclaim: true },
+      );
+      if (leaseRecovery.kind === "ready") {
+        claim = openDispatchClaim(
+          input.session,
+          input.flowId,
+          input.turnId,
+          input.iterData,
+          claimDeps,
+        );
+      } else if (leaseRecovery.kind === "blocked" || leaseRecovery.kind === "failed") {
+        return { kind: "blocked" as const, reason: leaseRecovery.reason };
+      } else {
+        return { kind: "degraded" as const, reason: leaseRecovery.reason };
+      }
+    }
     if (claim.kind === "opened") return claim;
     if (claim.kind === "skip") return { kind: "skip" as const, reason: claim.reason };
     return { kind: "degraded" as const, reason: claim.reason };

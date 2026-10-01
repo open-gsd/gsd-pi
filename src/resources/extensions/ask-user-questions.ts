@@ -336,7 +336,8 @@ export default function AskUserQuestions(pi: ExtensionAPI) {
 
 				const raceResult = await raceRemoteAndLocal(
 					() => tryRemoteQuestions(params.questions, raceSignal),
-					() => showInterviewRound(params.questions, { signal: raceSignal }, ctx as any),
+					// Overlay (#2333): replacing the editor mid-stream makes the bottom-anchored viewport jump.
+					() => showInterviewRound(params.questions, { signal: raceSignal, overlay: true }, ctx as any),
 					raceController,
 					params.questions,
 				);
@@ -373,7 +374,8 @@ export default function AskUserQuestions(pi: ExtensionAPI) {
 			}
 
 			// Delegate to shared interview UI
-			const result = await showInterviewRound(params.questions, { signal }, ctx as any);
+			// Overlay (#2333): replacing the editor mid-stream makes the bottom-anchored viewport jump.
+			const result = await showInterviewRound(params.questions, { signal, overlay: true }, ctx as any);
 
 			// RPC mode fallback: custom() returns undefined, so showInterviewRound
 			// may return undefined. Fall back to sequential ctx.ui.select() calls.

@@ -17,6 +17,7 @@ import { checkNeedsReassessment } from "../auto-prompts.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
   closeDatabase,
+  insertAssessment,
   insertMilestone,
   insertSlice,
   isDbAvailable,
@@ -180,4 +181,50 @@ test("checkNeedsReassessment returns null when all slices are complete", async (
   } finally {
     cleanup(base);
   }
+});
+
+// ─── checkNeedsReassessment: reads the durable roadmap assessment row ─────
+// #2344: reassess-roadmap persists its verdict as a roadmap-scoped assessments
+// row and never writes a slice ASSESSMENT.md, so a completed reassessment must
+// satisfy dispatch through the DB or the rule re-selects the unit every cycle.
+
+test("checkNeedsReassessment returns null when a roadmap assessment row exists for the last completed slice", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  invalidateAllCaches();
+  seedSlices("complete", "pending");
+  writeSummary(base, "S01");
+  // No slice ASSESSMENT.md on disk — only the durable row reassess-roadmap writes.
+  insertAssessment({
+    path: ".gsd/milestones/M001/M001-ROADMAP-ASSESSMENT.md",
+    milestoneId: "M001",
+    sliceId: "S01",
+    status: "no-changes",
+    scope: "roadmap",
+    fullContent: "No changes needed.",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const result = await checkNeedsReassessment(base, "M001", dummyState);
+  assert.strictEqual(result, null, "roadmap-scoped row must satisfy dispatch without a slice ASSESSMENT.md");
+});
+
+test("checkNeedsReassessment ignores roadmap assessment rows for other slices", async (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  invalidateAllCaches();
+  seedSlices("complete", "pending");
+  writeSummary(base, "S01");
+  insertAssessment({
+    path: ".gsd/milestones/M001/M001-ROADMAP-ASSESSMENT.md",
+    milestoneId: "M001",
+    sliceId: "S02",
+    status: "no-changes",
+    scope: "roadmap",
+    fullContent: "No changes needed.",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  });
+
+  const result = await checkNeedsReassessment(base, "M001", dummyState);
+  assert.deepStrictEqual(result, { sliceId: "S01" }, "a row recorded against a different slice must not suppress dispatch");
 });

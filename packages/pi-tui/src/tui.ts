@@ -1246,7 +1246,37 @@ export class TUI extends Container {
 
 		newLines = this.applyLineResets(newLines);
 
-		// Helper to clear scrollback and viewport and render all new lines
+		// Shared epilogue for every frame-writing path: record the frame the
+		// terminal now shows and reposition the hardware cursor. Every writer
+		// must land here so the commit bookkeeping has one home.
+		// maxLines: "set" resets the working-area high-water mark to the frame
+		// length (clean repaints), "grow" only raises it (differential appends),
+		// "keep" leaves it alone (pure deletions). hardwareCursorRow defaults to
+		// the end of the content; the differential path overrides it with the row
+		// its partial repaint actually left the cursor on.
+		const commitFrame = (maxLines: "set" | "grow" | "keep", hardwareCursorRow?: number): void => {
+			this.cursorRow = Math.max(0, newLines.length - 1);
+			this.hardwareCursorRow = hardwareCursorRow ?? this.cursorRow;
+			if (maxLines === "set") {
+				this.maxLinesRendered = newLines.length;
+			} else if (maxLines === "grow") {
+				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+			}
+			this.previousViewportTop = getViewportTop(this.maxLinesRendered);
+			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.commitRenderedLines(newLines);
+			this.previousWidth = width;
+			this.previousHeight = height;
+		};
+
+		// Clear the viewport and repaint. When `clear` is true the terminal
+		// already carries committed history (scrollback flushed by earlier frames,
+		// or content left on screen by a forced reset), so the rewrite is bounded
+		// to the visible viewport: \x1b[2J cannot reach scrollback, and rewriting
+		// the transcript from its first row would scroll the terminal past its
+		// bottom edge and re-commit the flushed prefix as duplicates (#2307). The
+		// pristine first render (clear === false) keeps the unbounded write — it
+		// is what seeds scrollback with the transcript.
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
 			let buffer = this.useSynchronizedOutput ? "\x1b[?2026h" : "";
@@ -1258,17 +1288,18 @@ export class TUI extends Container {
 			// previousKittyImageIds (not previousLines) because a forced full render
 			// resets previousLines to [] before we get here, but the GPU placements
 			// from the prior frame are still on screen and must be cleared. Any image
-			// still in newLines is re-emitted below and replaces its (now-deleted)
-			// prior placement via its stable id.
+			// still in the rewritten lines is re-emitted below and replaces its
+			// (now-deleted) prior placement via its stable id.
 			buffer += this.deleteKittyImages(this.previousKittyImageIds);
-			const startRow = Math.max(1, height - Math.max(1, newLines.length) + 1);
+			const firstLine = clear && newLines.length > height ? newLines.length - height : 0;
+			const startRow = Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
 			if (clear) {
 				buffer += `\x1b[2J\x1b[${startRow};1H`;
 			} else if (startRow > 1) {
 				buffer += `\x1b[${startRow};1H`;
 			}
-			for (let i = 0; i < newLines.length; i++) {
-				if (i > 0) buffer += "\r\n";
+			for (let i = firstLine; i < newLines.length; i++) {
+				if (i > firstLine) buffer += "\r\n";
 				let line = newLines[i];
 				if (!isImageLine(line) && visibleWidth(line) > width) {
 					line = truncateToWidth(line, width);
@@ -1277,18 +1308,7 @@ export class TUI extends Container {
 			}
 			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 			this.terminal.write(buffer);
-			this.cursorRow = Math.max(0, newLines.length - 1);
-			this.hardwareCursorRow = this.cursorRow;
-			if (clear) {
-				this.maxLinesRendered = newLines.length;
-			} else {
-				this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-			}
-			this.previousViewportTop = getViewportTop(this.maxLinesRendered);
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.commitRenderedLines(newLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
+			commitFrame(clear ? "set" : "grow");
 		};
 
 		const debugRedraw = process.env.PI_DEBUG_REDRAW === "1";
@@ -1318,14 +1338,7 @@ export class TUI extends Container {
 			}
 			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 			this.terminal.write(buffer);
-			this.cursorRow = Math.max(0, newLines.length - 1);
-			this.hardwareCursorRow = this.cursorRow;
-			this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-			this.previousViewportTop = getViewportTop(this.maxLinesRendered);
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.commitRenderedLines(newLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
+			commitFrame("grow");
 		};
 
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
@@ -1378,14 +1391,7 @@ export class TUI extends Container {
 			}
 			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 			this.terminal.write(buffer);
-			this.cursorRow = newLines.length - 1;
-			this.hardwareCursorRow = newLines.length - 1;
-			this.maxLinesRendered = newLines.length;
-			this.previousViewportTop = newViewportTop;
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.commitRenderedLines(newLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
+			commitFrame("set");
 			this._shrinkDebounceActive = false;
 			return;
 		}
@@ -1473,14 +1479,8 @@ export class TUI extends Container {
 				}
 				if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 				this.terminal.write(buffer);
-				this.cursorRow = targetRow;
-				this.hardwareCursorRow = targetRow;
 			}
-			this.positionHardwareCursor(cursorPos, newLines.length);
-			this.commitRenderedLines(newLines);
-			this.previousWidth = width;
-			this.previousHeight = height;
-			this.previousViewportTop = getViewportTop(this.maxLinesRendered);
+			commitFrame("keep");
 			return;
 		}
 
@@ -1489,7 +1489,8 @@ export class TUI extends Container {
 			// A mid-buffer reflow (for example markdown code-fence borders or prose word-wrap)
 			// shifted a line across the scrollback/viewport boundary. Clamping would leave
 			// the displaced line frozen in scrollback and re-emit it in the live region,
-			// producing a verbatim duplicate. Fall back to a clean repaint.
+			// producing a verbatim duplicate. Fall back to a clean repaint; the repaint is
+			// viewport-bounded (see fullRender), so it never re-commits the flushed prefix.
 			logRedraw(
 				`firstChanged < viewportTop (${firstChanged} < ${previousContentViewportTop}) — full repaint to avoid duplicate`,
 			);
@@ -1601,20 +1602,7 @@ export class TUI extends Container {
 		// Write entire buffer at once
 		this.terminal.write(buffer);
 
-		// Track cursor position for next render
-		// cursorRow tracks end of content (for viewport calculation)
-		// hardwareCursorRow tracks actual terminal cursor position (for movement)
-		this.cursorRow = Math.max(0, newLines.length - 1);
-		this.hardwareCursorRow = finalCursorRow;
-		this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
-		this.previousViewportTop = getViewportTop(this.maxLinesRendered);
-
-		// Position hardware cursor for IME
-		this.positionHardwareCursor(cursorPos, newLines.length);
-
-		this.commitRenderedLines(newLines);
-		this.previousWidth = width;
-		this.previousHeight = height;
+		commitFrame("grow", finalCursorRow);
 	}
 
 	/**

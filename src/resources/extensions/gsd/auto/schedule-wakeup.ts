@@ -35,6 +35,14 @@ export function consumeAutoWakeup(
   return wakeup;
 }
 
+export function peekAutoWakeup(
+  basePath: string,
+  unitType: string,
+  unitId: string,
+): ScheduledWakeup | null {
+  return pendingWakeups.get(wakeupKey(basePath, unitType, unitId)) ?? null;
+}
+
 export function clearAutoWakeup(
   basePath: string,
   unitType: string,

@@ -239,6 +239,10 @@ const contextModeGuidanceOverrideExpectedTools: Record<string, readonly string[]
     "subagent",
     "gsd_save_gate_result",
   ],
+  "rewrite-docs": [
+    "gsd_summary_save",
+    "gsd_decision_save",
+  ],
 };
 
 test("Context Mode composer: every known eligible unit renders its configured lane and required tools", () => {
@@ -384,6 +388,31 @@ test("Context Mode composer: narrow planning guidance steers only to contracted 
         assert.ok(!out.includes(`\`${toolName}\``), `${unitType} guidance must not mention ${toolName}`);
       }
     }
+  }
+});
+
+test("Context Mode composer: rewrite-docs guidance steers only to contracted save tools", () => {
+  const expectedTools = ["gsd_summary_save", "gsd_decision_save"];
+  const disallowedTools = ["gsd_exec", "gsd_exec_search", "gsd_resume"];
+
+  for (const renderMode of ["nested", "standalone"] as const) {
+    const out = composeContextModeInstructions("rewrite-docs", { enabled: true, renderMode });
+    assert.match(out, /documentation lane/i, "rewrite-docs should still render documentation lane guidance");
+    for (const toolName of expectedTools) {
+      assert.ok(out.includes(`\`${toolName}\``), `rewrite-docs guidance should mention ${toolName}`);
+    }
+    for (const toolName of disallowedTools) {
+      assert.ok(!out.includes(`\`${toolName}\``), `rewrite-docs guidance must not mention ${toolName}`);
+    }
+  }
+
+  for (const toolName of disallowedTools) {
+    const scope = shouldBlockAutoUnitToolCall("rewrite-docs", toolName);
+    assert.equal(scope.block, true, `rewrite-docs should hard-block ${toolName}: ${scope.reason ?? ""}`);
+  }
+  for (const toolName of expectedTools) {
+    const scope = shouldBlockAutoUnitToolCall("rewrite-docs", toolName);
+    assert.equal(scope.block, false, `rewrite-docs should not hard-block ${toolName}: ${scope.reason ?? ""}`);
   }
 });
 

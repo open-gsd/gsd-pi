@@ -28,16 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.20.0**
+Latest release: **v1.20.1**
 
-- **hermes:** Notify on a stalled running session (#2210).
-- **gsd:** Preserve effective model and routing provenance on assistant messages (#2285).
-- **gsd:** Show current dispatched model in the AUTO status strip (#2262).
-- **deps:** Bump sharp to 0.35.4 and vitest to 4.1.11.
-- **models:** Reconcile model-router registry with the 2026-09 catalog refresh.
-- **models:** Refresh generated model catalog.
-- **deps:** Bump next from 16.2.11 to 16.3.3.
-- **gsd:** Scope external skill activation reads.
+- **gsd:** Rebuild markdown skips projections whose write is already applied.
+- **gsd:** Reclaim milestone leases held by verifiably-dead local workers.
+- **gsd:** Journal and surface discarded scheduled wakeups on non-completed units.
+- **claude-code:** Shield gsd-core-owned skills from the interactive Skill surface.
+- **gsd:** Warn when gsd_plan_slice persists zero non-skipped tasks.
+- **mcp-server:** Resolve milestone projections on flat-phase-layout projects.
+- **claude-code:** Disallow Claude Code's native task tools under gsd-pi.
+- **gsd:** Uat_result_save rejects a PASS check citing failed uat_exec evidence.
 
 <!-- release-highlights:end -->
 

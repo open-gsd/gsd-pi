@@ -286,6 +286,7 @@ import {
 } from "./auto-start.js";
 import { initHealthWidget } from "./health-widget.js";
 import { runLegacyAutoLoop, runUokKernelLoop } from "./auto/loop.js";
+import { autoResumeEnterFailureStop } from "./auto/phase-helpers.js";
 import { resolveAgentEnd, resolveAgentEndCancelled, _resetPendingResolve, isSessionSwitchInFlight } from "./auto/resolve.js";
 import type { LoopDeps, PauseAutoOptions, PauseAutoUnitIdentity, StopAutoOptions } from "./auto/loop-deps.js";
 import type { ErrorContext } from "./auto/types.js";
@@ -3026,12 +3027,12 @@ export async function startAuto(
       const enterResult = buildLifecycle().enterMilestone(s.currentMilestoneId, {
         notify: ctx.ui.notify.bind(ctx.ui),
       });
-      if (!enterResult.ok && enterResult.reason === "lease-conflict") {
-        ctx.ui.notify(
-          `Cannot resume milestone ${s.currentMilestoneId}: lease is held by another worker.`,
-          "error",
-        );
-        await stopAuto(ctx, pi, "lease-conflict during resume");
+      // #2317 — lease conflicts and stale worktree registrations must stop the
+      // resume: continuing would run the milestone against the wrong tree.
+      const enterStop = autoResumeEnterFailureStop(enterResult, s.currentMilestoneId);
+      if (enterStop) {
+        ctx.ui.notify(enterStop.notify, "error");
+        await stopAuto(ctx, pi, enterStop.detail);
         return;
       }
       // s.basePath may have been updated to a worktree path by enterMilestone.

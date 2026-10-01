@@ -148,6 +148,52 @@ describe("GsdStatusWidget", () => {
 		assert.match(head, /openai\/gpt-5\.3-codex · 14m · ~6m left/);
 	});
 
+	test("keeps the same height with and without healthSummary when expanded (#2333)", () => {
+		const baseState = {
+			override: "auto",
+			activeToolCount: 0,
+			cwd: "/tmp/project",
+			manuallyExpanded: true,
+			gsdProgress: {
+				phase: "Executing T03 renderer polish",
+				modeTag: "AUTO" as const,
+				widgetMode: "full" as const,
+			},
+		};
+		const withHealth = new GsdStatusWidget(() => ({
+			...baseState,
+			gsdProgress: { ...baseState.gsdProgress, healthSummary: "Health: all checks passing" },
+		}));
+		const withoutHealth = new GsdStatusWidget(() => ({ ...baseState }));
+
+		const withLines = withHealth.render(120).map((line) => stripAnsi(line));
+		const withoutLines = withoutHealth.render(120).map((line) => stripAnsi(line));
+
+		assert.equal(withLines.length, withoutLines.length, "healthSummary flip must not change widget height");
+		assert.match(withLines.join("\n"), /Health: all checks passing/);
+		// The placeholder row is visually blank — no invented text.
+		assert.equal((withoutLines[1] ?? "").trim(), "");
+		assert.match(withoutLines.join("\n"), /ctrl\+shift\+d/, "workflow line still renders after the blank row");
+	});
+
+	test("small mode stays single-line regardless of healthSummary", () => {
+		const widget = new GsdStatusWidget(() => ({
+			override: "auto",
+			activeToolCount: 0,
+			cwd: "/tmp/project",
+			manuallyExpanded: true,
+			gsdProgress: {
+				phase: "Executing T03 renderer polish",
+				modeTag: "AUTO" as const,
+				healthSummary: "Health: all checks passing",
+				widgetMode: "small",
+			},
+		}));
+		const plain = widget.render(120).map((line) => stripAnsi(line)).join("\n");
+		assert.doesNotMatch(plain, /Health: all checks passing/);
+		assert.equal(widget.render(120).length, 1);
+	});
+
 	test("head line has no model segment artifacts when none is dispatched", () => {
 		const widget = new GsdStatusWidget(() => ({
 			override: "auto",

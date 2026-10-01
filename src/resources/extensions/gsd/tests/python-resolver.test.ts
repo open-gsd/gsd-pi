@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { normalizePythonCommand, detectPythonExecutable, resolveVenvInterpreter, normalizeVerifyCommandForVenv, venvPythonCandidates } from "../python-resolver.ts";
+import { normalizePythonCommand, detectPythonExecutable, resolveVenvInterpreter, normalizeVerifyCommandForVenv, venvPythonCandidates, formatPythonInvocation } from "../python-resolver.ts";
 import { discoverCommands, runVerificationGate } from "../verification-gate.ts";
 
 describe("normalizePythonCommand", () => {
@@ -106,6 +106,22 @@ describe("normalizePythonCommand", () => {
       `${detected} -m pytest`,
       `Expected clean rewrite without duplicated '-3' in: ${result}`,
     );
+  });
+});
+
+describe("formatPythonInvocation", () => {
+  test("posix style turns a Windows venv path into forward slashes for bash (#2399)", () => {
+    assert.equal(
+      formatPythonInvocation("D:\\proj\\.venv\\Scripts\\python.exe", "posix"),
+      "D:/proj/.venv/Scripts/python.exe",
+    );
+    assert.equal(
+      formatPythonInvocation("D:\\my proj\\.venv\\Scripts\\python.exe", "posix"),
+      '"D:/my proj/.venv/Scripts/python.exe"',
+    );
+    assert.equal(formatPythonInvocation("D:\\proj\\.venv\\Scripts\\python.exe"), "D:\\proj\\.venv\\Scripts\\python.exe");
+    assert.equal(formatPythonInvocation("py -3", "posix"), "py -3");
+    assert.equal(formatPythonInvocation("/usr/bin/python3", "posix"), "/usr/bin/python3");
   });
 });
 

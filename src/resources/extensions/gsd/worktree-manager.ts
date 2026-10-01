@@ -425,36 +425,57 @@ export function pruneEphemeralGhostWorktreeDirectories(basePath: string): string
   return removed;
 }
 
+const STALE_WORKTREE_REMOVE_ATTEMPTS = 5;
+const STALE_WORKTREE_SLEEP_VIEW = new Int32Array(new SharedArrayBuffer(4));
+
+function sleepStaleWorktreeRetry(ms: number): void {
+  Atomics.wait(STALE_WORKTREE_SLEEP_VIEW, 0, 0, ms);
+}
+
 export function removeStaleWorktreeDirectory(
   wtPath: string,
   name: string,
   removeDirectory: typeof rmSync = rmSync,
+  sleep: (ms: number) => void = sleepStaleWorktreeRetry,
 ): void {
   logWarning(
     "reconcile",
     `Removing stale worktree directory (not registered with git): ${wtPath}`,
     { worktree: name },
   );
-  try {
-    removeDirectory(wtPath, { recursive: true, force: true });
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException)?.code;
-    if (code === "EACCES") {
-      throw new GSDError(
-        GSD_GIT_ERROR,
-        `Cannot remove stale worktree directory at ${wtPath} (EACCES: permission denied). It may contain files owned by another user, such as files created with sudo or by a container. Fix the directory ownership or permissions, or remove it manually, then retry.`,
-        { cause: error as Error },
-      );
+  for (let attempt = 1; ; attempt++) {
+    try {
+      removeDirectory(wtPath, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException)?.code;
+      // Windows/OneDrive lock errors are routinely transient (#1987).
+      if ((code === "EPERM" || code === "EBUSY") && attempt < STALE_WORKTREE_REMOVE_ATTEMPTS) {
+        sleep(50 * 2 ** (attempt - 1));
+        continue;
+      }
+      throwStaleWorktreeRemovalError(wtPath, error);
     }
-    if (code === "EPERM" || code === "EBUSY") {
-      throw new GSDError(
-        GSD_GIT_ERROR,
-        `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process). Close editors/antivirus/git tools using this path and retry.`,
-        { cause: error as Error },
-      );
-    }
-    throw error;
   }
+}
+
+function throwStaleWorktreeRemovalError(wtPath: string, error: unknown): never {
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code === "EACCES") {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Cannot remove stale worktree directory at ${wtPath} (EACCES: permission denied). It may contain files owned by another user, such as files created with sudo or by a container. Fix the directory ownership or permissions, or remove it manually, then retry.`,
+      { cause: error as Error },
+    );
+  }
+  if (code === "EPERM" || code === "EBUSY") {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Cannot remove stale worktree directory at ${wtPath} (${code}: directory may be locked by another process after ${STALE_WORKTREE_REMOVE_ATTEMPTS} attempts). Close editors/antivirus/git tools using this path and retry.`,
+      { cause: error as Error },
+    );
+  }
+  throw error;
 }
 
 /**
@@ -545,6 +566,75 @@ export function buildManualValidationGuidance(
 // ─── Core Operations ───────────────────────────────────────────────────────
 
 /**
+ * Verify the target branch/path is actually free before `git worktree add`.
+ *
+ * After removing a stale worktree directory, git's `.git/worktrees/<name>`
+ * admin metadata can still claim the branch (e.g. a locked entry the prune
+ * skips). The add then fails with "already in use" and callers degrade to
+ * project-root, silently routing every subsequent operation for the milestone
+ * to the wrong base (#2317). Any stale registration (directory missing)
+ * triggers one prune retry — prune is idempotent and harmless, and libgit2's
+ * list can report an empty branch for a missing directory, so the trigger
+ * must not pre-filter by branch/path. Only a surviving registration that can
+ * still block THIS add fails loud: our branch, our canonical path, or an
+ * undeterminable registration inside the GSD worktrees containers. Live
+ * worktrees (directory present) keep their existing handling in
+ * createWorktree.
+ *
+ * `bridge` is injectable for tests; defaults to the same native-git bridge
+ * used by prune/add.
+ */
+export function verifyBranchFreeForWorktreeAdd(
+  basePath: string,
+  name: string,
+  branch: string,
+  wtPath: string,
+  bridge: { list: typeof nativeWorktreeList; prune: typeof nativeWorktreePrune } = {
+    list: nativeWorktreeList,
+    prune: nativeWorktreePrune,
+  },
+): void {
+  const staleRegistrations = (): { path: string; branch: string }[] =>
+    bridge
+      .list(basePath)
+      .filter((entry) => !existsSync(entry.path))
+      .map((entry) => ({ path: entry.path, branch: entry.branch }));
+
+  if (staleRegistrations().length === 0) return;
+
+  bridge.prune(basePath);
+
+  const blocking = staleRegistrations().find((entry) =>
+    entry.branch === branch ||
+    normalizePathForComparison(entry.path) === normalizePathForComparison(wtPath) ||
+    (entry.branch === "" && isInsideWorktreesDir(basePath, entry.path)),
+  );
+  if (!blocking) return; // the retry prune cleared everything that could block this add
+
+  const unlockFirst = `git worktree unlock ${blocking.path}`;
+  const clearRegistration = `git worktree prune (or git worktree remove --force ${blocking.path})`;
+  logError(
+    "worktree",
+    `Worktree creation blocked for ${name}: stale git worktree registration at ${blocking.path} survived a prune retry. ` +
+      `Remediation: ${unlockFirst}, then ${clearRegistration}, then re-enter the milestone.`,
+    { worktree: name, branch, path: blocking.path },
+  );
+  throw new GSDError(
+    GSD_LOCK_HELD,
+    `Branch "${branch}" is still claimed by a stale worktree registration at "${blocking.path}" ` +
+      `(directory missing; prune did not clear it — the entry may be locked). ` +
+      `Fix: ${unlockFirst}, then ${clearRegistration}, then re-enter the milestone.`,
+  );
+}
+
+/** True when err is the fail-loud stale-registration error from verifyBranchFreeForWorktreeAdd (#2317). */
+export function isStaleWorktreeRegistrationError(err: unknown): boolean {
+  return err instanceof GSDError
+    && err.code === GSD_LOCK_HELD
+    && err.message.includes("stale worktree registration");
+}
+
+/**
  * Create a new git worktree under .gsd/worktrees/<name>/ with branch worktree/<name>.
  * The branch is created from the current HEAD of the main branch.
  *
@@ -587,6 +677,12 @@ export function createWorktree(basePath: string, name: string, opts: { branch?: 
 
   // Prune any stale worktree entries from a previous removal
   nativeWorktreePrune(basePath);
+
+  // #2317 — the prune above is not guaranteed to clear git's worktree admin
+  // metadata. Verify the branch/path is actually free before the add so a
+  // lingering registration fails loudly here instead of the add failing and
+  // the session silently degrading to project-root.
+  verifyBranchFreeForWorktreeAdd(basePath, name, branch, wtPath);
 
   // Use the explicit start point (e.g. integration branch) if provided,
   // otherwise fall back to the repo's detected main branch.

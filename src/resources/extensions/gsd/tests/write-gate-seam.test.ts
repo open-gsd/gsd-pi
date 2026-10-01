@@ -21,7 +21,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
@@ -38,6 +38,7 @@ import {
   type WriteGateSnapshot,
 } from "../bootstrap/write-gate.ts";
 import { acquireSyncLock, releaseSyncLock } from "../sync-lock.ts";
+import { _resetLogs, drainLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
 
 const WRITE_GATE_LOCK_NAME = "write-gate.lock";
 
@@ -407,4 +408,33 @@ test("seam: gate mutation fails OPEN when a live peer holds the lock (never bloc
   } finally {
     releaseSyncLock(dir, WRITE_GATE_LOCK_NAME);
   }
+});
+
+test("seam: lock-held fail-open warning states the intentional contract, not a malfunction", (t) => {
+  const dir = makeTempDir("lock-fail-open-message");
+  const previousStderr = setStderrLoggingEnabled(false);
+  _resetLogs();
+  t.after(() => {
+    _resetLogs();
+    setStderrLoggingEnabled(previousStderr);
+    releaseSyncLock(dir, WRITE_GATE_LOCK_NAME);
+    cleanup(dir);
+  });
+
+  // A live peer holds the lock (its own PID → never stolen as stale).
+  assert.equal(acquireSyncLock(dir, 0, WRITE_GATE_LOCK_NAME).acquired, true);
+
+  // Contended mutation: fail-open must still arm and persist, and the warning
+  // must describe the intentional contract (the occurrence marks a real
+  // lost-update race window, but it is not a lock failure).
+  assert.equal(setPendingGate(GATE, dir), true, "arm must succeed (fail-open) while the lock is held");
+  const warns = drainLogs().filter((e) => e.component === "intercept" && e.severity === "warn");
+  assert.equal(warns.length, 1, "exactly one fail-open warning per contended mutation");
+  assert.match(warns[0].message, /fail-open by contract/, "warning must state the intentional fail-open contract");
+  assert.doesNotMatch(
+    warns[0].message,
+    /proceeding without cross-process lock/,
+    "old phrasing read like a lock failure",
+  );
+  assert.equal(warns[0].context?.lockRoot, resolve(dir), "lockRoot diagnostic detail is preserved");
 });

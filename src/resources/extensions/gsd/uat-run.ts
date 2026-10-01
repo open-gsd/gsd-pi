@@ -363,6 +363,20 @@ function validateUatChecks(basePath: string, params: UatResultSaveParams): strin
       for (const evidence of check.evidence) {
         const error = validateEvidenceRef(basePath, evidence);
         if (error) return `check ${check.id}: ${error}`;
+        if (check.result === "PASS" && evidence.kind === "gsd_uat_exec") {
+          const meta = readUatExecEvidenceMetadata(basePath, evidence.ref.trim());
+          if (
+            meta &&
+            (meta.exit_code !== 0 || meta.signal !== null || meta.timed_out !== false || meta.aborted === true)
+          ) {
+            return (
+              `check ${check.id}: PASS cites gsd_uat_exec evidence id "${evidence.ref}" whose execution ` +
+              `recorded exit_code=${String(meta.exit_code)}, signal=${String(meta.signal)}, ` +
+              `timed_out=${String(meta.timed_out)}, aborted=${String(meta.aborted)}; ` +
+              "re-run the check or fix the result"
+            );
+          }
+        }
       }
     } else if (!isNonEmptyString(check.notes)) {
       return `check ${check.id} is NEEDS-HUMAN but has no manual instruction or reason`;

@@ -22,7 +22,7 @@ You are evaluating **quality gates in parallel** for this slice. Each gate is an
 
 ## Execution Protocol
 
-**Critical:** Use only the GSD `subagent` tool for gate fanout. Do **not** use the native `Agent` tool or any dispatch with `run_in_background: true` — backgrounded subagents complete after your turn ends, so gate verdicts are never persisted and auto-mode wedges permanently.
+**Critical:** Use only the GSD `subagent` tool for gate fanout, and evaluate every gate synchronously within this turn — each `subagent` call MUST set `run_in_background: false`. Do **not** use the native `Agent` tool or any dispatch with `run_in_background: true` — backgrounded subagents complete after your turn ends, so gate verdicts are never persisted and auto-mode wedges permanently. Your turn may NOT end until `gsd_save_gate_result` has persisted a verdict for EVERY gate in this unit's scope: {{gateIdList}}. (fix(gsd): gate-evaluate units fail loudly and dispatch synchronously)
 
 1. **Dispatch all gates** using `subagent` in parallel mode. Call `subagent` with `tasks: [{ agent: "tester", task: "<prompt>" }, ...]` — one object per gate. Each subagent prompt is provided below.
    Pass `tasks` as a **JSON array**, not a string. Example shape:

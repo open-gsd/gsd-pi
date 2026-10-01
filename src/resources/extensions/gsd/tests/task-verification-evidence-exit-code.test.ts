@@ -297,3 +297,54 @@ describe("hasQualifyingTaskEvidence: lenient verdict matching (#2014)", () => {
     );
   });
 });
+
+describe("hasQualifyingTaskEvidence: re-run history (#2338)", () => {
+  const pest = "vendor/bin/pest tests/Unit/Models/BookingTest.php";
+  const record = (command: string, verdict: string, exitCode: number): TaskVerificationEvidence => ({
+    command,
+    exitCode,
+    verdict,
+    durationMs: 10,
+  });
+
+  test("a command that failed and was then re-run green qualifies", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record(pest, "FAIL - 12 passed, 1 failed", 1),
+        record(pest, "PASS - 13 passed, 28 assertions", 0),
+      ]),
+      true,
+    );
+  });
+
+  test("re-runs match on whitespace-normalized command text", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([record(pest, "fail", 1), record(`  ${pest.replace(" ", "   ")} `, "pass", 0)]),
+      true,
+    );
+  });
+
+  test("whitespace inside quotes distinguishes commands, so a different pattern is not a re-run", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("grep -q 'a  b' file", "fail", 1),
+        record("grep -q 'a b' file", "pass", 0),
+      ]),
+      false,
+    );
+  });
+
+  test("a command whose latest run failed still disqualifies", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([record(pest, "pass", 0), record(pest, "fail", 1)]),
+      false,
+    );
+  });
+
+  test("a failing distinct command cannot be laundered by an unrelated passing one", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([record("npm run lint", "fail", 1), record(pest, "pass", 0)]),
+      false,
+    );
+  });
+});

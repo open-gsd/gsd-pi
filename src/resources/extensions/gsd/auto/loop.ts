@@ -715,7 +715,12 @@ export async function autoLoop(
       ctx.ui.notify(cooldownDecision.notifyMessage, "warning");
       await new Promise(resolve => setTimeout(resolve, cooldownDecision.waitMs));
       finishIncompleteIteration({ status: "retry", reason: "cooldown-retry" });
-      finishTurn("retry", "timeout", errorMessage, "credential-cooldown");
+      // #2385: a budgeted cooldown retry is not a non-advancing outcome. The
+      // guardId payload here hashed to the constant "credential-cooldown", so
+      // the second consecutive cooldown tripped the ADR-047 backstop (threshold
+      // 2) and preempted the sanctioned MAX_COOLDOWN_RETRIES budget. The
+      // exhausted terminal below records the family's one liveness signature.
+      finishTurn("retry", "timeout", errorMessage, null);
       return "retry";
     };
 

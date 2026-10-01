@@ -85,6 +85,7 @@ function readWithMtimeCache<V>(
 }
 
 const milestoneIdsCache = new Map<string, MtimeEntry<string[]>>();
+const phaseIdsCache = new Map<string, MtimeEntry<string[]>>();
 const milestoneDirCache = new Map<string, MtimeEntry<string | null>>();
 const sliceIdsCache = new Map<string, MtimeEntry<string[]>>();
 const sliceDirCache = new Map<string, MtimeEntry<string | null>>();
@@ -104,6 +105,7 @@ function cloneTaskFiles(
 export function _resetReaderCaches(): void {
   gsdRootCache.clear();
   milestoneIdsCache.clear();
+  phaseIdsCache.clear();
   milestoneDirCache.clear();
   sliceIdsCache.clear();
   sliceDirCache.clear();
@@ -174,30 +176,85 @@ export function milestonesDir(gsdRoot: string): string {
 }
 
 /**
- * Find all milestone directory IDs (M001, M002, etc.).
- * Handles both bare (M001/) and descriptor (M001-FLIGHT-SIM/) naming.
+ * Numeric phase for a milestone id ("M001" → 1, "M010" → 10). Mirrors the
+ * extension's milestoneIdToPhaseNum (src/resources/extensions/gsd/layout-policy.ts)
+ * so both tools read the same phases/NN-slug/ layout.
  */
-export function findMilestoneIds(gsdRoot: string): string[] {
-  const dir = milestonesDir(gsdRoot);
-  if (!existsSync(dir)) return [];
-
-  return readWithMtimeCache(milestoneIdsCache, dir, dir, () => {
-    const entries = readdirSync(dir, { withFileTypes: true });
-    const ids: string[] = [];
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const match = entry.name.match(/^(M\d+)/);
-      if (match) ids.push(match[1]);
-    }
-    return ids.sort();
-  }, cloneStringArray, cloneStringArray);
+function milestonePhaseNum(milestoneId: string): number | null {
+  const m = milestoneId.match(/^M0*(\d+)/i);
+  return m ? Number.parseInt(m[1]!, 10) : null;
 }
 
 /**
- * Resolve the actual directory name for a milestone ID.
- * M001 might live in M001/ or M001-SOME-DESCRIPTOR/.
+ * Find all milestone directory IDs (M001, M002, etc.).
+ * Scans both layouts the product writes:
+ *   * legacy milestones/ — bare (M001/) and descriptor (M001-FLIGHT-SIM/) dirs
+ *   * flat-phase phases/ — NN-slug dirs ("01-foundation" → "M001")
+ */
+export function findMilestoneIds(gsdRoot: string): string[] {
+  const ids = new Set<string>();
+
+  const dir = milestonesDir(gsdRoot);
+  if (existsSync(dir)) {
+    for (const id of readWithMtimeCache(milestoneIdsCache, dir, dir, () => {
+      const entries = readdirSync(dir, { withFileTypes: true });
+      const found: string[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const match = entry.name.match(/^(M\d+)/);
+        if (match) found.push(match[1]);
+      }
+      return found;
+    }, cloneStringArray, cloneStringArray)) {
+      ids.add(id);
+    }
+  }
+
+  const phasesDir = join(gsdRoot, 'phases');
+  if (existsSync(phasesDir)) {
+    for (const id of readWithMtimeCache(phaseIdsCache, phasesDir, phasesDir, () => {
+      const entries = readdirSync(phasesDir, { withFileTypes: true });
+      const found: string[] = [];
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const match = entry.name.match(/^(\d+)-/);
+        if (match) found.push(`M${match[1]!.padStart(3, '0')}`);
+      }
+      return found;
+    }, cloneStringArray, cloneStringArray)) {
+      ids.add(id);
+    }
+  }
+
+  return Array.from(ids).sort();
+}
+
+/**
+ * Resolve the actual directory for a milestone ID across both layouts.
+ * Flat-phase (phases/NN-slug/) wins over legacy (milestones/M001/), mirroring
+ * the extension resolver's priority — a milestone present in both during a
+ * partial migration resolves to its phases/ dir.
  */
 export function resolveMilestoneDir(gsdRoot: string, milestoneId: string): string | null {
+  const phaseNum = milestonePhaseNum(milestoneId);
+  if (phaseNum !== null) {
+    const phasesDir = join(gsdRoot, 'phases');
+    if (existsSync(phasesDir)) {
+      const flat = readWithMtimeCache(milestoneDirCache, `${phasesDir} ${milestoneId}`, phasesDir, () => {
+        const entries = readdirSync(phasesDir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (!entry.isDirectory()) continue;
+          const m = entry.name.match(/^(\d+)-/);
+          if (m && Number.parseInt(m[1]!, 10) === phaseNum) {
+            return join(phasesDir, entry.name);
+          }
+        }
+        return null;
+      });
+      if (flat) return flat;
+    }
+  }
+
   const dir = milestonesDir(gsdRoot);
   if (!existsSync(dir)) return null;
 
@@ -219,8 +276,8 @@ export function resolveMilestoneDir(gsdRoot: string, milestoneId: string): strin
 }
 
 /**
- * Resolve a milestone-level file (M001-ROADMAP.md, M001-CONTEXT.md, etc.).
- * Handles various naming conventions.
+ * Resolve a milestone-level file (M001-ROADMAP.md, 01-ROADMAP.md, etc.).
+ * Handles both layouts' naming conventions.
  */
 export function resolveMilestoneFile(gsdRoot: string, milestoneId: string, suffix: string): string | null {
   const mDir = resolveMilestoneDir(gsdRoot, milestoneId);
@@ -228,12 +285,16 @@ export function resolveMilestoneFile(gsdRoot: string, milestoneId: string, suffi
 
   const dirName = basename(mDir);
 
-  // Try: M001-ROADMAP.md, then DIRNAME-ROADMAP.md
+  // Try: M001-ROADMAP.md, DIRNAME-ROADMAP.md, flat-phase 01-ROADMAP.md, ROADMAP.md
   const candidates = [
     join(mDir, `${milestoneId}-${suffix}.md`),
     join(mDir, `${dirName}-${suffix}.md`),
-    join(mDir, `${suffix}.md`),
   ];
+  const phaseNum = milestonePhaseNum(milestoneId);
+  if (phaseNum !== null) {
+    candidates.push(join(mDir, `${String(phaseNum).padStart(2, '0')}-${suffix}.md`));
+  }
+  candidates.push(join(mDir, `${suffix}.md`));
 
   for (const c of candidates) {
     if (existsSync(c)) return c;

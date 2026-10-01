@@ -431,7 +431,7 @@ test("resolveModelForComplexity: wasDowngraded is false when preferred session m
 test("resolveModelForTier: returns canonical Anthropic model when no available models", () => {
   try {
     resetLegacyTelemetry();
-    assert.equal(resolveModelForTier("heavy", []), "claude-opus-4-6");
+    assert.equal(resolveModelForTier("heavy", []), "claude-opus-5-5");
     assert.equal(resolveModelForTier("standard", []), "claude-sonnet-4-6");
     assert.equal(resolveModelForTier("light", []), "claude-haiku-4-5");
     assert.equal(getLegacyTelemetry()["legacy.providerDefaultUsed"], 3);
@@ -1821,5 +1821,31 @@ describe("Phase J routing safety", () => {
 
     assert.equal(result.modelId, "brand-new-unreleased-model-pinned", "an explicit tier_models pin must be honored even without a capability profile");
     assert.equal(result.selectionMethod, "tier-only");
+  });
+});
+
+describe("Copilot GPT-5.6 family tier classification (regression, 2026-09-20)", () => {
+  // GitHub Copilot documents gpt-5.6-luna as the cheap/fast tier ("fast help
+  // with simple or repetitive tasks") and gpt-5.6-terra as the balanced
+  // everyday tier ("general-purpose coding and agent tasks"), with gpt-5.6-sol
+  // reserved for deep reasoning/long-running agentic work. All three were
+  // previously misclassified as "heavy", which defeated dynamic-routing
+  // downgrade for any project pinning gpt-5.6-sol as its heavy ceiling.
+  test("gpt-5.6-luna canonicalizes to the light tier", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["gpt-5-6-luna"], "light");
+  });
+
+  test("gpt-5.6-terra canonicalizes to the standard tier", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["gpt-5-6-terra"], "standard");
+  });
+
+  test("gpt-5.6-sol remains the heavy tier", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["gpt-5-6-sol"], "heavy");
+  });
+
+  test("dotted Copilot IDs canonicalize onto the corrected tiers", () => {
+    assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-luna"), "gpt-5-6-luna");
+    assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-terra"), "gpt-5-6-terra");
+    assert.equal(canonicalizeModelId("github-copilot/gpt-5.6-sol"), "gpt-5-6-sol");
   });
 });

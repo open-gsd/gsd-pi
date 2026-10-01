@@ -22,8 +22,36 @@ import type { AgentSessionHost } from "./agent-session-host.js";
 
 const extensionUiStreamBridgedAgents = new WeakSet<Agent>();
 
+/**
+ * Cached tool-definition state keyed by a deterministic snapshot of all
+ * inputs that affect the tool registry construction.
+ *
+ * Cache key inputs (all must match for a hit):
+ *   - cwd
+ *   - allowedToolNames (sorted)
+ *   - customToolNames (sorted)
+ *   - extensionRunner registered tool names (sorted)
+ *   - baseToolsOverride presence (boolean)
+ *
+ * On a cache hit the existing Map instances are reused (no rebuild).
+ * On a cache miss the full rebuild path is followed and the cache is updated.
+ */
+interface ToolDefinitionCacheEntry {
+	key: string;
+	toolDefinitions: Map<string, ToolDefinitionEntry>;
+	toolPromptSnippets: Map<string, string>;
+	toolPromptGuidelines: Map<string, string[]>;
+	toolRegistry: Map<string, AgentTool>;
+	/** Names of tools that originated from extensions (for includeAllExtensionTools logic). */
+	extensionToolNames: string[];
+}
+
 export class AgentSessionExtensionsModule {
 	constructor(readonly host: AgentSessionHost) {}
+
+	// Tool definition cache (see ToolDefinitionCacheEntry for key inputs)
+	private _toolCacheKey: string | null = null;
+	private _toolCacheEntry: ToolDefinitionCacheEntry | null = null;
 
 	/** Forward ExtensionUIContext into provider stream options (claude-code-cli elicitation). */
 	private ensureExtensionUiStreamBridge(): void {
@@ -324,9 +352,117 @@ export class AgentSessionExtensionsModule {
 		);
 	}
 
+	/**
+	 * Build a deterministic cache key from all inputs that affect tool-definition
+	 * construction. Same key → same tool definitions (semantically).
+	 */
+	private buildToolCacheKey(): string {
+		const allowedNames = this.host._allowedToolNames
+			? [...this.host._allowedToolNames].sort()
+			: [];
+		const customNames = this.host._customTools.map((t) => t.name).sort();
+		const registeredNames = this.host._extensionRunner
+			.getAllRegisteredTools()
+			.map((t) => t.definition.name)
+			.sort();
+		const hasOverride = this.host._baseToolsOverride !== undefined;
+		return [
+			this.host._cwd,
+			`allowed:${allowedNames.join(",")}`,
+			`custom:${customNames.join(",")}`,
+			`registered:${registeredNames.join(",")}`,
+			`override:${hasOverride}`,
+		].join("|");
+	}
+
+	/**
+	 * Compare two string arrays for equality (order-sensitive).
+	 * Used to determine if the effective active tool selection changed.
+	 */
+	private arraysEqual(a: string[], b: string[]): boolean {
+		if (a.length !== b.length) return false;
+		for (let i = 0; i < a.length; i++) {
+			if (a[i] !== b[i]) return false;
+		}
+		return true;
+	}
+
+	/**
+	 * Clear the tool-definition cache. Called whenever any cache-key input changes.
+	 */
+	private clearToolCache(): void {
+		this._toolCacheKey = null;
+		this._toolCacheEntry = null;
+	}
+
 	refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+		// Check cache: if the tool-definition inputs haven't changed, reuse the cached Maps.
+		const cacheKey = this.buildToolCacheKey();
+		const cachedEntry = this._toolCacheKey === cacheKey ? this._toolCacheEntry : null;
+		const cacheHit = cachedEntry !== null;
+
+		if (cacheHit) {
+			this.host._toolDefinitions = cachedEntry.toolDefinitions;
+			this.host._toolPromptSnippets = cachedEntry.toolPromptSnippets;
+			this.host._toolPromptGuidelines = cachedEntry.toolPromptGuidelines;
+			this.host._toolRegistry = cachedEntry.toolRegistry;
+		} else {
+			// Full rebuild path (unchanged logic, now cached on completion).
+			this._refreshToolRegistryBuild(cacheKey);
+		}
+
 		const previousRegistryNames = new Set(this.host._toolRegistry.keys());
 		const previousActiveToolNames = this.host.getActiveToolNames();
+		const allowedToolNames = this.host._allowedToolNames;
+		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
+
+		const nextActiveToolNames = (
+			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
+		).filter((name) => isAllowedTool(name));
+
+		if (allowedToolNames) {
+			for (const toolName of this.host._toolRegistry.keys()) {
+				if (allowedToolNames.has(toolName)) {
+					nextActiveToolNames.push(toolName);
+				}
+			}
+		} else if (options?.includeAllExtensionTools && this._toolCacheEntry) {
+			// After a cache hit we use the stored extension tool names.
+			for (const name of this._toolCacheEntry.extensionToolNames) {
+				nextActiveToolNames.push(name);
+			}
+		} else if (options?.includeAllExtensionTools) {
+			// Cache miss — use fresh wrappedExtensionTools (already in _toolRegistry).
+			for (const tool of this.host._toolRegistry.values()) {
+				nextActiveToolNames.push(tool.name);
+			}
+		} else if (!options?.activeToolNames) {
+			for (const toolName of this.host._toolRegistry.keys()) {
+				if (!previousRegistryNames.has(toolName)) {
+					nextActiveToolNames.push(toolName);
+				}
+			}
+		}
+
+		const deduplicatedNext = [...new Set(nextActiveToolNames)];
+
+		// Optimization: on cache hit + unchanged effective active tool selection,
+		// skip setActiveToolsByName() to avoid redundant system prompt rebuild.
+		// On cache miss, always execute the rebinding path because the tool
+		// registry may contain new AgentTool instances (CWD change, extension
+		// reload, custom tool change, allowed-tool config change, base tool
+		// config change).
+		if (cacheHit && this.arraysEqual(deduplicatedNext, previousActiveToolNames)) {
+			return;
+		}
+
+		this.host.setActiveToolsByName(deduplicatedNext);
+	}
+
+	/**
+	 * Full rebuild of tool-definition Maps. Called on cache miss or after invalidation.
+	 */
+	private _refreshToolRegistryBuild(cacheKey: string): void {
 		const allowedToolNames = this.host._allowedToolNames;
 		const isAllowedTool = (name: string): boolean => !allowedToolNames || allowedToolNames.has(name);
 
@@ -385,34 +521,23 @@ export class AgentSessionExtensionsModule {
 		);
 
 		const toolRegistry = new Map(wrappedBuiltInTools.map((tool) => [tool.name, tool]));
+		const extensionToolNames: string[] = [];
 		for (const tool of wrappedExtensionTools as AgentTool[]) {
 			toolRegistry.set(tool.name, tool);
+			extensionToolNames.push(tool.name);
 		}
 		this.host._toolRegistry = toolRegistry;
 
-		const nextActiveToolNames = (
-			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
-		).filter((name) => isAllowedTool(name));
-
-		if (allowedToolNames) {
-			for (const toolName of this.host._toolRegistry.keys()) {
-				if (allowedToolNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-				}
-			}
-		} else if (options?.includeAllExtensionTools) {
-			for (const tool of wrappedExtensionTools) {
-				nextActiveToolNames.push(tool.name);
-			}
-		} else if (!options?.activeToolNames) {
-			for (const toolName of this.host._toolRegistry.keys()) {
-				if (!previousRegistryNames.has(toolName)) {
-					nextActiveToolNames.push(toolName);
-				}
-			}
-		}
-
-		this.host.setActiveToolsByName([...new Set(nextActiveToolNames)]);
+		// Store in cache for future hits.
+		this._toolCacheKey = cacheKey;
+		this._toolCacheEntry = {
+			key: cacheKey,
+			toolDefinitions: this.host._toolDefinitions,
+			toolPromptSnippets: this.host._toolPromptSnippets,
+			toolPromptGuidelines: this.host._toolPromptGuidelines,
+			toolRegistry: this.host._toolRegistry,
+			extensionToolNames,
+		};
 	}
 
 	buildRuntime(options: {
@@ -420,6 +545,9 @@ export class AgentSessionExtensionsModule {
 		flagValues?: Map<string, boolean | string>;
 		includeAllExtensionTools?: boolean;
 	}): void {
+		// CWD, base definitions, and extension runner all change — invalidate cache.
+		this.clearToolCache();
+
 		const autoResizeImages = this.host.settingsManager.getImageAutoResize();
 		const shellCommandPrefix = this.host.settingsManager.getShellCommandPrefix();
 		const shellPath = this.host.settingsManager.getShellPath();

@@ -409,7 +409,12 @@ function withWriteGateLock<T>(basePath: string, fn: () => T): T {
   try { ensureWriteGateSnapshotDirectory(basePath); } catch { /* best-effort; acquire fails-open below */ }
   const { acquired } = acquireSyncLock(lockRoot, 0, WRITE_GATE_LOCK_NAME);
   if (!acquired) {
-    logWarning("intercept", "write-gate: proceeding without cross-process lock (held by live peer)", { lockRoot });
+    // Intentional fail-open, not a lock failure — message asserted by the seam regression test.
+    logWarning(
+      "intercept",
+      "write-gate: cross-process lock held by live peer — proceeding fail-open by contract (racy-but-functional); a lost gate mutation remains possible while unlocked",
+      { lockRoot },
+    );
     return fn();
   }
   try {

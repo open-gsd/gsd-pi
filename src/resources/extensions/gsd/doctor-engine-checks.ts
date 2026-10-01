@@ -36,6 +36,7 @@ import { LAYOUT_SEGMENTS } from "./layout-policy.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { isCanonicalStagedTaskSummaryProjection } from "./task-summary-projection-classification.js";
 import { isMilestoneLifecycleAdopted, readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
+import { isDeadLocalAutoWorker } from "./db/auto-workers.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   captureMilestoneVerificationSourceRevision,
@@ -140,6 +141,116 @@ function reportOrphanedRunningAttempts(
       message:
         `Task ${unitId} has an orphaned running Attempt (${attempt.attempt_id}) with no live process or lease. ` +
         "Settle it with gsd_task_settle (dry-run first, then apply: true) — doctor --fix will not settle it for you.",
+      file: ".gsd/gsd.db",
+      fixable: false,
+    });
+  }
+}
+
+/**
+ * A settled succeeded Attempt at the verify stage whose Task is not terminal
+ * (#2417): the durable success never published, and with no running Attempt
+ * and no recovery route head nothing re-drives publication on its own.
+ * Reports the wedge; re-entering `/gsd auto` resumes publication, and
+ * `gsd_task_settle` apply publishes the verified completion. Auto-fix must
+ * never publish — publication is evidence-gated, not a repair judgment call.
+ */
+function reportUnpublishedSucceededAttempts(
+  adapter: ReturnType<typeof _getAdapter> & object,
+  issues: DoctorIssue[],
+): void {
+  const stranded = adapter.prepare(`
+    SELECT attempt.attempt_id, lifecycle.lifecycle_status,
+           COALESCE(tasks.status, '') AS legacy_status,
+           lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
+    FROM workflow_execution_attempts attempt
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = attempt.lifecycle_id
+     AND lifecycle.project_id = attempt.project_id
+    JOIN workflow_attempt_results result
+      ON result.attempt_id = attempt.attempt_id
+     AND result.lifecycle_id = attempt.lifecycle_id
+     AND result.project_id = attempt.project_id
+    JOIN workflow_kernel_checkpoints checkpoint
+      ON checkpoint.attempt_id = attempt.attempt_id
+     AND checkpoint.project_id = attempt.project_id
+    LEFT JOIN tasks
+      ON tasks.milestone_id = lifecycle.milestone_id
+     AND tasks.slice_id = lifecycle.slice_id
+     AND tasks.id = lifecycle.task_id
+    WHERE lifecycle.item_kind = 'task'
+      AND attempt.attempt_state = 'settled'
+      AND result.outcome = 'succeeded'
+      AND checkpoint.next_stage = 'verify'
+      AND attempt.attempt_number = (
+        SELECT MAX(latest.attempt_number)
+        FROM workflow_execution_attempts latest
+        WHERE latest.lifecycle_id = attempt.lifecycle_id
+          AND latest.project_id = attempt.project_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id = checkpoint.kernel_checkpoint_id
+      )
+      AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled', 'blocker-accepted')
+      AND COALESCE(tasks.status, '') NOT IN ('complete', 'cancelled', 'blocker-accepted')
+  `).all() as unknown as Array<{
+    attempt_id: string;
+    lifecycle_status: string;
+    legacy_status: string;
+    milestone_id: string;
+    slice_id: string;
+    task_id: string;
+  }>;
+
+  for (const row of stranded) {
+    const unitId = `${row.milestone_id}/${row.slice_id}/${row.task_id}`;
+    issues.push({
+      severity: "warning",
+      code: "unpublished_succeeded_attempt",
+      scope: "task",
+      unitId,
+      message:
+        `Task ${unitId} has a settled succeeded Attempt (${row.attempt_id}) at the verify stage but is not ` +
+        `terminal (lifecycle ${row.lifecycle_status}, tasks.status ${row.legacy_status || "unknown"}). If auto-mode ` +
+        "is not mid-publication this is a stranded success: re-enter `/gsd auto` to resume publication, or " +
+        "apply gsd_task_settle (dry-run first) to publish — it fails closed until a passing host Technical " +
+        "Verdict is recorded.",
+      file: ".gsd/gsd.db",
+      fixable: false,
+    });
+  }
+}
+
+/**
+ * A held, non-expired milestone lease whose holder worker's local process is
+ * verifiably dead blocks gsd_plan_milestone with no live reclaimer (#2375).
+ * Reports the wedge; re-running gsd_plan_milestone reclaims the lease via the
+ * dead-holder reclaim path.
+ */
+function reportOrphanedMilestoneLeases(
+  adapter: ReturnType<typeof _getAdapter> & object,
+  basePath: string,
+  issues: DoctorIssue[],
+): void {
+  const held = adapter.prepare(`
+    SELECT milestone_id, worker_id
+    FROM milestone_leases
+    WHERE status = 'held'
+      AND expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+    ORDER BY milestone_id
+  `).all() as unknown as Array<{ milestone_id: string; worker_id: string }>;
+
+  for (const lease of held) {
+    if (!isDeadLocalAutoWorker(lease.worker_id, basePath)) continue;
+    issues.push({
+      severity: "error",
+      code: "orphaned_milestone_lease",
+      scope: "milestone",
+      unitId: lease.milestone_id,
+      message:
+        `Milestone ${lease.milestone_id} is leased by worker ${lease.worker_id} whose local process is dead. ` +
+        "Re-running gsd_plan_milestone for this milestone reclaims the lease automatically.",
       file: ".gsd/gsd.db",
       fixable: false,
     });
@@ -837,6 +948,22 @@ export async function checkEngineHealth(
         reportOrphanedRunningAttempts(adapter, basePath, issues);
       } catch {
         // Non-fatal — orphaned running Attempt check failed
+      }
+
+      // Settled succeeded Attempts stranded before publication (#2417): the
+      // Task is not terminal and nothing re-drives the verify→publish chain.
+      try {
+        reportUnpublishedSucceededAttempts(adapter, issues);
+      } catch {
+        // Non-fatal — unpublished succeeded Attempt check failed
+      }
+
+      // Held, non-expired milestone leases whose holder worker process is
+      // dead (#2375): report only — the planning tool reclaims on its next run.
+      try {
+        reportOrphanedMilestoneLeases(adapter, basePath, issues);
+      } catch {
+        // Non-fatal — orphaned milestone lease check failed
       }
 
       // e. Completed milestone dispatch history but DB reopened without an explicit reopen event.

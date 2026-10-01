@@ -1002,6 +1002,58 @@ describe('createMcpServer tool registration', () => {
     assert.deepEqual(progress.readMetadata, { source: 'projection', authority: 'projection-fallback' });
   });
 
+  // Flat-phase fixture mirroring the extension renderer's output:
+  // .gsd/phases/NN-slug/NN-ROADMAP.md (no .gsd/milestones/ at all).
+  function makeFlatPhaseProject(): string {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-flat-phase-'));
+    mkdirSync(join(projectDir, '.gsd', 'phases', '01-foundation'), { recursive: true });
+    writeFileSync(
+      join(projectDir, '.gsd', 'phases', '01-foundation', '01-ROADMAP.md'),
+      [
+        '# M001: Foundation',
+        '',
+        '**Vision:** Build the foundation.',
+        '',
+        '## Slices',
+        '',
+        '- [ ] **S01: Set up tooling** `risk:low` `depends:[]`',
+        '  > After this: build runs',
+        '',
+      ].join('\n'),
+      'utf-8',
+    );
+    return projectDir;
+  }
+
+  it('gsd_roadmap returns milestones from the flat-phase layout', async (t) => {
+    const projectDir = makeFlatPhaseProject();
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const roadmapTool = (server as any)._registeredTools?.gsd_roadmap;
+    assert.ok(roadmapTool, 'gsd_roadmap should be registered');
+
+    const result = await roadmapTool.handler({ projectDir });
+    const roadmap = JSON.parse(result.content[0].text);
+    assert.equal(roadmap.milestones.length, 1, 'flat-phase milestone must be found');
+    assert.equal(roadmap.milestones[0].id, 'M001');
+    assert.equal(roadmap.milestones[0].title, 'Foundation');
+    assert.equal(roadmap.milestones[0].slices[0].id, 'S01');
+  });
+
+  it('gsd_query milestones returns milestones from the flat-phase layout', async (t) => {
+    const projectDir = makeFlatPhaseProject();
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const queryTool = (server as any)._registeredTools?.gsd_query;
+    assert.ok(queryTool, 'gsd_query should be registered');
+
+    const result = await queryTool.handler({ projectDir, query: 'milestones' });
+    const state = JSON.parse(result.content[0].text);
+    assert.deepEqual(state.milestones, [{ id: 'M001', hasRoadmap: true, hasSummary: false }]);
+  });
+
   it('ask_user_questions passes the declared elicitation timeout and signal to the MCP SDK request', async () => {
     const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
     const askTool = (server as any)._registeredTools?.ask_user_questions;

@@ -431,7 +431,21 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
     };
 
     collect('SELECT * FROM milestones WHERE id = :m', { ':m': milestone });
-    if (slice && task && unitType === 'gate-evaluate' && task.startsWith('gates+')) {
+    if (unitType === 'research-slice' && slice === 'parallel-research') {
+      // sentinel parallel-research unit id — no real slice row; advance is any
+      // slice-level RESEARCH artifact appearing (matching the special cases at
+      // artifact-verification.ts / auto-post-unit.ts). Task-level RESEARCH
+      // rows are excluded: they are not this unit's deliverable.
+      collect('SELECT * FROM slices WHERE milestone_id = :m ORDER BY id', { ':m': milestone });
+      collect(
+        `SELECT path, artifact_type, slice_id, content_hash
+           FROM artifacts
+          WHERE milestone_id = :m AND artifact_type = 'RESEARCH'
+            AND slice_id IS NOT NULL AND task_id IS NULL
+          ORDER BY path`,
+        { ':m': milestone },
+      );
+    } else if (slice && task && unitType === 'gate-evaluate' && task.startsWith('gates+')) {
       // gate-evaluate unit ids encode scoped gate ids in the third segment
       // (e.g. M001/S01/gates+Q3,Q4) — not a real task row.
       collect('SELECT * FROM slices WHERE milestone_id = :m AND id = :s ORDER BY id', { ':m': milestone, ':s': slice });
@@ -457,6 +471,22 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
              FROM quality_gates
             WHERE milestone_id = :m AND slice_id = :s AND gate_id = 'UAT'
             ORDER BY task_id`,
+          { ':m': milestone, ':s': slice },
+        );
+      }
+      if (unitType === 'reassess-roadmap') {
+        // reassess-roadmap upserts one roadmap-scoped assessment per milestone
+        // (its projection path is deterministic per milestone), so a re-run with
+        // an identical verdict rewrites the row without moving any status column.
+        // created_at is refreshed on every insert (tools/reassess-roadmap.ts never
+        // passes one), making it the only per-run proof of a fresh run (#2344) —
+        // aliased so strip() keeps it in the hash.
+        collect(
+          `SELECT milestone_id, slice_id, scope, status, created_at AS persisted_at
+             FROM assessments
+            WHERE milestone_id = :m AND slice_id = :s AND scope = 'roadmap'
+            ORDER BY created_at DESC, ROWID DESC
+            LIMIT 1`,
           { ':m': milestone, ':s': slice },
         );
       }

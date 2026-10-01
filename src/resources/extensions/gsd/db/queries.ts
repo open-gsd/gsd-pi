@@ -1221,6 +1221,14 @@ export function getArtifact(path: string): ArtifactRow | null {
   return rowToArtifact(row);
 }
 
+/** Stored content_hash for one artifact row, or null when the row is missing. */
+export function getArtifactContentHash(path: string): string | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare("SELECT content_hash FROM artifacts WHERE path = :path").get({ ":path": path }) as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return (row["content_hash"] as string) ?? null;
+}
+
 /** Milestone-level artifacts (CONTEXT, RESEARCH, VALIDATION, etc.) from the artifacts table. */
 export function getMilestoneScopedArtifacts(milestoneId: string): ArtifactRow[] {
   if (!getDbOrNull()!) return [];
@@ -1380,6 +1388,26 @@ export function getLatestAssessmentByScope(
       ORDER BY created_at DESC
       LIMIT 1`,
   ).get({ ":mid": milestoneId, ":scope": scope });
+  return row ?? null;
+}
+
+/**
+ * Latest roadmap-scoped assessment recorded against a slice — the durable row
+ * `reassess-roadmap` writes (it never renders a slice ASSESSMENT.md), so
+ * dispatch checks treat its presence as "this slice was already reassessed"
+ * (#2344).
+ */
+export function getRoadmapAssessmentForSlice(
+  milestoneId: string,
+  sliceId: string,
+): Record<string, unknown> | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare(
+    `SELECT * FROM assessments
+      WHERE milestone_id = :mid AND slice_id = :sid AND scope = 'roadmap'
+      ORDER BY created_at DESC, ROWID DESC
+      LIMIT 1`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId });
   return row ?? null;
 }
 

@@ -161,6 +161,8 @@ export const CONTEXT_MODE_GUIDANCE_BY_UNIT: Readonly<Record<string, string>> = {
     "Dispatch parallel reconnaissance subagents for stack, features, architecture, and pitfalls research; each writes one file under `.gsd/research/` (`STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, `PITFALLS.md`).",
   "gate-evaluate":
     "Use `subagent` to dispatch tester agents, then persist each gate with `gsd_save_gate_result`; rely on testers for verification evidence.",
+  "rewrite-docs":
+    "Use the preloaded context and the documents under review as the source of truth, editing documentation with ordinary file tools, then persist outcomes with `gsd_summary_save` or `gsd_decision_save` as appropriate.",
 };
 
 // Per-unit guidance for the nested render mode (renderMode: "nested"), used when this

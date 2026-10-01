@@ -8,6 +8,45 @@ This changelog starts from the `open-gsd/gsd-pi` ownership baseline. Earlier pro
 
 ## [Unreleased]
 
+## [1.20.1] - 2026-09-18
+
+### Fixed
+- **gsd**: reclaim milestone leases held by verifiably-dead local workers
+- **gsd**: journal and surface discarded scheduled wakeups on non-completed units
+- **claude-code**: shield gsd-core-owned skills from the interactive Skill surface
+- **gsd**: warn when gsd_plan_slice persists zero non-skipped tasks
+- **mcp-server**: resolve milestone projections on flat-phase-layout projects
+- **claude-code**: disallow Claude Code's native task tools under gsd-pi
+- **gsd**: uat_result_save rejects a PASS check citing failed uat_exec evidence
+- **pi-tui**: bound clean repaints to the viewport so flushed scrollback is never re-committed
+- **gsd**: write-gate fail-open warning states the intentional contract
+- **gsd**: reassess-roadmap completions advance the liveness wedge and stop the reassess loop
+- **gsd**: tell the pre-exec repair loop why a Verify command reads as prose
+- **gsd**: gate-evaluate units fail loudly and dispatch synchronously
+- **gsd**: render the ask-user interview as an overlay and pin status-widget height
+- **gsd**: silently skip skipped slices in the PLAN checkbox projection
+- **gsd**: prefs wizard omits uat model phase and drops thinking on re-select
+- **gsd**: worktree orphan reconcile fails loudly and stops auto-mode resume (#2322)
+- **gsd**: compound gsd_exec evidence mismatches state execution provenance (#2327)
+- **wave8**: import deriveSliceScope for local auto-prompts use
+- **wave8**: import deriveSliceScope and use SliceRow goal for scope
+- **init**: defer parse-cache registration and extract uat-types leaf module
+- **types**: guard defaultResolutionPaths in evidence resolution validation
+- **gates**: restore adopted-milestone gate closure guard and prove closeout writes
+- **stabilization**: wave 8 decisions register enforcement at plan time (#2248)
+- **stabilization**: wave 7 Windows evidence exchange and pi-agent test harness (#2178, #2140)
+- **stabilization**: wave 6 stale wedge GC for interrupted closeouts (#2159)
+- **stabilization**: wave 5 closeout refusal and startup resilience (#2033, #2077, #2294)
+- **stabilization**: wave 4 platform, provider, and test hygiene (#2086, #2139, #2250, #2114)
+- **stabilization**: wave 3 verification and pre-exec (#2290, #2259, #1994, #2248)
+- **stabilization**: wave 2 closeout and lifecycle authority (#2239, #2267, #2313, #2126)
+- **stabilization**: Wave 1 auto-mode wedge recovery (#2314, #2310, #2309) (#2316)
+- **stabilization**: wave 1 auto-mode wedge recovery (#2314, #2310, #2309)
+- **gsd**: clamp passing class verdict under non-succeeded milestone validation
+
+### Changed
+- **gsd**: rebuild markdown skips projections whose write is already applied
+
 ## [1.20.0] - 2026-09-12
 
 ### Added

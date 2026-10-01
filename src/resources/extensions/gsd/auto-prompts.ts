@@ -36,6 +36,7 @@ import {
   getMilestoneSlices,
   getPendingGates,
   getPendingGatesForTurn,
+  getRoadmapAssessmentForSlice,
   getSlice,
   getTask,
   isDbAvailable,
@@ -1593,7 +1594,8 @@ function isCompletedSliceStatus(status: string): boolean {
  * Skips reassessment when:
  * - No roadmap exists yet
  * - No slices are completed
- * - The last completed slice already has an assessment file
+ * - The last completed slice already has an assessment file or a roadmap
+ *   assessment row
  * - All slices are complete (milestone done — no point reassessing)
  */
 export async function checkNeedsReassessment(
@@ -1614,7 +1616,10 @@ export async function checkNeedsReassessment(
       const lastCompleted = completedSliceIds[completedSliceIds.length - 1];
       const assessmentFile = resolveSliceFile(base, mid, lastCompleted, "ASSESSMENT");
       const hasAssessment = !!(assessmentFile && await loadFile(assessmentFile));
-      if (hasAssessment) return null;
+      // reassess-roadmap persists its verdict as a roadmap-scoped assessments
+      // row and never renders a slice ASSESSMENT.md (#2344).
+      const hasRoadmapAssessment = !!getRoadmapAssessmentForSlice(mid, lastCompleted);
+      if (hasAssessment || hasRoadmapAssessment) return null;
       const summaryFile = resolveSliceFile(base, mid, lastCompleted, "SUMMARY");
       const hasSummary = !!(summaryFile && await loadFile(summaryFile));
       if (!hasSummary) return null;
@@ -4502,6 +4507,9 @@ export async function buildGateEvaluatePrompt(
       slicePlanContent: planContent,
       gateCount: String(pending.length),
       gateList: gateListLines.join("\n"),
+      // #2309: the synchronous-dispatch contract names every gate id the unit
+      // owns so the turn cannot end while one is missing its persisted verdict.
+      gateIdList: pending.map((g) => g.gate_id).join(", "),
       subagentPrompts: subagentSections.join("\n\n---\n\n"),
     }),
   );

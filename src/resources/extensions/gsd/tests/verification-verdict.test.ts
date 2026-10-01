@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { decideVerificationVerdict } from "../verification-verdict.ts";
+import { decideVerificationVerdict, unresolvedCommandToken } from "../verification-verdict.ts";
 import type { VerificationResult } from "../types.ts";
 
 function makeResult(overrides: Partial<VerificationResult> = {}): VerificationResult {
@@ -325,4 +325,36 @@ test("a blocking runtime error next to command-not-found cannot be laundered int
   assert.equal(verdict.reason, "command-not-found");
   assert.equal(verdict.retryable, false);
   assert.match(verdict.failureContext, /Verify command not runnable on this platform/);
+});
+
+test("command-not-found pause names the unresolved tool in a compound command (#2087)", () => {
+  const command = 'uv run pytest tests/ui/test_detail.py -q && grep -q "No filings ingested" detail.py';
+  const verdict = decideVerificationVerdict(
+    "execute-task",
+    makeResult({
+      passed: false,
+      discoverySource: "task-plan",
+      checks: [{
+        command,
+        exitCode: 1,
+        stdout: "16 passed\r\n",
+        stderr: "'grep' is not recognized as an internal or external command,\r\noperable program or batch file.\r\n",
+        durationMs: 10,
+        failureClass: "command-not-found",
+      }],
+    }),
+  );
+
+  assert.equal(
+    verdict.failureContext,
+    `Verify command not runnable on this platform: \`grep\` was not found while running \`${command}\``,
+  );
+});
+
+test("unresolvedCommandToken extracts the missing tool from cmd, bash, and sh stderr (#2087)", () => {
+  assert.equal(unresolvedCommandToken("'grep' is not recognized as an internal or external command,"), "grep");
+  assert.equal(unresolvedCommandToken("bash: line 1: rg: command not found"), "rg");
+  assert.equal(unresolvedCommandToken("sh: 1: jq: not found"), "jq");
+  assert.equal(unresolvedCommandToken("spawnSync cmd ENOENT"), null);
+  assert.equal(unresolvedCommandToken(undefined), null);
 });

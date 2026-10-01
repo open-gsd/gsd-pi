@@ -58,18 +58,16 @@ test("registers Claude Sonnet 5 as a Claude Code CLI model", () => {
 	assert.equal(sonnet5.maxTokens, 128_000);
 });
 
-test("registers a before_provider_request hook to capture the UI context", () => {
+test("captures UI context before streamSimple, including when before_provider_request never fires (#2118)", () => {
 	const { pi, handlers } = makeMockPi();
 	claudeCodeCli(pi as never);
 
-	const registered = handlers.get("before_provider_request");
-	assert.ok(registered && registered.length === 1, "before_provider_request handler must be registered");
-
-	// Without this hook, core calls streamSimple with no UI context and
-	// ask_user_questions self-cancels. The handler must accept both UI states
-	// without throwing and must not mutate the provider payload.
-	const handler = registered[0];
-	const sentinelUi = { kind: "ui" };
-	assert.equal(handler({ type: "before_provider_request" }, { hasUI: true, ui: sentinelUi }), undefined);
-	assert.equal(handler({ type: "before_provider_request" }, { hasUI: false, ui: sentinelUi }), undefined);
+	for (const event of ["session_start", "before_agent_start", "before_provider_request"]) {
+		const registered = handlers.get(event);
+		assert.ok(registered && registered.length === 1, `${event} handler must be registered`);
+		const handler = registered[0]!;
+		const sentinelUi = { kind: "ui" };
+		assert.equal(handler({ type: event }, { hasUI: true, ui: sentinelUi }), undefined);
+		assert.equal(handler({ type: event }, { hasUI: false, ui: sentinelUi }), undefined);
+	}
 });

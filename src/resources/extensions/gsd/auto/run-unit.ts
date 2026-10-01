@@ -7,6 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 
 import type { AutoSession } from "./session.js";
 import { NEW_SESSION_TIMEOUT_MS } from "./session.js";
@@ -26,7 +27,8 @@ import { debugLog } from "../debug-logger.js";
 import { logWarning, logError } from "../workflow-logger.js";
 import { resolveAutoSupervisorConfig } from "../preferences.js";
 import { readUnitRuntimeRecord, type AutoUnitRuntimeRecord } from "../unit-runtime.js";
-import { clearAutoWakeup, consumeAutoWakeup } from "./schedule-wakeup.js";
+import { clearAutoWakeup, consumeAutoWakeup, peekAutoWakeup } from "./schedule-wakeup.js";
+import { emitJournalEvent } from "../journal.js";
 import { applyUnitSkillVisibility } from "../skill-scope.js";
 
 const UNIT_FAILSAFE_BUFFER_MS = 30_000;
@@ -380,6 +382,42 @@ export async function runUnit(
   } finally {
     if (unitTimeoutHandle) clearTimeout(unitTimeoutHandle);
     if (result.status !== "completed") {
+      // #2366: the deletion below is deliberate (#1148 — cancelled or
+      // interrupted units do not leave prompts for later retries), but it must
+      // not be silent. The pending wakeup's reason/prompt are the only record
+      // of what this unit was waiting for, so journal and notify before
+      // dropping it.
+      const discardedWakeup = peekAutoWakeup(s.basePath, unitType, unitId);
+      if (discardedWakeup) {
+        emitJournalEvent(s.basePath, {
+          ts: new Date().toISOString(),
+          flowId: randomUUID(),
+          seq: 0,
+          eventType: "wakeup-discarded",
+          data: {
+            unitType,
+            unitId,
+            status: result.status,
+            reason: discardedWakeup.reason,
+            prompt: discardedWakeup.prompt,
+          },
+        });
+        // Reporting is best-effort (#2366) — a broken notify surface must
+        // never skip the wakeup deletion below.
+        try {
+          ctx.ui.notify(
+            `Scheduled wakeup discarded for ${unitType} ${unitId}: unit ended ${result.status}. Reason: ${discardedWakeup.reason}`,
+            "warning",
+          );
+        } catch (notifyErr) {
+          debugLog("runUnit", {
+            phase: "wakeup-discard-notify-failed",
+            unitType,
+            unitId,
+            error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+          });
+        }
+      }
       clearAutoWakeup(s.basePath, unitType, unitId);
     }
     ctx.ui.setWorkingMessage?.(undefined);

@@ -799,3 +799,63 @@ test("planned UAT rejects structured evidence from an older source revision", as
     WHERE operation_type = 'milestone.validate'
   `).count, 0, "stale evidence must not create a canonical validation receipt");
 });
+
+test("needs-attention validation clamps a passing class verdict so the schema trigger accepts it", async () => {
+  const basePath = makeBase();
+  // Mark Contract as a planned/required verification class for this Milestone.
+  db().prepare(`UPDATE milestones SET verification_contract = :v WHERE id = 'M001'`).run({
+    ":v": "Run focused contract tests; they must exit 0.",
+  });
+
+  const result = await handleValidateMilestone({
+    ...validValidation,
+    verdict: "needs-attention",
+    verdictRationale:
+      "The automated contract suite passed, but human-follow-up items remain, so the Milestone is not yet accepted.",
+    verificationClasses:
+      "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused contract tests | PASS |",
+    verificationEvidence: [{
+      verificationClass: "Contract",
+      evidenceClass: "command",
+      commandOrTool: "pnpm test contract",
+      workingDirectory: basePath,
+      startedAt: "2026-07-14T10:00:00.000Z",
+      endedAt: "2026-07-14T10:01:00.000Z",
+      testedSourceRevision: sourceRevision(basePath),
+      observation: "passed",
+      exitCode: 0,
+      durableOutputRef: "artifact://contract/passed",
+      environment: { runner: "vitest" },
+      rationale: "The contract suite passed with exit code 0.",
+    }],
+  } as ValidateMilestoneParams & {
+    verificationEvidence: Array<Record<string, unknown>>;
+  }, basePath, {
+    invocation: invocation("milestone-validate/public/needs-attention-passing-contract"),
+  });
+
+  assert.ok(
+    !("error" in result),
+    `unexpected validation error: ${"error" in result ? result.error : ""}`,
+  );
+  assert.equal(JSON.parse(String(row(`
+    SELECT payload_json FROM workflow_domain_events
+    WHERE event_type = 'milestone.validation.recorded'
+  `).payload_json)).overallVerdict, "inconclusive");
+  // A per-class "pass" technical verdict is only valid inside a succeeded
+  // attempt. Under a needs-attention Milestone verdict the attempt outcome is
+  // "interrupted", so the class verdict and its "passed" observations are clamped
+  // together to "inconclusive", while the raw command exit code (0) is preserved.
+  assert.deepEqual(db().prepare(`
+    SELECT criterion.criterion_key, verdict.verdict, evidence.observation, evidence.exit_code
+    FROM workflow_acceptance_criteria criterion
+    JOIN workflow_technical_verdicts verdict ON verdict.criterion_id = criterion.criterion_id
+    JOIN workflow_verification_evidence evidence ON evidence.verdict_id = verdict.verdict_id
+    WHERE criterion.criterion_key = 'milestone-validation:contract'
+  `).get(), {
+    criterion_key: "milestone-validation:contract",
+    verdict: "inconclusive",
+    observation: "inconclusive",
+    exit_code: 0,
+  });
+});
