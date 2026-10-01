@@ -52,8 +52,10 @@ import {
 	createInitialRunRecord,
 	createSubagentTrackingName,
 	deriveRunStatus,
+	isProcessAlive,
 	type SubagentChildArtifact,
 	type SubagentRunMode,
+	type SubagentRunRecord,
 	type SubagentRunStatus,
 } from "./run-store.js";
 
@@ -62,6 +64,12 @@ export { buildSubagentProcessArgs } from "./launch.js";
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
+// How often the direct-spawn wait revalidates the child's pid, and how long a
+// suspected death is re-checked before acting (guards a racing exit write).
+// Values from the #2364 report; the poll is ESRCH-only so healthy long runs —
+// deliberately exempt from stall detection — are never touched.
+const LIVENESS_POLL_INTERVAL_MS = 30_000;
+const LIVENESS_DEATH_GRACE_MS = 5_000;
 const liveSubagentProcesses = new Set<ChildProcess>();
 
 async function stopLiveSubagents(): Promise<void> {
@@ -412,6 +420,77 @@ function formatAgentLabel(agent: string, trackingName?: string): string {
 	return trackingName ? `${trackingName} / ${agent}` : agent;
 }
 
+/**
+ * Self-heal a record still marked `running` whose active children are provably
+ * dead: every active child must carry a persisted pid, all of them gone —
+ * confirmed twice, grace apart, against a fresh read — and the record must
+ * have been silent well past one poll interval, so nothing (funnel work like
+ * isolation capture/merge included) can still own it. Then the completion
+ * funnel can never run again and the record gets a terminal status (#2364).
+ * Anything less — unknown pids, mixed dispatches, fresh records, pid reuse —
+ * keeps the record untouched: never invents a death for healthy work.
+ */
+async function revalidateRunningRecord(
+	runStore: SubagentRunStore,
+	record: NonNullable<ReturnType<SubagentRunStore["get"]>>,
+): Promise<SubagentRunRecord | null> {
+	const deadActivePids = (candidate: SubagentRunRecord): number[] | null => {
+		if (candidate.status !== "running") return null;
+		const active = candidate.children.filter(
+			(child) => child.status === "queued" || child.status === "running",
+		);
+		if (active.length === 0) return null;
+		const pids = active
+			.map((child) => child.pid)
+			.filter((pid): pid is number => typeof pid === "number");
+		if (pids.length !== active.length) return null;
+		if (pids.some((pid) => isProcessAlive(pid))) return null;
+		return pids.sort((a, b) => a - b);
+	};
+	const firstPids = deadActivePids(record);
+	if (!firstPids) return null;
+	await new Promise((resolve) => setTimeout(resolve, LIVENESS_DEATH_GRACE_MS));
+	const latest = runStore.get(record.runId);
+	if (!latest) return null;
+	if (latest.status !== "running") return latest;
+	// Silence is part of the death evidence: a dispatch in post-exit funnel
+	// work (capture/merge) updates its record and must never be condemned by a
+	// mid-flight status probe.
+	const staleForMs = Date.now() - Date.parse(latest.updatedAt);
+	if (!(staleForMs > LIVENESS_POLL_INTERVAL_MS + LIVENESS_DEATH_GRACE_MS)) return latest;
+	const pids = deadActivePids(latest);
+	// Same children must be dead in both reads — a retry rewriting pids in
+	// between restarts the confirmation.
+	if (!pids || pids.join(",") !== firstPids.join(",")) return latest;
+
+	const message =
+		`Subagent process ${pids.join(", ")} is gone and no completion was ever persisted; ` +
+		"run marked failed by pid liveness revalidation.";
+	try {
+		return runStore.update(latest.runId, (current) => {
+			const children = current.children.map((child) =>
+				child.status === "queued" || child.status === "running"
+					? {
+						...child,
+						status: "failed" as const,
+						completedAt: new Date().toISOString(),
+						errorMessage: child.errorMessage ?? message,
+					}
+					: child,
+			);
+			return {
+				...current,
+				children,
+				status: deriveRunStatus(children),
+				completedAt: new Date().toISOString(),
+				failure: { type: "child-failed" as const, message },
+			};
+		});
+	} catch {
+		return null;
+	}
+}
+
 function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
 	if (!record) return "Subagent run not found.";
 	const lines = [
@@ -421,8 +500,12 @@ function formatRunRecord(record: ReturnType<SubagentRunStore["get"]>): string {
 		`Updated: ${record.updatedAt}`,
 	];
 	for (const child of record.children) {
-		const exit = child.exitCode === undefined ? "" : ` (exit ${child.exitCode})`;
-		lines.push(`- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${exit}: ${child.output || child.errorMessage || child.stderr || child.task}`);
+		const facts = [
+			child.pid !== undefined ? `pid ${child.pid}` : undefined,
+			child.exitCode !== undefined ? `exit ${child.exitCode}` : undefined,
+		].filter(Boolean).join(", ");
+		const suffix = facts ? ` (${facts})` : "";
+		lines.push(`- [${child.status}] ${formatAgentLabel(child.agent, child.trackingName)}${suffix}: ${child.output || child.errorMessage || child.stderr || child.task}`);
 		if (child.thinking) lines.push(`  thinking: ${child.thinking}`);
 		if (child.sessionFile) lines.push(`  session: ${child.sessionFile}`);
 	}
@@ -439,6 +522,8 @@ interface SubagentRunOptions {
 	thinkingOverride?: string;
 	projectRoot?: string;
 	projectRootSourceCwd?: string;
+	/** Observability hook fired once when the direct-spawn child exists. */
+	onChildSpawned?: (pid: number | undefined) => void;
 }
 
 async function runSingleAgent(
@@ -560,29 +645,77 @@ async function runSingleAgent(
 				{ cwd: launch.cwd, env: launch.env, shell: false, stdio: ["ignore", "pipe", "pipe"] },
 			);
 			liveSubagentProcesses.add(proc);
+			options.onChildSpawned?.(proc.pid);
 			let buffer = "";
-
-			proc.stdout.on("data", (data) => {
+			let settled = false;
+			let exitSeen = false;
+			let livenessTimer: NodeJS.Timeout | undefined;
+			let graceTimer: NodeJS.Timeout | undefined;
+			const onStdoutData = (data: Buffer) => {
 				buffer += data.toString();
 				const lines = buffer.split("\n");
 				buffer = lines.pop() || "";
 				for (const line of lines) processSubagentEventLine(line, currentResult, emitUpdate);
-			});
-
-			proc.stderr.on("data", (data) => {
+			};
+			const onStderrData = (data: Buffer) => {
 				currentResult.stderr += data.toString();
-			});
+			};
+			const settle = (code: number, drainBuffer: boolean) => {
+				if (settled) return;
+				settled = true;
+				clearInterval(livenessTimer);
+				clearTimeout(graceTimer);
+				liveSubagentProcesses.delete(proc);
+				if (drainBuffer && buffer.trim()) processSubagentEventLine(buffer, currentResult, emitUpdate);
+				// Detach and release the pipes: a surviving descendant must not
+				// keep feeding updates (which would resurrect a terminal record
+				// as `running`) or hold the parent's resources (#2364 review).
+				proc.stdout?.removeListener("data", onStdoutData);
+				proc.stderr?.removeListener("data", onStderrData);
+				proc.stdout?.destroy();
+				proc.stderr?.destroy();
+				resolve(code);
+			};
+
+			proc.stdout.on("data", onStdoutData);
+
+			proc.stderr.on("data", onStderrData);
 
 			proc.on("close", (code) => {
-				liveSubagentProcesses.delete(proc);
-				if (buffer.trim()) processSubagentEventLine(buffer, currentResult, emitUpdate);
-				resolve(code ?? 0);
+				settle(code ?? 0, true);
 			});
 
 			proc.on("error", () => {
-				liveSubagentProcesses.delete(proc);
-				resolve(1);
+				settle(1, false);
 			});
+
+			// "exit" fires when the child dies even if a surviving descendant still
+			// holds the stdio pipes — the only thing "close" waits on (#2364). Give
+			// the pipes a short grace to drain the trailing output, then resolve
+			// with the child's real exit status so a dead child cannot leave the
+			// dispatch pending forever. A prompt close still wins the race.
+			proc.on("exit", (code, signal) => {
+				if (settled) return;
+				exitSeen = true;
+				clearTimeout(graceTimer);
+				graceTimer = setTimeout(() => {
+					settle(code ?? (signal ? 1 : 0), true);
+				}, LIVENESS_DEATH_GRACE_MS);
+			});
+
+			// Belt-and-suspenders pid revalidation for the window before "exit"
+			// fires: only ESRCH proves death (EPERM means alive — Windows reports
+			// existence through err.code), and a suspected death is confirmed once
+			// more after a grace before failing the dispatch.
+			livenessTimer = setInterval(() => {
+				if (settled || exitSeen || isProcessAlive(proc.pid)) return;
+				clearTimeout(graceTimer);
+				graceTimer = setTimeout(() => {
+					if (settled || exitSeen || isProcessAlive(proc.pid)) return;
+					currentResult.stderr += `\nSubagent process ${proc.pid} disappeared without an exit event.`;
+					settle(1, true);
+				}, LIVENESS_DEATH_GRACE_MS);
+			}, LIVENESS_POLL_INTERVAL_MS);
 
 			if (signal) {
 				const killProc = () => {
@@ -942,7 +1075,12 @@ export default function (pi: ExtensionAPI) {
 						isError: true,
 					};
 				}
-				const record = runStore.get(params.runId);
+				let record = runStore.get(params.runId);
+				if (record && record.status === "running") {
+					// A record can outlive its process (harness restart, silent child
+					// death): revalidate persisted pids before reporting `running`.
+					record = await revalidateRunningRecord(runStore, record) ?? record;
+				}
 				return {
 					content: [{ type: "text", text: formatRunRecord(record) }],
 					details: makeDetails("single")([]),
@@ -1136,6 +1274,22 @@ export default function (pi: ExtensionAPI) {
 									? { failure: { type: failed.merge?.success === false ? "merge-failed" as const : "child-failed" as const, message: failed.errorMessage || failed.stderr || `Subagent ${failed.agent} failed` } }
 									: {}),
 						};
+					});
+				} catch {
+					// Persistence is observability; execution remains authoritative.
+				}
+			};
+
+			// Persist the child's OS pid so action: "status" can revalidate a run
+			// left `running` by a harness restart or a silent child death (#2364).
+			const noteChildPid = (index: number) => (pid: number | undefined): void => {
+				if (pid === undefined) return;
+				try {
+					runStore.update(dispatchId, (record) => {
+						if (!record.children[index]) return record;
+						const children = [...record.children];
+						children[index] = { ...children[index], pid };
+						return { ...record, children };
 					});
 				} catch {
 					// Persistence is observability; execution remains authoritative.
@@ -1341,6 +1495,7 @@ export default function (pi: ExtensionAPI) {
 								thinkingOverride: params.thinking,
 								projectRoot,
 								projectRootSourceCwd: isolation ? effectiveCwd : undefined,
+								onChildSpawned: noteChildPid(0),
 							},
 						);
 						if (isolation && result.exitCode === 0) {
@@ -1417,6 +1572,7 @@ export default function (pi: ExtensionAPI) {
 							parentSessionManager: ctx.sessionManager,
 							trackingName: dispatchTrackingNames[i],
 							thinkingOverride: step.thinking ?? params.thinking,
+							onChildSpawned: noteChildPid(i),
 						},
 					);
 					results.push(result);
@@ -1519,6 +1675,7 @@ export default function (pi: ExtensionAPI) {
 							thinkingOverride: taskThinking,
 							projectRoot,
 							projectRootSourceCwd,
+							onChildSpawned: noteChildPid(index),
 						};
 						return cmuxSplitsEnabled
 							? runSingleAgentInCmuxSplit(
@@ -1645,6 +1802,7 @@ export default function (pi: ExtensionAPI) {
 						thinkingOverride: params.thinking,
 						projectRoot,
 						projectRootSourceCwd: isolation ? effectiveCwd : undefined,
+						onChildSpawned: noteChildPid(0),
 					};
 					const result = cmuxSplitsEnabled
 						? await runSingleAgentInCmuxSplit(

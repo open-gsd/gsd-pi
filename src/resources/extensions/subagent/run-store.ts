@@ -14,6 +14,8 @@ export interface SubagentChildArtifact {
 	trackingName?: string;
 	task: string;
 	status: SubagentRunStatus;
+	/** OS pid of the spawned child process, when the dispatch path has one. */
+	pid?: number;
 	exitCode?: number;
 	cwd?: string;
 	sessionFile?: string;
@@ -61,6 +63,22 @@ export interface SubagentRunRecord {
 
 export function defaultSubagentRunStoreDir(): string {
 	return path.join(getAgentDir(), "subagent-runs");
+}
+
+/**
+ * Liveness probe via signal 0: only ESRCH proves the pid is gone. EPERM means
+ * the process exists but cannot be signaled (alive); any other failure is
+ * treated conservatively as alive too. Works on Windows, where kill(pid, 0)
+ * reports existence/permission through err.code (#2364).
+ */
+export function isProcessAlive(pid: number | undefined): boolean {
+	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return true;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (err) {
+		return (err as NodeJS.ErrnoException).code !== "ESRCH";
+	}
 }
 
 const TRACKING_ADJECTIVES = [
