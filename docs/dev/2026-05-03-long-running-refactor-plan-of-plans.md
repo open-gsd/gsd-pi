@@ -777,4 +777,3 @@ v1.15.0 (2026-08-12) satisfied the release count. The remaining calendar days
 - Separately sequenced product cleanup.
 
 Those remain INTENT vetoes. This closeout does not authorize them.
-

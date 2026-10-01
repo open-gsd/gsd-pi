@@ -58,15 +58,19 @@ Smoke tests exercise CLI `--help` and `--version` only; they do not require API 
 
 1. **Ensure seam is green** — run verification commands above on current pin before touching upstream.
 2. **Vendor upstream** (does not touch GSD packages):
+
    ```bash
    node scripts/vendor-pi.cjs --ref vX.Y.Z
    ```
+
    Or stepwise:
+
    ```bash
    node scripts/vendor-pi-deps.cjs --ref vX.Y.Z          # pi-ai, pi-agent-core, pi-tui
    node scripts/vendor-pi-coding-agent-core.cjs --ref vX.Y.Z
    node scripts/apply-seam.cjs                           # post-vendor deletes, import rewrites, boundary verify
    ```
+
    Seam config: `scripts/pi-seam.json` (forbidden paths, protected files, import rewrites, theme/tool fixes).
 3. **Reconcile GSD shims** — re-apply every path in `patchAllowlist`. Prefer **incremental shims** over restoring entire pre-vendor GSD files (HEAD restore of `model-registry.ts` / `settings-manager.ts` broke v0.75.5 compat in Phase 2).
 4. **Normalize package.json** — preserve `@gsd/pi-*` names, `gsd.linkable`, workspace `tsc` build scripts, and subpath exports (`./*` → `./dist/*`).

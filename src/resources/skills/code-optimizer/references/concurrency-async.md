@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Sequential Async (Should Be Parallel)
+
 ```
 await.*\n.*await.*\n.*await    (multiple sequential awaits that could be parallel)
 for.*await                      (sequential await in loop)
@@ -13,6 +14,7 @@ for.*in.*:\n.*await            (await in loop)
 ```
 
 ### Missing Parallelization
+
 ```
 # Should use Promise.all / asyncio.gather
 fetch\(.*\n.*fetch\(           (sequential fetches)
@@ -21,6 +23,7 @@ requests\.\w+\(.*\n.*requests\. (Python sequential requests)
 ```
 
 ### Blocking Operations in Async Context
+
 ```
 # Node.js sync operations in async code
 fs\.readFileSync               (blocking file read)
@@ -36,6 +39,7 @@ os\.path\.exists               (use aio equivalent)
 ```
 
 ### Race Conditions & Thread Safety
+
 ```
 # Shared mutable state
 global\s+\w+.*=               (Python global mutation)
@@ -48,6 +52,7 @@ let\s+\w+.*=.*\n.*async       (mutable let used in async)
 ```
 
 ### Unbounded Concurrency
+
 ```
 # No concurrency limit
 \.map\(.*fetch                 (unbounded parallel fetches)
@@ -59,6 +64,7 @@ while.*true.*await             (infinite async loop without backpressure)
 ```
 
 ### Error Handling in Async
+
 ```
 # Unhandled rejections
 \.then\(.*without.*\.catch     (promise without catch)

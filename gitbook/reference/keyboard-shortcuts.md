@@ -32,7 +32,6 @@ If you use cmux (terminal multiplexer), GSD can integrate with it:
 | `/gsd cmux sidebar on/off` | Toggle sidebar metadata |
 | `/gsd cmux splits on/off` | Toggle visual subagent splits |
 
-
 ## Claude Code selected-text Quick Action (macOS)
 
 The repository includes `scripts/claude-code-send-selection.sh`, an optional Automator Quick Action shim for Claude Code.app. It reads selected text from stdin (or the clipboard as a fallback), pastes it into Claude Code, submits it, and restores the previous clipboard. Create an Automator **Quick Action** with **Run Shell Script**, point it at the script path, then bind a macOS shortcut if you want this workflow.

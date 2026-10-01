@@ -26,6 +26,7 @@ files:
 After T024's contracts redirect, the gates execute at clean HEAD but the true
 baseline is red for two pre-existing reasons (evidence: T024 Log +
 `.project/plan/wave1-gate-baseline.md` ## Re-run after T024):
+
 1. `baseline:refactor:gate` — the prompt-golden Phase-2 reduction assertion
    fails: current aggregate 9454 chars vs reference 15400, required
    ≤ floor(15400 × 0.6) = 9240 (61.4% — 214 chars over). The reference lives

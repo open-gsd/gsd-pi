@@ -190,6 +190,7 @@ git:
 ```
 
 This pushes the milestone branch and creates a PR targeting `develop` (or whichever branch you specify). Requires `gh` CLI installed and authenticated. See [git.auto_pr](./configuration.md#gitauto_pr) for details.
+
 ```
 
 ### `commit_docs: false`

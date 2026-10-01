@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Heavy Imports
+
 ```
 import\s+\w+\s+from\s+['"]lodash['"]      (full lodash import vs lodash/specific)
 import\s+\w+\s+from\s+['"]moment['"]      (moment.js - use date-fns/dayjs)
@@ -15,6 +16,7 @@ import\s+boto3                              (full AWS SDK)
 ```
 
 ### Unused Dependencies
+
 ```
 # Check package.json dependencies vs actual imports
 # Check requirements.txt vs actual imports
@@ -23,6 +25,7 @@ import.*from.*['"](\w+)['"]   (cross-reference with package.json)
 ```
 
 ### Duplicate Functionality
+
 ```
 # Multiple date libraries
 moment.*\n.*date-fns          (both moment and date-fns)
@@ -38,6 +41,7 @@ zustand.*\n.*jotai            (multiple state libs)
 ```
 
 ### Dev Dependencies in Production
+
 ```
 # devDependencies imported in src/
 import.*from.*['"](@testing|jest|mocha|chai|sinon|cypress|storybook)
@@ -49,6 +53,7 @@ debugger;
 ```
 
 ### Dynamic Imports Missing
+
 ```
 # Large components imported statically that could be lazy
 import.*Modal       (modals are great candidates for lazy loading)
@@ -61,6 +66,7 @@ import.*Page.*from  (page components should often be lazy)
 ```
 
 ### Large Assets
+
 ```
 # Check for unoptimized assets
 \.png['"]          (check if could be webp/avif)

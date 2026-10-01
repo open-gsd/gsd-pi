@@ -11,6 +11,7 @@ Produce a high-quality MCP server that an LLM can actually use — not one that 
 gsd-pi consumes MCP heavily — see `src/resources/extensions/mcp-client/`, `src/resources/extensions/gsd/mcp-project-config.ts`, `src/resources/extensions/gsd/workflow-mcp.ts`, and `/gsd mcp` commands. Users frequently want to extend GSD with project-specific MCP servers (internal APIs, data sources, domain tools). This skill fills the authoring gap between "MCP exists" and "I have a working server."
 
 Invocation points:
+
 - User describes a service or API they want an LLM to reach
 - `/gsd mcp init` scaffolds config but there's a tool integration to build
 - Replacing a hand-rolled extension with a standard MCP server

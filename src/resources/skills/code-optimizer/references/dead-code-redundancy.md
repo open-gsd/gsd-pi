@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Unused Exports/Functions
+
 ```
 export\s+(function|const|class)\s+\w+    (cross-reference: is it imported anywhere?)
 def\s+\w+\(                              (cross-reference: is it called anywhere?)
@@ -11,6 +12,7 @@ func\s+\w+\(                             (Go functions - are they called?)
 ```
 
 ### Unused Imports
+
 ```
 import.*from.*['"].*['"]    (cross-reference with usage in file)
 from\s+\w+\s+import\s+\w+  (Python: check if imported name is used)
@@ -19,6 +21,7 @@ use\s+\w+;                  (Rust: check if used)
 ```
 
 ### Commented-Out Code
+
 ```
 //\s*(function|const|let|var|class|import|return|if|for|while)
 #\s*(def|class|import|return|if|for|while)
@@ -26,6 +29,7 @@ use\s+\w+;                  (Rust: check if used)
 ```
 
 ### Dead Branches
+
 ```
 if\s*\(\s*false\s*\)        (always-false condition)
 if\s*\(\s*true\s*\)         (always-true condition - dead else)
@@ -40,6 +44,7 @@ ENABLE_.*=\s*false
 ```
 
 ### Duplicate Logic
+
 ```
 # Similar function signatures in same file or nearby files
 function\s+\w*(get|fetch|load|process|handle)\w*\(   (many similar handlers)
@@ -49,6 +54,7 @@ def\s+\w*(get|fetch|load|process|handle)\w*\(        (Python: similar functions)
 ```
 
 ### Deprecated/Legacy Code
+
 ```
 @deprecated
 @Deprecated
@@ -65,6 +71,7 @@ _v[0-9]\b       (versioned functions like process_v1)
 ```
 
 ### Unreachable Code
+
 ```
 return.*\n\s*(var|let|const|function)   (code after return)
 throw.*\n\s*(var|let|const|function)    (code after throw)

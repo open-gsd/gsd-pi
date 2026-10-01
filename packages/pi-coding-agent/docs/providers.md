@@ -118,15 +118,20 @@ The file is created with `0600` permissions (user read/write only). Auth file cr
 The `key` field supports three formats:
 
 - **Shell command:** `"!command"` executes and uses stdout (cached for process lifetime)
+
   ```json
   { "type": "api_key", "key": "!security find-generic-password -ws 'anthropic'" }
   { "type": "api_key", "key": "!op read 'op://vault/item/credential'" }
   ```
+
 - **Environment variable:** Uses the value of the named variable
+
   ```json
   { "type": "api_key", "key": "MY_ANTHROPIC_KEY" }
   ```
+
 - **Literal value:** Used directly
+
   ```json
   { "type": "api_key", "key": "sk-ant-..." }
   ```

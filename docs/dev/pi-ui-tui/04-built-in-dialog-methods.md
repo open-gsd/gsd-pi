@@ -45,6 +45,7 @@ const ok = await ctx.ui.confirm(
 ```
 
 **Timeout return values:**
+
 - `select()` → `undefined`
 - `confirm()` → `false`
 - `input()` → `undefined`

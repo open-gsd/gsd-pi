@@ -30,6 +30,7 @@ All four models converge on a hybrid approach. The key insight: **don't over-eng
 ### The Hybrid Format
 
 Individual files use **YAML frontmatter + Markdown body**:
+
 ```yaml
 ---
 status: in_progress

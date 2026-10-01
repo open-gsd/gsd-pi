@@ -267,6 +267,7 @@ Today the agent must infer correctness from prose and heuristics. That is weaker
 ## Suggested assertion kinds
 
 ### Page state assertions
+
 - `url_contains`
 - `url_equals`
 - `title_contains`
@@ -275,6 +276,7 @@ Today the agent must infer correctness from prose and heuristics. That is weaker
 - `page_has_alert`
 
 ### Element assertions
+
 - `selector_visible`
 - `selector_hidden`
 - `ref_visible`
@@ -289,6 +291,7 @@ Today the agent must infer correctness from prose and heuristics. That is weaker
 - `count_at_least`
 
 ### Accessibility assertions
+
 - `aria_snapshot_contains`
 - `aria_snapshot_matches`
 - `role_name_exists`
@@ -296,6 +299,7 @@ Today the agent must infer correctness from prose and heuristics. That is weaker
 - `alert_visible`
 
 ### Observability assertions
+
 - `no_console_errors`
 - `network_request_seen`
 - `response_status_seen`
@@ -303,6 +307,7 @@ Today the agent must infer correctness from prose and heuristics. That is weaker
 - `dialog_seen`
 
 ### Visual assertions
+
 - `screenshot_changed`
 - `element_visually_changed`
 - `layout_breakpoint_ok`
@@ -469,6 +474,7 @@ A lightweight internal state snapshot should be stored after major actions so di
 Add form-specific analysis and fill tools.
 
 ### New tools
+
 - `browser_analyze_form`
 - `browser_fill_form`
 
@@ -623,6 +629,7 @@ Refs are the backbone of efficient browser interaction. The current system is go
 ## Proposed upgrades
 
 ### A. Snapshot modes
+
 Allow specialized snapshot modes:
 
 - `interactive`
@@ -636,6 +643,7 @@ Allow specialized snapshot modes:
 This reduces token waste and improves relevance.
 
 ### B. Better internal fingerprints
+
 Track more stable descriptors:
 
 - role
@@ -651,6 +659,7 @@ Track more stable descriptors:
 This helps ref remapping across light DOM changes.
 
 ### C. Semantic aliases
+
 Potentially expose alias-like labels such as:
 
 - primary submit
@@ -662,6 +671,7 @@ Potentially expose alias-like labels such as:
 Even if these remain derived rather than canonical, they can improve action clarity.
 
 ### D. Scoped ref groups
+
 Allow refs generated per region:
 
 - within dialog
@@ -680,6 +690,7 @@ This helps reduce ambiguity.
 Promote the internal browser model from “single active page” to a real page registry.
 
 ### New tools
+
 - `browser_list_pages`
 - `browser_switch_page`
 - `browser_close_page`
@@ -732,6 +743,7 @@ Auto-switching to a newly opened page is still useful, but should be visible and
 Add explicit debug artifact tools.
 
 ### New tools
+
 - `browser_trace_start`
 - `browser_trace_stop`
 - `browser_export_har`
@@ -787,6 +799,7 @@ Example return:
 Add tools that operate one level above raw browser actions.
 
 ### Candidate tools
+
 - `browser_act`
 - `browser_run_task`
 - `browser_recommend_next`
@@ -806,9 +819,11 @@ The model should not have to fully re-solve every local browser decision through
 ## Suggested roles
 
 ### `browser_recommend_next`
+
 Given a goal and current page state, return the best next 3 actions with confidence and reasons.
 
 ### `browser_act`
+
 Perform one higher-level semantic action like:
 
 - open login dialog
@@ -818,6 +833,7 @@ Perform one higher-level semantic action like:
 - expand navigation menu
 
 ### `browser_verify_flow`
+
 Run a bounded set of assertions for a named flow such as:
 
 - logged in
@@ -827,6 +843,7 @@ Run a bounded set of assertions for a named flow such as:
 - navigation completed
 
 ### `browser_run_task`
+
 Frontier tool: perform a bounded internal action loop toward a clear goal.
 
 ## Safety recommendations
@@ -884,6 +901,7 @@ This should integrate with the same state/diff infrastructure proposed above.
 Keep screenshots, but use them more surgically.
 
 ### New tools or behaviors
+
 - `browser_screenshot_diff`
 - `browser_capture_region`
 - `browser_inspect_visual`
@@ -1081,6 +1099,7 @@ You explicitly want browser tools to power automatic verification and testing du
 ## Suggested additions
 
 ### `browser_verify_flow`
+
 Return:
 
 - named flow
@@ -1090,6 +1109,7 @@ Return:
 - final verdict
 
 ### `browser_export_verification_report`
+
 Write a markdown or JSON artifact summarizing:
 
 - environment
@@ -1111,24 +1131,31 @@ This is especially useful for GSD artifacts.
 These are the best immediate improvements.
 
 ### 1. `browser_assert`
+
 Highest priority.
 
 ### 2. `browser_batch`
+
 Highest priority.
 
 ### 3. `browser_diff`
+
 Highest priority.
 
 ### 4. `browser_analyze_form`
+
 Very high priority.
 
 ### 5. `browser_fill_form`
+
 Very high priority.
 
 ### 6. Tighten tool descriptions and prompt guidance
+
 Low risk, immediate value.
 
 ### 7. Action timeline / action ids
+
 Important enabling infrastructure.
 
 ---
@@ -1136,9 +1163,13 @@ Important enabling infrastructure.
 ## Phase 2 — Strong Maturity Upgrades
 
 ### 8. Multi-page/tab/frame model
+
 ### 9. Richer wait predicates
+
 ### 10. Structured network/console assertions
+
 ### 11. Ref snapshot modes and better ref fingerprints
+
 ### 12. Debug bundle and trace export
 
 ---
@@ -1146,10 +1177,15 @@ Important enabling infrastructure.
 ## Phase 3 — Frontier AI-Native Capabilities
 
 ### 13. `browser_find_best`
+
 ### 14. `browser_recommend_next`
+
 ### 15. `browser_act`
+
 ### 16. `browser_verify_flow`
+
 ### 17. `browser_run_task`
+
 ### 18. hybrid semantic + visual fallback targeting
 
 These are the ideas that move the extension from excellent tooling into a genuinely mind-blowing browser device for agents.
@@ -1200,6 +1236,7 @@ These are the ideas that move the extension from excellent tooling into a genuin
 As the extension evolves, it should preserve its best current qualities.
 
 ### Keep these principles
+
 - accessibility-first browsing
 - deterministic refs
 - compact summaries
@@ -1209,6 +1246,7 @@ As the extension evolves, it should preserve its best current qualities.
 - adaptive settling
 
 ### Avoid these regressions
+
 - screenshot-first browsing as the normal path
 - giant raw DOM dumps as default output
 - excessive prose instead of structured results

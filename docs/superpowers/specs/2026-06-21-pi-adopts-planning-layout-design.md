@@ -32,6 +32,7 @@ End state: both tools read/write `.gsd/phases/NN-slug/NN-MM-PLAN.md`. One direct
 ### Stage 1 (this spec — gsd-pi side)
 
 **In scope:**
+
 - **Layout-policy module** (`layout-policy.ts`) — single source of truth for the segment names, file-naming, and root confirmation (`.gsd/`).
 - **Path layer migration** — the 17 resolvers in `paths.ts` route through the policy to emit `phases/NN-slug/...` instead of `milestones/MID/slices/SID/...`. ~6 hardcoded literals in `paths.ts`, ~3 in `markdown-renderer.ts`, ~3 in `md-importer.ts` move behind the policy.
 - **Tasks collapse** — task files (`TID-PLAN.md`, `TID-SUMMARY.md`) stop being written. Tasks become checkboxes inside plan files (`<tasks>` XML blocks). The DB keeps the task table; only the on-disk representation changes.
@@ -40,6 +41,7 @@ End state: both tools read/write `.gsd/phases/NN-slug/NN-MM-PLAN.md`. One direct
 - **Compat-layer removal** — the `.gsd/.compat.json` marker, `external-markdown-edit`/`external-planning-edit` drift handlers, `/gsd sync`, and doctor compat-health from PR #802 are removed. That parity work becomes the Stage 2 migration mechanism for gsd-core.
 
 **Out of scope (Stage 1):**
+
 - **gsd-core changes.** Stage 2.
 - **DB schema rename.** Tables stay `milestones`/`slices`/`tasks`.
 - **Multi-milestone / legacy-milestone-dir `.planning/` layouts.** Those still import correctly (read path unchanged) but aren't reverse-projected.
@@ -47,6 +49,7 @@ End state: both tools read/write `.gsd/phases/NN-slug/NN-MM-PLAN.md`. One direct
 ### Stage 2 (separate spec — gsd-core side)
 
 **In scope (Stage 2 only, not this spec):**
+
 - gsd-core's installer/init/templates change `.planning/` → `.gsd/`.
 - Existing gsd-core projects (`.planning/`) migrate to `.gsd/`.
 - Documented as a follow-up; not designed here.
@@ -144,6 +147,7 @@ Build runs and CI is green.
 ```
 
 What changes:
+
 - `resolveTasksDir`, `resolveTaskFile` → deprecated (return null or removed).
 - `renderTaskPlanFromDb` → removed. Task state renders inside `renderPlanFromDb`'s `<tasks>` block.
 - `renderTaskSummary` → removed as a *separate file writer*. Task-level summary content (verification evidence, key files, key decisions) that dispatch uses stays in the DB; on disk it renders into the plan file's `<verification>` block or the phase SUMMARY. No data is lost — the DB remains the store; only the per-task-file projection goes away.
@@ -223,12 +227,14 @@ The `state-reconciliation` drift pipeline stays — it's used for other drift ki
 ## 6. Data Flow
 
 **Normal operation (post-migration):**
+
 1. gsd-pi reads/writes `.gsd/phases/NN-slug/NN-MM-PLAN.md` via the layout-policy-backed resolvers.
 2. DB at `.gsd/gsd.db` is the internal index; dispatched from but not the on-disk contract.
 3. Tasks live as checkboxes in plan files; parsed into the DB on import; rendered from DB on projection.
 4. No compat marker, no drift detection for external edits — both tools write the same layout.
 
 **Startup migration (one-time, for existing nested-structure users):**
+
 1. Detect `.gsd/milestones/`.
 2. Backup to `.gsd-backups/`.
 3. Read DB, write flat-phase via renderer.
@@ -236,6 +242,7 @@ The `state-reconciliation` drift pipeline stays — it's used for other drift ki
 5. Leave backup for one release.
 
 **Cross-tool open (the goal state, after Stage 2):**
+
 - gsd-core opens the project: reads `.gsd/phases/...`, works natively.
 - gsd-pi opens the project: reads `.gsd/phases/...`, populates/refreshes DB, works natively.
 - No conversion, no bridge, no drift.
