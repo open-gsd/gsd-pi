@@ -378,6 +378,10 @@ function openCloseoutFixture(): string {
   return base;
 }
 
+// #2470: validation persistence rejects any non-sha256 testedSourceRevision;
+// fixtures use the same format-valid zero hash as the other lifecycle tests.
+const FIXTURE_SOURCE_REVISION = "sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
 function recordPassingValidation(): ValidateMilestoneReceipt {
   const runId = readDomainOperationFence().revision;
   return validateMilestone({
@@ -388,7 +392,7 @@ function recordPassingValidation(): ValidateMilestoneReceipt {
       actorId: "uat-dispatch-test",
     },
     milestoneId: "M001",
-    testedSourceRevision: "source-a",
+    testedSourceRevision: FIXTURE_SOURCE_REVISION,
     policyId: "test-policy",
     policyVersion: "1",
     verdict: "pass",
@@ -396,7 +400,7 @@ function recordPassingValidation(): ValidateMilestoneReceipt {
     outcome: "succeeded",
     failureClass: "none",
     summary: "Focused proof completed.",
-    output: { testedSourceRevision: "source-a" },
+    output: { testedSourceRevision: FIXTURE_SOURCE_REVISION },
     criteria: [{
       criterionKey: "focused-proof",
       evidenceClass: "command",
