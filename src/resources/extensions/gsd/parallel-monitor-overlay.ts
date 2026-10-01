@@ -467,7 +467,6 @@ export class ParallelMonitorOverlay {
     if (
       matchesKey(data, Key.escape) ||
       matchesKey(data, Key.ctrlAlt("p")) ||
-      matchesKey(data, Key.ctrlShift("p")) ||
       data === "q"
     ) {
       this.dispose();

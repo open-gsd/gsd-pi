@@ -3,7 +3,7 @@
  *
  * Full-screen overlay showing auto-mode progress: milestone/slice/task
  * breakdown, current unit, completed units, timing, and activity log.
- * Toggled with Ctrl+Alt+G (⌃⌥G on macOS), Ctrl+Shift+G fallback,
+ * Toggled with Ctrl+Alt+G (⌃⌥G on macOS), Alt+G fallback,
  * or opened from /gsd status.
  */
 
@@ -301,7 +301,7 @@ export class GSDDashboardOverlay {
       matchesKey(data, Key.escape) ||
       matchesKey(data, Key.ctrl("c")) ||
       matchesKey(data, Key.ctrlAlt("g")) ||
-      matchesKey(data, Key.ctrlShift("g"))
+      matchesKey(data, Key.alt("g"))
     ) {
       this.dispose();
       this.onClose();
