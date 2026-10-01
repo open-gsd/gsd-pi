@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 
@@ -1286,4 +1286,143 @@ export async function checkEngineHealth(
       }
     }
   }
+}
+
+/**
+ * Surface lifecycle-shadow observation-loss audit events whose loss accounting
+ * names `primary_sink_failed` (#2442). When the canonical lifecycle shadow
+ * cannot be persisted to its primary sink, the loss event is written outside
+ * the DB (audit projection, retry spool, or emergency journal) and nothing
+ * else in doctor looked at it — a run could lose shadow observations
+ * silently. The incident audit lived in the milestone WORKTREE projection, so
+ * every on-disk worktree audit projection is scanned too, registered or not.
+ * Matching is structural: only the loss accounting fields decide. Best-effort:
+ * missing files, unreadable lines, and a closed database are all skipped;
+ * events seen on several surfaces (projection mirrors the DB) count once.
+ */
+export function checkLifecycleShadowObservationLoss(basePath: string, issues: DoctorIssue[]): void {
+  const projectGsd = gsdRoot(basePath);
+  const surfaces: Array<{ label: string; path: string }> = [
+    { label: "audit projection", path: join(projectGsd, "audit", "events.jsonl") },
+    { label: "loss retry spool", path: join(projectGsd, "runtime", "lifecycle-shadow-observation-loss.jsonl") },
+    { label: "emergency loss journal", path: join(projectGsd, "lifecycle-shadow-observation-loss.jsonl") },
+  ];
+  // Milestone worktrees keep their own audit projections (the #2442 incident
+  // recorded its loss event in .gsd-worktrees/<MID>/.gsd/audit/events.jsonl).
+  // Scan the on-disk containers directly so unregistered directories count.
+  for (const container of [join(basePath, ".gsd-worktrees"), join(basePath, ".gsd", "worktrees")]) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(container);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      surfaces.push({
+        label: `worktree ${entry} audit projection`,
+        path: join(container, entry, ".gsd", "audit", "events.jsonl"),
+      });
+    }
+  }
+
+  const seenEventIds = new Set<string>();
+  let total = 0;
+  let latestTs = "";
+  let firstHitPath = "";
+  const surfacesHit: string[] = [];
+  for (const surface of surfaces) {
+    if (!existsSync(surface.path)) continue;
+    let content: string;
+    try {
+      content = readFileSync(surface.path, "utf-8");
+    } catch {
+      continue;
+    }
+    let count = 0;
+    for (const line of content.split("\n")) {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("{")) continue;
+      let event: { eventId?: unknown; type?: unknown; ts?: unknown; payload?: unknown };
+      try {
+        event = JSON.parse(trimmed) as typeof event;
+      } catch {
+        continue;
+      }
+      if (event.type !== "lifecycle-shadow-observation-loss") continue;
+      if (!primarySinkLossReason(event.payload)) continue;
+      const dedupeKey = typeof event.eventId === "string" ? event.eventId : "";
+      if (dedupeKey && seenEventIds.has(dedupeKey)) continue;
+      if (dedupeKey) seenEventIds.add(dedupeKey);
+      count += 1;
+      if (typeof event.ts === "string" && event.ts > latestTs) latestTs = event.ts;
+      if (!firstHitPath) firstHitPath = surface.path;
+    }
+    if (count > 0) {
+      total += count;
+      surfacesHit.push(`${count} in ${surface.label} (${surface.path})`);
+    }
+  }
+
+  if (isDbAvailable()) {
+    try {
+      const adapter = _getAdapter();
+      const rows = adapter?.prepare(`
+        SELECT event_id, ts, payload_json
+        FROM audit_events
+        WHERE type = 'lifecycle-shadow-observation-loss'
+          AND payload_json LIKE '%primary_sink_failed%'
+      `)?.all() as Array<{ event_id?: unknown; ts?: unknown; payload_json?: unknown }> | undefined;
+      for (const row of rows ?? []) {
+        let payload: unknown;
+        try {
+          payload = JSON.parse(String(row.payload_json ?? "null"));
+        } catch {
+          continue;
+        }
+        if (!primarySinkLossReason(payload)) continue;
+        const dedupeKey = typeof row.event_id === "string" ? row.event_id : "";
+        if (dedupeKey && seenEventIds.has(dedupeKey)) continue;
+        if (dedupeKey) seenEventIds.add(dedupeKey);
+        total += 1;
+        if (typeof row.ts === "string" && row.ts > latestTs) latestTs = row.ts;
+        if (!firstHitPath) firstHitPath = ".gsd/gsd.db";
+      }
+    } catch {
+      // Older schemas may not carry the audit_events table; the file surfaces
+      // above still cover the outside-the-DB loss paths.
+    }
+  }
+
+  if (total > 0) {
+    issues.push({
+      severity: "error",
+      code: "lifecycle_shadow_observation_loss",
+      scope: "project",
+      unitId: "project",
+      message:
+        `${total} lifecycle-shadow observation${total === 1 ? " was" : "s were"} lost to a failed primary sink` +
+        `${latestTs ? ` (latest at ${latestTs})` : ""}: ${surfacesHit.join("; ")}. ` +
+        "Canonical shadow observations could not be persisted — inspect the loss accounting for the underlying sink error.",
+      file: firstHitPath || ".gsd/audit/events.jsonl",
+      fixable: false,
+    });
+  }
+}
+
+/**
+ * Structural match on the loss accounting only: the top-level reason or any
+ * recorded cause must name the primary sink. A payload that merely mentions
+ * "primary_sink_failed" in unrelated content must not match.
+ */
+function primarySinkLossReason(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return false;
+  const accounting = (payload as { observationLossAccounting?: unknown }).observationLossAccounting;
+  if (!accounting || typeof accounting !== "object" || Array.isArray(accounting)) return false;
+  const record = accounting as { reason?: unknown; causes?: unknown };
+  if (record.reason === "primary_sink_failed") return true;
+  if (!Array.isArray(record.causes)) return false;
+  return record.causes.some((cause) =>
+    Boolean(cause) && typeof cause === "object" &&
+    (cause as { reason?: unknown }).reason === "primary_sink_failed",
+  );
 }

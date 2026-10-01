@@ -19,6 +19,7 @@ import { collectPreferenceDiagnostics, formatPreferenceDiagnosticDetail } from "
 import type { DoctorIssue, DoctorIssueCode, DoctorReport } from "./doctor-types.js";
 import { GLOBAL_STATE_CODES } from "./doctor-types.js";
 import { checkGitHealth, checkRuntimeHealth, checkGlobalHealth, checkEngineHealth } from "./doctor-checks.js";
+import { checkLifecycleShadowObservationLoss } from "./doctor-engine-checks.js";
 import { checkEnvironmentHealth } from "./doctor-environment.js";
 import { checkGsdStateHealth } from "./doctor-state-checks.js";
 import { validateTitle } from "./validation.js";
@@ -282,6 +283,10 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
     repair: fix && !dryRun,
     repairDbLock: shouldFix("db_locked"),
   });
+
+  // Lifecycle shadow observation-loss accounting (#2442): surface audit events
+  // whose primary sink failed — otherwise lost shadow observations are silent.
+  checkLifecycleShadowObservationLoss(basePath, issues);
 
   const milestonesPath = milestonesDir(basePath);
   const legacyMilestonesPath2 = legacyMilestonesDir(basePath);

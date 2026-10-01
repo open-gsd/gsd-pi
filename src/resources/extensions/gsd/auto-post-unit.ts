@@ -2158,6 +2158,36 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
 
     // Artifact verification
     const verificationBasePath = s.currentUnit.workspaceRoot ?? s.basePath;
+    // ── #2442: worktree integrity gates publication unconditionally ──────
+    // An execute-task dispatched into a GSD worktree must never publish from a
+    // broken one. The integrity check below used to run only when an artifact
+    // went missing or failed verification, so a fabricated SUMMARY inside a
+    // non-worktree directory verified cleanly (#2442). Evidence produced in a
+    // broken worktree cannot be trusted, so check before verifying at all:
+    // diagnoseWorktreeIntegrityFailure returns null for project roots and
+    // healthy worktrees, so every legitimate run pays one cheap probe and
+    // behaves exactly as before.
+    if (s.currentUnit.type === "execute-task") {
+      const worktreeIntegrityFailure = diagnoseWorktreeIntegrityFailure(verificationBasePath);
+      if (worktreeIntegrityFailure) {
+        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
+        s.pendingVerificationRetry = null;
+        s.verificationRetryCount.delete(retryKey);
+        s.verificationRetryFailureHashes.delete(retryKey);
+        debugLog("postUnit", {
+          phase: "worktree-integrity-failure-unverified-artifact",
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+          basePath: verificationBasePath,
+        });
+        ctx.ui.notify(
+          `${worktreeIntegrityFailure} Retry ${s.currentUnit.id} after repair.`,
+          "error",
+        );
+        await pauseAuto(ctx, pi);
+        return "dispatched";
+      }
+    }
     let triggerArtifactVerified = false;
     let durableReceiptFailure: string | null = null;
     if (!s.currentUnit.type.startsWith("hook/")) {

@@ -112,6 +112,8 @@ export type DoctorIssueCode =
   // Milestone filesystem/DB drift (#4996)
   | "orphan_milestone_dir"
   | "orphan_milestone_db"
+  // Lifecycle shadow observation loss accounting (#2442)
+  | "lifecycle_shadow_observation_loss"
   // Parent-workspace declared repository checks (#818)
   | "workspace_repo_path_missing"
   | "workspace_repo_not_a_repo";
