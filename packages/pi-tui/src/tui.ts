@@ -318,6 +318,19 @@ export class TUI extends Container {
 	private previousKittyImageIds = new Set<number>();
 	private previousWidth = 0;
 	private previousHeight = 0;
+	// High-water mark of leading lines pushed past the bottom row into terminal
+	// scrollback. Advanced only by writers that actually scroll (the pristine
+	// render and the differential append path); a clean repaint may start at
+	// this mark but never above it, so it can only skip lines a scroll has
+	// already preserved (#2415).
+	private flushedLineCount = 0;
+	// Terminal dimensions at which flushedLineCount was last established. The
+	// mark is positional, so it only identifies flushed lines while the layout
+	// that produced it is still current. Tracked separately from
+	// previousWidth/previousHeight because a forced render overwrites those
+	// with -1 sentinels and would otherwise hide a coalesced real resize.
+	private flushedAtWidth = 0;
+	private flushedAtHeight = 0;
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<InputListener>();
 
@@ -1246,6 +1259,15 @@ export class TUI extends Container {
 
 		newLines = this.applyLineResets(newLines);
 
+		// A shrunken frame shifts the positional meaning of the flushed mark:
+		// deletions move content up, so lines the mark claims are flushed may
+		// now sit at other indices. Demote the mark to the viewport top — the
+		// only boundary still plausible for the new layout — so later clean
+		// repaints cannot skip content that took its place (#2415).
+		if (newLines.length < this.previousLines.length) {
+			this.flushedLineCount = Math.min(this.flushedLineCount, Math.max(0, newLines.length - height));
+		}
+
 		// Shared epilogue for every frame-writing path: record the frame the
 		// terminal now shows and reposition the hardware cursor. Every writer
 		// must land here so the commit bookkeeping has one home.
@@ -1269,19 +1291,21 @@ export class TUI extends Container {
 			this.previousHeight = height;
 		};
 
-		// Clear the viewport and repaint. When `clear` is true the terminal
-		// already carries committed history (scrollback flushed by earlier frames,
-		// or content left on screen by a forced reset), so the rewrite is bounded
-		// to the visible viewport: \x1b[2J cannot reach scrollback, and rewriting
-		// the transcript from its first row would scroll the terminal past its
-		// bottom edge and re-commit the flushed prefix as duplicates (#2307). The
-		// pristine first render (clear === false) keeps the unbounded write — it
-		// is what seeds scrollback with the transcript.
+		// Clear the viewport and repaint. A clean repaint (clear === true) may
+		// only skip lines that were already flushed into scrollback: \x1b[2K
+		// cannot reach scrollback, so rewriting the already-flushed prefix would
+		// re-commit it as duplicates (#2307). Where that flushed prefix ends is
+		// tracked by flushedLineCount — enforced here via firstLine, not assumed
+		// (#2415). Anything from firstLine down is written below; if that region
+		// is taller than the screen the overflow scrolls the never-flushed part
+		// into scrollback instead of erasing it. The pristine first render
+		// (clear === false) keeps the unbounded write — it is what seeds
+		// scrollback with the transcript.
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
 			let buffer = this.useSynchronizedOutput ? "\x1b[?2026h" : "";
 			// Delete every Kitty placement from the previous frame before repainting.
-			// \x1b[2J clears graphics on Ghostty but NOT on upstream Kitty, and the
+			// \x1b[2J cleared graphics on Ghostty (but NOT on upstream Kitty), and the
 			// no-clear branch never erases graphics at all — so an unconditional
 			// delete of the prior frame's image ids is the only terminal-agnostic way
 			// to stop placements from lingering/stacking across a full repaint. We use
@@ -1291,23 +1315,49 @@ export class TUI extends Container {
 			// still in the rewritten lines is re-emitted below and replaces its
 			// (now-deleted) prior placement via its stable id.
 			buffer += this.deleteKittyImages(this.previousKittyImageIds);
-			const firstLine = clear && newLines.length > height ? newLines.length - height : 0;
+			const firstLine = clear ? Math.min(this.flushedLineCount, Math.max(0, newLines.length - height)) : 0;
 			const startRow = Math.max(1, height - Math.max(1, newLines.length - firstLine) + 1);
 			if (clear) {
-				buffer += `\x1b[2J\x1b[${startRow};1H`;
+				// Erase line-by-line instead of \x1b[2J: 2J erases the screen in
+				// place without scrolling, destroying lines that were never written
+				// to the terminal (#2415). Same visible result — the rows above the
+				// rewritten region are cleared first, each written row carries its
+				// own \x1b[2K, and the rows below are cleared after — but an
+				// oversized region scrolls naturally instead of being erased.
+				buffer += "\x1b[1;1H";
+				for (let row = 1; row < startRow; row++) {
+					buffer += "\x1b[2K\r\n";
+				}
 			} else if (startRow > 1) {
 				buffer += `\x1b[${startRow};1H`;
 			}
 			for (let i = firstLine; i < newLines.length; i++) {
 				if (i > firstLine) buffer += "\r\n";
+				if (clear) buffer += "\x1b[2K";
 				let line = newLines[i];
 				if (!isImageLine(line) && visibleWidth(line) > width) {
 					line = truncateToWidth(line, width);
 				}
 				buffer += line;
 			}
+			if (clear) {
+				// Clear any rows left below the rewritten region (content shorter
+				// than the screen). \r pins column 1 and \x1b[1B parks on the
+				// bottom row without scrolling, so this never pushes rows into
+				// scrollback and never leaves a partial erasure behind.
+				for (let row = startRow + (newLines.length - firstLine); row <= height; row++) {
+					buffer += "\r\x1b[1B\x1b[2K";
+				}
+			}
 			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
 			this.terminal.write(buffer);
+			// Everything from firstLine down has now been written; when the region
+			// overflowed the screen, its top scrolled into scrollback, so the
+			// flushed high-water advances to the new viewport top — established
+			// against the current dimensions.
+			this.flushedLineCount = Math.max(this.flushedLineCount, newLines.length - height);
+			this.flushedAtWidth = width;
+			this.flushedAtHeight = height;
 			commitFrame(clear ? "set" : "grow");
 		};
 
@@ -1348,6 +1398,19 @@ export class TUI extends Container {
 		}
 
 		if (widthChanged || heightChanged) {
+			// A resize re-anchors what the terminal holds: a width change re-wraps
+			// the transcript, and a height change moves the viewport/scrollback
+			// boundary itself (scrollback gives lines back on grow and takes more
+			// on shrink). A mark established under other dimensions no longer
+			// identifies flushed lines — invalidate it and repaint from the first
+			// line, loss-free at the cost of re-committing a bounded duplicate of
+			// the visible region (#2415). Forced renders reach this branch through
+			// the -1 sentinels without touching flushedAt*, so a forced repaint
+			// with no real resize behind it stays viewport-bounded and
+			// duplicate-free (#2307).
+			if (this.flushedAtWidth !== width || this.flushedAtHeight !== height) {
+				this.flushedLineCount = 0;
+			}
 			logRedraw(`terminal size changed (${this.previousWidth}x${this.previousHeight} -> ${width}x${height})`);
 			fullRender(true);
 			return;
@@ -1601,6 +1664,14 @@ export class TUI extends Container {
 
 		// Write entire buffer at once
 		this.terminal.write(buffer);
+
+		// Writing down to finalCursorRow scrolled every line above the new
+		// viewport top past the bottom row, so the flushed high-water advances
+		// with the cursor (no-op when the frame never reached the bottom row) —
+		// established against the current dimensions.
+		this.flushedLineCount = Math.max(this.flushedLineCount, finalCursorRow - height + 1);
+		this.flushedAtWidth = width;
+		this.flushedAtHeight = height;
 
 		commitFrame("grow", finalCursorRow);
 	}

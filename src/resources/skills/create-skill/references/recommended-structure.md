@@ -18,6 +18,7 @@ skill-name/
 </structure>
 
 <why_this_works>
+
 ## Problems This Solves
 
 **Problem 1: Context gets skipped**
@@ -38,6 +39,7 @@ A "build" task loads debugging references. A "debug" task loads build references
 </why_this_works>
 
 <skill_md_template>
+
 ## SKILL.md Template
 
 ```markdown
@@ -96,9 +98,11 @@ All domain knowledge in `references/`:
 | option-c.md | [What it does] |
 </workflows_index>
 ```
+
 </skill_md_template>
 
 <workflow_template>
+
 ## Workflow Template
 
 ```markdown
@@ -128,18 +132,22 @@ This workflow is complete when:
 - [ ] Criterion 3
 </success_criteria>
 ```
+
 </workflow_template>
 
 <when_to_use_this_pattern>
+
 ## When to Use This Pattern
 
 **Use router + workflows + references when:**
+
 - Multiple distinct workflows (build vs debug vs ship)
 - Different workflows need different references
 - Essential principles must not be skipped
 - Skill has grown beyond 200 lines
 
 **Use simple single-file skill when:**
+
 - One workflow
 - Small reference set
 - Under 200 lines total
@@ -147,21 +155,25 @@ This workflow is complete when:
 </when_to_use_this_pattern>
 
 <key_insight>
+
 ## The Key Insight
 
 **SKILL.md is always loaded. Use this guarantee.**
 
 Put unavoidable content in SKILL.md:
+
 - Essential principles
 - Intake question
 - Routing logic
 
 Put workflow-specific content in workflows/:
+
 - Step-by-step procedures
 - Required references for that workflow
 - Success criteria for that workflow
 
 Put reusable knowledge in references/:
+
 - Patterns and examples
 - Technical details
 - Domain expertise

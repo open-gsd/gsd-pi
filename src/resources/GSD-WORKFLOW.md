@@ -122,6 +122,7 @@ Consumes from S01:
 ```
 
 The boundary map is a **planning artifact** — not runnable code. It:
+
 - Forces upfront thinking about slice boundaries before implementation
 - Gives downstream slices a concrete target to code against
 - Enables deterministic verification that slices actually connect
@@ -220,6 +221,7 @@ Exact next thing to do.
 ```
 
 **Rules:**
+
 - **Append-only** — rows are never edited or removed. To reverse a decision, add a new row that supersedes it (reference the old ID).
 - **#** — Sequential ID (`D001`, `D002`, ...), never reused.
 - **When** — Where the decision was made: `M001`, `M001/S01`, or `M001/S01/T02`.
@@ -243,6 +245,7 @@ Work flows through these phases. Each phase produces a file.
 **When to skip:** When the user already knows exactly what they want, or told you to just go.
 
 **How to do it manually:**
+
 1. Read the roadmap to understand the scope.
 2. Identify 3-5 gray areas — implementation decisions the user cares about.
 3. Use `ask_user_questions` to discuss each area, one round at a time. Never fabricate user input; wait for the user's actual response before the next round.
@@ -257,6 +260,7 @@ Work flows through these phases. Each phase produces a file.
 **When to skip:** When the codebase is familiar and the work is straightforward.
 
 **How to do it manually:**
+
 1. Read `CONTEXT.md` and/or `S##-CONTEXT.md` if they exist — know what decisions are locked.
 2. Scout relevant code: `rg`, `find`, read key files.
 3. Use `resolve_library` / `get_library_docs` if needed.
@@ -300,6 +304,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 **Produces:** `<NN>-<MM>-PLAN.md` with task planning embedded in the slice plan.
 
 **For a milestone (roadmap):**
+
 1. Read `CONTEXT.md`, `M###-RESEARCH.md`, and `.gsd/DECISIONS.md` if they exist.
 2. Decompose the vision into 1-10 demoable vertical slices. Prefer one slice for tiny, single-file, or static work unless the request clearly spans independent capabilities.
 3. Order by risk (high-risk first to validate feasibility early).
@@ -307,6 +312,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 5. **Write the boundary map** — for each slice, specify what it produces (functions, types, interfaces, endpoints) and what it consumes from upstream slices. This forces interface thinking before implementation and enables deterministic verification that slices actually connect.
 
 **For a slice (task decomposition):**
+
 1. Read the slice's entry in `ROADMAP.md` **and its boundary map section** — know what interfaces this slice must produce and consume.
 2. Read `CONTEXT.md`, `S##-CONTEXT.md`, `M###-RESEARCH.md`, `S##-RESEARCH.md`, and `.gsd/DECISIONS.md` if they exist for this slice.
 3. Read summaries from dependency slices (check `depends:[]` in roadmap).
@@ -322,6 +328,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 **Produces:** Code changes + `[DONE:n]` markers.
 
 **How to do it manually:**
+
 1. Read the active slice's `<NN>-<MM>-PLAN.md` and use the selected task entry as the task plan.
 2. Read relevant summaries from prior tasks (for context on what's already built).
 3. Execute each step. Mark progress with `[DONE:n]` in responses.
@@ -334,6 +341,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 **Produces:** Pass/fail determination.
 
 **Verification ladder — use the strongest tier you can reach:**
+
 1. **Static:** Files exist, exports present, wiring connected, not stubs.
 2. **Command:** Tests pass, build succeeds, lint clean, blocked command works.
 3. **Behavioral:** Browser flows work, API responses correct.
@@ -376,6 +384,7 @@ When verification finds gaps, include a **Gaps** section with what's missing, im
 **Produces:** `S##-T##-SUMMARY.md` in flat-phase projects, and when slice completes, `S##-SUMMARY.md`. Legacy flat `T##-SUMMARY.md` task summaries are still readable.
 
 **Task summary format:**
+
 ```markdown
 ---
 id: T01
@@ -434,11 +443,13 @@ key_decisions: []
 **Purpose:** Mark work done and move to the next thing.
 
 **After a task completes:**
+
 1. Persist completion through the DB-backed Task completion path; it refreshes the `<NN>-<MM>-PLAN.md` checkbox projection.
 2. Check if there's a next task in the slice → execute it.
 3. If the slice is complete → run the Slice completion path.
 
 **After a slice completes:**
+
 1. Persist Slice completion through `gsd_slice_complete`; it records the authoritative state and renders `S##-SUMMARY.md`, `S##-UAT.md`, ROADMAP, and STATE projections.
 2. Continue to the next slice immediately. UAT can run after Slice completion; automatic Milestone closure requires current source-bound validation and any required UAT evidence.
 3. If UAT is missing or non-PASS at Milestone closeout, run `/gsd dispatch uat`, request a Slice-specific UAT rerun when needed, or create remediation work with `/gsd dispatch reassess`.
@@ -449,11 +460,13 @@ key_decisions: []
 ## Continue-Here Protocol
 
 **When to write `continue.md`:**
+
 - You're about to lose context (compaction, session end, Ctrl+C).
 - The current task isn't done yet.
 - You want to pause and come back later.
 
 **What to capture:**
+
 ```markdown
 ---
 milestone: M001
@@ -481,6 +494,7 @@ The EXACT first thing to do when resuming. Not vague. Specific.
 ```
 
 **How to resume:**
+
 1. Read `continue.md`.
 2. Delete `continue.md` (it's consumed, not permanent).
 3. Pick up from "Next Action".
@@ -494,12 +508,14 @@ The EXACT first thing to do when resuming. Not vague. Specific.
 It is NOT the source of truth. It's a convenience dashboard.
 
 **Authority and review surfaces:**
+
 - The project database owns runtime hierarchy, lifecycle, validation, and queue state.
 - `ROADMAP.md` and `<NN>-<MM>-PLAN.md` project planned work and current checkbox status for review.
 - `S##-T##-SUMMARY.md` records the readable Task outcome in flat-phase projects (legacy `T##-SUMMARY.md` is still readable).
 - `S##-SUMMARY.md` and `M###-SUMMARY.md` project compressed Slice and Milestone outcomes.
 
 **Refresh `STATE.md` through the workflow** after every significant action so it projects:
+
 - Active milestone/slice/task
 - Recent decisions (last 3-5)
 - Blockers
@@ -563,6 +579,7 @@ Execute-task closeout is fail-closed: the system writes verification evidence fi
 | Milestone squash | `{type}: <milestone title>` | Type inferred from title |
 
 The system reads the task summary after execution and builds a meaningful commit message:
+
 - **Subject**: `{type}: {one-liner}` — the one-liner from the summary frontmatter, sanitized to one line
 - **Type**: Inferred from the task title and one-liner (`feat`, `fix`, `test`, `refactor`, `docs`, `perf`, `chore`)
 - **Body**: Key files from the summary frontmatter (up to 8 files listed)
@@ -593,6 +610,7 @@ When planning or executing a task, load relevant prior context:
 6. If the dependency chain is too large, drop the oldest/least-relevant summaries first.
 
 **Aim for:**
+
 - ~5 provides per summary
 - ~10 key_files per summary
 - ~5 key_decisions per summary

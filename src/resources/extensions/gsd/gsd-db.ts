@@ -1597,7 +1597,7 @@ export function insertGateRun(entry: {
   sliceId?: string;
   taskId?: string;
   outcome: "pass" | "fail" | "retry" | "manual-attention";
-  failureClass: "none" | "policy" | "input" | "execution" | "artifact" | "verification" | "closeout" | "git" | "timeout" | "manual-attention" | "unknown";
+  failureClass: "none" | "policy" | "input" | "execution" | "artifact" | "verification" | "closeout" | "git" | "timeout" | "manual-attention" | "refusal" | "unknown";
   rationale?: string;
   findings?: string;
   attempt: number;

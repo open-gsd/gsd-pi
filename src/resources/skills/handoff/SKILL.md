@@ -13,6 +13,7 @@ GSD already writes `STATE.md` (rebuilt after each unit) and summary files (`M###
 `continue.md` exists for exactly this — see `auto-prompts.ts`, `guided-flow.ts`, `phase-anchor.ts`, `state.ts`. This skill is the deliberate authoring ritual.
 
 Invocation points:
+
 - User says "pause", "hand off", "I'll come back later", "this is a good stopping point"
 - Context usage nearing budget — better to hand off cleanly than truncate mid-thought
 - Before a risky operation (dependency upgrade, major refactor) where you want a known-good checkpoint
@@ -32,6 +33,7 @@ Invocation points:
 ## Step 1: Identify what's in flight
 
 Answer briefly:
+
 1. What task (`T##`) am I on? What's its current plan file?
 2. What have I completed since the last summary?
 3. What's the next concrete action? (Not a goal — an action: "Run X. If Y, do Z.")
@@ -84,6 +86,7 @@ Example: "The session refactor moved `expiresAt` from optional to required in `S
 ## Step 4: Sanity check
 
 Read `STATE.md` + `continue.md` + the most recent summary as if you were a fresh agent. Ask:
+
 1. Do I know what to do next?
 2. Do I know why?
 3. Do I know what not to do?

@@ -27,6 +27,7 @@ import type { BudgetAlertLevel } from "../auto-budget.js";
 import type { AutoOrchestrationModule } from "./contracts.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { normalizeRealPath } from "../paths.js";
+import { noteGlobalIdleWatchdogUnitStarted } from "./global-idle-watchdog.js";
 import type { MilestoneScope } from "../workspace.js";
 import type { RootDirtySnapshot } from "../root-write-leak-guard.js";
 import type { MilestoneSettlementOutcome } from "../milestone-settlement.js";
@@ -319,6 +320,11 @@ export class AutoSession {
 
   setCurrentUnit(unit: CurrentUnit): void {
     this.currentUnit = unit;
+    // A unit just appeared: the session-level idle watchdog (#2373) re-arms
+    // exactly here — covering every unit appearance path, including resumed
+    // host-verification contexts that never run startUnitSupervision. No-op
+    // when the watchdog is not running for this session.
+    noteGlobalIdleWatchdogUnitStarted(this);
     if (!supportsSourceObservationsForUnit(unit.type)) {
       this.sourceObservations.clear();
       return;

@@ -29,7 +29,9 @@ ALWAYS use this exact template structure:
 1. Specific actionable recommendation
 2. Specific actionable recommendation
 ```
+
 </report_structure>
+
 ```
 
 **When to use**: Compliance reports, standardized formats, automated processing
@@ -57,6 +59,7 @@ Here is a sensible default format, but use your best judgment:
 
 Adjust sections as needed for the specific analysis type.
 </report_structure>
+
 ```
 
 **When to use**: Exploratory analysis, context-dependent formatting, creative tasks
@@ -81,9 +84,11 @@ Generate commit messages following these examples:
 <input>Added user authentication with JWT tokens</input>
 <output>
 ```
+
 feat(auth): implement JWT-based authentication
 
 Add login endpoint and token validation middleware
+
 ```
 </output>
 </example>
@@ -92,9 +97,11 @@ Add login endpoint and token validation middleware
 <input>Fixed bug where dates displayed incorrectly in reports</input>
 <output>
 ```
+
 fix(reports): correct date formatting in timezone conversion
 
 Use UTC timestamps consistently across report generation
+
 ```
 </output>
 </example>
@@ -102,9 +109,11 @@ Use UTC timestamps consistently across report generation
 Follow this style: type(scope): brief description, then detailed explanation.
 </commit_message_format>
 ```
+
 </commit_messages_example>
 
 <when_to_use>
+
 - Output format has nuances that text explanations can't capture
 - Pattern recognition is easier than rule following
 - Examples demonstrate edge cases
@@ -119,6 +128,7 @@ Choose one term and use it throughout the skill. Inconsistent terminology confus
 
 <good_example>
 Consistent usage:
+
 - Always "API endpoint" (not mixing with "URL", "API route", "path")
 - Always "field" (not mixing with "box", "element", "control")
 - Always "extract" (not mixing with "pull", "get", "retrieve")
@@ -134,6 +144,7 @@ Extract data from API endpoints using field mappings.
 3. Extract field values
 </quick_start>
 ```
+
 </good_example>
 
 <bad_example>
@@ -182,6 +193,7 @@ with pdfplumber.open("file.pdf") as pdf:
 
 For scanned PDFs requiring OCR, use pdf2image with pytesseract instead.
 </quick_start>
+
 ```
 </good_example>
 
@@ -258,6 +270,7 @@ description: Helps with documents
 ```
 
 ✅ **GOOD**:
+
 ```yaml
 description: Extract text and tables from PDF files, fill forms, merge documents. Use when working with PDF files or when the user mentions PDFs, forms, or document extraction.
 ```
@@ -272,6 +285,7 @@ description: I can help you process Excel files and generate reports
 ```
 
 ✅ **GOOD**:
+
 ```yaml
 description: Processes Excel files and generates reports. Use when analyzing spreadsheets or .xlsx files.
 ```
@@ -286,6 +300,7 @@ description: Processes Excel files and generates reports. Use when analyzing spr
 - Directory: `helper-scripts`, Name: `helper`
 
 ✅ **GOOD**: Consistent verb-noun convention:
+
 - Directory: `manage-facebook-ads`, Name: `manage-facebook-ads`
 - Directory: `setup-stripe-payments`, Name: `setup-stripe-payments`
 - Directory: `process-pdfs`, Name: `process-pdfs`
@@ -302,6 +317,7 @@ You can use pypdf, or pdfplumber, or PyMuPDF, or pdf2image, or pdfminer, or tabu
 ```
 
 ✅ **GOOD**:
+
 ```xml
 <quick_start>
 Use pdfplumber for text extraction:
@@ -312,6 +328,7 @@ import pdfplumber
 
 For scanned PDFs requiring OCR, use pdf2image with pytesseract instead.
 </quick_start>
+
 ```
 
 **Why it matters**: Decision paralysis. Provide one default approach with escape hatch for special cases.
@@ -320,14 +337,18 @@ For scanned PDFs requiring OCR, use pdf2image with pytesseract instead.
 <pitfall name="deeply_nested_references">
 ❌ **BAD**: References nested multiple levels:
 ```
+
 SKILL.md → advanced.md → details.md → examples.md
+
 ```
 
 ✅ **GOOD**: References one level deep from SKILL.md:
 ```
+
 SKILL.md → advanced.md
 SKILL.md → details.md
 SKILL.md → examples.md
+
 ```
 
 **Why it matters**: Claude may only partially read deeply nested files. Keep references one level deep from SKILL.md.
@@ -342,6 +363,7 @@ See scripts\validate.py for validation
 ```
 
 ✅ **GOOD**:
+
 ```xml
 <reference_guides>
 See scripts/validate.py for validation
@@ -355,6 +377,7 @@ See scripts/validate.py for validation
 **Problem**: When showing examples of dynamic context syntax (exclamation mark + backticks) or file references (@ prefix), the skill loader executes these during skill loading.
 
 ❌ **BAD** - These execute during skill load:
+
 ```xml
 <examples>
 Load current status with: !`git status`
@@ -363,6 +386,7 @@ Review dependencies in: @package.json
 ```
 
 ✅ **GOOD** - Add space to prevent execution:
+
 ```xml
 <examples>
 Load current status with: ! `git status` (remove space before backtick in actual usage)
@@ -371,6 +395,7 @@ Review dependencies in: @ package.json (remove space after @ in actual usage)
 ```
 
 **When this applies**:
+
 - Skills that teach users about dynamic context (slash commands, prompts)
 - Any documentation showing the exclamation mark prefix syntax or @ file references
 - Skills with example commands or file paths that shouldn't execute during loading
@@ -387,6 +412,7 @@ Use this tool for processing...
 ```
 
 ✅ **GOOD**: All required tags present:
+
 ```xml
 <objective>
 Process data files with validation and transformation.
@@ -420,6 +446,7 @@ Extract text with pdfplumber...
 ## Advanced features
 
 Form filling...
+
 ```
 
 ✅ **GOOD**: Pure XML throughout:
@@ -449,6 +476,7 @@ Process PDF files
 <quick_start>
 Use pdfplumber...
 </quick_start>
+
 ```
 
 ✅ **GOOD**: Properly closed tags:
@@ -489,6 +517,7 @@ See [basic-operations.md](basic-operations.md) for campaign creation and managem
 **Budget optimization**: See [budgets.md](budgets.md)
 **API reference**: See [api-reference.md](api-reference.md)
 </advanced_features>
+
 ```
 
 **Benefits**:
@@ -521,6 +550,7 @@ If validation fails, fix errors before continuing. Validation errors include:
 
 Only proceed when validation passes with zero errors.
 </validation>
+
 ```
 
 **Why verbose errors help**:
@@ -541,12 +571,15 @@ For complex multi-step workflows, provide a checklist Claude can copy and track 
 Copy this checklist and check off items as you complete them:
 
 ```
+
 Task Progress:
+
 - [ ] Step 1: Analyze the form (run analyze_form.py)
 - [ ] Step 2: Create field mapping (edit fields.json)
 - [ ] Step 3: Validate mapping (run validate_fields.py)
 - [ ] Step 4: Fill the form (run fill_form.py)
 - [ ] Step 5: Verify output (run verify_output.py)
+
 ```
 
 <step_1>
@@ -588,8 +621,10 @@ If verification fails, return to Step 2.
 ```
 
 **Benefits**:
+
 - Clear progress tracking
 - Prevents skipping steps
 - Easy to resume after interruption
 </implementation>
+
 </checklist_pattern>

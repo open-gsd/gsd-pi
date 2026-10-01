@@ -93,6 +93,7 @@ Determine the user's intent and route to the appropriate workflow:
 → Read `references/feature-patterns.md` and explain the relevant feature.
 
 **If intent is unclear, ask one clarifying question:**
+
 - "Do you want to create a workflow from scratch, or start from an existing template?"
 - Then route based on the answer.
 </routing>

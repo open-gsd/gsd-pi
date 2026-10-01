@@ -25,6 +25,7 @@ not flagged, per the documented exception.
 - ✅ No fixture/builder/gate-script/package.json changes — `--name-status`: dist-redirect.mjs, dist-test-resolve.mjs, wave1-gate-baseline.md, task file only.
 
 Warnings (non-blocking):
+
 - Verify greps are execution-proof-by-proxy (test-name substring), but I observed the full gate output; adequate.
 
 ## T025 — Re-baseline gates (dd330463 on base c6935a65): pass
@@ -47,6 +48,7 @@ Warnings (non-blocking): none.
 - ✅ Corpus realigned: all 26 oracle.json `base_database_schema_version = 46` (scripted check, zero deviations); db-target-matrix has historical-v45 / current-v46 / future-v47 (historical-v44 deleted); Verify rerun 150/150 tests + 4 greps green.
 
 Warnings (non-blocking):
+
 - The V46 bump's stale-literal fallout escaped this task's latitude clause in two non-legacy-import files (see T009 AC5) — same defect class T026 repaired for restore-assessment; the schema-version-sensitive test inventory was incomplete.
 
 ## T006 — Cutover op + wedge fix + write-side skew protections (ffc8fca6 on base d5ad1524): pass
@@ -57,6 +59,7 @@ Warnings (non-blocking):
 - ✅ `pnpm run baseline:refactor:phase0` exit 0 at base+patch; no single-writer or D005 read-authority changes (diff scoped to the 8 declared files).
 
 Warnings (non-blocking):
+
 - Worktree-local package builds needed before the Verify (documented in the task Log); `build:pi-coding-agent` fails in nested disposable worktrees from a pre-existing self-resolution quirk — environmental, not this task's code.
 
 ## T007 — Derive-seam authority flip (6da17d40 on base 95bc1a5d): pass
@@ -67,6 +70,7 @@ Warnings (non-blocking):
 - ✅ No `markdownFallbackUsed`-class counter added (grep: 0 hits in both touched sources).
 
 Warnings (non-blocking):
+
 - Acceptance read as satisfied with comment-only production edits because the flip was already mechanical at `state/derive/index.ts` — reasonable satisfied reading; criterion wording could be tighter about what "make the flip real" requires.
 
 ## T026 — Restore-assessment future-schema fix (13e9bae1 on base 95bc1a5d): pass
@@ -85,6 +89,7 @@ Warnings (non-blocking): none.
 - ✅ `renderAllFromDb` / `roadmapRenderMarksSliceDone` / `detectStaleRenders` signatures unchanged for callers (diff inspection).
 
 Warnings (non-blocking):
+
 - 10 runtime skips in `markdown-renderer.test.ts` are pre-existing (12 static skip markers in the file both before and after the patch — not introduced here).
 - The stamp changed rendered bytes repo-wide; fallout escaped this task's files list in two unowned test files (see T009 AC5): `gsd-rebuild.test.ts:160` expects unstamped bytes; `migrate-safety-audit.test.ts:4560` trips "conflicting canonical projection representations" (both green at T008's base, red at HEAD — confirmed by re-running both at base 37aedafb).
 
@@ -103,6 +108,7 @@ Warnings (non-blocking):
   fix: wave-2 repair task (T026 pattern) realigning the stale expectations: v45 literals → `SCHEMA_VERSION`-relative in `db-authority-recovery-schema.test.ts` and `db-lifecycle-foundation.test.ts` (incl. the v42/v43 load-sensitive assertions); stamp-aware byte expectations in `gsd-rebuild.test.ts`; and reconcile stamped re-renders with the migrate audit's canonical-representation check in `migrate-safety-audit.test.ts` (either stamp-insensitive comparison or expectation update). Alternatively the planner explicitly re-scopes verify:pr redness ownership to a named wave-3 task and loosens AC5's wording — but as written it fails.
 
 Warnings (non-blocking):
+
 - Flag (a) CONFIRMED REAL but criterion-neutral: `scripts/m003-s07-dossier-input.ts:21` and `scripts/__tests__/m003-s07-dossier-input.test.ts:16` still import the deleted `scripts/semantic-shadow-no-cutover-gate.mjs`. Verified unreachable by every verify:pr leg: `tsconfig.extensions.json` includes only `src/resources/extensions` + `extensions`; root `tsconfig.json` includes only `src` (scripts/ excluded); `test:compile` is an esbuild per-file transform (no import resolution — stays green); `test:unit:compiled` globs cover only `dist-test/src/**`, never `dist-test/scripts/**`. Defeats no T009 criterion, but it is a live landmine: running `scripts/m003-s07-cutover-dossier.mjs` or its `.mjs` test crashes on the missing module. Recommend a follow-up (fits T021's retirement scope).
 - Flag (b): full verify:pr executed as decisive legs (budget) — exactly what was run is recorded under AC5; nothing was skipped except a single-invocation end-to-end run (300s cap), replaced by complete per-glob coverage.
 - Environmental reds observed and excluded from all verdicts, with proof: `read-cli-args.test.ts` "runReadCli handles global flags before read" fails only because the machine-global stale `~/.gsd/agent/extensions/gsd` bundle (SCHEMA_VERSION=45, no SchemaTooNewError) is picked up by `shouldUseAgentExtensionsDir` — green with an isolated `GSD_HOME`; ~111 compiled-tier native-lock failures occur only without CI's `dist-test/native/addon` mirror + `GSD_NATIVE_PREFER_LOCAL=1`; 24 fault-injection failures occur only with the dev (non-test) addon; `workflow-authority-baseline.test.ts` "controlled sabotage" flaked once under chunk load (green 3/3 in isolation with and without overrides).

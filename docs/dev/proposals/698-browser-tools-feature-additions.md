@@ -18,6 +18,7 @@ Key existing capabilities at proposal time: `browser_navigate`, `browser_click`,
 **Tool:** `browser_extract`
 
 ### What it does
+
 Accept a JSON Schema (or simplified shape description), extract matching structured data from the current page, validate against the schema, return typed JSON.
 
 ### Implementation requirements
@@ -34,6 +35,7 @@ Accept a JSON Schema (or simplified shape description), extract matching structu
 | **Risk** | Medium — extraction quality depends heavily on page structure; may need multiple strategies (DOM-based, a11y-tree-based, LLM-assisted) |
 
 ### Acceptance criteria
+
 - [ ] Extracts data matching a provided JSON schema from a page
 - [ ] Returns validation errors when extracted data doesn't match schema
 - [ ] Supports scoping extraction to a CSS selector
@@ -47,6 +49,7 @@ Accept a JSON Schema (or simplified shape description), extract matching structu
 **Tools:** `browser_save_state`, `browser_restore_state`
 
 ### What it does
+
 Save cookies, localStorage, sessionStorage, and auth tokens to disk. Restore them on a subsequent browser session to resume authenticated state without re-logging in.
 
 ### Implementation requirements
@@ -64,6 +67,7 @@ Save cookies, localStorage, sessionStorage, and auth tokens to disk. Restore the
 | **Risk** | Low — Playwright's `storageState()` is well-tested; sessionStorage requires extra handling |
 
 ### Acceptance criteria
+
 - [ ] Saves cookies + localStorage via `context.storageState()`
 - [ ] Saves sessionStorage via `page.evaluate()` (per-origin)
 - [ ] Restores state on new browser context launch
@@ -78,6 +82,7 @@ Save cookies, localStorage, sessionStorage, and auth tokens to disk. Restore the
 **Tool:** `browser_generate_test`
 
 ### What it does
+
 Record agent interactions during a browser session and emit a Playwright test script. Turns AI-driven exploration into deterministic, reproducible tests.
 
 ### Implementation requirements
@@ -95,6 +100,7 @@ Record agent interactions during a browser session and emit a Playwright test sc
 | **Risk** | High — generated selectors may be brittle; action timeline may not capture all nuances (hover timing, scroll position, wait conditions); output quality varies significantly by page complexity |
 
 ### Acceptance criteria
+
 - [ ] Generates a runnable Playwright test from a recorded session
 - [ ] Includes navigation, click, type, and assertion actions
 - [ ] Uses stable selectors (role-based preferred over CSS)
@@ -108,6 +114,7 @@ Record agent interactions during a browser session and emit a Playwright test sc
 **Tools:** `browser_mock_route`, `browser_block_urls`, `browser_clear_routes`
 
 ### What it does
+
 Intercept network requests to mock API responses, block URLs (analytics, ads), simulate error conditions (500s, timeouts, slow responses).
 
 ### Implementation requirements
@@ -123,6 +130,7 @@ Intercept network requests to mock API responses, block URLs (analytics, ads), s
 | **Risk** | Low — Playwright's route API is mature and well-documented |
 
 ### Acceptance criteria
+
 - [ ] Mock API responses with custom status, body, and headers
 - [ ] Block requests matching URL patterns (glob or regex)
 - [ ] Simulate slow responses with configurable delay
@@ -137,6 +145,7 @@ Intercept network requests to mock API responses, block URLs (analytics, ads), s
 **Tool:** `browser_emulate_device`
 
 ### What it does
+
 One-call device simulation: viewport + user agent + touch + device scale factor. Wraps Playwright's device descriptors.
 
 ### Implementation requirements
@@ -153,6 +162,7 @@ One-call device simulation: viewport + user agent + touch + device scale factor.
 | **Risk** | Low-Medium — context restart for full emulation changes the page state; partial emulation (viewport only) is simpler but less accurate |
 
 ### Acceptance criteria
+
 - [ ] Accept device name (e.g., "iPhone 15", "Pixel 7") and configure full emulation
 - [ ] Support fuzzy matching on device name with suggestions on no match
 - [ ] Set viewport, user agent, device scale factor, touch, and mobile flag
@@ -165,6 +175,7 @@ One-call device simulation: viewport + user agent + touch + device scale factor.
 **Tool:** `browser_visual_diff`
 
 ### What it does
+
 Compare two screenshots pixel-by-pixel, return a diff image and similarity score.
 
 ### Implementation requirements
@@ -180,6 +191,7 @@ Compare two screenshots pixel-by-pixel, return a diff image and similarity score
 | **Risk** | Medium — anti-aliasing and dynamic content (timestamps, ads) cause false positives; threshold tuning needed |
 
 ### Acceptance criteria
+
 - [ ] Compare current page screenshot against a stored baseline
 - [ ] Return similarity score (0–1) and diff pixel count
 - [ ] Generate diff image highlighting changed regions
@@ -193,6 +205,7 @@ Compare two screenshots pixel-by-pixel, return a diff image and similarity score
 **Tool:** `browser_save_pdf`
 
 ### What it does
+
 Render current page as PDF artifact.
 
 ### Implementation requirements
@@ -208,6 +221,7 @@ Render current page as PDF artifact.
 | **Risk** | Low — straightforward Playwright wrapper |
 
 ### Acceptance criteria
+
 - [ ] Generate PDF from current page
 - [ ] Support A4/Letter/custom page formats
 - [ ] Include background graphics option
@@ -221,6 +235,7 @@ Render current page as PDF artifact.
 **Tool:** `browser_zoom_region`
 
 ### What it does
+
 Capture and upscale a specific rectangular region for detailed inspection of dense UIs.
 
 ### Implementation requirements
@@ -235,6 +250,7 @@ Capture and upscale a specific rectangular region for detailed inspection of den
 | **Risk** | Low |
 
 ### Acceptance criteria
+
 - [ ] Capture arbitrary rectangular region by coordinates
 - [ ] Support scale factor for upscaling (2x, 3x)
 - [ ] Return as inline image (same as `browser_screenshot`)

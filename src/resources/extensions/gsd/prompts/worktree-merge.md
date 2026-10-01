@@ -50,12 +50,14 @@ Analyze and guide the merge exactly:
 Classify each changed file.
 
 **Code changes:**
+
 - **New source files** — modules, components, utilities, tests.
 - **Modified source files** — existing code changes.
 - **Config changes** — package.json, tsconfig, build config, etc.
 - **Deleted files** — removed source/config.
 
 **GSD artifact changes:**
+
 - **New milestones** — new M###/ directories with roadmaps.
 - **New slices/tasks** — planning artifacts inside existing milestones.
 - **Updated roadmaps** — changed M###-ROADMAP.md files.
@@ -70,11 +72,13 @@ Classify each changed file.
 For each **modified** file, check whether main also changed since the worktree branched. Flag diverged files for manual reconciliation.
 
 To compare versions:
+
 - **Main version:** read normal path from CWD.
 - **Worktree version:** read `{{worktreePath}}/<relative-path>`.
 - Use `git merge-base {{mainBranch}} {{worktreeBranch}}` if needed.
 
 Classify each modified file:
+
 - **Clean merges** — main unchanged; apply worktree changes directly.
 - **Conflicts** — both changed same file; reconcile.
 - **Stale changes** — main replaced/removed a file the worktree modified.
@@ -106,10 +110,12 @@ Once the user has explicitly confirmed, run all commands from `{{mainTreePath}}`
 ### Step 5: Cleanup Prompt
 
 After a successful merge, ask the user whether to:
+
 - **Remove the worktree** — delete the worktree directory and `{{worktreeBranch}}`.
 - **Keep the worktree** — leave it for continued parallel work.
 
 If the user chooses to remove it, run these commands from `{{mainTreePath}}`:
+
 ```
 git worktree remove {{worktreePath}}
 git branch -D {{worktreeBranch}}

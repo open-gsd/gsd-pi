@@ -89,6 +89,7 @@ Each token profile maps to an **inline level** that controls how much context is
 Dispatch prompt builders accept an `inlineLevel` parameter. At each level, specific artifacts are gated:
 
 **Minimal level reductions:**
+
 - `buildExecuteTaskPrompt` — drops the decisions template, truncates prior summaries to the most recent one
 - `buildPlanMilestonePrompt` — drops `PROJECT.md`, `REQUIREMENTS.md`, decisions, and supplementary templates like `secrets-manifest`
 - `buildCompleteSlicePrompt` — drops requirements and UAT template inlining

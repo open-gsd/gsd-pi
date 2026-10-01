@@ -152,6 +152,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 60   # 可选：无工作单元在运行达到该分钟数时发出通知（默认：0 = 关闭）
 ```
 
 ### 成本跟踪

@@ -4,6 +4,8 @@
 
 export type { SlashCommandInfo, SlashCommandSource } from "../slash-commands.js";
 export type { SourceInfo } from "../source-info.js";
+export type { BeforeAgentStartDispatchContext } from "./before-agent-start-context.js";
+export { setBeforeAgentStartContext } from "./before-agent-start-context.js";
 export {
 	createExtensionRuntime,
 	discoverAndLoadExtensions,
@@ -54,6 +56,7 @@ export type {
 	ToolPreparationErrorsTurnEventResult,
 	UnitEndEvent,
 	UnitStartEvent,
+	PhaseChangeEvent,
 	VerifyFailure,
 	VerifyResultEvent,
 	AfterProviderResponseEvent,

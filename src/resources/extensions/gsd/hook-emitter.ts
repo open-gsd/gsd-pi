@@ -186,3 +186,13 @@ export async function emitUnitEnd(args: {
   if (!_pi) return;
   await _pi.emitExtensionEvent({ type: "unit_end", ...args });
 }
+
+export async function emitPhaseChangeEvent(args: {
+  previousPhase: string | null;
+  currentPhase: string | null;
+  source: "auto" | "manual";
+  traceId?: string;
+}): Promise<void> {
+  if (!_pi) return;
+  await _pi.emitExtensionEvent({ type: "phase_change", ...args });
+}

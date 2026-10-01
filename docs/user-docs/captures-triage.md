@@ -42,6 +42,7 @@ Each capture is classified into one of five types:
 ### Automatic Triage
 
 Triage fires automatically between tasks during auto-mode. The triage prompt receives:
+
 - All pending captures
 - The current slice plan
 - The active roadmap
@@ -65,6 +66,7 @@ The progress widget shows a pending capture count badge when captures are waitin
 ## Context Injection
 
 Capture context is automatically injected into:
+
 - **Replan-slice prompts** — so the replan knows what triggered it
 - **Reassess-roadmap prompts** — so deferred captures influence roadmap decisions
 

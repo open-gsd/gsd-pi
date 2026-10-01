@@ -15,11 +15,13 @@ Every skill MUST have these three tags:
 **Content**: 1-3 paragraphs explaining the skill's purpose, domain, and value proposition.
 
 **Example**:
+
 ```xml
 <objective>
 Extract text and tables from PDF files, fill forms, and merge documents using Python libraries. This skill provides patterns for common PDF operations without requiring external services or APIs.
 </objective>
 ```
+
 </tag>
 
 <tag name="quick_start">
@@ -28,6 +30,7 @@ Extract text and tables from PDF files, fill forms, and merge documents using Py
 **Content**: Minimal working example, essential commands, or basic usage pattern.
 
 **Example**:
+
 ```xml
 <quick_start>
 Extract text with pdfplumber:
@@ -37,7 +40,9 @@ import pdfplumber
 with pdfplumber.open("file.pdf") as pdf:
     text = pdf.pages[0].extract_text()
 ```
+
 </quick_start>
+
 ```
 </tag>
 
@@ -60,6 +65,7 @@ A well-structured skill has:
 - Real-world testing and iteration based on observed behavior
 </success_criteria>
 ```
+
 </tag>
 </required_tags>
 
@@ -70,11 +76,13 @@ Add these tags based on skill complexity and domain requirements:
 **When to use**: Background or situational information that Claude needs before starting.
 
 **Example**:
+
 ```xml
 <context>
 The Facebook Marketing API uses a hierarchy: Account → Campaign → Ad Set → Ad. Each level has different configuration options and requires specific permissions. Always verify API access before making changes.
 </context>
 ```
+
 </tag>
 
 <tag name="workflow">
@@ -83,6 +91,7 @@ The Facebook Marketing API uses a hierarchy: Account → Campaign → Ad Set →
 **Alternative name**: `<process>`
 
 **Example**:
+
 ```xml
 <workflow>
 1. **Analyze the form**: Run analyze_form.py to extract field definitions
@@ -92,12 +101,14 @@ The Facebook Marketing API uses a hierarchy: Account → Campaign → Ad Set →
 5. **Verify output**: Check generated PDF
 </workflow>
 ```
+
 </tag>
 
 <tag name="advanced_features">
 **When to use**: Deep-dive topics that most users won't need (progressive disclosure).
 
 **Example**:
+
 ```xml
 <advanced_features>
 **Custom styling**: See [styling.md](styling.md)
@@ -105,12 +116,14 @@ The Facebook Marketing API uses a hierarchy: Account → Campaign → Ad Set →
 **API reference**: See [reference.md](reference.md)
 </advanced_features>
 ```
+
 </tag>
 
 <tag name="validation">
 **When to use**: Skills with verification steps, quality checks, or validation scripts.
 
 **Example**:
+
 ```xml
 <validation>
 After making changes, validate immediately:
@@ -121,6 +134,7 @@ python scripts/validate.py output_dir/
 
 Only proceed when validation passes. If errors occur, review and fix before continuing.
 </validation>
+
 ```
 </tag>
 
@@ -141,12 +155,14 @@ Only proceed when validation passes. If errors occur, review and fix before cont
 </example>
 </examples>
 ```
+
 </tag>
 
 <tag name="anti_patterns">
 **When to use**: Common mistakes that Claude should avoid.
 
 **Example**:
+
 ```xml
 <anti_patterns>
 <pitfall name="vague_descriptions">
@@ -160,12 +176,14 @@ Only proceed when validation passes. If errors occur, review and fix before cont
 </pitfall>
 </anti_patterns>
 ```
+
 </tag>
 
 <tag name="security_checklist">
 **When to use**: Skills with security implications (API keys, payments, authentication).
 
 **Example**:
+
 ```xml
 <security_checklist>
 - Never log API keys or tokens
@@ -175,12 +193,14 @@ Only proceed when validation passes. If errors occur, review and fix before cont
 - Check API response status before proceeding
 </security_checklist>
 ```
+
 </tag>
 
 <tag name="testing">
 **When to use**: Testing workflows, test patterns, or validation steps.
 
 **Example**:
+
 ```xml
 <testing>
 Test with all target models (Haiku, Sonnet, Opus):
@@ -191,12 +211,14 @@ Test with all target models (Haiku, Sonnet, Opus):
 4. Validate XML structure after changes
 </testing>
 ```
+
 </tag>
 
 <tag name="common_patterns">
 **When to use**: Code examples, recipes, or reusable patterns.
 
 **Example**:
+
 ```xml
 <common_patterns>
 <pattern name="error_handling">
@@ -208,6 +230,7 @@ except FileNotFoundError:
 except Exception as e:
     print(f"Error: {e}")
 ```
+
 </pattern>
 </common_patterns>
 ```
@@ -219,6 +242,7 @@ except Exception as e:
 **Alternative name**: `<detailed_references>`
 
 **Example**:
+
 ```xml
 <reference_guides>
 For deeper topics, see reference files:
@@ -228,20 +252,24 @@ For deeper topics, see reference files:
 **Troubleshooting**: [references/troubleshooting.md](references/troubleshooting.md)
 </reference_guides>
 ```
+
 </tag>
 </conditional_tags>
 
 <intelligence_rules>
 <decision_tree>
 **Simple skills** (single domain, straightforward):
+
 - Required tags only: objective, quick_start, success_criteria
 - Example: Text extraction, file format conversion, simple calculations
 
 **Medium skills** (multiple patterns, some complexity):
+
 - Required tags + workflow/examples as needed
 - Example: Document processing with steps, API integration with configuration
 
 **Complex skills** (multiple domains, security, APIs):
+
 - Required tags + conditional tags as appropriate
 - Example: Payment processing, authentication systems, multi-step workflows with validation
 </decision_tree>
@@ -271,26 +299,31 @@ Ask these questions:
 XML tags are more efficient than markdown headings:
 
 **Markdown headings**:
+
 ```markdown
 ## Quick start
 ## Workflow
 ## Advanced features
 ## Success criteria
 ```
+
 Total: ~20 tokens, no semantic meaning to Claude
 
 **XML tags**:
+
 ```xml
 <quick_start>
 <workflow>
 <advanced_features>
 <success_criteria>
 ```
+
 Total: ~15 tokens, semantic meaning built-in
 </token_efficiency>
 
 <parsing_accuracy>
 XML provides unambiguous boundaries and semantic meaning. Claude can reliably:
+
 - Identify section boundaries
 - Understand content purpose
 - Skip irrelevant sections
@@ -324,12 +357,14 @@ XML tags can nest for hierarchical content:
 </example>
 </examples>
 ```
+
 </proper_nesting>
 
 <closing_tags>
 Always close tags properly:
 
 ✅ Good:
+
 ```xml
 <objective>
 Content here
@@ -337,14 +372,17 @@ Content here
 ```
 
 ❌ Bad:
+
 ```xml
 <objective>
 Content here
 ```
+
 </closing_tags>
 
 <tag_naming>
 Use descriptive, semantic names:
+
 - `<workflow>` not `<steps>`
 - `<success_criteria>` not `<done>`
 - `<anti_patterns>` not `<dont_do>`
@@ -357,6 +395,7 @@ Be consistent within your skill. If you use `<workflow>`, don't also use `<proce
 **DO NOT use markdown headings in skill body content.**
 
 ❌ Bad (hybrid approach):
+
 ```markdown
 # PDF Processing
 
@@ -370,6 +409,7 @@ Form filling...
 ```
 
 ✅ Good (pure XML):
+
 ```markdown
 <objective>
 PDF processing with text extraction, form filling, and merging.
@@ -383,6 +423,7 @@ Extract text with pdfplumber...
 Form filling...
 </advanced_features>
 ```
+
 </anti_pattern>
 
 <benefits>
@@ -415,6 +456,7 @@ Standardized structure across all skills in the ecosystem
 XML tags work well with other prompting techniques:
 
 **Multi-shot learning**:
+
 ```xml
 <examples>
 <example number="1">...</example>
@@ -423,6 +465,7 @@ XML tags work well with other prompting techniques:
 ```
 
 **Chain of thought**:
+
 ```xml
 <thinking>
 Analyze the problem...
@@ -434,6 +477,7 @@ Based on the analysis...
 ```
 
 **Template provision**:
+
 ```xml
 <template>
 ```markdown
@@ -442,10 +486,12 @@ Based on the analysis...
 ## Summary
 ...
 ```
+
 </template>
 ```
 
 **Reference material**:
+
 ```xml
 <schema>
 {
@@ -453,6 +499,7 @@ Based on the analysis...
 }
 </schema>
 ```
+
 </combining_with_other_techniques>
 
 <tag_reference_pattern>

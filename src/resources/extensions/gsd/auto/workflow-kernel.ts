@@ -38,13 +38,26 @@ export type EngineDispatchDecision =
 
 export type FinalizeInput =
   | { action: "break"; reason?: string }
-  | { action: "continue"; failureDetail?: string }
+  | {
+      action: "continue";
+      failureDetail?: string;
+      /**
+       * True when the finalize continue coincides with a
+       * `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker — a
+       * deliberate closeout refusal (#2046). Identical-input retry cannot
+       * change a refusal, so the kernel stops instead of retrying. Callers
+       * that cannot detect a marker omit the flag: the unflagged default
+       * stays retry (conservative).
+       */
+      refusal?: boolean;
+    }
   | { action: "next" };
 
 export type FinalizeDecision =
   | {
       action: "stop";
-      failureClass: "git" | "closeout";
+      /** `"refusal"`: the unit deliberately declined closeout (#2046). */
+      failureClass: "git" | "closeout" | "refusal";
       ledgerErrorSummary: string;
       turnError: "finalize-break";
     }
@@ -342,6 +355,20 @@ export function decideFinalizeResult(input: FinalizeInput): FinalizeDecision {
     // stuck-loop kill message is actionable. The `finalize-retry` prefix is
     // preserved so legacy ledger filters and dashboards still match (#852).
     const detail = failureDetailForLedger(input.failureDetail);
+    if (input.refusal) {
+      // A deliberate closeout refusal (#2046): the unit wrote a
+      // `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker, so
+      // identical-input retry is a deterministic no-op that only burns the
+      // retry budget until the ADR-047 backstop trips. Stop with a distinct
+      // failure class; the `finalize-refusal` ledger prefix keeps forensics
+      // able to tell this disposition from a retry wedge or a break.
+      return {
+        action: "stop",
+        failureClass: "refusal",
+        ledgerErrorSummary: detail ? `finalize-refusal: ${detail}` : "finalize-refusal",
+        turnError: "finalize-break",
+      };
+    }
     return {
       action: "retry",
       ledgerErrorSummary: detail ? `finalize-retry: ${detail}` : "finalize-retry",

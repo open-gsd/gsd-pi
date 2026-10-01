@@ -14,6 +14,7 @@ gsd headless [flags] [command] [args...]
 ```
 
 **Flags:**
+
 - `--timeout N` — overall timeout in ms; `auto` has no overall timeout unless this flag is set
 - `--json` — JSONL event stream ending with the authoritative `headless_result`
 - `--model ID` — override LLM model
@@ -194,6 +195,7 @@ gsd headless --answers answers.json auto
 ```
 
 Answer file schema:
+
 ```json
 {
   "questions": { "question_id": "selected_option" },

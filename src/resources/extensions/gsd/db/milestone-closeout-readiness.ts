@@ -791,6 +791,31 @@ function latestValidationEventRevision(milestoneId: string): number {
   return Number(row?.["project_revision"] ?? 0);
 }
 
+/**
+ * Recorded timestamp of the milestone's latest validation receipt event (same
+ * ordering `readMilestoneCloseoutReadiness` uses), or null when absent. Used to
+ * order slice UAT verdicts against the current accepted validation (#2347).
+ */
+export function readMilestoneValidationReceiptRecordedAt(milestoneId: string): string | null {
+  const row = getDb().prepare(`
+    SELECT event.created_at
+    FROM workflow_domain_events event
+    JOIN workflow_operations operation
+      ON operation.operation_id = event.operation_id
+     AND operation.project_id = event.project_id
+    JOIN project_authority authority
+      ON authority.project_id = event.project_id
+     AND authority.singleton = 1
+    WHERE event.event_type = 'milestone.validation.recorded'
+      AND event.entity_type = 'milestone'
+      AND event.entity_id = :milestone_id
+      AND operation.operation_type = 'milestone.validate'
+    ORDER BY event.project_revision DESC, event.event_index DESC, event.event_id DESC
+    LIMIT 1
+  `).get({ ":milestone_id": milestoneId });
+  return typeof row?.["created_at"] === "string" ? row["created_at"] : null;
+}
+
 export function readMilestoneCloseoutAuthorization(
   input: MilestoneCloseoutReadinessInput,
 ): MilestoneCloseoutAuthorization {

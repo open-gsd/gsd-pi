@@ -85,9 +85,11 @@ is safe and does not modify committed files.)
 ## Scope
 
 **In scope**:
+
 - `scripts/link-workspace-packages.cjs`
 
 **Out of scope** (do NOT touch):
+
 - `scripts/install.js`, `scripts/postinstall.js` — the callers; do not change how
   the script is invoked.
 - The symlink→copy fallback logic itself — only add failure accounting around it.
@@ -180,6 +182,7 @@ repo working tree.
 ## STOP conditions
 
 Stop and report if:
+
 - The script no longer matches the "Current state" excerpt (drifted).
 - A caller (`install.js`/`postinstall.js`) inspects the script's exit code and a
   nonzero exit would change install behavior — if so, report before considering

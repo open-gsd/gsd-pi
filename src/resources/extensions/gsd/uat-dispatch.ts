@@ -55,6 +55,49 @@ async function resolveRunUatEffectiveType(
   return classifyUatContentForRun(uatContent, summaryContent).effectiveType;
 }
 
+/**
+ * True when the slice's recorded UAT verdict predates the milestone's current
+ * accepted closeout authorization (validation pass receipt or active waiver).
+ * Such a verdict was already in front of the validator when it accepted the
+ * milestone, so re-running it cannot change closeout and only re-trips the
+ * completed-no-advance liveness backstop (#2347). When authorization, receipt
+ * timestamp, or slice UAT timestamp cannot be established, this fails open so
+ * the existing retry behavior is unchanged.
+ */
+async function uatRetryPredatesAcceptedValidation(
+  milestoneId: string,
+  sliceId: string,
+): Promise<boolean> {
+  try {
+    const { isDbAvailable } = await import("./gsd-db.js");
+    if (!isDbAvailable()) return false;
+    const {
+      readMilestoneCloseoutAuthorization,
+      readMilestoneValidationReceiptRecordedAt,
+    } = await import("./db/milestone-closeout-readiness.js");
+    const authorization = readMilestoneCloseoutAuthorization({ milestoneId });
+    if (!authorization.authorized) return false;
+    const validationRecordedAt = readMilestoneValidationReceiptRecordedAt(milestoneId);
+    if (!validationRecordedAt) return false;
+    const { getSliceRunUatAssessmentRecordedAt } = await import("./gsd-db.js");
+    const sliceUatRecordedAt = getSliceRunUatAssessmentRecordedAt(milestoneId, sliceId);
+    if (!sliceUatRecordedAt) return false;
+    // Compare parsed instants, not raw strings: assessment rows may carry
+    // non-canonical timestamps (offsets, truncated precision, or restore
+    // artifacts). Unparseable either side fails open to preserve retries.
+    const sliceUatAt = Date.parse(sliceUatRecordedAt);
+    const validationAt = Date.parse(validationRecordedAt);
+    if (!Number.isFinite(sliceUatAt) || !Number.isFinite(validationAt)) return false;
+    return sliceUatAt < validationAt;
+  } catch (err) {
+    logWarning(
+      "prompt",
+      `uatRetryPredatesAcceptedValidation failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    return false;
+  }
+}
+
 async function resolveCandidateRunUatDispatch(
   base: string,
   milestoneId: string,
@@ -94,6 +137,7 @@ async function resolveCandidateRunUatDispatch(
   if (verdictContent) {
     const verdict = extractVerdict(verdictContent);
     if (!options.retryNonPass || !verdict || isAcceptableUatVerdict(verdict, uatType)) return null;
+    if (await uatRetryPredatesAcceptedValidation(milestoneId, candidate.sliceId)) return null;
   }
   if (!shouldDispatchUatForContent(uatContent, prefs)) return null;
 

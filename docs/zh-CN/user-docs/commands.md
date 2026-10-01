@@ -361,6 +361,7 @@ gsd headless query | jq '.cost.total'
 ```
 
 <a id="mcp-server-mode"></a>
+
 ## MCP Server 模式
 
 `gsd --mode mcp` 会通过 stdin/stdout 将 GSD 作为一个 [Model Context Protocol](https://modelcontextprotocol.io) server 运行。这会把所有 GSD 工具（read、write、edit、bash 等）暴露给外部 AI 客户端，例如 Claude Desktop、VS Code Copilot，以及任何兼容 MCP 的宿主。

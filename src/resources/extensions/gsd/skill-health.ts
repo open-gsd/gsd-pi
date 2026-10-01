@@ -7,6 +7,13 @@
  *   - Declining performance flags
  *   - Heal-skill suggestions (inspired by glittercowboy's heal-skill command)
  *
+ * DATA CAVEAT (#2495): metrics record which skills were AVAILABLE to each
+ * unit, not SKILL.md reads — recordSkillRead is not wired across the unit
+ * dispatch boundary. All per-skill counts below are availability counts and
+ * are labeled as such (see availabilityBased on SkillHealthReport). Causation
+ * claims about a skill (success drops, token bloat) are not emitted until
+ * real read telemetry lands.
+ *
  * The heal-skill concept: when an agent deviates from what a skill recommends
  * during execution, detect the drift and propose specific fixes with user
  * approval before applying. This closes the feedback loop that SkillsBench
@@ -51,6 +58,13 @@ export interface SkillHealthReport {
   staleSkills: string[];
   decliningSkills: string[];
   suggestions: SkillHealSuggestion[];
+  /**
+   * True when per-skill counts reflect skill AVAILABILITY (which skills were
+   * attached to units), not SKILL.md reads. Always true today: recordSkillRead
+   * is not yet wired across the unit dispatch boundary (#2495). Programmatic
+   * consumers (web panel, visualizer) should label accordingly when this is set.
+   */
+  availabilityBased: boolean;
 }
 
 export interface SkillHealSuggestion {
@@ -100,6 +114,7 @@ export function generateSkillHealthReport(basePath: string, staleDays?: number):
     staleSkills,
     decliningSkills,
     suggestions,
+    availabilityBased: true,
   };
 }
 
@@ -117,19 +132,20 @@ export function formatSkillHealthReport(report: SkillHealthReport): string {
 
   if (report.skills.length === 0) {
     lines.push("No skill telemetry data yet. Run auto-mode to start collecting.");
-    lines.push("Skill usage is recorded per-unit in metrics.json.");
+    lines.push("Skill availability is recorded per-unit in metrics.json.");
     return lines.join("\n");
   }
 
-  // Main table
-  lines.push("Skill                    Uses  Success%  Avg Tokens  Trend     Last Used");
-  lines.push("─".repeat(80));
+  // Main table — labeled for what the data actually is: each row counts the
+  // units the skill was AVAILABLE to, not SKILL.md reads (#2495).
+  lines.push("Skill                    Units  Unit Success%  Avg Unit Tokens  Trend     Last Available");
+  lines.push("─".repeat(94));
 
   for (const s of report.skills) {
     const name = s.name.padEnd(24).slice(0, 24);
     const uses = String(s.totalUses).padStart(5);
-    const success = `${Math.round(s.successRate * 100)}%`.padStart(8);
-    const tokens = formatTokenCount(s.avgTokens).padStart(11);
+    const success = `${Math.round(s.successRate * 100)}%`.padStart(13);
+    const tokens = formatTokenCount(s.avgTokens).padStart(15);
     const trend = s.tokenTrend.padEnd(10);
     const lastUsed = s.staleDays === 0 ? "today" :
       s.staleDays === 1 ? "1 day ago" :
@@ -138,19 +154,23 @@ export function formatSkillHealthReport(report: SkillHealthReport): string {
     lines.push(`${name}${uses}${success}${tokens}  ${trend}${lastUsed}${flag}`);
   }
 
+  lines.push("");
+  lines.push("Note: unit counts reflect skills AVAILABLE to each unit, not SKILL.md reads");
+  lines.push("(per-skill read telemetry is a follow-up — #2495).");
+
   // Stale skills
   if (report.staleSkills.length > 0) {
     lines.push("");
-    lines.push("Stale Skills (unused for 60+ days):");
+    lines.push("Stale Skills (not available for 60+ days):");
     for (const name of report.staleSkills) {
       lines.push(`  ⏸  ${name}`);
     }
   }
 
-  // Declining skills
+  // Flagged skills
   if (report.decliningSkills.length > 0) {
     lines.push("");
-    lines.push("Declining Skills (flagged for review):");
+    lines.push("Flagged Skills (flagged for review):");
     for (const name of report.decliningSkills) {
       const entry = report.skills.find(s => s.name === name);
       if (entry?.flagReason) {
@@ -184,7 +204,7 @@ export function formatSkillDetail(basePath: string, skillName: string): string {
   lines.push("═".repeat(50));
 
   if (units.length === 0) {
-    lines.push("No usage data recorded for this skill.");
+    lines.push("No availability data recorded for this skill.");
     return lines.join("\n");
   }
 
@@ -193,15 +213,17 @@ export function formatSkillDetail(basePath: string, skillName: string): string {
   const avgTokens = Math.round(totalTokens / units.length);
   const avgCost = totalCost / units.length;
 
-  lines.push(`Total uses: ${units.length}`);
-  lines.push(`Total tokens: ${formatTokenCount(totalTokens)}`);
-  lines.push(`Total cost: ${formatCost(totalCost)}`);
-  lines.push(`Avg tokens/use: ${formatTokenCount(avgTokens)}`);
-  lines.push(`Avg cost/use: ${formatCost(avgCost)}`);
+  // Labeled for what the data is: units the skill was available to, not reads (#2495).
+  lines.push(`Units with skill available: ${units.length}`);
+  lines.push(`Total unit tokens: ${formatTokenCount(totalTokens)}`);
+  lines.push(`Total unit cost: ${formatCost(totalCost)}`);
+  lines.push(`Avg unit tokens: ${formatTokenCount(avgTokens)}`);
+  lines.push(`Avg unit cost: ${formatCost(avgCost)}`);
   lines.push("");
+  lines.push("Note: counts reflect units where the skill was available, not SKILL.md reads (#2495).");
 
-  // Recent uses
-  lines.push("Recent uses:");
+  // Recent units
+  lines.push("Recent units:");
   const recent = units.slice(-10).reverse();
   for (const u of recent) {
     const date = new Date(u.finishedAt).toISOString().slice(0, 10);
@@ -388,34 +410,22 @@ function computeTokenTrend(uses: UnitMetrics[]): "stable" | "rising" | "declinin
   return "stable";
 }
 
-function generateSuggestions(skills: SkillHealthEntry[], staleSkills: string[]): SkillHealSuggestion[] {
+function generateSuggestions(_skills: SkillHealthEntry[], staleSkills: string[]): SkillHealSuggestion[] {
   const suggestions: SkillHealSuggestion[] = [];
 
-  for (const skill of skills) {
-    if (skill.totalUses >= MIN_USES_FOR_TREND && skill.successRate < SUCCESS_RATE_THRESHOLD) {
-      suggestions.push({
-        skillName: skill.name,
-        trigger: "declining_success",
-        message: `Success rate dropped to ${Math.round(skill.successRate * 100)}% over ${skill.totalUses} uses. Review SKILL.md for outdated patterns.`,
-        severity: skill.successRate < 0.5 ? "critical" : "warning",
-      });
-    }
-
-    if (skill.tokenTrend === "rising" && skill.totalUses >= MIN_USES_FOR_TREND * 2) {
-      suggestions.push({
-        skillName: skill.name,
-        trigger: "rising_tokens",
-        message: `Token usage trending upward. Skill may be causing inefficient execution patterns.`,
-        severity: "info",
-      });
-    }
-  }
+  // NOTE (#2495): the declining_success and rising_tokens suggestions are
+  // deliberately not emitted. Metrics record skill AVAILABILITY per unit
+  // (recordSkillRead is not wired across the unit dispatch boundary), so
+  // unit-derived success rates and token trends say nothing about the skill
+  // itself — asserting "inefficient execution patterns" or a success drop on
+  // this data is fiction and polluted the heal queue. They return when real
+  // per-skill read telemetry lands (recordSkillRead wiring follow-up).
 
   for (const name of staleSkills) {
     suggestions.push({
       skillName: name,
       trigger: "stale",
-      message: `Not used in ${DEFAULT_STALE_DAYS}+ days. Consider archiving or updating.`,
+      message: `Not available in recent units (${DEFAULT_STALE_DAYS}+ days). Consider archiving or updating.`,
       severity: "info",
     });
   }

@@ -22,6 +22,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
 ## Decision tree (Q1–Q9)
 
 ### Q1 — Mechanism & transport → **(A) Slash command → CLI subprocess**
+
 - New `_cmd_new_milestone` in `GsdCommandRouter`. Shells out to
   `gsd headless new-milestone --context-text <spec>`.
 - **Not** a Hermes skill (B), **not** a new MCP `gsd_create_milestone` tool (C).
@@ -34,6 +35,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
 - A later Hermes skill (B) can wrap the same client method with zero rework.
 
 ### Q2 — Co-run safety gate → **(A) Local supervisor state only**
+
 - Reject if `SupervisorContext.state in (RUNNING, BLOCKED)` before spawning.
 - **Not** a server-side cross-binding check (B). Documented limitation: a
   session started by *another* plugin instance / a headless run outside this
@@ -44,6 +46,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
   path to design and test.
 
 ### Q3 — Run model → **(A) Fire-and-track via the existing async-push model**
+
 - Return "🚀 Milestone creation started (session X)" immediately; push
   blocker/terminal notifications from a background stream-reader.
 - **Not** a synchronous blocking call (rejected after discovering the plugin is
@@ -53,6 +56,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
   label but does NOT work — see A1 below.)*
 
 ### Q3 follow-up — How to drive the fire-and-track → **(A1) Client-owned subprocess, direct stream→notification**
+
 - `GsdMcpClient` spawns `gsd headless new-milestone --output-format stream-json`
   on a background thread, reads stdout line-by-line, captures
   `init_result.sessionId`, and on terminal/blocker events calls
@@ -66,6 +70,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
   `NotificationService` and `SupervisorContext` unchanged.
 
 ### Q4 — Cancellation → **(A) Local PID ownership + direct SIGTERM**
+
 - `GsdMcpClient` holds the `subprocess.Popen` handle; `cancel_milestone()` calls
   `proc.terminate()` directly. `_cmd_cancel` routes to it when a milestone proc
   is active.
@@ -79,6 +84,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
   for next poll tick).
 
 ### Q5 — Scope: `--auto` (chained execution)? → **No. Planning-only.**
+
 - The plugin creates the milestone and hands off; execution is `/gsd auto`'s job.
 - `/gsd auto` already has a robust path (MCP `gsd_execute` → self-healing poll
   supervisor). Chaining `--auto` would duplicate that with a stateful
@@ -90,6 +96,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
   pointing to the two-step flow.
 
 ### Q6 — Input shape → **Bare positional, with `--file` escape**
+
 - `/gsd new-milestone <spec text>` → `--context-text` (matches `/gsd reply`).
 - `/gsd new-milestone --file <path>` → `--context <file>` (explicit opt-in).
 - **Not** auto-detect path-vs-text (heuristic misroutes on collision — rule #5).
@@ -97,6 +104,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
   positional matches the sibling command users already know).
 
 ### Q7 — Output → **(A) Bounded summary via `gsd_query` at completion, with (B) as graceful fallback**
+
 - Immediate ack: "🚀 Milestone creation started for `<project>`."
 - Completion push: bounded summary — milestone id, slice count, task count,
   one-line next step ("Run `/gsd auto` to start."). Built from
@@ -110,6 +118,7 @@ stream-json stdout, and hands execution off to the **existing, untouched**
   unchanged.
 
 ### Q8 — Failure modes
+
 | # | Mode | Disposition |
 |---|---|---|
 | 1 | Active auto session (co-run) | Reject before spawn; fail closed |
@@ -133,6 +142,7 @@ if a milestone subprocess with a pending blocker is active, route locally; else
 fall through to the existing MCP `resolve_blocker` path.
 
 ### Q9 — Cross-effects on existing commands
+
 - **`_cmd_cancel`** — MUST change: add milestone-subprocess branch routing to
   local `cancel_milestone()` (SIGTERM) when one is active. *Required.*
 - **`_cmd_auto`** — MUST change: add symmetric co-run guard (reject if
@@ -153,6 +163,7 @@ fall through to the existing MCP `resolve_blocker` path.
 ## Implementation surface (additive unless noted)
 
 **`gsd_client.py`** — new methods + state:
+
 - `self._milestone_proc: subprocess.Popen | None`
 - `create_milestone(project_dir, *, context_text=None, context_file=None) -> str` —
   spawns `gsd headless new-milestone --output-format stream-json`, starts the
@@ -167,6 +178,7 @@ fall through to the existing MCP `resolve_blocker` path.
 - `milestone_active()` predicate for the co-run gate.
 
 **`commands.py`** — new handler + two modifications:
+
 - `_cmd_new_milestone(rest)` — the new command (guard, parse, spawn, ack).
 - `_cmd_cancel` (modify) — milestone-subprocess branch.
 - `_cmd_auto` (modify) — symmetric co-run guard.
@@ -178,6 +190,7 @@ the constructor surface changes (likely no change — `GsdMcpClient` already has
 `config`, and `NotificationService` is already injected).
 
 **Tests** (new, matching existing `tests/test_*.py` patterns):
+
 - `test_new_milestone_command.py` — guard (co-run both ways), input parsing
   (bare text, `--file`, empty, `--auto` rejected), spawn + ack.
 - extend `test_gsd_client_cache.py` or new `test_milestone_client.py` —

@@ -124,6 +124,8 @@ function clearCurrentUnitToolErrorHarnessAbort(toolName: string): void {
 
 type WelcomeScreenModule = {
   buildWelcomeScreenLines(opts: { version: string; remoteChannel?: string; width?: number }): string[];
+  /** Optional: resolve GSD_MILESTONE_LOCK before the first sync render (#2360). */
+  primeMilestoneLock?: () => Promise<void>;
 };
 
 async function loadWelcomeScreenModule(): Promise<WelcomeScreenModule | undefined> {
@@ -159,6 +161,10 @@ async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
   try {
     const welcome = await loadWelcomeScreenModule();
     if (!welcome) return;
+
+    // Resolve the milestone lock up front — the header render itself is sync.
+    // Older welcome-screen builds without priming simply skip this.
+    await welcome.primeMilestoneLock?.();
 
     let remoteChannel: string | undefined;
     try {

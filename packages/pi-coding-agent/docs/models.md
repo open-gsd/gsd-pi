@@ -146,15 +146,20 @@ Set `api` at provider level (default for all models) or model level (override pe
 The `apiKey` and `headers` fields support three formats:
 
 - **Shell command:** `"!command"` executes and uses stdout
+
   ```json
   "apiKey": "!security find-generic-password -ws 'anthropic'"
   "apiKey": "!op read 'op://vault/item/credential'"
   ```
+
 - **Environment variable:** Uses the value of the named variable
+
   ```json
   "apiKey": "MY_API_KEY"
   ```
+
 - **Literal value:** Used directly
+
   ```json
   "apiKey": "sk-..."
   ```
@@ -200,6 +205,7 @@ If your command is slow, expensive, rate-limited, or should keep using a previou
 | `compat` | No | provider `compat` | Provider compatibility overrides. Merged with provider-level `compat` when both are set. |
 
 Current behavior:
+
 - `/model` and `--list-models` list entries by model `id`.
 - The configured `name` is used for model matching and detail/status text.
 
@@ -277,6 +283,7 @@ To merge custom models into a built-in provider, include the `models` array:
 ```
 
 Merge semantics:
+
 - Built-in models are kept.
 - Custom models are upserted by `id` within the provider.
 - If a custom model `id` matches a built-in model `id`, the custom model replaces that built-in model.
@@ -308,6 +315,7 @@ Use `modelOverrides` to customize specific built-in models without replacing the
 `modelOverrides` supports these fields per model: `name`, `reasoning`, `input`, `cost` (partial), `contextWindow`, `maxTokens`, `headers`, `compat`.
 
 Behavior notes:
+
 - `modelOverrides` are applied to built-in provider models.
 - Unknown model IDs are ignored.
 - You can combine provider-level `baseUrl`/`headers` with `modelOverrides`.
