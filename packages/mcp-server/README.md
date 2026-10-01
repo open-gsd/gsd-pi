@@ -166,6 +166,8 @@ Configured workflow startup remains fail-closed: `gsd-mcp-server` loads the work
 
 The server also keeps a per-project PID registry at `$GSD_HOME/mcp-instances.json` (default `~/.gsd/mcp-instances.json`). On startup it terminates a previously registered `gsd-mcp-server` process for the same project when the saved PID still belongs to an MCP server, then records the current PID. On normal shutdown it removes only its own entry. Corrupt registry files are preserved as `.corrupt-<timestamp>` backups before a new registry is written.
 
+When the recorded holder is alive but cannot be verified as this project's server (its working directory or command line does not match the registered project root), startup is refused and the refusal names the holder's PID, working directory, and the `startedAt` timestamp recorded in the registry when the holder registered (not the OS process start time). The remedy: kill the holder if it is stale, or restart with `GSD_MCP_CLIENT_MANAGED=1` to skip the per-project registry.
+
 For stdio hosts that leave child processes behind, the server watches stdin activity. If stdin is idle for five minutes and the original parent process is gone, it cleans up sessions, unregisters its PID, and exits.
 
 ### `gsd_execute`
@@ -287,6 +289,7 @@ Resolve a pending blocker in a session by sending a response to the blocked UI r
 | `GSD_WORKFLOW_EXECUTORS_MODULE` | Optional absolute path or `file:` URL for the shared GSD workflow executor module used by workflow mutation tools. |
 | `GSD_WORKFLOW_WRITE_GATE_MODULE` | Optional absolute path or `file:` URL for the shared write-gate module used by workflow mutation tools. |
 | `GSD_WORKFLOW_PROJECT_ROOT` | Canonical project root for workflow tools and the per-project MCP PID registry key. Defaults to the server's current working directory. |
+| `GSD_MCP_CLIENT_MANAGED` | Set to literal `1` to keep this server out of the per-project PID registry: startup skips the orphan sweep, registration, and unregister-on-shutdown. Use this when the MCP client manages server lifetimes itself and may run more than one server for the same project; it is also the way to start a second server for a project whose registry slot is held by another process. |
 | `GSD_MCP_ADVERTISE_ALIASES` | Set to literal `1` to include legacy workflow aliases in the packaged MCP server's `tools/list`. When workflow bridges are enabled, leaving it unset exposes canonical workflow names only. |
 | `GSD_MCP_HIDE_ALIASES` | Legacy force-hide switch. Set to literal `1` to keep packaged MCP aliases hidden even when `GSD_MCP_ADVERTISE_ALIASES=1`. |
 | `GSD_ADVERTISE_TOOL_ALIASES` | Set to literal `1` to register legacy workflow aliases on the native in-process GSD tool surface. This does not affect the packaged MCP server; use `GSD_MCP_ADVERTISE_ALIASES` for `gsd-mcp-server`. |

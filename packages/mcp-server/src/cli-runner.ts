@@ -15,6 +15,7 @@ import {
   registerMcpInstance,
   sweepProjectOrphanMcpServers,
   unregisterMcpInstance,
+  type McpInstanceRefusal,
 } from './pid-registry.js';
 import { createActivityTrackingInput, type ActivityTrackingInput } from './stdio-watchdog.js';
 
@@ -99,7 +100,7 @@ export interface RunMcpServerCliOptions {
   env?: NodeJS.ProcessEnv;
   exit?: (code: number) => never;
   loadStoredCredentialEnvKeys?: () => void;
-  registerMcpInstance?: (projectDir: string) => boolean | void;
+  registerMcpInstance?: (projectDir: string) => boolean | McpInstanceRefusal | void;
   sweepProjectOrphanMcpServers?: (projectDir: string) => void;
   unregisterMcpInstance?: (projectDir: string) => void;
   createSessionManager?: () => SessionManagerLike;
@@ -314,8 +315,14 @@ export async function runMcpServerCli(options: RunMcpServerCliOptions = {}): Pro
 
     if (!probeSession && !pumpScopedObservationSession && !clientManagedSession) {
       sweepOrphans(projectDir);
-      if (registerInstance(projectDir) === false) {
-        throw new Error('refusing to start: existing MCP server PID could not be verified');
+      const registration = registerInstance(projectDir);
+      if (registration === false || (typeof registration === 'object' && registration.refused)) {
+        const detail = typeof registration === 'object' && registration.refused
+          ? registration.detail
+          : '';
+        throw new Error(
+          `refusing to start: existing MCP server PID could not be verified${detail ? ` (${detail})` : ''}`,
+        );
       }
       registered = true;
     }

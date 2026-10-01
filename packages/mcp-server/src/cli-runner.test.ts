@@ -843,6 +843,75 @@ describe('runMcpServerCli', () => {
     assert.match(stderrChunks.join(''), /bridge unavailable/);
   });
 
+  test('surfaces the unverified-holder detail when instance registration is refused', async () => {
+    // Regression for #2361: the refusal error must name the holder (pid/cwd/
+    // startedAt/liveness) and the GSD_MCP_CLIENT_MANAGED=1 remedy instead of a
+    // bare "could not be verified".
+    const calls: string[] = [];
+    const stderrChunks: string[] = [];
+    const stdin = new PassThrough();
+    const stderr = new Writable({
+      write(chunk, _encoding, callback) {
+        stderrChunks.push(String(chunk));
+        callback();
+      },
+    });
+
+    await assert.rejects(
+      runMcpServerCli({
+        cwd: () => '/workspace/project',
+        env: {},
+        exit(code) {
+          throw new ExitError(code);
+        },
+        loadStoredCredentialEnvKeys() {},
+        registerMcpInstance(projectDir) {
+          calls.push(`register:${projectDir}`);
+          return {
+            refused: true as const,
+            detail:
+              'holder pid=4242, cwd=/workspace/project/sub, startedAt=2026-01-01T00:00:00.000Z, still running, remedy: kill pid 4242 if it is stale, or restart with GSD_MCP_CLIENT_MANAGED=1 to skip the per-project registry',
+          };
+        },
+        sweepProjectOrphanMcpServers() {},
+        unregisterMcpInstance(projectDir) {
+          calls.push(`unregister:${projectDir}`);
+        },
+        createSessionManager() {
+          return { async cleanup() {} };
+        },
+        async createMcpServer() {
+          calls.push('create-server');
+          throw new Error('should not create server');
+        },
+        stdin,
+        stdout: new PassThrough(),
+        stderr,
+        onSignal() {},
+        now: () => 0,
+        setInterval() {
+          throw new Error('should not start interval');
+        },
+        clearInterval() {},
+        isOrphaned: () => false,
+      }),
+      (error) => error instanceof ExitError && error.code === 1,
+    );
+
+    // Startup aborts before any server surface exists, and because registration
+    // never succeeded the holder's registry entry must not be unregistered.
+    assert.ok(!calls.includes('create-server'), 'server must NOT be created when registration is refused');
+    assert.ok(!calls.includes('unregister:/workspace/project'), 'must not unregister the holder entry');
+    const fatalOutput = stderrChunks.join('');
+    assert.match(fatalOutput, /Fatal: failed to start/);
+    assert.match(fatalOutput, /refusing to start: existing MCP server PID could not be verified/);
+    assert.match(fatalOutput, /holder pid=4242/);
+    assert.match(fatalOutput, /cwd=\/workspace\/project\/sub/);
+    assert.match(fatalOutput, /startedAt=2026-01-01T00:00:00\.000Z/);
+    assert.match(fatalOutput, /still running/);
+    assert.match(fatalOutput, /GSD_MCP_CLIENT_MANAGED=1/);
+  });
+
   test('keeps fatal startup failures on exit code 1 when stdin closes during cleanup', async () => {
     const calls: string[] = [];
     const stdin = new PassThrough();
