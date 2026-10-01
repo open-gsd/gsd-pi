@@ -391,6 +391,47 @@ export async function acknowledgeWedge(
 }
 
 /**
+ * Guard ids whose recheck in orchestrator.recheckWedge needs a live
+ * orchestrator (state derivation / dispatch re-selection). Step mode has no
+ * orchestrator, so `/gsd wedge ack` refuses these and points at the
+ * orchestrator-driven `--resume-wedge` path, which runs the full recheck.
+ * Keep in sync with orchestrator.recheckWedge's handled branches.
+ */
+const ORCHESTRATOR_ONLY_RECHECK_GUARD_IDS: ReadonlySet<string> = new Set([
+  'orphaned-active-unit',
+  'dispatch-rule-stop',
+  'dispatch-authority',
+  'no-active-milestone',
+]);
+
+/**
+ * `/gsd wedge ack <id>` (#2159) — the step-mode acknowledgment surface, for
+ * workflows that never enter auto-mode. Reuses acknowledgeWedge with the
+ * recheck branches that do not need a live orchestrator: completed-no-advance
+ * wedges are re-probed against current target rows, and one-shot guards follow
+ * the orchestrator's fallback semantics (explicit ack permitted; the retained
+ * signature re-trips unchanged input immediately). No wedge records are
+ * minted or altered here (ADR-047 §5).
+ */
+export async function acknowledgeWedgeStepMode(
+  scopeId: string,
+  wedgeId: string,
+): Promise<AcknowledgeResult> {
+  return acknowledgeWedge(scopeId, wedgeId, (wedge) => {
+    if (wedge.guardId === COMPLETED_NO_ADVANCE_GUARD_ID) {
+      return recheckCompletedNoAdvanceWedge(wedge);
+    }
+    if (ORCHESTRATOR_ONLY_RECHECK_GUARD_IDS.has(wedge.guardId)) {
+      return {
+        blocking: true,
+        reason: `${wedge.guardId} needs a live orchestrator recheck; use \`/gsd auto --resume-wedge ${wedge.wedgeId}\``,
+      };
+    }
+    return { blocking: false };
+  });
+}
+
+/**
  * Hash the DB rows a unit was dispatched to move (its target identity's
  * milestone/slice/task rows, plus unit-specific durable verdict rows). Used to detect completed-no-advance dispatches:
  * a unit that returns while this hash is unchanged did zero target work
@@ -538,6 +579,11 @@ export function wedgeResumeCommand(wedge: WedgeRecord): string {
   return `/gsd auto --resume-wedge ${wedge.wedgeId}`;
 }
 
+/** The step-mode acknowledgment command for a wedge (#2159) — no auto re-entry. */
+export function wedgeAckCommand(wedge: WedgeRecord): string {
+  return `/gsd wedge ack ${wedge.wedgeId}`;
+}
+
 /**
  * Terminal notice emitted when the backstop trips. Routed through
  * markBlockedStopReason → "Auto-mode blocked — …" so the headless host exits
@@ -548,7 +594,8 @@ export function formatWedgeTripNotice(wedge: WedgeRecord): string {
     `liveness backstop tripped: ${wedge.guardId} recurred ${wedge.occurrenceCount}x with unchanged inputs ` +
     `for ${wedge.unitType} ${wedge.unitId} (wedge ${wedge.wedgeId}). ` +
     `Sanctioned exit: ${wedge.sanctionedExit} ` +
-    `After resolving, acknowledge with \`${wedgeResumeCommand(wedge)}\` to re-enter auto-mode.`
+    `After resolving, acknowledge with \`${wedgeResumeCommand(wedge)}\` to re-enter auto-mode, ` +
+    `or, in a step-mode workflow, with \`${wedgeAckCommand(wedge)}\` without re-entering auto-mode.`
   );
 }
 
@@ -563,6 +610,7 @@ export function formatWedgeRefusalNotice(wedge: WedgeRecord): string {
     `wedged (${wedge.wedgeId}): ${wedge.guardId} recurred ${wedge.occurrenceCount}x with unchanged inputs ` +
     `for ${wedge.unitType} ${wedge.unitId}. ` +
     `Sanctioned exit: ${wedge.sanctionedExit} ` +
-    `Auto-mode will not re-enter until you acknowledge with \`${wedgeResumeCommand(wedge)}\`.`
+    `Auto-mode will not re-enter until you acknowledge with \`${wedgeResumeCommand(wedge)}\` ` +
+    `(step-mode alternative: \`${wedgeAckCommand(wedge)}\`).`
   );
 }

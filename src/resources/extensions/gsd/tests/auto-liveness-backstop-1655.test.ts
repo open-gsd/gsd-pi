@@ -25,6 +25,7 @@ import {
   LIVENESS_TRIP_THRESHOLD,
   COMPLETED_NO_ADVANCE_GUARD_ID,
   acknowledgeWedge,
+  acknowledgeWedgeStepMode,
   clearAbandonedCloseoutSignatures,
   formatWedgeRefusalNotice,
   formatWedgeTripNotice,
@@ -36,6 +37,7 @@ import {
   recordNonAdvancingRecurrence,
   serializeNonAdvancingEvidence,
   snapshotUnitTargetRows,
+  wedgeAckCommand,
   wedgeResumeCommand,
 } from '../auto-liveness-backstop.ts';
 import {
@@ -272,6 +274,8 @@ test('ADR-047: wedge trip notice names the guard, the wedge id, and the resume c
   assert.match(notice, new RegExp(tripped.wedge.wedgeId));
   assert.match(notice, /--resume-wedge/);
   assert.equal(wedgeResumeCommand(tripped.wedge), `/gsd auto --resume-wedge ${tripped.wedge.wedgeId}`);
+  assert.match(notice, /wedge ack/, 'the trip notice must name the step-mode ack alternative (#2159)');
+  assert.equal(wedgeAckCommand(tripped.wedge), `/gsd wedge ack ${tripped.wedge.wedgeId}`);
 
   // Routed through the canonical blocked stop notice, the terminal line keeps
   // the "Auto-mode blocked" prefix the headless host (exit 10) and the
@@ -536,6 +540,133 @@ test('#1672: a loop guard signature survives a database restart and trips at 2',
   if (!tripped.tripped) return;
   assert.match(tripped.wedge.sanctionedExit, /`\/gsd status`/);
   assert.match(formatWedgeRefusalNotice(tripped.wedge), /`\/gsd status`/);
+  assert.match(formatWedgeRefusalNotice(tripped.wedge), /wedge ack/, 'the refusal notice must name the step-mode ack alternative (#2159)');
+});
+
+test('#2159: step-mode ack refuses every guard whose recheck needs a live orchestrator', async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  // Keep in sync with ORCHESTRATOR_ONLY_RECHECK_GUARD_IDS.
+  const orchestratorOnlyGuards = [
+    'orphaned-active-unit',
+    'dispatch-rule-stop',
+    'dispatch-authority',
+    'no-active-milestone',
+  ];
+  const wedgeIds: string[] = [];
+  for (const guardId of orchestratorOnlyGuards) {
+    const record = () => recordNonAdvancingOutcome({
+      scopeId: SCOPE,
+      guardId,
+      unitType: 'execute-task',
+      unitId: 'M001/S01/T01',
+      inputPayload: `${guardId}: unchanged state`,
+    });
+    assert.equal(record().tripped, false, guardId);
+    const tripped = record();
+    assert.equal(tripped.tripped, true, guardId);
+    if (!tripped.tripped) return;
+    wedgeIds.push(tripped.wedge.wedgeId);
+  }
+
+  for (const [index, guardId] of orchestratorOnlyGuards.entries()) {
+    const ack = await acknowledgeWedgeStepMode(SCOPE, wedgeIds[index]!);
+    assert.equal(ack.ok, false, `${guardId} must not ack from step mode`);
+    if (ack.ok) continue;
+    assert.match(ack.reason, /--resume-wedge/, guardId);
+    assert.match(ack.reason, new RegExp(guardId), guardId);
+  }
+  assert.equal(readOpenWedge()?.wedgeId, wedgeIds[0], 'all four wedge records stay open');
+});
+
+test('#2159: step-mode ack of a one-shot wedge keeps the signature — unchanged input re-trips the same wedge', async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  const record = () => recordNonAdvancingOutcome({
+    scopeId: SCOPE,
+    guardId: 'finalize-break',
+    unitType: 'validate-milestone',
+    unitId: 'M001',
+    inputPayload: 'finalize-break: closeout refused terminally',
+  });
+  assert.equal(record().tripped, false);
+  const tripped = record();
+  assert.equal(tripped.tripped, true);
+  if (!tripped.tripped) return;
+
+  const ack = await acknowledgeWedgeStepMode(SCOPE, tripped.wedge.wedgeId);
+  assert.equal(ack.ok, true);
+  assert.equal(readOpenWedge(), null);
+
+  const unchanged = record();
+  assert.equal(unchanged.tripped, true, 'unchanged blocker must re-trip on the probe');
+  if (!unchanged.tripped) return;
+  assert.equal(unchanged.wedge.wedgeId, tripped.wedge.wedgeId, 'the original wedge is reopened');
+  assert.equal(readOpenWedge()?.wedgeId, tripped.wedge.wedgeId);
+});
+
+test('#2159: step-mode ack acknowledges a resolved completed-no-advance wedge', async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'S', status: 'active', depends: [] });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'task', status: 'pending' });
+
+  const atWedge = readTargetSnapshot('complete-slice', 'M001/S01');
+  assert.ok(atWedge);
+  const record = () => recordNonAdvancingOutcome({
+    scopeId: SCOPE,
+    guardId: COMPLETED_NO_ADVANCE_GUARD_ID,
+    unitType: 'complete-slice',
+    unitId: 'M001/S01',
+    inputPayload: atWedge!,
+  });
+  assert.equal(record().tripped, false);
+  const tripped = record();
+  assert.equal(tripped.tripped, true);
+  if (!tripped.tripped) return;
+
+  // The unit later completed — the target row moved past the wedge input.
+  updateTaskStatus('M001', 'S01', 'T01', 'complete');
+
+  const ack = await acknowledgeWedgeStepMode(SCOPE, tripped.wedge.wedgeId);
+  assert.equal(ack.ok, true, 'a resolved wedge must be acknowledgeable without entering auto-mode');
+  assert.equal(readOpenWedge(), null, 'the acknowledged wedge no longer blocks re-entry');
+});
+
+test('#2159: step-mode ack refuses a still-blocking completed-no-advance wedge', async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'S', status: 'active', depends: [] });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'task', status: 'pending' });
+
+  const atWedge = readTargetSnapshot('complete-slice', 'M001/S01');
+  assert.ok(atWedge);
+  const record = () => recordNonAdvancingOutcome({
+    scopeId: SCOPE,
+    guardId: COMPLETED_NO_ADVANCE_GUARD_ID,
+    unitType: 'complete-slice',
+    unitId: 'M001/S01',
+    inputPayload: atWedge!,
+  });
+  assert.equal(record().tripped, false);
+  const tripped = record();
+  assert.equal(tripped.tripped, true);
+  if (!tripped.tripped) return;
+
+  const ack = await acknowledgeWedgeStepMode(SCOPE, tripped.wedge.wedgeId);
+  assert.equal(ack.ok, false, 'an unresolved wedge must not be acknowledgeable');
+  if (ack.ok) return;
+  assert.match(ack.reason, /still blocks/);
+  assert.match(ack.reason, /state did not advance/);
+  assert.equal(readOpenWedge()?.wedgeId, tripped.wedge.wedgeId, 'the wedge record stays open');
 });
 
 test('hashBackstopInput is deterministic and payload-faithful', () => {
