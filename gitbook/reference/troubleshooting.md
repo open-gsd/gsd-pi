@@ -17,6 +17,7 @@ It checks file structure, roadmap ↔ slice ↔ task consistency, completion sta
 An old global `gsd-pi` install can shadow the new scoped package.
 
 **npm fix:**
+
 ```bash
 npm uninstall -g gsd-pi
 rm -f ~/.gsd/.update-check ~/.gsd/agent/managed-resources.json
@@ -24,6 +25,7 @@ npm install -g @opengsd/gsd-pi@latest
 ```
 
 **Move from old npm to pnpm:**
+
 ```bash
 npm uninstall -g gsd-pi @opengsd/gsd-pi
 rm -f ~/.gsd/.update-check ~/.gsd/agent/managed-resources.json
@@ -67,6 +69,7 @@ Do not delete `.gsd/gsd.db` to bypass this refusal. If `gsd --version` still sho
 pnpm global commands fail with `The configured global bin directory ... is not in PATH`.
 
 **Fix:**
+
 ```bash
 pnpm setup
 exec $SHELL -l
@@ -74,6 +77,7 @@ pnpm remove -g @opengsd/gsd-pi
 ```
 
 For a one-terminal workaround on macOS/Linux:
+
 ```bash
 export PATH="/path/from/pnpm-error:$PATH"
 pnpm remove -g @opengsd/gsd-pi
@@ -112,6 +116,7 @@ npm's global bin directory isn't in `$PATH`.
 For pnpm installs, use `pnpm setup`, restart your shell, and retry the pnpm command.
 
 **Fix:**
+
 ```bash
 npm prefix -g
 # Add the bin dir to PATH:
@@ -120,6 +125,7 @@ source ~/.zshrc
 ```
 
 **Common causes:**
+
 - **Homebrew Node** — `/opt/homebrew/bin` missing from PATH
 - **Version manager (nvm, fnm, mise)** — global bin is version-specific
 - **oh-my-zsh** — `gitfast` plugin aliases `gsd` to `git svn dcommit`; check with `alias gsd`
@@ -172,6 +178,7 @@ Auto mode was paused, stopped, or crashed mid-milestone, and the work is still o
 **Fix:** As of GSD 2.78, `/gsd auto` bootstrap automatically detects this condition and surfaces a warning naming the branch, commit count, and worktree location. Run `/gsd auto` to re-enter the worktree and resume. If the worktree must be resolved manually, merge salvageable work with `/gsd worktree merge <MID>` or remove a stale worktree with `/gsd worktree remove <MID>`, then run `/gsd doctor fix`.
 
 **Diagnose:** Run `/gsd forensics` and look at the **Worktree Telemetry** section:
+
 - `Orphans detected > 0` with reason `in-progress-unmerged` confirms the condition
 - `Unmerged exits > 0` on the producer side confirms which exit type caused it
 

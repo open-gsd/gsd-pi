@@ -103,6 +103,7 @@ phases:
 显式设置的 `phases` 总是优先于 profile 默认值。
 
 <a id="complexity-based-task-routing"></a>
+
 ## 基于复杂度的 Task 路由
 
 当启用 dynamic routing 时，GSD 会根据复杂度对每个 task 做分类，并将其路由到合适的 model tier。简单的文档修复会使用更便宜的模型，而复杂的架构工作会获得所需的推理能力。
@@ -151,6 +152,7 @@ Tasks 会通过分析 task plan 来分类：
 如果配置了 `execution_simple`，simple tasks 会优先使用它。`budget` profile 会自动把该键设为 Haiku。
 
 <a id="budget-pressure"></a>
+
 ### 预算压力
 
 当接近预算上限时，分类器会自动降低 tier：

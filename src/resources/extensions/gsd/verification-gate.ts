@@ -436,6 +436,18 @@ export function formatFailureSignature(result: VerificationResult): string {
 const UNQUOTED_SHELL_CONTROL_CHARS = new Set([";", "<", ">"]);
 const EXIT_CODE_ECHO_SUFFIX = /^;\s*echo\s+(?:"exit:\$\?"|'exit:\$\?'|exit:\$\?)\s*$/;
 
+/**
+ * CJK / fullwidth sentence punctuation (#2428). Unquoted, these mark prose
+ * sentence structure rather than shell syntax; test on quote-stripped text so
+ * quoted CJK data (a `grep '驗證腳本' src` pattern) does not trip it.
+ */
+const CJK_PROSE_PUNCTUATION_RE = /[、。，：；！？」』）　…—]/u;
+
+/** True when quote-stripped command text carries CJK sentence punctuation. */
+function hasCjkProsePunctuation(cmd: string): boolean {
+  return CJK_PROSE_PUNCTUATION_RE.test(cmd);
+}
+
 function isAllowedExitCodeEchoSuffix(suffix: string): boolean {
   return EXIT_CODE_ECHO_SUFFIX.test(suffix);
 }
@@ -824,6 +836,15 @@ export function isLikelyCommand(cmd: string): boolean {
   const strippedTokens = stripped ? stripped.split(/\s+/) : [];
   const proseTokens = firstToken === "!" ? strippedTokens.slice(1) : strippedTokens;
 
+  // CJK sentence punctuation outside quotes is prose structure, not shell
+  // syntax (#2428): tokenization on `\s+` and the ASCII-only control-char
+  // scan cannot see it, so a CJK planning sentence that begins with a known
+  // tool prefix used to slip past every heuristic (flags in the tail suppress
+  // the natural-language check) and execute verbatim. Quoted content is
+  // already stripped above, so real commands that search CJK text
+  // (e.g. `grep -r '驗證腳本' src`) stay valid.
+  if (hasCjkProsePunctuation(stripped)) return false;
+
   // Numbered checklist / narrative prose (#1994).
   if (/^\d+[.)]\s/.test(trimmed)) return false;
 
@@ -908,6 +929,21 @@ export function assertVerifyIsShellCheckable(verify: string): void {
     throw new Error(
       `verify must be a shell command, not a GSD tool invocation: "${toolVerifyLine}" — ` +
       "use a shell-checkable command, or describe the tool-verified outcome as prose",
+    );
+  }
+  // CJK prose sentence in the verify field would otherwise execute verbatim
+  // and record its exit-0 no-op as a passing check (#2428). Flag it at
+  // plan time; quoted CJK data is stripped before the test. Splitting uses
+  // the quote-aware splitter so a multiline quoted operand is not misread as
+  // unterminated fragments (#2428 review).
+  const proseLine = splitUnquotedLines(verify)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .find((line) => hasCjkProsePunctuation(stripQuotedSegments(line).trim())) ?? null;
+  if (proseLine) {
+    throw new Error(
+      `verify must be a shell command, not prose: "${proseLine}" — ` +
+      "write the check as a plain shell command; this line reads as narrative prose (CJK/fullwidth sentence punctuation)",
     );
   }
 }

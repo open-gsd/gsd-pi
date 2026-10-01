@@ -12,8 +12,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
 import { isUnitAlreadyActiveSkip } from "./contracts.js";
@@ -29,7 +29,7 @@ import {
 import { _clearCurrentResolve } from "./resolve.js";
 import { runGuards } from "./phases.js";
 import { runFinalize } from "./finalize.js";
-import { handlePendingHookOutcome } from "../auto-post-unit.js";
+import { handlePendingHookOutcome, resolveVerificationFailureMarkerPath } from "../auto-post-unit.js";
 import {
   resetSessionTimeoutState,
   restoreTaskHostVerificationContext,
@@ -54,6 +54,7 @@ import {
 } from "../db/unit-dispatches.js";
 import {
   claimMilestoneLease,
+  getMilestoneLease,
   refreshMilestoneLease,
   milestoneLeaseTtlSeconds,
 } from "../db/milestone-leases.js";
@@ -151,6 +152,18 @@ import {
 } from "../artifact-verification.js";
 import { IS_DISPATCH_OWNER_DEAD, RECLAIM_DEAD_DISPATCH_OWNER } from "./unit-run.js";
 
+/**
+ * Path of the `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker
+ * for the unit when one exists on disk — a deliberate closeout refusal
+ * (#2046). Flagged on the finalize input so the kernel stops instead of
+ * identical-input retrying. Unknown unit types resolve to no marker and keep
+ * the retry default.
+ */
+function resolvePresentVerificationFailureMarker(unitType: string, unitId: string, basePath: string): string | null {
+  const markerPath = resolveVerificationFailureMarkerPath(unitType, unitId, basePath);
+  return markerPath !== null && existsSync(markerPath) ? markerPath : null;
+}
+
 function resolveCompletionStopFromState(
   stateSnapshot: GSDState | undefined,
 ): { reason: string; options: StopAutoOptions } | null {
@@ -201,6 +214,17 @@ const TASK_EXECUTION_CUTOVER_DEPS = {
   readTaskAttempt,
   readTaskRecoveryRoute,
   readTaskTechnicalVerdict,
+  // #2443: the Attempt claim must carry the currently held fencing token, not
+  // a session-cached one that can lag after the lease TTL elapses mid-unit.
+  resolveHeldMilestoneLeaseToken: (milestoneId: string, workerId: string): number | null => {
+    const lease = getMilestoneLease(milestoneId);
+    return lease
+      && lease.worker_id === workerId
+      && lease.status === "held"
+      && Date.parse(lease.expires_at) > Date.now()
+      ? lease.fencing_token
+      : null;
+  },
   routeTaskFailure: recordFailureAndSelectRecovery,
   settleTaskAttempt,
 };
@@ -573,7 +597,7 @@ export async function autoLoop(
     });
     const finishTurn = (
       status: "completed" | "failed" | "paused" | "stopped" | "skipped" | "retry",
-      failureClass: "none" | "unknown" | "manual-attention" | "timeout" | "execution" | "verification" | "closeout" | "git" = "none",
+      failureClass: "none" | "unknown" | "manual-attention" | "timeout" | "execution" | "verification" | "closeout" | "git" | "refusal" = "none",
       error: string | undefined,
       guardId: string | null,
       inputPayload?: string,
@@ -979,7 +1003,7 @@ export async function autoLoop(
           if (lease.kind !== "ready") {
             throw new Error(`Custom engine execute-task requires a canonical milestone lease: ${lease.reason}`);
           }
-          const claim = openDispatchClaim(s, flowId, turnId, iterData, {
+          const customClaimDeps = {
             getRecentDispatchesForUnit,
             recordDispatchClaim,
             markDispatchRunning,
@@ -987,7 +1011,25 @@ export async function autoLoop(
             logClaimFailed: logDispatchClaimFailed,
             isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
             reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
-          });
+          };
+          let claim = openDispatchClaim(s, flowId, turnId, iterData, customClaimDeps);
+          if (claim.kind === "skip" && claim.reason === "stale-lease") {
+            // #2443: the dispatch guard rejects a lease whose TTL lapsed
+            // during guards/request throttling (mirroring the attempt fencing
+            // trigger). The same live worker almost always still owns the
+            // milestone here, so force-reclaim once and retry, matching the
+            // recovery the inline loop path and claimUnitRun already perform.
+            // Only a genuine takeover by another live worker surfaces as the
+            // terminal conflict below.
+            const leaseRecovery = ensureDispatchLease(s, iterData.mid, {
+              claimMilestoneLease,
+              logLeaseRecovered: logDispatchLeaseRecovered,
+              logLeaseRecoveryFailed: logDispatchLeaseRecoveryFailed,
+            }, { forceReclaim: true });
+            if (leaseRecovery.kind === "ready") {
+              claim = openDispatchClaim(s, flowId, turnId, iterData, customClaimDeps);
+            }
+          }
           if (claim.kind !== "opened") {
             const reason = claim.kind === "skip" || claim.kind === "degraded"
               ? claim.reason
@@ -2082,7 +2124,19 @@ export async function autoLoop(
         status: finalizeStatus,
         action: finalizeResult.action,
         ...(finalizeReason ? { reason: finalizeReason } : {}),
+        // #2443: carry the pending verification retry context so forensics
+        // can tell which finalize retry fired — the reason was previously not
+        // captured in this event.
+        ...(s.pendingVerificationRetry?.failureContext
+          ? { retryFailureContext: s.pendingVerificationRetry.failureContext }
+          : {}),
+        ...(typeof s.pendingVerificationRetry?.attempt === "number"
+          ? { retryAttempt: s.pendingVerificationRetry.attempt }
+          : {}),
       });
+      const refusalMarkerPath = finalizeResult.action === "continue"
+        ? resolvePresentVerificationFailureMarker(iterData.unitType, iterData.unitId, s.basePath)
+        : null;
       const finalizeDecision = decideFinalizeResult(
         finalizeResult.action === "break"
           ? { action: "break", reason: finalizeResult.reason }
@@ -2097,10 +2151,24 @@ export async function autoLoop(
                 // continue; it is cleared on the next dispatch, so reading it
                 // here captures the reason for THIS finalize (#852 follow-up).
                 failureDetail: s.pendingVerificationRetry?.failureContext,
+                // #2046: a `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED`
+                // marker is a deliberate closeout refusal — identical-input retry
+                // cannot change it. Flag it so the kernel stops with failureClass
+                // "refusal" instead of burning the retry budget. Units that have
+                // no marker resolver (unknown unit types) keep the retry default.
+                refusal: refusalMarkerPath !== null,
               }
             : { action: "next" },
       );
       if (finalizeDecision.action === "stop") {
+        if (finalizeDecision.failureClass === "refusal") {
+          // The unit deliberately declined closeout: stopping here must be
+          // legible to the operator, not a silent exit after a "retry" report.
+          ctx.ui.notify(
+            `${iterData.unitType} ${iterData.unitId} declined closeout${refusalMarkerPath ? ` (see ${relative(s.basePath, refusalMarkerPath)})` : ""}. Stopping instead of retrying — an identical-input retry cannot change a refusal.`,
+            "error",
+          );
+        }
         await closeRun("failed", finalizeDecision.ledgerErrorSummary);
         finishIncompleteIteration({
           status: "stopped",

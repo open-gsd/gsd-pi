@@ -35,6 +35,7 @@ Neither detects v1 `.planning/` directories, explains what GSD is, offers projec
 - **Project wizard** (`/gsd init`) — runs once per project folder. Handles: project-type detection, preferences template, git init, `.gitignore`, optional CONTEXT.md seeding.
 
 Both wizards should be:
+
 - Skippable at every step
 - Re-runnable (`/gsd setup` and `/gsd init` work any time)
 - Non-blocking (sensible defaults if skipped entirely)
@@ -120,6 +121,7 @@ interface ProjectSignals {
 ### Task 1.2: `detectV1Planning(basePath: string): V1Detection | null`
 
 Checks for `.planning/` directory with v1 markers:
+
 - `ROADMAP.md`, `PROJECT.md`, `REQUIREMENTS.md`, `STATE.md`
 - `phases/` directory with numbered phases
 - Returns null if no `.planning/` found
@@ -127,6 +129,7 @@ Checks for `.planning/` directory with v1 markers:
 ### Task 1.3: `detectProjectSignals(basePath: string): ProjectSignals`
 
 Quick filesystem scan (no heavy reads):
+
 - Check for `package.json`, `Cargo.toml`, `go.mod`, `pyproject.toml`, `Gemfile`, etc.
 - Check for monorepo markers (`workspaces` in package.json, `lerna.json`, `nx.json`, `turbo.json`, `pnpm-workspace.yaml`)
 - Check for `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile`
@@ -145,10 +148,12 @@ Absorbs and extends current `onboarding.ts` functionality.
 ### Task 2.1: Refactor `onboarding.ts` into composable steps
 
 Extract each step into a standalone async function that can be called from:
+
 - Pre-TUI boot (current behavior)
 - `/gsd setup` command (new)
 
 Steps become:
+
 - `runLlmSetupStep()` — already exists, just needs export
 - `runWebSearchStep()` — already exists
 - `runRemoteQuestionsStep()` — already exists
@@ -167,6 +172,7 @@ Steps become:
 ```
 
 Shows a summary dashboard at the end:
+
 ```
 ┌ Global Setup ─────────────────────────────────┐
 │                                               │
@@ -252,6 +258,7 @@ User sees: "I detected these verification commands — confirm, edit, or add mor
 ### Task 3.1: `showProjectInit()` — the main wizard
 
 Flow:
+
 ```
 Step 1: Detection scan (automatic, instant, no prompt)
    ├─ v1 .planning/ found? → Offer migration (Task 3.2)
@@ -331,6 +338,7 @@ When `.planning/` is detected in `showSmartEntry()`:
 ### Task 3.3: Re-init safety
 
 If `.gsd/` already exists when `/gsd init` is run:
+
 - Show current state (X milestones, Y slices)
 - Offer: "Reset preferences" / "Re-run project detection" / "Cancel"
 - Never destructively delete milestones via init

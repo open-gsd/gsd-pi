@@ -46,11 +46,13 @@ DefaultResourceLoader.reload()
 **Where:** `packages/pi-coding-agent/src/core/resource-loader.ts` ~line 381-385
 
 **Before:**
+
 ```typescript
 const extensionsResult = await loadExtensions(extensionPaths, this.cwd, this.eventBus);
 ```
 
 **After:**
+
 ```typescript
 import { sortExtensionPaths } from '../../../src/extension-sort.js';
 
@@ -62,6 +64,7 @@ const extensionsResult = await loadExtensions(sortedPaths, this.cwd, this.eventB
 ```
 
 **Consideration:** `sortExtensionPaths` lives in `src/` (GSD side), not in `packages/pi-coding-agent/`. Need to either:
+
 - (a) Move it into pi-coding-agent as a shared utility, OR
 - (b) Import it cross-package (already done for other GSD→pi imports), OR
 - (c) Call it on the GSD side before paths reach pi — harder since auto-discovered paths are added inside pi's package manager
@@ -75,6 +78,7 @@ Option (a) is cleanest — the sort logic only depends on `readManifestFromEntry
 **Where:** `src/resource-loader.ts` → `buildResourceLoader()` (lines 589-607)
 
 **Current code already filters pi extensions:**
+
 ```typescript
 const piExtensionPaths = discoverExtensionEntryPaths(piExtensionsDir)
   .filter((entryPath) => !bundledKeys.has(getExtensionKey(entryPath, piExtensionsDir)))
@@ -86,6 +90,7 @@ const piExtensionPaths = discoverExtensionEntryPaths(piExtensionsDir)
 ```
 
 **Add similar filtering for community extensions in agentDir:**
+
 - Discover extensions in `~/.gsd/agent/extensions/` that are NOT bundled
 - Filter through `isExtensionEnabled(registry, manifest.id)`
 - Pass as disabled (via override patterns or pre-filtering) to the resource loader
@@ -99,6 +104,7 @@ const piExtensionPaths = discoverExtensionEntryPaths(piExtensionsDir)
 **Where:** Wherever the sort is invoked from Task 1.
 
 **Format:**
+
 ```
 ⚠ Extension 'gsd-watch' declares dependency 'gsd' which is not installed — loading anyway
 ⚠ Extensions 'foo' and 'bar' form a dependency cycle — loading in alphabetical order
@@ -109,6 +115,7 @@ const piExtensionPaths = discoverExtensionEntryPaths(piExtensionsDir)
 **What:** The `discoverAndLoadExtensions()` function in `packages/pi-coding-agent/src/core/extensions/loader.ts` (lines 945-1002) is exported but never invoked. The project-local trust model inside it (`getUntrustedExtensionPaths`) also never runs.
 
 **Options:**
+
 - (a) Remove it entirely — it's dead
 - (b) Mark deprecated — in case upstream pi uses it
 - (c) Leave it — lowest risk

@@ -261,4 +261,3 @@ calendar window waived by the project owner ("finish all waves").
 
 Deferred out of this milestone (unchanged): canonical lifecycle read-authority
 cutover under M003/D005; Phase 5 DB split; separately sequenced product cleanup.
-

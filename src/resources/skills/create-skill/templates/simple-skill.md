@@ -27,6 +27,7 @@ description: {{What it does}} Use when {{trigger conditions}}.
 
 <success_criteria>
 {{Skill name}} is complete when:
+
 - [ ] {{First success criterion}}
 - [ ] {{Second success criterion}}
 - [ ] {{Third success criterion}}

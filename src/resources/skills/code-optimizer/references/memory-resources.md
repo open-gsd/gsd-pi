@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Memory Leaks
+
 ```
 # Event listeners never removed
 addEventListener.*without.*removeEventListener
@@ -24,6 +25,7 @@ useRef.*large.*object
 ```
 
 ### Unclosed Resources
+
 ```
 open\(.*without.*close
 open\(.*without.*with\s   (Python: not using context manager)
@@ -37,6 +39,7 @@ acquire\(.*without.*release
 ```
 
 ### Large Allocations
+
 ```
 new Array\(\d{5,}       (arrays > 10k elements)
 Buffer\.alloc\(\d{6,}   (buffers > 1MB)
@@ -48,6 +51,7 @@ JSON\.parse\(.*large     (parsing large JSON in memory)
 ```
 
 ### String Concatenation in Loops
+
 ```
 \+=.*string.*for
 \+=.*\".*loop

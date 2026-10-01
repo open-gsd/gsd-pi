@@ -2,6 +2,7 @@
 
 <required_reading>
 **Read these reference files NOW:**
+
 1. references/skill-structure.md
 </required_reading>
 
@@ -28,6 +29,7 @@ Determine `{skill-path}`: use `.agents/skills/{skill-name}` (project-local) if f
 ## Step 2: Read and Categorize
 
 Read the entire skill (SKILL.md + workflows/ + references/):
+
 ```bash
 cat {skill-path}/SKILL.md
 cat {skill-path}/workflows/*.md 2>/dev/null
@@ -51,22 +53,26 @@ Report: "This skill is primarily [type]-based. I'll verify using [method]."
 Scan skill content and extract:
 
 **CLI Tools mentioned:**
+
 - Tool names (xcodebuild, swift, npm, etc.)
 - Specific flags/options documented
 - Expected output patterns
 
 **API Endpoints:**
+
 - Service names (Stripe, Meta, etc.)
 - Specific endpoints documented
 - Authentication methods
 - SDK versions
 
 **Framework Patterns:**
+
 - Framework names (SwiftUI, React, etc.)
 - Specific APIs/patterns documented
 - Version-specific features
 
 **File Paths/Structures:**
+
 - Expected project structures
 - Config file locations
 
@@ -75,6 +81,7 @@ Present: "Found X verifiable claims to check."
 ## Step 4: Verify by Type
 
 ### For CLI Tools
+
 ```bash
 # Check tool exists
 which {tool-name}
@@ -87,23 +94,29 @@ which {tool-name}
 ```
 
 ### For API/Service Skills
+
 Use the active Context7 documentation tools to fetch current documentation if they are available. Resolve the library ID first, then fetch docs for `{library-id}` with `topic: {relevant-topic}`; use the exact tool names from the active tool list.
 
 Compare skill's documented patterns against current docs:
+
 - Are endpoints still valid?
 - Has authentication changed?
 - Are there deprecated methods being used?
 
 ### For Framework Skills
+
 Use the active Context7 documentation tools if they are available. Resolve the library ID first, then fetch docs for `{library-id}` with `topic: {specific-api}`; use the exact tool names from the active tool list.
 
 Check:
+
 - Are documented APIs still current?
 - Have patterns changed?
 - Are there newer recommended approaches?
 
 ### For Integration Skills
+
 WebSearch for recent changes:
+
 ```
 "[service name] API changes 2025"
 "[service name] breaking changes"
@@ -113,6 +126,7 @@ WebSearch for recent changes:
 Then Context7 for current SDK patterns.
 
 ### For Services with Status Pages
+
 WebFetch official docs/changelog if available.
 
 ## Step 5: Generate Freshness Report
@@ -152,6 +166,7 @@ If issues found:
 3. **Just the report** - No changes
 
 If updating:
+
 - Make changes based on verified current information
 - Add verification date comment if appropriate
 - Report what was updated
@@ -171,20 +186,24 @@ Based on skill type, recommend:
 </process>
 
 <verification_shortcuts>
+
 ## Quick Verification Commands
 
 **Check if CLI tool exists and get version:**
+
 ```bash
 which {tool} && {tool} --version
 ```
 
 **Context7 pattern for any library:**
+
 ```
 1. resolve-library-id: "{library-name}"
 2. get-library-docs: "{id}", topic: "{specific-feature}"
 ```
 
 **WebSearch patterns:**
+
 - Breaking changes: "{service} breaking changes 2025"
 - Deprecations: "{service} deprecated API"
 - Current best practices: "{framework} best practices 2025"
@@ -192,6 +211,7 @@ which {tool} && {tool} --version
 
 <success_criteria>
 Verification is complete when:
+
 - [ ] Skill categorized by dependency type
 - [ ] Verifiable claims extracted
 - [ ] Each claim checked with appropriate method

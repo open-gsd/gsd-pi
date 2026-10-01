@@ -45,6 +45,8 @@ import {
   targetTaskFile,
 } from "../paths.js";
 import { removeProjectionIfCurrent } from "../projection-cleanup.js";
+import { repairMilestoneShadowsForReopen } from "../lifecycle-shadow-repair-domain-operation.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 
 export interface ReopenMilestoneParams {
   milestoneId: string;
@@ -95,6 +97,33 @@ export async function handleReopenMilestone(
   if (adoptedLifecycle) {
     if (!invocation) {
       return { error: "adopted Milestone reopen requires canonical invocation identity" };
+    }
+    // Converge drifted descendants (legacy terminal while their canonical row
+    // stayed `ready`) before the reopen's terminal-parity checks (#2440). The
+    // evidence gate is unchanged: unverifiable drift fails the reopen here,
+    // listed, instead of aborting inside the Domain Operation. A replayed
+    // invocation skips the repair — its stored receipt must be returned as-is,
+    // not preceded by fresh mutations against newer state.
+    if (!readDomainOperationFence(invocation.idempotencyKey).replay) {
+      try {
+        const shadowRepair = repairMilestoneShadowsForReopen({
+          invocation,
+          milestoneId: params.milestoneId,
+        });
+        if (shadowRepair.unresolved.length > 0) {
+          return {
+            error: `Milestone ${params.milestoneId} has unresolved canonical lifecycle shadows: ${shadowRepair.unresolved.join(", ")}`,
+          };
+        }
+        if (shadowRepair.repaired.length > 0) {
+          logWarning(
+            "db",
+            `Repaired ${shadowRepair.repaired.length} evidence-backed lifecycle shadow(s) before reopening Milestone ${params.milestoneId}`,
+          );
+        }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
     }
     try {
       canonicalReceipt = reopenMilestone({

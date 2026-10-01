@@ -76,10 +76,12 @@ Conventions: single quotes, 2-space indent, `??` defaults in the constructor,
 ## Scope
 
 **In scope**:
+
 - `packages/daemon/src/message-batcher.ts`
 - The message-batcher test file (find with `ls packages/daemon/**/*batcher*` — extend it)
 
 **Out of scope** (do NOT touch):
+
 - `event-bridge.ts` and other callers — the cap is internal to the batcher.
 - The `destroy()`/`flush()` re-entrancy logic — leave it.
 - The priority-send path — unrelated.
@@ -165,6 +167,7 @@ assert on the `send` payloads (dropped events never appear in a flushed batch).
 ## STOP conditions
 
 Stop and report if:
+
 - `enqueue` or the constructor no longer matches the excerpt (drifted).
 - Dropping oldest events would silently lose a **blocker/priority** event — check
   whether priority events flow through `enqueue` or a separate path. If priority

@@ -32,7 +32,7 @@ import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
 import type { GSDState } from "../../types.js";
-import { isAfter, latestExplicitReopenAt } from "../../milestone-reopen-events.js";
+import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "../../milestone-reopen-events.js";
 import { isCanonicalStagedTaskSummaryProjection } from "../../task-summary-projection-classification.js";
 import { readLatestTaskAttempt } from "../../task-execution-domain-operation.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
@@ -85,13 +85,13 @@ function safeListArtifactRows(milestoneId: string): ArtifactStatusRow[] {
   }
 }
 
-function latestCompletedMilestoneDispatch(
+function completedMilestoneDispatches(
   milestoneId: string,
-): CompletedDispatchRow | null {
+): CompletedDispatchRow[] {
   const adapter = _getAdapter();
-  if (!adapter) return null;
+  if (!adapter) return [];
   try {
-    const row = adapter
+    return adapter
       .prepare(
         `SELECT started_at, ended_at
          FROM unit_dispatches
@@ -99,13 +99,11 @@ function latestCompletedMilestoneDispatch(
            AND unit_type = 'complete-milestone'
            AND unit_id = :mid
            AND status = 'completed'
-         ORDER BY COALESCE(ended_at, started_at) DESC, id DESC
-         LIMIT 1`,
+         ORDER BY COALESCE(ended_at, started_at) DESC, id DESC`,
       )
-      .get({ ":mid": milestoneId }) as CompletedDispatchRow | undefined;
-    return row ?? null;
+      .all({ ":mid": milestoneId }) as CompletedDispatchRow[];
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -636,18 +634,27 @@ function computeArtifactDbDrift(
   for (const milestone of getAllMilestones()) {
     if (isClosedStatus(milestone.status)) continue;
 
-    const completedDispatch = latestCompletedMilestoneDispatch(milestone.id);
-    const completedAt = completedDispatch?.ended_at ?? completedDispatch?.started_at ?? null;
-    if (
-      completedDispatch &&
-      !hasExplicitReopenAfter(ctx.basePath, milestone.id, completedAt)
-    ) {
-      drifts.push({
-        kind: "completed-milestone-reopened",
-        milestoneId: milestone.id,
-        dbStatus: milestone.status,
-        completedDispatchAt: completedAt,
-      });
+    // #2398: a completed `complete-milestone` dispatch row alone is not proof
+    // the milestone was ever completed — a closeout whose attempts all fail
+    // (or whose session exits) still leaves a status='completed' row behind.
+    // Evaluate every completed dispatch, newest first: a later receiptless
+    // row must not hide an earlier event-backed completion that was never
+    // explicitly reopened, while a row with no covering milestone.completed
+    // event is closeout debris, not completed-then-reopened history.
+    for (const dispatch of completedMilestoneDispatches(milestone.id)) {
+      const completedAt = dispatch.ended_at ?? dispatch.started_at ?? null;
+      if (
+        completedEventCoversDispatch(ctx.basePath, milestone.id, dispatch.started_at) &&
+        !hasExplicitReopenAfter(ctx.basePath, milestone.id, completedAt)
+      ) {
+        drifts.push({
+          kind: "completed-milestone-reopened",
+          milestoneId: milestone.id,
+          dbStatus: milestone.status,
+          completedDispatchAt: completedAt,
+        });
+        break; // one drift record per milestone
+      }
     }
 
     drifts.push(...detectArtifactDbStatusDriftForMilestone(ctx.basePath, milestone.id));

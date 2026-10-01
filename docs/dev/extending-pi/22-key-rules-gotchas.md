@@ -1,6 +1,5 @@
 # Key Rules & Gotchas
 
-
 ### Must-Follow Rules
 
 1. **Use `StringEnum` for string enums** — `Type.Union`/`Type.Literal` breaks Google's API.

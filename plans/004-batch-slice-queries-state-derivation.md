@@ -59,6 +59,7 @@ export function getMilestoneSlices(milestoneId: string): SliceRow[] {
 ```
 
 Repo conventions:
+
 - The Query Module (`db/queries.ts`) is read-only; add new `SELECT` functions there.
 - Keep `getMilestoneSlices` unchanged for other callers.
 - Preserve ordering (`ORDER BY sequence, id`).
@@ -75,11 +76,13 @@ Repo conventions:
 ## Scope
 
 **In scope**:
+
 - `src/resources/extensions/gsd/db/queries.ts` — add a batched slice query.
 - `src/resources/extensions/gsd/state.ts` — use the batched query in `buildRegistryAndFindActive`.
 - `src/resources/extensions/gsd/tests/derive-state-helpers.test.ts` — add a test that exercises the batched path with multiple milestones.
 
 **Out of scope**:
+
 - Task-query batching (similar N+1 exists for tasks but is not covered here).
 - Markdown renderer batching (plan for separately if needed).
 - Changing the public signature of `getMilestoneSlices`.
@@ -116,6 +119,7 @@ export function getSlicesByMilestoneIds(milestoneIds: readonly string[]): Map<st
 ```
 
 **Important**: the sql.js driver used here may not support numbered `:id0`, `:id1` style placeholders in the same way as better-sqlite3. Inspect existing dynamic `IN (...)` queries in `db/queries.ts` or `db/writers/` for the exact placeholder pattern used in this repo, and match it. If no pattern exists, use a safe approach such as:
+
 - A fixed-size chunking strategy with literal placeholders (`:a, :b, :c`).
 - Or query all slices and filter in memory if the table is small.
 
@@ -147,6 +151,7 @@ Remove the per-milestone `getMilestoneSlices(m.id)` call.
 ### Step 3: Ensure ordering and behavior preservation
 
 Confirm that:
+
 - Slices within each milestone remain ordered by `sequence, id`.
 - Milestones with no slices still produce an empty array (the `?? []` fallback).
 - Parked milestones are still skipped (no query needed).
@@ -158,6 +163,7 @@ If `getSlicesByMilestoneIds` cannot guarantee per-milestone ordering in SQL, sor
 ### Step 4: Add a focused performance/behavior test
 
 Add a test in `src/resources/extensions/gsd/tests/derive-state-helpers.test.ts` that:
+
 1. Creates three milestones.
 2. Inserts slices into each milestone with varying `sequence` values.
 3. Calls `buildRegistryAndFindActive` (or the public `deriveStateFromDb` if easier).
@@ -193,6 +199,7 @@ Run `pnpm run test:unit` to ensure no regressions in state derivation, dispatch 
 ## STOP conditions
 
 Stop and report back if:
+
 - The sql.js driver does not support the `IN (...)` placeholder style you chose and no existing pattern can be copied.
 - `buildRegistryAndFindActive` is not an `async` function and the change forces a signature change elsewhere.
 - Removing `getMilestoneSlices(m.id)` causes tests to fail because they monkey-patch that function.
