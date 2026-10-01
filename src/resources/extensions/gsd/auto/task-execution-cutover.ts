@@ -48,6 +48,10 @@ export interface TaskExecutionCutoverDeps {
     "recoveryActionId" | "action" | "recoveryOwner" | "resumeAuthorized" | "resumeEligibility"
   > | null;
   readTaskTechnicalVerdict(attemptId: string): TaskTechnicalVerdictSnapshot | null;
+  /** #2416 grace bound: whether the grace was already granted for the Attempt. */
+  readGrantedResumeGrace?(attemptId: string): boolean;
+  /** #2416 grace bound: record that the grace was granted for the Attempt. */
+  markResumeGraceGranted?(attemptId: string): void;
   claimTaskAttempt(input: ClaimTaskAttemptInput): ClaimTaskAttemptReceipt;
   settleTaskAttempt(input: SettleTaskAttemptInput): SettleTaskAttemptReceipt;
   routeTaskFailure(input: RouteFailureInput): TaskRecoveryReceipt;
@@ -420,6 +424,26 @@ function isNewlyRecordedBlocker(
     attempt.resultFailureClass === "blocker-discovered";
 }
 
+/**
+ * #2416: the running Attempt is the direct successor claimed by an authorized
+ * recovery resume — its predecessor's abort route still carries the
+ * already-resumed marker. The resume's one-shot successor authorization is
+ * consumed by the claim itself, so settling this Attempt as
+ * missing-executor-result on its first reconcile pass would convert a
+ * resumable state into a terminal lifecycle-progression route with the
+ * authorization already spent, stranding the task (no running Attempt to
+ * close, no re-issuable recovery action).
+ */
+function isResumedSuccessorClaim(
+  attempt: TaskExecutionAttemptSnapshot,
+  deps: TaskExecutionCutoverDeps,
+): boolean {
+  if (!attempt.retryOfAttemptId) return false;
+  const predecessorRoute = deps.readTaskRecoveryRoute(attempt.retryOfAttemptId);
+  return predecessorRoute?.recoveryOwner === "agent"
+    && predecessorRoute.action === "abort"
+    && predecessorRoute.resumeEligibility?.failedGuard === "already-resumed";
+}
 function reconcileNext(
   input: TaskExecutionCutoverInput,
   attemptId: string,
@@ -451,6 +475,26 @@ function reconcileNext(
       ));
     }
     throw new Error("execute-task next requires a succeeded Result at the verify stage");
+  }
+
+  // #2416 grace window: a just-claimed resumed successor whose executor turn
+  // ended without staging a succeeded Result has had no reconcile judgment
+  // yet. Leave it running and re-dispatch instead of settling it
+  // missing-executor-result; the next pass's same-session interrupt yields a
+  // bounded, repairable stale-worker recovery rather than a terminal
+  // lifecycle-progression route over a consumed authorization. The grace is
+  // bounded to one pass per Attempt with a durable attempt-scoped marker, so
+  // a same-dispatch claim replay re-enters the ordinary settlement instead of
+  // looping the grace.
+  if (
+    attempt
+    && isResumedSuccessorClaim(attempt, deps)
+    && deps.readGrantedResumeGrace
+    && deps.markResumeGraceGranted
+    && deps.readGrantedResumeGrace(attempt.attemptId) !== true
+  ) {
+    deps.markResumeGraceGranted(attempt.attemptId);
+    return { action: "retry", reason: "task-recovery-resumed-claim-grace" };
   }
 
   const recovery = settleRunningAttempt(

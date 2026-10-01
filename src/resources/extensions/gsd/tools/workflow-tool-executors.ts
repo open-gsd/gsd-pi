@@ -1307,7 +1307,10 @@ export async function executeTaskRecoveryResume(
           `Authorized one repaired Task continuation for ${result.attemptId}. ` +
           `Queued durable continuation ${result.workCheckpointId} for recovery action ${result.recoveryActionId} — ` +
           "the next execute-task dispatch of this Task atomically claims the successor Attempt (one-shot); " +
-          "re-enter `/gsd auto` to consume it.",
+          "re-enter `/gsd auto` to consume it. " +
+          "Do not call gsd_task_complete from this session to close the successor: only a live `/gsd auto` " +
+          "dispatch can claim it, and the authorization is single-shot — if no host re-enters, it stays " +
+          "dormant instead of stranding the Task.",
       }],
       details: { operation: "task_recovery_resume", ...result },
     };

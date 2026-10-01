@@ -20,6 +20,7 @@ import {
   adoptOrTransitionLifecycle,
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.js";
+import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.js";
 import { ReconciliationFailedError } from "../state-reconciliation.js";
 import {
   claimTaskAttempt,
@@ -464,6 +465,11 @@ function canonicalDeps(): CutoverDeps {
     readTaskTechnicalVerdict,
     claimTaskAttempt,
     settleTaskAttempt,
+    readGrantedResumeGrace: (attemptId: string): boolean =>
+      getRuntimeKv<boolean>("global", attemptId, "task-recovery-resume-grace") === true,
+    markResumeGraceGranted: (attemptId: string): void => {
+      setRuntimeKv("global", attemptId, "task-recovery-resume-grace", true);
+    },
     routeTaskFailure(route) {
       return recordFailureAndSelectRecovery(
         route as Parameters<typeof recordFailureAndSelectRecovery>[0],
@@ -1784,6 +1790,248 @@ test("an explicitly resumed verification abort claims one lineage-linked Attempt
   assert.equal(runs, 1);
   assert.equal(domain.claims.length, 1);
   assert.equal(domain.claims[0].retryOfAttemptId, "attempt-1");
+});
+
+test("a just-claimed resumed successor survives its first reconcile pass without a staged result (#2416)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  const first = claimTaskAttempt({
+    invocation: { idempotencyKey: "grace/claim/1", sourceTransport: "internal", actorType: "agent" },
+    task,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: firstDispatchId,
+  });
+  const settled = settleTaskAttempt({
+    invocation: { idempotencyKey: "grace/settle/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    outcome: "failed",
+    failureClass: "fatal",
+    summary: "fatal execution failure",
+    output: {},
+  });
+  const abort = recordFailureAndSelectRecovery({
+    invocation: { idempotencyKey: "grace/route/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    resultId: settled.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "fatal execution failure",
+    evidence: { source: "test" },
+    rationale: "abort",
+  });
+  assert.equal(abort.action, "abort");
+  resumeTaskRecovery({
+    invocation: { idempotencyKey: "grace/resume/1", sourceTransport: "internal", actorType: "user", actorId: "user-1" },
+    recoveryActionId: abort.recoveryActionId,
+    repairSummary: "The fatal condition was repaired.",
+    evidence: { verification: "operator confirmed the repair" },
+  });
+
+  // The next dispatch claims the resumed successor, but its executor turn ends
+  // without staging a succeeded Result — the incident's first pass (#2416).
+  let ran = false;
+  const result = await runWithTaskExecutionAttempt(input({
+    dispatchId: insertClaimedDispatch(2),
+  }), async () => {
+    ran = true;
+    return { action: "next", data: {} };
+  }, canonicalDeps());
+
+  assert.equal(ran, true);
+  assert.equal(result.action, "retry");
+  assert.equal(
+    (result as { reason?: string }).reason,
+    "task-recovery-resumed-claim-grace",
+    "the first pass must be graced instead of settling missing-executor-result",
+  );
+  const successor = readLatestTaskAttempt(task);
+  assert.notEqual(successor?.attemptId, first.attemptId);
+  assert.equal(successor?.retryOfAttemptId, first.attemptId);
+  assert.equal(
+    successor?.state,
+    "running",
+    "the just-claimed resumed successor must survive its first reconcile pass",
+  );
+  assert.equal(
+    readTaskRecoveryRoute(successor!.attemptId),
+    null,
+    "no failure route may be recorded over the consumed authorization on the graced pass",
+  );
+  assert.equal(
+    readTaskRecoveryRoute(first.attemptId)?.resumeEligibility?.failedGuard,
+    "already-resumed",
+    "the resume marker must stay diagnosable for the next pass",
+  );
+});
+
+test("a same-dispatch claim replay after the grace re-enters ordinary settlement (#2416)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  const first = claimTaskAttempt({
+    invocation: { idempotencyKey: "grace3/claim/1", sourceTransport: "internal", actorType: "agent" },
+    task,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: firstDispatchId,
+  });
+  const settled = settleTaskAttempt({
+    invocation: { idempotencyKey: "grace3/settle/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    outcome: "failed",
+    failureClass: "fatal",
+    summary: "fatal execution failure",
+    output: {},
+  });
+  const abort = recordFailureAndSelectRecovery({
+    invocation: { idempotencyKey: "grace3/route/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    resultId: settled.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "fatal execution failure",
+    evidence: { source: "test" },
+    rationale: "abort",
+  });
+  resumeTaskRecovery({
+    invocation: { idempotencyKey: "grace3/resume/1", sourceTransport: "internal", actorType: "user", actorId: "user-1" },
+    recoveryActionId: abort.recoveryActionId,
+    repairSummary: "The fatal condition was repaired.",
+    evidence: { verification: "operator confirmed the repair" },
+  });
+
+  const replayDispatch = insertClaimedDispatch(2);
+  const inputForReplay = { dispatchId: replayDispatch };
+  const graced = await runWithTaskExecutionAttempt(input(inputForReplay), async () => ({
+    action: "next",
+    data: {},
+  }), canonicalDeps());
+  assert.equal((graced as { reason?: string }).reason, "task-recovery-resumed-claim-grace");
+  const successor = readLatestTaskAttempt(task);
+  assert.equal(successor?.state, "running");
+
+  // The exact same dispatch re-enters (claim replay). The grace must not
+  // apply twice: the ordinary missing-executor-result settlement runs.
+  const replayed = await runWithTaskExecutionAttempt(input(inputForReplay), async () => ({
+    action: "next",
+    data: {},
+  }), canonicalDeps());
+
+  assert.equal(replayed.action, "retry");
+  assert.notEqual(
+    (replayed as { reason?: string }).reason,
+    "task-recovery-resumed-claim-grace",
+    "the grace must be bounded to one pass per Attempt",
+  );
+  const settledSuccessor = readLatestTaskAttempt(task);
+  assert.equal(settledSuccessor?.state, "settled");
+  assert.equal(settledSuccessor?.outcome, "failed");
+});
+
+test("the pass after the resumed-successor grace interrupts repairably, not as lifecycle-progression (#2416)", async () => {
+  const { runWithTaskExecutionAttempt } = await subject();
+  const firstDispatchId = seedCanonicalTask();
+  const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  const first = claimTaskAttempt({
+    invocation: { idempotencyKey: "grace2/claim/1", sourceTransport: "internal", actorType: "agent" },
+    task,
+    workerId: "worker-1",
+    milestoneLeaseToken: 7,
+    coordinationDispatchId: firstDispatchId,
+  });
+  const settled = settleTaskAttempt({
+    invocation: { idempotencyKey: "grace2/settle/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    outcome: "failed",
+    failureClass: "fatal",
+    summary: "fatal execution failure",
+    output: {},
+  });
+  const abort = recordFailureAndSelectRecovery({
+    invocation: { idempotencyKey: "grace2/route/1", sourceTransport: "internal", actorType: "agent" },
+    attemptId: first.attemptId,
+    resultId: settled.resultId,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "fatal execution failure",
+    evidence: { source: "test" },
+    rationale: "abort",
+  });
+  resumeTaskRecovery({
+    invocation: { idempotencyKey: "grace2/resume/1", sourceTransport: "internal", actorType: "user", actorId: "user-1" },
+    recoveryActionId: abort.recoveryActionId,
+    repairSummary: "The fatal condition was repaired.",
+    evidence: { verification: "operator confirmed the repair" },
+  });
+
+  // First pass: grace retry leaves the successor running (mirrors the prior test).
+  const gracedDispatch = insertClaimedDispatch(2);
+  const graced = await runWithTaskExecutionAttempt(input({
+    dispatchId: gracedDispatch,
+  }), async () => ({ action: "next", data: {} }), canonicalDeps());
+  assert.equal((graced as { reason?: string }).reason, "task-recovery-resumed-claim-grace");
+
+  // The graced dispatch stays active for the unit; terminalize it so the
+  // retry dispatch claim does not hit the one-active-dispatch-per-unit rule.
+  database().prepare(`UPDATE unit_dispatches SET status = 'failed' WHERE id = ?`).run(gracedDispatch);
+
+  // Second pass: the running successor is interrupted same-session; the routed
+  // recovery is the bounded stale-worker repair, not terminal
+  // lifecycle-progression over the consumed authorization.
+  const repairDispatch = insertClaimedDispatch(3);
+  const result = await runWithTaskExecutionAttempt(input({
+    dispatchId: repairDispatch,
+  }), async () => ({ action: "next", data: {} }), canonicalDeps());
+
+  assert.equal(result.action, "retry");
+  assert.equal(
+    (result as { reason?: string }).reason,
+    "task-recovery-repair",
+    "the interrupt must route the bounded stale-worker repair action",
+  );
+  const latest = readLatestTaskAttempt(task);
+  assert.equal(latest?.state, "settled");
+  assert.equal(latest?.outcome, "interrupted");
+  const route = readTaskRecoveryRoute(latest!.attemptId);
+  assert.equal(route?.action, "repair");
+  assert.equal(
+    readTerminalTaskRecoveryAbort("M001", "S01", "T01"),
+    null,
+    "the repair route must supersede the older abort as the sanctioned exit",
+  );
+
+  // The repair pass returned before claiming, so its dispatch row is closed by
+  // the loop's iteration closeout in production; mirror that here.
+  database().prepare(`UPDATE unit_dispatches SET status = 'failed' WHERE id = ?`).run(repairDispatch);
+
+  // Third pass: the replayed repair route authorizes the replacement claim,
+  // and a real executor turn completes host verification.
+  let ranThird = false;
+  const third = await runWithTaskExecutionAttempt(input({
+    dispatchId: insertClaimedDispatch(4),
+  }), async () => {
+    ranThird = true;
+    const claimed = readLatestTaskAttempt(task);
+    assert.ok(claimed && claimed.attemptId !== latest!.attemptId);
+    settleTaskAttempt({
+      invocation: { idempotencyKey: "grace2/settle/3", sourceTransport: "internal", actorType: "agent" },
+      attemptId: claimed.attemptId,
+      outcome: "succeeded",
+      failureClass: "none",
+      summary: "repaired execution finished",
+      output: {},
+    });
+    return { action: "next", data: {} };
+  }, canonicalDeps());
+
+  assert.equal(third.action, "next");
+  assert.equal(ranThird, true);
+  const completed = readLatestTaskAttempt(task);
+  assert.equal(completed?.state, "settled");
+  assert.equal(completed?.outcome, "succeeded");
+  assert.equal(completed?.nextStage, "verify");
 });
 
 test("a user-owned verification route resumes verification without executing again", async () => {
