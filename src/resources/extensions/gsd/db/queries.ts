@@ -417,6 +417,8 @@ export interface LifecycleShadowRepairCandidate extends LifecycleShadowRepairIde
    * completion's adoption territory when a canonically-completed sibling
    * establishes the adoption pattern (#2070) — from rows with a recorded
    * failed verification, which must never be silently repaired (#2002).
+   * Free-text verification narratives (#2313) count as adoptable evidence;
+   * only an explicit failure marker blocks repair.
    */
   legacyVerificationResult: string | null;
 }
@@ -460,8 +462,16 @@ interface RepairEvidenceFacts {
   digestFacts: unknown;
 }
 
-export function isPassingVerificationResult(verificationResult: string): boolean {
-  return verificationResult.trim().toLowerCase() === "passed";
+/**
+ * Only an explicit failure marker counts as a recorded failed verification
+ * (#2002). Legacy completion writes free-text verification narratives
+ * (tools/complete-task.ts persists params.verification verbatim), so any
+ * non-empty value that is not an explicit failure marker is adoptable
+ * evidence (#2313) — matching the closeout adoption sweep, which never
+ * gated on verification_result.
+ */
+export function isFailedVerificationResult(verificationResult: string): boolean {
+  return verificationResult.trim().toLowerCase() === "failed";
 }
 
 function taskCompletionFacts(row: Record<string, unknown>): RepairEvidenceFacts {
@@ -474,7 +484,8 @@ function taskCompletionFacts(row: Record<string, unknown>): RepairEvidenceFacts 
     supported:
       normalizeLegacyLifecycleStatus(typeof row["status"] === "string" ? row["status"] : null) === "completed" &&
       completedAt !== null &&
-      isPassingVerificationResult(verificationResult) &&
+      verificationResult.length > 0 &&
+      !isFailedVerificationResult(verificationResult) &&
       summary.length > 0,
     digestFacts: {
       status: row["status"] ?? null,

@@ -18,7 +18,7 @@ import {
   _getAdapter,
 } from '../gsd-db.ts';
 import { executeDomainOperation } from '../db/domain-operation.ts';
-import { readDomainOperationFence } from '../db/writers/lifecycle-commands.ts';
+import { adoptOrTransitionLifecycle, readDomainOperationFence } from '../db/writers/lifecycle-commands.ts';
 import { handleReplanSlice as handleReplanSliceWithInvocation } from '../tools/replan-slice.ts';
 import { internalPlanningInvocation } from '../planning-invocation.ts';
 import { parseProjectionPlan as parsePlan } from '../schemas/parsers.ts';
@@ -608,5 +608,78 @@ test('handleReplanSlice still refuses to modify or remove a blocker-accepted tas
     assert.match(removeResult.error, /cannot remove completed task T01/);
   } finally {
     cleanup(base);
+  }
+});
+
+test('handleReplanSlice adopts a missing parent Milestone lifecycle (#2313 plan-slice parity)', async (t) => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  t.after(() => cleanup(base));
+
+  {
+    seedSliceWithTasks();
+    const adapter = _getAdapter();
+    assert.ok(adapter);
+    assert.equal(adapter.prepare(`
+      SELECT COUNT(*) AS count FROM workflow_item_lifecycles WHERE item_kind = 'milestone'
+    `).get()?.['count'], 0, 'fixture must start without canonical Milestone authority');
+
+    const result = await handleReplanSlice(validReplanParams(), base);
+    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+
+    const milestoneRow = adapter.prepare(`
+      SELECT lifecycle_status FROM workflow_item_lifecycles
+      WHERE item_kind = 'milestone' AND milestone_id = 'M001'
+        AND slice_id IS NULL AND task_id IS NULL
+    `).get();
+    assert.equal(milestoneRow?.['lifecycle_status'], 'ready', 'replan must adopt the missing parent Milestone authority');
+  }
+});
+
+test('handleReplanSlice rejects replanning in a canonically-terminal Milestone (#2313)', async (t) => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  t.after(() => cleanup(base));
+
+  {
+    seedSliceWithTasks();
+    const adapter = _getAdapter();
+    assert.ok(adapter);
+    // Legacy status stays open, but the canonical Milestone row is terminal —
+    // the canonical authority wins and replan is refused (plan-slice parity).
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: 'test.lifecycle.seed',
+      idempotencyKey: 'test/replan-terminal-milestone',
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: 'test',
+      sourceTransport: 'test',
+      payload: {},
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: 'milestone',
+        milestoneId: 'M001',
+        lifecycleStatus: 'completed',
+      });
+      return {
+        events: [{
+          eventType: 'test.lifecycle.seeded',
+          entityType: 'milestone',
+          entityId: 'M001',
+          payload: {},
+          destinations: ['test'],
+        }],
+        projections: [{
+          projectionKey: 'test/replan-terminal-milestone',
+          projectionKind: 'test',
+          rendererVersion: '1',
+        }],
+      };
+    });
+
+    const result = await handleReplanSlice(validReplanParams(), base);
+    assert.ok('error' in result);
+    assert.match(result.error, /completed milestone M001/);
   }
 });

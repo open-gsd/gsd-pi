@@ -64,7 +64,7 @@ export interface LifecycleCommandResult {
 
 export interface LifecycleShadowRepairStepInput extends LifecycleIdentity {
   expectedBeforeStatus: CanonicalLifecycleStatus | null;
-  targetStatus: "in_progress" | "completed";
+  targetStatus: "in_progress" | "completed" | "ready";
   priorRepairOperationId?: string;
 }
 
@@ -567,6 +567,14 @@ export function repairLifecycleShadowStep(
     throw new Error("lifecycle shadow repair current status does not match expected before status");
   }
   const isMissingTerminalAdoption = input.expectedBeforeStatus === null && input.targetStatus === "completed";
+  // #2313: a legacy-open Milestone or Slice whose canonical row is missing
+  // has its authority restored at `ready` — no completion is claimed, so no
+  // terminal completion evidence is required. Descendant parity stays
+  // enforced by the completion guards downstream.
+  const isMissingOpenAdoption =
+    input.expectedBeforeStatus === null &&
+    (input.itemKind === "milestone" || input.itemKind === "slice") &&
+    input.targetStatus === "ready";
   const isReadyTaskAdvance =
     input.expectedBeforeStatus === "ready" &&
     input.itemKind === "task" &&
@@ -579,7 +587,13 @@ export function repairLifecycleShadowStep(
     input.expectedBeforeStatus === "in_progress" &&
     input.itemKind === "task" &&
     input.targetStatus === "completed";
-  if (!isMissingTerminalAdoption && !isReadyTaskAdvance && !isReadySliceCompletion && !isAdvancedTaskCompletion) {
+  if (
+    !isMissingTerminalAdoption &&
+    !isMissingOpenAdoption &&
+    !isReadyTaskAdvance &&
+    !isReadySliceCompletion &&
+    !isAdvancedTaskCompletion
+  ) {
     throw new Error("unsupported lifecycle shadow repair edge");
   }
   if (isAdvancedTaskCompletion) {
@@ -595,7 +609,9 @@ export function repairLifecycleShadowStep(
     ...(input.sliceId ? { sliceId: input.sliceId } : {}),
     ...(input.taskId ? { taskId: input.taskId } : {}),
     lifecycleStatus: input.targetStatus,
-    ...(input.expectedBeforeStatus === null ? { adoptedFromStatus: "completed" as const } : {}),
+    ...(input.expectedBeforeStatus === null && input.targetStatus === "completed"
+      ? { adoptedFromStatus: "completed" as const }
+      : {}),
   });
 }
 

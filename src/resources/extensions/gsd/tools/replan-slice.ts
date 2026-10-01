@@ -2,6 +2,7 @@ import { clearParseCache } from "../files.js";
 import {
   adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
+  getMilestone,
   getSlice,
   getSliceTasks,
   getTask,
@@ -196,6 +197,9 @@ export async function handleReplanSlice(
         rendererVersion: "v1",
       },
       lifecycleItems: () => [
+        // #2313: include the parent Milestone for plan-slice parity so the
+        // emitted shadow comparisons cover the full authority chain.
+        { itemKind: "milestone", milestoneId: params.milestoneId },
         { itemKind: "slice", milestoneId: params.milestoneId, sliceId: params.sliceId },
         ...getSliceTasks(params.milestoneId, params.sliceId).map((task) => ({
           itemKind: "task" as const,
@@ -209,6 +213,35 @@ export async function handleReplanSlice(
         const parentSlice = getSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
+        }
+        // #2313: adopt the parent Milestone lifecycle too, aligned with
+        // plan-slice — replanning must not leave the authority chain
+        // partially canonicalized.
+        const parentMilestone = getMilestone(params.milestoneId);
+        if (!parentMilestone) {
+          throw new PlanningGuardError(`missing parent milestone: ${params.milestoneId}`);
+        }
+        if (isClosedStatus(parentMilestone.status)) {
+          throw new PlanningGuardError(
+            `cannot replan a slice in a closed milestone: ${params.milestoneId} (status: ${parentMilestone.status})`,
+          );
+        }
+        const legacyMilestoneLifecycle = normalizeLegacyLifecycleStatus(parentMilestone.status);
+        const milestoneLifecycleStatus = legacyMilestoneLifecycle === "completed" || legacyMilestoneLifecycle === "cancelled"
+          ? legacyMilestoneLifecycle
+          : "ready";
+        const milestoneLifecycle = adoptLifecycleIfMissing(context, {
+          itemKind: "milestone",
+          milestoneId: params.milestoneId,
+          lifecycleStatus: milestoneLifecycleStatus,
+        });
+        if (
+          milestoneLifecycle.lifecycleStatus === "completed" ||
+          milestoneLifecycle.lifecycleStatus === "cancelled"
+        ) {
+          throw new PlanningGuardError(
+            `cannot replan a slice in a ${milestoneLifecycle.lifecycleStatus} milestone ${params.milestoneId} — use gsd_milestone_reopen first`,
+          );
         }
         const sliceLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "slice",

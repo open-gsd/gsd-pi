@@ -30,6 +30,13 @@ interface SliceIdentity {
 interface SliceCompletionFixtureInput extends SliceIdentity {
   completedTaskIds?: string[];
   runId?: string;
+  /**
+   * When false, the Milestone lifecycle row is deliberately NOT adopted, so a
+   * test can start from the legacy-import shadow shape (#2313): canonical
+   * authority exists for the Slice and Tasks but the parent Milestone row is
+   * missing. Defaults to true.
+   */
+  adoptMilestone?: boolean;
 }
 
 function db() {
@@ -292,11 +299,13 @@ export function seedSliceCompletionAuthority(
     "test.slice-completion.fixture.ready",
     `fixture/${entityId}/ready/${runId}`,
     (context) => {
-      adoptOrTransitionLifecycle(context, {
-        itemKind: "milestone",
-        milestoneId: input.milestoneId,
-        lifecycleStatus: fixtureLifecycleStatus(milestone["status"], `Milestone ${input.milestoneId}`),
-      });
+      if (input.adoptMilestone !== false) {
+        adoptOrTransitionLifecycle(context, {
+          itemKind: "milestone",
+          milestoneId: input.milestoneId,
+          lifecycleStatus: fixtureLifecycleStatus(milestone["status"], `Milestone ${input.milestoneId}`),
+        });
+      }
       adoptOrTransitionLifecycle(context, {
         itemKind: "slice",
         milestoneId: input.milestoneId,

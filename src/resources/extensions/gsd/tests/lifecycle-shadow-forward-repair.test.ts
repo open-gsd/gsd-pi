@@ -2,7 +2,7 @@
 // File Purpose: Executable contract for evidence-gated forward lifecycle-shadow repair.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test, type TestContext } from "node:test";
@@ -31,6 +31,8 @@ import {
   repairMilestoneLifecycleShadowsForward,
 } from "../lifecycle-shadow-repair-domain-operation.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
+import { handleCompleteSlice } from "../tools/complete-slice.ts";
+import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
 
 const tempDirs = new Set<string>();
 
@@ -75,6 +77,48 @@ function openFixture(t: TestContext): void {
       );
   `);
   t.after(closeDatabase);
+}
+
+/**
+ * #2313 end-to-end fixture: the legacy-import shadow shape where the Slice and
+ * Task have canonical authority (the Task with a full completion proof chain)
+ * but the parent Milestone's canonical row is missing. `gsd_slice_complete`
+ * must restore the Milestone authority and then complete the Slice.
+ */
+function openSliceCompletionFixture(t: TestContext): string {
+  const basePath = mkdtempSync(join(tmpdir(), "gsd-shadow-slice-complete-"));
+  tempDirs.add(basePath);
+  const phaseDir = join(basePath, ".gsd", "phases", "01-historical");
+  mkdirSync(phaseDir, { recursive: true });
+  writeFileSync(
+    join(phaseDir, "01-ROADMAP.md"),
+    "# M001: Historical milestone\n\n## Slices\n\n- [ ] **S01: Historical slice** `risk:medium` `depends:[]`\n  - After this: the historical slice is closed\n",
+  );
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  db().exec(`
+    INSERT INTO milestones (id, title, status, created_at)
+    VALUES ('M001', 'Historical milestone', 'active', '2026-07-01T00:00:00.000Z');
+    INSERT INTO slices (milestone_id, id, title, status, created_at)
+    VALUES ('M001', 'S01', 'Historical slice', 'active', '2026-07-01T00:00:00.000Z');
+    INSERT INTO tasks (
+      milestone_id, slice_id, id, title, status, completed_at,
+      one_liner, narrative, verification_result, full_summary_md
+    ) VALUES (
+      'M001', 'S01', 'T01', 'Historical task', 'complete',
+      '2026-07-02T00:00:00.000Z', 'Finished', 'Historical completion', 'passed', '# T01 summary'
+    );
+  `);
+  seedSliceCompletionAuthority({
+    milestoneId: "M001",
+    sliceId: "S01",
+    completedTaskIds: ["T01"],
+    adoptMilestone: false,
+  });
+  assert.equal(db().prepare(`
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles WHERE item_kind = 'milestone'
+  `).get()?.["count"], 0, "fixture must start without canonical Milestone authority");
+  t.after(closeDatabase);
+  return basePath;
 }
 
 function insertNonPassingVerificationTask(t: TestContext, verificationResult: string): void {
@@ -366,20 +410,54 @@ for (const variant of ["PASSED", "  passed  ", "Passed"]) {
   });
 }
 
-for (const variant of ["failed", "inconclusive", "needs-attention", "true", "banana", "NULL"]) {
-  test(`a "${variant}" verification_result is rejected as non-passing evidence`, (t) => {
+test("a recorded failed verification is rejected regardless of case or padding", (t) => {
+  openFixture(t);
+  insertNonPassingVerificationTask(t, "  FAILED  ");
+
+  const receipt = repairLifecycleShadowForward({
+    invocation: invocation("shadow-repair/non-passing/T04/padded-failed"),
+    item: isolatedTask("T04"),
+  });
+
+  assert.equal(receipt.disposition, "unresolved");
+  assert.equal(receipt.afterStatus, null);
+});
+
+// #2313: legacy completion (gsd_task_complete) persists the free-text
+// verification narrative verbatim, so only an explicit failure marker counts
+// as a recorded failed verification. Any other narrative is adoptable
+// evidence — matching the milestone-closeout adoption sweep, which never
+// gated on verification_result.
+for (const variant of ["inconclusive", "needs-attention", "true", "banana", "NULL"]) {
+  test(`a "${variant}" verification_result is adoptable free-text evidence (#2313)`, (t) => {
     openFixture(t);
     insertNonPassingVerificationTask(t, variant);
 
     const receipt = repairLifecycleShadowForward({
-      invocation: invocation(`shadow-repair/non-passing/T04/${variant}`),
+      invocation: invocation(`shadow-repair/free-text/T04/${variant}`),
       item: isolatedTask("T04"),
     });
 
-    assert.equal(receipt.disposition, "unresolved");
-    assert.equal(receipt.afterStatus, null);
+    assert.equal(receipt.disposition, "repaired");
+    assert.equal(receipt.afterStatus, "completed");
   });
 }
+
+test("a legacy verification narrative is adoptable evidence, not a failed verification (#2313)", (t) => {
+  openFixture(t);
+  insertNonPassingVerificationTask(
+    t,
+    "Ran the required targeted Jest command; all 6 suites and 38 tests passed after the fix.",
+  );
+
+  const receipt = repairLifecycleShadowForward({
+    invocation: invocation("shadow-repair/free-text/T04/narrative"),
+    item: isolatedTask("T04"),
+  });
+
+  assert.equal(receipt.disposition, "repaired");
+  assert.equal(receipt.afterStatus, "completed");
+});
 
 test("records an extra canonical shadow as unresolved when its legacy row is missing", (t) => {
   openFixture(t);
@@ -469,6 +547,30 @@ for (const repairCase of unsupportedWriterEdges) {
   });
 }
 
+test("repair writer rejects a missing Task open adoption (#2313 edge is Milestone/Slice only)", (t) => {
+  openFixture(t);
+  const before = authoritySnapshot();
+  const fence = readDomainOperationFence();
+
+  assert.throws(() => executeDomainOperation({
+    operationType: "lifecycle.shadow.repair",
+    idempotencyKey: "test/invalid-edge/repair/missing Task open adoption",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    repairLifecycleShadowStep(context, {
+      ...task("T01"),
+      expectedBeforeStatus: null,
+      targetStatus: "ready",
+    });
+    throw new Error("unreachable");
+  }), /unsupported lifecycle shadow repair edge/i);
+  assert.deepEqual(authoritySnapshot(), before);
+});
+
 test("repairs Slice and Milestone shadows only when every descendant has completion evidence", (t) => {
   openFixture(t);
   db().exec(`
@@ -522,7 +624,7 @@ test("keeps a ready Milestone unresolved even when historical completion evidenc
   assert.equal(receipt.targetStatus, "completed");
 });
 
-test("FIXED: a milestone with one repairable and one unresolved descendant writes nothing and reports both as unresolved", (t) => {
+test("FIXED: a milestone with one repairable and one unresolved descendant repairs only the milestone authority and reports both descendants as unresolved", (t) => {
   openFixture(t);
   db().exec(`
     INSERT INTO milestones (id, title, status, created_at)
@@ -550,14 +652,19 @@ test("FIXED: a milestone with one repairable and one unresolved descendant write
     milestoneId: "M003",
   });
 
-  assert.deepEqual(result.repaired, []);
+  // #2313: missing canonical open-item authority (the Milestone and the two
+  // legacy-open Slices) is restored, but no descendant completion may be
+  // repaired while any sibling in the milestone is unresolved.
+  assert.deepEqual(result.repaired, ["M003", "M003/S01", "M003/S02"]);
   assert.deepEqual([...result.unresolved].sort(), ["M003/S02/T02", "M003/S01/T01"].sort());
   assert.equal(db().prepare(`
-    SELECT COUNT(*) AS count FROM workflow_item_lifecycles WHERE milestone_id = 'M003'
-  `).get()?.["count"], 0, "no descendant may be repaired while any sibling in the milestone is unresolved");
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M003' AND item_kind = 'task'
+  `).get()?.["count"], 0, "no descendant Task may be repaired while any sibling in the milestone is unresolved");
   assert.equal(db().prepare(`
-    SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'lifecycle.shadow.repair'
-  `).get()?.["count"], 0, "an unresolved sibling must block every write, not just its own");
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M003' AND lifecycle_status = 'ready'
+  `).get()?.["count"], 3, "only open-item authority rows (Milestone + Slices) may be written");
 });
 
 test("FIXED: a milestone with multiple repairable single-step descendants commits them all in one shared Domain Operation", (t) => {
@@ -588,7 +695,7 @@ test("FIXED: a milestone with multiple repairable single-step descendants commit
     milestoneId: "M004",
   });
 
-  assert.deepEqual([...result.repaired].sort(), ["M004/S01/T01", "M004/S02/T02"].sort());
+  assert.deepEqual([...result.repaired].sort(), ["M004", "M004/S01", "M004/S02", "M004/S01/T01", "M004/S02/T02"].sort());
   assert.deepEqual(result.unresolved, []);
   assert.equal(db().prepare(`
     SELECT COUNT(*) AS count FROM workflow_item_lifecycles
@@ -596,7 +703,7 @@ test("FIXED: a milestone with multiple repairable single-step descendants commit
   `).get()?.["count"], 2);
   assert.equal(db().prepare(`
     SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'lifecycle.shadow.repair'
-  `).get()?.["count"], 1, "every single-step descendant must commit inside one shared Domain Operation");
+  `).get()?.["count"], 4, "three open-item authority adoptions (Milestone + 2 Slices) plus one shared descendant batch");
 });
 
 test("a changed evidence digest is rejected inside the repair transaction", (t) => {
@@ -722,7 +829,7 @@ test("repairMilestoneLifecycleShadowsForward runs task repairs before slice repa
     milestoneId: "M011",
   });
 
-  assert.deepEqual(result.repaired, ["M011/S01/T01", "M011/S01"]);
+  assert.deepEqual(result.repaired, ["M011", "M011/S01/T01", "M011/S01"]);
 });
 
 // ── Sibling corroboration (#2002 x #2070): a canonically-completed sibling
@@ -747,11 +854,11 @@ function insertCanonicalCompletedSibling(milestoneId: string, sliceId: string, t
   db().exec("PRAGMA foreign_keys = ON");
 }
 
-test("a bare legacy-complete straggler is deferred to completion when a sibling is canonically complete", (t) => {
+test("an evidenced descendant is repaired while bare stragglers defer when a sibling is canonically complete", (t) => {
   openFixture(t);
   insertCanonicalCompletedSibling("M001", "S01", "T01");
-  // T02 here: legacy complete, no durable evidence, canonical row absent —
-  // the exact straggler shape from #2070.
+  // T04 here: legacy complete, no durable evidence, canonical row absent —
+  // the exact bare straggler shape from #2070.
   db().exec(`
     INSERT INTO tasks (
       milestone_id, slice_id, id, title, status, completed_at,
@@ -767,12 +874,17 @@ test("a bare legacy-complete straggler is deferred to completion when a sibling 
     milestoneId: "M001",
   });
 
-  // Neither repaired by the gate nor treated as unresolved — completion adopts it.
-  assert.deepEqual(result.repaired, []);
+  // The evidenced T02 is repaired by the evidence gate (#2313 — slice
+  // completion has no sweep, so evidence-backed descendants must not defer).
+  // The bare T04 straggler is neither repaired nor unresolved — completion
+  // adopts it. Missing canonical open-item authority (Milestone + the
+  // legacy-open Slice) is restored first.
+  assert.deepEqual(result.repaired, ["M001", "M001/S01", "M001/S01/T02"]);
   assert.deepEqual(result.unresolved, []);
   assert.equal(db().prepare(`
-    SELECT COUNT(*) AS count FROM workflow_item_lifecycles WHERE milestone_id = 'M001'
-  `).get()?.["count"], 1, "the gate must not adopt the straggler itself");
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M001' AND item_kind = 'task'
+  `).get()?.["count"], 2, "only the evidenced T02 joins the sibling; the bare straggler is not adopted");
 });
 
 test("a bare straggler with recorded failed verification blocks even with sibling corroboration", (t) => {
@@ -793,10 +905,16 @@ test("a bare straggler with recorded failed verification blocks even with siblin
     milestoneId: "M001",
   });
 
-  assert.deepEqual(result.repaired, []);
-  assert.deepEqual(result.unresolved, ["M001/S01/T05"]);
+  // #2313: missing canonical open-item authority is restored even when a
+  // descendant stays unresolved — the failed verification must surface as its
+  // own precise item instead of hiding behind the parent-authority gate.
+  // #2002's atomicity is unchanged: the evidenced T02 joins T05 in the
+  // unresolved report and no descendant Task is written.
+  assert.deepEqual(result.repaired, ["M001", "M001/S01"]);
+  assert.deepEqual([...result.unresolved].sort(), ["M001/S01/T02", "M001/S01/T05"]);
   assert.equal(db().prepare(`
-    SELECT COUNT(*) AS count FROM workflow_item_lifecycles WHERE milestone_id = 'M001'
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M001' AND item_kind = 'task'
   `).get()?.["count"], 1, "only the corroborating sibling's own row exists");
 });
 
@@ -817,15 +935,146 @@ test("without sibling corroboration a bare legacy-complete descendant is unresol
     milestoneId: "M001",
   });
 
-  assert.deepEqual(result.repaired, []);
-  // #2002's atomicity: T03 (unsupported evidence) and T06 (bare, unverified)
-  // are unresolved, so the evidence-backed T01/T02 are reported unresolved
-  // too and nothing is written.
+  // #2313: missing canonical open-item authority is restored first; #2002's
+  // descendant atomicity is unchanged — T03 (unsupported evidence) and T06
+  // (bare, unverified) are unresolved, so the evidence-backed T01/T02 are
+  // reported unresolved too and no descendant Task is written.
+  assert.deepEqual(result.repaired, ["M001", "M001/S01"]);
   assert.deepEqual(
     [...result.unresolved].sort(),
     ["M001/S01/T01", "M001/S01/T02", "M001/S01/T03", "M001/S01/T06"],
   );
   assert.equal(db().prepare(`
-    SELECT COUNT(*) AS count FROM workflow_item_lifecycles WHERE milestone_id = 'M001'
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M001' AND item_kind = 'task'
   `).get()?.["count"], 0);
+});
+
+// ── Missing canonical Milestone authority adoption (#2313) ──────────────────
+
+test("repairMilestoneLifecycleShadowsForward adopts a missing canonical Milestone as ready when legacy status is open", (t) => {
+  openFixture(t);
+  db().exec(`
+    DELETE FROM tasks WHERE id = 'T03';
+    UPDATE slices
+    SET status = 'complete', completed_at = '2026-07-04T00:00:00.000Z',
+        full_summary_md = '# S01 summary'
+    WHERE milestone_id = 'M001' AND id = 'S01';
+  `);
+
+  const result = repairMilestoneLifecycleShadowsForward({
+    invocation: invocation("shadow-repair/open-milestone/M001"),
+    milestoneId: "M001",
+  });
+
+  assert.deepEqual([...result.repaired].sort(), ["M001", "M001/S01", "M001/S01/T01", "M001/S01/T02"].sort());
+  assert.deepEqual(result.unresolved, []);
+  assert.equal(db().prepare(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'milestone' AND milestone_id = 'M001'
+      AND slice_id IS NULL AND task_id IS NULL
+  `).get()?.["lifecycle_status"], "ready");
+  // The legacy hierarchy row is preserved untouched — no completion is claimed.
+  assert.equal(db().prepare("SELECT status FROM milestones WHERE id = 'M001'").get()?.["status"], "active");
+});
+
+test("the adopted open-item authority no-ops on a fresh invocation and replays on the same key", (t) => {
+  openFixture(t);
+  db().exec("DELETE FROM tasks WHERE id = 'T03'");
+  const first = repairMilestoneLifecycleShadowsForward({
+    invocation: invocation("shadow-repair/adopt-replay/M001"),
+    milestoneId: "M001",
+  });
+  assert.deepEqual([...first.repaired].sort(), ["M001", "M001/S01", "M001/S01/T01", "M001/S01/T02"].sort());
+  const operationsAfterFirst = db().prepare(`
+    SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'lifecycle.shadow.repair'
+  `).get()?.["count"];
+
+  // Same invocation key: every committed step is idempotent — the canonical
+  // rows now exist, so the authority adoption no-ops and the descendant pass
+  // finds nothing in scope. No new operations may be written.
+  const replayed = repairMilestoneLifecycleShadowsForward({
+    invocation: invocation("shadow-repair/adopt-replay/M001"),
+    milestoneId: "M001",
+  });
+  assert.deepEqual(replayed, { repaired: [], unresolved: [] });
+  assert.deepEqual(
+    db().prepare(`
+      SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'lifecycle.shadow.repair'
+    `).get()?.["count"],
+    operationsAfterFirst,
+  );
+
+  // A fresh invocation finds the canonical rows present and adopts nothing.
+  const fresh = repairMilestoneLifecycleShadowsForward({
+    invocation: invocation("shadow-repair/adopt-replay/M001/fresh"),
+    milestoneId: "M001",
+  });
+  assert.deepEqual(fresh.repaired, []);
+  assert.deepEqual(fresh.unresolved, []);
+  assert.equal(
+    db().prepare(`
+      SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'lifecycle.shadow.repair'
+    `).get()?.["count"],
+    operationsAfterFirst,
+  );
+});
+
+test("a legacy-complete Milestone without a canonical row is not adopted as ready", (t) => {
+  openFixture(t);
+  db().exec(`
+    DELETE FROM tasks WHERE id = 'T03';
+    UPDATE slices
+    SET status = 'complete', completed_at = '2026-07-04T00:00:00.000Z',
+        full_summary_md = '# S01 summary'
+    WHERE milestone_id = 'M001' AND id = 'S01';
+    UPDATE milestones
+    SET status = 'complete', completed_at = '2026-07-05T00:00:00.000Z'
+    WHERE id = 'M001';
+  `);
+
+  const result = repairMilestoneLifecycleShadowsForward({
+    invocation: invocation("shadow-repair/legacy-complete-milestone/M001"),
+    milestoneId: "M001",
+  });
+
+  // Terminal Milestone authority belongs to closeout adoption, not to the
+  // open-authority repair — no `ready` row may be minted.
+  assert.ok(!result.repaired.includes("M001"));
+  assert.equal(db().prepare(`
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
+    WHERE item_kind = 'milestone' AND milestone_id = 'M001'
+  `).get()?.["count"], 0);
+});
+
+test("gsd_slice_complete restores the missing Milestone authority and completes the slice (#2313)", async (t) => {
+  const basePath = openSliceCompletionFixture(t);
+  const attemptsBefore = db().prepare("SELECT COUNT(*) AS count FROM workflow_execution_attempts").get()?.["count"];
+  const resultsBefore = db().prepare("SELECT COUNT(*) AS count FROM workflow_attempt_results").get()?.["count"];
+
+  const result = await handleCompleteSlice({
+    sliceId: "S01",
+    milestoneId: "M001",
+    sliceTitle: "Historical slice",
+    oneLiner: "Completed the historical slice",
+    narrative: "Legacy hierarchy completed before canonical authority existed.",
+    uatContent: "## Smoke Test\n\nRun the test suite and verify all assertions pass.\n",
+  }, basePath, invocation("shadow-repair/slice-complete/M001"));
+
+  assert.ok(!("error" in result), `slice completion should proceed: ${"error" in result ? result.error : ""}`);
+  const sliceStatus = db().prepare("SELECT status FROM slices WHERE milestone_id = 'M001' AND id = 'S01'")
+    .get()?.["status"];
+  assert.equal(sliceStatus, "complete");
+  assert.equal(db().prepare(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'milestone' AND milestone_id = 'M001'
+      AND slice_id IS NULL AND task_id IS NULL
+  `).get()?.["lifecycle_status"], "ready", "the repair must restore the Milestone authority");
+  assert.equal(db().prepare(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).get()?.["lifecycle_status"], "completed");
+  // Existing canonical completion evidence is preserved untouched.
+  assert.equal(db().prepare("SELECT COUNT(*) AS count FROM workflow_execution_attempts").get()?.["count"], attemptsBefore);
+  assert.equal(db().prepare("SELECT COUNT(*) AS count FROM workflow_attempt_results").get()?.["count"], resultsBefore);
 });
