@@ -390,6 +390,14 @@ export interface AutoSupervisorConfig {
    * threshold.
    */
   stalled_tool_timeout_minutes?: number;
+  /**
+   * Session-level idle watchdog (#2373): fire one notification when auto-mode
+   * has had no unit in flight for this many minutes. Distinct from
+   * `idle_timeout_minutes`, which supervises a unit that is in flight. The
+   * watchdog is notification-only — no retry, no repair, no state mutation.
+   * `0` (the default) disables it.
+   */
+  global_idle_timeout_minutes?: number;
 }
 
 /**

@@ -33,6 +33,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 0
 budget_ceiling: 50.00
 token_profile: balanced
 ---
@@ -330,7 +331,10 @@ auto_supervisor:
   idle_timeout_minutes: 10    # 检测停滞
   hard_timeout_minutes: 30    # 暂停自动模式
   stalled_tool_timeout_minutes: 5  # 恢复在调用中卡死的 tool（默认：5）
+  global_idle_timeout_minutes: 0   # 无工作单元在运行达到该分钟数时发出通知（默认：0 = 关闭）
 ```
+
+`global_idle_timeout_minutes`（#2373）监视整个会话而非单个工作单元：当自动模式处于活动状态但没有工作单元在运行、且持续达到该分钟数时，每个空闲周期发出一次通知。仅通知——不派发、不重试、不修改任何状态。默认 `0` 表示关闭。
 
 `stalled_tool_timeout_minutes` 的工具豁免范围及超时限制，参见[英文配置指南](../../user-docs/configuration.md#auto_supervisor)。
 

@@ -608,6 +608,7 @@ auto_supervisor:
   idle_timeout_minutes: 10    # detect stalls
   hard_timeout_minutes: 30    # pause auto mode
   stalled_tool_timeout_minutes: 5  # recover a tool that hangs mid-call (default: 5)
+  global_idle_timeout_minutes: 0   # notify when no unit is in flight this long (default: 0 = off)
 ```
 
 Long-running coordination tools (`subagent` and its `Task` alias) and bounded execution
@@ -619,6 +620,11 @@ limits: `gsd_exec` and `gsd_uat_exec` use the 600-second exec sandbox clamp;
 and `bg_shell` has bounded per-action timeouts. All exempt tools remain subject to
 `hard_timeout_minutes` and do not re-arm that timeout. Other non-interactive tools
 remain subject to the stalled-tool budget.
+
+`global_idle_timeout_minutes` (#2373) watches the whole session rather than a unit:
+if auto mode is active but no unit has been in flight for this many minutes, it
+emits one notification per idle period. It is notification-only — nothing is
+dispatched, retried, or changed. The default `0` disables it.
 
 ### `min_request_interval_ms`
 

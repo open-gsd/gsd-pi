@@ -530,6 +530,7 @@ export function resolveAutoSupervisorConfig(): ResolvedAutoSupervisorConfig {
     idle_timeout_minutes: configured.idle_timeout_minutes ?? 10,
     hard_timeout_minutes: configured.hard_timeout_minutes ?? 30,
     stalled_tool_timeout_minutes: configured.stalled_tool_timeout_minutes ?? 5,
+    global_idle_timeout_minutes: configured.global_idle_timeout_minutes ?? 0,
     ...(modelConfig
       ? { model: modelConfig.primary, modelFallbacks: modelConfig.fallbacks }
       : {}),
