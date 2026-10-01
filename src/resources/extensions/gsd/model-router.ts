@@ -13,7 +13,7 @@ import type { ResolvedModelConfig } from "./preferences.js";
 
 export interface DynamicRoutingConfig {
   enabled?: boolean;
-  capability_routing?: boolean;    // default: false — enable capability profile scoring
+  capability_routing?: boolean;    // default: true — enable capability profile scoring (routes unless explicitly false)
   tier_models?: {
     light?: string;
     standard?: string;
