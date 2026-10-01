@@ -61,6 +61,7 @@ This exposes terminal and file APIs to any client that can reach the server unle
 The web interface is built with Next.js and communicates with GSD through a local bridge service. Each project gets its own bridge instance and one `gsd --mode rpc` child process. Commands and events use newline-delimited JSON over the child process's standard input and output, providing isolation for concurrent local sessions.
 
 Key components:
+
 - `BridgeService` — owns the per-project RPC child, command routing, and SSE subscription
 - `getProjectBridgeServiceForCwd()` — registry returning distinct instances per project path
 - `resolveProjectCwd()` — reads `?project=` from request URL or falls back to `GSD_WEB_PROJECT_CWD`

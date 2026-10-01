@@ -93,6 +93,42 @@ function prepareEditArguments(input: unknown): EditToolInput {
 
 	const args = input as Record<string, unknown>;
 
+	// Some models confuse the `edits` field name with a similar-sounding one
+	// (observed: `oldEntries`, `edit`). When the real `edits` field is absent
+	// but one of these aliases is present, treat it as `edits` before the
+	// recovery steps below run. This turns a confusing dual AJV error
+	// ("edits: must have required properties edits" + "root: must not have
+	// additional properties") into a single clear validation message, and
+	// recovers the call outright when the alias's value can be normalized
+	// into a real edits array or a single oldText/newText replacement.
+	if (args.edits === undefined) {
+		for (const alias of ["oldEntries", "edit"]) {
+			if (alias in args) {
+				args.edits = args[alias];
+				delete args[alias];
+				break;
+			}
+		}
+	}
+
+	// Some models leak a raw XML-style tool-call parameter wrapper into the
+	// (possibly alias-promoted) edits value instead of well-formed JSON, e.g.
+	//   oldEntries: "\n<parameter name=\"oldText\">ACTUAL OLD TEXT"
+	// alongside a well-formed top-level `newText`. Unwrap this specific shape
+	// into a plain `oldText` string so the existing oldText/newText fold-in
+	// below can still recover the call. Only unwrap when there is no real
+	// top-level oldText already, so a genuinely intended `oldText` never gets
+	// silently overwritten. The wrapper is not always well-formed (models
+	// have been observed to omit the closing tag), so the trailing
+	// `</parameter>` is optional.
+	if (typeof args.edits === "string" && typeof args.oldText !== "string") {
+		const wrapped = args.edits.match(/^\s*<parameter\s+name="old(?:Text|_text)">([\s\S]*?)(?:<\/parameter>\s*)?$/i);
+		if (wrapped) {
+			args.oldText = wrapped[1];
+			delete args.edits;
+		}
+	}
+
 	// Some models (Opus 4.6, GLM-5.1) send edits as a JSON string instead of an array.
 	if (typeof args.edits === "string") {
 		try {

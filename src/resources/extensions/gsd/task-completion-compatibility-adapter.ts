@@ -24,6 +24,7 @@ import {
 } from "./quality-gate-closure.js";
 import {
   readLatestTaskAttempt,
+  readTaskLifecycleStatus,
   settleTaskAttempt,
   type StagedTaskCompletionMutation,
 } from "./task-execution-domain-operation.js";
@@ -257,7 +258,8 @@ export function resolveTaskCompletionAuthority(
   }
   throw new Error(
     "Canonical Task completion has no running Attempt to close. Re-enter `/gsd auto` to resume " +
-    "the Task from its durable checkpoint." +
+    "the Task from its durable checkpoint; if its latest Attempt is settled succeeded at the verify " +
+    "stage, dry-run `gsd_task_settle` (reconcileLifecycle) to publish the verified completion." +
     latestAttemptRecoveryContext(task),
   );
 }
@@ -458,7 +460,12 @@ function loadSucceededAttempt(input: PublishVerifiedTaskCompletionInput): Attemp
       AND lifecycle.milestone_id = :milestone_id
       AND lifecycle.slice_id = :slice_id
       AND lifecycle.task_id = :task_id
-      AND lifecycle.lifecycle_status = 'in_progress'
+      -- 'ready' covers a durable success whose lifecycle shadow was reverted by
+      -- a side door (#2417): in_progress → ready is not a canonical transition,
+      -- so the Attempt and evidence predicates below carry the guarantee, not
+      -- the shadow. Publication first re-adopts in_progress in a separate
+      -- fenced operation, then completes the Task and its legacy row.
+      AND lifecycle.lifecycle_status IN ('in_progress', 'ready')
       AND attempt.attempt_state = 'settled'
       AND result.outcome = 'succeeded'
       AND checkpoint.next_stage = 'verify'
@@ -610,10 +617,68 @@ function requireCurrentVerifiedSource(input: PublishVerifiedTaskCompletionInput)
   });
 }
 
+/**
+ * A durable success behind a side-door `ready` lifecycle shadow (#2417) cannot
+ * complete in one step: the lifecycle trigger forbids ready → completed, and a
+ * second status change inside the publication domain operation cannot advance
+ * the causal revision. Re-adopt ready → in_progress as its own fenced
+ * operation first — the normal post-settle state, so a later failure leaves
+ * the Task in a shape the loop resume and a retry both understand.
+ */
+function readoptReadyLifecycleShadowForPublication(input: PublishVerifiedTaskCompletionInput): void {
+  const lifecycleStatus = readTaskLifecycleStatus(input.task);
+  if (lifecycleStatus !== "ready") return;
+  const idempotencyKey = `${input.invocation.idempotencyKey}:lifecycle:in_progress`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: "task.lifecycle.reconcile",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: input.invocation.actorType,
+    ...(input.invocation.actorId ? { actorId: input.invocation.actorId } : {}),
+    sourceTransport: input.invocation.sourceTransport,
+    ...(input.invocation.traceId ? { traceId: input.invocation.traceId } : {}),
+    ...(input.invocation.turnId ? { turnId: input.invocation.turnId } : {}),
+    payload: {
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      from: "ready",
+      to: "in_progress",
+      reason: "Verified Task publication re-adopted a side-door ready lifecycle shadow (#2417)",
+    },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: input.task.milestoneId,
+      sliceId: input.task.sliceId,
+      taskId: input.task.taskId,
+      lifecycleStatus: "in_progress",
+    });
+    const entityId = `${input.task.milestoneId}/${input.task.sliceId}/${input.task.taskId}`;
+    return {
+      events: [{
+        eventType: "task.lifecycle.reconciled",
+        entityType: "task",
+        entityId,
+        payload: { from: "ready", to: "in_progress", attemptId: input.attemptId },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `lifecycle/${entityId}`.toLowerCase(),
+        projectionKind: "task-lifecycle",
+        rendererVersion: "1",
+      }],
+    };
+  });
+}
+
 export async function publishVerifiedTaskCompletion(
   input: PublishVerifiedTaskCompletionInput,
 ): Promise<PublishedTaskCompletionReceipt> {
   requireCurrentVerifiedSource(input);
+  readoptReadyLifecycleShadowForPublication(input);
   const status = publishCanonicalCompletion(input);
   const summaryPath = await renderPublishedTaskCompletionProjections(input.basePath, input.task);
   return {

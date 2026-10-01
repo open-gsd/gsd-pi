@@ -11,6 +11,7 @@ Decompose an approved plan into the smallest useful vertical slices that each cu
 This skill runs after the brief is stable — `M###-CONTEXT.md` exists and the user has signed off on scope. It's the bridge from "we know what we're building" to "we know in what order and chunks." The vertical-slice discipline (tracer bullets) is non-negotiable here — it's the core of what makes GSD slices demoable and parallel-safe.
 
 Typical invocation points:
+
 - After `write-milestone-brief` (or after a `discuss` phase that produced a brief)
 - When a roadmap exists but slices are too thick, too few, or poorly ordered
 - When exporting the plan for external collaborators (GitHub issues)

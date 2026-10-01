@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, looksLikePosixAuthoredCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, assertVerifyIsShellCheckable, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, looksLikePosixAuthoredCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -1468,6 +1468,84 @@ test("isLikelyCommand: lowercase prose without command evidence is rejected (iss
     isLikelyCommand("verifica che il file contiene tutti i nomi richiesti"),
     false,
   );
+});
+
+test("isLikelyCommand: CJK sentence punctuation after a known command is rejected (issue #2428)", () => {
+  // Real failing samples (#2428): a CJK planning sentence beginning with a
+  // known tool prefix executed verbatim and its exit-0 no-op was recorded as
+  // verdict pass. Flags/paths in the tail suppress the natural-language
+  // heuristic, so the unquoted sentence punctuation is the prose signal.
+  assert.equal(
+    isLikelyCommand("pnpm --filter web vitest run tests/database，並跑 local-supabase 資料庫層案例；確認 anon/authenticated/agent 角色皆無法寫入白名單。"),
+    false,
+  );
+  assert.equal(
+    isLikelyCommand("pnpm --filter web vitest run tests/auth tests/api tests/passkey；安全負向：未授權、已撤銷、資料庫故障、agent 憑證皆被拒絕。"),
+    false,
+  );
+});
+
+test("isLikelyCommand: quoted CJK data in a real command stays valid (issue #2428)", () => {
+  // Quoted segments are stripped before the punctuation test — genuine
+  // commands that search CJK text must keep validating as commands. Plain
+  // unquoted CJK words without sentence punctuation are also untouched.
+  assert.equal(isLikelyCommand("grep -r '驗證腳本' src"), true);
+  assert.equal(isLikelyCommand('rg -q "資料庫層案例；確認" tests'), true);
+  assert.equal(isLikelyCommand("grep 資料庫 src"), true);
+});
+
+test("validateVerificationCommand rejects CJK prose verify sentences (issue #2428)", () => {
+  const result = validateVerificationCommand("pnpm --filter web vitest run tests/database，並跑 local-supabase 資料庫層案例；確認白名單。");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /does not look like a runnable command/);
+});
+
+test("assertVerifyIsShellCheckable rejects CJK prose verify lines (issue #2428)", () => {
+  const prose = "pnpm --filter web vitest run tests/database，並跑 local-supabase 資料庫層案例；確認白名單。";
+  assert.throws(() => assertVerifyIsShellCheckable(prose), /verify must be a shell command, not prose/);
+  // Quoted CJK data and plain commands keep persisting.
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("grep -r '驗證腳本' src"));
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("pnpm -r test:unit"));
+});
+
+test("assertVerifyIsShellCheckable keeps multiline quoted CJK operands intact (issue #2428 review)", () => {
+  // A newline inside a quoted segment is shell data: splitting on raw
+  // newlines would misread the fragments as unterminated and falsely reject.
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("rg -q '第一行，\n第二行。' tests"));
+  // CRLF line separators between separate commands still split.
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("pnpm -r test:unit\r\nnode scripts/check.js"));
+});
+
+test("assertVerifyIsShellCheckable rejects the prose line of a mixed verify (issue #2428)", () => {
+  const mixed = "node scripts/check.js\npnpm --filter web vitest run tests/database，並跑 local-supabase 案例確認白名單。";
+  assert.throws(() => assertVerifyIsShellCheckable(mixed), /verify must be a shell command, not prose/);
+});
+
+test("isLikelyCommand: CJK punctuation matrix is rejected unquoted (issue #2428)", () => {
+  // Each class member independently marks prose: enumeration 、 clause ，
+  // sentence 。 fullwidth colon/semicolon/question/bang, closing quotes and
+  // paren, ideographic space, ellipsis, em-dash.
+  for (const [label, mark] of [
+    ["enumeration comma", "、"],
+    ["fullwidth comma", "，"],
+    ["ideographic full stop", "。"],
+    ["fullwidth colon", "："],
+    ["fullwidth semicolon", "；"],
+    ["fullwidth question mark", "？"],
+    ["fullwidth exclamation mark", "！"],
+    ["closing corner quote", "」"],
+    ["closing double quote", "』"],
+    ["closing paren", "）"],
+    ["ideographic space", "　"],
+    ["ellipsis", "…"],
+    ["em-dash", "—"],
+  ] as const) {
+    assert.equal(
+      isLikelyCommand(`pnpm --filter web vitest run tests${mark}並確認白名單`),
+      false,
+      `unquoted ${label} must read as prose`,
+    );
+  }
 });
 
 test("validateVerificationCommand allows exit-code echo diagnostic suffix", () => {

@@ -5,7 +5,13 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { crossReferenceEvidence } from "../safety/evidence-cross-ref.ts";
-import type { EvidenceEntry } from "../safety/evidence-collector.ts";
+import {
+  getEvidence,
+  recordToolCall,
+  recordToolResult,
+  resetEvidence,
+} from "../safety/evidence-collector.ts";
+import type { BashEvidence, EvidenceEntry } from "../safety/evidence-collector.ts";
 import { isTaskAttemptAwaitingVerification } from "../task-execution-domain-operation.ts";
 
 test("evidence cross-reference waits for the canonical succeeded verify-stage Result", () => {
@@ -420,6 +426,166 @@ test("accepted tradeoff: a newer overlapping command passing masks an older same
         command: "node --test tests/unrelated.test.js",
         exitCode: 0,
         outputSnippet: "unrelated pass",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.deepEqual(mismatches, []);
+});
+test("MCP workflow deadline timeout is recorded as the inconclusive sentinel -2, not exit 1 (#2425)", () => {
+  // resolveExitCode must not encode an unobserved outcome as a failure: the
+  // workflow queue deadline rejects while the underlying run keeps going and
+  // usually exits 0. -2 is the collector's INCONCLUSIVE_EXIT_CODE sentinel.
+  resetEvidence();
+  recordToolCall("tc-deadline", "gsd_exec", { command: "pnpm -r test:integration" });
+  recordToolResult(
+    "tc-deadline",
+    "gsd_exec",
+    "Error: Workflow operation exceeded 300000ms deadline (GSD_MCP_WORKFLOW_TIMEOUT_MS)",
+    true,
+  );
+
+  const entry = getEvidence().find((e) => e.toolCallId === "tc-deadline") as BashEvidence | undefined;
+  assert.ok(entry, "deadline-timeouted call must be recorded");
+  assert.equal(entry.exitCode, -2);
+});
+
+test("an observed exit wins over a deadline mention in output (#2425)", () => {
+  // A result that merely contains the deadline signature (e.g. a verification
+  // grep over source) still records its real, observed exit code.
+  resetEvidence();
+  recordToolCall("tc-grep", "bash", { command: "grep -r 'Workflow operation exceeded 300000ms deadline' src" });
+  recordToolResult(
+    "tc-grep",
+    "bash",
+    "src/mcp/workflow-tools.ts:1284: Workflow operation exceeded 300000ms deadline\nCommand exited with code 0",
+    false,
+  );
+
+  const entry = getEvidence().find((e) => e.toolCallId === "tc-grep") as BashEvidence | undefined;
+  assert.ok(entry, "grep call must be recorded");
+  assert.equal(entry.exitCode, 0);
+});
+
+test("deadline-timeouted verification is an inconclusive warning, not a falsified pass (#2425)", () => {
+  const command = "pnpm -r test:integration";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command,
+        exitCode: -2,
+        outputSnippet: "Error: Workflow operation exceeded 300000ms deadline (GSD_MCP_WORKFLOW_TIMEOUT_MS)",
+        timestamp: Date.now(),
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "warning");
+  assert.match(mismatches[0].reason, /inconclusive/);
+});
+
+test("pre-fix deadline rows recorded as exit 1 are still inconclusive via the deadline signature (#2425)", () => {
+  // Evidence persisted before the sentinel existed carries exitCode 1 with the
+  // deadline text in the snippet; the signature must catch those too.
+  const command = "pnpm -r test:integration";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command,
+        exitCode: 1,
+        outputSnippet: "Workflow operation exceeded 300000ms deadline (GSD_MCP_WORKFLOW_TIMEOUT_MS)",
+        timestamp: Date.now(),
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "warning");
+  assert.match(mismatches[0].reason, /inconclusive/);
+});
+
+test("an observed failure whose output mentions the deadline is a real error, not inconclusive (#2425 review)", () => {
+  // The run exited on its own (prose marker, exit 1) and merely printed the
+  // deadline signature; it must be judged on its recorded exit.
+  const command = "pnpm test";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command,
+        exitCode: 1,
+        outputSnippet: "Workflow operation exceeded 300000ms deadline\nCommand exited with code 1",
+        timestamp: Date.now(),
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  assert.match(mismatches[0].reason, /Claimed exitCode=0/);
+});
+
+test("an older real failure followed by a deadline-timeouted retry still blocks (newest observed authority)", () => {
+  // The deadline retry is inconclusive, but no observed pass exists; the
+  // newest OBSERVED outcome is the failure. Same newest-run authority the
+  // WSL-infra path already applies (#2205 accepted tradeoff).
+  const command = "pnpm test";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command,
+        exitCode: 1,
+        outputSnippet: "tests failed",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command,
+        exitCode: -2,
+        outputSnippet: "Workflow operation exceeded 300000ms deadline (GSD_MCP_WORKFLOW_TIMEOUT_MS)",
+        timestamp: 2,
+      },
+    ] as EvidenceEntry[],
+  );
+
+  assert.equal(mismatches.length, 1);
+  assert.equal(mismatches[0].severity, "error");
+  assert.match(mismatches[0].reason, /Claimed exitCode=0/);
+});
+
+test("an older observed pass followed by a deadline-timeouted run stays clean (newest observed authority)", () => {
+  const command = "pnpm test";
+  const mismatches = crossReferenceEvidence(
+    [{ command, exitCode: 0, verdict: "passed" }],
+    [
+      {
+        kind: "bash",
+        toolCallId: "call-1",
+        command,
+        exitCode: 0,
+        outputSnippet: "all green",
+        timestamp: 1,
+      },
+      {
+        kind: "bash",
+        toolCallId: "call-2",
+        command,
+        exitCode: -2,
+        outputSnippet: "Workflow operation exceeded 300000ms deadline (GSD_MCP_WORKFLOW_TIMEOUT_MS)",
         timestamp: 2,
       },
     ] as EvidenceEntry[],

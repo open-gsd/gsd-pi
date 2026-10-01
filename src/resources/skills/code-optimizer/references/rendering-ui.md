@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### React Re-render Issues
+
 ```
 # Missing memoization
 const\s+\w+\s*=\s*\(\s*\)\s*=>.*return\s*\(    (inline component definitions)
@@ -20,6 +21,7 @@ setState\(.*\{\.\.\.state                          (spreading entire state on ea
 ```
 
 ### Missing Virtualization
+
 ```
 \.map\(.*<\w+                  (rendering list items - check list size)
 {items\.map\(                  (JSX list rendering - check if >50 items)
@@ -31,6 +33,7 @@ ngFor                          (Angular list rendering)
 ```
 
 ### Layout Thrashing
+
 ```
 offsetWidth.*style\.           (read then write in sequence)
 offsetHeight.*style\.          (read then write)
@@ -41,6 +44,7 @@ scrollTop.*style               (read then write)
 ```
 
 ### Large DOM
+
 ```
 document\.createElement.*loop  (creating elements in loop)
 innerHTML\s*\+=                (innerHTML concatenation - causes reparse)
@@ -50,6 +54,7 @@ document\.querySelector\(.*loop (DOM query in loop)
 ```
 
 ### Missing Lazy Loading
+
 ```
 <img\s+(?!.*loading)           (images without loading="lazy")
 <iframe\s+(?!.*loading)        (iframes without lazy loading)
@@ -57,6 +62,7 @@ import.*above.*fold            (heavy imports for below-fold content)
 ```
 
 ### Animation Performance
+
 ```
 # Layout-triggering animations
 animate.*width                 (animating width triggers layout)
@@ -71,6 +77,7 @@ transition.*height
 ```
 
 ### SSR/Hydration Issues
+
 ```
 useEffect\(.*\[\].*setState   (client-side data fetch causing hydration mismatch)
 typeof window                  (window checks indicating SSR issues)

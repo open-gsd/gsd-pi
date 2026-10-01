@@ -73,6 +73,7 @@ cat spec.md | gsd headless new-milestone --context - --auto
 ```
 
 Extra flags:
+
 - `--context <path>` — path to spec/PRD file (use `-` for stdin)
 - `--context-text <text>` — inline specification text
 - `--auto` — start auto-mode after milestone creation

@@ -48,6 +48,8 @@ Execute-task units use durable Attempt records. Before the worker starts, auto m
 
 On the canonical completion path, `gsd_task_complete` stages the executor result; it does not publish the task as complete by itself. A successful executor result settles the Attempt and advances the Kernel checkpoint to `verify`; host-owned verification then records the Technical Verdict and command evidence. Only a passing verdict for the current source revision publishes task completion: the canonical lifecycle becomes `completed`, the compatibility task row becomes `complete`, and summary/plan projections are refreshed from the database.
 
+If a succeeded Attempt remains at `verify` without publishing completion while the Task lifecycle is `ready` or `in_progress`, `/gsd doctor` reports `unpublished_succeeded_attempt`. Re-enter `/gsd auto` to resume verification and publication, or dry-run `gsd_task_settle` for the Task and then apply it to publish the verified completion. Apply requires a current passing host Technical Verdict and fails closed when that evidence is missing; `/gsd doctor --fix` does not publish it. This recovery also handles a Task lifecycle that reverted to `ready` after the Attempt succeeded.
+
 Task completion preserves the stored task title, including legacy completion when a blocker is discovered. The executor's one-line summary is stored separately; legacy completion uses it as the title only when creating a new task row.
 
 Task recovery keeps three intents separate. Reopen returns a terminal task to canonical `ready` plus legacy `pending` without starting work or deleting history; retry or remediation creates a fresh lineage-linked Attempt after an execution failure/interruption or a succeeded Result whose current evidence-backed Technical Verdict did not pass, without resetting task status; cancel moves actionable work to canonical `cancelled` plus legacy `skipped`, interrupting any running Attempt first. Projection and summary rendering failures are retryable delivery work after the database transaction commits. They return a visible error and leave the authoritative lifecycle state intact instead of rolling a committed completion back to pending.
@@ -301,6 +303,8 @@ Three timeout tiers prevent runaway sessions:
 | Idle | 10 min | Detects stalls, intervenes |
 | Hard | 30 min | Starts timeout recovery; pauses auto mode only if recovery cannot make durable progress |
 
+All three tiers supervise a unit that is in flight. `global_idle_timeout_minutes` (#2373) covers the opposite case: auto mode is active but **no unit is in flight at all** — an idle session that no per-unit watchdog observes. When the threshold passes, it emits one notification per idle period (naming the idle time and the active milestone). It is notification-only: nothing is dispatched, retried, repaired, or mutated, and the ADR-047 liveness backstop is unaffected. The default `0` disables it.
+
 Recovery steering nudges the LLM to finish durable output before timing out. When idle or hard timeout recovery is actively writing durable progress, the unit failsafe records fresh runtime progress in `.gsd/runtime/` and defers its final cancellation check for another short recheck window. This prevents auto mode from pausing while a recovered unit is finalizing, but future-dated or stale runtime timestamps are ignored so clock skew cannot keep the unit alive forever.
 
 Interactive prompts that block waiting for human input (such as `ask_user_questions` during discuss-phase/milestone, or secure value entry) are exempt from the idle and hard timeouts: while one is in flight, the watchdogs re-arm instead of firing, so a long human deliberation never cancels the prompt or aborts its turn. A genuinely hung non-interactive unit still hits the hard cap as usual.
@@ -321,6 +325,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 60   # optional: notify when no unit is in flight this long (default: 0 = off)
 ```
 
 ### Cost Tracking

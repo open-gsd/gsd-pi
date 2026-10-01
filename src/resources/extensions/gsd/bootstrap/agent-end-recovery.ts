@@ -33,7 +33,7 @@ import {
 } from "../auto/resolve.js";
 import { shouldIgnoreAgentEndForActiveUnit } from "../auto/unit-runner-events.js";
 import { isTaskExecutionReadyForHostVerification } from "../auto/task-execution-cutover.js";
-import { resolveModelId } from "../auto-model-selection.js";
+import { applyThinkingLevelForModel, resolveModelId } from "../auto-model-selection.js";
 import { resolveProjectRoot } from "../worktree.js";
 import { clearDiscussionFlowState } from "./write-gate.js";
 import { scheduleFallbackContinuation } from "./fallback-continuation.js";
@@ -150,9 +150,9 @@ async function tryProviderModelFallback(params: ProviderModelFallbackParams): Pr
   if (modelConfig && modelConfig.fallbacks.length > 0) {
     let cursorModelId: string | undefined = rejectedId;
     while (true) {
-      const nextModelId = getNextFallbackModel(cursorModelId, modelConfig);
-      if (!nextModelId) break;
-      const candidate = resolveModelId(nextModelId, availableModels, rejectedProvider);
+      const next = getNextFallbackModel(cursorModelId, modelConfig);
+      if (!next) break;
+      const candidate = resolveModelId(next.id, availableModels, rejectedProvider);
       if (
         candidate &&
         !isModelBlocked(basePath, candidate.provider, candidate.id) &&
@@ -160,6 +160,13 @@ async function tryProviderModelFallback(params: ProviderModelFallbackParams): Pr
       ) {
         const ok = await pi.setModel(candidate, { persist: false });
         if (ok) {
+          // Only an object entry's per-entry `thinking` changes behavior
+          // (#1270) — plain-string fallbacks keep the pre-#1270 behavior of
+          // this path exactly (model switch only; the scheduled continuation
+          // re-resolves the field/session level).
+          if (next.thinking) {
+            applyThinkingLevelForModel(pi, next.thinking, candidate, ctx);
+          }
           setCurrentUnitModelForRecovery(candidate);
           setCurrentDispatchedModelId({ provider: candidate.provider, id: candidate.id });
           switchedNotify(`${candidate.provider}/${candidate.id}`);
@@ -167,7 +174,7 @@ async function tryProviderModelFallback(params: ProviderModelFallbackParams): Pr
           return true;
         }
       }
-      cursorModelId = nextModelId;
+      cursorModelId = next.id;
     }
   }
 

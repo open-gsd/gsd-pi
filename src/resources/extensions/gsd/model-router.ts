@@ -8,12 +8,13 @@ import { tierOrdinal } from "./complexity-classifier.js";
 import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 import { resolveModelEconomics } from "./model-cost-table.js";
 import type { ResolvedModelConfig } from "./preferences.js";
+import { fallbackModelId } from "./preferences-types.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface DynamicRoutingConfig {
   enabled?: boolean;
-  capability_routing?: boolean;    // default: false — enable capability profile scoring
+  capability_routing?: boolean;    // default: true — enable capability profile scoring (routes unless explicitly false)
   tier_models?: {
     light?: string;
     standard?: string;
@@ -196,6 +197,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "claude-opus-4-7": "heavy",
   "claude-opus-4-8": "heavy",
   "claude-opus-5": "heavy",
+  "claude-opus-5-5": "heavy",          // Opus 5.5: Opus-line successor to Opus 5, cheaper per token
   "claude-fable-5": "heavy",
   "claude-fable-5-1": "heavy",             // models.dev 2026-09 refresh: Fable 5.1 point release, same class/pricing as Fable 5
   "claude-3-opus-latest": "heavy",
@@ -236,6 +238,7 @@ const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
   "claude-opus-4-7": 0.005,
   "claude-opus-4-8": 0.005,
   "claude-opus-5": 0.005,
+  "claude-opus-5-5": 0.004,
   "claude-fable-5": 0.010,
   "claude-fable-5-1": 0.010,
   "gpt-4o-mini": 0.00015,
@@ -291,6 +294,7 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   "claude-opus-4-7":              { coding: 95, debugging: 90, research: 85, reasoning: 95, speed: 30, longContext: 80, instruction: 90 },
   "claude-opus-4-8":              { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
   "claude-opus-5":                { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
+  "claude-opus-5-5":              { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
   "claude-fable-5":               { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
   // models.dev 2026-09 refresh: Fable 5.1 shares Fable 5's class and pricing; no published eval deltas yet.
   "claude-fable-5-1":             { coding: 97, debugging: 92, research: 87, reasoning: 97, speed: 30, longContext: 85, instruction: 92 },
@@ -621,11 +625,12 @@ export function getEligibleModels(
 
 /**
  * Build a fallback chain for a selected model: [selectedModel, ...configuredFallbacks, configuredPrimary]
- * Deduplicates entries while preserving order.
+ * Deduplicates entries while preserving order. Object fallback entries
+ * contribute their model ID — routing decisions carry bare IDs (#1270).
  */
 function buildFallbackChain(selectedModelId: string, phaseConfig: ResolvedModelConfig): string[] {
   return [
-    ...phaseConfig.fallbacks.filter(f => f !== selectedModelId),
+    ...phaseConfig.fallbacks.map(fallbackModelId).filter(f => f !== selectedModelId),
     phaseConfig.primary,
   ].filter(f => f !== selectedModelId);
 }
@@ -684,7 +689,7 @@ export function resolveModelForComplexity(
   if (!phaseConfig || !routingConfig.enabled) {
     return {
       modelId: phaseConfig?.primary ?? "",
-      fallbacks: phaseConfig?.fallbacks ?? [],
+      fallbacks: (phaseConfig?.fallbacks ?? []).map(fallbackModelId),
       tier: classification.tier,
       wasDowngraded: false,
       reason: "dynamic routing disabled or no phase config",
@@ -704,7 +709,7 @@ export function resolveModelForComplexity(
     warnUnknownConfiguredModel(configuredPrimary);
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: `configured model "${configuredPrimary}" is not in the known tier map — honoring explicit config`,
@@ -720,7 +725,7 @@ export function resolveModelForComplexity(
     if (isModelAvailable(configuredPrimary, availableModelIds)) {
       return {
         modelId: configuredPrimary,
-        fallbacks: phaseConfig.fallbacks,
+        fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
         tier: requestedTier,
         wasDowngraded: false,
         reason: `tier ${requestedTier} >= configured ${configuredTier}`,
@@ -744,8 +749,8 @@ export function resolveModelForComplexity(
     return {
       modelId: crossProviderEquivalent ?? configuredPrimary,
       fallbacks: crossProviderEquivalent
-        ? [...phaseConfig.fallbacks.filter(f => f !== crossProviderEquivalent), configuredPrimary]
-        : phaseConfig.fallbacks,
+        ? [...phaseConfig.fallbacks.map(fallbackModelId).filter(f => f !== crossProviderEquivalent), configuredPrimary]
+        : phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: crossProviderEquivalent
@@ -763,7 +768,7 @@ export function resolveModelForComplexity(
     // No suitable model found — use configured primary
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: `no ${requestedTier}-tier model available`,
@@ -797,7 +802,7 @@ export function resolveModelForComplexity(
       }));
       return {
         modelId: configuredPrimary,
-        fallbacks: phaseConfig.fallbacks,
+        fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
         tier: requestedTier,
         wasDowngraded: false,
         reason: "no profiled candidate eligible for automatic routing — fail closed",
@@ -893,7 +898,7 @@ export function resolveModelForComplexity(
   if (!targetModelId) {
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: "no profiled candidate eligible for automatic routing — fail closed",
@@ -956,7 +961,7 @@ export function defaultRoutingConfig(): DynamicRoutingConfig {
 const CANONICAL_TIER_MODELS: Record<ComplexityTier, string> = {
   light: "claude-haiku-4-5",
   standard: "claude-sonnet-4-6",
-  heavy: "claude-opus-4-6",
+  heavy: "claude-opus-5-5",
 };
 
 export function canonicalModelForTier(tier: ComplexityTier): string {

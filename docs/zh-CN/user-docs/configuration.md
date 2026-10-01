@@ -33,6 +33,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 0
 budget_ceiling: 50.00
 token_profile: balanced
 ---
@@ -94,6 +95,8 @@ GSD 会从以下项目本地路径读取 MCP client 配置：
 
 - 把你愿意提交到仓库的共享 MCP 配置放在 `.mcp.json`
 - 把仅本机使用、不希望共享的 MCP 配置放在 `.gsd/mcp.json`
+
+对于已有的 GSD 项目，GSD 也会在会话启动时自动准备仓库共享的 `.mcp.json`。这个自动准备不依赖当前选择的 model provider，但只会在项目根目录已经包含 `.gsd/` 时运行；非 GSD 仓库不会被改动。它会写入托管的 `gsd-workflow` 条目，并且在未设置 `GSD_BROWSER_MCP_ENABLED=0` 时写入托管的 `gsd-browser` 条目，供 Claude Code 等外部 MCP client 使用。
 
 ### 支持的 transport
 
@@ -330,7 +333,10 @@ auto_supervisor:
   idle_timeout_minutes: 10    # 检测停滞
   hard_timeout_minutes: 30    # 暂停自动模式
   stalled_tool_timeout_minutes: 5  # 恢复在调用中卡死的 tool（默认：5）
+  global_idle_timeout_minutes: 0   # 无工作单元在运行达到该分钟数时发出通知（默认：0 = 关闭）
 ```
+
+`global_idle_timeout_minutes`（#2373）监视整个会话而非单个工作单元：当自动模式处于活动状态但没有工作单元在运行、且持续达到该分钟数时，每个空闲周期发出一次通知。仅通知——不派发、不重试、不修改任何状态。默认 `0` 表示关闭。
 
 `stalled_tool_timeout_minutes` 的工具豁免范围及超时限制，参见[英文配置指南](../../user-docs/configuration.md#auto_supervisor)。
 

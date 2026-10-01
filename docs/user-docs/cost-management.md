@@ -19,6 +19,7 @@ Data is stored in `.gsd/metrics.json` and survives across sessions.
 **Dashboard:** `Ctrl+Alt+G` or `/gsd status` shows real-time cost breakdown.
 
 **Aggregations available:**
+
 - By phase (research, planning, execution, completion, reassessment)
 - By slice (M001/S01, M001/S02, ...)
 - By model (which models consumed the most budget)

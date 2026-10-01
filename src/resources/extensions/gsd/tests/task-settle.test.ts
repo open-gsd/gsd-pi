@@ -3,7 +3,8 @@
 // idempotent, never-guessing Task Attempt settlement (#1749).
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -25,14 +26,18 @@ import {
   planBlockerAcceptedDisposition,
   planTaskSettle,
 } from "../task-settle.ts";
-import { resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.ts";
+import { publishVerifiedTaskCompletion, resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.ts";
 import { isClosedStatus } from "../status-guards.ts";
 import {
   normalizeLegacyLifecycleStatus,
   compareLifecycleShadow,
 } from "../db/lifecycle-shadow-comparison.ts";
-import { readTaskRecoveryRoute } from "../task-recovery-domain-operation.ts";
+import { readTaskRecoveryRoute, recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.ts";
+import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.ts";
+import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
+import { internalExecutionInvocation } from "../execution-invocation.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
+import { emitJournalEvent } from "../journal.ts";
 
 const tempDirs = new Set<string>();
 
@@ -174,14 +179,15 @@ test("dry-run prints the exact row and mutates nothing", () => {
   );
 });
 
-test("apply settles the orphaned Attempt and a second apply is a no-op", () => {
-  const { attemptId, dispatchId } = seedRunningAttempt();
+test("apply settles the orphaned Attempt and a second apply is a no-op", async () => {
+  const { attemptId, dispatchId, dir } = seedRunningAttempt();
   orphanClaimedAttempt(dispatchId);
 
-  const applied = applyTaskSettle({
+  const applied = await applyTaskSettle({
     invocation: invocation("settle/apply/1"),
     task: TASK,
     reason: "operator repair after manual investigation",
+    basePath: dir,
   });
   assert.equal(applied.settled, true);
   assert.equal(applied.reconciled, false);
@@ -200,10 +206,11 @@ test("apply settles the orphaned Attempt and a second apply is a no-op", () => {
     "settle without reconcileLifecycle must not adopt canonical status",
   );
 
-  const again = applyTaskSettle({
+  const again = await applyTaskSettle({
     invocation: invocation("settle/apply/2"),
     task: TASK,
     reason: "operator repair after manual investigation",
+    basePath: dir,
   });
   assert.equal(again.settled, false);
   assert.equal(again.rows.length, 0, "a second apply reports nothing to do");
@@ -214,7 +221,7 @@ test("apply settles the orphaned Attempt and a second apply is a no-op", () => {
   );
 });
 
-test("a typo'd task id errors without writes", () => {
+test("a typo'd task id errors without writes", async () => {
   seedRunningAttempt();
   const before = row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count;
 
@@ -222,11 +229,12 @@ test("a typo'd task id errors without writes", () => {
     () => planTaskSettle({ milestoneId: "M001", sliceId: "S01", taskId: "T99" }, "typo"),
     /unknown Task M001\/S01\/T99/,
   );
-  assert.throws(
+  await assert.rejects(
     () => applyTaskSettle({
       invocation: invocation("settle/apply/typo"),
       task: { milestoneId: "M001", sliceId: "S01", taskId: "T99" },
       reason: "typo",
+      basePath: process.cwd(),
     }),
     /unknown Task M001\/S01\/T99/,
   );
@@ -241,8 +249,8 @@ test("a typo'd task id errors without writes", () => {
   );
 });
 
-test("apply reclaims an expired lease and interrupts its orphaned Attempt (#1907)", () => {
-  const { attemptId, dispatchId } = seedRunningAttempt();
+test("apply reclaims an expired lease and interrupts its orphaned Attempt (#1907)", async () => {
+  const { attemptId, dispatchId, dir } = seedRunningAttempt();
   orphanClaimedAttempt(dispatchId);
   db().exec(`
     UPDATE milestone_leases
@@ -258,10 +266,11 @@ test("apply reclaims an expired lease and interrupts its orphaned Attempt (#1907
     /orphaned running Attempt.*gsd_task_settle.*reclaimable.*\/gsd auto/s,
   );
 
-  const applied = applyTaskSettle({
+  const applied = await applyTaskSettle({
     invocation: invocation("settle/apply/released"),
     task: TASK,
     reason: "operator repair",
+    basePath: dir,
   });
   assert.equal(applied.settled, true);
   assert.equal(readTaskAttempt(attemptId)?.state, "settled");
@@ -279,8 +288,8 @@ test("apply reclaims an expired lease and interrupts its orphaned Attempt (#1907
   );
 });
 
-test("apply reclaims a released lease and interrupts its orphaned Attempt (#1907)", () => {
-  const { attemptId, dispatchId } = seedRunningAttempt();
+test("apply reclaims a released lease and interrupts its orphaned Attempt (#1907)", async () => {
+  const { attemptId, dispatchId, dir } = seedRunningAttempt();
   orphanClaimedAttempt(dispatchId);
   db().exec("UPDATE milestone_leases SET status = 'released' WHERE milestone_id = 'M001'");
 
@@ -288,18 +297,19 @@ test("apply reclaims a released lease and interrupts its orphaned Attempt (#1907
   assert.equal(plan.rows[0].leaseHeld, false);
   assert.match(plan.rows[0].rationale, /orphaned.*apply will reclaim/i);
 
-  const applied = applyTaskSettle({
+  const applied = await applyTaskSettle({
     invocation: invocation("settle/apply/released"),
     task: TASK,
     reason: "operator repair",
+    basePath: dir,
   });
   assert.equal(applied.settled, true);
   assert.equal(readTaskAttempt(attemptId)?.state, "settled");
   assert.equal(row("SELECT status FROM milestone_leases WHERE milestone_id = 'M001'").status, "released");
 });
 
-test("apply refuses an expired lease while its original worker is live (#1907)", () => {
-  const { attemptId, dispatchId } = seedRunningAttempt();
+test("apply refuses an expired lease while its original worker is live (#1907)", async () => {
+  const { attemptId, dispatchId, dir } = seedRunningAttempt();
   orphanClaimedAttempt(dispatchId);
   db().prepare(`
     UPDATE workers
@@ -319,19 +329,20 @@ test("apply refuses an expired lease while its original worker is live (#1907)",
   const plan = planTaskSettle(TASK, "operator repair");
   assert.equal(plan.rows[0].leaseHeld, false);
   assert.match(plan.rows[0].rationale, /apply will refuse/i);
-  assert.throws(
+  await assert.rejects(
     () => applyTaskSettle({
       invocation: invocation("settle/apply/live-owner"),
       task: TASK,
       reason: "operator repair",
+      basePath: dir,
     }),
     /live worker or replacement lease.*\/gsd auto/s,
   );
   assert.equal(readTaskAttempt(attemptId)?.state, "running");
 });
 
-test("apply refuses to steal a live replacement lease (#1907)", () => {
-  const { attemptId, dispatchId } = seedRunningAttempt();
+test("apply refuses to steal a live replacement lease (#1907)", async () => {
+  const { attemptId, dispatchId, dir } = seedRunningAttempt();
   orphanClaimedAttempt(dispatchId);
   db().exec(`
     INSERT INTO workers (
@@ -351,11 +362,12 @@ test("apply refuses to steal a live replacement lease (#1907)", () => {
   assert.equal(plan.rows[0].leaseHeld, false);
   assert.match(plan.rows[0].rationale, /apply will refuse/i);
 
-  assert.throws(
+  await assert.rejects(
     () => applyTaskSettle({
       invocation: invocation("settle/apply/live-replacement"),
       task: TASK,
       reason: "operator repair",
+      basePath: dir,
     }),
     /live worker or replacement lease.*\/gsd auto/s,
   );
@@ -384,7 +396,7 @@ function restoreSummary(dir: string, body: string, status: "pending" | "complete
   return summaryPath;
 }
 
-test("reconcileLifecycle adopts ready for pending after interrupt without deleting SUMMARYs", () => {
+test("reconcileLifecycle adopts ready for pending after interrupt without deleting SUMMARYs", async () => {
   const { dispatchId, dir } = seedRunningAttempt();
   orphanClaimedAttempt(dispatchId);
 
@@ -396,10 +408,11 @@ test("reconcileLifecycle adopts ready for pending after interrupt without deleti
   );
   assert.equal(taskLifecycleStatus(), "in_progress", "dry-run must not adopt lifecycle");
 
-  const settled = applyTaskSettle({
+  const settled = await applyTaskSettle({
     invocation: invocation("settle/reconcile/pending/settle"),
     task: TASK,
     reason: "operator repair",
+    basePath: dir,
   });
   assert.equal(settled.settled, true);
   const summaryPath = restoreSummary(dir, "# Pending repair SUMMARY", "pending");
@@ -411,10 +424,11 @@ test("reconcileLifecycle adopts ready for pending after interrupt without deleti
     ["in_progress->paused", "paused->ready"],
   );
 
-  const applied = applyTaskSettle({
+  const applied = await applyTaskSettle({
     invocation: invocation("settle/reconcile/pending"),
     task: TASK,
     reason: "operator repair",
+    basePath: dir,
     reconcileLifecycle: true,
   });
   assert.equal(applied.settled, false);
@@ -425,10 +439,11 @@ test("reconcileLifecycle adopts ready for pending after interrupt without deleti
   assert.equal(existsSync(summaryPath), true);
   assert.equal(readFileSync(summaryPath, "utf8"), "# Pending repair SUMMARY");
 
-  const again = applyTaskSettle({
+  const again = await applyTaskSettle({
     invocation: invocation("settle/reconcile/pending/2"),
     task: TASK,
     reason: "operator repair",
+    basePath: dir,
     reconcileLifecycle: true,
   });
   assert.equal(again.settled, false);
@@ -436,15 +451,16 @@ test("reconcileLifecycle adopts ready for pending after interrupt without deleti
   assert.equal(taskLifecycleStatus(), "ready");
 });
 
-test("reconcileLifecycle adopts completed for complete after interrupt without deleting SUMMARYs", () => {
+test("reconcileLifecycle adopts completed for complete after interrupt without deleting SUMMARYs", async () => {
   const { dispatchId, dir } = seedRunningAttempt();
   orphanClaimedAttempt(dispatchId);
   const summaryPath = restoreSummary(dir, "# Completed repair SUMMARY", "complete");
 
-  const applied = applyTaskSettle({
+  const applied = await applyTaskSettle({
     invocation: invocation("settle/reconcile/complete"),
     task: TASK,
     reason: "operator repair",
+    basePath: dir,
     reconcileLifecycle: true,
   });
   assert.equal(applied.settled, true);
@@ -464,7 +480,7 @@ test("reconcileLifecycle adopts completed for complete after interrupt without d
   );
 });
 
-test("reconcileLifecycle adopts completed after an out-of-band succeeded Attempt (#2018)", () => {
+test("reconcileLifecycle adopts completed after an out-of-band succeeded Attempt (#2018)", async () => {
   const { attemptId, dir } = seedRunningAttempt();
   settleTaskAttempt({
     invocation: invocation("fixture/succeed"),
@@ -477,11 +493,15 @@ test("reconcileLifecycle adopts completed after an out-of-band succeeded Attempt
   assert.equal(readTaskAttempt(attemptId)?.outcome, "succeeded");
   assert.equal(taskLifecycleStatus(), "in_progress");
 
-  assert.throws(
-    () => planTaskSettle(TASK, "operator repair", { reconcileLifecycle: true }),
-    /succeeded Attempt with tasks.status complete/,
-    "a succeeded Attempt must not reconcile a legacy pending task back to ready",
-  );
+  // #2417: a succeeded verify-stage Attempt over a legacy pending Task is not
+  // a reconcile case — planTaskSettle routes it to the publication pipeline
+  // instead of ever adopting ready (#2018's invariant is preserved: no
+  // lifecycleRows, so no ready-adopt).
+  const stranded = planTaskSettle(TASK, "operator repair", { reconcileLifecycle: true });
+  assert.equal(stranded.rows.length, 0);
+  assert.equal(stranded.lifecycleRows.length, 0);
+  assert.equal(stranded.publication?.attemptId, attemptId);
+  assert.equal(stranded.publication?.verdict ?? null, null);
 
   const summaryPath = restoreSummary(dir, "# Out-of-band completion SUMMARY", "complete");
   const planned = planTaskSettle(TASK, "operator repair", { reconcileLifecycle: true });
@@ -491,10 +511,11 @@ test("reconcileLifecycle adopts completed after an out-of-band succeeded Attempt
     ["in_progress->completed"],
   );
 
-  const applied = applyTaskSettle({
+  const applied = await applyTaskSettle({
     invocation: invocation("settle/reconcile/succeeded"),
     task: TASK,
     reason: "operator repair",
+    basePath: dir,
     reconcileLifecycle: true,
   });
   assert.equal(applied.settled, false);
@@ -517,6 +538,208 @@ test("reconcileLifecycle reports when completed repair still lacks passing proof
     plan.proof?.note ?? "",
     /gsd_slice_complete will still refuse/,
   );
+});
+
+// ── stranded durable success → publication door (#2417) ─────────────────────
+
+function seedPublicationProjectionArtifacts(dir: string): void {
+  const phaseDir = join(dir, ".gsd", "phases", "01-test");
+  mkdirSync(phaseDir, { recursive: true });
+  writeFileSync(join(phaseDir, "01-01-PLAN.md"), [
+    "# S01: Settle operation",
+    "",
+    "## Tasks",
+    "",
+    "- [ ] **T01: Settle atomically** `est:30m`",
+    "  - Do: recover the stranded completion",
+    "  - Verify: node --test",
+    "",
+  ].join("\n"));
+  db().prepare(`
+    UPDATE tasks SET full_summary_md = '# Stranded completion SUMMARY'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+}
+
+function gitCommitFixture(dir: string): void {
+  // The fixture DB lives at <dir>/gsd.db — untracked and inside the
+  // verification-source hash, so every DB write (including the -wal/-shm
+  // sidecars) would invalidate a just-recorded verdict. Ignore all of them,
+  // mirroring the production .gsd/ exclusion.
+  writeFileSync(join(dir, ".gitignore"), "gsd.db*\n");
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: dir });
+  writeFileSync(join(dir, "tracked.txt"), "verified\n");
+  execFileSync("git", ["add", ".gitignore", "tracked.txt"], { cwd: dir });
+  execFileSync("git", ["commit", "-qm", "fixture"], { cwd: dir });
+}
+
+function recordPassingVerdict(dir: string, attemptId: string): void {
+  const source = captureVerificationSourceSnapshot([{ id: "project", cwd: dir }]);
+  assert.equal(source.ok, true, source.ok ? undefined : source.error);
+  recordTaskTechnicalVerdict({
+    invocation: invocation(`fixture/verdict:${attemptId}`),
+    attemptId,
+    testedSourceRevision: source.snapshot.aggregateRevision,
+    verdict: "pass",
+    rationale: "Host verification passed.",
+    evidence: {
+      evidenceClass: "command",
+      commandOrTool: "node --test",
+      workingDirectory: dir,
+      startedAt: "2026-07-13T00:02:00.000Z",
+      endedAt: "2026-07-13T00:02:01.000Z",
+      exitCode: 0,
+      observation: "passed",
+      durableOutputRef: `db://host-verification/${attemptId}`,
+      environment: { runner: "node-test", platform: "test" },
+    },
+  });
+}
+
+function revertLifecycleToReadyFixture(): void {
+  // The #2417 wedge: in_progress → ready is not a canonical transition, so
+  // the side-door shadow cannot exist on a single legal edge. Build it the
+  // way real databases reached it — a sequence of fenced lifecycle writes
+  // (in_progress → paused → ready), each satisfying the transition trigger.
+  for (const status of ["paused", "ready"] as const) {
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: "test.task.side-door-revert",
+      idempotencyKey: `fixture/2417-revert-${status}`,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "test",
+      sourceTransport: "test",
+      payload: { taskId: "T01", to: status },
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: "task",
+        milestoneId: "M001",
+        sliceId: "S01",
+        taskId: "T01",
+        lifecycleStatus: status,
+      });
+      return {
+        events: [{
+          eventType: "test.task.side-door-revert",
+          entityType: "task",
+          entityId: "M001/S01/T01",
+          payload: { to: status },
+          destinations: ["test"],
+        }],
+        projections: [{
+          projectionKey: "test/m001/s01/t01",
+          projectionKind: "test",
+          rendererVersion: "1",
+        }],
+      };
+    });
+  }
+}
+
+function seedStrandedSuccess(
+  options: { revertLifecycleToReady?: boolean } = {},
+): { attemptId: string; dir: string } {
+  const { attemptId, dir } = seedRunningAttempt();
+  settleTaskAttempt({
+    invocation: invocation("fixture/stranded-succeed"),
+    attemptId,
+    outcome: "succeeded",
+    failureClass: "none",
+    summary: "executor produced the verified result",
+    output: { completed: true },
+  });
+  if (options.revertLifecycleToReady) {
+    revertLifecycleToReadyFixture();
+  }
+  seedPublicationProjectionArtifacts(dir);
+  return { attemptId, dir };
+}
+
+test("publication door: dry run reports the stranded success and mutates nothing", () => {
+  const { attemptId } = seedStrandedSuccess({ revertLifecycleToReady: true });
+
+  const plan = planTaskSettle(TASK, "publish the stranded durable success");
+  assert.equal(plan.rows.length, 0);
+  assert.equal(plan.lifecycleRows.length, 0, "a stranded success is not a reconcile case");
+  assert.equal(plan.publication?.attemptId, attemptId);
+  assert.equal(plan.publication?.lifecycleStatus, "ready");
+  assert.equal(plan.publication?.legacyStatus, "pending");
+  assert.equal(plan.publication?.verdict ?? null, null);
+  assert.match(plan.publication?.rationale ?? "", /verify stage/);
+  assert.equal(
+    taskLifecycleStatus(),
+    "ready",
+    "dry-run must not move the lifecycle",
+  );
+  assert.equal(row("SELECT status AS status FROM tasks WHERE id = 'T01'").status, "pending");
+});
+
+test("publication door: apply fails closed without a passing host Technical Verdict", async () => {
+  const { dir } = seedStrandedSuccess({ revertLifecycleToReady: true });
+  gitCommitFixture(dir);
+
+  await assert.rejects(
+    () => applyTaskSettle({
+      invocation: invocation("settle/publish/no-verdict"),
+      task: TASK,
+      reason: "publish the stranded durable success",
+      basePath: dir,
+    }),
+    /passing host Technical Verdict/,
+  );
+  assert.equal(taskLifecycleStatus(), "ready", "a refused publication must not move the lifecycle");
+  assert.equal(row("SELECT status AS status FROM tasks WHERE id = 'T01'").status, "pending");
+});
+
+test("publication door: apply publishes the stranded success from a reverted ready shadow (#2417)", async () => {
+  const { attemptId, dir } = seedStrandedSuccess({ revertLifecycleToReady: true });
+  gitCommitFixture(dir);
+  recordPassingVerdict(dir, attemptId);
+
+  const applied = await applyTaskSettle({
+    invocation: invocation("settle/publish/ready"),
+    task: TASK,
+    reason: "publish the stranded durable success",
+    basePath: dir,
+  });
+  assert.equal(applied.settled, false);
+  assert.equal(applied.reconciled, false);
+  assert.equal(applied.published?.attemptId, attemptId);
+  assert.equal(applied.published?.status, "committed");
+  assert.equal(taskLifecycleStatus(), "completed", "publication re-adopts the reverted shadow to completed");
+  assert.equal(row("SELECT status AS status FROM tasks WHERE id = 'T01'").status, "complete");
+
+  const replay = await publishVerifiedTaskCompletion({
+    invocation: internalExecutionInvocation(`internal:auto:task.publish:${attemptId}`),
+    basePath: dir,
+    task: TASK,
+    attemptId,
+  });
+  assert.equal(replay.status, "replayed", "auto publication reuses the manual settlement operation");
+
+  const again = planTaskSettle(TASK, "operator repair");
+  assert.equal(again.rows.length, 0);
+  assert.equal(again.publication ?? null, null, "a terminal Task is no publication candidate");
+});
+
+test("publication door: covers the in_progress lifecycle a loop crash leaves behind", async () => {
+  const { attemptId, dir } = seedStrandedSuccess();
+  gitCommitFixture(dir);
+  recordPassingVerdict(dir, attemptId);
+
+  const applied = await applyTaskSettle({
+    invocation: invocation("settle/publish/in-progress"),
+    task: TASK,
+    reason: "publish after the loop died between settlement and publication",
+    basePath: dir,
+  });
+  assert.equal(applied.published?.attemptId, attemptId);
+  assert.equal(applied.published?.status, "committed");
+  assert.equal(taskLifecycleStatus(), "completed");
+  assert.equal(row("SELECT status AS status FROM tasks WHERE id = 'T01'").status, "complete");
 });
 
 // ── blocker-accepted closeout disposition (#2202) ───────────────────────────
@@ -723,3 +946,211 @@ function readLatestTaskAttemptSnapshotStage(): string | null {
   `);
   return head.stage ? String(head.stage) : null;
 }
+
+// ── verification-paused reconcile (#2334) ────────────────────────────────────
+
+function seedVerificationPausedStrand(): { attemptId: string; dir: string } {
+  const { attemptId, dir } = seedRunningAttempt();
+  settleTaskAttempt({
+    invocation: invocation("fixture/verification-pause-succeed"),
+    attemptId,
+    outcome: "succeeded",
+    failureClass: "none",
+    summary: "executor completed; finalizer verification paused",
+    output: { completed: true },
+  });
+  // The stranded #2334 state: the finalizer never released the legacy row.
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  return { attemptId, dir };
+}
+
+function readLatestAttemptResult(attemptId: string): string {
+  const result = row(
+    "SELECT result_id AS id FROM workflow_attempt_results WHERE attempt_id = :id",
+    { ":id": attemptId },
+  );
+  return String(result.id);
+}
+
+function writePauseReceipt(
+  dir: string,
+  eventType = "verification-paused",
+  ts: string = new Date().toISOString(),
+): void {
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  emitJournalEvent(dir, {
+    ts,
+    flowId: "flow-verification-pause",
+    seq: 3,
+    eventType: eventType as never,
+    data: {
+      unitType: "execute-task",
+      unitId: "M001/S01/T01",
+      ...(eventType === "post-unit-finalize-end"
+        ? { status: "stopped", action: "break", reason: "verification-pause" }
+        : {}),
+    },
+  });
+}
+
+test("reconcileLifecycle releases a verification-paused in-progress Task to ready (#2334)", async () => {
+  const { dir } = seedVerificationPausedStrand();
+  writePauseReceipt(dir);
+  assert.equal(taskLifecycleStatus(), "in_progress");
+
+  const dryRun = planTaskSettle(TASK, "release verification-paused task", {
+    reconcileLifecycle: true,
+    basePath: dir,
+  });
+  assert.equal(dryRun.rows.length, 0);
+  assert.equal(dryRun.publication ?? null, null, "publication must not hijack a verification-paused Task");
+  assert.deepEqual(
+    dryRun.lifecycleRows.map((entry) => `${entry.currentStatus}->${entry.targetStatus}`),
+    ["in_progress->paused", "paused->ready"],
+  );
+  assert.match(dryRun.lifecycleRows[0].rationale, /verification-pause receipt/);
+
+  const applied = await applyTaskSettle({
+    invocation: invocation("settle/reconcile/verification-paused"),
+    task: TASK,
+    reason: "release verification-paused task",
+    basePath: dir,
+    reconcileLifecycle: true,
+  });
+  assert.equal(applied.settled, false);
+  assert.equal(applied.reconciled, true);
+  assert.equal(applied.published, undefined);
+  assert.equal(taskLifecycleStatus(), "ready");
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "the legacy row and SUMMARY projections are left in place",
+  );
+
+  const again = await applyTaskSettle({
+    invocation: invocation("settle/reconcile/verification-paused/2"),
+    task: TASK,
+    reason: "release verification-paused task",
+    basePath: dir,
+    reconcileLifecycle: true,
+  });
+  assert.equal(again.settled, false);
+  assert.equal(again.reconciled, false);
+  assert.equal(taskLifecycleStatus(), "ready");
+});
+
+test("verification-paused reconcile throws when the durable receipt is missing (negative control)", () => {
+  const { dir } = seedVerificationPausedStrand();
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /verification-pause receipt/,
+  );
+});
+
+test("verification-paused reconcile accepts the pre-#2334 finalize-end receipt", () => {
+  const { dir } = seedVerificationPausedStrand();
+  writePauseReceipt(dir, "post-unit-finalize-end");
+  const plan = planTaskSettle(TASK, "release verification-paused task", {
+    reconcileLifecycle: true,
+    basePath: dir,
+  });
+  assert.deepEqual(
+    plan.lifecycleRows.map((entry) => `${entry.currentStatus}->${entry.targetStatus}`),
+    ["in_progress->paused", "paused->ready"],
+  );
+});
+
+test("verification-paused reconcile never releases a failed verification (#2334)", () => {
+  const { attemptId, dir } = seedRunningAttempt();
+  settleTaskAttempt({
+    invocation: invocation("fixture/verification-failed"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "executor-error",
+    summary: "verification failed",
+    output: { completed: false },
+  });
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  writePauseReceipt(dir);
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /reconcileLifecycle requires an interrupted Attempt/,
+  );
+});
+
+test("verification-paused reconcile refuses a succeeded Attempt whose verification failed into an agent-owned abort route", () => {
+  const { attemptId, dir } = seedVerificationPausedStrand();
+  writePauseReceipt(dir);
+  // Host verification FAILED after the executor settled succeeded: the failing
+  // verdict advances the Kernel head to route and the failure routes to a
+  // durable agent-owned abort recovery that owns the lineage until
+  // /gsd recover. The pause receipt must not release it.
+  gitCommitFixture(dir);
+  const source = captureVerificationSourceSnapshot([{ id: "project", cwd: dir }]);
+  assert.equal(source.ok, true, source.ok ? undefined : source.error);
+  recordTaskTechnicalVerdict({
+    invocation: invocation(`fixture/failing-verdict:${attemptId}`),
+    attemptId,
+    testedSourceRevision: source.snapshot.aggregateRevision,
+    verdict: "fail",
+    rationale: "Host verification failed after the pause.",
+    evidence: {
+      evidenceClass: "command",
+      commandOrTool: "node --test",
+      workingDirectory: dir,
+      startedAt: "2026-07-13T00:02:00.000Z",
+      endedAt: "2026-07-13T00:02:01.000Z",
+      exitCode: 1,
+      observation: "failed",
+      durableOutputRef: `db://host-verification/${attemptId}`,
+      environment: { runner: "node-test", platform: "test" },
+    },
+  });
+  const settlement = readLatestAttemptResult(attemptId);
+  const recovery = recordFailureAndSelectRecovery({
+    invocation: invocation("fixture/verification-abort-route"),
+    attemptId,
+    resultId: settlement,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "Host verification failed after the pause",
+    evidence: { source: "test" },
+    rationale: "preserve a durable resume action",
+  });
+  assert.equal(recovery.action, "abort");
+  assert.equal(readTaskRecoveryRoute(attemptId)?.resumeAuthorized, false);
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /reconcileLifecycle requires an interrupted Attempt/,
+  );
+});
+
+test("verification-paused reconcile ignores a stale receipt that predates the latest settlement", () => {
+  const { dir } = seedVerificationPausedStrand();
+  // A receipt from an earlier pause on a superseded Attempt: written before
+  // the current Attempt's Result, so it cannot vouch for this settlement.
+  writePauseReceipt(dir, "verification-paused", "2020-01-01T00:00:00.000Z");
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /verification-pause receipt/,
+  );
+});

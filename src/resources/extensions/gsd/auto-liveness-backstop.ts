@@ -391,6 +391,47 @@ export async function acknowledgeWedge(
 }
 
 /**
+ * Guard ids whose recheck in orchestrator.recheckWedge needs a live
+ * orchestrator (state derivation / dispatch re-selection). Step mode has no
+ * orchestrator, so `/gsd wedge ack` refuses these and points at the
+ * orchestrator-driven `--resume-wedge` path, which runs the full recheck.
+ * Keep in sync with orchestrator.recheckWedge's handled branches.
+ */
+const ORCHESTRATOR_ONLY_RECHECK_GUARD_IDS: ReadonlySet<string> = new Set([
+  'orphaned-active-unit',
+  'dispatch-rule-stop',
+  'dispatch-authority',
+  'no-active-milestone',
+]);
+
+/**
+ * `/gsd wedge ack <id>` (#2159) — the step-mode acknowledgment surface, for
+ * workflows that never enter auto-mode. Reuses acknowledgeWedge with the
+ * recheck branches that do not need a live orchestrator: completed-no-advance
+ * wedges are re-probed against current target rows, and one-shot guards follow
+ * the orchestrator's fallback semantics (explicit ack permitted; the retained
+ * signature re-trips unchanged input immediately). No wedge records are
+ * minted or altered here (ADR-047 §5).
+ */
+export async function acknowledgeWedgeStepMode(
+  scopeId: string,
+  wedgeId: string,
+): Promise<AcknowledgeResult> {
+  return acknowledgeWedge(scopeId, wedgeId, (wedge) => {
+    if (wedge.guardId === COMPLETED_NO_ADVANCE_GUARD_ID) {
+      return recheckCompletedNoAdvanceWedge(wedge);
+    }
+    if (ORCHESTRATOR_ONLY_RECHECK_GUARD_IDS.has(wedge.guardId)) {
+      return {
+        blocking: true,
+        reason: `${wedge.guardId} needs a live orchestrator recheck; use \`/gsd auto --resume-wedge ${wedge.wedgeId}\``,
+      };
+    }
+    return { blocking: false };
+  });
+}
+
+/**
  * Hash the DB rows a unit was dispatched to move (its target identity's
  * milestone/slice/task rows, plus unit-specific durable verdict rows). Used to detect completed-no-advance dispatches:
  * a unit that returns while this hash is unchanged did zero target work
@@ -431,7 +472,21 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
     };
 
     collect('SELECT * FROM milestones WHERE id = :m', { ':m': milestone });
-    if (slice && task && unitType === 'gate-evaluate' && task.startsWith('gates+')) {
+    if (unitType === 'research-slice' && slice === 'parallel-research') {
+      // sentinel parallel-research unit id — no real slice row; advance is any
+      // slice-level RESEARCH artifact appearing (matching the special cases at
+      // artifact-verification.ts / auto-post-unit.ts). Task-level RESEARCH
+      // rows are excluded: they are not this unit's deliverable.
+      collect('SELECT * FROM slices WHERE milestone_id = :m ORDER BY id', { ':m': milestone });
+      collect(
+        `SELECT path, artifact_type, slice_id, content_hash
+           FROM artifacts
+          WHERE milestone_id = :m AND artifact_type = 'RESEARCH'
+            AND slice_id IS NOT NULL AND task_id IS NULL
+          ORDER BY path`,
+        { ':m': milestone },
+      );
+    } else if (slice && task && unitType === 'gate-evaluate' && task.startsWith('gates+')) {
       // gate-evaluate unit ids encode scoped gate ids in the third segment
       // (e.g. M001/S01/gates+Q3,Q4) — not a real task row.
       collect('SELECT * FROM slices WHERE milestone_id = :m AND id = :s ORDER BY id', { ':m': milestone, ':s': slice });
@@ -443,6 +498,23 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
     } else if (slice) {
       collect('SELECT * FROM slices WHERE milestone_id = :m AND id = :s ORDER BY id', { ':m': milestone, ':s': slice });
       collect('SELECT * FROM tasks WHERE milestone_id = :m AND slice_id = :s ORDER BY id', { ':m': milestone, ':s': slice });
+      if (unitType === 'research-slice' || unitType === 'discuss-slice') {
+        // #2384 stage 1 — artifact-only units: a research/discuss slice writes
+        // its RESEARCH/CONTEXT artifact without transitioning slice or task
+        // rows, so the row-only hash never moved and every completed dispatch
+        // accrued a completed-no-advance recurrence. The unit's own artifact
+        // row is its advance (same explicit-column shape as the
+        // parallel-research branch above; task-level rows are not this unit's
+        // deliverable).
+        collect(
+          `SELECT path, artifact_type, slice_id, content_hash
+             FROM artifacts
+            WHERE milestone_id = :m AND artifact_type = :type
+              AND slice_id = :s AND task_id IS NULL
+            ORDER BY path`,
+          { ':m': milestone, ':s': slice, ':type': unitType === 'research-slice' ? 'RESEARCH' : 'CONTEXT' },
+        );
+      }
       if (unitType === 'run-uat') {
         collect(
           `SELECT milestone_id, slice_id, scope, status
@@ -495,6 +567,23 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
           { ':m': milestone },
         );
       }
+      if (unitType === 'research-milestone' || unitType === 'discuss-milestone') {
+        // #2384 stage 1 — milestone-level artifact-only units: research/
+        // discuss-milestone writes its RESEARCH/CONTEXT artifact and moves no
+        // milestone/slice row at all, so the row-only hash never changed and
+        // the second completed dispatch tripped completed-no-advance with a
+        // wedge its recheck could never clear (#2384 second repro). The
+        // milestone-level artifact row is the unit's advance; slice/task-level
+        // rows are not this unit's deliverable.
+        collect(
+          `SELECT path, artifact_type, content_hash
+             FROM artifacts
+            WHERE milestone_id = :m AND artifact_type = :type
+              AND slice_id IS NULL AND task_id IS NULL
+            ORDER BY path`,
+          { ':m': milestone, ':type': unitType === 'research-milestone' ? 'RESEARCH' : 'CONTEXT' },
+        );
+      }
     }
     return { ok: true, hash: hashBackstopInput(`${unitType}\n${JSON.stringify(rows)}`) };
   } catch (err) {
@@ -524,6 +613,11 @@ export function wedgeResumeCommand(wedge: WedgeRecord): string {
   return `/gsd auto --resume-wedge ${wedge.wedgeId}`;
 }
 
+/** The step-mode acknowledgment command for a wedge (#2159) — no auto re-entry. */
+export function wedgeAckCommand(wedge: WedgeRecord): string {
+  return `/gsd wedge ack ${wedge.wedgeId}`;
+}
+
 /**
  * Terminal notice emitted when the backstop trips. Routed through
  * markBlockedStopReason → "Auto-mode blocked — …" so the headless host exits
@@ -534,7 +628,8 @@ export function formatWedgeTripNotice(wedge: WedgeRecord): string {
     `liveness backstop tripped: ${wedge.guardId} recurred ${wedge.occurrenceCount}x with unchanged inputs ` +
     `for ${wedge.unitType} ${wedge.unitId} (wedge ${wedge.wedgeId}). ` +
     `Sanctioned exit: ${wedge.sanctionedExit} ` +
-    `After resolving, acknowledge with \`${wedgeResumeCommand(wedge)}\` to re-enter auto-mode.`
+    `After resolving, acknowledge with \`${wedgeResumeCommand(wedge)}\` to re-enter auto-mode, ` +
+    `or, in a step-mode workflow, with \`${wedgeAckCommand(wedge)}\` without re-entering auto-mode.`
   );
 }
 
@@ -549,6 +644,7 @@ export function formatWedgeRefusalNotice(wedge: WedgeRecord): string {
     `wedged (${wedge.wedgeId}): ${wedge.guardId} recurred ${wedge.occurrenceCount}x with unchanged inputs ` +
     `for ${wedge.unitType} ${wedge.unitId}. ` +
     `Sanctioned exit: ${wedge.sanctionedExit} ` +
-    `Auto-mode will not re-enter until you acknowledge with \`${wedgeResumeCommand(wedge)}\`.`
+    `Auto-mode will not re-enter until you acknowledge with \`${wedgeResumeCommand(wedge)}\` ` +
+    `(step-mode alternative: \`${wedgeAckCommand(wedge)}\`).`
   );
 }

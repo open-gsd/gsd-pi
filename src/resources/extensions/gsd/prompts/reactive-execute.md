@@ -34,6 +34,7 @@ You are executing **multiple tasks in parallel** for this slice. The task graph 
 8. **Report the batch outcome** — which tasks succeeded, which failed, and any output collisions or dependency surprises.
 
 If any subagent fails:
+
 - Keep successful task summaries and completion tool calls as-is
 - Write a failure summary only when the failed task did not leave one behind
 - Do not silently discard or overwrite another task's outputs

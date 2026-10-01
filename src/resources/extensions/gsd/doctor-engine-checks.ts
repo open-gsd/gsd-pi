@@ -6,6 +6,7 @@ import type { DoctorIssue } from "./doctor-types.js";
 import {
   deleteArtifactByPath,
   getAllMilestones,
+  getMilestoneLifecycleShadowSnapshot,
   getMilestoneSlices,
   getSliceTasks,
   findWrongKindLifecycleProjectionHeads,
@@ -15,7 +16,7 @@ import {
   _getAdapter,
 } from "./gsd-db.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
-import { isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
+import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
 import {
   gsdProjectionRoot,
   gsdRoot,
@@ -141,6 +142,81 @@ function reportOrphanedRunningAttempts(
       message:
         `Task ${unitId} has an orphaned running Attempt (${attempt.attempt_id}) with no live process or lease. ` +
         "Settle it with gsd_task_settle (dry-run first, then apply: true) — doctor --fix will not settle it for you.",
+      file: ".gsd/gsd.db",
+      fixable: false,
+    });
+  }
+}
+
+/**
+ * A settled succeeded Attempt at the verify stage whose Task is not terminal
+ * (#2417): the durable success never published, and with no running Attempt
+ * and no recovery route head nothing re-drives publication on its own.
+ * Reports the wedge; re-entering `/gsd auto` resumes publication, and
+ * `gsd_task_settle` apply publishes the verified completion. Auto-fix must
+ * never publish — publication is evidence-gated, not a repair judgment call.
+ */
+function reportUnpublishedSucceededAttempts(
+  adapter: ReturnType<typeof _getAdapter> & object,
+  issues: DoctorIssue[],
+): void {
+  const stranded = adapter.prepare(`
+    SELECT attempt.attempt_id, lifecycle.lifecycle_status,
+           COALESCE(tasks.status, '') AS legacy_status,
+           lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
+    FROM workflow_execution_attempts attempt
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = attempt.lifecycle_id
+     AND lifecycle.project_id = attempt.project_id
+    JOIN workflow_attempt_results result
+      ON result.attempt_id = attempt.attempt_id
+     AND result.lifecycle_id = attempt.lifecycle_id
+     AND result.project_id = attempt.project_id
+    JOIN workflow_kernel_checkpoints checkpoint
+      ON checkpoint.attempt_id = attempt.attempt_id
+     AND checkpoint.project_id = attempt.project_id
+    LEFT JOIN tasks
+      ON tasks.milestone_id = lifecycle.milestone_id
+     AND tasks.slice_id = lifecycle.slice_id
+     AND tasks.id = lifecycle.task_id
+    WHERE lifecycle.item_kind = 'task'
+      AND attempt.attempt_state = 'settled'
+      AND result.outcome = 'succeeded'
+      AND checkpoint.next_stage = 'verify'
+      AND attempt.attempt_number = (
+        SELECT MAX(latest.attempt_number)
+        FROM workflow_execution_attempts latest
+        WHERE latest.lifecycle_id = attempt.lifecycle_id
+          AND latest.project_id = attempt.project_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_kernel_checkpoints successor
+        WHERE successor.previous_kernel_checkpoint_id = checkpoint.kernel_checkpoint_id
+      )
+      AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled', 'blocker-accepted')
+      AND COALESCE(tasks.status, '') NOT IN ('complete', 'cancelled', 'blocker-accepted')
+  `).all() as unknown as Array<{
+    attempt_id: string;
+    lifecycle_status: string;
+    legacy_status: string;
+    milestone_id: string;
+    slice_id: string;
+    task_id: string;
+  }>;
+
+  for (const row of stranded) {
+    const unitId = `${row.milestone_id}/${row.slice_id}/${row.task_id}`;
+    issues.push({
+      severity: "warning",
+      code: "unpublished_succeeded_attempt",
+      scope: "task",
+      unitId,
+      message:
+        `Task ${unitId} has a settled succeeded Attempt (${row.attempt_id}) at the verify stage but is not ` +
+        `terminal (lifecycle ${row.lifecycle_status}, tasks.status ${row.legacy_status || "unknown"}). If auto-mode ` +
+        "is not mid-publication this is a stranded success: re-enter `/gsd auto` to resume publication, or " +
+        "apply gsd_task_settle (dry-run first) to publish — it fails closed until a passing host Technical " +
+        "Verdict is recorded.",
       file: ".gsd/gsd.db",
       fixable: false,
     });
@@ -559,6 +635,12 @@ export function createValidationSourceDriftDoctorIssue(
   const recovery = drift.autoCommitDetected
     ? " GSD's pre-merge auto-commit is the current HEAD. If it captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry."
     : " Restore or remove unintended working-tree changes before retrying.";
+  // The only caller, reportMilestoneValidationSourceDrift, inspects closed
+  // milestones only — but /gsd validate-milestone requires a ready or
+  // in_progress lifecycle, so the old "run /gsd validate-milestone, then
+  // /gsd auto" remediation was unexecutable by construction (#2439). State the
+  // truth: the pinned receipt is unreachable for a terminal milestone until a
+  // re-pin path exists, so the issue is not doctor-fixable.
   return {
     severity: "error",
     code: "validation_source_revision_mismatch",
@@ -567,9 +649,9 @@ export function createValidationSourceDriftDoctorIssue(
     message:
       `Milestone ${milestoneId} validation source revision does not match the current tree ` +
       `(expected ${mismatch.expectedSourceRevision}; tested ${mismatch.testedSourceRevision}).${paths}${recovery} ` +
-      `If the current content is intended, run \`/gsd validate-milestone ${milestoneId}\`, then \`/gsd auto\`.`,
+      `The milestone is closed, so its pinned validation receipt is unreachable: \`/gsd validate-milestone ${milestoneId}\` requires a ready or in_progress lifecycle, and no re-pin path for closed milestones exists yet.`,
     file: drift.paths[0],
-    fixable: true,
+    fixable: false,
   };
 }
 
@@ -594,6 +676,47 @@ export function reportMilestoneValidationSourceDrift(basePath: string, issues: D
       mismatch,
       diagnoseMilestoneVerificationSourceDrift(sourceRoot, preferences),
     ));
+  }
+}
+
+/**
+ * #2440: legacy/canonical lifecycle shadow drift was invisible — a hierarchy
+ * row whose legacy status went terminal while its canonical lifecycle row stayed
+ * `ready` fails every terminal-parity check (complete/validate/reopen) with an
+ * opaque "canonical and legacy lifecycle mismatch", and doctor reported nothing.
+ * This check surfaces the drift itself via the engine's own comparator.
+ * Evidence-backed drift converges through the shadow repair on the reopen path;
+ * unverifiable drift must be resolved by an operator (#2313 tracks the
+ * free-text verification-result classification gap).
+ */
+export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void {
+  if (!isDbAvailable()) return;
+  for (const milestone of getAllMilestones()) {
+    if (!isMilestoneLifecycleAdopted(milestone.id)) continue;
+    const snapshot = getMilestoneLifecycleShadowSnapshot(milestone.id);
+    if (snapshot.queryError) continue;
+    for (const item of snapshot.items) {
+      if (item.classification !== "status_mismatch") continue;
+      const unitId = [
+        item.itemIdentity.milestoneId,
+        item.itemIdentity.sliceId,
+        item.itemIdentity.taskId,
+      ].filter(Boolean).join("/");
+      issues.push({
+        severity: "error",
+        code: "lifecycle_shadow_mismatch",
+        scope: item.itemIdentity.taskId ? "task" : item.itemIdentity.sliceId ? "slice" : "milestone",
+        unitId,
+        message:
+          `Legacy status "${item.rawLegacyStatus ?? "null"}" does not match canonical lifecycle ` +
+          `"${item.rawCanonicalStatus ?? "null"}" for ${unitId}. Terminal-parity checks refuse ` +
+          `completion, validation, and reopen for this row. Reopen path converges drift backed by ` +
+          `durable completion evidence via the lifecycle shadow repair; drift without evidence ` +
+          `must be resolved manually.`,
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    }
   }
 }
 
@@ -744,6 +867,12 @@ export async function checkEngineHealth(
         // Non-fatal — closeout source drift diagnostics failed
       }
 
+      try {
+        reportMilestoneLifecycleShadowDrift(issues);
+      } catch {
+        // Non-fatal — lifecycle shadow drift diagnostics failed
+      }
+
       // a. Orphaned tasks (task.slice_id points to non-existent slice)
       try {
         const orphanedTasks = adapter
@@ -875,6 +1004,14 @@ export async function checkEngineHealth(
         // Non-fatal — orphaned running Attempt check failed
       }
 
+      // Settled succeeded Attempts stranded before publication (#2417): the
+      // Task is not terminal and nothing re-drives the verify→publish chain.
+      try {
+        reportUnpublishedSucceededAttempts(adapter, issues);
+      } catch {
+        // Non-fatal — unpublished succeeded Attempt check failed
+      }
+
       // Held, non-expired milestone leases whose holder worker process is
       // dead (#2375): report only — the planning tool reclaims on its next run.
       try {
@@ -894,24 +1031,24 @@ export async function checkEngineHealth(
                AND ud.unit_type = 'complete-milestone'
                AND ud.unit_id = m.id
                AND ud.status = 'completed'
-               AND ud.id = (
-                 SELECT latest.id
-                 FROM unit_dispatches latest
-                 WHERE latest.milestone_id = m.id
-                   AND latest.unit_type = 'complete-milestone'
-                   AND latest.unit_id = m.id
-                   AND latest.status = 'completed'
-                 ORDER BY COALESCE(latest.ended_at, latest.started_at) DESC, latest.id DESC
-                 LIMIT 1
-               )
-             ORDER BY m.id`,
+             ORDER BY m.id, COALESCE(ud.ended_at, ud.started_at) DESC, ud.id DESC`,
           )
           .all() as Array<{ id: string; status: string; started_at: string | null; ended_at: string | null }>;
 
+        // #2398: the dispatch row alone is not completion proof — require a
+        // covering milestone.completed event (mirrors the drift detector gate
+        // in state-reconciliation/drift/artifact-db.ts). Evaluate every
+        // completed dispatch newest-first so a later receiptless row cannot
+        // hide an earlier event-backed completion; at most one issue per
+        // milestone.
+        const flagged = new Set<string>();
         for (const row of reopened) {
+          if (flagged.has(row.id)) continue;
           const completedAt = row.ended_at ?? row.started_at ?? null;
+          if (!completedEventCoversDispatch(basePath, row.id, row.started_at)) continue;
           const reopenAt = latestExplicitReopenAt(basePath, row.id);
           if (reopenAt && (!completedAt || Date.parse(reopenAt) > Date.parse(completedAt))) continue;
+          flagged.add(row.id);
           issues.push({
             severity: "error",
             code: "completed_milestone_reopened",

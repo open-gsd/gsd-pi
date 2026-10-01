@@ -90,6 +90,7 @@ docker run --rm -v $(pwd):/workspace ghcr.io/open-gsd/gsd-pi:<version> --version
 **CI refactor (2026-05):** Single `fast-gates` job, Linux build/test consolidation, path-gated Windows/Docker checks, and coverage moved out of the core CI path. Local parity: `verify:fast`, `verify:pr` (fast loop), **`verify:merge`** (PR blocking). See [Test confidence stack](./test-confidence-stack.md).
 
 **Publish workflow hardening:**
+
 - **Shallow clones** — downstream jobs use shallow checkout + shared build artifacts
 - **pnpm cache** — the prerelease publish, prerelease verify, and production release jobs in `npm-publish.yml` use `cache: pnpm` on `setup-node`, saving ~1-2 min per job on repeat runs
 - **Exponential backoff** — npm registry propagation waits use exponential backoff (10s → 20s → 40s → 60s cap in `npm-publish.yml`; 5s → 30s cap for native package verification) instead of fixed sleeps

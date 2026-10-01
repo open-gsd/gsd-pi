@@ -1,6 +1,5 @@
 # Custom Tools — Giving the LLM New Abilities
 
-
 Tools are the most powerful extension capability. They appear in the LLM's system prompt and the LLM calls them autonomously when appropriate.
 
 ### Tool Definition
