@@ -388,24 +388,29 @@ The right-pane PTY path should remain independent. Reusing PTY-specific assumpti
 ## Initial file map
 
 ### Main runtime / session ownership
+
 - `src/web/bridge-service.ts`
 - `src/web/cli-entry.ts`
 
 ### Native TUI runtime seam
+
 - `packages/pi-coding-agent/src/modes/interactive/interactive-mode.ts`
 - `packages/pi-tui/src/terminal.ts`
 - `packages/pi-tui/src/tui.ts`
 
 ### Web left-pane UI
+
 - `web/components/gsd/dual-terminal.tsx`
 - new bridge-native terminal component under `web/components/gsd/`
 
 ### Existing right-pane UI to keep stable
+
 - `web/components/gsd/shell-terminal.tsx`
 - `web/lib/pty-manager.ts`
 - `web/app/api/terminal/*`
 
 ### Browser sync surfaces
+
 - `web/lib/gsd-workspace-store.tsx`
 - `web/components/gsd/chat-mode.tsx`
 - `web/components/gsd/dashboard.tsx`
@@ -414,7 +419,9 @@ The right-pane PTY path should remain independent. Reusing PTY-specific assumpti
 ## Final architecture rule
 
 ### Runtime A — authoritative main session
+
 Powers:
+
 - left native TUI
 - chat
 - dashboard/status
@@ -422,7 +429,9 @@ Powers:
 - session browser active session state
 
 ### Runtime B — separate PTY session
+
 Powers:
+
 - right pane only
 
 This rule should be treated as the invariant for implementation and tests.

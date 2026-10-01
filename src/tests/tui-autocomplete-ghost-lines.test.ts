@@ -80,9 +80,18 @@ describe("TUI autocomplete shrink clearing (#3721)", () => {
 
     assert.ok(terminal.writtenData.length >= 1, "shrink render should write a differential buffer");
     const buffer = terminal.writtenData[0];
+    // #2415: clean repaints erase per-line instead of \x1b[2J (which erased
+    // never-flushed lines in place). The shrink still homes to row 1, erases
+    // every screen row exactly once (20 above the block + 4 written), and
+    // leaves the retained block bottom-anchored: block height 4, terminal
+    // height 24 → the block occupies rows 21..24.
+    assert.ok(buffer.includes("\x1b[1;1H"), `expected the repaint to home to row 1, got ${JSON.stringify(buffer)}`);
+    assert.ok(!buffer.includes("\x1b[2J"), `clean repaints must not emit \\x1b[2J, got ${JSON.stringify(buffer)}`);
+    const eraseCount = (buffer.match(/\x1b\[2K/g) ?? []).length;
+    assert.strictEqual(eraseCount, 24, `expected one \\x1b[2K per screen row, got ${eraseCount} in ${JSON.stringify(buffer)}`);
     assert.ok(
-      buffer.includes("\x1b[2J\x1b[21;1H"),
-      `expected short shrink to redraw at the bottom anchor, got ${JSON.stringify(buffer)}`,
+      buffer.includes("autocomplete row 1"),
+      `expected the retained autocomplete row to be repainted, got ${JSON.stringify(buffer)}`,
     );
   });
 });

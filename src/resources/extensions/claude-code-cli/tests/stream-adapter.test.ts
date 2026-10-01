@@ -940,6 +940,189 @@ describe("stream-adapter — Claude Code external tool results", () => {
 		);
 	});
 
+	test("attaches the last main-loop per-call usage as liveContextTokens (#2358, #2359)", async () => {
+		// The terminal result.usage is cumulative across the SDK's internal
+		// tool-use loop; each assistant event carries its own call's usage.
+		// The final message must expose the last MAIN-LOOP event's
+		// input + cacheRead + cacheWrite as liveContextTokens (subagent
+		// events have their own context and must be ignored), while the
+		// mapUsage-derived cumulative fields keep their existing contract.
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Do the thing." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					// Earlier main-loop call of the internal loop.
+					yield {
+						type: "assistant",
+						uuid: "assistant-main-1",
+						session_id: "session-1",
+						parent_tool_use_id: null,
+						message: {
+							id: "msg-main-1",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "intermediate text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "tool_use" as const,
+							usage: {
+								input_tokens: 10,
+								output_tokens: 20,
+								cache_read_input_tokens: 30,
+								cache_creation_input_tokens: 40,
+							},
+						},
+					};
+					// Last main-loop call — its per-call usage is the live
+					// end-of-turn context (#2359 real-turn numbers).
+					yield {
+						type: "assistant",
+						uuid: "assistant-main-2",
+						session_id: "session-1",
+						parent_tool_use_id: null,
+						message: {
+							id: "msg-main-2",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "final text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "end_turn" as const,
+							usage: {
+								input_tokens: 2,
+								output_tokens: 5_567,
+								cache_read_input_tokens: 168_082,
+								cache_creation_input_tokens: 4_005,
+							},
+						},
+					};
+					// Subagent call AFTER the last main-loop event — its own
+					// (smaller) context must be ignored despite arriving last.
+					yield {
+						type: "assistant",
+						uuid: "assistant-sub-1",
+						session_id: "session-1",
+						parent_tool_use_id: "tool-task-1",
+						message: {
+							id: "msg-sub-1",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "subagent text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "end_turn" as const,
+							usage: {
+								input_tokens: 1,
+								output_tokens: 2,
+								cache_read_input_tokens: 3,
+								cache_creation_input_tokens: 4,
+							},
+						},
+					};
+					// Terminal result usage — cumulative across the loop.
+					yield {
+						...makeSdkSuccessResult("done"),
+						usage: {
+							input_tokens: 19_328,
+							output_tokens: 5_567,
+							cache_read_input_tokens: 476_140,
+							cache_creation_input_tokens: 335_600,
+						},
+					};
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const done = events.find((event) => event.type === "done");
+		assert.ok(done, "expected a terminal done event");
+		const message = done.message as AssistantMessage;
+		assert.equal(message.usage.liveContextTokens, 172_089);
+		assert.equal(message.usage.input, 19_328);
+		assert.equal(message.usage.output, 5_567);
+		assert.equal(message.usage.totalTokens, 360_495);
+	});
+
+	test("readiness retry does not inherit the previous attempt's assistant usage", async () => {
+		// The per-call usage capture resets per sdkAttemptLoop attempt: if a
+		// readiness retry starts a new SDK session whose attempt reaches a
+		// result without any main-loop assistant event, the final message must
+		// not carry the abandoned attempt's measurement.
+		let queryCalls = 0;
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-retry-usage-"));
+		const context: Context = {
+			systemPrompt: "UNIT: Run UAT",
+			messages: [{ role: "user", content: "Run UAT." } as Message],
+		};
+		_setAutoActiveForTest(true);
+		autoSession.currentUnit = { type: "run-uat", id: "M001/S001", startedAt: 0, workspaceRoot: cwd } as never;
+		try {
+			const stream = streamViaClaudeCode(
+				{ id: "claude-sonnet-4-6" } as any,
+				context,
+				{
+					cwd,
+					_skipWorkflowMcpPreflightForTest: true,
+					async *_sdkQueryForTest() {
+						queryCalls += 1;
+						if (queryCalls === 1) {
+							// Abandoned attempt: a main-loop assistant event whose
+							// per-call usage (sum 80) must NOT leak into attempt 2.
+							yield {
+								type: "assistant",
+								uuid: "assistant-attempt-1",
+								session_id: "session-1",
+								parent_tool_use_id: null,
+								message: {
+									id: "msg-attempt-1",
+									type: "message" as const,
+									role: "assistant" as const,
+									content: [{ type: "text", text: "stale attempt text" }],
+									model: "claude-sonnet-4-6",
+									stop_reason: "end_turn" as const,
+									usage: {
+										input_tokens: 10,
+										output_tokens: 20,
+										cache_read_input_tokens: 30,
+										cache_creation_input_tokens: 40,
+									},
+								},
+							};
+							// Same failing-init shape as the readiness-retry regression
+							// above — this init triggers the retry.
+							yield {
+								type: "system",
+								subtype: "init",
+								tools: ["Read"],
+								mcp_servers: [{ name: "gsd-workflow", status: "connected" }],
+							};
+							return;
+						}
+
+						// Retry attempt reaches a result with no assistant events.
+						yield makeSdkSuccessResult("fresh retry result");
+					},
+				} as any,
+			);
+
+			const message = await stream.result();
+
+			assert.equal(queryCalls, 2);
+			assert.equal(
+				(message.usage as AssistantMessage["usage"]).liveContextTokens,
+				undefined,
+				"result without assistant events must not inherit the abandoned attempt's usage",
+			);
+		} finally {
+			autoSession.currentUnit = null;
+			_setAutoActiveForTest(false);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("closes an in-flight interview when ask_user_questions reports timed_out first", async (t) => {
 		const notifications: Array<{ message: string; type?: string }> = [];
 		let elicitationPromise: Promise<unknown> | undefined;
@@ -1526,6 +1709,115 @@ describe("claude-code-cli — Claude Fable 5 Opus-tier support", () => {
 		const options = buildSdkOptions("claude-haiku-4-5", "test prompt", undefined, { reasoning: "xhigh" });
 		assert.equal(options.effort, "high", "xhigh must clamp to high for non-Opus-tier models");
 		assert.deepEqual(options.betas, [], "Haiku must not enable the 1M-context beta");
+	});
+});
+
+// #2437 — catalog model metadata drives additive thinking checks: a catalog
+// compat flag can enable adaptive thinking for ids the id-heuristic does not
+// know yet, and a catalog thinkingLevelMap entry wins over the legacy effort map.
+describe("stream-adapter — catalog model metadata (#2437)", () => {
+	test("compat.forceAdaptiveThinking enables adaptive thinking for ids the heuristic does not know", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{ reasoning: "high" },
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { high: "high" } },
+		);
+		assert.equal(options.effort, "high", "catalog-backed model must map effort");
+		assert.deepEqual(options.thinking, { type: "adaptive" }, "catalog compat must force adaptive thinking");
+	});
+
+	test("xhigh resolves via the catalog thinkingLevelMap over the legacy effort map", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{ reasoning: "xhigh" },
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: "xhigh" } },
+		);
+		assert.equal(options.effort, "xhigh", "catalog thinkingLevelMap entry must win");
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	test("legacy id-heuristic behavior is unchanged when no metadata is passed", () => {
+		const options = buildSdkOptions("claude-opus-4-6", "test", undefined, { reasoning: "xhigh" });
+		assert.equal(options.effort, "max", "legacy xhigh clamp for opus-4-6 must persist");
+	});
+
+	test("unknown id without catalog compat stays non-adaptive", () => {
+		const options = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "high" });
+		assert.equal("effort" in options, false);
+		assert.equal("thinking" in options, false);
+	});
+
+	test("streamViaClaudeCode forwards model metadata into the sdk options", async (t) => {
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-metadata-"));
+		t.after(() => rmSync(cwd, { recursive: true, force: true }));
+		let capturedOptions: Record<string, unknown> | undefined;
+		const stream = streamViaClaudeCode(
+			{
+				id: "claude-opus-9",
+				compat: { forceAdaptiveThinking: true },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			} as any,
+			{ messages: [{ role: "user", content: "Hi." } as Message] },
+			{
+				cwd,
+				reasoning: "xhigh",
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest(args: {
+					prompt: string | AsyncIterable<unknown>;
+					options?: Record<string, unknown>;
+				}) {
+					capturedOptions = args.options;
+					yield makeSdkSuccessResult("ok");
+				},
+			} as any,
+		);
+		await stream.result();
+		assert.equal(capturedOptions?.effort, "xhigh", "model metadata must reach the sdk effort option");
+		assert.deepEqual(capturedOptions?.thinking, { type: "adaptive" });
+	});
+
+	test("metadata-only adaptive model with reasoning omitted still disables thinking explicitly", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{},
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: "xhigh" } },
+		);
+		assert.equal("effort" in options, false, "no effort when reasoning is off");
+		assert.deepEqual(options.thinking, { type: "disabled" }, "thinking must be explicitly disabled");
+	});
+
+	test("forceAdaptiveThinking: false does not disable the id-heuristic path (additive only)", () => {
+		const options = buildSdkOptions(
+			"claude-opus-4-6",
+			"test prompt",
+			undefined,
+			{ reasoning: "high" },
+			{ compat: { forceAdaptiveThinking: false } },
+		);
+		assert.equal(options.effort, "high", "heuristic-supported model must keep mapping effort");
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	test("missing, null, and non-effort thinkingLevelMap entries fall back to the legacy effort map", () => {
+		const metadata = { compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: null, high: "off-the-scale" } };
+		const nullMapped = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "xhigh" }, metadata);
+		assert.equal(nullMapped.effort, "high", "null catalog entry must fall through to the legacy map default");
+		const invalidMapped = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "high" }, metadata);
+		assert.equal(invalidMapped.effort, "high", "non-effort catalog value must fall through to the legacy map");
+		const unmapped = buildSdkOptions(
+			"claude-opus-9",
+			"test",
+			undefined,
+			{ reasoning: "medium" },
+			{ compat: { forceAdaptiveThinking: true } },
+		);
+		assert.equal(unmapped.effort, "medium", "missing catalog entry must fall through to the legacy map");
 	});
 });
 

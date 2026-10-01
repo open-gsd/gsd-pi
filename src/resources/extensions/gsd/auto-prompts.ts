@@ -4145,19 +4145,28 @@ export async function buildReassessRoadmapPrompt(
 /**
  * Build the `with model: "…" and thinking: "…"` suffix injected into a prompt
  * that instructs the coordinator how to dispatch a `subagent` call. Either or
- * both may be absent (ADR-026 / #508).
+ * both may be absent (ADR-026 / #508). Fallback entries accept the widened
+ * `{ model, thinking? }` object form and render their per-entry level (#1270).
  */
-function subagentCallSuffix(model?: string, thinking?: string, fallbacks?: string[]): string {
-  const parts: string[] = [];
-  if (model) {
-    let modelHint = `model: "${model}"`;
-    if (fallbacks && fallbacks.length > 0) {
-      modelHint += ` (fallbacks, in order: ${fallbacks.map((f) => `"${f}"`).join(", ")})`;
-    }
-    parts.push(modelHint);
-  }
-  if (thinking) parts.push(`thinking: "${thinking}"`);
-  return parts.length > 0 ? ` with ${parts.join(" and ")}` : "";
+function subagentCallSuffix(
+	model?: string,
+	thinking?: string,
+	fallbacks?: Array<string | { model: string; thinking?: string }>,
+): string {
+	const renderFallback = (entry: string | { model: string; thinking?: string }): string => {
+		if (typeof entry === "string") return `"${entry}"`;
+		return entry.thinking ? `"${entry.model}" (thinking: "${entry.thinking}")` : `"${entry.model}"`;
+	};
+	const parts: string[] = [];
+	if (model) {
+		let modelHint = `model: "${model}"`;
+		if (fallbacks && fallbacks.length > 0) {
+			modelHint += ` (fallbacks, in order: ${fallbacks.map(renderFallback).join(", ")})`;
+		}
+		parts.push(modelHint);
+	}
+	if (thinking) parts.push(`thinking: "${thinking}"`);
+	return parts.length > 0 ? ` with ${parts.join(" and ")}` : "";
 }
 
 export async function buildReactiveExecutePrompt(
@@ -4171,7 +4180,7 @@ export async function buildReactiveExecutePrompt(
     modelRegistry?: MinimalModelRegistry;
     sessionProvider?: string;
     subagentThinking?: string;
-    subagentModelFallbacks?: string[];
+    subagentModelFallbacks?: Array<string | { model: string; thinking?: string }>;
   },
 ): Promise<string> {
   const { loadSliceTaskIO, deriveTaskGraph, graphMetrics } = await import("./reactive-graph.js");

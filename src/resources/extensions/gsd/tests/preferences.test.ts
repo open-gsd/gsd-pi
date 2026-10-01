@@ -31,6 +31,7 @@ import {
 } from "../preferences.ts";
 import { collectPreferenceDiagnostics, formatPreferenceDiagnostic } from "../preferences-diagnostics.ts";
 import { formatConfiguredModel, toPersistedModelId } from "../commands-prefs-wizard.ts";
+import { normalizeModelFieldConfig } from "../preferences-models.ts";
 import { _resetLogs, peekLogs } from "../workflow-logger.ts";
 import type { GSDPreferences, GSDModelConfigV2, GSDPhaseModelConfig } from "../preferences.ts";
 
@@ -1037,6 +1038,68 @@ test("parses OpenRouter model config with org/model IDs and fallbacks", () => {
   assert.deepEqual(research.fallbacks, ["qwen/qwen3.5-397b-a17b"]);
   const execution = models.execution as GSDPhaseModelConfig;
   assert.deepEqual(execution.fallbacks, ["qwen/qwen3-coder-next"]);
+});
+
+// ── Fallbacks per-entry thinking (#1270) ─────────────────────────────────────
+
+test("fallbacks[] accepts { model, thinking } object entries on a phase bucket (#1270)", () => {
+  const { preferences, errors } = validatePreferences({
+    models: {
+      execution: {
+        model: "gpt-5.5",
+        provider: "openai-codex",
+        thinking: "medium",
+        fallbacks: [
+          "anthropic/claude-sonnet-4-6",
+          { model: "anthropic/claude-opus-4-6", thinking: "high" },
+        ],
+      },
+    },
+  } as any);
+  assert.deepEqual(errors, []);
+  const execution = (preferences.models as GSDModelConfigV2).execution as GSDPhaseModelConfig;
+  assert.deepEqual(execution.fallbacks, [
+    "anthropic/claude-sonnet-4-6",
+    { model: "anthropic/claude-opus-4-6", thinking: "high" },
+  ]);
+});
+
+test("invalid per-entry fallback thinking is warned and stripped; junk entries are skipped (#1270)", () => {
+  const { preferences, errors, warnings } = validatePreferences({
+    models: {
+      execution: {
+        model: "gpt-5.5",
+        fallbacks: [
+          { model: "anthropic/claude-opus-4-6", thinking: "ultra" },
+          { thinking: "high" },
+          "not-empty",
+          42,
+        ],
+      },
+    },
+  } as any);
+  assert.deepEqual(errors, []);
+  const execution = (preferences.models as GSDModelConfigV2).execution as GSDPhaseModelConfig;
+  assert.deepEqual(
+    execution.fallbacks,
+    [{ model: "anthropic/claude-opus-4-6" }, "not-empty"],
+    "invalid thinking is stripped but the model stays; junk entries are dropped; valid strings keep",
+  );
+  assert.ok(warnings.some((w) => w.includes("models.execution.fallbacks") && w.includes("not a valid thinking level")));
+  assert.equal(warnings.filter((w) => w.includes("entry must be")).length, 2);
+});
+
+test("normalizeModelFieldConfig carries object fallback entries into the resolved config (#1270)", () => {
+  const resolved = normalizeModelFieldConfig({
+    model: "gpt-5.5",
+    fallbacks: ["anthropic/claude-sonnet-4-6", { model: "anthropic/claude-opus-4-6", thinking: "high" }],
+  });
+  assert.ok(resolved);
+  assert.equal(resolved.primary, "gpt-5.5");
+  assert.deepEqual(resolved.fallbacks, [
+    "anthropic/claude-sonnet-4-6",
+    { model: "anthropic/claude-opus-4-6", thinking: "high" },
+  ]);
 });
 
 test("parses model IDs with colons (OpenRouter :free, :exacto)", () => {

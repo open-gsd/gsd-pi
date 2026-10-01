@@ -12,6 +12,7 @@ Produce documentation that works for a reader landing cold. Not a summary of wha
 GSD already produces durable artifacts (`M###-CONTEXT.md`, `S##-SUMMARY.md`, `DECISIONS.md`, `KNOWLEDGE.md`), but those are scaffolded by templates. This skill is for free-form documentation: README changes, public docs, architectural proposals, RFCs, PR descriptions, runbooks, and anything that lives under `docs/`, `mintlify-docs/`, or `gitbook/` in this repo.
 
 Invocation points:
+
 - User asks to write or rewrite a piece of documentation
 - Before shipping a feature that adds user-facing behavior — docs need updates
 - After `write-milestone-brief` when the brief needs a public-facing summary for non-GSD consumers

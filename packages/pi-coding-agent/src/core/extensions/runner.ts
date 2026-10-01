@@ -5,6 +5,7 @@
 import type { AgentMessage } from "@gsd/pi-agent-core";
 import type { ImageContent, Model } from "@gsd/pi-ai";
 import type { KeyId } from "@gsd/pi-tui";
+import { getBeforeAgentStartContext } from "./before-agent-start-context.js";
 import { type Theme, theme } from "../../theme/theme.js";
 import type { ResourceDiagnostic } from "../diagnostics.js";
 import type { Keybinding, KeybindingsConfig } from "../keybindings.js";
@@ -999,6 +1000,7 @@ export class ExtensionRunner {
 		let currentSystemPrompt = systemPrompt;
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let systemPromptModified = false;
+		const dispatchContext = getBeforeAgentStartContext();
 		const ctx = Object.defineProperties(
 			{},
 			Object.getOwnPropertyDescriptors(this.createContext()),
@@ -1026,6 +1028,7 @@ export class ExtensionRunner {
 						images,
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
+						...(dispatchContext ? { unitType: dispatchContext.unitType, phase: dispatchContext.phase } : {}),
 					};
 					const handlerResult = await handler(event, ctx);
 
@@ -1183,19 +1186,40 @@ export class ExtensionRunner {
 	}
 
 	async emitAdjustToolSet(event: Omit<AdjustToolSetEvent, "type">): Promise<AdjustToolSetResult | undefined> {
-		let result: AdjustToolSetResult | undefined;
+		// Full iteration: every listener is invoked (no first-wins short circuit),
+		// accumulating toolNames override (first non-null wins — legacy semantics
+		// for pure-override listeners), removeTools and addTools deltas. An
+		// early result without override/deltas (e.g. `{}`) no longer blocks
+		// later listeners. Composed as override → remove → add → dedupe so a
+		// delta listener coexists with pure-override listeners (#1998).
+		let sawResult = false;
+		let toolNamesOverride: string[] | undefined;
+		const removes: string[] = [];
+		const adds: string[] = [];
 		await this.invokeHandlers(
 			"adjust_tool_set",
 			() => ({ type: "adjust_tool_set" as const, ...event }),
 			(handlerResult) => {
 				if (handlerResult) {
-					result = handlerResult as AdjustToolSetResult;
-					return { done: true };
+					const result = handlerResult as AdjustToolSetResult;
+					sawResult = true;
+					if (toolNamesOverride === undefined && result.toolNames !== undefined) {
+						toolNamesOverride = result.toolNames;
+					}
+					if (result.removeTools) removes.push(...result.removeTools);
+					if (result.addTools) adds.push(...result.addTools);
 				}
 				return { done: false };
 			},
 		);
-		return result;
+		if (!sawResult) return undefined;
+		if (toolNamesOverride === undefined && adds.length === 0 && removes.length === 0) {
+			return {};
+		}
+		const base = toolNamesOverride ?? event.activeToolNames;
+		const removed = new Set(removes);
+		const composed = [...new Set([...base.filter((name) => !removed.has(name)), ...adds])];
+		return { toolNames: composed };
 	}
 
 	async emitExtensionEventDynamic(event: ExtensionEvent): Promise<unknown> {
@@ -1240,6 +1264,8 @@ export class ExtensionRunner {
 				return this.invokeHandlers("unit_start", () => event, () => ({ done: false }));
 			case "unit_end":
 				return this.invokeHandlers("unit_end", () => event, () => ({ done: false }));
+			case "phase_change":
+				return this.invokeHandlers("phase_change", () => event, () => ({ done: false }));
 			case "session_switch":
 				return this.invokeHandlers("session_switch", () => event, () => ({ done: false }));
 			case "session_end":

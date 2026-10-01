@@ -58,6 +58,7 @@ In short:
 - When a check cannot be honestly automated, gather the best objective evidence you can and mark it `NEEDS-HUMAN`
 
 For each check, record:
+
 - The check description (from the UAT file)
 - The evidence mode used: `artifact`, `runtime`, `browser`, or `human-follow-up`
 - The command or action taken, including the `gsd_uat_exec` evidence ID for automated checks
@@ -65,6 +66,7 @@ For each check, record:
 - `PASS`, `FAIL`, or `NEEDS-HUMAN`
 
 After running all checks, compute the **overall verdict**:
+
 - `PASS` — all automatable checks passed. Any remaining checks that honestly require human judgment are marked `NEEDS-HUMAN` with clear instructions for the human reviewer. (This is the correct verdict for mixed/human-experience/live-runtime modes when all automatable checks succeed.)
 - `FAIL` — one or more automatable checks failed
 - `PARTIAL` — one or more automatable checks were skipped or returned inconclusive results (not the same as `NEEDS-HUMAN` — use PARTIAL only when the agent itself could not determine pass/fail for a check it was supposed to automate)

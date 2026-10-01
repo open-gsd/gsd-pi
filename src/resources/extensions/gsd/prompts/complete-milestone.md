@@ -54,6 +54,7 @@ Subagents report only; they do not write user source. Fold any findings into Dec
 **If ANY verification failure was recorded in steps 4, 5, or 6, you MUST follow the failure path below. Do NOT proceed with steps 10–14.**
 
 **Failure path** (verification failed):
+
 - Do NOT call `gsd_complete_milestone`.
 - Do NOT update `.gsd/PROJECT.md` to reflect completion.
 - Do NOT update `.gsd/REQUIREMENTS.md` to mark requirements validated.
@@ -71,6 +72,7 @@ Subagents report only; they do not write user source. Fold any findings into Dec
 13. **Persist completion through `gsd_complete_milestone`.** Call it with the parameters below. This must be the final persistent write in the unit. The tool updates the milestone status in the DB, renders `{{milestoneSummaryPath}}`, and validates all slices are complete.
 
    **Required parameters:**
+
    - `milestoneId` (string) — Milestone ID (e.g. M001)
    - `title` (string) — Milestone title
    - `oneLiner` (string) — One-sentence summary of what the milestone achieved
@@ -78,6 +80,7 @@ Subagents report only; they do not write user source. Fold any findings into Dec
    - `verificationPassed` (boolean) — Must be `true`; confirms code-change verification, success criteria, and definition-of-done checks all passed
 
    **Recommended parameters** (the schema accepts these as optional, but always fill them in — omitted values render as placeholders such as "Not provided.", "None.", or "(none)"):
+
    - `successCriteriaResults` (string) — Markdown detailing how each success criterion was met or not met
    - `definitionOfDoneResults` (string) — Markdown detailing how each definition-of-done item was met
    - `requirementOutcomes` (string) — Markdown detailing requirement status transitions with evidence
@@ -86,10 +89,12 @@ Subagents report only; they do not write user source. Fold any findings into Dec
    - `lessonsLearned` (array of strings) — Lessons learned during the milestone
 
    **Optional parameters:**
+
    - `followUps` (string) — Follow-up items for future milestones
    - `deviations` (string) — Deviations from the original plan
 
 14. Do not commit manually — the system auto-commits your changes after this unit completes.
+
 - After `gsd_complete_milestone` succeeds, emit only one closeout line: "Milestone {{milestoneId}} closeout submitted." Do not say the milestone is complete, do not add a second final-status block, repeat the tool result, or restate the closeout summary.
 
 **Important:** Do NOT skip code-change, success-criteria, or definition-of-done verification (steps 4-6). The summary must reflect verified outcomes. Verification failures block completion; there is no override. If a verification tool fails, errors, or returns unexpected output, treat it as failure.

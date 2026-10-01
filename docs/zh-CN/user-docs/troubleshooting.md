@@ -129,6 +129,7 @@ rm -rf "$(dirname .gsd)/.gsd.lock"
 **机制：** 在多数 `/gsd` 命令执行前，GSD 会探测项目根目录（以及存在时的活跃 milestone worktree）中的未合并路径、冲突标记（`git diff --check`）和残留的 merge/rebase 状态。它会自动修复安全路径（`.gsd/` 运行时文件与构建产物），在无未合并路径时中止陈旧的 merge 状态，若仍存在产品代码冲突则拦截。
 
 **解决：**
+
 - 手动解决源代码中的冲突后运行 `/gsd doctor`。
 - 冲突未清空前仍可使用：`/gsd doctor`、`/gsd closeout …`、`/gsd dispatch complete-milestone …`。
 - 待 `git status` 干净后重试原命令。
@@ -427,6 +428,7 @@ lsp status
 ## Notifications
 
 <a id="notifications-not-appearing-on-macos"></a>
+
 ### macOS 上通知不显示
 
 **症状：** 偏好中已设置 `notifications.enabled: true`，但自动模式期间没有任何桌面通知（没有 milestone 完成提示、预算预警或错误通知），同时日志里也没有报错。

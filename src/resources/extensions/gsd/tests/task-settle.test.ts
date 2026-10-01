@@ -32,11 +32,12 @@ import {
   normalizeLegacyLifecycleStatus,
   compareLifecycleShadow,
 } from "../db/lifecycle-shadow-comparison.ts";
-import { readTaskRecoveryRoute } from "../task-recovery-domain-operation.ts";
+import { readTaskRecoveryRoute, recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.ts";
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
+import { emitJournalEvent } from "../journal.ts";
 
 const tempDirs = new Set<string>();
 
@@ -945,3 +946,211 @@ function readLatestTaskAttemptSnapshotStage(): string | null {
   `);
   return head.stage ? String(head.stage) : null;
 }
+
+// ── verification-paused reconcile (#2334) ────────────────────────────────────
+
+function seedVerificationPausedStrand(): { attemptId: string; dir: string } {
+  const { attemptId, dir } = seedRunningAttempt();
+  settleTaskAttempt({
+    invocation: invocation("fixture/verification-pause-succeed"),
+    attemptId,
+    outcome: "succeeded",
+    failureClass: "none",
+    summary: "executor completed; finalizer verification paused",
+    output: { completed: true },
+  });
+  // The stranded #2334 state: the finalizer never released the legacy row.
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  return { attemptId, dir };
+}
+
+function readLatestAttemptResult(attemptId: string): string {
+  const result = row(
+    "SELECT result_id AS id FROM workflow_attempt_results WHERE attempt_id = :id",
+    { ":id": attemptId },
+  );
+  return String(result.id);
+}
+
+function writePauseReceipt(
+  dir: string,
+  eventType = "verification-paused",
+  ts: string = new Date().toISOString(),
+): void {
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  emitJournalEvent(dir, {
+    ts,
+    flowId: "flow-verification-pause",
+    seq: 3,
+    eventType: eventType as never,
+    data: {
+      unitType: "execute-task",
+      unitId: "M001/S01/T01",
+      ...(eventType === "post-unit-finalize-end"
+        ? { status: "stopped", action: "break", reason: "verification-pause" }
+        : {}),
+    },
+  });
+}
+
+test("reconcileLifecycle releases a verification-paused in-progress Task to ready (#2334)", async () => {
+  const { dir } = seedVerificationPausedStrand();
+  writePauseReceipt(dir);
+  assert.equal(taskLifecycleStatus(), "in_progress");
+
+  const dryRun = planTaskSettle(TASK, "release verification-paused task", {
+    reconcileLifecycle: true,
+    basePath: dir,
+  });
+  assert.equal(dryRun.rows.length, 0);
+  assert.equal(dryRun.publication ?? null, null, "publication must not hijack a verification-paused Task");
+  assert.deepEqual(
+    dryRun.lifecycleRows.map((entry) => `${entry.currentStatus}->${entry.targetStatus}`),
+    ["in_progress->paused", "paused->ready"],
+  );
+  assert.match(dryRun.lifecycleRows[0].rationale, /verification-pause receipt/);
+
+  const applied = await applyTaskSettle({
+    invocation: invocation("settle/reconcile/verification-paused"),
+    task: TASK,
+    reason: "release verification-paused task",
+    basePath: dir,
+    reconcileLifecycle: true,
+  });
+  assert.equal(applied.settled, false);
+  assert.equal(applied.reconciled, true);
+  assert.equal(applied.published, undefined);
+  assert.equal(taskLifecycleStatus(), "ready");
+  assert.equal(
+    row("SELECT status AS status FROM tasks WHERE id = 'T01'").status,
+    "in_progress",
+    "the legacy row and SUMMARY projections are left in place",
+  );
+
+  const again = await applyTaskSettle({
+    invocation: invocation("settle/reconcile/verification-paused/2"),
+    task: TASK,
+    reason: "release verification-paused task",
+    basePath: dir,
+    reconcileLifecycle: true,
+  });
+  assert.equal(again.settled, false);
+  assert.equal(again.reconciled, false);
+  assert.equal(taskLifecycleStatus(), "ready");
+});
+
+test("verification-paused reconcile throws when the durable receipt is missing (negative control)", () => {
+  const { dir } = seedVerificationPausedStrand();
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /verification-pause receipt/,
+  );
+});
+
+test("verification-paused reconcile accepts the pre-#2334 finalize-end receipt", () => {
+  const { dir } = seedVerificationPausedStrand();
+  writePauseReceipt(dir, "post-unit-finalize-end");
+  const plan = planTaskSettle(TASK, "release verification-paused task", {
+    reconcileLifecycle: true,
+    basePath: dir,
+  });
+  assert.deepEqual(
+    plan.lifecycleRows.map((entry) => `${entry.currentStatus}->${entry.targetStatus}`),
+    ["in_progress->paused", "paused->ready"],
+  );
+});
+
+test("verification-paused reconcile never releases a failed verification (#2334)", () => {
+  const { attemptId, dir } = seedRunningAttempt();
+  settleTaskAttempt({
+    invocation: invocation("fixture/verification-failed"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "executor-error",
+    summary: "verification failed",
+    output: { completed: false },
+  });
+  db().prepare(`
+    UPDATE tasks SET status = 'in_progress'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  writePauseReceipt(dir);
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /reconcileLifecycle requires an interrupted Attempt/,
+  );
+});
+
+test("verification-paused reconcile refuses a succeeded Attempt whose verification failed into an agent-owned abort route", () => {
+  const { attemptId, dir } = seedVerificationPausedStrand();
+  writePauseReceipt(dir);
+  // Host verification FAILED after the executor settled succeeded: the failing
+  // verdict advances the Kernel head to route and the failure routes to a
+  // durable agent-owned abort recovery that owns the lineage until
+  // /gsd recover. The pause receipt must not release it.
+  gitCommitFixture(dir);
+  const source = captureVerificationSourceSnapshot([{ id: "project", cwd: dir }]);
+  assert.equal(source.ok, true, source.ok ? undefined : source.error);
+  recordTaskTechnicalVerdict({
+    invocation: invocation(`fixture/failing-verdict:${attemptId}`),
+    attemptId,
+    testedSourceRevision: source.snapshot.aggregateRevision,
+    verdict: "fail",
+    rationale: "Host verification failed after the pause.",
+    evidence: {
+      evidenceClass: "command",
+      commandOrTool: "node --test",
+      workingDirectory: dir,
+      startedAt: "2026-07-13T00:02:00.000Z",
+      endedAt: "2026-07-13T00:02:01.000Z",
+      exitCode: 1,
+      observation: "failed",
+      durableOutputRef: `db://host-verification/${attemptId}`,
+      environment: { runner: "node-test", platform: "test" },
+    },
+  });
+  const settlement = readLatestAttemptResult(attemptId);
+  const recovery = recordFailureAndSelectRecovery({
+    invocation: invocation("fixture/verification-abort-route"),
+    attemptId,
+    resultId: settlement,
+    owner: "agent",
+    classification: { failureKind: "fatal" },
+    summary: "Host verification failed after the pause",
+    evidence: { source: "test" },
+    rationale: "preserve a durable resume action",
+  });
+  assert.equal(recovery.action, "abort");
+  assert.equal(readTaskRecoveryRoute(attemptId)?.resumeAuthorized, false);
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /reconcileLifecycle requires an interrupted Attempt/,
+  );
+});
+
+test("verification-paused reconcile ignores a stale receipt that predates the latest settlement", () => {
+  const { dir } = seedVerificationPausedStrand();
+  // A receipt from an earlier pause on a superseded Attempt: written before
+  // the current Attempt's Result, so it cannot vouch for this settlement.
+  writePauseReceipt(dir, "verification-paused", "2020-01-01T00:00:00.000Z");
+  assert.throws(
+    () => planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      basePath: dir,
+    }),
+    /verification-pause receipt/,
+  );
+});

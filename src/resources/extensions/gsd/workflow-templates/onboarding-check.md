@@ -26,6 +26,7 @@ gap report, not a fix.
 
 For each prerequisite the README claims ("Node ≥ 22", "Python 3.11",
 "Docker", etc.):
+
 - Check whether the version is stated.
 - Check whether it's pinned in the repo (e.g. `package.json` engines, `.nvmrc`,
   `.tool-versions`, `pyproject.toml`, `Dockerfile`).
@@ -34,11 +35,13 @@ For each prerequisite the README claims ("Node ≥ 22", "Python 3.11",
 ## 3. Dry-run the commands
 
 Where safe, run the commands in the **current** environment:
+
 - `npm install` / `pip install -r requirements.txt` / equivalent.
 - The "build" / "test" / "run" commands.
 - The "dev server" command (spawn, wait 5s, kill it).
 
 Skip any command that:
+
 - Would hit external APIs with credentials (record as "needs real creds, not tested").
 - Would incur real cost (cloud deploys, paid APIs).
 - Would modify global state (`sudo`, package manager global installs).

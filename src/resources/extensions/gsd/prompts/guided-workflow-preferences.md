@@ -44,6 +44,7 @@ Apply the defaults:
 5. Pre-seed the research decision so the standalone `research-decision` stage is a no-op if the user already answered here:
    - Ensure `{{workingDirectory}}/.gsd/runtime/` exists.
    - Write `{{workingDirectory}}/.gsd/runtime/research-decision.json`:
+
      ```json
      {
        "decision": "skip",
@@ -52,6 +53,7 @@ Apply the defaults:
        "reason": "deterministic-default"
      }
      ```
+
    Use `"skip"` unless an existing valid `{{workingDirectory}}/.gsd/runtime/research-decision.json` explicitly says `"research"` with `"source": "research-decision"` or `"source": "user"`.
 6. Print a concise summary in chat: each key on its own line, format `key: value`. Include `commit_policy`, `branch_model`, `uat_dispatch`, `models.executor_class`, and `research` (matching the preserved or pre-seeded runtime research decision).
 7. Say exactly: `"Workflow preferences saved."` — nothing else.

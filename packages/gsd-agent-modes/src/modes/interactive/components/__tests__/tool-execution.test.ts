@@ -5,7 +5,12 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import stripAnsi from "strip-ansi";
 import { isImageLine, resetCapabilitiesCache, setCapabilities, setCellDimensions } from "@gsd/pi-tui";
-import { ToolExecutionComponent, ToolPhaseSummaryComponent, type ToolExecutionPhase } from "../tool-execution.js";
+import {
+	TOOL_TUI_EXPANDED_MAX_LINES,
+	ToolExecutionComponent,
+	ToolPhaseSummaryComponent,
+	type ToolExecutionPhase,
+} from "../tool-execution.js";
 import { setRailAnimationEnabled } from "../transcript-design.js";
 import { initTheme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { READ_TUI_EXPANDED_MAX_LINES } from "@gsd/pi-coding-agent/core/tools/read.js";
@@ -366,11 +371,182 @@ describe("ToolExecutionComponent", () => {
 			{ content: [{ type: "text", text: output }], isError: false },
 		);
 
-		assert.match(rendered, /line-1/);
-		assert.match(rendered, new RegExp(`line-${READ_TUI_EXPANDED_MAX_LINES}\\b`));
-		assert.doesNotMatch(rendered, new RegExp(`line-${READ_TUI_EXPANDED_MAX_LINES + 1}\\b`));
-		assert.match(rendered, /2 more lines hidden from display/);
-	});
+	assert.match(rendered, /line-1/);
+	assert.match(rendered, new RegExp(`line-${READ_TUI_EXPANDED_MAX_LINES}\\b`));
+	assert.doesNotMatch(rendered, new RegExp(`line-${READ_TUI_EXPANDED_MAX_LINES + 1}\\b`));
+	assert.match(rendered, /2 more lines hidden from display/);
+});
+
+test("truncates expanded write content to the shared display cap", () => {
+	const total = TOOL_TUI_EXPANDED_MAX_LINES + 40;
+	const content = Array.from({ length: total }, (_, index) => `wline-${index + 1}`).join("\n");
+	const rendered = renderTool(
+		"write",
+		{ path: "big.txt", content },
+		{ content: [{ type: "text", text: "ok" }], isError: false },
+	);
+
+	// Head+tail window: first and last lines visible, middle elided with a hint.
+	assert.match(rendered, /wline-1\b/);
+	assert.match(rendered, new RegExp(`wline-${total}\\b`));
+	assert.doesNotMatch(rendered, /wline-30\b/, "middle lines must be elided from the expanded body");
+	assert.match(rendered, /40 middle lines hidden from display/);
+});
+
+test("truncates expanded bash output to the shared display cap", () => {
+	const total = TOOL_TUI_EXPANDED_MAX_LINES + 40;
+	const output = Array.from({ length: total }, (_, index) => `out-${index + 1}`).join("\n");
+	const rendered = renderTool(
+		"bash",
+		{ command: "generate" },
+		{ content: [{ type: "text", text: output }], isError: false },
+	);
+
+	assert.match(rendered, /out-1\b/);
+	assert.match(rendered, new RegExp(`out-${total}\\b`));
+	assert.doesNotMatch(rendered, /out-30\b/, "middle lines must be elided from the expanded body");
+	assert.match(rendered, /40 middle lines hidden from display/);
+});
+
+test("truncates huge error bodies with the same display window", () => {
+	const total = TOOL_TUI_EXPANDED_MAX_LINES + 40;
+	const errorOutput = Array.from({ length: total }, (_, index) => `err-${index + 1}`).join("\n");
+	const rendered = renderTool(
+		"write",
+		{ path: "x.txt", content: "hi" },
+		{ content: [{ type: "text", text: errorOutput }], isError: true },
+	);
+
+	assert.match(rendered, /err-1\b/);
+	assert.match(rendered, new RegExp(`err-${total}\\b`));
+	assert.doesNotMatch(rendered, /err-30\b/, "middle lines must be elided from the error body");
+	assert.match(rendered, /40 middle lines hidden from display/);
+});
+
+test("collapses carriage-return progress frames to the last frame", () => {
+	const rendered = renderTool(
+		"write",
+		{ path: "progress.txt", content: "0%\r25%\r50%\r100%\nnext" },
+		{ content: [{ type: "text", text: "ok" }], isError: false },
+	);
+
+	assert.match(rendered, /100%/);
+	assert.match(rendered, /next/);
+	assert.doesNotMatch(rendered, /0%25%50%/, "progress frames must not concatenate into one giant line");
+	assert.doesNotMatch(rendered, /\b25%\b/, "overwritten frames must be gone entirely");
+});
+
+test("collapses carriage-return frames in tool output bodies", () => {
+	const rendered = renderTool(
+		"bash",
+		{ command: "progress" },
+		{ content: [{ type: "text", text: "frame1\rframe2\rframe3\nafter" }], isError: false },
+	);
+
+	assert.match(rendered, /frame3/);
+	assert.match(rendered, /after/);
+	assert.doesNotMatch(rendered, /frame1frame2frame3/, "progress frames must not concatenate into one giant line");
+	assert.doesNotMatch(rendered, /\bframe1\b/, "overwritten frames must be gone entirely");
+	assert.doesNotMatch(rendered, /\bframe2\b/, "overwritten frames must be gone entirely");
+});
+
+test("keeps the frame a trailing carriage return points at", () => {
+	const rendered = renderTool(
+		"bash",
+		{ command: "progress" },
+		{ content: [{ type: "text", text: "0%\r100%\r" }], isError: false },
+	);
+
+	// A trailing \r moves the cursor without erasing: the frame stays visible.
+	assert.match(rendered, /100%/);
+	assert.doesNotMatch(rendered, /\b0%\b/, "overwritten frames must be gone entirely");
+});
+
+test("keeps CRLF line endings intact while collapsing frames", () => {
+	const rendered = renderTool(
+		"write",
+		{ path: "crlf.txt", content: "line one\r\nline two" },
+		{ content: [{ type: "text", text: "ok" }], isError: false },
+	);
+
+	assert.match(rendered, /line one/);
+	assert.match(rendered, /line two/);
+});
+
+test("caps raw output fallback for tools without a custom result renderer", () => {
+	const total = TOOL_TUI_EXPANDED_MAX_LINES + 40;
+	const output = Array.from({ length: total }, (_, index) => `raw-${index + 1}`).join("\n");
+	const rendered = renderTool(
+		"mcp__demo__raw",
+		{ ok: true },
+		{ content: [{ type: "text", text: output }], isError: false },
+		{},
+	);
+
+	assert.match(rendered, /raw-1\b/);
+	assert.match(rendered, new RegExp(`raw-${total}\\b`));
+	assert.doesNotMatch(rendered, /raw-30\b/, "fallback output must be capped like every other body");
+	assert.match(rendered, /40 middle lines hidden from display/);
+});
+
+test("rebuilds incremental write highlighting when carriage returns stream in", () => {
+	const component = new ToolExecutionComponent(
+		"write",
+		{ path: "progress.ts", content: "frame1" },
+		{},
+		undefined,
+		{ requestRender() {} } as any,
+	);
+	component.setExpanded(true);
+	component.updateArgs({ path: "progress.ts", content: "frame1\rframe2" });
+	const rendered = stripAnsi(component.render(120).join("\n"));
+
+	assert.match(rendered, /frame2/);
+	assert.doesNotMatch(rendered, /frame1frame2/, "delta normalization must match a fresh full normalization");
+});
+
+test("windows 51-line output just over the cap", () => {
+	const total = TOOL_TUI_EXPANDED_MAX_LINES + 1;
+	const output = Array.from({ length: total }, (_, index) => `edge-${index + 1}`).join("\n");
+	const rendered = renderTool(
+		"bash",
+		{ command: "echo" },
+		{ content: [{ type: "text", text: output }], isError: false },
+	);
+
+	assert.match(rendered, /edge-1\b/);
+	assert.match(rendered, new RegExp(`edge-${total}\\b`));
+	assert.doesNotMatch(rendered, /edge-26\b/, "the single middle line must be elided");
+	assert.match(rendered, /1 middle lines? hidden from display/);
+});
+
+test("renders small expanded outputs unchanged", () => {
+	const output = Array.from({ length: 10 }, (_, index) => `sline-${index + 1}`).join("\n");
+	const rendered = renderTool(
+		"bash",
+		{ command: "echo" },
+		{ content: [{ type: "text", text: output }], isError: false },
+	);
+
+	for (let index = 1; index <= 10; index++) {
+		assert.match(rendered, new RegExp(`sline-${index}\\b`));
+	}
+	assert.doesNotMatch(rendered, /hidden from display/);
+});
+
+test("collapsed write body keeps the total-lines hint", () => {
+	const content = Array.from({ length: 15 }, (_, index) => `cline-${index + 1}`).join("\n");
+	const rendered = renderToolCollapsed(
+		"write",
+		{ path: "w.txt", content },
+		{ content: [{ type: "text", text: "boom" }], isError: true },
+	);
+
+	assert.match(rendered, /cline-10\b/);
+	assert.doesNotMatch(rendered, /cline-11\b/);
+	assert.match(rendered, /\(5 more lines, 15 total, ctrl\+o to expand\)/);
+	assert.match(rendered, /boom/);
+});
 
 	test("renders compact edit rows with target metadata", () => {
 		const rendered = renderToolCollapsed(
