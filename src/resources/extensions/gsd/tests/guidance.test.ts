@@ -202,8 +202,11 @@ describe("doctor fix hints", () => {
     assert.ok(hint);
     assert.match(hint, /git reset --mixed HEAD\^/);
     assert.match(hint, /\/gsd dispatch validate <id>/);
-    assert.doesNotMatch(hint, /\/gsd validate-milestone/);
+    // #2434 forbids prescribing /gsd validate-milestone as the repair; #2439 requires naming
+    // it as unreachable for closed milestones — only the repair form is banned.
+    assert.doesNotMatch(hint, /run `\/gsd validate-milestone/);
     assert.doesNotMatch(hint, /\/gsd validate-phase/);
     assert.match(hint, /`\/gsd auto` alone will not re-run milestone validation/);
+    assert.match(hint, /unreachable/);
   });
 });
