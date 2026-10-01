@@ -45,6 +45,7 @@ import { resolveTaskCompletionAuthority } from "../task-completion-compatibility
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.js";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.js";
 import {
+  adoptOrTransitionLifecycle,
   appendKernelCheckpoint,
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.js";
@@ -833,6 +834,97 @@ test("#1763: verified publication from a milestone worktree restores both SUMMAR
     readFileSync(published.summaryPath, "utf8"),
     "the project-root and worktree copies are byte-identical",
   );
+});
+
+function revertLifecycleToReadyFixture(): void {
+  // in_progress → ready is not a canonical transition, so the #2417 side-door
+  // shadow cannot exist on one legal edge. Build it the way real databases
+  // reached it — a sequence of fenced lifecycle writes that each satisfy the
+  // transition trigger (in_progress → paused → ready).
+  for (const status of ["paused", "ready"] as const) {
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: "test.task.side-door-revert",
+      idempotencyKey: `fixture/2417-revert-${status}`,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "test",
+      sourceTransport: "test",
+      payload: { taskId: "T01", to: status },
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: "task",
+        milestoneId: "M001",
+        sliceId: "S01",
+        taskId: "T01",
+        lifecycleStatus: status,
+      });
+      return {
+        events: [{
+          eventType: "test.task.side-door-revert",
+          entityType: "task",
+          entityId: "M001/S01/T01",
+          payload: { to: status },
+          destinations: ["test"],
+        }],
+        projections: [{
+          projectionKey: "test/m001/s01/t01",
+          projectionKind: "test",
+          rendererVersion: "1",
+        }],
+      };
+    });
+  }
+}
+
+test("#2417: publication commits from a reverted ready lifecycle shadow", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  recordPassingHostVerdict(basePath, attemptId);
+
+  revertLifecycleToReadyFixture();
+
+  const published = await publishVerifiedTaskCompletion(publishInput(basePath, attemptId));
+
+  assert.equal(published.status, "committed");
+  assert.equal(
+    row(`SELECT lifecycle_status AS s FROM workflow_item_lifecycles WHERE item_kind = 'task' AND task_id = 'T01'`).s,
+    "completed",
+    "publication re-adopts the reverted shadow to completed",
+  );
+  assert.equal(row(`SELECT status AS s FROM tasks WHERE id = 'T01'`).s, "complete");
+});
+
+test("#2417: a ready lifecycle shadow without a passing verdict stays fail-closed", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  revertLifecycleToReadyFixture();
+
+  await assert.rejects(
+    () => publishVerifiedTaskCompletion(publishInput(basePath, attemptId)),
+    /passing host Technical Verdict/,
+  );
+  assert.equal(
+    row(`SELECT lifecycle_status AS s FROM workflow_item_lifecycles WHERE item_kind = 'task' AND task_id = 'T01'`).s,
+    "ready",
+    "a refused publication must not move the lifecycle",
+  );
+});
+
+test("#2417: doctor reports a settled succeeded verify-stage Attempt on a non-terminal Task", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+
+  const issues: DoctorIssue[] = [];
+  await checkEngineHealth(basePath, issues, []);
+
+  const stranded = issues.filter((issue) => issue.code === "unpublished_succeeded_attempt");
+  assert.equal(stranded.length, 1);
+  assert.equal(stranded[0].unitId, "M001/S01/T01");
+  assert.match(stranded[0].message, new RegExp(attemptId));
 });
 
 test("#1677: inside a worktree the classifier falls back to the project-root copy", async () => {

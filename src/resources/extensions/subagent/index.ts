@@ -385,12 +385,18 @@ function resultToChildArtifact(result: SingleResult, index: number, cwd?: string
 	};
 }
 
-function markMissingFinalResponse(result: SingleResult): void {
+// Exported for tests (missing-final-response.test.ts).
+export function markMissingFinalResponse(result: SingleResult): void {
 	if (result.exitCode !== 0) return;
 	if (getFinalOutput(result.messages).trim()) return;
+	const originalStopReason = result.stopReason;
 	result.exitCode = 1;
 	result.stopReason = "error";
-	result.errorMessage = "Subagent produced no valid final response.";
+	const detail = [
+		`model: ${result.model ?? "unknown"}`,
+		`stopReason: ${originalStopReason ?? "unknown"}`,
+	].join(", ");
+	result.errorMessage = `Subagent produced no valid final response (child exited 0; ${detail}).`;
 	result.stderr = result.stderr || result.errorMessage;
 }
 

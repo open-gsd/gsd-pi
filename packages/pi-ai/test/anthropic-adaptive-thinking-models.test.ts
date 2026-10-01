@@ -3,6 +3,8 @@ import { getModels, getProviders } from "../src/models.ts";
 import type { Api, Model } from "../src/types.ts";
 
 // models.dev 2026-09 refresh: Claude Fable 5.1 joined the Anthropic-backed providers; github-copilot dropped claude-opus-4.6.
+// Claude Opus 5.5 is injected by generate-models.ts for anthropic/anthropic-vertex and matches the `opus-5` substring in
+// isAnthropicAdaptiveThinkingModel, so it carries forceAdaptiveThinking like the rest of the Opus 5 line.
 const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"anthropic-vertex/claude-fable-5",
 	"anthropic-vertex/claude-fable-5-1",
@@ -10,6 +12,7 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"anthropic-vertex/claude-opus-4-7",
 	"anthropic-vertex/claude-opus-4-8",
 	"anthropic-vertex/claude-opus-5",
+	"anthropic-vertex/claude-opus-5-5",
 	"anthropic-vertex/claude-sonnet-4-6",
 	"anthropic-vertex/claude-sonnet-5",
 	"anthropic/claude-fable-5",
@@ -18,6 +21,7 @@ const EXPECTED_ADAPTIVE_THINKING_MODELS = [
 	"anthropic/claude-opus-4-7",
 	"anthropic/claude-opus-4-8",
 	"anthropic/claude-opus-5",
+	"anthropic/claude-opus-5-5",
 	"anthropic/claude-sonnet-4-6",
 	"anthropic/claude-sonnet-5",
 	"cloudflare-ai-gateway/claude-fable-5",

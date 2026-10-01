@@ -82,6 +82,43 @@ describe("models.generated.ts", () => {
 		}
 	});
 
+	test("includes Claude Opus 5.5 across Anthropic-backed providers with adaptive thinking", () => {
+		const anthropic = MODELS.anthropic["claude-opus-5-5"];
+		expect(anthropic).toBeDefined();
+		expect(anthropic.api).toBe("anthropic-messages");
+		expect(anthropic.name).toBe("Claude Opus 5.5");
+		expect(anthropic.contextWindow).toBe(1_000_000);
+		expect(anthropic.maxTokens).toBe(128_000);
+		expect(anthropic.cost).toMatchObject({ input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 });
+		expect(anthropic.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
+		expect(anthropic.compat).toMatchObject({ forceAdaptiveThinking: true });
+
+		const vertex = MODELS["anthropic-vertex"]["claude-opus-5-5"];
+		expect(vertex).toBeDefined();
+		expect(vertex.api).toBe("anthropic-vertex");
+		expect(vertex.name).toBe("Claude Opus 5.5 (Vertex)");
+		expect(vertex.contextWindow).toBe(1_000_000);
+		expect(vertex.maxTokens).toBe(128_000);
+		expect(vertex.cost).toMatchObject({ input: 4, output: 20 });
+		expect(vertex.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
+		expect(vertex.compat).toMatchObject({ forceAdaptiveThinking: true });
+
+		for (const [id, name] of [
+			["anthropic.claude-opus-5-5", "Claude Opus 5.5"],
+			["us.anthropic.claude-opus-5-5", "Claude Opus 5.5 (US)"],
+			["global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Global)"],
+		] as const) {
+			const bedrock = MODELS["amazon-bedrock"][id];
+			expect(bedrock).toBeDefined();
+			expect(bedrock.api).toBe("bedrock-converse-stream");
+			expect(bedrock.name).toBe(name);
+			expect(bedrock.contextWindow).toBe(1_000_000);
+			expect(bedrock.maxTokens).toBe(128_000);
+			expect(bedrock.cost).toMatchObject({ input: 4, output: 20 });
+			expect(bedrock.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
+		}
+	});
+
 	test("includes Claude Sonnet 5 across Anthropic-backed providers with adaptive thinking", () => {
 		const anthropic = MODELS.anthropic["claude-sonnet-5"];
 		expect(anthropic).toBeDefined();

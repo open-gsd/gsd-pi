@@ -431,7 +431,21 @@ export function snapshotUnitTargetRows(unitType: string, unitId: string): UnitTa
     };
 
     collect('SELECT * FROM milestones WHERE id = :m', { ':m': milestone });
-    if (slice && task && unitType === 'gate-evaluate' && task.startsWith('gates+')) {
+    if (unitType === 'research-slice' && slice === 'parallel-research') {
+      // sentinel parallel-research unit id — no real slice row; advance is any
+      // slice-level RESEARCH artifact appearing (matching the special cases at
+      // artifact-verification.ts / auto-post-unit.ts). Task-level RESEARCH
+      // rows are excluded: they are not this unit's deliverable.
+      collect('SELECT * FROM slices WHERE milestone_id = :m ORDER BY id', { ':m': milestone });
+      collect(
+        `SELECT path, artifact_type, slice_id, content_hash
+           FROM artifacts
+          WHERE milestone_id = :m AND artifact_type = 'RESEARCH'
+            AND slice_id IS NOT NULL AND task_id IS NULL
+          ORDER BY path`,
+        { ':m': milestone },
+      );
+    } else if (slice && task && unitType === 'gate-evaluate' && task.startsWith('gates+')) {
       // gate-evaluate unit ids encode scoped gate ids in the third segment
       // (e.g. M001/S01/gates+Q3,Q4) — not a real task row.
       collect('SELECT * FROM slices WHERE milestone_id = :m AND id = :s ORDER BY id', { ':m': milestone, ':s': slice });

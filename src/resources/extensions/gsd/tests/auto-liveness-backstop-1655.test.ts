@@ -11,10 +11,12 @@ import { tmpdir } from 'node:os';
 import {
   openDatabase,
   closeDatabase,
+  _getAdapter,
   insertMilestone,
   insertSlice,
   insertTask,
   insertAssessment,
+  insertArtifact,
   insertGateRow,
   saveGateResult,
   updateTaskStatus,
@@ -742,4 +744,103 @@ test('#2344: a second reassessment run advances the target even with an identica
   insertRun('2026-01-02T00:00:00.000Z');
   const afterSecond = readTargetSnapshot('reassess-roadmap', 'M001/S01');
   assert.notEqual(afterSecond, afterFirst, 'the second run must hash differently so its wedge stays acknowledgeable');
+});
+
+test('#2411: parallel-research sentinel target advances when slice or RESEARCH rows land', (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  insertMilestone({ id: 'M001', title: 'T', status: 'active' });
+
+  // The sentinel unit id "{mid}/parallel-research" maps to no real slice row,
+  // so before the fix the snapshot hashed only the constant milestones row and
+  // the completed-no-advance guard could never observe an advance — the wedge
+  // was unacknowledgeable via --resume-wedge.
+  const empty = readTargetSnapshot('research-slice', 'M001/parallel-research');
+  assert.ok(empty, 'snapshot available once the milestone row exists');
+  assert.equal(
+    readTargetSnapshot('research-slice', 'M001/parallel-research'),
+    empty,
+    'zero-work completion leaves the hash identical',
+  );
+
+  // While nothing has landed, a completed-no-advance wedge for the sentinel
+  // still blocks its recheck.
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: 'completed-no-advance',
+      unitType: 'research-slice',
+      unitId: 'M001/parallel-research',
+      inputHash: hashBackstopInput(empty),
+    }).blocking,
+    true,
+    'the wedge recheck blocks while the snapshot is unchanged',
+  );
+
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'S', status: 'active', depends: [] });
+  const afterSlice = readTargetSnapshot('research-slice', 'M001/parallel-research');
+  assert.notEqual(afterSlice, empty, 'a slice row landing must advance the hash');
+
+  insertArtifact({
+    path: '.gsd/milestones/M001/research-S01.md',
+    artifact_type: 'RESEARCH',
+    milestone_id: 'M001',
+    slice_id: 'S01',
+    task_id: null,
+    full_content: 'research for S01',
+  });
+  const afterArtifact = readTargetSnapshot('research-slice', 'M001/parallel-research');
+  assert.ok(afterArtifact, 'snapshot after the RESEARCH artifact lands');
+  assert.notEqual(afterArtifact, afterSlice, 'a slice RESEARCH artifact landing must advance the hash again');
+
+  // A bookkeeping-only rewrite (same content, fresh imported_at) is not
+  // advancement — pins the explicit-column selection.
+  _getAdapter()!.prepare(
+    "UPDATE artifacts SET imported_at = '2030-01-01T00:00:00.000Z' WHERE path = :path",
+  ).run({ ':path': '.gsd/milestones/M001/research-S01.md' });
+  assert.equal(
+    readTargetSnapshot('research-slice', 'M001/parallel-research'),
+    afterArtifact,
+    'an imported_at touch must not change the hash',
+  );
+
+  // A task-level RESEARCH artifact is not this unit's deliverable — it must
+  // not mask a no-op sentinel dispatch.
+  insertArtifact({
+    path: '.gsd/milestones/M001/slices/S01/tasks/S01-T01-RESEARCH.md',
+    artifact_type: 'RESEARCH',
+    milestone_id: 'M001',
+    slice_id: 'S01',
+    task_id: 'S01-T01',
+    full_content: 'task-level research',
+  });
+  assert.equal(
+    readTargetSnapshot('research-slice', 'M001/parallel-research'),
+    afterArtifact,
+    'a task-level RESEARCH artifact must not change the hash',
+  );
+
+  // The user-visible contract: once per-slice research has landed, the
+  // empty-state wedge no longer blocks its recheck — while a wedge recorded
+  // against the current state still does (a genuine no-op stays blocked).
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: 'completed-no-advance',
+      unitType: 'research-slice',
+      unitId: 'M001/parallel-research',
+      inputHash: hashBackstopInput(empty),
+    }).blocking,
+    false,
+    'the wedge recheck clears once slice research has landed',
+  );
+  assert.equal(
+    recheckCompletedNoAdvanceWedge({
+      guardId: 'completed-no-advance',
+      unitType: 'research-slice',
+      unitId: 'M001/parallel-research',
+      inputHash: hashBackstopInput(afterArtifact),
+    }).blocking,
+    true,
+    'a wedge against the current state still blocks a genuine no-op',
+  );
 });

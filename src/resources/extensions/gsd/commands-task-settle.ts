@@ -126,7 +126,7 @@ export async function handleTaskSettle(
     const settleOptions = { reconcileLifecycle: parsed.reconcileLifecycle };
     if (!parsed.apply) {
       const plan = planTaskSettle(parsed.task, parsed.reason, settleOptions);
-      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0) {
+      if (plan.rows.length === 0 && plan.lifecycleRows.length === 0 && !plan.publication) {
         ctx.ui.notify(`gsd task settle (dry run): ${unit} has no running Attempt — nothing to do.`, "info");
         return;
       }
@@ -137,6 +137,12 @@ export async function handleTaskSettle(
         ...plan.lifecycleRows.map(
           (row) => `  lifecycle ${row.currentStatus} → ${row.targetStatus} — ${row.rationale}`,
         ),
+        ...(plan.publication ? [
+          `  publication: ${plan.publication.rationale} (host verdict: ${plan.publication.verdict ?? "none recorded"})` +
+          (plan.publication.verdict === "pass"
+            ? ""
+            : " — apply will fail closed until a passing host Technical Verdict is recorded (re-enter `/gsd auto` to run verification)"),
+        ] : []),
         ...(plan.proof ? [`  proof: ${plan.proof.note}`] : []),
       ];
       ctx.ui.notify(
@@ -145,13 +151,14 @@ export async function handleTaskSettle(
       );
       return;
     }
-    const result = applyTaskSettle({
+    const result = await applyTaskSettle({
       invocation: cliInvocation(),
       task: parsed.task,
       reason: parsed.reason,
+      basePath,
       ...settleOptions,
     });
-    if (!result.settled && !result.reconciled) {
+    if (!result.settled && !result.reconciled && !result.published) {
       ctx.ui.notify(`gsd task settle: ${unit} has no running Attempt — nothing to do.`, "info");
       return;
     }
@@ -162,6 +169,12 @@ export async function handleTaskSettle(
     if (result.reconciled) {
       const target = result.lifecycleRows[result.lifecycleRows.length - 1]?.targetStatus;
       parts.push(`Reconciled lifecycle to ${target} (${unit}) without deleting SUMMARYs.`);
+    }
+    if (result.published) {
+      parts.push(
+        `Published verified Task completion for ${unit} from Attempt ${result.published.attemptId} ` +
+        `(${result.published.status}): lifecycle completed, tasks.status complete.`,
+      );
     }
     ctx.ui.notify(parts.join(" "), "info");
   } catch (error) {

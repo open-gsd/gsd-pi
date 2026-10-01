@@ -2635,6 +2635,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"Settles under the Attempt's held lease, or safely reclaims an expired/released lease when its worker is no longer live; never steals a live peer's lease.",
 			"A second apply is a no-op — the tool is idempotent.",
 			"reconcileLifecycle adopts ready/completed after an interrupted Attempt, or completed after a succeeded Attempt, without deleting SUMMARYs.",
+			"If the latest Attempt settled succeeded at the verify stage but the Task never completed (#2417 stranded publication), apply runs the verified publication pipeline instead — it fails closed until a passing host Technical Verdict is recorded; re-enter `/gsd auto` to run verification first.",
 			"settleDisposition 'blocker-accepted' closes a Task whose latest Attempt failed as blocker-discovered at the route stage: terminal closeout, blocker provenance recorded, then replan with gsd_replan_slice — never re-executes the Task and fabricates no success evidence.",
 		],
 		parameters: Type.Object(

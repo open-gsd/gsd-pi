@@ -100,6 +100,8 @@ export type DoctorIssueCode =
   | "validation_source_revision_mismatch"
   // Orphaned execution Attempts (#1749)
   | "orphaned_running_attempt"
+  // Succeeded Attempt stranded before publication (#2417)
+  | "unpublished_succeeded_attempt"
   // Milestone lease held by a dead local worker (#2375)
   | "orphaned_milestone_lease"
   // Pre-#1659 legacy import remediation (#1661)
