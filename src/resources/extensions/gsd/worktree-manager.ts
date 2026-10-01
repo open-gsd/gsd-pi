@@ -19,9 +19,9 @@
  *   4. remove()  — git worktree remove + branch cleanup
  */
 
-import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
-import { join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { GSDError, GSD_PARSE_ERROR, GSD_STALE_STATE, GSD_LOCK_HELD, GSD_GIT_ERROR, GSD_MERGE_CONFLICT } from "./errors.js";
 import { logError, logWarning } from "./workflow-logger.js";
 import {
@@ -635,6 +635,117 @@ export function isStaleWorktreeRegistrationError(err: unknown): boolean {
     && err.message.includes("stale worktree registration");
 }
 
+/** Opt-in allowlist file listing repo-relative paths copied into new worktrees (#2386). */
+const WORKTREE_FILES_ALLOWLIST = join(".gsd", "worktree-files.json");
+
+export interface WorktreeFileCopyOutcome {
+  copied: string[];
+  skipped: { path: string; reason: string }[];
+}
+
+/**
+ * Read the opt-in `.gsd/worktree-files.json` allowlist (#2386): an array of
+ * repo-relative paths copied from the main checkout into each new worktree.
+ * Returns null when the file is absent (no behavior change), [] when present
+ * but empty or invalid (invalid shape is warned, never fatal).
+ */
+export function readWorktreeFilesAllowlist(basePath: string): string[] | null {
+  const configPath = join(basePath, WORKTREE_FILES_ALLOWLIST);
+  if (!existsSync(configPath)) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf-8"));
+  } catch (err) {
+    logWarning(
+      "worktree",
+      `.gsd/worktree-files.json is not valid JSON; ignoring allowlist: ${(err as Error).message}`,
+      { file: WORKTREE_FILES_ALLOWLIST },
+    );
+    return [];
+  }
+  if (parsed === null || !Array.isArray(parsed) || parsed.some((entry) => typeof entry !== "string")) {
+    logWarning(
+      "worktree",
+      ".gsd/worktree-files.json must be an array of repo-relative path strings; ignoring allowlist",
+      { file: WORKTREE_FILES_ALLOWLIST },
+    );
+    return [];
+  }
+  return parsed as string[];
+}
+
+/**
+ * Copy allowlisted files from the main checkout into a freshly created
+ * worktree (#2386). `git worktree add` only populates tracked files, so
+ * gitignored-but-required config never reaches the worktree; the repo owner
+ * opts in per path via .gsd/worktree-files.json. GSD never provisions secrets
+ * on its own — nothing is hardcoded here. Paths must be repo-relative and
+ * stay inside the repository (source and destination are both contained);
+ * symlinked sources are skipped (use the post-create hook for symlink
+ * fan-out). Missing sources and copy failures are warned and skipped — a
+ * bad entry never fails worktree creation and never aborts later entries.
+ */
+export function copyWorktreeFilesIntoWorktree(basePath: string, wtPath: string, allowlist: string[]): WorktreeFileCopyOutcome {
+  const outcome: WorktreeFileCopyOutcome = { copied: [], skipped: [] };
+  const resolvedBase = resolve(basePath);
+  const resolvedWt = resolve(wtPath);
+
+  for (const rawEntry of allowlist) {
+    const rel = rawEntry.trim();
+    if (!rel) continue;
+
+    if (isAbsolute(rel)) {
+      outcome.skipped.push({ path: rel, reason: "absolute path" });
+      logWarning("worktree", ".gsd/worktree-files.json entry is absolute; must be repo-relative; skipped", { file: rel });
+      continue;
+    }
+
+    const source = resolve(resolvedBase, rel);
+    const sourceInsideRepo = source !== resolvedBase && source.startsWith(resolvedBase + sep);
+    const dest = join(resolvedWt, rel);
+    const destInsideWorktree = dest.startsWith(resolvedWt + sep);
+    if (!sourceInsideRepo || !destInsideWorktree) {
+      outcome.skipped.push({ path: rel, reason: "outside repository" });
+      logWarning("worktree", ".gsd/worktree-files.json entry resolves outside the repository; skipped", { file: rel });
+      continue;
+    }
+
+    let sourceStat;
+    try {
+      sourceStat = lstatSync(source);
+    } catch {
+      outcome.skipped.push({ path: rel, reason: "source missing" });
+      logWarning("worktree", ".gsd/worktree-files.json source missing; skipped", { file: rel });
+      continue;
+    }
+    if (sourceStat.isSymbolicLink()) {
+      outcome.skipped.push({ path: rel, reason: "symlinked source" });
+      logWarning("worktree", ".gsd/worktree-files.json source is a symlink; skipped", { file: rel });
+      continue;
+    }
+    if (!sourceStat.isFile()) {
+      outcome.skipped.push({ path: rel, reason: "source missing" });
+      logWarning("worktree", ".gsd/worktree-files.json source missing; skipped", { file: rel });
+      continue;
+    }
+
+    try {
+      mkdirSync(dirname(dest), { recursive: true });
+      copyFileSync(source, dest);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      outcome.skipped.push({ path: rel, reason: `copy failed: ${msg}` });
+      logWarning("worktree", `.gsd/worktree-files.json copy failed; skipped: ${msg}`, { file: rel });
+      continue;
+    }
+    outcome.copied.push(rel);
+    logWarning("worktree", "copied allowlisted file into new worktree", { file: rel, worktree: wtPath });
+  }
+
+  return outcome;
+}
+
 /**
  * Create a new git worktree under .gsd/worktrees/<name>/ with branch worktree/<name>.
  * The branch is created from the current HEAD of the main branch.
@@ -750,6 +861,14 @@ export function createWorktree(basePath: string, name: string, opts: { branch?: 
     }
   } else {
     nativeWorktreeAdd(basePath, wtPath, branch, true, startPoint);
+  }
+
+  // #2386 — copy the opt-in .gsd/worktree-files.json allowlist from the main
+  // checkout into the fresh worktree. Absent/empty allowlist → no behavior
+  // change; copy problems are warned, never fatal to creation.
+  const allowlist = readWorktreeFilesAllowlist(basePath);
+  if (allowlist && allowlist.length > 0) {
+    copyWorktreeFilesIntoWorktree(basePath, wtPath, allowlist);
   }
 
   return {

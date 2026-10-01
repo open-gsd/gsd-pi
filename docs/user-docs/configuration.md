@@ -907,6 +907,18 @@ ln -sf "$SOURCE_DIR/assets" "$WORKTREE_DIR/assets"
 
 The path can be absolute or relative to the project root. The script runs with a 30-second timeout. Failure is non-fatal — GSD logs a warning and continues.
 
+#### `.gsd/worktree-files.json`
+
+Declarative alternative to the post-create hook for plain file copies: a JSON array of repo-relative paths copied from the main checkout into each new worktree right after creation. Useful for gitignored-but-required files that `git worktree add` never populates (for example Rails' `config/master.key` alongside the tracked `config/credentials.yml.enc`).
+
+```json
+["config/master.key", ".env.local"]
+```
+
+- Absent or empty file → no behavior change.
+- Paths must stay inside the repository; missing sources are warned and skipped.
+- Copies are logged as warnings for auditability. GSD never copies secrets on its own — every path here is an explicit repo-owner choice.
+
 #### `git.auto_pr`
 
 Automatically create a pull request when a milestone completes. Designed for teams using Gitflow or branch-based workflows where work should go through PR review before merging to a target branch.
