@@ -24,6 +24,7 @@ import { toPosixPath } from "../../shared/mod.js";
 import { autoEnableCmuxPreferences } from "../commands-cmux.js";
 import { gsdHome } from "../gsd-home.js";
 import { GSD_CONTEXT_MESSAGE_SENTINEL } from "../constants.js";
+import { discoverAgents } from "../../subagent/agents.js";
 
 // Single source of truth lives in ../constants.js; re-exported here because
 // buildContextMessage() stamps this marker on every context injection and the
@@ -447,7 +448,7 @@ export async function buildBeforeAgentStartResult(
 
   const subagentModelConfig = resolveModelWithFallbacksForUnit("subagent", basePath);
   const subagentModelBlock = subagentModelConfig
-    ? `\n\n## Subagent Model\n\nWhen spawning subagents via the \`subagent\` tool, always pass \`model: "${subagentModelConfig.primary}"\` in the tool call parameters. Never omit this — always specify it explicitly.`
+    ? buildSubagentModelBlock(subagentModelConfig.primary, hasFrontmatterModelAgent(basePath))
     : "";
 
   // memoryBlock is FTS-queried against the user prompt and changes per call.
@@ -469,6 +470,51 @@ export async function buildBeforeAgentStartResult(
     systemPrompt: fullSystem,
     ...(contextMessage ? { message: contextMessage } : {}),
   };
+}
+
+/**
+ * True when any discoverable agent (user or project scope) declares a
+ * frontmatter `model`. A hard tool-level "always pass this model" instruction
+ * would shadow those declared models at dispatch (`modelOverride ?? agent.model`
+ * in subagent/launch.ts), so callers must soften or suppress it (#2245).
+ *
+ * Scopes are unioned without name dedup: dispatch accepts `agentScope: "user"`,
+ * so a modeled user agent stays reachable even when a model-less project agent
+ * shares its name. Malformed agent files must not break context injection —
+ * discovery failures fail open to the advisory block.
+ */
+export function hasFrontmatterModelAgent(basePath: string): boolean {
+  const scopeHasModeledAgent = (scope: "user" | "project"): boolean => {
+    try {
+      return discoverAgents(basePath, scope).agents.some(
+        (agent) => typeof agent.model === "string" && agent.model.trim().length > 0,
+      );
+    } catch (e) {
+      // A malformed agent file must not break context injection — the failing
+      // scope fails open while the other scope's result is preserved.
+      logWarning("bootstrap", `subagent model guidance: ${scope} agent discovery failed: ${(e as Error).message}`);
+      return false;
+    }
+  };
+  return scopeHasModeledAgent("user") || scopeHasModeledAgent("project");
+}
+
+/**
+ * Build the "## Subagent Model" system-prompt block. Exported for direct unit
+ * testing (#2245 / #2394).
+ *
+ * - When any agent declares a frontmatter `model`, the agent's own model
+ *   governs; the injected guidance must not force a tool-level override.
+ * - Otherwise the resolved `models.subagent` value is advisory-by-complexity:
+ *   always pass an explicit `model`, chosen per task complexity, with the
+ *   resolved value as the suggested default — not a phase-ceiling default for
+ *   lightweight/recon dispatches.
+ */
+export function buildSubagentModelBlock(primary: string, hasFrontmatterModelAgents: boolean): string {
+  if (hasFrontmatterModelAgents) {
+    return `\n\n## Subagent Model\n\nSome available agents declare a \`model\` in their frontmatter; that declared model governs those agents — when spawning one of them via the \`subagent\` tool, do not pass a \`model\` override unless the caller explicitly requests a specific model for this invocation (on parallel/chain calls a top-level \`model\` reaches every item, so set \`model\` per item only where an override is intended). For agents without a declared model, pass an explicit \`model\` chosen per task complexity; the configured default \`${primary}\` is the suggested starting point — prefer a lighter model for lightweight/recon dispatches instead of defaulting to it.`;
+  }
+  return `\n\n## Subagent Model\n\nWhen spawning subagents via the \`subagent\` tool, always pass an explicit \`model\` in the tool call parameters. Use the caller's requested model when one is specified; otherwise choose per task complexity — the resolved default \`${primary}\` is the suggested default for standard work; prefer a lighter model for lightweight/recon dispatches instead of defaulting to it, and reserve heavier models for genuinely complex tasks.`;
 }
 
 /**

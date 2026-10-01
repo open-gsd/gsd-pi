@@ -1,6 +1,9 @@
 # Single-Writer Engine v3: Agent Control Plane
+
 # Plan: State machine guards + actor causation + reversibility
+
 # Created: 2026-03-25
+
 # Status: CLOSED (2026-04-25) — see Implementation Status section below
 
 ---
@@ -34,6 +37,7 @@ v2 gave the engine **write discipline** — agents can't corrupt STATE.md direct
 every mutation goes through the DB, event log is append-only.
 
 What v2 did NOT give us: **behavioral control**.  Agents can still:
+
 - Complete a task twice (silent overwrite)
 - Complete a slice with open tasks (if they bypass the slice status check)
 - Complete a milestone in any status
@@ -49,15 +53,18 @@ share infrastructure (WorkflowEvent schema, DB query surface, handler preconditi
 ## Work Streams
 
 ### Stream 1 — State Machine Guards (P0)
+
 Add precondition checks to all 8 tool handlers so invalid transitions return an
 error instead of silently succeeding.
 
 ### Stream 2 — Actor Identity + Persistent Audit Log (P1)
+
 Extend `WorkflowEvent` with `actor_name` and `trigger_reason`. Flush the
 in-process `workflow-logger` buffer to a persistent `.gsd/audit-log.jsonl`
 after every tool invocation, so "who did what and why" is durable.
 
 ### Stream 3 — Reversibility + Unit Ownership (P2)
+
 Add `gsd_task_reopen` and `gsd_slice_reopen` tools. Add a unit-ownership
 validation layer so an agent can only complete/reopen units it explicitly claimed.
 
@@ -93,6 +100,7 @@ Need a version that returns the slice row itself.
 **File:** `src/resources/extensions/gsd/tools/complete-task.ts`
 
 Preconditions to add (before the transaction block):
+
 1. `getMilestoneById(milestoneId)` → must exist, must NOT be `"complete"` or `"done"`
 2. `getSlice(sliceId, milestoneId)` → must exist, must be `"pending"` or `"in_progress"`
 3. `getTask(taskId, sliceId)` → if exists, status must be `"pending"` (not already `"complete"`)
@@ -106,6 +114,7 @@ On failure: return `{ error: "<reason>" }` — do NOT throw.
 **File:** `src/resources/extensions/gsd/tools/complete-slice.ts`
 
 Preconditions to add:
+
 1. `getSlice(sliceId, milestoneId)` → must exist, status must be `"pending"` or `"in_progress"` (not already `"complete"`)
 2. `getMilestoneById(milestoneId)` → must exist, must NOT be `"complete"`
 3. All tasks in slice must be `"complete"` (already enforced — keep it, add explicit slice-status check before this)
@@ -117,6 +126,7 @@ Preconditions to add:
 **File:** `src/resources/extensions/gsd/tools/complete-milestone.ts`
 
 Preconditions to add:
+
 1. `getMilestoneById(milestoneId)` → must exist, status must be `"active"` (not already `"complete"`)
 2. Keep existing all-slices-complete check
 3. Add deep check: all tasks across all slices must also be `"complete"` (not just slice status)
@@ -128,6 +138,7 @@ Preconditions to add:
 **File:** `src/resources/extensions/gsd/tools/plan-task.ts`
 
 Preconditions to add:
+
 1. `getSlice(sliceId, milestoneId)` → must exist, status must NOT be `"complete"` (already blocks planning on a closed slice)
 2. If task exists (`getTask`), status must be `"pending"` — block re-planning a `"complete"` task
 
@@ -138,6 +149,7 @@ Preconditions to add:
 **File:** `src/resources/extensions/gsd/tools/plan-slice.ts`
 
 Preconditions to add:
+
 1. `getSlice(sliceId, milestoneId)` → if exists, status must NOT be `"complete"`
 2. `getMilestoneById(milestoneId)` → must exist, status must NOT be `"complete"`
 
@@ -148,6 +160,7 @@ Preconditions to add:
 **File:** `src/resources/extensions/gsd/tools/plan-milestone.ts`
 
 Preconditions to add:
+
 1. If milestone exists (`getMilestoneById`), status must NOT be `"complete"`
 2. Validate `depends_on` array: each referenced milestoneId must exist and be `"complete"` before this milestone can be planned
 
@@ -161,6 +174,7 @@ Gap: `completedSliceId` is accepted without confirming it is actually `"complete
 Also: no check that milestone is still `"active"` (could reassess after milestone is done).
 
 Preconditions to add:
+
 1. `getSlice(completedSliceId, milestoneId)` → status must be `"complete"`
 2. `getMilestoneById(milestoneId)` → status must be `"active"`
 
@@ -171,10 +185,12 @@ Preconditions to add:
 **File:** `src/resources/extensions/gsd/tools/replan-slice.ts`
 
 Gaps:
+
 - `blockerTaskId` is accepted without verifying it exists or is `"complete"`
 - No check that slice is still `"in_progress"` (could replan after slice is complete)
 
 Preconditions to add:
+
 1. `getSlice(sliceId, milestoneId)` → status must be `"in_progress"` or `"pending"`, NOT `"complete"`
 2. `getTask(blockerTaskId, sliceId)` → must exist, status must be `"complete"`
 
@@ -187,6 +203,7 @@ Preconditions to add:
 **File:** `src/resources/extensions/gsd/workflow-events.ts`
 
 Extend the `WorkflowEvent` interface:
+
 ```ts
 export interface WorkflowEvent {
   cmd: string;
@@ -211,6 +228,7 @@ so fork detection isn't broken.
 **Files:** All 8 handlers in `src/resources/extensions/gsd/tools/`
 
 Each handler receives its inputs. Add a convention where params can include:
+
 - `actor_name` (optional string) — caller passes their agent identity
 - `trigger_reason` (optional string) — caller passes why this action was triggered
 
@@ -260,6 +278,7 @@ export function readAuditLog(basePath: string): LogEntry[]
 **File:** `src/resources/extensions/gsd/gsd-db.ts`
 
 If they don't already exist (check first):
+
 ```ts
 updateTaskStatus(taskId: string, sliceId: string, status: string): void
 updateSliceStatus(sliceId: string, milestoneId: string, status: string): void
@@ -274,6 +293,7 @@ These are the write primitives needed by reopen tools.
 **New file:** `src/resources/extensions/gsd/tools/reopen-task.ts`
 
 Logic:
+
 1. Validate `taskId`, `sliceId`, `milestoneId` are non-empty strings
 2. `getTask(taskId, sliceId)` → must exist, status must be `"complete"` (can't reopen what isn't closed)
 3. `getSlice(sliceId, milestoneId)` → must exist, status must NOT be `"complete"` (can't reopen a task inside a closed slice — too late)
@@ -289,6 +309,7 @@ Logic:
 **New file:** `src/resources/extensions/gsd/tools/reopen-slice.ts`
 
 Logic:
+
 1. Validate `sliceId`, `milestoneId`
 2. `getSlice(sliceId, milestoneId)` → must exist, status must be `"complete"`
 3. `getMilestoneById(milestoneId)` → must NOT be `"complete"`
@@ -303,6 +324,7 @@ Logic:
 **New file:** `src/resources/extensions/gsd/unit-ownership.ts`
 
 Lightweight JSON file at `.gsd/unit-claims.json` mapping unit IDs to agent names:
+
 ```json
 {
   "M01/S01/T01": { "agent": "executor-01", "claimed_at": "2026-03-25T..." },
@@ -311,6 +333,7 @@ Lightweight JSON file at `.gsd/unit-claims.json` mapping unit IDs to agent names
 ```
 
 Functions:
+
 ```ts
 claimUnit(basePath, unitKey, agentName): void   // atomic write
 releaseUnit(basePath, unitKey): void
@@ -326,6 +349,7 @@ getOwner(basePath, unitKey): string | null
 **Files:** `complete-task.ts`, `complete-slice.ts`
 
 If `actor_name` is provided AND `.gsd/unit-claims.json` exists AND the unit is claimed:
+
 - Verify `actor_name` matches the registered owner
 - If mismatch: return `{ error: "Unit <key> is owned by <owner>, not <actor>" }`
 - If no claim file / unit is unclaimed: allow the operation (opt-in ownership)
@@ -380,6 +404,7 @@ S3-T4 (unit-ownership.ts)
 ```
 
 Parallelizable:
+
 - All of Stream 1 (S1-T2 through S1-T9) can run in parallel once S1-T1 is done
 - Stream 2 and Stream 3 are fully independent of Stream 1
 
@@ -412,6 +437,7 @@ After this phase:
 5. **Idempotency: fix in this phase** — convert `insertAssessment` and `insertReplanHistory` to upserts (keyed on `milestoneId+sliceId` and `milestoneId+sliceId+ts` respectively). Accumulating duplicate records on retry is a bug, not a feature.
 
 ### Additional task from decision 5:
+
 #### S1-T10: Convert `insertAssessment` and `insertReplanHistory` to upserts
 
 **File:** `src/resources/extensions/gsd/gsd-db.ts`

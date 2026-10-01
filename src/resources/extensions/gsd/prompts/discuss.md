@@ -9,6 +9,7 @@ The opener is intentionally variable so GSD feels alive across project starts. K
 ## Reflection Step
 
 After the user describes the idea, **do not ask questions yet**. Reflect first:
+
 1. Concrete summary in your own words.
 2. Honest size read: rough milestone count and first-milestone slice count.
 3. Scope honesty: "Here's what I'm hearing:" plus major capability bullets.
@@ -21,6 +22,7 @@ Do not skip this or combine it with the first question round. **End your turn af
 After reflection is confirmed, choose the approach from actual scope, not a label:
 
 **If the work spans multiple milestones:** map the landscape before details:
+
 1. Propose milestone names, intents, and rough dependencies.
 2. Treat it as the working sequence; adjust if the user objects or adds constraints.
 3. Then begin deep Q&A scoped to the full vision, not just M001.
@@ -34,6 +36,7 @@ After reflection is confirmed, choose the approach from actual scope, not a labe
 ## Ground the First Question Round
 
 Ground your questions in the **Preparation Context above** (codebase snapshot, prior context) plus the user's reflected vision — that is authoritative. **Do not survey the codebase** with `ls`/`find`/`rg`/`scout` before asking; the snapshot already covers code reality. Read a specific file only when a question's answer genuinely hinges on it.
+
 1. Check mentioned tech with `resolve_library` / `get_library_docs`.
 2. Use web tools only for current external facts.
 
@@ -135,6 +138,7 @@ Summarize quality bar: acceptance criteria, test strategy, definition of done. T
 Start open, follow the user's detail, challenge vague terms with specifics, and use their language. **Lead with experience, but ask implementation when it materially matters.** Ask implementation directly when it changes scope, proof, compliance, integration, deployment, or irreversible architecture. If the user selects "Other" or wants explanation, switch to plain-text follow-ups until structured choices fit again. State your read and rationale before asking when useful. Ask what would disappoint them and what the product should never feel like. Codebase facts are context, not decisions.
 
 **Anti-patterns — never do these:**
+
 - **Checklist walking** — going through a predetermined list of topics regardless of what the user said
 - **Canned questions** — asking generic questions that could apply to any project
 - **Corporate speak** — "What are your key success metrics?" / "Who are the stakeholders?"
@@ -196,6 +200,7 @@ Requirements must be organized into Active, Validated, Deferred, Out of Scope, a
 Each requirement includes stable ID (`R###`), title, class, status, description, why it matters, source (`user`, `inferred`, `research`, or `execution`), primary owning slice, supporting slices, validation status, and notes.
 
 Rules:
+
 - Keep requirements capability-oriented, not a feature inventory
 - Every Active requirement must either be mapped to a roadmap owner, explicitly deferred, blocked with reason, or moved out of scope
 - Product-facing work should capture launchability, primary user loop, continuity, and failure visibility when relevant
@@ -226,6 +231,7 @@ Directories use bare IDs. Files use ID-SUFFIX format. Titles live inside file co
 ### Single Milestone
 
 Once the user is satisfied, in a single pass:
+
 1. `mkdir -p .gsd/milestones/{{milestoneId}}/slices`
 2. Call `gsd_summary_save` with `artifact_type: "PROJECT"` and full Project template content. The tool persists the DB-backed PROJECT artifact and renders `.gsd/PROJECT.md`. Describe what the project is, its current state, and list the milestone sequence.
 3. Persist requirements with `gsd_requirement_save` or `gsd_requirement_update`, then call `gsd_summary_save` with `artifact_type: "REQUIREMENTS"` so the tool renders `.gsd/REQUIREMENTS.md` from DB rows. Confirm requirement states, ownership, and traceability before roadmap creation.

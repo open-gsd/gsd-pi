@@ -119,6 +119,7 @@ Track skill performance:
 ```
 
 The dashboard flags:
+
 - Success rate below 70% over the last 10 uses
 - Token usage rising 20%+ compared to previous window
 - Skills unused beyond the configured threshold

@@ -22,12 +22,16 @@
 
 import {
   getSliceTasks,
+  getDb,
 } from "../gsd-db.js";
 import {
   isCurrentSliceReopenOperation,
   reopenSlice,
   SliceLifecycleValidationError,
 } from "../slice-lifecycle-domain-operation.js";
+import { repairSliceShadowsForReopen } from "../lifecycle-shadow-repair-domain-operation.js";
+import { isMilestoneLifecycleAdopted } from "../db/milestone-closeout-readiness.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
@@ -75,6 +79,31 @@ export function _setReopenSliceCleanupInterleaveForTest(hook: (() => void) | nul
   _setProjectionCleanupInterleaveForTest(hook);
 }
 
+/**
+ * True when the milestone's canonical lifecycle head is terminal. A slice
+ * reopen under such a milestone is refused by the Domain Operation no matter
+ * what — the shadow repair must not run (and fail on unverifiable drift)
+ * ahead of that refusal, which would mask the fail-closed error callers pin.
+ */
+function milestoneCanonicalTerminal(milestoneId: string): boolean {
+  try {
+    const row = getDb().prepare(`
+      SELECT lifecycle.lifecycle_status AS status
+      FROM milestones milestone
+      LEFT JOIN workflow_item_lifecycles lifecycle
+        ON lifecycle.project_id = (SELECT project_id FROM project_authority WHERE singleton = 1)
+       AND lifecycle.item_kind = 'milestone'
+       AND lifecycle.milestone_id = milestone.id
+       AND lifecycle.slice_id IS NULL
+      WHERE milestone.id = :milestone_id
+    `).get({ ":milestone_id": milestoneId }) as Record<string, unknown> | undefined;
+    const status = row?.["status"];
+    return status === "completed" || status === "cancelled";
+  } catch {
+    return false;
+  }
+}
+
 export async function handleReopenSlice(
   params: ReopenSliceParams,
   basePath: string,
@@ -92,6 +121,37 @@ export async function handleReopenSlice(
   let operationStatus: "committed" | "replayed";
   let operationId: string;
   let projectionStale = false;
+  // Converge drifted descendants before the reopen's terminal-parity checks
+  // (#2440). Evidence-gated: unverifiable drift fails here, listed, instead of
+  // aborting inside the Domain Operation. Legacy (non-adopted) hierarchies —
+  // including the #1205 desync escape — have no canonical authority to repair
+  // against and keep their cascade path.
+  if (isMilestoneLifecycleAdopted(params.milestoneId) && !milestoneCanonicalTerminal(params.milestoneId)) {
+    // A replayed invocation skips the repair — its stored receipt must be
+    // returned as-is, not preceded by fresh mutations against newer state.
+    if (!readDomainOperationFence(invocation.idempotencyKey).replay) {
+      try {
+        const shadowRepair = repairSliceShadowsForReopen({
+          invocation,
+          milestoneId: params.milestoneId,
+          sliceId: params.sliceId,
+        });
+        if (shadowRepair.unresolved.length > 0) {
+          return {
+            error: `Milestone ${params.milestoneId} has unresolved canonical lifecycle shadows: ${shadowRepair.unresolved.join(", ")}`,
+          };
+        }
+        if (shadowRepair.repaired.length > 0) {
+          logWarning(
+            "tool",
+            `Repaired ${shadowRepair.repaired.length} evidence-backed lifecycle shadow(s) before reopening Slice ${params.milestoneId}/${params.sliceId}`,
+          );
+        }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+  }
   try {
     const receipt = reopenSlice({
       invocation,

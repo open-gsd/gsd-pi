@@ -148,6 +148,7 @@ The [LLM Compiler pattern](https://arxiv.org/pdf/2312.04511) (ICML 2024) treats 
 ### How It Works
 
 **Current GSD behavior (sequential):**
+
 ```
 Read(auth.ts) ─── 150ms ───▶ result
                                │
@@ -161,6 +162,7 @@ Total: ~480ms sequential
 ```
 
 **With DAG execution (parallel):**
+
 ```
 Read(auth.ts)  ─── 150ms ──▶ result ─┐
 Read(types.ts) ─── 120ms ──▶ result ─┤
@@ -282,6 +284,7 @@ Based on [Speculative Tool Calls research](https://arxiv.org/pdf/2512.15834), th
 The #1 latency bottleneck in GSD is the round-trip: user prompt → model thinks → model requests tool → tool executes → result sent back → model thinks again. Speculative execution attacks the highest-latency step.
 
 GSD's architecture makes this easy to add:
+
 - `AgentSession.prompt()` already processes user input before sending to the model
 - Tool results are already cached in the message array
 - The extension system can intercept input and spawn pre-fetches
@@ -567,6 +570,7 @@ Instead of the model deciding one action at a time and hoping it works, the syst
 ### Current vs MCTS Approach
 
 **Current (linear):**
+
 ```
 User: "fix the auth bug"
   │
@@ -586,6 +590,7 @@ Action 1: Read auth.ts ──▶ Action 2: Edit line 45 ──▶ Action 3: Run 
 ```
 
 **With MCTS (tree search):**
+
 ```
 User: "fix the auth bug"
   │
@@ -607,6 +612,7 @@ Result: Branch B succeeds after 2 actions, not 5+
 ### Why It Fits gsd-pi
 
 GSD already has session branching primitives:
+
 - `fork()` creates a branch from any message
 - Branch summaries compress history at fork points
 - Tree navigation (`/tree`) lets users explore branches

@@ -268,3 +268,44 @@ test("transient journaled exchange failure keeps the entry and propagates for re
   assert.equal(readFileSync(join(fixture.rootPath, fixture.logicalPath), "utf8"), "replacement\n");
   assert.equal(existsSync(fixture.journalPath), false);
 });
+
+test("repeatedly transient exchange replay retires the entry after three failures across restarts", (t) => {
+  const fixture = prepareExchangeFixture("gsd-exchange-replay-transient-escalation-");
+  t.after(() => cleanupFixture(fixture.base));
+  writeExchangeJournal(fixture);
+
+  const fault = new Error("projection root operation failed: sharing violation (os error 32)");
+  const replay = (): unknown => _recoverManagedProjectionMutationsForTest(
+    () => handleFailingExchangePaths(fixture.rootPath, fault),
+    fixture.base,
+  );
+  // The first two transient failures keep the entry (outer retry schedules
+  // keep ownership) with the failure count persisted for the next process.
+  assert.throws(replay, (error: unknown) => error === fault);
+  assert.equal(existsSync(fixture.journalPath), true);
+  assert.equal(
+    (JSON.parse(readFileSync(fixture.journalPath, "utf8")) as { replayFailureCount?: number }).replayFailureCount,
+    1,
+  );
+  assert.throws(replay, (error: unknown) => error === fault);
+  assert.equal(existsSync(fixture.journalPath), true);
+  assert.equal(
+    (JSON.parse(readFileSync(fixture.journalPath, "utf8")) as { replayFailureCount?: number }).replayFailureCount,
+    2,
+  );
+
+  // The third failure escalates: participants are retained as reviewable
+  // evidence, the journal entry is removed, and the thrown error is the
+  // retirement shape instead of the raw transient fault.
+  assert.throws(replay, /managed projection target identity changed; recovery evidence retained/u);
+  assert.equal(existsSync(fixture.journalPath), false);
+  assert.deepEqual(
+    loadUnboundProjectionEvidence(fixture.base).map((entry) => entry.evidencePath).sort(),
+    [fixture.logicalPath, fixture.temporaryPath, fixture.replacementPath, fixture.guardPath].sort(),
+  );
+
+  // The next open succeeds (the entry no longer replays); the affected
+  // target regenerates from the DB once its retained evidence is resolved
+  // through the standard /gsd doctor review flow.
+  assert.deepEqual(loadManagedProjectionPaths(fixture.base), []);
+});

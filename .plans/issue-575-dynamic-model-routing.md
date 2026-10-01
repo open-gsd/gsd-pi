@@ -11,6 +11,7 @@ Users on capped plans (e.g., Claude Pro) exhaust weekly token limits in 15-20 ho
 ## Current Architecture
 
 ### What Exists
+
 - **Phase-based model config:** Users can set different models per phase via `PREFERENCES.md` (research, planning, execution, completion)
 - **Fallback chains:** Each phase supports `fallbacks: [model1, model2]` for error recovery
 - **Pre-dispatch hooks:** `PreDispatchResult` has a `model` field but it's **never applied** in `auto.ts` — this is a ready-made extension point
@@ -19,6 +20,7 @@ Users on capped plans (e.g., Claude Pro) exhaust weekly token limits in 15-20 ho
 - **Budget enforcement:** Real-time cost tracking with alerts at 75%/90%/100%
 
 ### Key Files
+
 | File | Role |
 |------|------|
 | `src/resources/extensions/gsd/auto.ts` | Dispatch logic, model switching (lines 1791-1879) |
@@ -109,8 +111,10 @@ Model dispatch (existing auto.ts logic)
 #### 1a. Define types and configuration
 
 **File:** `src/resources/extensions/gsd/types.ts`
+
 - Add `ComplexityTier` type: `'light' | 'standard' | 'heavy'`
 - Add `DynamicRoutingConfig` interface:
+
   ```typescript
   interface DynamicRoutingConfig {
     enabled: boolean;
@@ -124,6 +128,7 @@ Model dispatch (existing auto.ts logic)
   ```
 
 **File:** `src/resources/extensions/gsd/preferences.ts`
+
 - Add `dynamic_routing` to preference schema
 - Add validation for the new config
 - Add `loadDynamicRoutingConfig()` function
@@ -131,6 +136,7 @@ Model dispatch (existing auto.ts logic)
 #### 1b. Build complexity classifier
 
 **New file:** `src/resources/extensions/gsd/complexity-classifier.ts`
+
 - `classifyUnitComplexity(unitType, unitId, metadata?)` → `ComplexityTier`
 - Heuristic rules:
   - Unit type mapping (see Tiers table above)
@@ -141,6 +147,7 @@ Model dispatch (existing auto.ts logic)
 #### 1c. Build model router
 
 **New file:** `src/resources/extensions/gsd/model-router.ts`
+
 - `resolveModelForComplexity(tier, phaseConfig, availableModels)` → `ResolvedModelConfig`
 - Logic:
   1. Get user's configured model for phase (ceiling)
@@ -152,6 +159,7 @@ Model dispatch (existing auto.ts logic)
 #### 1d. Wire into dispatch
 
 **File:** `src/resources/extensions/gsd/auto.ts`
+
 - In the model resolution block (lines 1791-1879):
   1. After `resolveModelWithFallbacksForUnit()`, call classifier
   2. If dynamic routing enabled, call router to potentially downgrade
@@ -161,23 +169,27 @@ Model dispatch (existing auto.ts logic)
 #### 1e. Wire the unused pre-dispatch hook model field
 
 **File:** `src/resources/extensions/gsd/auto.ts`
+
 - Apply `preDispatchResult.model` when returned — this is already defined but unused
 - Allows hooks to override dynamic routing decisions
 
 #### Tests
 
 **New file:** `src/resources/extensions/gsd/tests/complexity-classifier.test.ts`
+
 - Test tier assignment for each unit type
 - Test metadata-based adjustments (file count, dependency count)
 - Test edge cases (missing metadata, unknown unit types)
 
 **New file:** `src/resources/extensions/gsd/tests/model-router.test.ts`
+
 - Test downgrade-only behavior (never exceeds configured model)
 - Test tier-to-model mapping with various available model sets
 - Test fallback chain construction
 - Test when dynamic routing is disabled (passthrough)
 
 **New file:** `src/resources/extensions/gsd/tests/dynamic-routing-integration.test.ts`
+
 - Test full flow: unit → classify → route → dispatch
 - Test escalation on failure
 - Test preference loading and validation
@@ -191,6 +203,7 @@ Model dispatch (existing auto.ts logic)
 #### 2a. Metrics tracking
 
 **File:** `src/resources/extensions/gsd/metrics.ts`
+
 - Add `tier` field to `UnitMetrics`
 - Add `model_downgraded: boolean` field
 - Add `escalation_count` field
@@ -200,11 +213,13 @@ Model dispatch (existing auto.ts logic)
 #### 2b. Dashboard integration
 
 **File:** `src/resources/extensions/gsd/auto-dashboard.ts`
+
 - Add tier badge to unit progress display (e.g., `[L]`, `[S]`, `[H]`)
 - Add savings summary to completion stats: "Dynamic routing saved ~$X.XX (N units downgraded)"
 - Color-code tier in token widget
 
 #### Tests
+
 - Test metrics aggregation by tier
 - Test savings calculation
 - Test dashboard formatting
@@ -218,6 +233,7 @@ Model dispatch (existing auto.ts logic)
 #### 3a. Outcome tracking
 
 **File:** `src/resources/extensions/gsd/complexity-classifier.ts`
+
 - Track success/failure per tier per unit-type pattern
 - Store in `.gsd/routing-history.json` (project-level)
 - Simple structure: `{ "execute-task:docs": { light: { success: 12, fail: 1 }, ... } }`
@@ -229,6 +245,7 @@ Model dispatch (existing auto.ts logic)
 - User can reset learning: `dynamic_routing_reset: true` in preferences
 
 #### Tests
+
 - Test learning updates on success/failure
 - Test threshold bumping
 - Test decay logic
@@ -282,11 +299,13 @@ dynamic_routing:
 ## Estimated Token Savings
 
 Based on typical GSD session patterns:
+
 - ~30% of units are completion/summary (Tier 1 candidates)
 - ~40% are research/standard planning (Tier 2 candidates)
 - ~30% are complex execution (Tier 3, no downgrade)
 
 If Haiku is ~10x cheaper than Opus and Sonnet is ~5x cheaper:
+
 - **Conservative estimate:** 20-30% cost reduction with dynamic routing enabled
 - **Aggressive estimate:** 40-50% for projects with many small tasks
 
@@ -295,12 +314,15 @@ If Haiku is ~10x cheaper than Opus and Sonnet is ~5x cheaper:
 All four open questions resolved as **yes** — folded into the plan as additional scope:
 
 ### 1. Post-unit hook classification — YES
+
 Hooks get their own complexity classification. Most hooks are lightweight (validation, file checks) and should default to Tier 1. The existing `model` field on `PostUnitHookConfig` becomes the ceiling, same as phase models for units.
 
 **Implementation:** Add to Phase 1d — extend `classifyUnitComplexity()` to accept hook metadata. Wire into hook dispatch at `auto.ts` lines 936-946.
 
 ### 2. Budget-pressure-aware routing — YES
+
 As budget usage increases, the classifier becomes more aggressive about downgrading:
+
 - **<50% budget used:** Normal classification
 - **50-75% budget used:** Bump Tier 2 candidates down to Tier 1 where possible
 - **75-90% budget used:** Only Tier 3 tasks get the configured model; everything else goes to cheapest available
@@ -309,9 +331,11 @@ As budget usage increases, the classifier becomes more aggressive about downgrad
 **Implementation:** Add to Phase 1b — `classifyUnitComplexity()` takes `budgetPct` parameter from existing `getBudgetAlertLevel()` logic. New function `applyBudgetPressure(tier, budgetPct)` adjusts the tier.
 
 ### 3. Multi-provider cost routing — YES
+
 When multiple providers are configured, the router should consider cost differences. If a user has both Anthropic and OpenRouter, pick the cheapest option for the resolved tier.
 
 **Implementation:**
+
 - Add `cost_per_1k_tokens` metadata to model registry (or maintain a lookup table for known models)
 - New file: `src/resources/extensions/gsd/model-cost-table.ts` — static cost table for known models, updatable via preferences
 - `resolveModelForComplexity()` ranks available models by cost within a tier's capability range
@@ -320,9 +344,11 @@ When multiple providers are configured, the router should consider cost differen
 **Risk:** Cost data goes stale. Mitigate with a bundled cost table that gets updated with GSD releases + user override capability.
 
 ### 4. User feedback loop — YES
+
 After each unit completes, users can flag the output quality to improve future classification.
 
 **Implementation (Phase 3 — Adaptive Learning):**
+
 - Post-unit prompt option: user can react with `/gsd:rate-unit [over|under|ok]`
   - `over` = "this could have used a simpler model" → records downgrade signal
   - `under` = "this needed a better model" → records upgrade signal

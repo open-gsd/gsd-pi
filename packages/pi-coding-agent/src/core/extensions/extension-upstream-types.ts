@@ -73,6 +73,7 @@ import type {
 	ToolPreparationErrorsTurnEventResult,
 	UnitEndEvent,
 	UnitStartEvent,
+	PhaseChangeEvent,
 	VerifyFailure,
 	VerifyResultEvent,
 } from "../gsd-extension-types.js";
@@ -166,6 +167,8 @@ export interface GsdProgressState {
 	eta?: string;
 	/** Fully-qualified dispatched model ID (provider/id) auto-mode is currently running, if any. */
 	model?: string;
+	/** Dynamic-routing tier that classified the active unit, when dynamic routing applied (#2395). */
+	dynamicRoutingTier?: "light" | "standard" | "heavy";
 	healthSummary?: string;
 	path?: string;
 	widgetMode?: GsdProgressWidgetMode;
@@ -701,6 +704,10 @@ export interface BeforeAgentStartEvent {
 	systemPrompt: string;
 	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Pi loaded without re-discovering resources. */
 	systemPromptOptions: BuildSystemPromptOptions;
+	/** Unit type being dispatched by the embedding host, if known (e.g. a gsd auto-mode unit). Absent for ordinary user-initiated turns. */
+	unitType?: string;
+	/** GSD phase being dispatched by the embedding host, if known (e.g. "executing"). Absent for ordinary user-initiated turns. */
+	phase?: string;
 }
 
 /** Fired when an agent loop starts */
@@ -1226,6 +1233,7 @@ export interface ExtensionAPI {
 	on(event: "milestone_end", handler: ExtensionHandler<MilestoneEndEvent>): void;
 	on(event: "unit_start", handler: ExtensionHandler<UnitStartEvent>): void;
 	on(event: "unit_end", handler: ExtensionHandler<UnitEndEvent>): void;
+	on(event: "phase_change", handler: ExtensionHandler<PhaseChangeEvent>): void;
 	on(event: "before_model_select", handler: ExtensionHandler<BeforeModelSelectEvent, BeforeModelSelectResult>): void;
 	on(event: "adjust_tool_set", handler: ExtensionHandler<AdjustToolSetEvent, AdjustToolSetResult>): void;
 	on(event: "bash_transform", handler: ExtensionHandler<BashTransformEvent, BashTransformEventResult>): void;

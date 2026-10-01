@@ -83,6 +83,7 @@ The `-dev.` prerelease identifier is distinct from the existing `-next.` convent
 Dev versions (`@dev` tag) use the native binaries from the most recent stable `build-native.yml` release. The `optionalDependencies` in `package.json` use `>=` ranges, so a `-dev.` version of `gsd-pi` resolves the latest stable `@opengsd/engine-*` packages from the registry.
 
 If a PR modifies Rust native crate code (`native/` directory), the dev publish will bundle stale native binaries. This is acceptable because:
+
 - Native crate changes are infrequent and always accompanied by a `v*` tag release
 - The Test stage validates the installed package works end-to-end
 - Full native binary validation happens via `build-native.yml` on the version tag
@@ -96,6 +97,7 @@ concurrency:
 ```
 
 Policy:
+
 - Each pipeline run is keyed to its commit SHA — no two runs for the same commit race
 - Newer merges do NOT cancel in-progress promotions — a version already in the Test stage completes its promotion
 - If Run A is promoting version X to `@next` while Run B publishes version Y to `@dev`, they operate independently — `@next` and `@dev` point to different versions, which is correct
@@ -211,6 +213,7 @@ class FixtureProvider implements Provider {
 ```
 
 Key integration details:
+
 - **Streaming:** Fixture replay simulates streaming by yielding saved response chunks with minimal delay. This exercises the same consumer code paths as real streaming.
 - **Registration:** When `GSD_FIXTURE_MODE` is set, the fixture provider wraps the configured real provider. No changes to provider selection logic needed.
 - **Provider-agnostic:** Fixtures are captured at the `Provider` interface level (above HTTP transport), so they work regardless of which underlying provider was used during recording.

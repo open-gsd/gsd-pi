@@ -5,11 +5,13 @@ GSD can auto-sync milestones, slices, and tasks to GitHub Issues, PRs, and Miles
 ## Setup
 
 1. Install and authenticate the `gh` CLI:
+
    ```bash
    gh auth login
    ```
 
 2. Enable in preferences:
+
    ```yaml
    github:
      enabled: true

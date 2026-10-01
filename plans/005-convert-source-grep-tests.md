@@ -29,6 +29,7 @@ The following test files read source code and assert text:
 - `src/tests/cli-model-override-startup.test.ts:1-24` — reads `src/cli.ts` and asserts source structure.
 
 Repo conventions:
+
 - Tests use `node:test` and `node:assert/strict`.
 - `CONTRIBUTING.md` bans source-grep tests; the narrow exception is file-structure-as-product tests marked with `// allow-source-grep`.
 - Prefer importing the code under test and exercising it, or spawning the CLI/binary and asserting on real output.
@@ -46,12 +47,14 @@ Repo conventions:
 ## Scope
 
 **In scope**:
+
 - `src/resources/extensions/gsd/tests/notifications.test.ts`
 - `src/resources/extensions/gsd/tests/remote-notification-from-desktop.test.ts`
 - `src/resources/extensions/gsd/tests/engine-interfaces-contract.test.ts`
 - `src/tests/cli-model-override-startup.test.ts`
 
 **Out of scope**:
+
 - Production code changes unless a function must be exported to be tested behaviorally.
 - Removing the `check-source-grep-tests.sh` gate.
 - Other test files that legitimately use `// allow-source-grep`.
@@ -78,6 +81,7 @@ If the functions are hard to import due to side effects, use a subprocess test t
 ### Step 2: Convert `remote-notification-from-desktop.test.ts`
 
 Open `src/resources/extensions/gsd/tests/remote-notification-from-desktop.test.ts`. Replace source-grep assertions with a behavioral test that:
+
 1. Imports `sendDesktopNotification` from `notifications.ts`.
 2. Mocks `sendRemoteNotification` using `node:test` module mocking if available, or by extracting `sendRemoteNotification` to a swappable dependency.
 3. Calls `sendDesktopNotification` with test arguments.
@@ -151,6 +155,7 @@ Run `pnpm run test:unit` to catch regressions.
 ## STOP conditions
 
 Stop and report back if:
+
 - A production function cannot be imported or tested without a large refactor.
 - Converting a test requires changing the public API of a module.
 - `node:test` module mocking is unavailable and no dependency seam exists.

@@ -180,6 +180,18 @@ export interface UnitEndEvent {
 	cwd: string;
 }
 
+export interface PhaseChangeEvent {
+	type: "phase_change";
+	/** Phase before the transition, or null when none was set. */
+	previousPhase: string | null;
+	/** Phase after the transition, or null when the phase was cleared/deactivated. */
+	currentPhase: string | null;
+	/** What drove the transition. Only auto-mode transitions exist today. */
+	source: "auto" | "manual";
+	/** Audit trace id, when phase auditing is configured for the transition. */
+	traceId?: string;
+}
+
 export interface BeforeModelSelectEvent {
 	type: "before_model_select";
 	unitType: string;
@@ -211,6 +223,10 @@ export interface AdjustToolSetEvent {
 
 export interface AdjustToolSetResult {
 	toolNames?: string[];
+	/** Tool names to remove from the final toolset. Applied after any toolNames override from any listener. */
+	removeTools?: string[];
+	/** Tool names to add to the final toolset. Applied after removes; the final list is deduplicated. */
+	addTools?: string[];
 }
 
 export interface BashTransformEvent {
@@ -271,6 +287,7 @@ export type GsdExtensionEvent =
 	| MilestoneEndEvent
 	| UnitStartEvent
 	| UnitEndEvent
+	| PhaseChangeEvent
 	| BeforeModelSelectEvent
 	| AdjustToolSetEvent
 	| BashTransformEvent

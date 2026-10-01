@@ -6,6 +6,7 @@ import type { DoctorIssue } from "./doctor-types.js";
 import {
   deleteArtifactByPath,
   getAllMilestones,
+  getMilestoneLifecycleShadowSnapshot,
   getMilestoneSlices,
   getSliceTasks,
   findWrongKindLifecycleProjectionHeads,
@@ -15,7 +16,7 @@ import {
   _getAdapter,
 } from "./gsd-db.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
-import { isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
+import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
 import {
   gsdProjectionRoot,
   gsdRoot,
@@ -634,6 +635,12 @@ export function createValidationSourceDriftDoctorIssue(
   const recovery = drift.autoCommitDetected
     ? " GSD's pre-merge auto-commit is the current HEAD. If it captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry."
     : " Restore or remove unintended working-tree changes before retrying.";
+  // The only caller, reportMilestoneValidationSourceDrift, inspects closed
+  // milestones only — but /gsd validate-milestone requires a ready or
+  // in_progress lifecycle, so the old "run /gsd validate-milestone, then
+  // /gsd auto" remediation was unexecutable by construction (#2439). State the
+  // truth: the pinned receipt is unreachable for a terminal milestone until a
+  // re-pin path exists, so the issue is not doctor-fixable.
   return {
     severity: "error",
     code: "validation_source_revision_mismatch",
@@ -642,9 +649,9 @@ export function createValidationSourceDriftDoctorIssue(
     message:
       `Milestone ${milestoneId} validation source revision does not match the current tree ` +
       `(expected ${mismatch.expectedSourceRevision}; tested ${mismatch.testedSourceRevision}).${paths}${recovery} ` +
-      `If the current content is intended, run \`/gsd validate-milestone ${milestoneId}\`, then \`/gsd auto\`.`,
+      `The milestone is closed, so its pinned validation receipt is unreachable: \`/gsd validate-milestone ${milestoneId}\` requires a ready or in_progress lifecycle, and no re-pin path for closed milestones exists yet.`,
     file: drift.paths[0],
-    fixable: true,
+    fixable: false,
   };
 }
 
@@ -669,6 +676,47 @@ export function reportMilestoneValidationSourceDrift(basePath: string, issues: D
       mismatch,
       diagnoseMilestoneVerificationSourceDrift(sourceRoot, preferences),
     ));
+  }
+}
+
+/**
+ * #2440: legacy/canonical lifecycle shadow drift was invisible — a hierarchy
+ * row whose legacy status went terminal while its canonical lifecycle row stayed
+ * `ready` fails every terminal-parity check (complete/validate/reopen) with an
+ * opaque "canonical and legacy lifecycle mismatch", and doctor reported nothing.
+ * This check surfaces the drift itself via the engine's own comparator.
+ * Evidence-backed drift converges through the shadow repair on the reopen path;
+ * unverifiable drift must be resolved by an operator (#2313 tracks the
+ * free-text verification-result classification gap).
+ */
+export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void {
+  if (!isDbAvailable()) return;
+  for (const milestone of getAllMilestones()) {
+    if (!isMilestoneLifecycleAdopted(milestone.id)) continue;
+    const snapshot = getMilestoneLifecycleShadowSnapshot(milestone.id);
+    if (snapshot.queryError) continue;
+    for (const item of snapshot.items) {
+      if (item.classification !== "status_mismatch") continue;
+      const unitId = [
+        item.itemIdentity.milestoneId,
+        item.itemIdentity.sliceId,
+        item.itemIdentity.taskId,
+      ].filter(Boolean).join("/");
+      issues.push({
+        severity: "error",
+        code: "lifecycle_shadow_mismatch",
+        scope: item.itemIdentity.taskId ? "task" : item.itemIdentity.sliceId ? "slice" : "milestone",
+        unitId,
+        message:
+          `Legacy status "${item.rawLegacyStatus ?? "null"}" does not match canonical lifecycle ` +
+          `"${item.rawCanonicalStatus ?? "null"}" for ${unitId}. Terminal-parity checks refuse ` +
+          `completion, validation, and reopen for this row. Reopen path converges drift backed by ` +
+          `durable completion evidence via the lifecycle shadow repair; drift without evidence ` +
+          `must be resolved manually.`,
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    }
   }
 }
 
@@ -817,6 +865,12 @@ export async function checkEngineHealth(
         reportMilestoneValidationSourceDrift(basePath, issues);
       } catch {
         // Non-fatal — closeout source drift diagnostics failed
+      }
+
+      try {
+        reportMilestoneLifecycleShadowDrift(issues);
+      } catch {
+        // Non-fatal — lifecycle shadow drift diagnostics failed
       }
 
       // a. Orphaned tasks (task.slice_id points to non-existent slice)
@@ -977,24 +1031,24 @@ export async function checkEngineHealth(
                AND ud.unit_type = 'complete-milestone'
                AND ud.unit_id = m.id
                AND ud.status = 'completed'
-               AND ud.id = (
-                 SELECT latest.id
-                 FROM unit_dispatches latest
-                 WHERE latest.milestone_id = m.id
-                   AND latest.unit_type = 'complete-milestone'
-                   AND latest.unit_id = m.id
-                   AND latest.status = 'completed'
-                 ORDER BY COALESCE(latest.ended_at, latest.started_at) DESC, latest.id DESC
-                 LIMIT 1
-               )
-             ORDER BY m.id`,
+             ORDER BY m.id, COALESCE(ud.ended_at, ud.started_at) DESC, ud.id DESC`,
           )
           .all() as Array<{ id: string; status: string; started_at: string | null; ended_at: string | null }>;
 
+        // #2398: the dispatch row alone is not completion proof — require a
+        // covering milestone.completed event (mirrors the drift detector gate
+        // in state-reconciliation/drift/artifact-db.ts). Evaluate every
+        // completed dispatch newest-first so a later receiptless row cannot
+        // hide an earlier event-backed completion; at most one issue per
+        // milestone.
+        const flagged = new Set<string>();
         for (const row of reopened) {
+          if (flagged.has(row.id)) continue;
           const completedAt = row.ended_at ?? row.started_at ?? null;
+          if (!completedEventCoversDispatch(basePath, row.id, row.started_at)) continue;
           const reopenAt = latestExplicitReopenAt(basePath, row.id);
           if (reopenAt && (!completedAt || Date.parse(reopenAt) > Date.parse(completedAt))) continue;
+          flagged.add(row.id);
           issues.push({
             severity: "error",
             code: "completed_milestone_reopened",

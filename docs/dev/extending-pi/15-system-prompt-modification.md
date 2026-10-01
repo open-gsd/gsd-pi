@@ -1,6 +1,5 @@
 # System Prompt Modification
 
-
 ### Per-Turn Modification (before_agent_start)
 
 ```typescript

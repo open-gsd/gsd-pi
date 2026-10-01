@@ -11,6 +11,7 @@ Interview the user one question at a time until every material branch of the dec
 Planning conversations in GSD ship to `M###-CONTEXT.md`, `S##-CONTEXT.md`, or `.gsd/DECISIONS.md`. Those artifacts are only as good as the interview that produced them. This skill is the interview. It runs during the `discuss` phase, after `research`, or any time a plan has open branches the user has not actually thought through.
 
 Use this skill when:
+
 - The user asks to be grilled, stress-tested, or interrogated
 - A plan reads like a list of happy paths with no failure modes
 - Two or more sections of a plan implicitly depend on one undecided choice
@@ -56,6 +57,7 @@ Take the answer. If it kills branches of the tree, cross them off your private m
 Repeat Q2, Q3, … in dependency order. Each question follows the same format (question, recommendation, alternatives). Cap at the natural end of the decision tree, not a round number.
 
 Stop the interview when:
+
 - Every remaining open decision is either deferred by explicit user choice ("decide at execution time") or out of scope
 - The user says to stop
 - You have nothing left where the answer would materially change the plan

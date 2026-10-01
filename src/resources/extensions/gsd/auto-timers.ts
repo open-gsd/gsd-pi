@@ -24,6 +24,7 @@ import { closeoutUnit, type CloseoutOptions } from "./auto-unit-closeout.js";
 import { saveActivityLog } from "./activity-log.js";
 import { recoverTimedOutUnit, type RecoveryContext } from "./auto-timeout-recovery.js";
 import { resolveAgentEndCancelled } from "./auto/resolve.js";
+import { startGlobalIdleWatchdog } from "./auto/global-idle-watchdog.js";
 import type { PauseAutoOptions } from "./auto/loop-deps.js";
 import type { AutoSession } from "./auto/session.js";
 import { logWarning, logError } from "./workflow-logger.js";
@@ -426,3 +427,54 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
     }
   }, 15_000);
 }
+// ── Session-level idle watchdog (#2373) ──────────────────────────────────────
+// The pure state machine and timer ownership live in
+// ./auto/global-idle-watchdog.ts (dependency-free so AutoSession.setCurrentUnit
+// can re-arm it directly). This wrapper binds it to the auto-loop lifetime and
+// the configured threshold.
+
+export type {
+  GlobalIdleWatchdogSession,
+  GlobalIdleWatchdogState,
+  GlobalIdleWatchdogNotify,
+} from "./auto/global-idle-watchdog.js";
+export {
+  GLOBAL_IDLE_WATCHDOG_TICK_MS,
+  noteGlobalIdleWatchdogUnitStarted,
+  startGlobalIdleWatchdog,
+  tickGlobalIdleWatchdog,
+} from "./auto/global-idle-watchdog.js";
+
+/**
+ * Owns the session-level idle watchdog for one auto-loop run (#2373): when
+ * `auto_supervisor.global_idle_timeout_minutes` is > 0, a 60s unref'd interval
+ * tracks unit presence and is cleared when the loop promise settles.
+ * Disabled (`0`, the default) runs the loop unchanged.
+ */
+export function withGlobalIdleWatchdog<T>(
+  ctx: ExtensionContext,
+  s: AutoSession,
+  run: () => Promise<T>,
+  options?: { thresholdMinutes?: number; tickMs?: number },
+): Promise<T> {
+  const thresholdMinutes = options?.thresholdMinutes
+    ?? resolveAutoSupervisorConfig().global_idle_timeout_minutes
+    ?? 0;
+  if (!(thresholdMinutes > 0)) return run();
+  const stop = startGlobalIdleWatchdog(
+    s,
+    (message, level) => ctx.ui.notify(message, level),
+    thresholdMinutes,
+    options?.tickMs,
+    (message) => logWarning("timer", message),
+  );
+  return (async () => {
+    try {
+      return await run();
+    } finally {
+      stop();
+    }
+  })();
+}
+
+export const _withGlobalIdleWatchdogForTest = withGlobalIdleWatchdog;

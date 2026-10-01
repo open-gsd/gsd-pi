@@ -22,6 +22,7 @@ This isn't missing features — it's a deliberate architectural choice. Every ba
 ### The extension system as a first-class citizen
 
 Extensions aren't an afterthought. The entire event system, tool registration, command system, custom UI, and session persistence were designed from the ground up to make extensions as powerful as built-in features. An extension can:
+
 - Override any built-in tool
 - Replace the system prompt
 - Modify every message sent to the LLM

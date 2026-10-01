@@ -60,6 +60,7 @@ When `plan-milestone` runs, it decomposes all slices in full detail. For a 4-sli
 The `reassess-roadmap` phase exists to catch stale plans, but as noted in ADR-003, it "almost always says 'roadmap is fine.'" The granularity is too coarse — it evaluates the entire roadmap rather than the specific next slice's assumptions against what prior slices actually built.
 
 **Research backing:**
+
 - Zylos Research (Feb 2026): 95% per-step reliability over 20 steps = 36% success. Planning S04 from a stale snapshot adds compounding unreliability at each step.
 - ETH Zurich (Feb 2026): Context quality > quantity. Plans based on stale codebase snapshots are low-quality context that actively hurts execution.
 
@@ -75,6 +76,7 @@ There is no middle ground. The vast space between "trivially resolvable" and "pl
 ADR-009's Gate Plane defines `manual-attention` as a gate outcome, but this currently applies only to gate-level decisions (policy, verification, closeout). It does not apply to task-level ambiguity during execution.
 
 **Research backing:**
+
 - Zylos Research (Feb 2026): 65% of AI failures from context drift — small wrong guesses compounding through downstream tasks.
 - OpenAI (Sept 2025): Training rewards confident guessing over calibrated uncertainty. Agents are trained to produce answers, not to express uncertainty.
 - METR (2025): 39-point perception gap between believed and actual quality of AI-generated output.
@@ -88,10 +90,12 @@ ADR-009's Gate Plane defines `manual-attention` as a gate outcome, but this curr
 Replace all-or-nothing milestone planning with two-tier slice specification:
 
 **During `plan-milestone` (Plan Plane `compile` step):**
+
 - Plan S01 in full detail (task decomposition, must-haves, verification criteria)
 - Plan S02+ as **sketches**: title, goal, risk level, dependencies, rough scope (2-3 sentences), key constraints — but NO task decomposition, NO task plans, NO detailed verification
 
 **After each slice completes (Execution Plane, new `refine` node):**
+
 - Before dispatching `plan-slice` for the next slice, the scheduler dispatches a `refine-slice` unit
 - The `refine-slice` unit receives: the sketch, the completed prior slice's summary and findings, and the current codebase state
 - It converts the sketch into a full plan — same output as `plan-slice`, but with better context
@@ -109,6 +113,7 @@ refine — converts a sketch into a full plan using current codebase state
 **State derivation:**
 
 A new `refining` phase triggers when:
+
 - The next slice exists as a sketch (has roadmap entry but no PLAN.md)
 - The prior slice is complete (has SUMMARY.md)
 - The milestone is not blocked
@@ -116,6 +121,7 @@ A new `refining` phase triggers when:
 This fits naturally into ADR-009's scheduler model — `refine` is a typed node with explicit inputs, outputs, and gate requirements.
 
 **Type system changes required:**
+
 - Extend `UokNodeKind` type in `contracts.ts` to include `"refine"`
 - Update scheduler dispatch logic to handle the new node kind
 - Add validation for `refine` nodes in DAG construction
@@ -166,6 +172,7 @@ Escalation maps to the `manual-attention` gate outcome:
 7. The decision is recorded via `gsd_decision_save` with source: `"escalation"`
 
 **`continueWithDefault` semantics:**
+
 - `true`: The executor continues with its recommended option. If the user later chooses differently:
   - If the current task (e.g., T03) is still in progress, inject "ESCALATION OVERRIDE: User chose [X] instead of executor's [Y]" into the current task's carry-forward
   - If the current task has completed, attach the override to the next pending task in the same slice (e.g., T04)
@@ -175,6 +182,7 @@ Escalation maps to the `manual-attention` gate outcome:
 **Integration with ADR-009's Audit Plane:**
 
 Every escalation is recorded in the audit ledger:
+
 - Escalation created (timestamp, question, options, recommendation)
 - User response (timestamp, chosen option, override status)
 - Decision persisted (DECISIONS.md entry with source: "escalation")
