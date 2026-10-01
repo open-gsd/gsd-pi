@@ -32,14 +32,34 @@ test("lookupModelCost returns undefined for unknown model", () => {
 test("lookupModelCost finds haiku", () => {
   const entry = lookupModelCost("claude-haiku-4-5");
   assert.ok(entry);
-  assert.ok(entry.inputPer1k < 0.001, "haiku should be cheap");
+  assert.ok(entry.inputPer1k <= 0.001, "haiku should be cheap");
 });
 
 test("lookupModelCost finds Claude Sonnet 5 pricing", () => {
   const entry = lookupModelCost("github-copilot/claude-sonnet-5");
   assert.ok(entry);
-  assert.equal(entry.inputPer1k, 0.003);
-  assert.equal(entry.outputPer1k, 0.015);
+  assert.equal(entry.inputPer1k, 0.002);
+  assert.equal(entry.outputPer1k, 0.010);
+});
+
+test("lookupModelCost resolves dotted gateway Claude ids to the hyphenated rows", () => {
+  for (const [id, expected] of [
+    ["github-copilot/claude-sonnet-5.5", "claude-sonnet-5-5"],
+    ["openrouter/anthropic/claude-sonnet-5.5", "claude-sonnet-5-5"],
+    ["anthropic/claude-sonnet-5.5:batch", "claude-sonnet-5-5"],
+    ["claude-haiku-4.5", "claude-haiku-4-5"],
+  ] as const) {
+    assert.equal(lookupModelCost(id)?.id, expected, id);
+  }
+  assert.equal(lookupModelCost("github-copilot/mai-code-1.1-flash")?.id, "mai-code-1.1-flash");
+});
+
+test("lookupModelCost uses current Haiku 4.5 and Fable 5.1 list prices", () => {
+  assert.deepEqual(
+    [lookupModelCost("claude-haiku-4-5")?.inputPer1k, lookupModelCost("claude-haiku-4-5")?.outputPer1k],
+    [0.001, 0.005],
+  );
+  assert.equal(lookupModelCost("claude-fable-5-1")?.id, "claude-fable-5-1");
 });
 
 test("lookupModelCost finds Claude Sonnet 5.5 pricing without falling back to the Sonnet 5 row", () => {

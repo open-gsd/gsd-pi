@@ -180,7 +180,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "claude-sonnet-4-5": "standard",
   "claude-sonnet-4-6": "standard",
   "claude-sonnet-5": "standard",           // GA on GitHub Copilot, Anthropic, Vertex, Bedrock
-  "claude-sonnet-5-5": "standard",         // Sonnet 5 successor; Anthropic, Vertex, Bedrock
+  "claude-sonnet-5-5": "standard",         // Sonnet 5 successor; Anthropic, Vertex, Bedrock, Copilot, OpenRouter, Vercel, opencode
   "claude-sonnet-4-5-20250514": "standard",
   "claude-3-5-sonnet-latest": "standard",
   "gpt-4o": "standard",
@@ -227,12 +227,12 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
 // the same capability tier.
 
 const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
-  "claude-haiku-4-5": 0.0008,
+  "claude-haiku-4-5": 0.001,
   "claude-3-5-haiku-latest": 0.0008,
   "claude-sonnet-4": 0.003,
   "claude-sonnet-4-5": 0.003,
   "claude-sonnet-4-6": 0.003,
-  "claude-sonnet-5": 0.003,                // $3.00/M input; matches Sonnet 4.x pricing
+  "claude-sonnet-5": 0.002,                // $2.00/M input
   "claude-sonnet-5-5": 0.002,              // $2.00/M input
   "claude-sonnet-4-5-20250514": 0.003,
   "claude-opus-4-5": 0.005,

@@ -1609,11 +1609,16 @@ async function generateModels() {
 		});
 	}
 
+	// Sonnet 5 and Sonnet 5.5 share list pricing ($/MTok).
+	const SONNET_5_COST = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
+	const SONNET_5_GEO_COST = { input: 2.2, output: 11, cacheRead: 0.22, cacheWrite: 2.75 };
+
 	// Add missing Claude Sonnet 5 Bedrock profiles until models.dev includes them.
-	for (const [bedrockId, regionLabel] of [
-		["anthropic.claude-sonnet-5", ""],
-		["us.anthropic.claude-sonnet-5", " (US)"],
-		["global.anthropic.claude-sonnet-5", " (Global)"],
+	// Geo profiles (us./eu.) carry AWS's 10% premium over in-region and global.
+	for (const [bedrockId, regionLabel, cost] of [
+		["anthropic.claude-sonnet-5", "", SONNET_5_COST],
+		["us.anthropic.claude-sonnet-5", " (US)", SONNET_5_GEO_COST],
+		["global.anthropic.claude-sonnet-5", " (Global)", SONNET_5_COST],
 	] as const) {
 		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
 			allModels.push({
@@ -1624,12 +1629,7 @@ async function generateModels() {
 				provider: "amazon-bedrock",
 				reasoning: true,
 				input: ["text", "image"],
-				cost: {
-					input: 3,
-					output: 15,
-					cacheRead: 0.3,
-					cacheWrite: 3.75,
-				},
+				cost: { ...cost },
 				contextWindow: 1000000,
 				maxTokens: 128000,
 			});
@@ -1679,10 +1679,12 @@ async function generateModels() {
 	}
 
 	// Add missing Claude Sonnet 5.5 Bedrock profiles until models.dev includes them.
-	for (const [bedrockId, regionLabel] of [
-		["anthropic.claude-sonnet-5-5", ""],
-		["us.anthropic.claude-sonnet-5-5", " (US)"],
-		["global.anthropic.claude-sonnet-5-5", " (Global)"],
+	// Geo profiles (us./eu.) carry AWS's 10% premium over in-region and global.
+	for (const [bedrockId, regionLabel, cost] of [
+		["anthropic.claude-sonnet-5-5", "", SONNET_5_COST],
+		["us.anthropic.claude-sonnet-5-5", " (US)", SONNET_5_GEO_COST],
+		["eu.anthropic.claude-sonnet-5-5", " (EU)", SONNET_5_GEO_COST],
+		["global.anthropic.claude-sonnet-5-5", " (Global)", SONNET_5_COST],
 	] as const) {
 		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
 			allModels.push({
@@ -1693,12 +1695,7 @@ async function generateModels() {
 				provider: "amazon-bedrock",
 				reasoning: true,
 				input: ["text", "image"],
-				cost: {
-					input: 2,
-					output: 10,
-					cacheRead: 0.2,
-					cacheWrite: 2.5,
-				},
+				cost: { ...cost },
 				contextWindow: 1000000,
 				maxTokens: 128000,
 			});

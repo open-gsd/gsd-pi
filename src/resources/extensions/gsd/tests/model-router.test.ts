@@ -1656,11 +1656,10 @@ describe("model-router registry keys", () => {
       longContext: 82,
       instruction: 90,
     });
-    // Sonnet 5.5 ($2/M input) must sort cheaper than Sonnet 5 ($3/M) and gemini-2.5-pro ($1.25/M) cheaper still.
-    assert.deepEqual(
-      getEligibleModels("standard", ["claude-sonnet-5", "claude-sonnet-5-5", "gemini-2.5-pro"], defaultRoutingConfig()),
-      ["gemini-2.5-pro", "claude-sonnet-5-5", "claude-sonnet-5"],
-    );
+    // Sonnet 5.5 and Sonnet 5 share list pricing ($2/M input); gemini-2.5-pro ($1.25/M) sorts first.
+    const eligible = getEligibleModels("standard", ["claude-sonnet-5", "claude-sonnet-5-5", "gemini-2.5-pro"], defaultRoutingConfig());
+    assert.equal(eligible[0], "gemini-2.5-pro");
+    assert.deepEqual([...eligible.slice(1)].sort(), ["claude-sonnet-5", "claude-sonnet-5-5"]);
     // Dotted Copilot-style ids canonicalize onto the same rows.
     assert.equal(MODEL_CAPABILITY_TIER[canonicalizeModelId("claude-sonnet-5.5")], "standard");
   });

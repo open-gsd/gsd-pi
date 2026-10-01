@@ -405,10 +405,11 @@ export const BUNDLED_COST_TABLE: ModelCostEntry[] = [
   { id: "claude-opus-5", inputPer1k: 0.005, outputPer1k: 0.025, updatedAt: "2026-08-12" },
   { id: "claude-opus-5-5", inputPer1k: 0.004, outputPer1k: 0.020, updatedAt: "2026-09-22" },
   { id: "claude-fable-5", inputPer1k: 0.010, outputPer1k: 0.050, updatedAt: "2026-06-09" },
+  { id: "claude-fable-5-1", inputPer1k: 0.010, outputPer1k: 0.050, updatedAt: "2026-10-01" },
   { id: "claude-sonnet-4-6", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2025-03-15" },
-  { id: "claude-sonnet-5", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2026-08-12" },
+  { id: "claude-sonnet-5", inputPer1k: 0.002, outputPer1k: 0.010, updatedAt: "2026-10-01" },
   { id: "claude-sonnet-5-5", inputPer1k: 0.002, outputPer1k: 0.010, updatedAt: "2026-10-01" },
-  { id: "claude-haiku-4-5", inputPer1k: 0.0008, outputPer1k: 0.004, updatedAt: "2025-03-15" },
+  { id: "claude-haiku-4-5", inputPer1k: 0.001, outputPer1k: 0.005, updatedAt: "2026-10-01" },
   { id: "claude-sonnet-4-5-20250514", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2025-03-15" },
   { id: "claude-3-5-sonnet-latest", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2025-03-15" },
   { id: "claude-3-5-haiku-latest", inputPer1k: 0.0008, outputPer1k: 0.004, updatedAt: "2025-03-15" },
@@ -465,6 +466,15 @@ export const BUNDLED_COST_TABLE: ModelCostEntry[] = [
  */
 export function lookupModelCost(modelId: string): ModelCostEntry | undefined {
   const bareId = modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
+  // Gateways spell Claude versions with dots (claude-sonnet-5.5); retry those
+  // against the hyphenated rows. Other families keep dots in their own row ids.
+  return lookupBareModelCost(bareId)
+    ?? (bareId.startsWith("claude-") && bareId.includes(".")
+      ? lookupBareModelCost(bareId.replace(/\./g, "-"))
+      : undefined);
+}
+
+function lookupBareModelCost(bareId: string): ModelCostEntry | undefined {
   const exact = BUNDLED_COST_TABLE.find(e => e.id === bareId);
   if (exact) return exact;
   // Longest prefix wins so dated/suffixed ids (claude-sonnet-5-5-20261001)

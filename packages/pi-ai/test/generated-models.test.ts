@@ -7,6 +7,7 @@ import { describe, expect, test } from "vitest";
 import { isModelsCatalog } from "../src/model-catalog.ts";
 import { calculateCost } from "../src/models.ts";
 import { MODELS } from "../src/models.generated.ts";
+import type { Api, Model } from "../src/types.ts";
 
 describe("models.generated.ts", () => {
 	test("models.generated.json mirrors the complete generated catalog", () => {
@@ -140,10 +141,12 @@ describe("models.generated.ts", () => {
 		expect(vertex.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
 		expect(vertex.compat).toMatchObject({ forceAdaptiveThinking: true });
 
-		for (const [id, name] of [
-			["anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5"],
-			["us.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5 (US)"],
-			["global.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5 (Global)"],
+		// Geo profiles (us./eu.) carry AWS's 10% premium; Sonnet 5.5 has no jp./au. profiles.
+		for (const [id, name, input, output] of [
+			["anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5", 2, 10],
+			["us.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5 (US)", 2.2, 11],
+			["eu.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5 (EU)", 2.2, 11],
+			["global.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5 (Global)", 2, 10],
 		] as const) {
 			const bedrock = MODELS["amazon-bedrock"][id];
 			expect(bedrock).toBeDefined();
@@ -151,9 +154,28 @@ describe("models.generated.ts", () => {
 			expect(bedrock.name).toBe(name);
 			expect(bedrock.contextWindow).toBe(1_000_000);
 			expect(bedrock.maxTokens).toBe(128_000);
-			expect(bedrock.cost).toMatchObject({ input: 2, output: 10 });
+			expect(bedrock.cost).toMatchObject({ input, output });
 			expect(bedrock.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
 		}
+		expect("jp.anthropic.claude-sonnet-5-5" in MODELS["amazon-bedrock"]).toBe(false);
+		expect("au.anthropic.claude-sonnet-5-5" in MODELS["amazon-bedrock"]).toBe(false);
+	});
+
+	test("includes Claude Sonnet 5.5 on gateways that serve it, at list price", () => {
+		for (const [provider, id, api] of [
+			["openrouter", "anthropic/claude-sonnet-5.5", "openai-completions"],
+			["vercel-ai-gateway", "anthropic/claude-sonnet-5.5", "anthropic-messages"],
+			["opencode", "claude-sonnet-5-5", "anthropic-messages"],
+			["github-copilot", "claude-sonnet-5.5", "openai-completions"],
+		] as const) {
+			const model = (MODELS[provider] as Record<string, Model<Api>>)[id];
+			expect(model, `${provider}/${id}`).toBeDefined();
+			expect(model.api).toBe(api);
+			expect(model.contextWindow).toBe(1_000_000);
+			expect(model.maxTokens).toBe(128_000);
+			expect(model.cost).toMatchObject({ input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 });
+		}
+		expect(MODELS.openrouter["anthropic/claude-sonnet-5.5:batch"].cost).toMatchObject({ input: 1, output: 5 });
 	});
 
 	test("includes Claude Sonnet 5 across Anthropic-backed providers with adaptive thinking", () => {
@@ -175,10 +197,10 @@ describe("models.generated.ts", () => {
 		expect(vertex.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
 		expect(vertex.compat).toMatchObject({ forceAdaptiveThinking: true });
 
-		for (const [id, name] of [
-			["anthropic.claude-sonnet-5", "Claude Sonnet 5"],
-			["us.anthropic.claude-sonnet-5", "Claude Sonnet 5 (US)"],
-			["global.anthropic.claude-sonnet-5", "Claude Sonnet 5 (Global)"],
+		for (const [id, name, input, output] of [
+			["anthropic.claude-sonnet-5", "Claude Sonnet 5", 2, 10],
+			["us.anthropic.claude-sonnet-5", "Claude Sonnet 5 (US)", 2.2, 11],
+			["global.anthropic.claude-sonnet-5", "Claude Sonnet 5 (Global)", 2, 10],
 		] as const) {
 			const bedrock = MODELS["amazon-bedrock"][id];
 			expect(bedrock).toBeDefined();
@@ -186,6 +208,7 @@ describe("models.generated.ts", () => {
 			expect(bedrock.name).toBe(name);
 			expect(bedrock.contextWindow).toBe(1_000_000);
 			expect(bedrock.maxTokens).toBe(128_000);
+			expect(bedrock.cost).toMatchObject({ input, output });
 			expect(bedrock.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
 		}
 	});
