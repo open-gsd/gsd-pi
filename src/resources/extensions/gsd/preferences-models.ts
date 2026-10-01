@@ -26,6 +26,7 @@ import type {
   ResolvedModelConfig,
   ResolvedAutoSupervisorConfig,
 } from "./preferences-types.js";
+import { fallbackCandidate } from "./preferences-types.js";
 import { clearGSDPreferencesCache, loadEffectiveGSDPreferences, getGlobalGSDPreferencesPath } from "./preferences.js";
 import { getUnitPhaseChain } from "./unit-registry.js";
 
@@ -404,15 +405,29 @@ export function isCustomProvider(provider: string | undefined, registry?: Provid
 }
 
 /**
+ * The next fallback to try: the model ID plus the per-entry reasoning effort
+ * when the entry's object form carries one (#1270).
+ */
+export interface NextFallbackModel {
+  id: string;
+  thinking?: GSDThinkingLevel;
+}
+
+/**
  * Determines the next fallback model to try when the current model fails.
  * If the current model is not in the configured list, returns the primary model.
  * If the current model is the last in the list, returns undefined (exhausted).
+ * Object entries surface their per-entry `thinking` so the caller can apply it
+ * instead of the field-level level (#1270).
  */
 export function getNextFallbackModel(
   currentModelId: string | undefined,
   modelConfig: ResolvedModelConfig,
-): string | undefined {
-  const modelsToTry = [modelConfig.primary, ...modelConfig.fallbacks];
+): NextFallbackModel | undefined {
+  const modelsToTry: NextFallbackModel[] = [
+    { id: modelConfig.primary },
+    ...modelConfig.fallbacks.map(fallbackCandidate),
+  ];
 
   if (!currentModelId) {
     return modelsToTry[0];
@@ -420,9 +435,9 @@ export function getNextFallbackModel(
 
   let foundCurrent = false;
   for (let i = 0; i < modelsToTry.length; i++) {
-    const mId = modelsToTry[i];
+    const entry = modelsToTry[i]!;
     // Check for exact match or provider/model suffix match
-    if (mId === currentModelId || (mId.includes("/") && mId.endsWith(`/${currentModelId}`))) {
+    if (entry.id === currentModelId || (entry.id.includes("/") && entry.id.endsWith(`/${currentModelId}`))) {
       foundCurrent = true;
       return modelsToTry[i + 1]; // Return the next one, or undefined if at the end
     }
@@ -486,7 +501,16 @@ export function updatePreferencesModels(models: GSDModelConfigV2): void {
       if (config.fallbacks && config.fallbacks.length > 0) {
         lines.push(`    fallbacks:`);
         for (const fb of config.fallbacks) {
-          lines.push(`      - ${fb}`);
+          if (typeof fb === "string") {
+            lines.push(`      - ${fb}`);
+          } else {
+            // Object form (#1270): serialize `{ model, thinking? }` so the
+            // per-entry level survives the write.
+            lines.push(`      - model: ${fb.model}`);
+            if (fb.thinking) {
+              lines.push(`        thinking: ${fb.thinking}`);
+            }
+          }
         }
       }
     }

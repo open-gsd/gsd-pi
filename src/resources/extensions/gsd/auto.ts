@@ -90,6 +90,7 @@ import {
   getIsolationMode,
   resolveEffectiveUnitIsolationMode,
 } from "./preferences.js";
+import { fallbackEntryThinking, fallbackModelId } from "./preferences-types.js";
 import { playNotificationBell, sendDesktopNotification } from "./notifications.js";
 import type { GSDPreferences } from "./preferences.js";
 import {
@@ -3414,7 +3415,8 @@ export async function dispatchHookUnit(
   if (modelCandidates.length > 0) {
     let applied = false;
     for (const candidate of modelCandidates) {
-      const match = resolveModelId(candidate, availableModels, ctx.model?.provider);
+      const candidateId = fallbackModelId(candidate);
+      const match = resolveModelId(candidateId, availableModels, ctx.model?.provider);
       if (!match) continue;
       // Skip models the runtime has marked blocked or temporarily unavailable
       // (e.g. a primary that just tripped a provider limit) so the configured
@@ -3426,21 +3428,24 @@ export async function dispatchHookUnit(
           // The manual trigger path bypasses selectAndApplyModel, so apply the
           // hook's per-field `thinking` (from `post_unit_hooks[].model`'s object
           // form) here against the just-set model rather than leaving the hook at
-          // the session level (#1269). Absent → session level, unchanged.
-          if (hookModelConfig?.thinking) {
-            applyThinkingLevelForModel(pi, hookModelConfig.thinking, match, ctx);
+          // the session level (#1269). A per-entry `thinking` on the matched
+          // fallback entry wins over the field level (#1270). Absent → session
+          // level, unchanged.
+          const level = fallbackEntryThinking(candidate) ?? hookModelConfig?.thinking;
+          if (level) {
+            applyThinkingLevelForModel(pi, level, match, ctx);
           }
           applied = true;
           break;
         }
       } catch (err) {
         /* non-fatal — try the next fallback */
-        logWarning("dispatch", `hook model set failed for ${candidate}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+        logWarning("dispatch", `hook model set failed for ${candidateId}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
       }
     }
     if (!applied) {
       ctx.ui.notify(
-        `Hook model${modelCandidates.length > 1 ? "s" : ""} "${modelCandidates.join(", ")}" not available. ` +
+        `Hook model${modelCandidates.length > 1 ? "s" : ""} "${modelCandidates.map(fallbackModelId).join(", ")}" not available. ` +
         `Falling back to current session model. ` +
         `Ensure the model is defined in models.json and has auth configured.`,
         "warning",

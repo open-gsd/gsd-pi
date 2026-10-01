@@ -8,6 +8,7 @@ import { tierOrdinal } from "./complexity-classifier.js";
 import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 import { resolveModelEconomics } from "./model-cost-table.js";
 import type { ResolvedModelConfig } from "./preferences.js";
+import { fallbackModelId } from "./preferences-types.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -624,11 +625,12 @@ export function getEligibleModels(
 
 /**
  * Build a fallback chain for a selected model: [selectedModel, ...configuredFallbacks, configuredPrimary]
- * Deduplicates entries while preserving order.
+ * Deduplicates entries while preserving order. Object fallback entries
+ * contribute their model ID — routing decisions carry bare IDs (#1270).
  */
 function buildFallbackChain(selectedModelId: string, phaseConfig: ResolvedModelConfig): string[] {
   return [
-    ...phaseConfig.fallbacks.filter(f => f !== selectedModelId),
+    ...phaseConfig.fallbacks.map(fallbackModelId).filter(f => f !== selectedModelId),
     phaseConfig.primary,
   ].filter(f => f !== selectedModelId);
 }
@@ -687,7 +689,7 @@ export function resolveModelForComplexity(
   if (!phaseConfig || !routingConfig.enabled) {
     return {
       modelId: phaseConfig?.primary ?? "",
-      fallbacks: phaseConfig?.fallbacks ?? [],
+      fallbacks: (phaseConfig?.fallbacks ?? []).map(fallbackModelId),
       tier: classification.tier,
       wasDowngraded: false,
       reason: "dynamic routing disabled or no phase config",
@@ -707,7 +709,7 @@ export function resolveModelForComplexity(
     warnUnknownConfiguredModel(configuredPrimary);
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: `configured model "${configuredPrimary}" is not in the known tier map — honoring explicit config`,
@@ -723,7 +725,7 @@ export function resolveModelForComplexity(
     if (isModelAvailable(configuredPrimary, availableModelIds)) {
       return {
         modelId: configuredPrimary,
-        fallbacks: phaseConfig.fallbacks,
+        fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
         tier: requestedTier,
         wasDowngraded: false,
         reason: `tier ${requestedTier} >= configured ${configuredTier}`,
@@ -747,8 +749,8 @@ export function resolveModelForComplexity(
     return {
       modelId: crossProviderEquivalent ?? configuredPrimary,
       fallbacks: crossProviderEquivalent
-        ? [...phaseConfig.fallbacks.filter(f => f !== crossProviderEquivalent), configuredPrimary]
-        : phaseConfig.fallbacks,
+        ? [...phaseConfig.fallbacks.map(fallbackModelId).filter(f => f !== crossProviderEquivalent), configuredPrimary]
+        : phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: crossProviderEquivalent
@@ -766,7 +768,7 @@ export function resolveModelForComplexity(
     // No suitable model found — use configured primary
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: `no ${requestedTier}-tier model available`,
@@ -800,7 +802,7 @@ export function resolveModelForComplexity(
       }));
       return {
         modelId: configuredPrimary,
-        fallbacks: phaseConfig.fallbacks,
+        fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
         tier: requestedTier,
         wasDowngraded: false,
         reason: "no profiled candidate eligible for automatic routing — fail closed",
@@ -896,7 +898,7 @@ export function resolveModelForComplexity(
   if (!targetModelId) {
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: "no profiled candidate eligible for automatic routing — fail closed",
