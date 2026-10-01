@@ -1377,6 +1377,25 @@ export function getSliceRunUatAssessment(
   return { status: String(row["status"] ?? ""), fullContent: String(row["fullContent"] ?? "") };
 }
 
+/**
+ * Recorded timestamp of the slice's latest `run-uat` assessment row, or null
+ * when the DB is unavailable or the slice has no run-uat assessment. Used to
+ * order a slice's UAT verdict against a milestone validation receipt (#2347).
+ */
+export function getSliceRunUatAssessmentRecordedAt(
+  milestoneId: string,
+  sliceId: string,
+): string | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare(
+    `SELECT created_at FROM assessments
+      WHERE milestone_id = :mid AND slice_id = :sid AND scope = 'run-uat'
+      ORDER BY created_at DESC, ROWID DESC
+      LIMIT 1`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId });
+  return typeof row?.["created_at"] === "string" ? row["created_at"] : null;
+}
+
 export function getLatestAssessmentByScope(
   milestoneId: string,
   scope: string,
