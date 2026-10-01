@@ -2059,7 +2059,12 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ minLength: 1 }),
-			criterionKey: Type.String({ minLength: 1 }),
+			criterionKey: Type.Optional(
+				Type.String({
+					minLength: 1,
+					description: "Criterion key to prepare. Required unless supersedesCriterionId is given; then the replacement inherits the superseded criterion's key and a passed key must match it.",
+				}),
+			),
 			description: Type.String({ minLength: 1 }),
 			focusedPrompt: Type.String({ minLength: 1 }),
 			recommendedDisposition: StringEnum(["accepted", "rejected"]),
@@ -2071,6 +2076,12 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			),
 			requirementId: Type.Optional(Type.String({ minLength: 1 })),
 			required: Type.Optional(Type.Boolean()),
+			supersedesCriterionId: Type.Optional(
+				Type.String({
+					minLength: 1,
+					description: "Explicitly supersede this current subjective UAT criterion by ID; the replacement inherits its criterionKey and requirementId so validation requires the new question instead.",
+				}),
+			),
 		}),
 		execute: async (
 			toolCallId: string,

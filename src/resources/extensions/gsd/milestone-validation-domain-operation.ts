@@ -73,6 +73,9 @@ interface OperationReceipt {
 
 interface SubjectiveProofRow {
   criterion_id: string;
+  criterion_key: string;
+  requirement_id: string | null;
+  tested_source_revision: string | null;
   human_acceptance_id: string | null;
   disposition: string | null;
 }
@@ -348,6 +351,18 @@ function currentRequiredSubjectiveProofs(
 ): SubjectiveProofRow[] {
   return getDb().prepare(`
     SELECT criterion.criterion_id,
+           criterion.criterion_key,
+           criterion.requirement_id,
+           (
+             SELECT json_extract(prepared.payload_json, '$.testedSourceRevision')
+             FROM workflow_domain_events prepared
+             WHERE prepared.project_id = criterion.project_id
+               AND prepared.event_type = 'milestone.subjective-uat.prepared'
+               AND json_extract(prepared.payload_json, '$.criterionId') = criterion.criterion_id
+             ORDER BY prepared.project_revision DESC, prepared.event_index DESC,
+                      prepared.event_id DESC
+             LIMIT 1
+           ) AS tested_source_revision,
            acceptance.human_acceptance_id,
            acceptance.disposition
     FROM workflow_acceptance_criteria criterion
@@ -490,8 +505,20 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
         !proof.human_acceptance_id || proof.disposition !== "accepted"
       );
       if (unsatisfied) {
+        // #2341: name the criterion's key, requirement, and bound source
+        // revision so the blocking criterion can be identified and replaced
+        // (prepare a replacement under its criterionKey, or supersede it by
+        // ID with supersedesCriterionId) instead of surfacing a bare UUID.
+        const requirementClause = unsatisfied.requirement_id
+          ? `, requirement ${unsatisfied.requirement_id}`
+          : "";
+        const revisionClause = unsatisfied.tested_source_revision
+          ? ` for source revision ${unsatisfied.tested_source_revision}`
+          : "";
         throw new Error(
-          `Milestone validation pass requires accepted subjective UAT criterion ${unsatisfied.criterion_id}`,
+          `Milestone validation pass requires accepted subjective UAT criterion ${unsatisfied.criterion_id}` +
+          ` (criterionKey: "${unsatisfied.criterion_key}"${requirementClause})${revisionClause}` +
+          "; prepare a current-source replacement for this criterionKey (or supersede the criterion by ID via supersedesCriterionId) and answer it before passing",
         );
       }
     }

@@ -307,7 +307,7 @@ type WorkflowToolExecutors = {
   executePrepareMilestoneSubjectiveUat: (
     params: {
       milestoneId: string;
-      criterionKey: string;
+      criterionKey?: string;
       description: string;
       focusedPrompt: string;
       recommendedDisposition: "accepted" | "rejected";
@@ -317,6 +317,7 @@ type WorkflowToolExecutors = {
       recommendationConfidence?: number;
       requirementId?: string;
       required?: boolean;
+      supersedesCriterionId?: string;
     },
     basePath: string,
     invocation: ExecutionInvocation,
@@ -2123,7 +2124,7 @@ const validateMilestoneSchema = z.object(validateMilestoneParams);
 const prepareMilestoneSubjectiveUatParams = {
   projectDir: projectDirParam,
   milestoneId: nonEmptyString("milestoneId"),
-  criterionKey: nonEmptyString("criterionKey"),
+  criterionKey: nonEmptyString("criterionKey").optional().describe("Criterion key to prepare; required unless supersedesCriterionId is given, in which case the replacement inherits the superseded criterion key"),
   description: nonEmptyString("description"),
   focusedPrompt: nonEmptyString("focusedPrompt"),
   recommendedDisposition: z.enum(["accepted", "rejected"]),
@@ -2133,6 +2134,7 @@ const prepareMilestoneSubjectiveUatParams = {
   recommendationConfidence: z.number().min(0).max(1).optional(),
   requirementId: nonEmptyString("requirementId").optional(),
   required: z.boolean().optional(),
+  supersedesCriterionId: nonEmptyString("supersedesCriterionId").optional().describe("Explicitly supersede this current subjective UAT criterion by ID; the replacement inherits its criterionKey and requirementId"),
 };
 const prepareMilestoneSubjectiveUatSchema = z.object(prepareMilestoneSubjectiveUatParams);
 
