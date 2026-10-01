@@ -743,6 +743,138 @@ describe("ExtensionRunner", () => {
 		});
 	});
 
+	describe("adjust_tool_set", () => {
+		const adjustEvent = {
+			selectedModelApi: "anthropic-messages",
+			selectedModelProvider: "anthropic",
+			selectedModelId: "claude-opus-4-8",
+			activeToolNames: ["read", "edit", "bash"],
+			filteredTools: [],
+		};
+
+		it("honors toolNames override and addTools delta from two listeners", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						return { toolNames: ["read", "edit"] };
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						globalThis.__atsSecondCalled = true;
+						return { addTools: ["discussion_arena"] };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "1-adjust-override.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "2-adjust-add.ts"), extCode2);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors).toEqual([]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const composed = await runner.emitAdjustToolSet(adjustEvent);
+
+			expect((globalThis as unknown as { __atsSecondCalled?: boolean }).__atsSecondCalled).toBe(true);
+			expect(composed?.toolNames).toEqual(["read", "edit", "discussion_arena"]);
+			delete (globalThis as unknown as { __atsSecondCalled?: boolean }).__atsSecondCalled;
+		});
+
+		it("applies override, then removeTools, then addTools, deduplicated", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						return { toolNames: ["read", "edit", "bash", "edit"] };
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						return { removeTools: ["bash"], addTools: ["read", "extra"] };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "1-adjust-override.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "2-adjust-delta.ts"), extCode2);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors).toEqual([]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const composed = await runner.emitAdjustToolSet(adjustEvent);
+
+			expect(composed?.toolNames).toEqual(["read", "edit", "extra"]);
+		});
+
+		it("keeps first-non-null toolNames semantics and falls back to activeToolNames as the base for deltas", async () => {
+			const extCode1 = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						return { toolNames: ["read"] };
+					});
+				}
+			`;
+			const extCode2 = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						return { toolNames: ["bash"] };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "1-adjust-override.ts"), extCode1);
+			fs.writeFileSync(path.join(extensionsDir, "2-adjust-override.ts"), extCode2);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors).toEqual([]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+
+			const composed = await runner.emitAdjustToolSet(adjustEvent);
+
+			expect(composed?.toolNames).toEqual(["read"]);
+		});
+
+		it("returns undefined when no listener produces a result and activeToolNames base for pure deltas", async () => {
+			const extCodeNone = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						return undefined;
+					});
+				}
+			`;
+			const extCodeRemove = `
+				export default function(pi) {
+					pi.on("adjust_tool_set", async () => {
+						return { removeTools: ["bash"] };
+					});
+				}
+			`;
+
+			const load = async (code: string, name: string) => {
+				fs.writeFileSync(path.join(extensionsDir, name), code);
+				return discoverAndLoadExtensions([], tempDir, tempDir);
+			};
+
+			let result = await load(extCodeNone, "1-adjust-none.ts");
+			expect(result.errors).toEqual([]);
+			let runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+			expect(await runner.emitAdjustToolSet(adjustEvent)).toBeUndefined();
+
+			result = await load(extCodeRemove, "2-adjust-remove.ts");
+			expect(result.errors).toEqual([]);
+			runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			runner.bindCore(extensionActions, extensionContextActions);
+			const composed = await runner.emitAdjustToolSet(adjustEvent);
+			expect(composed?.toolNames).toEqual(["read", "edit"]);
+		});
+	});
+
 	describe("provider registration", () => {
 		it("bindCore ignores invalid queued registrations and reports extension error", () => {
 			const runtime = createExtensionRuntime();

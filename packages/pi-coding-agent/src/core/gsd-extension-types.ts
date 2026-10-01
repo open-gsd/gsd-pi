@@ -211,6 +211,10 @@ export interface AdjustToolSetEvent {
 
 export interface AdjustToolSetResult {
 	toolNames?: string[];
+	/** Tool names to remove from the final toolset. Applied after any toolNames override from any listener. */
+	removeTools?: string[];
+	/** Tool names to add to the final toolset. Applied after removes; the final list is deduplicated. */
+	addTools?: string[];
 }
 
 export interface BashTransformEvent {
