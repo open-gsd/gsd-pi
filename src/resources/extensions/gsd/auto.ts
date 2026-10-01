@@ -3258,6 +3258,7 @@ const widgetStateAccessors: WidgetStateAccessors = {
   isVerbose: () => s.verbose,
   isSessionSwitching: isSessionSwitchInFlight,
   getCurrentDispatchedModelId: () => s.currentDispatchedModelId,
+  getCurrentUnitRoutingTier: () => s.currentUnitRouting?.tier ?? null,
 };
 
 // ─── Preconditions ────────────────────────────────────────────────────────────

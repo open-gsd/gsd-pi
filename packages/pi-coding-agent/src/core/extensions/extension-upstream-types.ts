@@ -166,6 +166,8 @@ export interface GsdProgressState {
 	eta?: string;
 	/** Fully-qualified dispatched model ID (provider/id) auto-mode is currently running, if any. */
 	model?: string;
+	/** Dynamic-routing tier that classified the active unit, when dynamic routing applied (#2395). */
+	dynamicRoutingTier?: "light" | "standard" | "heavy";
 	healthSummary?: string;
 	path?: string;
 	widgetMode?: GsdProgressWidgetMode;
