@@ -33,7 +33,7 @@ import {
 	mergeDeltaPatches,
 	readIsolationMode,
 } from "./isolation.js";
-import { registerWorker, updateWorker } from "./worker-registry.js";
+import { registerWorker, updateWorker, formatWorkerIdentity } from "./worker-registry.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
@@ -216,7 +216,13 @@ interface SingleResult {
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
+	/** Provider-reported model when it differs from the requested `model` (#2396) */
+	reportedModel?: string;
 	thinking?: string;
+	/** When this child started executing (#2396) */
+	startedAt?: number;
+	/** When this child reached a terminal state (#2396) */
+	completedAt?: number;
 	stopReason?: string;
 	errorMessage?: string;
 	sessionFile?: string;
@@ -516,6 +522,7 @@ async function runSingleAgent(
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model: modelOverride ?? agent.model,
 		thinking: effectiveThinking,
+		startedAt: Date.now(),
 		step,
 	};
 
@@ -599,6 +606,7 @@ async function runSingleAgent(
 
 		currentResult.exitCode = exitCode;
 		currentResult.running = false;
+		currentResult.completedAt = Date.now();
 		if (wasAborted) throw new Error("Subagent was aborted");
 		markMissingFinalResponse(currentResult);
 		return currentResult;
@@ -664,6 +672,7 @@ async function runSingleAgentInCmuxSplit(
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model: modelOverride ?? agent.model,
 		thinking: effectiveThinking,
+		startedAt: Date.now(),
 		step,
 	};
 
@@ -747,6 +756,7 @@ async function runSingleAgentInCmuxSplit(
 			await waitForFile(exitPath, undefined, 5000);
 			currentResult.exitCode = 1;
 			currentResult.running = false;
+			currentResult.completedAt = Date.now();
 			currentResult.stderr = "cmux split execution timed out or was aborted";
 			if (fs.existsSync(stdoutPath)) {
 				const stdout = fs.readFileSync(stdoutPath, "utf-8");
@@ -768,6 +778,7 @@ async function runSingleAgentInCmuxSplit(
 		}
 		currentResult.exitCode = Number.parseInt(fs.readFileSync(exitPath, "utf-8").trim() || "1", 10) || 0;
 		currentResult.running = false;
+		currentResult.completedAt = Date.now();
 		markMissingFinalResponse(currentResult);
 		return currentResult;
 	} finally {
@@ -1208,6 +1219,8 @@ export default function (pi: ExtensionAPI) {
 							stopReason: signal?.aborted ? "aborted" : "error",
 							errorMessage: result.errorMessage || message,
 							usage: result.usage ?? zeroUsage(),
+							// Freeze elapsed display at the failure moment (#2396)
+							completedAt: Date.now(),
 						};
 					});
 					if (patchedRunning || patched.some((result) => result.exitCode !== 0)) return patched;
@@ -1460,6 +1473,17 @@ export default function (pi: ExtensionAPI) {
 				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(taskParams.length);
 
+				// Requested identity per child: task override → tool default → agent frontmatter,
+				// resolved with the same precedence execution uses (#2396). Display-only:
+				// execution overrides below stay `t.* || params.*` so argv is unchanged.
+				const workerIdentities = taskParams.map((t) => {
+					const taskAgent = agents.find((a) => a.name === t.agent);
+					return {
+						model: t.model || params.model || taskAgent?.model,
+						thinking: t.thinking ?? params.thinking ?? taskAgent?.thinking,
+					};
+				});
+
 				// Initialize placeholder results
 				for (let i = 0; i < taskParams.length; i++) {
 					allResults[i] = {
@@ -1471,6 +1495,9 @@ export default function (pi: ExtensionAPI) {
 						messages: [],
 						stderr: "",
 						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						// Identity is known before the child's first event; timing starts at execution
+						...(workerIdentities[i].model !== undefined ? { model: workerIdentities[i].model } : {}),
+						...(workerIdentities[i].thinking !== undefined ? { thinking: workerIdentities[i].thinking } : {}),
 					};
 				}
 				finalResults = allResults;
@@ -1496,9 +1523,9 @@ export default function (pi: ExtensionAPI) {
 					? await cmuxClient.createGridLayout(Math.min(batchSize, MAX_CONCURRENCY))
 					: [];
 				const results = await mapWithConcurrencyLimit(taskParams, MAX_CONCURRENCY, async (t, index) => {
-					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId);
 					const taskModel = t.model || params.model;
 					const taskThinking = t.thinking ?? params.thinking;
+					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId, workerIdentities[index]);
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
 							allResults[index] = partial.details.results[0];
@@ -1988,6 +2015,9 @@ export default function (pi: ExtensionAPI) {
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`, 0, 0),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						// Terminal children keep their identity attribution (#2396)
+						const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2031,6 +2061,12 @@ export default function (pi: ExtensionAPI) {
 								: theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
+					// Per-child identity: model · thinking · elapsed (#2396)
+					const identity = formatWorkerIdentity(
+						r,
+						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+					);
+					if (identity) text += `\n${theme.fg("dim", identity)}`;
 					if (displayItems.length === 0)
 						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;

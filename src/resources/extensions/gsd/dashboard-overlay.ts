@@ -8,7 +8,7 @@
  */
 
 import type { Theme } from "@gsd/pi-coding-agent";
-import { truncateToWidth, matchesKey, Key } from "@gsd/pi-tui";
+import { truncateToWidth, visibleWidth, matchesKey, Key } from "@gsd/pi-tui";
 import { deriveState } from "./state.js";
 import { loadFile } from "./files.js";
 import { isDbAvailable, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
@@ -26,7 +26,13 @@ import {
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { countPendingCaptures } from "./captures.js";
 import { getActiveWorktreeName } from "./worktree-session-state.js";
-import { getWorkerBatches, hasActiveWorkers, type WorkerEntry } from "../subagent/worker-registry.js";
+import {
+  formatWorkerElapsed,
+  formatWorkerModelTokens,
+  getWorkerBatches,
+  hasActiveWorkers,
+  type WorkerEntry,
+} from "../subagent/worker-registry.js";
 import { formatDuration, padRight, joinColumns, centerLine, fitColumns, STATUS_GLYPH, STATUS_COLOR } from "../shared/mod.js";
 import { estimateTimeRemaining } from "./auto-dashboard.js";
 import { computeProgressScore, formatProgressLine } from "./progress-score.js";
@@ -475,13 +481,24 @@ export class GSDDashboardOverlay {
             : w.status === "completed"
               ? th.fg("success", "✓")
               : th.fg("error", "✗");
-          const elapsed = th.fg("dim", formatDuration(Date.now() - w.startedAt));
-          const taskPreview = truncateToWidth(w.task, Math.max(20, contentWidth - 30));
-          lines.push(row(joinColumns(
-            `    ${icon} ${th.fg("text", w.agent)} ${th.fg("dim", taskPreview)}`,
-            elapsed,
-            contentWidth,
-          )));
+          // Per-child identity: agent · model · thinking, elapsed on the right (#2396).
+          // Priority when narrow: state, identity, model/thinking (truncated), elapsed,
+          // then the task preview. Measure display width (visibleWidth), not UTF-16
+          // length, so wide characters can't push the row past the terminal edge.
+          const metaTokens = formatWorkerModelTokens(w);
+          const elapsedText = formatWorkerElapsed(w, w.status);
+          const baseWidth = 4 + 1 + 1 + visibleWidth(w.agent) + 3 + visibleWidth(elapsedText) + 2;
+          const metaDisplay = metaTokens
+            ? truncateToWidth(metaTokens, Math.max(0, contentWidth - baseWidth))
+            : "";
+          const metaWidth = visibleWidth(metaDisplay);
+          const meta = metaDisplay ? th.fg("dim", ` · ${metaDisplay}`) : "";
+          // " preview" needs its separator too, so a 1-char remainder shows nothing.
+          const remaining = contentWidth - baseWidth - metaWidth;
+          const taskPreview = remaining >= 2 ? truncateToWidth(w.task, remaining - 1) : "";
+          const elapsed = elapsedText ? th.fg("dim", elapsedText) : "";
+          const left = `    ${icon} ${th.fg("text", w.agent)}${meta}${taskPreview ? ` ${th.fg("dim", taskPreview)}` : ""}`;
+          lines.push(row(joinColumns(left, elapsed, contentWidth)));
         }
       }
       lines.push(blank());
