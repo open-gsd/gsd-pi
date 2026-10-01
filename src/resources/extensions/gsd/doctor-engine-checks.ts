@@ -634,6 +634,12 @@ export function createValidationSourceDriftDoctorIssue(
   const recovery = drift.autoCommitDetected
     ? " GSD's pre-merge auto-commit is the current HEAD. If it captured unintended files, run `git reset --mixed HEAD^` to preserve them as working-tree changes, remove or ignore unwanted files, then retry."
     : " Restore or remove unintended working-tree changes before retrying.";
+  // The only caller, reportMilestoneValidationSourceDrift, inspects closed
+  // milestones only — but /gsd validate-milestone requires a ready or
+  // in_progress lifecycle, so the old "run /gsd validate-milestone, then
+  // /gsd auto" remediation was unexecutable by construction (#2439). State the
+  // truth: the pinned receipt is unreachable for a terminal milestone until a
+  // re-pin path exists, so the issue is not doctor-fixable.
   return {
     severity: "error",
     code: "validation_source_revision_mismatch",
@@ -642,9 +648,9 @@ export function createValidationSourceDriftDoctorIssue(
     message:
       `Milestone ${milestoneId} validation source revision does not match the current tree ` +
       `(expected ${mismatch.expectedSourceRevision}; tested ${mismatch.testedSourceRevision}).${paths}${recovery} ` +
-      `If the current content is intended, run \`/gsd validate-milestone ${milestoneId}\`, then \`/gsd auto\`.`,
+      `The milestone is closed, so its pinned validation receipt is unreachable: \`/gsd validate-milestone ${milestoneId}\` requires a ready or in_progress lifecycle, and no re-pin path for closed milestones exists yet.`,
     file: drift.paths[0],
-    fixable: true,
+    fixable: false,
   };
 }
 
