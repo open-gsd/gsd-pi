@@ -34,6 +34,7 @@ a systematic manual search (see step 3).
 ## 2. Scan for candidates
 
 Look for four kinds of dead code:
+
 1. **Unused exports** — exports no other file imports.
 2. **Unused files** — files imported by nothing (and not an entry point).
 3. **Dead branches** — functions that are reachable but have branches that
@@ -44,6 +45,7 @@ Look for four kinds of dead code:
 ## 3. Verify each candidate
 
 Dead-code tools are noisy. Before reporting anything, manually confirm by:
+
 - Searching for the symbol name across the repo (`grep -r` or `rg`).
 - Checking build configs (webpack, vite, rollup) for dynamic imports.
 - Checking test configs for fixtures or test-only code.
@@ -51,6 +53,7 @@ Dead-code tools are noisy. Before reporting anything, manually confirm by:
   often trip tools).
 
 If a symbol is only referenced in a test, distinguish:
+
 - Real dead code: test exists but production never calls it.
 - Test-only helper: legitimate — not dead.
 

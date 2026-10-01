@@ -3,6 +3,7 @@
 LLMs have limited context windows. When conversations grow too long, pi uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
 
 **Source files** ([pi-mono](https://github.com/earendil-works/pi-mono)):
+
 - [`packages/coding-agent/src/core/compaction/compaction.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/compaction.ts) - Auto-compaction logic
 - [`packages/coding-agent/src/core/compaction/branch-summarization.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/branch-summarization.ts) - Branch summarization
 - [`packages/coding-agent/src/core/compaction/utils.ts`](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/compaction/utils.ts) - Shared utilities (file tracking, serialization)
@@ -103,12 +104,14 @@ Split turn (one huge turn exceeds budget):
 ```
 
 For split turns, pi generates two summaries and merges them:
+
 1. **History summary**: Previous context (if any)
 2. **Turn prefix summary**: The early part of the split turn
 
 ### Cut Point Rules
 
 Valid cut points are:
+
 - User messages
 - Assistant messages
 - BashExecution messages
@@ -178,6 +181,7 @@ After navigation with summary:
 ### Cumulative File Tracking
 
 Both compaction and branch summarization track files cumulatively. When generating a summary, pi extracts file operations from:
+
 - Tool calls in the messages being summarized
 - Previous compaction or branch summary `details` (if any)
 

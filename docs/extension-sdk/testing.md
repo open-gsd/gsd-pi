@@ -267,6 +267,7 @@ describe("config persistence", () => {
 ```
 
 Key points:
+
 - `mkdtempSync` creates a unique temporary directory each run
 - `beforeEach`/`afterEach` ensure clean state between tests
 - Always clean up with `rmSync` in `afterEach` or a `finally` block

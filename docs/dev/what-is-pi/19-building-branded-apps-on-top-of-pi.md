@@ -5,6 +5,7 @@ This document covers the part that the extension docs, SDK docs, RPC docs, and p
 **How do you build your own product on top of pi** so users run **your** app, **your** command, and **your** UI rather than installing and managing pi directly?
 
 Examples:
+
 - a branded CLI like `gsd`
 - a desktop app that uses pi as its backend engine
 - a web or Electron app that uses pi sessions, tools, and event streaming
@@ -125,6 +126,7 @@ instead of `~/.gsd`.
 ### Important nuance
 
 If you use the default resource loader and default managers, pi behaves like pi:
+
 - standard discovery
 - standard config locations
 - standard session directories
@@ -144,12 +146,14 @@ This is the most natural fit for tools like `gsd`.
 You create your own executable and call `createAgentSession()` directly.
 
 #### Good for
+
 - a branded terminal tool
 - a custom TUI
 - internal company coding agents
 - a CLI with pi sessions, tools, and extensions under the hood
 
 #### Benefits
+
 - type-safe
 - no subprocess management
 - easy to customize storage and discovery
@@ -157,6 +161,7 @@ You create your own executable and call `createAgentSession()` directly.
 - easiest way to bundle built-in resources
 
 #### Typical stack
+
 - `@gsd/pi-coding-agent`
 - optionally `@gsd/pi-tui`
 - your own entrypoint and app directories
@@ -168,17 +173,20 @@ You create your own executable and call `createAgentSession()` directly.
 Here your app spawns pi as a subprocess and talks to it over JSON lines.
 
 #### Good for
+
 - non-Node host applications
 - desktop shells with a strict engine boundary
 - process isolation
 - integrations where restarting the engine independently is useful
 
 #### Benefits
+
 - language-agnostic
 - process isolation
 - JSON protocol is explicit and stream-friendly
 
 #### Costs
+
 - you must manage subprocess lifecycle
 - some UI features are degraded compared to pi's native TUI
 - extension UI works through a request/response sub-protocol, not full TUI embedding
@@ -190,17 +198,20 @@ Here your app spawns pi as a subprocess and talks to it over JSON lines.
 This is for cases where you want pi's model and agent infrastructure but not necessarily pi's full coding-agent product surface.
 
 #### Good for
+
 - browser apps
 - web chat products
 - custom artifact workflows
 - custom message types and renderers
 
 #### Benefits
+
 - lower-level control
 - more app-specific freedom
 - easier fit for non-terminal interfaces
 
 #### Costs
+
 - you build more yourself
 - fewer coding-agent-specific conveniences out of the box
 
@@ -254,6 +265,7 @@ and you want it to feel like your product rather than "pi but renamed," the defa
 7. Expose only the commands and UX you want
 
 That gives you the best control over:
+
 - branding
 - defaults
 - storage layout
@@ -293,6 +305,7 @@ Or on macOS:
 ### Why this matters
 
 If your product uses `~/.gsd`, then:
+
 - it shares state with the user's pi installation
 - branding becomes muddy
 - support/debugging becomes more confusing
@@ -343,6 +356,7 @@ This is another place where people often assume they must rely on discovery from
 You do not.
 
 Your app can bundle:
+
 - extensions
 - prompts
 - themes
@@ -401,10 +415,12 @@ const loader = new DefaultResourceLoader({
 ### Why this matters
 
 For a branded product, it is often better to think in terms of:
+
 - **bundled built-ins shipped by your app**
 - optional plugin support later
 
 rather than:
+
 - user-managed global pi resources first
 
 ---
@@ -414,25 +430,31 @@ rather than:
 These are different product strategies.
 
 ### Discovery-driven product
+
 You intentionally load from:
+
 - `~/.gsd/agent/...`
 - `.gsd/...`
 - installed pi packages
 
 #### Good when
+
 - your product is basically pi with additions
 - you want compatibility with existing pi user workflows
 
 ### Bundled-app product
+
 You intentionally ship your own resources and avoid implicit user-level discovery.
 
 #### Good when
+
 - you want strong branding
 - you want predictable behavior
 - you want supportability and reproducibility
 - you do not want random user extensions affecting behavior
 
 ### Recommendation
+
 For a branded tool like `gsd`, default to **bundled-app product** behavior.
 
 If you later add plugin support, make it explicit.
@@ -449,6 +471,7 @@ But when you are building your own app, there are two separate questions:
 2. **Should your app internally use pi-package-style resource organization?**
 
 ### Usually, for a branded app:
+
 - **No** on #1
 - **Maybe** on #2
 
@@ -468,7 +491,9 @@ resources/
 and load them through your resource loader.
 
 ### When pi packages still matter
+
 Pi packages are still useful when:
+
 - you want optional add-ons
 - you want to reuse existing pi ecosystem resources
 - you want third parties to extend your app through pi-compatible bundles
@@ -488,12 +513,14 @@ pi --mode rpc
 or programmatically by calling `runRpcMode(session)` in your own Node process.
 
 ### RPC is good for
+
 - non-Node clients
 - desktop shells in other runtimes
 - separate engine process architecture
 - explicit JSON protocol boundaries
 
 ### What RPC gives you
+
 - prompt / steer / follow_up / abort
 - model selection
 - state inspection
@@ -503,17 +530,20 @@ or programmatically by calling `runRpcMode(session)` in your own Node process.
 - extension UI request/response protocol
 
 ### Important limitation
+
 RPC is not the same thing as embedding pi's full native TUI.
 
 Some extension UI methods degrade in RPC mode.
 
 #### Dialogs still work
+
 - `select`
 - `confirm`
 - `input`
 - `editor`
 
 #### Fire-and-forget UI signals still work
+
 - notifications
 - status
 - widgets
@@ -521,6 +551,7 @@ Some extension UI methods degrade in RPC mode.
 - editor text setting
 
 #### Some richer TUI behaviors do not map cleanly
+
 - full `custom()` component workflows
 - some footer/header/editor replacement behavior
 - some theme-specific TUI behavior
@@ -538,7 +569,9 @@ The client receives `extension_ui_request` messages and must answer with `extens
 This means you can build your own frontend and still support many extension-driven workflows.
 
 ### But know the boundary
+
 RPC mode supports:
+
 - interaction patterns
 - not full TUI component identity
 
@@ -554,6 +587,7 @@ If your app is a web app or browser-hosted UI, look closely at:
 - the built-in `gsd --web` interface, or the upstream `pi-web-ui` package (not vendored into GSD)
 
 `pi-web-ui` already provides:
+
 - chat UI
 - session storage
 - provider key storage
@@ -566,11 +600,13 @@ If your app is a web app or browser-hosted UI, look closely at:
 This is effectively a starter kit for a branded web app using pi-related primitives.
 
 ### Use pi-web-ui when
+
 - you want a browser or Electron-friendly UI surface
 - you want a ready-made chat shell
 - you do not specifically want pi's TUI
 
 ### Use pi-coding-agent SDK when
+
 - you want coding-agent-specific resource loading, sessions, extensions, and coding tool behaviors
 - your app is terminal-first or Node-first
 
@@ -581,17 +617,21 @@ This is effectively a starter kit for a branded web app using pi-related primiti
 This matters if you are building a white-labeled or branded product.
 
 ### If you spawn the pi CLI directly
+
 Your product is closer to “pi as a subprocess.”
 That is fine, but many pi-level assumptions remain nearby.
 
 ### If you embed `@gsd/pi-coding-agent`
+
 You can hide most pi branding and product surface decisions.
 You keep the coding-agent infrastructure but own the app UX.
 
 ### If you use `@gsd/pi-agent-core`
+
 You are even lower-level. Pi becomes more of a library source than a user-visible product.
 
 ### Practical recommendation
+
 If branding matters, do not treat the pi CLI binary as your product surface unless you truly want pi semantics exposed.
 
 Use the SDK or lower-level packages and build your own interface.
@@ -608,6 +648,7 @@ Decide whether your app wants:
 - **branching session history** exposed to users
 
 ### Persistent app-owned sessions
+
 Most natural for a CLI or desktop app.
 
 ```typescript
@@ -615,6 +656,7 @@ const sessionManager = SessionManager.create(process.cwd(), sessionsDir);
 ```
 
 ### Ephemeral mode
+
 Useful for task-runner or automation workflows.
 
 ```typescript
@@ -622,6 +664,7 @@ const sessionManager = SessionManager.inMemory();
 ```
 
 ### Important question
+
 Do you want your app to share session files with pi itself?
 
 Usually the answer should be **no** unless interoperability is an explicit feature.
@@ -663,12 +706,14 @@ Use in-memory settings when you want the host app to own the config model entire
 ## 19.17 Provider and Auth Strategy
 
 A branded app should decide whether users:
+
 - bring their own API keys
 - use OAuth through pi provider support
 - connect to your proxy/backend
 - use your own registered providers
 
 ### App-owned auth paths
+
 Use custom `AuthStorage` paths.
 
 ```typescript
@@ -676,6 +721,7 @@ const authStorage = AuthStorage.create("/path/to/gsd/auth.json");
 ```
 
 ### App-owned model config
+
 Use your own `models.json` location or register providers dynamically.
 
 ```typescript
@@ -683,6 +729,7 @@ const modelRegistry = new ModelRegistry(authStorage, "/path/to/gsd/models.json")
 ```
 
 ### Custom provider strategy
+
 If your app talks to a proxy or company backend, register providers from your app or bundled extensions.
 
 That keeps the app experience aligned with your branding and infrastructure.
@@ -710,6 +757,7 @@ my-gsd/
 ```
 
 ### In `cli.ts`
+
 - parse your app flags
 - compute app directories
 - create auth/model/settings/session managers
@@ -718,11 +766,13 @@ my-gsd/
 - run your own mode (custom TUI, print mode, or RPC bridge)
 
 ### In `resource-loader.ts`
+
 - load bundled resources
 - optionally disable ambient pi discovery
 - add your branded system prompt and context files
 
 ### In bundled extensions
+
 - add your commands
 - register your custom tools
 - control your app-specific behaviors
@@ -795,10 +845,12 @@ The SDK exports `InteractiveMode`, `runPrintMode`, and `runRpcMode`.
 These are useful if you want to reuse existing pi surfaces while changing the surrounding setup.
 
 ### Reuse `InteractiveMode` when
+
 - you want pi's TUI mostly intact
 - but with app-owned storage, extensions, defaults, and resources
 
 ### Do not reuse it when
+
 - you want a strongly branded UI
 - you want different commands or layout metaphors
 - you want your app to feel fundamentally different from pi
@@ -810,21 +862,27 @@ For a white-labeled product, `InteractiveMode` is a good prototyping step, not a
 ## 19.21 What to Avoid in a Branded Product
 
 ### Avoid accidental dependence on ambient user state
+
 If your app silently loads from a user's `~/.gsd`, you may get:
+
 - surprising extensions
 - strange prompts
 - odd themes
 - hard-to-debug behavior differences
 
 ### Avoid mixing branding and storage casually
+
 If your app is called `gsd`, but state lives in `~/.gsd`, users will notice.
 
 ### Avoid choosing RPC just because it sounds generic
+
 If your app is already Node/TypeScript, SDK embedding is usually simpler and more powerful.
 
 ### Avoid exposing every pi concept unless you want to
+
 A branded product should choose what the user sees.
 You do not need to expose:
+
 - all slash commands
 - all extension loading paths
 - all package concepts
@@ -835,17 +893,20 @@ You do not need to expose:
 ## 19.22 Suggested Product Postures
 
 ### Posture A: “Pi-compatible branded shell”
+
 - Uses pi concepts openly
 - Supports pi packages and pi-style discovery
 - Good for power users
 
 ### Posture B: “Branded app powered by pi”
+
 - Uses pi internally
 - App-owned directories and resources
 - Explicit plugins only
 - Good for productized tools like `gsd`
 
 ### Posture C: “Custom agent product using pi primitives”
+
 - Uses `pi-agent-core` or selective libraries
 - Pi itself is mostly invisible
 - Good for SaaS or browser products
@@ -869,6 +930,7 @@ If you are building a branded app on top of pi, read in this order:
 9. `pi-ui-tui/22-quick-reference-all-ui-apis.md`
 
 Then read the source package docs for exact API details:
+
 - `packages/coding-agent/docs/sdk.md`
 - `packages/coding-agent/docs/rpc.md`
 - `packages/coding-agent/docs/extensions.md`
@@ -893,5 +955,6 @@ Then the answer is:
 - **Treat pi as a foundation layer, not necessarily the product surface**
 
 That is the difference between:
+
 - “using pi as a user tool”
 - and “building your own product on top of pi.”

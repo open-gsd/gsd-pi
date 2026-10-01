@@ -31,6 +31,7 @@ The codebase has a contradictory workaround: `smartStage()` (git-service.ts:304-
 **3. Merge/conflict code complexity**
 
 The current slice branch model requires:
+
 - `mergeSliceToMilestone()` — 98 lines, `--no-ff` merge with `withMergeHeal` wrapper
 - `mergeSliceToMain()` — 189 lines, squash-merge with conflict detection/categorization/auto-resolution
 - `git-self-heal.ts` — 198 lines, 3 recovery functions for merge failures
@@ -98,6 +99,7 @@ main ─────────────────────────
 ### `.gsd/` Tracking Model
 
 **Tracked in git (travels with the branch):**
+
 ```
 .gsd/milestones/         — roadmaps, plans, summaries, research, contexts, task plans/summaries
 .gsd/PROJECT.md          — project overview
@@ -107,6 +109,7 @@ main ─────────────────────────
 ```
 
 **Gitignored (ephemeral, runtime, infrastructure):**
+
 ```
 .gsd/runtime/            — dispatch records, timeout tracking
 .gsd/activity/           — JSONL session dumps
@@ -159,6 +162,7 @@ Planning artifacts (milestones/, PROJECT.md, DECISIONS.md, REQUIREMENTS.md, QUEU
 ### What `mergeMilestoneToMain()` Becomes
 
 The function simplifies dramatically:
+
 1. Auto-commit any dirty state in worktree
 2. `chdir` back to main repo root
 3. `git checkout main`
@@ -180,6 +184,7 @@ The `_runtimeFilesCleanedUp` one-time migration logic can also be removed.
 ### What Happens to `handleAgentEnd()`
 
 After any unit completes:
+
 1. Invalidate caches
 2. `autoCommitCurrentBranch()` — commits on the one and only branch
 3. `verifyExpectedArtifact()` — file is always on the current branch (no branch switching)
@@ -206,6 +211,7 @@ If two milestones modify the same source file, the second squash-merge to `main`
 **2. Loss of per-slice git history after squash**
 
 Squash merge collapses all commits into one on `main`. Mitigations:
+
 - Commit messages tag slices (`feat(M001/S01/T01):`) — filterable with `git log --grep`
 - The milestone branch can be preserved (not deleted) if history is needed
 - Alternative: `merge --no-ff` instead of `--squash` to keep history on `main`

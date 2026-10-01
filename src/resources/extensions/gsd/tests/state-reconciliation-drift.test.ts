@@ -32,6 +32,8 @@ import {
 import { clearParseCache } from "../files.ts";
 import { clearPathCache } from "../paths.ts";
 import { detectStaleRenders, getCurrentProjectStateVersion, renderRoadmapFromDb } from "../markdown-renderer.ts";
+import { detectArtifactDbDrift } from "../state-reconciliation/drift/artifact-db.ts";
+import { appendEvent } from "../workflow-events.ts";
 import { invalidateStateCache } from "../state.ts";
 import {
   reconcileBeforeDispatch,
@@ -2176,6 +2178,210 @@ test("completedMilestoneReopenedGuidance tells active milestones to finish close
   assert.match(guidance, /\/gsd next again before fixing/);
 });
 
+// ─── #2398: completed-milestone-reopened requires completion-event proof ─────
+
+function seedCompletedCloseoutDispatch(milestoneId: string, startedAt: string, endedAt: string): void {
+  const adapter = _getAdapter();
+  assert.ok(adapter, "DB must be open before seeding a closeout dispatch");
+  adapter.prepare(
+    `INSERT OR REPLACE INTO workers
+      (worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath)
+     VALUES ('w-2398', 'local', 1, :started, 'test', :ended, 'stopped', '')`,
+  ).run({ ":started": startedAt, ":ended": endedAt });
+  adapter.prepare(
+    `INSERT INTO unit_dispatches
+      (trace_id, worker_id, milestone_lease_token, milestone_id, unit_type, unit_id, status, attempt_n, started_at, ended_at)
+     VALUES
+      ('trace-2398', 'w-2398', 1, :mid, 'complete-milestone', :mid, 'completed', 1, :started, :ended)`,
+  ).run({ ":mid": milestoneId, ":started": startedAt, ":ended": endedAt });
+}
+
+// Seeds the durable receipt the milestone.complete domain operation writes
+// (workflow_domain_events event_type='milestone.completed'), mirroring the
+// production writer shape in milestone-lifecycle-domain-operation.ts.
+function seedDurableMilestoneCompletedEvent(milestoneId: string, createdAt: string): void {
+  const adapter = _getAdapter();
+  assert.ok(adapter, "DB must be open before seeding a domain event");
+  adapter.prepare(
+    `INSERT INTO workflow_operations (
+       operation_id, project_id, operation_type, idempotency_key,
+       expected_revision, resulting_revision,
+       expected_authority_epoch, resulting_authority_epoch,
+       actor_type, source_transport, request_hash, created_at
+     )
+     SELECT :op_id, project_id, 'milestone.complete', :op_id,
+            0, 1, 0, 0, 'test', 'test', 'hash-2398', :created_at
+     FROM project_authority WHERE singleton = 1`,
+  ).run({ ":op_id": `op-2398-${milestoneId}`, ":created_at": createdAt });
+  adapter.prepare(
+    `INSERT INTO workflow_domain_events (
+       event_id, operation_id, event_index, project_id, project_revision,
+       authority_epoch, event_type, entity_type, entity_id, payload_json, created_at
+     )
+     SELECT :event_id, :op_id, 0, project_id, 1,
+            0, 'milestone.completed', 'milestone', :entity_id, '{}', :created_at
+     FROM project_authority WHERE singleton = 1`,
+  ).run({
+    ":event_id": `event-2398-${milestoneId}`,
+    ":op_id": `op-2398-${milestoneId}`,
+    ":entity_id": milestoneId,
+    ":created_at": createdAt,
+  });
+}
+
+test("#2398: a completed complete-milestone dispatch without a milestone.completed event is not completed-milestone-reopened drift", (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  // Closeout debris (the #2398 report): every closeout attempt failed / the
+  // session exited, leaving a status='completed' dispatch row while M001 is
+  // still active and no milestone.completed event was ever committed.
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T07:53:00.000Z", "2026-09-17T07:54:00.000Z");
+
+  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
+  const drifts = detectArtifactDbDrift(state, { basePath: base, state });
+
+  assert.equal(
+    drifts.filter((d) => d.kind === "completed-milestone-reopened").length,
+    0,
+    "a completed dispatch row without a covering milestone.completed event must not wedge the active milestone",
+  );
+});
+
+test("#2398: a milestone.completed event covering the dispatch keeps completed-milestone-reopened drift reportable", (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T07:53:00.000Z", "2026-09-17T07:54:00.000Z");
+  // The event is minted inside the closeout: after started_at, before the
+  // ended_at that markCompleted stamps afterwards.
+  seedDurableMilestoneCompletedEvent("M001", "2026-09-17T07:53:30.000Z");
+
+  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
+  const drifts = detectArtifactDbDrift(state, { basePath: base, state });
+  const completed = drifts.filter((d) => d.kind === "completed-milestone-reopened");
+
+  assert.equal(completed.length, 1, "genuine completion history without a reopen must still be reported");
+  if (completed[0]?.kind === "completed-milestone-reopened") {
+    assert.equal(completed[0].milestoneId, "M001");
+    assert.equal(completed[0].completedDispatchAt, "2026-09-17T07:54:00.000Z");
+  }
+});
+
+test("#2398: a milestone.completed event older than the dispatch does not cover a later stale closeout row", (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  // The last genuine completion predates a newer stale closeout attempt; the
+  // newer completed row has no covering event, so it is debris, not history.
+  seedDurableMilestoneCompletedEvent("M001", "2026-09-17T07:00:00.000Z");
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T09:00:00.000Z", "2026-09-17T09:01:00.000Z");
+
+  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
+  const drifts = detectArtifactDbDrift(state, { basePath: base, state });
+
+  assert.equal(
+    drifts.filter((d) => d.kind === "completed-milestone-reopened").length,
+    0,
+    "an event that predates the dispatch must not count as its completion proof",
+  );
+});
+
+test("#2398: a later receiptless dispatch does not hide an earlier event-backed completion", (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  // Genuine completion (D1 + receipt), then a later debris closeout attempt
+  // (D2, no receipt). The milestone is active with no explicit reopen — the
+  // D1 history must still be reported despite the newer D2 row.
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T07:00:00.000Z", "2026-09-17T07:01:00.000Z");
+  seedDurableMilestoneCompletedEvent("M001", "2026-09-17T07:00:30.000Z");
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T09:00:00.000Z", "2026-09-17T09:01:00.000Z");
+
+  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
+  const drifts = detectArtifactDbDrift(state, { basePath: base, state });
+  const completed = drifts.filter((d) => d.kind === "completed-milestone-reopened");
+
+  assert.equal(completed.length, 1, "older event-backed completion must still be reported");
+  if (completed[0]?.kind === "completed-milestone-reopened") {
+    assert.equal(completed[0].completedDispatchAt, "2026-09-17T07:01:00.000Z");
+  }
+});
+
+test("#2398: an explicit reopen between dispatches exempts a receiptless retry", (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  // D1 genuinely completed and was explicitly reopened; D2 is a later
+  // receiptless retry. The active milestone is legitimately active.
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T07:00:00.000Z", "2026-09-17T07:01:00.000Z");
+  seedDurableMilestoneCompletedEvent("M001", "2026-09-17T07:00:30.000Z");
+  appendEvent(base, {
+    cmd: "reopen-milestone",
+    params: { milestoneId: "M001" },
+    ts: "2026-09-17T08:00:00.000Z",
+    actor: "agent",
+  });
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T09:00:00.000Z", "2026-09-17T09:01:00.000Z");
+
+  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
+  const drifts = detectArtifactDbDrift(state, { basePath: base, state });
+
+  assert.equal(
+    drifts.filter((d) => d.kind === "completed-milestone-reopened").length,
+    0,
+    "an explicit reopen before the receiptless retry must leave the milestone unblocked",
+  );
+});
+
+test("#2398: legacy underscore ledger spellings count for completion and reopen", (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  // Legacy file ledger records the completion (and a later reopen) with the
+  // underscore vocabulary.
+  appendEvent(base, {
+    cmd: "complete_milestone",
+    params: { milestoneId: "M001" },
+    ts: "2026-09-17T07:00:30.000Z",
+    actor: "agent",
+  });
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T07:00:00.000Z", "2026-09-17T07:01:00.000Z");
+
+  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
+  const withLegacyCompletion = detectArtifactDbDrift(state, { basePath: base, state });
+  assert.equal(
+    withLegacyCompletion.filter((d) => d.kind === "completed-milestone-reopened").length,
+    1,
+    "underscore completion receipts must still back the drift",
+  );
+
+  appendEvent(base, {
+    cmd: "reopen_milestone",
+    params: { milestoneId: "M001" },
+    ts: "2026-09-17T08:00:00.000Z",
+    actor: "agent",
+  });
+  const afterLegacyReopen = detectArtifactDbDrift(state, { basePath: base, state });
+  assert.equal(
+    afterLegacyReopen.filter((d) => d.kind === "completed-milestone-reopened").length,
+    0,
+    "underscore reopen receipts must exempt the milestone",
+  );
+});
+
 test("ADR-017: completed milestone dispatch history blocks accidental re-planning", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-completed-reopened-drift-"));
   t.after(() => cleanup(base));
@@ -2197,6 +2403,9 @@ test("ADR-017: completed milestone dispatch history blocks accidental re-plannin
      VALUES
       ('trace', 'w1', 1, 'M001', 'complete-milestone', 'M001', 'completed', 1, '2026-05-30T00:00:00.000Z', '2026-05-30T00:01:00.000Z')`,
   ).run();
+  // #2398: the guard now requires the completion receipt — the milestone
+  // really did complete here, then the DB was reopened without a reopen event.
+  seedDurableMilestoneCompletedEvent("M001", "2026-05-30T00:00:30.000Z");
 
   const result = await reconcileBeforeDispatch(base, {
     invalidateStateCache: () => {},

@@ -336,7 +336,7 @@ export async function handleSkillHealth(args: string, ctx: ExtensionCommandConte
 
   if (decliningOnly) {
     if (report.decliningSkills.length === 0) {
-      ctx.ui.notify("No skills flagged for declining performance.", "info");
+      ctx.ui.notify("No skills flagged for review.", "info");
       return;
     }
     const filtered = {

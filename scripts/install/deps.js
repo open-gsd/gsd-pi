@@ -163,6 +163,31 @@ function execCommand(command, opts = {}) {
  * hoisted deps (openai, @anthropic-ai/sdk, …). Run npm install in packageRoot
  * to materialize the real packages without re-running lifecycle scripts.
  */
+
+// npm sets these npm_config_* keys in the env of every lifecycle child when a
+// global install is in flight. If they leak into this nested install, npm
+// reifies it as a global install too and tries to rename/replace its own cwd
+// on Windows (EBUSY mid-reify, leaving rename temp dirs behind). This repair
+// must always be a local install into packageRoot, so strip them while keeping
+// registry/auth configuration (npm_config_registry, *_token, NPM_TOKEN, ...).
+// npm reads config env keys case-insensitively (NPM_CONFIG_GLOBAL and
+// Npm_Config_Global both count), and `location=global` independently enables
+// global mode, so matching is case-insensitive and covers `location` too.
+const NESTED_INSTALL_STRIPPED_ENV_KEYS = new Set([
+  'npm_config_global',
+  'npm_config_global_style',
+  'npm_config_location',
+  'npm_config_prefix',
+])
+
+function nestedInstallEnv() {
+  const env = { ...process.env }
+  for (const key of Object.keys(env)) {
+    if (NESTED_INSTALL_STRIPPED_ENV_KEYS.has(key.toLowerCase())) delete env[key]
+  }
+  return env
+}
+
 export async function repairPackageDependencies(packageRoot, { ui, quiet = false } = {}) {
   if (
     process.env.GSD_SKIP_DEP_REPAIR === '1' ||
@@ -178,7 +203,10 @@ export async function repairPackageDependencies(packageRoot, { ui, quiet = false
   if (!existsSync(pkgJson)) return
 
   const stop = quiet ? undefined : ui?.start?.('Installing dependencies...')
-  const result = await execCommand('npm install --ignore-scripts', { cwd: packageRoot })
+  const result = await execCommand('npm install --ignore-scripts', {
+    cwd: packageRoot,
+    env: nestedInstallEnv(),
+  })
   stop?.()
 
   if (!result.ok) {

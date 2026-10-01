@@ -109,6 +109,7 @@ Parallel to `external-markdown-edit` (PR #802). Added to the `DriftRecord` union
 ```
 
 Detect compares `.planning/` file shas to `marker.planning.projections`. Repair:
+
 - For modeled files: re-import via the existing parser + transformer, then run the hierarchy importer with checkbox status authority scoped to the milestone ids recorded for the drifted file.
 - For passthrough files: no DB import (there's nothing to import into); just refresh the marker sha so the next detect treats it as current.
 
@@ -120,6 +121,7 @@ New function in `migrate/writer.ts` (or a sibling). Given the DB state and the r
 - `phases/NN-<slug>/NN-MM-PLAN.md`, `NN-MM-SUMMARY.md`, `NN-CONTEXT.md`, `NN-RESEARCH.md` per the layout policy
 
 Layout-specific emission:
+
 - **`flat-phases`**: milestone M00N maps to phase NN; slice S0M maps to plan file NN-0M.
 - **`multi-milestone`**: each roadmap milestone section maps to a phase group; naming follows gsd-core's convention.
 - **`legacy-milestone-dir`**: reproduce `.planning/milestones/<mid>/phases/...`.

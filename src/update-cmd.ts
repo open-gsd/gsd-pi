@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { isModelsCatalog, isModelsCatalogOverlay, type ModelsCatalog } from '@gsd/pi-ai'
 import { agentDir as defaultAgentDir } from './app-paths.js'
@@ -241,6 +241,41 @@ async function runBrowserUpdate(): Promise<void> {
   }
 }
 
+/**
+ * Version of the installed `packageName` manifest, anchored at the running
+ * executable instead of package self-resolution: after a successful upgrade
+ * the global bin (npm/bun) or its retargeted symlink (pnpm) resolves to the
+ * new install, whereas self-resolution from the already-running module can
+ * still find pnpm's retained old content directory and report a stale version
+ * for an upgrade that actually succeeded (#2435).
+ * Walks up from the entry script until a package.json whose `name` matches,
+ * skipping unrelated manifests. Returns null when unreadable.
+ */
+function resolveRunningPackageVersion(packageName: string): string | null {
+  const entry = process.argv[1]
+  if (!entry) return null
+  try {
+    let dir = dirname(realpathSync(entry))
+    for (let depth = 0; depth < 32; depth++) {
+      const manifestPath = join(dir, 'package.json')
+      if (existsSync(manifestPath)) {
+        try {
+          const pkg = JSON.parse(readFileSync(manifestPath, 'utf-8')) as { name?: unknown; version?: unknown }
+          if (pkg.name === packageName && typeof pkg.version === 'string') return pkg.version
+        } catch {
+          // Unreadable/invalid manifest: keep walking.
+        }
+      }
+      const parent = dirname(dir)
+      if (parent === dir) return null
+      dir = parent
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
 export async function runUpdate(options: RunUpdateOptions = {}): Promise<void> {
   if (options.target === 'browser' || options.target === 'gsd-browser') {
     await runBrowserUpdate()
@@ -293,10 +328,21 @@ export async function runUpdate(options: RunUpdateOptions = {}): Promise<void> {
     execSync(installCmd, {
       stdio: 'inherit',
     })
-    process.stdout.write(`\n${green}${bold}Updated to v${latest}${reset}\n`)
-    printClaudeRuntimeFloorAdvisory(options.agentDir ?? defaultAgentDir)
   } catch {
     process.stderr.write(`\n${yellow}Update failed. Try manually: ${installCmd}${reset}\n`)
     process.exit(1)
   }
+  // The installer can exit 0 while silently failing to change the installed
+  // package (e.g. the #2435 Windows EBUSY mid-reify). Re-read the installed
+  // manifest before claiming success.
+  const installed = resolveRunningPackageVersion(NPM_PACKAGE)
+  if (!installed || compareSemver(latest, installed) > 0) {
+    process.stderr.write(
+      `\n${yellow}Update incomplete: expected v${latest} but the installed ${NPM_PACKAGE} is ${installed ? `v${installed}` : 'unreadable'}.${reset}\n`,
+    )
+    process.stderr.write(`${yellow}Try manually: ${installCmd}${reset}\n`)
+    process.exit(1)
+  }
+  process.stdout.write(`\n${green}${bold}Updated to v${latest}${reset}\n`)
+  printClaudeRuntimeFloorAdvisory(options.agentDir ?? defaultAgentDir)
 }

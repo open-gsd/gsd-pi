@@ -3719,12 +3719,66 @@ describe("validateProjectDir", () => {
         structuredContent?: { count?: number; decisions?: Array<{ id?: string }> };
       };
       assert.match(result.content?.[0]?.text ?? "", /Found 1 decision/);
+      // #2445 — the model-visible content must carry the usable fields, not
+      // just the count (choice/rationale only in details never reach the model).
+      assert.match(
+        result.content?.[0]?.text ?? "",
+        /D001 \[global\] Mirror read payloads over MCP \| choice: structuredContent/,
+      );
+      assert.match(
+        result.content?.[0]?.text ?? "",
+        /rationale: the details field is dropped by the MCP transport/,
+      );
       assert.ok(result.structuredContent, "payload must ride on structuredContent");
       assert.equal(result.structuredContent.count, 1);
       assert.equal(result.structuredContent.decisions?.[0]?.id, "D001");
     } finally {
       cleanup(base);
     }
+  });
+
+  it("renders the full decision row into gsd_decision_get content (#2445)", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+    const tool = server.tools.find((entry) => entry.name === "gsd_decision_get");
+    assert.ok(tool, "gsd_decision_get must be registered");
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    createMemory({
+      category: "architecture",
+      content: "decision memory fixture",
+      scope: "global",
+      confidence: 0.85,
+      structuredFields: {
+        sourceDecisionId: "D001",
+        when_context: "slice planning",
+        scope: "global",
+        decision: "Mirror read payloads over MCP",
+        choice: "structuredContent",
+        rationale: "the details field is dropped by the MCP transport",
+        made_by: "agent",
+        revisable: "yes",
+        superseded_by: null,
+      },
+    });
+
+    const result = await tool.handler({ projectDir: base, id: "D001" }) as {
+      content?: Array<{ text?: string }>;
+      structuredContent?: { decision?: { id?: string } };
+    };
+    const text = result.content?.[0]?.text ?? "";
+    assert.match(text, /Decision D001: Mirror read payloads over MCP/);
+    assert.match(text, /Choice: structuredContent/);
+    assert.match(text, /Rationale: the details field is dropped by the MCP transport/);
+    assert.match(text, /Scope: global/);
+    assert.match(text, /When: slice planning/);
+    assert.match(text, /Made by: agent/);
+    assert.match(text, /Source: discussion/);
+    assert.match(text, /Revisable: yes/);
+    assert.match(text, /Superseded by: none/);
+    assert.equal(result.structuredContent?.decision?.id, "D001");
   });
 
   it("mirrors canonical read errors into structuredContent", async () => {

@@ -136,15 +136,21 @@ function countSlicesAndTasks(gsdRoot: string, milestoneIds: string[]): {
       const tasks = findTaskFiles(gsdRoot, mid, sid);
       taskTotal += tasks.length;
 
-      const allDone = tasks.length > 0 && tasks.every((t) => t.hasSummary);
-      const anyDone = tasks.some((t) => t.hasSummary);
+      // Flat-phase inventories carry the plan checkbox state in `done`
+      // (tasks are checkboxes inside the slice plan, not separate files).
+      // An explicit unchecked box means staged-not-verified: the writer
+      // writes the task summary before host verification.
+      const isDone = (t: { hasSummary: boolean; done?: boolean }) =>
+        t.done === true ? true : t.done === false ? false : t.hasSummary;
+      const allDone = tasks.length > 0 && tasks.every(isDone);
+      const anyDone = tasks.some(isDone);
 
       if (allDone) {
         sliceDone++;
         taskDone += tasks.length;
       } else {
         if (anyDone) sliceActive++;
-        taskDone += tasks.filter((t) => t.hasSummary).length;
+        taskDone += tasks.filter(isDone).length;
       }
     }
   }

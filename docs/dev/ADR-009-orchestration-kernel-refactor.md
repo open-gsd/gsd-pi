@@ -357,6 +357,7 @@ ADR-009 closure is complete, with emergency fallback retained as a release safet
 - CI parity coverage includes explicit kernel-vs-legacy path assertions.
 
 Evidence is tracked in the implementation plan matrix:
+
 - [ADR-009-IMPLEMENTATION-PLAN.md](./ADR-009-IMPLEMENTATION-PLAN.md)
 
 ## Consequences

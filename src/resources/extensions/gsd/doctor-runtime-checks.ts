@@ -22,6 +22,8 @@ import { removeLegacyProjectionTreeSync, removeProjectionTreeSync } from "./atom
 import {
   loadUnboundProjectionEvidence,
   previewUnboundProjectionEvidenceResolution,
+  isControlPublicationIntentName,
+  CONTROL_INTENT_QUARANTINE_MIN_AGE_MS,
 } from "./managed-projection-history.js";
 import {
   getSupersedingActiveMilestoneId,
@@ -80,6 +82,81 @@ export async function checkRuntimeHealth(
         fixable: false,
       });
     }
+  }
+
+  // ── Stale control-publication intents (#2154) ─────────────────────────
+  // Lock-free scan: reads names only, never opens the projection-root
+  // identity lock or replays anything, so it also reports on exactly the
+  // wedged stores where every managed open throws. Only intents past the
+  // supervised-quarantine age are listed: a fresh intent is either an
+  // in-flight publication or drains on the next successful open.
+  try {
+    const journalDir = join(root, "migration", "projection-mutations");
+    const staleIntentNames: string[] = [];
+    let names: string[] = [];
+    try {
+      names = readdirSync(journalDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    for (const name of names.sort()) {
+      if (!isControlPublicationIntentName(name)) continue;
+      const intentPath = join(journalDir, name);
+      let stat;
+      try {
+        stat = lstatSync(intentPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        continue;
+      }
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      if (Date.now() - stat.mtimeMs < CONTROL_INTENT_QUARANTINE_MIN_AGE_MS) continue;
+      staleIntentNames.push(name);
+    }
+    for (const name of staleIntentNames) {
+      issues.push({
+        severity: "error",
+        code: "stale_control_publication_intent",
+        scope: "project",
+        unitId: "project",
+        message: `Stale prepared control-publication intent .gsd/migration/projection-mutations/${name} is pending native replay. A pending intent that still completes is drained on the next projection write; if every render fails with "control publication content evidence changed" or "control publication evidence retention is incomplete", quarantine it: with all GSD sessions stopped, move the intent file into .gsd/migration/quarantined-control-publications/ (keep the file; do not delete the journal entry alone). The next GSD operation quarantines it automatically and retries.`,
+        file: `.gsd/migration/projection-mutations/${name}`,
+        fixable: false,
+      });
+    }
+    // Quarantined publications from the supervised reconciliation: listed so
+    // the retained bytes stay reviewable after the wedge is defused.
+    const quarantineDir = join(root, "migration", "quarantined-control-publications");
+    let quarantinedNames: string[] = [];
+    try {
+      quarantinedNames = readdirSync(quarantineDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    for (const name of quarantinedNames.sort()) {
+      // Sidecars end in ".quarantined.json" and are skipped with the
+      // artifact filter; only the quarantined artifacts themselves list.
+      if (!name.endsWith(".quarantined")) continue;
+      issues.push({
+        severity: "warning",
+        code: "stale_control_publication_intent",
+        scope: "project",
+        unitId: "project",
+        message: `Control-publication artifact ${name} was quarantined to .gsd/migration/quarantined-control-publications/${name} after its native replay failed deterministically (#2154). Its bytes and provenance sidecar (${name}.json) are preserved for review; projections regenerate from gsd.db.`,
+        file: `.gsd/migration/quarantined-control-publications/${name}`,
+        fixable: false,
+      });
+    }
+  } catch (error) {
+    issues.push({
+      severity: "warning",
+      code: "stale_control_publication_intent",
+      scope: "project",
+      unitId: "project",
+      message: `Control-publication intent scan could not read .gsd/migration: ${error instanceof Error ? error.message : String(error)}`,
+      file: ".gsd/migration",
+      fixable: false,
+    });
   }
 
   // ── Stale paused session ──────────────────────────────────────────────

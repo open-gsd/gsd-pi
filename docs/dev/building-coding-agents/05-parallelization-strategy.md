@@ -21,6 +21,7 @@ The quality of parallelization is directly determined by the quality of interfac
 ### Phase-by-Phase Strategy
 
 #### Planning: Mostly Serial, with Parallel Spikes
+
 - High-level decomposition must be serial (one coherent act of reasoning)
 - **Parallelize uncertainty resolution:** Multiple spikes investigating different risks simultaneously
 - Output: A dependency graph that explicitly identifies what can be parallelized
@@ -36,12 +37,14 @@ The quality of parallelization is directly determined by the quality of interfac
 **Critical insight:** The frontend doesn't need the real API — it needs the API *contract*. Once contracts exist, both sides build in parallel.
 
 #### Testing: The Most Interesting Story
+
 - **Unit tests:** Same agent, same context, atomic with code
 - **Cross-task tests:** All parallel by definition
 - **Integration tests:** Parallel across different boundaries
 - **E2E tests:** Serial (exercises whole system)
 
 #### Verification: Deliberate Redundancy
+
 - **Adversarial verification:** Separate reviewer agent with fresh context evaluates against spec
 - **Red-team parallelism:** Agent tries to break the implementation
 

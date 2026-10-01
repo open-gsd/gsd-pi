@@ -15,6 +15,7 @@ Milestone  →  a shippable version (4-10 slices)
 A milestone is a shippable version of your project — an MVP, a major release, or a feature set that delivers standalone value. Milestones typically contain 4-10 slices.
 
 Examples:
+
 - "MVP with user auth, dashboard, and settings"
 - "v2.0 with real-time collaboration and API v2"
 - "Security hardening milestone"
@@ -24,6 +25,7 @@ Examples:
 A slice is one demoable, vertical capability within a milestone. It cuts across layers (database, backend, frontend) to deliver something you could show to a user. Slices contain 1-7 tasks.
 
 Examples:
+
 - "User authentication with JWT"
 - "Dashboard layout with charts"
 - "API rate limiting"
@@ -33,6 +35,7 @@ Examples:
 A task is the smallest unit of work — something that fits in one AI context window. If a task can't be completed in a single AI session, it's broken into smaller tasks.
 
 Examples:
+
 - "Create the User model and migration"
 - "Implement JWT middleware"
 - "Build the login form component"

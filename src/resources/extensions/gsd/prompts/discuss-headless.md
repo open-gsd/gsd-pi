@@ -9,6 +9,7 @@ You are creating a GSD milestone from a provided specification document. This is
 ## Reflection Step
 
 Summarize your concrete understanding of the specification:
+
 1. What is being built, in your own words.
 2. Honest size read: rough milestone count and first-milestone slice count.
 3. Scope honesty: "Here's what I'm reading from the spec:" plus major capability bullets.
@@ -21,6 +22,7 @@ Print this reflection in chat. Do not skip this step.
 Decide the approach based on the actual scope:
 
 **If the work spans multiple milestones:** map the landscape:
+
 1. Propose milestone names, one-line intents, and rough dependencies.
 2. Print this as the working milestone sequence.
 
@@ -31,6 +33,7 @@ Decide the approach based on the actual scope:
 ## Mandatory Investigation
 
 Investigate before making decisions:
+
 1. Scout relevant code with `ls`, `find`, `rg`, or `scout`.
 2. Check mentioned tech with `resolve_library` / `get_library_docs`.
 3. Use `search-the-web`, `fetch_page`, or `search_and_read` only for current external facts.
@@ -57,6 +60,7 @@ If the spec leaves any of these unresolved, make your best-judgment call and doc
 ## Depth Verification
 
 Print a structured depth summary in chat covering:
+
 - What you understood the spec to describe
 - Key technical findings from investigation
 - Assumptions you made and why
@@ -79,6 +83,7 @@ Requirements must be organized into Active, Validated, Deferred, Out of Scope, a
 Each requirement includes stable ID (`R###`), title, class, status, description, why it matters, source (`spec`, `inferred`, `research`, or `execution`), primary owning slice, supporting slices, validation status, and notes.
 
 Rules:
+
 - Keep requirements capability-oriented, not a feature inventory
 - Every Active requirement must either be mapped to a roadmap owner, explicitly deferred, blocked with reason, or moved out of scope
 - Product-facing work should capture launchability, primary user loop, continuity, and failure visibility when relevant
@@ -105,6 +110,7 @@ Directories use bare IDs. Files use ID-SUFFIX format. Titles live inside content
 ### Single Milestone
 
 In a single pass:
+
 1. `mkdir -p .gsd/milestones/{{milestoneId}}/slices`
 2. Call `gsd_summary_save` with `artifact_type: "PROJECT"` and full Project template content. The tool persists the DB-backed PROJECT artifact and renders `.gsd/PROJECT.md`. Describe what the project is, its current state, and list the milestone sequence.
 3. Persist requirements with `gsd_requirement_save` or `gsd_requirement_update`, then call `gsd_summary_save` with `artifact_type: "REQUIREMENTS"` so the tool renders `.gsd/REQUIREMENTS.md` from DB rows. Confirm states, ownership, and traceability before roadmap creation.
@@ -185,6 +191,7 @@ For each remaining milestone, in dependency order, autonomously decide the readi
 **Default to writing full context** when the spec is detailed enough, draft when mentioned but vague, and queue when implied but not described.
 
 **Technical Assumption Verification is still MANDATORY** for full-context milestones:
+
 1. Read actual code for every referenced file or module.
 2. Check stale assumptions against current behavior.
 3. Print findings before writing each milestone's CONTEXT.md.

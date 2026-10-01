@@ -12,9 +12,11 @@ Tasks reviewed: 4
 - ✅ Verify command — ran the grep chain in the disposable worktree at base `254f51d046caa5863956f350210749b6daab680c` with the task patch applied: exit 0.
 
 Warnings (non-blocking):
+
 - Verify is presence-only greps; it cannot fail on missing exit codes or wrong verdicts. Criterion 1 was verified by reading the file instead (evidence above). Consider tightening the Verify command in future tasks.
 
 Contract violations (blocking):
+
 - none
 
 ## T002 — Map T07 deferred blockers and write the D005 supersede-for-filesystem-state-only milestone decision doc: pass
@@ -26,9 +28,11 @@ Contract violations (blocking):
 - ✅ Verify command — all five greps exit 0 in the disposable worktree with the task patch applied.
 
 Warnings (non-blocking):
+
 - none
 
 Contract violations (blocking):
+
 - none
 
 ## T003 — Spike: pre-cutover binary vs. cut-over project fixture: pass
@@ -40,9 +44,11 @@ Contract violations (blocking):
 - ✅ Verify command — both greps exit 0 in the disposable worktree with the task patch applied.
 
 Warnings (non-blocking):
+
 - Step 1 prescribed the disposable worktree at `.worktrees/spike-mixed-version`; the coder relocated it to `$(mktemp -d)` because the v1.11.0 build's module resolution leaks into the primary checkout inside `.worktrees/**`. Deviation is documented in the report (lines 17-21) and the acceptance criteria are met; criterion wording ("disposable worktrees") tolerates it. Consider amending the step text if this recurs.
 
 Contract violations (blocking):
+
 - none
 
 ## T004 — Authoritative parsers-legacy importer union inventory with per-consumer dispositions: pass
@@ -54,9 +60,11 @@ Contract violations (blocking):
 - ✅ Verify command — all five greps exit 0 in the disposable worktree with the task patch applied.
 
 Warnings (non-blocking):
+
 - none
 
 Contract violations (blocking):
+
 - none
 
 ## Fixed since last cycle
