@@ -42,6 +42,16 @@ test("lookupModelCost finds Claude Sonnet 5 pricing", () => {
   assert.equal(entry.outputPer1k, 0.015);
 });
 
+test("lookupModelCost finds Claude Sonnet 5.5 pricing without falling back to the Sonnet 5 row", () => {
+  for (const id of ["claude-sonnet-5-5", "anthropic/claude-sonnet-5-5"]) {
+    const entry = lookupModelCost(id);
+    assert.ok(entry, id);
+    assert.equal(entry.id, "claude-sonnet-5-5");
+    assert.equal(entry.inputPer1k, 0.002);
+    assert.equal(entry.outputPer1k, 0.010);
+  }
+});
+
 test("lookupModelCost finds MAI Code 1.1 Flash pricing", () => {
   const entry = lookupModelCost("github-copilot/mai-code-1.1-flash");
   assert.ok(entry);

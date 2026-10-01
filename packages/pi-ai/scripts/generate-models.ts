@@ -1636,6 +1636,75 @@ async function generateModels() {
 		}
 	}
 
+	// Add missing Claude Sonnet 5.5 until models.dev includes it.
+	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-sonnet-5-5")) {
+		allModels.push({
+			id: "claude-sonnet-5-5",
+			name: "Claude Sonnet 5.5",
+			api: "anthropic-messages",
+			baseUrl: "https://api.anthropic.com",
+			provider: "anthropic",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 10,
+				cacheRead: 0.2,
+				cacheWrite: 2.5,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		});
+	}
+
+	// Add missing Claude Sonnet 5.5 on Vertex until models.dev includes it.
+	if (!allModels.some(m => m.provider === "anthropic-vertex" && m.id === "claude-sonnet-5-5")) {
+		allModels.push({
+			id: "claude-sonnet-5-5",
+			name: "Claude Sonnet 5.5 (Vertex)",
+			api: "anthropic-vertex",
+			baseUrl: VERTEX_BASE_URL,
+			provider: "anthropic-vertex",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: {
+				input: 2,
+				output: 10,
+				cacheRead: 0.2,
+				cacheWrite: 2.5,
+			},
+			contextWindow: 1000000,
+			maxTokens: 128000,
+		});
+	}
+
+	// Add missing Claude Sonnet 5.5 Bedrock profiles until models.dev includes them.
+	for (const [bedrockId, regionLabel] of [
+		["anthropic.claude-sonnet-5-5", ""],
+		["us.anthropic.claude-sonnet-5-5", " (US)"],
+		["global.anthropic.claude-sonnet-5-5", " (Global)"],
+	] as const) {
+		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
+			allModels.push({
+				id: bedrockId,
+				name: `Claude Sonnet 5.5${regionLabel}`,
+				api: "bedrock-converse-stream",
+				baseUrl: getBedrockBaseUrl(bedrockId),
+				provider: "amazon-bedrock",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: {
+					input: 2,
+					output: 10,
+					cacheRead: 0.2,
+					cacheWrite: 2.5,
+				},
+				contextWindow: 1000000,
+				maxTokens: 128000,
+			});
+		}
+	}
+
 	// Add missing Claude Fable 5 (direct Anthropic) until models.dev includes it.
 	if (!allModels.some(m => m.provider === "anthropic" && m.id === "claude-fable-5")) {
 		allModels.push({

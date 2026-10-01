@@ -407,6 +407,7 @@ export const BUNDLED_COST_TABLE: ModelCostEntry[] = [
   { id: "claude-fable-5", inputPer1k: 0.010, outputPer1k: 0.050, updatedAt: "2026-06-09" },
   { id: "claude-sonnet-4-6", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2025-03-15" },
   { id: "claude-sonnet-5", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2026-08-12" },
+  { id: "claude-sonnet-5-5", inputPer1k: 0.002, outputPer1k: 0.010, updatedAt: "2026-10-01" },
   { id: "claude-haiku-4-5", inputPer1k: 0.0008, outputPer1k: 0.004, updatedAt: "2025-03-15" },
   { id: "claude-sonnet-4-5-20250514", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2025-03-15" },
   { id: "claude-3-5-sonnet-latest", inputPer1k: 0.003, outputPer1k: 0.015, updatedAt: "2025-03-15" },

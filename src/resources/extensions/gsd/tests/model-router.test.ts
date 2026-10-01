@@ -1645,6 +1645,41 @@ describe("model-router registry keys", () => {
     );
   });
 
+  test("claude-sonnet-5-5 has curated tier, cost, and capability rows (no inherited Sonnet 5 fallback)", () => {
+    assert.equal(MODEL_CAPABILITY_TIER["claude-sonnet-5-5"], "standard");
+    assert.deepEqual(MODEL_CAPABILITY_PROFILES["claude-sonnet-5-5"], {
+      coding: 92,
+      debugging: 87,
+      research: 82,
+      reasoning: 89,
+      speed: 55,
+      longContext: 82,
+      instruction: 90,
+    });
+    // Sonnet 5.5 ($2/M input) must sort cheaper than Sonnet 5 ($3/M) and gemini-2.5-pro ($1.25/M) cheaper still.
+    assert.deepEqual(
+      getEligibleModels("standard", ["claude-sonnet-5", "claude-sonnet-5-5", "gemini-2.5-pro"], defaultRoutingConfig()),
+      ["gemini-2.5-pro", "claude-sonnet-5-5", "claude-sonnet-5"],
+    );
+    // Dotted Copilot-style ids canonicalize onto the same rows.
+    assert.equal(MODEL_CAPABILITY_TIER[canonicalizeModelId("claude-sonnet-5.5")], "standard");
+  });
+
+  test("claude-sonnet-5-5 as ceiling: light task downgrades, standard task stays on sonnet-5-5", () => {
+    const config = {
+      ...defaultRoutingConfig(),
+      enabled: true,
+      tier_models: { light: "claude-haiku-4-5", standard: "claude-sonnet-5-5", heavy: "claude-opus-5-5" },
+    };
+    const available = ["claude-haiku-4-5", "claude-sonnet-5-5", "claude-opus-5-5"];
+    const light = resolveModelForComplexity({ tier: "light", reason: "test", downgraded: false }, { primary: "claude-sonnet-5-5", fallbacks: [] }, config, available);
+    assert.equal(light.modelId, "claude-haiku-4-5");
+    assert.equal(light.wasDowngraded, true);
+    const standard = resolveModelForComplexity({ tier: "standard", reason: "test", downgraded: false }, { primary: "claude-sonnet-5-5", fallbacks: [] }, config, available);
+    assert.equal(standard.modelId, "claude-sonnet-5-5");
+    assert.ok(!standard.reason?.includes("not in the known tier map"), "must not hit #2192 bypass reason");
+  });
+
   test("all bundled GitHub Copilot chat models have router tier and capability profiles", () => {
     const catalogPath = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..", "..", "packages", "pi-ai", "src", "models.generated.json");
     const catalog = JSON.parse(readFileSync(catalogPath, "utf8"))["github-copilot"] as Record<string, Model<Api>>;
