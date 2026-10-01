@@ -1081,9 +1081,13 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		// Process Kimi For Coding models. models.dev renamed the provider key to
+		// region-scoped "kimi-code-plan-*" entries; the global plan is the one
+		// served at api.kimi.com/coding. Prefer the legacy key if upstream
+		// restores it.
+		const kimiProviderSource = data["kimi-for-coding"] ?? data["kimi-code-plan-global"];
+		if (kimiProviderSource?.models) {
+			const kimiModels = kimiProviderSource.models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
