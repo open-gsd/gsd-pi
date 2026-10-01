@@ -22,6 +22,7 @@
 
 import {
   getSliceTasks,
+  getDb,
 } from "../gsd-db.js";
 import {
   isCurrentSliceReopenOperation,
@@ -78,6 +79,31 @@ export function _setReopenSliceCleanupInterleaveForTest(hook: (() => void) | nul
   _setProjectionCleanupInterleaveForTest(hook);
 }
 
+/**
+ * True when the milestone's canonical lifecycle head is terminal. A slice
+ * reopen under such a milestone is refused by the Domain Operation no matter
+ * what — the shadow repair must not run (and fail on unverifiable drift)
+ * ahead of that refusal, which would mask the fail-closed error callers pin.
+ */
+function milestoneCanonicalTerminal(milestoneId: string): boolean {
+  try {
+    const row = getDb().prepare(`
+      SELECT lifecycle.lifecycle_status AS status
+      FROM milestones milestone
+      LEFT JOIN workflow_item_lifecycles lifecycle
+        ON lifecycle.project_id = (SELECT project_id FROM project_authority WHERE singleton = 1)
+       AND lifecycle.item_kind = 'milestone'
+       AND lifecycle.milestone_id = milestone.id
+       AND lifecycle.slice_id IS NULL
+      WHERE milestone.id = :milestone_id
+    `).get({ ":milestone_id": milestoneId }) as Record<string, unknown> | undefined;
+    const status = row?.["status"];
+    return status === "completed" || status === "cancelled";
+  } catch {
+    return false;
+  }
+}
+
 export async function handleReopenSlice(
   params: ReopenSliceParams,
   basePath: string,
@@ -100,7 +126,7 @@ export async function handleReopenSlice(
   // aborting inside the Domain Operation. Legacy (non-adopted) hierarchies —
   // including the #1205 desync escape — have no canonical authority to repair
   // against and keep their cascade path.
-  if (isMilestoneLifecycleAdopted(params.milestoneId)) {
+  if (isMilestoneLifecycleAdopted(params.milestoneId) && !milestoneCanonicalTerminal(params.milestoneId)) {
     // A replayed invocation skips the repair — its stored receipt must be
     // returned as-is, not preceded by fresh mutations against newer state.
     if (!readDomainOperationFence(invocation.idempotencyKey).replay) {
