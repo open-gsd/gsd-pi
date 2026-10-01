@@ -5,6 +5,7 @@
 import type { AgentMessage } from "@gsd/pi-agent-core";
 import type { ImageContent, Model } from "@gsd/pi-ai";
 import type { KeyId } from "@gsd/pi-tui";
+import { getBeforeAgentStartContext } from "./before-agent-start-context.js";
 import { type Theme, theme } from "../../theme/theme.js";
 import type { ResourceDiagnostic } from "../diagnostics.js";
 import type { Keybinding, KeybindingsConfig } from "../keybindings.js";
@@ -999,6 +1000,7 @@ export class ExtensionRunner {
 		let currentSystemPrompt = systemPrompt;
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
 		let systemPromptModified = false;
+		const dispatchContext = getBeforeAgentStartContext();
 		const ctx = Object.defineProperties(
 			{},
 			Object.getOwnPropertyDescriptors(this.createContext()),
@@ -1026,6 +1028,7 @@ export class ExtensionRunner {
 						images,
 						systemPrompt: currentSystemPrompt,
 						systemPromptOptions,
+						...(dispatchContext ? { unitType: dispatchContext.unitType, phase: dispatchContext.phase } : {}),
 					};
 					const handlerResult = await handler(event, ctx);
 

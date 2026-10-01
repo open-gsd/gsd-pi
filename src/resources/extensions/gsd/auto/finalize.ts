@@ -2,6 +2,7 @@
 // File Purpose: Auto-loop finalize phase — post-unit verification and UAT pause.
 
 import type { SidecarItem } from "./session.js";
+import { setBeforeAgentStartContext } from "@gsd/pi-coding-agent";
 import {
   type PostUnitContext,
   type PreVerificationOpts,
@@ -86,6 +87,7 @@ export async function failClosedOnFinalizeTimeout(
   await deps.pauseAuto(ctx, pi);
   s.clearCurrentUnit();
   clearCurrentPhase();
+  setBeforeAgentStartContext(undefined);
   drainLogs();
   return { action: "break", reason: progressKind };
 }
@@ -150,6 +152,7 @@ export async function runFinalize(
     s.rootWriteBaseline = null;
   };
   clearCurrentPhase();
+  setBeforeAgentStartContext(undefined);
   const preResultGuard = await withTimeout(
     deps.postUnitPreVerification(postUnitCtx, preVerificationOpts),
     FINALIZE_PRE_TIMEOUT_MS,

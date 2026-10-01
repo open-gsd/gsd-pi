@@ -701,6 +701,10 @@ export interface BeforeAgentStartEvent {
 	systemPrompt: string;
 	/** Structured options used to build the system prompt. Extensions can inspect this to understand what Pi loaded without re-discovering resources. */
 	systemPromptOptions: BuildSystemPromptOptions;
+	/** Unit type being dispatched by the embedding host, if known (e.g. a gsd auto-mode unit). Absent for ordinary user-initiated turns. */
+	unitType?: string;
+	/** GSD phase being dispatched by the embedding host, if known (e.g. "executing"). Absent for ordinary user-initiated turns. */
+	phase?: string;
 }
 
 /** Fired when an agent loop starts */

@@ -8,6 +8,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createExtensionRuntime, discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
+import { setBeforeAgentStartContext } from "../src/core/extensions/before-agent-start-context.ts";
 import { ExtensionRunner } from "../src/core/extensions/runner.ts";
 import type { ExtensionActions, ExtensionContextActions, ProviderConfig } from "../src/core/extensions/types.ts";
 import { KeybindingsManager, type KeyId } from "../src/core/keybindings.ts";
@@ -563,6 +564,11 @@ describe("ExtensionRunner", () => {
 	});
 
 	describe("before_agent_start", () => {
+		afterEach(() => {
+			setBeforeAgentStartContext(undefined);
+			delete (globalThis as unknown as { __basContext?: unknown }).__basContext;
+		});
+
 		it("keeps ctx.getSystemPrompt() in sync with chained system prompt updates", async () => {
 			const extCode1 = `
 				export default function(pi) {
@@ -648,6 +654,40 @@ describe("ExtensionRunner", () => {
 				messages: undefined,
 				systemPrompt: "reloaded\ngsd",
 			});
+		});
+
+		it("passes dispatch context fields to handlers when set and omits them when cleared", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("before_agent_start", async (event) => {
+						globalThis.__basContext = { unitType: event.unitType, phase: event.phase };
+					});
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "before-agent-start-context.ts"), extCode);
+
+			const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+			expect(result.errors).toEqual([]);
+			const runner = new ExtensionRunner(result.extensions, result.runtime, tempDir, sessionManager, modelRegistry);
+			const errors: string[] = [];
+			runner.onError((error) => errors.push(error.error));
+			runner.bindCore(extensionActions, extensionContextActions);
+			const captured = () => (globalThis as unknown as { __basContext?: unknown }).__basContext;
+
+			// Without a setter call: no dispatch context on the event.
+			await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
+			expect(errors).toEqual([]);
+			expect(captured()).toEqual({ unitType: undefined, phase: undefined });
+
+			setBeforeAgentStartContext({ unitType: "execute-task", phase: "executing" });
+			await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
+			expect(errors).toEqual([]);
+			expect(captured()).toEqual({ unitType: "execute-task", phase: "executing" });
+
+			setBeforeAgentStartContext(undefined);
+			await runner.emitBeforeAgentStart("hello", undefined, "base", { cwd: tempDir });
+			expect(errors).toEqual([]);
+			expect(captured()).toEqual({ unitType: undefined, phase: undefined });
 		});
 	});
 
