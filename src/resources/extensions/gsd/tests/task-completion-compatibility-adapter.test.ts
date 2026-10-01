@@ -51,6 +51,7 @@ import {
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.js";
 import { checkEngineHealth } from "../doctor-engine-checks.js";
+import { clearGSDPreferencesCache } from "../preferences.js";
 import type { DoctorIssue } from "../doctor-types.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import {
@@ -1866,6 +1867,194 @@ test("#1973: attempt-gate rejection names the settled outcome and recovery lever
     "blockerDiscovered reports must route to the legacy durable write instead of dead-ending on the gate",
   );
 });
+
+test("#2348: a legacy blocker write for a watchdog-settled Task records the blocker but refuses completion projections", async () => {
+  const { basePath, planPath, attemptId } = createFixture();
+  // The watchdog settle: the supervisor fails the Attempt out from under the
+  // session without an executor Result, leaving the canonical lifecycle
+  // in_progress with no running Attempt — the exact state that previously
+  // routed blockerDiscovered reports into the legacy completion writer.
+  settleTaskAttempt({
+    invocation: invocation("task-completion/watchdog-settle"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "missing-executor-result",
+    summary: "The supervisor settled the stalled Attempt without an executor Result.",
+    output: {},
+  });
+  assert.equal(
+    resolveTaskCompletionAuthority(TASK, undefined, { blockerReport: true }),
+    "legacy",
+    "pre-fix baseline: the blocker report still resolves to the legacy durable write",
+  );
+
+  const { handleCompleteTask } = await import("../tools/complete-task.js");
+  const result = await handleCompleteTask({
+    taskId: "T01",
+    sliceId: "S01",
+    milestoneId: "M001",
+    oneLiner: "Discovered a blocker after the supervisor settled the Attempt",
+    narrative: "The executor hit a blocker but its Attempt was already watchdog-settled.",
+    verification: "Blocker report; there is no completion to verify.",
+    blockerDiscovered: true,
+    keyFiles: ["src/task.ts"],
+    keyDecisions: [],
+    verificationEvidence: [{
+      command: "npm test",
+      exitCode: 1,
+      verdict: "fail",
+      durationMs: 10,
+    }],
+  }, basePath);
+
+  assert.ok("error" in result, "the legacy write must refuse instead of reporting completion");
+  assert.match(result.error, /no running Attempt/);
+  assert.ok(result.error.includes(attemptId), "the refusal must name the settled Attempt");
+  assert.match(result.error, /outcome=failed/);
+
+  // The blocker/disposition is still recorded durably — the legacy shadow row
+  // keeps its canonical-owned status (insertTask refuses to flip it while a
+  // lifecycle row exists) but carries the blocker fields and evidence…
+  const recorded = row(`
+    SELECT status, blocker_discovered, completed_at, one_liner
+    FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `);
+  assert.equal(recorded.status, "in_progress", "the canonical lifecycle owns the legacy shadow status");
+  assert.equal(Number(recorded.blocker_discovered), 1);
+  assert.equal(recorded.completed_at, null);
+  assert.equal(recorded.one_liner, "Discovered a blocker after the supervisor settled the Attempt");
+  assert.equal(Number(row("SELECT COUNT(*) AS count FROM verification_evidence").count), 1);
+  // …but no SUMMARY projection exists and the plan checkbox stays unchecked (#1726).
+  assert.equal(
+    Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY'").count),
+    0,
+    "no SUMMARY artifact may be projected for a non-terminal canonical Task",
+  );
+  const phaseDir = join(basePath, ".gsd", "phases", "01-test");
+  const summaryFile = readdirSync(phaseDir).find((entry) => entry.endsWith("T01-SUMMARY.md"));
+  assert.equal(summaryFile, undefined, "no SUMMARY file may be written for a non-terminal canonical Task");
+  assert.match(readFileSync(planPath, "utf8"), /\[ \][^\n]*\*\*T01/);
+});
+
+test("#2348: the legacy refusal still writes the escalation artifact for a recorded blocker", async () => {
+  const { basePath, attemptId } = createFixture();
+  settleTaskAttempt({
+    invocation: invocation("task-completion/watchdog-settle-escalation"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "missing-executor-result",
+    summary: "The supervisor settled the stalled Attempt without an executor Result.",
+    output: {},
+  });
+  // The escalation readable artifact is not a completion projection: its
+  // disposition is committed with the Task, so it must survive the refusal
+  // instead of leaving a dangling artifact path behind.
+  writeFileSync(join(basePath, ".gsd", "PREFERENCES.md"), "---\nphases:\n  mid_execution_escalation: true\n---\n");
+  clearGSDPreferencesCache();
+  const previousCwd = process.cwd();
+  process.chdir(basePath);
+  try {
+    const { handleCompleteTask } = await import("../tools/complete-task.js");
+    const result = await handleCompleteTask({
+      taskId: "T01",
+      sliceId: "S01",
+      milestoneId: "M001",
+      oneLiner: "Discovered a hard blocker after the supervisor settled the Attempt",
+      narrative: "The executor hit a hard blocker but its Attempt was already watchdog-settled.",
+      verification: "Blocker report; there is no completion to verify.",
+      blockerDiscovered: true,
+      keyFiles: ["src/task.ts"],
+      keyDecisions: [],
+      verificationEvidence: [{
+        command: "npm test",
+        exitCode: 1,
+        verdict: "fail",
+        durationMs: 10,
+      }],
+      escalation: {
+        question: "Should execution pause for the hard blocker?",
+        options: [
+          { id: "continue", label: "Continue", tradeoffs: "Keeps execution moving with the default path." },
+          { id: "pause", label: "Pause", tradeoffs: "Stops execution until the blocker is reviewed." },
+        ],
+        recommendation: "pause",
+        recommendationRationale: "The blocker should not be silently advanced.",
+        continueWithDefault: false,
+      },
+    }, basePath);
+
+    assert.ok("error" in result, "the refusal must still carry the recovery-context error");
+    assert.match(result.error, /no running Attempt/);
+    const artifactPath = String(row(`
+      SELECT escalation_artifact_path AS p
+      FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+    `).p);
+    assert.match(artifactPath, /T01-ESCALATION\.json$/);
+    assert.equal(existsSync(artifactPath), true, "the escalation artifact must survive the projection refusal");
+    assert.equal(
+      Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY'").count),
+      0,
+      "no SUMMARY artifact may accompany the refusal",
+    );
+  } finally {
+    process.chdir(previousCwd);
+    clearGSDPreferencesCache();
+  }
+});
+
+test("#2348: the missing-summary repair also refuses to project for a non-terminal canonical Task", async () => {
+  const { basePath, attemptId } = createFixture();
+  settleTaskAttempt({
+    invocation: invocation("task-completion/watchdog-settle-repair"),
+    attemptId,
+    outcome: "failed",
+    failureClass: "missing-executor-result",
+    summary: "The supervisor settled the stalled Attempt without an executor Result.",
+    output: {},
+  });
+  // Drifted legacy row: closed with an intact summary intent but the SUMMARY
+  // file is gone — the exact precondition the repair sentinel exists for. The
+  // repair must not resurrect a projection the canonical lifecycle rejects.
+  db().prepare(`
+    UPDATE tasks
+    SET status = 'complete', completed_at = '2026-07-12T00:20:00.000Z',
+        full_summary_md = '# T01 Summary
+
+Previously recorded completion.
+'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+
+  const { handleCompleteTask } = await import("../tools/complete-task.js");
+  const result = await handleCompleteTask({
+    taskId: "T01",
+    sliceId: "S01",
+    milestoneId: "M001",
+    oneLiner: "Discovered a blocker after the supervisor settled the Attempt",
+    narrative: "The executor hit a blocker but its Attempt was already watchdog-settled.",
+    verification: "Blocker report; there is no completion to verify.",
+    blockerDiscovered: true,
+    keyFiles: ["src/task.ts"],
+    keyDecisions: [],
+    verificationEvidence: [{
+      command: "npm test",
+      exitCode: 1,
+      verdict: "fail",
+      durationMs: 10,
+    }],
+  }, basePath);
+
+  assert.ok("error" in result, "the repair branch must not bypass the canonical projection refusal");
+  assert.match(result.error, /no running Attempt/);
+  const phaseDir = join(basePath, ".gsd", "phases", "01-test");
+  const summaryFile = readdirSync(phaseDir).find((entry) => entry.endsWith("T01-SUMMARY.md"));
+  assert.equal(summaryFile, undefined, "the repair must not write a SUMMARY for a non-terminal canonical Task");
+  assert.match(readFileSync(planPathOf(basePath), "utf8"), /\[ \][^\n]*\*\*T01/);
+});
+
+function planPathOf(basePath: string): string {
+  return join(basePath, ".gsd", "phases", "01-test", "01-01-PLAN.md");
+}
 
 test("settled remediate recovery resumes through a fresh verified completion", async () => {
   const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();

@@ -149,6 +149,9 @@ export interface TaskCompletionAuthorityOptions {
    * when the supervisor already settled the Attempt out from under a surviving
    * session (#1973). When set, the running-attempt gate routes to the legacy
    * write path (a durable DB write that needs no Attempt) instead of throwing.
+   * The legacy writer still refuses its SUMMARY + plan-checkbox projections
+   * while the canonical lifecycle is non-terminal (#2348, see
+   * legacyCompletionProjectionRefusal) — recordable, not projectable.
    */
   blockerReport?: boolean;
 }
@@ -168,6 +171,18 @@ export function recoveryRouteLever(route: TaskRecoveryRouteSnapshot): string {
       `call gsd_task_recovery_resume with recoveryActionId "${route.recoveryActionId}".`;
   }
   return ` Recovery action ${route.recoveryActionId} (${route.action}) is recorded for this Attempt.`;
+}
+
+/**
+ * The gate error for a Task whose canonical lifecycle has no running Attempt
+ * to close. Shared by the running-attempt gate itself and by the legacy
+ * projection refusal (#2348), so both surfaces name the same sanctioned exit.
+ */
+function noRunningAttemptGateError(task: TaskCompletionIdentity): string {
+  return "Canonical Task completion has no running Attempt to close. Re-enter `/gsd auto` to resume " +
+    "the Task from its durable checkpoint; if its latest Attempt is settled succeeded at the verify " +
+    "stage, dry-run `gsd_task_settle` (reconcileLifecycle) to publish the verified completion." +
+    latestAttemptRecoveryContext(task);
 }
 
 /**
@@ -256,12 +271,40 @@ export function resolveTaskCompletionAuthority(
       latestAttemptRecoveryContext(task),
     );
   }
-  throw new Error(
-    "Canonical Task completion has no running Attempt to close. Re-enter `/gsd auto` to resume " +
-    "the Task from its durable checkpoint; if its latest Attempt is settled succeeded at the verify " +
-    "stage, dry-run `gsd_task_settle` (reconcileLifecycle) to publish the verified completion." +
-    latestAttemptRecoveryContext(task),
-  );
+  throw new Error(noRunningAttemptGateError(task));
+}
+
+/**
+ * Canonical Task lifecycle dispositions that already carry their outcome.
+ * Matches the closed set doctor-engine-checks reconciles against, including
+ * the #2202 operator `blocker-accepted` closeout.
+ */
+const TERMINAL_TASK_LIFECYCLE_STATUSES: ReadonlySet<string> = new Set([
+  "completed",
+  "cancelled",
+  "blocker-accepted",
+]);
+
+/**
+ * The legacy projection refusal (#2348): when the Task already carries a
+ * canonical lifecycle that has not reached a terminal disposition, the legacy
+ * completion writer may still record the blocker/disposition durably, but it
+ * must not project a SUMMARY or flip plan checkboxes — a legacy completion
+ * projection would claim a completion the canonical lifecycle does not carry.
+ * This is the legacy-path twin of the #1726 staging invariant ("a failed
+ * Attempt has no completion to render"), and the returned message mirrors the
+ * running-attempt gate error so a stranded session learns the sanctioned exit
+ * (#1973) instead of a false completion. Returns null when the legacy
+ * projections may proceed (no canonical row, or a terminal disposition).
+ */
+export function legacyCompletionProjectionRefusal(
+  task: TaskCompletionIdentity,
+): string | null {
+  const lifecycleStatus = readTaskLifecycleStatus(task);
+  if (lifecycleStatus === null || TERMINAL_TASK_LIFECYCLE_STATUSES.has(lifecycleStatus)) {
+    return null;
+  }
+  return noRunningAttemptGateError(task);
 }
 
 function runningAttemptId(task: TaskCompletionIdentity): string {

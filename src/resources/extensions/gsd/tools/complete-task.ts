@@ -61,7 +61,10 @@ import { appendEvent } from "../workflow-events.js";
 import { logWarning, logError } from "../workflow-logger.js";
 import { loadEffectiveGSDPreferences } from "../preferences.js";
 import { isStaleWrite } from "../auto/turn-epoch.js";
-import { resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.js";
+import {
+  legacyCompletionProjectionRefusal,
+  resolveTaskCompletionAuthority,
+} from "../task-completion-compatibility-adapter.js";
 import {
   buildEscalationArtifact,
   escalationArtifactPath,
@@ -432,6 +435,19 @@ export async function handleCompleteTask(
     return { error: error instanceof Error ? error.message : String(error) };
   }
 
+  // ── #2348: a canonical non-terminal Task must not receive completion projections ─
+  // The legacy writer below still records the blocker/disposition durably, but
+  // when a canonical lifecycle row exists and has not reached a terminal
+  // disposition, its SUMMARY + plan-checkbox projections would claim a
+  // completion the canonical lifecycle does not carry (#1726). The refusal
+  // error mirrors the canonical gate so the session learns the sanctioned
+  // recovery exit (#1973) instead of a false completion.
+  const projectionRefusal = legacyCompletionProjectionRefusal({
+    milestoneId: params.milestoneId,
+    sliceId: params.sliceId,
+    taskId: params.taskId,
+  });
+
   const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, params.milestoneId);
 
   // ── Ownership check (opt-in: only enforced when claim file exists) ──────
@@ -663,6 +679,30 @@ export async function handleCompleteTask(
       duplicate: true,
       stale: true,
     };
+  }
+
+  if (projectionRefusal) {
+    // Recorded, not projected: the legacy row and its evidence are committed,
+    // but the readable completion projections (SUMMARY, plan checkboxes,
+    // milestone shell) stay off until the canonical lifecycle reaches a
+    // terminal disposition or recovery resumes the Task. The escalation
+    // readable artifact is not a completion projection — its state was
+    // committed with the Task above, so it is still written here; otherwise a
+    // committed escalation path would dangle with no artifact behind it.
+    if (validatedEscalationArtifact && validatedEscalationPath) {
+      try {
+        writeEscalationArtifact(artifactBasePath, validatedEscalationArtifact);
+      } catch (escalationErr) {
+        logWarning(
+          "tool",
+          `complete-task escalation write failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}: ${(escalationErr as Error).message}`,
+        );
+      }
+    }
+    invalidateStateCache();
+    clearPathCache();
+    clearParseCache();
+    return { error: projectionRefusal };
   }
 
   if (guardError === "__repair_missing_summary__" && repairTaskSummaryRow) {
