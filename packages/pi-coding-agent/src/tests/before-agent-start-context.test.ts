@@ -18,7 +18,7 @@ function makeExtension(handler: ExtensionHandler<BeforeAgentStartEvent>): Extens
 	return {
 		path: "before-agent-start-context.test.ts",
 		resolvedPath: "before-agent-start-context.test.ts",
-		sourceInfo: { path: "before-agent-start-context.test.ts", source: "test", scope: "user", origin: "dir" },
+		sourceInfo: { path: "before-agent-start-context.test.ts", source: "test", scope: "user", origin: "top-level" },
 		handlers: new Map([["before_agent_start", [handler as never]]]),
 		tools: new Map(),
 		messageRenderers: new Map(),
