@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -13,6 +13,7 @@ import { AutoSession } from "../auto/session.ts";
 import { hashVerificationFailureContext } from "../auto/verification-retry-policy.ts";
 import { readUnitRuntimeRecord, writeUnitRuntimeRecord } from "../unit-runtime.ts";
 import { captureRootDirtySnapshot } from "../root-write-leak-guard.ts";
+import { emitJournalEvent as emitJournalEventFn, type JournalEntry } from "../journal.ts";
 
 function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -171,6 +172,44 @@ test("runFinalize clears currentUnit after successful finalize", async () => {
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("runFinalize persists the durable verification-pause receipt (#2334)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-finalize-verification-pause-"));
+  t.after(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+
+  const s = new AutoSession();
+  s.basePath = base;
+  s.currentUnit = {
+    type: "execute-task",
+    id: "M001/S01/T01",
+    startedAt: Date.now(),
+  };
+
+  const result = await runFinalizeWithDeps(s, {
+    runPostUnitVerification: async () => "pause",
+    emitJournalEvent: (entry: JournalEntry) => emitJournalEventFn(base, entry),
+  });
+
+  assert.equal(result.action, "break");
+  assert.equal(result.reason, "verification-pause");
+  assert.equal(s.currentUnit, null);
+
+  const journalDir = join(base, ".gsd", "journal");
+  const files = readdirSync(journalDir).filter((f) => f.endsWith(".jsonl"));
+  const entries = files.flatMap((f) =>
+    readFileSync(join(journalDir, f), "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as JournalEntry),
+  );
+  const receipt = entries.find((entry) => entry.eventType === "verification-paused");
+  assert.ok(receipt, "finalize must persist the verification-pause receipt");
+  assert.equal((receipt.data as Record<string, unknown>).unitId, "M001/S01/T01");
+  assert.equal((receipt.data as Record<string, unknown>).unitType, "execute-task");
 });
 
 test("runFinalize keeps a durable Task verification retry agent-owned across repeated failure signatures", async (t) => {

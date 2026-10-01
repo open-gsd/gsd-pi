@@ -292,6 +292,20 @@ export async function runFinalize(
     }
 
     if (verificationResult === "pause") {
+      // #2334 — persist the pause context durably. Without this receipt a
+      // succeeded Attempt stranded here has no sanctioned exit: the task-settle
+      // verification-paused reconcile gate reads this journal record as proof
+      // that the finalizer — not the operator — stopped the unit here.
+      deps.emitJournalEvent({
+        ts: new Date().toISOString(),
+        flowId: ic.flowId,
+        seq: ic.nextSeq(),
+        eventType: "verification-paused",
+        data: {
+          unitType: iterData.unitType,
+          unitId: iterData.unitId,
+        },
+      });
       debugLog("autoLoop", { phase: "exit", reason: "verification-pause" });
       clearFinalizingUnit();
       return { action: "break", reason: "verification-pause" };
