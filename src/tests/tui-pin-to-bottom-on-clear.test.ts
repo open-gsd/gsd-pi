@@ -1,14 +1,17 @@
 // gsd-pi — TUI pin-to-bottom regression test
 //
-// When the TUI does a full redraw with clear (`\x1b[2J`), the rendered block
-// must be anchored so its last line lands at the terminal's bottom row. Before
-// this fix the renderer emitted `\x1b[2J\x1b[H`, which homed the cursor to
-// row 1 and left every `belowEditor` widget (health widget, editor, dashboard)
-// floating at the top of an otherwise empty terminal after a chat clear.
+// When the TUI does a clean full redraw (height change, shrink fallback,
+// forced render), the rendered block must be anchored so its last line lands
+// at the terminal's bottom row. Before this fix the renderer emitted
+// `\x1b[2J\x1b[H`, which homed the cursor to row 1 and left every
+// `belowEditor` widget (health widget, editor, dashboard) floating at the top
+// of an otherwise empty terminal after a chat clear.
 //
 // Trigger condition: a terminal height change forces `fullRender(true)` —
 // exactly the path that fires on compaction/clear events when the chat
-// collapses to a short block.
+// collapses to a short block. Since #2415 the erase is per-line (`\x1b[2K`)
+// instead of `\x1b[2J`, so a repaint taller than the screen scrolls the
+// never-flushed prefix into scrollback instead of erasing it.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -140,10 +143,27 @@ describe("TUI pin-to-bottom on clear", () => {
       "height change should trigger a write",
     );
     const frame = terminal.writtenData.join("");
-    // Block height = 3, terminal height = 20, so startRow = 20 - 3 + 1 = 18.
+    // Block height = 3, terminal height = 20, so the block is anchored to
+    // rows 18..20. #2415: clean repaints erase per-line instead of \x1b[2J —
+    // the repaint homes to row 1, erases the 17 rows above the block, writes
+    // the 3 rows, and every screen row is erased exactly once.
     assert.ok(
-      frame.includes("\x1b[2J\x1b[18;1H"),
-      `expected clear+pin sequence (startRow=18), got ${JSON.stringify(frame.slice(0, 120))}`,
+      frame.includes("\x1b[1;1H"),
+      `expected the repaint to home to row 1, got ${JSON.stringify(frame.slice(0, 120))}`,
+    );
+    assert.ok(
+      !frame.includes("\x1b[2J"),
+      "clean repaints must not emit \\x1b[2J (#2415: per-line erase preserves unflushed lines)",
+    );
+    const eraseCount = (frame.match(/\x1b\[2K/g) ?? []).length;
+    assert.strictEqual(
+      eraseCount,
+      20,
+      `expected one \\x1b[2K per screen row (17 above + 3 written), got ${eraseCount}`,
+    );
+    assert.ok(
+      frame.includes("line 1") && frame.includes("line 3"),
+      `expected the bottom-anchored block to be repainted, got ${JSON.stringify(frame.slice(0, 120))}`,
     );
     // Ensure the legacy unpinned sequence is NOT emitted.
     assert.ok(
@@ -168,10 +188,16 @@ describe("TUI pin-to-bottom on clear", () => {
 
     const frame = terminal.writtenData.join("");
     // startRow = max(1, 20 - 30 + 1) = 1 → top-anchored, identical to the
-    // pre-fix behavior for oversized blocks.
+    // pre-fix behavior for oversized blocks. #2415: the write is prefixed by
+    // a homing sequence and per-line erases instead of \x1b[2J, and the
+    // oversized region scrolls the overflow into scrollback naturally.
     assert.ok(
-      frame.includes("\x1b[2J\x1b[1;1H"),
-      `expected clear + row-1 anchor for oversized block, got ${JSON.stringify(frame.slice(0, 120))}`,
+      frame.includes("\x1b[1;1H\x1b[2Kline 1"),
+      `expected row-1 anchor with per-line erase for oversized block, got ${JSON.stringify(frame.slice(0, 120))}`,
+    );
+    assert.ok(
+      !frame.includes("\x1b[2J"),
+      "clean repaints must not emit \\x1b[2J (#2415: per-line erase preserves unflushed lines)",
     );
   });
 
