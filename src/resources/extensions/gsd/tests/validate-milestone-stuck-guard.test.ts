@@ -175,7 +175,7 @@ function writeCanonicalValidation(verdict: "fail" | "inconclusive"): void {
       actorType: "agent",
     },
     milestoneId: "M001",
-    testedSourceRevision: "sha256:source",
+    testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     policyId: "test",
     policyVersion: "1",
     verdict,
@@ -318,7 +318,7 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
       recommendedDisposition: "accepted",
       recommendationRationale: "Automated checks passed.",
       recommendationEvidence: "Current objective evidence.",
-      testedSourceRevision: "sha256:source",
+      testedSourceRevision: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     });
     const ctx = makeMockCtx();
     const pi = makeMockPi();

@@ -103,6 +103,15 @@ function requireNonBlank(value: string, field: string): string {
   return normalized;
 }
 
+/**
+ * The aggregate content-hash form captureVerificationSourceSnapshot computes:
+ * `sha256:` followed by 64 lowercase hex characters. A bare git SHA (or any
+ * other form) can never equal a computed revision, so evidence tested against
+ * one is rejected at persistence time with the expected format named (#2450)
+ * instead of guaranteeing a downstream validation-source-revision mismatch.
+ */
+const TESTED_SOURCE_REVISION_PATTERN = /^sha256:[0-9a-f]{64}$/;
+
 function operationReceipt(operation: DomainOperationResult): OperationReceipt {
   return {
     status: operation.status,
@@ -394,6 +403,13 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     input.testedSourceRevision,
     "testedSourceRevision",
   );
+  if (!TESTED_SOURCE_REVISION_PATTERN.test(testedSourceRevision)) {
+    throw new Error(
+      `testedSourceRevision must be the aggregate content hash the verification gate computes, ` +
+      `formatted "sha256:" followed by 64 lowercase hex characters; got "${testedSourceRevision}" ` +
+      `(a bare git SHA is not a source revision — re-produce the evidence against the current source snapshot)`,
+    );
+  }
   const policyId = requireNonBlank(input.policyId, "policyId");
   const policyVersion = requireNonBlank(input.policyVersion, "policyVersion");
   const rationale = requireNonBlank(input.rationale, "rationale");
