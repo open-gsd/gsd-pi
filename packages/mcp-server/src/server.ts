@@ -1109,12 +1109,17 @@ export async function secureEnvCollectHandler(
  * Create and configure an MCP server with session and read-only tools, plus
  * workflow tools when their runtime bridge is available.
  *
+ * `clientManaged` mirrors GSD_MCP_CLIENT_MANAGED=1: when the MCP client owns
+ * the server's lifetime the session-lifetime disclosure is omitted. The default
+ * (a plain stdio harness child) means sessions die with the client connection,
+ * so gsd_execute discloses that lifetime (#2368).
+ *
  * Returns the McpServer instance — call `connect(transport)` to start serving.
  * Uses dynamic imports for the MCP SDK to avoid TS subpath resolution issues.
  */
 export async function createMcpServer(
   sessionManager: SessionManager,
-  options: { includeWorkflowTools?: boolean } = {},
+  options: { includeWorkflowTools?: boolean; clientManaged?: boolean } = {},
 ): Promise<{
   server: McpServerInstance;
 }> {
@@ -1123,6 +1128,13 @@ export async function createMcpServer(
   if (includeWorkflowTools) {
     await warmWorkflowToolBridges();
   }
+
+  // This surface is stdio-only: the packaged server is connected through
+  // StdioServerTransport, so its sessions cannot outlive the client connection.
+  // `clientManaged` does not change that lifetime (shutdown on connection close
+  // is unconditional) — it only marks clients that own the server's lifecycle
+  // and do not need the disclosure.
+  const discloseConnectionLifetime = options.clientManaged !== true;
 
   // Dynamic import — same workaround as src/mcp-server.ts
   const mcpMod = await import(`${MCP_PKG}/server/mcp.js`);
@@ -1142,11 +1154,17 @@ export async function createMcpServer(
   // If the JSON-RPC request is aborted while the session is starting (or
   // immediately after), we cancel the session so we don't leak a background
   // RpcClient process. Once the session is running the caller should use
-  // `gsd_cancel` to stop it via sessionId.
+  // `gsd_cancel` to stop it via sessionId. On a plain stdio connection the
+  // session is stopped when the connection closes, so both the tool
+  // description and the success result disclose that lifetime (#2368).
   // -----------------------------------------------------------------------
+  const lifetimeGuidance =
+    'This session is stopped when the MCP client connection closes (stdio). '
+    + 'Start auto runs that must outlive this connection from a durable long-lived host instead.';
   server.tool(
     'gsd_execute',
-    'Start a GSD auto-mode session for a project directory. Returns a sessionId for tracking.',
+    'Start a GSD auto-mode session for a project directory. Returns a sessionId for tracking.'
+      + (discloseConnectionLifetime ? ` Session lifetime: client-connection. ${lifetimeGuidance}` : ''),
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       command: z.string().optional().describe('Command to send (default: "/gsd auto")'),
@@ -1167,7 +1185,13 @@ export async function createMcpServer(
           return errorContent('gsd_execute aborted by client before returning');
         }
 
-        return jsonContent({ sessionId, status: 'started' });
+        return jsonContent({
+          sessionId,
+          status: 'started',
+          ...(discloseConnectionLifetime
+            ? { lifetime: 'client-connection', lifetimeGuidance }
+            : {}),
+        });
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }

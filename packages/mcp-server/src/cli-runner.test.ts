@@ -490,6 +490,56 @@ describe('runMcpServerCli', () => {
     ]);
   });
 
+  test('createMcpServer receives the client-managed flag derived from the environment', async () => {
+    // #2368: the gsd_execute lifetime disclosure is suppressed exactly when the
+    // environment marks the server client-managed, so the env-derived boolean
+    // must reach createMcpServer.
+    const seen: Array<{ includeWorkflowTools: boolean; clientManaged: boolean }> = [];
+
+    async function runWithEnv(env: NodeJS.ProcessEnv): Promise<void> {
+      await assert.rejects(
+        runMcpServerCli({
+          cwd: () => '/workspace/project',
+          env,
+          exit(code) {
+            throw new ExitError(code);
+          },
+          loadStoredCredentialEnvKeys() {},
+          registerMcpInstance() {
+            return true;
+          },
+          sweepProjectOrphanMcpServers() {},
+          unregisterMcpInstance() {},
+          createSessionManager() {
+            return { async cleanup() {} };
+          },
+          async createMcpServer(_manager, options) {
+            seen.push(options);
+            throw new Error('stop after create');
+          },
+          stdin: new PassThrough(),
+          stdout: new PassThrough(),
+          stderr: new Writable({ write(_chunk, _encoding, callback) { callback(); } }),
+          onSignal() {},
+          now: () => 0,
+          setInterval() {
+            throw new Error('should not start interval');
+          },
+          clearInterval() {},
+          isOrphaned: () => false,
+        }),
+        (error) => error instanceof ExitError && error.code === 1,
+      );
+    }
+
+    await runWithEnv({});
+    await runWithEnv({ GSD_MCP_CLIENT_MANAGED: '1' });
+
+    // includeWorkflowTools is environment-dependent (bridge co-location), so
+    // assert only the flag this regression is about.
+    assert.deepEqual(seen.map((options) => options.clientManaged), [false, true]);
+  });
+
   test('extension-owned server starts and coexists with a concurrent client-managed daemon child (#1516)', async () => {
     // #1516 acceptance: an extension-owned server and a daemon-spawned
     // (client-managed) server for the same project must run concurrently

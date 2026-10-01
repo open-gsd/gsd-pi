@@ -105,7 +105,7 @@ export interface RunMcpServerCliOptions {
   createSessionManager?: () => SessionManagerLike;
   createMcpServer?: (
     sessionManager: SessionManagerLike,
-    options: { includeWorkflowTools: boolean },
+    options: { includeWorkflowTools: boolean; clientManaged: boolean },
   ) => Promise<{ server: McpServerLike }>;
   importStdioServerTransport?: () => Promise<{ StdioServerTransport: StdioTransportConstructor }>;
   warmWorkflowToolBridges?: () => Promise<unknown> | unknown;
@@ -225,7 +225,7 @@ export async function runMcpServerCli(options: RunMcpServerCliOptions = {}): Pro
   const unregisterInstance = options.unregisterMcpInstance ?? unregisterMcpInstance;
   const createSessionManager = options.createSessionManager ?? (() => new SessionManager());
   const createServer = options.createMcpServer ?? (
-    async (manager: SessionManagerLike, serverOptions: { includeWorkflowTools: boolean }) =>
+    async (manager: SessionManagerLike, serverOptions: { includeWorkflowTools: boolean; clientManaged: boolean }) =>
       createMcpServer(manager as SessionManager, serverOptions)
   );
   const importTransport = options.importStdioServerTransport ?? importDefaultStdioServerTransport;
@@ -321,7 +321,7 @@ export async function runMcpServerCli(options: RunMcpServerCliOptions = {}): Pro
     }
 
     sessionManager = createSessionManager();
-    ({ server } = await createServer(sessionManager, { includeWorkflowTools }));
+    ({ server } = await createServer(sessionManager, { includeWorkflowTools, clientManaged: clientManagedSession }));
 
     const { StdioServerTransport } = await importTransport();
     trackedStdin = createActivityTrackingInput(stdin, () => {

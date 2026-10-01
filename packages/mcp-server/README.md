@@ -181,6 +181,8 @@ Start a GSD auto-mode session for a project directory.
 
 **Returns:** `{ sessionId, status: "started" }`
 
+Session lifetime: a session started through `gsd_execute` lives inside the server process, which is connected to one MCP client — when that client's connection closes, the server shuts down and stops the session's process, so a run started this way may end before completing. The success result therefore carries `lifetime: "client-connection"` with that guidance (the tool description says the same), and auto runs that must outlive the connection should be started from a durable long-lived host (for example a TUI or the daemon) instead. `GSD_MCP_CLIENT_MANAGED=1` does not change this lifetime; it only omits the disclosure for clients that own the server's lifecycle themselves.
+
 ### `gsd_status`
 
 Poll the current status of a running GSD session.
