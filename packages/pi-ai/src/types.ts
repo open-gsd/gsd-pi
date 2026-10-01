@@ -540,6 +540,15 @@ export interface AnthropicMessagesCompat {
 	 * Default: false.
 	 */
 	forceAdaptiveThinking?: boolean;
+	/**
+	 * Whether the model rejects the legacy request surface with 400s:
+	 * `thinking: {type: "disabled"}` (the API requires
+	 * `{type: "between_tools"}` to turn thinking off), `temperature`,
+	 * `top_p` / `top_k`, and forced `tool_choice` (`any` / named tool).
+	 * Claude Sonnet 5.5 sets this in generated metadata (#2500).
+	 * Default: false.
+	 */
+	strictRequestParams?: boolean;
 }
 
 /**

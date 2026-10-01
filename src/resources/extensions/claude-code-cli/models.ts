@@ -27,7 +27,7 @@ export interface ClaudeCodeModelDefinition {
 	contextWindow: number;
 	maxTokens: number;
 	thinkingLevelMap?: Record<string, string | null>;
-	compat?: { forceAdaptiveThinking?: boolean };
+	compat?: { forceAdaptiveThinking?: boolean; strictRequestParams?: boolean };
 }
 
 export const CLAUDE_CODE_MODELS: ClaudeCodeModelDefinition[] = [

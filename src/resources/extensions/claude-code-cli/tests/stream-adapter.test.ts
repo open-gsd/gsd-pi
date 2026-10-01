@@ -1792,6 +1792,45 @@ describe("stream-adapter — catalog model metadata (#2437)", () => {
 		assert.deepEqual(options.thinking, { type: "disabled" }, "thinking must be explicitly disabled");
 	});
 
+	// #2500 — Sonnet 5.5 400s on thinking:{type:"disabled"}; its off switch is
+	// {type:"between_tools"}, flagged via catalog compat.strictRequestParams.
+	test("strict-param catalog model (Sonnet 5.5) maps thinking-off to between_tools and emits no rejected params", () => {
+		const options = buildSdkOptions(
+			"claude-sonnet-5-5",
+			"test prompt",
+			undefined,
+			{},
+			{
+				compat: { forceAdaptiveThinking: true, strictRequestParams: true },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			},
+		);
+		assert.equal("effort" in options, false, "no effort when reasoning is off");
+		assert.deepEqual(
+			options.thinking,
+			{ type: "between_tools" },
+			"Sonnet 5.5 rejects {type:\"disabled\"}; off must map to between_tools",
+		);
+		assert.equal("temperature" in options, false, "Sonnet 5.5 rejects temperature");
+		assert.equal("top_p" in options, false, "Sonnet 5.5 rejects top_p");
+		assert.equal("top_k" in options, false, "Sonnet 5.5 rejects top_k");
+		assert.equal("tool_choice" in options, false, "Sonnet 5.5 rejects forced tool_choice");
+	});
+
+	test("non-strict adaptive model keeps the legacy disabled off switch", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{},
+			{
+				compat: { forceAdaptiveThinking: true, strictRequestParams: false },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			},
+		);
+		assert.deepEqual(options.thinking, { type: "disabled" }, "legacy models must keep {type:\"disabled\"}");
+	});
+
 	test("forceAdaptiveThinking: false does not disable the id-heuristic path (additive only)", () => {
 		const options = buildSdkOptions(
 			"claude-opus-4-6",

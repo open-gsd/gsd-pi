@@ -4098,7 +4098,8 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true
       }
     },
     "claude-opus-4-7": {
@@ -4244,7 +4245,8 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true
       }
     },
     "claude-opus-5-5": {
@@ -12908,7 +12910,8 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true
       }
     },
     "qwen3.6-plus": {
@@ -25416,7 +25419,8 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true
       }
     },
     "arcee-ai/trinity-large-thinking": {

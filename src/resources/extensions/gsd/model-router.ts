@@ -231,13 +231,13 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
 // the same capability tier.
 
 const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
-  "claude-haiku-4-5": 0.0008,
+  "claude-haiku-4-5": 0.001,               // $1.00/M input; matches pi-ai catalog (#2500)
   "claude-3-5-haiku-latest": 0.0008,
   "claude-sonnet-4": 0.003,
   "claude-sonnet-4-5": 0.003,
   "claude-sonnet-4-6": 0.003,
-  "claude-sonnet-5": 0.003,                // $3.00/M input; matches Sonnet 4.x pricing
-  "claude-sonnet-5-5": 0.003,              // Sonnet 5.5 point release, same class/pricing as Sonnet 5
+  "claude-sonnet-5": 0.002,                // $2.00/M input; matches pi-ai catalog (#2500)
+  "claude-sonnet-5-5": 0.002,              // $2.00/M input; matches pi-ai catalog (#2500)
   "claude-sonnet-4-5-20250514": 0.003,
   "claude-opus-4-5": 0.005,
   "claude-opus-4-6": 0.005,

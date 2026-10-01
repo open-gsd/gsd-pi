@@ -149,6 +149,29 @@ test("buildClaudeCodeModelList: hardcoded list wins conflicts, catalog-only entr
 	assert.equal(merged[merged.length - 1]!.id, "claude-opus-9", "catalog-only entries must be appended at the end");
 });
 
+test("buildClaudeCodeModelList: catalog strictRequestParams compat flows through to merged entries (#2500)", () => {
+	const merged = buildClaudeCodeModelList([
+		{
+			id: "claude-sonnet-5-5",
+			name: "Claude Sonnet 5.5",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+			contextWindow: 1_000_000,
+			maxTokens: 128_000,
+			compat: { forceAdaptiveThinking: true, strictRequestParams: true },
+		},
+	]);
+
+	const sonnet55 = merged.find((model) => model.id === "claude-sonnet-5-5");
+	assert.ok(sonnet55, "catalog sonnet-5-5 must be merged in");
+	assert.deepEqual(
+		sonnet55.compat,
+		{ forceAdaptiveThinking: true, strictRequestParams: true },
+		"strictRequestParams must reach the registered model so the stream adapter can guard requests",
+	);
+});
+
 test("captures UI context before streamSimple, including when before_provider_request never fires (#2118)", () => {
 	const { pi, handlers } = makeMockPi();
 	claudeCodeCli(pi as never);
