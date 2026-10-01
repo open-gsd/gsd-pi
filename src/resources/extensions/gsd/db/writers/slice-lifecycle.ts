@@ -174,12 +174,14 @@ export interface PlanReconciliationAuthorization {
 }
 
 const PLAN_RECONCILIATION_OPERATION = "workflow.slice.plan";
+const PLAN_RECONCILIATION_REPLAN_OPERATION = "workflow.slice.replan";
 const PLAN_RECONCILIATION_AUTHORIZATION_OPERATION = "workflow.slice.plan.authorization";
 
 /**
  * Mint the cancellation authorization the slice-completion invariant demands
- * for a task that a plan-slice re-dispatch omits (#2217). Runs inside the
- * `workflow.slice.plan` Domain Operation and stamps the Waiver with that
+ * for a task that a plan-slice re-dispatch omits (#2217) or that a replan
+ * removes (#2346/#2451). Runs inside the owning `workflow.slice.plan` /
+ * `workflow.slice.replan` Domain Operation and stamps the Waiver with that
  * operation's provenance; the matching waived Requirement Disposition is
  * recorded by `recordPlanReconciliationDisposition` in the fenced
  * authorization operation that follows, because the schema requires a Waiver
@@ -189,8 +191,14 @@ export function grantPlanReconciliationWaiver(
   context: Readonly<DomainOperationContext>,
   input: SliceIdentity & { taskId: string },
 ): PlanReconciliationAuthorization {
-  if (requireActiveDomainOperationContext(context) !== PLAN_RECONCILIATION_OPERATION) {
-    throw new Error("Plan reconciliation Waiver requires a workflow.slice.plan Domain Operation");
+  const activeOperation = requireActiveDomainOperationContext(context);
+  if (
+    activeOperation !== PLAN_RECONCILIATION_OPERATION &&
+    activeOperation !== PLAN_RECONCILIATION_REPLAN_OPERATION
+  ) {
+    throw new Error(
+      "Plan reconciliation Waiver requires a workflow.slice.plan or workflow.slice.replan Domain Operation",
+    );
   }
   const slice = {
     milestoneId: requireText(input.milestoneId, "milestoneId"),
@@ -275,6 +283,49 @@ export function grantPlanReconciliationWaiver(
     ":authority_epoch": context.resultingAuthorityEpoch,
   });
   return { taskId, requirementId, waiverId };
+}
+
+/**
+ * Read back the active plan-reconciliation Waiver for an omitted task, if one
+ * exists. The replan follow-up authorization operation re-derives its inputs
+ * through this reader so an exact retry after a lost or failed authorization
+ * operation still records the waived Disposition (#2346).
+ */
+export function readActivePlanReconciliationWaiver(
+  input: SliceIdentity & { taskId: string },
+): PlanReconciliationAuthorization | null {
+  const slice = {
+    milestoneId: requireText(input.milestoneId, "milestoneId"),
+    sliceId: requireText(input.sliceId, "sliceId"),
+  };
+  const taskId = requireText(input.taskId, "taskId");
+  const scope = `task:${slice.milestoneId}/${slice.sliceId}/${taskId}`;
+  const requirementId = `plan-omission:${slice.milestoneId}/${slice.sliceId}/${taskId}`;
+  const rows = getDb().prepare(`
+    SELECT waiver.waiver_id
+    FROM workflow_waivers waiver
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = waiver.lifecycle_id
+    WHERE lifecycle.item_kind = 'task'
+      AND lifecycle.milestone_id = :milestone_id
+      AND lifecycle.slice_id = :slice_id
+      AND lifecycle.task_id = :task_id
+      AND waiver.waiver_status = 'active'
+      AND waiver.scope = :scope
+      AND waiver.requirement_id = :requirement_id
+    ORDER BY waiver.project_revision DESC, waiver.waiver_id
+  `).all({
+    ":milestone_id": slice.milestoneId,
+    ":slice_id": slice.sliceId,
+    ":task_id": taskId,
+    ":scope": scope,
+    ":requirement_id": requirementId,
+  }) as Array<Record<string, unknown>>;
+  if (rows.length > 1) {
+    throw new Error("Found multiple active plan-reconciliation Waivers for one task");
+  }
+  if (rows.length === 0) return null;
+  return { taskId, requirementId, waiverId: String(rows[0]!["waiver_id"]) };
 }
 
 /**
@@ -880,7 +931,13 @@ function loadPlan(slice: SliceIdentity): {
       ...task,
       normalizedLegacyStatus,
       running,
-      preserve: normalizedLegacyStatus === "completed" || normalizedLegacyStatus === "cancelled",
+      // #2451 Gap 1: `blocker-accepted` is terminal-without-proof (#2202) and
+      // has no `cancelled` transition edge, so it must be preserved like
+      // completed/cancelled tasks — in either vocabulary.
+      preserve: normalizedLegacyStatus === "completed" ||
+        normalizedLegacyStatus === "cancelled" ||
+        normalizedLegacyStatus === "blocker-accepted" ||
+        task.lifecycleStatus === "blocker-accepted",
     };
   });
   return { slice: target, normalizedSliceStatus, tasks };
@@ -1086,7 +1143,13 @@ export function reopenSliceHierarchy(
     };
     requireMatchingShadow(state, `Task ${state.taskId}`);
     const legacyStatus = normalizeLegacyLifecycleStatus(state.legacyStatus);
-    if (legacyStatus !== "completed" && legacyStatus !== "cancelled") {
+    // #2451: `blocker-accepted` is terminal-without-proof (#2202) and its
+    // `blocker-accepted -> ready` edge is the documented reopen parity path,
+    // so a Task the cancellation preserved must not block Slice reopen.
+    if (
+      legacyStatus !== "completed" && legacyStatus !== "cancelled" &&
+      legacyStatus !== "blocker-accepted" && state.lifecycleStatus !== "blocker-accepted"
+    ) {
       throw new SliceLifecycleValidationError(
         `slice ${slice.sliceId} is not complete because Task ${state.taskId} is not terminal`,
       );
