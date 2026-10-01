@@ -12,8 +12,8 @@
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
 import { isUnitAlreadyActiveSkip } from "./contracts.js";
@@ -29,7 +29,7 @@ import {
 import { _clearCurrentResolve } from "./resolve.js";
 import { runGuards } from "./phases.js";
 import { runFinalize } from "./finalize.js";
-import { handlePendingHookOutcome } from "../auto-post-unit.js";
+import { handlePendingHookOutcome, resolveVerificationFailureMarkerPath } from "../auto-post-unit.js";
 import {
   resetSessionTimeoutState,
   restoreTaskHostVerificationContext,
@@ -150,6 +150,18 @@ import {
   verifyExpectedArtifact,
 } from "../artifact-verification.js";
 import { IS_DISPATCH_OWNER_DEAD, RECLAIM_DEAD_DISPATCH_OWNER } from "./unit-run.js";
+
+/**
+ * Path of the `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker
+ * for the unit when one exists on disk — a deliberate closeout refusal
+ * (#2046). Flagged on the finalize input so the kernel stops instead of
+ * identical-input retrying. Unknown unit types resolve to no marker and keep
+ * the retry default.
+ */
+function resolvePresentVerificationFailureMarker(unitType: string, unitId: string, basePath: string): string | null {
+  const markerPath = resolveVerificationFailureMarkerPath(unitType, unitId, basePath);
+  return markerPath !== null && existsSync(markerPath) ? markerPath : null;
+}
 
 function resolveCompletionStopFromState(
   stateSnapshot: GSDState | undefined,
@@ -573,7 +585,7 @@ export async function autoLoop(
     });
     const finishTurn = (
       status: "completed" | "failed" | "paused" | "stopped" | "skipped" | "retry",
-      failureClass: "none" | "unknown" | "manual-attention" | "timeout" | "execution" | "verification" | "closeout" | "git" = "none",
+      failureClass: "none" | "unknown" | "manual-attention" | "timeout" | "execution" | "verification" | "closeout" | "git" | "refusal" = "none",
       error: string | undefined,
       guardId: string | null,
       inputPayload?: string,
@@ -2083,6 +2095,9 @@ export async function autoLoop(
         action: finalizeResult.action,
         ...(finalizeReason ? { reason: finalizeReason } : {}),
       });
+      const refusalMarkerPath = finalizeResult.action === "continue"
+        ? resolvePresentVerificationFailureMarker(iterData.unitType, iterData.unitId, s.basePath)
+        : null;
       const finalizeDecision = decideFinalizeResult(
         finalizeResult.action === "break"
           ? { action: "break", reason: finalizeResult.reason }
@@ -2097,10 +2112,24 @@ export async function autoLoop(
                 // continue; it is cleared on the next dispatch, so reading it
                 // here captures the reason for THIS finalize (#852 follow-up).
                 failureDetail: s.pendingVerificationRetry?.failureContext,
+                // #2046: a `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED`
+                // marker is a deliberate closeout refusal — identical-input retry
+                // cannot change it. Flag it so the kernel stops with failureClass
+                // "refusal" instead of burning the retry budget. Units that have
+                // no marker resolver (unknown unit types) keep the retry default.
+                refusal: refusalMarkerPath !== null,
               }
             : { action: "next" },
       );
       if (finalizeDecision.action === "stop") {
+        if (finalizeDecision.failureClass === "refusal") {
+          // The unit deliberately declined closeout: stopping here must be
+          // legible to the operator, not a silent exit after a "retry" report.
+          ctx.ui.notify(
+            `${iterData.unitType} ${iterData.unitId} declined closeout${refusalMarkerPath ? ` (see ${relative(s.basePath, refusalMarkerPath)})` : ""}. Stopping instead of retrying — an identical-input retry cannot change a refusal.`,
+            "error",
+          );
+        }
         await closeRun("failed", finalizeDecision.ledgerErrorSummary);
         finishIncompleteIteration({
           status: "stopped",

@@ -713,7 +713,7 @@ async function prepareHookRetry(
   return "retry";
 }
 
-function resolveVerificationFailureMarkerPath(
+export function resolveVerificationFailureMarkerPath(
   unitType: string,
   unitId: string,
   basePath: string,
