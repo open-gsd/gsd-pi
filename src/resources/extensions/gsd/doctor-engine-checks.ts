@@ -15,7 +15,7 @@ import {
   _getAdapter,
 } from "./gsd-db.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
-import { isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
+import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
 import {
   gsdProjectionRoot,
   gsdRoot,
@@ -977,24 +977,24 @@ export async function checkEngineHealth(
                AND ud.unit_type = 'complete-milestone'
                AND ud.unit_id = m.id
                AND ud.status = 'completed'
-               AND ud.id = (
-                 SELECT latest.id
-                 FROM unit_dispatches latest
-                 WHERE latest.milestone_id = m.id
-                   AND latest.unit_type = 'complete-milestone'
-                   AND latest.unit_id = m.id
-                   AND latest.status = 'completed'
-                 ORDER BY COALESCE(latest.ended_at, latest.started_at) DESC, latest.id DESC
-                 LIMIT 1
-               )
-             ORDER BY m.id`,
+             ORDER BY m.id, COALESCE(ud.ended_at, ud.started_at) DESC, ud.id DESC`,
           )
           .all() as Array<{ id: string; status: string; started_at: string | null; ended_at: string | null }>;
 
+        // #2398: the dispatch row alone is not completion proof — require a
+        // covering milestone.completed event (mirrors the drift detector gate
+        // in state-reconciliation/drift/artifact-db.ts). Evaluate every
+        // completed dispatch newest-first so a later receiptless row cannot
+        // hide an earlier event-backed completion; at most one issue per
+        // milestone.
+        const flagged = new Set<string>();
         for (const row of reopened) {
+          if (flagged.has(row.id)) continue;
           const completedAt = row.ended_at ?? row.started_at ?? null;
+          if (!completedEventCoversDispatch(basePath, row.id, row.started_at)) continue;
           const reopenAt = latestExplicitReopenAt(basePath, row.id);
           if (reopenAt && (!completedAt || Date.parse(reopenAt) > Date.parse(completedAt))) continue;
+          flagged.add(row.id);
           issues.push({
             severity: "error",
             code: "completed_milestone_reopened",
