@@ -292,8 +292,8 @@ describe("hasQualifyingTaskEvidence: lenient verdict matching (#2014)", () => {
 
   test("commandless records remain distinct instead of collapsing to one latest row (#2338)", () => {
     assert.equal(hasQualifyingTaskEvidence([
-      { exitCode: 1, verdict: "", durationMs: 10 },
-      { exitCode: 0, verdict: "", durationMs: 10 },
+      { command: "", exitCode: 1, verdict: "", durationMs: 10 },
+      { command: "", exitCode: 0, verdict: "", durationMs: 10 },
     ]), false);
   });
 
