@@ -62,6 +62,18 @@ export { buildSubagentProcessArgs } from "./launch.js";
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
 const COLLAPSED_ITEM_COUNT = 10;
+
+/**
+ * Bound a diagnostic excerpt so a noisy child cannot flood the parent session
+ * through the detached-completion wake message (#2363 review finding).
+ */
+export function truncateDiagnostic(text: string, maxChars: number): string {
+	return text.length > maxChars
+		? `${text.slice(0, maxChars)}… [truncated, full output via action: "status"]`
+		: text;
+}
+
+const WAKE_DIAGNOSTIC_MAX_CHARS = 300;
 const liveSubagentProcesses = new Set<ChildProcess>();
 
 async function stopLiveSubagents(): Promise<void> {
@@ -1267,6 +1279,46 @@ export default function (pi: ExtensionAPI) {
 				});
 			};
 
+			// A detached run's completion is otherwise invisible: the journal event
+			// has no turn-starting consumer, so the session idles until the model
+			// happens to poll action: "status" (#2363). Re-invoke it with a short
+			// summary. One wake per dispatch, interactive sessions only, and fully
+			// defensive — a wake failure must never affect persistence or escape
+			// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
+			let backgroundWakeSent = false;
+			const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
+				try {
+					if (!ctx.hasUI || backgroundWakeSent) return;
+					backgroundWakeSent = true;
+					const successCount = results.filter((r) => r.exitCode === 0).length;
+					const failureCount = results.length - successCount;
+					const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
+					const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
+					const perAgent = results
+						.map((r) =>
+							`- ${r.agent}: ${r.exitCode === 0 ? "succeeded" : `failed — ${truncateDiagnostic(r.errorMessage || r.stderr || "unknown error", WAKE_DIAGNOSTIC_MAX_CHARS)}`}`
+						)
+						.join("\n");
+					void pi.sendMessage(
+						{
+							customType: "subagent_completed",
+							content: [
+								`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
+								perAgent,
+								`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
+							].join("\n"),
+							display: true,
+							details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
+						},
+						{ triggerTurn: true },
+					).catch(() => {
+						// Wake delivery is best-effort; persistence above is authoritative.
+					});
+				} catch {
+					// A wake failure must never affect persistence.
+				}
+			};
+
 			try {
 			if ((agentScope === "project" || agentScope === "both") && confirmProjectAgents && ctx.hasUI) {
 				const requestedAgentNames = new Set<string>();
@@ -1358,9 +1410,11 @@ export default function (pi: ExtensionAPI) {
 						}
 						finalResults = [result];
 						finishDispatch([result]);
+						wakeSessionAfterDetachedCompletion([result]);
 					} catch (err) {
 						finalResults = synthesizeFailureResults(err);
 						finishDispatch(finalResults);
+						wakeSessionAfterDetachedCompletion(finalResults);
 					} finally {
 						if (isolation) await isolation.cleanup();
 					}
