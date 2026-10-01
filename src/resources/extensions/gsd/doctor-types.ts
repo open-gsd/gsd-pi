@@ -106,6 +106,8 @@ export type DoctorIssueCode =
   | "orphaned_milestone_lease"
   // Pre-#1659 legacy import remediation (#1661)
   | "lifecycle_projection_wrong_kind"
+  // Legacy/canonical lifecycle shadow drift (#2440)
+  | "lifecycle_shadow_mismatch"
   // Milestone filesystem/DB drift (#4996)
   | "orphan_milestone_dir"
   | "orphan_milestone_db"

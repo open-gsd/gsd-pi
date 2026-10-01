@@ -422,7 +422,7 @@ function requireMatchingShadow(row: HierarchyRow, entity: string): void {
   }
 }
 
-function requireNoProgressedDownstreamSlices(slice: SliceIdentity): void {
+function requireNoProgressedDownstreamSlices(slice: SliceIdentity, projectId: string): void {
   const downstream = getDb().prepare(`
     WITH RECURSIVE reachable(slice_id) AS (
       SELECT candidate.id
@@ -446,6 +446,7 @@ function requireNoProgressedDownstreamSlices(slice: SliceIdentity): void {
      AND candidate.id = reachable.slice_id
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'slice'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = candidate.milestone_id
      AND lifecycle.slice_id = candidate.id
      AND lifecycle.task_id IS NULL
@@ -454,6 +455,7 @@ function requireNoProgressedDownstreamSlices(slice: SliceIdentity): void {
   `).all({
     ":milestone_id": slice.milestoneId,
     ":slice_id": slice.sliceId,
+    ":project_id": projectId,
   }) as Array<Record<string, unknown>>;
 
   const progressed = downstream.find((candidate) => {
@@ -581,10 +583,11 @@ export function completeSliceHierarchy(
     SELECT milestone.status AS legacy_status, lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM milestones milestone
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = milestone.id
+      ON lifecycle.item_kind = 'milestone' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = milestone.id
      AND lifecycle.slice_id IS NULL
     WHERE milestone.id = :milestone_id
-  `).get({ ":milestone_id": slice.milestoneId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!milestone) throw new SliceLifecycleValidationError(`milestone not found: ${slice.milestoneId}`);
   const milestoneStatus = normalizeLegacyLifecycleStatus(String(milestone["legacy_status"]));
   if (!milestoneStatus || milestoneStatus === "completed" || milestoneStatus === "cancelled") {
@@ -604,10 +607,11 @@ export function completeSliceHierarchy(
     SELECT slice.status AS legacy_status, lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM slices slice
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = slice.milestone_id
+      ON lifecycle.item_kind = 'slice' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = slice.milestone_id
      AND lifecycle.slice_id = slice.id AND lifecycle.task_id IS NULL
     WHERE slice.milestone_id = :milestone_id AND slice.id = :slice_id
-  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!target) throw new SliceLifecycleValidationError(`slice not found: ${slice.milestoneId}/${slice.sliceId}`);
   if (!target["lifecycle_id"] || !target["lifecycle_status"]) {
     throw new SliceLifecycleValidationError("Slice completion requires canonical Slice lifecycle authority");
@@ -628,11 +632,12 @@ export function completeSliceHierarchy(
            lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM tasks task
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task' AND lifecycle.milestone_id = task.milestone_id
+      ON lifecycle.item_kind = 'task' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = task.milestone_id
      AND lifecycle.slice_id = task.slice_id AND lifecycle.task_id = task.id
     WHERE task.milestone_id = :milestone_id AND task.slice_id = :slice_id
     ORDER BY task.sequence, task.id
-  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Array<Record<string, unknown>>;
+  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Array<Record<string, unknown>>;
   if (tasks.length === 0) throw new SliceLifecycleValidationError(`no tasks found for slice ${slice.sliceId}`);
 
   const completedTaskIds: string[] = [];
@@ -774,7 +779,7 @@ export function completeSliceHierarchy(
   };
 }
 
-function loadPlan(slice: SliceIdentity): {
+function loadPlan(slice: SliceIdentity, projectId: string): {
   slice: HierarchyRow;
   normalizedSliceStatus: CanonicalLifecycleStatus;
   tasks: PlannedTask[];
@@ -785,10 +790,11 @@ function loadPlan(slice: SliceIdentity): {
     FROM milestones milestone
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'milestone'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = milestone.id
      AND lifecycle.slice_id IS NULL
     WHERE milestone.id = :milestone_id
-  `).get({ ":milestone_id": slice.milestoneId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":project_id": projectId }) as Record<string, unknown> | undefined;
   if (!milestone) throw new SliceLifecycleValidationError(`milestone not found: ${slice.milestoneId}`);
   const milestoneStatus = normalizeLegacyLifecycleStatus(String(milestone["legacy_status"]));
   if (!milestoneStatus) throw new SliceLifecycleValidationError(`Milestone ${slice.milestoneId} has an unknown legacy status`);
@@ -814,6 +820,7 @@ function loadPlan(slice: SliceIdentity): {
     FROM slices slice
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'slice'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = slice.milestone_id
      AND lifecycle.slice_id = slice.id
      AND lifecycle.task_id IS NULL
@@ -821,6 +828,7 @@ function loadPlan(slice: SliceIdentity): {
   `).get({
     ":milestone_id": slice.milestoneId,
     ":slice_id": slice.sliceId,
+    ":project_id": projectId,
   }) as Record<string, unknown> | undefined;
   if (!sliceRow) throw new SliceLifecycleValidationError(`Slice ${slice.sliceId} not found in milestone ${slice.milestoneId}`);
   const target: HierarchyRow = {
@@ -844,6 +852,7 @@ function loadPlan(slice: SliceIdentity): {
     FROM tasks task
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'task'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = task.milestone_id
      AND lifecycle.slice_id = task.slice_id
      AND lifecycle.task_id = task.id
@@ -852,6 +861,7 @@ function loadPlan(slice: SliceIdentity): {
   `).all({
     ":milestone_id": slice.milestoneId,
     ":slice_id": slice.sliceId,
+    ":project_id": projectId,
   }) as Array<Record<string, unknown>>;
   const tasks = taskRows.map((row): PlannedTask => {
     const taskId = String(row["task_id"]);
@@ -912,7 +922,7 @@ export function cancelSliceHierarchy(
     sliceId: requireText(input.sliceId, "sliceId"),
   };
   const reason = requireText(input.reason, "reason");
-  const plan = loadPlan(slice);
+  const plan = loadPlan(slice, context.projectId);
   const cancelledTaskIds: string[] = [];
   const preservedTaskIds: string[] = [];
   const interruptions: SliceCancellationInterruption[] = [];
@@ -1022,15 +1032,16 @@ export function reopenSliceHierarchy(
     sliceId: requireText(input.sliceId, "sliceId"),
   };
   requireText(input.reason, "reason");
-  requireNoProgressedDownstreamSlices(slice);
+  requireNoProgressedDownstreamSlices(slice, context.projectId);
   const milestone = getDb().prepare(`
     SELECT milestone.status AS legacy_status, lifecycle.lifecycle_status
     FROM milestones milestone
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = milestone.id
+      ON lifecycle.item_kind = 'milestone' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = milestone.id
      AND lifecycle.slice_id IS NULL
     WHERE milestone.id = :milestone_id
-  `).get({ ":milestone_id": slice.milestoneId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!milestone) throw new SliceLifecycleValidationError(`milestone not found: ${slice.milestoneId}`);
   const milestoneStatus = normalizeLegacyLifecycleStatus(String(milestone["legacy_status"]));
   if (!milestoneStatus || milestoneStatus === "completed" || milestoneStatus === "cancelled") {
@@ -1049,10 +1060,11 @@ export function reopenSliceHierarchy(
     SELECT slice.status AS legacy_status, lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM slices slice
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = slice.milestone_id
+      ON lifecycle.item_kind = 'slice' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = slice.milestone_id
      AND lifecycle.slice_id = slice.id AND lifecycle.task_id IS NULL
     WHERE slice.milestone_id = :milestone_id AND slice.id = :slice_id
-  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!sliceRow) throw new SliceLifecycleValidationError(`slice not found: ${slice.milestoneId}/${slice.sliceId}`);
   const legacySliceStatus = normalizeLegacyLifecycleStatus(String(sliceRow["legacy_status"]));
   if (!legacySliceStatus) throw new SliceLifecycleValidationError(`Slice ${slice.sliceId} has an unknown legacy status`);
@@ -1068,11 +1080,12 @@ export function reopenSliceHierarchy(
            lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM tasks task
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task' AND lifecycle.milestone_id = task.milestone_id
+      ON lifecycle.item_kind = 'task' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = task.milestone_id
      AND lifecycle.slice_id = task.slice_id AND lifecycle.task_id = task.id
     WHERE task.milestone_id = :milestone_id AND task.slice_id = :slice_id
     ORDER BY task.sequence, task.id
-  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Array<Record<string, unknown>>;
+  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Array<Record<string, unknown>>;
   for (const task of tasks) {
     const lifecycleId = task["lifecycle_id"] ? String(task["lifecycle_id"]) : null;
     if (lifecycleId && runningAttempt(lifecycleId)) {

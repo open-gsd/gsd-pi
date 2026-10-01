@@ -6,6 +6,7 @@ import type { DoctorIssue } from "./doctor-types.js";
 import {
   deleteArtifactByPath,
   getAllMilestones,
+  getMilestoneLifecycleShadowSnapshot,
   getMilestoneSlices,
   getSliceTasks,
   findWrongKindLifecycleProjectionHeads,
@@ -672,6 +673,47 @@ export function reportMilestoneValidationSourceDrift(basePath: string, issues: D
   }
 }
 
+/**
+ * #2440: legacy/canonical lifecycle shadow drift was invisible — a hierarchy
+ * row whose legacy status went terminal while its canonical lifecycle row stayed
+ * `ready` fails every terminal-parity check (complete/validate/reopen) with an
+ * opaque "canonical and legacy lifecycle mismatch", and doctor reported nothing.
+ * This check surfaces the drift itself via the engine's own comparator.
+ * Evidence-backed drift converges through the shadow repair on the reopen path;
+ * unverifiable drift must be resolved by an operator (#2313 tracks the
+ * free-text verification-result classification gap).
+ */
+export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void {
+  if (!isDbAvailable()) return;
+  for (const milestone of getAllMilestones()) {
+    if (!isMilestoneLifecycleAdopted(milestone.id)) continue;
+    const snapshot = getMilestoneLifecycleShadowSnapshot(milestone.id);
+    if (snapshot.queryError) continue;
+    for (const item of snapshot.items) {
+      if (item.classification !== "status_mismatch") continue;
+      const unitId = [
+        item.itemIdentity.milestoneId,
+        item.itemIdentity.sliceId,
+        item.itemIdentity.taskId,
+      ].filter(Boolean).join("/");
+      issues.push({
+        severity: "error",
+        code: "lifecycle_shadow_mismatch",
+        scope: item.itemIdentity.taskId ? "task" : item.itemIdentity.sliceId ? "slice" : "milestone",
+        unitId,
+        message:
+          `Legacy status "${item.rawLegacyStatus ?? "null"}" does not match canonical lifecycle ` +
+          `"${item.rawCanonicalStatus ?? "null"}" for ${unitId}. Terminal-parity checks refuse ` +
+          `completion, validation, and reopen for this row. Reopen path converges drift backed by ` +
+          `durable completion evidence via the lifecycle shadow repair; drift without evidence ` +
+          `must be resolved manually.`,
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+    }
+  }
+}
+
 export async function checkEngineHealth(
   basePath: string,
   issues: DoctorIssue[],
@@ -817,6 +859,12 @@ export async function checkEngineHealth(
         reportMilestoneValidationSourceDrift(basePath, issues);
       } catch {
         // Non-fatal — closeout source drift diagnostics failed
+      }
+
+      try {
+        reportMilestoneLifecycleShadowDrift(issues);
+      } catch {
+        // Non-fatal — lifecycle shadow drift diagnostics failed
       }
 
       // a. Orphaned tasks (task.slice_id points to non-existent slice)
