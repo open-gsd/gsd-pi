@@ -54,6 +54,7 @@ import {
 } from "../db/unit-dispatches.js";
 import {
   claimMilestoneLease,
+  getMilestoneLease,
   refreshMilestoneLease,
   milestoneLeaseTtlSeconds,
 } from "../db/milestone-leases.js";
@@ -201,6 +202,17 @@ const TASK_EXECUTION_CUTOVER_DEPS = {
   readTaskAttempt,
   readTaskRecoveryRoute,
   readTaskTechnicalVerdict,
+  // #2443: the Attempt claim must carry the currently held fencing token, not
+  // a session-cached one that can lag after the lease TTL elapses mid-unit.
+  resolveHeldMilestoneLeaseToken: (milestoneId: string, workerId: string): number | null => {
+    const lease = getMilestoneLease(milestoneId);
+    return lease
+      && lease.worker_id === workerId
+      && lease.status === "held"
+      && Date.parse(lease.expires_at) > Date.now()
+      ? lease.fencing_token
+      : null;
+  },
   routeTaskFailure: recordFailureAndSelectRecovery,
   settleTaskAttempt,
 };
@@ -979,7 +991,7 @@ export async function autoLoop(
           if (lease.kind !== "ready") {
             throw new Error(`Custom engine execute-task requires a canonical milestone lease: ${lease.reason}`);
           }
-          const claim = openDispatchClaim(s, flowId, turnId, iterData, {
+          const customClaimDeps = {
             getRecentDispatchesForUnit,
             recordDispatchClaim,
             markDispatchRunning,
@@ -987,7 +999,25 @@ export async function autoLoop(
             logClaimFailed: logDispatchClaimFailed,
             isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
             reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
-          });
+          };
+          let claim = openDispatchClaim(s, flowId, turnId, iterData, customClaimDeps);
+          if (claim.kind === "skip" && claim.reason === "stale-lease") {
+            // #2443: the dispatch guard rejects a lease whose TTL lapsed
+            // during guards/request throttling (mirroring the attempt fencing
+            // trigger). The same live worker almost always still owns the
+            // milestone here, so force-reclaim once and retry, matching the
+            // recovery the inline loop path and claimUnitRun already perform.
+            // Only a genuine takeover by another live worker surfaces as the
+            // terminal conflict below.
+            const leaseRecovery = ensureDispatchLease(s, iterData.mid, {
+              claimMilestoneLease,
+              logLeaseRecovered: logDispatchLeaseRecovered,
+              logLeaseRecoveryFailed: logDispatchLeaseRecoveryFailed,
+            }, { forceReclaim: true });
+            if (leaseRecovery.kind === "ready") {
+              claim = openDispatchClaim(s, flowId, turnId, iterData, customClaimDeps);
+            }
+          }
           if (claim.kind !== "opened") {
             const reason = claim.kind === "skip" || claim.kind === "degraded"
               ? claim.reason
@@ -2082,6 +2112,15 @@ export async function autoLoop(
         status: finalizeStatus,
         action: finalizeResult.action,
         ...(finalizeReason ? { reason: finalizeReason } : {}),
+        // #2443: carry the pending verification retry context so forensics
+        // can tell which finalize retry fired — the reason was previously not
+        // captured in this event.
+        ...(s.pendingVerificationRetry?.failureContext
+          ? { retryFailureContext: s.pendingVerificationRetry.failureContext }
+          : {}),
+        ...(typeof s.pendingVerificationRetry?.attempt === "number"
+          ? { retryAttempt: s.pendingVerificationRetry.attempt }
+          : {}),
       });
       const finalizeDecision = decideFinalizeResult(
         finalizeResult.action === "break"

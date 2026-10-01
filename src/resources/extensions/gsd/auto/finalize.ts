@@ -31,6 +31,7 @@ import {
   isIsolatedWorktreeSession,
 } from "./phase-helpers.js";
 import { _runMilestoneMergeOnceWithStashRestore } from "./closeout.js";
+import { isTaskExecutionReadyForHostVerification } from "./task-execution-cutover.js";
 import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
 import { MAX_FINALIZE_TIMEOUTS } from "./types.js";
 
@@ -216,22 +217,48 @@ export async function runFinalize(
           unitType: preUnitSnapshot?.type,
           unitId: retryInfo?.unitId,
           attempt: retryInfo?.attempt,
+          // #2443: the retry reason was previously not captured anywhere for
+          // the finalize-only path (which clears the marker before the
+          // post-unit-finalize-end event reads it).
+          ...(retryInfo?.failureContext ? { failureContext: retryInfo.failureContext } : {}),
         },
       });
-      const retryPolicyResult = await applyVerificationRetryPolicy(
-        ic,
-        preUnitSnapshot?.type,
-        "artifact-verification-retry",
-      );
-      if (retryPolicyResult) {
+      // #2443: an execute-task whose canonical Attempt already sits at the
+      // verify stage has a verified artifact — the pre-verification read
+      // raced the DB or failed transiently. Re-dispatching the unit would
+      // claim a fresh Attempt that can only re-execute completed work and
+      // abort on lease fencing (#2443), so re-run ONLY finalize/publication:
+      // fall through to the verification gate with the retry context
+      // cleared. A git-commit remediation retry re-dispatches the published
+      // task on purpose (#2119) and keeps its existing path.
+      const finalizeOnlyArtifactRetry =
+        preUnitSnapshot?.type === "execute-task"
+        && !retryInfo?.signature?.startsWith("git-commit:")
+        && isTaskExecutionReadyForHostVerification(preUnitSnapshot.type, preUnitSnapshot.id);
+      if (finalizeOnlyArtifactRetry) {
+        s.pendingVerificationRetry = null;
+        debugLog("autoLoop", {
+          phase: "finalize-only-retry-verified-artifact",
+          iteration: ic.iteration,
+          unitType: preUnitSnapshot.type,
+          unitId: preUnitSnapshot.id,
+        });
+      } else {
+        const retryPolicyResult = await applyVerificationRetryPolicy(
+          ic,
+          preUnitSnapshot?.type,
+          "artifact-verification-retry",
+        );
+        if (retryPolicyResult) {
+          clearFinalizingUnit();
+          return retryPolicyResult;
+        }
+        // Continue the loop — next iteration will inject the retry context into the prompt.
+        rememberRetryDispatch(s, preUnitSnapshot, iterData);
+        debugLog("autoLoop", { phase: "artifact-verification-retry", iteration: ic.iteration });
         clearFinalizingUnit();
-        return retryPolicyResult;
+        return { action: "continue" };
       }
-      // Continue the loop — next iteration will inject the retry context into the prompt.
-      rememberRetryDispatch(s, preUnitSnapshot, iterData);
-      debugLog("autoLoop", { phase: "artifact-verification-retry", iteration: ic.iteration });
-      clearFinalizingUnit();
-      return { action: "continue" };
     }
   }
 
