@@ -963,7 +963,7 @@ export function defaultRoutingConfig(): DynamicRoutingConfig {
  */
 const CANONICAL_TIER_MODELS: Record<ComplexityTier, string> = {
   light: "claude-haiku-4-5",
-  standard: "claude-sonnet-4-6",
+  standard: "claude-sonnet-5-5",
   heavy: "claude-opus-5-5",
 };
 

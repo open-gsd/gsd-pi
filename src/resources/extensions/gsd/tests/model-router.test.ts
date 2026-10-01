@@ -432,7 +432,7 @@ test("resolveModelForTier: returns canonical Anthropic model when no available m
   try {
     resetLegacyTelemetry();
     assert.equal(resolveModelForTier("heavy", []), "claude-opus-5-5");
-    assert.equal(resolveModelForTier("standard", []), "claude-sonnet-4-6");
+    assert.equal(resolveModelForTier("standard", []), "claude-sonnet-5-5");
     assert.equal(resolveModelForTier("light", []), "claude-haiku-4-5");
     assert.equal(getLegacyTelemetry()["legacy.providerDefaultUsed"], 3);
   } finally {

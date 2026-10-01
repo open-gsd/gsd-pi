@@ -546,13 +546,13 @@ Inline form — thinking pinned alongside the model:
 version: 1
 models:
   planning:
-    model: bedrock/global.anthropic.claude-sonnet-5
+    model: bedrock/global.anthropic.claude-sonnet-5-5
     thinking: xhigh
   execution:
-    model: bedrock/global.anthropic.claude-sonnet-5
+    model: bedrock/global.anthropic.claude-sonnet-5-5
     thinking: low      # explicit → bypasses the execute-task medium floor
   validation:
-    model: bedrock/global.anthropic.claude-sonnet-5
+    model: bedrock/global.anthropic.claude-sonnet-5-5
     thinking: high
 ---
 ```

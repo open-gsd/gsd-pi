@@ -139,6 +139,20 @@ export interface BootstrapDeps {
   buildLifecycle: () => WorktreeLifecycle;
 }
 
+const COPILOT_SONNET_4_FALLBACKS = ["claude-sonnet-4.6", "claude-sonnet-4.5", "claude-sonnet-4"];
+
+/**
+ * Nearest Copilot Sonnet ids to try, in order, when Copilot temporarily omits a
+ * preferred Sonnet 5.x from its live catalog. Undefined for other models.
+ */
+export function copilotSonnetFallbackChain(preferredIdLower: string): string[] | undefined {
+  if (preferredIdLower === "claude-sonnet-5.5" || preferredIdLower === "claude-sonnet-5-5") {
+    return ["claude-sonnet-5", ...COPILOT_SONNET_4_FALLBACKS];
+  }
+  if (preferredIdLower === "claude-sonnet-5") return [...COPILOT_SONNET_4_FALLBACKS];
+  return undefined;
+}
+
 export function resolveIsolationNoneBranchCheckout(
   currentBranch: string,
   integrationBranch: string,
@@ -1133,12 +1147,16 @@ export async function bootstrapAutoSession(
       const isCopilotProvider = providerLower === "github-copilot" || providerLower === "copilot";
       const preferredIdLower = preferredModel.id.toLowerCase();
 
-      if (isCopilotProvider && preferredIdLower === "claude-sonnet-5") {
-        const copilotSonnetFallback = available.find((candidate) => {
-          const candidateProvider = candidate.provider.toLowerCase();
-          if (candidateProvider !== "github-copilot" && candidateProvider !== "copilot") return false;
-          return ["claude-sonnet-4.6", "claude-sonnet-4.5", "claude-sonnet-4"].includes(candidate.id.toLowerCase());
-        });
+      const copilotSonnetChain = isCopilotProvider ? copilotSonnetFallbackChain(preferredIdLower) : undefined;
+      if (copilotSonnetChain) {
+        // Walk the chain in order so the nearest available Sonnet wins.
+        const copilotSonnetFallback = copilotSonnetChain
+          .map((fallbackId) => available.find((candidate) => {
+            const candidateProvider = candidate.provider.toLowerCase();
+            if (candidateProvider !== "github-copilot" && candidateProvider !== "copilot") return false;
+            return candidate.id.toLowerCase() === fallbackId;
+          }))
+          .find((candidate) => candidate !== undefined);
 
         if (copilotSonnetFallback) {
           validatedPreferredModel = {

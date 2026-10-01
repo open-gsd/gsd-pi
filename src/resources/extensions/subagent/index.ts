@@ -814,7 +814,7 @@ const TaskItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task to delegate to the agent" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	model: Type.Optional(Type.String({ description: "Model override for this task (e.g. 'claude-sonnet-4-6')" })),
+	model: Type.Optional(Type.String({ description: "Model override for this task (e.g. 'claude-sonnet-5-5')" })),
 	thinking: Type.Optional(ThinkingLevelSchema),
 	context: Type.Optional(StringEnum(["fresh", "fork"] as const, {
 		description: 'Context mode for this task (see context field on the top-level params).',
@@ -826,7 +826,7 @@ const ChainItem = Type.Object({
 	agent: Type.String({ description: "Name of the agent to invoke" }),
 	task: Type.String({ description: "Task with optional {previous} placeholder for prior step output" }),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process" })),
-	model: Type.Optional(Type.String({ description: "Model override for this step (e.g. 'claude-sonnet-4-6')" })),
+	model: Type.Optional(Type.String({ description: "Model override for this step (e.g. 'claude-sonnet-5-5')" })),
 	thinking: Type.Optional(ThinkingLevelSchema),
 	context: Type.Optional(StringEnum(["fresh", "fork"] as const, {
 		description: 'Context mode for this step (see context field on the top-level params).',
@@ -864,7 +864,7 @@ const SubagentParams = Type.Object({
 		Type.Boolean({ description: "Prompt before running project-local agents. Default: false.", default: false }),
 	),
 	cwd: Type.Optional(Type.String({ description: "Working directory for the agent process (single mode)" })),
-	model: Type.Optional(Type.String({ description: "Model override for the subagent (e.g. 'claude-sonnet-4-6'). Takes precedence over the agent's frontmatter model." })),
+	model: Type.Optional(Type.String({ description: "Model override for the subagent (e.g. 'claude-sonnet-5-5'). Takes precedence over the agent's frontmatter model." })),
 	thinking: Type.Optional(ThinkingLevelSchema),
 	isolated: Type.Optional(
 		Type.Boolean({
