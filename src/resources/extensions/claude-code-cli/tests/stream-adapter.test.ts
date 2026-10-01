@@ -1529,6 +1529,115 @@ describe("claude-code-cli — Claude Fable 5 Opus-tier support", () => {
 	});
 });
 
+// #2437 — catalog model metadata drives additive thinking checks: a catalog
+// compat flag can enable adaptive thinking for ids the id-heuristic does not
+// know yet, and a catalog thinkingLevelMap entry wins over the legacy effort map.
+describe("stream-adapter — catalog model metadata (#2437)", () => {
+	test("compat.forceAdaptiveThinking enables adaptive thinking for ids the heuristic does not know", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{ reasoning: "high" },
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { high: "high" } },
+		);
+		assert.equal(options.effort, "high", "catalog-backed model must map effort");
+		assert.deepEqual(options.thinking, { type: "adaptive" }, "catalog compat must force adaptive thinking");
+	});
+
+	test("xhigh resolves via the catalog thinkingLevelMap over the legacy effort map", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{ reasoning: "xhigh" },
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: "xhigh" } },
+		);
+		assert.equal(options.effort, "xhigh", "catalog thinkingLevelMap entry must win");
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	test("legacy id-heuristic behavior is unchanged when no metadata is passed", () => {
+		const options = buildSdkOptions("claude-opus-4-6", "test", undefined, { reasoning: "xhigh" });
+		assert.equal(options.effort, "max", "legacy xhigh clamp for opus-4-6 must persist");
+	});
+
+	test("unknown id without catalog compat stays non-adaptive", () => {
+		const options = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "high" });
+		assert.equal("effort" in options, false);
+		assert.equal("thinking" in options, false);
+	});
+
+	test("streamViaClaudeCode forwards model metadata into the sdk options", async (t) => {
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-metadata-"));
+		t.after(() => rmSync(cwd, { recursive: true, force: true }));
+		let capturedOptions: Record<string, unknown> | undefined;
+		const stream = streamViaClaudeCode(
+			{
+				id: "claude-opus-9",
+				compat: { forceAdaptiveThinking: true },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			} as any,
+			{ messages: [{ role: "user", content: "Hi." } as Message] },
+			{
+				cwd,
+				reasoning: "xhigh",
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest(args: {
+					prompt: string | AsyncIterable<unknown>;
+					options?: Record<string, unknown>;
+				}) {
+					capturedOptions = args.options;
+					yield makeSdkSuccessResult("ok");
+				},
+			} as any,
+		);
+		await stream.result();
+		assert.equal(capturedOptions?.effort, "xhigh", "model metadata must reach the sdk effort option");
+		assert.deepEqual(capturedOptions?.thinking, { type: "adaptive" });
+	});
+
+	test("metadata-only adaptive model with reasoning omitted still disables thinking explicitly", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{},
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: "xhigh" } },
+		);
+		assert.equal("effort" in options, false, "no effort when reasoning is off");
+		assert.deepEqual(options.thinking, { type: "disabled" }, "thinking must be explicitly disabled");
+	});
+
+	test("forceAdaptiveThinking: false does not disable the id-heuristic path (additive only)", () => {
+		const options = buildSdkOptions(
+			"claude-opus-4-6",
+			"test prompt",
+			undefined,
+			{ reasoning: "high" },
+			{ compat: { forceAdaptiveThinking: false } },
+		);
+		assert.equal(options.effort, "high", "heuristic-supported model must keep mapping effort");
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	test("missing, null, and non-effort thinkingLevelMap entries fall back to the legacy effort map", () => {
+		const metadata = { compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: null, high: "off-the-scale" } };
+		const nullMapped = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "xhigh" }, metadata);
+		assert.equal(nullMapped.effort, "high", "null catalog entry must fall through to the legacy map default");
+		const invalidMapped = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "high" }, metadata);
+		assert.equal(invalidMapped.effort, "high", "non-effort catalog value must fall through to the legacy map");
+		const unmapped = buildSdkOptions(
+			"claude-opus-9",
+			"test",
+			undefined,
+			{ reasoning: "medium" },
+			{ compat: { forceAdaptiveThinking: true } },
+		);
+		assert.equal(unmapped.effort, "medium", "missing catalog entry must fall through to the legacy map");
+	});
+});
+
 describe("stream-adapter — print bg wait ceiling (#1855)", () => {
 	function withCeilingEnv(value: string | undefined): () => void {
 		const previous = process.env[CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS_ENV];
