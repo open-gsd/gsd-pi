@@ -180,6 +180,18 @@ export interface UnitEndEvent {
 	cwd: string;
 }
 
+export interface PhaseChangeEvent {
+	type: "phase_change";
+	/** Phase before the transition, or null when none was set. */
+	previousPhase: string | null;
+	/** Phase after the transition, or null when the phase was cleared/deactivated. */
+	currentPhase: string | null;
+	/** What drove the transition. Only auto-mode transitions exist today. */
+	source: "auto" | "manual";
+	/** Audit trace id, when phase auditing is configured for the transition. */
+	traceId?: string;
+}
+
 export interface BeforeModelSelectEvent {
 	type: "before_model_select";
 	unitType: string;
@@ -271,6 +283,7 @@ export type GsdExtensionEvent =
 	| MilestoneEndEvent
 	| UnitStartEvent
 	| UnitEndEvent
+	| PhaseChangeEvent
 	| BeforeModelSelectEvent
 	| AdjustToolSetEvent
 	| BashTransformEvent

@@ -1240,6 +1240,8 @@ export class ExtensionRunner {
 				return this.invokeHandlers("unit_start", () => event, () => ({ done: false }));
 			case "unit_end":
 				return this.invokeHandlers("unit_end", () => event, () => ({ done: false }));
+			case "phase_change":
+				return this.invokeHandlers("phase_change", () => event, () => ({ done: false }));
 			case "session_switch":
 				return this.invokeHandlers("session_switch", () => event, () => ({ done: false }));
 			case "session_end":

@@ -73,6 +73,7 @@ import type {
 	ToolPreparationErrorsTurnEventResult,
 	UnitEndEvent,
 	UnitStartEvent,
+	PhaseChangeEvent,
 	VerifyFailure,
 	VerifyResultEvent,
 } from "../gsd-extension-types.js";
@@ -1226,6 +1227,7 @@ export interface ExtensionAPI {
 	on(event: "milestone_end", handler: ExtensionHandler<MilestoneEndEvent>): void;
 	on(event: "unit_start", handler: ExtensionHandler<UnitStartEvent>): void;
 	on(event: "unit_end", handler: ExtensionHandler<UnitEndEvent>): void;
+	on(event: "phase_change", handler: ExtensionHandler<PhaseChangeEvent>): void;
 	on(event: "before_model_select", handler: ExtensionHandler<BeforeModelSelectEvent, BeforeModelSelectResult>): void;
 	on(event: "adjust_tool_set", handler: ExtensionHandler<AdjustToolSetEvent, AdjustToolSetResult>): void;
 	on(event: "bash_transform", handler: ExtensionHandler<BashTransformEvent, BashTransformEventResult>): void;

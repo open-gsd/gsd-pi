@@ -69,6 +69,7 @@ export type {
 	LsToolCallEvent,
 	MessageRenderer,
 	MessageRenderOptions,
+	PhaseChangeEvent,
 	ProviderConfig,
 	ProviderModelConfig,
 	ReadToolCallEvent,
