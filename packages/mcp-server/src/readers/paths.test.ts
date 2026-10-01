@@ -2,7 +2,7 @@
 
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -155,7 +155,9 @@ describe('reader path caches', () => {
       { id: 'T01', hasPlan: true, hasSummary: false, done: true },
     ]);
 
-    // Content-only edit: the directory mtime is unchanged, the plan mtime is not.
+    // Content-only edit: the directory mtime is unchanged, the plan mtime is
+    // not. Force a distinct mtime — CI filesystems have coarse timestamp
+    // granularity, so a quick rewrite alone may not advance it.
     writeFixture(gsdRoot, planRel, `# S01
 
 <tasks>
@@ -163,6 +165,7 @@ describe('reader path caches', () => {
 - [ ] **T02**: Contract checks
 </tasks>
 `);
+    utimesSync(join(gsdRoot, planRel), new Date(Date.now() + 10_000), new Date(Date.now() + 10_000));
     assert.deepEqual(findTaskFiles(gsdRoot, 'M002', 'S01'), [
       { id: 'T01', hasPlan: true, hasSummary: false, done: true },
       { id: 'T02', hasPlan: true, hasSummary: false, done: false },
