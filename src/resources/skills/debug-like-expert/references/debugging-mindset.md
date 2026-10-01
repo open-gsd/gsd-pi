@@ -6,12 +6,14 @@ Debugging is applied epistemology. You're investigating a system to discover tru
 **Special challenge**: When you're debugging code you wrote or modified, you're fighting your own mental model.
 
 **Why this is harder**:
+
 - You made the design decisions - they feel obviously correct
 - You remember your intent, not what you actually implemented
 - You see what you meant to write, not what's there
 - Familiarity breeds blindness to bugs
 
 **The trap**:
+
 - "I know this works because I implemented it correctly"
 - "The bug must be elsewhere - I designed this part"
 - "I tested this approach"
@@ -20,23 +22,27 @@ Debugging is applied epistemology. You're investigating a system to discover tru
 **The discipline**:
 
 **1. Treat your own code as foreign**
+
 - Read it as if someone else wrote it
 - Don't assume it does what you intended
 - Verify what it actually does, not what you think it does
 - Fresh eyes see bugs; familiar eyes see intent
 
 **2. Question your own design decisions**
+
 - "I chose approach X because..." - Was that reasoning sound?
 - "I assumed Y would..." - Have you verified Y actually does that?
 - Your implementation decisions are hypotheses, not facts
 
 **3. Admit your mental model might be wrong**
+
 - You built a mental model of how this works
 - That model might be incomplete or incorrect
 - The code's behavior is truth; your model is just a guess
 - Be willing to discover you misunderstood the problem
 
 **4. Prioritize code you touched**
+
 - If you modified 100 lines and something breaks
 - Those 100 lines are the prime suspects
 - Don't assume the bug is in the framework or existing code
@@ -46,6 +52,7 @@ Debugging is applied epistemology. You're investigating a system to discover tru
 ❌ "I implemented the auth flow correctly, the bug must be in the existing user service"
 
 ✅ "I implemented the auth flow. Let me verify each part:
+
    - Does login actually set the token? [test it]
    - Does the middleware actually validate it? [test it]
    - Does logout actually clear it? [test it]
@@ -65,11 +72,13 @@ This intellectual honesty is the difference between debugging for hours and find
 When debugging, return to foundational truths:
 
 **What do you know for certain?**
+
 - What have you directly observed (not assumed)?
 - What can you prove with a test right now?
 - What is speculation vs evidence?
 
 **What are you assuming?**
+
 - "This library should work this way" - Have you verified?
 - "The docs say X" - Have you tested that X actually happens?
 - "This worked before" - Can you prove when it worked and what changed?
@@ -130,6 +139,7 @@ Strip away everything you think you know. Build understanding from observable fa
 **Why it matters**: If you change multiple things at once, you don't know which one fixed (or broke) it.
 
 **In practice**:
+
 1. Make one change
 2. Test
 3. Observe result
@@ -145,6 +155,7 @@ Strip away everything you think you know. Build understanding from observable fa
 **Why it matters**: Skimming code causes you to miss crucial details. You see what you expect to see, not what's there.
 
 **In practice**:
+
 - Read entire functions, not just the "relevant" lines
 - Read imports and dependencies
 - Read configuration files completely
@@ -159,6 +170,7 @@ Strip away everything you think you know. Build understanding from observable fa
 **Why it matters**: Premature certainty stops investigation. "I don't know" is a position of strength.
 
 **In practice**:
+
 - "I don't know why this fails" - Good. Now you can investigate.
 - "It must be X" - Dangerous. You've stopped thinking.
 
@@ -213,18 +225,21 @@ This isn't failure. This is professionalism.
 The best debuggers have deep humility about their mental models:
 
 **They know**:
+
 - Their understanding of the system is incomplete
 - Documentation can be wrong or outdated
 - Their memory of "how this works" may be faulty
 - The system's behavior is the only truth
 
 **They don't**:
+
 - Trust their first instinct
 - Assume anything works as designed
 - Skip verification steps
 - Declare victory without proof
 
 **They ask**:
+
 - "What am I missing?"
 - "What am I wrong about?"
 - "What haven't I tested?"
@@ -235,12 +250,14 @@ The best debuggers have deep humility about their mental models:
 Debugging is a craft that improves with practice:
 
 **Novice debuggers**:
+
 - Try random things hoping something works
 - Skip reading code carefully
 - Don't test their hypotheses
 - Declare success too early
 
 **Expert debuggers**:
+
 - Form hypotheses explicitly
 - Test hypotheses systematically
 - Read code like literature

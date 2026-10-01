@@ -245,6 +245,7 @@ Run `/gsd doctor --fix` to clean up automatically.
 ### Stale Detection
 
 Sessions are considered stale when:
+
 - The worker PID is no longer running
 - The last heartbeat is older than the worker TTL
 - A milestone lease is released or expires without a matching active heartbeat

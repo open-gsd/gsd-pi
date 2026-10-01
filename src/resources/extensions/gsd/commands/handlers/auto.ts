@@ -5,9 +5,11 @@ import { resolve } from "node:path";
 
 import { enableDebug } from "../../debug-logger.js";
 import { getAutoDashboardData, isAutoActive, isAutoPaused, pauseAuto, startAutoDetached, stopAuto, stopAutoRemote } from "../../auto.js";
+import { acknowledgeWedgeStepMode } from "../../auto-liveness-backstop.js";
 import { handleRate } from "../../commands-rate.js";
 import { notifyPreferenceDiagnostics } from "../../preferences-diagnostics.js";
 import { setSessionModelOverride } from "../../session-model-override.js";
+import { normalizeRealPath } from "../../paths.js";
 import { guardRemoteSession, projectRoot } from "../context.js";
 import { findMilestoneIds } from "../../milestone-ids.js";
 
@@ -75,6 +77,18 @@ export function parseResumeWedgeFlag(input: string): { resumeWedgeId: string | n
   if (!match) return { resumeWedgeId: null, rest: input };
   const rest = input.replace(match[0], "").replace(/\s+/g, " ").trim();
   return { resumeWedgeId: match[1], rest };
+}
+
+/**
+ * Parse `/gsd wedge ack <id>` (#2159) — the step-mode acknowledgment surface
+ * for a liveness wedge whose blocker has cleared, without re-entering
+ * auto-mode (ADR-047 §5 explicit ack).
+ */
+export function parseWedgeAckArgs(input: string): { wedgeId: string | null; usage: boolean } {
+  const rest = input.replace(/^wedge\b/, "").trim();
+  const match = rest.match(/^ack\s+(\S+)/);
+  if (!match) return { wedgeId: null, usage: true };
+  return { wedgeId: match[1]!, usage: false };
 }
 
 /**
@@ -192,6 +206,39 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
     } else {
       startAutoDetached(ctx, pi, basePath, verboseMode, { resumeWedgeId });
     }
+    return true;
+  }
+
+  if (trimmed === "wedge" || /^wedge\s/.test(trimmed)) {
+    // ADR-047 §5 (#2159): acknowledge a liveness wedge whose blocker has
+    // cleared without re-entering auto-mode — the ack surface for
+    // step-by-step workflows, where --resume-wedge's auto re-entry is
+    // unwanted. Refuses while the originating guard still blocks.
+    const { wedgeId, usage } = parseWedgeAckArgs(trimmed);
+    if (usage || !wedgeId) {
+      ctx.ui.notify("Usage: /gsd wedge ack <wedge-id> — acknowledge a liveness wedge whose blocker has cleared. Open wedge ids appear in the wedge trip/refusal notice and `/gsd forensics`.", "error");
+      return true;
+    }
+    if (!(await guardRemoteSession(ctx, pi))) return true;
+    const basePath = projectRoot();
+    const { ensureDbOpen } = await import("../../bootstrap/dynamic-tools.js");
+    if (!(await ensureDbOpen(basePath))) {
+      ctx.ui.notify(
+        "Auto-mode blocked — liveness backstop unavailable: workflow database could not be opened. Run `/gsd doctor --fix` before retrying.",
+        "error",
+      );
+      return true;
+    }
+    const scopeId = normalizeRealPath(basePath) || basePath;
+    const ack = await acknowledgeWedgeStepMode(scopeId, wedgeId);
+    if (!ack.ok) {
+      ctx.ui.notify(`Cannot acknowledge wedge ${wedgeId}: ${ack.reason}`, "error");
+      return true;
+    }
+    ctx.ui.notify(
+      `Wedge ${wedgeId} acknowledged — auto-mode re-entry is permitted. If the underlying condition is unchanged, the wedge will re-trip on the next identical outcome.`,
+      "info",
+    );
     return true;
   }
 

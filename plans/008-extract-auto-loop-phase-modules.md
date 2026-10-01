@@ -42,6 +42,7 @@ Relevant excerpt from `auto/phases.ts:1-10`:
 ```
 
 Repo conventions:
+
 - Extension-first; keep core lean.
 - Behavior-neutral refactors must pass the existing test suite.
 - Use the existing discriminated-result types (`PhaseResult`, `DispatchDecision`, etc.).
@@ -65,6 +66,7 @@ Repo conventions:
 ## Scope
 
 **In scope**:
+
 - `src/resources/extensions/gsd/auto/phases.ts` — extract functions into focused modules; keep as a thin compatibility shim.
 - New modules:
   - `src/resources/extensions/gsd/auto/pre-dispatch.ts` — `runPreDispatch` and pre-dispatch guards.
@@ -76,6 +78,7 @@ Repo conventions:
 - `src/resources/extensions/gsd/auto/orchestrator.ts` — update imports if it directly calls extracted functions.
 
 **Out of scope**:
+
 - Changing auto-loop behavior or recovery policy.
 - Re-seating the Auto Closeout adapter behind `closeUnit` (move helpers into the new `closeout.ts` module but keep behavior).
 - Refactoring `auto-dispatch.ts`, `auto-worktree.ts`, or the orchestrator beyond import updates.
@@ -105,6 +108,7 @@ Before starting, confirm that plans 001, 002, and 003 are DONE in `plans/README.
 Run the auto-loop and orchestrator tests on a clean checkout to establish a baseline.
 
 **Verify**:
+
 - `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/auto-loop.test.ts` exits 0.
 - `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/auto-orchestrator.test.ts` exits 0.
 
@@ -162,6 +166,7 @@ Run the auto-loop and orchestrator tests on a clean checkout to establish a base
 ### Step 7: Thin `auto/phases.ts` to a compatibility shim
 
 After extraction, `auto/phases.ts` should:
+
 - Import the five new modules.
 - Re-export the public functions with identical names/signatures.
 - Keep any module-level constants or types that other files import from `auto/phases.js` to avoid breaking external callers.
@@ -181,6 +186,7 @@ Do not change call signatures.
 ### Step 9: Run focused tests after each module extraction
 
 After each step 2-6, run:
+
 - `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/auto-loop.test.ts`
 - `node --import ./src/resources/extensions/gsd/tests/resolve-ts.mjs --experimental-strip-types --test src/resources/extensions/gsd/tests/auto-orchestrator.test.ts`
 
@@ -193,6 +199,7 @@ If a test fails, fix it before moving to the next extraction. The goal is behavi
 Run the full PR verification suite.
 
 **Verify**:
+
 - `pnpm run typecheck:extensions` exits 0.
 - `pnpm run test:unit` exits 0.
 - `pnpm run verify:pr` exits 0.
@@ -221,6 +228,7 @@ Run the full PR verification suite.
 ## STOP conditions
 
 Stop and report back if:
+
 - A prerequisite plan is not DONE.
 - Extracting a function changes its signature or behavior and tests fail.
 - A circular dependency appears between the new modules.

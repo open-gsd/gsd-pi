@@ -1,20 +1,24 @@
 # Token Optimization Suite — Implementation Plan
 
 ## Overview
+
 Comprehensive token optimization across the GSD dispatch pipeline. Six phases targeting
 prompt caching, accurate token counting, structured data compression, prompt compression,
 semantic context selection, and context distillation.
 
 ## Phase 1: Prompt Cache Optimization (P0)
+
 **Goal:** Restructure dispatch prompt assembly for maximum cache hit rates.
 
 ### What
+
 Anthropic prompt caching gives 90% savings on cached input tokens. Currently, GSD places
 `cache_control` on system prompts and the last user message (in `packages/pi-ai/src/providers/anthropic.ts`).
 But dispatch prompts in `auto-prompts.ts` mix static and dynamic content throughout,
 reducing cache prefix reuse.
 
 ### Tasks
+
 1. **Create `prompt-cache-optimizer.ts`** — module that separates prompt content into
    cacheable (static) and dynamic (per-task) sections.
    - Static: templates, plans, decisions, roadmap, project context
@@ -32,6 +36,7 @@ reducing cache prefix reuse.
    Already tracks `cacheRead` and `cacheWrite` tokens — add derived percentage.
 
 ### Files Modified
+
 - `src/resources/extensions/gsd/prompt-cache-optimizer.ts` (NEW)
 - `src/resources/extensions/gsd/auto-prompts.ts` (modify builders)
 - `src/resources/extensions/gsd/metrics.ts` (add cache hit rate)
@@ -40,13 +45,16 @@ reducing cache prefix reuse.
 ---
 
 ## Phase 2: Accurate Multi-Provider Token Counting (P1)
+
 **Goal:** Replace GPT-4o-only tiktoken with provider-aware counting.
 
 ### What
+
 `token-counter.ts` uses `tiktoken` with `gpt-4o` encoder for ALL providers. Claude uses a
 different tokenizer, so counts can be off by 15-25%. This causes budget under/over-allocation.
 
 ### Tasks
+
 1. **Add provider-aware counting** — extend `countTokens()` to accept an optional
    `provider` parameter:
    - `anthropic`: Use `@anthropic-ai/sdk` `messages.countTokens()` for exact counts
@@ -63,6 +71,7 @@ different tokenizer, so counts can be off by 15-25%. This causes budget under/ov
    on the configured execution model's provider.
 
 ### Files Modified
+
 - `src/resources/extensions/gsd/token-counter.ts` (extend)
 - `src/resources/extensions/gsd/context-budget.ts` (provider-aware ratio)
 - `src/resources/extensions/gsd/tests/token-counter.test.ts` (NEW)
@@ -71,14 +80,17 @@ different tokenizer, so counts can be off by 15-25%. This causes budget under/ov
 ---
 
 ## Phase 3: Structured Data Compression with TOON (P1)
+
 **Goal:** Reduce token usage for structured data blocks in prompts by 30-60%.
 
 ### What
+
 Decisions registers, requirements lists, task plans, and metrics are passed as verbose
 markdown tables. TOON (Token-Oriented Object Notation) removes braces/brackets/quotes,
 using indentation and tabular patterns instead.
 
 ### Tasks
+
 1. **Add `@toon-format/toon` dependency** — install the npm package.
 
 2. **Create `structured-data-formatter.ts`** — module that converts structured data to
@@ -95,6 +107,7 @@ using indentation and tabular patterns instead.
    (backward compatible).
 
 ### Files Modified
+
 - `package.json` (add dependency)
 - `src/resources/extensions/gsd/structured-data-formatter.ts` (NEW)
 - `src/resources/extensions/gsd/context-store.ts` (add TOON variants)
@@ -104,13 +117,16 @@ using indentation and tabular patterns instead.
 ---
 
 ## Phase 4: Prompt Compression via LLMLingua-2 (P2)
+
 **Goal:** Compress large context blocks 3-5x while preserving semantic meaning.
 
 ### What
+
 When context exceeds budget, instead of dropping entire sections (current behavior),
 compress them using LLMLingua-2. This preserves information density while reducing tokens.
 
 ### Tasks
+
 1. **Create `prompt-compressor.ts`** — wrapper around compression logic:
    - `compressContext(text: string, targetRatio: number): Promise<string>`
    - Supports configurable compression ratios (2x for light, 5x for aggressive)
@@ -128,6 +144,7 @@ compress them using LLMLingua-2. This preserves information density while reduci
    - Budget profile auto-enables compress for `budget` and `balanced`
 
 ### Files Modified
+
 - `src/resources/extensions/gsd/prompt-compressor.ts` (NEW)
 - `src/resources/extensions/gsd/context-budget.ts` (integrate)
 - `src/resources/extensions/gsd/preferences.ts` (add compression_strategy)
@@ -135,6 +152,7 @@ compress them using LLMLingua-2. This preserves information density while reduci
 - `src/resources/extensions/gsd/tests/prompt-compressor.test.ts` (NEW)
 
 ### Note
+
 LLMLingua-2 JS port (`@atjsh/llmlingua-2`) is experimental. We'll implement the interface
 with a fallback path so the feature degrades gracefully. If the JS port isn't stable enough,
 we can use the Compresso REST API as an alternative, or implement a simpler heuristic
@@ -144,13 +162,16 @@ common programming terms).
 ---
 
 ## Phase 5: Semantic Context Selection (P2)
+
 **Goal:** Only include semantically relevant content in prompts instead of entire files.
 
 ### What
+
 `diff-context.ts` currently selects recently-changed files. `auto-prompts.ts` inlines
 entire files. For large files, this wastes tokens on irrelevant sections.
 
 ### Tasks
+
 1. **Create `semantic-chunker.ts`** — wrapper for semantic text splitting:
    - `chunkByRelevance(content: string, query: string, maxChunks: number): string[]`
    - Splits content into semantic chunks (function boundaries, class boundaries, etc.)
@@ -170,6 +191,7 @@ entire files. For large files, this wastes tokens on irrelevant sections.
    - Auto-enabled for `budget` and `balanced` profiles
 
 ### Files Modified
+
 - `src/resources/extensions/gsd/semantic-chunker.ts` (NEW)
 - `src/resources/extensions/gsd/auto-prompts.ts` (integrate with inlineFile)
 - `src/resources/extensions/gsd/preferences.ts` (add context_selection)
@@ -179,13 +201,16 @@ entire files. For large files, this wastes tokens on irrelevant sections.
 ---
 
 ## Phase 6: Summary Distillation (P3)
+
 **Goal:** Produce tighter dependency summaries when budget is constrained.
 
 ### What
+
 `inlineDependencySummaries()` currently concatenates full summaries from prior slices.
 When a slice has many dependencies, this consumes a large portion of the context budget.
 
 ### Tasks
+
 1. **Create `summary-distiller.ts`** — reduces multiple summaries to a condensed form:
    - `distillSummaries(summaries: string[], budgetChars: number): string`
    - Extracts key facts: files modified, decisions made, patterns established
@@ -199,6 +224,7 @@ When a slice has many dependencies, this consumes a large portion of the context
    - Budget pressure is above 50%
 
 ### Files Modified
+
 - `src/resources/extensions/gsd/summary-distiller.ts` (NEW)
 - `src/resources/extensions/gsd/auto-prompts.ts` (integrate with inlineDependencySummaries)
 - `src/resources/extensions/gsd/tests/summary-distiller.test.ts` (NEW)
@@ -206,6 +232,7 @@ When a slice has many dependencies, this consumes a large portion of the context
 ---
 
 ## Implementation Order
+
 1. Phase 2 (token counting) — foundation, needed by other phases
 2. Phase 1 (cache optimization) — highest ROI
 3. Phase 3 (TOON format) — quick win on structured data
@@ -214,6 +241,7 @@ When a slice has many dependencies, this consumes a large portion of the context
 6. Phase 4 (prompt compression) — depends on 3rd party stability
 
 ## Testing Strategy
+
 - Each phase adds dedicated unit tests
 - Existing tests must continue to pass (no regressions)
 - Token savings tests validate measurable reduction

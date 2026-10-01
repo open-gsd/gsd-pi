@@ -14,6 +14,7 @@ Comprehensive UI/UX best practices guide for web interfaces. Contains 152 rules 
 ## When to Apply
 
 Reference these guidelines when:
+
 - Implementing or reviewing animations (CSS transitions, Motion/Framer Motion)
 - Choosing between springs, easing curves, or no animation
 - Working with AnimatePresence and exit animations
@@ -244,6 +245,7 @@ rules/type-tabular-nums-for-data.md
 ```
 
 Each rule file contains:
+
 - Brief explanation of why it matters
 - Incorrect code example with explanation
 - Correct code example with explanation

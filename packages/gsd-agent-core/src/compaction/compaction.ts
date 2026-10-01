@@ -133,20 +133,30 @@ export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 /**
  * Calculate prompt-side context tokens from usage.
  *
- * Providers can normalize cumulative SDK usage into `totalTokens`, so prefer it
- * when present. Completion/output tokens are not part of the reusable
- * conversation context, so they are excluded — `totalTokens` includes them
- * (direct-API providers report `input + output + cacheRead + cacheWrite`; the
- * claude-code adapter reports `input + output + cacheWrite`), hence the
- * subtraction. When `totalTokens` is unavailable, fall back to the prompt-side
- * component sum.
+ * Adapters whose terminal usage is cumulative across an internal loop
+ * (claude-code) attach `liveContextTokens` — the prompt-side context of the
+ * final per-call API response — which is the closest measure of live context
+ * and is preferred when present. (`totalTokens - output` is NOT a live-context
+ * proxy for such adapters: the SDK sums `input` and `cacheWrite` across the
+ * same internal loop as `cacheRead`, so the difference over- or under-reports
+ * depending on cache state.)
  *
+ * Otherwise, providers that normalize per-request usage into `totalTokens`:
+ * completion/output tokens are not part of the reusable conversation context,
+ * so they are excluded — `totalTokens` includes them (direct-API providers
+ * report `input + output + cacheRead + cacheWrite`; the claude-code adapter
+ * reports `input + output + cacheWrite`), hence the subtraction. When
+ * `totalTokens` is unavailable, fall back to the prompt-side component sum.
+ *
+ * - With `liveContextTokens > 0`: returned as-is.
  * - Direct-API: `totalTokens - output === input + cacheRead + cacheWrite`
  *   (behavior-preserving, token-for-token, vs. the fallback).
- * - claude-code: `totalTokens - output === input + cacheWrite`, the
- *   de-cumulated live-context proxy (the cumulative `cacheRead` is excluded).
+ * - claude-code without `liveContextTokens` (e.g. sessions persisted before
+ *   the field existed): `totalTokens - output === input + cacheWrite`, the
+ *   legacy de-cumulated proxy.
  */
 export function calculateContextTokens(usage: Usage): number {
+	if (usage.liveContextTokens && usage.liveContextTokens > 0) return usage.liveContextTokens;
 	if (usage.totalTokens > 0) return Math.max(0, usage.totalTokens - usage.output);
 	return usage.input + usage.cacheRead + usage.cacheWrite;
 }

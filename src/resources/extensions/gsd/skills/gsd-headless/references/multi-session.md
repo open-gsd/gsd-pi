@@ -18,6 +18,7 @@ GSD uses **file-based IPC** — no sockets or ports. All coordination happens th
 ## Worker Isolation
 
 Each worker gets:
+
 1. **`GSD_MILESTONE_LOCK=M00X`** — state derivation only sees this milestone
 2. **`GSD_PARALLEL_WORKER=1`** — prevents nested parallel spawns
 3. **Own git worktree** at `.gsd/worktrees/M00X/` — branch `milestone/M00X`
@@ -114,6 +115,7 @@ send_signal M003 resume
 ## Budget Enforcement
 
 Use `gsd headless query` for instant aggregate cost:
+
 ```bash
 TOTAL=$(gsd headless query | jq -r '.cost.total')
 CEILING=50.00
@@ -129,6 +131,7 @@ fi
 ## Stale Session Cleanup
 
 A session is stale when:
+
 - PID is dead (`kill -0 $pid` fails), OR
 - `lastHeartbeat` is older than 30 seconds
 

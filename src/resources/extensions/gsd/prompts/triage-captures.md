@@ -48,7 +48,7 @@ Classify each capture as one of:
    - Your proposed classification
    - Your rationale
    - If applicable, which files would be affected
-   
+
    Auto-confirm **note** and **defer** because they are low-impact.
    Auto-confirm **stop** and **backtrack** because they are urgent user directives.
    For captures classified as **quick-task**, **inject**, or **replan**, ask the user to confirm or choose a different classification. **Non-bypassable:** If `ask_user_questions` fails, errors, or the user does not respond, you MUST re-ask — never auto-confirm these classifications without explicit user approval.

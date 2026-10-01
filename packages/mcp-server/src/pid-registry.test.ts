@@ -390,6 +390,52 @@ describe('registerMcpInstance', () => {
     assert.equal(readOwnEntry(registryPath, tmp)?.pid, 9200);
   });
 
+  test('refusal for a live unverified holder carries pid, cwd, startedAt, liveness, and the remedy', () => {
+    // Regression for #2361: a healthy holder whose cwd is a project subdirectory
+    // (and whose command line omits the project root) can never be verified, so
+    // the refusal must name the blocking process and the way out instead of
+    // leaving the operator to out-of-band process archaeology.
+    writeFileSync(registryPath, JSON.stringify({
+      [tmp]: { pid: 9300, projectDir: tmp, startedAt: '2026-01-01T00:00:00.000Z' },
+    }));
+
+    const signals: Array<{ pid: number; signal: NodeJS.Signals | 0 | undefined }> = [];
+    const outcome = registerMcpInstance(tmp, registryPath, {
+      kill(pid, signal) {
+        signals.push({ pid, signal });
+      },
+      getProcessCommand() {
+        return 'node /usr/local/bin/gsd-mcp-server';
+      },
+      // Live holder rooted in a project subdirectory; the command omits the
+      // project path, so identity verification fails and startup is refused.
+      getProcessCwd() {
+        return join(tmp, 'subdir');
+      },
+      getProcessStartTime() {
+        return Date.parse('2025-12-31T23:59:59.000Z');
+      },
+    });
+
+    assert.ok(
+      typeof outcome === 'object' && outcome !== null && outcome.refused,
+      'expected a refusal result for the unverified holder',
+    );
+    assert.match(outcome.detail, /holder pid=9300/);
+    assert.ok(
+      outcome.detail.includes(`cwd=${join(tmp, 'subdir')}`),
+      `expected refusal detail to name the holder cwd, got: ${outcome.detail}`,
+    );
+    assert.match(outcome.detail, /startedAt=2026-01-01T00:00:00\.000Z/);
+    assert.match(outcome.detail, /still running/);
+    assert.match(outcome.detail, /kill pid 9300/);
+    assert.match(outcome.detail, /GSD_MCP_CLIENT_MANAGED=1/);
+
+    // Probe only: the unverified holder is never signalled and keeps its entry.
+    assert.ok(signals.every((s) => s.pid === 9300 && s.signal === 0));
+    assert.equal(readOwnEntry(registryPath, tmp)?.pid, 9300);
+  });
+
   test('terminates a matching Windows local MCP command path when cwd is unavailable', () => {
     const projectDir = 'C:\\workspace\\project';
     writeFileSync(registryPath, JSON.stringify({

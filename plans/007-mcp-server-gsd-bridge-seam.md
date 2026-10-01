@@ -40,6 +40,7 @@ A full bridge would cover 17+ distinct internal modules — too large for one sa
 - `packages/mcp-server/tsconfig.json` sets `rootDir: "./src"`, so a static `import type *` from `src/resources/extensions/gsd/...` causes `TS6059` errors during `build:mcp-server`.
 
 Repo conventions:
+
 - Extension-first architecture; packages consume each other through declared exports.
 - Use TypeScript strict mode and NodeNext resolution.
 - Prefer small, typed seams over `any`.
@@ -57,11 +58,13 @@ Repo conventions:
 ## Scope
 
 **In scope**:
+
 - `packages/mcp-server/src/workflow-tools.ts` — replace imports from the 9 core modules listed above with imports from the bridge.
 - `src/resources/extensions/gsd/mcp-bridge.ts` — new module re-exporting the bridged symbols.
 - `packages/mcp-server/src/workflow-tools.test.ts` — update direct GSD imports to use the bridge.
 
 **Out of scope**:
+
 - Bridging tool-specific imports (`tools/plan-task.js`, `tools/skip-slice.js`, `tools/exec-tool.js`, etc.) — phase 2.
 - Refactoring GSD extension internals.
 - Changing MCP server behavior or tool surface.
@@ -77,6 +80,7 @@ Repo conventions:
 ### Step 1: Inventory the core imports
 
 Open `packages/mcp-server/src/workflow-tools.ts` and locate every `importLocalModule` call targeting these 9 modules:
+
 - `bootstrap/write-gate.js`
 - `bootstrap/dynamic-tools.js`
 - `gsd-db.js`
@@ -203,6 +207,7 @@ For each inventory entry, change the call site to go through `importBridgeModule
 Examples:
 
 Write-gate candidate path:
+
 ```ts
 // Before:
 ...buildBridgeImportCandidates("../../../src/resources/extensions/gsd/bootstrap/write-gate.js")
@@ -212,6 +217,7 @@ Write-gate candidate path:
 ```
 
 Dynamic DB bootstrap:
+
 ```ts
 // Before:
 const { ensureDbOpen } = await importLocalModule<any>(
@@ -225,6 +231,7 @@ const { ensureDbOpen } = bridge;
 ```
 
 GSD DB helpers:
+
 ```ts
 // Before:
 const { getAllMilestones } = await importLocalModule<any>("../../../src/resources/extensions/gsd/gsd-db.js");
@@ -273,6 +280,7 @@ Then add it to `package.json` scripts. Find the `verify:pi-boundary` script and 
 Run typecheck, MCP server build, MCP server tests, and the unit suite.
 
 **Verify**:
+
 - `pnpm run typecheck:extensions` exits 0 (or only pre-existing unrelated errors).
 - `pnpm run build:mcp-server` exits 0.
 - `pnpm --filter @opengsd/mcp-server run test` exits 0.
@@ -301,6 +309,7 @@ Run typecheck, MCP server build, MCP server tests, and the unit suite.
 ## STOP conditions
 
 Stop and report back if:
+
 - A circular dependency prevents creating `mcp-bridge.ts`.
 - A bridged symbol cannot be re-exported without exposing GSD internals (e.g., it depends on a private type).
 - `build:mcp-server` fails due to package resolution after using the local interface approach.

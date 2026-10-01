@@ -25,6 +25,7 @@ Before your first action, print this banner verbatim in chat:
 3. If `.gsd/REQUIREMENTS.md` exists, read it as the working set.
 
 **Shape-dependent cadence:**
+
 - **`simple`**: one fast pass. Extract from PROJECT.md, ask 1-2 plain-text clarifiers only when class/status is ambiguous, then persist requirements through the DB-backed tools.
 - **`complex`**: multi-round questioning with structured 3-4-option questions where alternatives matter.
 
@@ -35,6 +36,7 @@ Before your first action, print this banner verbatim in chat:
 ### Before your first question round
 
 Ground your requirements in **PROJECT.md, any existing REQUIREMENTS.md, and the Preparation Context snapshot** — those are authoritative for what already exists (already-built work is `Validated` or `Active`). **Do not survey the codebase**; read a specific file only when a requirement's scope genuinely hinges on it.
+
 - Cross-check milestone sequence; every milestone needs at least one owned Active requirement.
 - Use `resolve_library` / `get_library_docs` for libraries that imply capabilities.
 - Identify domain table-stakes only when PROJECT.md confidence is low.

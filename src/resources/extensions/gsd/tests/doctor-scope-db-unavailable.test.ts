@@ -467,6 +467,14 @@ test("checkEngineHealth reads canonical reopen events from worktree bases", asyn
     "2026-01-01T00:00:00.000Z",
     "2026-01-01T00:00:01.000Z",
   );
+  // #2398: the doctor gate requires the completion receipt before the reopen
+  // comparison — seed it so this test still exercises the reopen exemption.
+  appendEvent(base, {
+    cmd: "complete-milestone",
+    params: { milestoneId: "M001" },
+    ts: "2026-01-01T00:00:00.500Z",
+    actor: "agent",
+  });
   appendEvent(base, {
     cmd: "reopen-milestone",
     params: { milestoneId: "M001" },
@@ -505,6 +513,14 @@ test("checkEngineHealth treats explicit reopen as authoritative when dispatch ti
       unit_type, unit_id, status, attempt_n, started_at, ended_at
     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run("trace-1", "worker-1", 1, "M001", "complete-milestone", "M001", "completed", 1, "", "");
+  // #2398: with dispatch timestamps missing, the completion event itself is
+  // the proof — seed it so this test still exercises the reopen exemption.
+  appendEvent(base, {
+    cmd: "complete-milestone",
+    params: { milestoneId: "M001" },
+    ts: "2026-01-01T00:00:01.000Z",
+    actor: "agent",
+  });
   appendEvent(base, {
     cmd: "reopen-milestone",
     params: { milestoneId: "M001" },
@@ -519,6 +535,106 @@ test("checkEngineHealth treats explicit reopen as authoritative when dispatch ti
     issues.some((issue) => issue.code === "completed_milestone_reopened"),
     false,
     "explicit reopen should exempt reopened milestone even when completion dispatch timestamps are absent",
+  );
+});
+
+test("checkEngineHealth still flags completion history backed by a covering milestone.completed event (#2398)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-completion-receipt-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+
+  openDatabase(join(gsdDir, "gsd.db"));
+  insertMilestone({ id: "M001", title: "Reopened", status: "active" });
+  const db = _getAdapter()!;
+  db.prepare(
+    `INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("worker-1", "localhost", 1, "2026-01-01T00:00:00.000Z", "test", "2026-01-01T00:00:00.000Z", "stopped", base);
+  db.prepare(
+    `INSERT INTO unit_dispatches (
+      trace_id, worker_id, milestone_lease_token, milestone_id,
+      unit_type, unit_id, status, attempt_n, started_at, ended_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "trace-1",
+    "worker-1",
+    1,
+    "M001",
+    "complete-milestone",
+    "M001",
+    "completed",
+    1,
+    "2026-01-01T00:00:00.000Z",
+    "2026-01-01T00:00:01.000Z",
+  );
+  // Receipt minted inside the closeout: after started_at, before ended_at.
+  appendEvent(base, {
+    cmd: "complete-milestone",
+    params: { milestoneId: "M001" },
+    ts: "2026-01-01T00:00:00.500Z",
+    actor: "agent",
+  });
+
+  const issues: any[] = [];
+  await checkEngineHealth(base, issues, []);
+
+  assert.equal(
+    issues.some((issue) => issue.code === "completed_milestone_reopened"),
+    true,
+    "genuine completion history without an explicit reopen must still be flagged",
+  );
+});
+
+test("checkEngineHealth ignores a completion receipt older than the dispatch row (#2398)", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-stale-receipt-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const gsdDir = join(base, ".gsd");
+  mkdirSync(gsdDir, { recursive: true });
+
+  openDatabase(join(gsdDir, "gsd.db"));
+  insertMilestone({ id: "M001", title: "Active", status: "active" });
+  const db = _getAdapter()!;
+  db.prepare(
+    `INSERT INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run("worker-1", "localhost", 1, "2026-01-01T00:00:00.000Z", "test", "2026-01-01T00:00:00.000Z", "stopped", base);
+  db.prepare(
+    `INSERT INTO unit_dispatches (
+      trace_id, worker_id, milestone_lease_token, milestone_id,
+      unit_type, unit_id, status, attempt_n, started_at, ended_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(
+    "trace-1",
+    "worker-1",
+    1,
+    "M001",
+    "complete-milestone",
+    "M001",
+    "completed",
+    1,
+    "2026-01-01T02:00:00.000Z",
+    "2026-01-01T02:00:01.000Z",
+  );
+  // A receipt from an earlier completion cycle predates this receiptless row.
+  appendEvent(base, {
+    cmd: "complete-milestone",
+    params: { milestoneId: "M001" },
+    ts: "2026-01-01T00:00:30.000Z",
+    actor: "agent",
+  });
+
+  const issues: any[] = [];
+  await checkEngineHealth(base, issues, []);
+
+  assert.equal(
+    issues.some((issue) => issue.code === "completed_milestone_reopened"),
+    false,
+    "a receipt that predates the dispatch row is closeout debris, not completion history",
   );
 });
 

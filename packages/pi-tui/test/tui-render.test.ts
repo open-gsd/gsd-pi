@@ -136,10 +136,10 @@ describe("TUI Kitty image cleanup", () => {
 
 		const writes = terminal.getWrites();
 		const deleteIndex = writes.indexOf(deleteKittyImage(77));
-		const clearIndex = writes.indexOf("\x1b[2J");
+		const eraseIndex = writes.indexOf("\x1b[2K");
 		assert.ok(deleteIndex >= 0, "previous image should be deleted during full redraw");
-		assert.ok(clearIndex >= 0, "full redraw should clear the screen");
-		assert.ok(deleteIndex < clearIndex, "old image should be deleted before the screen is cleared");
+		assert.ok(eraseIndex >= 0, "full redraw should erase lines (#2415: per-line erase, not \\x1b[2J)");
+		assert.ok(deleteIndex < eraseIndex, "old image should be deleted before the screen is erased");
 
 		tui.stop();
 	});
@@ -422,12 +422,16 @@ describe("TUI mid-buffer reflow", () => {
 	});
 });
 
-describe("TUI full repaint scrollback safety (issue #2307)", () => {
+describe("TUI full repaint scrollback safety (issues #2307 / #2415)", () => {
 	// A transcript taller than the screen has a committed scrollback prefix.
-	// \x1b[2J can only erase the visible screen, so a clean repaint that rewrites
-	// the transcript from its first row scrolls the terminal and re-commits the
-	// flushed prefix as duplicates (issue #2307). Repaints must touch only the
-	// visible viewport once history has been flushed.
+	// A clean repaint that rewrites the transcript from its first row scrolls
+	// the terminal and re-commits the flushed prefix as duplicates (issue
+	// #2307), while one that erases in place below the flushed prefix destroys
+	// lines that were never written (issue #2415). Clean repaints therefore
+	// start at the flushed high-water mark: never above it (no duplicates),
+	// never erasing below it (no loss). A real width change re-wraps the
+	// transcript and invalidates the mark — there the tradeoff is explicit:
+	// loss-free, accepting one bounded re-commit of the prefix.
 
 	function tallLines(): string[] {
 		return ["Line 0", "MARKER", ...Array.from({ length: 10 }, (_, i) => `Line ${i + 2}`)];
@@ -486,7 +490,7 @@ describe("TUI full repaint scrollback safety (issue #2307)", () => {
 		tui.stop();
 	});
 
-	it("width resize in a tall transcript repaints only the viewport", async () => {
+	it("width resize in a tall transcript repaints loss-free with bounded duplicates", async () => {
 		const { terminal, tui } = await setupTallTranscript();
 		assert.strictEqual(countMarker(terminal), 1);
 
@@ -495,8 +499,183 @@ describe("TUI full repaint scrollback safety (issue #2307)", () => {
 		await terminal.waitForRender();
 
 		assert.ok(tui.fullRedraws > redrawsBefore, "width change must still take the clean-repaint path");
-		assert.strictEqual(countMarker(terminal), 1, "resize repaint must not re-commit flushed scrollback");
+		// #2415: the re-wrapped lines correspond to nothing in scrollback, so
+		// the repaint re-emits the whole transcript — the pre-resize MARKER copy
+		// stays frozen above and the re-wrapped copy is committed exactly once.
+		// Loss-free beats duplicate-free here: a destroyed line is unrecoverable,
+		// a duplicated one is merely redundant.
+		assert.ok(countMarker(terminal) >= 1, "resize must never destroy flushed scrollback");
+		assert.strictEqual(countMarker(terminal), 2, "re-wrapped prefix re-commits at most once (bounded duplicates)");
 		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after resize");
+
+		tui.stop();
+	});
+
+	it("width change before a grown buffer is flushed keeps the top of the response recoverable", async () => {
+		// The #2415 reproducer: the response outgrows the terminal and a width
+		// change forces a clean repaint in the same frame. Nothing above the
+		// viewport was ever written, so the old \x1b[2J erase destroyed it —
+		// neither on screen nor in scrollback. The repaint must scroll the
+		// unflushed prefix into scrollback instead.
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["prompt", "assistant:"];
+		tui.start();
+		await terminal.waitForRender();
+		assert.strictEqual(
+			terminal.getScrollBuffer().filter((line) => line !== "").length,
+			2,
+			"sanity: short transcript is fully on screen, nothing flushed yet",
+		);
+
+		// Grow past the bottom and change width before any of it is flushed.
+		component.lines = ["prompt", "assistant:", ...Array.from({ length: 18 }, (_, i) => `response ${i}`)];
+		terminal.resize(60, 5);
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("assistant:"), `top of the response must survive in scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(scrollback.includes("response 0"), `unflushed prefix must scroll into scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("response 17"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		tui.stop();
+	});
+
+	it("mid-buffer reflow over unflushed growth keeps the unflushed prefix recoverable", async () => {
+		// The reflow fallback repaints when a change crosses the viewport top.
+		// If the buffer grew in the same frame, part of that prefix was never
+		// flushed — the repaint must start at the flushed mark, not the viewport
+		// top, or the never-written lines are erased by the old \x1b[2J.
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		// 3 lines on screen (height 5) — nothing flushed.
+		component.lines = ["Line 0", "Line 1", "Line 2"];
+		tui.start();
+		await terminal.waitForRender();
+
+		// Append past the bottom: 9 lines, differential append flushes 0..3.
+		component.lines = Array.from({ length: 9 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+		const bufferAfterAppend = terminal.getScrollBuffer();
+		const scrollbackAfterAppend = bufferAfterAppend.slice(0, bufferAfterAppend.length - 5);
+		assert.ok(
+			scrollbackAfterAppend.includes("Line 3"),
+			"sanity: append path flushed the prefix (Line 3 in scrollback)",
+		);
+		assert.ok(
+			!scrollbackAfterAppend.includes("Line 4"),
+			"sanity: Line 4 was appended but never flushed",
+		);
+
+		const redrawsBefore = tui.fullRedraws;
+		// Reword a line above the viewport top (index 1 < viewportTop 4) and
+		// grow the buffer in the same frame → clean repaint over unflushed lines.
+		const reflowed = ["Line 0", "Line 1 reflowed", "Line 2", ...Array.from({ length: 17 }, (_, i) => `Line ${i + 3}`)];
+		component.lines = reflowed;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assert.ok(tui.fullRedraws > redrawsBefore, "reflow crossing the viewport top must take the clean-repaint path");
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("Line 10"), `never-flushed lines must scroll into scrollback: ${JSON.stringify(scrollback)}`);
+		assert.strictEqual(
+			scrollback.filter((line) => line === "Line 3").length,
+			1,
+			"already-flushed lines must not be re-committed by the repaint",
+		);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 19"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		tui.stop();
+	});
+
+	it("forced render after an uncaptured width change still invalidates the mark", async () => {
+		// resize + requestRender(true) coalesce into one frame; the forced
+		// render's -1 sentinels overwrite previousWidth, so the flushed mark
+		// must carry its own record of which dimensions produced it.
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = ["prompt", "assistant:"];
+		tui.start();
+		await terminal.waitForRender();
+
+		component.lines = ["prompt", "assistant:", ...Array.from({ length: 18 }, (_, i) => `response ${i}`)];
+		terminal.resize(60, 5);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("assistant:"), `top of the response must survive in scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(scrollback.includes("response 0"), `unflushed prefix must scroll into scrollback: ${JSON.stringify(scrollback)}`);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("response 17"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		tui.stop();
+	});
+
+	it("height resize of a tall transcript repaints loss-free", async () => {
+		const { terminal, tui } = await setupTallTranscript();
+		assert.strictEqual(countMarker(terminal), 1);
+
+		terminal.resize(40, 8);
+		await terminal.waitForRender();
+
+		// The viewport/scrollback boundary itself moves on a height change, so
+		// the mark is invalidated: the transcript is re-committed exactly once
+		// (bounded duplicates) and nothing is destroyed.
+		assert.strictEqual(countMarker(terminal), 2, "height resize re-commits the prefix exactly once (bounded duplicates)");
+		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after height resize");
+
+		tui.stop();
+	});
+
+	it("shrink demotes the flushed mark so replacement content is not skipped", async () => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+
+		component.lines = Array.from({ length: 12 }, (_, i) => `Line ${i}`);
+		tui.start();
+		await terminal.waitForRender();
+
+		// Shrink: deletions shift the positional meaning of the mark.
+		component.lines = Array.from({ length: 6 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		// Replacement content grows past the bottom with a forced repaint: the
+		// demoted mark must not skip the new lines at the old boundary.
+		component.lines = [
+			...Array.from({ length: 6 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 6 }, (_, i) => `NEW ${i}`),
+		];
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const scrollback = terminal.getScrollBuffer();
+		assert.ok(scrollback.includes("NEW 0"), `replacement content must be recoverable: ${JSON.stringify(scrollback)}`);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("NEW 5"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
 
 		tui.stop();
 	});

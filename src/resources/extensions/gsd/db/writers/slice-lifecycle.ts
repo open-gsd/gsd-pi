@@ -174,12 +174,14 @@ export interface PlanReconciliationAuthorization {
 }
 
 const PLAN_RECONCILIATION_OPERATION = "workflow.slice.plan";
+const PLAN_RECONCILIATION_REPLAN_OPERATION = "workflow.slice.replan";
 const PLAN_RECONCILIATION_AUTHORIZATION_OPERATION = "workflow.slice.plan.authorization";
 
 /**
  * Mint the cancellation authorization the slice-completion invariant demands
- * for a task that a plan-slice re-dispatch omits (#2217). Runs inside the
- * `workflow.slice.plan` Domain Operation and stamps the Waiver with that
+ * for a task that a plan-slice re-dispatch omits (#2217) or that a replan
+ * removes (#2346/#2451). Runs inside the owning `workflow.slice.plan` /
+ * `workflow.slice.replan` Domain Operation and stamps the Waiver with that
  * operation's provenance; the matching waived Requirement Disposition is
  * recorded by `recordPlanReconciliationDisposition` in the fenced
  * authorization operation that follows, because the schema requires a Waiver
@@ -189,8 +191,14 @@ export function grantPlanReconciliationWaiver(
   context: Readonly<DomainOperationContext>,
   input: SliceIdentity & { taskId: string },
 ): PlanReconciliationAuthorization {
-  if (requireActiveDomainOperationContext(context) !== PLAN_RECONCILIATION_OPERATION) {
-    throw new Error("Plan reconciliation Waiver requires a workflow.slice.plan Domain Operation");
+  const activeOperation = requireActiveDomainOperationContext(context);
+  if (
+    activeOperation !== PLAN_RECONCILIATION_OPERATION &&
+    activeOperation !== PLAN_RECONCILIATION_REPLAN_OPERATION
+  ) {
+    throw new Error(
+      "Plan reconciliation Waiver requires a workflow.slice.plan or workflow.slice.replan Domain Operation",
+    );
   }
   const slice = {
     milestoneId: requireText(input.milestoneId, "milestoneId"),
@@ -275,6 +283,49 @@ export function grantPlanReconciliationWaiver(
     ":authority_epoch": context.resultingAuthorityEpoch,
   });
   return { taskId, requirementId, waiverId };
+}
+
+/**
+ * Read back the active plan-reconciliation Waiver for an omitted task, if one
+ * exists. The replan follow-up authorization operation re-derives its inputs
+ * through this reader so an exact retry after a lost or failed authorization
+ * operation still records the waived Disposition (#2346).
+ */
+export function readActivePlanReconciliationWaiver(
+  input: SliceIdentity & { taskId: string },
+): PlanReconciliationAuthorization | null {
+  const slice = {
+    milestoneId: requireText(input.milestoneId, "milestoneId"),
+    sliceId: requireText(input.sliceId, "sliceId"),
+  };
+  const taskId = requireText(input.taskId, "taskId");
+  const scope = `task:${slice.milestoneId}/${slice.sliceId}/${taskId}`;
+  const requirementId = `plan-omission:${slice.milestoneId}/${slice.sliceId}/${taskId}`;
+  const rows = getDb().prepare(`
+    SELECT waiver.waiver_id
+    FROM workflow_waivers waiver
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = waiver.lifecycle_id
+    WHERE lifecycle.item_kind = 'task'
+      AND lifecycle.milestone_id = :milestone_id
+      AND lifecycle.slice_id = :slice_id
+      AND lifecycle.task_id = :task_id
+      AND waiver.waiver_status = 'active'
+      AND waiver.scope = :scope
+      AND waiver.requirement_id = :requirement_id
+    ORDER BY waiver.project_revision DESC, waiver.waiver_id
+  `).all({
+    ":milestone_id": slice.milestoneId,
+    ":slice_id": slice.sliceId,
+    ":task_id": taskId,
+    ":scope": scope,
+    ":requirement_id": requirementId,
+  }) as Array<Record<string, unknown>>;
+  if (rows.length > 1) {
+    throw new Error("Found multiple active plan-reconciliation Waivers for one task");
+  }
+  if (rows.length === 0) return null;
+  return { taskId, requirementId, waiverId: String(rows[0]!["waiver_id"]) };
 }
 
 /**
@@ -422,7 +473,7 @@ function requireMatchingShadow(row: HierarchyRow, entity: string): void {
   }
 }
 
-function requireNoProgressedDownstreamSlices(slice: SliceIdentity): void {
+function requireNoProgressedDownstreamSlices(slice: SliceIdentity, projectId: string): void {
   const downstream = getDb().prepare(`
     WITH RECURSIVE reachable(slice_id) AS (
       SELECT candidate.id
@@ -446,6 +497,7 @@ function requireNoProgressedDownstreamSlices(slice: SliceIdentity): void {
      AND candidate.id = reachable.slice_id
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'slice'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = candidate.milestone_id
      AND lifecycle.slice_id = candidate.id
      AND lifecycle.task_id IS NULL
@@ -454,6 +506,7 @@ function requireNoProgressedDownstreamSlices(slice: SliceIdentity): void {
   `).all({
     ":milestone_id": slice.milestoneId,
     ":slice_id": slice.sliceId,
+    ":project_id": projectId,
   }) as Array<Record<string, unknown>>;
 
   const progressed = downstream.find((candidate) => {
@@ -581,10 +634,11 @@ export function completeSliceHierarchy(
     SELECT milestone.status AS legacy_status, lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM milestones milestone
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = milestone.id
+      ON lifecycle.item_kind = 'milestone' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = milestone.id
      AND lifecycle.slice_id IS NULL
     WHERE milestone.id = :milestone_id
-  `).get({ ":milestone_id": slice.milestoneId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!milestone) throw new SliceLifecycleValidationError(`milestone not found: ${slice.milestoneId}`);
   const milestoneStatus = normalizeLegacyLifecycleStatus(String(milestone["legacy_status"]));
   if (!milestoneStatus || milestoneStatus === "completed" || milestoneStatus === "cancelled") {
@@ -604,10 +658,11 @@ export function completeSliceHierarchy(
     SELECT slice.status AS legacy_status, lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM slices slice
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = slice.milestone_id
+      ON lifecycle.item_kind = 'slice' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = slice.milestone_id
      AND lifecycle.slice_id = slice.id AND lifecycle.task_id IS NULL
     WHERE slice.milestone_id = :milestone_id AND slice.id = :slice_id
-  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!target) throw new SliceLifecycleValidationError(`slice not found: ${slice.milestoneId}/${slice.sliceId}`);
   if (!target["lifecycle_id"] || !target["lifecycle_status"]) {
     throw new SliceLifecycleValidationError("Slice completion requires canonical Slice lifecycle authority");
@@ -628,11 +683,12 @@ export function completeSliceHierarchy(
            lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM tasks task
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task' AND lifecycle.milestone_id = task.milestone_id
+      ON lifecycle.item_kind = 'task' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = task.milestone_id
      AND lifecycle.slice_id = task.slice_id AND lifecycle.task_id = task.id
     WHERE task.milestone_id = :milestone_id AND task.slice_id = :slice_id
     ORDER BY task.sequence, task.id
-  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Array<Record<string, unknown>>;
+  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Array<Record<string, unknown>>;
   if (tasks.length === 0) throw new SliceLifecycleValidationError(`no tasks found for slice ${slice.sliceId}`);
 
   const completedTaskIds: string[] = [];
@@ -774,7 +830,7 @@ export function completeSliceHierarchy(
   };
 }
 
-function loadPlan(slice: SliceIdentity): {
+function loadPlan(slice: SliceIdentity, projectId: string): {
   slice: HierarchyRow;
   normalizedSliceStatus: CanonicalLifecycleStatus;
   tasks: PlannedTask[];
@@ -785,10 +841,11 @@ function loadPlan(slice: SliceIdentity): {
     FROM milestones milestone
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'milestone'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = milestone.id
      AND lifecycle.slice_id IS NULL
     WHERE milestone.id = :milestone_id
-  `).get({ ":milestone_id": slice.milestoneId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":project_id": projectId }) as Record<string, unknown> | undefined;
   if (!milestone) throw new SliceLifecycleValidationError(`milestone not found: ${slice.milestoneId}`);
   const milestoneStatus = normalizeLegacyLifecycleStatus(String(milestone["legacy_status"]));
   if (!milestoneStatus) throw new SliceLifecycleValidationError(`Milestone ${slice.milestoneId} has an unknown legacy status`);
@@ -814,6 +871,7 @@ function loadPlan(slice: SliceIdentity): {
     FROM slices slice
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'slice'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = slice.milestone_id
      AND lifecycle.slice_id = slice.id
      AND lifecycle.task_id IS NULL
@@ -821,6 +879,7 @@ function loadPlan(slice: SliceIdentity): {
   `).get({
     ":milestone_id": slice.milestoneId,
     ":slice_id": slice.sliceId,
+    ":project_id": projectId,
   }) as Record<string, unknown> | undefined;
   if (!sliceRow) throw new SliceLifecycleValidationError(`Slice ${slice.sliceId} not found in milestone ${slice.milestoneId}`);
   const target: HierarchyRow = {
@@ -844,6 +903,7 @@ function loadPlan(slice: SliceIdentity): {
     FROM tasks task
     LEFT JOIN workflow_item_lifecycles lifecycle
       ON lifecycle.item_kind = 'task'
+     AND lifecycle.project_id = :project_id
      AND lifecycle.milestone_id = task.milestone_id
      AND lifecycle.slice_id = task.slice_id
      AND lifecycle.task_id = task.id
@@ -852,6 +912,7 @@ function loadPlan(slice: SliceIdentity): {
   `).all({
     ":milestone_id": slice.milestoneId,
     ":slice_id": slice.sliceId,
+    ":project_id": projectId,
   }) as Array<Record<string, unknown>>;
   const tasks = taskRows.map((row): PlannedTask => {
     const taskId = String(row["task_id"]);
@@ -880,7 +941,13 @@ function loadPlan(slice: SliceIdentity): {
       ...task,
       normalizedLegacyStatus,
       running,
-      preserve: normalizedLegacyStatus === "completed" || normalizedLegacyStatus === "cancelled",
+      // #2451 Gap 1: `blocker-accepted` is terminal-without-proof (#2202) and
+      // has no `cancelled` transition edge, so it must be preserved like
+      // completed/cancelled tasks — in either vocabulary.
+      preserve: normalizedLegacyStatus === "completed" ||
+        normalizedLegacyStatus === "cancelled" ||
+        normalizedLegacyStatus === "blocker-accepted" ||
+        task.lifecycleStatus === "blocker-accepted",
     };
   });
   return { slice: target, normalizedSliceStatus, tasks };
@@ -912,7 +979,7 @@ export function cancelSliceHierarchy(
     sliceId: requireText(input.sliceId, "sliceId"),
   };
   const reason = requireText(input.reason, "reason");
-  const plan = loadPlan(slice);
+  const plan = loadPlan(slice, context.projectId);
   const cancelledTaskIds: string[] = [];
   const preservedTaskIds: string[] = [];
   const interruptions: SliceCancellationInterruption[] = [];
@@ -1022,15 +1089,16 @@ export function reopenSliceHierarchy(
     sliceId: requireText(input.sliceId, "sliceId"),
   };
   requireText(input.reason, "reason");
-  requireNoProgressedDownstreamSlices(slice);
+  requireNoProgressedDownstreamSlices(slice, context.projectId);
   const milestone = getDb().prepare(`
     SELECT milestone.status AS legacy_status, lifecycle.lifecycle_status
     FROM milestones milestone
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = milestone.id
+      ON lifecycle.item_kind = 'milestone' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = milestone.id
      AND lifecycle.slice_id IS NULL
     WHERE milestone.id = :milestone_id
-  `).get({ ":milestone_id": slice.milestoneId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!milestone) throw new SliceLifecycleValidationError(`milestone not found: ${slice.milestoneId}`);
   const milestoneStatus = normalizeLegacyLifecycleStatus(String(milestone["legacy_status"]));
   if (!milestoneStatus || milestoneStatus === "completed" || milestoneStatus === "cancelled") {
@@ -1049,10 +1117,11 @@ export function reopenSliceHierarchy(
     SELECT slice.status AS legacy_status, lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM slices slice
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = slice.milestone_id
+      ON lifecycle.item_kind = 'slice' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = slice.milestone_id
      AND lifecycle.slice_id = slice.id AND lifecycle.task_id IS NULL
     WHERE slice.milestone_id = :milestone_id AND slice.id = :slice_id
-  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Record<string, unknown> | undefined;
+  `).get({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Record<string, unknown> | undefined;
   if (!sliceRow) throw new SliceLifecycleValidationError(`slice not found: ${slice.milestoneId}/${slice.sliceId}`);
   const legacySliceStatus = normalizeLegacyLifecycleStatus(String(sliceRow["legacy_status"]));
   if (!legacySliceStatus) throw new SliceLifecycleValidationError(`Slice ${slice.sliceId} has an unknown legacy status`);
@@ -1068,11 +1137,12 @@ export function reopenSliceHierarchy(
            lifecycle.lifecycle_id, lifecycle.lifecycle_status
     FROM tasks task
     LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task' AND lifecycle.milestone_id = task.milestone_id
+      ON lifecycle.item_kind = 'task' AND lifecycle.project_id = :project_id
+     AND lifecycle.milestone_id = task.milestone_id
      AND lifecycle.slice_id = task.slice_id AND lifecycle.task_id = task.id
     WHERE task.milestone_id = :milestone_id AND task.slice_id = :slice_id
     ORDER BY task.sequence, task.id
-  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId }) as Array<Record<string, unknown>>;
+  `).all({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId, ":project_id": context.projectId }) as Array<Record<string, unknown>>;
   for (const task of tasks) {
     const lifecycleId = task["lifecycle_id"] ? String(task["lifecycle_id"]) : null;
     if (lifecycleId && runningAttempt(lifecycleId)) {
@@ -1086,7 +1156,13 @@ export function reopenSliceHierarchy(
     };
     requireMatchingShadow(state, `Task ${state.taskId}`);
     const legacyStatus = normalizeLegacyLifecycleStatus(state.legacyStatus);
-    if (legacyStatus !== "completed" && legacyStatus !== "cancelled") {
+    // #2451: `blocker-accepted` is terminal-without-proof (#2202) and its
+    // `blocker-accepted -> ready` edge is the documented reopen parity path,
+    // so a Task the cancellation preserved must not block Slice reopen.
+    if (
+      legacyStatus !== "completed" && legacyStatus !== "cancelled" &&
+      legacyStatus !== "blocker-accepted" && state.lifecycleStatus !== "blocker-accepted"
+    ) {
       throw new SliceLifecycleValidationError(
         `slice ${slice.sliceId} is not complete because Task ${state.taskId} is not terminal`,
       );

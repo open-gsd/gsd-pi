@@ -3,6 +3,7 @@ Guide the user through creating a workflow definition from scratch. Follow these
 
 <required_reading>
 Before starting, read these references so you can answer schema questions accurately:
+
 - `../references/yaml-schema-v1.md` — all fields, types, and constraints
 - `../references/verification-policies.md` — the four verify policies
 - `../references/feature-patterns.md` — context_from, iterate, params patterns
@@ -21,6 +22,7 @@ Ask the user:
 - "What are the main steps? List them in order. For each step, give a short name and what it should do."
 
 For each step the user describes:
+
 1. Generate an `id` (lowercase, short, descriptive — e.g., `gather`, `analyze`, `write-draft`).
 2. Confirm the `name` (human-readable).
 3. Write the `prompt` — this is the instruction the engine dispatches. It should be detailed enough for an LLM to execute independently.
@@ -45,6 +47,7 @@ Ask:
 - "Should any step receive artifacts from earlier steps as context?"
 
 If yes, for each such step:
+
 - Ask which prior steps to pull context from → populate `context_from`.
 - Remind the user: `context_from` does not imply a dependency. If the step should wait for the context source, it must also list it in `requires`.
 </phase>
@@ -54,6 +57,7 @@ Ask:
 - "Should any values in this workflow be configurable at run time? (e.g., a topic, a target directory, a language)"
 
 If yes:
+
 - Define each parameter with a default value in top-level `params`.
 - Replace hardcoded values in step prompts with `{{ key }}` placeholders.
 - Explain: "Users can override these when running the workflow."
@@ -64,6 +68,7 @@ Ask:
 - "Does any step need to fan out — running once per item in a list? (e.g., review each file, process each section)"
 
 If yes:
+
 - Identify the source artifact (the list to iterate over).
 - Define the `pattern` regex with a capture group to extract each item.
 - Set `iterate.source` and `iterate.pattern` on the step.
@@ -91,12 +96,14 @@ Apply any requested changes.
 Write the file to `.gsd/workflow-defs/<name>.yaml`.
 
 Tell the user:
+
 - "Definition saved to `.gsd/workflow-defs/<name>.yaml`."
 - "Run `/gsd workflow validate <name>` to check it against the schema."
 - "Run `/gsd workflow run <name>` to execute it."
 </phase>
 
 <success_criteria>
+
 - A valid YAML file exists at `.gsd/workflow-defs/<name>.yaml`
 - The definition passes `validateDefinition()` from `definition-loader.ts`
 - The user has reviewed and approved the definition

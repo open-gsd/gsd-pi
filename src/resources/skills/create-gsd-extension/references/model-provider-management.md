@@ -3,6 +3,7 @@ Model and provider management — switching models, registering custom providers
 </overview>
 
 <switching_models>
+
 ```typescript
 const model = ctx.modelRegistry.find("anthropic", "claude-sonnet-4-5");
 if (model) {
@@ -14,9 +15,11 @@ if (model) {
 pi.getThinkingLevel();  // "off" | "minimal" | "low" | "medium" | "high" | "xhigh"
 pi.setThinkingLevel("high");  // Clamped to model capabilities
 ```
+
 </switching_models>
 
 <register_provider>
+
 ```typescript
 pi.registerProvider("my-proxy", {
   baseUrl: "https://proxy.example.com",
@@ -73,6 +76,7 @@ pi.registerProvider("corporate-ai", {
   },
 });
 ```
+
 </oauth_provider>
 
 <model_events>
@@ -86,4 +90,5 @@ pi.on("model_select", async (event, ctx) => {
   ctx.ui.setStatus("model", `${event.model.provider}/${event.model.id}`);
 });
 ```
+
 </model_events>

@@ -131,7 +131,15 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 
 	// Case 2: Silent overflow (z.ai style) - successful but usage exceeds context
 	if (contextWindow && message.stopReason === "stop") {
-		const inputTokens = message.usage.input + message.usage.cacheRead;
+		// Adapters whose terminal usage is cumulative across an internal loop
+		// (claude-code) attach the live per-call context; summing their
+		// cumulative input+cacheRead would fire at ~1/K of the window. Prefer
+		// the live value when present, else the legacy component sum (z.ai).
+		const liveContextTokens = message.usage.liveContextTokens;
+		const inputTokens =
+			liveContextTokens && liveContextTokens > 0
+				? liveContextTokens
+				: message.usage.input + message.usage.cacheRead;
 		if (inputTokens > contextWindow) {
 			return true;
 		}

@@ -13,6 +13,7 @@ Remote questions let GSD ask for your input via Slack, Discord, or Telegram when
 The wizard prompts for your bot token, validates it, lets you pick a server and channel, sends a test message, and saves the config.
 
 **Bot requirements:**
+
 - A bot application with a token from the [Discord Developer Portal](https://discord.com/developers/applications)
 - Bot invited to the server with: Send Messages, Read Message History, Add Reactions, View Channel
 - `DISCORD_BOT_TOKEN` environment variable set
@@ -24,6 +25,7 @@ The wizard prompts for your bot token, validates it, lets you pick a server and 
 ```
 
 **Bot requirements:**
+
 - A Slack app with a bot token (`xoxb-...`) from [Slack API](https://api.slack.com/apps)
 - Bot invited to the target channel
 - Scopes: `chat:write`, `reactions:read`, `reactions:write`, `channels:read`, `groups:read`, `channels:history`, `groups:history`
@@ -35,6 +37,7 @@ The wizard prompts for your bot token, validates it, lets you pick a server and 
 ```
 
 **Bot requirements:**
+
 - A bot token from [@BotFather](https://t.me/BotFather)
 - Bot added to the target group chat
 - `TELEGRAM_BOT_TOKEN` environment variable set
