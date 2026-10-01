@@ -21,6 +21,7 @@ research-milestone → plan-milestone →
 The exact session count depends on profile. The "quality" profile runs all phases. The "balanced" profile skips slice research by default. The "budget" profile skips milestone research, slice research, reassessment, and milestone validation. This ADR uses the quality profile as the baseline for analysis — it represents the full pipeline and the worst-case ceremony overhead.
 
 For a typical 4-slice, 3-task milestone under the quality profile:
+
 - 1 research-milestone + 1 plan-milestone
 - Per slice: research-slice (skipped for S01) + plan-slice + 3 execute-task + complete-slice + reassess-roadmap (skipped for last slice, since all slices are done)
 - Per-slice total for S01: 0 + 1 + 3 + 1 + 1 = 6
@@ -47,6 +48,7 @@ Every fresh session re-ingests static context via prompt inlining. The `auto-pro
 The ROADMAP alone is inlined into 7 unit types. It never changes during normal execution. This is a static document being re-tokenized per session at a cost of 5–20K tokens each time.
 
 For the 30-session milestone above (quality profile), context re-ingestion costs approximately:
+
 - ROADMAP: 7 re-inlines × ~10K tokens = 70K tokens
 - DECISIONS: 6 re-inlines × ~5K tokens = 30K tokens
 - REQUIREMENTS: 8 re-inlines × ~5K tokens = 40K tokens
@@ -107,6 +109,7 @@ Total: 1 + 3 + 4 + 3 + 1 + 1 = **13 ceremony sessions** (under quality profile),
 ### Root Cause
 
 The pipeline was designed around a paradigm where:
+
 1. LLM context windows are small (32K–100K tokens)
 2. Sessions are expensive, so specialize each one
 3. Handoffs between specialized agents produce better results than generalist sessions
@@ -127,6 +130,7 @@ plan-milestone → (plan-slice → execute-task × M) × N → done
 Note: `discuss` is an interactive human-facing session, not an auto-mode unit — it's not counted in session math. It continues to work as-is.
 
 For the same 4-slice, 3-task milestone:
+
 - 1 plan-milestone (S01 plan + task plans produced inline via single-slice fast path if applicable)
 - S01: plan-slice skipped (milestone planner already explored) + 3 execute-task = 3
 - S02–S04: plan-slice + 3 execute-task = 4 each × 3 slices = 12
@@ -142,6 +146,7 @@ For the same 4-slice, 3-task milestone:
 **New:** One session. The plan-milestone agent explores the codebase directly and produces the ROADMAP. It has full tool access — it can read files, run commands, search code. The "research" happens naturally as part of planning, not as a serialized intermediary.
 
 **What changes:**
+
 - The plan-milestone prompt gains the research-milestone's exploration instructions: "Explore relevant code, check technologies, identify constraints."
 - The plan-milestone prompt drops "Trust the research" — there is no research document to trust.
 - The RESEARCH.md artifact becomes optional. If the planner wants to capture notes for downstream reference, it can write one. But it's not required, and downstream units don't depend on it.
@@ -159,6 +164,7 @@ For the same 4-slice, 3-task milestone:
 **New:** One session. The plan-slice agent explores the relevant code directly and produces the slice plan with task plans.
 
 **What changes:**
+
 - The plan-slice prompt gains exploration instructions: "Read the relevant code for this slice's scope before decomposing."
 - The plan-slice prompt drops "Trust the research" — there is no slice research document.
 - Slice RESEARCH.md becomes optional (same as milestone research above).
@@ -181,16 +187,19 @@ For the same 4-slice, 3-task milestone:
 3. If the mechanical summary is insufficient (complex slices where structured aggregation loses important narrative), the system detects low quality (e.g., summary is below a character threshold) and dispatches a standalone complete-slice LLM session as recovery.
 
 **Why post-gate, not in the executor prompt:**
+
 - Codex audit identified that folding completion into execute-task creates a verification-retry ordering problem: if the executor writes SUMMARY.md and marks the slice done in the ROADMAP before the verification gate runs, a gate failure would retry against incorrect derived state (the slice appears complete when it isn't).
 - Post-gate processing runs after verification succeeds, so state transitions are always consistent.
 - The executor's context budget is fully available for its actual work.
 
 **What changes in `deriveState()`:**
+
 - The `summarizing` phase still exists in state derivation (all tasks done, slice not marked complete).
 - The dispatch table no longer maps `summarizing → complete-slice`. Instead, post-unit processing handles the transition synchronously.
 - If post-unit mechanical completion fails or produces low-quality output, the `summarizing` phase still exists as a dispatch target and the system falls back to dispatching a complete-slice LLM session.
 
 **What changes:**
+
 - `auto-post-unit.ts` gains a `mechanicalSliceCompletion()` function.
 - The complete-slice dispatch rule is removed from the default path but retained as a fallback.
 - The complete-slice template is retained for recovery and explicit dispatch.
@@ -209,6 +218,7 @@ For the same 4-slice, 3-task milestone:
 **New:** Reassessment is eliminated by default. The plan-slice agent for the next slice serves as the natural reassessment point — it reads the ROADMAP and prior slice summaries, and can adjust its plan if the ground has shifted.
 
 **What changes:**
+
 - The reassess-roadmap dispatch rule fires only when the `reassess_after_slice` preference is enabled (default: off, was effectively always-on). **Landed:** `auto-dispatch.ts` now defaults `reassess_after_slice` to `false`. Opt-in via explicit `true` or the `burn-max` profile.
 - The plan-slice prompt gains a reassessment preamble: "Before planning this slice, verify that the roadmap's assumptions still hold given prior slice summaries. If the remaining roadmap needs adjustment, modify it before proceeding." **Landed:** `prompts/plan-slice.md` `### Verify Roadmap Assumptions (JIT Reassessment — ADR-003 §4)` with explicit `gsd_reassess_roadmap` tool-call guidance and "bias strongly toward roadmap is fine" instruction.
 - The `checkNeedsReassessment()` function in auto-prompts.ts becomes a preference gate, not a mandatory check. **Landed:** gated by `reassess_after_slice` (default false) in the dispatch rule; function signature unchanged.
@@ -230,6 +240,7 @@ For the same 4-slice, 3-task milestone:
 The aggregator reads task verification JSON as the primary source of truth, supplements with UAT-RESULT artifacts, and produces a deterministic VALIDATION.md.
 
 **What changes:**
+
 - A new `aggregateMilestoneVerification()` function collects flat-phase `S##-T##-VERIFY.json` files, legacy `T##-VERIFY.json` files, and `S##-UAT-RESULT.md` files across all slices.
 - The function produces a VALIDATION.md with per-task and per-slice pass/fail status, UAT evidence, and an overall verdict.
 - The LLM-driven validate-milestone session is removed from the default pipeline.
@@ -280,11 +291,13 @@ async function aggregateMilestoneVerification(base: string, mid: string): Promis
 **New:** The system produces a milestone summary mechanically by aggregating slice summaries. The summary includes: milestone title, success criteria with pass/fail status, slice completion dates, key decisions made, and patterns established (all extracted from structured frontmatter in slice summaries).
 
 **What changes:**
+
 - A new `generateMilestoneSummary()` function reads all slice SUMMARY.md files, extracts frontmatter fields, and produces a structured milestone SUMMARY.md.
 - The complete-milestone dispatch rule is replaced with a synchronous post-processing step after the validation artifact is written.
 - The complete-milestone template is retained for explicit dispatch.
 
 **What changes in `deriveState()`:**
+
 - The `validating-milestone` and `completing-milestone` phases still exist in state derivation.
 - When mechanical validation + completion runs synchronously in post-unit processing, these phases are transient — `deriveState()` emits them, but the mechanical processing writes the VALIDATION.md and SUMMARY.md artifacts before the next dispatch cycle, so the phases resolve immediately.
 - If mechanical processing fails, the phases remain as dispatch targets and the system falls back to dispatching LLM sessions for validation and/or completion.
@@ -335,6 +348,7 @@ async function aggregateMilestoneVerification(base: string, mid: string): Promis
 Note: Rules 2, 11, and 12 are retained as **fallbacks** for cases where mechanical processing fails. They do not fire in the normal path because post-unit processing writes the required artifacts before the next dispatch cycle. This means `deriveState()` is unchanged — it still emits `summarizing`, `validating-milestone`, and `completing-milestone` phases. The change is that these phases are normally resolved mechanically before dispatch evaluates them.
 
 **Removed rules (no longer in default path):**
+
 - `reassess-roadmap` — folded into next plan-slice (or opt-in preference)
 - `pre-planning (no research) → research-milestone` — merged into plan-milestone
 - `planning (no research, not S01) → research-slice` — merged into plan-slice
@@ -382,11 +396,13 @@ Read the relevant code for this slice before decomposing:
 Planning sessions (plan-milestone, plan-slice) currently inline ROADMAP, DECISIONS, REQUIREMENTS, KNOWLEDGE, and PROJECT. Since these sessions now also explore the codebase (merged research), the total prompt size grows. To offset this, stable documents should be provided as file paths rather than inlined content for planning sessions.
 
 **Current pattern:**
+
 ```typescript
 inlined.push(await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap"));
 ```
 
 **New pattern for plan-milestone/plan-slice:**
+
 ```typescript
 sourcePaths.push(`- Milestone Roadmap: \`${roadmapRel}\` — read this for the full slice decomposition`);
 ```
@@ -394,12 +410,14 @@ sourcePaths.push(`- Milestone Roadmap: \`${roadmapRel}\` — read this for the f
 The prompt header changes from "All relevant context has been preloaded below" to "Source files are listed below. Read them before proceeding."
 
 **What stays inlined:**
+
 - **Task plan** in execute-task (it's the executor's authoritative contract — must be in prompt)
 - **Slice plan excerpt** in execute-task (goal/demo/verification — small and task-specific)
 - **Prior task summaries** in execute-task (carry-forward context — already budget-managed)
 - **Milestone context** in plan-milestone (it's the starting input — relatively small)
 
 **What moves to file-path references:**
+
 - ROADMAP in plan-slice, complete-slice, reassess, validate, complete-milestone
 - DECISIONS.md everywhere except execute-task (where it's already omitted for minimal inline level)
 - REQUIREMENTS.md everywhere except execute-task
@@ -598,6 +616,7 @@ Merging research into planning makes plan-milestone sessions longer. The planner
 The mechanical slice completion aggregates structured frontmatter but cannot produce narrative context, forward intelligence sections, or nuanced UAT scenarios that the current LLM-driven complete-slice session produces.
 
 **Mitigation:**
+
 - For most slices (2-3 tasks, straightforward work), structured aggregation is sufficient. The frontmatter fields (provides, requires, affects, key_files, key_decisions, patterns_established) capture the essential information.
 - The quality threshold fallback dispatches a complete-slice LLM session for complex slices.
 - The LLM fallback is zero-cost to implement — the complete-slice template and dispatch rule are retained.
@@ -607,6 +626,7 @@ The mechanical slice completion aggregates structured frontmatter but cannot pro
 RESEARCH.md files provided a useful paper trail for debugging plan quality. Without them, it's harder to understand why a planner made certain decisions.
 
 **Mitigation:**
+
 - The planner's narration (visible in the conversation transcript) captures exploration reasoning.
 - RESEARCH.md is optional, not eliminated. Planners can write one when exploration is complex.
 - The KNOWLEDGE.md file captures non-obvious patterns and decisions.
@@ -617,6 +637,7 @@ RESEARCH.md files provided a useful paper trail for debugging plan quality. With
 Without mandatory reassessment, a slice might complete with findings that invalidate the remaining roadmap, and the next planner might not notice.
 
 **Mitigation:**
+
 - The plan-slice prompt includes a reassessment preamble that explicitly checks prior slice summaries.
 - The `blocker_discovered` flag in task summaries already triggers automatic replanning.
 - Users who want explicit reassessment can enable the `reassess_after_slice` preference.
@@ -626,6 +647,7 @@ Without mandatory reassessment, a slice might complete with findings that invali
 The current complete-slice prompt (steps 5, 8, 9) updates REQUIREMENTS.md, appends to DECISIONS.md, and appends to KNOWLEDGE.md. The mechanical completion handles REQUIREMENTS.md and DECISIONS.md mechanically but cannot produce KNOWLEDGE.md entries (which require judgment about what's genuinely useful).
 
 **Mitigation:**
+
 - Execute-task prompt step 13 already instructs executors to append to KNOWLEDGE.md during task execution. Most knowledge entries are discovered during implementation, not during completion.
 - DECISIONS.md appendix is handled mechanically by collecting `key_decisions` from task summaries and deduplicating against existing entries.
 - REQUIREMENTS.md updates are handled mechanically by cross-referencing task verification results against requirement-to-slice mappings.
@@ -636,6 +658,7 @@ The current complete-slice prompt (steps 5, 8, 9) updates REQUIREMENTS.md, appen
 Milestones in progress when this change deploys will have state files (RESEARCH.md, etc.) that the new pipeline doesn't produce. The dispatch table must gracefully handle both old-style and new-style state.
 
 **Mitigation:**
+
 - Dispatch rules check for file existence, not file absence. A milestone with an existing RESEARCH.md still works — the plan-milestone rule fires regardless of whether research exists.
 - The idempotency system already handles "completed research unit → dispatch plan" transitions.
 - All `deriveState()` phases are preserved — old-style state resolves correctly.
@@ -676,6 +699,7 @@ The mechanical summary quality might be insufficient for complex slices.
 ## Action Items
 
 ### Phase 1: Merge research into planning (+ targeted inlining reduction)
+
 1. Update `buildPlanMilestonePrompt()` — add exploration instructions, skill discovery, drop "Trust the research"
 2. Update `buildPlanSlicePrompt()` — add exploration instructions, reassessment preamble, drop "Trust the research"
 3. Remove dispatch rule "pre-planning (no research) → research-milestone" — merge with "pre-planning (has research) → plan-milestone" into single "pre-planning → plan-milestone"
@@ -686,6 +710,7 @@ The mechanical summary quality might be insufficient for complex slices.
 8. **Targeted inlining reduction for planning sessions:** Move DECISIONS, REQUIREMENTS, PROJECT to path references in plan-milestone and plan-slice prompts. Keep ROADMAP and CONTEXT inlined. This prevents context pressure from the added exploration work.
 
 ### Phase 2: Mechanical slice completion
+
 9. Implement `mechanicalSliceCompletion()` in `auto-post-unit.ts`
 10. Wire into post-unit processing: detect all-tasks-done after verification gate passes, run mechanical completion
 11. Implement quality threshold check (summary length, artifact presence)
@@ -693,6 +718,7 @@ The mechanical summary quality might be insufficient for complex slices.
 13. Implement `mechanicalRequirementsUpdate()` and `appendNewDecisions()`
 
 ### Phase 3: Mechanical milestone validation + completion
+
 14. Implement `aggregateMilestoneVerification()` reading task verification JSON and `S##-UAT-RESULT.md`
 15. Implement `generateMilestoneSummary()` from slice summary aggregation
 16. Wire into post-unit processing: after last slice completion, run mechanical validation + summary
@@ -700,12 +726,14 @@ The mechanical summary quality might be insufficient for complex slices.
 18. Retain `validating-milestone` and `completing-milestone` dispatch rules as fallbacks
 
 ### Phase 4: Full context re-ingestion reduction
+
 19. Replace remaining `inlineFile()` calls for stable documents with mandatory-read path references
 20. Update prompt headers with explicit "You MUST read" directives for critical files
 21. Add plan output verification (must cite ROADMAP slice description)
 22. Measure plan quality metrics before/after to validate the change
 
 ### Phase 5: Downstream simplification (optional, deferred)
+
 23. Simplify `auto-post-unit.ts` — remove reassess dispatch logic (opt-in only)
 24. Simplify `auto-stuck-detection.ts` — fewer unit type patterns
 25. Simplify `auto-idempotency.ts` — fewer completed-key types
@@ -717,6 +745,7 @@ The mechanical summary quality might be insufficient for complex slices.
 ### Round 1 — Three-model review (March 18, 2026)
 
 **Claude Opus 4.6** identified 8 issues:
+
 1. ✅ Session count math inconsistent about S01 plan-slice skip — **fixed**: explicit derivation added with per-slice breakdown
 2. ✅ `discuss` session counted in pipeline but not in math — **fixed**: noted as interactive session, not auto-mode unit
 3. ✅ Token savings double-counting (eliminated sessions + re-ingestion) — **fixed**: removed overlap, noted savings are not additive
@@ -727,6 +756,7 @@ The mechanical summary quality might be insufficient for complex slices.
 8. ✅ ADR number conflict — **fixed**: confirmed no ADR-003 exists in `docs/` (the referenced file doesn't exist in current git)
 
 **OpenAI Codex** identified 6 issues:
+
 1. ✅ HIGH: Folding completion into execute-task breaks verification-retry model — **fixed**: moved completion to post-gate mechanical processing instead of executor prompt. Added Alternative D explaining why.
 2. ✅ HIGH: Mechanical validation reads nonexistent `verification_evidence` frontmatter — **fixed**: now reads task verification JSON (canonical machine-readable source from `verification-evidence.ts`)
 3. ✅ HIGH: Replacement validation drops UAT evidence — **fixed**: aggregator now reads both task verification JSON and `S##-UAT-RESULT.md`

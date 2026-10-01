@@ -12,7 +12,7 @@
  */
 
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { CLAUDE_CODE_MODELS } from "./models.js";
+import { buildClaudeCodeModelList } from "./models.js";
 import { isClaudeCodeReady } from "./readiness.js";
 import { setClaudeCodeUIContext, streamViaClaudeCode } from "./stream-adapter.js";
 
@@ -35,6 +35,8 @@ export default function claudeCodeCli(pi: ExtensionAPI) {
 		baseUrl: "local://claude-code",
 		isReady: isClaudeCodeReady,
 		streamSimple: streamViaClaudeCode,
-		models: CLAUDE_CODE_MODELS,
+		// Hardcoded list merged with the pi-ai anthropic catalog so new Claude
+		// releases register without a code change (#2437).
+		models: buildClaudeCodeModelList(),
 	});
 }

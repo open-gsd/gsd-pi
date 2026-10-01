@@ -52,6 +52,7 @@ Secrets are never logged or included in event streams.
 ## How It Works
 
 Two-phase correlation:
+
 1. **Observe** `tool_execution_start` events for `ask_user_questions` — extracts question metadata (ID, options, allowMultiple)
 2. **Match** subsequent `extension_ui_request` events to metadata, respond with pre-supplied answer
 
@@ -60,6 +61,7 @@ Handles out-of-order events (extension_ui_request can arrive before tool_executi
 ## Coexistence with --supervised
 
 Both `--answers` and `--supervised` can be active simultaneously. Priority order:
+
 1. Answer injector tries first
 2. If no answer found, supervised mode takes over
 3. If no orchestrator response, auto-responder kicks in after timeout
@@ -67,6 +69,7 @@ Both `--answers` and `--supervised` can be active simultaneously. Priority order
 ## Without Answer Injection
 
 Headless mode has built-in auto-responders:
+
 - **select** → picks first option
 - **confirm** → auto-confirms
 - **input** → empty string
@@ -77,6 +80,7 @@ Answer injection overrides these defaults with specific answers when precision m
 ## Diagnostics
 
 The injector tracks stats printed in the summary:
+
 - `questionsAnswered` / `questionsDefaulted`
 - `secretsProvided`
 

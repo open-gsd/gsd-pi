@@ -1,6 +1,5 @@
 # Custom Rendering — Controlling What the User Sees
 
-
 ### Tool Rendering
 
 Tools can provide `renderCall` (how the tool call looks) and `renderResult` (how the result looks):

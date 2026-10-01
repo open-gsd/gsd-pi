@@ -2,7 +2,8 @@
 // File Purpose: Operator Task settle — human-gated, dry-run-first reconciliation
 // of a running Task Attempt whose executor is gone, plus optional lifecycle
 // adopt after an interrupted Attempt or succeeded completion (#1749, #2018),
-// and the `blocker-accepted` operator closeout disposition (#2202).
+// the `blocker-accepted` operator closeout disposition (#2202), and the
+// receipt-gated verification-paused reconcile (#2334).
 
 import { executeDomainOperation } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
@@ -22,6 +23,7 @@ import {
 } from "./db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
+import { queryJournal } from "./journal.js";
 import { TASK_LIFECYCLE_PROJECTION_KIND } from "./projection-identity.js";
 import { publishVerifiedTaskCompletion } from "./task-completion-compatibility-adapter.js";
 import {
@@ -75,6 +77,12 @@ export interface TaskSettlePlan {
 
 export interface TaskSettleOptions {
   reconcileLifecycle?: boolean;
+  /**
+   * Project root used to read the durable verification-pause receipt from the
+   * journal (#2334). Without it the verification-paused reconcile target is
+   * unreachable — the gate fails closed rather than trusting an unproven pause.
+   */
+  basePath?: string;
 }
 
 interface RunningAttemptRow {
@@ -274,13 +282,101 @@ function planCompletionProof(
   };
 }
 
-function targetCanonicalStatus(legacyStatus: string): "ready" | "completed" {
+// ── verification-paused reconcile (#2334) ───────────────────────────────────
+//
+// A finalizer verification pause strands a succeeded Attempt: the legacy Task
+// stays in_progress, no Attempt is running, and every operator route refuses.
+// The sanctioned exit is a receipt-gated reconcile to ready — gated on the
+// durable journal receipt the finalize pause branch writes, so only the
+// finalizer (never an operator hand-edit) can vouch for the pause. Failed
+// verification never qualifies: the Attempt outcome must be succeeded.
+
+interface VerificationPauseReceipt {
+  ts: string;
+  flowId: string;
+  eventType: string;
+}
+
+function readVerificationPauseReceipt(
+  basePath: string | undefined,
+  task: TaskSettleTask,
+  settledAt: string | null,
+): VerificationPauseReceipt | null {
+  if (!basePath) return null;
+  const unit = `${task.milestoneId}/${task.sliceId}/${task.taskId}`;
+  // The dedicated receipt is written by the finalize pause branch. The generic
+  // finalize-end record predates the dedicated receipt and keeps projects
+  // stranded before #2334 recoverable without a fresh pause.
+  const dedicated = queryJournal(basePath, { eventType: "verification-paused", unitId: unit });
+  const finalizeEnds = queryJournal(basePath, { eventType: "post-unit-finalize-end", unitId: unit })
+    .filter((entry) => entry.data?.["reason"] === "verification-pause");
+  // Freshness binds the receipt to the current execution: a receipt written
+  // before the latest Attempt's Result belongs to an earlier pause and must
+  // never vouch for this settlement (a superseding Attempt re-owns the exit).
+  const settledMs = settledAt ? Date.parse(settledAt) : NaN;
+  const candidates = [...dedicated, ...finalizeEnds]
+    .filter((entry) => {
+      if (Number.isNaN(settledMs)) return false;
+      const entryMs = Date.parse(entry.ts);
+      return !Number.isNaN(entryMs) && entryMs >= settledMs;
+    })
+    .sort((a, b) => a.ts.localeCompare(b.ts));
+  const latest = candidates[candidates.length - 1];
+  if (!latest) return null;
+  return { ts: latest.ts, flowId: latest.flowId, eventType: latest.eventType };
+}
+
+function readLatestSucceededAttemptSettledAt(task: TaskSettleTask): string | null {
+  const row = getDb().prepare(`
+    SELECT result.created_at AS settled_at
+    FROM workflow_item_lifecycles lifecycle
+    JOIN workflow_execution_attempts attempt
+      ON attempt.lifecycle_id = lifecycle.lifecycle_id
+     AND attempt.project_id = lifecycle.project_id
+    JOIN workflow_attempt_results result
+      ON result.attempt_id = attempt.attempt_id
+     AND result.project_id = attempt.project_id
+    WHERE lifecycle.item_kind = 'task'
+      AND lifecycle.milestone_id = :milestone_id
+      AND lifecycle.slice_id = :slice_id
+      AND lifecycle.task_id = :task_id
+    ORDER BY attempt.attempt_number DESC
+    LIMIT 1
+  `).get({
+    ":milestone_id": task.milestoneId,
+    ":slice_id": task.sliceId,
+    ":task_id": task.taskId,
+  }) as { settled_at?: string } | undefined;
+  return row?.settled_at ? String(row.settled_at) : null;
+}
+
+function isVerificationPausedCandidate(task: TaskSettleTask): boolean {
+  const state = readTaskLifecycleState(task);
+  if (normalizeLegacyLifecycleStatus(state.legacyStatus) !== "in_progress") return false;
+  const latest = readLatestTaskAttempt(task);
+  if (latest?.state !== "settled" || latest?.outcome !== "succeeded") return false;
+  // An agent-owned unrecovered abort route owns the lineage — `/gsd recover`
+  // is the sanctioned exit, never a lifecycle release (same fail-closed rule
+  // as the #2417 publication door).
+  const route = readTaskRecoveryRoute(latest.attemptId);
+  if (route && route.recoveryOwner === "agent" && route.action === "abort" && !route.resumeAuthorized) {
+    return false;
+  }
+  return true;
+}
+
+function targetCanonicalStatus(
+  legacyStatus: string,
+  verificationPaused: boolean,
+): "ready" | "completed" {
   const normalized = normalizeLegacyLifecycleStatus(legacyStatus);
   if (normalized === "pending") return "ready";
   if (normalized === "completed") return "completed";
+  if (normalized === "in_progress" && verificationPaused) return "ready";
   throw new Error(
     `gsd_task_settle: reconcileLifecycle only repairs a pending/complete mismatch ` +
-    `after an interrupted Attempt or succeeded completion; tasks.status is ${legacyStatus}`,
+    `after an interrupted Attempt or succeeded completion, or a receipt-gated ` +
+    `verification-paused in-progress Task; tasks.status is ${legacyStatus}`,
   );
 }
 
@@ -305,18 +401,31 @@ function planLifecycleReconcile(
   task: TaskSettleTask,
   reason: string,
   hasRunningAttempt: boolean,
+  verificationPaused: boolean,
+  pauseReceipt: VerificationPauseReceipt | null,
 ): TaskLifecycleReconcileRow[] {
   const latest = readLatestTaskAttempt(task);
   const state = readTaskLifecycleState(task);
+  const normalizedLegacy = normalizeLegacyLifecycleStatus(state.legacyStatus);
   const succeededCompletion = latest?.outcome === "succeeded" &&
-    normalizeLegacyLifecycleStatus(state.legacyStatus) === "completed";
-  if (!hasRunningAttempt && latest?.outcome !== "interrupted" && !succeededCompletion) {
+    normalizedLegacy === "completed";
+  if (
+    !hasRunningAttempt &&
+    latest?.outcome !== "interrupted" &&
+    !succeededCompletion &&
+    !(verificationPaused && pauseReceipt)
+  ) {
     throw new Error(
-      "gsd_task_settle: reconcileLifecycle requires an interrupted Attempt or a succeeded " +
-      "Attempt with tasks.status complete (settle the running Attempt first)",
+      verificationPaused
+        ? "gsd_task_settle: reconcileLifecycle of a verification-paused in-progress Task " +
+          "requires the durable verification-pause receipt in the journal; none was found " +
+          "(the receipt is written by the auto finalizer when verification pauses)"
+        : "gsd_task_settle: reconcileLifecycle requires an interrupted Attempt or a succeeded " +
+          "Attempt with tasks.status complete (settle the running Attempt first)",
     );
   }
-  const target = targetCanonicalStatus(state.legacyStatus);
+  const receiptGated = verificationPaused && pauseReceipt !== null;
+  const target = targetCanonicalStatus(state.legacyStatus, receiptGated);
   const fromStatus = state.lifecycleStatus;
   if (fromStatus === null) {
     throw new Error(`gsd_task_settle: Task ${unitId(task)} has no canonical lifecycle to reconcile`);
@@ -329,9 +438,12 @@ function planLifecycleReconcile(
     rows.push({
       currentStatus: current,
       targetStatus: next,
-      rationale:
-        `${reason} (adopt ${target} to match tasks.status=${state.legacyStatus}; ` +
-        "SUMMARY projections are left in place)",
+      rationale: receiptGated
+        ? `${reason} (verification-pause receipt ${pauseReceipt?.ts ?? "unknown"}; adopt ${target} to ` +
+          "release the stranded in-progress Task for replan/cancel; SUMMARY projections and " +
+          "tasks.status are left in place)"
+        : `${reason} (adopt ${target} to match tasks.status=${state.legacyStatus}; ` +
+          "SUMMARY projections are left in place)",
     });
     current = next;
   }
@@ -442,9 +554,32 @@ export function planTaskSettle(
   options: TaskSettleOptions = {},
 ): TaskSettlePlan {
   const attempt = requireSingleRunningAttempt(task);
-  const publication = attempt === null ? planDurableSuccessPublication(task) : null;
+  // #2334: a receipt-gated verification-paused reconcile takes precedence over
+  // the #2417 publication door — the finalizer paused this unit before the
+  // publication boundary, so the operator exit is replan/cancel, not publish.
+  // A candidate without the durable receipt fails closed instead of silently
+  // routing to publication: the pause must be proven, never assumed.
+  const verificationPaused =
+    attempt === null && options.reconcileLifecycle === true && isVerificationPausedCandidate(task);
+  const pauseReceipt = verificationPaused
+    ? readVerificationPauseReceipt(
+        options.basePath,
+        task,
+        readLatestSucceededAttemptSettledAt(task),
+      )
+    : null;
+  if (verificationPaused && !pauseReceipt) {
+    throw new Error(
+      "gsd_task_settle: reconcileLifecycle of a verification-paused in-progress Task " +
+      "requires the durable verification-pause receipt in the journal; none was found " +
+      "(the receipt is written by the auto finalizer when verification pauses)",
+    );
+  }
+  const publication = attempt === null && !pauseReceipt
+    ? planDurableSuccessPublication(task)
+    : null;
   const lifecycleRows = options.reconcileLifecycle && !publication
-    ? planLifecycleReconcile(task, reason, attempt !== null)
+    ? planLifecycleReconcile(task, reason, attempt !== null, verificationPaused, pauseReceipt)
     : [];
   const proof = planCompletionProof(task, lifecycleRows);
   if (!attempt) return { task, rows: [], lifecycleRows, proof, publication };
@@ -486,7 +621,11 @@ export function planTaskSettle(
  * runs the verified publication pipeline, which re-adopts the lifecycle to
  * completed and completes the legacy Task row. Its evidence gates
  * (passing host Technical Verdict, source parity, UAT closure) stay
- * fail-closed; verification itself belongs to `/gsd auto`.
+ * fail-closed; verification itself belongs to `/gsd auto`. A finalizer
+ * verification pause (#2334) outranks that door: when the durable
+ * verification-pause receipt exists for the unit, reconcileLifecycle plans
+ * in_progress → paused → ready so replan/cancel become reachable — never
+ * publication, and never for a failed verification.
  */
 export async function applyTaskSettle(input: {
   invocation: ExecutionInvocation;
@@ -502,6 +641,7 @@ export async function applyTaskSettle(input: {
 }> {
   const plan = planTaskSettle(input.task, input.reason, {
     reconcileLifecycle: input.reconcileLifecycle,
+    basePath: input.basePath,
   });
   let settled = false;
   let resultId: string | undefined;
@@ -556,7 +696,10 @@ export async function applyTaskSettle(input: {
   let proof = plan.proof;
   let reconciled = false;
   if (input.reconcileLifecycle && !plan.publication) {
-    const after = planTaskSettle(input.task, input.reason, { reconcileLifecycle: true });
+    const after = planTaskSettle(input.task, input.reason, {
+      reconcileLifecycle: true,
+      basePath: input.basePath,
+    });
     lifecycleRows = after.lifecycleRows;
     proof = after.proof;
     if (lifecycleRows.length > 0) {

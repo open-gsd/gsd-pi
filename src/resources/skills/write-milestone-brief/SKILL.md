@@ -11,6 +11,7 @@ Take everything established in the current conversation (plus repo reality) and 
 This skill runs at the end of a discussion phase, after enough grilling/design has happened that the plan has stabilized. It does NOT interview — use the `grill-me` skill for that. This skill collapses what is already on the page into a durable artifact.
 
 Typical invocation points:
+
 - User says "capture this" or "write it up" after a planning discussion
 - End of a `discuss` phase before moving to `plan`
 - User wants to hand the work off to another agent or a human teammate

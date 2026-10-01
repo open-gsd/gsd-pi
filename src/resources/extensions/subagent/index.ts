@@ -33,7 +33,7 @@ import {
 	mergeDeltaPatches,
 	readIsolationMode,
 } from "./isolation.js";
-import { registerWorker, updateWorker } from "./worker-registry.js";
+import { registerWorker, updateWorker, formatWorkerIdentity } from "./worker-registry.js";
 import { loadEffectiveGSDPreferences } from "../gsd/preferences.js";
 import { emitJournalEvent } from "../gsd/journal.js";
 import { CmuxClient, shellEscape } from "../cmux/index.js";
@@ -70,6 +70,18 @@ const COLLAPSED_ITEM_COUNT = 10;
 // deliberately exempt from stall detection — are never touched.
 const LIVENESS_POLL_INTERVAL_MS = 30_000;
 const LIVENESS_DEATH_GRACE_MS = 5_000;
+
+/**
+ * Bound a diagnostic excerpt so a noisy child cannot flood the parent session
+ * through the detached-completion wake message (#2363 review finding).
+ */
+export function truncateDiagnostic(text: string, maxChars: number): string {
+	return text.length > maxChars
+		? `${text.slice(0, maxChars)}… [truncated, full output via action: "status"]`
+		: text;
+}
+
+const WAKE_DIAGNOSTIC_MAX_CHARS = 300;
 const liveSubagentProcesses = new Set<ChildProcess>();
 
 async function stopLiveSubagents(): Promise<void> {
@@ -224,7 +236,13 @@ interface SingleResult {
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
+	/** Provider-reported model when it differs from the requested `model` (#2396) */
+	reportedModel?: string;
 	thinking?: string;
+	/** When this child started executing (#2396) */
+	startedAt?: number;
+	/** When this child reached a terminal state (#2396) */
+	completedAt?: number;
 	stopReason?: string;
 	errorMessage?: string;
 	sessionFile?: string;
@@ -601,6 +619,7 @@ async function runSingleAgent(
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model: modelOverride ?? agent.model,
 		thinking: effectiveThinking,
+		startedAt: Date.now(),
 		step,
 	};
 
@@ -732,6 +751,7 @@ async function runSingleAgent(
 
 		currentResult.exitCode = exitCode;
 		currentResult.running = false;
+		currentResult.completedAt = Date.now();
 		if (wasAborted) throw new Error("Subagent was aborted");
 		markMissingFinalResponse(currentResult);
 		return currentResult;
@@ -797,6 +817,7 @@ async function runSingleAgentInCmuxSplit(
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model: modelOverride ?? agent.model,
 		thinking: effectiveThinking,
+		startedAt: Date.now(),
 		step,
 	};
 
@@ -880,6 +901,7 @@ async function runSingleAgentInCmuxSplit(
 			await waitForFile(exitPath, undefined, 5000);
 			currentResult.exitCode = 1;
 			currentResult.running = false;
+			currentResult.completedAt = Date.now();
 			currentResult.stderr = "cmux split execution timed out or was aborted";
 			if (fs.existsSync(stdoutPath)) {
 				const stdout = fs.readFileSync(stdoutPath, "utf-8");
@@ -901,6 +923,7 @@ async function runSingleAgentInCmuxSplit(
 		}
 		currentResult.exitCode = Number.parseInt(fs.readFileSync(exitPath, "utf-8").trim() || "1", 10) || 0;
 		currentResult.running = false;
+		currentResult.completedAt = Date.now();
 		markMissingFinalResponse(currentResult);
 		return currentResult;
 	} finally {
@@ -1362,6 +1385,8 @@ export default function (pi: ExtensionAPI) {
 							stopReason: signal?.aborted ? "aborted" : "error",
 							errorMessage: result.errorMessage || message,
 							usage: result.usage ?? zeroUsage(),
+							// Freeze elapsed display at the failure moment (#2396)
+							completedAt: Date.now(),
 						};
 					});
 					if (patchedRunning || patched.some((result) => result.exitCode !== 0)) return patched;
@@ -1419,6 +1444,46 @@ export default function (pi: ExtensionAPI) {
 						wallTimeMs: Date.now() - dispatchStartMs,
 					},
 				});
+			};
+
+			// A detached run's completion is otherwise invisible: the journal event
+			// has no turn-starting consumer, so the session idles until the model
+			// happens to poll action: "status" (#2363). Re-invoke it with a short
+			// summary. One wake per dispatch, interactive sessions only, and fully
+			// defensive — a wake failure must never affect persistence or escape
+			// the unobserved IIFE (ctx.hasUI itself can throw on a stale runtime).
+			let backgroundWakeSent = false;
+			const wakeSessionAfterDetachedCompletion = (results: SingleResult[]): void => {
+				try {
+					if (!ctx.hasUI || backgroundWakeSent) return;
+					backgroundWakeSent = true;
+					const successCount = results.filter((r) => r.exitCode === 0).length;
+					const failureCount = results.length - successCount;
+					const totalCost = results.reduce((s, r) => s + (r.usage?.cost ?? 0), 0);
+					const wallSeconds = ((Date.now() - dispatchStartMs) / 1000).toFixed(1);
+					const perAgent = results
+						.map((r) =>
+							`- ${r.agent}: ${r.exitCode === 0 ? "succeeded" : `failed — ${truncateDiagnostic(r.errorMessage || r.stderr || "unknown error", WAKE_DIAGNOSTIC_MAX_CHARS)}`}`
+						)
+						.join("\n");
+					void pi.sendMessage(
+						{
+							customType: "subagent_completed",
+							content: [
+								`Background subagent run ${dispatchId} finished in ${wallSeconds}s: ${successCount} succeeded, ${failureCount} failed (cost $${totalCost.toFixed(4)}).`,
+								perAgent,
+								`Full output is persisted. Inspect it with the subagent tool, action: "status", runId: "${dispatchId}", and process the results in this turn.`,
+							].join("\n"),
+							display: true,
+							details: { dispatchId, mode: dispatchMode, agents: dispatchAgents, successCount, failureCount },
+						},
+						{ triggerTurn: true },
+					).catch(() => {
+						// Wake delivery is best-effort; persistence above is authoritative.
+					});
+				} catch {
+					// A wake failure must never affect persistence.
+				}
 			};
 
 			try {
@@ -1513,9 +1578,11 @@ export default function (pi: ExtensionAPI) {
 						}
 						finalResults = [result];
 						finishDispatch([result]);
+						wakeSessionAfterDetachedCompletion([result]);
 					} catch (err) {
 						finalResults = synthesizeFailureResults(err);
 						finishDispatch(finalResults);
+						wakeSessionAfterDetachedCompletion(finalResults);
 					} finally {
 						if (isolation) await isolation.cleanup();
 					}
@@ -1616,6 +1683,17 @@ export default function (pi: ExtensionAPI) {
 				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(taskParams.length);
 
+				// Requested identity per child: task override → tool default → agent frontmatter,
+				// resolved with the same precedence execution uses (#2396). Display-only:
+				// execution overrides below stay `t.* || params.*` so argv is unchanged.
+				const workerIdentities = taskParams.map((t) => {
+					const taskAgent = agents.find((a) => a.name === t.agent);
+					return {
+						model: t.model || params.model || taskAgent?.model,
+						thinking: t.thinking ?? params.thinking ?? taskAgent?.thinking,
+					};
+				});
+
 				// Initialize placeholder results
 				for (let i = 0; i < taskParams.length; i++) {
 					allResults[i] = {
@@ -1627,6 +1705,9 @@ export default function (pi: ExtensionAPI) {
 						messages: [],
 						stderr: "",
 						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						// Identity is known before the child's first event; timing starts at execution
+						...(workerIdentities[i].model !== undefined ? { model: workerIdentities[i].model } : {}),
+						...(workerIdentities[i].thinking !== undefined ? { thinking: workerIdentities[i].thinking } : {}),
 					};
 				}
 				finalResults = allResults;
@@ -1652,9 +1733,9 @@ export default function (pi: ExtensionAPI) {
 					? await cmuxClient.createGridLayout(Math.min(batchSize, MAX_CONCURRENCY))
 					: [];
 				const results = await mapWithConcurrencyLimit(taskParams, MAX_CONCURRENCY, async (t, index) => {
-					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId);
 					const taskModel = t.model || params.model;
 					const taskThinking = t.thinking ?? params.thinking;
+					const workerId = registerWorker(t.agent, t.task, index, batchSize, batchId, workerIdentities[index]);
 					const updateParallelResult = (partial: AgentToolResult<SubagentDetails>) => {
 						if (partial.details?.results[0]) {
 							allResults[index] = partial.details.results[0];
@@ -2146,6 +2227,9 @@ export default function (pi: ExtensionAPI) {
 							new Text(`${theme.fg("muted", "─── ") + theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`, 0, 0),
 						);
 						container.addChild(new Text(theme.fg("muted", "Task: ") + theme.fg("dim", r.task), 0, 0));
+						// Terminal children keep their identity attribution (#2396)
+						const identity = formatWorkerIdentity(r, r.exitCode === 0 ? "completed" : "failed");
+						if (identity) container.addChild(new Text(theme.fg("dim", identity), 0, 0));
 
 						// Show tool calls
 						for (const item of displayItems) {
@@ -2189,6 +2273,12 @@ export default function (pi: ExtensionAPI) {
 								: theme.fg("error", "✗");
 					const displayItems = getDisplayItems(r.messages);
 					text += `\n\n${theme.fg("muted", "─── ")}${theme.fg("accent", formatAgentLabel(r.agent, r.trackingName))} ${rIcon}`;
+					// Per-child identity: model · thinking · elapsed (#2396)
+					const identity = formatWorkerIdentity(
+						r,
+						r.exitCode === -1 ? "running" : r.exitCode === 0 ? "completed" : "failed",
+					);
+					if (identity) text += `\n${theme.fg("dim", identity)}`;
 					if (displayItems.length === 0)
 						text += `\n${theme.fg("muted", r.exitCode === -1 ? "(running...)" : "(no output)")}`;
 					else text += `\n${renderDisplayItems(displayItems, 5)}`;

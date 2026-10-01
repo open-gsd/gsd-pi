@@ -6,12 +6,14 @@ Templates are reusable output structures that Claude copies and fills in. They e
 
 <when_to_use>
 Use templates when:
+
 - Output should have consistent structure across invocations
 - The structure matters more than creative generation
 - Filling placeholders is more reliable than blank-page generation
 - Users expect predictable, professional-looking outputs
 
 Common template types:
+
 - **Plans** - Project plans, implementation plans, migration plans
 - **Specifications** - Technical specs, feature specs, API specs
 - **Documents** - Reports, proposals, summaries
@@ -34,6 +36,7 @@ skill-name/
 ```
 
 A template file contains:
+
 1. Clear section markers
 2. Placeholder indicators (use `{{placeholder}}` or `[PLACEHOLDER]`)
 3. Inline guidance for what goes where
@@ -41,6 +44,7 @@ A template file contains:
 </template_structure>
 
 <template_example>
+
 ```markdown
 # {{PROJECT_NAME}} Implementation Plan
 
@@ -78,6 +82,7 @@ A template file contains:
 |------|------------|--------|------------|
 | {{Risk}} | {{H/M/L}} | {{H/M/L}} | {{Strategy}} |
 ```
+
 </template_example>
 
 <workflow_integration>
@@ -99,12 +104,14 @@ The workflow tells Claude WHEN to use the template. The template provides WHAT s
 
 <best_practices>
 **Do:**
+
 - Keep templates focused on structure, not content
 - Use clear placeholder syntax consistently
 - Include brief inline guidance where sections might be ambiguous
 - Make templates complete but minimal
 
 **Don't:**
+
 - Put excessive example content that might be copied verbatim
 - Create templates for outputs that genuinely need creative generation
 - Over-constrain with too many required sections

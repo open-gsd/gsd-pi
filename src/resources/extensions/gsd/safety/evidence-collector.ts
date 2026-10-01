@@ -20,7 +20,7 @@ import {
   renameSync,
   unlinkSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { basename, join, dirname } from "node:path";
 import { randomBytes } from "node:crypto";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -61,6 +61,16 @@ const EXECUTION_TOOL_NAMES = new Set([
   "powershell",
 ]);
 const MCP_EXECUTION_TOOL_RE = /^mcp__.+__gsd_(?:uat_)?exec(?:_search)?$/;
+
+/**
+ * Exit-code sentinel for outcomes the harness never observed (#2425) — e.g.
+ * the MCP workflow queue deadline fired before the process exited. Not a real
+ * shell exit code; evidence-cross-ref treats it as inconclusive, not a failure.
+ */
+export const INCONCLUSIVE_EXIT_CODE = -2;
+
+/** Matches the deadline rejection thrown by the MCP workflow queue (workflow-tools.ts runSerializedWorkflowOperation). */
+const WORKFLOW_DEADLINE_RE = /Workflow operation exceeded \d+ms deadline/;
 
 // ─── Module State ───────────────────────────────────────────────────────────
 
@@ -215,6 +225,40 @@ export function clearEvidenceFromDisk(
   }
 }
 
+/**
+ * Move the persisted evidence file for a unit into `.gsd/safety/blocked/`
+ * instead of deleting it (#2425). The blocked path pauses the unit; archiving
+ * preserves the recorded evidence so the mismatch that caused the block stays
+ * inspectable. Normal-completion clearing still uses clearEvidenceFromDisk().
+ */
+export function archiveEvidenceToBlocked(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  taskId: string,
+): void {
+  try {
+    const path = evidencePath(basePath, milestoneId, sliceId, taskId);
+    if (!existsSync(path)) return;
+    const blockedDir = join(basePath, ".gsd", "safety", "blocked");
+    mkdirSync(blockedDir, { recursive: true });
+    const stem = basename(path, ".json");
+    let dest = join(blockedDir, `${stem}.json`);
+    // Keep earlier archives: suffix collisions instead of overwriting. The
+    // loop guards even same-millisecond collisions.
+    for (let i = 1; existsSync(dest); i++) {
+      dest = join(blockedDir, `${stem}-${Date.now()}-${i}.json`);
+    }
+    renameSync(path, dest);
+    if (path === lastWritePath) {
+      lastWritePath = null;
+      lastWriteSig = null;
+    }
+  } catch {
+    // Non-fatal
+  }
+}
+
 // ─── Recording (called from register-hooks.ts) ─────────────────────────────
 
 /**
@@ -324,6 +368,11 @@ function resolveExitCode(text: string, isError: boolean): number {
       // Fall through to the isError heuristic
     }
   }
+
+  // A harness deadline is not a process exit (#2425): the workflow queue timed
+  // out before observing the run, which keeps going and usually succeeds.
+  // Record the inconclusive sentinel instead of encoding "unknown" as failed.
+  if (WORKFLOW_DEADLINE_RE.test(text)) return INCONCLUSIVE_EXIT_CODE;
 
   return isError ? 1 : 0;
 }

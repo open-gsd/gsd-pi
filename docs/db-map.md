@@ -52,6 +52,7 @@ After commit: regenerate markdown artifacts → write to disk → invalidate cac
 ```
 
 **Connection scoping (db-connection-cache.ts):**
+
 - Keyed by workspace `identityKey` (realpath of project root)
 - Sibling worktrees share the same `.gsd/gsd.db` via SQLite WAL
 - Only one connection is "active" at a time; others cached for fast re-activation
@@ -60,6 +61,7 @@ After commit: regenerate markdown artifacts → write to disk → invalidate cac
 - Before file-backed schema migrations, `db-migration-backup.ts` checkpoints WAL and replaces `.gsd/gsd.db.backup-vN` with a copy of the database being migrated. The copy must report the expected schema version and pass SQLite `quick_check`; checkpoint, copy, or validation failures warn and fail closed before migration DDL.
 
 **Provider selection:**
+
 1. `node:sqlite` (Node ≥ 22.18 built-in)
 2. null → DB unavailable. Runtime `deriveState()` fails closed with an explicit blocker; markdown-only recovery is available only through explicit migration/recovery commands.
 
@@ -130,15 +132,18 @@ history below explains each migration without duplicating that live value.
 ### 3a. Core Hierarchy (V1, V5–V11)
 
 #### `schema_version`
+
 ```
 version    INTEGER NOT NULL
 applied_at TEXT NOT NULL
 ```
+
 Tracks which migrations have run.
 
 ---
 
 #### `decisions`
+
 ```
 seq            INTEGER PRIMARY KEY AUTOINCREMENT
 id             TEXT NOT NULL UNIQUE
@@ -152,11 +157,13 @@ made_by        TEXT NOT NULL DEFAULT 'agent'     ← V4
 source         TEXT NOT NULL DEFAULT 'discussion' ← V16
 superseded_by  TEXT DEFAULT NULL
 ```
+
 - View: `active_decisions` WHERE superseded_by IS NULL
 
 ---
 
 #### `requirements`
+
 ```
 id                TEXT PRIMARY KEY
 class             TEXT NOT NULL DEFAULT ''
@@ -171,11 +178,13 @@ notes             TEXT NOT NULL DEFAULT ''
 full_content      TEXT NOT NULL DEFAULT ''
 superseded_by     TEXT DEFAULT NULL
 ```
+
 - View: `active_requirements` WHERE superseded_by IS NULL
 
 ---
 
 #### `artifacts` (V2)
+
 ```
 path          TEXT PRIMARY KEY
 artifact_type TEXT NOT NULL DEFAULT ''
@@ -186,12 +195,14 @@ full_content  TEXT NOT NULL DEFAULT ''
 imported_at   TEXT NOT NULL DEFAULT ''
 content_hash  TEXT DEFAULT NULL                  ← V27, SHA-256 of full_content
 ```
+
 Stores markdown artifact content (PROJECT, REQUIREMENTS, SUMMARY, RESEARCH, CONTEXT, etc.).
 V27: `content_hash` is computed and stored on every `insertArtifact` for integrity fingerprinting.
 
 ---
 
 #### `milestones` (V5)
+
 ```
 id                      TEXT PRIMARY KEY
 title                   TEXT NOT NULL DEFAULT ''
@@ -212,6 +223,7 @@ requirement_coverage    TEXT NOT NULL DEFAULT ''           ← V8
 boundary_map_markdown   TEXT NOT NULL DEFAULT ''           ← V8
 sequence                INTEGER DEFAULT 0                  ← V23
 ```
+
 - Index: `idx_milestones_status` (status)
 - Status values: `active`, `closed`, `queued`
 - `sequence` is the canonical DB ordering used to choose the next open milestone. `.gsd/QUEUE-ORDER.json` is the durable operator reorder contract for `/gsd rethink` and `/gsd phase`; when present, state derivation mirrors that file into `milestones.sequence` before dispatch.
@@ -219,6 +231,7 @@ sequence                INTEGER DEFAULT 0                  ← V23
 ---
 
 #### `slices` (V5)
+
 ```
 milestone_id         TEXT NOT NULL
 id                   TEXT NOT NULL
@@ -244,12 +257,14 @@ sketch_scope         TEXT NOT NULL DEFAULT ''           ← V16
 PRIMARY KEY (milestone_id, id)
 FOREIGN KEY milestone_id → milestones(id)
 ```
+
 - Index: `idx_slices_active` (milestone_id, status)
 - Status values: `pending`, `in_progress`, `complete`, `skipped` (legacy/imported `done` and `closed` are treated as closed aliases by `status-guards.ts`)
 
 ---
 
 #### `tasks` (V5)
+
 ```
 milestone_id                TEXT NOT NULL
 slice_id                    TEXT NOT NULL
@@ -286,12 +301,14 @@ sequence                    INTEGER DEFAULT 0                  ← V9
 PRIMARY KEY (milestone_id, slice_id, id)
 FOREIGN KEY (milestone_id, slice_id) → slices(milestone_id, id)
 ```
+
 - Indexes: `idx_tasks_active` (milestone_id, slice_id, status), `idx_tasks_escalation_pending`
 - Status values: `pending`, `in_progress`, `complete`, `skipped`, `blocked` (legacy/imported `done` and `closed` are treated as complete aliases; `insertTask` stamps `completed_at` for `complete`/`done`/`closed`, but not `skipped`)
 
 ---
 
 #### `verification_evidence` (V5)
+
 ```
 id           INTEGER PRIMARY KEY AUTOINCREMENT
 task_id      TEXT NOT NULL DEFAULT ''
@@ -304,11 +321,13 @@ duration_ms  INTEGER DEFAULT 0
 created_at   TEXT NOT NULL DEFAULT ''
 FOREIGN KEY (milestone_id, slice_id, task_id) → tasks
 ```
+
 - Indexes: `idx_verification_evidence_task`, unique dedup index (V13)
 
 ---
 
 #### `replan_history` (V8)
+
 ```
 id                       INTEGER PRIMARY KEY AUTOINCREMENT
 milestone_id             TEXT NOT NULL
@@ -324,6 +343,7 @@ FOREIGN KEY milestone_id → milestones(id)
 ---
 
 #### `rework_briefs` (V30)
+
 ```
 id            TEXT PRIMARY KEY
 milestone_id  TEXT NOT NULL DEFAULT ''
@@ -332,12 +352,14 @@ task_id       TEXT NOT NULL DEFAULT ''
 created_at    TEXT NOT NULL DEFAULT ''
 updated_at    TEXT NOT NULL DEFAULT ''
 ```
+
 - Index: `idx_rework_briefs_task` (milestone_id, slice_id, task_id)
 - Default ID when omitted by the caller: `RB-<milestoneId>-<sliceId>-<taskId>`
 
 ---
 
 #### `rework_brief_findings` (V30)
+
 ```
 brief_id              TEXT NOT NULL
 finding_id            TEXT NOT NULL
@@ -352,12 +374,14 @@ updated_at            TEXT NOT NULL DEFAULT ''
 PRIMARY KEY (brief_id, finding_id)
 FOREIGN KEY brief_id → rework_briefs(id)
 ```
+
 - Index: `idx_rework_findings_status` (brief_id, severity, status)
 - `severity = 'blocking'` and `status = 'pending'` gates `gsd_task_complete` for the linked task until the finding is resolved or explicitly deferred with an override.
 
 ---
 
 #### `assessments` (V8)
+
 ```
 path         TEXT PRIMARY KEY
 milestone_id TEXT NOT NULL DEFAULT ''
@@ -373,6 +397,7 @@ FOREIGN KEY milestone_id → milestones(id)
 ---
 
 #### `quality_gates` (V12, repaired V22)
+
 ```
 milestone_id TEXT NOT NULL
 slice_id     TEXT NOT NULL
@@ -387,11 +412,13 @@ evaluated_at TEXT DEFAULT NULL
 PRIMARY KEY (milestone_id, slice_id, gate_id, task_id)
 FOREIGN KEY (milestone_id, slice_id) → slices
 ```
+
 - Index: `idx_quality_gates_pending`
 
 ---
 
 #### `slice_dependencies` (V14)
+
 ```
 milestone_id        TEXT NOT NULL
 slice_id            TEXT NOT NULL
@@ -400,6 +427,7 @@ PRIMARY KEY (milestone_id, slice_id, depends_on_slice_id)
 FOREIGN KEY (milestone_id, slice_id) → slices
 FOREIGN KEY (milestone_id, depends_on_slice_id) → slices
 ```
+
 - Index: `idx_slice_deps_target`
 - Maintained from the milestone `ROADMAP.md` slice `depends` declarations. The
   ADR-017 `roadmap-divergence` reconciliation repair re-imports the roadmap as
@@ -409,6 +437,7 @@ FOREIGN KEY (milestone_id, depends_on_slice_id) → slices
 ---
 
 #### `gate_runs` (V15)
+
 ```
 id            INTEGER PRIMARY KEY AUTOINCREMENT
 trace_id      TEXT NOT NULL
@@ -429,11 +458,13 @@ max_attempts  INTEGER NOT NULL DEFAULT 1
 retryable     INTEGER NOT NULL DEFAULT 0
 evaluated_at  TEXT NOT NULL DEFAULT ''
 ```
+
 - Indexes: `idx_gate_runs_turn`, `idx_gate_runs_lookup`
 
 ---
 
 #### `turn_git_transactions` (V15)
+
 ```
 trace_id      TEXT NOT NULL
 turn_id       TEXT NOT NULL
@@ -448,11 +479,13 @@ metadata_json TEXT NOT NULL DEFAULT '{}'
 updated_at    TEXT NOT NULL DEFAULT ''
 PRIMARY KEY (trace_id, turn_id, stage)
 ```
+
 - Index: `idx_turn_git_tx_turn`
 
 ---
 
 #### `audit_events` (V15)
+
 ```
 event_id     TEXT PRIMARY KEY
 trace_id     TEXT NOT NULL
@@ -463,11 +496,13 @@ type         TEXT NOT NULL
 ts           TEXT NOT NULL
 payload_json TEXT NOT NULL DEFAULT '{}'
 ```
+
 - Indexes: `idx_audit_events_trace`, `idx_audit_events_turn`
 
 ---
 
 #### `audit_turn_index` (V15)
+
 ```
 trace_id    TEXT NOT NULL
 turn_id     TEXT NOT NULL
@@ -480,6 +515,7 @@ PRIMARY KEY (trace_id, turn_id)
 ---
 
 #### `milestone_commit_attributions` (V26)
+
 ```
 commit_sha   TEXT NOT NULL
 milestone_id TEXT NOT NULL
@@ -491,6 +527,7 @@ files_json   TEXT NOT NULL DEFAULT '[]'
 created_at   TEXT NOT NULL DEFAULT ''
 PRIMARY KEY (commit_sha, milestone_id)
 ```
+
 - Index: `idx_milestone_commit_attr_milestone`
 
 ---
@@ -498,6 +535,7 @@ PRIMARY KEY (commit_sha, milestone_id)
 ### 3b. Memory & Knowledge Layer (V3, V18–V21)
 
 #### `memories` (V3)
+
 ```
 seq               INTEGER PRIMARY KEY AUTOINCREMENT
 id                TEXT NOT NULL UNIQUE
@@ -515,6 +553,7 @@ tags              TEXT NOT NULL DEFAULT '[]'         ← V18, JSON
 structured_fields TEXT DEFAULT NULL                  ← V21, JSON
 last_hit_at       TEXT DEFAULT NULL                  ← V28, set by incrementMemoryHitCount
 ```
+
 - Index: `idx_memories_active` (superseded_by), `idx_memories_scope` (scope)
 - View: `active_memories` WHERE superseded_by IS NULL
 - FTS: `memories_fts` virtual table (V19)
@@ -523,6 +562,7 @@ last_hit_at       TEXT DEFAULT NULL                  ← V28, set by incrementMe
 ---
 
 #### `memory_processed_units` (V3)
+
 ```
 unit_key     TEXT PRIMARY KEY
 activity_file TEXT
@@ -532,6 +572,7 @@ processed_at TEXT NOT NULL
 ---
 
 #### `memory_sources` (V18)
+
 ```
 id           TEXT PRIMARY KEY
 kind         TEXT NOT NULL
@@ -543,11 +584,13 @@ imported_at  TEXT NOT NULL
 scope        TEXT NOT NULL DEFAULT 'project'
 tags         TEXT NOT NULL DEFAULT '[]'
 ```
+
 - Indexes: `idx_memory_sources_kind`, `idx_memory_sources_scope`
 
 ---
 
 #### `memory_embeddings` (V19)
+
 ```
 memory_id  TEXT PRIMARY KEY
 model      TEXT NOT NULL
@@ -559,6 +602,7 @@ updated_at TEXT NOT NULL
 ---
 
 #### `memory_relations` (V20)
+
 ```
 from_id    TEXT NOT NULL
 to_id      TEXT NOT NULL
@@ -567,11 +611,13 @@ confidence REAL NOT NULL DEFAULT 0.8
 created_at TEXT NOT NULL
 PRIMARY KEY (from_id, to_id, rel)
 ```
+
 - Indexes: `idx_memory_relations_from`, `idx_memory_relations_to`
 
 ---
 
 #### `memories_fts` (V19, Virtual)
+
 ```
 FTS5 virtual table
 Content: memories.content
@@ -585,6 +631,7 @@ Fallback: LIKE scan if FTS5 unavailable
 ### 3c. Auto-Mode Coordination (V24 and ADR-047)
 
 #### `workers`
+
 ```
 worker_id              TEXT PRIMARY KEY
 host                   TEXT NOT NULL
@@ -599,6 +646,7 @@ project_root_realpath  TEXT NOT NULL
 ---
 
 #### `milestone_leases`
+
 ```
 milestone_id   TEXT PRIMARY KEY
 worker_id      TEXT NOT NULL
@@ -613,6 +661,7 @@ FOREIGN KEY milestone_id → milestones(id)
 ---
 
 #### `unit_dispatches`
+
 ```
 id                      INTEGER PRIMARY KEY AUTOINCREMENT
 trace_id                TEXT NOT NULL
@@ -639,12 +688,14 @@ last_error_at           TEXT
 FOREIGN KEY worker_id → workers
 FOREIGN KEY verification_evidence_id → verification_evidence(id)
 ```
+
 - Indexes: `idx_unit_dispatches_active`, `idx_unit_dispatches_trace`
 - Unique partial index: `idx_unit_dispatches_active_per_unit` ON unit_id WHERE status IN ('claimed','running') — prevents double-claim
 
 ---
 
 #### `cancellation_requests`
+
 ```
 id              INTEGER PRIMARY KEY AUTOINCREMENT
 requested_at    TEXT NOT NULL
@@ -663,6 +714,7 @@ FOREIGN KEY acked_worker_id → workers(worker_id)
 ---
 
 #### `command_queue`
+
 ```
 id           INTEGER PRIMARY KEY AUTOINCREMENT
 target_worker TEXT     ← NULL = broadcast to all workers
@@ -674,6 +726,7 @@ claimed_by   TEXT
 completed_at TEXT
 result_json  TEXT
 ```
+
 - Index: `idx_command_queue_pending` (target_worker, claimed_at)
 - Claiming is a read-then-write path and uses `immediateTransaction()` so WAL workers serialize before selecting the pending row instead of failing a deferred write upgrade with `SQLITE_BUSY_SNAPSHOT`.
 
@@ -694,6 +747,7 @@ maintenance without changing `schema_version`, `application_id`, or
 ### 3d. Soft State (V25)
 
 #### `runtime_kv`
+
 ```
 scope      TEXT NOT NULL    ← 'global' | 'worker' | 'milestone'
 scope_id   TEXT NOT NULL DEFAULT ''
@@ -702,6 +756,7 @@ value_json TEXT NOT NULL
 updated_at TEXT NOT NULL
 PRIMARY KEY (scope, scope_id, key)
 ```
+
 Non-correctness-critical state: UI cursors, dashboard caches, resume pointers. Safe to lose.
 
 ---
@@ -716,6 +771,7 @@ Milestone lifecycle commands, UAT orchestration, import application, and the
 projection worker remain separate later cutovers.
 
 #### `project_authority`
+
 ```
 singleton            INTEGER PRIMARY KEY CHECK (singleton = 1)
 project_id           TEXT NOT NULL UNIQUE
@@ -725,12 +781,14 @@ authority_epoch      INTEGER NOT NULL DEFAULT 0 CHECK (authority_epoch >= 0)
 created_at           TEXT NOT NULL DEFAULT ''
 updated_at           TEXT NOT NULL DEFAULT ''
 ```
+
 - Exactly one row is seeded with a generated 32-character lowercase hex
   `project_id`; fresh and upgraded databases begin at revision/epoch `0`.
 - `schema_version` remains the DDL compatibility version and is not this domain
   revision.
 
 #### `workflow_operations`
+
 ```
 operation_id             TEXT PRIMARY KEY
 project_id               TEXT NOT NULL
@@ -749,6 +807,7 @@ request_hash             TEXT NOT NULL
 created_at               TEXT NOT NULL
 FOREIGN KEY project_id → project_authority(project_id)
 ```
+
 - `resulting_authority_epoch` must equal the expected epoch or advance it by
   exactly one.
 - `(project_id, idempotency_key)` and `(project_id, resulting_revision)` are
@@ -757,6 +816,7 @@ FOREIGN KEY project_id → project_authority(project_id)
 - Index: `idx_workflow_operations_created` (project_id, created_at, operation_id)
 
 #### `workflow_domain_events`
+
 ```
 event_id          TEXT PRIMARY KEY
 operation_id      TEXT NOT NULL
@@ -771,6 +831,7 @@ caused_by_event_id TEXT DEFAULT NULL
 payload_json      TEXT NOT NULL DEFAULT '{}'
 created_at        TEXT NOT NULL
 ```
+
 - `(operation_id, event_index)` is unique.
 - The composite foreign key to `workflow_operations` requires every event's
   project revision and Authority Epoch to match its operation result exactly;
@@ -780,6 +841,7 @@ created_at        TEXT NOT NULL
   (project_id, entity_type, entity_id, project_revision, event_index)
 
 #### `workflow_outbox`
+
 ```
 outbox_id        INTEGER PRIMARY KEY AUTOINCREMENT
 event_id         TEXT NOT NULL
@@ -792,6 +854,7 @@ delivered_at     TEXT DEFAULT NULL
 last_error       TEXT DEFAULT NULL
 FOREIGN KEY event_id → workflow_domain_events(event_id)
 ```
+
 - `(event_id, destination)` is unique.
 - Inserts whose generated identity exceeds JavaScript's maximum safe integer
   abort with `outbox identity exceeds safe integer range`.
@@ -872,6 +935,7 @@ read-authority cutover, Attempt/Result integration, backfill, or Markdown
 inference ships with it.
 
 #### `workflow_item_lifecycles`
+
 ```
 lifecycle_id          TEXT PRIMARY KEY
 project_id            TEXT NOT NULL
@@ -888,6 +952,7 @@ last_operation_id     TEXT NOT NULL
 last_project_revision INTEGER NOT NULL
 last_authority_epoch  INTEGER NOT NULL
 ```
+
 - Partial unique indexes enforce one lifecycle per fully scoped milestone,
   slice, or task identity. Kind-specific checks require exactly the applicable
   identity columns.
@@ -900,6 +965,7 @@ last_authority_epoch  INTEGER NOT NULL
   `idx_workflow_lifecycle_slice`, and `idx_workflow_lifecycle_task`.
 
 #### `workflow_execution_attempts`
+
 ```
 attempt_id                TEXT PRIMARY KEY
 project_id                TEXT NOT NULL
@@ -920,6 +986,7 @@ settle_operation_id       TEXT DEFAULT NULL
 settle_project_revision   INTEGER DEFAULT NULL
 settle_authority_epoch    INTEGER DEFAULT NULL
 ```
+
 - `(lifecycle_id, attempt_number)` is unique, attempt numbers are contiguous,
   and every retry points to the immediately preceding Attempt for that
   lifecycle. A partial unique index permits only one `claimed` or `running`
@@ -934,6 +1001,7 @@ settle_authority_epoch    INTEGER DEFAULT NULL
   `running` rows.
 
 #### `workflow_attempt_results`
+
 ```
 result_id         TEXT PRIMARY KEY
 project_id        TEXT NOT NULL
@@ -948,6 +1016,7 @@ operation_id      TEXT NOT NULL
 project_revision  INTEGER NOT NULL
 authority_epoch   INTEGER NOT NULL
 ```
+
 - Exactly one Result may exist per Attempt, and only after that Attempt is
   settled. Its operation, revision, and Authority Epoch must exactly match the
   Attempt's settlement provenance.
@@ -955,6 +1024,7 @@ authority_epoch   INTEGER NOT NULL
   status or requirement disposition.
 
 #### `workflow_blockers`
+
 ```
 blocker_id               TEXT PRIMARY KEY
 project_id               TEXT NOT NULL
@@ -977,6 +1047,7 @@ resolved_operation_id    TEXT DEFAULT NULL
 resolved_project_revision INTEGER DEFAULT NULL
 resolved_authority_epoch INTEGER DEFAULT NULL
 ```
+
 - Blockers represent only user- or external-owned impediments and remain
   separate from lifecycle and execution outcomes.
 - Opening facts are immutable. An open Blocker may become `resolved` or
@@ -984,6 +1055,7 @@ resolved_authority_epoch INTEGER DEFAULT NULL
   deletes are immutable.
 
 #### `workflow_waivers`
+
 ```
 waiver_id              TEXT PRIMARY KEY
 project_id             TEXT NOT NULL
@@ -1005,6 +1077,7 @@ ended_operation_id     TEXT DEFAULT NULL
 ended_project_revision INTEGER DEFAULT NULL
 ended_authority_epoch  INTEGER DEFAULT NULL
 ```
+
 - User grants require an actor ID. At most one active Waiver may reference a
   Blocker, and requirement/blocker references must resolve to canonical rows.
 - Grant facts are immutable. An active Waiver may become `revoked` or
@@ -1015,6 +1088,7 @@ ended_authority_epoch  INTEGER DEFAULT NULL
   rows with a Blocker.
 
 #### `workflow_requirement_dispositions`
+
 ```
 disposition_id             TEXT PRIMARY KEY
 project_id                 TEXT NOT NULL
@@ -1028,6 +1102,7 @@ operation_id               TEXT NOT NULL
 project_revision           INTEGER NOT NULL
 authority_epoch            INTEGER NOT NULL
 ```
+
 - Rows form an immutable, single-head history per requirement. Every successor
   must supersede the current head with causally newer revision/Authority Epoch
   provenance.
@@ -1063,6 +1138,7 @@ decision rows retain their current behavior until the later cutover slice.
 | `workflow_work_checkpoints` | Restart-safe, append-only conversation/work summaries with one ordered head per scope. Kinds cover `discovery`, `research`, `requirements`, `roadmap`, `delivery`, `answer`, `pause`, `correction`, `recap`, and `handoff`. Narrative fields are resumability aids; canonical Answer and Decision heads remain the machine truth. |
 
 #### `workflow_milestone_contexts`
+
 ```
 context_id             TEXT PRIMARY KEY
 project_id             TEXT NOT NULL
@@ -1079,10 +1155,12 @@ operation_id           TEXT NOT NULL
 project_revision       INTEGER NOT NULL
 authority_epoch        INTEGER NOT NULL
 ```
+
 - The lifecycle must identify the same milestone. Each later context supersedes
   the current head with causally newer provenance; updates and deletes fail.
 
 #### `workflow_open_questions`
+
 ```
 question_id                 TEXT PRIMARY KEY
 project_id                  TEXT NOT NULL
@@ -1099,12 +1177,14 @@ last_operation_id           TEXT NOT NULL
 last_project_revision       INTEGER NOT NULL
 last_authority_epoch        INTEGER NOT NULL
 ```
+
 - Questions begin open at version zero. The only transition is from `open` to
   `answered` or `withdrawn`, with a one-step version increment and newer causal
   provenance. Answering requires an accepted Answer created by that same final
   operation; withdrawal carries no Answer. Deletes fail.
 
 #### `workflow_question_dependencies`
+
 ```
 question_id       TEXT NOT NULL
 lifecycle_id      TEXT NOT NULL
@@ -1116,10 +1196,12 @@ project_revision  INTEGER NOT NULL
 authority_epoch   INTEGER NOT NULL
 PRIMARY KEY (question_id, lifecycle_id)
 ```
+
 - Dependencies are immutable and bound to an existing Question, lifecycle,
   Domain Operation, revision, and Authority Epoch.
 
 #### `workflow_interactions`
+
 ```
 interaction_id              TEXT PRIMARY KEY
 project_id                  TEXT NOT NULL
@@ -1142,12 +1224,14 @@ operation_id                TEXT NOT NULL
 project_revision            INTEGER NOT NULL
 authority_epoch             INTEGER NOT NULL
 ```
+
 - Interactions begin `prepared`. The only update presents the immutable turn
   after validating its exact option count and ordinal-one recommendation.
   `choice` requires two or three options. Every Kind except `recap` requires an
   Answer and non-empty recommendation text and rationale.
 
 #### `workflow_interaction_options`
+
 ```
 interaction_id    TEXT NOT NULL
 option_id         TEXT NOT NULL
@@ -1160,10 +1244,12 @@ project_revision  INTEGER NOT NULL
 authority_epoch   INTEGER NOT NULL
 PRIMARY KEY (interaction_id, option_id)
 ```
+
 - Options may be added only while the Interaction is prepared. Ordinals are
   unique within an Interaction; updates and deletes fail.
 
 #### `workflow_answers`
+
 ```
 answer_id                  TEXT PRIMARY KEY
 project_id                 TEXT NOT NULL
@@ -1181,6 +1267,7 @@ operation_id               TEXT NOT NULL
 project_revision           INTEGER NOT NULL
 authority_epoch            INTEGER NOT NULL
 ```
+
 - An accepted Answer must target a presented Interaction at the observed
   revision; recaps accept only corrections. The resulting revision must advance
   beyond the observed revision. The optional selected option must belong to the
@@ -1189,6 +1276,7 @@ authority_epoch            INTEGER NOT NULL
   Answer per Interaction.
 
 #### `workflow_conversation_decisions`
+
 ```
 decision_id             TEXT PRIMARY KEY
 project_id              TEXT NOT NULL
@@ -1201,11 +1289,13 @@ operation_id            TEXT NOT NULL
 project_revision        INTEGER NOT NULL
 authority_epoch         INTEGER NOT NULL
 ```
+
 - A Decision requires an accepted Answer from the same operation. A successor
   must derive from a correction Answer and supersede the causally older current
   head for that Question. Updates and deletes fail.
 
 #### `workflow_decision_impacts`
+
 ```
 decision_id       TEXT NOT NULL
 lifecycle_id      TEXT NOT NULL
@@ -1216,12 +1306,14 @@ project_revision  INTEGER NOT NULL
 authority_epoch   INTEGER NOT NULL
 PRIMARY KEY (decision_id, lifecycle_id)
 ```
+
 - The target lifecycle must be a declared dependency of the Decision's
   Question. `inform` works with either dependency Kind; `revalidate` and
   `invalidate` require a `revalidate` dependency. Updates and deletes fail.
 - Index: `idx_workflow_decision_impacts_lifecycle` (lifecycle_id, effect)
 
 #### `workflow_work_checkpoints`
+
 ```
 checkpoint_id          TEXT PRIMARY KEY
 project_id             TEXT NOT NULL
@@ -1239,6 +1331,7 @@ operation_id           TEXT NOT NULL
 project_revision       INTEGER NOT NULL
 authority_epoch        INTEGER NOT NULL
 ```
+
 - A scope begins at sequence one. Each later checkpoint extends the current
   head for the same project, scope, and lifecycle with the next sequence and
   causally newer provenance. Updates and deletes fail.
@@ -1269,6 +1362,7 @@ surfaces retain their existing compatibility meaning until the explicit
 runtime cutover.
 
 #### `workflow_failure_observations`
+
 ```
 failure_observation_id  TEXT PRIMARY KEY
 project_id              TEXT NOT NULL
@@ -1287,6 +1381,7 @@ operation_id            TEXT NOT NULL
 project_revision        INTEGER NOT NULL
 authority_epoch         INTEGER NOT NULL
 ```
+
 - Boundary stage is `advance | execute | verify | route | closeout`.
 - Failure kinds and fingerprints are non-empty, trimmed, lowercase normalized
   values. The kind vocabulary remains extensible so a newer deterministic
@@ -1306,6 +1401,7 @@ authority_epoch         INTEGER NOT NULL
   (lifecycle_id, failure_fingerprint, project_revision)
 
 #### `workflow_recovery_budgets`
+
 ```
 recovery_budget_id  TEXT PRIMARY KEY
 project_id          TEXT NOT NULL
@@ -1320,6 +1416,7 @@ operation_id        TEXT NOT NULL
 project_revision    INTEGER NOT NULL
 authority_epoch     INTEGER NOT NULL
 ```
+
 - A budget is an immutable count allocation for one lifecycle, normalized
   failure kind/fingerprint, policy class, and policy version.
 - Only one allocation may exist for a project/lifecycle, failure
@@ -1337,6 +1434,7 @@ authority_epoch     INTEGER NOT NULL
   require canonical Attempt metrics and later policy work.
 
 #### `workflow_recovery_actions`
+
 ```
 recovery_action_id     TEXT PRIMARY KEY
 project_id             TEXT NOT NULL
@@ -1353,6 +1451,7 @@ operation_id           TEXT NOT NULL
 project_revision       INTEGER NOT NULL
 authority_epoch        INTEGER NOT NULL
 ```
+
 - Action is exactly `retry | repair | replan | remediate | clarify | pause |
   abort`; one Failure Observation can have only one selected Action.
 - Retry requires a matching unexhausted budget and the same lifecycle target.
@@ -1371,6 +1470,7 @@ authority_epoch        INTEGER NOT NULL
   (recovery_budget_id, project_revision)
 
 #### `workflow_acceptance_criteria`
+
 ```
 criterion_id             TEXT PRIMARY KEY
 criterion_key            TEXT NOT NULL
@@ -1387,6 +1487,7 @@ operation_id             TEXT NOT NULL
 project_revision         INTEGER NOT NULL
 authority_epoch          INTEGER NOT NULL
 ```
+
 - Criterion kind is `technical | subjective_uat`. Evidence class is `command |
   runtime | browser | artifact | human`; technical criteria cannot use `human`
   and subjective UAT must use it.
@@ -1397,6 +1498,7 @@ authority_epoch          INTEGER NOT NULL
   and cannot authorize a verdict for the new head. Updates and deletes fail.
 
 #### `workflow_technical_verdicts`
+
 ```
 verdict_id             TEXT PRIMARY KEY
 project_id             TEXT NOT NULL
@@ -1414,6 +1516,7 @@ operation_id           TEXT NOT NULL
 project_revision       INTEGER NOT NULL
 authority_epoch        INTEGER NOT NULL
 ```
+
 - Verdict is `pass | fail | inconclusive`. Corrections append to an immutable
   current-head chain for the same criterion, Attempt, and tested source revision.
 - Only the current technical criterion and a matching settled V32 Attempt may
@@ -1426,6 +1529,7 @@ authority_epoch        INTEGER NOT NULL
   cannot authorize a Failure Observation or Recovery Action.
 
 #### `workflow_verification_evidence`
+
 ```
 evidence_id              TEXT PRIMARY KEY
 project_id               TEXT NOT NULL
@@ -1450,6 +1554,7 @@ operation_id             TEXT NOT NULL
 project_revision         INTEGER NOT NULL
 authority_epoch          INTEGER NOT NULL
 ```
+
 - Evidence class is objective only: `command | runtime | browser | artifact`.
   Observation is `passed | failed | inconclusive`.
 - Evidence is owned directly by one Technical Verdict; there is no separate
@@ -1470,6 +1575,7 @@ authority_epoch          INTEGER NOT NULL
 - Index: `idx_workflow_evidence_verdict` (verdict_id, evidence_id)
 
 #### `workflow_human_acceptances`
+
 ```
 human_acceptance_id            TEXT PRIMARY KEY
 project_id                     TEXT NOT NULL
@@ -1487,6 +1593,7 @@ operation_id                   TEXT NOT NULL
 project_revision               INTEGER NOT NULL
 authority_epoch                INTEGER NOT NULL
 ```
+
 - Disposition is `accepted | rejected`; pending is represented by no row.
 - Human Acceptance is separate from Technical Verdict. It requires the current
   `subjective_uat` criterion and the current accepted V33 Answer from an
@@ -1497,6 +1604,7 @@ authority_epoch                INTEGER NOT NULL
   deletes fail.
 
 #### `workflow_remediation_links`
+
 ```
 remediation_link_id     TEXT PRIMARY KEY
 project_id              TEXT NOT NULL
@@ -1512,6 +1620,7 @@ operation_id            TEXT NOT NULL
 project_revision        INTEGER NOT NULL
 authority_epoch         INTEGER NOT NULL
 ```
+
 - Exactly one source is required: a `fail | inconclusive` Technical Verdict or
   the current rejected Human Acceptance. A technical source must already own at
   least one Verification Evidence row; S06 still owns aggregate evidence
@@ -1547,6 +1656,7 @@ migration is additive: it performs no legacy backfill and does not cut runtime
 readers, writers, adapters, or lifecycle completion over to these tables.
 
 #### `workflow_projection_work`
+
 ```
 projection_work_id          TEXT PRIMARY KEY
 project_id                  TEXT NOT NULL
@@ -1571,6 +1681,7 @@ enqueue_operation_id        TEXT NOT NULL
 created_at                  TEXT NOT NULL
 updated_at                  TEXT NOT NULL
 ```
+
 - Each normalized projection key has one immutable desired-work lineage.
   Successors name the causally older current head and advance the source
   revision without decreasing the Authority Epoch.
@@ -1586,6 +1697,7 @@ updated_at                  TEXT NOT NULL
   reuse the unique `(project_id, projection_key, source_project_revision)` index.
 
 #### `workflow_import_applications`
+
 ```
 operation_id                  TEXT PRIMARY KEY
 project_id                    TEXT NOT NULL
@@ -1618,6 +1730,7 @@ applied_at                    TEXT NOT NULL
 resulting_project_revision    INTEGER NOT NULL
 resulting_authority_epoch     INTEGER NOT NULL
 ```
+
 - Preview generation is non-authoritative. One immutable receipt seals the
   versioned preview envelope, ordered source/change fingerprints, raw legacy
   diagnoses, explicit resolutions, and aggregate counts used by application.
@@ -1640,6 +1753,7 @@ resulting_authority_epoch     INTEGER NOT NULL
   the receipt transaction.
 
 #### `workflow_authority_cutovers`
+
 ```
 operation_id                TEXT PRIMARY KEY
 project_id                  TEXT NOT NULL
@@ -1650,11 +1764,13 @@ cutover_at                  TEXT NOT NULL
 resulting_project_revision  INTEGER NOT NULL
 resulting_authority_epoch   INTEGER NOT NULL
 ```
+
 - The receipt must match one `authority.cutover` operation that advances the
   project revision and Authority Epoch by exactly one. Project/epoch pairs are
   unique. Receipt and linked operation rows are immutable.
 
 #### `workflow_import_restores`
+
 ```
 operation_id                            TEXT PRIMARY KEY
 project_id                              TEXT NOT NULL
@@ -1679,6 +1795,7 @@ restored_at                             TEXT NOT NULL
 resulting_project_revision              INTEGER NOT NULL
 resulting_authority_epoch               INTEGER NOT NULL
 ```
+
 - Restore replaces the live database with the verified pre-Application backup
   and therefore deliberately does not reference the erased Application or its
   operation by foreign key. The erased identity is retained as checked JSON
@@ -1689,6 +1806,7 @@ resulting_authority_epoch               INTEGER NOT NULL
   Restore receipts and their linked operation are immutable.
 
 #### `workflow_import_forward_repairs`
+
 ```
 operation_id                 TEXT PRIMARY KEY
 project_id                   TEXT NOT NULL
@@ -1710,6 +1828,7 @@ repaired_at                  TEXT NOT NULL
 resulting_project_revision   INTEGER NOT NULL
 resulting_authority_epoch    INTEGER NOT NULL
 ```
+
 - Forward Repair requires the retained Import Application and its exact
   index-zero `legacy-import.applied` event. It advances revision once without
   lowering or advancing the Authority Epoch.
@@ -1719,6 +1838,7 @@ resulting_authority_epoch    INTEGER NOT NULL
   linked operation rows are immutable.
 
 #### `workflow_kernel_checkpoints`
+
 ```
 kernel_checkpoint_id          TEXT PRIMARY KEY
 project_id                    TEXT NOT NULL
@@ -1732,6 +1852,7 @@ operation_id                  TEXT NOT NULL
 project_revision              INTEGER NOT NULL
 authority_epoch               INTEGER NOT NULL
 ```
+
 - Absence of a checkpoint means Advance. The first row is sequence one,
   records Execute, and shares the exact operation/revision/epoch tuple that
   claimed its V32 Attempt.
@@ -1744,6 +1865,7 @@ authority_epoch               INTEGER NOT NULL
 - Current-head scans reuse the unique `(project_id, lifecycle_id, sequence)` index.
 
 #### `workflow_closeout_plans`
+
 ```
 closeout_plan_id            TEXT PRIMARY KEY
 project_id                  TEXT NOT NULL
@@ -1757,6 +1879,7 @@ operation_id                TEXT NOT NULL
 project_revision            INTEGER NOT NULL
 authority_epoch             INTEGER NOT NULL
 ```
+
 - A plan requires a causally prior succeeded, settled Attempt. One immutable
   lineage exists per lifecycle; its head is current.
 - Supersession preserves project/lifecycle and may retain the Attempt or name a
@@ -1767,6 +1890,7 @@ authority_epoch             INTEGER NOT NULL
 - Index: `idx_workflow_closeout_plan_head`.
 
 #### `workflow_closeout_effects`
+
 ```
 closeout_effect_id TEXT PRIMARY KEY
 closeout_plan_id   TEXT NOT NULL
@@ -1782,6 +1906,7 @@ operation_id       TEXT NOT NULL
 project_revision   INTEGER NOT NULL
 authority_epoch    INTEGER NOT NULL
 ```
+
 - Settlement-critical host effects are immutable and inserted in contiguous
   ordinal order. Idempotency keys are unique within a plan and may recur on a
   superseding plan so an adapter can recognize an earlier host result.
@@ -1793,6 +1918,7 @@ authority_epoch    INTEGER NOT NULL
   verification, and idempotent execution.
 
 #### `workflow_settlement_receipts`
+
 ```
 settlement_receipt_id TEXT PRIMARY KEY
 closeout_effect_id    TEXT NOT NULL UNIQUE
@@ -1807,6 +1933,7 @@ operation_id          TEXT NOT NULL
 project_revision      INTEGER NOT NULL
 authority_epoch       INTEGER NOT NULL
 ```
+
 - Receipts are immutable success-only facts with outcome `performed |
   recognized`. Missing receipt means pending; failures remain V34 Failure
   Observations and Recovery Actions rather than failed receipts.

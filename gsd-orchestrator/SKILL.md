@@ -37,6 +37,7 @@ You never write application code yourself — GSD does that.
 </mental_model>
 
 <critical_rules>
+
 - **Flags before command.** `gsd headless [--flags] [command] [args]`. Flags after the command are ignored.
 - **Redirect stderr.** JSON output goes to stdout. Progress goes to stderr. Always `2>/dev/null` when parsing JSON.
 - **Check exit codes.** 0=success, 1=error, 10=blocked (needs you), 11=cancelled.
@@ -70,6 +71,7 @@ Read `references/commands.md` — full command reference with flags and examples
 <quick_reference>
 
 **Launch a full build (spec to working code):**
+
 ```bash
 mkdir -p /tmp/my-project && cd /tmp/my-project && git init
 cat > spec.md << 'EOF'
@@ -80,18 +82,21 @@ gsd headless --output-format json --context spec.md new-milestone --auto 2>/dev/
 ```
 
 **Check project state (instant, free):**
+
 ```bash
 cd /path/to/project
 gsd headless query | jq '{phase: .state.phase, progress: .state.progress, cost: .cost.total}'
 ```
 
 **Resume work on an existing project:**
+
 ```bash
 cd /path/to/project
 gsd headless --output-format json auto 2>/dev/null
 ```
 
 **Run one step at a time:**
+
 ```bash
 RESULT=$(gsd headless --output-format json next 2>/dev/null)
 echo "$RESULT" | jq '{status: .status, phase: .phase, cost: .cost.total}'
@@ -110,6 +115,7 @@ echo "$RESULT" | jq '{status: .status, phase: .phase, cost: .cost.total}'
 
 <project_structure>
 GSD creates and manages all state in `.gsd/`:
+
 ```
 .gsd/
   PROJECT.md          # What this project is

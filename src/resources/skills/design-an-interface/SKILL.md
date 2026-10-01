@@ -11,6 +11,7 @@ Generate at least three radically different interface designs for a single modul
 This skill runs during planning — before `S##-PLAN.md` task decomposition, or mid-slice when a seam turns out to be more load-bearing than the roadmap assumed. It is not for picking between two libraries. It is for shaping the interface your own code will expose.
 
 Typical invocation points:
+
 - A slice plan says "add module X" and the shape of X is not obvious.
 - Two callers are about to grow coupled to an interface that has not been designed on purpose.
 - A refactor surfaces a seam that needs to be re-cut deliberately.

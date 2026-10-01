@@ -109,7 +109,7 @@ export interface MinimalModelRegistry {
 
 export interface MinimalPreferences {
   models?: {
-    execution?: string | { model: string; fallbacks?: string[] };
+    execution?: string | { model: string; fallbacks?: Array<string | { model: string; thinking?: string }> };
   };
 }
 

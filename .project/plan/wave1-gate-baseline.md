@@ -126,6 +126,7 @@ Surviving red leg: `discard` witness — native projection-root identity locking
 (@gsd/native), pre-existing, owned by T025.
 
 ### 3. Compiled-tier spot check — `pnpm run test:compile`, then
+
 `node --import ./scripts/dist-test-resolve.mjs --experimental-test-isolation=process --test dist-test/src/tests/prompt-golden-fixtures.test.js`
 
 `@opengsd/contracts` resolves in the compiled tier (direct import returns all contract

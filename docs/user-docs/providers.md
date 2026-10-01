@@ -90,7 +90,7 @@ If you already have a Claude Pro or Max subscription and want to use GSD's plann
 
 **Automatic setup (recommended):**
 
-When GSD detects a Claude Code model during startup, it automatically writes a `.mcp.json` file in your project root with the GSD workflow and `gsd-browser` MCP servers configured. No manual steps needed — just start GSD once with Claude Code as the provider and the config is created for you.
+For existing GSD projects, automatic MCP prep is provider-independent. When the project root already contains `.gsd/`, GSD writes or updates `.mcp.json` with the GSD workflow and `gsd-browser` MCP servers during startup, even if the current GSD session is using OpenAI, Codex, Cursor Agent, or another provider. This keeps the project ready for Claude Code or direct `claude` CLI use without dirtying ordinary non-GSD repositories.
 
 You can also trigger this manually from inside a GSD session:
 
@@ -412,6 +412,7 @@ The `apiKey` is required by the config schema but Ollama ignores it — any valu
 Inside GSD, type `/model` and pick your Ollama model.
 
 **Ollama tips:**
+
 - Ollama does not support the `developer` role or `reasoning_effort` — always set `compat.supportsDeveloperRole: false` and `compat.supportsReasoningEffort: false`.
 - If you get empty responses, check that `ollama serve` is running and the model is pulled.
 - Context window and max tokens default to 128K / 16K if not specified. Override these if your model has different limits.
@@ -455,6 +456,7 @@ In LM Studio, go to the "Local Server" tab, load a model, and click "Start Serve
 Replace `your-model-name` with the model identifier shown in LM Studio's server tab.
 
 **LM Studio tips:**
+
 - The model ID in `models.json` must match what LM Studio reports in its server API. Check the server tab for the exact string.
 - LM Studio defaults to port 1234. If you changed it, update `baseUrl` accordingly.
 - Increase `contextWindow` and `maxTokens` if your model supports larger contexts.
@@ -697,14 +699,17 @@ Values are per million tokens.
 After configuring a provider:
 
 1. **Launch GSD:**
+
    ```bash
    gsd
    ```
 
 2. **Check available models:**
+
    ```
    /model
    ```
+
    Your provider's models should appear in the list.
 
 3. **Switch to the model:**
@@ -714,6 +719,7 @@ After configuring a provider:
    Type anything to confirm the model responds.
 
 If the model doesn't appear, check:
+
 - The environment variable is set in the current shell
 - `models.json` is valid JSON (use `cat ~/.gsd/agent/models.json | python3 -m json.tool`)
 - The server is running (for local providers)

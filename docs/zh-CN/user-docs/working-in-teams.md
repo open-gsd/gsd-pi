@@ -79,6 +79,7 @@ git:
 2. 按上面的选择性规则更新 `.gitignore`
 3. 在 `.gsd/PREFERENCES.md` 中添加 `unique_milestone_ids: true`
 4. 如有需要，重命名现有 milestones 以使用唯一 ID：
+
    ```
    I have turned on unique milestone ids, please update all old milestone
    ids to use this new format e.g. M001-abc123 where abc123 is a random
@@ -86,6 +87,7 @@ git:
    .gsd file contents, file names and directory names. Validate your work
    once done to ensure referential integrity.
    ```
+
 5. 提交修改
 
 ## 并行开发

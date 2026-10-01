@@ -678,9 +678,12 @@ function loadHealth(units: UnitMetrics[], totals: ProjectTotals | null, basePath
     const criticals = report.suggestions.filter(s => s.severity === "critical");
     skillSummary = {
       total: report.skills.length,
-      warningCount: warnings.length,
+      // #2495: causation heal suggestions no longer fire on availability-only
+      // data, so surface the report's own flags instead of implying "all
+      // healthy" when suggestions are quiet.
+      warningCount: warnings.length + report.decliningSkills.length,
       criticalCount: criticals.length,
-      topIssue: report.suggestions[0]?.message ?? null,
+      topIssue: report.suggestions[0]?.message ?? report.skills.find(s => s.flagged)?.flagReason ?? null,
     };
   } catch { /* non-fatal */ }
 

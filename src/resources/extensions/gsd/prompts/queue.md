@@ -56,6 +56,7 @@ Before writing artifacts, classify scope as **single-milestone** or **multi-mile
 **Single milestone**: one coherent deliverable set, roughly 2-12 slices.
 
 **Multi-milestone** if:
+
 - The work has natural phase boundaries
 - Different parts could ship independently on different timelines
 - The full scope is too large for one milestone to stay focused
@@ -89,6 +90,7 @@ id: "depth_verification_M010-3ym37m"
 ```
 
 This triggers the per-milestone write-gate. Present:
+
 - Scope you are about to capture.
 - Key technical assumptions verified or still unverified.
 - Risks or unknowns surfaced by investigation.
@@ -105,11 +107,13 @@ Once the user is satisfied, in one pass for **each** new milestone:
 
 1. Call `gsd_milestone_generate_id`; never invent IDs. Then `mkdir -p .gsd/milestones/<ID>/slices`.
 2. Call `gsd_summary_save` with `artifact_type: "CONTEXT"` and full context markdown. The tool computes path and persists DB + disk. Capture intent, scope, risks, constraints, integration points, and requirements. Mark status "Queued — pending auto-mode execution." **If dependent, include YAML frontmatter:**
+
    ```yaml
    ---
    depends_on: [M001, M002]
    ---
    ```
+
    Auto-mode reads this to enforce order. List exact milestone IDs, including suffixes.
 
 After all milestone directories and context files are written:

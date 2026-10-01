@@ -12,6 +12,7 @@ You are investigating a reported issue in a GSD debug session.
 `{{goal}}`
 
 Goal semantics:
+
 - `find_root_cause_only` — identify the root cause and document your findings; do **NOT** apply code changes, patches, or fixes. Your deliverable is a structured root cause analysis.
 - `find_and_fix` — identify the root cause **and** apply a targeted, minimal fix. Verify the fix works after applying it.
 

@@ -8,6 +8,7 @@
  */
 
 import { buildAuditEnvelope, emitUokAuditEvent } from "../gsd/uok/audit.js";
+import { emitPhaseChangeEvent } from "../gsd/hook-emitter.js";
 
 let _active = false;
 let _currentPhase: string | null = null;
@@ -22,23 +23,34 @@ export interface GSDPhaseAuditContext {
 let _auditContext: GSDPhaseAuditContext | null = null;
 
 function emitPhaseChange(action: string, previousPhase: string | null, nextPhase: string | null): void {
-	if (!_auditContext) return;
-	emitUokAuditEvent(
-		_auditContext.basePath,
-		buildAuditEnvelope({
-			traceId: _auditContext.traceId,
-			turnId: _auditContext.turnId,
-			causedBy: _auditContext.causedBy,
-			category: "orchestration",
-			type: "phase_changed",
-			payload: {
-				action,
-				active: _active,
-				previousPhase,
-				nextPhase,
-			},
-		}),
-	);
+	// Audit first (pre-existing contract: it may throw synchronously), then the
+	// best-effort extension event beside it — one phase_change per transition,
+	// independent of audit configuration (a missing host API is a no-op inside
+	// the bridge) (#1999).
+	if (_auditContext) {
+		emitUokAuditEvent(
+			_auditContext.basePath,
+			buildAuditEnvelope({
+				traceId: _auditContext.traceId,
+				turnId: _auditContext.turnId,
+				causedBy: _auditContext.causedBy,
+				category: "orchestration",
+				type: "phase_changed",
+				payload: {
+					action,
+					active: _active,
+					previousPhase,
+					nextPhase,
+				},
+			}),
+		);
+	}
+	void emitPhaseChangeEvent({
+		previousPhase,
+		currentPhase: nextPhase,
+		source: "auto",
+		...(_auditContext ? { traceId: _auditContext.traceId } : {}),
+	});
 }
 
 export function configureGSDPhaseAudit(context: GSDPhaseAuditContext | null): void {

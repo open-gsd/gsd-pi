@@ -1923,6 +1923,30 @@ function mapThinkingLevelToAnthropicEffort(level: ThinkingLevel | undefined, mod
 	}
 }
 
+const ANTHROPIC_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * Model metadata the adapter consults in addition to id heuristics (#2437).
+ * Mirrors the pi-ai `Model` fields needed for adaptive-thinking decisions so
+ * this extension stays typecheck-stable even when the published @gsd/pi-ai
+ * barrel lags behind monorepo source exports.
+ */
+export interface ClaudeCodeModelMetadata {
+	compat?: { forceAdaptiveThinking?: boolean } | undefined;
+	thinkingLevelMap?: Partial<Record<string, string | null>> | undefined;
+}
+
+/** Return the catalog effort for a thinking level when it is a valid Anthropic effort value. */
+function resolveCatalogEffort(
+	thinkingLevelMap: ClaudeCodeModelMetadata["thinkingLevelMap"],
+	level: ThinkingLevel,
+): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+	const mapped = thinkingLevelMap?.[level];
+	return typeof mapped === "string" && (ANTHROPIC_EFFORTS as readonly string[]).includes(mapped)
+		? mapped as (typeof ANTHROPIC_EFFORTS)[number]
+		: undefined;
+}
+
 function parseAllowedMcpToolName(toolName: string): { server: string; tool: string } | undefined {
 	const match = /^mcp__(.+)__(\*|[^*]+)$/.exec(toolName);
 	return match?.[1] && match[2] ? { server: match[1], tool: match[2] } : undefined;
@@ -2182,6 +2206,7 @@ export function buildSdkOptions(
 	prompt: string,
 	overrides?: { permissionMode?: "bypassPermissions" | "acceptEdits" | "default" | "plan" },
 	extraOptions: Record<string, unknown> & { reasoning?: ThinkingLevel; gsdPhase?: string } = {},
+	modelMetadata?: ClaudeCodeModelMetadata,
 ): Record<string, unknown> {
 	const { reasoning, cwd, gsdPhase, env: extraEnv, stderr: extraStderr, ...sdkExtraOptions } = extraOptions;
 	const sdkCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
@@ -2344,10 +2369,15 @@ export function buildSdkOptions(
 				...(workflowMcpTools.length === 0 && exactWorkflowMcpTools.length === 0 ? ["AskUserQuestion"] : []),
 				...allowedBrowserMcpTools,
 			];
-	const supportsAdaptive = modelSupportsAdaptiveThinking(modelId);
+	// #2437: catalog metadata is additive. A catalog compat flag can enable
+	// adaptive thinking for ids the heuristic does not know yet, and a catalog
+	// thinkingLevelMap entry wins over the legacy id-based effort map.
+	const supportsAdaptive = modelMetadata?.compat?.forceAdaptiveThinking === true
+		|| modelSupportsAdaptiveThinking(modelId);
 	const effort =
 		reasoning && supportsAdaptive
-			? mapThinkingLevelToAnthropicEffort(reasoning, modelId)
+			? (resolveCatalogEffort(modelMetadata?.thinkingLevelMap, reasoning)
+				?? mapThinkingLevelToAnthropicEffort(reasoning, modelId))
 			: undefined;
 
 	// Bug B: SDK requires thinking:{type:"adaptive"} alongside effort for adaptive thinking to activate.
@@ -2588,6 +2618,11 @@ async function pumpSdkMessages(
 						}
 					: {}),
 			},
+			// Catalog model metadata drives the additive thinking checks (#2437).
+			{
+				compat: model.compat as ClaudeCodeModelMetadata["compat"],
+				thinkingLevelMap: model.thinkingLevelMap,
+			},
 		);
 		const workflowMcpServerName = workflowMcpServerNameFromAllowedTools(sdkOpts.allowedTools);
 		const allowedTools = Array.isArray(sdkOpts.allowedTools) ? sdkOpts.allowedTools : [];
@@ -2704,6 +2739,14 @@ async function pumpSdkMessages(
 					toolCompletionTargetsById,
 					emittedExternalToolResultIds,
 				} = createSdkAttemptMessageState();
+				// Per-call usage of the last main-loop assistant event, per attempt.
+				// The terminal `result.usage` is cumulative across the SDK's
+				// internal tool-use loop, while each assistant event carries the
+				// usage of its own API call — the last main-loop one reflects the
+				// live end-of-turn context (#2358, #2359). Reset per attempt so a
+				// readiness retry can never inherit the previous attempt's
+				// measurement.
+				let lastMainLoopAssistantUsage: SDKAssistantMessage["message"]["usage"] | null = null;
 				const controller = new AbortController();
 				const forwardAbort = (): void => controller.abort();
 				if (options?.signal) {
@@ -2832,6 +2875,13 @@ async function pumpSdkMessages(
 									lastThinkingContent = block.thinking;
 								}
 							}
+
+							// Subagent events carry their own (smaller) context; only
+							// main-loop events (parent_tool_use_id === null) see the
+							// conversation this turn's final usage must describe.
+							if (sdkAssistant.parent_tool_use_id === null) {
+								lastMainLoopAssistantUsage = sdkAssistant.message.usage;
+							}
 							break;
 						}
 
@@ -2956,13 +3006,28 @@ async function pumpSdkMessages(
 									result.subtype === "success" && result.result ? result.result : undefined,
 							});
 
+							const usage = mapUsage(result.usage, result.total_cost_usd);
+							if (lastMainLoopAssistantUsage) {
+								// Live end-of-turn context from the SDK's final main-loop
+								// call. The terminal result usage is cumulative across the
+								// internal loop, so overflow detection and the context
+								// gauge prefer this per-call value when present (#2358,
+								// #2359). Additive field: existing usage fields (and
+								// persisted sessions) stay untouched. Cache counts are
+								// nullable in the native API shape and read as 0.
+								usage.liveContextTokens =
+									lastMainLoopAssistantUsage.input_tokens +
+									(lastMainLoopAssistantUsage.cache_read_input_tokens ?? 0) +
+									(lastMainLoopAssistantUsage.cache_creation_input_tokens ?? 0);
+							}
+
 							const finalMessage: AssistantMessage = {
 								role: "assistant",
 								content: finalContent,
 								api: "anthropic-messages",
 								provider: "claude-code",
 								model: modelId,
-								usage: mapUsage(result.usage, result.total_cost_usd),
+								usage,
 								stopReason: result.is_error ? "error" : "stop",
 								timestamp: Date.now(),
 							};

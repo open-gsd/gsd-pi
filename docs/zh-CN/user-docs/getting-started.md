@@ -82,6 +82,7 @@ gsd --version     # 输出已安装版本
 进入会话后，输入 `/model` 以确认你的 LLM 已成功连接。
 
 > **Apple Silicon PATH 修复：** 如果安装后找不到 `gsd`，可能是 npm 的全局 bin 目录没有加入 PATH：
+>
 > ```bash
 > echo 'export PATH="$(npm prefix -g)/bin:$PATH"' >> ~/.zshrc
 > source ~/.zshrc
@@ -159,6 +160,7 @@ gsd --version     # 输出已安装版本
 3. 打开一个**新的**终端，然后继续执行上面的第 3-7 步
 
 > **Windows 提示：**
+>
 > - 建议使用 **Windows Terminal** 或 **PowerShell**，体验最佳。Command Prompt 也能用，但颜色支持较弱。
 > - 如果 `gsd` 无法识别，先重启终端。Windows 需要新开终端才能读取更新后的 PATH。
 > - **WSL2** 也可用，安装 WSL 后，在发行版内部按 Linux 说明继续。
@@ -258,6 +260,7 @@ gsd --version     # 输出已安装版本
 进入会话后，输入 `/model` 以确认你的 LLM 已成功连接。
 
 > **`npm install -g` 遇到权限错误？** 不要用 `sudo npm`。应改为修复 npm 的全局目录：
+>
 > ```bash
 > mkdir -p ~/.npm-global
 > npm config set prefix '~/.npm-global'
