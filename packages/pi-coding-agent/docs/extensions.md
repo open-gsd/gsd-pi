@@ -7,6 +7,7 @@ Extensions are TypeScript modules that extend pi's behavior. They can subscribe 
 > **Placement for /reload:** Put extensions in `~/.pi/agent/extensions/` (global) or `.pi/extensions/` (project-local) for auto-discovery. Use `pi -e ./path.ts` only for quick tests. Extensions in auto-discovered locations can be hot-reloaded with `/reload`.
 
 **Key capabilities:**
+
 - **Custom tools** - Register tools the LLM can call via `pi.registerTool()`
 - **Event interception** - Block or modify tool calls, inject context, customize compaction
 - **User interaction** - Prompt users via `ctx.ui` (select, confirm, input, notify)
@@ -16,6 +17,7 @@ Extensions are TypeScript modules that extend pi's behavior. They can subscribe 
 - **Custom rendering** - Control how tool calls/results and messages appear in TUI
 
 **Example use cases:**
+
 - Permission gates (confirm before `rm -rf`, `sudo`, etc.)
 - Git checkpointing (stash at each turn, restore on branch)
 - Path protection (block writes to `.env`, `node_modules/`)
@@ -568,6 +570,7 @@ pi.on("message_end", async (event, ctx) => {
 Fired for tool execution lifecycle updates.
 
 In parallel tool mode:
+
 - `tool_execution_start` is emitted in assistant source order during the preflight phase
 - `tool_execution_update` events may interleave across tools
 - `tool_execution_end` is emitted in tool completion order after each tool is finalized
@@ -683,6 +686,7 @@ In the default parallel tool execution mode, sibling tool calls from the same as
 `event.input` is mutable. Mutate it in place to patch tool arguments before execution.
 
 Behavior guarantees:
+
 - Mutations to `event.input` affect the actual tool execution
 - Later `tool_call` handlers see mutations made by earlier handlers
 - No re-validation is performed after your mutation
@@ -742,6 +746,7 @@ Fired after tool execution finishes and before `tool_execution_end` plus the fin
 In parallel tool mode, `tool_result` and `tool_execution_end` may interleave in tool completion order, while final `toolResult` message events are still emitted later in assistant source order.
 
 `tool_result` handlers chain like middleware:
+
 - Handlers run in extension load order
 - Each handler sees the latest result after previous handler changes
 - Handlers can return partial patches (`content`, `details`, or `isError`); omitted fields keep their current values
@@ -809,6 +814,7 @@ pi.on("user_bash", (event, ctx) => {
 Fired when user input is received, after extension commands are checked but before skill and template expansion. The event sees the raw input text, so `/skill:foo` and `/template` are not yet expanded.
 
 **Processing order:**
+
 1. Extension commands (`/cmd`) checked first - if found, handler runs and input event is skipped
 2. `input` event fires - can intercept, transform, or handle
 3. If not handled: skill commands (`/skill:name`) expanded to skill content
@@ -844,6 +850,7 @@ pi.on("input", async (event, ctx) => {
 ```
 
 **Results:**
+
 - `continue` - pass through unchanged (default if handler returns nothing)
 - `transform` - modify text/images, then continue to expansion
 - `handled` - skip agent entirely (first handler to return this wins)
@@ -887,6 +894,7 @@ Access to models and API keys.
 The current agent abort signal, or `undefined` when no agent turn is active.
 
 Use this for abort-aware nested work started by extension handlers, for example:
+
 - `fetch(..., { signal: ctx.signal })`
 - model calls that accept `signal`
 - file or process helpers that accept `AbortSignal`
@@ -1018,6 +1026,7 @@ if (result.cancelled) {
 ```
 
 Options:
+
 - `parentSession`: parent session file to record in the new session header
 - `setup`: mutate the new session's `SessionManager` before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
@@ -1044,6 +1053,7 @@ if (cloneResult.cancelled) {
 ```
 
 Options:
+
 - `position`: `"before"` (default) forks before the selected user message, restoring that prompt into the editor
 - `position`: `"at"` duplicates the active path through the selected entry without restoring editor text
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
@@ -1062,6 +1072,7 @@ const result = await ctx.navigateTree("entry-id-456", {
 ```
 
 Options:
+
 - `summarize`: Whether to generate a summary of the abandoned branch
 - `customInstructions`: Custom instructions for the summarizer
 - `replaceInstructions`: If true, `customInstructions` replaces the default prompt instead of being appended
@@ -1083,6 +1094,7 @@ if (result.cancelled) {
 ```
 
 Options:
+
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
 To discover available sessions, use the static `SessionManager.list()` or `SessionManager.listAll()` methods:
@@ -1115,6 +1127,7 @@ pi.registerCommand("switch", {
 `withSession` receives a fresh `ReplacedSessionContext`, which extends `ExtensionCommandContext` with async `sendMessage()` and `sendUserMessage()` helpers bound to the replacement session.
 
 Lifecycle and footguns:
+
 - `withSession` runs only after the old session has emitted `session_shutdown`, the old runtime has been torn down, the replacement session has been rebound, and the new extension instance has already received `session_start`.
 - The callback still executes in the original closure, not inside the new extension instance. That means your old extension instance may already have run its shutdown cleanup before `withSession` starts.
 - Captured old `pi` / old command `ctx` session-bound objects are stale after replacement and will throw if used. Use only the `ctx` passed to `withSession` for session-bound work.
@@ -1168,6 +1181,7 @@ pi.registerCommand("reload-runtime", {
 ```
 
 Important behavior:
+
 - `await ctx.reload()` emits `session_shutdown` for the current extension runtime
 - It then reloads resources and emits `session_start` with `reason: "reload"` and `resources_discover` with reason `"reload"`
 - The currently running command handler still continues in the old call frame
@@ -1283,6 +1297,7 @@ pi.sendMessage({
 ```
 
 **Options:**
+
 - `deliverAs` - Delivery mode:
   - `"steer"` (default) - Queues the message while streaming. Delivered after the current assistant turn finishes executing its tool calls, before the next LLM call.
   - `"followUp"` - Waits for agent to finish. Delivered only when agent has no more tool calls.
@@ -1309,6 +1324,7 @@ pi.sendUserMessage("And then summarize", { deliverAs: "followUp" });
 ```
 
 **Options:**
+
 - `deliverAs` - Required when agent is streaming:
   - `"steer"` - Queues the message for delivery after the current assistant turn finishes executing its tool calls
   - `"followUp"` - Waits for agent to finish all tools
@@ -1503,6 +1519,7 @@ pi.setActiveTools(["read", "bash"]); // Switch to read-only
 `pi.getAllTools()` returns `name`, `description`, `parameters`, and `sourceInfo`.
 
 Typical `sourceInfo.source` values:
+
 - `builtin` for built-in tools
 - `sdk` for tools passed via `createAgentSession({ customTools })`
 - extension source metadata for tools registered by extensions
@@ -1597,6 +1614,7 @@ pi.registerProvider("corporate-ai", {
 ```
 
 **Config options:**
+
 - `name` - Display name for the provider in UI such as `/login`.
 - `baseUrl` - API endpoint URL. Required when defining models.
 - `apiKey` - API key or environment variable name. Required when defining models (unless `oauth` provided).
@@ -1832,6 +1850,7 @@ pi -e ./tool-override.ts
 ```
 
 Alternatively, use `--no-builtin-tools` to start without any built-in tools while keeping extension tools enabled:
+
 ```bash
 # No built-in tools, only extension tools
 pi --no-builtin-tools -e ./my-extension.ts
@@ -1846,6 +1865,7 @@ See [examples/extensions/tool-override.ts](../examples/extensions/tool-override.
 **Your implementation must match the exact result shape**, including the `details` type. The UI and session logic depend on these shapes for rendering and state tracking.
 
 Built-in tool implementations:
+
 - [read.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/read.ts) - `ReadToolDetails`
 - [bash.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/bash.ts) - `BashToolDetails`
 - [edit.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/edit.ts)
@@ -1906,6 +1926,7 @@ See [examples/extensions/ssh.ts](../examples/extensions/ssh.ts) for a complete S
 ### Output Truncation
 
 **Tools MUST truncate their output** to avoid overwhelming the LLM context. Large outputs can cause:
+
 - Context overflow errors (prompt too long)
 - Compaction failures
 - Degraded model performance
@@ -1948,6 +1969,7 @@ async execute(toolCallId, params, signal, onUpdate, ctx) {
 ```
 
 **Key points:**
+
 - Use `truncateHead` for content where the beginning matters (search results, file reads)
 - Use `truncateTail` for content where the end matters (logs, command output)
 - Always inform the LLM when output is truncated and where to find the full version
@@ -1998,6 +2020,7 @@ pi.registerTool({
 ```
 
 `renderCall` and `renderResult` each receive a `context` object with:
+
 - `args` - the current tool call arguments
 - `state` - shared row-local state across `renderCall` and `renderResult`
 - `lastComponent` - the previously returned component for that slot, if any
@@ -2068,11 +2091,13 @@ renderResult(result, { expanded }, theme, context) {
 ```
 
 Available functions:
+
 - `keyHint(keybinding, description)` - Formats a configured keybinding id such as `"app.tools.expand"` or `"tui.select.confirm"`
 - `keyText(keybinding)` - Returns the raw configured key text for a keybinding id
 - `rawKeyHint(key, description)` - Format a raw key string
 
 Use namespaced keybinding ids:
+
 - Coding-agent ids use the `app.*` namespace, for example `app.tools.expand`, `app.editor.external`, `app.session.rename`
 - Shared TUI ids use the `tui.*` namespace, for example `tui.select.confirm`, `tui.select.cancel`, `tui.input.tab`
 
@@ -2095,6 +2120,7 @@ Custom editors and `ctx.ui.custom()` components receive `keybindings: Keybinding
 #### Fallback
 
 If a slot renderer is not defined or throws:
+
 - `renderCall`: Shows the tool name
 - `renderResult`: Shows raw text from `content`
 
@@ -2103,6 +2129,7 @@ If a slot renderer is not defined or throws:
 Extensions can interact with users via `ctx.ui` methods and customize how messages/tools render.
 
 **For custom components, see [tui.md](tui.md)** which has copy-paste patterns for:
+
 - Selection dialogs (SelectList)
 - Async operations with cancel (BorderedLoader)
 - Settings toggles (SettingsList)
@@ -2151,6 +2178,7 @@ if (confirmed) {
 ```
 
 **Return values on timeout:**
+
 - `select()` returns `undefined`
 - `confirm()` returns `false`
 - `input()` returns `undefined`
@@ -2350,6 +2378,7 @@ if (result) {
 ```
 
 The callback receives:
+
 - `tui` - TUI instance (for screen dimensions, focus management)
 - `theme` - Current theme for styling
 - `keybindings` - App keybinding manager (for checking shortcuts)
@@ -2417,6 +2446,7 @@ export default function (pi: ExtensionAPI) {
 ```
 
 **Key points:**
+
 - Extend `CustomEditor` (not base `Editor`) to get app keybindings (escape to abort, ctrl+d, model switching)
 - Call `super.handleInput(data)` for keys you don't handle
 - Factory receives `theme` and `keybindings` from the app

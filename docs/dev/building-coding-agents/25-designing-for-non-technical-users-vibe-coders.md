@@ -18,15 +18,19 @@
 ### The 10 Pillars of a Magical Non-Technical Experience
 
 #### 1. Intent-Based Input, Not Specification
+
 Users speak naturally: *"I want an app where people can upload recipes and find them by ingredient."* The system runs a **discovery conversation** that feels like talking to a brilliant product partner — not filling out a requirements form. Behind the scenes, answers compile into structured specs, acceptance criteria, and interface contracts the human never sees.
 
 > **Critical:** Questions should be about the *experience*, not the *implementation.* Never "relational or document store?" Always "should search find exact matches only, or also substitutable ingredients?"
 
 #### 2. Show the Thing, Not the Process
+
 After each milestone: a **working preview**, not a task list. The human interacts with the real thing at every checkpoint — clicks around, feels it, reacts. Progress is communicated as capability, not code: *"Your app can now save workouts and retrieve them later"* — not *"implemented REST endpoint."*
 
 #### 3. Collaborative Builder, Not Command Executor
+
 The agent should feel like a senior co-founder:
+
 ```
 User: I want something like Notion but for recipes.
 
@@ -37,9 +41,11 @@ Agent: Here's how I'd approach that:
 
 Would you like to prioritize simplicity or advanced features?
 ```
+
 This implicitly educates the user while avoiding wrong builds from vague specs.
 
 #### 4. Problems, Not Errors
+
 The human should **never see a stack trace**. Technical failures are either resolved silently or translated to domain-level questions:
 
 | ❌ Never Show | ✅ Show Instead |
@@ -49,27 +55,33 @@ The human should **never see a stack trace**. Technical failures are either reso
 | Ambiguous technical decision | "When someone searches 'chicken,' should results include recipes where chicken is optional?" |
 
 #### 5. Reactions, Not Reviews
+
 Design for **reactions** to the running app, not code reviews. Like working with an interior designer: *"I love the color but the couch feels too big."* Visual, spatial, experiential feedback. **A/B comparison** is the most powerful pattern: show two versions, human picks which "feels better" in seconds.
 
 #### 6. Engineering Tradeoffs as Simple Choices
+
 Instead of *"Which auth provider?"* → ask *"Which matters more: A) Simplicity B) Maximum customization C) Enterprise security"* — the system maps answers to technical decisions automatically.
 
 #### 7. Safety Blanket
+
 - Auto-backups every slice + "undo entire feature" button
 - **"Vibe Checkpoints"** — before every major change, a save point. "Go back to how it was ten minutes ago."
 - Deployment previews before anything goes live
 - No irreversible actions without plain-English confirmation
 
 #### 8. Progressive Disclosure
+
 Start ultra-simple. Offer "Advanced mode" toggle only if the user ever asks. The system should **progressively reveal engineering** — at first pure vision → later architecture tweaking → eventually deep collaboration. Many users will never leave the simple mode, and that's fine.
 
 #### 9. Implicit Teaching
+
 When the user asks *"why is that taking longer?"*:
 > "The recipe search needs to look through all recipes every time. I'm adding an index — think of it like a table of contents — so it can find things faster."
 
 Optional, triggered by curiosity, expressed in analogy. Over time, users develop useful mental models of software **without it ever being mandatory.**
 
 #### 10. Invisible Deployment & Operations
+
 "I want to share this with people" → receive a URL. Behind the scenes: hosting, domain, database, SSL, CI/CD. Ongoing maintenance equally invisible. Simple dashboard: *"Your recipe app had 340 visitors this week. Everything is running smoothly."*
 
 ### The Translation Layer (The Magic Glue)
@@ -103,6 +115,7 @@ This respects agency while providing the information needed for good decisions.
 ### What Makes It Feel Magical
 
 The most powerful systems feel magical when they:
+
 - Understand vague ideas
 - Ask smart clarifying questions
 - Translate intent into architecture

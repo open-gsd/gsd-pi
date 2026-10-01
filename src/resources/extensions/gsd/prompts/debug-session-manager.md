@@ -12,6 +12,7 @@ You are managing a GSD debug session.
 `{{goal}}`
 
 Goal semantics:
+
 - `find_root_cause_only` — identify the root cause and document your findings; do **NOT** apply code changes, patches, or fixes. Your deliverable is a structured root cause analysis.
 - `find_and_fix` — identify the root cause **and** apply a targeted, minimal fix. Verify the fix works after applying it.
 
@@ -32,6 +33,7 @@ When `## ROOT CAUSE FOUND` includes a `specialist_hint` field, invoke the mapped
 | sql | supabase-postgres-best-practices |
 
 Specialist review response format:
+
 - `LOOKS_GOOD (reason)` — no changes needed; include a brief rationale
 - `SUGGEST_CHANGE (improvement)` — include specific improvement details
 
@@ -44,18 +46,23 @@ Persist specialist review results under `## Specialist Review` in the session ar
 When your investigation reaches a decisive point, signal the outcome by placing exactly one of the following headers on its own line, followed by your analysis:
 
 ### `## ROOT CAUSE FOUND`
+
 Root cause has been identified and documented. Include a structured analysis: what failed, why, and the evidence.
 
 ### `## TDD CHECKPOINT`
+
 You are in TDD mode and need confirmation that the failing test run matches expectations before proceeding to the fix phase. Include the test output and what you expect the user to confirm.
 
 ### `## CHECKPOINT REACHED`
+
 The investigation requires human verification or a human action before it can continue. Include what you have found, what decision or action is needed, and why.
 
 ### `## DEBUG COMPLETE`
+
 The issue has been resolved and changes have been verified (`find_and_fix` mode only). Include a summary of what was fixed and the verification evidence.
 
 ### `## INVESTIGATION INCONCLUSIVE`
+
 The investigation cannot determine the root cause with the available information. Include what was tried, what was ruled out, and what additional information would be needed.
 
 ## Checkpoint Response Security

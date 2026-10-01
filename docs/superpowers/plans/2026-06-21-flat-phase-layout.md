@@ -33,6 +33,7 @@
 ## Task 1: Layout-policy module
 
 **Files:**
+
 - Create: `src/resources/extensions/gsd/layout-policy.ts`
 - Test: `src/resources/extensions/gsd/tests/layout-policy.test.ts`
 
@@ -217,6 +218,7 @@ stay milestone/slice/task internally."
 ## Task 2: Path resolvers delegate to policy
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/paths.ts`
 
 The 17 path resolvers today hardcode `"milestones"`, `"slices"`, `"tasks"` literals. Route them through the policy. Function names stay (`resolveMilestonePath`, etc.) — only their internals change. The DB-facing callers see no difference.
@@ -395,6 +397,7 @@ checkboxes inside plan files now, not subdirs."
 ## Task 3: Renderer emits flat-phase paths + tasks as checkboxes
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/markdown-renderer.ts`
 - Test: `src/resources/extensions/gsd/tests/flat-phase-renderer.test.ts`
 
@@ -585,6 +588,7 @@ behind the policy-backed resolvers."
 ## Task 4: Importer reads flat-phase paths
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/md-importer.ts`
 
 The importer's `importHierarchyArtifacts` (lines 339-436) walks `.gsd/milestones/MID/slices/SID/tasks/TID/`. Update it to walk `.gsd/phases/NN-slug/` and read `NN-MM-PLAN.md` files, extracting tasks from `<tasks>` blocks.
@@ -712,6 +716,7 @@ a slice; tasks are parsed from <tasks> blocks inside plan content."
 ## Task 5: Startup auto-migration (legacy nested → flat-phase)
 
 **Files:**
+
 - Modify: `src/resources/extensions/gsd/detection.ts`
 - Create: `src/resources/extensions/gsd/tests/flat-phase-migration.test.ts`
 
@@ -904,6 +909,7 @@ One-release backup safety net at .gsd-backups/."
 ## Task 6: Round-trip property suite + final verification
 
 **Files:**
+
 - Create: `src/resources/extensions/gsd/tests/flat-phase-round-trip.test.ts`
 - Create: `src/resources/extensions/gsd/tests/__fixtures__/flat-phase/01-foundation/01-01-PLAN.md`
 
@@ -1037,6 +1043,7 @@ Validates the flat-phase layout round-trips correctly."
 ## Self-Review
 
 **Spec coverage:**
+
 - §4.1 layout-policy module → Task 1 ✓
 - §4.2 tasks collapse → Task 3.5-3.6 (renderer) + Task 4 (importer) ✓
 - §4.3 startup auto-migration → Task 5 ✓
@@ -1051,6 +1058,7 @@ Validates the flat-phase layout round-trips correctly."
 **Scope note:** The `auto-prompts.ts` 154-reference update (spec §4.5/§10) is intentionally deferred to a follow-up task — it's mechanical churn that doesn't affect correctness (prompts still produce valid paths, just with old segment names until updated). The layout-policy-backed helper approach (spec §10 open question) would be the right way to do it, but it's a separate focused effort.
 
 **Out-of-scope for this plan (explicit):**
+
 - `auto-prompts.ts` path string updates (154 refs) — follow-up
 - Compat layer removal — N/A on this branch (no compat layer on `main`)
 - gsd-core Stage 2 dir rename — separate spec

@@ -303,6 +303,13 @@ export interface Usage {
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
+	/**
+	 * Live prompt-side context of the final per-call API response, set only by
+	 * adapters whose terminal usage is cumulative across an internal loop
+	 * (claude-code). Consumers that approximate live context should prefer this
+	 * when it is present and > 0, and fall back to the derived totals otherwise.
+	 */
+	liveContextTokens?: number;
 	cost: {
 		input: number;
 		output: number;

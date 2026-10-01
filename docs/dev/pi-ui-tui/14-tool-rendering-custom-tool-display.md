@@ -81,6 +81,7 @@ rawKeyHint("Ctrl+O", "to expand")      // Always shows "Ctrl+O to expand"
 ### Fallback Behavior
 
 If `renderCall` or `renderResult` is not defined or throws:
+
 - `renderCall` → shows tool name
 - `renderResult` → shows raw text from `content`
 

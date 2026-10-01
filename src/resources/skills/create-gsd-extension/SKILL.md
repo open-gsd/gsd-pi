@@ -8,17 +8,20 @@ description: Create, debug, and iterate on GSD extensions (TypeScript modules ad
 **Extensions are TypeScript modules** that hook into GSD's runtime (built on pi). They export a default function receiving `ExtensionAPI` and use it to subscribe to events, register tools/commands/shortcuts, and interact with the session.
 
 **GSD extension paths (community/user-installed extensions):**
+
 - Global: `~/.pi/agent/extensions/*.ts` or `~/.pi/agent/extensions/*/index.ts`
 - Project-local: `.gsd/extensions/*.ts` or `.gsd/extensions/*/index.ts`
 
 Note: `~/.gsd/agent/extensions/` is reserved for bundled extensions synced from the gsd-pi package. Community extensions placed there are silently ignored by the loader.
 
 **The three primitives:**
+
 1. **Events** — Listen and react (`pi.on("event", handler)`). Can block tool calls, modify messages, inject context.
 2. **Tools** — Give the LLM new abilities (`pi.registerTool()`). LLM calls them autonomously.
 3. **Commands** — Give users slash commands (`pi.registerCommand()`). Users type `/mycommand`.
 
 **Non-negotiable rules:**
+
 - Use `StringEnum` from `@gsd/pi-ai` for string enum params (NOT `Type.Union`/`Type.Literal` — breaks Google's API)
 - Truncate tool output to 50KB / 2000 lines max (use `truncateHead`/`truncateTail` from `@gsd/pi-coding-agent`)
 - Store stateful tool state in `details` for branching support
@@ -46,12 +49,15 @@ Note: `~/.gsd/agent/extensions/` is reserved for bundled extensions synced from 
 Based on user intent, route to the appropriate workflow:
 
 **Building a new extension:**
+
 - "Create an extension", "build a tool", "I want to add a command" → `workflows/create-extension.md`
 
 **Adding capabilities to an existing extension:**
+
 - "Add a tool to my extension", "add event hook", "add custom rendering" → `workflows/add-capability.md`
 
 **Debugging an extension:**
+
 - "My extension doesn't work", "tool not showing up", "event not firing" → `workflows/debug-extension.md`
 
 **If user intent is clear from context, skip the question and go directly to the workflow.**
@@ -81,6 +87,7 @@ All domain knowledge in `references/`:
 
 <success_criteria>
 Extension is complete when:
+
 - `extension-manifest.json` exists with accurate `provides` listing all registered tools/commands/hooks/shortcuts
 - TypeScript compiles without errors (jiti handles this at runtime)
 - Extension loads on GSD startup or `/reload` without errors

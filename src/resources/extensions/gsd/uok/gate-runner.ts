@@ -36,6 +36,8 @@ const RETRY_MATRIX: Record<FailureClass, number> = {
   git: 1,
   timeout: 2,
   "manual-attention": 0,
+  // A refusal is deterministic by definition (#2046) — never gate-retry it.
+  refusal: 0,
   unknown: 0,
 };
 

@@ -445,6 +445,7 @@ test("updateProgressWidget preserves the phase handoff during session switching"
       isVerbose: () => false,
       isSessionSwitching: () => true,
       getCurrentDispatchedModelId: () => null,
+      getCurrentUnitRoutingTier: () => null,
     },
   );
 
@@ -486,6 +487,7 @@ test("updateProgressWidget clears the phase handoff once active progress resumes
       isVerbose: () => false,
       isSessionSwitching: () => false,
       getCurrentDispatchedModelId: () => null,
+      getCurrentUnitRoutingTier: () => null,
     },
   );
 
@@ -664,6 +666,7 @@ test("updateProgressWidget refreshes slice progress cache immediately", (t) => {
       isVerbose: () => false,
       isSessionSwitching: () => false,
       getCurrentDispatchedModelId: () => null,
+      getCurrentUnitRoutingTier: () => null,
     },
   );
 
@@ -724,6 +727,7 @@ test("updateProgressWidget full mode keeps footer-owned signals out of auto deck
       isVerbose: () => false,
       isSessionSwitching: () => false,
       getCurrentDispatchedModelId: () => "claude-code/claude-sonnet-4-6",
+      getCurrentUnitRoutingTier: () => null,
     },
   );
 
@@ -791,6 +795,7 @@ test("updateProgressWidget small mode renders the dense horizontal grid", (t) =>
       isVerbose: () => false,
       isSessionSwitching: () => false,
       getCurrentDispatchedModelId: () => null,
+      getCurrentUnitRoutingTier: () => null,
     },
   );
 
@@ -844,6 +849,7 @@ test("updateProgressWidget carries the dispatched model into the strip", (t) => 
         isVerbose: () => false,
         isSessionSwitching: () => false,
         getCurrentDispatchedModelId: () => modelId,
+        getCurrentUnitRoutingTier: () => null,
       },
     );
     const progress = mock.getProgressState();
@@ -861,6 +867,80 @@ test("updateProgressWidget carries the dispatched model into the strip", (t) => 
   assert.match(rendered, /openai\/gpt-5\.3-codex/, "strip should show the dispatched model");
   for (const width of [40, 80, 120]) {
     assertLinesFit(renderProgressStripLines(withModel, width, { cwd: dir }), width);
+  }
+});
+
+test("updateProgressWidget carries the dynamic-routing tier into the strip (#2395)", (t) => {
+  const dir = makeTempDir("routing-tier");
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  const mocks: ReturnType<typeof createProgressStripUiMock>[] = [];
+
+  t.after(() => {
+    for (const mock of mocks) mock.disposeProgress();
+    _resetWidgetModeForTests();
+    clearSliceProgressCache();
+    cleanup(dir);
+  });
+
+  function capture(modelId: string | null, tier: string | null) {
+    const mock = createProgressStripUiMock();
+    mocks.push(mock);
+    updateProgressWidget(
+      {
+        hasUI: true,
+        ui: mock.ui,
+      } as any,
+      "execute-task",
+      "M004/S01/T01",
+      {
+        phase: "executing",
+        activeSlice: { id: "S01", title: "Filter chip bar" },
+        activeTask: { id: "T01", title: "Add category filter" },
+      } as any,
+      {
+        getAutoStartTime: () => Date.now() - 12_000,
+        isStepMode: () => false,
+        getCmdCtx: () => null,
+        getBasePath: () => dir,
+        isVerbose: () => false,
+        isSessionSwitching: () => false,
+        getCurrentDispatchedModelId: () => modelId,
+        getCurrentUnitRoutingTier: () => tier,
+      },
+    );
+    const progress = mock.getProgressState();
+    assert.ok(progress, "progress strip state should be published");
+    return progress;
+  }
+
+  // Dynamic routing classified the unit — payload exposes the tier.
+  const routed = capture("github-copilot/gpt-5.6-sol", "heavy");
+  assert.equal(routed.model, "github-copilot/gpt-5.6-sol");
+  assert.equal(routed.dynamicRoutingTier, "heavy");
+  const routedRendered = renderProgressStrip(routed, 120, { cwd: dir });
+  assert.match(routedRendered, /\(dynamic\/heavy\)/, "strip annotates the model with the routing tier");
+
+  // Recovery may swap the model mid-unit while the unit's tier stays authoritative.
+  const recovered = capture("anthropic/claude-opus-4-6", "heavy");
+  assert.equal(recovered.model, "anthropic/claude-opus-4-6");
+  assert.equal(recovered.dynamicRoutingTier, "heavy", "recovery changes the model but keeps the unit tier");
+
+  // Session switch / reset clears both — no stale model or tier leaks.
+  const cleared = capture(null, null);
+  assert.equal(cleared.model, undefined);
+  assert.equal(cleared.dynamicRoutingTier, undefined);
+  assert.doesNotMatch(
+    renderProgressStrip(cleared, 120, { cwd: dir }),
+    /dynamic\//,
+    "no tier annotation after reset",
+  );
+
+  // Unknown tier strings never cross the typed payload boundary.
+  const unknownTier = capture("github-copilot/gpt-5.6-sol", "ultra");
+  assert.equal(unknownTier.dynamicRoutingTier, undefined, "unrecognized tiers are omitted");
+
+  for (const width of [40, 60, 80, 120]) {
+    assertLinesFit(renderProgressStripLines(routed, width, { cwd: dir }), width);
   }
 });
 
@@ -900,6 +980,7 @@ test("updateProgressWidget shows provider-waiting state consistently for auto an
         isVerbose: () => false,
         isSessionSwitching: () => false,
         getCurrentDispatchedModelId: () => null,
+        getCurrentUnitRoutingTier: () => null,
       },
     );
 

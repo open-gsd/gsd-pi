@@ -22,6 +22,7 @@ import {
   clearGSDPreferencesCache,
 } from "./preferences.js";
 import { GSD_MODEL_PHASE_KEYS } from "./preferences-types.js";
+import { defaultRoutingConfig } from "./model-router.js";
 import { loadFile, saveFile, splitFrontmatter, parseFrontmatterMap } from "./files.js";
 import { runClaudeImportFlow } from "./claude-import.js";
 import { clearSessionModelOverride } from "./session-model-override.js";
@@ -777,7 +778,10 @@ async function configureDynamicRouting(ctx: ExtensionCommandContext, prefs: Reco
     // If routing is disabled / kept-off, still let the user configure sub-fields (they may enable later).
   }
 
-  const cap = await promptBoolean(ctx, "Capability-aware routing", dr.capability_routing, false);
+  // Default comes straight from the router's defaultRoutingConfig() — the
+  // single source of truth for routing defaults (#2397 stage 1) — so this
+  // hint cannot drift from the runtime gate again.
+  const cap = await promptBoolean(ctx, "Capability-aware routing", dr.capability_routing, defaultRoutingConfig().capability_routing);
   if (cap !== undefined) dr.capability_routing = cap;
 
   const escalate = await promptBoolean(ctx, "Escalate to heavier tier on failure", dr.escalate_on_failure, true);

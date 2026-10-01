@@ -38,6 +38,7 @@ steps:
 ```
 
 How it works:
+
 - `context_from: [gather]` means the engine includes artifacts from the `gather` step when executing `analyze`.
 - You can reference multiple prior steps: `context_from: [gather, analyze]`.
 - The referenced steps must exist in the workflow (they are validated as step IDs).
@@ -70,6 +71,7 @@ steps:
 ```
 
 How it works:
+
 - `source`: Path to an artifact (relative to the run directory). Must not contain `..`.
 - `pattern`: A regex string applied with the global flag. Must contain at least one capture group `(...)`.
 - The engine reads the source artifact, applies the pattern, and creates one execution per match.
@@ -77,6 +79,7 @@ How it works:
 - The regex is validated at definition-load time — invalid regex or missing capture groups are rejected.
 
 Pattern requirements:
+
 - Must be a valid JavaScript regex.
 - Must contain at least one non-lookahead capture group: `(...)` not `(?:...)`.
 - Example valid patterns: `^(.+)$`, `- (.+\.ts)`, `\[(.+?)\]`.
@@ -115,6 +118,7 @@ steps:
 ```
 
 How it works:
+
 - `params` is a top-level object mapping string keys to string default values.
 - `{{ key }}` in any step prompt is replaced with the corresponding param value.
 - Merge order: definition `params` (defaults) ← CLI overrides (win).
@@ -123,6 +127,7 @@ How it works:
 - Keys in `{{ }}` match `\w+` (letters, digits, underscore).
 
 Common usage:
+
 - Make workflows reusable across different topics, projects, or configurations.
 - Users override defaults at run time: `/gsd workflow run blog-post topic="Rust performance"`.
 </feature_patterns>

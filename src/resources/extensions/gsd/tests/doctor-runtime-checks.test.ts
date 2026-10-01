@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -235,4 +235,65 @@ test("doctor fix preserves a pending gate block in hook-state.json (#2194)", asy
   await runGSDDoctor(dir, { fix: true });
   const cleared = JSON.parse(readFileSync(hookStatePath, "utf-8"));
   assert.deepEqual(cleared.cycleCounts, {});
+});
+
+test("doctor lists stale control-publication intents without opening the projection lock (#2154)", async (t) => {
+  const dir = createGitProject();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const journalDir = join(dir, ".gsd", "migration", "projection-mutations");
+  mkdirSync(journalDir, { recursive: true });
+  const intentPath = join(journalDir, ".gsd-control-00000000-0000-0000-0000-000000000001.json.intent");
+  writeFileSync(intentPath, JSON.stringify({ sequence: 1, phase: "temporary-durable" }));
+  const stale = new Date(Date.now() - 200_000);
+  utimesSync(intentPath, stale, stale);
+  // Non-intent journal content must not be reported.
+  writeFileSync(join(journalDir, "00000000-0000-0000-0000-000000000002.json"), "{}\n");
+
+  const report = await runGSDDoctor(dir);
+  const issue = report.issues.find((candidate) => candidate.code === "stale_control_publication_intent");
+  assert.ok(issue, "doctor lists the stale prepared intent");
+  assert.match(issue.message, /\.gsd-control-00000000-0000-0000-0000-000000000001\.json\.intent/u);
+  assert.match(issue.message, /quarantined-control-publications/u);
+  assert.equal(issue.fixable, false);
+  assert.equal(
+    report.issues.filter((candidate) => candidate.code === "stale_control_publication_intent").length,
+    1,
+  );
+});
+
+test("doctor lists only aged control-publication intents plus quarantined artifacts (#2154)", async (t) => {
+  const dir = createGitProject();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  const journalDir = join(dir, ".gsd", "migration", "projection-mutations");
+  const quarantineDir = join(dir, ".gsd", "migration", "quarantined-control-publications");
+  mkdirSync(journalDir, { recursive: true });
+  mkdirSync(quarantineDir, { recursive: true });
+  const staleIntentPath = join(journalDir, ".gsd-control-00000000-0000-0000-0000-000000000001.json.intent");
+  const freshIntentPath = join(journalDir, ".gsd-control-00000000-0000-0000-0000-000000000003.json.intent");
+  writeFileSync(staleIntentPath, JSON.stringify({ sequence: 1, phase: "temporary-durable" }));
+  writeFileSync(freshIntentPath, JSON.stringify({ sequence: 1, phase: "temporary-durable" }));
+  const stale = new Date(Date.now() - 200_000);
+  utimesSync(staleIntentPath, stale, stale);
+  writeFileSync(
+    join(quarantineDir, ".gsd-control-00000000-0000-0000-0000-000000000002.json.intent.11111111-2222-4333-8444-555555555555.quarantined"),
+    "{}",
+  );
+  writeFileSync(
+    join(quarantineDir, ".gsd-control-00000000-0000-0000-0000-000000000002.json.intent.11111111-2222-4333-8444-555555555555.quarantined.json"),
+    JSON.stringify({ reason: "stale-control-publication-intent" }),
+  );
+
+  const report = await runGSDDoctor(dir);
+  const issues = report.issues.filter((candidate) => candidate.code === "stale_control_publication_intent");
+  // The aged in-journal intent lists as an error...
+  assert.ok(issues.some((candidate) => candidate.severity === "error"
+    && /\.gsd-control-00000000-0000-0000-0000-000000000001\.json\.intent/u.test(candidate.message)));
+  // ...the fresh (possibly in-flight) intent does not list at all...
+  assert.ok(!issues.some((candidate) => /\.gsd-control-00000000-0000-0000-0000-000000000003/u.test(candidate.message)));
+  // ...and the already-quarantined artifact lists as reviewable, without its sidecar.
+  assert.ok(issues.some((candidate) => candidate.severity === "warning"
+    && /00000000-0000-0000-0000-000000000002\.json\.intent\.11111111[^\n]*\.quarantined\b/u.test(candidate.message)));
+  assert.ok(!issues.some((candidate) => candidate.file?.endsWith(".quarantined.json") ?? false));
 });

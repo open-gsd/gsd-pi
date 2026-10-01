@@ -11,6 +11,7 @@ Shape an HTTP or GraphQL API so callers get predictable, evolvable, and honest s
 gsd-pi has `design-an-interface` for general module-interface design; this skill is the HTTP/GraphQL specialization. REST and GraphQL carry baggage — status codes, verbs, nullability, pagination — that a generic interface-design discussion glosses over.
 
 Invocation points:
+
 - Adding a new public API endpoint
 - Redesigning an internal API boundary between services
 - Code review of a PR that introduces HTTP handlers
@@ -66,6 +67,7 @@ Answer, or ask (one round, 1–3 questions):
 | DELETE | Remove | Yes | 204 |
 
 Errors:
+
 - 400: caller screwed up the request shape
 - 401: no/invalid auth
 - 403: authed but not allowed

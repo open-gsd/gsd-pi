@@ -31,6 +31,7 @@ two more still live in the same file. Verbatim failed criterion:
 > `src/resources/extensions/gsd/artifact-verification.ts`, and **both return a
 > verify-PASS when the DB is unavailable** — the exact defect class AC5 and
 > SYNTHESIS clause (c) exist to close:
+>
 > 1. `artifact-verification.ts:524-528` (`execute-task`): accepts a `PLAN.md`
 >    `- [x] **T0N:` checkbox as task completion (helper `:156-165`).
 > 2. `artifact-verification.ts:566-568`: turns a failed closeout proof into a

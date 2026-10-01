@@ -42,6 +42,7 @@ Once you have a milestone and roadmap, let GSD take the wheel:
 ```
 
 GSD autonomously:
+
 1. **Plans** each slice — scouts the codebase, researches docs, decomposes into tasks
 2. **Executes** each task — writes code in a fresh AI session
 3. **Completes** the slice — writes summaries, commits with meaningful messages

@@ -48,6 +48,7 @@ Share planning artifacts while keeping runtime files local:
 ```
 
 **What gets shared** (committed to git):
+
 - `.gsd/PREFERENCES.md` — project preferences
 - `.gsd/PROJECT.md` — living project description
 - `.gsd/REQUIREMENTS.md` — requirement contract
@@ -56,6 +57,7 @@ Share planning artifacts while keeping runtime files local:
 - `.gsd/milestones/` — legacy milestone artifacts, if the project has not migrated yet
 
 **What stays local** (gitignored):
+
 - Database files, lock files, metrics, state projections, activity logs, worktrees, and migration backups under `.gsd-backups/`. Stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the flat-phase `.gsd/phases/` migration is complete.
 
 ## Commit the Config

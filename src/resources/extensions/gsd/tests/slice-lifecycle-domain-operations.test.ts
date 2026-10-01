@@ -490,3 +490,103 @@ test("public skip rejects a deep canonical and legacy mismatch with exact zero r
   assert.match(result.error ?? "", /canonical|legacy|shadow|mismatch/i);
   assert.deepEqual(durableSnapshot(), before, "mismatch rejection must leave exact zero residue");
 });
+
+function seedBlockerAcceptedSlice(): void {
+  const dir = mkdtempSync(join(tmpdir(), "gsd-slice-lifecycle-domain-"));
+  tempDirs.add(dir);
+  assert.equal(openDatabase(join(dir, "gsd.db")), true);
+  db().exec(`
+    INSERT INTO milestones (id, title, status, created_at)
+    VALUES ('M001', 'Slice lifecycle', 'active', '2026-07-14T00:00:00.000Z');
+    INSERT INTO slices (milestone_id, id, title, status, created_at)
+    VALUES ('M001', 'S01', 'Cancellation', 'active', '2026-07-14T00:00:00.000Z');
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES
+      ('M001', 'S01', 'T01', 'Pending child', 'pending', 1),
+      ('M001', 'S01', 'T02', 'Blocker-accepted child', 'in_progress', 2);
+  `);
+
+  executeAtFence("test.slice.fixture", "fixture/slice/adopt-blocker", (context) => {
+    adoptFixtureLifecycle(context, "slice", "in_progress");
+    adoptFixtureLifecycle(context, "task", "pending", "T01");
+    adoptFixtureLifecycle(context, "task", "in_progress", "T02");
+  });
+  // #2202: close T02 through the blocker-accepted operator disposition —
+  // terminal in both vocabularies with its only outgoing edge back to ready.
+  executeAtFence("test.blocker.accepted", "fixture/T02/blocker-accepted", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T02",
+      lifecycleStatus: "blocker-accepted",
+    });
+    db().prepare(`
+      UPDATE tasks SET status = 'blocker-accepted'
+      WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'
+    `).run();
+  });
+}
+
+test("public skip preserves a blocker-accepted Task instead of aborting on the missing transition edge", () => {
+  seedBlockerAcceptedSlice();
+  const blockerBefore = row(`
+    SELECT lifecycle_id, lifecycle_status, state_version
+    FROM workflow_item_lifecycles
+    WHERE item_kind = 'task' AND task_id = 'T02'
+  `);
+
+  const result = handleSkipSlice({
+    milestoneId: "M001",
+    sliceId: "S01",
+    reason: "The remaining Slice work is no longer required.",
+  }, invocation("slice-cancel/public/blocker-accepted"));
+
+  // #2451 Gap 1: blocker-accepted has no cancelled transition edge, so skip
+  // must preserve it like completed/cancelled children.
+  assert.equal(result.error, undefined, result.error);
+  assert.deepEqual(rows(`
+    SELECT task.id, task.status AS legacy_status,
+           lifecycle.lifecycle_status AS canonical_status
+    FROM tasks task
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'task'
+     AND lifecycle.milestone_id = task.milestone_id
+     AND lifecycle.slice_id = task.slice_id
+     AND lifecycle.task_id = task.id
+    WHERE task.milestone_id = 'M001' AND task.slice_id = 'S01'
+    ORDER BY task.id
+  `), [
+    { id: "T01", legacy_status: "skipped", canonical_status: "cancelled" },
+    { id: "T02", legacy_status: "blocker-accepted", canonical_status: "blocker-accepted" },
+  ]);
+  assert.deepEqual(row(`
+    SELECT lifecycle_id, lifecycle_status, state_version
+    FROM workflow_item_lifecycles
+    WHERE item_kind = 'task' AND task_id = 'T02'
+  `), blockerBefore, "a preserved blocker-accepted Task must be left untouched");
+
+  // The preserved Task must not deadlock the reverse path either: the
+  // `blocker-accepted -> ready` edge is the documented reopen parity (#2202).
+  const reopened = reopenSlice({
+    invocation: invocation("slice-cancel/public/blocker-accepted/reopen"),
+    slice: { milestoneId: "M001", sliceId: "S01" },
+    reason: "Restore the cancelled Slice to active work.",
+  });
+  assert.deepEqual(reopened.reopenedTaskIds.sort(), ["T01", "T02"]);
+  assert.deepEqual(rows(`
+    SELECT task.id, task.status AS legacy_status,
+           lifecycle.lifecycle_status AS canonical_status
+    FROM tasks task
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'task'
+     AND lifecycle.milestone_id = task.milestone_id
+     AND lifecycle.slice_id = task.slice_id
+     AND lifecycle.task_id = task.id
+    WHERE task.milestone_id = 'M001' AND task.slice_id = 'S01'
+    ORDER BY task.id
+  `), [
+    { id: "T01", legacy_status: "pending", canonical_status: "ready" },
+    { id: "T02", legacy_status: "pending", canonical_status: "ready" },
+  ]);
+});

@@ -11,6 +11,7 @@ Produce a security review that names specific exploit paths through the actual c
 gsd-pi's general `review` skill covers security as one of several categories. This skill is the deeper pass — triggered deliberately when security is the primary concern. It complements v1's `/gsd-secure-phase` concept, adapted to the gsd-pi artifact model.
 
 Invocation points:
+
 - Any change touching authentication, authorization, session handling
 - Any change touching user input → database, filesystem, or shell
 - Any change exposing a new external surface (HTTP endpoint, webhook, IPC boundary)
@@ -19,6 +20,7 @@ Invocation points:
 - Response to a suspected vulnerability
 
 Do NOT use for:
+
 - General code review (use `review`)
 - Performance audits (use `code-optimizer`)
 </context>
@@ -36,6 +38,7 @@ Do NOT use for:
 ## Step 1: Scope the review
 
 Identify what to review:
+
 - Recent diff (staged / branch / specific commit)
 - A named subsystem (`src/auth/`, the webhook handler, etc.)
 - A user-provided concern ("I'm worried about our JWT handling")
@@ -61,31 +64,37 @@ For each, note: who can reach this surface? (public internet, authenticated user
 For each attack surface, walk STRIDE:
 
 ### Spoofing (identity)
+
 - Can an attacker pretend to be another user?
 - Are identity tokens verified before they're trusted?
 - Session cookies: HttpOnly, Secure, SameSite set?
 
 ### Tampering (integrity)
+
 - Can an attacker modify data in transit or at rest?
 - Are webhooks signed and signatures verified?
 - Are incoming payloads rehydrated without integrity checks?
 
 ### Repudiation (audit trail)
+
 - Is there a log of who did what?
 - Can an attacker erase their trail?
 - Are logs tamper-evident where it matters?
 
 ### Information disclosure
+
 - Does an error message leak internal state, stack traces, file paths, DB queries?
 - Are secrets logged anywhere?
 - Are authorization checks upstream of data loading, or does the query run first?
 
 ### Denial of service
+
 - Are there unbounded loops, unpaginated queries, or user-controlled recursion?
 - Rate limits on expensive endpoints?
 - Regex-on-user-input vulnerable to ReDoS?
 
 ### Elevation of privilege
+
 - Are admin-only routes actually gated?
 - Can a low-privilege user trigger a high-privilege operation through an unauthenticated webhook?
 - Are role checks enforced at the handler, the service, and the data layer — or just one?
@@ -152,6 +161,7 @@ Offer to file as a GitHub issue — requires explicit confirmation per the outwa
 ## Step 7: Follow-ups
 
 If the review found CRITICAL or HIGH issues:
+
 - Recommend filing a private security advisory (not a public issue) if the repo is public.
 - Flag the finding for `/gsd start hotfix` if it's in the scope of active work.
 - Append one line to `.gsd/DECISIONS.md` if the remediation involves an architectural change.

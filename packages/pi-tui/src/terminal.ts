@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { setKittyProtocolActive } from "./keys.js";
+import { isKittyProtocolActive, isModifyOtherKeysFrame, setKittyProtocolActive } from "./keys.js";
 import { DISABLE_MOUSE, ENABLE_MOUSE } from "./mouse.js";
 import { StdinBuffer } from "./stdin-buffer.js";
 
@@ -24,6 +24,41 @@ export function isStdoutClosedError(err: unknown): boolean {
 	if (errno.code === "EIO" && errno.syscall === "write") return true;
 	const message = err.message;
 	return message === "write EOF" || message === "read EOF" || message === "write EIO";
+}
+
+/**
+ * Module-level mirror of the confirmed modifyOtherKeys observation (mirrors
+ * setKittyProtocolActive/isKittyProtocolActive in keys.ts): ProcessTerminal is
+ * the writer, getKeyboardCapabilities the reader.
+ */
+let _modifyOtherKeysConfirmedGlobal = false;
+
+/** State of the xterm modifyOtherKeys mode 2 channel. */
+export type ModifyOtherKeysCapability = "unknown" | "confirmed" | "absent";
+
+export interface KeyboardCapabilities {
+	/** True once the terminal answered the Kitty protocol query. */
+	kitty: boolean;
+	/**
+	 * modifyOtherKeys channel: "confirmed" once an ESC[27;<mod>;<cp>~ frame was
+	 * observed on stdin after the enable request; "absent" when the Kitty
+	 * protocol is active (so modifyOtherKeys was never requested); "unknown"
+	 * otherwise — the enable request has no reply, only observed input frame
+	 * can confirm it.
+	 */
+	modifyOtherKeys: ModifyOtherKeysCapability;
+}
+
+/**
+ * Report which keyboard enhancement protocols the terminal has demonstrably
+ * enabled. Consumers that advertise chords (footer chips, help tables, overlay
+ * footers) should ask this instead of guessing from TERM values.
+ */
+export function getKeyboardCapabilities(): KeyboardCapabilities {
+	if (isKittyProtocolActive()) {
+		return { kitty: true, modifyOtherKeys: "absent" };
+	}
+	return { kitty: false, modifyOtherKeys: _modifyOtherKeysConfirmedGlobal ? "confirmed" : "unknown" };
 }
 
 /**
@@ -90,7 +125,8 @@ export class ProcessTerminal implements Terminal {
 	private inputHandler?: (data: string) => void;
 	private resizeHandler?: () => void;
 	private _kittyProtocolActive = false;
-	private _modifyOtherKeysActive = false;
+	/** True once CSI > 4;2m has been sent — an assumption until confirmed by an observed frame. */
+	private _modifyOtherKeysRequested = false;
 	private _mouseActive = false;
 	private stdinBuffer?: StdinBuffer;
 	private stdinDataHandler?: (data: string) => void;
@@ -255,6 +291,15 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
+			// Confirm modifyOtherKeys mode on the first frame in xterm's
+			// ESC[27;<mod>;<cp>~ format (see getKeyboardCapabilities). Only
+			// observations for an enable request this session sent count as
+			// evidence, and the frame is a keypress that must still reach input
+			// matching.
+			if (this._modifyOtherKeysRequested && isModifyOtherKeysFrame(sequence)) {
+				_modifyOtherKeysConfirmedGlobal = true;
+			}
+
 			if (this.inputHandler) {
 				this.inputHandler(sequence);
 			}
@@ -284,6 +329,11 @@ export class ProcessTerminal implements Terminal {
 	 * modified enter keys as CSI-u when extended-keys is enabled, but may not
 	 * answer the Kitty protocol query.
 	 *
+	 * CSI > 4;2m has no reply, so unlike the Kitty branch this request cannot be
+	 * confirmed from a response. The mode is confirmed lazily by observing the
+	 * first ESC[27;<mod>;<cp>~ frame in setupStdinBuffer's data handler (see
+	 * getKeyboardCapabilities).
+	 *
 	 * The response is detected in setupStdinBuffer's data handler, which properly
 	 * handles the case where the response arrives split across multiple stdin events.
 	 */
@@ -292,9 +342,9 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.on("data", this.stdinDataHandler!);
 		this.writeStdout("\x1b[?u");
 		setTimeout(() => {
-			if (!this._kittyProtocolActive && !this._modifyOtherKeysActive) {
+			if (!this._kittyProtocolActive && !this._modifyOtherKeysRequested) {
 				this.writeStdout("\x1b[>4;2m");
-				this._modifyOtherKeysActive = true;
+				this._modifyOtherKeysRequested = true;
 			}
 		}, 150);
 	}
@@ -343,10 +393,11 @@ export class ProcessTerminal implements Terminal {
 			this._kittyProtocolActive = false;
 			setKittyProtocolActive(false);
 		}
-		if (this._modifyOtherKeysActive) {
+		if (this._modifyOtherKeysRequested) {
 			this.writeStdout("\x1b[>4;0m");
-			this._modifyOtherKeysActive = false;
+			this._modifyOtherKeysRequested = false;
 		}
+		_modifyOtherKeysConfirmedGlobal = false;
 		if (this._mouseActive) {
 			this.writeStdout(DISABLE_MOUSE);
 			this._mouseActive = false;
@@ -397,10 +448,11 @@ export class ProcessTerminal implements Terminal {
 			this._kittyProtocolActive = false;
 			setKittyProtocolActive(false);
 		}
-		if (this._modifyOtherKeysActive) {
+		if (this._modifyOtherKeysRequested) {
 			this.writeStdout("\x1b[>4;0m");
-			this._modifyOtherKeysActive = false;
+			this._modifyOtherKeysRequested = false;
 		}
+		_modifyOtherKeysConfirmedGlobal = false;
 
 		// Clean up StdinBuffer
 		if (this.stdinBuffer) {
