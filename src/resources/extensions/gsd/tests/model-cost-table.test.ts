@@ -52,6 +52,15 @@ test("lookupModelCost finds Claude Sonnet 5.5 pricing without falling back to th
   }
 });
 
+test("lookupModelCost prefers the longest prefix for suffixed Sonnet 5.5 ids", () => {
+  for (const id of ["claude-sonnet-5-5-20261001", "claude-sonnet-5-5@20261001"]) {
+    const entry = lookupModelCost(id);
+    assert.ok(entry, id);
+    assert.equal(entry.id, "claude-sonnet-5-5", id);
+  }
+  assert.equal(lookupModelCost("claude-sonnet-5-20260801")?.id, "claude-sonnet-5");
+});
+
 test("lookupModelCost finds MAI Code 1.1 Flash pricing", () => {
   const entry = lookupModelCost("github-copilot/mai-code-1.1-flash");
   assert.ok(entry);

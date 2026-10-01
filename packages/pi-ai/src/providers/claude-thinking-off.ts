@@ -32,3 +32,12 @@ export function rejectsClaudeSamplingParams(modelId: string): boolean {
 export function rejectsClaudeForcedToolChoice(modelId: string): boolean {
 	return getClaudeThinkingOffMode(modelId) !== undefined;
 }
+
+/**
+ * Whether to use adaptive thinking (`thinking.type: "adaptive"` + effort). The 5.5 models
+ * require it regardless of catalog metadata, so custom or gateway entries that lack
+ * `compat.forceAdaptiveThinking` do not fall back to the rejected budget-based format.
+ */
+export function usesClaudeAdaptiveThinking(modelId: string, forceAdaptiveThinking: boolean | undefined): boolean {
+	return forceAdaptiveThinking === true || getClaudeThinkingOffMode(modelId) !== undefined;
+}

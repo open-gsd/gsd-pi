@@ -41,6 +41,7 @@ import {
 	getClaudeThinkingOffMode,
 	rejectsClaudeForcedToolChoice,
 	rejectsClaudeSamplingParams,
+	usesClaudeAdaptiveThinking,
 } from "./claude-thinking-off.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
@@ -859,7 +860,7 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 
 	// For models with adaptive thinking: use an effort level.
 	// For older models: use budget-based thinking.
-	if (model.compat?.forceAdaptiveThinking === true) {
+	if (usesClaudeAdaptiveThinking(model.id, model.compat?.forceAdaptiveThinking)) {
 		const effort = mapThinkingLevelToEffort(model, options.reasoning);
 		return streamAnthropic(model, context, {
 			...base,
@@ -900,7 +901,8 @@ function createClient(
 	sessionId?: string,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
-	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
+	const needsInterleavedBeta =
+		interleavedThinking && !usesClaudeAdaptiveThinking(model.id, model.compat?.forceAdaptiveThinking);
 	const betaFeatures: string[] = [];
 	if (useFineGrainedToolStreamingBeta) {
 		betaFeatures.push(FINE_GRAINED_TOOL_STREAMING_BETA);
@@ -1074,7 +1076,7 @@ function buildParams(
 			// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
 			// older Claude 4 models (whose API default is also "summarized").
 			const display: AnthropicThinkingDisplay = options.thinkingDisplay ?? "summarized";
-			if (model.compat?.forceAdaptiveThinking === true) {
+			if (usesClaudeAdaptiveThinking(model.id, model.compat?.forceAdaptiveThinking)) {
 				// Adaptive thinking: Claude decides when and how much to think.
 				params.thinking = { type: "adaptive", display };
 				if (options.effort) {

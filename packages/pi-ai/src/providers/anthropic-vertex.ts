@@ -15,6 +15,7 @@ import {
 	type AnthropicOptions,
 	streamAnthropic,
 } from "./anthropic.js";
+import { usesClaudeAdaptiveThinking } from "./claude-thinking-off.js";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
 
 export type AnthropicVertexOptions = Omit<AnthropicOptions, "client">;
@@ -148,7 +149,7 @@ export const streamSimpleAnthropicVertex: StreamFunction<"anthropic-vertex", Sim
 		);
 	}
 
-	if (model.compat?.forceAdaptiveThinking === true) {
+	if (usesClaudeAdaptiveThinking(model.id, model.compat?.forceAdaptiveThinking)) {
 		const effort = mapThinkingLevelToEffort(model, options.reasoning);
 		return streamAnthropicVertex(model, context, {
 			...base,

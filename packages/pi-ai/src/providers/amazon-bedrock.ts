@@ -47,6 +47,7 @@ import { parseStreamingJson } from "../utils/json-parse.js";
 import { createHttpProxyAgentsForTarget } from "../utils/node-http-proxy.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 import {
+	type ClaudeThinkingOffMode,
 	getClaudeThinkingOffMode,
 	rejectsClaudeForcedToolChoice,
 	rejectsClaudeSamplingParams,
@@ -197,11 +198,11 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
 					...(options.temperature !== undefined &&
-						!rejectsClaudeSamplingParams(model.id) && { temperature: options.temperature }),
+						!rejectsBedrockClaudeSamplingParams(model) && { temperature: options.temperature }),
 				},
 				toolConfig: convertToolConfig(
 					context.tools,
-					rejectsClaudeForcedToolChoice(model.id) && options.toolChoice !== "none" && options.toolChoice
+					rejectsBedrockClaudeForcedToolChoice(model) && options.toolChoice !== "none" && options.toolChoice
 						? "auto"
 						: options.toolChoice,
 				),
@@ -487,6 +488,23 @@ function getModelMatchCandidates(modelId: string, modelName?: string): string[] 
 		const lower = value.toLowerCase();
 		return [lower, lower.replace(/[\s_.:]+/g, "-")];
 	});
+}
+
+/** Id or display name (application inference profile ARNs carry no model id) of a 5.5 Claude model. */
+function getBedrockClaudeThinkingOffMode(model: Model<"bedrock-converse-stream">): ClaudeThinkingOffMode | undefined {
+	for (const candidate of getModelMatchCandidates(model.id, model.name)) {
+		const mode = getClaudeThinkingOffMode(candidate);
+		if (mode) return mode;
+	}
+	return undefined;
+}
+
+function rejectsBedrockClaudeSamplingParams(model: Model<"bedrock-converse-stream">): boolean {
+	return getModelMatchCandidates(model.id, model.name).some(rejectsClaudeSamplingParams);
+}
+
+function rejectsBedrockClaudeForcedToolChoice(model: Model<"bedrock-converse-stream">): boolean {
+	return getModelMatchCandidates(model.id, model.name).some(rejectsClaudeForcedToolChoice);
 }
 
 function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean {
@@ -944,7 +962,7 @@ function buildAdditionalModelRequestFields(
 	if (!options.reasoning) {
 		// Sonnet/Opus 5.5 reject disabled thinking; express "off" as their lowest setting
 		// so it is not silently left at the model's adaptive default.
-		const offMode = isAnthropicClaudeModel(model) ? getClaudeThinkingOffMode(model.id) : undefined;
+		const offMode = isAnthropicClaudeModel(model) ? getBedrockClaudeThinkingOffMode(model) : undefined;
 		if (offMode === "between-tools") return { thinking: { type: "between_tools" } };
 		if (offMode === "low-effort") return { output_config: { effort: "low" } };
 		return undefined;

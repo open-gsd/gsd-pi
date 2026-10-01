@@ -249,6 +249,16 @@ describe("Claude 5.5 thinking-off payload (disabled thinking and sampling params
 		}
 	});
 
+	it("uses adaptive thinking for 5.5 ids even when catalog compat lacks forceAdaptiveThinking", async () => {
+		for (const id of ["claude-sonnet-5-5", "claude-opus-5-5"] as const) {
+			const { compat: _compat, ...base } = getModel("anthropic", id);
+			const payload = await capturePayload({ ...base, provider: "custom-gateway" }, { reasoning: "high" });
+			expect(payload.thinking).toEqual({ type: "adaptive", display: "summarized" });
+			expect(payload.thinking?.budget_tokens).toBeUndefined();
+			expect(payload.output_config).toEqual({ effort: "high" });
+		}
+	});
+
 	it("still sends thinking.type=disabled and temperature for Claude Sonnet 5", async () => {
 		const payload = await capturePayload(getModel("anthropic", "claude-sonnet-5"), { temperature: 0 });
 

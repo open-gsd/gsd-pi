@@ -153,6 +153,21 @@ describe("Bedrock thinking payload", () => {
 		}
 	});
 
+	it("recognizes Claude Sonnet 5.5 application inference profiles by display name", async () => {
+		const base = getModel("amazon-bedrock", "us.anthropic.claude-sonnet-5-5");
+		const model: Model<"bedrock-converse-stream"> = {
+			...base,
+			id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/abc123",
+			name: "Claude Sonnet 5.5 (US)",
+		};
+
+		const payload = await capturePayload(model, { reasoning: undefined, temperature: 0, toolChoice: "any", tools: true });
+
+		expect(payload.additionalModelRequestFields).toEqual({ thinking: { type: "between_tools" } });
+		expect(payload.inferenceConfig?.temperature).toBeUndefined();
+		expect(payload.toolConfig?.toolChoice).toEqual({ auto: {} });
+	});
+
 	it("keeps Claude Sonnet 5 thinking-off and sampling behavior unchanged", async () => {
 		const model = getModel("amazon-bedrock", "global.anthropic.claude-sonnet-5");
 

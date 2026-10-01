@@ -465,12 +465,19 @@ export const BUNDLED_COST_TABLE: ModelCostEntry[] = [
  */
 export function lookupModelCost(modelId: string): ModelCostEntry | undefined {
   const bareId = modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;
-  return BUNDLED_COST_TABLE.find(e => e.id === bareId)
-    ?? BUNDLED_COST_TABLE.find(e =>
+  const exact = BUNDLED_COST_TABLE.find(e => e.id === bareId);
+  if (exact) return exact;
+  // Longest prefix wins so dated/suffixed ids (claude-sonnet-5-5-20261001)
+  // don't resolve to a shorter sibling row (claude-sonnet-5).
+  let best: ModelCostEntry | undefined;
+  for (const e of BUNDLED_COST_TABLE) {
+    const matches =
       bareId.startsWith(`${e.id}-`) ||
       bareId.startsWith(`${e.id}:`) ||
-      bareId.startsWith(`${e.id}@`)
-    );
+      bareId.startsWith(`${e.id}@`);
+    if (matches && (!best || e.id.length > best.id.length)) best = e;
+  }
+  return best;
 }
 
 /**
