@@ -97,6 +97,7 @@ export type DoctorIssueCode =
   | "memories_fts_rebuild_missing"
   | "projection_drift"
   | "unresolved_projection_evidence"
+  | "stale_control_publication_intent"
   | "validation_source_revision_mismatch"
   // Orphaned execution Attempts (#1749)
   | "orphaned_running_attempt"

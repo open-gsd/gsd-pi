@@ -259,6 +259,27 @@ function isDeterministicExchangeIdentityError(error: unknown): boolean {
   return isUnexpectedOccupantError(error) || isJournaledExchangeIdentityChangedError(error);
 }
 
+// Deterministic native control-publication replay failures (#2154): a stale
+// prepared intent (.gsd-control-*.json.intent) whose publication can no
+// longer complete throws these on every projection-root open, wedging every
+// render. Classified by message so a native wording change fails loud
+// instead of silently skipping the supervised quarantine.
+function isControlPublicationEvidenceError(error: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current = error;
+  while (current !== null && typeof current === "object" && !seen.has(current)) {
+    seen.add(current);
+    const candidate = current as { message?: unknown; cause?: unknown };
+    if (typeof candidate.message === "string"
+      && /control publication content evidence changed|control publication evidence retention is incomplete/u
+        .test(candidate.message)) {
+      return true;
+    }
+    current = candidate.cause;
+  }
+  return false;
+}
+
 function openManagedProjectionRootWithRetry<T>(
   open: () => T,
   wait: (delayMs: number) => void = (delayMs) => {
@@ -288,12 +309,132 @@ function withManagedProjectionRoot<T>(
   operation: (handle: ProjectionRootIdentityLock) => T,
   open: (root: string) => ProjectionRootIdentityLock = openManagedProjectionRoot,
 ): T {
-  const handle = openManagedProjectionRootWithRetry(() => open(targetRoot));
+  // The native control-publication replay can throw during the open itself
+  // or during the first journal-directory access inside the operation, so
+  // both are covered by the supervised retry (#2154).
+  const run = (): T => {
+    const handle = openManagedProjectionRootWithRetry(() => open(targetRoot));
+    try {
+      return operation(handle);
+    } finally {
+      handle.close();
+    }
+  };
   try {
-    return operation(handle);
-  } finally {
-    handle.close();
+    return run();
+  } catch (error) {
+    // A stale prepared control-publication intent wedges every attempt
+    // deterministically (#2154): the native replay of the pending intent
+    // throws before any JS reconciliation can run. Quarantine the stale
+    // intents (never an in-flight publication) and retry once.
+    if (!isControlPublicationEvidenceError(error)
+      || !quarantineStaleControlPublicationIntents(targetRoot)) {
+      throw error;
+    }
+    return run();
   }
+}
+
+export function _withManagedProjectionRootAtForTest<T>(
+  targetRoot: string,
+  open: () => ProjectionRootIdentityLock,
+  operation: (handle: ProjectionRootIdentityLock) => T,
+): T {
+  return withManagedProjectionRoot(targetRoot, operation, open);
+}
+
+// Control-publication protocol artifacts live in the journal directory; the
+// native engine replays each pending intent on every projection-root open
+// (during the open and again on the first journal-directory listing). The
+// family covers the intent, its torn prepared successor, and the staging
+// siblings of one interrupted publication.
+const CONTROL_PUBLICATION_INTENT_NAME
+  = /^\.gsd-control-.+\.json\.(?:intent(?:\.prepared)?|temporary|replaced)$/u;
+
+export function isControlPublicationIntentName(name: string): boolean {
+  return CONTROL_PUBLICATION_INTENT_NAME.test(name);
+}
+
+// 2x the projection-lock-transient backoff schedule (recovery-policy.ts
+// PROJECTION_LOCK_TRANSIENT_BACKOFF_MS, 61s in total): a publication still
+// in flight under the code's own retry schedules cannot be older than this,
+// and an intent that old has already failed its replay on every open since
+// it was written. A fresher artifact is never touched.
+export const CONTROL_INTENT_QUARANTINE_MIN_AGE_MS = 122_000;
+
+// Quarantine destination, outside every protocol-scanned directory (the
+// native replay scan reads migration/projection-mutations/, the evidence
+// readers read migration/native-projection-evidence/ and
+// migration/unbound-projection-evidence.json).
+const QUARANTINED_CONTROL_PUBLICATIONS_ROOT = "migration/quarantined-control-publications";
+
+// A durable .intent record must look like a native control-publication
+// record before this path will move it: an externally planted or corrupted
+// file is ambiguous, stays untouched, and keeps failing loudly. A torn
+// .intent.prepared (interrupted mid-write) is an expected interrupted shape
+// and needs no parse.
+function looksLikeControlPublicationIntent(path: string, name: string): boolean {
+  if (name.endsWith(".intent.prepared")) return true;
+  try {
+    const parsed = JSON.parse(readFileSync(path, "utf8")) as unknown;
+    return parsed !== null && typeof parsed === "object"
+      && typeof (parsed as Record<string, unknown>)["sequence"] === "number"
+      && typeof (parsed as Record<string, unknown>)["phase"] === "string";
+  } catch (error) {
+    if (error instanceof SyntaxError) return false;
+    throw error;
+  }
+}
+
+// Supervised pre-open reconciliation (#2154): move stale control-publication
+// artifacts out of the journal directory (plain fs, no lock — the attempt
+// that led here already failed) so the native replay stops throwing, and
+// record a sidecar next to each move for review. Returns whether anything
+// was quarantined; ambiguous or in-flight state stays untouched and keeps
+// failing loudly.
+function quarantineStaleControlPublicationIntents(targetRoot: string): boolean {
+  return withProjectionMutationSync(historyPath(targetRoot), () => {
+    const journalDirectory = journalRoot(targetRoot);
+    let names: string[];
+    try {
+      names = readdirSync(journalDirectory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+    const quarantineDirectory = join(gsdProjectionRoot(targetRoot), ...QUARANTINED_CONTROL_PUBLICATIONS_ROOT.split("/"));
+    let quarantined = 0;
+    for (const name of names.sort()) {
+      if (!CONTROL_PUBLICATION_INTENT_NAME.test(name)) continue;
+      const artifactPath = join(journalDirectory, name);
+      let stat;
+      try {
+        stat = lstatSync(artifactPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        continue;
+      }
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      if (Date.now() - stat.mtimeMs < CONTROL_INTENT_QUARANTINE_MIN_AGE_MS) continue;
+      if (!looksLikeControlPublicationIntent(artifactPath, name)) continue;
+      const content = readFileSync(artifactPath);
+      mkdirSync(quarantineDirectory, { recursive: true });
+      // Nonce suffix: the move must never overwrite an already-quarantined
+      // artifact, and the exclusive sidecar write must stay collision-free.
+      const destination = join(quarantineDirectory, `${name}.${randomUUID()}.quarantined`);
+      renameSync(artifactPath, destination);
+      writeFileSync(`${destination}.json`, `${JSON.stringify({
+        reason: "stale-control-publication-intent",
+        quarantinedAt: new Date().toISOString(),
+        originalPath: `${JOURNAL_LOGICAL_ROOT}/${name}`,
+        quarantinedPath: `${QUARANTINED_CONTROL_PUBLICATIONS_ROOT}/${basename(destination)}`,
+        contentDigest: `sha256:${createHash("sha256").update(content).digest("hex")}`,
+        contentBytes: content.byteLength,
+      }, null, 2)}\n`, { flag: "wx" });
+      quarantined++;
+    }
+    return quarantined > 0;
+  });
 }
 
 export function _withManagedProjectionRootForTest<T>(
