@@ -111,6 +111,37 @@ describe("openai-completions tool_choice", () => {
 		expect(params.tools?.length ?? 0).toBeGreaterThan(0);
 	});
 
+	it("downgrades forced tool choice and drops temperature for Claude Sonnet 5.5 behind a gateway", async () => {
+		const tools: Tool[] = [
+			{ name: "ping", description: "Ping tool", parameters: Type.Object({ ok: Type.Boolean() }) },
+		];
+		for (const [provider, id] of [
+			["openrouter", "anthropic/claude-sonnet-5.5"],
+			["github-copilot", "claude-sonnet-5.5"],
+		] as const) {
+			const model = getModel(provider, id as never) as Model<"openai-completions">;
+			expect(model, `${provider}/${id}`).toBeDefined();
+			for (const toolChoice of ["required", { type: "function", function: { name: "ping" } }] as const) {
+				let payload: unknown;
+				await streamSimple(
+					model,
+					{ messages: [{ role: "user", content: "Call ping", timestamp: Date.now() }], tools },
+					{
+						apiKey: "test",
+						toolChoice,
+						temperature: 0.2,
+						onPayload: (params: unknown) => {
+							payload = params;
+						},
+					} as unknown as Parameters<typeof streamSimple>[2],
+				).result();
+				const params = (payload ?? mockState.lastParams) as { tool_choice?: unknown; temperature?: number };
+				expect(params.tool_choice, `${id} ${JSON.stringify(toolChoice)}`).toBe("auto");
+				expect("temperature" in (params as object), id).toBe(false);
+			}
+		}
+	});
+
 	it("omits strict when compat disables strict mode", async () => {
 		const { compat: _compat, ...baseModel } = getModel("openai", "gpt-4o-mini")!;
 		const model = {

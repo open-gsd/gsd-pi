@@ -35,6 +35,7 @@ import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeToolSchema } from "../utils/sanitize-tool-schema.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { rejectsClaudeForcedToolChoice, rejectsClaudeSamplingParams } from "./claude-thinking-off.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.js";
@@ -641,7 +642,8 @@ function buildParams(
 		}
 	}
 
-	if (options?.temperature !== undefined) {
+	// Claude Sonnet/Opus 5.5 behind gateways (Copilot, OpenRouter) reject sampling params with a 400.
+	if (options?.temperature !== undefined && !rejectsClaudeSamplingParams(model.id)) {
 		params.temperature = options.temperature;
 	}
 
@@ -660,7 +662,9 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		params.tool_choice = options.toolChoice;
+		const forced = options.toolChoice === "required" || typeof options.toolChoice === "object";
+		// Claude Sonnet/Opus 5.5 reject forced tool choice with a 400; fall back to "auto".
+		params.tool_choice = forced && rejectsClaudeForcedToolChoice(model.id) ? "auto" : options.toolChoice;
 	}
 
 	if (compat.thinkingFormat === "zai" && model.reasoning) {
