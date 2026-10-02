@@ -78,7 +78,7 @@ import {
 import {
   migrateHierarchyToDb,
   migrateFromMarkdown,
-} from "../../md-importer.ts";
+} from "../helpers/md-importer.ts";
 
 // ── Post-unit diagnostics ─────────────────────────────────────────────────
 import { detectRogueFileWrites } from "../../auto-post-unit.ts";

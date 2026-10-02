@@ -570,8 +570,8 @@ describe('worktree-sync-milestones', async () => {
     }
   }
 
-  // ─── 13. syncWorktreeStateBack skips QUEUE.md but preserves completed-units diagnostics ──
-  console.log('\n=== 13. QUEUE.md skipped; completed-units.json diagnostic synced ===');
+  // ─── 13. syncWorktreeStateBack skips QUEUE.md and completed-units.json ──
+  console.log('\n=== 13. QUEUE.md and completed-units.json skipped ===');
   {
     const mainBase = mkdtempSync(join(tmpdir(), 'gsd-wt-back-queue-main-'));
     const wtBase = mkdtempSync(join(tmpdir(), 'gsd-wt-back-queue-wt-'));
@@ -580,7 +580,7 @@ describe('worktree-sync-milestones', async () => {
       mkdirSync(join(mainBase, '.gsd', 'milestones', 'M001'), { recursive: true });
       mkdirSync(join(wtBase, '.gsd', 'milestones', 'M001'), { recursive: true });
 
-      // Worktree has QUEUE.md projection and completed-units.json diagnostic.
+      // Worktree has QUEUE.md projection and a vestigial completed-units.json.
       writeFileSync(join(wtBase, '.gsd', 'QUEUE.md'), '# Queue\n- M002 next');
       writeFileSync(
         join(wtBase, '.gsd', 'completed-units.json'),
@@ -609,19 +609,14 @@ describe('worktree-sync-milestones', async () => {
         'QUEUE.md does not appear in synced list',
       );
 
-      // completed-units.json is diagnostic and may be copied for operator visibility.
+      // completed-units.json has no reader and must not be copied back.
       assert.ok(
-        existsSync(join(mainBase, '.gsd', 'completed-units.json')),
-        '#1787: completed-units.json synced from worktree to main',
-      );
-      const cuContent = readFileSync(join(mainBase, '.gsd', 'completed-units.json'), 'utf-8');
-      assert.ok(
-        cuContent.includes('M001-S01-T01'),
-        '#1787: completed-units.json has correct content',
+        !existsSync(join(mainBase, '.gsd', 'completed-units.json')),
+        'completed-units.json is not synced from worktree to main',
       );
       assert.ok(
-        synced.includes('completed-units.json'),
-        '#1787: completed-units.json appears in synced list',
+        !synced.includes('completed-units.json'),
+        'completed-units.json does not appear in synced list',
       );
     } finally {
       rmSync(mainBase, { recursive: true, force: true });

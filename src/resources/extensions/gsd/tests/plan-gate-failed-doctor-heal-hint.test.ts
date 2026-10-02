@@ -18,15 +18,6 @@ function readSrc(file: string): string {
   return readFileSync(join(gsdDir, file), "utf-8");
 }
 
-test("#4620: auto/pre-dispatch plan gate failed message includes doctor heal hint", () => {
-  const src = readSrc("auto/pre-dispatch.ts");
-  assert.match(
-    src,
-    /Plan gate failed-closed:[\s\S]*\/gsd doctor heal/,
-    "auto/pre-dispatch.ts should include /gsd doctor heal in plan gate failed notification",
-  );
-});
-
 test("#4620: guided-flow plan gate failed message includes doctor heal hint", () => {
   const src = readSrc("guided-flow.ts");
   assert.match(

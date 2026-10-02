@@ -51,7 +51,6 @@ interface GsdMcpBridge {
   saveDecisionToDb: (...args: any[]) => any;
   saveRequirementToDb: (...args: any[]) => any;
   updateRequirementInDb: (...args: any[]) => any;
-  rebuildState: (...args: any[]) => any;
   queryJournal: (...args: any[]) => any;
   claimReservedId: (...args: any[]) => any;
   findMilestoneIds: (...args: any[]) => any;

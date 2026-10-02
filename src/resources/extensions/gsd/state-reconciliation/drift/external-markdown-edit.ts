@@ -1,9 +1,8 @@
 // Project/App: gsd-pi
-// File Purpose: Observe external .gsd edits and retain the opt-in legacy drift handler.
+// File Purpose: Observe external .gsd edits.
 //
 // gsd-pi's DB is canonical, while .gsd/*.md is a readable projection. External
-// modeled edits are reported to the Projection Worker for preservation. Runtime
-// reconciliation does not register the legacy blocker handler below.
+// modeled edits are reported to the Projection Worker for preservation.
 
 import { existsSync, readFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -16,8 +15,7 @@ import {
 } from "../../compat/compat-marker.js";
 import { _getAdapter } from "../../gsd-db.js";
 import { logWarning } from "../../workflow-logger.js";
-import type { GSDState } from "../../types.js";
-import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
+import type { DriftRecord } from "../types.js";
 
 type ExternalMarkdownEditDrift = Extract<
   DriftRecord,
@@ -185,29 +183,3 @@ export function observeExternalMarkdownEdits(
   }
   return records;
 }
-
-function externalMarkdownEditBlocker(record: ExternalMarkdownEditDrift): string {
-  return [
-    `External modeled edit detected in \`.gsd/${record.projectionPath}\`.`,
-    "The database is authoritative, so GSD paused before importing or overwriting this projection.",
-    "Recommended: run `/gsd rebuild markdown` to restore the database projection.",
-    "If this edit should replace database state, review it first, then run `/gsd recover` and approve its exact hash through the explicit Preview/Application flow.",
-  ].join(" ");
-}
-
-function repairExternalMarkdownEdit(
-  record: ExternalMarkdownEditDrift,
-  _ctx: DriftContext,
-): never {
-  throw new Error(
-    `Invariant violation: modeled projection repair must remain blocked for .gsd/${record.projectionPath}`,
-  );
-}
-
-export const externalMarkdownEditHandler: DriftHandler<ExternalMarkdownEditDrift> = {
-  kind: "external-markdown-edit",
-  detect: (_state: GSDState, ctx: DriftContext) =>
-    observeExternalMarkdownEdits(ctx.basePath, ctx.dryRun),
-  blocker: externalMarkdownEditBlocker,
-  repair: repairExternalMarkdownEdit,
-};

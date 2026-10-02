@@ -9,15 +9,13 @@
  * The `loadSliceTaskIO` loader at the bottom is the only async/IO function.
  */
 
-import type { TaskIO, DerivedTaskNode, ReactiveExecutionState } from "./types.js";
+import type { TaskIO, DerivedTaskNode } from "./types.js";
 import { loadFile, parseTaskPlanIO } from "./files.js";
 import { isDbAvailable, getSliceTasks } from "./gsd-db.js";
 import { isClosedStatus } from "./status-guards.js";
 import { logWarning } from "./workflow-logger.js";
 import { resolveTasksDir, resolveTaskFiles } from "./paths.js";
 import { join } from "node:path";
-import { loadJsonFileOrNull, saveJsonFile } from "./json-persistence.js";
-import { existsSync, unlinkSync } from "node:fs";
 
 // ─── Graph Construction ───────────────────────────────────────────────────
 
@@ -280,56 +278,4 @@ export async function loadSliceTaskIO(
   }
 
   return results;
-}
-
-// ─── State Persistence ────────────────────────────────────────────────────
-
-function reactiveStatePath(basePath: string, mid: string, sid: string): string {
-  return join(basePath, ".gsd", "runtime", `${mid}-${sid}-reactive.json`);
-}
-
-function isReactiveState(data: unknown): data is ReactiveExecutionState {
-  if (!data || typeof data !== "object") return false;
-  const d = data as Record<string, unknown>;
-  return typeof d.sliceId === "string" && Array.isArray(d.completed) && Array.isArray(d.dispatched);
-}
-
-/**
- * Load persisted reactive execution state for a slice.
- * Returns null when no state file exists or the file is invalid.
- */
-export function loadReactiveState(
-  basePath: string,
-  mid: string,
-  sid: string,
-): ReactiveExecutionState | null {
-  return loadJsonFileOrNull(reactiveStatePath(basePath, mid, sid), isReactiveState);
-}
-
-/**
- * Save reactive execution state to disk.
- */
-export function saveReactiveState(
-  basePath: string,
-  mid: string,
-  sid: string,
-  state: ReactiveExecutionState,
-): void {
-  saveJsonFile(reactiveStatePath(basePath, mid, sid), state);
-}
-
-/**
- * Remove the reactive state file when a slice completes.
- */
-export function clearReactiveState(
-  basePath: string,
-  mid: string,
-  sid: string,
-): void {
-  const path = reactiveStatePath(basePath, mid, sid);
-  try {
-    if (existsSync(path)) unlinkSync(path);
-  } catch {
-    // Non-fatal
-  }
 }

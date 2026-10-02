@@ -48,7 +48,6 @@ import {
   targetMilestoneFile,
 } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
-import { checkOwnership, taskUnitKey } from "../unit-ownership.js";
 import { clearParseCache, normalizePlannedFileReference } from "../files.js";
 import { invalidateStateCache } from "../state.js";
 import { ProjectionWriteError, renderPlanCheckboxes, writeTaskSummaryProjection } from "../markdown-renderer.js";
@@ -449,16 +448,6 @@ export async function handleCompleteTask(
   });
 
   const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, params.milestoneId);
-
-  // ── Ownership check (opt-in: only enforced when claim file exists) ──────
-  const ownershipErr = checkOwnership(
-    artifactBasePath,
-    taskUnitKey(params.milestoneId, params.sliceId, params.taskId),
-    params.actorName,
-  );
-  if (ownershipErr) {
-    return { error: ownershipErr };
-  }
 
   // ── Guards + DB writes inside a single transaction (prevents TOCTOU) ───
   const completedAt = new Date().toISOString();

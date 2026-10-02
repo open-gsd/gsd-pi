@@ -9,8 +9,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { isClosedStatus } from "../status-guards.js";
 import { openDatabase, closeDatabase, upsertDecision, _getAdapter, insertMilestone, insertSlice, insertTask, getTask } from "../gsd-db.js";
-import { extractEntityKey } from "../workflow-reconcile.js";
-import type { WorkflowEvent } from "../workflow-events.js";
 
 // ── Fix 19: isClosedStatus covers all closed statuses ──
 
@@ -128,38 +126,5 @@ describe("isClosedStatus drives projection checkbox logic", () => {
         `status "${status}" must NOT be closed so projections render [ ]`,
       );
     }
-  });
-});
-
-// ── extractEntityKey: underscored cmds are recognized (Wave 5 scope) ──
-// Note: hyphenated cmd normalization is in Wave 1. These tests validate
-// the underscored format that Wave 5's extractEntityKey handles directly.
-
-describe("extractEntityKey recognizes underscored cmds", () => {
-  const base: WorkflowEvent = { cmd: "", params: {}, ts: "", hash: "", actor: "agent", session_id: "" };
-
-  test("complete_task → task entity", () => {
-    const key = extractEntityKey({ ...base, cmd: "complete_task", params: { taskId: "T01" } });
-    assert.deepStrictEqual(key, { type: "task", id: "T01" });
-  });
-
-  test("complete_slice → slice entity", () => {
-    const key = extractEntityKey({ ...base, cmd: "complete_slice", params: { sliceId: "S01" } });
-    assert.deepStrictEqual(key, { type: "slice", id: "S01" });
-  });
-
-  test("plan_slice → slice_plan entity (distinct from complete)", () => {
-    const key = extractEntityKey({ ...base, cmd: "plan_slice", params: { sliceId: "S01" } });
-    assert.deepStrictEqual(key, { type: "slice_plan", id: "S01" });
-  });
-
-  test("save_decision → decision entity", () => {
-    const key = extractEntityKey({ ...base, cmd: "save_decision", params: { scope: "s", decision: "d" } });
-    assert.deepStrictEqual(key, { type: "decision", id: "s:d" });
-  });
-
-  test("unknown cmd returns null (not crash)", () => {
-    const key = extractEntityKey({ ...base, cmd: "future_unknown_cmd", params: {} });
-    assert.strictEqual(key, null);
   });
 });

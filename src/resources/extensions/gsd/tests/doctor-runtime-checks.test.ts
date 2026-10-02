@@ -162,6 +162,28 @@ test("doctor reports and repairs a paused session superseded by the active miles
   assert.ok(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY));
 });
 
+test("doctor ignores a leftover completed-units.json file", async (t) => {
+  const dir = createGitProject();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+
+  // Keys with no matching artifact: the removed check reported these as
+  // orphaned completed units and pruned them on fix.
+  const completedUnitsPath = join(dir, ".gsd", "completed-units.json");
+  const content = JSON.stringify(["execute-task/M001/S01/T01", "complete-slice/M001/S01"]);
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  writeFileSync(completedUnitsPath, content, "utf-8");
+
+  const report = await runGSDDoctor(dir, { fix: true });
+
+  const mentions = (text: string | undefined): boolean => /completed[- ]unit/i.test(text ?? "");
+  assert.deepEqual(
+    report.issues.filter((issue) => mentions(issue.code) || mentions(issue.message) || mentions(issue.file)),
+    [],
+  );
+  assert.deepEqual(report.fixesApplied.filter(mentions), []);
+  assert.equal(readFileSync(completedUnitsPath, "utf-8"), content);
+});
+
 test("doctor surfaces unresolved projection evidence with recovery instructions", async (t) => {
   const dir = createGitProject();
   t.after(() => rmSync(dir, { recursive: true, force: true }));

@@ -31,7 +31,6 @@ export {
   saveRequirementToDb,
   updateRequirementInDb,
 } from "./db-writer.js";
-export { rebuildState } from "./doctor.js";
 export { queryJournal } from "./journal.js";
 export {
   claimReservedId,

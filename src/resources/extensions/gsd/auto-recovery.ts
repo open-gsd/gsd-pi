@@ -14,7 +14,6 @@ import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { clearParseCache } from "./files.js";
 import {
   isDbAvailable,
-  getDb,
   getTask,
   getSlice,
   getSliceTasks,
@@ -447,22 +446,6 @@ export function writeReactiveExecuteBlocker(
     skippedTaskIds: [],
     unchangedTaskIds: batchIds,
   };
-}
-
-/**
- * Whether a milestone already has canonical Domain-Operation lifecycle
- * history. Adopted milestones must not have a fabricated blocker slice
- * inserted to paper over a stuck plan-milestone unit (fail-closed).
- */
-function hasAdoptedMilestoneHistory(milestoneId: string): boolean {
-  return Boolean(getDb().prepare(`
-    SELECT 1 AS adopted
-    FROM workflow_item_lifecycles
-    WHERE item_kind = 'milestone'
-      AND milestone_id = :milestone_id
-      AND slice_id IS NULL
-      AND task_id IS NULL
-  `).get({ ":milestone_id": milestoneId }));
 }
 
 /**

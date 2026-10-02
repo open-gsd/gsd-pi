@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os';
 import {
   adoptOrTransitionLifecycle,
   closeDatabase,
-  deleteSlice,
   executeDomainOperation,
   getMilestone,
   getMilestoneSlices,

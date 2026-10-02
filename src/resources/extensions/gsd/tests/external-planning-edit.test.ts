@@ -1,17 +1,14 @@
 // Project/App: gsd-pi
-// File Purpose: Tests for the external-planning-edit drift handler.
+// File Purpose: Tests for external .planning edit observation.
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
-import { externalPlanningEditHandler } from "../state-reconciliation/drift/external-planning-edit.ts";
-import { reconcileBeforeDispatch } from "../state-reconciliation.ts";
+import { observeExternalPlanningEdits } from "../state-reconciliation/drift/external-planning-edit.ts";
 import { writeCompatMarker, readCompatMarker } from "../compat/compat-marker.ts";
-import type { DriftContext } from "../state-reconciliation/types.ts";
-import type { GSDState } from "../types.ts";
 
 const tmpDirs: string[] = [];
 function makeTmpBase(): string {
@@ -20,10 +17,6 @@ function makeTmpBase(): string {
   mkdirSync(join(base, ".planning"), { recursive: true });
   tmpDirs.push(base);
   return base;
-}
-const stubState = { phase: "idle" } as unknown as GSDState;
-function ctx(base: string): DriftContext {
-  return { basePath: base, state: stubState };
 }
 afterEach(() => {
   for (const d of tmpDirs) { try { rmSync(d, { recursive: true, force: true }); } catch { /* */ } }
@@ -34,7 +27,7 @@ test("detect returns no drift when planning inactive and dir is empty", async ()
   const base = makeTmpBase();
   // .planning/ exists (created by makeTmpBase) but has no ROADMAP.md → no
   // layout signal → detectPlanningLayout returns null → stays inactive.
-  const drift = await externalPlanningEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalPlanningEdits(base);
   assert.equal(drift.length, 0);
 
   const { readCompatMarker } = await import("../compat/compat-marker.ts");
@@ -51,13 +44,10 @@ test("detect reports inactive modeled planning without activating compatibility"
   );
   // No compat marker written → planning.active = false by default.
 
-  const drift = await externalPlanningEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalPlanningEdits(base);
   assert.equal(drift.length, 1);
   assert.equal(drift[0]?.projectionPath, "ROADMAP.md");
   assert.equal(drift[0]?.passthrough, false);
-  const blocker = await externalPlanningEditHandler.blocker?.(drift[0]!, ctx(base));
-  assert.match(blocker ?? "", /database is authoritative/i);
-  assert.match(blocker ?? "", /Preview\/Application/);
 
   // Marker must NOT have been written by detect().
   const { readCompatMarker } = await import("../compat/compat-marker.ts");
@@ -83,7 +73,7 @@ test("detect returns drift when planning projection sha mismatches", async () =>
     piVersion: "1.4.0",
   });
 
-  const drift = await externalPlanningEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalPlanningEdits(base);
   assert.equal(drift.length, 1);
   assert.equal(drift[0]!.kind, "external-planning-edit");
   assert.equal(drift[0]!.projectionPath, rel);
@@ -109,7 +99,7 @@ test("detect flags passthrough files separately with passthrough=true", async ()
     piVersion: "1.4.0",
   });
 
-  const drift = await externalPlanningEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalPlanningEdits(base);
   assert.equal(drift.length, 1);
   assert.equal(drift[0]!.passthrough, true);
 });
@@ -134,40 +124,11 @@ test("detect returns no drift when sha matches", async () => {
     piVersion: "1.4.0",
   });
 
-  const drift = await externalPlanningEditHandler.detect(stubState, ctx(base));
+  const drift = await observeExternalPlanningEdits(base);
   assert.equal(drift.length, 0);
 });
 
-test("repair refreshes passthrough marker sha (idempotent on second detect)", async () => {
-  const base = makeTmpBase();
-  const rel = "codebase/STACK.md";
-  mkdirSync(join(base, ".planning", "codebase"), { recursive: true });
-  writeFileSync(join(base, ".planning", rel), "# new stack content\n", "utf-8");
-  writeCompatMarker(base, {
-    schema: 2,
-    lastWriter: "gsd-pi",
-    lastProjectedAt: "2026-06-21T00:00:00.000Z",
-    projections: {},
-    planning: {
-      active: true,
-      layout: "flat-phases",
-      projections: {},
-      passthrough: { [rel]: { sha: "old0000000000000", entities: [] } },
-    },
-    piVersion: "1.4.0",
-  });
-
-  const drift1 = await externalPlanningEditHandler.detect(stubState, ctx(base));
-  assert.equal(drift1.length, 1);
-  const contentBefore = readFileSync(join(base, ".planning", rel));
-  await externalPlanningEditHandler.repair(drift1[0]!, ctx(base));
-
-  const drift2 = await externalPlanningEditHandler.detect(stubState, ctx(base));
-  assert.equal(drift2.length, 0);
-  assert.deepEqual(readFileSync(join(base, ".planning", rel)), contentBefore);
-});
-
-test("reconcileBeforeDispatch dryRun=true does not write compat marker (planning)", async () => {
+test("observe with dryRun=true does not write compat marker (planning)", async () => {
   // /gsd sync --dry-run must leave planning compatibility state untouched.
   const base = makeTmpBase();
   writeFileSync(
@@ -178,14 +139,8 @@ test("reconcileBeforeDispatch dryRun=true does not write compat marker (planning
   // Capture the marker state before the dry-run reconcile.
   const markerBefore = readCompatMarker(base);
 
-  const result = await reconcileBeforeDispatch(base, {
-    dryRun: true,
-    registry: [externalPlanningEditHandler],
-    invalidateStateCache: () => {},
-    deriveState: async () => stubState as unknown as import("../types.ts").GSDState,
-  });
-  assert.match(result.blockers.join("\n"), /Preview\/Application/);
-  assert.equal(result.repaired.length, 0);
+  const drift = await observeExternalPlanningEdits(base, true);
+  assert.equal(drift.length, 1);
 
   // Marker must be identical to before: no planning activation, no SHA seeding.
   const markerAfter = readCompatMarker(base);

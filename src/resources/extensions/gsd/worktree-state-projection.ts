@@ -8,7 +8,7 @@
  *     for some classes, worktree authoritative for others)
  *   - The bug-hardened invariants encoded in `syncProjectRootToWorktree` /
  *     `syncStateToProjectRoot` (additive milestone copy #1886, ASSESSMENT
- *     verdict overwrite #2821, completed-units forward-sync, WAL/SHM
+ *     verdict overwrite #2821, WAL/SHM
  *     cleanup #2478, .gsd symlink edge case #2184)
  *
  * Slice 7 (#5591): the bodies of the three projection verbs and their
@@ -188,7 +188,6 @@ function syncFlatPhaseArtifacts(prGsd: string, wtGsd: string): void {
  * remains authoritative.
  */
 const ROOT_DIAGNOSTIC_FILES = [
-  "completed-units.json",
   "metrics.json",
 ] as const;
 
@@ -204,7 +203,6 @@ const ROOT_FORWARD_PROJECTION_FILES = [
   "KNOWLEDGE.md",
   "OVERRIDES.md",
   "QUEUE.md",
-  "completed-units.json",
   "metrics.json",
   "mcp.json",
 ] as const;
@@ -233,7 +231,7 @@ function syncRootProjectionFilesToWorktree(prGsd: string, wtGsd: string): void {
  *
  * Owns the rules: identity-key safety check (#2184 .gsd symlink), additive
  * milestone copy preserving worktree-local files (#1886), ASSESSMENT
- * verdict force-overwrite (#2821), forward-sync of `completed-units.json`,
+ * verdict force-overwrite (#2821),
  * WAL/SHM cleanup on legacy worktree-local DB (#2478).
  */
 export function _projectRootToWorktreeImpl(
@@ -290,15 +288,6 @@ export function _projectRootToWorktreeImpl(
     join(prGsd, "milestones"),
     join(wtGsd, "milestones"),
     milestoneId,
-  );
-
-  // Forward-sync completed-units.json from project root to worktree.
-  // Project root is authoritative for completion state after crash recovery;
-  // without this, the worktree re-dispatches already-completed units (#1886).
-  copyProjectionFileSync(
-    join(prGsd, "completed-units.json"),
-    join(wtGsd, "completed-units.json"),
-    true,
   );
 
   // Delete a legacy worktree-local gsd.db ONLY if it is empty (0 bytes).
@@ -366,14 +355,6 @@ export function _projectWorktreeToRootImpl(
   // Without this, metrics accumulated in the worktree are invisible from the
   // project root and never appear in the dashboard or skill-health reports.
   copyProjectionFileSync(join(wtGsd, "metrics.json"), join(prGsd, "metrics.json"), true);
-
-  // completed-units.json — runtime completion diagnostics used to avoid
-  // re-dispatching work already completed in an isolated worktree.
-  copyProjectionFileSync(
-    join(wtGsd, "completed-units.json"),
-    join(prGsd, "completed-units.json"),
-    true,
-  );
 
   // Runtime records — unit dispatch diagnostics used by selfHealRuntimeRecords().
   // Without this, a crash during a unit leaves the runtime record only in the

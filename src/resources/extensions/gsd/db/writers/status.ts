@@ -6,10 +6,9 @@
 // The update*Status faces in gsd-db.ts delegate here.
 //
 // Two ADR-030 responsibilities remain deferred for safety:
-//   - Write-normalization via toStatus(): workflow-reconcile replays journal
-//     events that write raw "done"/"in-progress" and tests assert those exact
+//   - Write-normalization via toStatus(): tests assert raw "done"/"in-progress"
 //     stored values, so converging on write is a separate, behavior-sensitive
-//     change (migrate replay/import to canonical first).
+//     change.
 //   - Generalizing the closed→open guard to unadopted slices: legitimate reopen
 //     callers still use the generic face. Adopted slices are fenced below, but
 //     changing unadopted compatibility behavior remains separate work.

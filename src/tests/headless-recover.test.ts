@@ -8,8 +8,7 @@
 // printNonTtyErrorAndExit) and rejected piped invocations.
 //
 // Public headless recovery must use the same retained-backup Import
-// Application boundary as the interactive slash command. A few direct
-// Markdown-importer tests remain as low-level compatibility characterization.
+// Application boundary as the interactive slash command.
 //
 // The dispatcher branch itself (one if-block in headless.ts) is verified
 // by `npm run build:core`; the behavior-level guarantees live here.
@@ -24,20 +23,11 @@ import { tmpdir } from "node:os";
 
 import { openWorkflowDatabase } from "../resources/extensions/gsd/db-workspace.ts";
 import {
-  isDbAvailable,
   closeDatabase,
-  clearEngineHierarchy,
-  transaction,
-  getAllMilestones,
-  getMilestoneSlices,
-  getSliceTasks,
   getMilestone,
   insertMilestone,
-  insertGateRow,
   _getAdapter,
 } from "../resources/extensions/gsd/gsd-db.ts";
-import { migrateHierarchyToDb } from "../resources/extensions/gsd/md-importer.ts";
-import { invalidateStateCache } from "../resources/extensions/gsd/state.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../resources/extensions/gsd/legacy-import-preview-base.ts";
 import { createLegacyImportPreview } from "../resources/extensions/gsd/legacy-import-preview.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
@@ -195,99 +185,6 @@ test("headless recover verifies backups from a populated synced extension", (t) 
   assert.equal(recovered.status, 0, recovered.stderr);
   assert.match(recovered.stderr, /gsd-recover: recovered 4M\/7S\/5T hierarchy/u);
   assert.ok(existsSync(join(base, ".gsd", "gsd.db")));
-});
-
-test("legacy Markdown importer populates hierarchy in a direct compatibility fixture", async (t) => {
-  const base = makeMarkdownFixture();
-  t.after(() => {
-    try { closeDatabase(); } catch { /* may not be open */ }
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  const opened = await ensureDbOpen(base);
-  assert.ok(opened, "ensureDbOpen should succeed when .gsd/ exists");
-  assert.ok(isDbAvailable(), "DB should be open after ensureDbOpen");
-
-  const counts = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  assert.equal(counts.milestones, 1, "one milestone imported");
-  assert.equal(counts.slices, 1, "one slice imported");
-  assert.equal(counts.tasks, 1, "one task imported");
-
-  const milestones = getAllMilestones();
-  assert.equal(milestones.length, 1, "DB has the imported milestone");
-  assert.equal(milestones[0]!.id, "M001");
-
-  const slices = getMilestoneSlices("M001");
-  assert.equal(slices.length, 1, "milestone has the imported slice");
-  assert.equal(slices[0]!.id, "S01");
-  assert.equal(slices[0]!.status, "pending");
-
-  const tasks = getSliceTasks("M001", "S01");
-  assert.equal(tasks.length, 1, "slice has the imported task");
-  assert.equal(tasks[0]!.id, "T01");
-});
-
-test("legacy Markdown importer is stable across an explicit test-only reset", async (t) => {
-  const base = makeMarkdownFixture();
-  t.after(() => {
-    try { closeDatabase(); } catch { /* may not be open */ }
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  await ensureDbOpen(base);
-
-  const first = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  const second = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  assert.deepEqual(
-    second,
-    first,
-    "an explicit test-only reset must reproduce identical importer counts",
-  );
-  assert.equal(getAllMilestones().length, 1, "DB has exactly one milestone after the second pass");
-  assert.equal(getSliceTasks("M001", "S01").length, 1, "DB has exactly one task after the second pass");
-});
-
-test("test-only hierarchy clearing permits a subsequent legacy Markdown import", async (t) => {
-  const base = makeMarkdownFixture();
-  t.after(() => {
-    try { closeDatabase(); } catch { /* may not be open */ }
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  await ensureDbOpen(base);
-
-  transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
-  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q5", scope: "task", taskId: "T01" });
-
-  const recovered = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  assert.deepEqual(recovered, { milestones: 1, slices: 1, tasks: 1 });
-  assert.equal(getSliceTasks("M001", "S01").length, 1, "DB has the imported task after gate-backed recovery");
 });
 
 test("headless recover: verified-backup failure aborts before destructive work", async (t) => {

@@ -20,24 +20,18 @@ import {
 } from "../db/writers/lifecycle-commands.ts";
 import {
   _getAdapter,
-  bulkInsertLegacyHierarchy,
-  clearEngineHierarchy,
   closeDatabase,
-  copyWorktreeDb,
   getAllMilestones,
-  getMilestoneSlices,
-  getSliceTasks,
   insertMilestone,
   insertSlice,
   insertTask,
   openDatabase,
   reconcileWorktreeDb,
-  restoreManifest,
   updateSliceStatus,
   updateTaskStatus,
 } from "../gsd-db.ts";
 import { discardMilestone } from "../milestone-actions.ts";
-import type { StateManifest } from "../workflow-manifest.ts";
+import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 import { reconcileWorktreeDbBeforeManualMerge } from "../worktree-command.ts";
 import { worktreePath } from "../worktree-manager.ts";
 import { createWorkspace } from "../workspace.ts";
@@ -91,21 +85,6 @@ function seedLegacyHierarchy(): void {
     status: "pending",
     sequence: 1,
   });
-}
-
-function legacyManifest(): StateManifest {
-  const milestones = getAllMilestones();
-  const slices = milestones.flatMap((milestone) => getMilestoneSlices(milestone.id));
-  const tasks = slices.flatMap((slice) => getSliceTasks(slice.milestone_id, slice.id));
-  return {
-    version: 1,
-    exported_at: "2026-07-12T00:00:00.000Z",
-    milestones,
-    slices,
-    tasks,
-    decisions: [],
-    verification_evidence: [],
-  };
 }
 
 function adoptHierarchy(): void {
@@ -256,22 +235,6 @@ function sliceExecutionSnapshot(): Record<string, unknown> | undefined {
     FROM slices
     WHERE milestone_id = 'M001' AND id = 'S01'
   `).get();
-}
-
-function explicitAdoptionGuardError(action: () => void): Error {
-  let thrown: unknown;
-  try {
-    action();
-  } catch (error) {
-    thrown = error;
-  }
-  assert.ok(thrown instanceof Error, "destructive compatibility path must reject adopted hierarchy");
-  assert.match(
-    thrown.message,
-    /(?:adopted|canonical).*lifecycle|lifecycle.*(?:adopted|canonical)/i,
-    "rejection must explain that canonical lifecycle history prevents destructive restore",
-  );
-  return thrown;
 }
 
 test("worktree reconcile updates adopted hierarchy in place without deleting lifecycle identity", (t) => {
@@ -482,88 +445,6 @@ test("auto-worktree teardown preserves canonical divergence when the database st
     process.chdir(originalCwd);
   }
   t.after(() => process.chdir(originalCwd));
-});
-
-test("manifest restore rejects adopted hierarchy before changing either authority surface", (t) => {
-  openFixture(t);
-  const manifest = legacyManifest();
-  adoptHierarchy();
-  const before = hierarchyIdentitySnapshot();
-
-  explicitAdoptionGuardError(() => restoreManifest(manifest));
-
-  assert.deepEqual(hierarchyIdentitySnapshot(), before, "failed restore must leave hierarchy and lifecycles unchanged");
-});
-
-test("recover hierarchy clear rejects adopted rows before deleting legacy state", (t) => {
-  openFixture(t);
-  adoptHierarchy();
-  const before = hierarchyIdentitySnapshot();
-
-  explicitAdoptionGuardError(clearEngineHierarchy);
-
-  assert.deepEqual(hierarchyIdentitySnapshot(), before, "failed recover clear must leave adopted state unchanged");
-});
-
-test("legacy markdown bulk restore rejects adopted rows before replacing identities", (t) => {
-  openFixture(t);
-  adoptHierarchy();
-  const before = hierarchyIdentitySnapshot();
-
-  explicitAdoptionGuardError(() => bulkInsertLegacyHierarchy({
-    milestones: [{ id: "M001", title: "Imported milestone", status: "active" }],
-    slices: [{ id: "S01", milestoneId: "M001", title: "Imported slice", status: "active", risk: "low", sequence: 1 }],
-    tasks: [{ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Imported task", status: "pending", sequence: 1 }],
-    clearMilestoneIds: ["M001"],
-    createdAt: "2026-07-12T00:00:00.000Z",
-  }));
-
-  assert.deepEqual(hierarchyIdentitySnapshot(), before, "failed bulk restore must leave adopted state unchanged");
-});
-
-test("legacy markdown bulk restore may replace an unrelated unadopted milestone", (t) => {
-  openFixture(t);
-  insertMilestone({ id: "M002", title: "Replace me", status: "active" });
-  insertSlice({ milestoneId: "M002", id: "S02", title: "Replace me", status: "pending" });
-  insertTask({ milestoneId: "M002", sliceId: "S02", id: "T02", title: "Replace me", status: "pending" });
-  adoptHierarchy();
-  const adoptedBefore = hierarchyIdentitySnapshot();
-
-  bulkInsertLegacyHierarchy({
-    milestones: [{ id: "M002", title: "Imported milestone", status: "active" }],
-    slices: [{ id: "S02", milestoneId: "M002", title: "Imported slice", status: "pending", risk: "medium", sequence: 2 }],
-    tasks: [{ id: "T02", sliceId: "S02", milestoneId: "M002", title: "Imported task", status: "pending", sequence: 3 }],
-    clearMilestoneIds: ["M002"],
-    createdAt: "2026-07-12T00:00:00.000Z",
-  });
-
-  assert.deepEqual(hierarchyIdentitySnapshot(), adoptedBefore, "scoped import must not touch adopted milestone M001");
-  assert.equal(getAllMilestones().find((milestone) => milestone.id === "M002")?.title, "Imported milestone");
-  assert.equal(getMilestoneSlices("M002")[0]?.title, "Imported slice");
-  assert.equal(getSliceTasks("M002", "S02")[0]?.title, "Imported task");
-});
-
-test("legacy-only restore, recover clear, and bulk import retain their existing behavior", (t) => {
-  openFixture(t);
-  const manifest = legacyManifest();
-  db().prepare("UPDATE milestones SET title = 'Changed' WHERE id = 'M001'").run();
-
-  restoreManifest(manifest);
-  assert.equal(getAllMilestones()[0]?.title, "Original milestone");
-
-  clearEngineHierarchy();
-  assert.equal(getAllMilestones().length, 0);
-
-  bulkInsertLegacyHierarchy({
-    milestones: [{ id: "M002", title: "Legacy import", status: "active" }],
-    slices: [{ id: "S02", milestoneId: "M002", title: "Legacy slice", status: "pending", risk: "medium", sequence: 2 }],
-    tasks: [{ id: "T02", sliceId: "S02", milestoneId: "M002", title: "Legacy task", status: "pending", sequence: 3 }],
-    clearMilestoneIds: ["M002"],
-    createdAt: "2026-07-12T00:00:00.000Z",
-  });
-  assert.equal(getAllMilestones()[0]?.title, "Legacy import");
-  assert.equal(getMilestoneSlices("M002")[0]?.title, "Legacy slice");
-  assert.equal(getSliceTasks("M002", "S02")[0]?.title, "Legacy task");
 });
 
 test("legacy projection renderers exclude cancelled slices and tasks", (t) => {

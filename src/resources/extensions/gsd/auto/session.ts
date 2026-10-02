@@ -205,7 +205,6 @@ export class AutoSession {
   pausedUnitType: string | null = null;
   pausedUnitId: string | null = null;
   resourceVersionOnStart: string | null = null;
-  lastStateRebuildAt = 0;
 
   // ── Sidecar queue ─────────────────────────────────────────────────────
   sidecarQueue: SidecarItem[] = [];
@@ -431,7 +430,6 @@ export class AutoSession {
     this.pausedUnitType = null;
     this.pausedUnitId = null;
     this.resourceVersionOnStart = null;
-    this.lastStateRebuildAt = 0;
 
     // Metrics
     this.autoStartTime = 0;

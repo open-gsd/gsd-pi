@@ -33,7 +33,6 @@ const BANNED_DECISION_PATHS = new Set([
   "gsd/auto-post-unit.ts",
   "gsd/milestone-closeout.ts",
   "gsd/auto/phases.ts",
-  "gsd/auto/pre-dispatch.ts",
   "gsd/auto/dispatch.ts",
   "gsd/auto/unit-phase.ts",
   "gsd/auto/finalize.ts",

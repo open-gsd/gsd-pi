@@ -17,10 +17,8 @@ import {
   EMPTY_MARKER,
   compatMarkerPath,
 } from "../compat/compat-marker.ts";
-import { externalMarkdownEditHandler } from "../state-reconciliation/drift/external-markdown-edit.ts";
+import { observeExternalMarkdownEdits } from "../state-reconciliation/drift/external-markdown-edit.ts";
 import { isSafeProjectionKey } from "../compat/compat-marker-validation.ts";
-import type { DriftContext } from "../state-reconciliation/types.ts";
-import type { GSDState } from "../types.ts";
 
 const tmpDirs: string[] = [];
 
@@ -381,11 +379,8 @@ test("hostile marker makes the drift detector read nothing outside the project",
     piVersion: "1.8.1",
   });
 
-  const stubState = { phase: "idle" } as unknown as GSDState;
-  const ctx: DriftContext = { basePath: base, state: stubState };
-
   // Must not throw and must not emit a record referencing the sentinel.
-  const drift = await externalMarkdownEditHandler.detect(stubState, ctx);
+  const drift = observeExternalMarkdownEdits(base);
   assert.equal(drift.length, 0, "no drift record from a rejected hostile marker");
   assert.ok(
     !drift.some((d) => d.projectionPath.includes(sentinelName)),

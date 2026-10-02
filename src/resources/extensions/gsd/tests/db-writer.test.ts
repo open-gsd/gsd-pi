@@ -16,7 +16,7 @@ import {
 import {
   parseDecisionsTable,
   parseRequirementsSections,
-} from '../md-importer.ts';
+} from './helpers/md-importer.ts';
 import {
   generateDecisionsMd,
   generateRequirementsMd,

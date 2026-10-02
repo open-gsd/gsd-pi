@@ -35,7 +35,6 @@ const ROOT_STATE_FILES = [
   "KNOWLEDGE.md",
   "OVERRIDES.md",
   "QUEUE.md",
-  "completed-units.json",
   "metrics.json",
   "mcp.json",
   // NOTE: project preferences are intentionally NOT in ROOT_STATE_FILES.

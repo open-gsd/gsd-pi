@@ -23,7 +23,7 @@ import {
   getSlice,
   getTask,
 } from '../gsd-db.ts';
-import { migrateHierarchyToDb } from '../md-importer.ts';
+import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
 import { captureCurrentLegacyImportBaseSnapshot } from '../legacy-import-preview-base.ts';

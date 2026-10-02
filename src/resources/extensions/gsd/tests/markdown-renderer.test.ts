@@ -42,7 +42,7 @@ import {
   stripProjectionStamp,
 } from '../markdown-renderer.ts';
 import { repairStaleRenders } from '../state-reconciliation/drift/stale-render.ts';
-import { migrateHierarchyToDb } from '../md-importer.ts';
+import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import {
   parseProjectionRoadmap as parseRoadmap,
   parseProjectionPlan as parsePlan,

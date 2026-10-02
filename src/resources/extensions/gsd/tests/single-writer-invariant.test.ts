@@ -13,8 +13,6 @@
 // - typed coordination/runtime writer modules listed in TYPED_DB_WRITER_FILES
 // - schema/migration helper modules listed in SCHEMA_DB_WRITER_FILES
 // - ADR migration/backfill helpers listed in MIGRATION_BACKFILL_WRITER_FILES
-// - unit-ownership.ts — manages a separate .gsd/unit-claims.db for
-//   cross-worktree claim races; intentionally outside this invariant
 // - tests/** — fixtures and direct DB inspection are fair game
 //
 // When this test fails, do not add a new suppression. Instead:
@@ -42,11 +40,9 @@ const gsdDir = join(process.cwd(), "src/resources/extensions/gsd");
 //   - typed coordination/runtime writers listed below.
 //   - schema/migration helpers listed below.
 //   - ADR migration/backfill helpers listed below.
-//   - unit-ownership.ts — a separate .gsd/unit-claims.db, intentionally outside.
 // db/queries.ts is explicitly NOT allowed write SQL (asserted separately below).
 const TYPED_DB_WRITER_FILES = new Set([
   "db/auto-workers.ts",
-  "db/command-queue.ts",
   "db/domain-operation.ts",
   "db/milestone-leases.ts",
   "db/runtime-kv.ts",
@@ -84,13 +80,12 @@ const DB_WRITER_ALLOWLIST_GUIDANCE = [
   ...TYPED_DB_WRITER_FILES,
   ...SCHEMA_DB_WRITER_FILES,
   ...MIGRATION_BACKFILL_WRITER_FILES,
-  "unit-ownership.ts only for .gsd/unit-claims.db",
 ].join(", ");
 
 function isSingleWriterFile(rel: string): boolean {
   const norm = rel.split("\\").join("/");
   if (norm === "sqlite-readonly.ts") return true;
-  if (norm === "gsd-db.ts" || norm === "unit-ownership.ts") return true;
+  if (norm === "gsd-db.ts") return true;
   if (norm === "db/engine.ts") return true;
   if (norm.startsWith("db/writers/") && norm.endsWith(".ts")) return true;
   if (TYPED_DB_WRITER_FILES.has(norm)) return true;
@@ -339,13 +334,8 @@ test("gsd-db.ts exports the expected single-writer wrappers", async () => {
     "deleteDecisionById",
     "deleteRequirementById",
     "deleteArtifactByPath",
-    "clearEngineHierarchy",
-    "insertOrIgnoreSlice",
-    "insertOrIgnoreTask",
     "setSliceReplanTriggeredAt",
     "upsertQualityGate",
-    "restoreManifest",
-    "bulkInsertLegacyHierarchy",
     "readTransaction",
     "insertMemoryRow",
     "rewriteMemoryId",
@@ -363,6 +353,50 @@ test("gsd-db.ts exports the expected single-writer wrappers", async () => {
       typeof (db as Record<string, unknown>)[name] === "function",
       `gsd-db.ts must export ${name} as a function`,
     );
+  }
+});
+
+test("dead legacy writers, importers and readers are not exported", async () => {
+  // These had no production caller. An export that comes back is a bypass of
+  // the Domain Operation path, so each name must stay absent at runtime.
+  const removed: Array<[string, string[]]> = [
+    ["../gsd-db.js", [
+      "reopenMilestoneStatus",
+      "deleteTask",
+      "deleteSlice",
+      "syncSliceDependencies",
+      "clearEngineHierarchy",
+      "insertOrIgnoreSlice",
+      "insertOrIgnoreTask",
+      "bulkInsertLegacyHierarchy",
+      "restoreManifest",
+      "reopenSliceCascade",
+      "skipSliceCascade",
+      "resetSliceCascade",
+      "copyWorktreeDb",
+      "getActiveMilestoneFromDb",
+      "getActiveMilestoneIdFromDb",
+      "getActiveSliceFromDb",
+      "getActiveTaskFromDb",
+      "getActiveTaskIdFromDb",
+    ]],
+    ["../workflow-manifest.js", ["bootstrapFromManifest"]],
+    ["../auto-start.js", ["reconcileMergedMilestonesFromJournal"]],
+    ["../auto-recovery.js", ["hasAdoptedMilestoneHistory"]],
+    ["../reactive-graph.js", ["saveReactiveState", "loadReactiveState", "clearReactiveState"]],
+    ["../dispatch-guard.js", ["getConsecutiveDispatchBlocker"]],
+    ["../auto/phases.js", ["runPreDispatch", "runDispatch"]],
+    ["../auto/dispatch.js", ["runDispatch"]],
+    ["../mcp-bridge.js", ["rebuildState"]],
+    ["../state-reconciliation/drift/external-markdown-edit.js", ["externalMarkdownEditHandler"]],
+    ["../state-reconciliation/drift/external-planning-edit.js", ["externalPlanningEditHandler"]],
+  ];
+
+  for (const [specifier, names] of removed) {
+    const mod = await import(specifier) as Record<string, unknown>;
+    for (const name of names) {
+      assert.equal(name in mod, false, `${specifier} must not export ${name}`);
+    }
   }
 });
 

@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { _getAdapter, closeDatabase, getAllMilestones, insertMilestone, isDbAvailable, openDatabase } from "../gsd-db.ts";
-import { openProjectDbIfPresent, reconcileMergedMilestonesFromJournal } from "../auto-start.ts";
+import { openProjectDbIfPresent } from "../auto-start.ts";
 import { emitWorktreeMerged } from "../worktree-telemetry.ts";
 
 test.afterEach(() => {
@@ -51,30 +51,4 @@ test("bootstrap has no PROJECT.md → canonical milestone reconciliation path", 
     false,
     "bootstrap must not parse PROJECT.md milestone sequences into canonical authority",
   );
-});
-test("#1236: bootstrap merged-milestone reconciliation degrades to a warning instead of aborting when the DB is degraded", () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-merged-reconcile-degraded-"));
-  try {
-    mkdirSync(join(base, ".gsd"), { recursive: true });
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Merged Milestone", status: "active" });
-
-    emitWorktreeMerged(base, "M001", { reason: "milestone-complete", conflict: false });
-
-    // Simulate a degraded DB: the connection stays "available" (isDbAvailable()
-    // remains true because the handle is non-null), but the milestones table is
-    // gone, so the reconciler's DB access throws partway through bootstrap.
-    _getAdapter()!.exec("DROP TABLE milestones");
-    assert.equal(isDbAvailable(), true);
-
-    // Regression (#1236): this reconciler was previously unguarded, so a
-    // degraded-DB failure threw and aborted the rest of `/gsd auto` bootstrap.
-    // It must now catch, warn, and return 0. Reaching the assertion proves it
-    // did not throw.
-    const closed = reconcileMergedMilestonesFromJournal(base);
-    assert.equal(closed, 0);
-  } finally {
-    if (isDbAvailable()) closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  }
 });

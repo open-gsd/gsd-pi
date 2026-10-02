@@ -509,9 +509,6 @@ export async function autoLoop(
   hydrateCustomVerifyRetryCounts(s, { logFailure: logCustomVerifyRetryLoadFailure });
   const loopState: LoopState = {
     consecutiveFinalizeTimeouts: 0,
-    consecutiveDispatchCount: new Map<string, number>(),
-    lastDispatchedKey: null,
-    lastDispatchPhase: null,
   };
   let consecutiveErrors = 0;
   let consecutiveProjectionLockPauses = 0;

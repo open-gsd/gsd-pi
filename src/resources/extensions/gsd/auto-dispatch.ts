@@ -211,7 +211,7 @@ let researchProjectPromptBuilder: ResearchProjectPromptBuilder = buildResearchPr
  * uses the real loadSliceTaskIO + deriveTaskGraph; tests inject a throwing
  * function to deterministically exercise the best-effort failure path
  * (auto-dispatch.ts:1494). The catch is otherwise unreachable because every
- * operation it wraps (loadSliceTaskIO, deriveTaskGraph, saveReactiveState) is
+ * operation it wraps (loadSliceTaskIO, deriveTaskGraph) is
  * internally defensive.
  * @internal
  */
@@ -1748,20 +1748,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
           `gsd-reactive: ${mid}/${sid} graph — tasks:${metrics.taskCount} edges:${metrics.edgeCount} ` +
           `ready:${metrics.readySetSize} dispatching:${selected.length} ambiguous:${metrics.ambiguous}\n`,
         );
-
-        // Persist dispatched batch so verification and recovery can check
-        // exactly which tasks were sent. Preview reports the batch without
-        // persisting it.
-        if (!preview) {
-          const { saveReactiveState } = await import("./reactive-graph.js");
-          saveReactiveState(basePath, mid, sid, {
-            sliceId: sid,
-            completed: [...completed],
-            dispatched: selected,
-            graphSnapshot: metrics,
-            updatedAt: new Date().toISOString(),
-          });
-        }
 
         // Encode selected task IDs in unitId for artifact verification.
         // Format: M001/S01/reactive+T02,T03

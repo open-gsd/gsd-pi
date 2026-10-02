@@ -9,7 +9,7 @@ machines.
 ## Why single-host only
 
 - SQLite WAL coordination — the locking primitives that make
-  `claimMilestoneLease`, `recordDispatchClaim`, and `claimNextCommand`
+  `claimMilestoneLease` and `recordDispatchClaim`
   atomic — is local-disk only. Network filesystems (NFS, SMB, S3FS) and
   fuse mounts break the lock semantics that the WAL relies on.
 - Heartbeat TTL (`workers.last_heartbeat_at`) compares timestamps written

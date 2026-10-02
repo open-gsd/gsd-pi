@@ -27,7 +27,7 @@ import {
   updateMilestoneStatus,
   upsertMilestonePlanning,
 } from "../gsd-db.ts";
-import { migrateHierarchyToDb } from "../md-importer.ts";
+import { migrateHierarchyToDb } from "./helpers/md-importer.ts";
 import { executeSummarySave } from "../tools/workflow-tool-executors.ts";
 
 type CanonicalMilestoneStatus = "ready" | "completed";

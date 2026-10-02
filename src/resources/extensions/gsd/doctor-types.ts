@@ -22,7 +22,6 @@ export type DoctorIssueCode =
   | "stale_crash_lock"
   | "stale_paused_session"
   | "stale_parallel_session"
-  | "orphaned_completed_units"
   | "stale_hook_state"
   | "uat_retry_exhausted"
   | "activity_log_bloat"
@@ -122,18 +121,11 @@ export type DoctorIssueCode =
 /**
  * Issue codes that represent global or completion-critical state.
  * These must NOT be auto-fixed when fixLevel is "task" — automated
- * post-task health checks must never delete external project state directories
- * or remove completed-unit keys (which causes state reversion / data loss).
- *
- * orphaned_completed_units: Removing completed-unit keys causes deriveState to
- * consider those tasks incomplete, reverting the user to an earlier slice and
- * effectively discarding all work past that point (#1809). This must only be
- * fixed by an explicit manual doctor run (fixLevel="all").
+ * post-task health checks must never delete external project state directories.
  */
 export const GLOBAL_STATE_CODES = new Set<DoctorIssueCode>([
   "db_locked",
   "orphaned_project_state",
-  "orphaned_completed_units",
 ]);
 
 export interface DoctorIssue {

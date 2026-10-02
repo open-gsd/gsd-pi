@@ -16,8 +16,7 @@ import { BUDGET_THRESHOLDS, type IterationContext, type PhaseResult } from "./ty
 import type { AutoSession } from "./session.js";
 
 // Re-export phase implementations.
-export { runPreDispatch } from "./pre-dispatch.js";
-export { runDispatch, getAlreadyClosedDispatchReason, isUnhandledPhaseWarning } from "./dispatch.js";
+export { getAlreadyClosedDispatchReason } from "./dispatch.js";
 export {
   runUnitPhase,
   resetSessionTimeoutState,

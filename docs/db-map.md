@@ -26,7 +26,7 @@ gsd-db.ts  ← compatibility barrel over the explicit single-writer allowlist
        ├── db/lifecycle-shadow-comparison.ts
        │                    ← pure legacy/canonical lifecycle comparison
        ├── db/writers/*.ts  ← the Single Writer Layer (one write subsystem per file)
-       ├── db/{milestone-leases,unit-dispatches,auto-workers,runtime-kv,command-queue}.ts
+       ├── db/{milestone-leases,unit-dispatches,auto-workers,runtime-kv}.ts
        │                    ← typed coordination/runtime writers
        ├── schema/migration helper modules
        │                    ← write-capable helpers are explicitly listed by
@@ -728,7 +728,7 @@ result_json  TEXT
 ```
 
 - Index: `idx_command_queue_pending` (target_worker, claimed_at)
-- Claiming is a read-then-write path and uses `immediateTransaction()` so WAL workers serialize before selecting the pending row instead of failing a deferred write upgrade with `SQLITE_BUSY_SNAPSHOT`.
+- No code produces or claims rows in this table at present; the unused `db/command-queue.ts` module was deleted.
 
 ---
 
@@ -2200,7 +2200,7 @@ invariants rather than duplicating dispatch policy.
 
 ## 7. Write Path Invariants
 
-1. **Single-writer rule**: all write SQL lives in the explicit single-writer *layer*. The authoritative allowlists are `TYPED_DB_WRITER_FILES`, `SCHEMA_DB_WRITER_FILES`, and `MIGRATION_BACKFILL_WRITER_FILES` in `single-writer-invariant.test.ts`; `db/engine.ts`, `db/writers/**`, `gsd-db.ts`, and the separate `unit-ownership.ts` database have the named exceptions documented there. This is not permission for arbitrary raw writes under `db/`; `db/queries.ts` remains read-only. The structural test rejects every unlisted write site.
+1. **Single-writer rule**: all write SQL lives in the explicit single-writer *layer*. The authoritative allowlists are `TYPED_DB_WRITER_FILES`, `SCHEMA_DB_WRITER_FILES`, and `MIGRATION_BACKFILL_WRITER_FILES` in `single-writer-invariant.test.ts`; `db/engine.ts`, `db/writers/**`, and `gsd-db.ts` have the named exceptions documented there. This is not permission for arbitrary raw writes under `db/`; `db/queries.ts` remains read-only. The structural test rejects every unlisted write site.
 
 2. **Transaction wrapping**: every multi-table write uses `transaction()` or `immediateTransaction()` when it needs SQLite's reserved writer lock up front. Rollback on any error. Re-entrant callers normally increment the shared depth counter with no nested `BEGIN`; `executeDomainOperation()` is the exception and rejects an existing outer transaction so it owns the reserved-writer boundary. `gsd_save_gate_result` commits the `quality_gates` verdict update and matching `gate_runs` ledger insert together, so recovery never sees a completed gate without its audit row.
 

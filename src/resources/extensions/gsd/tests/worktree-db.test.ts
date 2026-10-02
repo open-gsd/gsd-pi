@@ -30,9 +30,9 @@ import {
   updateSliceStatus,
   updateTaskStatus,
   _getAdapter,
-  copyWorktreeDb,
   reconcileWorktreeDb,
 } from "../gsd-db.ts";
+import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -116,79 +116,6 @@ function registerCleanup(t: { after: (fn: () => void) => void }, ...dirs: string
     }
   });
 }
-
-// ─── copyWorktreeDb ───────────────────────────────────────────────────────
-
-test("copyWorktreeDb copies DB file and data is queryable", (t) => {
-  const srcDir = tempDir();
-  const destDir = tempDir();
-  registerCleanup(t, srcDir, destDir);
-
-  const srcDb = path.join(srcDir, "gsd.db");
-  const destDb = path.join(destDir, "nested", "gsd.db");
-
-  seedMainDb(srcDb);
-  closeDatabase();
-  assert.ok(fs.statSync(`${srcDb}-wal`).size > 0, "source retains committed WAL frames before copy");
-
-  const result = copyWorktreeDb(srcDb, destDb);
-  assert.equal(result, true, "copyWorktreeDb returns true on success");
-  assert.ok(fs.existsSync(destDb), "dest DB file exists after copy");
-
-  openDatabase(destDb);
-  const d = getDecisionById("D001");
-  assert.ok(d !== null, "decision queryable in copied DB");
-  assert.equal(d?.choice, "node:sqlite", "decision data preserved in copy");
-
-  const r = getRequirementById("R001");
-  assert.ok(r !== null, "requirement queryable in copied DB");
-  assert.equal(r?.description, "Must store decisions", "requirement data preserved in copy");
-});
-
-test("copyWorktreeDb skips -wal and -shm files", (t) => {
-  const srcDir = tempDir();
-  const destDir = tempDir();
-  registerCleanup(t, srcDir, destDir);
-
-  const srcDb = path.join(srcDir, "gsd.db");
-  const destDb = path.join(destDir, "gsd.db");
-
-  seedMainDb(srcDb);
-  closeDatabase();
-
-  assert.ok(fs.statSync(srcDb + "-wal").size > 0, "source has a real WAL to snapshot");
-
-  copyWorktreeDb(srcDb, destDb);
-
-  assert.ok(fs.existsSync(destDb), "DB file copied");
-  assert.ok(!fs.existsSync(destDb + "-wal"), "WAL file NOT copied");
-  assert.ok(!fs.existsSync(destDb + "-shm"), "SHM file NOT copied");
-});
-
-test("copyWorktreeDb returns false when source doesn't exist", (t) => {
-  const destDir = tempDir();
-  registerCleanup(t, destDir);
-
-  const missingSrc = path.join(destDir, "missing", "gsd.db");
-  const result = copyWorktreeDb(missingSrc, path.join(destDir, "gsd.db"));
-  assert.equal(result, false, "returns false for missing source");
-});
-
-test("copyWorktreeDb creates deeply nested dest directories", (t) => {
-  const srcDir = tempDir();
-  const destDir = tempDir();
-  registerCleanup(t, srcDir, destDir);
-
-  const srcDb = path.join(srcDir, "gsd.db");
-  const deepDest = path.join(destDir, "a", "b", "c", "gsd.db");
-
-  seedMainDb(srcDb);
-  closeDatabase();
-
-  const result = copyWorktreeDb(srcDb, deepDest);
-  assert.equal(result, true, "copyWorktreeDb succeeds with nested dest");
-  assert.ok(fs.existsSync(deepDest), "DB file created at deeply nested path");
-});
 
 // ─── reconcileWorktreeDb ──────────────────────────────────────────────────
 

@@ -68,7 +68,6 @@ import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
 import { checkoutBranchWithStashGuard } from "./worktree-git-recovery.js";
 import { cleanStaleRuntimeUnits } from "./auto-worktree-runtime-cleanup.js";
 import { readResourceVersion } from "./auto-worktree-resource-version.js";
-import { queryJournal } from "./journal.js";
 import { worktreePath as getWorktreeDir, isInsideWorktreesDir } from "./worktree-manager.js";
 import { emitWorktreeOrphaned } from "./worktree-telemetry.js";
 import { initMetrics } from "./metrics.js";
@@ -81,11 +80,7 @@ import {
   probeDbWritable,
   getMilestone,
   getAllMilestones,
-  insertMilestone,
-  updateMilestoneStatus,
 } from "./gsd-db.js";
-import { readMilestoneMergeObservation } from "./db/milestone-closeout-readiness.js";
-import { immediateTransaction } from "./db/engine.js";
 import {
   closeAllWorkflowDatabases,
   getWorkflowDatabaseStatus,
@@ -208,77 +203,6 @@ export async function openProjectDbIfPresent(basePath: string): Promise<void> {
   const result = openExistingWorkflowDatabase(basePath);
   if (!result.ok && (result.reason === "open-failed" || result.reason === "locked")) {
     logWarning("engine", `gsd-db: failed to open existing database: ${result.error?.message ?? "open failed"}`);
-  }
-}
-
-class MilestoneMergeObservationMismatchError extends Error {}
-
-export function reconcileMergedMilestonesFromJournal(basePath: string): number {
-  if (!isDbAvailable()) return 0;
-
-  try {
-    const mergedAtByMilestone = new Map<string, string>();
-    for (const entry of queryJournal(basePath, { eventType: "worktree-merged" })) {
-      const data = entry.data ?? {};
-      const milestoneId = typeof data.milestoneId === "string" ? data.milestoneId : null;
-      if (!milestoneId) continue;
-      if (data.conflict === true) continue;
-
-      const endedAt = typeof data.endedAt === "string" ? data.endedAt : entry.ts;
-      const previous = mergedAtByMilestone.get(milestoneId);
-      if (!previous || endedAt > previous) mergedAtByMilestone.set(milestoneId, endedAt);
-    }
-
-    const closed = immediateTransaction(() => {
-      const preflight = [...mergedAtByMilestone].map(([milestoneId, completedAt]) => ({
-        milestoneId,
-        completedAt,
-        observation: readMilestoneMergeObservation(milestoneId),
-      }));
-      for (const { milestoneId, observation } of preflight) {
-        if (observation.kind === "mismatch") {
-          throw new MilestoneMergeObservationMismatchError(
-            `Milestone ${milestoneId} canonical and legacy status mismatch ` +
-            `(canonical=${observation.canonicalStatus}, legacy=${observation.legacyStatus})`,
-          );
-        }
-      }
-
-      let completed = 0;
-      for (const { milestoneId, completedAt, observation } of preflight) {
-        if (observation.kind === "completed") continue;
-        if (observation.kind === "not-completed") {
-          logWarning(
-            "bootstrap",
-            `Ignoring worktree-merged observation for adopted Milestone ${milestoneId}: ` +
-            `canonical lifecycle is ${observation.canonicalStatus}, not completed.`,
-          );
-          continue;
-        }
-        const existing = getMilestone(milestoneId);
-        if (!existing) {
-          insertMilestone({ id: milestoneId, title: milestoneId, status: "complete" });
-          updateMilestoneStatus(milestoneId, "complete", completedAt);
-          completed++;
-          continue;
-        }
-        if (!isClosedStatus(existing.status)) {
-          updateMilestoneStatus(milestoneId, "complete", completedAt);
-          completed++;
-        }
-      }
-      return completed;
-    });
-
-    if (closed > 0) invalidateAllCaches();
-    return closed;
-  } catch (err) {
-    if (err instanceof MilestoneMergeObservationMismatchError) throw err;
-    logWarning(
-      "bootstrap",
-      `merged-milestone journal reconciliation failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-    return 0;
   }
 }
 

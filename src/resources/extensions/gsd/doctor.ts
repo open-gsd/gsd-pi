@@ -163,7 +163,7 @@ async function updateStateFile(basePath: string, fixesApplied: string[]): Promis
   fixesApplied.push(`updated ${path}`);
 }
 
-/** Rebuild STATE.md from current disk state. Exported for auto-mode post-hooks. */
+/** Rebuild STATE.md from current DB state. Exported for auto-mode post-hooks. */
 export async function rebuildState(basePath: string): Promise<void> {
   invalidateAllCaches();
   const state = await deriveState(basePath);

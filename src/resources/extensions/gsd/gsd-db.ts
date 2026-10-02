@@ -12,9 +12,6 @@
 // `_getAdapter()` (re-exported from the engine) is retained for read-only
 // SELECTs in query modules. Do NOT use it for writes — add or call a typed
 // wrapper in the explicit writer layer.
-//
-// The separate `.gsd/unit-claims.db` (unit-ownership.ts) is an intentionally
-// independent store and is excluded from this invariant.
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { renamePhaseDirOnTitleChange } from "./phase-dir-rename.js";
@@ -42,7 +39,7 @@ import {
 } from "./db-decision-requirement-rows.js";
 import { rowToGate } from "./db-gate-rows.js";
 import { rowToArtifact, rowToMilestone, type ArtifactRow, type MilestoneRow } from "./db-milestone-artifact-rows.js";
-import { isClosedStatus, toStatus } from "./status-guards.js";
+import { toStatus } from "./status-guards.js";
 import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "./db-task-slice-rows.js";
 
 // Connection ownership, lifecycle, schema/migrations and transaction
@@ -967,46 +964,16 @@ export function setMilestoneQueueOrder(order: string[]): void {
   });
 }
 
-function getMilestoneStatusForUpdate(milestoneId: string): string | null {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  const row = getDbOrNull()!.prepare("SELECT status FROM milestones WHERE id = :id").get({ ":id": milestoneId });
-  return typeof row?.["status"] === "string" ? row["status"] : null;
-}
-
-function writeMilestoneStatus(milestoneId: string, status: string, completedAt?: string | null): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  getDbOrNull()!.prepare(
-    `UPDATE milestones SET status = :status, completed_at = :completed_at WHERE id = :id`,
-  ).run({ ":status": status, ":completed_at": completedAt ?? null, ":id": milestoneId });
-}
-
 /**
  * Update a milestone's status in the database.
  *
  * Generic status updates may close unadopted milestones, park/unpark open
  * milestones, or advance planned milestones. Adopted milestones close through
  * the canonical operation. Closed milestones reopen through
- * reopenMilestoneStatus(), which is reserved for gsd_milestone_reopen.
+ * gsd_milestone_reopen.
  */
 export function updateMilestoneStatus(milestoneId: string, status: string, completedAt?: string | null, preserveCompletion?: boolean): void {
   applyStatusTransition({ entity: "milestone", milestoneId, status, completedAt, preserveCompletion });
-}
-
-/**
- * Explicit closed -> active transition for gsd_milestone_reopen only.
- */
-export function reopenMilestoneStatus(milestoneId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  immediateTransaction(() => {
-    const currentStatus = getMilestoneStatusForUpdate(milestoneId);
-    if (!currentStatus) {
-      throw new Error(`Cannot reopen missing milestone ${milestoneId}`);
-    }
-    if (!isClosedStatus(currentStatus)) {
-      throw new Error(`Cannot reopen milestone ${milestoneId} from status ${currentStatus}; milestone is not closed.`);
-    }
-    writeMilestoneStatus(milestoneId, "active", null);
-  });
 }
 
 
@@ -1021,21 +988,6 @@ export function reopenMilestoneStatus(milestoneId: string): void {
 
 
 // ─── Slice Dependencies (junction table) ─────────────────────────────────
-
-/** Sync the slice_dependencies junction table from a slice's JSON depends array. */
-export function syncSliceDependencies(milestoneId: string, sliceId: string, depends: string[]): void {
-  if (!getDbOrNull()!) return;
-  immediateTransaction(() => {
-    getDbOrNull()!.prepare(
-      "DELETE FROM slice_dependencies WHERE milestone_id = :mid AND slice_id = :sid",
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    for (const dep of depends) {
-      getDbOrNull()!.prepare(
-        "INSERT OR IGNORE INTO slice_dependencies (milestone_id, slice_id, depends_on_slice_id) VALUES (:mid, :sid, :dep)",
-      ).run({ ":mid": milestoneId, ":sid": sliceId, ":dep": dep });
-    }
-  });
-}
 
 
 // ─── Worktree DB Helpers ──────────────────────────────────────────────────
@@ -1337,44 +1289,6 @@ export function deleteVerificationEvidence(milestoneId: string, sliceId: string,
   transaction(() => getDbOrNull()!.prepare(
     `DELETE FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid`,
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
-}
-
-export function deleteTask(milestoneId: string, sliceId: string, taskId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => {
-    // Must delete verification_evidence first (FK constraint)
-    getDbOrNull()!!.prepare(
-      `DELETE FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM quality_gates WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM tasks WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId });
-  });
-}
-
-export function deleteSlice(milestoneId: string, sliceId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => {
-    // Cascade-style manual deletion: evidence → tasks → dependencies → slice
-    getDbOrNull()!!.prepare(
-      `DELETE FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM tasks WHERE milestone_id = :mid AND slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slice_dependencies WHERE milestone_id = :mid AND slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slice_dependencies WHERE milestone_id = :mid AND depends_on_slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slices WHERE milestone_id = :mid AND id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-  });
 }
 
 export function deleteMilestone(milestoneId: string): void {
@@ -1838,75 +1752,6 @@ export function getArtifactsByPathPrefix(prefix: string): ArtifactRow[] {
     "SELECT * FROM artifacts WHERE path LIKE :prefix ORDER BY path",
   ).all({ ":prefix": `${prefix}%` });
   return rows.map(rowToArtifact);
-}
-
-/**
- * Legacy destructive hierarchy-reset helper. Explicit recovery does not call
- * this; it applies a verified Import Application without clearing absent rows.
- */
-export function clearEngineHierarchy(): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  immediateTransaction(() => {
-    assertNoAdoptedLifecycleHistory("clearEngineHierarchy");
-    getDbOrNull()!!.exec("DELETE FROM verification_evidence");
-    getDbOrNull()!!.exec("DELETE FROM quality_gates");
-    getDbOrNull()!!.exec("DELETE FROM slice_dependencies");
-    getDbOrNull()!!.exec("DELETE FROM assessments");
-    getDbOrNull()!!.exec("DELETE FROM replan_history");
-    getDbOrNull()!!.exec("DELETE FROM milestone_commit_attributions");
-    getDbOrNull()!!.exec("DELETE FROM tasks");
-    getDbOrNull()!!.exec("DELETE FROM slices");
-    getDbOrNull()!!.exec("DELETE FROM milestone_leases");
-    getDbOrNull()!!.exec("DELETE FROM milestones");
-  });
-}
-
-/**
- * INSERT OR IGNORE a slice during event replay (workflow-reconcile.ts).
- * Strict insert-or-ignore semantics are required here to avoid the
- * `insertSlice` ON CONFLICT path that could downgrade an already-completed
- * slice back to 'pending'.
- */
-export function insertOrIgnoreSlice(args: {
-  milestoneId: string;
-  sliceId: string;
-  title: string;
-  createdAt: string;
-}): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `INSERT OR IGNORE INTO slices (milestone_id, id, title, status, created_at)
-     VALUES (:mid, :sid, :title, 'pending', :ts)`,
-  ).run({
-    ":mid": args.milestoneId,
-    ":sid": args.sliceId,
-    ":title": args.title,
-    ":ts": args.createdAt,
-  }));
-}
-
-/**
- * INSERT OR IGNORE a task during event replay (workflow-reconcile.ts).
- * Same rationale as `insertOrIgnoreSlice`.
- */
-export function insertOrIgnoreTask(args: {
-  milestoneId: string;
-  sliceId: string;
-  taskId: string;
-  title: string;
-  createdAt: string;
-}): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `INSERT OR IGNORE INTO tasks (milestone_id, slice_id, id, title, status, created_at)
-     VALUES (:mid, :sid, :tid, :title, 'pending', :ts)`,
-  ).run({
-    ":mid": args.milestoneId,
-    ":sid": args.sliceId,
-    ":tid": args.taskId,
-    ":title": args.title,
-    ":ts": args.createdAt,
-  }));
 }
 
 /**

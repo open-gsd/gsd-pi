@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
@@ -9,13 +9,9 @@ import {
   isGraphAmbiguous,
   getReadyTasks,
   chooseNonConflictingSubset,
-  loadReactiveState,
-  saveReactiveState,
-  clearReactiveState,
 } from "../reactive-graph.ts";
 import { validatePreferences } from "../preferences-validation.ts";
 import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask } from "../gsd-db.ts";
-import type { ReactiveExecutionState } from "../types.ts";
 import { parseUnitId } from "../unit-id.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import {
@@ -397,60 +393,7 @@ test("single ready task falls through to sequential", async () => {
   }
 });
 
-// ─── State Persistence ────────────────────────────────────────────────────
-
-test("saveReactiveState and loadReactiveState round-trip", () => {
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-state-"));
-  mkdirSync(join(repo, ".gsd", "runtime"), { recursive: true });
-  try {
-    const state: ReactiveExecutionState = {
-      sliceId: "S01",
-      completed: ["T01", "T02"],
-      dispatched: ["T03"],
-      graphSnapshot: { taskCount: 4, edgeCount: 2, readySetSize: 1, ambiguous: false },
-      updatedAt: "2025-01-01T00:00:00Z",
-    };
-
-    saveReactiveState(repo, "M001", "S01", state);
-    const loaded = loadReactiveState(repo, "M001", "S01");
-    assert.deepEqual(loaded, state);
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-});
-
-test("clearReactiveState removes the file", () => {
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-clear-"));
-  mkdirSync(join(repo, ".gsd", "runtime"), { recursive: true });
-  try {
-    const state: ReactiveExecutionState = {
-      sliceId: "S01",
-      completed: [],
-      dispatched: ["T01", "T02"],
-      graphSnapshot: { taskCount: 2, edgeCount: 0, readySetSize: 2, ambiguous: false },
-      updatedAt: "2025-01-01T00:00:00Z",
-    };
-
-    saveReactiveState(repo, "M001", "S01", state);
-    assert.ok(existsSync(join(repo, ".gsd", "runtime", "M001-S01-reactive.json")));
-
-    clearReactiveState(repo, "M001", "S01");
-    assert.ok(!existsSync(join(repo, ".gsd", "runtime", "M001-S01-reactive.json")));
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-});
-
-test("loadReactiveState returns null when no file exists", () => {
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-nofile-"));
-  mkdirSync(join(repo, ".gsd", "runtime"), { recursive: true });
-  try {
-    const loaded = loadReactiveState(repo, "M001", "S01");
-    assert.equal(loaded, null);
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
-});
+// ─── Re-entry ─────────────────────────────────────────────────────────────
 
 test("completed tasks are not re-dispatched on next iteration", async () => {
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-reentry-"));

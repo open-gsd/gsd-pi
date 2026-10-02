@@ -27,11 +27,11 @@ import { consumeAutoWakeup, scheduleAutoWakeup, _resetAutoWakeupsForTest } from 
 import { writeUnitRuntimeRecord, readUnitRuntimeRecord } from "../unit-runtime.js";
 import { queryJournal } from "../journal.js";
 import { autoLoop as rawAutoLoop } from "../auto/loop.js";
-import { runPreDispatch } from "../auto/pre-dispatch.js";
-import { runDispatch } from "../auto/dispatch.js";
+import { runPreDispatch } from "./helpers/legacy-pre-dispatch.ts";
+import { runDispatch, type LegacyLoopState } from "./helpers/legacy-dispatch.ts";
 import { runUnitPhase, resetSessionTimeoutState } from "../auto/unit-phase.js";
 import { runPostUnitVerification } from "../auto-verification.js";
-import type { UnitResult, AgentEndEvent, LoopState } from "../auto/types.js";
+import type { UnitResult, AgentEndEvent } from "../auto/types.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
 import type { AutoAdvanceResult, AutoOrchestrationModule, AutoStatus, UnitRef } from "../auto/contracts.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
@@ -179,7 +179,7 @@ async function waitForMicrotasks(
   assert.fail(`Timed out waiting for ${label}`);
 }
 
-function makeLoopState(): LoopState {
+function makeLoopState(): LegacyLoopState {
   return {
     consecutiveFinalizeTimeouts: 0,
     consecutiveDispatchCount: new Map<string, number>(),

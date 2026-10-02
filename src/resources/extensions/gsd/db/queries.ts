@@ -12,11 +12,9 @@ import { getGateIdsForTurn, type OwnerTurn } from "../gate-registry.js";
 import type { Decision, Requirement, GateRow, GateScope } from "../types.js";
 import {
   emptyTaskStatusCounts,
-  rowToActiveTaskSummary,
   rowToIdStatusSummary,
   rowToTaskStatusCounts,
   rowsToStringColumn,
-  type ActiveTaskSummary,
   type IdStatusSummary,
   type TaskStatusCounts,
 } from "../db-lightweight-query-rows.js";
@@ -894,46 +892,6 @@ export function getPlanMilestoneRecoveryBlock(milestoneId: string): PlanMileston
   };
 }
 
-export function getActiveMilestoneFromDb(): MilestoneRow | null {
-  if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare(
-    `SELECT * FROM milestones WHERE status NOT IN (${TERMINAL_STATUS_SQL}, 'parked') ORDER BY id LIMIT 1`,
-  ).get();
-  if (!row) return null;
-  return rowToMilestone(row);
-}
-
-export function getActiveSliceFromDb(milestoneId: string): SliceRow | null {
-  if (!getDbOrNull()!) return null;
-
-  // Single query: find the first non-complete slice whose dependencies are all satisfied.
-  // Uses json_each() to expand the JSON depends array and checks each dep is complete.
-  const row = getDbOrNull()!.prepare(
-    `SELECT s.* FROM slices s
-     WHERE s.milestone_id = :mid
-       AND s.status NOT IN (${TERMINAL_STATUS_SQL})
-       AND NOT EXISTS (
-         SELECT 1 FROM json_each(s.depends) AS dep
-         WHERE dep.value NOT IN (
-           SELECT id FROM slices WHERE milestone_id = :mid AND status IN (${TERMINAL_STATUS_SQL})
-         )
-       )
-     ORDER BY s.sequence, s.id
-     LIMIT 1`,
-  ).get({ ":mid": milestoneId });
-  if (!row) return null;
-  return rowToSlice(row);
-}
-
-export function getActiveTaskFromDb(milestoneId: string, sliceId: string): TaskRow | null {
-  if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare(
-    `SELECT * FROM tasks WHERE milestone_id = :mid AND slice_id = :sid AND status NOT IN (${TERMINAL_STATUS_SQL}) ORDER BY sequence, id LIMIT 1`,
-  ).get({ ":mid": milestoneId, ":sid": sliceId });
-  if (!row) return null;
-  return rowToTask(row);
-}
-
 export function getMilestoneSlices(milestoneId: string): SliceRow[] {
   if (!getDbOrNull()!) return [];
   const rows = getDbOrNull()!.prepare("SELECT * FROM slices WHERE milestone_id = :mid ORDER BY sequence, id").all({ ":mid": milestoneId });
@@ -1265,32 +1223,12 @@ export function getSliceScopedArtifacts(milestoneId: string, sliceId: string): A
   return rows.map(rowToArtifact);
 }
 
-/** Fast milestone status check — avoids deserializing JSON planning fields. */
-export function getActiveMilestoneIdFromDb(): IdStatusSummary | null {
-  if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare(
-    `SELECT id, status FROM milestones WHERE status NOT IN (${TERMINAL_STATUS_SQL}, 'parked') ORDER BY id LIMIT 1`,
-  ).get();
-  if (!row) return null;
-  return rowToIdStatusSummary(row);
-}
-
 /** Fast slice status check — avoids deserializing JSON depends/planning fields. */
 export function getSliceStatusSummary(milestoneId: string): IdStatusSummary[] {
   if (!getDbOrNull()!) return [];
   return getDbOrNull()!.prepare(
     "SELECT id, status FROM slices WHERE milestone_id = :mid ORDER BY sequence, id",
   ).all({ ":mid": milestoneId }).map(rowToIdStatusSummary);
-}
-
-/** Fast task status check — avoids deserializing JSON arrays and large text fields. */
-export function getActiveTaskIdFromDb(milestoneId: string, sliceId: string): ActiveTaskSummary | null {
-  if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare(
-    `SELECT id, status, title FROM tasks WHERE milestone_id = :mid AND slice_id = :sid AND status NOT IN (${TERMINAL_STATUS_SQL}) ORDER BY sequence, id LIMIT 1`,
-  ).get({ ":mid": milestoneId, ":sid": sliceId });
-  if (!row) return null;
-  return rowToActiveTaskSummary(row);
 }
 
 /** Count tasks by status for a slice — useful for progress reporting without full row load. */

@@ -1848,16 +1848,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       });
     }
 
-    // Reactive state cleanup on slice completion
     if (s.currentUnit.type === "complete-slice") {
-      await runSafely("postUnit", "reactive-state-cleanup", async () => {
-        const { milestone: mid, slice: sid } = parseUnitId(unit.id);
-        if (mid && sid) {
-          const { clearReactiveState } = await import("./reactive-graph.js");
-          clearReactiveState(s.basePath, mid, sid);
-        }
-      });
-
       // #4765 — slice-cadence collapse. When `git.collapse_cadence: "slice"`
       // is set, squash-merge the slice's commits from the milestone branch
       // onto main right here, so orphan risk shrinks from milestone-size to

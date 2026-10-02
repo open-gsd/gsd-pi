@@ -64,7 +64,7 @@ test("syncWorktreeStateBack does not copy task markdown projections from worktre
   }
 });
 
-test("syncWorktreeStateBack still copies diagnostic root files", () => {
+test("syncWorktreeStateBack copies metrics.json but not completed-units.json", () => {
   const mainBase = makeTempDir("main");
   const wtBase = makeTempDir("wt");
 
@@ -75,9 +75,9 @@ test("syncWorktreeStateBack still copies diagnostic root files", () => {
 
     const result = syncWorktreeStateBack(mainBase, wtBase, "M001");
 
-    assert.ok(result.synced.includes("completed-units.json"));
+    assert.equal(result.synced.includes("completed-units.json"), false);
     assert.ok(result.synced.includes("metrics.json"));
-    assert.ok(existsSync(join(mainBase, ".gsd/completed-units.json")));
+    assert.equal(existsSync(join(mainBase, ".gsd/completed-units.json")), false);
     assert.ok(existsSync(join(mainBase, ".gsd/metrics.json")));
   } finally {
     cleanup(mainBase, wtBase);

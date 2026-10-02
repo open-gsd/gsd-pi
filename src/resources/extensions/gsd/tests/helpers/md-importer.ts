@@ -1,23 +1,15 @@
-// GSD Markdown Importer
+// GSD Markdown Importer (test fixture helper)
 // Parses DECISIONS.md, REQUIREMENTS.md, and hierarchy artifacts from a .gsd/ tree,
 // then upserts everything into the SQLite database.
 //
-// Exports: parseDecisionsTable, parseRequirementsSections, migrateFromMarkdown
-//
-// ⚠ TEST-ONLY EXPORTS — DO NOT WIRE INTO PRODUCTION PATHS ⚠
-// `migrateHierarchyToDb` and `migrateFromMarkdown` are an UNCONSENTED,
-// UNVERIFIED markdown→DB write path. Every production markdown→DB import MUST
-// go through the crash-safe Import Application (workflow_import_applications),
-// which stages, hashes, and fences the write before applying it. These two
-// functions bypass all of that and currently have ZERO production callers —
-// they exist solely so test scaffolding can exercise legacy import semantics.
-// Guarded by tests/implicit-import-startup-authority.test.ts ("no production
-// module imports the legacy markdown importer"). Do not import this module
-// from any non-test file; extend the Import Application instead.
+// This is an unconsented, unverified markdown→DB write path. It lives under
+// tests/ so it does not ship and no production module can reach it. Production
+// markdown→DB import goes through the Import Application
+// (workflow_import_applications).
 
 import { readFileSync, readdirSync, existsSync, statSync } from 'node:fs';
 import { join, relative, basename, dirname } from 'node:path';
-import type { Requirement } from './types.js';
+import type { Requirement } from '../../types.js';
 import {
   upsertDecision,
   upsertRequirement,
@@ -31,8 +23,8 @@ import {
   getMilestoneSlices,
   getSliceTasks,
   _getAdapter,
-} from './gsd-db.js';
-import { openWorkflowDatabasePath } from './db-workspace.js';
+} from '../../gsd-db.js';
+import { openWorkflowDatabasePath } from '../../db-workspace.js';
 import {
   resolveGsdRootFile,
   resolveMilestoneFile,
@@ -44,16 +36,16 @@ import {
   resolveTaskFiles,
   resolveTaskFile,
   resolveMilestonePath,
-} from './paths.js';
-import { findMilestoneIds } from './guided-flow.js';
-import { milestoneIdToPhaseNum } from './layout-policy.js';
-import { stripIdPrefix } from './strip-id-prefix.js';
-import { parseProjectionRoadmap as parseRoadmap, parseProjectionPlan as parsePlan } from './schemas/parsers.js';
-import { parseContextDependsOn, parseSummary } from './files.js';
-import { logWarning } from './workflow-logger.js';
-import { parseDecisionsTable } from './decision-markdown-parser.js';
+} from '../../paths.js';
+import { findMilestoneIds } from '../../guided-flow.js';
+import { milestoneIdToPhaseNum } from '../../layout-policy.js';
+import { stripIdPrefix } from '../../strip-id-prefix.js';
+import { parseProjectionRoadmap as parseRoadmap, parseProjectionPlan as parsePlan } from '../../schemas/parsers.js';
+import { parseContextDependsOn, parseSummary } from '../../files.js';
+import { logWarning } from '../../workflow-logger.js';
+import { parseDecisionsTable } from '../../decision-markdown-parser.js';
 
-export { parseDecisionsTable } from './decision-markdown-parser.js';
+export { parseDecisionsTable } from '../../decision-markdown-parser.js';
 
 // ─── DECISIONS.md Parser ───────────────────────────────────────────────────
 

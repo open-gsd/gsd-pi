@@ -1,41 +1,45 @@
 // Project/App: gsd-pi
-// File Purpose: Auto-loop pre-dispatch phase.
+// File Purpose: Test-only legacy pre-dispatch phase. Production pre-dispatch runs
+// in auto/orchestrator.ts; the auto-loop test harness still adapts this phase.
 
-import { join } from "node:path";
-import { existsSync, cpSync } from "node:fs";
 import { basename } from "node:path";
-import { UokGateRunner } from "../uok/gate-runner.js";
-import { resolveUokFlags } from "../uok/flags.js";
+import { UokGateRunner } from "../../uok/gate-runner.js";
+import { resolveUokFlags } from "../../uok/flags.js";
 import {
   ensurePlanV2Graph,
   isEmptyPlanV2GraphResult,
   isMissingFinalizedContextResult,
-} from "../uok/plan-v2.js";
-import { getEligibleSlicesFromRows } from "../slice-parallel-eligibility.js";
-import { isSliceParallelActive, startSliceParallel } from "../slice-parallel-orchestrator.js";
-import { reconcileBeforeSpawn } from "../state-reconciliation.js";
+} from "../../uok/plan-v2.js";
+import { getEligibleSlicesFromRows } from "../../slice-parallel-eligibility.js";
+import { isSliceParallelActive, startSliceParallel } from "../../slice-parallel-orchestrator.js";
+import { reconcileBeforeSpawn } from "../../state-reconciliation.js";
 import {
   countUnmappedActiveRequirements,
   formatCompletePhaseNextAction,
-} from "../requirements-backlog.js";
-import { isDbAvailable, getMilestoneSlices } from "../gsd-db.js";
-import { getIsolationMode } from "../preferences.js";
-import { gsdRoot } from "../paths.js";
-import { atomicWriteSync } from "../atomic-write.js";
-import { logWarning } from "../workflow-logger.js";
-import { debugLog } from "../debug-logger.js";
+} from "../../requirements-backlog.js";
+import { isDbAvailable, getMilestoneSlices } from "../../gsd-db.js";
+import { getIsolationMode } from "../../preferences.js";
+import { logWarning } from "../../workflow-logger.js";
+import { debugLog } from "../../debug-logger.js";
 import {
   _resolveDispatchGuardBasePath,
   shouldRunPlanV2Gate,
   isSamePathLocal,
-} from "./phase-helpers.js";
+} from "../../auto/phase-helpers.js";
 import {
   closeoutAndStop,
   generateMilestoneReport,
   _runMilestoneMergeOnceWithStashRestore,
   shouldSkipTerminalMilestoneCloseout,
-} from "./closeout.js";
-import type { IterationContext, LoopState, PhaseResult, PreDispatchData } from "./types.js";
+} from "../../auto/closeout.js";
+import type { IterationContext, LoopState, PhaseResult } from "../../auto/types.js";
+import type { GSDState } from "../../types.js";
+
+export interface PreDispatchData {
+  state: GSDState;
+  mid: string;
+  midTitle: string;
+}
 
 type BlockerKind = "needs-remediation-dead-end" | "completed-milestone-reopened" | "other";
 
@@ -211,7 +215,7 @@ export async function runPreDispatch(
   // across worktree↔project-root path-form alternation. See PR #5236
   // (workspace handle infrastructure) and the Phase A pt 2 plan.
   let state = await deps.deriveState(s.canonicalProjectRoot);
-  const { getDeepStageGate } = await import("../auto-dispatch.js");
+  const { getDeepStageGate } = await import("../../auto-dispatch.js");
   const deepStageGate = getDeepStageGate(prefs, s.basePath);
   const canRunDeepSetupGate =
     state.phase === "pre-planning" ||
@@ -466,25 +470,7 @@ export async function runPreDispatch(
       .map((m: { id: string }) => m.id);
     deps.pruneQueueOrder(s.basePath, pendingIds);
 
-    // Archive the old completed-units.json instead of wiping it (#2313).
-    try {
-      const completedKeysPath = join(gsdRoot(s.basePath), "completed-units.json");
-      if (existsSync(completedKeysPath) && s.currentMilestoneId) {
-        const archivePath = join(
-          gsdRoot(s.basePath),
-          `completed-units-${s.currentMilestoneId}.json`,
-        );
-        cpSync(completedKeysPath, archivePath);
-      }
-      atomicWriteSync(completedKeysPath, JSON.stringify([], null, 2));
-    } catch (e) {
-      logWarning("engine", "Failed to archive completed-units on milestone transition", { error: String(e) });
-    }
-
     // Rebuild STATE.md immediately so it reflects the new active milestone.
-    // This bypasses the 30-second throttle in the normal rebuild path —
-    // milestone transitions are rare and important enough to warrant an
-    // immediate write.
     try {
       await deps.rebuildState(s.basePath);
     } catch (e) {
@@ -495,7 +481,7 @@ export async function runPreDispatch(
     // reconciliation during merge can leave main-branch markdown stale relative
     // to gsd.db (the 3M/3S/10T vs 3M/5S/16T drift class at /gsd startup).
     try {
-      const { rebuildMarkdownProjectionsFromDb } = await import("../commands-maintenance.js");
+      const { rebuildMarkdownProjectionsFromDb } = await import("../../commands-maintenance.js");
       await rebuildMarkdownProjectionsFromDb(s.canonicalProjectRoot);
       if (s.basePath !== s.canonicalProjectRoot) {
         await rebuildMarkdownProjectionsFromDb(s.basePath);

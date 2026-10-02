@@ -32,13 +32,8 @@ import {
   getSliceTasks,
   getMilestoneSliceSummaries,
   getClosedSliceIds,
-  getActiveMilestoneFromDb,
-  getActiveSliceFromDb,
-  getActiveTaskFromDb,
-  getActiveTaskIdFromDb,
   getSliceTaskCounts,
   deleteMilestone,
-  clearEngineHierarchy,
   recordMilestoneCommitAttribution,
   getMilestoneCommitAttributionShas,
   checkpointDatabase,
@@ -285,23 +280,7 @@ describe('gsd-db', () => {
     closeDatabase();
   });
 
-  test("gsd-db: getActiveMilestoneFromDb excludes closed statuses", () => {
-    openDatabase(":memory:");
-
-    insertMilestone({ id: "M001", title: "Done", status: "complete" });
-    insertMilestone({ id: "M002", title: "Legacy done", status: "done" });
-    insertMilestone({ id: "M003", title: "Skipped", status: "skipped" });
-    insertMilestone({ id: "M004", title: "Closed", status: "closed" });
-    insertMilestone({ id: "M005", title: "Parked", status: "parked" });
-    insertMilestone({ id: "M006", title: "Active", status: "active" });
-
-    const active = getActiveMilestoneFromDb();
-    assert.equal(active?.id, "M006", "closed/complete/done/skipped/parked should be excluded from active milestone selection");
-
-    closeDatabase();
-  });
-
-  test("gsd-db: active readers use the shared closed-status vocabulary", () => {
+  test("gsd-db: slice task counts use the shared closed-status vocabulary", () => {
     openDatabase(":memory:");
 
     try {
@@ -312,21 +291,6 @@ describe('gsd-db', () => {
       insertTask({ id: "T02", sliceId: "S02", milestoneId: "M001", title: "Closed", status: "closed", sequence: 2 });
       insertTask({ id: "T03", sliceId: "S02", milestoneId: "M001", title: "Pending", status: "pending", sequence: 3 });
 
-      assert.equal(
-        getActiveSliceFromDb("M001")?.id,
-        "S02",
-        "closed dependency slices must satisfy dependencies and be excluded from active slice selection",
-      );
-      assert.equal(
-        getActiveTaskFromDb("M001", "S02")?.id,
-        "T03",
-        "skipped/closed tasks must be excluded from active task selection",
-      );
-      assert.equal(
-        getActiveTaskIdFromDb("M001", "S02")?.id,
-        "T03",
-        "lightweight active task selection must use the same closed-status vocabulary",
-      );
       assert.deepEqual(
         getSliceTaskCounts("M001", "S02"),
         { total: 3, done: 2, pending: 1 },
@@ -1297,23 +1261,6 @@ describe('gsd-db', () => {
       closeDatabase();
     });
 
-    test('clearEngineHierarchy removes persisted milestone commit attributions', () => {
-      openDatabase(':memory:');
-      insertMilestone({ id: 'M001', title: 'Milestone', status: 'active' });
-      recordMilestoneCommitAttribution({
-        commitSha: 'fedcba9876543210fedcba9876543210fedcba98',
-        milestoneId: 'M001',
-        source: 'backfill',
-        confidence: 0.8,
-        files: ['app.js'],
-        createdAt: '2026-05-05T00:00:00.000Z',
-      });
-
-      assert.deepEqual(getMilestoneCommitAttributionShas('M001'), ['fedcba9876543210fedcba9876543210fedcba98']);
-      clearEngineHierarchy();
-      assert.deepEqual(getMilestoneCommitAttributionShas('M001'), []);
-      closeDatabase();
-    });
   });
 
   // ─── getDbStatus ───────────────────────────────────────────────────────────

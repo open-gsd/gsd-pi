@@ -30,11 +30,11 @@ function makeTestBase(prefix: string): string {
 import type { JournalEntry } from "../journal.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
-import type { IterationContext, LoopState, PreDispatchData, IterationData } from "../auto/types.js";
+import type { IterationContext, LoopState, IterationData } from "../auto/types.js";
 import type { SessionLockStatus } from "../session-lock.js";
-import { runDispatch } from "../auto/dispatch.js";
+import { runDispatch } from "./helpers/legacy-dispatch.ts";
 import { runUnitPhase } from "../auto/unit-phase.js";
-import { runPreDispatch } from "../auto/pre-dispatch.js";
+import { runPreDispatch, type PreDispatchData } from "./helpers/legacy-pre-dispatch.ts";
 import { runFinalize } from "../auto/finalize.js";
 import { readUnitRuntimeRecord } from "../unit-runtime.js";
 import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";

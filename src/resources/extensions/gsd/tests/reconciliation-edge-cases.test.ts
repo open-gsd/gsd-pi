@@ -8,7 +8,6 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { findForkPoint, readEvents, appendEvent } from "../workflow-events.ts";
 import type { WorkflowEvent } from "../workflow-events.ts";
-import { extractEntityKey, detectConflicts } from "../workflow-reconcile.ts";
 
 // ─── Helper: build a full WorkflowEvent from cmd + params ────────────────────
 
@@ -64,78 +63,6 @@ describe("reconciliation-edge-cases", () => {
 
   test("findForkPoint returns -1 for empty logs", () => {
     assert.equal(findForkPoint([], []), -1, "two empty logs should return -1");
-  });
-
-  // extractEntityKey
-  test("extractEntityKey returns null for malformed events (missing taskId)", () => {
-    const event = makeEvent("complete_task", {});
-    // params has no taskId — should return null rather than return a bad key
-    assert.equal(extractEntityKey(event), null, "missing taskId should yield null entity key");
-  });
-
-  test("extractEntityKey returns null for unknown commands", () => {
-    const event = makeEvent("future_cmd", { foo: "bar" });
-    assert.equal(extractEntityKey(event), null, "unknown command should yield null entity key");
-  });
-
-  test("plan_slice and complete_slice use different entity types", () => {
-    const planEvent = makeEvent("plan_slice", { sliceId: "S01" });
-    const completeEvent = makeEvent("complete_slice", { sliceId: "S01" });
-
-    const planKey = extractEntityKey(planEvent);
-    const completeKey = extractEntityKey(completeEvent);
-
-    assert.ok(planKey !== null, "plan_slice should produce an entity key");
-    assert.ok(completeKey !== null, "complete_slice should produce an entity key");
-    assert.equal(planKey!.type, "slice_plan", "plan_slice entity type should be 'slice_plan'");
-    assert.equal(completeKey!.type, "slice", "complete_slice entity type should be 'slice'");
-    assert.notEqual(
-      planKey!.type,
-      completeKey!.type,
-      "plan_slice and complete_slice must map to different entity types",
-    );
-  });
-
-  // detectConflicts
-  test("detectConflicts finds no conflicts when entities do not overlap", () => {
-    const mainDiverged: WorkflowEvent[] = [
-      makeEvent("complete_task", { milestoneId: "M001", sliceId: "S01", taskId: "T01" }),
-    ];
-    const wtDiverged: WorkflowEvent[] = [
-      makeEvent("complete_task", { milestoneId: "M001", sliceId: "S01", taskId: "T02" }),
-    ];
-
-    const conflicts = detectConflicts(mainDiverged, wtDiverged);
-    assert.equal(conflicts.length, 0, "non-overlapping task edits should produce no conflicts");
-  });
-
-  test("detectConflicts flags conflict when both sides touch the same task", () => {
-    const mainDiverged: WorkflowEvent[] = [
-      makeEvent("start_task", { milestoneId: "M001", sliceId: "S01", taskId: "T01" }),
-    ];
-    const wtDiverged: WorkflowEvent[] = [
-      makeEvent("complete_task", { milestoneId: "M001", sliceId: "S01", taskId: "T01" }),
-    ];
-
-    const conflicts = detectConflicts(mainDiverged, wtDiverged);
-    assert.equal(conflicts.length, 1, "same task touched by both sides should produce exactly one conflict");
-
-    const conflict = conflicts[0]!;
-    assert.equal(conflict.entityType, "task", "conflict entityType should be 'task'");
-    assert.equal(conflict.entityId, "T01", "conflict entityId should be 'T01'");
-  });
-
-  test("detectConflicts ignores events with null entity keys", () => {
-    // Events with unknown commands produce null keys and must not cause false conflicts.
-    const mainDiverged: WorkflowEvent[] = [
-      makeEvent("unknown_future_cmd", { milestoneId: "M001" }),
-    ];
-    const wtDiverged: WorkflowEvent[] = [
-      makeEvent("another_unknown_cmd", { milestoneId: "M001" }),
-    ];
-
-    const conflicts = detectConflicts(mainDiverged, wtDiverged);
-    assert.equal(conflicts.length, 0, "unknown commands with null entity keys should not produce conflicts");
   });
 
   // appendEvent — filesystem creation

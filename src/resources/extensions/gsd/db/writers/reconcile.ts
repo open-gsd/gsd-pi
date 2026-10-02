@@ -1,15 +1,14 @@
 // Project/App: gsd-pi
 // File Purpose: Worktree DB reconciliation writers for the single-writer layer.
-// Owns copyWorktreeDb + reconcileWorktreeDb: the ATTACH-and-merge of an
+// Owns reconcileWorktreeDb: the ATTACH-and-merge of an
 // auto-worktree's gsd.db back into the project-root DB, with conflict
 // detection. Reads the shared engine handle via getDbOrNull(); opens the
 // project-root DB via the engine's openDatabase().
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { GSDError, GSD_STALE_STATE } from "../../errors.js";
 import { logError, logWarning } from "../../workflow-logger.js";
-import { getDbOrNull, openDatabase, snapshotDatabaseFile, transaction } from "../engine.js";
+import { getDbOrNull, openDatabase, transaction } from "../engine.js";
 import { TERMINAL_STATUS_SQL } from "../sql-constants.js";
 
 export class CanonicalWorktreeDivergenceError extends GSDError {
@@ -43,19 +42,6 @@ export function _setMainDbOpenerFnForTests(
 
 function openMainDb(mainDbPath: string): boolean {
   return _mainDbOpenerFn ? _mainDbOpenerFn(mainDbPath) : openDatabase(mainDbPath);
-}
-
-export function copyWorktreeDb(srcDbPath: string, destDbPath: string): boolean {
-  try {
-    if (!existsSync(srcDbPath)) return false;
-    const destDir = dirname(destDbPath);
-    mkdirSync(destDir, { recursive: true });
-    snapshotDatabaseFile(srcDbPath, destDbPath);
-    return true;
-  } catch (err) {
-    logError("db", "failed to copy DB to worktree", { error: (err as Error).message });
-    return false;
-  }
 }
 
 export interface ReconcileResult {
