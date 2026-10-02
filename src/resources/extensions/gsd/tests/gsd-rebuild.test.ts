@@ -23,6 +23,7 @@ import { saveDecisionToDb, saveRequirementToDb } from "../db-writer.ts";
 import { computeProjectionSha, readCompatMarker } from "../compat/compat-marker.ts";
 import {
   closeDatabase,
+  getArtifact,
   getTask,
   insertArtifact,
   insertMilestone,
@@ -132,6 +133,35 @@ test("handleRebuild quarantines stale completion projections without mutating DB
   } finally {
     cleanup(base);
   }
+});
+
+test("handleRebuild keeps the SUMMARY artifact row when it quarantines the file on disk", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  seedOpenTask();
+  const artifactPath = "milestones/M001/slices/S01/tasks/T01-SUMMARY.md";
+  insertArtifact({
+    path: artifactPath,
+    artifact_type: "SUMMARY",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: "T01",
+    full_content: "# T01 Summary\n\nStored in the DB.\n",
+  });
+  const summaryPath = join(base, ".gsd", artifactPath);
+  writeFileSync(summaryPath, "# T01 Summary\n\nHand-edited on disk.\n", "utf-8");
+
+  const { ctx } = makeCtx();
+  await handleRebuild(ctx, base, "markdown");
+
+  const quarantined = listFiles(join(base, ".gsd", "quarantine", "projections"));
+  assert.equal(quarantined.length, 1, "the disk file is moved to quarantine");
+  assert.equal(
+    getArtifact(artifactPath)?.full_content,
+    "# T01 Summary\n\nStored in the DB.\n",
+    "a file on disk must not make rebuild delete DB content",
+  );
 });
 
 test("handleRebuild re-renders missing task summary projections from DB", async () => {

@@ -32,6 +32,7 @@ import {
 import { clearParseCache } from "../files.ts";
 import { clearPathCache } from "../paths.ts";
 import { detectStaleRenders, getCurrentProjectStateVersion, renderRoadmapFromDb } from "../markdown-renderer.ts";
+import { preserveProjectionChanges, rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
 import { detectArtifactDbDrift } from "../state-reconciliation/drift/artifact-db.ts";
 import { appendEvent } from "../workflow-events.ts";
 import { invalidateStateCache } from "../state.ts";
@@ -1047,8 +1048,14 @@ test("ADR-017 (#5702): stale-render detector reason strings match repair contrac
   ].sort());
 });
 
-test("ADR-017 (#5702): missing UAT.md clears stale full_uat_md from DB", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-adr017-clear-uat-"));
+function sliceArtifactRows(): Array<Record<string, unknown>> {
+  return _getAdapter()!.prepare(
+    "SELECT path, artifact_type, full_content FROM artifacts WHERE slice_id = 'S01' ORDER BY path",
+  ).all();
+}
+
+test("ADR-017 (#5702): a missing UAT.md is rendered again and never clears full_uat_md", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-adr017-missing-uat-"));
   const sliceDir = join(base, ".gsd", "phases", "01-test");
   mkdirSync(sliceDir, { recursive: true });
   t.after(() => {
@@ -1060,7 +1067,8 @@ test("ADR-017 (#5702): missing UAT.md clears stale full_uat_md from DB", async (
   clearRendererCaches();
   insertMilestone({ id: "M001", title: "Test", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "complete" });
-  setSliceSummaryMd("M001", "S01", "# S01 Summary\n", "# S01 UAT\nLegacy planning text\n");
+  const uatMd = "# S01 UAT\nAcceptance evidence that exists only in the DB.\n";
+  setSliceSummaryMd("M001", "S01", "# S01 Summary\n", uatMd);
 
   const result = await reconcileBeforeDispatch(base, {
     invalidateStateCache: () => {},
@@ -1068,14 +1076,61 @@ test("ADR-017 (#5702): missing UAT.md clears stale full_uat_md from DB", async (
   });
   assert.equal(result.ok, true);
 
-  const updated = getSlice("M001", "S01");
-  assert.equal(updated?.full_uat_md ?? "", "", "full_uat_md should be cleared after UAT deletion");
-  assert.equal(
-    existsSync(join(sliceDir, "01-01-UAT.md")),
-    false,
-    "UAT.md should not be recreated while clearing stale UAT content",
+  assert.equal(getSlice("M001", "S01")?.full_uat_md, uatMd, "a missing file must not erase DB content");
+  assert.match(
+    readFileSync(join(sliceDir, "01-01-UAT.md"), "utf-8"),
+    /Acceptance evidence that exists only in the DB\./,
+    "UAT.md must be rendered again from the DB",
   );
 });
+
+for (const change of ["delete", "edit"] as const) {
+  test(`P02: a UAT.md ${change} does not change full_uat_md or artifact rows through observe, reconcile and rebuild`, async (t) => {
+    const base = mkdtempSync(join(tmpdir(), "gsd-p02-uat-"));
+    const sliceDir = join(base, ".gsd", "phases", "01-test");
+    mkdirSync(sliceDir, { recursive: true });
+    t.after(() => {
+      try { closeDatabase(); } catch { /* noop */ }
+      rmTreeQuiet(base);
+    });
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    clearRendererCaches();
+    insertMilestone({ id: "M001", title: "Test", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "complete" });
+    const uatMd = "# S01 UAT\nCanonical acceptance evidence.\n";
+    setSliceSummaryMd("M001", "S01", "# S01 Summary\n", uatMd);
+    await rebuildMarkdownProjectionsFromDb(base);
+
+    const uatPath = join(sliceDir, "01-01-UAT.md");
+    assert.match(readFileSync(uatPath, "utf-8"), /Canonical acceptance evidence\./);
+    const rowsBefore = sliceArtifactRows();
+    assert.ok(
+      rowsBefore.some((row) => row["artifact_type"] === "UAT"),
+      "the fixture must hold a UAT artifact row",
+    );
+
+    if (change === "delete") rmSync(uatPath);
+    else writeFileSync(uatPath, "# S01 UAT\nHand edit that the DB never accepted.\n", "utf-8");
+    clearRendererCaches();
+
+    await preserveProjectionChanges(base);
+    const result = await reconcileBeforeDispatch(base, {
+      invalidateStateCache: () => {},
+      deriveState: async () => makeState(),
+    });
+    assert.equal(result.ok, true);
+    assert.equal(getSlice("M001", "S01")?.full_uat_md, uatMd, "reconcile must not erase full_uat_md");
+
+    await rebuildMarkdownProjectionsFromDb(base);
+
+    assert.equal(getSlice("M001", "S01")?.full_uat_md, uatMd, "rebuild must not erase full_uat_md");
+    assert.deepEqual(sliceArtifactRows(), rowsBefore, "artifact rows must be unchanged");
+    const rendered = readFileSync(uatPath, "utf-8");
+    assert.match(rendered, /Canonical acceptance evidence\./, "UAT.md must be rendered again from the DB");
+    assert.doesNotMatch(rendered, /Hand edit/);
+  });
+}
 
 test("ADR-017 (#5702): stale-render plan repair works with descriptor-layout milestone dir", async (t) => {
   // Regression for bugbot finding: repairStaleRenderFromBasePath was passing the

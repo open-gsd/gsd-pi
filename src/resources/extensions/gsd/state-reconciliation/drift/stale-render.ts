@@ -18,14 +18,11 @@ import {
 import {
   getMilestone,
   getMilestoneSlices,
-  getSlice,
   getSliceTasks,
-  setSliceSummaryMd,
 } from "../../gsd-db.js";
 import {
   ensureWorkflowDbForBase,
 } from "../../db-workspace.js";
-import { resolveSliceFile } from "../../paths.js";
 import type { GSDState } from "../../types.js";
 import { logWarning } from "../../workflow-logger.js";
 import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
@@ -290,14 +287,6 @@ async function repairStaleRenderFromBasePath(
       const reasonSlice = reason.match(/^(S\d+)/);
       sliceId = reasonSlice ? reasonSlice[1] : "S01";
     }
-    const slice = getSlice(milestoneId, sliceId);
-    // Use resolveSliceFile so the UAT existence check matches the NN-MM-UAT.md
-    // name that renderSliceSummary actually writes (buildSliceFileName only yields MM-UAT.md).
-    const uatPath = resolveSliceFile(basePath, milestoneId, sliceId, "UAT");
-    // renderSliceSummary writes both artifacts, so clear deleted UAT first.
-    if (slice?.full_uat_md && !uatPath) {
-      setSliceSummaryMd(milestoneId, sliceId, slice.full_summary_md ?? "", "");
-    }
     const wrote = await renderSliceSummary(basePath, milestoneId, sliceId);
     if (!wrote) {
       throw new Error(
@@ -330,13 +319,16 @@ async function repairStaleRenderFromBasePath(
       const reasonSlice = reason.match(/(S\d+)/);
       sliceId = reasonSlice ? reasonSlice[1] : "S01";
     }
-    const slice = getSlice(milestoneId, sliceId);
-    if (!slice) {
+    // A missing UAT.md is projection drift. The DB row is the authority, so
+    // the repair renders the file again and never writes to the slice row.
+    const wrote = await renderSliceSummary(basePath, milestoneId, sliceId);
+    if (!wrote) {
       throw new Error(
-        `stale-render drift: missing slice for UAT clear ${milestoneId}/${sliceId}`,
+        `stale-render drift: UAT re-render wrote nothing for ` +
+          `${milestoneId}/${sliceId} (${record.renderPath}); slice has no summary/UAT ` +
+          `in DB or its path is unresolvable`,
       );
     }
-    setSliceSummaryMd(milestoneId, sliceId, slice.full_summary_md ?? "", "");
     return;
   }
 

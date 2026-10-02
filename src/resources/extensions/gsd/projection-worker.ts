@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { isAbsolute, join } from "node:path";
 
 import { readCompatMarker } from "./compat/compat-marker.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -11,7 +11,6 @@ import {
   captureCurrentProjectionWork,
   settleProjectionWork,
 } from "./db/writers/projection-work-delivery.js";
-import { deleteArtifactByPath } from "./gsd-db.js";
 import { renderAllFromDb } from "./markdown-renderer.js";
 import { gsdProjectionRoot, gsdRoot } from "./paths.js";
 import {
@@ -38,18 +37,6 @@ function resolveDiskArtifactPath(basePath: string, artifactPath: string): string
     join(gsdRoot(basePath), artifactPath),
   ];
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
-}
-
-function artifactPathForDb(basePath: string, absPath: string): string {
-  const projectionRoot = gsdProjectionRoot(basePath);
-  const projectionRelative = relative(projectionRoot, absPath);
-  const withinProjectionRoot = projectionRelative !== ".."
-    && !projectionRelative.startsWith(`..${sep}`)
-    && !isAbsolute(projectionRelative);
-  const artifactPath = withinProjectionRoot
-    ? projectionRelative
-    : relative(gsdRoot(basePath), absPath);
-  return artifactPath.replace(/\\/g, "/");
 }
 
 function projectionTreeHash(basePath: string): string {
@@ -85,12 +72,6 @@ export async function rebuildMarkdownProjectionsFromDb(
       : []);
   const observation = await preserveProjectionEvidence(basePath, legacyDriftPaths);
   const preserved = observation.preserved;
-  const legacyPathSet = new Set(legacyDriftPaths);
-  for (const evidence of preserved) {
-    if (legacyPathSet.has(evidence.sourcePath)) {
-      deleteArtifactByPath(artifactPathForDb(basePath, evidence.sourcePath));
-    }
-  }
 
   const deliveryBatch = captureCurrentProjectionWork();
   const rendered = await renderAllFromDb(basePath);
