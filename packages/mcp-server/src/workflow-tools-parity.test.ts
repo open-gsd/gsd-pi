@@ -38,6 +38,11 @@ import {
   readTaskRecoveryRoute,
   recordFailureAndSelectRecovery,
 } from "../../../src/resources/extensions/gsd/task-recovery-domain-operation.ts";
+import {
+  expectedFail,
+  fenceWorkflowWrites,
+  snapshotProjections,
+} from "../../../src/resources/extensions/gsd/tests/db-authority-gate.ts";
 import { seedSliceCompletionAuthority } from "../../../src/resources/extensions/gsd/tests/slice-completion-fixture.ts";
 import { createWorkflowAuthorityFixture } from "../../../src/resources/extensions/gsd/tests/workflow-authority-fixture.ts";
 import {
@@ -848,4 +853,85 @@ describe("Slice lifecycle persistent retry parity", () => {
     const mcpResponses = await runPersistentSliceLifecycleMatrix("mcp");
     assert.deepEqual(mcpResponses, piResponses, "Pi and MCP lifecycle response contracts must match");
   });
+});
+
+// ADR-046 gate G4, and the projection-ownership leg of G5. `passesWith` names
+// the cutover package that routes the tool through one Domain Operation. The
+// headless transport registers the same native tools in an RPC child and has
+// no leg here.
+const OPERATION_ONLY_CASES = [
+  { tool: "gsd_slice_complete", args: SLICE_LIFECYCLE_CASES[0].args, passesWith: "P35" },
+  {
+    tool: "gsd_decision_save",
+    args: { ...DECISION_SAVE_ARGS, when_context: "parity matrix", made_by: "agent" },
+    passesWith: "P15",
+  },
+  { tool: "gsd_summary_save", args: SUMMARY_SAVE_ARGS, passesWith: "P15" },
+] as const;
+
+function operationCount(): number {
+  return Number(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM workflow_operations").get()?.count);
+}
+
+async function withOperationOnlyFixture(
+  transport: "pi" | "mcp",
+  run: (call: (gateCase: (typeof OPERATION_ONLY_CASES)[number]) => Promise<unknown>, base: string) => Promise<void>,
+): Promise<void> {
+  const fixture = await createWorkflowAuthorityFixture();
+  try {
+    seedSliceCompletionAuthority({
+      milestoneId: "M001",
+      sliceId: "S02",
+      completedTaskIds: ["T01"],
+      runId: `${transport}-operation-only`,
+    });
+    await run((gateCase) => transport === "pi"
+      ? runNativeDbTool(fixture.root, gateCase.tool, gateCase.args)
+      : callMcpLifecycleTool(fixture.root, gateCase.tool, gateCase.args, `operation-only-${gateCase.tool}`),
+    fixture.root);
+  } finally {
+    fixture.cleanup();
+  }
+}
+
+describe("G4: workflow tables are written only inside a Domain Operation", () => {
+  for (const transport of ["pi", "mcp"] as const) {
+    for (const gateCase of OPERATION_ONLY_CASES) {
+      it(`${transport} ${gateCase.tool}: one operation per call, none on replay, no write outside it`, async () => {
+        await withOperationOnlyFixture(transport, async (call) => {
+          const before = operationCount();
+          const fence = fenceWorkflowWrites();
+          await call(gateCase);
+          const afterFirstCall = operationCount();
+          await call(gateCase);
+          fence.restore();
+
+          expectedFail(gateCase.passesWith, () => {
+            assert.deepEqual(fence.violations, [], "no workflow-table write outside a Domain Operation");
+            assert.equal(afterFirstCall - before, 1, "one call commits one operation");
+            assert.equal(operationCount() - afterFirstCall, 0, "a replay commits no operation");
+          });
+        });
+      });
+    }
+
+    it(`${transport}: a tool handler returns before any projection file is written`, async () => {
+      await withOperationOnlyFixture(transport, async (call, base) => {
+        const wroteProjections: string[] = [];
+        for (const gateCase of OPERATION_ONLY_CASES) {
+          const before = snapshotProjections(base);
+          const result = await call(gateCase);
+          assert.ok(!(result as { isError?: boolean }).isError, `${gateCase.tool} must succeed`);
+          try {
+            assert.deepEqual(snapshotProjections(base), before);
+          } catch {
+            wroteProjections.push(gateCase.tool);
+          }
+        }
+
+        // Only the Projection Worker drain may write a projection file.
+        expectedFail("P12", () => assert.deepEqual(wroteProjections, []));
+      });
+    });
+  }
 });
