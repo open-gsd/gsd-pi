@@ -207,6 +207,25 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 	);
 }
 
+/**
+ * Bedrock geo cross-region inference profiles (us./eu./jp./au./apac.) cost 10%
+ * more than the global. profile for Claude Sonnet 4.5 and later.
+ */
+function isBedrockGeoProfile(bedrockId: string): boolean {
+	return /^(us|eu|jp|au|apac)\./.test(bedrockId);
+}
+
+function bedrockClaudeCost(bedrockId: string, listCost: Model<Api>["cost"]): Model<Api>["cost"] {
+	if (!isBedrockGeoProfile(bedrockId)) return { ...listCost };
+	const premium = (value: number) => roundCost(value * 1.1);
+	return {
+		input: premium(listCost.input),
+		output: premium(listCost.output),
+		cacheRead: premium(listCost.cacheRead),
+		cacheWrite: premium(listCost.cacheWrite),
+	};
+}
+
 function isSonnet55Model(modelId: string): boolean {
 	return modelId.includes("sonnet-5-5") || modelId.includes("sonnet-5.5");
 }
@@ -1291,8 +1310,12 @@ async function generateModels() {
 	// Temporary overrides until upstream model metadata is corrected.
 	for (const candidate of allModels) {
 		if (candidate.provider === "amazon-bedrock" && candidate.id.includes("anthropic.claude-opus-4-6-v1")) {
-			candidate.cost.cacheRead = 0.5;
-			candidate.cost.cacheWrite = 6.25;
+			if (isBedrockGeoProfile(candidate.id)) {
+				candidate.cost = bedrockClaudeCost(candidate.id, { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 });
+			} else {
+				candidate.cost.cacheRead = 0.5;
+				candidate.cost.cacheWrite = 6.25;
+			}
 		}
 		if (
 			(candidate.provider === "anthropic" ||
@@ -1626,27 +1649,27 @@ async function generateModels() {
 		});
 	}
 
-	// Add missing Claude Sonnet 5 Bedrock profiles until models.dev includes them.
-	for (const [bedrockId, regionLabel] of [
-		["anthropic.claude-sonnet-5", ""],
-		["us.anthropic.claude-sonnet-5", " (US)"],
-		["global.anthropic.claude-sonnet-5", " (Global)"],
+	// Add missing Claude Sonnet 5 / 5.5 Bedrock profiles until models.dev includes them.
+	// AWS lists Sonnet 5.5 for the in-region, us., eu. and global. profiles only.
+	for (const [bedrockId, modelName, regionLabel] of [
+		["anthropic.claude-sonnet-5", "Claude Sonnet 5", ""],
+		["us.anthropic.claude-sonnet-5", "Claude Sonnet 5", " (US)"],
+		["global.anthropic.claude-sonnet-5", "Claude Sonnet 5", " (Global)"],
+		["anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5", ""],
+		["us.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5", " (US)"],
+		["eu.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5", " (EU)"],
+		["global.anthropic.claude-sonnet-5-5", "Claude Sonnet 5.5", " (Global)"],
 	] as const) {
 		if (!allModels.some(m => m.provider === "amazon-bedrock" && m.id === bedrockId)) {
 			allModels.push({
 				id: bedrockId,
-				name: `Claude Sonnet 5${regionLabel}`,
+				name: `${modelName}${regionLabel}`,
 				api: "bedrock-converse-stream",
 				baseUrl: getBedrockBaseUrl(bedrockId),
 				provider: "amazon-bedrock",
 				reasoning: true,
 				input: ["text", "image"],
-				cost: {
-					input: 3,
-					output: 15,
-					cacheRead: 0.3,
-					cacheWrite: 3.75,
-				},
+				cost: bedrockClaudeCost(bedrockId, { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }),
 				contextWindow: 1000000,
 				maxTokens: 128000,
 			});

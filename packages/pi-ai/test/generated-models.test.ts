@@ -448,4 +448,19 @@ describe("models.generated.ts", () => {
 		const ids = Object.keys(MODELS.zai);
 		expect(ids).toEqual([...ids].sort());
 	});
+
+	test("prices Claude Bedrock geo profiles with the 10% cross-region premium", () => {
+		const bedrock = MODELS["amazon-bedrock"] as Record<string, { cost: Record<string, number> }>;
+		const geo = { input: 2.2, output: 11, cacheRead: 0.22, cacheWrite: 2.75 };
+		const list = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
+
+		expect(bedrock["anthropic.claude-sonnet-5-5"]?.cost).toMatchObject(list);
+		expect(bedrock["global.anthropic.claude-sonnet-5-5"]?.cost).toMatchObject(list);
+		expect(bedrock["us.anthropic.claude-sonnet-5-5"]?.cost).toMatchObject(geo);
+		expect(bedrock["eu.anthropic.claude-sonnet-5-5"]?.cost).toMatchObject(geo);
+
+		for (const id of ["us.anthropic.claude-opus-4-6-v1", "eu.anthropic.claude-opus-4-6-v1", "au.anthropic.claude-opus-4-6-v1"]) {
+			expect(bedrock[id]?.cost, id).toMatchObject({ input: 5.5, output: 27.5, cacheRead: 0.55, cacheWrite: 6.875 });
+		}
+	});
 });

@@ -355,6 +355,52 @@
         "xhigh": "xhigh"
       }
     },
+    "us.anthropic.claude-sonnet-5-5": {
+      "id": "us.anthropic.claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5 (US)",
+      "api": "bedrock-converse-stream",
+      "provider": "amazon-bedrock",
+      "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.2,
+        "output": 11,
+        "cacheRead": 0.22,
+        "cacheWrite": 2.75
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
+    "eu.anthropic.claude-sonnet-5-5": {
+      "id": "eu.anthropic.claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5 (EU)",
+      "api": "bedrock-converse-stream",
+      "provider": "amazon-bedrock",
+      "baseUrl": "https://bedrock-runtime.eu-central-1.amazonaws.com",
+      "reasoning": true,
+      "input": [
+        "text",
+        "image"
+      ],
+      "cost": {
+        "input": 2.2,
+        "output": 11,
+        "cacheRead": 0.22,
+        "cacheWrite": 2.75
+      },
+      "contextWindow": 1000000,
+      "maxTokens": 128000,
+      "thinkingLevelMap": {
+        "xhigh": "xhigh"
+      }
+    },
     "global.anthropic.claude-sonnet-5-5": {
       "id": "global.anthropic.claude-sonnet-5-5",
       "name": "Claude Sonnet 5.5 (Global)",
@@ -1667,8 +1713,8 @@
       "cost": {
         "input": 5.5,
         "output": 27.5,
-        "cacheRead": 0.5,
-        "cacheWrite": 6.25
+        "cacheRead": 0.55,
+        "cacheWrite": 6.875
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -2140,8 +2186,8 @@
       "cost": {
         "input": 5.5,
         "output": 27.5,
-        "cacheRead": 0.5,
-        "cacheWrite": 6.25
+        "cacheRead": 0.55,
+        "cacheWrite": 6.875
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
@@ -2788,8 +2834,8 @@
       "cost": {
         "input": 5.5,
         "output": 27.5,
-        "cacheRead": 0.5,
-        "cacheWrite": 6.25
+        "cacheRead": 0.55,
+        "cacheWrite": 6.875
       },
       "contextWindow": 1000000,
       "maxTokens": 128000,
