@@ -31,10 +31,10 @@ version: 1
 
 # Model selection
 models:
-  research: claude-sonnet-4-6
-  planning: claude-opus-4-8
-  execution: claude-sonnet-4-6
-  completion: claude-sonnet-4-6
+  research: claude-sonnet-5-5
+  planning: claude-opus-5-5
+  execution: claude-sonnet-5-5
+  completion: claude-sonnet-5-5
 
 # Token optimization
 token_profile: balanced
@@ -81,15 +81,15 @@ Per-phase model selection. See [Choosing a Model](../getting-started/choosing-a-
 
 ```yaml
 models:
-  research: claude-sonnet-4-6
+  research: claude-sonnet-5-5
   planning:
-    model: claude-opus-4-8
+    model: claude-opus-5-5
     fallbacks:
       - openrouter/z-ai/glm-5
-  execution: claude-sonnet-4-6
+  execution: claude-sonnet-5-5
   execution_simple: claude-haiku-4-5
-  completion: claude-sonnet-4-6
-  subagent: claude-sonnet-4-6
+  completion: claude-sonnet-5-5
+  subagent: claude-sonnet-5-5
 ```
 
 ### `token_profile`

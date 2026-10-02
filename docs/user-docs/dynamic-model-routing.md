@@ -39,8 +39,8 @@ dynamic_routing:
   enabled: true
   tier_models:                    # explicit model per tier (optional)
     light: claude-haiku-4-5
-    standard: claude-sonnet-4-6
-    heavy: claude-opus-4-6
+    standard: claude-sonnet-5-5
+    heavy: claude-opus-5-5
   escalate_on_failure: true       # bump tier on task failure (default: true)
   budget_pressure: true           # auto-downgrade when approaching budget ceiling (default: true)
   cross_provider: true            # consider models from other providers (default: true)
@@ -69,8 +69,8 @@ Keep `cross_provider: false` when routing inside a flat-rate subscription unless
 Override which model is used for each tier. When omitted, the router uses a built-in capability mapping that knows common model families:
 
 - **Light:** `claude-haiku-4-5`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5.1-codex-mini`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gemini-2.0-flash`
-- **Standard:** `claude-sonnet-4`, `claude-sonnet-4-5`, `claude-sonnet-4-6`, `gpt-4o`, `gpt-4.1`, `gpt-5.1-codex-max`, `gemini-2.5-pro`, `deepseek-chat`
-- **Heavy:** `claude-opus-4-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `gpt-5`, `gpt-5-pro`, `gpt-5.1`, `gpt-5.2`, `gpt-5.2-codex`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `o1`, `o3`, `o4-mini`
+- **Standard:** `claude-sonnet-4`, `claude-sonnet-4-5`, `claude-sonnet-4-6`, `claude-sonnet-5`, `claude-sonnet-5-5`, `gpt-4o`, `gpt-4.1`, `gpt-5.1-codex-max`, `gemini-2.5-pro`, `deepseek-chat`
+- **Heavy:** `claude-opus-4-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`, `claude-fable-5-1`, `gpt-5`, `gpt-5-pro`, `gpt-5.1`, `gpt-5.2`, `gpt-5.2-codex`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `o1`, `o3`, `o4-mini`
 
 Token profiles use the same tier mapping. `budget`, `balanced`, and `quality` declare per-phase tier intentions, then GSD resolves those tiers against the models currently available from your configured providers. This means a profile can resolve to OpenAI, Gemini, Anthropic, or another provider-specific model instead of hardcoding Claude-family defaults.
 
@@ -79,7 +79,7 @@ Token profiles use the same tier mapping. `budget`, `balanced`, and `quality` de
 Tier, cost, capability-profile, availability, and override lookups use a provider-independent model identity. The router trims whitespace, ignores case, removes a provider prefix up to the final `/`, and treats `.`, `_`, and `-` separator runs as equivalent. For example, all of these resolve to the same internal identity:
 
 ```text
-github-copilot/claude-sonnet-4.6
+github-copilot/claude-sonnet-5.5
 github-copilot/claude_sonnet_4_6
 CLAUDE-SONNET-4-6
 ```
@@ -200,7 +200,7 @@ Correct built-in capability profiles for models you know well using `modelOverri
   "providers": {
     "anthropic": {
       "modelOverrides": {
-        "claude-sonnet-4-6": {
+        "claude-sonnet-5-5": {
           "capabilities": {
             "debugging": 90,
             "research": 85
@@ -221,13 +221,13 @@ Overrides are **deep-merged** with built-in defaults — only the specified dime
 When verbose mode is active, the router logs its routing decision. When capability scoring was used, the log includes a full scoring breakdown:
 
 ```
-Dynamic routing [S]: claude-sonnet-4-6 (capability-scored) — claude-sonnet-4-6: 82.3, gpt-4o: 78.1, deepseek-chat: 72.0
+Dynamic routing [S]: claude-sonnet-5-5 (capability-scored) — claude-sonnet-5-5: 82.3, gpt-4o: 78.1, deepseek-chat: 72.0
 ```
 
 When tier-only routing was used (scoring disabled, single eligible model, or routing guards applied):
 
 ```
-Dynamic routing [S]: claude-sonnet-4-6 (standard complexity, multiple steps)
+Dynamic routing [S]: claude-sonnet-5-5 (standard complexity, multiple steps)
 ```
 
 The `selectionMethod` field in the routing decision indicates which path was taken:
@@ -320,9 +320,10 @@ The router includes a built-in cost table for common models, used for cross-prov
 
 | Model | Input | Output |
 |-------|-------|--------|
-| claude-haiku-4-5 | $0.80 | $4.00 |
-| claude-sonnet-4-6 | $3.00 | $15.00 |
-| claude-opus-4-6 | $15.00 | $75.00 |
+| claude-haiku-4-5 | $1.00 | $5.00 |
+| claude-sonnet-5-5 | $2.00 | $10.00 |
+| claude-opus-5-5 | $4.00 | $20.00 |
+| claude-fable-5-1 | $10.00 | $50.00 |
 | gpt-4o-mini | $0.15 | $0.60 |
 | gpt-4o | $2.50 | $10.00 |
 | gemini-2.0-flash | $0.10 | $0.40 |

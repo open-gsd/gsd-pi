@@ -143,7 +143,7 @@ For permanent errors, configure fallback models:
 ```yaml
 models:
   execution:
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5-5
     fallbacks:
       - openrouter/minimax/minimax-m2.5
 ```

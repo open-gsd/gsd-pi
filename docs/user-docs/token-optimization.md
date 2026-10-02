@@ -216,7 +216,7 @@ version: 1
 token_profile: budget
 budget_ceiling: 25.00
 models:
-  execution_simple: claude-haiku-4-5-20250414
+  execution_simple: claude-haiku-4-5
 ---
 ```
 
@@ -228,10 +228,10 @@ version: 1
 token_profile: balanced
 models:
   planning:
-    model: claude-opus-4-6
+    model: claude-opus-5-5
     fallbacks:
       - openrouter/z-ai/glm-5
-  execution: claude-sonnet-4-6
+  execution: claude-sonnet-5-5
 ---
 ```
 
@@ -242,8 +242,8 @@ models:
 version: 1
 token_profile: quality
 models:
-  planning: claude-opus-4-6
-  execution: claude-opus-4-6
+  planning: claude-opus-5-5
+  execution: claude-opus-5-5
 ---
 ```
 
@@ -258,7 +258,7 @@ token_profile: budget
 phases:
   skip_research: false     # override: keep milestone research
 models:
-  planning: claude-opus-4-6  # override: use Opus for planning despite budget profile
+  planning: claude-opus-5-5  # override: use Opus for planning despite budget profile
 ---
 ```
 

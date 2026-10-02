@@ -343,7 +343,7 @@ Some Anthropic models require adaptive thinking (`thinking.type: "adaptive"` plu
       },
       "models": [
         {
-          "id": "claude-opus-4-8",
+          "id": "claude-opus-5-5",
           "reasoning": true,
           "input": ["text", "image"]
         }
