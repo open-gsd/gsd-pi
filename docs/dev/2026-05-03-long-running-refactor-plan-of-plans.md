@@ -746,10 +746,16 @@ Parallel work is allowed only inside a phase when file ownership is disjoint and
 
 ## Closeout — state-DB cutover milestone (2026-08-12)
 
-The state-DB cutover milestone shipped. Live project state is DB-authoritative;
-markdown files are stamped read-only projections. Wave 4 deleted the leftover
-filesystem-state read path (`_deriveStateImpl`, `parsers-legacy.ts`) and the
-ADR-046-timeboxed unadopted import/reconcile witnesses.
+The state-DB cutover milestone shipped. It removed the markdown fallback for
+state derivation. It did not run an Authority Epoch Cutover and it did not
+finish the ADR-046 program (status on 2026-10-02: see
+[`state-db-cutover-milestone-decision.md`](state-db-cutover-milestone-decision.md)).
+Hierarchy reads come from legacy database rows. Projections written through
+`markdown-renderer.ts` carry the state-version stamp; STATE.md, DECISIONS.md,
+and `.planning/` carry no stamp, and KNOWLEDGE.md Rules exist on disk only.
+Wave 4 deleted the leftover filesystem-state read path (`_deriveStateImpl`,
+`parsers-legacy.ts`) and the ADR-046-timeboxed unadopted import/reconcile
+witnesses.
 
 **Gate split-retirement:** `gate:semantic-shadow-no-cutover` was split-retired
 into `gate:lifecycle-shadow-no-cutover`, which is part of `verify:pr`. D005
@@ -762,17 +768,23 @@ relocated parsers to `parseProjection*`; T021 deleted the four timeboxed
 witnesses and the unadopted import/reconcile compatibility branches. The
 legacy-state-path proof is PASS (zero offenders).
 
-**Timebox:** ADR-046 required 2 stable releases + ≥60 days after cutover
-release v1.13.0 (2026-08-08). Subsequent stables v1.14.0 (2026-08-10) and
-v1.15.0 (2026-08-12) satisfied the release count. The remaining calendar days
+**Timebox:** The wave-4 deletions were measured from the cutover release
+v1.13.0 (2026-08-08). Subsequent stables v1.14.0 (2026-08-10) and v1.15.0
+(2026-08-12) satisfied the release count. The remaining calendar days
 (earliest date 2026-10-07) were waived by the project owner on 2026-08-12
 ("finish all waves").
+
+**Correction (2026-10-02):** ADR-046 starts the Compatibility Window when
+Import Preview and Import Application ship, not at the cutover release. That
+is v1.12.0 (2026-08-03), so the 60-day condition was met on 2026-10-02. Time
+alone is not a Removal Gate.
 
 **Still deferred, explicitly out of this milestone:**
 
 - Canonical lifecycle read-authority cutover under M003 / D005 (public status
   responses, disagreement witnesses, park/unpark/discard adoption as lifecycle
-  commands).
+  commands). Decision D012 (2026-10-02) supersedes D005 for read authority; the
+  implementation is still open.
 - Phase 5 DB split.
 - Separately sequenced product cleanup.
 

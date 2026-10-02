@@ -1,13 +1,13 @@
 # GSD Pi Stabilization Plan (v1.12+)
 
 Project/App: gsd-pi  
-File Purpose: Prioritized stabilization roadmap for broken features and regressions since the v1.12.0 DB-authority cutover (2026-08-03).
+File Purpose: Prioritized stabilization roadmap for broken features and regressions since v1.12.0 (2026-08-03). The state-DB cutover milestone shipped in v1.13.0 (2026-08-08).
 
 ## Context
 
-Since v1.12.0, GSD Pi shipped the state-DB cutover (#1627) and eight minor releases (through v1.20.0). Each release fixed dozens of wedge/livelock/closeout bugs, but several failure classes remain open. This plan groups them by subsystem, assigns priority, and tracks fix status.
+Since v1.12.0, GSD Pi shipped the state-DB cutover milestone (#1627, v1.13.0) and eight minor releases (through v1.20.0). That milestone removed the markdown fallback; the ADR-046 program is not finished (see [`state-db-cutover-milestone-decision.md`](state-db-cutover-milestone-decision.md)). Each release fixed dozens of wedge/livelock/closeout bugs, but several failure classes remain open. This plan groups them by subsystem, assigns priority, and tracks fix status.
 
-**Current version:** 1.20.0  
+**Current version:** 1.20.1  
 **Open issues (total):** ~30  
 **Agent-ready bugs:** 0 (as of 2026-09-14) — stabilization waves 1–8 complete
 

@@ -11,6 +11,12 @@
 > [`M003-S07-T07-DOSSIER-RESEARCH.md`](M003-S07-T07-DOSSIER-RESEARCH.md),
 > [`M003-S07-T07-UAT-SHIP-RESEARCH.md`](M003-S07-T07-UAT-SHIP-RESEARCH.md),
 > and `.project/research/SYNTHESIS.md` (decision "D005 standing NO-GO").
+>
+> **Amended 2026-10-02:** decision D012 supersedes D005 for canonical lifecycle
+> read authority. The cutover is not finished. See
+> [Decision D012](#decision-d012--d005-superseded-for-canonical-lifecycle-read-authority-2026-10-02),
+> [Compatibility Window](#compatibility-window-and-removal-gates) and
+> [Tracking](#tracking-for-the-remaining-cutover-work).
 
 ## Decision
 
@@ -247,7 +253,9 @@ a future separate, explicit lifecycle read-cutover decision.
 
 Recorded 2026-08-12 at wave-4 closeout (T023). Timebox waiver: cutover release
 v1.13.0 (2026-08-08); subsequent stables v1.14.0 and v1.15.0; remaining ≥60-day
-calendar window waived by the project owner ("finish all waves").
+calendar window waived by the project owner ("finish all waves"). This waiver
+measured the window from v1.13.0. The ADR-046 Compatibility Window starts at
+v1.12.0; see [Compatibility Window](#compatibility-window-and-removal-gates).
 
 | Command | Verdict |
 |---|---|
@@ -261,3 +269,123 @@ calendar window waived by the project owner ("finish all waves").
 
 Deferred out of this milestone (unchanged): canonical lifecycle read-authority
 cutover under M003/D005; Phase 5 DB split; separately sequenced product cleanup.
+
+## Decision D012 — D005 superseded for canonical lifecycle read authority (2026-10-02)
+
+**D012 supersedes D005 for read authority.** Canonical lifecycle rows become
+the read authority for status, phase, dispatch, and dependency decisions.
+D005 ("Keep legacy handler responses and reads authoritative; canonical
+lifecycle writes and comparisons remain shadow evidence") stays in the record
+as history. It no longer governs new work.
+
+This is the separate, explicit decision that this document and the T07 cutover
+decision research require before a lifecycle read-authority cutover.
+
+D012 is a decision. It is not the cutover:
+
+- Runtime behavior does not change with this record. Hierarchy reads still come
+  from legacy database rows. No Project has advanced its Authority Epoch:
+  `cutoverProjectAuthority` has no production caller.
+- `gate:lifecycle-shadow-no-cutover` stays in `verify:pr` until the read
+  cutover work replaces it. That work inverts the gate into a structural
+  "no legacy status read outside the read interface" gate. It does not delete
+  the gate.
+- The nine `deferredCutoverBlockers` in the dossier stay open. They are the
+  Removal Gates listed below.
+
+**Database record.** The decision row for D012 must be written to the project
+database with `gsd_decision_save`. That tool has no field that sets
+`superseded_by` on D005, so the `decision` text of the D012 row must name D005.
+This document does not replace that row.
+
+## Compatibility Window and Removal Gates
+
+ADR-046 starts the Compatibility Window "when Import Preview and Import
+Application ship". The first stable release that contains both is **v1.12.0
+(tag date 2026-08-03)**. v1.11.0 does not contain them.
+
+| Condition | Value | State on 2026-10-02 |
+|---|---|---|
+| Window start | v1.12.0, 2026-08-03 | Recorded here |
+| At least 60 days | 2026-08-03 + 60 days = 2026-10-02 | Met |
+| Two stable releases | v1.13.0 (2026-08-08), v1.14.0 (2026-08-10) | Met |
+
+Earlier text in this repository measured a "downgrade window" from the
+v1.13.0 release and recorded an owner waiver on 2026-08-12. That waiver applied
+to the wave-4 deletions only. It is not a Removal Gate for the remaining legacy
+paths.
+
+**Time alone is not a Removal Gate** (ADR-046). The window conditions are met,
+and that fact permits no deletion by itself. Each legacy runtime path stays
+until its own evidence passes. The open Removal Gates are the nine dossier
+blockers:
+
+1. `production-read-authority`
+2. `canonical-dependency-eligibility`
+3. `integrated-slice-source-uat-identity`
+4. `closeout-effects`
+5. `merge-publication-settlement`
+6. `park-unpark-discard-adoption`
+7. `projection-work-redesign`
+8. `legacy-cascade-deletion`
+9. `compatibility-retirement`
+
+ADR-046 migration step 8 adds the general gates: fault and restore gates,
+production routing closure, structural no-authority-read tests, telemetry
+thresholds, and performance baselines.
+
+## Dossier status: frozen record
+
+[`m003-s07-cutover-dossier.json`](m003-s07-cutover-dossier.json) is a frozen
+record of the M003/S07 NO_GO recommendation. Do not regenerate it. The
+M003/S07/T07 exact-merged UAT evidence stores its `dossierHash`
+(`exact-merged-uat-closure.ts`), and a regenerated file has a different hash.
+
+The record lists references that were retired after it was written:
+
+| Reference in the dossier | State |
+|---|---|
+| `tests/md-importer-adopted-authority.test.ts` | Deleted in wave 4 (commit `c8a4f5dc5`, 2026-08-12) |
+| `tests/semantic-shadow-contract.test.ts` | Deleted in wave 4 (commit `c8a4f5dc5`, 2026-08-12) |
+| `tests/semantic-shadow-mode-matrix.test.ts` | Deleted in wave 4 (commit `c8a4f5dc5`, 2026-08-12) |
+| `tests/workflow-reconcile.test.ts` | Deleted in wave 4 (commit `c8a4f5dc5`, 2026-08-12) |
+| `pnpm run gate:semantic-shadow-no-cutover` | Split-retired into `gate:lifecycle-shadow-no-cutover` |
+
+The dossier counts (no-cutover behavioral 15/15, structural 8/8; authority
+revision 195, epoch 0) describe the M003/S07 source revision, not current
+`main`. `scripts/m003-s07-cutover-dossier.mjs` no longer emits the retired
+gate command. `scripts/__tests__/m003-s07-cutover-dossier.test.mjs` fails when
+the dossier lists a file or a pnpm script that does not exist and is not in
+this table.
+
+## Tracking for the remaining cutover work
+
+The filesystem-state milestone removed the markdown fallback. It did not
+complete the ADR-046 program. The open work is the ADR-046 program Milestones
+3 to 11 (issue #1411): database-only runtime and durable Projection Work,
+discovery and conversation, recovery and UAT, the Lifecycle Kernel, adapter
+convergence and shared closeout, canonical status, canary and documentation,
+retirement, and the final audit.
+
+ADR-046 ("Implementation boundary") requires that this work exists as
+database-backed Milestones before it starts. On 2026-10-02 the project
+database has Milestones M001 to M004 only, and no decision row after D011.
+These records are still required:
+
+- the D012 decision row (see above);
+- Milestones for the ADR-046 program Milestones 3 to 11, which own the nine
+  Removal Gates above;
+- one open tracking issue that links those Milestones. No open issue tracks
+  the remaining cutover.
+
+User reports that come from the unfinished cutover were closed as point fixes.
+They belong to four classes of open work, and each class needs an owner
+Milestone:
+
+| Class | Examples |
+|---|---|
+| Root projections (STATE.md, KNOWLEDGE.md, DECISIONS.md) are stale or cannot be corrected through the database | #2360, #2422, #2424, #830, #169, #1956, #2215 |
+| A projection failure or projection drift blocks work | #2449 |
+| Legacy rows and canonical lifecycle rows disagree | #2440, #2126 |
+| File presence is used as evidence | #2107, #2399, #2256 |
+

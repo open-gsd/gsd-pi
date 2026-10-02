@@ -1,6 +1,6 @@
 # ADR-038: Dispatch History deep module
 
-> **Disposition under [ADR-047](ADR-047-auto-mode-liveness-backstop.md): Superseded.** Durable dispatch attribution remains in `unit_dispatches`; the dispatch-history window, Rule 1 detector, and graduated stuck recovery are deleted in favor of the DB-persisted liveness backstop.
+> **Disposition under [ADR-046](ADR-046-database-authoritative-workflow-lifecycle.md) and [ADR-047](ADR-047-auto-mode-liveness-backstop.md): Superseded.** Durable dispatch attribution remains in `unit_dispatches`; the dispatch-history window, Rule 1 detector, and graduated stuck recovery are deleted in favor of the DB-persisted liveness backstop.
 
 ## Status
 

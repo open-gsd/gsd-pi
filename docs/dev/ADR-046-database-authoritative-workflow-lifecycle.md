@@ -310,37 +310,48 @@ These dispositions define the accepted post-cutover architecture. They do not
 claim that current runtime behavior has changed before the corresponding
 migration and cutover gates complete.
 
-| Existing decision | Disposition under ADR-046 |
-|---|---|
-| ADR-003 Pipeline Simplification | Superseded before adoption. Research remains first-class, resumable Milestone work rather than being merged into planning or reduced to optional artifacts; its ceremony-reduction goal remains valid through the shared Lifecycle Kernel, automated verification, and durable closeout. |
-| ADR-009 Unified Orchestration Kernel | Superseded for workflow orchestration. Provider/model/TOS policy remains independently valid. |
-| ADR-011 Progressive Planning and Escalation | Progressive refinement retained; file-backed escalation, DAG, broad pauses, and forward-only correction superseded. |
-| ADR-013 Memory Store Consolidation | Amended. `memories` remains canonical for reusable cross-session knowledge, while workflow Decisions and their lifecycle effects move to the Conversation domain; memory extraction is noncritical follow-on work. |
-| ADR-014 Auto Orchestration Deep Module | Amended and generalized into the shared Lifecycle Kernel. |
-| ADR-015 Runtime Invariant Modules | Retained with database-only reconciliation and typed module results. |
-| ADR-016 Worktree Lifecycle and Projection | Worktree Lifecycle retained; workflow-state copying and worktree-local authority reconciliation superseded. |
-| ADR-016 Worktree Safety | Retained. |
-| ADR-016 Phase 2 Design Notes | Historical implementation addendum. |
-| ADR-017 Drift-Driven State Reconciliation | Superseded; only idempotent database-invariant repair remains. |
-| ADR-018 PROJECT Authority Contract | Retained and generalized to all workflow artifacts; prose cannot register machine facts implicitly. |
-| ADR-022 Post-Unit Gate Enforcement | Amended: the shared kernel owns progression; remediation replaces routine pauses. |
-| ADR-023 Hook Outcome Frontmatter | Superseded by database Verification Evidence and Technical Verdicts. |
-| ADR-025 Closeout Consistency Gate | Retained and generalized by prepared/settled closeout and receipts. |
-| ADR-028/029 Preload-Authoritative Guidance | Grounded-context discipline retained; workflow context must derive from one database snapshot. |
-| ADR-030 Two-Altitude State Machine | Single Writer chokepoint retained; in-memory phase authority, skipped status, and filesystem replay superseded. |
-| ADR-032 Unit Closeout Module | Superseded by `prepareCloseout` plus `settleCloseout`. |
-| ADR-033 Unit Registry | Retained as adapter/tool/prompt metadata only. |
-| ADR-034 Merge and Publication Split | Retained; required source effects precede completion and publication remains non-authoritative. |
-| ADR-035 Dirty Projection Scope | Superseded before adoption by durable Projection Work. |
-| ADR-038 Dispatch History Module | Superseded by persisted Attempts, Failure Observations, fingerprints, and recovery budgets. |
-| ADR-039 Consent Question Module | Superseded by explicit interaction kinds and the narrow consent boundary. |
-| ADR-040 Write-Gate Snapshot Adapters | Superseded by Domain Operations, revisions, fencing, and Authority Epoch. |
-| ADR-041 Engine Hook Contract | Retained; hooks submit typed adapter results and cannot own lifecycle. |
-| ADR-042 Three Session Types | Session separation retained; durable GSD lifecycle moves out of AutoSession. |
-| ADR-045 Flat-Phase Migration | Superseded before adoption; legacy layouts are explicit import/export formats, not startup authority. |
+The "Current effect" column records which dispositions are true in the runtime
+now. It was assessed against `main` at `f083599c4`. "Not assessed" means that
+no evidence was collected; it is not a claim in either direction. Update the
+column when a migration gate passes.
+
+| Existing decision | Disposition under ADR-046 | Current effect (2026-10-02) |
+|---|---|---|
+| ADR-003 Pipeline Simplification | Superseded before adoption. Research remains first-class, resumable Milestone work rather than being merged into planning or reduced to optional artifacts; its ceremony-reduction goal remains valid through the shared Lifecycle Kernel, automated verification, and durable closeout. | Partly. ADR-003 was not adopted. The shared Lifecycle Kernel and durable closeout are not complete. |
+| ADR-009 Unified Orchestration Kernel | Superseded for workflow orchestration. Provider/model/TOS policy remains independently valid. | Not assessed. |
+| ADR-011 Progressive Planning and Escalation | Progressive refinement retained; file-backed escalation, DAG, broad pauses, and forward-only correction superseded. | Not yet. Escalation is still a file artifact (`escalation.ts`). |
+| ADR-013 Memory Store Consolidation | Amended. `memories` remains canonical for reusable cross-session knowledge, while workflow Decisions and their lifecycle effects move to the Conversation domain; memory extraction is noncritical follow-on work. | Not yet. Workflow Decisions are still `memories` rows. The Conversation domain is not in production. |
+| ADR-014 Auto Orchestration Deep Module | Amended and generalized into the shared Lifecycle Kernel. | Not yet. The Lifecycle Kernel is not the sole sequencer for every unit type and entry point. |
+| ADR-015 Runtime Invariant Modules | Retained with database-only reconciliation and typed module results. | Partly. The modules are retained. Reconciliation still compares projection files. |
+| ADR-016 Worktree Lifecycle and Projection | Worktree Lifecycle retained; workflow-state copying and worktree-local authority reconciliation superseded. | Partly. Worktree Lifecycle is in effect. `worktree-state-projection.ts` still copies workflow files to worktrees. |
+| ADR-016 Worktree Safety | Retained. | In effect. |
+| ADR-016 Phase 2 Design Notes | Historical implementation addendum. | In effect (historical record). |
+| ADR-017 Drift-Driven State Reconciliation | Superseded; only idempotent database-invariant repair remains. | Not yet. `reconcileBeforeDispatch` is in production and projection drift can still block dispatch. |
+| ADR-018 PROJECT Authority Contract | Retained and generalized to all workflow artifacts; prose cannot register machine facts implicitly. | Partly. In effect for PROJECT. KNOWLEDGE.md Rules and an on-disk CONTEXT.md still enter state from files. |
+| ADR-022 Post-Unit Gate Enforcement | Amended: the shared kernel owns progression; remediation replaces routine pauses. | Not yet. See ADR-014. |
+| ADR-023 Hook Outcome Frontmatter | Superseded by database Verification Evidence and Technical Verdicts. | Not yet. Hook verdicts are still read from artifact files. |
+| ADR-025 Closeout Consistency Gate | Retained and generalized by prepared/settled closeout and receipts. | Partly. The gate is retained. `prepareCloseout` and `settleCloseout` do not exist. |
+| ADR-028/029 Preload-Authoritative Guidance | Grounded-context discipline retained; workflow context must derive from one database snapshot. | Partly. The discipline is in effect. Workflow context still reads some projection files. |
+| ADR-030 Two-Altitude State Machine | Single Writer chokepoint retained; in-memory phase authority, skipped status, and filesystem replay superseded. | Partly. The Single Writer chokepoint is in effect. The `skipped` status still exists. |
+| ADR-032 Unit Closeout Module | Superseded by `prepareCloseout` plus `settleCloseout`. | Not yet. `unit-closeout.ts` is in production. `prepareCloseout` and `settleCloseout` do not exist. |
+| ADR-033 Unit Registry | Retained as adapter/tool/prompt metadata only. | Not assessed. |
+| ADR-034 Merge and Publication Split | Retained; required source effects precede completion and publication remains non-authoritative. | Partly. The split is retained. Closeout settlement is open (`closeout-effects`, `merge-publication-settlement`). |
+| ADR-035 Dirty Projection Scope | Superseded before adoption by durable Projection Work. | Partly. Durable Projection Work rows exist. The Projection Worker settles them only inside a full rebuild. |
+| ADR-038 Dispatch History Module | Superseded by persisted Attempts, Failure Observations, fingerprints, and recovery budgets. | In effect through [ADR-047](ADR-047-auto-mode-liveness-backstop.md), which deleted the dispatch-history module. |
+| ADR-039 Consent Question Module | Superseded by explicit interaction kinds and the narrow consent boundary. | Not yet. `consent-question.ts` is in production. |
+| ADR-040 Write-Gate Snapshot Adapters | Superseded by Domain Operations, revisions, fencing, and Authority Epoch. | Not yet. The write-gate snapshot state is in production. No Project has advanced its Authority Epoch. |
+| ADR-041 Engine Hook Contract | Retained; hooks submit typed adapter results and cannot own lifecycle. | Not assessed. |
+| ADR-042 Three Session Types | Session separation retained; durable GSD lifecycle moves out of AutoSession. | Not assessed. |
+| ADR-045 Flat-Phase Migration | Amended: superseded for startup layout detection and automatic filesystem migration; legacy layouts are explicit import/export formats, not startup authority. Flat-phase projection layout work continues. | Partly. Flat-phase layout work continues (see the amendment below). The read cutover that removes on-disk layout from runtime decisions is open. |
 
 Each superseded or amended ADR has a short top-of-file status notice linking
 here. Historical bodies remain intact.
+
+**Amendment (2026-10-02), ADR-045:** flat-phase layout work continues. ADR-045
+is superseded only where it gives an on-disk layout runtime authority: startup
+layout detection and automatic filesystem migration. Its projection work
+(single-sourced layout resolution for renders, and stale-render detection as a
+diagnostic) stays valid and is not blocked by this ADR.
 
 ## Implementation boundary and references
 

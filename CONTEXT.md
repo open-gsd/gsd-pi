@@ -90,13 +90,23 @@ completed.
 - **`tool-unavailable` (Recovery kind)**: the Recovery Classification failure kind for a tool call that raced the workflow MCP server's registration (`No such tool available` / a Tool Surface Readiness abort). Transient — action `retry` with bounded attempts and its own exit reason; distinct from `tool-schema`/`tool-contract`, which are deterministic stops. The system retries; the model must never improvise a fallback around a missing workflow tool.
 - **Workflow Bridge Warm-up**: the stdio MCP server's eager load + shape-check of the executor and write-gate bridges before connecting when workflow tools are enabled. A broken bridge fails the spawn with the actionable error (fail closed) instead of advertising tools that error on first call; a healthy spawn pre-pays the bridge import.
 
-## State layer (filesystem-state cutover shipped)
+## State layer (markdown fallback removed; Cutover not yet executed)
 
-The live project-state path is **database-authoritative**. `.gsd/gsd.db` decides
-phase, registry, and progress. Markdown files under `.gsd/` (STATE.md, ROADMAP,
-PLAN, SUMMARY, CONTEXT, and the rest of the inventory) are stamped **read-only
-projections** of that database. They are not a fallback when the DB is missing:
-an unavailable DB fails closed.
+The 2026-08 state-DB milestone removed the markdown fallback for state
+derivation. It was not a **Cutover** in the glossary sense: no production
+command advances a Project's Authority Epoch (`cutoverProjectAuthority` has no
+production caller), and the ADR-046 program is not finished.
+
+What shipped:
+
+- `.gsd/gsd.db` decides phase, registry, and progress. These hierarchy reads
+  come from the legacy database rows, not from canonical lifecycle rows.
+- Markdown files under `.gsd/` are not a fallback when the DB is missing: an
+  unavailable DB fails closed.
+- Projections written through `markdown-renderer.ts` (ROADMAP, PLAN, SUMMARY,
+  and the other Milestone and Slice artifacts) carry the DB state-version
+  stamp. STATE.md, DECISIONS.md, and `.planning/` carry no stamp. KNOWLEDGE.md
+  is not a pure projection: its Rules section exists on disk only.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).
@@ -104,9 +114,15 @@ External readers should treat that document as the reference, not on-disk
 markdown as authority.
 
 Downgrade recovery uses the explicit backup-restore command:
-`/gsd db restore-backup`. Canonical lifecycle *read* authority (public status
-responses and the D005 shadow surface) remains deferred under M003; that
-surface is still pinned by `gate:lifecycle-shadow-no-cutover`.
+`/gsd db restore-backup`.
+
+Decision D012 (2026-10-02) supersedes D005 for canonical lifecycle *read*
+authority, but the read cutover is not implemented: public status responses,
+dispatch, and dependency decisions still read legacy rows, and that surface is
+still pinned by `gate:lifecycle-shadow-no-cutover`. The decision, the
+Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
+are recorded in
+[`docs/dev/state-db-cutover-milestone-decision.md`](docs/dev/state-db-cutover-milestone-decision.md).
 
 ## Current pre-cutover architecture
 
