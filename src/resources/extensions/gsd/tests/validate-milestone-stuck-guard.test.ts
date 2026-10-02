@@ -366,6 +366,23 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
     assert.equal(pauseAutoMock.mock.callCount(), 1);
   });
 
+  test("does not count a deferred slice as queued remediation work", async () => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Slice 2", status: "deferred" });
+    writeValidationFile("needs-remediation");
+
+    const ctx = makeMockCtx();
+    const pi = makeMockPi();
+    const pauseAutoMock = mock.fn(async () => {});
+    const s = makeMockSession(tempDir, "validate-milestone", "M001");
+
+    const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
+
+    assert.equal(result, "pause");
+    assert.equal(pauseAutoMock.mock.callCount(), 1);
+  });
+
   test("continues when verdict=needs-remediation but a queued remediation slice exists", async () => {
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });

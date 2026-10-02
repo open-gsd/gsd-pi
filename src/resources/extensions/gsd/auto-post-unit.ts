@@ -98,7 +98,7 @@ import { ensureCodebaseMapFresh } from "./codebase-generator.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { UokGateRunner } from "./uok/gate-runner.js";
 import { writeTurnGitTransaction } from "./uok/gitops.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { detectAbandonMilestone } from "./abandon-detect.js";
 import { getPendingGate } from "./bootstrap/write-gate.js";
 import { isDeterministicPolicyError, isToolInvocationError, isToolUnavailableError } from "./auto-tool-tracking.js";
@@ -237,7 +237,7 @@ function agentEndMessagesMentionTool(messages: unknown[] | undefined, toolName: 
 
 function hasIncompleteMilestoneSlice(milestoneId: string): boolean {
   if (!isDbAvailable()) return false;
-  return getMilestoneSlices(milestoneId).some((slice) => !isClosedStatus(slice.status));
+  return getMilestoneSlices(milestoneId).some((slice) => !isInactiveStatus(slice.status));
 }
 
 function hasRoadmapReassessmentArtifact(basePath: string, milestoneId: string): boolean {

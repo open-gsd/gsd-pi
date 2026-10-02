@@ -31,7 +31,7 @@ import type { TaskRow } from "./db-task-slice-rows.js";
 import { formatEscalationForDisplay, readEscalationArtifact } from "./escalation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import type { GSDPreferences } from "./preferences-types.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isInactiveStatus } from "./status-guards.js";
 import {
   runVerificationGate,
   runVerificationGateForTargets,
@@ -762,7 +762,7 @@ async function countIncompleteSlices(_basePath: string, milestoneId: string): Pr
   if (!isDbAvailable()) return 1;
   const slices = getMilestoneSlices(milestoneId);
   if (slices.length === 0) return 1;
-  return slices.filter((slice) => !isClosedStatus(slice.status)).length;
+  return slices.filter((slice) => !isInactiveStatus(slice.status)).length;
 }
 
 type BlockerDiscoveredAttempt = VerificationAttemptSnapshot & {
