@@ -168,7 +168,8 @@ export function resolveProjectRootDbPath(basePath: string): string {
 
 /**
  * True when `.gsd` proves an earlier Workflow Authority existed: a milestone
- * directory with content, or a migration backup. An absent or zero-byte
+ * directory with content (current `phases/` or legacy `milestones/` layout),
+ * or a migration backup. An absent or zero-byte
  * gsd.db beside them is a lost authority, not a fresh project.
  */
 function hasWorkflowHistoryWithoutDatabase(location: WorkflowDatabaseLocation): boolean {
@@ -184,8 +185,10 @@ function hasWorkflowHistoryWithoutDatabase(location: WorkflowDatabaseLocation): 
       return [];
     }
   };
-  const milestonesDir = join(location.projectGsd, "milestones");
-  return entries(milestonesDir).some((milestone) => entries(join(milestonesDir, milestone)).length > 0)
+  return ["phases", "milestones"].some((layout) => {
+    const container = join(location.projectGsd, layout);
+    return entries(container).some((milestone) => entries(join(container, milestone)).length > 0);
+  })
     || entries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"));
 }
 

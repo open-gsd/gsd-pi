@@ -127,6 +127,16 @@ test("(1) projections without gsd.db: a tool call fails with authority-missing a
   assert.equal(readFileSync(dbPath).length, 0);
 });
 
+test("(1a) flat-phase projections without gsd.db: authority-missing and no file", async () => {
+  const { base, dbPath } = makeProject();
+  mkdirSync(join(base, ".gsd", "phases", "01-foo"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "phases", "01-foo", "01-ROADMAP.md"), "# M001\n");
+
+  await assert.rejects(executeSummarySave({} as never, base), /authority-missing/);
+  assert.equal(openWorkflowDatabase(base).reason, "authority-missing");
+  assert.equal(existsSync(dbPath), false, "no empty authority may be created");
+});
+
 test("(1b) a leftover migration backup also proves a lost authority", () => {
   const { base, dbPath } = makeProject();
   writeFileSync(`${dbPath}.backup-v45`, "not-inspected");
@@ -137,6 +147,12 @@ test("(1b) a leftover migration backup also proves a lost authority", () => {
 test("(1c) a fresh project and the explicit import path still create the database", () => {
   const fresh = makeProject();
   assert.equal(openWorkflowDatabase(fresh.base).reason, "created-empty");
+  closeDatabase();
+
+  // The milestone shell a new project gets before its first database open.
+  const shell = makeProject();
+  mkdirSync(join(shell.base, ".gsd", "phases", "01-new-milestone-m001"), { recursive: true });
+  assert.equal(openWorkflowDatabase(shell.base).reason, "created-empty");
   closeDatabase();
 
   const legacy = makeProject();
@@ -245,6 +261,38 @@ test("(4) restore shows the erased Domain Operation range and refuses a higher A
   assert.match(refusal.message, /\/gsd recover/);
   assert.ok(!refused.notes.some((note) => note.kind === "success"));
   assert.equal(sha256File(fixture.dbPath), before, "a refused restore must not touch the live database");
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+});
+
+test("(4b) a healthy database locked by another process is refused, not replaced as corrupt", async () => {
+  const fixture = makeRestoreFixture();
+  rawExec(
+    fixture.dbPath,
+    `UPDATE project_authority SET authority_epoch = authority_epoch + 1 WHERE singleton = 1;
+     PRAGMA wal_checkpoint(TRUNCATE);`,
+  );
+  const before = sha256File(fixture.dbPath);
+
+  // The state during another process's startup migration or maintenance claim.
+  const holder = new sqlite.DatabaseSync(fixture.dbPath);
+  const { ctx, notes } = makeCtx();
+  try {
+    holder.exec("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; ROLLBACK;");
+    await handleDbRestoreBackup(ctx, fixture.base, consentArgs(fixture));
+  } finally {
+    holder.close();
+  }
+  closeDatabase();
+
+  assert.ok(!notes.some((note) => note.kind === "success"), JSON.stringify(notes));
+  const refusal = notes.find((note) => note.kind === "error");
+  assert.ok(refusal, JSON.stringify(notes));
+  assert.match(refusal.message, /in use by another process\. Nothing was restored/);
+  assert.equal(sha256File(fixture.dbPath), before, "a locked live database must not be touched");
+  assert.deepEqual(
+    readdirSync(join(fixture.base, ".gsd")).filter((entry) => entry.startsWith("gsd.db.quarantine-")),
+    [],
+  );
   assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
 });
 

@@ -1305,11 +1305,15 @@ type CurrentRestoreAuthority = {
 
 /**
  * Read the live database's authority position without opening it through the
- * engine (no migration, no repair). Returns null when the file is absent,
- * empty or fails quick_check: such a database cannot be opened, only replaced.
+ * engine (no migration, no repair). Returns null only for a proven
+ * unopenable database: absent, empty, failing quick_check, or rejected by
+ * SQLite as corrupt. Any other failure (a lock held by another process
+ * included) throws: an unreadable database is not proof of a corrupt one.
  */
 async function readCurrentRestoreAuthority(dbPath: string): Promise<CurrentRestoreAuthority | null> {
   const { openSqliteReadOnly } = await import("./sqlite-readonly.js");
+  const { isSqliteBusyError, isSqliteCorruptError } = await import("./sqlite-errors.js");
+  if (!existsSync(dbPath)) return null;
   try {
     if (lstatSync(dbPath).size === 0) return null;
     const { db } = openSqliteReadOnly(dbPath);
@@ -1334,9 +1338,14 @@ async function readCurrentRestoreAuthority(dbPath: string): Promise<CurrentResto
     } finally {
       db.close();
     }
-  } catch {
-    // Unreadable bytes are the corrupt-database case this command recovers.
-    return null;
+  } catch (error) {
+    // Corrupt bytes are the case this command recovers.
+    if (isSqliteCorruptError(error)) return null;
+    throw new Error(
+      isSqliteBusyError(error)
+        ? "the project database is in use by another process"
+        : `cannot read the project database (${(error as Error).message})`,
+    );
   }
 }
 
@@ -1792,7 +1801,15 @@ export async function handleDbRestoreBackup(
 
     // Inspect the live database read-only: nothing is opened through the
     // engine (and so nothing is migrated or repaired) before consent.
-    const current = existingIntent === null ? await readCurrentRestoreAuthority(dbPath) : null;
+    let current: CurrentRestoreAuthority | null = null;
+    if (existingIntent === null) {
+      try {
+        current = await readCurrentRestoreAuthority(dbPath);
+      } catch (error) {
+        ctx.ui.notify(`gsd db restore-backup: ${(error as Error).message}. Nothing was restored.`, "error");
+        return;
+      }
+    }
     const erasedLines: string[] = [];
     if (current !== null) {
       if (current.projectId !== verified.projectId) {
@@ -1858,6 +1875,9 @@ export async function handleDbRestoreBackup(
     }
     if (opened === null || !opened.ok) {
       engine.closeDatabase();
+      // No maintenance claim can be taken on a database the engine cannot
+      // open; refuse while another process holds one.
+      engine.assertDatabaseMaintenanceAllowsReplacement(dbPath);
       const quarantinePath = await publishBackupOverUnopenableDatabase(dbPath, backupPath, backupSha);
       logWarning("command", `db restore-backup replaced an unopenable database with ${basename(backupPath)} (${backupSha}); previous file: ${quarantinePath ?? "none"}`);
       ctx.ui.notify([
