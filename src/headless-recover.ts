@@ -21,7 +21,7 @@ import { fileURLToPath } from 'node:url'
 import { resolveGsdAgentExtensionsDir, shouldUseAgentExtensionsDir } from './headless-query.js'
 import { resolveBundledGsdExtensionModule } from './bundled-resource-path.js'
 import { join } from 'node:path'
-import { existsSync } from 'node:fs'
+import { existsSync, renameSync, rmSync, statSync } from 'node:fs'
 
 const jiti = createJiti(fileURLToPath(import.meta.url), { interopDefault: true, debug: false })
 
@@ -52,6 +52,7 @@ async function loadExtensionModules() {
   const actionModule = await jiti.import(gsdExtensionPath('legacy-import-recovery-action.ts'), {}) as any
   const choiceTokenModule = await jiti.import(gsdExtensionPath('legacy-import-forward-repair-choice-token.ts'), {}) as any
   const openWorkflowDatabase = workspaceModule.openWorkflowDatabase
+  const resolveProjectRootDbPath = workspaceModule.resolveProjectRootDbPath
   const closeWorkflowDatabase = workspaceModule.closeWorkflowDatabase
   const prepareVerifiedRecoverApplication = workspaceModule.prepareVerifiedRecoverApplication
   const applyPreparedVerifiedRecoverApplication = workspaceModule.applyPreparedVerifiedRecoverApplication
@@ -61,7 +62,7 @@ async function loadExtensionModules() {
   const parseLegacyImportRecoveryAction = actionModule.parseLegacyImportRecoveryAction
   const formatLegacyImportForwardRepairChoice = choiceTokenModule.formatLegacyImportForwardRepairChoice
   const parseLegacyImportForwardRepairChoices = choiceTokenModule.parseLegacyImportForwardRepairChoices
-  if (typeof openWorkflowDatabase !== 'function') {
+  if (typeof openWorkflowDatabase !== 'function' || typeof resolveProjectRootDbPath !== 'function') {
     throw new Error('selected GSD extensions do not support workflow database recovery; synchronize the extension bundle')
   }
   if (typeof closeWorkflowDatabase !== 'function') {
@@ -86,7 +87,11 @@ async function loadExtensionModules() {
     throw new Error('selected GSD extensions do not support recovery choice tokens; synchronize the extension bundle')
   }
   return {
-    openWorkflowDatabase: openWorkflowDatabase as (basePath: string) => { ok: boolean; reason?: string; error?: Error },
+    openWorkflowDatabase: openWorkflowDatabase as (
+      basePath: string,
+      options: { createEmptyAuthority: boolean },
+    ) => { ok: boolean; reason?: string; error?: Error },
+    resolveProjectRootDbPath: resolveProjectRootDbPath as (basePath: string) => string,
     closeWorkflowDatabase: closeWorkflowDatabase as () => void,
     prepareVerifiedRecoverApplication: prepareVerifiedRecoverApplication as PrepareVerifiedRecoverApplication,
     applyPreparedVerifiedRecoverApplication: applyPreparedVerifiedRecoverApplication as ApplyPreparedVerifiedRecoverApplication,
@@ -196,7 +201,15 @@ export async function handleRecover(
     process.stderr.write(`[headless] recover: ${recoveryErrorMessage(err)}\n`)
     return { exitCode: 1 }
   }
-  const opened = modules.openWorkflowDatabase(basePath)
+  // Explicit import may start an empty database beside existing markdown.
+  // Like the slash command, a database created here is parked at
+  // gsd.db.recover-pending unless the import is applied, so a declined
+  // recover leaves the authority missing and the next run reuses it.
+  const dbPath = modules.resolveProjectRootDbPath(basePath)
+  const lost = !existsSync(dbPath) || statSync(dbPath).size === 0
+  if (lost) moveDatabaseFiles(`${dbPath}.recover-pending`, dbPath)
+  let appliedPreview = false
+  const opened = modules.openWorkflowDatabase(basePath, { createEmptyAuthority: true })
   if (!opened.ok) {
     // Refuse-newer version skew forwards the exact engine message (T003 spike,
     // mandate 3); every other open failure keeps the generic message.
@@ -233,6 +246,7 @@ export async function handleRecover(
         return { exitCode: 1 }
       }
       application = await modules.applyPreparedVerifiedRecoverApplication(prepared, approvedPreviewHash)
+      appliedPreview = true
     }
   } catch (err) {
     const msg = recoveryErrorMessage(err)
@@ -320,5 +334,15 @@ export async function handleRecover(
   return { exitCode: 0 }
   } finally {
     modules.closeWorkflowDatabase()
+    if (lost && !appliedPreview) moveDatabaseFiles(dbPath, `${dbPath}.recover-pending`)
+  }
+}
+
+/** Move a database file with its sidecars when it exists; the target is replaced. */
+function moveDatabaseFiles(from: string, to: string): void {
+  if (!existsSync(from)) return
+  for (const suffix of ['', '-wal', '-shm', '-journal']) {
+    rmSync(`${to}${suffix}`, { force: true })
+    if (existsSync(`${from}${suffix}`)) renameSync(`${from}${suffix}`, `${to}${suffix}`)
   }
 }

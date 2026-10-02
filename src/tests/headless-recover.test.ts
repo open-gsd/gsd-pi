@@ -22,7 +22,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureDbOpen } from "../resources/extensions/gsd/bootstrap/dynamic-tools.ts";
+import { openWorkflowDatabase } from "../resources/extensions/gsd/db-workspace.ts";
 import {
   isDbAvailable,
   closeDatabase,
@@ -51,6 +51,12 @@ after(() => {
   if (previousAgentDir === undefined) delete process.env.GSD_AGENT_DIR;
   else process.env.GSD_AGENT_DIR = previousAgentDir;
 });
+
+// Fixtures place markdown beside a missing gsd.db, so they open through the
+// explicit-import path that may start an empty authority.
+async function ensureDbOpen(base: string): Promise<boolean> {
+  return openWorkflowDatabase(base, { createEmptyAuthority: true }).ok;
+}
 
 function makeMarkdownFixture(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-headless-recover-"));
@@ -175,6 +181,8 @@ test("headless recover verifies backups from a populated synced extension", (t) 
   const previewHash = /^Preview hash: (sha256:[0-9a-f]{64})$/mu.exec(preview.stderr)?.[1];
   assert.equal(preview.status, 1, preview.stderr);
   assert.ok(previewHash, preview.stderr);
+  assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false, "an unapproved recover leaves the authority missing");
+  assert.ok(existsSync(join(base, ".gsd", "gsd.db.recover-pending")), "the empty database is parked for the approved run");
   assert.ok(
     ["ts", "js"].some(extension => existsSync(
       join(agentDir, "extensions", "gsd", `legacy-import-restore-drill.${extension}`),
@@ -327,7 +335,6 @@ test("headless recover: reports the drilled content-addressed backup used before
   }) as typeof process.stderr.write;
 
   const result = await handleHeadlessRecover(base, recoverPreviewApproval(base));
-
   assert.equal(result.exitCode, 0);
   assert.equal(await ensureDbOpen(base), true);
   assert.ok(getMilestone("M999"), "recovery preserves pre-existing authority after the gate");
