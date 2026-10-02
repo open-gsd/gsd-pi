@@ -370,6 +370,7 @@ export async function handleCleanupProjects(args: string, ctx: ExtensionCommandC
   const { readdirSync, existsSync: fsExists, rmSync: fsRmSync } = await import("node:fs");
   const { join: pathJoin } = await import("node:path");
   const { readRepoMeta, externalProjectsRoot } = await import("./repo-identity.js");
+  const { projectStateHoldsWorkflowData } = await import("./doctor-global-checks.js");
 
   const fix = args.includes("--fix");
   const projectsDir = externalProjectsRoot();
@@ -464,9 +465,17 @@ export async function handleCleanupProjects(args: string, ctx: ExtensionCommandC
   if (fix && orphaned.length > 0) {
     let removed = 0;
     const failed: string[] = [];
+    const kept: string[] = [];
     for (const e of orphaned) {
+      const dirPath = pathJoin(projectsDir, e.hash);
+      // A stale gitRoot is not proof that the database is dead (moved or
+      // re-cloned repo). Never delete a workflow database with content.
+      if (projectStateHoldsWorkflowData(dirPath)) {
+        kept.push(e.hash);
+        continue;
+      }
       try {
-        fsRmSync(pathJoin(projectsDir, e.hash), { recursive: true, force: true });
+        fsRmSync(dirPath, { recursive: true, force: true });
         removed++;
       } catch (err) {
         logWarning("command", `project cleanup rm failed for ${e.hash}: ${(err as Error).message}`);
@@ -474,6 +483,12 @@ export async function handleCleanupProjects(args: string, ctx: ExtensionCommandC
       }
     }
     lines.push(`Removed ${pl(removed, "orphaned director")}${removed === 1 ? "y" : "ies"}.`);
+    if (kept.length > 0) {
+      lines.push(
+        `Kept ${kept.length} director${kept.length === 1 ? "y that holds" : "ies that hold"} a workflow database with content: ${kept.join(", ")}. ` +
+          `Open the moved repo in GSD to register it again, or remove the directory by hand if the project is gone.`,
+      );
+    }
     if (failed.length > 0) {
       lines.push(`Failed to remove: ${failed.join(", ")}`);
     }
