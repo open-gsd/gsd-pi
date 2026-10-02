@@ -334,7 +334,7 @@ export function fallbackCandidate(entry: GSDModelFallback): { id: string; thinki
  * Supports primary model with optional fallbacks for resilience.
  */
 export interface GSDPhaseModelConfig {
-  /** Primary model ID (e.g., "claude-opus-4-6") */
+  /** Primary model ID (e.g., "claude-opus-5-5") */
   model: string;
   /** Provider name to disambiguate when the same model ID exists across providers (e.g., "bedrock", "anthropic") */
   provider?: string;

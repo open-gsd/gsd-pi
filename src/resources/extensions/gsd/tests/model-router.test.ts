@@ -432,7 +432,7 @@ test("resolveModelForTier: returns canonical Anthropic model when no available m
   try {
     resetLegacyTelemetry();
     assert.equal(resolveModelForTier("heavy", []), "claude-opus-5-5");
-    assert.equal(resolveModelForTier("standard", []), "claude-sonnet-4-6");
+    assert.equal(resolveModelForTier("standard", []), "claude-sonnet-5-5");
     assert.equal(resolveModelForTier("light", []), "claude-haiku-4-5");
     assert.equal(getLegacyTelemetry()["legacy.providerDefaultUsed"], 3);
   } finally {
@@ -1270,6 +1270,17 @@ describe("getEligibleModels", () => {
     const config: DynamicRoutingConfig = defaultRoutingConfig();
     const result = getEligibleModels("light", [], config);
     assert.equal(result.length, 0);
+  });
+
+  test("equal-cost models prefer the stronger capability profile (Sonnet 5.5 over Sonnet 5)", () => {
+    const config: DynamicRoutingConfig = defaultRoutingConfig();
+    for (const order of [
+      ["claude-sonnet-5", "claude-sonnet-5-5"],
+      ["claude-sonnet-5-5", "claude-sonnet-5"],
+    ]) {
+      const result = getEligibleModels("standard", order, config);
+      assert.deepStrictEqual(result, ["claude-sonnet-5-5", "claude-sonnet-5"], `input order ${order.join(",")}`);
+    }
   });
 
   test("unknown models classified as standard appear in standard tier results", () => {

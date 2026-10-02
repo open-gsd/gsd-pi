@@ -600,6 +600,11 @@ export function scoreEligibleModels(
   return scored;
 }
 
+function capabilityTotal(modelId: string): number {
+  const { profile } = resolveCapabilityProfile(modelId);
+  return CAPABILITY_DIMENSIONS.reduce((sum, dimension) => sum + profile[dimension], 0);
+}
+
 /**
  * Return all models eligible for a given tier, sorted cheapest first.
  * A runtime preferred model (the user's selected/session model) is returned
@@ -625,13 +630,16 @@ export function getEligibleModels(
     if (match) return [match];
   }
 
-  // 2. Auto-detect: filter by tier, sort cheapest first
+  // 2. Auto-detect: filter by tier, sort cheapest first. Equal-cost models
+  //    (e.g. Sonnet 5 vs Sonnet 5.5) prefer the stronger capability profile so
+  //    registry order cannot pick the older generation.
   const tierMatches = availableModelIds
     .filter(id => getModelTier(id) === tier)
     .sort((a, b) => {
       const costA = getModelCost(a, availableModels);
       const costB = getModelCost(b, availableModels);
-      return costA - costB;
+      if (costA !== costB) return costA - costB;
+      return capabilityTotal(b) - capabilityTotal(a);
     });
 
   const preferred = findPreferredModelForTier(tier, availableModelIds, preferredModelId);
@@ -976,7 +984,7 @@ export function defaultRoutingConfig(): DynamicRoutingConfig {
  */
 const CANONICAL_TIER_MODELS: Record<ComplexityTier, string> = {
   light: "claude-haiku-4-5",
-  standard: "claude-sonnet-4-6",
+  standard: "claude-sonnet-5-5",
   heavy: "claude-opus-5-5",
 };
 

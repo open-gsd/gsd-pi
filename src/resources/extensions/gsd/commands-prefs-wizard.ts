@@ -697,7 +697,7 @@ async function configureModels(ctx: ExtensionCommandContext, prefs: Record<strin
       if (providerChoice === "(type manually)") {
         const input = await ctx.ui.input(
           `${phaseLabel} — enter model ID:`,
-          current || "e.g. claude-sonnet-4-20250514",
+          current || "e.g. claude-sonnet-5-5",
         );
         if (input !== null && input !== undefined) {
           const val = input.trim();
@@ -728,7 +728,7 @@ async function configureModels(ctx: ExtensionCommandContext, prefs: Record<strin
       const current = formatConfiguredModel(models[phase]);
       const input = await ctx.ui.input(
         `Model for ${phase} phase${current ? ` (current: ${current})` : ""}:`,
-        current || "e.g. claude-sonnet-4-20250514",
+        current || "e.g. claude-sonnet-5-5",
       );
       if (input !== null && input !== undefined) {
         const val = input.trim();
