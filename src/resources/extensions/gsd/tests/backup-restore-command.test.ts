@@ -2,8 +2,8 @@
 // File Purpose: T014 — explicit `gsd db restore-backup` command tests.
 //
 //   (a) v45 fixture + verified backup-v45, simulated v46 cutover, restore with
-//       consent → v45 contents restored (schema/row assertions) and a restore
-//       receipt persisted.
+//       consent → v45 contents restored, migrated to the current schema with
+//       a pre-migration copy kept, and a restore receipt persisted.
 //   (b) invocation without consent (or with a stale consent hash) is refused
 //       with consent-required guidance and restores nothing.
 //   (c) invocation with a corrupt backup fails verification and restores
@@ -127,11 +127,16 @@ test("(a) restore with consent restores v45 contents and persists a receipt", as
   assert.match(success.message, /restored gsd\.db\.backup-v45/);
   assert.match(success.message, /Backup schema: v45/);
   assert.match(success.message, /Receipt: import\.restore committed/);
-  assert.match(success.message, new RegExp(`stamps v${SCHEMA_VERSION} on next open`));
+  assert.match(success.message, new RegExp(`Migrated to schema v${SCHEMA_VERSION}`));
+  assert.match(success.message, /Projections rebuilt from the restored database/);
 
-  // The handler closed the engine DB; read the restored file without migrating.
-  assert.equal(maxSchemaVersionOf(fixture.dbPath), 45);
+  // The handler reopened the restored DB through the engine, which migrated
+  // it to the current schema after keeping a pre-migration copy.
+  closeDatabase();
+  assert.equal(maxSchemaVersionOf(fixture.dbPath), SCHEMA_VERSION);
   assert.deepEqual(milestoneIds(fixture.dbPath), ["M999"]);
+  assert.deepEqual(milestoneIds(`${fixture.backupPath}.latest`), ["M999"]);
+  assert.equal(maxSchemaVersionOf(`${fixture.backupPath}.latest`), 45);
 
   const receipt = readOnly(fixture.dbPath, (db) =>
     db.prepare(

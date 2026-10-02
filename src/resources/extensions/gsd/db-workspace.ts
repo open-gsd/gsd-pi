@@ -172,7 +172,7 @@ export function resolveProjectRootDbPath(basePath: string): string {
  * or a migration backup. An absent or zero-byte
  * gsd.db beside them is a lost authority, not a fresh project.
  */
-function hasWorkflowHistoryWithoutDatabase(location: WorkflowDatabaseLocation): boolean {
+function hasWorkflowHistoryWithoutDatabase(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): boolean {
   try {
     if (statSync(location.projectDb).size > 0) return false;
   } catch {
@@ -192,6 +192,19 @@ function hasWorkflowHistoryWithoutDatabase(location: WorkflowDatabaseLocation): 
     || entries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"));
 }
 
+function authorityMissingError(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): GSDError {
+  return new GSDError(
+    GSD_STALE_STATE,
+    `authority-missing: ${location.projectGsd} holds workflow history but ${location.projectDb} is ` +
+    "missing or empty. No empty database was created. Restore a backup with /gsd db restore-backup, " +
+    "or import the markdown with /gsd recover.",
+  );
+}
+
+export function isAuthorityMissingError(err: unknown): boolean {
+  return err instanceof GSDError && err.message.startsWith("authority-missing:");
+}
+
 function openWorkflowDatabaseWithMode(
   basePath: string,
   createIfMissing: boolean,
@@ -207,17 +220,7 @@ function openWorkflowDatabaseWithMode(
     return { ok: false, reason: "missing-database", location };
   }
   if (!options.createEmptyAuthority && hasWorkflowHistoryWithoutDatabase(location)) {
-    return {
-      ok: false,
-      reason: "authority-missing",
-      location,
-      error: new GSDError(
-        GSD_STALE_STATE,
-        `authority-missing: ${location.projectGsd} holds workflow history but ${location.projectDb} is ` +
-        "missing or empty. No empty database was created. Restore a backup with /gsd db restore-backup, " +
-        "or import the markdown with /gsd recover.",
-      ),
-    };
+    return { ok: false, reason: "authority-missing", location, error: authorityMissingError(location) };
   }
   try {
     const opened = createIfMissing
@@ -276,6 +279,10 @@ export function openExistingWorkflowDatabase(basePath: string): WorkflowDatabase
 }
 
 export function openWorkflowDatabasePath(path: string): boolean {
+  if (path !== ":memory:") {
+    const location = { projectGsd: dirname(path), projectDb: path };
+    if (hasWorkflowHistoryWithoutDatabase(location)) throw authorityMissingError(location);
+  }
   return openDatabase(path);
 }
 
@@ -352,7 +359,7 @@ export function ensureWorkflowDbAtPath(dbPath: string | null): boolean {
   try {
     return openWorkflowDatabasePath(dbPath);
   } catch (err) {
-    if (isSchemaTooNewError(err)) throw err;
+    if (isSchemaTooNewError(err) || isAuthorityMissingError(err)) throw err;
     logWarning("reconcile", `ensureWorkflowDbAtPath could not reopen DB: ${(err as Error).message}`);
     return false;
   }
@@ -376,7 +383,7 @@ export function ensureWorkflowDbForBase(
     if (isDbAvailable() && getWorkflowDatabasePath() === dbPath) return true;
     return openWorkflowDatabasePath(dbPath);
   } catch (err) {
-    if (isSchemaTooNewError(err)) throw err;
+    if (isSchemaTooNewError(err) || isAuthorityMissingError(err)) throw err;
     logWarning("reconcile", `ensureWorkflowDbForBase could not reopen DB: ${(err as Error).message}`);
     return false;
   }

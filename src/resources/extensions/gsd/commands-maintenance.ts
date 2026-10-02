@@ -8,13 +8,14 @@ import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import {
   chmodSync, closeSync, copyFileSync, existsSync, fsyncSync, linkSync, lstatSync,
   mkdirSync, openSync, readdirSync, readFileSync, realpathSync, renameSync,
-  rmdirSync, unlinkSync, writeFileSync, constants as fsConstants,
+  rmdirSync, rmSync, unlinkSync, writeFileSync, constants as fsConstants,
 } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { deriveState } from "./state.js";
 import { nativeBranchList, nativeDetectMainBranch, nativeBranchListMerged, nativeBranchDelete, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
 import { logWarning } from "./workflow-logger.js";
+import type { DbAdapter } from "./db-adapter.js";
 import {
   applyPreparedVerifiedRecoverApplication,
   loadRetainedVerifiedRecoverApplication,
@@ -715,11 +716,20 @@ export async function handleRecover(
   const { invalidateStateCache } = await import("./state.js");
   const { countDbHierarchy, countMarkdownHierarchy } = await import("./migration-auto-check.js");
 
+  // An empty database created here is parked at gsd.db.recover-pending unless
+  // the import is applied: a declined or failed recover leaves the authority
+  // missing, and the next recover reuses the parked database so its sealed
+  // Preview hash stays valid.
+  let createdDbPath: string | null = null;
   if (!dbAvailable()) {
     // Explicit import is the one operator path that may start an empty
     // database beside existing markdown.
-    const { openWorkflowDatabase } = await import("./db-workspace.js");
+    const { openWorkflowDatabase, resolveProjectRootDbPath } = await import("./db-workspace.js");
+    const dbPath = resolveProjectRootDbPath(basePath);
+    const lost = !existsSync(dbPath) || lstatSync(dbPath).size === 0;
+    if (lost) moveDatabaseFiles(`${dbPath}.recover-pending`, dbPath);
     const opened = openWorkflowDatabase(basePath, { createEmptyAuthority: true });
+    if (opened.ok && lost) createdDbPath = dbPath;
     if (!opened.ok) {
       const detail = opened.error?.message ?? opened.reason;
       ctx.ui.notify(
@@ -735,6 +745,7 @@ export async function handleRecover(
   // updates only modeled Preview targets and never clears absent DB rows.
   const markdown = countMarkdownHierarchy(basePath);
   const beforeDb = countDbHierarchy();
+  let appliedPreview = false;
 
   try {
     const action = parseLegacyImportRecoveryAction(args.trim().split(/\s+/u).filter(Boolean));
@@ -745,7 +756,6 @@ export async function handleRecover(
     let application = applicationId
       ? loadVerifiedRecoverApplication(applicationId)
       : loadRetainedVerifiedRecoverApplication();
-    let appliedPreview = false;
     if (!application) {
       const prepared = prepareVerifiedRecoverApplication(basePath);
       if (!(await confirmRecover(
@@ -888,6 +898,21 @@ export async function handleRecover(
     const message = err instanceof Error ? err.message : String(err);
     logWarning("command", `recover failed: ${message}`);
     ctx.ui.notify(`gsd recover failed: ${message}`, "error");
+  } finally {
+    if (createdDbPath !== null && !appliedPreview) {
+      const { closeWorkflowDatabase } = await import("./db-workspace.js");
+      closeWorkflowDatabase();
+      moveDatabaseFiles(createdDbPath, `${createdDbPath}.recover-pending`);
+    }
+  }
+}
+
+/** Move a database file with its sidecars when it exists; the target is replaced. */
+function moveDatabaseFiles(from: string, to: string): void {
+  if (!existsSync(from)) return;
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    rmSync(`${to}${suffix}`, { force: true });
+    if (existsSync(`${from}${suffix}`)) renameSync(`${from}${suffix}`, `${to}${suffix}`);
   }
 }
 
@@ -1188,7 +1213,7 @@ function restoreFileIdentity(path: string): RestoreFileIdentity {
 
 async function listRestoreBackupCandidates(dbPath: string): Promise<RestoreBackupCandidate[]> {
   const { openSqliteReadOnly } = await import("./sqlite-readonly.js");
-  const pattern = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)$`);
+  const pattern = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)(?:\\.latest)?$`);
   const candidates: RestoreBackupCandidate[] = [];
   for (const entry of readdirSync(dirname(dbPath))) {
     const match = pattern.exec(entry);
@@ -1229,7 +1254,7 @@ async function listRestoreBackupCandidates(dbPath: string): Promise<RestoreBacku
       sha256: sha256FileHex(path),
     });
   }
-  return candidates.sort((a, b) => a.nameVersion - b.nameVersion);
+  return candidates.sort((a, b) => a.nameVersion - b.nameVersion || a.fileName.localeCompare(b.fileName));
 }
 
 /**
@@ -1346,6 +1371,48 @@ async function readCurrentRestoreAuthority(dbPath: string): Promise<CurrentResto
         ? "the project database is in use by another process"
         : `cannot read the project database (${(error as Error).message})`,
     );
+  }
+}
+
+function truncateWalCheckpoint(db: DbAdapter, failure: string): void {
+  const checkpoint = db.prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+  const busy = Number(checkpoint?.["busy"] ?? -1);
+  const log = Number(checkpoint?.["log"] ?? Number.NaN);
+  const checkpointed = Number(checkpoint?.["checkpointed"] ?? Number.NaN);
+  if (busy !== 0 || !((log === -1 && checkpointed === -1) || (Number.isSafeInteger(log) && log >= 0 && checkpointed === log))) {
+    throw new Error(failure);
+  }
+}
+
+/**
+ * Open the restored database through the engine (pre-migration backup, then
+ * migration) and render the projection tree from it, so no .gsd file keeps
+ * describing the erased database. The previous tree is moved aside, never
+ * deleted. The restore itself has already succeeded; a failure here is
+ * reported, not thrown.
+ */
+async function rebuildProjectionsAfterRestore(basePath: string): Promise<string> {
+  try {
+    const { openWorkflowDatabase } = await import("./db-workspace.js");
+    const { gsdProjectionRoot } = await import("./paths.js");
+    const opened = openWorkflowDatabase(basePath);
+    if (!opened.ok) throw opened.error ?? new Error(opened.reason);
+    const root = gsdProjectionRoot(basePath);
+    const keptAt = join(root, "quarantine", `restore-${new Date().toISOString().replace(/[:.]/g, "-")}`);
+    let kept = false;
+    for (const layout of ["milestones", "phases"]) {
+      if (!existsSync(join(root, layout))) continue;
+      mkdirSync(keptAt, { recursive: true });
+      renameSync(join(root, layout), join(keptAt, layout));
+      kept = true;
+    }
+    const result = await rebuildMarkdownProjectionsFromDb(basePath);
+    if (result.errors.length > 0) throw new Error(result.errors.join("; "));
+    return `Projections rebuilt from the restored database (${result.rendered} rendered)` +
+      (kept ? `; previous projections kept at ${keptAt}.` : ".");
+  } catch (error) {
+    logWarning("command", `db restore-backup could not rebuild projections: ${(error as Error).message}`);
+    return `Projection rebuild failed (${(error as Error).message}) — the .gsd markdown may still describe the erased database; run /gsd rebuild markdown.`;
   }
 }
 
@@ -1534,7 +1601,10 @@ async function executeRestoreBackupPlan(plan: RestoreBackupPlan): Promise<"commi
   if (activeIntent === null) {
     // Once the intent exists, other processes read the main file immutably
     // (WAL ignored). Fold the WAL in first so they never see a stale snapshot.
-    engine.getDb().prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
+    truncateWalCheckpoint(
+      engine.getDb(),
+      "the project database WAL could not be checkpointed (another process holds a read snapshot) — retry when it is idle",
+    );
     const claimed = await claimRestoreBackupIntent(paths.activeIntentPath, intent);
     if (!claimed) {
       activeIntent = readRestoreBackupIntent(paths.activeIntentPath);
@@ -1629,13 +1699,7 @@ async function executeRestoreBackupPlan(plan: RestoreBackupPlan): Promise<"commi
       };
     });
 
-    const checkpoint = engine.getDb().prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
-    const busy = Number(checkpoint?.["busy"] ?? -1);
-    const log = Number(checkpoint?.["log"] ?? Number.NaN);
-    const checkpointed = Number(checkpoint?.["checkpointed"] ?? Number.NaN);
-    if (busy !== 0 || !((log === -1 && checkpointed === -1) || (Number.isSafeInteger(log) && log >= 0 && checkpointed === log))) {
-      throw new Error("restore receipt checkpoint did not complete");
-    }
+    truncateWalCheckpoint(engine.getDb(), "restore receipt checkpoint did not complete");
     restoreSyncFile(dbPath);
     await restoreSyncDirectory(dirname(dbPath));
 
@@ -1736,7 +1800,10 @@ export async function handleDbRestoreBackup(
       const state = candidate.schemaVersion === null
         ? "unreadable (failed verification)"
         : `schema v${candidate.schemaVersion}${candidate.schemaVersion !== candidate.nameVersion ? ` (file name says v${candidate.nameVersion} — suspect)` : ""}, quick_check ${candidate.quickCheck ?? "FAILED"}`;
-      lines.push(`  ${candidate.fileName}  ${state}  ${candidate.byteSize} bytes`);
+      const latest = candidate.fileName.endsWith(".latest")
+        ? `  (newer copy of ${candidate.fileName.slice(0, -".latest".length)})`
+        : "";
+      lines.push(`  ${candidate.fileName}  ${state}  ${candidate.byteSize} bytes${latest}`);
       lines.push(`    sha256: ${candidate.sha256}`);
     }
     lines.push(
@@ -1759,10 +1826,10 @@ export async function handleDbRestoreBackup(
       ctx.ui.notify(`gsd db restore-backup: backup not found: ${backupArg}`, "error");
       return;
     }
-    const nameMatch = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)$`).exec(basename(backupPath));
+    const nameMatch = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)(?:\\.latest)?$`).exec(basename(backupPath));
     if (nameMatch === null || dirname(backupPath) !== dirname(dbPath)) {
       ctx.ui.notify(
-        `gsd db restore-backup: --backup must name a ${basename(dbPath)}.backup-v<N> file beside ${dbPath}.`,
+        `gsd db restore-backup: --backup must name a ${basename(dbPath)}.backup-v<N> or .backup-v<N>.latest file beside ${dbPath}.`,
         "error",
       );
       return;
@@ -1864,8 +1931,6 @@ export async function handleDbRestoreBackup(
       return;
     }
 
-    const projectionNote = "The .gsd markdown still describes the erased database — run /gsd rebuild markdown after the next open.";
-
     // The engine opens only after consent. A database it cannot open is
     // replaced directly; the previous file is kept, never deleted.
     const opened = current === null && existingIntent === null ? null : openWorkflowDatabase(basePath);
@@ -1888,7 +1953,7 @@ export async function handleDbRestoreBackup(
           ? `  Previous database kept at: ${quarantinePath}`
           : "  There was no previous database.",
         "  Receipt: none — the previous database could not be opened, so no import.restore receipt was written.",
-        `  ${projectionNote}`,
+        `  ${await rebuildProjectionsAfterRestore(basePath)}`,
       ].join("\n"), "success");
       return;
     }
@@ -2033,9 +2098,10 @@ export async function handleDbRestoreBackup(
     engine.closeDatabase();
 
     const downgradeNote = verified.schemaVersion < engine.SCHEMA_VERSION
-      ? `To stay on schema v${verified.schemaVersion}, run the older gsd-pi release this backup was taken with — ` +
-        `this gsd-pi stamps v${engine.SCHEMA_VERSION} on next open (keeping a fresh verified backup-v${verified.schemaVersion}).`
+      ? `Migrated to schema v${engine.SCHEMA_VERSION}; the restored v${verified.schemaVersion} bytes are kept as a ` +
+        `verified ${basename(dbPath)}.backup-v${verified.schemaVersion} (or .latest).`
       : `Backup schema matches this gsd-pi (v${engine.SCHEMA_VERSION}).`;
+    const projectionNote = await rebuildProjectionsAfterRestore(basePath);
     ctx.ui.notify([
       `gsd db restore-backup: restored ${basename(backupPath)}`,
       `  Backup schema: v${verified.schemaVersion}`,

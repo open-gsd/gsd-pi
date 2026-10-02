@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1038,6 +1038,63 @@ test("bootstrap adopts stranded active branch before deep project setup", async 
       notifications.every((entry) => entry.level !== "warning" || !entry.message.includes("Stranded work for in-progress milestone M001")),
       "adopting the active milestone should not emit a scary stranded-work warning",
     );
+  } finally {
+    try {
+      closeDatabase();
+    } catch {}
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap aborts with authority-missing when workflow history has no database", async () => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-authority-missing-bootstrap-"));
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# M001: Lost authority\n");
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\ngit:\n  isolation: \"none\"\n---\n");
+  runGit(base, ["init"]);
+  runGit(base, ["config", "user.email", "test@test.com"]);
+  runGit(base, ["config", "user.name", "Test"]);
+  writeFileSync(join(base, "README.md"), "# test\n");
+  runGit(base, ["add", "-A"]);
+  runGit(base, ["commit", "-m", "init"]);
+  const previousCwd = process.cwd();
+  const notifications: Array<{ message: string; level?: string }> = [];
+
+  try {
+    const ready = await bootstrapAutoSession(
+      new AutoSession(),
+      makeCtx(notifications) as any,
+      { getThinkingLevel: () => "medium", getActiveTools: () => [], events: { emit: () => {} } } as any,
+      base,
+      false,
+      false,
+      {
+        shouldUseWorktreeIsolation: () => false,
+        registerSigtermHandler: () => {},
+        registerAutoWorkerForSession: () => {},
+        lockBase: () => base,
+        buildLifecycle: () => ({}) as any,
+      },
+      {
+        classification: "none",
+        lock: null,
+        pausedSession: null,
+        state: null,
+        recovery: null,
+        recoveryPrompt: null,
+        recoveryToolCallCount: 0,
+        artifactSatisfied: false,
+        hasResumableDiskState: false,
+        isBootstrapCrash: false,
+      },
+    );
+
+    assert.equal(ready, false);
+    const error = notifications.find((entry) => entry.level === "error");
+    assert.match(error?.message ?? "", /authority-missing: .*\/gsd db restore-backup.*\/gsd recover/s, JSON.stringify(notifications));
+    assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false, "no empty authority may be created");
+    assert.equal(isSessionLockHeld(base), false, "the aborted bootstrap releases its lock");
   } finally {
     try {
       closeDatabase();

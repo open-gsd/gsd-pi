@@ -469,8 +469,10 @@ function hasProjectState(externalPath: string): boolean {
 
 /**
  * Move a state directory as a whole. The source is deleted only after every
- * entry reached the destination; any failure throws with the source intact,
- * so gsd.db is never separated from its -wal/-shm sidecars or lost.
+ * entry reached the destination; a copy failure throws with the source
+ * intact, so gsd.db is never separated from its -wal/-shm sidecars or lost.
+ * Once the copy is complete the destination is the state directory, so a
+ * failed source cleanup is logged, not thrown.
  */
 export function moveStateDirectory(from: string, to: string): void {
   mkdirSync(dirname(to), { recursive: true });
@@ -481,7 +483,11 @@ export function moveStateDirectory(from: string, to: string): void {
     // Cross-device or non-empty destination: copy everything, then delete.
   }
   cpSync(from, to, { recursive: true, force: true });
-  rmSync(from, { recursive: true, force: true });
+  try {
+    rmSync(from, { recursive: true, force: true });
+  } catch (err) {
+    logWarning("migration", `state moved to ${to}, but the old directory ${from} could not be removed: ${(err as Error).message}`);
+  }
 }
 
 /**

@@ -1237,7 +1237,13 @@ export async function bootstrapAutoSession(
       return releaseLockAndReturn();
     }
 
-    openWorkflowDatabase(base);
+    // Workflow history without a database: stop before any state derivation
+    // or dispatch can run against a missing authority.
+    const firstDbOpen = openWorkflowDatabase(base);
+    if (!firstDbOpen.ok && firstDbOpen.reason === "authority-missing") {
+      ctx.ui.notify(firstDbOpen.error.message, "error");
+      return releaseLockAndReturn();
+    }
 
     // Ensure .gitignore has baseline patterns.
     // ensureGitignore checks for git-tracked .gsd/ files and skips the

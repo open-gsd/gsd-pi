@@ -5,15 +5,15 @@ import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { handleDbRestoreBackup, handleRecover } from "../commands-maintenance.ts";
-import { closeDatabase, isSchemaTooNewError, openDatabase, _getAdapter } from "../gsd-db.ts";
-import { ensureWorkflowDbForBase, openWorkflowDatabase, resolveProjectRootDbPath } from "../db-workspace.ts";
+import { handleDbRestoreBackup, handleRecover, rebuildMarkdownProjectionsFromDb } from "../commands-maintenance.ts";
+import { closeDatabase, insertSlice, isSchemaTooNewError, openDatabase, _getAdapter } from "../gsd-db.ts";
+import { ensureWorkflowDbAtPath, ensureWorkflowDbForBase, openWorkflowDatabase, resolveProjectRootDbPath } from "../db-workspace.ts";
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.ts";
 import { backupDatabaseBeforeMigration } from "../db-migration-backup.ts";
 import { recordSchemaVersion } from "../db-schema-metadata.ts";
@@ -78,12 +78,16 @@ function makeCtx(): { ctx: any; notes: Array<{ message: string; kind: string }> 
  * A project whose live DB holds M100 and whose verified gsd.db.backup-v45
  * holds M999 (same construction as backup-restore-command.test.ts).
  */
-function makeRestoreFixture(): { base: string; dbPath: string; backupPath: string; backupSha: string } {
+function makeRestoreFixture(withSlices = false): { base: string; dbPath: string; backupPath: string; backupSha: string } {
   const { base, dbPath } = makeProject();
+  const seedSlice = (milestoneId: string): void => {
+    if (withSlices) insertSlice({ id: "S01", milestoneId, title: `${milestoneId} slice`, status: "pending", risk: "low", depends: [] });
+  };
   assert.equal(openWorkflowDatabase(base).ok, true);
   const db = _getAdapter()!;
   db.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
     .run("M999", "sentinel-milestone", "active", "2026-01-01T00:00:00.000Z");
+  seedSlice("M999");
   db.exec("DELETE FROM schema_version");
   recordSchemaVersion(db, 45);
   db.exec("PRAGMA user_version = 0");
@@ -94,9 +98,10 @@ function makeRestoreFixture(): { base: string; dbPath: string; backupPath: strin
   const backupPath = `${dbPath}.backup-v45`;
   assert.equal(existsSync(backupPath), true);
   const live = _getAdapter()!;
-  live.exec("DELETE FROM milestones");
+  live.exec("DELETE FROM slices; DELETE FROM milestones;");
   live.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
     .run("M100", "post-cutover", "active", "2026-01-02T00:00:00.000Z");
+  seedSlice("M100");
   closeDatabase();
   return { base, dbPath, backupPath, backupSha: sha256File(backupPath) };
 }
@@ -162,16 +167,48 @@ test("(1c) a fresh project and the explicit import path still create the databas
   assert.equal(created.reason, "created-empty");
 });
 
-test("(1d) /gsd recover is the explicit path that starts a database beside existing markdown", async () => {
+test("(1d) /gsd recover starts a database beside markdown only when the import is applied", async () => {
   const { base, dbPath } = makeProject();
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
-  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# M001\n");
+  writeFileSync(
+    join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
+    "# M001: Recovery Test\n\n**Vision:** Recover.\n\n## Slices\n\n- [ ] **S01: Setup** `risk:low` `depends:[]`\n  > After this: done.\n",
+  );
 
-  const { ctx, notes } = makeCtx();
-  await handleRecover(ctx, base, "");
+  // Preview only (no approval): the empty database is not left behind.
+  const preview = makeCtx();
+  await handleRecover(preview.ctx, base, "");
+  const previewHash = /--preview=(sha256:[0-9a-f]{64})/.exec(preview.notes.map((note) => note.message).join("\n"))?.[1];
+  assert.ok(previewHash, JSON.stringify(preview.notes));
+  assert.equal(existsSync(dbPath), false, "a recover that applied nothing must not leave an empty authority");
+  assert.equal(openWorkflowDatabase(base).reason, "authority-missing");
 
-  assert.equal(existsSync(dbPath), true);
-  assert.ok(!notes.some((note) => /cannot open the project database|No database open/.test(note.message)), JSON.stringify(notes));
+  // Declined interactively, and the bare command error path: still no database.
+  const declined = makeCtx();
+  declined.ctx.ui.confirm = async () => false;
+  await handleRecover(declined.ctx, base, "");
+  assert.equal(existsSync(dbPath), false);
+  await handleRecover(makeCtx().ctx, base, "--restore");
+  assert.equal(existsSync(dbPath), false);
+
+  // Approved: the database stays.
+  const applied = makeCtx();
+  await handleRecover(applied.ctx, base, `--preview=${previewHash}`);
+  assert.ok(!applied.notes.some((note) => /cannot open the project database/.test(note.message)), JSON.stringify(applied.notes));
+  closeDatabase();
+  assert.equal(existsSync(dbPath), true, JSON.stringify(applied.notes));
+  assert.equal(openWorkflowDatabase(base).ok, true);
+});
+
+test("(1e) reopen seams refuse a zero-byte gsd.db beside history instead of creating a schema", () => {
+  const { base, dbPath } = makeProject();
+  mkdirSync(join(base, ".gsd", "phases", "01-foo"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "phases", "01-foo", "01-ROADMAP.md"), "# M001\n");
+  writeFileSync(dbPath, "");
+
+  assert.throws(() => ensureWorkflowDbForBase(base), /authority-missing/);
+  assert.throws(() => ensureWorkflowDbAtPath(dbPath), /authority-missing/);
+  assert.equal(readFileSync(dbPath).length, 0, "the lost authority must stay zero bytes");
 });
 
 test("(2) a newer-schema database is refused with its bytes and journal mode unchanged", async () => {
@@ -211,7 +248,7 @@ test("(3) restore-backup replaces a corrupt database without opening it and keep
   const success = notes.find((note) => note.kind === "success");
   assert.ok(success, `expected a success notification, got ${JSON.stringify(notes)}`);
   assert.match(success.message, /Receipt: none/);
-  assert.equal(sha256File(fixture.dbPath), fixture.backupSha);
+  closeDatabase();
   assert.deepEqual(milestoneIds(fixture.dbPath), ["M999"]);
 
   const quarantined = readdirSync(join(fixture.base, ".gsd")).filter((entry) => entry.startsWith("gsd.db.quarantine-"));
@@ -296,6 +333,89 @@ test("(4b) a healthy database locked by another process is refused, not replaced
   assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
 });
 
+test("(3c) restore refuses before claiming its intent when the WAL cannot be checkpointed", async () => {
+  const fixture = makeRestoreFixture();
+  const before = milestoneIds(fixture.dbPath);
+
+  // Another process holds a read snapshot, so wal_checkpoint(TRUNCATE) is busy.
+  const reader = new sqlite.DatabaseSync(fixture.dbPath);
+  const { ctx, notes } = makeCtx();
+  try {
+    reader.exec("BEGIN");
+    reader.prepare("SELECT COUNT(*) AS n FROM milestones").get();
+    await handleDbRestoreBackup(ctx, fixture.base, consentArgs(fixture));
+  } finally {
+    reader.exec("ROLLBACK");
+    reader.close();
+  }
+  closeDatabase();
+
+  assert.ok(!notes.some((note) => note.kind === "success"), JSON.stringify(notes));
+  assert.match(notes.find((note) => note.kind === "error")?.message ?? "", /WAL could not be checkpointed/);
+  assert.equal(existsSync(join(`${fixture.dbPath}.recovery`, "active.json")), false, "no restore intent may be claimed");
+  assert.deepEqual(milestoneIds(fixture.dbPath), before);
+});
+
+test("(5) after a restore the projection tree equals a clean render of the restored database", async () => {
+  const fixture = makeRestoreFixture(true);
+  // Projections describe the live database (M100) before the restore.
+  assert.equal(openWorkflowDatabase(fixture.base).ok, true);
+  await rebuildMarkdownProjectionsFromDb(fixture.base);
+  closeDatabase();
+  const projectionTree = (): Record<string, string> => {
+    const tree: Record<string, string> = {};
+    const walk = (dir: string, rel: string): void => {
+      if (!existsSync(dir)) return;
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        if (entry.isDirectory()) walk(join(dir, entry.name), `${rel}${entry.name}/`);
+        else tree[`${rel}${entry.name}`] = readFileSync(join(dir, entry.name), "utf8");
+      }
+    };
+    for (const layout of ["milestones", "phases"]) walk(join(fixture.base, ".gsd", layout), `${layout}/`);
+    return tree;
+  };
+  assert.match(Object.values(projectionTree()).join("\n"), /M100/);
+
+  const { ctx, notes } = makeCtx();
+  await handleDbRestoreBackup(ctx, fixture.base, consentArgs(fixture));
+  assert.match(notes.find((note) => note.kind === "success")?.message ?? "", /Projections rebuilt/, JSON.stringify(notes));
+  const afterRestore = projectionTree();
+  closeDatabase();
+
+  for (const layout of ["milestones", "phases"]) rmSync(join(fixture.base, ".gsd", layout), { recursive: true, force: true });
+  assert.equal(openWorkflowDatabase(fixture.base).ok, true);
+  await rebuildMarkdownProjectionsFromDb(fixture.base);
+  const cleanRender = projectionTree();
+
+  assert.match(Object.values(cleanRender).join("\n"), /M999/);
+  assert.deepEqual(afterRestore, cleanRender);
+});
+
+test("(6) a .latest migration backup is listed as the newer copy and can be restored", async () => {
+  const fixture = makeRestoreFixture();
+  const latestPath = `${fixture.backupPath}.latest`;
+  writeFileSync(latestPath, readFileSync(fixture.backupPath));
+  rawExec(
+    latestPath,
+    `INSERT INTO milestones (id, title, status, created_at) VALUES ('M555', 'newer', 'active', '2026-01-03T00:00:00.000Z');
+     PRAGMA wal_checkpoint(TRUNCATE);`,
+  );
+  for (const suffix of ["-wal", "-shm"]) rmSync(`${latestPath}${suffix}`, { force: true });
+  const latestSha = sha256File(latestPath);
+
+  const listing = makeCtx();
+  await handleDbRestoreBackup(listing.ctx, fixture.base, "");
+  const listed = listing.notes.map((note) => note.message).join("\n");
+  assert.match(listed, /gsd\.db\.backup-v45\.latest .*\(newer copy of gsd\.db\.backup-v45\)/);
+  assert.ok(listed.includes(latestSha), listed);
+
+  const { ctx, notes } = makeCtx();
+  await handleDbRestoreBackup(ctx, fixture.base, consentArgs({ backupPath: latestPath, backupSha: latestSha }));
+  closeDatabase();
+  assert.ok(notes.some((note) => note.kind === "success"), JSON.stringify(notes));
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M555", "M999"]);
+});
+
 test("a verified migration backup is not overwritten by a later same-version backup", () => {
   const { dbPath } = makeProject();
   assert.equal(openDatabase(dbPath), true);
@@ -338,4 +458,30 @@ test("a failed state-directory move leaves the source intact", () => {
   moveStateDirectory(from, to);
   assert.equal(existsSync(from), false);
   assert.deepEqual(readdirSync(to).sort(), ["gsd.db", "gsd.db-wal"]);
+});
+
+test("a state-directory move whose source cleanup fails still succeeds with the complete copy", (t) => {
+  if (process.platform === "win32" || process.getuid?.() === 0) {
+    t.skip("needs POSIX permissions enforced for the current user");
+    return;
+  }
+  const root = mkdtempSync(join(tmpdir(), "gsd-state-move-"));
+  tempDirs.add(root);
+  const from = join(root, "old");
+  const to = join(root, "new");
+  mkdirSync(join(from, "locked"), { recursive: true });
+  writeFileSync(join(from, "gsd.db"), "db");
+  writeFileSync(join(from, "locked", "entry"), "x");
+  // A non-empty destination forces copy-then-delete; a read-only subdirectory
+  // makes the source delete fail after the copy completed.
+  mkdirSync(to);
+  writeFileSync(join(to, "stale"), "s");
+  chmodSync(join(from, "locked"), 0o500);
+  try {
+    assert.doesNotThrow(() => moveStateDirectory(from, to));
+  } finally {
+    chmodSync(join(from, "locked"), 0o700);
+  }
+  assert.equal(readFileSync(join(to, "gsd.db"), "utf8"), "db");
+  assert.equal(readFileSync(join(to, "locked", "entry"), "utf8"), "x");
 });
