@@ -1843,7 +1843,7 @@ export async function bootstrapAutoSession(
     // ── DB lifecycle ──
     const gsdDbPath = resolveProjectRootDbPath(s.basePath);
     const initialDbOpen = openWorkflowDatabase(s.basePath);
-    if (!initialDbOpen.ok && (initialDbOpen.reason === "open-failed" || initialDbOpen.reason === "locked")) {
+    if (!initialDbOpen.ok && (initialDbOpen.reason === "open-failed" || initialDbOpen.reason === "locked" || initialDbOpen.reason === "authority-missing")) {
       logError("engine", `failed to initialize project database: ${initialDbOpen.error?.message ?? "open failed"}`);
     }
     if (_shouldAbortBootstrapForUnavailableDbForTest(gsdDbPath, isDbAvailable())) {
@@ -1866,11 +1866,9 @@ export async function bootstrapAutoSession(
         ? "The database file could not be opened"
         : dbStatus.lastPhase === "initSchema"
           ? "The database schema could not be initialized"
-          : dbStatus.lastPhase === "vacuum-recovery"
-            ? "Corruption recovery (VACUUM) failed"
-            : dbStatus.attempted
-              ? "The database could not be opened (phase unknown)"
-              : "The database provider could not be loaded";
+          : dbStatus.attempted
+            ? "The database could not be opened (phase unknown)"
+            : "The database provider could not be loaded";
       const errorDetail = dbStatus.lastError ? ` (${dbStatus.lastError.message})` : "";
       const providerHint = dbStatus.provider
         ? ` Provider: ${dbStatus.provider}.`

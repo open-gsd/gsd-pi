@@ -67,7 +67,7 @@ type WorkflowDatabaseOpenResult =
       reason: "missing-database" | "missing-gsd-dir" | "locked" | "open-failed";
       error?: Error;
     }
-  | { ok: false; reason: "schema-too-new"; error: Error };
+  | { ok: false; reason: "schema-too-new" | "authority-missing"; error: Error };
 
 async function importBridgeModule(): Promise<GsdMcpBridge> {
   return importLocalModule<GsdMcpBridge>("../../../src/resources/extensions/gsd/mcp-bridge.js");

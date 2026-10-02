@@ -182,7 +182,7 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
     );
   }
 
-  const opened = await ensureDbOpen(targetRoot);
+  const opened = await ensureDbOpen(targetRoot, { createEmptyAuthority: true });
   if (!opened) return;
 
   try {

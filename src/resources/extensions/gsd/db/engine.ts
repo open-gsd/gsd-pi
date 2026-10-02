@@ -213,6 +213,13 @@ function assessStartupRepair(db: DbAdapter): StartupRepairAssessment {
     FROM sqlite_master
     WHERE type = 'table' AND name = 'schema_version'
   `).get();
+  // Refuse a newer schema on the first read-only statement: no maintenance
+  // claim, journal-mode change or DDL may touch a database this binary
+  // cannot own.
+  if (schemaMetadata !== undefined) {
+    const currentVersion = getCurrentSchemaVersion(db);
+    if (currentVersion > SCHEMA_VERSION) throw new SchemaTooNewError(currentVersion, SCHEMA_VERSION);
+  }
   const fts = inspectMemoriesFtsStartupState(db);
   const required = schemaMetadata === undefined
     || getCurrentSchemaVersion(db) !== SCHEMA_VERSION
@@ -2299,9 +2306,22 @@ function runStartupRepair(adapter: DbAdapter, path: string, forceMemoriesFtsRebu
     } catch (error) {
       if (!shouldAttemptVacuumRecovery(true, error)) throw error;
       _startupRepairBoundaryForTest?.("before-vacuum", path);
+      // VACUUM rewrites every page. Keep the pre-repair bytes so a repair
+      // that loses rows stays recoverable; the copy is never auto-deleted.
+      const corruptCopyPath = `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      copyFileSync(path, corruptCopyPath);
+      if (existsSync(`${path}-wal`)) copyFileSync(`${path}-wal`, `${corruptCopyPath}-wal`);
       adapter.exec("VACUUM");
       initialize();
-      logWarning("db", "recovered corrupt database via VACUUM");
+      const integrity = adapter.prepare("PRAGMA integrity_check").all();
+      if (integrity.length !== 1 || integrity[0]?.["integrity_check"] !== "ok") {
+        throw new GSDError(
+          GSD_STALE_STATE,
+          `gsd-db: Database is still corrupt after VACUUM (pre-repair copy: ${corruptCopyPath}). ` +
+          "Restore a verified backup with /gsd db restore-backup.",
+        );
+      }
+      logWarning("db", `recovered corrupt database via VACUUM; pre-repair copy kept at ${corruptCopyPath}`);
     }
   });
 }
@@ -2635,6 +2655,8 @@ export function refreshOpenDatabaseFromDisk(): boolean {
     }
     return opened;
   } catch (e) {
+    // Version skew is never generic unavailability: refuse loudly.
+    if (isSchemaTooNewError(e)) throw e;
     logWarning("db", `database refresh failed: ${(e as Error).message}`);
     return false;
   }

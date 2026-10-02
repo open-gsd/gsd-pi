@@ -26,9 +26,11 @@ export function isMigrationBackupError(err: unknown): err is MigrationBackupErro
 /**
  * Creates a same-version backup before file-backed schema migrations.
  *
- * Same-version backups are replaced so they always represent the database
- * being migrated. WAL checkpoint, copy, integrity-check, and schema-version
- * failures are logged and then rethrown before migration DDL runs.
+ * A verified `backup-v<N>` is never overwritten: a retry after a failed
+ * migration would otherwise replace the pristine copy with a half-migrated
+ * database. The retry copy goes to `backup-v<N>.latest` instead. WAL
+ * checkpoint, copy, integrity-check, and schema-version failures are logged
+ * and then rethrown before migration DDL runs.
  */
 export function backupDatabaseBeforeMigration(
   db: DbAdapter,
@@ -39,14 +41,28 @@ export function backupDatabaseBeforeMigration(
   if (!dbPath || dbPath === ":memory:" || !deps.existsSync(dbPath)) return;
 
   try {
-    const backupPath = `${dbPath}.backup-v${currentVersion}`;
+    const allowMissingSchemaVersion = deps.allowMissingSchemaVersion === true;
+    let backupPath = `${dbPath}.backup-v${currentVersion}`;
+    if (deps.existsSync(backupPath) && backupVerifies(db, backupPath, currentVersion, allowMissingSchemaVersion)) {
+      backupPath = `${backupPath}.latest`;
+    }
     checkpointWal(db);
     deps.copyFileSync(dbPath, backupPath);
-    verifyBackup(db, backupPath, currentVersion, deps.allowMissingSchemaVersion === true);
+    verifyBackup(db, backupPath, currentVersion, allowMissingSchemaVersion);
   } catch (backupErr) {
     const error = toMigrationBackupError(backupErr);
     deps.logWarning("db", `Pre-migration backup failed: ${error.message}`);
     throw error;
+  }
+}
+
+function backupVerifies(db: DbAdapter, backupPath: string, currentVersion: number, allowMissingSchemaVersion: boolean): boolean {
+  try {
+    verifyBackup(db, backupPath, currentVersion, allowMissingSchemaVersion);
+    return true;
+  } catch {
+    // An unreadable or wrong-version file is not a backup worth keeping.
+    return false;
   }
 }
 

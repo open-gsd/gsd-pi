@@ -55,7 +55,7 @@ class FakeAdapter implements DbAdapter {
 }
 
 describe("db-migration-backup", () => {
-  test("skips missing and memory databases but replaces existing backups", () => {
+  test("skips missing and memory databases and never overwrites a verified backup", () => {
     const db = new FakeAdapter();
     db.backupVersion = 7;
     const copies: Array<[string, string]> = [];
@@ -77,9 +77,13 @@ describe("db-migration-backup", () => {
       logWarning: (_scope, message) => warnings.push(message),
     });
 
-    assert.deepEqual(copies, [["/tmp/gsd.db", "/tmp/gsd.db.backup-v7"]]);
+    // The existing backup-v7 verifies, so the retry copy goes beside it.
+    assert.deepEqual(copies, [["/tmp/gsd.db", "/tmp/gsd.db.backup-v7.latest"]]);
     assert.deepEqual(warnings, []);
     assert.deepEqual(db.prepareCalls, [
+      "ATTACH DATABASE ? AS migration_backup",
+      "PRAGMA migration_backup.quick_check",
+      "SELECT MAX(version) AS version FROM migration_backup.schema_version",
       "PRAGMA wal_checkpoint(TRUNCATE)",
       "ATTACH DATABASE ? AS migration_backup",
       "PRAGMA migration_backup.quick_check",
@@ -111,7 +115,7 @@ describe("db-migration-backup", () => {
     const copies: Array<[string, string]> = [];
 
     backupDatabaseBeforeMigration(db, "/tmp/legacy.db", 1, {
-      existsSync: () => true,
+      existsSync: (path) => path === "/tmp/legacy.db",
       copyFileSync: (src, dest) => copies.push([src, dest]),
       logWarning: () => assert.fail("should not warn"),
       allowMissingSchemaVersion: true,
@@ -195,7 +199,7 @@ describe("db-migration-backup", () => {
     assert.throws(
       () =>
         backupDatabaseBeforeMigration(db, "/tmp/gsd.db", 12, {
-          existsSync: () => true,
+          existsSync: (path) => path === "/tmp/gsd.db",
           copyFileSync: () => {},
           logWarning: (_scope, message) => warnings.push(message),
         }),

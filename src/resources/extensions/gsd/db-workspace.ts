@@ -2,7 +2,7 @@
 // File Purpose: Workspace-facing Interface for opening and maintaining the workflow database.
 
 import { createHash } from "node:crypto";
-import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 import { syncDirectoryEntry } from "@gsd/native/directory-sync";
@@ -62,6 +62,7 @@ import {
 import { drillLegacyImportBackupRestore } from "./legacy-import-restore-drill.js";
 import { inspectSqliteReadOnlySnapshot } from "./sqlite-readonly.js";
 import { atomicWriteSync } from "./atomic-write.js";
+import { GSDError, GSD_STALE_STATE } from "./errors.js";
 import {
   assessLegacyImportRestore,
   type LegacyImportRestoreAssessment,
@@ -93,6 +94,7 @@ export type WorkflowDatabaseOpenReason =
   | "created-empty"
   | "missing-database"
   | "missing-gsd-dir"
+  | "authority-missing"
   | "locked"
   | "open-failed"
   | "schema-too-new";
@@ -112,11 +114,21 @@ export type WorkflowDatabaseOpenResult =
   | {
       // Refuse-newer version skew: the typed engine error (with its exact
       // message) is ALWAYS attached so read seams can surface it loudly.
+      // "authority-missing": the project has workflow history on disk but no
+      // database; the error names the operator path.
       ok: false;
-      reason: "schema-too-new";
+      reason: "schema-too-new" | "authority-missing";
       location: WorkflowDatabaseLocation;
       error: Error;
     };
+
+export interface OpenWorkflowDatabaseOptions {
+  /**
+   * Explicit import/bootstrap only (/gsd recover, /gsd migrate): start an
+   * empty database although the project already holds workflow history.
+   */
+  createEmptyAuthority?: boolean;
+}
 
 export type WorkflowDatabaseStatus = ReturnType<typeof getDbStatus>;
 export type WorkflowDatabaseProvider = ReturnType<typeof getDbProvider>;
@@ -154,9 +166,33 @@ export function resolveProjectRootDbPath(basePath: string): string {
   return resolveWorkflowDatabaseLocation(basePath).projectDb;
 }
 
+/**
+ * True when `.gsd` proves an earlier Workflow Authority existed: a milestone
+ * directory with content, or a migration backup. An absent or zero-byte
+ * gsd.db beside them is a lost authority, not a fresh project.
+ */
+function hasWorkflowHistoryWithoutDatabase(location: WorkflowDatabaseLocation): boolean {
+  try {
+    if (statSync(location.projectDb).size > 0) return false;
+  } catch {
+    // Absent database: fall through to the history check.
+  }
+  const entries = (dir: string): string[] => {
+    try {
+      return readdirSync(dir);
+    } catch {
+      return [];
+    }
+  };
+  const milestonesDir = join(location.projectGsd, "milestones");
+  return entries(milestonesDir).some((milestone) => entries(join(milestonesDir, milestone)).length > 0)
+    || entries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"));
+}
+
 function openWorkflowDatabaseWithMode(
   basePath: string,
   createIfMissing: boolean,
+  options: OpenWorkflowDatabaseOptions = {},
 ): WorkflowDatabaseOpenResult {
   const location = resolveWorkflowDatabaseLocation(basePath);
   if (!existsSync(location.projectGsd)) {
@@ -166,6 +202,19 @@ function openWorkflowDatabaseWithMode(
   const existed = existsSync(location.projectDb);
   if (!createIfMissing && !existed) {
     return { ok: false, reason: "missing-database", location };
+  }
+  if (!options.createEmptyAuthority && hasWorkflowHistoryWithoutDatabase(location)) {
+    return {
+      ok: false,
+      reason: "authority-missing",
+      location,
+      error: new GSDError(
+        GSD_STALE_STATE,
+        `authority-missing: ${location.projectGsd} holds workflow history but ${location.projectDb} is ` +
+        "missing or empty. No empty database was created. Restore a backup with /gsd db restore-backup, " +
+        "or import the markdown with /gsd recover.",
+      ),
+    };
   }
   try {
     const opened = createIfMissing
@@ -212,8 +261,11 @@ function openWorkflowDatabaseWithMode(
   }
 }
 
-export function openWorkflowDatabase(basePath: string): WorkflowDatabaseOpenResult {
-  return openWorkflowDatabaseWithMode(basePath, true);
+export function openWorkflowDatabase(
+  basePath: string,
+  options: OpenWorkflowDatabaseOptions = {},
+): WorkflowDatabaseOpenResult {
+  return openWorkflowDatabaseWithMode(basePath, true, options);
 }
 
 export function openExistingWorkflowDatabase(basePath: string): WorkflowDatabaseOpenResult {
@@ -297,6 +349,7 @@ export function ensureWorkflowDbAtPath(dbPath: string | null): boolean {
   try {
     return openWorkflowDatabasePath(dbPath);
   } catch (err) {
+    if (isSchemaTooNewError(err)) throw err;
     logWarning("reconcile", `ensureWorkflowDbAtPath could not reopen DB: ${(err as Error).message}`);
     return false;
   }
@@ -320,6 +373,7 @@ export function ensureWorkflowDbForBase(
     if (isDbAvailable() && getWorkflowDatabasePath() === dbPath) return true;
     return openWorkflowDatabasePath(dbPath);
   } catch (err) {
+    if (isSchemaTooNewError(err)) throw err;
     logWarning("reconcile", `ensureWorkflowDbForBase could not reopen DB: ${(err as Error).message}`);
     return false;
   }

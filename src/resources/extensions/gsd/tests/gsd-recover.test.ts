@@ -1113,7 +1113,8 @@ describe('gsd-recover', async () => {
     const stderr: string[] = [];
     try {
       installCorpusCase(base, 'gsd-nested');
-      assert.equal(openWorkflowDatabase(base).ok, true);
+      assert.equal(openWorkflowDatabase(base).reason, 'authority-missing');
+      assert.equal(openWorkflowDatabase(base, { createEmptyAuthority: true }).ok, true);
       const { ctx, notes } = makeCtx();
       await handleRecover(ctx, base, previewApproval(base));
       const db = _getAdapter()!;

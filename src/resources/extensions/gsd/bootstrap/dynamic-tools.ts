@@ -13,6 +13,7 @@ import {
   openWorkflowDatabaseIsolated,
   openWorkflowDatabase,
   resolveProjectRootDbPath,
+  type OpenWorkflowDatabaseOptions,
   type WorkflowDatabaseOpenResult,
   type WorkflowDatabaseStatus,
 } from "../db-workspace.js";
@@ -133,7 +134,6 @@ function dbOpenPhaseHint(status: WorkflowDatabaseStatus): string {
   if (status.lastPhase === "locked") return "The database is locked by another process";
   if (status.lastPhase === "open") return "The database file could not be opened";
   if (status.lastPhase === "initSchema") return "The database schema could not be initialized";
-  if (status.lastPhase === "vacuum-recovery") return "Corruption recovery (VACUUM) failed";
   if (status.attempted) return "The database could not be opened";
   return "The database provider could not be loaded";
 }
@@ -145,6 +145,10 @@ export function formatWorkflowDatabaseOpenFailure(
 ): string {
   if (result.reason === "missing-gsd-dir") {
     return `ensureDbOpen failed — no .gsd directory found at ${result.location.projectGsd}`;
+  }
+
+  if (result.reason === "authority-missing") {
+    return `ensureDbOpen failed — ${result.error.message}`;
   }
 
   if (result.reason === "missing-database") {
@@ -160,11 +164,17 @@ export function formatWorkflowDatabaseOpenFailure(
   );
 }
 
-export async function ensureDbOpen(basePath: string = safeWorkspaceCwd()): Promise<boolean> {
-  const result = openWorkflowDatabase(basePath);
+export async function ensureDbOpen(
+  basePath: string = safeWorkspaceCwd(),
+  options: OpenWorkflowDatabaseOptions = {},
+): Promise<boolean> {
+  const result = openWorkflowDatabase(basePath, options);
   if (result.ok) return true;
 
   logWarning("bootstrap", formatWorkflowDatabaseOpenFailure(result));
+  // A too-new schema or a lost authority is not generic unavailability:
+  // throw the typed error so callers cannot degrade to "not available".
+  if (result.reason === "schema-too-new" || result.reason === "authority-missing") throw result.error;
   return false;
 }
 

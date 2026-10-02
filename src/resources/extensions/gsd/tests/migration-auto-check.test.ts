@@ -95,7 +95,7 @@ test("migration auto-check preserves empty DB and reports explicit recovery", as
     await writeGSDDirectory(projectFixture(), base);
     assert.deepEqual(countMarkdownHierarchy(base), { milestones: 1, slices: 1, tasks: 1 });
 
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     assert.equal(getAllMilestones().length, 0, "fresh authoritative DB starts empty");
 
     const result = await checkMarkdownHierarchyAgainstDb(base);
@@ -115,7 +115,7 @@ test("migration auto-check preserves DB on hierarchy count mismatch", async () =
   const base = makeBase();
   try {
     await writeGSDDirectory(projectFixture(), base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Legacy Slice", status: "pending", risk: "medium", depends: [], demo: "Legacy slice demo", sequence: 1 });
     assert.equal(getSliceTasks("M001", "S01").length, 0, "test fixture simulates stale DB task count");
@@ -136,7 +136,7 @@ test("migration auto-check leaves matching DB hierarchy alone", async () => {
   const base = makeBase();
   try {
     await writeGSDDirectory(projectFixture(), base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Legacy Slice", status: "pending", risk: "medium", depends: [], demo: "Legacy slice demo", sequence: 1 });
     insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Legacy Task", status: "pending" });
@@ -155,7 +155,7 @@ test("migration auto-check ignores unplanned DB milestones deliberately omitted 
   const base = makeBase();
   t.after(() => cleanup(base));
   await writeGSDDirectory(projectFixture(), base);
-  assert.equal(await ensureDbOpen(base), true);
+  assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
   insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Legacy Slice", status: "pending", risk: "medium", depends: [], demo: "Legacy slice demo", sequence: 1 });
   insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Legacy Task", status: "pending" });
@@ -182,7 +182,7 @@ test("migration auto-check omits skipped slices and tasks that ROADMAP/PLAN omit
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
 
     insertMilestone({
       id: "M001",
@@ -255,7 +255,7 @@ test("migration auto-check flags a populated DB with missing markdown and points
     // over a populated DB. The previous early return treated all-zero markdown
     // as 'no project' and never even opened the DB, silently hiding the rows.
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     assert.deepEqual(countMarkdownHierarchy(base), { milestones: 0, slices: 0, tasks: 0 });
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Legacy Slice", status: "pending", risk: "medium", depends: [], demo: "Legacy slice demo", sequence: 1 });
@@ -281,7 +281,7 @@ test("migration auto-check detects identity drift even when counts match", async
   const base = makeBase();
   try {
     await writeGSDDirectory(projectFixture(), base); // markdown: M001 / S01 / T01
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     // Same cardinalities (1M/1S/1T) but a DIFFERENT slice identity (S99 vs S01).
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     insertSlice({ id: "S99", milestoneId: "M001", title: "Other Slice", status: "pending", risk: "medium", depends: [], demo: "d", sequence: 1 });
@@ -314,7 +314,7 @@ test("migration auto-check canonicalizes a legacy descriptor milestone dir (no f
     const milestonesRoot = join(base, ".gsd", "milestones");
     renameSync(join(milestonesRoot, "M001"), join(milestonesRoot, "M001-old"));
 
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Legacy Slice", status: "pending", risk: "medium", depends: [], demo: "Legacy slice demo", sequence: 1 });
     insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Legacy Task", status: "pending" });
@@ -335,7 +335,7 @@ test("migration auto-check recognizes suffixed flat-phase projection directories
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
 
     insertMilestone({
       id: "M001-re4q3k",
@@ -402,7 +402,7 @@ test("migration auto-check refreshes a stale open DB handle before comparing", a
   const base = makeBase();
   try {
     await writeGSDDirectory(projectFixture(), base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     checkpointDatabase();
 
@@ -446,7 +446,7 @@ test("migration auto-check ignores discussion-scratch milestone dirs (CONTEXT on
   const base = makeBase();
   try {
     await writeGSDDirectory(projectFixture(), base); // markdown: M001 / S01 / T01
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Legacy Slice", status: "pending", risk: "medium", depends: [], demo: "Legacy slice demo", sequence: 1 });
     insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Legacy Task", status: "pending" });
@@ -472,7 +472,7 @@ test("migration auto-check stays quiet mid-first-discussion (scratch dir over em
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     writeScratchMilestoneDir(base, "M001", "M001-CONTEXT.md");
 
     const result = await checkMarkdownHierarchyAgainstDb(base);
@@ -487,7 +487,7 @@ test("migration auto-check still reports real drift with scratch dirs excluded f
   const base = makeBase();
   try {
     await writeGSDDirectory(projectFixture(), base); // markdown: M001 / S01 / T01, DB empty
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     writeScratchMilestoneDir(base, "M002", "M002-CONTEXT.md");
 
     const result = await checkMarkdownHierarchyAgainstDb(base);
@@ -558,7 +558,7 @@ test("migration auto-check still compares a roadmapless milestone that HAS a DB 
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     // Post-handoff queued milestone: CONTEXT-only dir WITH a DB row. It must
     // stay in the comparison (both sides have it → in-sync).
     insertMilestone({ id: "M001", title: "M001", status: "queued" });
@@ -577,7 +577,7 @@ test("migration auto-check aligns a roadmapless milestone dir to its suffixed DB
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     // Team-mode suffixed milestone whose markdown dir has no ROADMAP yet (e.g. a
     // freshly handed-off / zero-slice milestone). Markdown discovers the bare
     // "M001"; the DB stores the authoritative suffixed "M001-re4q3k". The
@@ -601,7 +601,7 @@ test("rebuildMarkdownProjectionsFromDb realigns markdown when DB holds extra row
   const base = makeBase();
   try {
     await writeGSDDirectory(projectFixture(), base); // markdown: M001 / S01 / T01
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "M001", title: "Legacy Milestone", status: "active" });
     insertSlice({
       id: "S01",
@@ -659,7 +659,7 @@ test("slice-prefixed DB task ids converge after markdown projection rebuild", as
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "M016", title: "Prefixed tasks", status: "active" });
     insertSlice({
       id: "S05",
@@ -699,7 +699,7 @@ test("rebuildMarkdownProjectionsFromDb realigns markdown for numeric milestone I
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({ id: "15", title: "Numeric milestone", status: "active" });
     insertSlice({
       id: "S01",
@@ -740,7 +740,7 @@ test("rebuildMarkdownProjectionsFromDb realigns markdown for planned zero-slice 
   const base = makeBase();
   try {
     await writeGSDDirectory({ projectContent: "# P\n", decisionsContent: "", requirements: [], milestones: [] }, base);
-    assert.equal(await ensureDbOpen(base), true);
+    assert.equal(await ensureDbOpen(base, { createEmptyAuthority: true }), true);
     insertMilestone({
       id: "M016",
       title: "Queued milestone",

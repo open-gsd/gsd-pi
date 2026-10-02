@@ -716,8 +716,19 @@ export async function handleRecover(
   const { countDbHierarchy, countMarkdownHierarchy } = await import("./migration-auto-check.js");
 
   if (!dbAvailable()) {
-    ctx.ui.notify("gsd recover: No database open. Run a GSD command first to initialize the DB.", "error");
-    return;
+    // Explicit import is the one operator path that may start an empty
+    // database beside existing markdown.
+    const { openWorkflowDatabase } = await import("./db-workspace.js");
+    const opened = openWorkflowDatabase(basePath, { createEmptyAuthority: true });
+    if (!opened.ok) {
+      const detail = opened.error?.message ?? opened.reason;
+      ctx.ui.notify(
+        `gsd recover: cannot open the project database (${detail}). ` +
+        "If gsd.db is corrupt, restore a verified backup with /gsd db restore-backup.",
+        "error",
+      );
+      return;
+    }
   }
 
   // Show both sides before the user approves the explicit import. Application
@@ -1222,25 +1233,24 @@ async function listRestoreBackupCandidates(dbPath: string): Promise<RestoreBacku
 }
 
 /**
- * Verify a restore candidate through the same ATTACH + quick_check +
- * schema-version approach as db-migration-backup.ts's verifyBackup.
+ * Verify a restore candidate on its own read-only connection (quick_check +
+ * schema-version read). The live database is never opened or attached, so a
+ * corrupt, too-new or absent live database cannot block verification.
  */
 async function verifyRestoreBackupCandidate(
   backupPath: string,
   expectedNameVersion: number,
 ): Promise<VerifiedRestoreBackup> {
-  const { getDb, SCHEMA_VERSION } = await import("./db/engine.js");
-  const db = getDb();
-  let attached = false;
+  const { SCHEMA_VERSION } = await import("./db/engine.js");
+  const { openSqliteReadOnly } = await import("./sqlite-readonly.js");
+  const { db } = openSqliteReadOnly(backupPath);
   try {
-    db.prepare("ATTACH DATABASE ? AS restore_candidate").run(backupPath);
-    attached = true;
-    const checkRows = db.prepare("PRAGMA restore_candidate.quick_check").all();
+    const checkRows = db.prepare("PRAGMA quick_check").all();
     if (checkRows.length !== 1 || checkRows[0]?.["quick_check"] !== "ok") {
       throw new Error(`backup failed quick_check: ${checkRows.map((row) => String(row?.["quick_check"])).join("; ")}`);
     }
     const version = Number(
-      db.prepare("SELECT MAX(version) AS version FROM restore_candidate.schema_version").get()?.["version"],
+      db.prepare("SELECT MAX(version) AS version FROM schema_version").get()?.["version"],
     );
     if (!Number.isSafeInteger(version) || version <= 0) {
       throw new Error("backup has no readable schema_version");
@@ -1255,16 +1265,17 @@ async function verifyRestoreBackupCandidate(
       );
     }
     const receipts = db.prepare(
-      "SELECT 1 AS present FROM restore_candidate.sqlite_master WHERE type = 'table' AND name = 'workflow_import_restores'",
+      "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'workflow_import_restores'",
     ).get()?.["present"];
     if (receipts !== 1) {
       throw new Error(
         "backup predates v45 restore receipts — restore it manually: stop gsd-pi, replace the project " +
-        "gsd.db with the backup file, then start the older gsd-pi release the backup was taken with",
+        "gsd.db with the backup file, delete gsd.db-wal and gsd.db-shm, then start the older gsd-pi " +
+        "release the backup was taken with",
       );
     }
     const authority = db.prepare(
-      "SELECT project_id, revision, authority_epoch FROM restore_candidate.project_authority WHERE singleton = 1",
+      "SELECT project_id, revision, authority_epoch FROM project_authority WHERE singleton = 1",
     ).get();
     if (
       typeof authority?.["project_id"] !== "string"
@@ -1281,7 +1292,88 @@ async function verifyRestoreBackupCandidate(
       authorityEpoch: Number(authority["authority_epoch"]),
     };
   } finally {
-    if (attached) db.exec("DETACH DATABASE restore_candidate");
+    db.close();
+  }
+}
+
+type CurrentRestoreAuthority = {
+  projectId: string | null;
+  revision: number;
+  authorityEpoch: number;
+  headOperationId: string | null;
+};
+
+/**
+ * Read the live database's authority position without opening it through the
+ * engine (no migration, no repair). Returns null when the file is absent,
+ * empty or fails quick_check: such a database cannot be opened, only replaced.
+ */
+async function readCurrentRestoreAuthority(dbPath: string): Promise<CurrentRestoreAuthority | null> {
+  const { openSqliteReadOnly } = await import("./sqlite-readonly.js");
+  try {
+    if (lstatSync(dbPath).size === 0) return null;
+    const { db } = openSqliteReadOnly(dbPath);
+    try {
+      const checkRows = db.prepare("PRAGMA quick_check").all();
+      if (checkRows.length !== 1 || checkRows[0]?.["quick_check"] !== "ok") return null;
+      const tables = new Set(
+        db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => String(row["name"])),
+      );
+      const authority = tables.has("project_authority")
+        ? db.prepare("SELECT project_id, revision, authority_epoch FROM project_authority WHERE singleton = 1").get()
+        : undefined;
+      const head = tables.has("workflow_operations")
+        ? db.prepare("SELECT operation_id FROM workflow_operations ORDER BY resulting_revision DESC LIMIT 1").get()
+        : undefined;
+      return {
+        projectId: typeof authority?.["project_id"] === "string" ? authority["project_id"] : null,
+        revision: Number(authority?.["revision"] ?? 0),
+        authorityEpoch: Number(authority?.["authority_epoch"] ?? 0),
+        headOperationId: typeof head?.["operation_id"] === "string" ? head["operation_id"] : null,
+      };
+    } finally {
+      db.close();
+    }
+  } catch {
+    // Unreadable bytes are the corrupt-database case this command recovers.
+    return null;
+  }
+}
+
+/**
+ * Publish verified backup bytes over a database the engine cannot open
+ * (absent, empty, corrupt or newer-schema). The previous file is kept beside
+ * the database, never deleted. No import.restore receipt is written: a
+ * receipt needs the replacement capability of an openable original.
+ */
+async function publishBackupOverUnopenableDatabase(
+  dbPath: string,
+  backupPath: string,
+  backupSha: string,
+): Promise<string | null> {
+  const staged = `${dbPath}.restore-${randomUUID()}`;
+  try {
+    copyFileSync(backupPath, staged, fsConstants.COPYFILE_EXCL);
+    chmodSync(staged, 0o600);
+    restoreSyncFile(staged);
+    if (sha256FileHex(staged) !== backupSha) {
+      throw new Error("backup file changed after consent — re-list candidates and re-consent");
+    }
+    const quarantinePath = existsSync(dbPath)
+      ? `${dbPath}.quarantine-${new Date().toISOString().replace(/[:.]/g, "-")}`
+      : null;
+    if (quarantinePath !== null) renameSync(dbPath, quarantinePath);
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      if (!existsSync(`${dbPath}${suffix}`)) continue;
+      // Stale sidecars must never be replayed into the restored bytes.
+      if (quarantinePath !== null) renameSync(`${dbPath}${suffix}`, `${quarantinePath}${suffix}`);
+      else unlinkSync(`${dbPath}${suffix}`);
+    }
+    renameSync(staged, dbPath);
+    await restoreSyncDirectory(dirname(dbPath));
+    return quarantinePath;
+  } finally {
+    if (existsSync(staged)) unlinkSync(staged);
   }
 }
 
@@ -1431,6 +1523,9 @@ async function executeRestoreBackupPlan(plan: RestoreBackupPlan): Promise<"commi
     throw new Error(`a different restore intent is active at ${paths.activeIntentPath}`);
   }
   if (activeIntent === null) {
+    // Once the intent exists, other processes read the main file immutably
+    // (WAL ignored). Fold the WAL in first so they never see a stale snapshot.
+    engine.getDb().prepare("PRAGMA wal_checkpoint(TRUNCATE)").get();
     const claimed = await claimRestoreBackupIntent(paths.activeIntentPath, intent);
     if (!claimed) {
       activeIntent = readRestoreBackupIntent(paths.activeIntentPath);
@@ -1588,7 +1683,8 @@ async function executeRestoreBackupPlan(plan: RestoreBackupPlan): Promise<"commi
  * beside the project database with their schema versions and consent hashes
  * without mutating anything. With `--backup` and an exact
  * `--consent=proceed:destructive-database-restore:sha256:<hash>` token, it
- * verifies the backup (ATTACH + quick_check + schema-version read), publishes
+ * verifies the backup (read-only quick_check + schema-version read), refuses
+ * when the current Authority Epoch is higher than the backup's, publishes
  * it through the database replacement machinery inside the EXCLUSIVE
  * maintenance claim, and persists an auditable import.restore receipt through
  * the existing authority-recovery writers.
@@ -1672,19 +1768,6 @@ export async function handleDbRestoreBackup(
       );
       return;
     }
-    if (!existsSync(dbPath)) {
-      ctx.ui.notify(`gsd db restore-backup: no project database at ${dbPath} — nothing to restore over.`, "error");
-      return;
-    }
-
-    // Ensure the engine DB is open. A crashed earlier restore opens as a
-    // read-only observation connection; fresh runs migrate as usual.
-    const opened = openWorkflowDatabase(basePath);
-    if (!opened.ok) {
-      ctx.ui.notify(`gsd db restore-backup: cannot open the project database (${opened.reason}).`, "error");
-      return;
-    }
-
     const { getDatabaseReplacementPaths } = await import("./database-replacement-paths.js");
     const paths = getDatabaseReplacementPaths(dbPath);
     let existingIntent: RestoreBackupIntent | null;
@@ -1698,11 +1781,6 @@ export async function handleDbRestoreBackup(
       );
       return;
     }
-    if (existingIntent !== null) {
-      // Crash convergence: the replacement intent itself fences writers, so no
-      // maintenance claim is taken; promote the observation connection instead.
-      engine.promoteDatabaseForReplacementRecovery();
-    }
 
     let verified: VerifiedRestoreBackup;
     try {
@@ -1712,12 +1790,34 @@ export async function handleDbRestoreBackup(
       return;
     }
 
-    const currentProjectId = engine.getDb().prepare(
-      "SELECT project_id FROM project_authority WHERE singleton = 1",
-    ).get()?.["project_id"];
-    if (typeof currentProjectId !== "string" || currentProjectId !== verified.projectId) {
-      ctx.ui.notify("gsd db restore-backup: the backup belongs to a different project — refusing to restore. Nothing was restored.", "error");
-      return;
+    // Inspect the live database read-only: nothing is opened through the
+    // engine (and so nothing is migrated or repaired) before consent.
+    const current = existingIntent === null ? await readCurrentRestoreAuthority(dbPath) : null;
+    const erasedLines: string[] = [];
+    if (current !== null) {
+      if (current.projectId !== verified.projectId) {
+        ctx.ui.notify("gsd db restore-backup: the backup belongs to a different project — refusing to restore. Nothing was restored.", "error");
+        return;
+      }
+      if (current.authorityEpoch > verified.authorityEpoch) {
+        ctx.ui.notify([
+          "gsd db restore-backup: refused — the Restore Window is closed. Nothing was restored.",
+          `  Current Authority Epoch ${current.authorityEpoch} is higher than the backup's epoch ${verified.authorityEpoch}:`,
+          "  a cutover completed after this backup was taken, and a migrated project cannot downgrade.",
+          "  Use Forward Repair instead: /gsd recover",
+        ].join("\n"), "error");
+        return;
+      }
+      const erased = current.revision - verified.projectRevision;
+      erasedLines.push(erased > 0
+        ? `  Erases ${erased} later Domain Operation${erased === 1 ? "" : "s"}: project revisions ` +
+          `${verified.projectRevision + 1}..${current.revision}` +
+          (current.headOperationId !== null ? ` (head operation ${current.headOperationId})` : "")
+        : `  No Domain Operation is later than the backup (project revision ${current.revision}).`);
+    } else if (existingIntent === null) {
+      erasedLines.push(existsSync(dbPath)
+        ? "  The current database is unreadable; it is kept beside the restored one as gsd.db.quarantine-<time>."
+        : "  There is no current database; the backup becomes the project database.");
     }
 
     const backupSha = sha256FileHex(backupPath);
@@ -1731,6 +1831,7 @@ export async function handleDbRestoreBackup(
         `  sha256:  ${backupSha}`,
         "",
         "This replaces the current database with the verified backup; current DB contents are erased.",
+        ...erasedLines,
         "Re-run with:",
         `  /gsd db restore-backup --backup ${backupPath} --consent=proceed:destructive-database-restore:${backupSha}`,
       ].join("\n"), "warning");
@@ -1744,6 +1845,37 @@ export async function handleDbRestoreBackup(
         `  /gsd db restore-backup --backup ${backupPath} --consent=proceed:destructive-database-restore:${backupSha}`,
       ].join("\n"), "error");
       return;
+    }
+
+    const projectionNote = "The .gsd markdown still describes the erased database — run /gsd rebuild markdown after the next open.";
+
+    // The engine opens only after consent. A database it cannot open is
+    // replaced directly; the previous file is kept, never deleted.
+    const opened = current === null && existingIntent === null ? null : openWorkflowDatabase(basePath);
+    if (opened !== null && !opened.ok && (existingIntent !== null || opened.reason !== "schema-too-new")) {
+      ctx.ui.notify(`gsd db restore-backup: cannot open the project database (${opened.reason}). Nothing was restored.`, "error");
+      return;
+    }
+    if (opened === null || !opened.ok) {
+      engine.closeDatabase();
+      const quarantinePath = await publishBackupOverUnopenableDatabase(dbPath, backupPath, backupSha);
+      logWarning("command", `db restore-backup replaced an unopenable database with ${basename(backupPath)} (${backupSha}); previous file: ${quarantinePath ?? "none"}`);
+      ctx.ui.notify([
+        `gsd db restore-backup: restored ${basename(backupPath)}`,
+        `  Backup schema: v${verified.schemaVersion}`,
+        `  Backup sha256: ${backupSha}`,
+        quarantinePath !== null
+          ? `  Previous database kept at: ${quarantinePath}`
+          : "  There was no previous database.",
+        "  Receipt: none — the previous database could not be opened, so no import.restore receipt was written.",
+        `  ${projectionNote}`,
+      ].join("\n"), "success");
+      return;
+    }
+    if (existingIntent !== null) {
+      // Crash convergence: the replacement intent itself fences writers, so no
+      // maintenance claim is taken; promote the observation connection instead.
+      engine.promoteDatabaseForReplacementRecovery();
     }
 
     // Deterministic receipt/intent material: every field derives only from the
@@ -1890,6 +2022,7 @@ export async function handleDbRestoreBackup(
       `  Backup sha256: ${backupSha}`,
       `  Receipt: import.restore ${status} (application ${applicationOperationId})`,
       `  ${downgradeNote}`,
+      `  ${projectionNote}`,
     ].join("\n"), "success");
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

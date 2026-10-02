@@ -276,7 +276,8 @@ export async function importWrittenMigrationToDb(
   beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
   artifactEvidence: readonly { logicalPath: string; sha256: string }[] = [],
 ): Promise<MigrationImportCounts> {
-  const opened = await ensureDbOpen(basePath);
+  // Explicit import: the markdown was just written, so an empty database is intended.
+  const opened = await ensureDbOpen(basePath, { createEmptyAuthority: true });
   if (!opened) {
     throw new Error(`failed to open or create the GSD database at ${basePath}`);
   }
@@ -313,7 +314,7 @@ async function completeMigrationPublication(
   const sourceRoot = evidence.projectionRoot;
   const sourcePaths = record.logicalPaths.map((logicalPath) => join(sourceRoot, logicalPath));
   if (!claimed) {
-    const opened = await ensureDbOpen(record.targetRoot);
+    const opened = await ensureDbOpen(record.targetRoot, { createEmptyAuthority: true });
     if (!opened) throw new Error(`failed to open or create the GSD database at ${record.targetRoot}`);
     return withDatabaseMaintenanceClaim(() => completeMigrationPublication(initial, choices, evidence, true));
   }
