@@ -428,7 +428,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 
 **What it means:** Runtime will not silently trust an open-task SUMMARY as task completion. After `gsd_task_complete` stages a result, an `in_progress` task's SUMMARY is considered a current staged projection only when its milestone, slice, and task identity and canonical path match; its disk and artifact content are byte-identical; its stamp-stripped content matches the task's database summary; and the latest Attempt is settled and successful at `verify`, or at `route` after a current non-passing host verdict. A mismatched, disk-only, missing-task, missing-Attempt, or failed-executor SUMMARY remains fail-closed and produces this diagnostic.
 
-**Fix:** Review the divergent SUMMARY, then run `/gsd rebuild markdown` to quarantine stale projections and re-render from the authoritative database. Use `/gsd recover` with its exact Preview approval only when markdown should repopulate a lost or corrupt database. Otherwise, repair or rerun the task and rerun `/gsd doctor`.
+**Fix:** Review the divergent SUMMARY, then run `/gsd rebuild markdown` to quarantine stale projections and re-render from the authoritative database. The rebuild keeps `artifacts` rows: when the diagnostic names a SUMMARY artifact row (not only a file on disk), it can remain after the rebuild, and `/gsd recover` is then the only command that replaces that row. Use `/gsd recover` with its exact Preview approval only when markdown should repopulate a lost or corrupt database. Otherwise, repair or rerun the task and rerun `/gsd doctor`.
 
 ### `/gsd doctor` reports `artifact_user_content_missing`
 

@@ -713,6 +713,22 @@ function diskSliceIdDivergenceGuidance(record: DiskSliceIdDivergenceDrift): stri
   );
 }
 
+/**
+ * Recovery text for an artifact/DB status drift. A rebuild moves the file on
+ * disk aside but keeps the artifact row, so it cannot clear a drift that comes
+ * from a stale row. Do not tell the user that it can.
+ */
+function artifactDbStatusDivergenceExit(record: ArtifactDbStatusDivergenceDrift): string {
+  if (safeListArtifactRows(record.milestoneId).some((row) => row.path === record.artifactPath)) {
+    return (
+      "This drift comes from a SUMMARY row in the database. " +
+      "`/gsd rebuild markdown` moves the file on disk to quarantine and keeps that row, so this blocker can remain after a rebuild. " +
+      "If it remains, the row is stale: `/gsd recover` with exact Preview approval is the only command that replaces artifact rows from markdown."
+    );
+  }
+  return "Run `/gsd rebuild markdown` after review to quarantine stale projections and re-render from the DB; use `/gsd recover` with exact Preview approval only when markdown should repopulate a lost or corrupt DB.";
+}
+
 export async function repairArtifactDbDrift(
   record:
     | DiskSliceIdDivergenceDrift
@@ -753,7 +769,7 @@ export async function repairArtifactDbDrift(
       `${record.sliceId ? `/${record.sliceId}` : ""}` +
       `${record.taskId ? `/${record.taskId}` : ""}: ${record.reason}. ` +
       "Runtime will not silently import completion artifacts into DB state. " +
-      "Run `/gsd rebuild markdown` after review to quarantine stale projections and re-render from the DB; use `/gsd recover` with exact Preview approval only when markdown should repopulate a lost or corrupt DB.",
+      artifactDbStatusDivergenceExit(record),
   );
 }
 
@@ -780,7 +796,7 @@ export function describeArtifactDbDriftBlocker(
     `${record.sliceId ? `/${record.sliceId}` : ""}` +
     `${record.taskId ? `/${record.taskId}` : ""}: ${record.reason}. ` +
     "Runtime will not silently import completion artifacts into DB state. " +
-    "Run `/gsd rebuild markdown` after review to quarantine stale projections and re-render from the DB; use `/gsd recover` with exact Preview approval only when markdown should repopulate a lost or corrupt DB."
+    artifactDbStatusDivergenceExit(record)
   );
 }
 
