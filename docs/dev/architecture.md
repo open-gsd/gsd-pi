@@ -236,7 +236,7 @@ Model routing (complexity classification, budget pressure, routing history, capa
 | `memory-store.ts` | Persistent memory store for cross-session knowledge |
 | `queue-order.ts` | Durable milestone queue ordering contract and DB sequence mirroring |
 | `db/domain-operation.ts` | Additive revision-checked Domain Operation transaction and durable replay receipt boundary |
-| `db/lifecycle-shadow-comparison.ts` | Pure legacy-to-canonical lifecycle status normalization and semantic shadow comparison |
+| `db/lifecycle-shadow-comparison.ts` | Pure semantic shadow comparison over the legacy-to-canonical status map in `status-guards.ts` |
 | `db/writers/lifecycle-commands.ts` | Transaction-bound lifecycle, Attempt, Result, replay-fence, and Kernel checkpoint primitives |
 | `task-execution-domain-operation.ts` | Canonical execute-task claim, settlement, retry lineage, coordination dispatch linkage, and Kernel checkpoint advancement |
 | `task-recovery-domain-operation.ts` | Immutable failure routing, bounded Recovery Actions, genuine Blockers, one-use abort resume, and fresh successor Attempt authorization |

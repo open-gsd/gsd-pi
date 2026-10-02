@@ -26,9 +26,11 @@ separately proven read-authority cutover.
 5. Return the legacy response during M003. Projection delivery follows the
    committed operation and cannot compensate canonical state backward.
 
-Handlers must use `normalizeLegacyLifecycleStatus` and the exported
-`CanonicalLifecycleStatus` type. Do not duplicate alias tables in tools,
-commands, or orchestration modules.
+Handlers must use the one legacy-to-canonical map in `status-guards.ts`:
+`adoptionLifecycleStatus` at adoption seams (it refuses an unknown legacy
+status and never adopts `in_progress`), `normalizeLegacyLifecycleStatus`
+elsewhere, and the exported `CanonicalLifecycleStatus` type. Do not duplicate
+alias tables in tools, commands, or orchestration modules.
 
 ## S02 planning boundary
 

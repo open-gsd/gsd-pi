@@ -912,8 +912,8 @@ The schema triggers continue to enforce transition legality, live lease and
 optional dispatch fencing, retry order, provenance, and checkpoint lineage.
 V40 authorizes Slice cancellation to settle running descendants without
 weakening those fences; V41 adds only the Slice `ready -> completed` face.
-`db/lifecycle-shadow-comparison.ts` separately provides pure legacy/canonical
-status normalization and classifies exact matches, accepted semantic deltas,
+`db/lifecycle-shadow-comparison.ts` normalizes through the one
+legacy-to-canonical status map in `status-guards.ts` and classifies exact matches, accepted semantic deltas,
 missing or extra shadow rows, and mismatches while preserving both raw values.
 Planning, Task execution/recovery/publication, and Slice lifecycle handlers now
 use replay fences and lifecycle adoption/transition.

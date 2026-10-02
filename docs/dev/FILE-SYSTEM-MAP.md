@@ -507,7 +507,7 @@
 | gsd/state/derive/cache.ts | State Machine | Derive-state cache and telemetry |
 | gsd/state/derive/db-open.ts | State Machine | Workflow DB opening and DB-unavailable state construction |
 | gsd/db/domain-operation.ts | Database, State Machine | Revision-checked Domain Operation transaction and durable replay receipt boundary |
-| gsd/db/lifecycle-shadow-comparison.ts | Database, State Machine | Pure legacy-to-canonical lifecycle normalization and semantic shadow comparison |
+| gsd/db/lifecycle-shadow-comparison.ts | Database, State Machine | Pure semantic shadow comparison over the legacy-to-canonical status map in `status-guards.ts` |
 | gsd/db/writers/lifecycle-commands.ts | Database, State Machine | Transaction-bound lifecycle adoption/transition, Attempt, Result, replay-fence, and Kernel checkpoint writers; planning handlers use the lifecycle and fence subset |
 | gsd/db/writers/slice-companion-state.ts | Database, State Machine | Transaction-bound owner of the taskless Q8 companion gate required by Slice planning and reopen lifecycle operations |
 | gsd/db-required-schema.ts | Database, Loader/Bootstrap | Registry and shared completeness checks for non-versioned schema features required on every database open |
