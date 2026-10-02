@@ -210,13 +210,16 @@ describe("Anthropic strict request params (Opus 5.5 / Fable 5.x)", () => {
 // AnthropicOptions (the simple path does not forward it), so these exercise
 // the request-building layer directly against a local HTTP server.
 describe("Anthropic strict request params tool_choice (#2500)", () => {
-	function createStrictModel(compat?: {
-		strictRequestParams?: boolean;
-		thinkingOffMode?: "between_tools" | "omit";
-	}): Model<"anthropic-messages"> {
+	function createStrictModel(
+		compat?: {
+			strictRequestParams?: boolean;
+			thinkingOffMode?: "between_tools" | "omit";
+		},
+		id = "claude-sonnet-5-5",
+	): Model<"anthropic-messages"> {
 		return {
-			id: "claude-sonnet-5-5",
-			name: "Claude Sonnet 5.5",
+			id,
+			name: id,
 			api: "anthropic-messages",
 			provider: "test-anthropic",
 			baseUrl: "",
@@ -303,9 +306,25 @@ describe("Anthropic strict request params tool_choice (#2500)", () => {
 	});
 
 	it("keeps forced tool_choice for models without the strictRequestParams marker", async () => {
-		const body = await captureRequest(createStrictModel(), { toolChoice: "any" });
+		const body = await captureRequest(createStrictModel(undefined, "claude-sonnet-5"), { toolChoice: "any" });
 
 		expect(body.tool_choice).toEqual({ type: "any" });
+	});
+
+	it("applies id-based rules to custom models without catalog compat", async () => {
+		const sonnet = await captureRequest(createStrictModel(undefined, "claude-sonnet-5-5-20261001"), {
+			toolChoice: "any",
+			thinkingEnabled: false,
+		});
+		expect(sonnet.tool_choice).toBeUndefined();
+		expect(sonnet.thinking).toEqual({ type: "between_tools" });
+
+		const opus = await captureRequest(createStrictModel(undefined, "claude-opus-5-5"), { thinkingEnabled: false });
+		expect(opus.thinking).toBeUndefined();
+		expect(opus.output_config).toEqual({ effort: "low" });
+
+		const fable = await captureRequest(createStrictModel(undefined, "claude-fable-5"), { toolChoice: "any" });
+		expect(fable.tool_choice).toEqual({ type: "any" });
 	});
 
 	it("keeps forced tool_choice for omit-only models (Fable 5)", async () => {

@@ -68,9 +68,9 @@ Keep `cross_provider: false` when routing inside a flat-rate subscription unless
 
 Override which model is used for each tier. When omitted, the router uses a built-in capability mapping that knows common model families:
 
-- **Light:** `claude-haiku-4-5`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5.1-codex-mini`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gemini-2.0-flash`
-- **Standard:** `claude-sonnet-4`, `claude-sonnet-4-5`, `claude-sonnet-4-6`, `claude-sonnet-5`, `claude-sonnet-5-5`, `gpt-4o`, `gpt-4.1`, `gpt-5.1-codex-max`, `gemini-2.5-pro`, `deepseek-chat`
-- **Heavy:** `claude-opus-4-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`, `claude-fable-5-1`, `gpt-5`, `gpt-5-pro`, `gpt-5.1`, `gpt-5.2`, `gpt-5.2-codex`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `o1`, `o3`, `o4-mini`
+- **Light:** `claude-haiku-4-5`, `gpt-4o-mini`, `gpt-4.1-mini`, `gpt-4.1-nano`, `gpt-5-mini`, `gpt-5-nano`, `gpt-5.1-codex-mini`, `gpt-5.3-codex-spark`, `gpt-5.4-mini`, `gpt-5.6-luna`, `gemini-2.0-flash`
+- **Standard:** `claude-sonnet-4`, `claude-sonnet-4-5`, `claude-sonnet-4-6`, `claude-sonnet-5`, `claude-sonnet-5-5`, `gpt-4o`, `gpt-4.1`, `gpt-5.1-codex-max`, `gpt-5.6-terra`, `gemini-2.5-pro`, `deepseek-chat`
+- **Heavy:** `claude-opus-4-5`, `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`, `claude-fable-5-1`, `gpt-5`, `gpt-5-pro`, `gpt-5.1`, `gpt-5.2`, `gpt-5.2-codex`, `gpt-5.3-codex`, `gpt-5.4`, `gpt-5.5`, `gpt-5.6-sol`, `o1`, `o3`, `o4-mini`
 
 Token profiles use the same tier mapping. `budget`, `balanced`, and `quality` declare per-phase tier intentions, then GSD resolves those tiers against the models currently available from your configured providers. This means a profile can resolve to OpenAI, Gemini, Anthropic, or another provider-specific model instead of hardcoding Claude-family defaults.
 
@@ -80,8 +80,8 @@ Tier, cost, capability-profile, availability, and override lookups use a provide
 
 ```text
 github-copilot/claude-sonnet-5.5
-github-copilot/claude_sonnet_4_6
-CLAUDE-SONNET-4-6
+github-copilot/claude_sonnet_5_5
+CLAUDE-SONNET-5-5
 ```
 
 This canonicalization is only for matching. It does not rewrite the selected registry entry: complexity-routing decisions retain the available model ID, including its provider prefix, and tier resolution preserves the bare ID's separator spelling if it removes a prefix. A dotted Copilot ID is therefore dispatched with its dotted spelling rather than the router's internal hyphenated key. Explicit provider-qualified `tier_models` values are also preserved, which disambiguates providers that expose the same bare model ID.

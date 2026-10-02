@@ -153,6 +153,8 @@ const AnthropicMessagesCompatSchema = Type.Object({
 	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
 	supportsCacheControlOnTools: Type.Optional(Type.Boolean()),
 	forceAdaptiveThinking: Type.Optional(Type.Boolean()),
+	strictRequestParams: Type.Optional(Type.Boolean()),
+	thinkingOffMode: Type.Optional(Type.Union([Type.Literal("between_tools"), Type.Literal("omit")])),
 });
 
 const ProviderCompatSchema = Type.Union([

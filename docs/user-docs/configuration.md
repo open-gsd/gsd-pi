@@ -285,7 +285,7 @@ claude_code_mcp:
         - analytics-noisy
 ```
 
-With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `google-search` regardless of how many servers `.mcp.json` defines; a Sonnet-4-6 session sees every discovered server except `analytics-noisy`. Other models match no prefix and are unaffected.
+With this configuration, a Haiku-4-5 subagent sees only `gsd-workflow` and `google-search` regardless of how many servers `.mcp.json` defines; a Sonnet-5-5 session sees every discovered server except `analytics-noisy`. Other models match no prefix and are unaffected.
 
 ## Environment Variables
 

@@ -692,7 +692,10 @@ function buildParams(
 			openRouterParams.reasoning = {
 				effort: model.thinkingLevelMap?.[options.reasoningEffort] ?? options.reasoningEffort,
 			};
-		} else if (model.thinkingLevelMap?.off !== null) {
+		} else if (!claudeConstraints && model.thinkingLevelMap?.off !== null) {
+			// Claude 5.5 / Fable 5.x cannot take a "disabled" thinking config
+			// (#2500), so for them reasoning is omitted and the gateway applies
+			// the model default.
 			openRouterParams.reasoning = { effort: model.thinkingLevelMap?.off ?? "none" };
 		}
 	} else if (compat.thinkingFormat === "together" && model.reasoning) {

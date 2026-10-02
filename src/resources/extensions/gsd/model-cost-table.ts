@@ -467,7 +467,9 @@ export const BUNDLED_COST_TABLE: ModelCostEntry[] = [
  * Strips provider (`openrouter/`) and Bedrock (`us.anthropic.`) prefixes,
  * maps dotted Claude ids (`claude-sonnet-5.5`, GitHub Copilot) to the hyphen
  * form, and prefers the longest matching prefix so `claude-opus-5-5-fast`
- * resolves to Opus 5.5, not Opus 5.
+ * resolves to the Opus 5.5 row, not Opus 5. Variants without their own row
+ * (`-fast`, Bedrock geo +10%) get the base list price, which is close enough
+ * for routing comparisons but not billing.
  */
 export function lookupModelCost(modelId: string): ModelCostEntry | undefined {
   let bareId = modelId.includes("/") ? (modelId.split("/").pop() ?? modelId) : modelId;

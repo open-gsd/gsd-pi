@@ -36,6 +36,7 @@ import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse.js"
 import { sanitizeToolSchema } from "../utils/sanitize-tool-schema.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
 
+import { getClaudeRequestConstraints } from "./claude-request-constraints.js";
 import { resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.js";
@@ -1000,6 +1001,29 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
+/**
+ * Request-surface constraints for a Claude model (#2500). Catalog compat is
+ * authoritative when it sets either field; custom or uncatalogued ids
+ * (models.json proxies, dated snapshots) fall back to id-based rules.
+ */
+function resolveStrictRequestSurface(model: Model<"anthropic-messages">): {
+	strictRequestParams: boolean;
+	thinkingOffMode: "between_tools" | "omit" | undefined;
+} {
+	const compat = model.compat;
+	if (compat?.strictRequestParams !== undefined || compat?.thinkingOffMode !== undefined) {
+		return {
+			strictRequestParams: compat.strictRequestParams === true,
+			thinkingOffMode: compat.thinkingOffMode ?? (compat.strictRequestParams === true ? "between_tools" : undefined),
+		};
+	}
+	const constraints = getClaudeRequestConstraints(model.id) ?? getClaudeRequestConstraints(model.name);
+	return {
+		strictRequestParams: constraints?.strictRequestParams === true,
+		thinkingOffMode: constraints?.thinkingOffMode,
+	};
+}
+
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: Context,
@@ -1007,6 +1031,7 @@ function buildParams(
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
+	const requestSurface = resolveStrictRequestSurface(model);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl),
@@ -1052,8 +1077,8 @@ function buildParams(
 	if (
 		options?.temperature !== undefined &&
 		!options?.thinkingEnabled &&
-		model.compat?.strictRequestParams !== true &&
-		model.compat?.thinkingOffMode !== "omit"
+		!requestSurface.strictRequestParams &&
+		requestSurface.thinkingOffMode !== "omit"
 	) {
 		params.temperature = options.temperature;
 	}
@@ -1101,8 +1126,7 @@ function buildParams(
 			// lags the API value, same as the xhigh effort workaround above);
 			// Opus 5.5 and Fable 5.x cannot disable thinking, so omit it and ask
 			// for the lowest effort instead.
-			const thinkingOffMode = model.compat?.thinkingOffMode
-				?? (model.compat?.strictRequestParams === true ? "between_tools" : undefined);
+			const thinkingOffMode = requestSurface.thinkingOffMode;
 			if (thinkingOffMode === "omit") {
 				params.output_config = { effort: "low" };
 			} else if (thinkingOffMode === "between_tools") {
@@ -1126,7 +1150,7 @@ function buildParams(
 		const isForcedToolChoice = typeof options.toolChoice === "string"
 			? options.toolChoice === "any"
 			: options.toolChoice.type === "tool";
-		const omitToolChoice = model.compat?.strictRequestParams === true && isForcedToolChoice;
+		const omitToolChoice = requestSurface.strictRequestParams && isForcedToolChoice;
 		if (!omitToolChoice) {
 			if (typeof options.toolChoice === "string") {
 				params.tool_choice = { type: options.toolChoice };
