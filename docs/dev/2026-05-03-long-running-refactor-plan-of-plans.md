@@ -783,8 +783,9 @@ alone is not a Removal Gate.
 
 - Canonical lifecycle read-authority cutover under M003 / D005 (public status
   responses, disagreement witnesses, park/unpark/discard adoption as lifecycle
-  commands). Decision D012 (2026-10-02) supersedes D005 for read authority. Its
-  project-database row is not written yet (D012 is a provisional ID), and the
+  commands). Decision D012 (2026-10-02, owner-confirmed) supersedes D005 for
+  read authority. Its project-database row is not written yet (D012 is a
+  provisional ID), and the
   implementation is still open.
 - Phase 5 DB split.
 - Separately sequenced product cleanup.

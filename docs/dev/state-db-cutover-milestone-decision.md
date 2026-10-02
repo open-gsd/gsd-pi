@@ -13,8 +13,8 @@
 > and `.project/research/SYNTHESIS.md` (decision "D005 standing NO-GO").
 >
 > **Amended 2026-10-02:** decision D012 supersedes D005 for canonical lifecycle
-> read authority. The D012 database row is not written yet, so the ID is
-> provisional. The cutover is not finished. See
+> read authority. The owner confirmed this decision on 2026-10-02. The D012
+> database row is not written yet, so the ID is provisional. The cutover is not finished. See
 > [Decision D012](#decision-d012--d005-superseded-for-canonical-lifecycle-read-authority-2026-10-02),
 > [Compatibility Window](#compatibility-window-and-removal-gates) and
 > [Tracking](#tracking-for-the-remaining-cutover-work).
@@ -278,6 +278,8 @@ the read authority for status, phase, dispatch, and dependency decisions.
 D005 ("Keep legacy handler responses and reads authoritative; canonical
 lifecycle writes and comparisons remain shadow evidence") stays in the record
 as history. It no longer governs new work.
+
+The owner confirmed this decision on 2026-10-02.
 
 This is the separate, explicit decision that this document and the T07 cutover
 decision research require before a lifecycle read-authority cutover.

@@ -2,7 +2,7 @@
 // File Purpose: Executable proof for local, read-only M003/S07 dossier input collection.
 
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,9 +12,10 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 import {
-  NO_CUTOVER_BEHAVIORAL_WITNESSES,
-} from "../semantic-shadow-no-cutover-gate.mjs";
-import { buildDossier, renderDossier } from "../m003-s07-cutover-dossier.mjs";
+  buildDossier,
+  COMPATIBILITY_WITNESSES as NO_CUTOVER_BEHAVIORAL_WITNESSES,
+  renderDossier,
+} from "../m003-s07-cutover-dossier.mjs";
 import {
   collectSemanticShadowCapstoneEvidence,
   normalizeSemanticShadowCapstoneEvidence,
@@ -447,26 +448,8 @@ test("collector rejects duplicate evidence rows even when their hashes match", a
   );
 });
 
-test("CLI runs local reports and emits canonical validator-ready JSON", async () => {
-  const root = mkdtempSync(join(tmpdir(), "gsd-dossier-input-cli-"));
-  tempDirs.add(root);
-  const stateDir = join(root, "state");
-  const databasePath = join(stateDir, "projects", "fixture-project", "gsd.db");
-  mkdirSync(join(stateDir, "projects", "fixture-project"), { recursive: true });
-  const capstonePath = join(root, "capstone.json");
-  makeFixtureDatabase(databasePath);
-  const capstone = normalizeSemanticShadowCapstoneEvidence(
-    await collectSemanticShadowCapstoneEvidence({ sourceRoot: process.cwd() }),
-  );
-  writeFileSync(capstonePath, `${JSON.stringify(capstone)}\n`, "utf8");
-
-  const environment = {
-    ...process.env,
-    GSD_PROJECT_ID: "fixture-project",
-    GSD_STATE_DIR: stateDir,
-  };
-  delete environment.NODE_TEST_CONTEXT;
-  const stdout = execFileSync(process.execPath, [
+test("CLI fails closed without a no-cutover report because the semantic-shadow gate is retired", () => {
+  const result = spawnSync(process.execPath, [
     "--import",
     loaderPath,
     "--experimental-strip-types",
@@ -474,25 +457,13 @@ test("CLI runs local reports and emits canonical validator-ready JSON", async ()
     "--source-root",
     process.cwd(),
     "--database",
-    databasePath,
+    "gsd.db",
     "--capstone",
-    capstonePath,
-  ], {
-    cwd: process.cwd(),
-    encoding: "utf8",
-    env: environment,
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 240_000,
-  });
-  const input = JSON.parse(stdout);
-  assert.equal(stdout.trimStart()[0], "{");
-  assert.equal(stdout.endsWith("\n"), true);
-  assert.equal(buildDossier(input).recommendation, "NO_GO");
-  assert.deepEqual(input.noCutover, {
-    structural: { passed: 8, total: 8 },
-    behavioral: { passed: 15, total: 15 },
-  });
-  assert.deepEqual(input.authorityBaseline, { passed: 4, total: 4 });
+    "capstone.json",
+  ], { cwd: process.cwd(), encoding: "utf8" });
+  assert.equal(result.status, 1);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /No-cutover report is required/);
 });
 
 test("CLI writes canonical validator-ready JSON to an explicit local output", async () => {
