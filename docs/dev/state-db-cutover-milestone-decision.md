@@ -13,7 +13,8 @@
 > and `.project/research/SYNTHESIS.md` (decision "D005 standing NO-GO").
 >
 > **Amended 2026-10-02:** decision D012 supersedes D005 for canonical lifecycle
-> read authority. The cutover is not finished. See
+> read authority. The D012 database row is not written yet, so the ID is
+> provisional. The cutover is not finished. See
 > [Decision D012](#decision-d012--d005-superseded-for-canonical-lifecycle-read-authority-2026-10-02),
 > [Compatibility Window](#compatibility-window-and-removal-gates) and
 > [Tracking](#tracking-for-the-remaining-cutover-work).
@@ -293,9 +294,21 @@ D012 is a decision. It is not the cutover:
 - The nine `deferredCutoverBlockers` in the dossier stay open. They are the
   Removal Gates listed below.
 
-**Database record.** The decision row for D012 must be written to the project
-database with `gsd_decision_save`. That tool has no field that sets
-`superseded_by` on D005, so the `decision` text of the D012 row must name D005.
+**Database record — pending.** The project database is the source of truth for
+decisions, and on 2026-10-02 it has no row for this decision: the last decision
+is D011. Until the row exists, this decision is recorded in prose only.
+
+- The row must be written with `gsd_decision_save`. That tool has no field that
+  sets `superseded_by` on D005, so the `decision` text of the row must name
+  D005.
+- D012 is the predicted next ID, not an assigned ID. If a different decision is
+  saved first, the tool assigns a different ID, and every "D012" in this
+  document, `CONTEXT.md`, `.project/STATE.md`, and the plan-of-plans closeout
+  must change to the assigned ID.
+- The proof is a read-only query of the project database that returns a
+  decision that names D005 as superseded. A repository test cannot make this
+  proof, because the project database is not tracked in the repository.
+
 This document does not replace that row.
 
 ## Compatibility Window and Removal Gates

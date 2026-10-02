@@ -117,7 +117,9 @@ Downgrade recovery uses the explicit backup-restore command:
 `/gsd db restore-backup`.
 
 Decision D012 (2026-10-02) supersedes D005 for canonical lifecycle *read*
-authority, but the read cutover is not implemented: public status responses,
+authority. Its project-database row is not written yet, so D012 is a
+provisional ID and the decision is pending that row. The read cutover is not
+implemented: public status responses,
 dispatch, and dependency decisions still read legacy rows, and that surface is
 still pinned by `gate:lifecycle-shadow-no-cutover`. The decision, the
 Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
