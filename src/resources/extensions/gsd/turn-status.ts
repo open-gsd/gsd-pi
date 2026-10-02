@@ -170,12 +170,13 @@ export class TurnStatusTracker {
       // One notify per entry into a waiting state (re-entry after returning
       // to working notifies again; flipping question↔gate notifies too).
       if (this.lastWaitingKind !== kind) {
-        this.deps.ui.notify(
-          kind === "question"
-            ? "GSD is waiting on you — answer the question in the terminal"
-            : "GSD is waiting on you — approve the pending write gate",
-          "info",
-        );
+        this.safeUi("notify", (ui) =>
+          ui.notify(
+            kind === "question"
+              ? "GSD is waiting on you — answer the question in the terminal"
+              : "GSD is waiting on you — approve the pending write gate",
+            "info",
+          ));
       }
       this.lastWaitingKind = kind;
     } else {
@@ -206,7 +207,7 @@ export class TurnStatusTracker {
     this.clearTimer = setTimeout(() => {
       this.clearTimer = null;
       if (this.state === "done") {
-        this.deps.ui?.setStatus(TURN_STATUS_KEY, undefined);
+        this.safeUi("setStatus", (ui) => ui.setStatus(TURN_STATUS_KEY, undefined));
         this.state = "idle";
       }
     }, this.deps.doneFlashMs ?? TURN_STATUS_DONE_FLASH_MS);
@@ -215,7 +216,24 @@ export class TurnStatusTracker {
 
   private setState(state: ActiveState | "done"): void {
     this.state = state;
-    this.deps.ui?.setStatus(TURN_STATUS_KEY, TURN_STATUS_TEXT[state]);
+    this.safeUi("setStatus", (ui) => ui.setStatus(TURN_STATUS_KEY, TURN_STATUS_TEXT[state]));
+  }
+
+  /**
+   * Run a UI-channel call without letting a sync throw escape into the
+   * shared poll/done timers (#2515): tick() runs on a 500ms interval inside
+   * the TUI process, and an escaping throw surfaces as an uncaughtException
+   * that tears the whole session down. A failed status write or notify
+   * degrades to a warning instead.
+   */
+  private safeUi(op: string, fn: (ui: TurnStatusUi) => void): void {
+    const ui = this.deps.ui;
+    if (!ui) return;
+    try {
+      fn(ui);
+    } catch (err) {
+      logWarning("dashboard", `turn-status ${op} failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private stopPoller(): void {

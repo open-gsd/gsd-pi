@@ -316,6 +316,49 @@ describe("TurnStatusTracker", () => {
     assert.strictEqual(tracker.getState(), "working");
   });
 
+  // #2515: tick() runs on a 500ms interval inside the TUI process — a sync
+  // throw escaping a UI call surfaces as an uncaughtException there. UI calls
+  // must be throw-safe exactly like the predicates above.
+  test("throwing ui channel never escapes tick/turnStarted/turnEnded", (t) => {
+    const throwingUi: TurnStatusUi = {
+      setStatus: () => {
+        throw new Error("render exploded");
+      },
+      notify: () => {
+        throw new Error("notify exploded");
+      },
+    };
+
+    // Waiting path: tick exercises the notify + waiting setState throws.
+    const waiting = makeTracker(t, throwingUi, { question: true });
+    assert.doesNotThrow(() => waiting.turnStarted());
+    assert.doesNotThrow(() => waiting.tick());
+    assert.doesNotThrow(() => waiting.turnEnded());
+    assert.strictEqual(waiting.getState(), "waiting-question");
+
+    // Completion path: the end flashes done through the throwing setStatus.
+    const completing = makeTracker(t, throwingUi, {});
+    assert.doesNotThrow(() => completing.turnStarted());
+    assert.doesNotThrow(() => completing.turnEnded());
+    assert.strictEqual(completing.getState(), "done");
+  });
+
+  test("done-clear timer with a throwing setStatus does not throw", async (t) => {
+    const throwingUi: TurnStatusUi = {
+      setStatus: () => {
+        throw new Error("render exploded");
+      },
+      notify: () => {},
+    };
+    const tracker = makeTracker(t, throwingUi, {}, { doneFlashMs: 20 });
+
+    tracker.turnStarted();
+    tracker.turnEnded();
+    // Fires the done-clear timer whose setStatus throws pre-fix.
+    await sleep(60);
+    assert.strictEqual(tracker.getState(), "idle");
+  });
+
   test("defaults: 500ms poll and 2s done flash", () => {
     assert.strictEqual(TURN_STATUS_POLL_MS, 500);
     assert.strictEqual(TURN_STATUS_DONE_FLASH_MS, 2000);
