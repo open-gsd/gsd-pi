@@ -17,8 +17,13 @@ export function projectStateHoldsWorkflowData(dirPath: string): boolean {
   const dbPath = join(dirPath, "gsd.db");
   if (!existsSync(dbPath)) return false;
   try {
+    // Decisions, requirements and memories exist before the first milestone
+    // is planned, so a database without a milestone row can still hold work.
     return inspectSqliteReadOnlySnapshot(dbPath, (db) =>
-      Number(db.prepare("SELECT COUNT(*) AS n FROM milestones").get()?.["n"] ?? 1) > 0);
+      Number(db.prepare(
+        `SELECT (SELECT COUNT(*) FROM milestones) + (SELECT COUNT(*) FROM decisions)
+              + (SELECT COUNT(*) FROM requirements) + (SELECT COUNT(*) FROM memories) AS n`,
+      ).get()?.["n"] ?? 1) > 0);
   } catch {
     return true;
   }
