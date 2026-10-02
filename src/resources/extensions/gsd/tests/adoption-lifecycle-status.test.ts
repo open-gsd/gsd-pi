@@ -3,7 +3,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -23,7 +23,10 @@ import {
   adoptionLifecycleStatus,
   normalizeLegacyLifecycleStatus,
 } from "../status-guards.ts";
+import { handlePlanSlice } from "../tools/plan-slice.ts";
 import { handlePlanTask } from "../tools/plan-task.ts";
+import { handleReassessRoadmap } from "../tools/reassess-roadmap.ts";
+import { handleReplanSlice } from "../tools/replan-slice.ts";
 import { handleReplanTask } from "../tools/replan-task.ts";
 
 test("adoptionLifecycleStatus maps each legacy status to one canonical adoption status", () => {
@@ -160,6 +163,85 @@ test("plan-task adopts legacy in-flight rows as ready, never in_progress", async
     verify: "node --test planned.test.ts",
     inputs: ["src/original.ts"],
     expectedOutput: ["src/planned.ts"],
+  }, base, internalPlanningInvocation());
+
+  assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
+  assertNoInProgressWithoutAttempt();
+});
+
+test("replan-slice adopts a legacy in-flight slice and task as ready, never in_progress", async (t) => {
+  const base = seedLegacyInFlightHierarchy(t);
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Blocker", status: "complete" });
+
+  const result = await handleReplanSlice({
+    milestoneId: "M001",
+    sliceId: "S01",
+    blockerTaskId: "T02",
+    blockerDescription: "T02 discovered a blocker.",
+    whatChanged: "Updated T01 for the new scope.",
+    updatedTasks: [{
+      taskId: "T01",
+      title: "Replanned Task",
+      description: "Revised description for T01.",
+      estimate: "1h",
+      files: ["src/replanned.ts"],
+      verify: "node --test replanned.test.ts",
+      inputs: ["src/original.ts"],
+      expectedOutput: ["src/replanned.ts"],
+      requiredWorkflowTools: [],
+    }],
+    removedTaskIds: [],
+  }, base, internalPlanningInvocation());
+
+  assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
+  assertNoInProgressWithoutAttempt();
+});
+
+test("reassess-roadmap adopts a legacy in-flight milestone and slice as ready, never in_progress", async (t) => {
+  const base = seedLegacyInFlightHierarchy(t);
+  insertSlice({ id: "S00", milestoneId: "M001", title: "Finished Slice", status: "complete", demo: "Demo." });
+
+  const result = await handleReassessRoadmap({
+    milestoneId: "M001",
+    completedSliceId: "S00",
+    verdict: "confirmed",
+    assessment: "S00 completed. S01 needs a wider scope.",
+    sliceChanges: {
+      modified: [{ sliceId: "S01", title: "Updated Slice", risk: "high", depends: ["S00"], demo: "Updated demo." }],
+      added: [],
+      removed: [],
+    },
+  }, base, internalPlanningInvocation());
+
+  assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
+  assertNoInProgressWithoutAttempt();
+});
+
+test("plan-slice adopts an existing legacy in-flight task as ready, never in_progress", async (t) => {
+  const base = seedLegacyInFlightHierarchy(t);
+  mkdirSync(join(base, "src"), { recursive: true });
+  writeFileSync(join(base, "src", "original.ts"), "// fixture\n", "utf-8");
+
+  const result = await handlePlanSlice({
+    milestoneId: "M001",
+    sliceId: "S01",
+    goal: "Re-plan a slice that has a legacy in-flight task.",
+    successCriteria: "- The task is planned again",
+    proofLevel: "integration",
+    integrationClosure: "Planning handlers write DB rows.",
+    observabilityImpact: "- None",
+    tasks: [{
+      taskId: "T01",
+      title: "Planned Task",
+      description: "Task description for the adoption seam.",
+      estimate: "45m",
+      files: ["src/planned.ts"],
+      verify: "node --test planned.test.ts",
+      inputs: ["src/original.ts"],
+      expectedOutput: ["src/planned.ts"],
+      requiredWorkflowTools: [],
+      observabilityImpact: "None.",
+    }],
   }, base, internalPlanningInvocation());
 
   assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
