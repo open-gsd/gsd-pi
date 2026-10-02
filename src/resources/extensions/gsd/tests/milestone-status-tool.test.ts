@@ -2,10 +2,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   clearNativeMilestoneStatusSourceRevisions,
@@ -254,6 +255,60 @@ test("gsd_milestone_status handles missing DB gracefully", async () => {
       ["context_resolution_failed", "shadow_query_failed", "primary_sink_failed"],
     );
   } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+// ─── gsd_checkpoint_db ────────────────────────────────────────────────────────
+
+test("gsd_checkpoint_db does not tell agents to stage gsd.db and reports a completed checkpoint", async () => {
+  const base = makeTmpBase();
+  try {
+    openTestDb(base);
+    seedMilestone("M001", "Checkpoint Milestone");
+
+    const pi = makeMockPi();
+    registerQueryTools(pi);
+    const tool = pi.tools.find((t: { name: string }) => t.name === "gsd_checkpoint_db");
+    const guidance = [tool.description, tool.promptSnippet, ...tool.promptGuidelines].join(" ");
+    assert.doesNotMatch(guidance, /git add|safe to stage|before staging/i);
+
+    const result = await executeToolInDir(tool, {}, base);
+    assert.deepEqual(result.details, { operation: "checkpoint_db", status: "ok" });
+    assert.doesNotMatch(result.content[0].text, /git add/);
+    assert.equal(statSync(join(base, ".gsd", "gsd.db-wal")).size, 0, "the WAL must be truncated");
+  } finally {
+    closeDatabase();
+    cleanup(base);
+  }
+});
+
+test("gsd_checkpoint_db reports failure when a busy reader blocks the checkpoint", async () => {
+  const base = makeTmpBase();
+  let reader: DatabaseSync | undefined;
+  try {
+    openTestDb(base);
+    const dbPath = join(base, ".gsd", "gsd.db");
+    // A second connection holds a read snapshot, then the main connection
+    // writes. SQLite cannot checkpoint frames past the reader's snapshot.
+    reader = new DatabaseSync(dbPath, { readOnly: true });
+    reader.exec("BEGIN");
+    reader.prepare("SELECT COUNT(*) FROM milestones").get();
+    seedMilestone("M001", "Checkpoint Milestone");
+    assert.ok(statSync(`${dbPath}-wal`).size > 0, "the write must be in the WAL");
+
+    const pi = makeMockPi();
+    registerQueryTools(pi);
+    const tool = pi.tools.find((t: { name: string }) => t.name === "gsd_checkpoint_db");
+    const result = await executeToolInDir(tool, {}, base);
+
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /WAL checkpoint did not complete/);
+    assert.deepEqual(result.details, { operation: "checkpoint_db", error: "checkpoint_incomplete" });
+    assert.ok(statSync(`${dbPath}-wal`).size > 0, "a blocked checkpoint must leave the WAL in place");
+  } finally {
+    try { reader?.close(); } catch { /* Best-effort cleanup only. */ }
     closeDatabase();
     cleanup(base);
   }

@@ -2650,14 +2650,27 @@ export function vacuumDatabase(): void {
   });
 }
 
-/** Flush WAL into gsd.db so `git add .gsd/gsd.db` stages current state — safe while DB is open. */
-export function checkpointDatabase(): void {
-  if (!currentDb) return;
+/**
+ * Flush the WAL into gsd.db — safe while the DB is open. Returns true only
+ * when SQLite reports that the whole WAL was checkpointed. A busy reader, a
+ * skip inside an open transaction, or an error returns false.
+ */
+export function checkpointDatabase(): boolean {
+  if (!currentDb) return false;
+  let complete = false;
   runCoordinatedMaintenance((db) => {
     try {
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      const busy = Number(row?.["busy"] ?? -1);
+      const log = Number(row?.["log"] ?? Number.NaN);
+      const checkpointed = Number(row?.["checkpointed"] ?? Number.NaN);
+      complete = busy === 0 && checkpointed === log;
+      if (!complete) {
+        logWarning("db", `WAL checkpoint incomplete: busy=${busy} log=${log} checkpointed=${checkpointed}`);
+      }
     } catch (e) { logWarning("db", `WAL checkpoint failed: ${(e as Error).message}`); }
   });
+  return complete;
 }
 
 function runCoordinatedMaintenance(operation: (db: DbAdapter) => void): void {

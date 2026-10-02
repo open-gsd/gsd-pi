@@ -3777,18 +3777,28 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_checkpoint_db",
-    "Flush the SQLite WAL into gsd.db so git add stages the current GSD database state.",
+    "Flush the SQLite WAL into gsd.db. Reports failure when the checkpoint did not complete. gsd.db is git-ignored runtime state: do not stage or commit it.",
     checkpointDbParams,
     async (args: Record<string, unknown>) => {
       const { projectDir } = parseWorkflowArgs(checkpointDbSchema, args);
-      await runSerializedWorkflowDbOperation(projectDir, async () => {
+      const complete = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        bridge.checkpointDatabase();
+        return bridge.checkpointDatabase() === true;
       });
+      if (!complete) {
+        return {
+          content: [{
+            type: "text" as const,
+            text: "Error: WAL checkpoint did not complete. Another connection may hold the database; retry later.",
+          }],
+          structuredContent: { operation: "checkpoint_db", error: "checkpoint_incomplete" },
+          isError: true,
+        };
+      }
       return {
         content: [{
           type: "text" as const,
-          text: "WAL checkpoint complete. gsd.db is now up to date and safe to stage with git add.",
+          text: "WAL checkpoint complete. gsd.db is now up to date.",
         }],
         structuredContent: { operation: "checkpoint_db", status: "ok" },
       };

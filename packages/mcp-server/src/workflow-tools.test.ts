@@ -7,6 +7,7 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -518,7 +519,7 @@ describe("workflow MCP tools", () => {
         scope: "global",
         decision: "Expose checkpoint tool over MCP",
         choice: "register gsd_checkpoint_db",
-        rationale: "MCP clients need to flush WAL before staging gsd.db",
+        rationale: "MCP clients need to flush the WAL",
         revisable: "yes",
         made_by: "agent",
         superseded_by: null,
@@ -530,12 +531,59 @@ describe("workflow MCP tools", () => {
 
       const result = await tool.handler({ projectDir: base });
       const record = result as { content?: Array<{ text?: string }>; structuredContent?: Record<string, unknown> };
-      assert.equal(record.content?.[0]?.text, "WAL checkpoint complete. gsd.db is now up to date and safe to stage with git add.");
+      assert.equal(record.content?.[0]?.text, "WAL checkpoint complete. gsd.db is now up to date.");
+      assert.doesNotMatch(tool.description, /git add/, "the tool must not tell agents to stage gsd.db");
       assert.deepEqual(record.structuredContent, { operation: "checkpoint_db", status: "ok" });
 
       const walSizeAfter = existsSync(walPath) ? statSync(walPath).size : 0;
       assert.equal(walSizeAfter, 0, "WAL file should be truncated to 0 after MCP checkpoint");
     } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_checkpoint_db reports failure when a busy reader blocks the checkpoint", async () => {
+    const base = makeTmpBase();
+    const dbPath = join(base, ".gsd", "gsd.db");
+    let reader: DatabaseSync | undefined;
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const tool = server.tools.find((t) => t.name === "gsd_checkpoint_db");
+      assert.ok(tool, "gsd_checkpoint_db must be registered");
+
+      openDatabase(dbPath);
+      // A second connection holds a read snapshot, then the main connection
+      // writes. SQLite cannot checkpoint frames past the reader's snapshot.
+      reader = new DatabaseSync(dbPath, { readOnly: true });
+      reader.exec("BEGIN");
+      reader.prepare("SELECT COUNT(*) FROM decisions").get();
+      insertDecision({
+        id: "D001",
+        when_context: "test",
+        scope: "global",
+        decision: "Report an incomplete checkpoint",
+        choice: "return an error",
+        rationale: "A busy reader must not look like success",
+        revisable: "yes",
+        made_by: "agent",
+        superseded_by: null,
+      });
+      const walPath = `${dbPath}-wal`;
+      assert.ok(statSync(walPath).size > 0, "WAL file should be non-empty after a write");
+
+      const result = await tool.handler({ projectDir: base });
+      const record = result as {
+        content?: Array<{ text?: string }>;
+        structuredContent?: Record<string, unknown>;
+        isError?: boolean;
+      };
+      assert.equal(record.isError, true);
+      assert.match(record.content?.[0]?.text ?? "", /WAL checkpoint did not complete/);
+      assert.deepEqual(record.structuredContent, { operation: "checkpoint_db", error: "checkpoint_incomplete" });
+      assert.ok(statSync(walPath).size > 0, "a blocked checkpoint must leave the WAL in place");
+    } finally {
+      try { reader?.close(); } catch { /* Best-effort cleanup only. */ }
       cleanup(base);
     }
   });

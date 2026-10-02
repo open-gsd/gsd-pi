@@ -325,8 +325,8 @@ export function ensureWorkflowDbForBase(
   }
 }
 
-export function checkpointWorkflowDatabase(): void {
-  checkpointDatabase();
+export function checkpointWorkflowDatabase(): boolean {
+  return checkpointDatabase();
 }
 
 export function vacuumWorkflowDatabase(): void {
