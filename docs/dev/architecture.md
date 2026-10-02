@@ -188,7 +188,7 @@ Model routing (complexity classification, budget pressure, routing history, capa
 
 ## Key Modules
 
-> The auto-mode kernel lives under the `auto/` subdirectory (`auto/orchestrator.ts`, `auto/loop.ts`, `auto/phases.ts`, `auto/pre-dispatch.ts`, `auto/dispatch.ts`, `auto/finalize.ts`, `auto/dispatch-key.ts`, and `workflow-kernel.ts`). Pre-dispatch invariants are enforced by the `uok/` deep module (`uok/flags.ts`, `uok/gate-runner.ts`) wired into the orchestrator. The flat `auto-*.ts` modules below are the older, surrounding surface.
+> The auto-mode kernel lives under the `auto/` subdirectory (`auto/orchestrator.ts`, `auto/loop.ts`, `auto/phases.ts`, `auto/dispatch.ts`, `auto/finalize.ts`, `auto/dispatch-key.ts`, and `workflow-kernel.ts`). Pre-dispatch invariants are enforced by the `uok/` deep module (`uok/flags.ts`, `uok/gate-runner.ts`) wired into the orchestrator. The flat `auto-*.ts` modules below are the older, surrounding surface.
 
 | Module | Purpose |
 |--------|---------|

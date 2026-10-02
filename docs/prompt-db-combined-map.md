@@ -341,7 +341,7 @@ complete migration history.
 |-----------|---------------|
 | Single-writer: raw write SQL is limited to the explicit writer-layer allowlists and named exceptions; `db/queries.ts` is read-only | authoritative allowlists and enforcement in `single-writer-invariant.test.ts`; architecture detail in [db-map.md](./db-map.md#7-write-path-invariants) |
 | Milestone full-redo reopen: every hierarchy head → canonical `ready`, legacy Milestone → `active`, Slices → `in_progress`, Tasks → `pending`; current cancellation Waivers are revoked | `gsd_milestone_reopen` Domain Operation |
-| No nested write transactions: `transaction()` and `immediateTransaction()` share one depth counter; `executeDomainOperation()` rejects an existing outer transaction so it owns the reserved-writer boundary; read-then-write claims use `immediateTransaction()` and gate verdict + ledger writes commit atomically | `db-transaction.test.ts`, `domain-operation.test.ts`, `command-queue.test.ts`, `gate-storage.test.ts` |
+| No nested write transactions: `transaction()` and `immediateTransaction()` share one depth counter; `executeDomainOperation()` rejects an existing outer transaction so it owns the reserved-writer boundary; read-then-write claims use `immediateTransaction()` and gate verdict + ledger writes commit atomically | `db-transaction.test.ts`, `domain-operation.test.ts`, `gate-storage.test.ts` |
 | Workspace isolation: one DB per project root, shared across worktrees via WAL | `db-connection-cache.ts` identityKey |
 | Coordination: one active dispatch per unit_id at a time | `idx_unit_dispatches_active_per_unit` unique partial index |
 | Memory FTS fallback: LIKE scan if FTS5 unavailable | `tryCreateMemoriesFtsSchema` onUnavailable callback |
