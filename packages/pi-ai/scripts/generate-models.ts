@@ -9,6 +9,7 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
+import { getClaudeRequestConstraints } from "../src/providers/claude-request-constraints.ts";
 import type { AnthropicMessagesCompat, Api, KnownProvider, Model, OpenAICompletionsCompat } from "../src/types.ts";
 import { formatCost, roundCost } from "./lib/model-cost.ts";
 
@@ -226,10 +227,6 @@ function bedrockClaudeCost(bedrockId: string, listCost: Model<Api>["cost"]): Mod
 	};
 }
 
-function isSonnet55Model(modelId: string): boolean {
-	return modelId.includes("sonnet-5-5") || modelId.includes("sonnet-5.5");
-}
-
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
 	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
 }
@@ -296,14 +293,16 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	) {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
 	}
-	if (
-		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
-		isSonnet55Model(model.id)
-	) {
-		// Sonnet 5.5 rejects the legacy request surface with 400s (#2500):
-		// thinking {type:"disabled"} (use "between_tools"), temperature,
-		// top_p/top_k, and forced tool_choice.
-		mergeAnthropicMessagesCompat(model, { strictRequestParams: true });
+	const claudeConstraints = getClaudeRequestConstraints(model.id);
+	if ((model.api === "anthropic-messages" || model.api === "anthropic-vertex") && claudeConstraints) {
+		// Sonnet 5.5, Opus 5.5 and Fable 5.x reject the legacy request surface
+		// with 400s (#2500): thinking {type:"disabled"} (Sonnet 5.5 uses
+		// "between_tools"; the others cannot disable thinking), temperature,
+		// top_p/top_k, and (all but Fable 5) forced tool_choice.
+		mergeAnthropicMessagesCompat(model, {
+			...(claudeConstraints.strictRequestParams ? { strictRequestParams: true } : {}),
+			thinkingOffMode: claudeConstraints.thinkingOffMode,
+		});
 	}
 	if (
 		(model.provider === "minimax" || model.provider === "minimax-cn") &&

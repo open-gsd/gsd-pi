@@ -545,10 +545,21 @@ export interface AnthropicMessagesCompat {
 	 * `thinking: {type: "disabled"}` (the API requires
 	 * `{type: "between_tools"}` to turn thinking off), `temperature`,
 	 * `top_p` / `top_k`, and forced `tool_choice` (`any` / named tool).
-	 * Claude Sonnet 5.5 sets this in generated metadata (#2500).
+	 * Claude Sonnet 5.5, Opus 5.5 and Fable 5 / 5.1 set this in generated
+	 * metadata (#2500).
 	 * Default: false.
 	 */
 	strictRequestParams?: boolean;
+	/**
+	 * How to send "thinking off" for models that reject
+	 * `thinking: {type: "disabled"}`:
+	 * - `"between_tools"`: send `{type: "between_tools"}` (Claude Sonnet 5.5).
+	 * - `"omit"`: thinking cannot be disabled; omit `thinking` and request
+	 *   `output_config.effort: "low"` (Claude Opus 5.5, Fable 5 / 5.1).
+	 * Default: `"between_tools"` when `strictRequestParams` is set, otherwise
+	 * `{type: "disabled"}` is sent.
+	 */
+	thinkingOffMode?: "between_tools" | "omit";
 }
 
 /**

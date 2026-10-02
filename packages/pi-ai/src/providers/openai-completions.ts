@@ -35,6 +35,7 @@ import { headersToRecord } from "../utils/headers.js";
 import { parseStreamingJson } from "../utils/json-parse.js";
 import { sanitizeToolSchema } from "../utils/sanitize-tool-schema.js";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.js";
+import { getClaudeRequestConstraints, rejectsSamplingParams } from "./claude-request-constraints.js";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.js";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.js";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.js";
@@ -641,7 +642,12 @@ function buildParams(
 		}
 	}
 
-	if (options?.temperature !== undefined) {
+	// Claude 5.5 / Fable 5.x behind OpenAI-compatible gateways (Copilot,
+	// OpenRouter) reject sampling params, and all but Fable 5 forced tool
+	// choice, with a 400.
+	const claudeConstraints = getClaudeRequestConstraints(model.id);
+
+	if (options?.temperature !== undefined && !rejectsSamplingParams(claudeConstraints)) {
 		params.temperature = options.temperature;
 	}
 
@@ -660,7 +666,8 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		params.tool_choice = options.toolChoice;
+		const forcedToolChoice = options.toolChoice === "required" || typeof options.toolChoice === "object";
+		params.tool_choice = forcedToolChoice && claudeConstraints?.strictRequestParams ? "auto" : options.toolChoice;
 	}
 
 	if (compat.thinkingFormat === "zai" && model.reasoning) {

@@ -2288,6 +2288,35 @@ describe("stream-adapter — catalog model metadata (#2437)", () => {
 		assert.equal("tool_choice" in options, false, "Sonnet 5.5 rejects forced tool_choice");
 	});
 
+	// Opus 5.5 / Fable 5.x cannot disable thinking at all; "off" stays adaptive
+	// at the lowest effort, flagged via catalog compat.thinkingOffMode "omit".
+	test("strict-param catalog model with thinkingOffMode omit (Opus 5.5) maps thinking-off to adaptive low effort", () => {
+		const options = buildSdkOptions(
+			"claude-opus-5-5",
+			"test prompt",
+			undefined,
+			{},
+			{
+				compat: { forceAdaptiveThinking: true, strictRequestParams: true, thinkingOffMode: "omit" },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			},
+		);
+		assert.deepEqual(options.thinking, { type: "adaptive" }, "Opus 5.5 rejects {type:\"disabled\"} and between_tools");
+		assert.equal(options.effort, "low", "off maps to the lowest effort");
+	});
+
+	test("thinkingOffMode omit keeps the requested effort when reasoning is on", () => {
+		const options = buildSdkOptions(
+			"claude-opus-5-5",
+			"test prompt",
+			undefined,
+			{ reasoning: "high" },
+			{ compat: { forceAdaptiveThinking: true, strictRequestParams: true, thinkingOffMode: "omit" } },
+		);
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+		assert.equal(options.effort, "high");
+	});
+
 	test("non-strict adaptive model keeps the legacy disabled off switch", () => {
 		const options = buildSdkOptions(
 			"claude-opus-9",

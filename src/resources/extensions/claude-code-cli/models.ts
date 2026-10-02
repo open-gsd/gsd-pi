@@ -27,7 +27,7 @@ export interface ClaudeCodeModelDefinition {
 	contextWindow: number;
 	maxTokens: number;
 	thinkingLevelMap?: Record<string, string | null>;
-	compat?: { forceAdaptiveThinking?: boolean; strictRequestParams?: boolean };
+	compat?: { forceAdaptiveThinking?: boolean; strictRequestParams?: boolean; thinkingOffMode?: "between_tools" | "omit" };
 }
 
 export const CLAUDE_CODE_MODELS: ClaudeCodeModelDefinition[] = [
@@ -75,6 +75,8 @@ export const CLAUDE_CODE_MODELS: ClaudeCodeModelDefinition[] = [
 		cost: ZERO_COST,
 		contextWindow: 1_000_000,
 		maxTokens: 128_000,
+		// Thinking cannot be disabled; strict request surface (#2500).
+		compat: { forceAdaptiveThinking: true, strictRequestParams: true, thinkingOffMode: "omit" },
 	},
 	{
 		id: "claude-fable-5",
@@ -84,6 +86,8 @@ export const CLAUDE_CODE_MODELS: ClaudeCodeModelDefinition[] = [
 		cost: ZERO_COST,
 		contextWindow: 1_000_000,
 		maxTokens: 128_000,
+		// Thinking cannot be disabled (#2500); forced tool choice is still accepted.
+		compat: { forceAdaptiveThinking: true, thinkingOffMode: "omit" },
 	},
 	{
 		id: "claude-sonnet-5",

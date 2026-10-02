@@ -242,7 +242,7 @@ const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 
 function getAnthropicCompat(
 	model: Model<"anthropic-messages">,
-): Required<Omit<AnthropicMessagesCompat, "forceAdaptiveThinking" | "strictRequestParams">> {
+): Required<Omit<AnthropicMessagesCompat, "forceAdaptiveThinking" | "strictRequestParams" | "thinkingOffMode">> {
 	// Auto-detect session affinity and cache control support from provider
 	const isFireworks = model.provider === "fireworks";
 	const isCloudflareAiGatewayAnthropic =
@@ -1047,8 +1047,14 @@ function buildParams(
 	}
 
 	// Temperature is incompatible with extended thinking (adaptive or budget-based).
-	// Strict-param models (Sonnet 5.5, #2500) reject temperature outright.
-	if (options?.temperature !== undefined && !options?.thinkingEnabled && model.compat?.strictRequestParams !== true) {
+	// Strict-param models and models whose thinking cannot be turned off
+	// (#2500) reject temperature outright.
+	if (
+		options?.temperature !== undefined &&
+		!options?.thinkingEnabled &&
+		model.compat?.strictRequestParams !== true &&
+		model.compat?.thinkingOffMode !== "omit"
+	) {
 		params.temperature = options.temperature;
 	}
 
@@ -1090,12 +1096,20 @@ function buildParams(
 				};
 			}
 		} else if (options?.thinkingEnabled === false) {
-			// Strict-param models (Sonnet 5.5, #2500) 400 on {type: "disabled"};
-			// {type: "between_tools"} is their off switch. The SDK type union
-			// lags the API value, same as the xhigh effort workaround above.
-			params.thinking = model.compat?.strictRequestParams === true
-				? ({ type: "between_tools" } as unknown as NonNullable<MessageCreateParamsStreaming["thinking"]>)
-				: { type: "disabled" };
+			// Strict-param models (#2500) 400 on {type: "disabled"}. Sonnet 5.5
+			// turns thinking off with {type: "between_tools"} (the SDK type union
+			// lags the API value, same as the xhigh effort workaround above);
+			// Opus 5.5 and Fable 5.x cannot disable thinking, so omit it and ask
+			// for the lowest effort instead.
+			const thinkingOffMode = model.compat?.thinkingOffMode
+				?? (model.compat?.strictRequestParams === true ? "between_tools" : undefined);
+			if (thinkingOffMode === "omit") {
+				params.output_config = { effort: "low" };
+			} else if (thinkingOffMode === "between_tools") {
+				params.thinking = { type: "between_tools" } as unknown as NonNullable<MessageCreateParamsStreaming["thinking"]>;
+			} else {
+				params.thinking = { type: "disabled" };
+			}
 		}
 	}
 
@@ -1107,7 +1121,7 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		// Strict-param models (Sonnet 5.5, #2500) 400 on forced tool choice
+		// Strict-param models (#2500) 400 on forced tool choice
 		// ("any" / named tool); "auto" and "none" remain valid and pass through.
 		const isForcedToolChoice = typeof options.toolChoice === "string"
 			? options.toolChoice === "any"

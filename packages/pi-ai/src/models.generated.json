@@ -3879,7 +3879,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-fable-5-1": {
@@ -3905,7 +3907,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-opus-4-5-20251101": {
@@ -3977,7 +3981,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "claude-opus-4-8": {
@@ -4145,7 +4151,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "claude-opus-4-7": {
@@ -4292,7 +4299,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "claude-opus-5-5": {
@@ -4318,7 +4326,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-opus-5": {
@@ -4479,7 +4489,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-fable-5": {
@@ -4505,7 +4517,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "claude-sonnet-4@20250514": {
@@ -6854,7 +6868,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-sonnet-4.5": {
@@ -6900,7 +6916,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "claude-sonnet-5": {
@@ -6975,7 +6993,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "gpt-5.4": {
@@ -12086,7 +12106,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "claude-fable-5-1": {
@@ -12112,7 +12134,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "gemini-3.6-flash": {
@@ -12398,7 +12422,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "mimo-v2.6-flash-free": {
@@ -12957,7 +12983,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "qwen3.6-plus": {
@@ -25056,7 +25083,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-fable-5.1": {
@@ -25082,7 +25111,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-haiku-4.5": {
@@ -25324,7 +25355,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-opus-5.5-fast": {
@@ -25350,7 +25383,9 @@
         "xhigh": "xhigh"
       },
       "compat": {
-        "forceAdaptiveThinking": true
+        "forceAdaptiveThinking": true,
+        "strictRequestParams": true,
+        "thinkingOffMode": "omit"
       }
     },
     "anthropic/claude-sonnet-4": {
@@ -25466,7 +25501,8 @@
       },
       "compat": {
         "forceAdaptiveThinking": true,
-        "strictRequestParams": true
+        "strictRequestParams": true,
+        "thinkingOffMode": "between_tools"
       }
     },
     "arcee-ai/trinity-large-thinking": {
