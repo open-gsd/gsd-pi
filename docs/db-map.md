@@ -58,7 +58,7 @@ After commit: regenerate markdown artifacts → write to disk → invalidate cac
 - Only one connection is "active" at a time; others cached for fast re-activation
 - Fresh, active, and cached opens verify the registered non-versioned schema invariants described under [ADR-047 liveness ledger](#adr-047-liveness-ledger-non-versioned) before reuse.
 - On process exit: close without checkpointing; coordinated maintenance owns checkpoint and vacuum
-- Before file-backed schema migrations, `db-migration-backup.ts` checkpoints WAL and replaces `.gsd/gsd.db.backup-vN` with a copy of the database being migrated. The copy must report the expected schema version and pass SQLite `quick_check`; checkpoint, copy, or validation failures warn and fail closed before migration DDL.
+- Before file-backed schema migrations, `db-migration-backup.ts` checkpoints WAL and copies the database being migrated to `.gsd/gsd.db.backup-vN`. An existing backup is never overwritten: later copies go to the first free `backup-vN.latest`, `backup-vN.latest-2`, ... name, and `/gsd db restore-backup` lists and accepts all of them. The copy must report the expected schema version and pass SQLite `quick_check`; checkpoint, copy, or validation failures warn and fail closed before migration DDL.
 
 **Provider selection:**
 
@@ -2212,4 +2212,4 @@ invariants rather than duplicating dispatch policy.
 
 6. **Workspace isolation**: same `.gsd/gsd.db` for all worktrees of one project; separate `.gsd/gsd.db` per project root. Coordination tables assume single-host shared WAL. Multi-host needs external coordinator.
 
-7. **Pre-migration backup**: file-backed migrations checkpoint WAL before replacing `.gsd/gsd.db.backup-vN` with the database being migrated. GSD attaches the copy, requires the expected schema version and a successful SQLite `quick_check`, then detaches it. Checkpoint, copy, or validation failures warn and propagate before any migration DDL runs.
+7. **Pre-migration backup**: see the `db-migration-backup.ts` entry under "Connection scoping" in section 1 for naming, verification, and fail-closed rules.
