@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { clearParseCache } from "../files.js";
-import { adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import {
@@ -506,7 +506,7 @@ export async function handlePlanSlice(
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: adoptionLifecycleStatus(parentMilestone.status),
+          lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, parentMilestone.status, "ready"),
         });
         if (milestoneLifecycle.lifecycleStatus === "completed" || milestoneLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -525,7 +525,7 @@ export async function handlePlanSlice(
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: adoptionLifecycleStatus(parentSlice.status, hasTaskPayload ? "ready" : "pending"),
+          lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${params.sliceId}`, parentSlice.status, hasTaskPayload ? "ready" : "pending"),
         });
         if (sliceLifecycle.lifecycleStatus === "completed" || sliceLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -569,7 +569,7 @@ export async function handlePlanSlice(
         );
         if (hasTaskPayload) {
           for (const task of existingTasks) {
-            const observedLifecycleStatus = adoptionLifecycleStatus(task.status);
+            const observedLifecycleStatus = adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${task.id}`, task.status);
             const omitted = !matchedRowIds.has(task.id);
             const lifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
@@ -734,7 +734,7 @@ export async function handlePlanSlice(
       });
     }
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 

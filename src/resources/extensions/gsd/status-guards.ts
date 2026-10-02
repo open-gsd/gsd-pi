@@ -110,21 +110,37 @@ export function normalizeCanonicalLifecycleStatus(status: string | null): Canoni
   return status as CanonicalLifecycleStatus;
 }
 
+/** An adoption seam met a legacy status that the one map does not list. */
+export class UnknownLegacyStatusError extends Error {
+  readonly row: string;
+  readonly rawStatus: string | null;
+  constructor(row: string, rawStatus: string | null) {
+    super(`cannot adopt ${row}: unknown legacy status ${JSON.stringify(rawStatus)}`);
+    this.name = "UnknownLegacyStatusError";
+    this.row = row;
+    this.rawStatus = rawStatus;
+  }
+}
+
 /**
  * The lifecycle status a legacy hierarchy row is adopted with — the single
- * mapping every adoption seam uses. A terminal or paused legacy status keeps
- * its meaning. Every other status (pending, active, unknown) adopts as
- * `openStatus`: `ready`, or `pending` for a sketch Slice. Adoption never
- * yields `in_progress`: that state is only truthful with an Attempt behind
- * it, and adoption creates none.
+ * mapping every adoption seam uses. An unknown or null legacy status refuses
+ * with `UnknownLegacyStatusError`. A seam that plans the row passes
+ * `openStatus`: a completed or cancelled row keeps its status and every other
+ * row adopts as `openStatus`. Without `openStatus` the row keeps its legacy
+ * meaning, except that in-flight adopts as `ready`. Adoption never yields
+ * `in_progress`: that state is only truthful with an Attempt behind it, and
+ * adoption creates none.
  */
 export function adoptionLifecycleStatus(
+  row: string,
   legacyStatus: string | null,
-  openStatus: "ready" | "pending" = "ready",
+  openStatus?: "ready" | "pending",
 ): Exclude<CanonicalLifecycleStatus, "in_progress"> {
   const normalized = normalizeLegacyLifecycleStatus(legacyStatus);
-  if (normalized === null || normalized === "pending" || normalized === "in_progress") return openStatus;
-  return normalized;
+  if (normalized === null) throw new UnknownLegacyStatusError(row, legacyStatus);
+  if (openStatus) return normalized === "completed" || normalized === "cancelled" ? normalized : openStatus;
+  return normalized === "in_progress" ? "ready" : normalized;
 }
 
 /** Returns true when a milestone, slice, or task status indicates closure. */

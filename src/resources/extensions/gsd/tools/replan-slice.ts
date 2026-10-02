@@ -13,7 +13,7 @@ import {
   projectCanonicalStatusToLegacy,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
-import { adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { renderPlanFromDb, renderReplanFromDb } from "../markdown-renderer.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
@@ -294,7 +294,7 @@ export async function handleReplanSlice(
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: adoptionLifecycleStatus(parentMilestone.status),
+          lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, parentMilestone.status, "ready"),
         });
         if (
           milestoneLifecycle.lifecycleStatus === "completed" ||
@@ -308,7 +308,7 @@ export async function handleReplanSlice(
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: adoptionLifecycleStatus(parentSlice.status),
+          lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${params.sliceId}`, parentSlice.status),
         });
         if (sliceLifecycle.lifecycleStatus === "cancelled" || parentSlice.status === "skipped") {
           throw new PlanningGuardError(`cannot replan cancelled slice ${params.sliceId} — use gsd_slice_reopen first`);
@@ -330,7 +330,7 @@ export async function handleReplanSlice(
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
           taskId: params.blockerTaskId,
-          lifecycleStatus: adoptionLifecycleStatus(blockerTask.status),
+          lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${params.blockerTaskId}`, blockerTask.status),
         });
         if (blockerLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -368,7 +368,7 @@ export async function handleReplanSlice(
               milestoneId: params.milestoneId,
               sliceId: params.sliceId,
               taskId: updatedTask.taskId,
-              lifecycleStatus: adoptionLifecycleStatus(existingTask.status),
+              lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${updatedTask.taskId}`, existingTask.status),
             });
             if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
               throw new PlanningGuardError(
@@ -394,7 +394,7 @@ export async function handleReplanSlice(
           if (latestAttempt?.state === "running") {
             throw new PlanningGuardError(`cannot remove task ${taskId} while it has a running Attempt`);
           }
-          const observedLifecycleStatus = adoptionLifecycleStatus(task.status);
+          const observedLifecycleStatus = adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${taskId}`, task.status);
           const lifecycle = adoptLifecycleIfMissing(context, {
             itemKind: "task",
             milestoneId: params.milestoneId,
@@ -465,7 +465,7 @@ export async function handleReplanSlice(
             milestoneId: params.milestoneId,
             sliceId: params.sliceId,
             taskId: removedTask.id,
-            lifecycleStatus: adoptionLifecycleStatus(removedTask.status),
+            lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${params.sliceId}/${removedTask.id}`, removedTask.status),
           });
           if (lifecycle.lifecycleStatus !== "cancelled") {
             adoptOrTransitionLifecycle(context, {
@@ -519,7 +519,7 @@ export async function handleReplanSlice(
       });
     }
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 

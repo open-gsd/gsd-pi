@@ -74,7 +74,7 @@ import { findMilestoneIds } from "./milestone-ids.js";
 import { buildRunUatPresentationForType, RUN_UAT_TOOL_PRESENTATION_PLAN_ID } from "./tool-presentation-plan.js";
 import { classifyUatContentForRun } from "./uat-policy.js";
 import { checkNeedsRunUat as resolveNeedsRunUat, type UatDispatchCandidate } from "./uat-dispatch.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { STOPWORDS, deriveSliceScope } from "./slice-scope.js";
 import { buildWebAppUatGuidanceBlock } from "./web-app-uat.js";
 import {
@@ -1611,7 +1611,7 @@ export async function checkNeedsReassessment(
     const slices = getMilestoneSlices(mid);
     if (slices.length > 0) {
       const completedSliceIds = slices.filter(s => isCompletedSliceStatus(s.status)).map(s => s.id);
-      const hasIncomplete = slices.some(s => !isClosedStatus(s.status));
+      const hasIncomplete = slices.some(s => !isInactiveStatus(s.status));
       if (completedSliceIds.length === 0 || !hasIncomplete) return null;
       const lastCompleted = completedSliceIds[completedSliceIds.length - 1];
       const assessmentFile = resolveSliceFile(base, mid, lastCompleted, "ASSESSMENT");

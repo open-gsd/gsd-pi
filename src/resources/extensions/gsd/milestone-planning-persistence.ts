@@ -27,7 +27,7 @@ import { flushWorkflowProjections } from "./projection-flush.js";
 import { writeManifestAndFlush } from "./workflow-manifest.js";
 import { appendEvent } from "./workflow-events.js";
 import { logWarning } from "./workflow-logger.js";
-import { adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
 
 export interface PersistMilestonePlanSlice {
   sliceId: string;
@@ -89,7 +89,7 @@ function validatePlanPromotion(
     const lifecycle = adoptLifecycleIfMissing(context, {
       itemKind: "milestone",
       milestoneId: params.milestoneId,
-      lifecycleStatus: adoptionLifecycleStatus(existingMilestone.status),
+      lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, existingMilestone.status, "ready"),
     });
     if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
       return `cannot re-plan ${lifecycle.lifecycleStatus} milestone ${params.milestoneId} — use gsd_milestone_reopen first`;
@@ -109,6 +109,7 @@ function validatePlanPromotion(
       milestoneId: params.milestoneId,
       sliceId: slice.id,
       lifecycleStatus: adoptionLifecycleStatus(
+        `slice ${params.milestoneId}/${slice.id}`,
         slice.status,
         incomingSliceById.get(slice.id)?.isSketch === true ? "pending" : "ready",
       ),
@@ -319,7 +320,7 @@ export async function persistMilestonePlan(
   try {
     operationStatus = persistPlanOperation(params, invocation).status;
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 

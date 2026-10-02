@@ -20,7 +20,7 @@ import {
   openDatabase,
 } from "../gsd-db.ts";
 import { getEligibleSlicesFromRows } from "../slice-parallel-eligibility.ts";
-import { deriveStateFromDb, getActiveMilestoneId, invalidateStateCache } from "../state.ts";
+import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 import { appendEvent } from "../workflow-events.ts";
 
 // The expected answer is stated here, independent of any predicate under test.
@@ -148,25 +148,3 @@ for (const [status, closed] of [
     assert.equal(issues.some((issue) => issue.code === "completed_milestone_reopened"), !closed);
   });
 }
-
-test("getActiveMilestoneId follows deriveState, including the dependency rule", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-status-vocabulary-active-"));
-  mkdirSync(join(base, ".gsd", "milestones"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  t.after(() => {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  // M001 is first in order but waits on M002, so it is not the active milestone.
-  insertMilestone({ id: "M001", title: "Waits on M002", status: "active", depends_on: ["M002"] });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], sequence: 1 });
-  insertMilestone({ id: "M002", title: "Runs first", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M002", title: "Slice", status: "pending", risk: "low", depends: [], sequence: 1 });
-
-  invalidateStateCache();
-  const state = await deriveStateFromDb(base);
-  assert.equal(state.activeMilestone?.id, "M002");
-  invalidateStateCache();
-  assert.equal(await getActiveMilestoneId(base), state.activeMilestone?.id);
-});

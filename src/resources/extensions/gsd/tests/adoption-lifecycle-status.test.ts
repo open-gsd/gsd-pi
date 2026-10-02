@@ -20,6 +20,7 @@ import { compareLifecycleShadow } from "../db/lifecycle-shadow-comparison.ts";
 import { internalPlanningInvocation } from "../planning-invocation.ts";
 import {
   RAW_CLOSED_STATUSES,
+  UnknownLegacyStatusError,
   adoptionLifecycleStatus,
   normalizeLegacyLifecycleStatus,
 } from "../status-guards.ts";
@@ -29,11 +30,11 @@ import { handleReassessRoadmap } from "../tools/reassess-roadmap.ts";
 import { handleReplanSlice } from "../tools/replan-slice.ts";
 import { handleReplanTask } from "../tools/replan-task.ts";
 
-test("adoptionLifecycleStatus maps each legacy status to one canonical adoption status", () => {
-  const expected: ReadonlyArray<readonly [legacy: string | null, adopted: string]> = [
-    ["pending", "ready"],
-    ["queued", "ready"],
-    ["planned", "ready"],
+test("an adopted legacy row keeps its meaning, except that in-flight adopts as ready", () => {
+  const expected: ReadonlyArray<readonly [legacy: string, adopted: string]> = [
+    ["pending", "pending"],
+    ["queued", "pending"],
+    ["planned", "pending"],
     ["active", "ready"],
     ["in_progress", "ready"],
     ["in-progress", "ready"],
@@ -46,19 +47,36 @@ test("adoptionLifecycleStatus maps each legacy status to one canonical adoption 
     ["deferred", "cancelled"],
     ["cancelled", "cancelled"],
     ["blocker-accepted", "blocker-accepted"],
-    ["not-a-status", "ready"],
-    [null, "ready"],
   ];
   for (const [legacy, adopted] of expected) {
-    assert.equal(adoptionLifecycleStatus(legacy), adopted, `legacy ${legacy}`);
+    assert.equal(adoptionLifecycleStatus("task M001/S01/T01", legacy), adopted, `legacy ${legacy}`);
   }
 });
 
-test("a sketch Slice adopts as pending while it is open, and keeps a terminal status", () => {
-  assert.equal(adoptionLifecycleStatus("active", "pending"), "pending");
-  assert.equal(adoptionLifecycleStatus("pending", "pending"), "pending");
-  assert.equal(adoptionLifecycleStatus("complete", "pending"), "completed");
-  assert.equal(adoptionLifecycleStatus("skipped", "pending"), "cancelled");
+test("a seam that plans the row adopts every open status as its open status", () => {
+  for (const legacy of ["pending", "queued", "planned", "active", "in_progress", "blocked", "parked"]) {
+    assert.equal(adoptionLifecycleStatus("slice M001/S01", legacy, "ready"), "ready", `legacy ${legacy}`);
+    assert.equal(adoptionLifecycleStatus("slice M001/S01", legacy, "pending"), "pending", `sketch ${legacy}`);
+  }
+  assert.equal(adoptionLifecycleStatus("slice M001/S01", "complete", "pending"), "completed");
+  assert.equal(adoptionLifecycleStatus("slice M001/S01", "skipped", "ready"), "cancelled");
+});
+
+test("an unknown or null legacy status refuses and names the row and the raw value", () => {
+  for (const openStatus of [undefined, "ready"] as const) {
+    for (const raw of ["not-a-status", null]) {
+      assert.throws(
+        () => adoptionLifecycleStatus("task M001/S01/T01", raw, openStatus),
+        (err: unknown) => {
+          assert.ok(err instanceof UnknownLegacyStatusError);
+          assert.equal(err.row, "task M001/S01/T01");
+          assert.equal(err.rawStatus, raw);
+          assert.match(err.message, /task M001\/S01\/T01/);
+          return true;
+        },
+      );
+    }
+  }
 });
 
 test("every raw closed status has a terminal canonical status", () => {
@@ -246,4 +264,55 @@ test("plan-slice adopts an existing legacy in-flight task as ready, never in_pro
 
   assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
   assertNoInProgressWithoutAttempt();
+});
+
+test("replan-task refuses a legacy task with an unknown status and writes no lifecycle row", async (t) => {
+  const base = seedLegacyInFlightHierarchy(t);
+  _getAdapter()!.prepare("UPDATE tasks SET status = 'wip' WHERE id = 'T01'").run();
+
+  const result = await handleReplanTask({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    title: "Replanned Task",
+    description: "Updated task description with blocking rework scope.",
+    estimate: "45m",
+    files: ["src/replanned.ts"],
+    verify: "node --test replanned.test.ts",
+    inputs: ["src/original.ts"],
+    expectedOutput: ["src/replanned.ts"],
+    requiredWorkflowTools: [],
+    reworkBriefRef: "RB-001",
+  }, base, internalPlanningInvocation());
+
+  assert.ok("error" in result, "the seam refuses");
+  assert.equal(result.error, 'cannot adopt task M001/S01/T01: unknown legacy status "wip"');
+  assert.deepEqual(lifecycleStatuses(), [], "no lifecycle row is written");
+});
+
+test("replan-task keeps a legacy pending slice and task as pending", async (t) => {
+  const base = seedLegacyInFlightHierarchy(t);
+  _getAdapter()!.prepare("UPDATE slices SET status = 'pending'").run();
+  _getAdapter()!.prepare("UPDATE tasks SET status = 'pending'").run();
+
+  const result = await handleReplanTask({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    title: "Replanned Task",
+    description: "Updated task description with blocking rework scope.",
+    estimate: "45m",
+    files: ["src/replanned.ts"],
+    verify: "node --test replanned.test.ts",
+    inputs: ["src/original.ts"],
+    expectedOutput: ["src/replanned.ts"],
+    requiredWorkflowTools: [],
+    reworkBriefRef: "RB-001",
+  }, base, internalPlanningInvocation());
+
+  assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
+  assert.deepEqual(lifecycleStatuses(), [
+    { item_kind: "slice", lifecycle_status: "pending" },
+    { item_kind: "task", lifecycle_status: "pending" },
+  ]);
 });

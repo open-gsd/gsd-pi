@@ -183,6 +183,24 @@ test("checkNeedsReassessment returns null when all slices are complete", async (
   }
 });
 
+// ─── checkNeedsReassessment: a deferred slice is not open work ───────────
+// Discriminating because S01 has a SUMMARY and no ASSESSMENT: count deferred
+// S02 as open and this fixture dispatches { sliceId: "S01" }.
+
+test("checkNeedsReassessment returns null when the only other slice is deferred", async () => {
+  const base = makeTmpBase();
+  try {
+    invalidateAllCaches();
+    seedSlices("complete", "deferred");
+    writeSummary(base, "S01");
+
+    const result = await checkNeedsReassessment(base, "M001", dummyState);
+    assert.strictEqual(result, null, "should return null — a deferred slice leaves nothing to run");
+  } finally {
+    cleanup(base);
+  }
+});
+
 // ─── checkNeedsReassessment: reads the durable roadmap assessment row ─────
 // #2344: reassess-roadmap persists its verdict as a roadmap-scoped assessments
 // row and never writes a slice ASSESSMENT.md, so a completed reassessment must

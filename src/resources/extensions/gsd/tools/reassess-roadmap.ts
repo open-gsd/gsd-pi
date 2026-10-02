@@ -11,7 +11,7 @@ import {
 } from "../paths.js";
 import { deriveCompatProjectionKey } from "../compat/compat-marker.js";
 import { clearParseCache } from "../files.js";
-import { adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import {
@@ -348,7 +348,7 @@ export async function handleReassessRoadmap(
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: adoptionLifecycleStatus(milestone.status),
+          lifecycleStatus: adoptionLifecycleStatus(`milestone ${params.milestoneId}`, milestone.status),
         });
         if (milestoneLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(`cannot reassess a closed milestone: ${params.milestoneId} (canonical status: ${milestoneLifecycle.lifecycleStatus})`);
@@ -368,7 +368,7 @@ export async function handleReassessRoadmap(
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.completedSliceId,
-          lifecycleStatus: adoptionLifecycleStatus(completedSlice.status),
+          lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${params.completedSliceId}`, completedSlice.status),
         });
         if (completedSliceLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(`completedSliceId ${params.completedSliceId} is canonically cancelled and is not a valid completed slice`);
@@ -393,7 +393,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: correction.sliceId,
-            lifecycleStatus: adoptionLifecycleStatus(existing.status),
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${correction.sliceId}`, existing.status),
           });
           if (lifecycle.lifecycleStatus !== "completed") {
             throw new PlanningGuardError(`metadata correction target ${correction.sliceId} is canonically ${lifecycle.lifecycleStatus}, not completed`);
@@ -423,7 +423,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: modifiedSlice.sliceId,
-            lifecycleStatus: adoptionLifecycleStatus(existing.status),
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${modifiedSlice.sliceId}`, existing.status),
           });
           if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
             throw new PlanningGuardError(
@@ -439,7 +439,7 @@ export async function handleReassessRoadmap(
           if (!existing) {
             throw new PlanningGuardError(`cannot remove missing slice ${removedId}`);
           }
-          const observedLifecycleStatus = adoptionLifecycleStatus(existing.status);
+          const observedLifecycleStatus = adoptionLifecycleStatus(`slice ${params.milestoneId}/${removedId}`, existing.status);
           const lifecycle = adoptLifecycleIfMissing(context, {
             itemKind: "slice",
             milestoneId: params.milestoneId,
@@ -452,7 +452,7 @@ export async function handleReassessRoadmap(
           }
           for (const task of getSliceTasks(params.milestoneId, removedId)) {
             const legacyTaskLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
-            const observedTaskLifecycleStatus = adoptionLifecycleStatus(task.status);
+            const observedTaskLifecycleStatus = adoptionLifecycleStatus(`task ${params.milestoneId}/${removedId}/${task.id}`, task.status);
             const taskLifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
               milestoneId: params.milestoneId,
@@ -503,7 +503,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: added.sliceId,
-            lifecycleStatus: adoptionLifecycleStatus(existing.status),
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${added.sliceId}`, existing.status),
           });
           if (existing.status === "skipped" || lifecycle.lifecycleStatus === "cancelled") {
             throw new PlanningGuardError(`cannot reuse cancelled slice ${added.sliceId} — use gsd_slice_reopen first`);
@@ -565,7 +565,7 @@ export async function handleReassessRoadmap(
               milestoneId: params.milestoneId,
               sliceId: removedId,
               taskId: task.id,
-              lifecycleStatus: adoptionLifecycleStatus(task.status),
+              lifecycleStatus: adoptionLifecycleStatus(`task ${params.milestoneId}/${removedId}/${task.id}`, task.status),
             });
             if (lifecycle.lifecycleStatus === "completed") continue;
             if (lifecycle.lifecycleStatus !== "cancelled") {
@@ -589,7 +589,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: removedId,
-            lifecycleStatus: adoptionLifecycleStatus(existingSliceById.get(removedId)?.status ?? null),
+            lifecycleStatus: adoptionLifecycleStatus(`slice ${params.milestoneId}/${removedId}`, existingSliceById.get(removedId)?.status ?? null),
           });
           if (lifecycle.lifecycleStatus !== "cancelled") {
             adoptOrTransitionLifecycle(context, {
@@ -623,7 +623,7 @@ export async function handleReassessRoadmap(
     });
     operationStatus = receipt.status;
   } catch (err) {
-    if (err instanceof PlanningGuardError) return { error: err.message };
+    if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
 

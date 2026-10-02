@@ -13,6 +13,8 @@ import {
   gsdRoot,
 } from './paths.js';
 
+import { findMilestoneIds } from './milestone-ids.js';
+import { isClosedStatus } from './status-guards.js';
 import { join } from 'path';
 import { existsSync } from 'node:fs';
 import { extractVerdict } from './verdict-parser.js';
@@ -24,6 +26,7 @@ import {
   type DeriveStateOptions,
 } from './state/derive/index.js';
 import { deriveStateFromDb } from './state/derive/from-db.js';
+import { getRequestedMilestoneLock, syncQueueOrderProjectionToDb } from './state/derive/db-open.js';
 
 export {
   deriveState,
@@ -36,6 +39,7 @@ export {
 
 import {
   isDbAvailable,
+  getAllMilestones,
   getMilestone,
 } from './gsd-db.js';
 
@@ -152,7 +156,40 @@ export function isValidationTerminal(validationContent: string): boolean {
   return extractVerdict(validationContent) != null;
 }
 
-/** The active milestone id, by the one selection rule: deriveState. */
 export async function getActiveMilestoneId(basePath: string): Promise<string | null> {
-  return (await deriveState(basePath)).activeMilestone?.id ?? null;
+  // Milestone-scoped execution. Parallel workers and explicit solo commands
+  // such as `/gsd auto M002` both set GSD_MILESTONE_LOCK; state derivation must
+  // honor it so recovery/adoption sees the requested milestone, not the first
+  // open milestone in queue order.
+  const milestoneLock = getRequestedMilestoneLock();
+  if (milestoneLock) {
+    if (isDbAvailable()) {
+      const locked = getAllMilestones().find(m => m.id === milestoneLock);
+      if (!locked || isClosedStatus(locked.status) || locked.status === "parked") return null;
+      return locked.id;
+    }
+
+    const milestoneIds = findMilestoneIds(basePath);
+    if (!milestoneIds.includes(milestoneLock)) return null;
+    const lockedParked = resolveMilestoneFile(basePath, milestoneLock, "PARKED");
+    if (lockedParked) return null;
+    return milestoneLock;
+  }
+
+  // DB-first: query milestones table for the first non-complete, non-parked milestone
+  if (isDbAvailable()) {
+    syncQueueOrderProjectionToDb(basePath);
+    const allMilestones = getAllMilestones();
+    if (allMilestones.length > 0) {
+      for (const m of allMilestones) {
+        if (isClosedStatus(m.status) || m.status === "parked") continue;
+        return m.id;
+      }
+      return null;
+    }
+    return null;
+  }
+
+  // Fail closed: an unavailable DB is not a license to parse markdown (T022).
+  return null;
 }
