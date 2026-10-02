@@ -2,11 +2,11 @@ import { existsSync, mkdirSync, lstatSync, readdirSync, readFileSync } from "nod
 import { join } from "node:path";
 
 import { loadFile, parseSummary, saveFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
-import { getMilestone, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
+import { getMilestone, getMilestoneSlices, getPlanMilestoneRecoveryBlock, getSliceTasks } from "./gsd-db.js";
 import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, legacyMilestonesDir, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, resolveGsdRootFile, relMilestonePath } from "./paths.js";
 import { findMilestoneIds } from "./milestone-ids.js";
 import { deriveState } from "./state.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isClosedStatus, isSkippedForDispatch } from "./status-guards.js";
 
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import type { RoadmapSliceEntry } from "./types.js";
@@ -181,12 +181,39 @@ export async function checkGsdStateHealth(
 
     const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
     const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
+    const dbMilestone = getMilestone(milestoneId);
+
+    // #2510: a recorded plan-milestone-recovery gate means milestone planning
+    // failed fail-closed and auto-mode is gated on a real plan being persisted.
+    // Surface it as its own issue independent of ROADMAP presence — the
+    // recovery blocker diagnostic itself occupies ROADMAP.md, so the missing-
+    // roadmap branch below would never see this state. Eligibility mirrors
+    // derive: the gate only blocks while the milestone has zero slices (a
+    // persisted plan supersedes it), and only for live milestones.
+    if (
+      dbMilestone !== null
+      && !isSkippedForDispatch(dbMilestone.status)
+      && getMilestoneSlices(milestoneId).length === 0
+    ) {
+      const planningBlocker = getPlanMilestoneRecoveryBlock(milestoneId);
+      if (planningBlocker) {
+        issues.push({
+          severity: "error",
+          code: "planning_blocked",
+          scope: "milestone",
+          unitId: milestoneId,
+          message: `Milestone ${milestoneId} planning failed fail-closed and auto-mode is blocked until a plan is persisted: ${planningBlocker.reason} Re-run milestone planning (/gsd dispatch plan-milestone or gsd_plan_milestone); a successful plan supersedes the recovery gate.`,
+          fixable: false,
+        });
+        continue;
+      }
+    }
+
     if (!roadmapContent) {
       // #1634: a missing ROADMAP with intact DB planning data is projection
       // drift, not data loss — the DB is the authority. Repair by re-rendering,
       // sharing the same predicate and repair as the roadmap-missing drift
       // handler so doctor and reconciliation agree on what is fixable.
-      const dbMilestone = getMilestone(milestoneId);
       const { isRoadmapRenderable } = await import("./state-reconciliation/drift/roadmap.js");
       const renderable = dbMilestone !== null && isRoadmapRenderable(dbMilestone);
       if (renderable && fix && shouldFix("missing_roadmap")) {
@@ -199,15 +226,26 @@ export async function checkGsdStateHealth(
           }
         } catch { /* non-fatal — report the issue below */ }
       }
+      if (dbMilestone !== null && !renderable) {
+        // #2510: known-unplanned — the DB row exists but has no renderable plan
+        // (no slices, empty vision) and no recovery gate. This is the normal
+        // pre-planning state of a queued milestone; the roadmap-missing drift
+        // handler skips exactly these milestones, so a blocking non-fixable
+        // missing_roadmap here is a false positive.
+        continue;
+      }
       issues.push({
         severity: "error",
         code: "missing_roadmap",
         scope: "milestone",
         unitId: milestoneId,
-        message: renderable
+        // dbMilestone === null means the row is unknown (DB unavailable, or a
+        // filesystem-discovered milestone dir) — preserve the legacy diagnostic
+        // rather than assuming the milestone was never planned.
+        message: dbMilestone !== null
           ? `Milestone ${milestoneId} is missing its ROADMAP.md file. Its plan is intact in the DB — run /gsd sync (or gsd doctor --fix) to re-render it.`
           : `Milestone ${milestoneId} is missing its ROADMAP.md file.`,
-        fixable: renderable,
+        fixable: dbMilestone !== null,
       });
       continue;
     }

@@ -226,6 +226,8 @@ export function crashResumeHint(unitType: string, unitId: string): string | unde
 const DOCTOR_FIX_HINTS: Partial<Record<DoctorIssueCode, string>> = {
   db_locked:
     "On macOS/Linux, run `/gsd doctor --fix` to stop proven dormant GSD holders, or stop the listed PID(s) manually. On Windows, identify the process using gsd.db in Resource Monitor and stop it.",
+  planning_blocked:
+    "Re-run milestone planning (`/gsd dispatch plan-milestone` or `gsd_plan_milestone`); a successful plan supersedes the recovery gate and unblocks `/gsd auto`.",
   db_unavailable:
     "The workflow database could not be opened — state derivation is degraded. Restart the session; if it persists, run `/gsd doctor` from the project root.",
   stale_crash_lock: "Run `/gsd doctor fix` to clear the stale lock, then `/gsd auto` to resume.",

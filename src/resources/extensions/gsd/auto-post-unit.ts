@@ -2503,10 +2503,15 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         s.pendingVerificationRetry = null;
         s.verificationRetryCount.delete(retryKey);
         s.verificationRetryFailureHashes.delete(retryKey);
-        writeBlockerPlaceholder(s.currentUnit.type, s.currentUnit.id, s.basePath, reason);
+        // #2510: the write can return null (artifact path unresolvable) — in that
+        // case neither the diagnostic sidecar nor the plan-milestone-recovery
+        // gate row exists, so the UI must not claim a blocker was recorded.
+        const blockerPath = writeBlockerPlaceholder(s.currentUnit.type, s.currentUnit.id, s.basePath, reason);
         ctx.ui.notify(
           planningBlocked
-            ? `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, recorded planning blocker and paused (no work marked complete)`
+            ? blockerPath
+              ? `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, recorded planning blocker and paused (no work marked complete)`
+              : `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, paused, but the planning blocker could not be persisted (no recovery gate was recorded; the next iteration re-dispatches planning)`
             : `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, wrote blocker placeholder (no retries)`,
           planningBlocked ? "error" : "warning",
         );

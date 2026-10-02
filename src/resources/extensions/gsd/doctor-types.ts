@@ -3,6 +3,7 @@ export type DoctorSeverity = "info" | "warning" | "error";
 export type DoctorIssueCode =
   | "invalid_preferences"
   | "missing_roadmap"
+  | "planning_blocked"
   | "missing_tasks_dir"
   | "missing_slice_plan"
   | "all_slices_done_missing_milestone_validation"
