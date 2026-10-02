@@ -56,11 +56,16 @@ const EXECUTION_TOOL_NAMES = new Set([
   "exec_command",
   "functions.exec_command",
   "gsd_exec",
-  "gsd_exec_search",
   "gsd_uat_exec",
   "powershell",
 ]);
-const MCP_EXECUTION_TOOL_RE = /^mcp__.+__gsd_(?:uat_)?exec(?:_search)?$/;
+// MCP workflow surface (#2513): only `gsd_exec` and `gsd_uat_exec` execute
+// anything. `gsd_exec_search` is a read-only lookup over past runs in
+// .gsd/exec/*.meta.json — its result embeds OLD runs' exit codes — so it must
+// not be classified as an execution tool. The trailing `$` (no `_search`
+// suffix) keeps search variants out; a name-based denylist is unnecessary
+// because the registry has exactly two execution tools.
+const MCP_EXECUTION_TOOL_RE = /^mcp__.+__gsd_(?:uat_)?exec$/;
 
 /**
  * Exit-code sentinel for outcomes the harness never observed (#2425) — e.g.
@@ -275,7 +280,7 @@ export function recordToolCall(toolCallId: string, toolName: string, input: Reco
       kind: "bash",
       toolCallId,
       // gsd_exec / gsd_uat_exec carry the script body in `script` (or `code`);
-      // bash-style tools use `command`/`cmd`; gsd_exec_search uses `query`.
+      // bash-style tools use `command`/`cmd`.
       command: formatExecutionEvidenceCommand(toolName, input),
       exitCode: -1,
       outputSnippet: "",
@@ -313,7 +318,11 @@ function canonicalExecutionToolLabel(toolName: string): string {
 }
 
 function formatExecutionEvidenceCommand(toolName: string, input: Record<string, unknown>): string {
-  const body = pickString(input, "command", "script", "cmd", "code", "query");
+  // No `query` fallback (#2513): only the read-only gsd_exec_search takes a
+  // query, and a search query is not a command. If a search-classified tool
+  // ever slips through the execution guards, it records a blank command —
+  // which cross-ref can never match against a claim.
+  const body = pickString(input, "command", "script", "cmd", "code");
   const tool = canonicalExecutionToolLabel(toolName);
   const purpose = pickString(input, "purpose");
   const runtime = pickString(input, "runtime").toLowerCase();
@@ -342,7 +351,13 @@ export function recordToolResult(
   if (entry.kind === "bash") {
     const text = extractResultText(result);
     entry.outputSnippet = text.slice(0, 500);
-    entry.exitCode = resolveExitCode(text, isError);
+    // Belt-and-braces (#2513): a *_search tool executes nothing and its result
+    // embeds PAST runs' outcomes (exit_code, meta_path). Never derive an exit
+    // code from it — record the inconclusive sentinel (evidence-cross-ref
+    // treats the sentinel as inconclusive, not a failure).
+    entry.exitCode = canonicalExecutionToolLabel(toolName).endsWith("_search")
+      ? INCONCLUSIVE_EXIT_CODE
+      : resolveExitCode(text, isError);
   }
 }
 
