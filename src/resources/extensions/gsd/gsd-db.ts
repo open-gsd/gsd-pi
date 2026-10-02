@@ -12,6 +12,9 @@
 // `_getAdapter()` (re-exported from the engine) is retained for read-only
 // SELECTs in query modules. Do NOT use it for writes — add or call a typed
 // wrapper in the explicit writer layer.
+//
+// The separate `.gsd/unit-claims.db` (unit-ownership.ts) is an intentionally
+// independent store and is excluded from this invariant.
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { renamePhaseDirOnTitleChange } from "./phase-dir-rename.js";

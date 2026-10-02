@@ -15,6 +15,7 @@ import type { CompleteSliceParams } from "../types.js";
 import { getDb } from "../gsd-db.js";
 import { clearPathCache, relSliceFile } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
+import { checkOwnership, sliceUnitKey } from "../unit-ownership.js";
 import { loadFile, saveFile, clearParseCache } from "../files.js";
 import { classifyUatContent, escalatesArtifactUatToBrowser } from "../uat-policy.js";
 import { invalidateStateCache } from "../state.js";
@@ -305,6 +306,16 @@ export async function handleCompleteSlice(
   }
 
   const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, params.milestoneId);
+
+  // ── Ownership check (opt-in: only enforced when claim file exists) ──────
+  const ownershipErr = checkOwnership(
+    artifactBasePath,
+    sliceUnitKey(params.milestoneId, params.sliceId),
+    params.actorName,
+  );
+  if (ownershipErr) {
+    return { error: ownershipErr };
+  }
 
   // ── Verification content gate (#3580) ──────────────────────────────────
   // Reject completion when the provided verification/UAT clearly indicates

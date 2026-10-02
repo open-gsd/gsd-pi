@@ -2200,7 +2200,7 @@ invariants rather than duplicating dispatch policy.
 
 ## 7. Write Path Invariants
 
-1. **Single-writer rule**: all write SQL lives in the explicit single-writer *layer*. The authoritative allowlists are `TYPED_DB_WRITER_FILES`, `SCHEMA_DB_WRITER_FILES`, and `MIGRATION_BACKFILL_WRITER_FILES` in `single-writer-invariant.test.ts`; `db/engine.ts`, `db/writers/**`, and `gsd-db.ts` have the named exceptions documented there. This is not permission for arbitrary raw writes under `db/`; `db/queries.ts` remains read-only. The structural test rejects every unlisted write site.
+1. **Single-writer rule**: all write SQL lives in the explicit single-writer *layer*. The authoritative allowlists are `TYPED_DB_WRITER_FILES`, `SCHEMA_DB_WRITER_FILES`, and `MIGRATION_BACKFILL_WRITER_FILES` in `single-writer-invariant.test.ts`; `db/engine.ts`, `db/writers/**`, `gsd-db.ts`, and the separate `unit-ownership.ts` database have the named exceptions documented there. This is not permission for arbitrary raw writes under `db/`; `db/queries.ts` remains read-only. The structural test rejects every unlisted write site.
 
 2. **Transaction wrapping**: every multi-table write uses `transaction()` or `immediateTransaction()` when it needs SQLite's reserved writer lock up front. Rollback on any error. Re-entrant callers normally increment the shared depth counter with no nested `BEGIN`; `executeDomainOperation()` is the exception and rejects an existing outer transaction so it owns the reserved-writer boundary. `gsd_save_gate_result` commits the `quality_gates` verdict update and matching `gate_runs` ledger insert together, so recovery never sees a completed gate without its audit row.
 

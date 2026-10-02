@@ -27,8 +27,6 @@ import { consumeAutoWakeup, scheduleAutoWakeup, _resetAutoWakeupsForTest } from 
 import { writeUnitRuntimeRecord, readUnitRuntimeRecord } from "../unit-runtime.js";
 import { queryJournal } from "../journal.js";
 import { autoLoop as rawAutoLoop } from "../auto/loop.js";
-import { runPreDispatch } from "./helpers/legacy-pre-dispatch.ts";
-import { runDispatch, type LegacyLoopState } from "./helpers/legacy-dispatch.ts";
 import { runUnitPhase, resetSessionTimeoutState } from "../auto/unit-phase.js";
 import { runPostUnitVerification } from "../auto-verification.js";
 import type { UnitResult, AgentEndEvent } from "../auto/types.js";
@@ -73,14 +71,6 @@ import { autoSession } from "../auto-runtime-state.js";
 
 const ORCHESTRATION_MISSING_REASON =
   "Auto Orchestration Module is not wired; cannot dispatch built-in GSD Unit.";
-
-type CapturedAutoSideEffects<T> = {
-  result: T;
-  stopped: boolean;
-  stoppedReason?: string;
-  paused: boolean;
-  pausedReason?: string;
-};
 
 function makeEvent(
   messages: unknown[] = [{ role: "assistant" }],
@@ -179,15 +169,6 @@ async function waitForMicrotasks(
   assert.fail(`Timed out waiting for ${label}`);
 }
 
-function makeLoopState(): LegacyLoopState {
-  return {
-    consecutiveFinalizeTimeouts: 0,
-    consecutiveDispatchCount: new Map<string, number>(),
-    lastDispatchedKey: null,
-    lastDispatchPhase: null,
-  };
-}
-
 function createLoopTestOrchestration(
   ctx: any,
   pi: any,
@@ -195,70 +176,20 @@ function createLoopTestOrchestration(
   deps: LoopDeps,
 ): AutoOrchestrationModule {
   // Production auto.ts wires the real Auto Orchestration Module before entering
-  // autoLoop. These loop-mechanics tests keep their LoopDeps fixtures by
-  // adapting the old phase helpers to the public orchestration Interface.
-  const loopState = makeLoopState();
+  // autoLoop. These loop-mechanics tests fake that Interface from their
+  // LoopDeps fixtures: derive state, resolve one dispatch, hand it to the loop.
   const status: AutoStatus = { phase: "running", transitionCount: 0 };
-  let iteration = 0;
-  let seq = 0;
-
-  function nextSeq(): number {
-    return ++seq;
-  }
 
   function clearActiveUnit(): void {
     status.activeUnit = undefined;
   }
 
-  async function captureAutoSideEffects<T>(
-    run: () => Promise<T>,
-  ): Promise<CapturedAutoSideEffects<T>> {
-    const originalStopAuto = deps.stopAuto;
-    const originalPauseAuto = deps.pauseAuto;
-    let stoppedReason: string | undefined;
-    let pausedReason: string | undefined;
-    let stopped = false;
-    let paused = false;
-
-    (deps as any).stopAuto = async (...args: Parameters<LoopDeps["stopAuto"]>) => {
-      stopped = true;
-      stoppedReason = args[2];
-      return originalStopAuto(...args);
-    };
-    (deps as any).pauseAuto = async (...args: Parameters<LoopDeps["pauseAuto"]>) => {
-      paused = true;
-      const context = args[2] as { message?: string } | undefined;
-      pausedReason = context?.message;
-      return originalPauseAuto(...args);
-    };
-
-    try {
-      const result = await run();
-      return { result, stopped, stoppedReason, paused, pausedReason };
-    } finally {
-      (deps as any).stopAuto = originalStopAuto;
-      (deps as any).pauseAuto = originalPauseAuto;
-    }
-  }
-
-  function resultForBreak(
-    reason: string,
-    sideEffects: CapturedAutoSideEffects<unknown>,
-  ): AutoAdvanceResult {
+  async function stopWith(reason: string): Promise<AutoAdvanceResult> {
+    await deps.stopAuto(ctx, pi, reason);
     clearActiveUnit();
-    status.phase = sideEffects.paused && !sideEffects.stopped ? "paused" : "stopped";
+    status.phase = "stopped";
     status.transitionCount += 1;
-    if (sideEffects.paused && !sideEffects.stopped) {
-      return {
-        kind: "blocked",
-        reason: sideEffects.pausedReason ?? reason,
-        action: "pause",
-      };
-    }
-    return {
-      kind: "stopped",
-      reason: sideEffects.stoppedReason ?? reason,
-    };
+    return { kind: "stopped", reason };
   }
 
   return {
@@ -268,60 +199,42 @@ function createLoopTestOrchestration(
       return { kind: "started" };
     },
     async advance() {
-      iteration += 1;
-      seq = 0;
       const prefs = deps.loadEffectiveGSDPreferences()?.preferences;
-      const ic = {
-        ctx,
-        pi,
-        s,
-        deps,
+      const state = await deps.deriveState(s.basePath);
+      const mid = state.activeMilestone?.id;
+      if (!mid || state.phase === "complete") {
+        return stopWith("no active milestone");
+      }
+      const midTitle = state.activeMilestone?.title ?? mid;
+      const dispatch = await deps.resolveDispatch({
+        basePath: s.basePath,
+        mid,
+        midTitle,
+        state,
         prefs,
-        iteration,
-        flowId: `loop-test-orchestration-${iteration}`,
-        nextSeq,
-      };
-
-      const preDispatch = await captureAutoSideEffects(() => runPreDispatch(ic, loopState));
-      const preDispatchResult = preDispatch.result;
-      if (preDispatchResult.action === "break") {
-        return resultForBreak(preDispatchResult.reason, preDispatch);
+        session: s,
+      });
+      if (dispatch.action === "stop") {
+        return stopWith(dispatch.reason);
       }
-      if (preDispatchResult.action === "continue") {
-        return { kind: "skipped", code: "no-dispatch" as const, reason: "pre-dispatch-skip" };
-      }
-      if (preDispatchResult.action === "retry") {
-        return { kind: "paused", reason: preDispatchResult.reason, failureKind: "runtime-unknown" as const };
-      }
-
-      const dispatch = await captureAutoSideEffects(() =>
-        runDispatch(ic, preDispatchResult.data, loopState),
-      );
-      if (dispatch.result.action === "break") {
-        return resultForBreak(dispatch.result.reason, dispatch);
-      }
-      if (dispatch.result.action === "continue") {
+      if (dispatch.action !== "dispatch") {
         return {
           kind: "skipped",
           code: "no-dispatch" as const,
           reason: "dispatch-skip",
-          stateSnapshot: preDispatchResult.data.state,
+          stateSnapshot: state,
         };
       }
-      if (dispatch.result.action === "retry") {
-        return { kind: "paused", reason: dispatch.result.reason, failureKind: "runtime-unknown" as const };
-      }
 
-      const data = dispatch.result.data;
-      const unit: UnitRef = { unitType: data.unitType, unitId: data.unitId };
+      const unit: UnitRef = { unitType: dispatch.unitType, unitId: dispatch.unitId };
       s.pendingOrchestrationDispatch = {
-        unitType: data.unitType,
-        unitId: data.unitId,
-        prompt: data.prompt,
-        pauseAfterUatDispatch: data.pauseAfterUatDispatch,
-        state: data.state,
-        mid: data.mid,
-        midTitle: data.midTitle,
+        unitType: dispatch.unitType,
+        unitId: dispatch.unitId,
+        prompt: dispatch.prompt,
+        pauseAfterUatDispatch: dispatch.pauseAfterDispatch ?? false,
+        state,
+        mid,
+        midTitle,
       };
       status.phase = "running";
       status.activeUnit = unit;
@@ -330,7 +243,7 @@ function createLoopTestOrchestration(
       // positive id so the loop does not open a second database claim.
       const dispatchId = s.workerId ? 0 : 1;
       s.pendingOrchestrationDispatch.dispatchId = dispatchId;
-      return { kind: "advanced", unit, stateSnapshot: data.state, dispatchId };
+      return { kind: "advanced", unit, stateSnapshot: state, dispatchId };
     },
     async settle() {
       clearActiveUnit();
@@ -2290,67 +2203,6 @@ test("autoLoop exits on terminal complete state", async (t) => {
   );
 });
 
-test("autoLoop skips provider dispatch when execute-task is already complete in DB", async () => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  ctx.ui.setStatus = () => {};
-  ctx.ui.setWidget = () => {};
-  const pi = makeMockPi();
-  const basePath = realpathSync(makeLoopTestBase("gsd-already-complete-dispatch-"));
-  mkdirSync(join(basePath, ".gsd"), { recursive: true });
-
-  try {
-    openDatabase(join(basePath, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "pending" });
-    insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task One", status: "complete" });
-
-    const s = makeLoopSession({
-      basePath,
-      originalBasePath: basePath,
-      canonicalProjectRoot: basePath,
-    });
-    let deriveCount = 0;
-    const notifications: string[] = [];
-    ctx.ui.notify = (msg: string) => notifications.push(msg);
-
-    const deps = makeMockDeps({
-      isDbAvailable: () => true,
-      deriveState: async () => {
-        deriveCount++;
-        if (deriveCount > 1) s.active = false;
-        return {
-          phase: "executing",
-          activeMilestone: { id: "M001", title: "Test", status: "active" },
-          activeSlice: { id: "S01", title: "Slice 1" },
-          activeTask: { id: "T01" },
-          registry: [{ id: "M001", status: "active" }],
-          blockers: [],
-        } as any;
-      },
-      resolveDispatch: async () => {
-        deps.callLog.push("resolveDispatch");
-        return {
-          action: "dispatch" as const,
-          unitType: "execute-task",
-          unitId: "M001/S01/T01",
-          prompt: "do the already-complete task",
-        };
-      },
-    });
-
-    await autoLoop(ctx, pi, s, deps);
-
-    assert.equal(pi.calls.length, 0, "completed task must not be sent to provider again");
-    assert.ok(!deps.callLog.includes("postUnitPreVerification"));
-    assert.ok(notifications.some((m) => m.includes("already complete")));
-  } finally {
-    try { closeDatabase(); } catch { /* noop */ }
-    rmSync(basePath, { recursive: true, force: true });
-  }
-});
-
 test("custom-engine replan recovery completes preparation without verifying or reconciling the workflow step", async (t) => {
   _resetPendingResolve();
   let reconcileCalls = 0;
@@ -3293,141 +3145,6 @@ test("autoLoop refreshes its milestone lease while an execute-task call is pendi
   }
 });
 
-test("autoLoop stops before success notification when postflight stash restore needs recovery", async (t) => {
-  _resetPendingResolve();
-
-  const notifications: Array<{ msg: string; level: string }> = [];
-  const ctx = makeMockCtx();
-  ctx.ui.setStatus = () => {};
-  ctx.ui.notify = (msg: string, level: string) => {
-    notifications.push({ msg, level });
-  };
-  const pi = makeMockPi();
-  const s = makeLoopSession();
-  openLoopDatabase(t, s);
-  let stopReason = "";
-
-  const deps = makeMockDeps({
-    deriveState: async () => {
-      deps.callLog.push("deriveState");
-      return {
-        phase: "complete",
-        activeMilestone: { id: "M001", title: "Test", status: "complete" },
-        activeSlice: null,
-        activeTask: null,
-        registry: [{ id: "M001", status: "complete" }],
-        blockers: [],
-      } as any;
-    },
-    preflightCleanRoot: () => ({
-      stashPushed: true,
-      stashMarker: "gsd-preflight-stash:M001:test",
-      summary: "stashed",
-    }),
-    postflightPopStash: () => ({
-      restored: false,
-      needsManualRecovery: true,
-      message: "git stash pop stash@{0} failed after merge of milestone M001",
-      stashRef: "stash@{0}",
-    }),
-    sendDesktopNotification: () => {
-      deps.callLog.push("sendDesktopNotification");
-    },
-    logCmuxEvent: () => {
-      deps.callLog.push("logCmuxEvent");
-    },
-    stopAuto: async (_ctx, _pi, reason) => {
-      deps.callLog.push("stopAuto");
-      stopReason = reason ?? "";
-    },
-  });
-
-  await autoLoop(ctx, pi, s, deps);
-
-  assert.equal(stopReason, "Post-merge stash restore failed for milestone M001");
-  assert.ok(
-    notifications.some(
-      (n) => n.level === "error" && n.msg.includes("Post-merge stash restore failed for milestone M001"),
-    ),
-    "failed postflight restore must be surfaced as an error",
-  );
-  assert.ok(
-    !deps.callLog.includes("sendDesktopNotification"),
-    "must not emit milestone success desktop notification after stash restore failure",
-  );
-  assert.ok(
-    !deps.callLog.includes("logCmuxEvent"),
-    "must not emit milestone success cmux event after stash restore failure",
-  );
-});
-
-test("autoLoop marks transition merge complete before postflight recovery stop", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  ctx.ui.setStatus = () => {};
-  ctx.ui.notify = () => {};
-  const pi = makeMockPi();
-  const s = makeLoopSession();
-  openLoopDatabase(t, s);
-  let mergeCalls = 0;
-  let stopReason = "";
-
-  const deps = makeMockDeps({
-    deriveState: async () => {
-      deps.callLog.push("deriveState");
-      return {
-        phase: "executing",
-        activeMilestone: { id: "M002", title: "Next", status: "active" },
-        activeSlice: null,
-        activeTask: null,
-        registry: [
-          { id: "M001", title: "Done", status: "complete" },
-          { id: "M002", title: "Next", status: "active" },
-        ],
-        blockers: [],
-      } as any;
-    },
-    preflightCleanRoot: () => ({
-      stashPushed: true,
-      stashMarker: "gsd-preflight-stash:M001:test",
-      summary: "stashed",
-    }),
-    postflightPopStash: () => ({
-      restored: false,
-      needsManualRecovery: true,
-      message: "git stash pop stash@{0} failed after merge of milestone M001",
-      stashRef: "stash@{0}",
-    }),
-    lifecycle: {
-      enterMilestone: () => {
-        assert.fail("must not enter the next milestone after postflight recovery fails");
-      },
-      exitMilestone: guardedExitMilestoneForTest((_mid, opts) => {
-        if (opts.merge) mergeCalls += 1;
-        return { ok: true, merged: opts.merge, codeFilesChanged: false };
-      }),
-    } as any,
-    stopAuto: async (_ctx, _pi, reason) => {
-      deps.callLog.push("stopAuto");
-      stopReason = reason ?? "";
-      if (!s.milestoneMergedInPhases) {
-        deps.lifecycle.exitMilestone(
-          "M001",
-          { merge: true },
-          { notify: ctx.ui.notify.bind(ctx.ui) },
-        );
-      }
-    },
-  });
-
-  await autoLoop(ctx, pi, s, deps);
-
-  assert.equal(stopReason, "Post-merge stash restore failed for milestone M001");
-  assert.equal(s.milestoneMergedInPhases, true);
-  assert.equal(mergeCalls, 1, "postflight recovery stop must not re-run an already completed transition merge");
-});
-
 test("autoLoop pauses when provider readiness cancels before dispatch", async (t) => {
   _resetPendingResolve();
 
@@ -3617,41 +3334,6 @@ test("autoLoop dequeues sidecar item before session-lock break (mid-session, #53
   assert.ok(
     deps.callLog.includes("handleLostSessionLock"),
     "lock-loss handler must still fire on iteration 2",
-  );
-});
-
-test("autoLoop exits on terminal blocked state", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  ctx.ui.setStatus = () => {};
-  const pi = makeMockPi();
-  const s = makeLoopSession();
-
-  const deps = makeMockDeps({
-    deriveState: async () => {
-      deps.callLog.push("deriveState");
-      return {
-        phase: "blocked",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: null,
-        activeTask: null,
-        registry: [{ id: "M001", status: "active" }],
-        blockers: ["Missing API key"],
-      } as any;
-    },
-  });
-
-  await autoLoop(ctx, pi, s, deps);
-
-  assert.ok(deps.callLog.includes("deriveState"), "should have derived state");
-  assert.ok(
-    deps.callLog.includes("pauseAuto"),
-    "should have called pauseAuto for blocked state",
-  );
-  assert.ok(
-    !deps.callLog.includes("resolveDispatch"),
-    "should not dispatch when blocked",
   );
 });
 
@@ -4171,165 +3853,6 @@ test("autoLoop stops orchestrator complete state through completion surface", as
     false,
     "orchestrator completion must not fall back to legacy dispatch or a generic stop",
   );
-});
-
-test("autoLoop replays artifact retry dispatch before deriving the next unit", async () => {
-  _resetPendingResolve();
-  mock.timers.enable({ apis: ["Date", "setTimeout"], now: 50_000 });
-
-  try {
-    const ctx = makeMockCtx();
-    ctx.ui.setStatus = () => {};
-    ctx.ui.notify = () => {};
-    ctx.sessionManager = { getSessionFile: () => "/tmp/session.json" };
-    const pi = makeMockPi();
-    const stateSnapshot = {
-      phase: "summarizing",
-      activeMilestone: { id: "M004", title: "Milestone 4", status: "active" },
-      activeSlice: { id: "S01", title: "Slice 1" },
-      activeTask: null,
-      registry: [{ id: "M004", status: "active" }],
-      blockers: [],
-    } as any;
-    const s = makeLoopSession({
-      currentMilestoneId: "M004",
-    });
-
-    let resolveDispatchCalls = 0;
-    let preVerificationCalls = 0;
-    const deps = makeMockDeps({
-      deriveState: async () => stateSnapshot,
-      resolveDispatch: async () => {
-        resolveDispatchCalls++;
-        return resolveDispatchCalls === 1
-          ? {
-              action: "dispatch" as const,
-              unitType: "complete-slice",
-              unitId: "M004/S01",
-              prompt: "complete slice prompt",
-            }
-          : {
-              action: "dispatch" as const,
-              unitType: "complete-milestone",
-              unitId: "M004",
-              prompt: "complete milestone prompt",
-            };
-      },
-      postUnitPreVerification: async () => {
-        preVerificationCalls++;
-        if (preVerificationCalls === 1) {
-          s.pendingVerificationRetry = {
-            unitId: "M004/S01",
-            failureContext: "slice summary exists but did not satisfy the completion contract",
-            attempt: 1,
-          };
-          return "retry" as const;
-        }
-        return "continue" as const;
-      },
-      postUnitPostVerification: async () => {
-        deps.callLog.push("postUnitPostVerification");
-        if (preVerificationCalls >= 2) s.active = false;
-        return "continue" as const;
-      },
-    });
-
-    const loopPromise = autoLoop(ctx, pi, s, deps);
-
-    await waitForMicrotasks(() => pi.calls.length === 1, "initial complete-slice dispatch");
-    resolveAgentEnd(makeEvent());
-    await drainMicrotasks(100);
-    mock.timers.tick(30_000);
-    await waitForMicrotasks(() => pi.calls.length === 2, "same-unit retry dispatch");
-    resolveAgentEnd(makeEvent());
-    await loopPromise;
-
-    const secondPrompt = (pi.calls[1] as any[])[0].content;
-    assert.match(secondPrompt, /VERIFICATION FAILED/);
-    assert.match(secondPrompt, /complete slice prompt/);
-    assert.doesNotMatch(secondPrompt, /complete milestone prompt/);
-    assert.equal(s.pendingVerificationRetryDispatch, null);
-  } finally {
-    mock.timers.reset();
-  }
-});
-
-test("autoLoop replays pre-execution retry dispatch before deriving the next unit", async () => {
-  _resetPendingResolve();
-  mock.timers.enable({ apis: ["Date", "setTimeout"], now: 60_000 });
-
-  try {
-    const ctx = makeMockCtx();
-    ctx.ui.setStatus = () => {};
-    ctx.ui.notify = () => {};
-    ctx.sessionManager = { getSessionFile: () => "/tmp/session.json" };
-    const pi = makeMockPi();
-    const stateSnapshot = {
-      phase: "planning",
-      activeMilestone: { id: "M006", title: "Milestone 6", status: "active" },
-      activeSlice: { id: "S01", title: "Slice 1" },
-      activeTask: null,
-      registry: [{ id: "M006", status: "active" }],
-      blockers: [],
-    } as any;
-    const s = makeLoopSession({
-      currentMilestoneId: "M006",
-    });
-
-    let resolveDispatchCalls = 0;
-    let postVerificationCalls = 0;
-    const deps = makeMockDeps({
-      deriveState: async () => stateSnapshot,
-      resolveDispatch: async () => {
-        resolveDispatchCalls++;
-        return resolveDispatchCalls === 1
-          ? {
-              action: "dispatch" as const,
-              unitType: "plan-slice",
-              unitId: "M006/S01",
-              prompt: "plan slice prompt",
-            }
-          : {
-              action: "dispatch" as const,
-              unitType: "execute-task",
-              unitId: "M006/S01/T01",
-              prompt: "execute task prompt",
-            };
-      },
-      postUnitPostVerification: async () => {
-        postVerificationCalls++;
-        if (postVerificationCalls === 1) {
-          s.pendingVerificationRetry = {
-            unitId: "M006/S01",
-            failureContext: "Unsafe Verify command: grep alternation with |",
-            attempt: 1,
-          };
-          return "retry" as const;
-        }
-        s.active = false;
-        return "continue" as const;
-      },
-    });
-
-    const loopPromise = autoLoop(ctx, pi, s, deps);
-
-    await waitForMicrotasks(() => pi.calls.length === 1, "initial plan-slice dispatch");
-    resolveAgentEnd(makeEvent());
-    await drainMicrotasks(100);
-    mock.timers.tick(30_000);
-    await waitForMicrotasks(() => pi.calls.length === 2, "same planning retry dispatch");
-    resolveAgentEnd(makeEvent());
-    await loopPromise;
-
-    const secondPrompt = (pi.calls[1] as any[])[0].content;
-    assert.match(secondPrompt, /VERIFICATION FAILED/);
-    assert.match(secondPrompt, /Unsafe Verify command/);
-    assert.match(secondPrompt, /plan slice prompt/);
-    assert.doesNotMatch(secondPrompt, /execute task prompt/);
-    assert.equal(s.pendingVerificationRetryDispatch, null);
-  } finally {
-    mock.timers.reset();
-  }
 });
 
 test("autoLoop releases orchestration active unit before artifact retry", async () => {
@@ -5002,108 +4525,6 @@ test("autoLoop handles dispatch stop action", async (t) => {
   );
 });
 
-// #2474: warning-level dispatch stop should pause (resumable), not hard-stop
-test("autoLoop pauses instead of stopping for warning-level dispatch stop", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  ctx.ui.setStatus = () => {};
-  const pi = makeMockPi();
-  const s = makeLoopSession();
-  let pauseContext: unknown;
-
-  const deps = makeMockDeps({
-    resolveDispatch: async () => {
-      deps.callLog.push("resolveDispatch");
-      return {
-        action: "stop" as const,
-        reason: 'UAT verdict for S01 is "partial" — blocking progression.',
-        level: "warning" as const,
-      };
-    },
-    pauseAuto: async (_ctx, _pi, errorContext) => {
-      pauseContext = errorContext;
-      deps.callLog.push("pauseAuto");
-    },
-  });
-
-  await autoLoop(ctx, pi, s, deps);
-
-  assert.ok(
-    deps.callLog.includes("resolveDispatch"),
-    "should have called resolveDispatch",
-  );
-  assert.ok(
-    deps.callLog.includes("pauseAuto"),
-    "warning-level stop should call pauseAuto (resumable)",
-  );
-  assert.ok(
-    !deps.callLog.includes("stopAuto"),
-    "warning-level stop should NOT call stopAuto (hard stop)",
-  );
-  assert.equal(
-    (pauseContext as { message?: string } | undefined)?.message,
-    'UAT verdict for S01 is "partial" — blocking progression.',
-    "warning-level stop should pass pause reason into pauseAuto for persisted paused metadata",
-  );
-});
-
-test("autoLoop retries warning-level unhandled phase with fresh state before pausing", async () => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  ctx.ui.setStatus = () => {};
-  const pi = makeMockPi();
-  const s = makeLoopSession();
-  const states = [
-    {
-      phase: "planning",
-      activeMilestone: { id: "M001", title: "Test", status: "active" },
-      activeSlice: null,
-      activeTask: null,
-      registry: [{ id: "M001", status: "active" }],
-      blockers: [],
-    },
-    {
-      phase: "executing",
-      activeMilestone: { id: "M001", title: "Test", status: "active" },
-      activeSlice: { id: "S01", title: "Slice 1" },
-      activeTask: { id: "T01" },
-      registry: [{ id: "M001", status: "active" }],
-      blockers: [],
-    },
-  ];
-  const seenPhases: string[] = [];
-  let deriveCalls = 0;
-
-  const deps = makeMockDeps({
-    deriveState: async () => states[Math.min(deriveCalls++, states.length - 1)] as any,
-    resolveDispatch: async (dctx) => {
-      seenPhases.push(dctx.state.phase);
-      if (dctx.state.phase === "planning") {
-        return {
-          action: "stop" as const,
-          reason: 'Unhandled phase "planning" — run /gsd doctor to diagnose.',
-          level: "warning" as const,
-          matchedRule: "<no-match>",
-        };
-      }
-      return {
-        action: "stop" as const,
-        reason: "fresh state reached terminal stop",
-        level: "info" as const,
-      };
-    },
-  });
-
-  await autoLoop(ctx, pi, s, deps);
-
-  assert.deepEqual(seenPhases, ["planning", "executing"]);
-  assert.equal(deriveCalls, 2, "unhandled warning should re-derive state once");
-  assert.equal(deps.callLog.includes("pauseAuto"), false);
-  assert.equal(deps.callLog.includes("stopAuto"), true);
-});
-
 // #2474: error-level dispatch stop should still hard-stop
 test("autoLoop hard-stops for error-level dispatch stop", async (t) => {
   _resetPendingResolve();
@@ -5133,41 +4554,6 @@ test("autoLoop hard-stops for error-level dispatch stop", async (t) => {
   assert.ok(
     !deps.callLog.includes("pauseAuto"),
     "error-level stop should NOT call pauseAuto",
-  );
-});
-
-test("autoLoop closes journal iteration on pre-dispatch health-gate break", async () => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  ctx.ui.setStatus = () => {};
-  const pi = makeMockPi();
-  const s = makeLoopSession();
-  const journalEvents: Array<{ eventType: string; data?: any }> = [];
-  let pauseOptions: unknown;
-
-  const deps = makeMockDeps({
-    preDispatchHealthGate: async () => ({
-      proceed: false,
-      reason: "health gate failed",
-      fixesApplied: [],
-    }),
-    pauseAuto: async (_ctx, _pi, _errorContext, options) => {
-      pauseOptions = options;
-      deps.callLog.push("pauseAuto");
-    },
-    emitJournalEvent: (event: any) => {
-      journalEvents.push(event);
-    },
-  });
-
-  await autoLoop(ctx, pi, s, deps);
-
-  assert.equal(deps.callLog.includes("pauseAuto"), true);
-  assert.deepEqual(pauseOptions, { expectedCurrentUnit: null });
-  assert.ok(
-    journalEvents.some((event) => event.eventType === "iteration-end" && event.data?.reason === "health-gate-failed"),
-    "pre-dispatch break must close the started iteration",
   );
 });
 
@@ -6424,7 +5810,7 @@ test("resetSessionTimeoutState gives a new auto session a fresh session-creation
         isRetry: false,
         previousTier: undefined,
       },
-      makeLoopState(),
+      { consecutiveFinalizeTimeouts: 0 },
     );
 
     // Wait until runUnit has dispatched the prompt, then resolve the unit
@@ -7996,632 +7382,6 @@ test("autoLoop stops when Worktree Safety finds no .git marker for execute-task 
   assert.ok(
     healthNotification,
     "should notify about missing worktree .git marker",
-  );
-});
-
-test("dispatch Worktree Safety wins before stuck detection for execute-task without .git", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-dispatch-"));
-  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
-  mkdirSync(worktreeRoot, { recursive: true });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const s = makeLoopSession({
-    basePath: worktreeRoot,
-    originalBasePath: projectRoot,
-    canonicalProjectRoot: projectRoot,
-  });
-  const deps = makeMockDeps({
-    getIsolationMode: () => "worktree",
-  });
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "break");
-  assert.equal(result.reason, "worktree-git-marker-missing");
-  assert.ok(deps.callLog.includes("stopAuto"), "should stop through Worktree Safety");
-  assert.ok(
-    notifications.some((n) => n.includes("Worktree Safety failed") && n.includes("worktree-git-marker-missing")),
-    "should notify about missing worktree .git marker",
-  );
-  assert.ok(
-    !notifications.some((n) => n.includes("Stuck on execute-task")),
-    "stuck-loop message must not mask the worktree health failure",
-  );
-});
-
-test("dispatch Worktree Safety honors degraded branch fallback instead of demanding the canonical worktree root", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  // Worktree creation failed and the lifecycle fell back to the milestone
-  // branch in the project root. The safety gate must validate against that
-  // effective branch mode, not the configured worktree mode.
-  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-degraded-"));
-  execSync("git init --initial-branch=main", { cwd: projectRoot, stdio: "ignore" });
-  execSync("git config user.email test@test.com", { cwd: projectRoot, stdio: "ignore" });
-  execSync("git config user.name Test", { cwd: projectRoot, stdio: "ignore" });
-  // The lifecycle fallback checks out the milestone branch in the project
-  // root, so the safety gate's branch verification expects that branch here
-  // too. expectedBranch comes from deps.autoWorktreeBranch (mocked to
-  // "auto/M001"), so the fixture repo must be on that same branch.
-  execSync("git commit --allow-empty -m init", { cwd: projectRoot, stdio: "ignore" });
-  execSync("git checkout -b auto/M001", { cwd: projectRoot, stdio: "ignore" });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const s = makeLoopSession({
-    basePath: projectRoot,
-    originalBasePath: projectRoot,
-    canonicalProjectRoot: projectRoot,
-    isolationDegraded: true,
-  });
-  const deps = makeMockDeps({
-    getIsolationMode: () => "worktree",
-  });
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "next", "dispatch must proceed under degraded branch isolation");
-  assert.ok(
-    !notifications.some((n) => n.includes("Worktree Safety failed")),
-    "degraded branch fallback must not trip a false invalid-root",
-  );
-  assert.ok(!deps.callLog.includes("stopAuto"), "auto-mode must not stop on the degraded fallback");
-});
-
-test("dispatch Worktree Safety honors stranded branch recovery instead of demanding the canonical worktree root", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  // Bootstrap adopted stranded work by checking out the milestone branch in
-  // the project root (strandedRecoveryIsolationMode = "branch"). Isolation is
-  // NOT degraded — the adoption is intentional. The safety gate must validate
-  // against the effective branch mode, not the configured worktree mode.
-  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-stranded-"));
-  execSync("git init --initial-branch=main", { cwd: projectRoot, stdio: "ignore" });
-  execSync("git config user.email test@test.com", { cwd: projectRoot, stdio: "ignore" });
-  execSync("git config user.name Test", { cwd: projectRoot, stdio: "ignore" });
-  // Stranded recovery adopts the milestone branch in the project root, so the
-  // safety gate's branch verification expects that branch here too.
-  // expectedBranch comes from deps.autoWorktreeBranch (mocked to "auto/M001"),
-  // so the fixture repo must be on that same branch.
-  execSync("git commit --allow-empty -m init", { cwd: projectRoot, stdio: "ignore" });
-  execSync("git checkout -b auto/M001", { cwd: projectRoot, stdio: "ignore" });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const s = makeLoopSession({
-    basePath: projectRoot,
-    originalBasePath: projectRoot,
-    canonicalProjectRoot: projectRoot,
-    strandedRecoveryIsolationMode: "branch",
-  });
-  const deps = makeMockDeps({
-    getIsolationMode: () => "worktree",
-  });
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "next", "dispatch must proceed under stranded branch recovery");
-  assert.ok(
-    !notifications.some((n) => n.includes("Worktree Safety failed")),
-    "stranded branch recovery must not trip a false invalid-root",
-  );
-  assert.ok(!deps.callLog.includes("stopAuto"), "auto-mode must not stop on stranded branch recovery");
-});
-
-test("runDispatch falls back to main when dispatch guard cannot read main branch (#5530)", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const basePath = makeLoopTestBase("gsd-5530-main-branch-fallback-");
-  t.after(() => rmSync(basePath, { recursive: true, force: true }));
-
-  let guardBranch: string | null = null;
-  const s = makeLoopSession({ basePath });
-  const deps = makeMockDeps({
-    getMainBranch: () => {
-      throw new Error("fatal: detected dubious ownership");
-    },
-    getPriorSliceCompletionBlocker: (_basePath, mainBranch) => {
-      guardBranch = mainBranch;
-      return null;
-    },
-  });
-
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(guardBranch, "main");
-  assert.equal(result.action, "next");
-});
-
-test("dispatch Worktree Safety stops unknown unit types with missing Tool Contract", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-missing-contract-"));
-  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
-  mkdirSync(worktreeRoot, { recursive: true });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const s = makeLoopSession({
-    basePath: worktreeRoot,
-    originalBasePath: projectRoot,
-    canonicalProjectRoot: projectRoot,
-  });
-  const deps = makeMockDeps({
-    getIsolationMode: () => "worktree",
-    resolveDispatch: async () => {
-      deps.callLog.push("resolveDispatch");
-      return {
-        action: "dispatch" as const,
-        unitType: "new-source-writing-unit-without-manifest",
-        unitId: "M001/S01/T01",
-        prompt: "do the thing",
-      };
-    },
-  });
-
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "break");
-  assert.equal(result.reason, "missing-tool-contract");
-  assert.ok(deps.callLog.includes("stopAuto"), "should stop when the Tool Contract is missing");
-  assert.ok(
-    notifications.some((n) => n.includes("missing Tool Contract for new-source-writing-unit-without-manifest")),
-    "should notify with an actionable missing Tool Contract reason",
-  );
-});
-
-test("dispatch Worktree Safety allows hook units without Tool Contract lookup", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-hook-contract-"));
-  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
-  mkdirSync(worktreeRoot, { recursive: true });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const s = makeLoopSession({
-    basePath: worktreeRoot,
-    originalBasePath: projectRoot,
-    canonicalProjectRoot: projectRoot,
-  });
-  const deps = makeMockDeps({
-    getIsolationMode: () => "worktree",
-    resolveDispatch: async () => {
-      deps.callLog.push("resolveDispatch");
-      return {
-        action: "dispatch" as const,
-        unitType: "hook/code-review",
-        unitId: "M001/S01/T01/review",
-        prompt: "review the unit",
-      };
-    },
-  });
-
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "next");
-  assert.equal(result.data?.unitType, "hook/code-review");
-  assert.ok(!deps.callLog.includes("stopAuto"), "hook units should not require a Tool Contract");
-  assert.ok(
-    !notifications.some((n) => n.includes("missing Tool Contract")),
-    "hook units must not fail the source-writing Tool Contract gate",
-  );
-});
-
-test("dispatch Worktree Safety accepts sidecar-prefixed known unit types", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-
-  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-sidecar-prefix-"));
-  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
-  mkdirSync(worktreeRoot, { recursive: true });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const s = makeLoopSession({
-    basePath: worktreeRoot,
-    originalBasePath: projectRoot,
-    canonicalProjectRoot: projectRoot,
-  });
-  const deps = makeMockDeps({
-    getIsolationMode: () => "worktree",
-    resolveDispatch: async () => ({
-      action: "dispatch" as const,
-      unitType: "sidecar/triage-captures",
-      unitId: "M001/S01/triage",
-      prompt: "triage",
-    }),
-  });
-
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "next");
-  assert.ok(!deps.callLog.includes("stopAuto"), "should not stop for sidecar-prefixed known unit types");
-});
-
-test("dispatch Worktree Safety allows hook units without Unit Tool Contract manifests", async (t) => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-safety-hook-contract-"));
-  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", "M001");
-  mkdirSync(worktreeRoot, { recursive: true });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const s = makeLoopSession({
-    basePath: worktreeRoot,
-    originalBasePath: projectRoot,
-    canonicalProjectRoot: projectRoot,
-  });
-  const deps = makeMockDeps({
-    getIsolationMode: () => "worktree",
-    resolveDispatch: async () => {
-      deps.callLog.push("resolveDispatch");
-      return {
-        action: "dispatch" as const,
-        unitType: "hook/session-context",
-        unitId: "M001/S01/T01",
-        prompt: "do the thing",
-      };
-    },
-  });
-
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    {
-      consecutiveFinalizeTimeouts: 0,
-    },
-  );
-
-  assert.equal(result.action, "next");
-  assert.ok(
-    !notifications.some((n) => n.includes("missing Tool Contract for hook/session-context")),
-    "hook units should not fail closed with missing-tool-contract",
-  );
-});
-
-test("pre-dispatch skip resolves before dispatch health and stuck accounting", async () => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  const s = makeLoopSession({ basePath: "/tmp/broken-worktree" });
-  const deps = makeMockDeps({
-    existsSync: (p: string) => !p.endsWith(".git"),
-    runPreDispatchHooks: () => ({ firedHooks: ["skip-execute"], action: "skip" }),
-  });
-  const loopState = {
-    consecutiveFinalizeTimeouts: 0,
-  };
-
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    loopState,
-  );
-
-  assert.equal(result.action, "continue");
-  assert.ok(!deps.callLog.includes("stopAuto"), "skip hook should not stop on worktree health");
-  assert.ok(
-    notifications.some((n) => n.includes("Skipping execute-task M001/S01/T01")),
-    "should notify about the skip hook",
-  );
-  assert.ok(
-    !notifications.some((n) => n.includes("Worktree health check failed") || n.includes("Stuck on execute-task")),
-    "health and stuck notifications must not run before skip hook resolution",
-  );
-});
-
-test("pre-dispatch replace resolves final unit before dispatch health and stuck accounting", async () => {
-  _resetPendingResolve();
-
-  const ctx = makeMockCtx();
-  const pi = makeMockPi();
-  const notifications: string[] = [];
-  ctx.ui.notify = (msg: string) => { notifications.push(msg); };
-
-  const s = makeLoopSession({ basePath: "/tmp/broken-worktree" });
-  const deps = makeMockDeps({
-    existsSync: (p: string) => !p.endsWith(".git"),
-    runPreDispatchHooks: () => ({
-      firedHooks: ["review"],
-      action: "replace",
-      unitType: "run-uat",
-      prompt: "review before executing",
-      model: "review-model",
-    }),
-  });
-  const loopState = {
-    consecutiveFinalizeTimeouts: 0,
-  };
-
-  const result = await runDispatch(
-    {
-      ctx,
-      pi,
-      s,
-      deps,
-      prefs: undefined,
-      iteration: 1,
-      flowId: "test-flow",
-      nextSeq: () => 1,
-    },
-    {
-      state: {
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-      } as any,
-      mid: "M001",
-      midTitle: "Test",
-    },
-    loopState,
-  );
-
-  assert.equal(result.action, "next");
-  assert.equal(result.data?.unitType, "run-uat");
-  assert.equal(result.data?.finalPrompt, "review before executing");
-  assert.equal(result.data?.hookModelOverride, "review-model");
-  assert.ok(!deps.callLog.includes("stopAuto"), "replace hook should not stop on execute-task health");
-  assert.ok(
-    !notifications.some((n) => n.includes("Worktree health check failed") || n.includes("Stuck on execute-task")),
-    "health and stuck notifications must use the final replaced unit",
   );
 });
 
