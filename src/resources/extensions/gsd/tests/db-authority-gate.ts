@@ -181,7 +181,10 @@ export function seedLifecycle(
   });
 }
 
-const WRITE_TARGET =/^\s*(?:INSERT(?:\s+OR\s+\w+)?\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+["`]?(\w+)/i;
+// Scans the whole text, so it also finds a write after a WITH clause and each
+// statement of a multi-statement exec(). A match that is not a table name
+// (for example "DO UPDATE SET") is harmless: only workflow tables are fenced.
+const WRITE_TARGET = /\b(?:(?:INSERT(?:\s+OR\s+\w+)?|REPLACE)\s+INTO|UPDATE(?:\s+OR\s+\w+)?|DELETE\s+FROM)\s+["`]?(\w+)/gi;
 
 /**
  * Wrap the open adapter so that a write to a workflow table throws unless the
@@ -198,24 +201,31 @@ export function fenceWorkflowWrites(): { violations: string[]; restore: () => vo
   const originalExec = db.exec;
   const originalPrepare = db.prepare;
 
+  // Throws on the first workflow-table write that has no open Domain Operation.
+  const check = (sql: string): void => {
+    for (const match of sql.matchAll(WRITE_TARGET)) {
+      const table = match[1].toLowerCase();
+      if (table === "workflow_operations") operationOpen = true;
+      if (workflowTables.has(table) && !operationOpen) {
+        violations.push(table);
+        throw new Error(`write to workflow table "${table}" outside a Domain Operation`);
+      }
+    }
+  };
+
   db.exec = function exec(sql: string) {
     if (/^\s*(COMMIT|ROLLBACK)\s*;?\s*$/i.test(sql)) operationOpen = false;
+    check(sql);
     return originalExec.call(db, sql);
   };
   db.prepare = function prepare(sql: string) {
     const statement = originalPrepare.call(db, sql);
-    const table = WRITE_TARGET.exec(sql)?.[1]?.toLowerCase();
-    if (!table) return statement;
     // The adapter caches statements, so wrap instead of patching the shared object.
     return {
       get: (...params: unknown[]) => statement.get(...params),
       all: (...params: unknown[]) => statement.all(...params),
       run(...params: unknown[]) {
-        if (table === "workflow_operations") operationOpen = true;
-        if (workflowTables.has(table) && !operationOpen) {
-          violations.push(table);
-          throw new Error(`write to workflow table "${table}" outside a Domain Operation`);
-        }
+        check(sql);
         return statement.run(...params);
       },
     };

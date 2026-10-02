@@ -259,6 +259,9 @@ describe("G4: the write fence used by the per-tool gates", () => {
       payload: {},
     }, () => {
       db().prepare("UPDATE tasks SET title = 'Written inside' WHERE slice_id = 'S02'").run();
+      db().exec("UPDATE tasks SET description = 'exec inside' WHERE slice_id = 'S02'");
+      db().prepare("REPLACE INTO tasks SELECT * FROM tasks WHERE slice_id = 'S02'").run();
+      db().prepare("WITH x AS (SELECT 1) UPDATE tasks SET narrative = 'with inside' WHERE slice_id = 'S02'").run();
       return {
         events: [{
           eventType: "db-authority-gate.fence-inside",
@@ -279,13 +282,20 @@ describe("G4: the write fence used by the per-tool gates", () => {
       () => updateTaskStatus("M001", "S02", "T01", "complete"),
       /write to workflow table "tasks" outside a Domain Operation/,
     );
+    const refused = /write to workflow table "tasks" outside a Domain Operation/;
+    assert.throws(() => db().exec("DELETE FROM tasks"), refused);
+    assert.throws(() => db().prepare("REPLACE INTO tasks SELECT * FROM tasks").run(), refused);
+    assert.throws(
+      () => db().prepare("WITH x AS (SELECT 1) UPDATE tasks SET title = 'Written outside'").run(),
+      refused,
+    );
     fence.restore();
 
     assert.deepEqual(fenceAfterOperation, []);
-    assert.deepEqual(fence.violations, ["tasks"]);
+    assert.deepEqual(fence.violations, ["tasks", "tasks", "tasks", "tasks"]);
     assert.deepEqual(
-      db().prepare("SELECT title, status FROM tasks WHERE slice_id = 'S02'").get(),
-      { title: "Written inside", status: "pending" },
+      db().prepare("SELECT title, status, description, narrative FROM tasks WHERE slice_id = 'S02'").get(),
+      { title: "Written inside", status: "pending", description: "exec inside", narrative: "with inside" },
       "the operation write is stored and the refused write is not",
     );
   });
