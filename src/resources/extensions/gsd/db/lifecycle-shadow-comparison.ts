@@ -1,6 +1,11 @@
 // Project/App: gsd-pi
 // File Purpose: Pure semantic comparison between legacy hierarchy and canonical lifecycle statuses.
 
+import {
+  normalizeCanonicalLifecycleStatus,
+  normalizeLegacyLifecycleStatus,
+} from "../status-guards.js";
+
 export type LifecycleShadowComparisonKind =
   | "match"
   | "semantic_match_exact_delta"
@@ -8,14 +13,10 @@ export type LifecycleShadowComparisonKind =
   | "extra_shadow"
   | "status_mismatch";
 
-export type CanonicalLifecycleStatus =
-  | "pending"
-  | "ready"
-  | "in_progress"
-  | "paused"
-  | "completed"
-  | "cancelled"
-  | "blocker-accepted";
+// The status vocabulary and the legacy-to-canonical map live in
+// status-guards.ts; re-exported here for existing importers.
+export { normalizeCanonicalLifecycleStatus, normalizeLegacyLifecycleStatus };
+export type { CanonicalLifecycleStatus } from "../status-guards.js";
 
 export interface LifecycleShadowComparison {
   kind: LifecycleShadowComparisonKind;
@@ -23,45 +24,6 @@ export interface LifecycleShadowComparison {
   canonicalStatus: string | null;
   normalizedLegacyStatus: string | null;
   normalizedCanonicalStatus: string | null;
-}
-
-const LEGACY_STATUS_MAP: Readonly<Record<string, CanonicalLifecycleStatus>> = {
-  pending: "pending",
-  queued: "pending",
-  planned: "pending",
-  active: "in_progress",
-  in_progress: "in_progress",
-  "in-progress": "in_progress",
-  blocked: "paused",
-  parked: "paused",
-  complete: "completed",
-  done: "completed",
-  closed: "completed",
-  skipped: "cancelled",
-  deferred: "cancelled",
-  // #2202: operator closeout disposition — the Task closed by accepting a
-  // discovered blocker; terminal in both vocabularies.
-  "blocker-accepted": "blocker-accepted",
-};
-
-const CANONICAL_STATUSES: ReadonlySet<string> = new Set([
-  "pending",
-  "ready",
-  "in_progress",
-  "paused",
-  "completed",
-  "cancelled",
-  "blocker-accepted",
-]);
-
-export function normalizeLegacyLifecycleStatus(status: string | null): CanonicalLifecycleStatus | null {
-  if (status === null) return null;
-  return LEGACY_STATUS_MAP[status] ?? null;
-}
-
-export function normalizeCanonicalLifecycleStatus(status: string | null): CanonicalLifecycleStatus | null {
-  if (status === null || !CANONICAL_STATUSES.has(status)) return null;
-  return status as CanonicalLifecycleStatus;
 }
 
 function isSemanticMatch(

@@ -8,7 +8,7 @@
 // resolveMilestoneValidationVerdict) is pinned by D005 and unchanged.
 
 import type { ActiveRef, GSDState, MilestoneRegistryEntry, Phase } from '../../types.js';
-import { isClosedStatus, isDeferredStatus } from '../../status-guards.js';
+import { isClosedStatus, isInactiveStatus } from '../../status-guards.js';
 import { parseProject } from '../../schemas/parsers.js';
 import {
   queryDecisions,
@@ -195,7 +195,7 @@ async function buildRegistryAndFindActive(
       continue;
     }
 
-    const allSlicesDone = slices.length > 0 && slices.every(s => isStatusDone(s.status));
+    const allSlicesDone = slices.length > 0 && slices.every(s => isInactiveStatus(s.status));
 
     const title = stripMilestonePrefix(m.title) || m.id;
     const artifacts = getMilestoneScopedArtifacts(m.id);
@@ -400,7 +400,7 @@ async function handleAllSlicesDone(
 
 function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSlice: ActiveRef | null, activeSliceRow: SliceRow | null } {
   const doneSliceIds = new Set(
-    activeMilestoneSlices.filter(s => isStatusDone(s.status)).map(s => s.id)
+    activeMilestoneSlices.filter(s => isInactiveStatus(s.status)).map(s => s.id)
   );
 
   const sliceLock = process.env.GSD_PARALLEL_WORKER ? process.env.GSD_SLICE_LOCK : undefined;
@@ -415,8 +415,7 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSl
   }
 
   for (const s of activeMilestoneSlices) {
-    if (isStatusDone(s.status)) continue;
-    if (isDeferredStatus(s.status)) continue;
+    if (isInactiveStatus(s.status)) continue;
     if (s.depends.every(dep => doneSliceIds.has(dep))) {
       return { activeSlice: { id: s.id, title: s.title }, activeSliceRow: s };
     }
@@ -509,9 +508,9 @@ export async function deriveStateFromDb(
     );
   }
 
-  const allSlicesDone = activeMilestoneSlices.every(s => isStatusDone(s.status));
+  const allSlicesDone = activeMilestoneSlices.every(s => isInactiveStatus(s.status));
   const sliceProgress = {
-    done: activeMilestoneSlices.filter(s => isStatusDone(s.status)).length,
+    done: activeMilestoneSlices.filter(s => isInactiveStatus(s.status)).length,
     total: activeMilestoneSlices.length,
   };
   const sliceStateContext: DerivedStateContext = {

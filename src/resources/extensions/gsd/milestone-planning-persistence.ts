@@ -27,7 +27,7 @@ import { flushWorkflowProjections } from "./projection-flush.js";
 import { writeManifestAndFlush } from "./workflow-manifest.js";
 import { appendEvent } from "./workflow-events.js";
 import { logWarning } from "./workflow-logger.js";
-import { isClosedStatus } from "./status-guards.js";
+import { adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
 
 export interface PersistMilestonePlanSlice {
   sliceId: string;
@@ -86,14 +86,10 @@ function validatePlanPromotion(
     return `cannot re-plan milestone ${params.milestoneId}: it is already complete`;
   }
   if (existingMilestone) {
-    const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(existingMilestone.status);
-    const lifecycleStatus = legacyLifecycleStatus === "completed" || legacyLifecycleStatus === "cancelled"
-      ? legacyLifecycleStatus
-      : "ready";
     const lifecycle = adoptLifecycleIfMissing(context, {
       itemKind: "milestone",
       milestoneId: params.milestoneId,
-      lifecycleStatus,
+      lifecycleStatus: adoptionLifecycleStatus(existingMilestone.status),
     });
     if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
       return `cannot re-plan ${lifecycle.lifecycleStatus} milestone ${params.milestoneId} — use gsd_milestone_reopen first`;
@@ -108,17 +104,14 @@ function validatePlanPromotion(
   const incomingSliceById = new Map(params.slices.map((slice) => [slice.sliceId, slice]));
   const existingSliceLifecycleById = new Map<string, CanonicalLifecycleStatus>();
   for (const slice of existingSlices) {
-    const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(slice.status);
-    const plannedLifecycleStatus = incomingSliceById.get(slice.id)?.isSketch === true
-      ? "pending"
-      : "ready";
     const lifecycle = adoptLifecycleIfMissing(context, {
       itemKind: "slice",
       milestoneId: params.milestoneId,
       sliceId: slice.id,
-      lifecycleStatus: legacyLifecycleStatus === "completed" || legacyLifecycleStatus === "cancelled"
-        ? legacyLifecycleStatus
-        : plannedLifecycleStatus,
+      lifecycleStatus: adoptionLifecycleStatus(
+        slice.status,
+        incomingSliceById.get(slice.id)?.isSketch === true ? "pending" : "ready",
+      ),
     });
     existingSliceLifecycleById.set(slice.id, lifecycle.lifecycleStatus);
     if (incomingSliceById.has(slice.id) && (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled")) {

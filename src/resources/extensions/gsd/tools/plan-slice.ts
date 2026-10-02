@@ -1,6 +1,6 @@
 import { resolve } from "node:path";
 import { clearParseCache } from "../files.js";
-import { isClosedStatus } from "../status-guards.js";
+import { adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import {
@@ -10,7 +10,6 @@ import {
   getSlice,
   getSliceTasks,
   insertTask,
-  normalizeLegacyLifecycleStatus,
   projectCanonicalStatusToLegacy,
   upsertSlicePlanning,
   upsertTaskPlanning,
@@ -504,14 +503,10 @@ export async function handlePlanSlice(
         if (isClosedStatus(parentMilestone.status)) {
           throw new PlanningGuardError(`cannot plan slice in a closed milestone: ${params.milestoneId} (status: ${parentMilestone.status})`);
         }
-        const legacyMilestoneLifecycle = normalizeLegacyLifecycleStatus(parentMilestone.status);
-        const milestoneLifecycleStatus = legacyMilestoneLifecycle === "completed" || legacyMilestoneLifecycle === "cancelled"
-          ? legacyMilestoneLifecycle
-          : "ready";
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: milestoneLifecycleStatus,
+          lifecycleStatus: adoptionLifecycleStatus(parentMilestone.status),
         });
         if (milestoneLifecycle.lifecycleStatus === "completed" || milestoneLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -526,18 +521,11 @@ export async function handlePlanSlice(
         if (isClosedStatus(parentSlice.status)) {
           throw new PlanningGuardError(`cannot re-plan slice ${params.sliceId}: it is already complete — use gsd_slice_reopen first`);
         }
-        const legacySliceLifecycle = normalizeLegacyLifecycleStatus(parentSlice.status);
-        let sliceLifecycleStatus: "pending" | "ready" | "completed" | "cancelled" = hasTaskPayload
-          ? "ready"
-          : "pending";
-        if (legacySliceLifecycle === "completed" || legacySliceLifecycle === "cancelled") {
-          sliceLifecycleStatus = legacySliceLifecycle;
-        }
         const sliceLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: sliceLifecycleStatus,
+          lifecycleStatus: adoptionLifecycleStatus(parentSlice.status, hasTaskPayload ? "ready" : "pending"),
         });
         if (sliceLifecycle.lifecycleStatus === "completed" || sliceLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -581,8 +569,7 @@ export async function handlePlanSlice(
         );
         if (hasTaskPayload) {
           for (const task of existingTasks) {
-            const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
-            const observedLifecycleStatus = legacyLifecycleStatus ?? "ready";
+            const observedLifecycleStatus = adoptionLifecycleStatus(task.status);
             const omitted = !matchedRowIds.has(task.id);
             const lifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",

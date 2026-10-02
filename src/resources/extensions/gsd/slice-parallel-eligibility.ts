@@ -7,6 +7,8 @@
  * without explicit dependencies use sequential ordering as an implicit constraint.
  */
 
+import { isInactiveStatus } from "./status-guards.js";
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface SliceInput {
@@ -70,4 +72,19 @@ export function getEligibleSlices(
   }
 
   return eligible;
+}
+
+/**
+ * Eligibility straight from slice rows. `done` comes from the shared slice
+ * predicate, so a skipped, cancelled, or deferred slice satisfies ordering
+ * and dependencies exactly as it does in deriveState.
+ */
+export function getEligibleSlicesFromRows(
+  rows: ReadonlyArray<{ id: string; status: string; depends?: string[] }>,
+): EligibleSlice[] {
+  const doneIds = new Set(rows.filter(row => isInactiveStatus(row.status)).map(row => row.id));
+  return getEligibleSlices(
+    rows.map(row => ({ id: row.id, done: doneIds.has(row.id), depends: row.depends ?? [] })),
+    doneIds,
+  );
 }

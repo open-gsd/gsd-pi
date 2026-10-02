@@ -1939,7 +1939,7 @@ describe("checkTaskOrdering false positive for pre-execution refs (#4071)", () =
       createTask({
         id: "T_SETUP",
         sequence: 5,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["artifacts/setup.json"],
       }),
@@ -2017,7 +2017,7 @@ describe("checkTaskOrdering false positive for pre-execution refs (#4071)", () =
       createTask({
         id: "T_COMPLETED_PRODUCER",
         sequence: 2,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["shared/artifact.json"],
       }),
@@ -2052,7 +2052,7 @@ describe("checkTaskOrdering false positive for pre-execution refs (#4071)", () =
       createTask({
         id: "T_INIT",
         sequence: 10,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["generated/config.json"],
       }),
@@ -2088,7 +2088,7 @@ describe("checkFilePathConsistency completed-task output exemption (#4071)", () 
       createTask({
         id: "T_SETUP",
         sequence: 10,
-        status: "completed",
+        status: "complete",
         inputs: [],
         expected_output: ["artifacts/config.json"],
       }),

@@ -1003,7 +1003,7 @@ test("task replanning preserves lifecycle provenance while recording ordered his
   }, afterCommit, "changed semantics under the same invocation key must leave no residue");
 });
 
-test("task replanning adopts legacy lifecycle statuses through the shared normalizer", async () => {
+test("task replanning adopts legacy in-flight rows as ready, not in_progress", async () => {
   const { base } = makeFixture();
   insertMilestone({ id: "M001", title: "Existing milestone", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Active slice", status: "active" });
@@ -1021,8 +1021,8 @@ test("task replanning adopts legacy lifecycle statuses through the shared normal
     FROM workflow_item_lifecycles
     ORDER BY item_kind
   `), [
-    { item_kind: "slice", lifecycle_status: "in_progress", state_version: 0 },
-    { item_kind: "task", lifecycle_status: "in_progress", state_version: 0 },
+    { item_kind: "slice", lifecycle_status: "ready", state_version: 0 },
+    { item_kind: "task", lifecycle_status: "ready", state_version: 0 },
   ]);
 });
 

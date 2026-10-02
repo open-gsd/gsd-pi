@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 
 import { getDbOrNull, readTransaction } from "./engine.js";
-import { isClosedStatus } from "../status-guards.js";
+import { isClosedStatus, isInactiveStatus } from "../status-guards.js";
 import { getGateIdsForTurn, type OwnerTurn } from "../gate-registry.js";
 import type { Decision, Requirement, GateRow, GateScope } from "../types.js";
 import {
@@ -1207,8 +1207,8 @@ export interface MilestoneSliceSummary {
 
 /**
  * Consolidated DB read for dispatch/gate/completion decisions (ADR-017).
- * `done` uses the canonical closed-status predicate (`isClosedStatus`) — the
- * same vocabulary the SQL terminal-status fragment derives from. Decision
+ * `done` uses the shared slice predicate `isInactiveStatus` (closed, or
+ * deferred by a decision) — the same answer deriveState gives. Decision
  * paths must consume this instead of parsing `.gsd/*.md` projections.
  * Rows keep `getMilestoneSlices` ordering (sequence, then id).
  */
@@ -1216,19 +1216,19 @@ export function getMilestoneSliceSummaries(milestoneId: string): MilestoneSliceS
   return getMilestoneSlices(milestoneId).map((s) => ({
     id: s.id,
     title: s.title,
-    done: isClosedStatus(s.status),
+    done: isInactiveStatus(s.status),
     depends: s.depends ?? [],
   }));
 }
 
 /**
  * Ids of slices closed per the canonical status vocabulary (ADR-017), in
- * milestone order. Thin wrapper over `getMilestoneSliceSummaries` for the
- * common "which slices are done?" decision-path read.
+ * milestone order, for the "which slices produced closeout artifacts?"
+ * decision-path read. A deferred slice is not closed: it never ran.
  */
 export function getClosedSliceIds(milestoneId: string): string[] {
-  return getMilestoneSliceSummaries(milestoneId)
-    .filter((s) => s.done)
+  return getMilestoneSlices(milestoneId)
+    .filter((s) => isClosedStatus(s.status))
     .map((s) => s.id);
 }
 

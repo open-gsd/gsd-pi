@@ -141,7 +141,7 @@ describe("deferred-slice-dispatch (#2661)", () => {
     }
   });
 
-  test("deriveStateFromDb does not count deferred slices as done for progress", async () => {
+  test("deriveStateFromDb counts a deferred slice as needing no further work", async () => {
     const base = createFixtureBase();
     try {
       openDatabase(":memory:");
@@ -162,9 +162,10 @@ describe("deferred-slice-dispatch (#2661)", () => {
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      // Deferred slices should not count as "done" in progress
-      // Only S01 (complete) counts as done
-      assert.equal(state.progress?.slices?.done, 1, "only 1 slice (S01) should be done");
+      // Deferred is terminal in the read model: S01 (complete) and S02
+      // (deferred) need no further work, so only S03 remains.
+      assert.equal(state.progress?.slices?.done, 2, "S01 and deferred S02 need no further work");
+      assert.equal(state.activeSlice?.id, "S03", "S03 is the remaining slice");
       // Total should still be 3 (deferred slices are still part of the milestone)
       assert.equal(state.progress?.slices?.total, 3, "all 3 slices counted in total");
 
@@ -175,7 +176,7 @@ describe("deferred-slice-dispatch (#2661)", () => {
     }
   });
 
-  test("all slices deferred results in blocked state", async () => {
+  test("all slices deferred does not block milestone closeout", async () => {
     const base = createFixtureBase();
     try {
       openDatabase(":memory:");
@@ -193,9 +194,12 @@ describe("deferred-slice-dispatch (#2661)", () => {
       invalidateStateCache();
       const state = await deriveStateFromDb(base);
 
-      // No eligible slice — should be blocked
+      // No slice is left to run, and deferred slices do not block closeout:
+      // the milestone moves on to its closeout phases instead of stalling.
       assert.equal(state.activeSlice, null, "no active slice when all deferred");
-      assert.equal(state.phase, "blocked", "phase should be blocked when all slices deferred");
+      assert.equal(state.activeMilestone?.id, "M001");
+      assert.notEqual(state.phase, "blocked", "deferred slices must not block the milestone");
+      assert.deepEqual(state.blockers, [], "no dependency blocker is reported");
 
       closeDatabase();
     } finally {

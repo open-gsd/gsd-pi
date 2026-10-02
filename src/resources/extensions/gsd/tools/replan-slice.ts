@@ -10,11 +10,10 @@ import {
   insertTask,
   upsertTaskPlanning,
   insertReplanHistory,
-  normalizeLegacyLifecycleStatus,
   projectCanonicalStatusToLegacy,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
-import { isClosedStatus } from "../status-guards.js";
+import { adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { renderPlanFromDb, renderReplanFromDb } from "../markdown-renderer.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
@@ -292,14 +291,10 @@ export async function handleReplanSlice(
             `cannot replan a slice in a closed milestone: ${params.milestoneId} (status: ${parentMilestone.status})`,
           );
         }
-        const legacyMilestoneLifecycle = normalizeLegacyLifecycleStatus(parentMilestone.status);
-        const milestoneLifecycleStatus = legacyMilestoneLifecycle === "completed" || legacyMilestoneLifecycle === "cancelled"
-          ? legacyMilestoneLifecycle
-          : "ready";
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: milestoneLifecycleStatus,
+          lifecycleStatus: adoptionLifecycleStatus(parentMilestone.status),
         });
         if (
           milestoneLifecycle.lifecycleStatus === "completed" ||
@@ -313,7 +308,7 @@ export async function handleReplanSlice(
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(parentSlice.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(parentSlice.status),
         });
         if (sliceLifecycle.lifecycleStatus === "cancelled" || parentSlice.status === "skipped") {
           throw new PlanningGuardError(`cannot replan cancelled slice ${params.sliceId} — use gsd_slice_reopen first`);
@@ -335,7 +330,7 @@ export async function handleReplanSlice(
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
           taskId: params.blockerTaskId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(blockerTask.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(blockerTask.status),
         });
         if (blockerLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -373,7 +368,7 @@ export async function handleReplanSlice(
               milestoneId: params.milestoneId,
               sliceId: params.sliceId,
               taskId: updatedTask.taskId,
-              lifecycleStatus: normalizeLegacyLifecycleStatus(existingTask.status) ?? "ready",
+              lifecycleStatus: adoptionLifecycleStatus(existingTask.status),
             });
             if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
               throw new PlanningGuardError(
@@ -399,8 +394,7 @@ export async function handleReplanSlice(
           if (latestAttempt?.state === "running") {
             throw new PlanningGuardError(`cannot remove task ${taskId} while it has a running Attempt`);
           }
-          const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
-          const observedLifecycleStatus = legacyLifecycleStatus ?? "ready";
+          const observedLifecycleStatus = adoptionLifecycleStatus(task.status);
           const lifecycle = adoptLifecycleIfMissing(context, {
             itemKind: "task",
             milestoneId: params.milestoneId,
@@ -471,7 +465,7 @@ export async function handleReplanSlice(
             milestoneId: params.milestoneId,
             sliceId: params.sliceId,
             taskId: removedTask.id,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(removedTask.status) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(removedTask.status),
           });
           if (lifecycle.lifecycleStatus !== "cancelled") {
             adoptOrTransitionLifecycle(context, {

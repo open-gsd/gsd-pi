@@ -64,6 +64,69 @@ export function toStatus(raw: string): Status {
   return value as Status;
 }
 
+/**
+ * Canonical lifecycle status vocabulary (ADR-046): the values the workflow
+ * lifecycle tables accept. Legacy hierarchy rows reach it only through
+ * `normalizeLegacyLifecycleStatus()` / `adoptionLifecycleStatus()` below.
+ */
+export const LIFECYCLE_STATUSES = [
+  "pending", "ready", "in_progress", "paused", "completed", "cancelled", "blocker-accepted",
+] as const;
+export type CanonicalLifecycleStatus = (typeof LIFECYCLE_STATUSES)[number];
+const LIFECYCLE_STATUS_SET: ReadonlySet<string> = new Set(LIFECYCLE_STATUSES);
+
+/**
+ * The one legacy-to-canonical status map. Every raw closed status has an entry
+ * (a legacy "cancelled" row is cancelled, not unknown). An unlisted raw value
+ * normalizes to null so callers can surface it instead of guessing.
+ */
+const LEGACY_TO_LIFECYCLE_STATUS: Readonly<Record<string, CanonicalLifecycleStatus>> = {
+  pending: "pending",
+  queued: "pending",
+  planned: "pending",
+  active: "in_progress",
+  in_progress: "in_progress",
+  "in-progress": "in_progress",
+  blocked: "paused",
+  parked: "paused",
+  complete: "completed",
+  done: "completed",
+  closed: "completed",
+  skipped: "cancelled",
+  deferred: "cancelled",
+  cancelled: "cancelled",
+  // #2202: operator closeout disposition — the Task closed by accepting a
+  // discovered blocker; terminal in both vocabularies.
+  "blocker-accepted": "blocker-accepted",
+};
+
+export function normalizeLegacyLifecycleStatus(status: string | null): CanonicalLifecycleStatus | null {
+  if (status === null) return null;
+  return LEGACY_TO_LIFECYCLE_STATUS[status] ?? null;
+}
+
+export function normalizeCanonicalLifecycleStatus(status: string | null): CanonicalLifecycleStatus | null {
+  if (status === null || !LIFECYCLE_STATUS_SET.has(status)) return null;
+  return status as CanonicalLifecycleStatus;
+}
+
+/**
+ * The lifecycle status a legacy hierarchy row is adopted with — the single
+ * mapping every adoption seam uses. A terminal or paused legacy status keeps
+ * its meaning. Every other status (pending, active, unknown) adopts as
+ * `openStatus`: `ready`, or `pending` for a sketch Slice. Adoption never
+ * yields `in_progress`: that state is only truthful with an Attempt behind
+ * it, and adoption creates none.
+ */
+export function adoptionLifecycleStatus(
+  legacyStatus: string | null,
+  openStatus: "ready" | "pending" = "ready",
+): Exclude<CanonicalLifecycleStatus, "in_progress"> {
+  const normalized = normalizeLegacyLifecycleStatus(legacyStatus);
+  if (normalized === null || normalized === "pending" || normalized === "in_progress") return openStatus;
+  return normalized;
+}
+
 /** Returns true when a milestone, slice, or task status indicates closure. */
 export function isClosedStatus(status: string): boolean {
   return RAW_CLOSED_SET.has(status);
@@ -89,8 +152,10 @@ export function isDeferredStatus(status: string): boolean {
 }
 
 /**
- * Returns true when a slice should be skipped during active-slice selection.
- * This includes both closed (complete/done) and deferred slices.
+ * Returns true when a slice needs no further work: it is closed, or it was
+ * deferred by a decision. Deferred is terminal in the read model (it maps to
+ * canonical `cancelled`), so it does not block later slices or closeout. Every
+ * reader that asks "is this slice still open?" uses this predicate.
  */
 export function isInactiveStatus(status: string): boolean {
   return isClosedStatus(status) || isDeferredStatus(status);

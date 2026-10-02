@@ -4547,7 +4547,7 @@ export async function buildRewriteDocsPrompt(
           const { isDbAvailable, getSliceTasks } = await import("./gsd-db.js");
           if (isDbAvailable()) {
             incompleteTasks = getSliceTasks(mid, sid)
-              .filter(t => t.status !== "complete" && t.status !== "done")
+              .filter(t => !isClosedStatus(t.status))
               .map(t => ({ id: t.id }));
           }
         } catch (err) {

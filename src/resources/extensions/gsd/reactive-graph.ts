@@ -12,6 +12,7 @@
 import type { TaskIO, DerivedTaskNode, ReactiveExecutionState } from "./types.js";
 import { loadFile, parseTaskPlanIO } from "./files.js";
 import { isDbAvailable, getSliceTasks } from "./gsd-db.js";
+import { isClosedStatus } from "./status-guards.js";
 import { logWarning } from "./workflow-logger.js";
 import { resolveTasksDir, resolveTaskFiles } from "./paths.js";
 import { join } from "node:path";
@@ -217,7 +218,7 @@ export async function loadSliceTaskIO(
         taskEntries = tasks.map(t => ({
           id: t.id,
           title: t.title,
-          done: t.status === "complete" || t.status === "done",
+          done: isClosedStatus(t.status),
         }));
       }
     }

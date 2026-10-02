@@ -27,7 +27,8 @@ import {
   resolveTaskFile,
 } from "./paths.js";
 import { deriveState } from "./state.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
+import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
 import { workflowEventLogPath } from "./workflow-event-ledger.js";
 import { readEvents } from "./workflow-events.js";
 import { flushWorkflowProjections } from "./projection-flush.js";
@@ -1027,7 +1028,7 @@ export async function checkEngineHealth(
             `SELECT m.id, m.status, ud.started_at, ud.ended_at
              FROM milestones m
              JOIN unit_dispatches ud ON ud.milestone_id = m.id
-             WHERE m.status NOT IN ('complete', 'done', 'skipped', 'closed')
+             WHERE m.status NOT IN (${TERMINAL_STATUS_SQL})
                AND ud.unit_type = 'complete-milestone'
                AND ud.unit_id = m.id
                AND ud.status = 'completed'
@@ -1137,7 +1138,7 @@ export async function checkEngineHealth(
              LEFT JOIN slices s ON s.milestone_id = a.milestone_id AND s.id = a.slice_id
              LEFT JOIN tasks t ON t.milestone_id = a.milestone_id AND t.slice_id = a.slice_id AND t.id = a.task_id
              WHERE a.artifact_type = 'SUMMARY'
-               AND m.status NOT IN ('complete', 'done', 'skipped', 'closed')`,
+               AND m.status NOT IN (${TERMINAL_STATUS_SQL})`,
           )
           .all() as Array<{
             path: string;
@@ -1158,8 +1159,8 @@ export async function checkEngineHealth(
           if (!artifactExistsOnDisk(basePath, row.path, row)) continue;
           const reopenAt = latestExplicitReopenAt(basePath, row.milestone_id);
           if (!isAfter(row.imported_at, reopenAt)) continue;
-          const isSliceSummary = row.slice_id && !row.task_id && row.slice_status && !["complete", "done", "skipped", "closed"].includes(row.slice_status);
-          const isTaskSummary = row.slice_id && row.task_id && (!row.task_status || !["complete", "done", "skipped", "closed"].includes(row.task_status));
+          const isSliceSummary = row.slice_id && !row.task_id && row.slice_status && !isInactiveStatus(row.slice_status);
+          const isTaskSummary = row.slice_id && row.task_id && (!row.task_status || !isClosedStatus(row.task_status));
           const isTaskArtifactWithoutDbTasks = row.slice_id && row.task_id && Number(row.task_count) === 0;
           if (
             isTaskSummary &&

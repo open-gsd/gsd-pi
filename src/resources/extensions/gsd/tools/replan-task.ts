@@ -6,7 +6,7 @@ import {
   upsertTaskPlanning,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
-import { isClosedStatus } from "../status-guards.js";
+import { adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { assertVerifyIsShellCheckable, validateVerificationCommand } from "../verification-gate.js";
 import { normalizeVerifyCommandForVenv } from "../python-resolver.js";
@@ -30,7 +30,6 @@ import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   adoptLifecycleIfMissing,
-  normalizeLegacyLifecycleStatus,
 } from "../db/writers/lifecycle-commands.js";
 import {
   executePlanningDomainOperation,
@@ -185,7 +184,7 @@ export async function handleReplanTask(
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(parentSlice.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(parentSlice.status),
         });
         if (parentLifecycle.lifecycleStatus === "completed" || parentLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(
@@ -205,7 +204,7 @@ export async function handleReplanTask(
           milestoneId: params.milestoneId,
           sliceId: params.sliceId,
           taskId: params.taskId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(task.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(task.status),
         });
         if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(

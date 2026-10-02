@@ -11,7 +11,7 @@ import {
   isEmptyPlanV2GraphResult,
   isMissingFinalizedContextResult,
 } from "../uok/plan-v2.js";
-import { getEligibleSlices } from "../slice-parallel-eligibility.js";
+import { getEligibleSlicesFromRows } from "../slice-parallel-eligibility.js";
 import { isSliceParallelActive, startSliceParallel } from "../slice-parallel-orchestrator.js";
 import { reconcileBeforeSpawn } from "../state-reconciliation.js";
 import {
@@ -324,13 +324,7 @@ export async function runPreDispatch(
       }
       const dbSlices = getMilestoneSlices(mid);
       if (dbSlices.length > 0) {
-        const doneIds = new Set(dbSlices.filter(sl => sl.status === "complete" || sl.status === "done").map(sl => sl.id));
-        const sliceInputs = dbSlices.map(sl => ({
-          id: sl.id,
-          done: doneIds.has(sl.id),
-          depends: sl.depends ?? [],
-        }));
-        const eligible = getEligibleSlices(sliceInputs, doneIds);
+        const eligible = getEligibleSlicesFromRows(dbSlices);
         if (eligible.length > 1) {
           debugLog("autoLoop", {
             phase: "slice-parallel-dispatch",

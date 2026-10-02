@@ -403,7 +403,7 @@ export async function checkGsdStateHealth(
       let plan: { tasks: Array<{ id: string; done: boolean; title: string; estimate?: string }> } | null = null;
       const dbTasks = getSliceTasks(milestoneId, slice.id);
       if (dbTasks.length > 0) {
-        plan = { tasks: dbTasks.map(t => ({ id: t.id, done: t.status === "complete" || t.status === "done", title: t.title, estimate: t.estimate || undefined })) };
+        plan = { tasks: dbTasks.map(t => ({ id: t.id, done: isClosedStatus(t.status), title: t.title, estimate: t.estimate || undefined })) };
       }
       if (!plan) {
         if (!slice.done) {

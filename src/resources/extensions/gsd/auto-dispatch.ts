@@ -33,7 +33,7 @@ import {
   getAssessment,
   getSliceRunUatAssessment,
 } from "./gsd-db.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
 
 import {
@@ -563,10 +563,9 @@ function hasMilestonePassedDiscuss(basePath: string, mid: string): boolean {
 export function findMissingSummaries(basePath: string, mid: string): string[] {
   if (!isDbAvailable()) return [];
   const slices = getMilestoneSlices(mid);
-  // Skipped slices never produce SUMMARYs; legacy-complete slices may lack them
-  const CLOSED_STATUSES = new Set(["skipped", "complete", "done"]);
+  // Skipped and deferred slices never produce SUMMARYs; legacy-complete slices may lack them
   return slices
-    .filter(s => !CLOSED_STATUSES.has(s.status))
+    .filter(s => !isInactiveStatus(s.status))
     .filter(s => {
       const summaryPath = resolveSliceFile(basePath, mid, s.id, "SUMMARY");
       return !summaryPath || !existsSync(summaryPath);

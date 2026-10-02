@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 
 import { loadFile, saveFile } from "./files.js";
 import { _getAdapter, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
+import { isInactiveStatus } from "./status-guards.js";
 import {
   openExistingWorkflowDatabase,
   openWorkflowDatabaseIsolated,
@@ -190,7 +191,7 @@ export async function selectDoctorScope(basePath: string, requestedScope?: strin
     const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
     if (!roadmapContent) continue;
     const dbSlices = getMilestoneSlices(milestone.id);
-    const allDone = dbSlices.length > 0 && dbSlices.every(s => s.status === "complete");
+    const allDone = dbSlices.length > 0 && dbSlices.every(s => isInactiveStatus(s.status));
     if (!allDone) return milestone.id;
   }
 

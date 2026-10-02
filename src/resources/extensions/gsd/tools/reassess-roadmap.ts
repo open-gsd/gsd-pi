@@ -11,7 +11,7 @@ import {
 } from "../paths.js";
 import { deriveCompatProjectionKey } from "../compat/compat-marker.js";
 import { clearParseCache } from "../files.js";
-import { isClosedStatus } from "../status-guards.js";
+import { adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import {
@@ -348,7 +348,7 @@ export async function handleReassessRoadmap(
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
           itemKind: "milestone",
           milestoneId: params.milestoneId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(milestone.status) ?? "ready",
+          lifecycleStatus: adoptionLifecycleStatus(milestone.status),
         });
         if (milestoneLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(`cannot reassess a closed milestone: ${params.milestoneId} (canonical status: ${milestoneLifecycle.lifecycleStatus})`);
@@ -368,7 +368,7 @@ export async function handleReassessRoadmap(
           itemKind: "slice",
           milestoneId: params.milestoneId,
           sliceId: params.completedSliceId,
-          lifecycleStatus: normalizeLegacyLifecycleStatus(completedSlice.status) ?? "completed",
+          lifecycleStatus: adoptionLifecycleStatus(completedSlice.status),
         });
         if (completedSliceLifecycle.lifecycleStatus === "cancelled") {
           throw new PlanningGuardError(`completedSliceId ${params.completedSliceId} is canonically cancelled and is not a valid completed slice`);
@@ -393,7 +393,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: correction.sliceId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existing.status) ?? "completed",
+            lifecycleStatus: adoptionLifecycleStatus(existing.status),
           });
           if (lifecycle.lifecycleStatus !== "completed") {
             throw new PlanningGuardError(`metadata correction target ${correction.sliceId} is canonically ${lifecycle.lifecycleStatus}, not completed`);
@@ -423,7 +423,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: modifiedSlice.sliceId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existing.status) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(existing.status),
           });
           if (lifecycle.lifecycleStatus === "completed" || lifecycle.lifecycleStatus === "cancelled") {
             throw new PlanningGuardError(
@@ -439,8 +439,7 @@ export async function handleReassessRoadmap(
           if (!existing) {
             throw new PlanningGuardError(`cannot remove missing slice ${removedId}`);
           }
-          const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(existing.status);
-          const observedLifecycleStatus = legacyLifecycleStatus ?? "ready";
+          const observedLifecycleStatus = adoptionLifecycleStatus(existing.status);
           const lifecycle = adoptLifecycleIfMissing(context, {
             itemKind: "slice",
             milestoneId: params.milestoneId,
@@ -453,7 +452,7 @@ export async function handleReassessRoadmap(
           }
           for (const task of getSliceTasks(params.milestoneId, removedId)) {
             const legacyTaskLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
-            const observedTaskLifecycleStatus = legacyTaskLifecycleStatus ?? "ready";
+            const observedTaskLifecycleStatus = adoptionLifecycleStatus(task.status);
             const taskLifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
               milestoneId: params.milestoneId,
@@ -504,7 +503,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: added.sliceId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existing.status) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(existing.status),
           });
           if (existing.status === "skipped" || lifecycle.lifecycleStatus === "cancelled") {
             throw new PlanningGuardError(`cannot reuse cancelled slice ${added.sliceId} — use gsd_slice_reopen first`);
@@ -561,13 +560,12 @@ export async function handleReassessRoadmap(
 
         for (const removedId of params.sliceChanges.removed) {
           for (const task of getSliceTasks(params.milestoneId, removedId)) {
-            const legacyLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
             const lifecycle = adoptLifecycleIfMissing(context, {
               itemKind: "task",
               milestoneId: params.milestoneId,
               sliceId: removedId,
               taskId: task.id,
-              lifecycleStatus: legacyLifecycleStatus ?? "ready",
+              lifecycleStatus: adoptionLifecycleStatus(task.status),
             });
             if (lifecycle.lifecycleStatus === "completed") continue;
             if (lifecycle.lifecycleStatus !== "cancelled") {
@@ -591,7 +589,7 @@ export async function handleReassessRoadmap(
             itemKind: "slice",
             milestoneId: params.milestoneId,
             sliceId: removedId,
-            lifecycleStatus: normalizeLegacyLifecycleStatus(existingSliceById.get(removedId)?.status ?? null) ?? "ready",
+            lifecycleStatus: adoptionLifecycleStatus(existingSliceById.get(removedId)?.status ?? null),
           });
           if (lifecycle.lifecycleStatus !== "cancelled") {
             adoptOrTransitionLifecycle(context, {
