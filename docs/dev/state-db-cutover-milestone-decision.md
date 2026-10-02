@@ -369,7 +369,9 @@ The record lists references that were retired after it was written:
 The dossier counts (no-cutover behavioral 15/15, structural 8/8; authority
 revision 195, epoch 0) describe the M003/S07 source revision, not current
 `main`. `scripts/m003-s07-cutover-dossier.mjs` no longer emits the retired
-gate command. `scripts/__tests__/m003-s07-cutover-dossier.test.mjs` fails when
+gate command. The `scripts/m003-s07-dossier-input.ts` CLI fails closed with
+"No-cutover report is required", because the gate that supplied its no-cutover
+report is retired. `scripts/__tests__/m003-s07-cutover-dossier.test.mjs` fails when
 the dossier lists a file or a pnpm script that does not exist and is not in
 this table.
 
@@ -403,4 +405,3 @@ Milestone:
 | A projection failure or projection drift blocks work | #2449 |
 | Legacy rows and canonical lifecycle rows disagree | #2440, #2126 |
 | File presence is used as evidence | #2107, #2399, #2256 |
-

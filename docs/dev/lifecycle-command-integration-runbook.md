@@ -146,6 +146,11 @@ The S07 dossier keeps two evidence planes separate:
   proves the 33 scoped repair receipts, current M003 semantic drift, T01-T06
   verification heads, project revision, and Authority Epoch.
 
+> **Historical (2026-10-02):** the checked dossier is a frozen record and the
+> collector CLI below fails closed. Do not run this sequence to regenerate the
+> dossier. See "Dossier status: frozen record" in
+> [`state-db-cutover-milestone-decision.md`](state-db-cutover-milestone-decision.md#dossier-status-frozen-record).
+
 Generate the candidate only from local evidence. First emit normalized capstone
 evidence for the current checkout, then collect the canonical input, then write
 the dossier:

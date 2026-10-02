@@ -112,7 +112,7 @@ These require design decisions or timebox gates, not point fixes:
 
 Key stabilization themes already shipped:
 
-- **1.13.0**: DB-authority cutover + 15 live-1.12.0 bug fixes
+- **1.13.0**: state-DB cutover milestone (markdown fallback removed) + 15 live-1.12.0 bug fixes
 - **1.16.x**: Auto-mode UnitRun collapse (ADR-048), 50+ wedge fixes
 - **1.18.0**: Progress reads DB-authoritative, legacy adoption repairs
 - **1.19.0**: Husk-task gate closeout (#2197 area), blocker escalation at verify gate
