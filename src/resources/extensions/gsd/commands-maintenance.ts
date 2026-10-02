@@ -1213,7 +1213,7 @@ function restoreFileIdentity(path: string): RestoreFileIdentity {
 
 async function listRestoreBackupCandidates(dbPath: string): Promise<RestoreBackupCandidate[]> {
   const { openSqliteReadOnly } = await import("./sqlite-readonly.js");
-  const pattern = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)(?:\\.latest)?$`);
+  const pattern = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)(?:\\.latest(?:-\\d+)?)?$`);
   const candidates: RestoreBackupCandidate[] = [];
   for (const entry of readdirSync(dirname(dbPath))) {
     const match = pattern.exec(entry);
@@ -1254,7 +1254,7 @@ async function listRestoreBackupCandidates(dbPath: string): Promise<RestoreBacku
       sha256: sha256FileHex(path),
     });
   }
-  return candidates.sort((a, b) => a.nameVersion - b.nameVersion || a.fileName.localeCompare(b.fileName));
+  return candidates.sort((a, b) => a.nameVersion - b.nameVersion || a.fileName.localeCompare(b.fileName, undefined, { numeric: true }));
 }
 
 /**
@@ -1391,12 +1391,14 @@ function truncateWalCheckpoint(db: DbAdapter, failure: string): void {
  * deleted. The restore itself has already succeeded; a failure here is
  * reported, not thrown.
  */
-async function rebuildProjectionsAfterRestore(basePath: string): Promise<string> {
+async function rebuildProjectionsAfterRestore(basePath: string): Promise<{ opened: boolean; note: string }> {
+  let opened = false;
   try {
     const { openWorkflowDatabase } = await import("./db-workspace.js");
     const { gsdProjectionRoot } = await import("./paths.js");
-    const opened = openWorkflowDatabase(basePath);
-    if (!opened.ok) throw opened.error ?? new Error(opened.reason);
+    const open = openWorkflowDatabase(basePath);
+    if (!open.ok) throw open.error ?? new Error(open.reason);
+    opened = true;
     const root = gsdProjectionRoot(basePath);
     const keptAt = join(root, "quarantine", `restore-${new Date().toISOString().replace(/[:.]/g, "-")}`);
     let kept = false;
@@ -1408,11 +1410,17 @@ async function rebuildProjectionsAfterRestore(basePath: string): Promise<string>
     }
     const result = await rebuildMarkdownProjectionsFromDb(basePath);
     if (result.errors.length > 0) throw new Error(result.errors.join("; "));
-    return `Projections rebuilt from the restored database (${result.rendered} rendered)` +
-      (kept ? `; previous projections kept at ${keptAt}.` : ".");
+    return {
+      opened,
+      note: `Projections rebuilt from the restored database (${result.rendered} rendered)` +
+        (kept ? `; previous projections kept at ${keptAt}.` : "."),
+    };
   } catch (error) {
     logWarning("command", `db restore-backup could not rebuild projections: ${(error as Error).message}`);
-    return `Projection rebuild failed (${(error as Error).message}) — the .gsd markdown may still describe the erased database; run /gsd rebuild markdown.`;
+    return {
+      opened,
+      note: `Projection rebuild failed (${(error as Error).message}) — the .gsd markdown may still describe the erased database; run /gsd rebuild markdown.`,
+    };
   }
 }
 
@@ -1800,9 +1808,8 @@ export async function handleDbRestoreBackup(
       const state = candidate.schemaVersion === null
         ? "unreadable (failed verification)"
         : `schema v${candidate.schemaVersion}${candidate.schemaVersion !== candidate.nameVersion ? ` (file name says v${candidate.nameVersion} — suspect)` : ""}, quick_check ${candidate.quickCheck ?? "FAILED"}`;
-      const latest = candidate.fileName.endsWith(".latest")
-        ? `  (newer copy of ${candidate.fileName.slice(0, -".latest".length)})`
-        : "";
+      const latestAt = candidate.fileName.lastIndexOf(".latest");
+      const latest = latestAt >= 0 ? `  (newer copy of ${candidate.fileName.slice(0, latestAt)})` : "";
       lines.push(`  ${candidate.fileName}  ${state}  ${candidate.byteSize} bytes${latest}`);
       lines.push(`    sha256: ${candidate.sha256}`);
     }
@@ -1826,10 +1833,10 @@ export async function handleDbRestoreBackup(
       ctx.ui.notify(`gsd db restore-backup: backup not found: ${backupArg}`, "error");
       return;
     }
-    const nameMatch = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)(?:\\.latest)?$`).exec(basename(backupPath));
+    const nameMatch = new RegExp(`^${escapeRegExpLiteral(basename(dbPath))}\\.backup-v(\\d+)(?:\\.latest(?:-\\d+)?)?$`).exec(basename(backupPath));
     if (nameMatch === null || dirname(backupPath) !== dirname(dbPath)) {
       ctx.ui.notify(
-        `gsd db restore-backup: --backup must name a ${basename(dbPath)}.backup-v<N> or .backup-v<N>.latest file beside ${dbPath}.`,
+        `gsd db restore-backup: --backup must name a ${basename(dbPath)}.backup-v<N>, .backup-v<N>.latest or .backup-v<N>.latest-<K> file beside ${dbPath}.`,
         "error",
       );
       return;
@@ -1953,7 +1960,7 @@ export async function handleDbRestoreBackup(
           ? `  Previous database kept at: ${quarantinePath}`
           : "  There was no previous database.",
         "  Receipt: none — the previous database could not be opened, so no import.restore receipt was written.",
-        `  ${await rebuildProjectionsAfterRestore(basePath)}`,
+        `  ${(await rebuildProjectionsAfterRestore(basePath)).note}`,
       ].join("\n"), "success");
       return;
     }
@@ -2097,11 +2104,14 @@ export async function handleDbRestoreBackup(
       : await engine.withDatabaseMaintenanceClaim(() => executeRestoreBackupPlan(plan));
     engine.closeDatabase();
 
-    const downgradeNote = verified.schemaVersion < engine.SCHEMA_VERSION
-      ? `Migrated to schema v${engine.SCHEMA_VERSION}; the restored v${verified.schemaVersion} bytes are kept as a ` +
-        `verified ${basename(dbPath)}.backup-v${verified.schemaVersion} (or .latest).`
-      : `Backup schema matches this gsd-pi (v${engine.SCHEMA_VERSION}).`;
-    const projectionNote = await rebuildProjectionsAfterRestore(basePath);
+    const rebuilt = await rebuildProjectionsAfterRestore(basePath);
+    const projectionNote = rebuilt.note;
+    const downgradeNote = verified.schemaVersion >= engine.SCHEMA_VERSION
+      ? `Backup schema matches this gsd-pi (v${engine.SCHEMA_VERSION}).`
+      : rebuilt.opened
+        ? `Migrated to schema v${engine.SCHEMA_VERSION}; the restored v${verified.schemaVersion} bytes are kept as a ` +
+          `verified ${basename(dbPath)}.backup-v${verified.schemaVersion}* pre-migration copy.`
+        : `Still at schema v${verified.schemaVersion}: the restored database could not be opened, so it was not migrated.`;
     ctx.ui.notify([
       `gsd db restore-backup: restored ${basename(backupPath)}`,
       `  Backup schema: v${verified.schemaVersion}`,

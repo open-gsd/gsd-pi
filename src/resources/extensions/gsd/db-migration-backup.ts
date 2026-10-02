@@ -26,9 +26,10 @@ export function isMigrationBackupError(err: unknown): err is MigrationBackupErro
 /**
  * Creates a same-version backup before file-backed schema migrations.
  *
- * A verified `backup-v<N>` is never overwritten: a retry after a failed
- * migration would otherwise replace the pristine copy with a half-migrated
- * database. The retry copy goes to `backup-v<N>.latest` instead. WAL
+ * An existing backup is never overwritten: a retry after a failed migration
+ * would otherwise replace the pristine copy with a half-migrated database.
+ * Later copies go to the first free `backup-v<N>.latest`,
+ * `backup-v<N>.latest-2`, ... name instead. WAL
  * checkpoint, copy, integrity-check, and schema-version failures are logged
  * and then rethrown before migration DDL runs.
  */
@@ -42,9 +43,10 @@ export function backupDatabaseBeforeMigration(
 
   try {
     const allowMissingSchemaVersion = deps.allowMissingSchemaVersion === true;
-    let backupPath = `${dbPath}.backup-v${currentVersion}`;
-    if (deps.existsSync(backupPath) && backupVerifies(db, backupPath, currentVersion, allowMissingSchemaVersion)) {
-      backupPath = `${backupPath}.latest`;
+    const basePath = `${dbPath}.backup-v${currentVersion}`;
+    let backupPath = basePath;
+    for (let n = 1; deps.existsSync(backupPath); n++) {
+      backupPath = n === 1 ? `${basePath}.latest` : `${basePath}.latest-${n}`;
     }
     checkpointWal(db);
     deps.copyFileSync(dbPath, backupPath);
@@ -53,16 +55,6 @@ export function backupDatabaseBeforeMigration(
     const error = toMigrationBackupError(backupErr);
     deps.logWarning("db", `Pre-migration backup failed: ${error.message}`);
     throw error;
-  }
-}
-
-function backupVerifies(db: DbAdapter, backupPath: string, currentVersion: number, allowMissingSchemaVersion: boolean): boolean {
-  try {
-    verifyBackup(db, backupPath, currentVersion, allowMissingSchemaVersion);
-    return true;
-  } catch {
-    // An unreadable or wrong-version file is not a backup worth keeping.
-    return false;
   }
 }
 

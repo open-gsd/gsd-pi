@@ -416,6 +416,39 @@ test("(6) a .latest migration backup is listed as the newer copy and can be rest
   assert.deepEqual(milestoneIds(fixture.dbPath), ["M555", "M999"]);
 });
 
+test("(6b) restoring backup-v45 beside an existing .latest keeps both earlier backups", async () => {
+  const fixture = makeRestoreFixture();
+  const latestPath = `${fixture.backupPath}.latest`;
+  writeFileSync(latestPath, readFileSync(fixture.backupPath));
+  rawExec(
+    latestPath,
+    `INSERT INTO milestones (id, title, status, created_at) VALUES ('M555', 'newer', 'active', '2026-01-03T00:00:00.000Z');
+     PRAGMA wal_checkpoint(TRUNCATE);`,
+  );
+  for (const suffix of ["-wal", "-shm"]) rmSync(`${latestPath}${suffix}`, { force: true });
+  const latestSha = sha256File(latestPath);
+
+  const { ctx, notes } = makeCtx();
+  await handleDbRestoreBackup(ctx, fixture.base, consentArgs(fixture));
+  closeDatabase();
+  const success = notes.find((note) => note.kind === "success");
+  assert.ok(success, JSON.stringify(notes));
+  assert.match(success.message, new RegExp(`Migrated to schema v${SCHEMA_VERSION}`));
+
+  assert.equal(sha256File(fixture.backupPath), fixture.backupSha, "backup-v45 must survive");
+  assert.equal(sha256File(latestPath), latestSha, "the existing .latest must survive");
+  assert.deepEqual(milestoneIds(`${fixture.backupPath}.latest-2`), ["M999"], "the new pre-migration copy takes a new name");
+
+  const listing = makeCtx();
+  await handleDbRestoreBackup(listing.ctx, fixture.base, "");
+  assert.match(listing.notes.map((note) => note.message).join("\n"), /gsd\.db\.backup-v45\.latest-2 .*\(newer copy of gsd\.db\.backup-v45\)/);
+  const latest2 = `${fixture.backupPath}.latest-2`;
+  const restored = makeCtx();
+  await handleDbRestoreBackup(restored.ctx, fixture.base, consentArgs({ backupPath: latest2, backupSha: sha256File(latest2) }));
+  closeDatabase();
+  assert.ok(restored.notes.some((note) => note.kind === "success"), JSON.stringify(restored.notes));
+});
+
 test("a verified migration backup is not overwritten by a later same-version backup", () => {
   const { dbPath } = makeProject();
   assert.equal(openDatabase(dbPath), true);

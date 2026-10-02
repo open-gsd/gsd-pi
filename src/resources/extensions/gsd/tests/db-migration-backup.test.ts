@@ -55,7 +55,7 @@ class FakeAdapter implements DbAdapter {
 }
 
 describe("db-migration-backup", () => {
-  test("skips missing and memory databases and never overwrites a verified backup", () => {
+  test("skips missing and memory databases and never overwrites an existing backup", () => {
     const db = new FakeAdapter();
     db.backupVersion = 7;
     const copies: Array<[string, string]> = [];
@@ -71,19 +71,17 @@ describe("db-migration-backup", () => {
       copyFileSync: (src, dest) => copies.push([src, dest]),
       logWarning: (_scope, message) => warnings.push(message),
     });
+    const existing = new Set(["/tmp/gsd.db", "/tmp/gsd.db.backup-v7", "/tmp/gsd.db.backup-v7.latest"]);
     backupDatabaseBeforeMigration(db, "/tmp/gsd.db", 7, {
-      existsSync: () => true,
+      existsSync: (path) => existing.has(path),
       copyFileSync: (src, dest) => copies.push([src, dest]),
       logWarning: (_scope, message) => warnings.push(message),
     });
 
-    // The existing backup-v7 verifies, so the retry copy goes beside it.
-    assert.deepEqual(copies, [["/tmp/gsd.db", "/tmp/gsd.db.backup-v7.latest"]]);
+    // backup-v7 and .latest both exist, so the copy takes the next free name.
+    assert.deepEqual(copies, [["/tmp/gsd.db", "/tmp/gsd.db.backup-v7.latest-2"]]);
     assert.deepEqual(warnings, []);
     assert.deepEqual(db.prepareCalls, [
-      "ATTACH DATABASE ? AS migration_backup",
-      "PRAGMA migration_backup.quick_check",
-      "SELECT MAX(version) AS version FROM migration_backup.schema_version",
       "PRAGMA wal_checkpoint(TRUNCATE)",
       "ATTACH DATABASE ? AS migration_backup",
       "PRAGMA migration_backup.quick_check",
