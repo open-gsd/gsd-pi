@@ -588,6 +588,108 @@ test("clearStaleWorkerLock settles running Attempts before releasing the stale w
   assert.equal(readCrashLock(base), null);
 });
 
+test("clearLock settles a stale worker's orphaned running Attempt before releasing the lease", (t) => {
+  // Regression for the #kunnen-we-dit-in-de-toekomst-voorkomen incident:
+  // bootstrapAutoSession's fresh-start path (auto-start.ts) calls clearLock(),
+  // not clearStaleWorkerLock(). Previously clearLock() released the stale
+  // worker's milestone lease without settling any workflow_execution_attempts
+  // row left in attempt_state='running' for that worker, so a subsequent
+  // `gsd auto` run failed to claim the unit with "dispatch claim skipped:
+  // stale-lease" until a human ran gsd_task_settle by hand.
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "T", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "S", status: "active" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
+  const projectRoot = normalizeRealPath(base);
+  const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+  const claim = recordDispatchClaim({
+    traceId: "t1",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T02",
+    unitType: "execute-task",
+    unitId: "M001/S01/T02",
+  });
+  assert.equal(claim.ok, true);
+  if (!claim.ok) return;
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.task.ready",
+    idempotencyKey: "fixture/crash-recovery/clearlock-task-ready",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { taskId: "T02" },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T02",
+      lifecycleStatus: "ready",
+    });
+    return {
+      events: [{
+        eventType: "test.task.ready",
+        entityType: "task",
+        entityId: "M001/S01/T02",
+        payload: { taskId: "T02" },
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: "test/m001/s01/t02/clearlock",
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  const attempt = claimTaskAttempt({
+    invocation: {
+      idempotencyKey: "fixture/crash-recovery/clearlock-attempt-claim",
+      sourceTransport: "internal",
+      actorType: "agent",
+      actorId: workerId,
+    },
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T02" },
+    workerId,
+    milestoneLeaseToken: lease.token,
+    coordinationDispatchId: claim.dispatchId,
+  });
+  _getAdapter()!.prepare(`
+    UPDATE milestone_leases SET expires_at = '1970-01-01T00:00:00.000Z'
+    WHERE milestone_id = 'M001'
+  `).run();
+  setWorkerPid(workerId, 99999);
+  expireWorker(workerId);
+
+  assert.ok(readCrashLock(base), "stale worker is detected before clearLock");
+
+  clearLock(base);
+
+  assert.equal(getAutoWorker(workerId)?.status, "stopping");
+  const attemptRow = _getAdapter()!.prepare(`
+    SELECT attempt.attempt_state, attempt.settle_outcome
+    FROM workflow_execution_attempts attempt
+    WHERE attempt.attempt_id = :attempt_id
+  `).get({ ":attempt_id": attempt.attemptId }) as {
+    attempt_state: string;
+    settle_outcome: string | null;
+  } | undefined;
+  assert.deepEqual(attemptRow, { attempt_state: "settled", settle_outcome: "interrupted" });
+  const leaseRow = _getAdapter()!.prepare(
+    `SELECT status FROM milestone_leases WHERE fencing_token = :ft`,
+  ).get({ ":ft": lease.token }) as { status: string } | undefined;
+  assert.equal(leaseRow?.status, "released");
+});
+
 test("clearLock marks stale worker stopping and releases held milestone lease", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
