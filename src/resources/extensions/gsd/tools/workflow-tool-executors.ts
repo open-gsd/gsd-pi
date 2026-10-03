@@ -691,7 +691,6 @@ export async function executeSummarySave(
             registeredMilestones = existingMilestones.map((milestone) => milestone.id);
             projectRegistrationContent = null;
           }
-          contentToSave = rebuildMilestoneSequenceSection(contentToSave, existingMilestones);
           milestoneSequenceSelfHealed = true;
         }
       } catch (healErr) {
@@ -753,6 +752,11 @@ export async function executeSummarySave(
           },
           isError: true,
         };
+      }
+      // Rebuild after registration: a line for a milestone that had no row
+      // before this save must stay in the sequence.
+      if (milestoneSequenceSelfHealed) {
+        contentToSave = rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRows());
       }
     }
 

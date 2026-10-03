@@ -22,7 +22,7 @@ import { discardMilestone, parkMilestone, unparkMilestone } from "../milestone-a
 import { clearReservedMilestoneIds, reserveMilestoneId } from "../milestone-ids.ts";
 import { registerMilestones } from "../milestone-registration.ts";
 import { clearPathCache } from "../paths.ts";
-import { invalidateStateCache } from "../state.ts";
+import { deriveState, invalidateStateCache } from "../state.ts";
 import { executeMilestoneGenerateId, executeSummarySave } from "../tools/workflow-tool-executors.ts";
 import { fenceWorkflowWrites } from "./db-authority-gate.ts";
 
@@ -210,5 +210,37 @@ describe("milestone registration", () => {
     const second = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
     assert.ok(!second.isError, second.content[0]!.text);
     assert.equal(registerOperations(), 1, "an unchanged sequence registers nothing");
+  });
+
+  test("a PROJECT save that repairs a checked box keeps a new milestone line, and the new milestone becomes active", async (t) => {
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+    markApprovalGateVerified("depth_verification_project_confirm", base);
+    t.after(() => clearDiscussionFlowState(base));
+    const originalCwd = process.cwd();
+    process.chdir(base);
+    t.after(() => process.chdir(originalCwd));
+    const firstContent = ["# Project", "", "## Milestone Sequence", "", "- [x] M001: Legacy — done before", ""].join("\n");
+    const first = await executeSummarySave({ artifact_type: "PROJECT", content: firstContent }, base);
+    assert.ok(!first.isError, first.content[0]!.text);
+
+    const second = await executeSummarySave({
+      artifact_type: "PROJECT",
+      content: `${firstContent}- [ ] M002: New — thing\n`,
+    }, base);
+
+    assert.ok(!second.isError, second.content[0]!.text);
+    const sequence = [
+      "- [ ] M001: Legacy — done before",
+      "- [ ] M002: New — thing",
+    ].join("\n");
+    assert.ok(readFileSync(join(base, ".gsd", "PROJECT.md"), "utf-8").includes(sequence), "PROJECT.md keeps the new line");
+    assert.ok(
+      String(scalar("SELECT full_content FROM artifacts WHERE path = 'PROJECT.md'")).includes(sequence),
+      "the PROJECT artifact row keeps the new line",
+    );
+
+    assert.equal(await discardMilestone(base, "M001", { reason: "superseded" }), true);
+    invalidateStateCache();
+    assert.equal((await deriveState(base)).activeMilestone?.id, "M002");
   });
 });
