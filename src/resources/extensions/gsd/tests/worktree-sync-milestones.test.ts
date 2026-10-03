@@ -790,4 +790,28 @@ describe('worktree-sync-milestones', async () => {
       cleanup(wtBase);
     }
   }
+
+  // ─── KNOWLEDGE.md worktree copy is refreshed, not copied once ─────────
+  console.log('\n=== KNOWLEDGE.md worktree copy is refreshed on every sync ===');
+  {
+    const mainBase = createBase('knowledge-main');
+    const wtBase = createBase('knowledge-wt');
+
+    try {
+      writeFileSync(join(mainBase, '.gsd', 'KNOWLEDGE.md'), '# Knowledge v1\n');
+      syncGsdStateToWorktree(mainBase, wtBase);
+      assert.equal(readFileSync(join(wtBase, '.gsd', 'KNOWLEDGE.md'), 'utf-8'), '# Knowledge v1\n');
+
+      writeFileSync(join(mainBase, '.gsd', 'KNOWLEDGE.md'), '# Knowledge v2\n');
+      syncGsdStateToWorktree(mainBase, wtBase);
+      assert.equal(readFileSync(join(wtBase, '.gsd', 'KNOWLEDGE.md'), 'utf-8'), '# Knowledge v2\n', 'state sync refreshes KNOWLEDGE.md');
+
+      writeFileSync(join(mainBase, '.gsd', 'KNOWLEDGE.md'), '# Knowledge v3\n');
+      syncProjectRootToWorktree(mainBase, wtBase, 'M001');
+      assert.equal(readFileSync(join(wtBase, '.gsd', 'KNOWLEDGE.md'), 'utf-8'), '# Knowledge v3\n', 'projection sync refreshes KNOWLEDGE.md');
+    } finally {
+      cleanup(mainBase);
+      cleanup(wtBase);
+    }
+  }
 });

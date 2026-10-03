@@ -213,9 +213,13 @@ function syncRootProjectionFilesToWorktree(prGsd: string, wtGsd: string): void {
   for (const file of ROOT_FORWARD_PROJECTION_FILES) {
     const src = join(prGsd, file);
     const dst = join(wtGsd, file);
-    if (!existsSync(src) || existsSync(dst)) continue;
+    // KNOWLEDGE.md is rendered from the database at the project root after
+    // every write, so the worktree copy is refreshed on every sync instead of
+    // being copied once and left stale.
+    const refresh = file === "KNOWLEDGE.md";
+    if (!existsSync(src) || (existsSync(dst) && !refresh)) continue;
 
-    copyProjectionFileSync(src, dst, false);
+    copyProjectionFileSync(src, dst, refresh);
   }
 }
 

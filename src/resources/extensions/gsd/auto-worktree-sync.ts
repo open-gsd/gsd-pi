@@ -148,7 +148,9 @@ function syncRootStateFiles(
   for (const file of ROOT_STATE_FILES) {
     const src = join(mainGsd, file);
     const dst = join(wtGsd, file);
-    if (!existsSync(src) || existsSync(dst)) continue;
+    // KNOWLEDGE.md is a database render at the project root: refresh the
+    // worktree copy on every sync instead of copying it once.
+    if (!existsSync(src) || (existsSync(dst) && file !== "KNOWLEDGE.md")) continue;
 
     try {
       cpSync(src, dst);

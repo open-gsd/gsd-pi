@@ -30,6 +30,7 @@ import {
 } from "./memory-store.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { createMemoryRelation, listRelationsFor } from "./memory-relations.js";
+import { renderKnowledgeProjection } from "./knowledge-projection.js";
 
 // ─── Arg parsing ────────────────────────────────────────────────────────────
 
@@ -176,6 +177,18 @@ function usage(): string {
   ].join("\n");
 }
 
+/**
+ * Render KNOWLEDGE.md after a command that changed memories rows, so the file
+ * shows the change at once. A render failure is reported, not hidden.
+ */
+function renderKnowledgeAfterMemoryChange(ctx: ExtensionCommandContext): void {
+  try {
+    renderKnowledgeProjection(projectRoot());
+  } catch (err) {
+    ctx.ui.notify(`KNOWLEDGE.md render failed: ${(err as Error).message}`, "warning");
+  }
+}
+
 async function ensureDb(): Promise<void> {
   if (isDbAvailable()) return;
   const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
@@ -245,6 +258,7 @@ function handleForget(ctx: ExtensionCommandContext, id: string | undefined): voi
     return;
   }
   ctx.ui.notify(`Forgot ${id}.`, "info");
+  renderKnowledgeAfterMemoryChange(ctx);
 }
 
 function handleStats(ctx: ExtensionCommandContext): void {
@@ -336,6 +350,7 @@ function handleExport(ctx: ExtensionCommandContext, target: string | undefined):
         hit_count: m.hit_count,
         scope: m.scope,
         tags: m.tags,
+        structured_fields: m.structured_fields,
         source_unit_type: m.source_unit_type,
         source_unit_id: m.source_unit_id,
         created_at: m.created_at,
@@ -367,6 +382,7 @@ interface ExportedMemory {
   confidence?: number;
   scope?: string;
   tags?: string[];
+  structured_fields?: Record<string, unknown> | null;
 }
 
 interface ExportedRelation {
@@ -401,6 +417,8 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
         confidence: mem.confidence,
         scope: mem.scope,
         tags: mem.tags,
+        // Keeps the knowledge id (sourceKnowledgeId) so the row stays in KNOWLEDGE.md.
+        structuredFields: mem.structured_fields ?? null,
       });
       if (id) memoryCount++;
     }
@@ -413,6 +431,7 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
     }
 
     ctx.ui.notify(`Imported ${memoryCount} memories and ${relationCount} relations.`, "info");
+    renderKnowledgeAfterMemoryChange(ctx);
   } catch (err) {
     ctx.ui.notify(`Import failed: ${(err as Error).message}`, "error");
   }
@@ -425,6 +444,7 @@ function handleDecay(ctx: ExtensionCommandContext): void {
     return;
   }
   ctx.ui.notify(`Decayed ${decayed.length} stale memor${decayed.length === 1 ? "y" : "ies"}: ${decayed.join(", ")}`, "info");
+  renderKnowledgeAfterMemoryChange(ctx);
 }
 
 function handleCap(ctx: ExtensionCommandContext, arg: string | undefined): void {
@@ -435,6 +455,7 @@ function handleCap(ctx: ExtensionCommandContext, arg: string | undefined): void 
   }
   enforceMemoryCap(max);
   ctx.ui.notify(`Enforced memory cap of ${max}.`, "info");
+  renderKnowledgeAfterMemoryChange(ctx);
 }
 
 function handleSources(ctx: ExtensionCommandContext): void {

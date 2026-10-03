@@ -194,7 +194,8 @@ export function decayMemoriesBefore(cutoffTs: string, now: string): void {
      WHERE superseded_by IS NULL
        AND updated_at < :cutoff
        AND confidence > 0.1
-       AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceDecisionId"%')`,
+       AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceDecisionId"%')
+         AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceKnowledgeId"%')`,
   ).run({ ":now": now, ":cutoff": cutoffTs }));
 }
 
@@ -203,7 +204,7 @@ export function supersedeLowestRankedMemories(limit: number, now: string): void 
     `UPDATE memories SET superseded_by = 'CAP_EXCEEDED', updated_at = :now
      WHERE id IN (
        SELECT id FROM memories
-       WHERE superseded_by IS NULL AND category <> 'rule'
+       WHERE superseded_by IS NULL AND category <> 'rule' AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceKnowledgeId"%')
        ORDER BY (confidence * (1.0 + hit_count * 0.1)) ASC
        LIMIT :limit
      )`,
