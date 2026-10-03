@@ -5,7 +5,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -39,6 +39,10 @@ import {
 } from "../db/writers/lifecycle-commands.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import type { EscalationArtifact, EscalationOption } from "../types.ts";
+import { checkEngineHealth } from "../doctor-engine-checks.ts";
+import type { DoctorIssue } from "../doctor-types.ts";
+import { handleEscalateCommand } from "../commands/handlers/escalate.ts";
+import { withCommandCwd } from "../commands/context.ts";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────
 
@@ -974,38 +978,168 @@ test("ADR-046: the question row decides the pause and the pending override, not 
   assert.equal(claimOverrideForInjection("M001", "S01")?.sourceTaskId, "T96");
 });
 
-test("ADR-046: a pause flag from before the database stored escalations still pauses, and resolve clears it", (t) => {
-  // Upgrade state: the Task was paused by a T##-ESCALATION.json escalation, so
-  // the flag and the file path are set but no question row exists.
+const LEGACY_PATH = ".gsd/milestones/M001/slices/S01/tasks/T97-ESCALATION.json";
+
+/**
+ * Upgrade state: T97 has a T##-ESCALATION.json escalation and no question row.
+ * `response` is the user's pre-upgrade resolution; without it the Task is paused.
+ */
+function seedLegacyEscalation(
+  base: string,
+  options: { writeFile?: boolean; response?: { userChoice: string; userRationale: string } } = {},
+): void {
+  seedCompletedTask(base, "T97");
+  if (options.writeFile !== false) {
+    writeFileSync(join(base, LEGACY_PATH), JSON.stringify({
+      version: 1, taskId: "T97", sliceId: "S01", milestoneId: "M001",
+      question: "Which store?", options: sampleOptions,
+      recommendation: "A", recommendationRationale: "Flexible",
+      continueWithDefault: false, createdAt: "2026-01-01T00:00:00.000Z",
+      ...(options.response ? { respondedAt: "2026-01-02T00:00:00.000Z", ...options.response } : {}),
+    }));
+  }
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET escalation_pending = :pending, escalation_artifact_path = :path WHERE id = 'T97'",
+  ).run({ ":pending": options.response ? 0 : 1, ":path": LEGACY_PATH });
+}
+
+function operations(type: string): number {
+  const row = _getAdapter()!.prepare(
+    "SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = :type",
+  ).get({ ":type": type });
+  return Number(row?.["count"]);
+}
+
+async function legacyEscalationIssues(
+  base: string, repair: boolean, fixesApplied: string[] = [],
+): Promise<DoctorIssue[]> {
+  const issues: DoctorIssue[] = [];
+  await checkEngineHealth(base, issues, fixesApplied, { repair });
+  return issues.filter((issue) => issue.code === "escalation_legacy_response_unapplied");
+}
+
+test("ADR-046: a pre-upgrade escalation pause is resolved through task.escalation.resolve with a validated choice", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Test", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
-  insertTask({ id: "T97", sliceId: "S01", milestoneId: "M001", title: "T", status: "complete" });
-  const legacyPath = ".gsd/milestones/M001/slices/S01/tasks/T97-ESCALATION.json";
-  _getAdapter()!.prepare(
-    "UPDATE tasks SET escalation_pending = 1, escalation_artifact_path = :path WHERE id = 'T97'",
-  ).run({ ":path": legacyPath });
+  seedLegacyEscalation(base);
 
   const task = getTask("M001", "S01", "T97")!;
   assert.equal(detectPendingEscalation([task]), "T97", "auto mode must not pass the legacy hard blocker");
   assert.deepEqual(listEscalationArtifacts("M001", false).map((row) => row.id), ["T97"]);
-  assert.deepEqual(listEscalationArtifacts("M001", true).map((row) => row.id), ["T97"]);
-  assert.ok(formatLegacyEscalationNotice(task).includes(legacyPath), "the notice names the legacy question file");
 
-  const result = resolveEscalation(base, "M001", "S01", "T97", "accept", "");
-  assert.equal(result.status, "legacy-cleared");
-  assert.ok(result.message.includes(legacyPath));
-  assert.match(result.message, /NOT recorded/);
+  const invalid = resolveEscalation(base, "M001", "S01", "T97", "Z", "");
+  assert.equal(invalid.status, "invalid-choice");
+  assert.match(invalid.message, /accept, reject-blocker, A, B/);
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T97")!]), "T97", "an invalid choice keeps the pause");
+  assert.equal(operations("task.escalation.resolve"), 0);
+
+  const result = resolveEscalation(base, "M001", "S01", "T97", "B", "keep it simple");
+  assert.equal(result.status, "resolved");
+  assert.equal(result.chosenOption?.id, "B");
+  assert.equal(operations("task.escalation.resolve"), 1);
+  assert.equal(countRows("workflow_answers"), 1, "the response is stored as the accepted answer");
 
   const cleared = getTask("M001", "S01", "T97")!;
   assert.equal(cleared.escalation_pending, 0);
   assert.equal(detectPendingEscalation([cleared]), null);
-  assert.deepEqual(listEscalationArtifacts("M001", true), []);
-  assert.equal(countRows("workflow_answers"), 0, "a legacy pause has no question to answer");
-  assert.equal(claimOverrideForInjection("M001", "S01"), null, "a cleared legacy pause injects nothing");
+  const claim = claimOverrideForInjection("M001", "S01");
+  assert.equal(claim?.sourceTaskId, "T97");
+  assert.match(claim!.injectionBlock, /Which store\?/);
+  assert.match(claim!.injectionBlock, /JSON array \(id: B\)/);
+  assert.match(claim!.injectionBlock, /keep it simple/);
+  assert.equal(resolveEscalation(base, "M001", "S01", "T97", "A", "").status, "already-resolved");
+});
+
+test("ADR-046: rejecting a pre-upgrade escalation pause starts the slice replan, also when its file is gone", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedLegacyEscalation(base, { writeFile: false });
+
+  const task = getTask("M001", "S01", "T97")!;
+  assert.equal(detectPendingEscalation([task]), "T97");
+  assert.ok(formatLegacyEscalationNotice(task).includes(LEGACY_PATH), "the notice names the legacy question file");
+
+  const invalid = resolveEscalation(base, "M001", "S01", "T97", "A", "");
+  assert.equal(invalid.status, "invalid-choice", "an option id cannot be validated without the file");
+  assert.equal(getTask("M001", "S01", "T97")!.escalation_pending, 1);
+
+  const result = resolveEscalation(base, "M001", "S01", "T97", "reject-blocker", "none fit");
+  assert.equal(result.status, "rejected-to-blocker");
+  assert.equal(operations("task.escalation.resolve"), 1);
+
+  const row = getTask("M001", "S01", "T97")!;
+  assert.equal(row.escalation_pending, 0);
+  assert.equal(row.blocker_discovered, true);
+  assert.equal(row.blocker_source, "reject-escalation");
+  assert.equal(detectPendingEscalation([row]), null);
   assert.equal(resolveEscalation(base, "M001", "S01", "T97", "accept", "").status, "not-found");
+});
+
+test("ADR-046: a pre-upgrade escalation response that is not applied is listed, reported by doctor, and converted by doctor --fix", async (t) => {
+  const base = makeBase();
+  const previousCwd = process.cwd();
+  t.after(() => {
+    process.chdir(previousCwd);
+    cleanup(base);
+  });
+  seedLegacyEscalation(base, { response: { userChoice: "B", userRationale: "keep it simple" } });
+  insertTask({ id: "T98", sliceId: "S01", milestoneId: "M001", title: "Next", status: "pending" });
+
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T97")!]), null, "a resolved escalation does not pause");
+  assert.deepEqual(listEscalationArtifacts("M001", false), []);
+  assert.deepEqual(listEscalationArtifacts("M001", true).map((row) => row.id), ["T97"]);
+
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nversion: 1\nphases:\n  mid_execution_escalation: true\n---\n");
+  process.chdir(base);
+  const notes: string[] = [];
+  const ctx = { ui: { notify: (message: string) => notes.push(message) } } as unknown as Parameters<typeof handleEscalateCommand>[1];
+  await withCommandCwd(base, () => handleEscalateCommand("list --all", ctx, {} as Parameters<typeof handleEscalateCommand>[2]));
+  assert.match(notes.join("\n"), /S01\/T97 {2}\[resolved, NOT applied\].*\/gsd doctor --fix/);
+
+  const reported = await legacyEscalationIssues(base, false);
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0]!.severity, "warning");
+  assert.equal(reported[0]!.unitId, "M001/S01/T97");
+  assert.equal(reported[0]!.fixable, true);
+  assert.equal(countRows("workflow_open_questions"), 0, "a report without --fix writes nothing");
+
+  const fixesApplied: string[] = [];
+  assert.deepEqual(await legacyEscalationIssues(base, true, fixesApplied), []);
+  assert.equal(fixesApplied.filter((fix) => fix.includes("M001/S01/T97")).length, 1);
+  assert.equal(operations("task.escalation.open"), 1);
+  assert.equal(operations("task.escalation.resolve"), 1);
+  assert.equal(countRows("workflow_open_questions"), 1);
+  assert.equal(countRows("workflow_answers"), 1);
+  assert.equal(readTaskEscalation("M001", "S01", "T97")?.userChoice, "B");
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T97")!]), null, "the conversion leaves no pause");
+
+  const claim = claimOverrideForInjection("M001", "S01");
+  assert.equal(claim?.sourceTaskId, "T97");
+  assert.match(claim!.injectionBlock, /JSON array \(id: B\)/);
+  assert.match(claim!.injectionBlock, /keep it simple/);
+  assert.deepEqual(await legacyEscalationIssues(base, true), [], "a converted escalation is not reported again");
+});
+
+test("ADR-046: a pre-upgrade escalation response in a slice with no next task is not reported or converted", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedLegacyEscalation(base, { response: { userChoice: "B", userRationale: "" } });
+
+  assert.deepEqual(listEscalationArtifacts("M001", true), []);
+  assert.deepEqual(await legacyEscalationIssues(base, true), []);
+  assert.equal(countRows("workflow_open_questions"), 0);
+});
+
+test("ADR-046: a pre-upgrade escalation response whose file is gone is reported as not fixable", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedLegacyEscalation(base, { writeFile: false, response: { userChoice: "B", userRationale: "" } });
+  insertTask({ id: "T98", sliceId: "S01", milestoneId: "M001", title: "Next", status: "pending" });
+
+  const reported = await legacyEscalationIssues(base, true);
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0]!.fixable, false);
+  assert.equal(countRows("workflow_open_questions"), 0);
 });
 
 test("ADR-046: an escalation is limited to the three options of a choice interaction", () => {

@@ -801,13 +801,51 @@ export function findUnappliedEscalationOverride(
   return { taskId: row.id };
 }
 
+/**
+ * SQL condition on a `tasks` row: an escalation from before the database stored
+ * them, which the user resolved and no prompt has claimed. Limited to a Task in
+ * an open slice of an open milestone that still has a next task to receive it.
+ */
+const UNAPPLIED_LEGACY_ESCALATION_SQL = `(
+  escalation_artifact_path IS NOT NULL
+  AND escalation_pending = 0
+  AND escalation_awaiting_review = 0
+  AND escalation_override_applied_at IS NULL
+  AND NOT ${TASK_HAS_ESCALATION_SQL}
+  AND EXISTS (
+    SELECT 1 FROM slices open_slice
+    JOIN milestones open_milestone ON open_milestone.id = open_slice.milestone_id
+    WHERE open_slice.milestone_id = tasks.milestone_id
+      AND open_slice.id = tasks.slice_id
+      AND open_slice.status NOT IN (${TERMINAL_STATUS_SQL})
+      AND open_milestone.status NOT IN (${TERMINAL_STATUS_SQL})
+  )
+  AND EXISTS (
+    SELECT 1 FROM tasks next_task
+    WHERE next_task.milestone_id = tasks.milestone_id
+      AND next_task.slice_id = tasks.slice_id
+      AND next_task.status NOT IN (${TERMINAL_STATUS_SQL})
+  )
+)`;
+
+/** List every Task whose resolved pre-database escalation is not applied (for doctor). */
+export function listUnappliedLegacyEscalations(): TaskRow[] {
+  if (!getDbOrNull()!) return [];
+  const rows = getDbOrNull()!.prepare(
+    `SELECT * FROM tasks WHERE ${UNAPPLIED_LEGACY_ESCALATION_SQL} ORDER BY milestone_id, slice_id, sequence, id`,
+  ).all();
+  return rows.map(rowToTask);
+}
+
 /** List tasks with escalations across a milestone (for /gsd escalate list). */
 export function listEscalationArtifacts(milestoneId: string, includeResolved: boolean = false): TaskRow[] {
   if (!getDbOrNull()!) return [];
   // A pause flag with no question row is an escalation from before the
-  // database stored them. It stays listed so the user can clear the pause.
+  // database stored them. It stays listed so the user can resolve it.
   const legacyPause = `((escalation_pending = 1 OR escalation_awaiting_review = 1) AND NOT ${TASK_HAS_ESCALATION_SQL})`;
-  const filter = `(${includeResolved ? TASK_HAS_ESCALATION_SQL : TASK_HAS_OPEN_ESCALATION_SQL} OR ${legacyPause})`;
+  const filter = includeResolved
+    ? `(${TASK_HAS_ESCALATION_SQL} OR ${legacyPause} OR ${UNAPPLIED_LEGACY_ESCALATION_SQL})`
+    : `(${TASK_HAS_OPEN_ESCALATION_SQL} OR ${legacyPause})`;
   const rows = getDbOrNull()!.prepare(
     `SELECT * FROM tasks WHERE milestone_id = :mid AND ${filter} ORDER BY slice_id, sequence, id`,
   ).all({ ":mid": milestoneId });

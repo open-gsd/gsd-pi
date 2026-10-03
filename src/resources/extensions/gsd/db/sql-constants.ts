@@ -83,8 +83,11 @@ function taskEscalationExistsSql(statusCondition: string): string {
   JOIN workflow_open_questions escalation_question
     ON escalation_question.lifecycle_id = escalation_lifecycle.lifecycle_id
    AND escalation_question.project_id = escalation_lifecycle.project_id
-  JOIN workflow_domain_events escalation_event
-    ON escalation_event.event_type = '${TASK_ESCALATION_OPENED_EVENT}'
+  CROSS JOIN workflow_domain_events escalation_event
+    ON escalation_event.project_id = escalation_lifecycle.project_id
+   AND escalation_event.entity_type = 'task'
+   AND escalation_event.entity_id = escalation_lifecycle.milestone_id || '/' || escalation_lifecycle.slice_id || '/' || escalation_lifecycle.task_id
+   AND escalation_event.event_type = '${TASK_ESCALATION_OPENED_EVENT}'
    AND json_extract(escalation_event.payload_json, '$.questionId') = escalation_question.question_id
   WHERE escalation_lifecycle.item_kind = 'task'
     AND escalation_lifecycle.milestone_id = tasks.milestone_id

@@ -14,6 +14,7 @@ import {
   isMemoriesFtsAvailable,
   repairWrongKindLifecycleProjections,
   _getAdapter,
+  listUnappliedLegacyEscalations,
 } from "./gsd-db.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
 import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
@@ -30,6 +31,7 @@ import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from "./
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
 import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
 import { importFileOverrides, unimportedFileOverrides, type FileOverride } from "./overrides.js";
+import { convertResolvedLegacyEscalation, readConvertibleLegacyEscalation } from "./escalation.js";
 import { isUnplannedMilestone, milestoneRenderArtifactPaths } from "./markdown-renderer.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { parseProjectionPlan } from "./schemas/parsers.js";
@@ -1271,6 +1273,46 @@ export async function checkEngineHealth(
       fixesApplied,
       options?.repair === true && options.importFileOverrides === true,
     );
+    checkUnappliedLegacyEscalations(basePath, issues, fixesApplied, options?.repair === true);
+  }
+}
+
+/**
+ * An escalation the user resolved before the database stored escalations has
+ * its response only in a T##-ESCALATION.json file, so the next task does not
+ * receive it. Report each one; under repair, convert it to question and answer
+ * rows.
+ */
+function checkUnappliedLegacyEscalations(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  repair: boolean,
+): void {
+  for (const task of listUnappliedLegacyEscalations()) {
+    const unitId = `${task.milestone_id}/${task.slice_id}/${task.id}`;
+    const legacy = readConvertibleLegacyEscalation(basePath, task);
+    let convertError = "";
+    if (repair && legacy) {
+      try {
+        convertResolvedLegacyEscalation(basePath, legacy);
+        fixesApplied.push(`stored the escalation response of ${unitId} in the database; the next task of ${task.slice_id} receives it`);
+        continue;
+      } catch (err) {
+        convertError = ` The conversion failed: ${(err as Error).message}.`;
+      }
+    }
+    issues.push({
+      severity: "warning",
+      code: "escalation_legacy_response_unapplied",
+      scope: "task",
+      unitId,
+      message: legacy
+        ? `The user's response to the escalation of ${unitId} is from before escalations were stored in the database and is not carried into the next task. Run \`/gsd doctor --fix\` to store it.${convertError}`
+        : `The user's response to the escalation of ${unitId} is from before escalations were stored in the database and is not carried into the next task. It cannot be converted: the file is missing, has no valid response, or the Task has no canonical lifecycle. Give the decision to the next task yourself.`,
+      ...(task.escalation_artifact_path ? { file: task.escalation_artifact_path } : {}),
+      fixable: legacy !== null,
+    });
   }
 }
 

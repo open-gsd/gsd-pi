@@ -7,6 +7,7 @@ import { projectRoot } from "../context.js";
 import { getActiveMilestoneId } from "../../state.js";
 import {
   readTaskEscalation,
+  readLegacyEscalation,
   formatEscalationForDisplay,
   formatLegacyEscalationNotice,
   resolveEscalation,
@@ -42,9 +43,12 @@ function formatListEntries(
   if (rows.length === 0) return "No escalations.";
   return rows.map((t) => {
     const escalation = readTaskEscalation(t.milestone_id, t.slice_id, t.id);
-    // A listed Task with no question row is a legacy pause.
+    // A listed Task with no question row has an escalation from before the
+    // database stored them: a pause, or a response that is not applied.
     if (!escalation) {
-      return `  ${t.slice_id}/${t.id}  [PENDING (paused)]  (question not in the database — run /gsd escalate show ${t.id})`;
+      return t.escalation_pending || t.escalation_awaiting_review
+        ? `  ${t.slice_id}/${t.id}  [PENDING (paused)]  (question not in the database — run /gsd escalate show ${t.id})`
+        : `  ${t.slice_id}/${t.id}  [resolved, NOT applied]  (response is not in the database and is not carried into the next task — run /gsd doctor --fix)`;
     }
     const status = escalation.respondedAt ? "resolved" : escalation.continueWithDefault ? "awaiting-review" : "PENDING (paused)";
     return `  ${t.slice_id}/${t.id}  [${status}]  ${escalation.question}`;
@@ -126,7 +130,7 @@ export async function handleEscalateCommand(
       ctx.ui.notify(`No escalation found for ${ref} in ${milestoneId}.`, "warning");
       return;
     }
-    const escalation = readTaskEscalation(milestoneId, row.slice_id, row.id);
+    const escalation = readTaskEscalation(milestoneId, row.slice_id, row.id) ?? readLegacyEscalation(basePath, row);
     if (!escalation) {
       ctx.ui.notify(formatLegacyEscalationNotice(row), "warning");
       return;
@@ -161,10 +165,7 @@ export async function handleEscalateCommand(
     await renderStateProjection(basePath);
 
     if (result.status !== "resolved" && result.status !== "rejected-to-blocker") {
-      ctx.ui.notify(
-        result.message,
-        result.status === "invalid-choice" || result.status === "legacy-cleared" ? "warning" : "error",
-      );
+      ctx.ui.notify(result.message, result.status === "invalid-choice" ? "warning" : "error");
       return;
     }
 

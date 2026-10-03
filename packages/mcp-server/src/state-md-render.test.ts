@@ -23,7 +23,10 @@ import { mergeCompletedMilestone } from "../../../src/resources/extensions/gsd/p
 import { seedMergeReadyMilestone } from "../../../src/resources/extensions/gsd/tests/merge-ready-fixture.ts";
 import { handleEscalateCommand } from "../../../src/resources/extensions/gsd/commands/handlers/escalate.ts";
 import { withCommandCwd } from "../../../src/resources/extensions/gsd/commands/context.ts";
-import { buildEscalationArtifact, writeEscalationArtifact } from "../../../src/resources/extensions/gsd/escalation.ts";
+import { buildEscalationArtifact, openTaskEscalation } from "../../../src/resources/extensions/gsd/escalation.ts";
+import { internalExecutionInvocation } from "../../../src/resources/extensions/gsd/execution-invocation.ts";
+import { executeDomainOperation } from "../../../src/resources/extensions/gsd/db/domain-operation.ts";
+import { adoptOrTransitionLifecycle, readDomainOperationFence } from "../../../src/resources/extensions/gsd/db/writers/lifecycle-commands.ts";
 import { deriveState, invalidateStateCache } from "../../../src/resources/extensions/gsd/state.ts";
 import { renderStateContent } from "../../../src/resources/extensions/gsd/workflow-projections.ts";
 import { rebuildMarkdownProjectionsFromDb } from "../../../src/resources/extensions/gsd/projection-worker.ts";
@@ -318,7 +321,32 @@ describe("STATE.md render after workflow commands and rebuild", () => {
     writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nversion: 1\nphases:\n  mid_execution_escalation: true\n---\n");
     mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S02", "tasks"), { recursive: true });
     clearPathCache();
-    writeEscalationArtifact(base, buildEscalationArtifact({
+    // An escalation question is scoped to the Task's canonical lifecycle row.
+    const fence = readDomainOperationFence();
+    executeDomainOperation({
+      operationType: "test.task.adopt",
+      idempotencyKey: "state-md-render:escalation:adopt",
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "test",
+      sourceTransport: "test",
+      payload: { taskId: "T01" },
+    }, (context) => {
+      adoptOrTransitionLifecycle(context, {
+        itemKind: "task", milestoneId: "M001", sliceId: "S02", taskId: "T01", lifecycleStatus: "ready",
+      });
+      return {
+        events: [{
+          eventType: "test.task.adopted",
+          entityType: "task",
+          entityId: "M001/S02/T01",
+          payload: { taskId: "T01" },
+          destinations: ["test"],
+        }],
+        projections: [{ projectionKey: "test/task/s02/t01", projectionKind: "test", rendererVersion: "1" }],
+      };
+    });
+    openTaskEscalation(base, buildEscalationArtifact({
       taskId: "T01",
       sliceId: "S02",
       milestoneId: "M001",
@@ -330,7 +358,7 @@ describe("STATE.md render after workflow commands and rebuild", () => {
       recommendation: "B",
       recommendationRationale: "Simple",
       continueWithDefault: false,
-    }));
+    }), internalExecutionInvocation("state-md-render:escalation"));
     const notes: string[] = [];
     const ctx = { ui: { notify: (message: string) => notes.push(message) } } as unknown as Parameters<typeof handleEscalateCommand>[1];
     // Escalation preferences are read from the working directory.
