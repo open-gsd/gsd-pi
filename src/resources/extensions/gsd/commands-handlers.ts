@@ -15,7 +15,7 @@ import { deriveState } from "./state.js";
 import { gsdRoot } from "./paths.js";
 import { gsdHome } from "./gsd-home.js";
 import { appendCapture, hasPendingCaptures, loadPendingCaptures } from "./captures.js";
-import { appendOverride, appendKnowledge } from "./files.js";
+import { appendOverride } from "./files.js";
 import {
   formatDoctorIssuesForPrompt,
   formatDoctorReport,
@@ -519,25 +519,24 @@ export async function handleKnowledge(args: string, ctx: ExtensionCommandContext
     ? `${state.activeMilestone.id}${state.activeSlice ? `/${state.activeSlice.id}` : ""}`
     : "global";
 
-  // ADR-013 Stage 2c: Patterns and Lessons land in the memories table; the
-  // next session-start projection render emits them back into KNOWLEDGE.md.
-  // Rules stay file-canonical per ADR-013 line 39 — Rules are not migrated.
-  if (type === "rule") {
-    await appendKnowledge(basePath, type, entryText, scope);
-    ctx.ui.notify(`Added rule to KNOWLEDGE.md: "${entryText}"`, "success");
-    return;
-  }
-
+  // Rules, Patterns and Lessons are database rows; the capture renders
+  // KNOWLEDGE.md from the database right after the write.
   const { captureKnowledgeEntry } = await import("./knowledge-capture.js");
-  const { id, written } = captureKnowledgeEntry(basePath, type, entryText, scope);
-  if (!written) {
-    ctx.ui.notify(`Could not persist ${type} — see logs for details.`, "error");
+  let result: ReturnType<typeof captureKnowledgeEntry>;
+  try {
+    result = captureKnowledgeEntry(basePath, type, entryText, scope);
+  } catch (e) {
+    ctx.ui.notify(`Could not save ${type}: ${(e as Error).message}`, "error");
     return;
   }
-  ctx.ui.notify(
-    `Captured ${type} ${id} to memories; KNOWLEDGE.md will render it on next session start.`,
-    "success",
-  );
+  if (result.projectionError) {
+    ctx.ui.notify(
+      `Saved ${type} ${result.id}, but KNOWLEDGE.md render failed: ${result.projectionError}`,
+      "warning",
+    );
+    return;
+  }
+  ctx.ui.notify(`Saved ${type} ${result.id} to KNOWLEDGE.md: "${entryText}"`, "success");
 }
 
 // ─── run-hook unit-ID validation (#2195) ─────────────────────────────────────

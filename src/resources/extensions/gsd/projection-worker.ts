@@ -11,6 +11,7 @@ import {
   captureCurrentProjectionWork,
   settleProjectionWork,
 } from "./db/writers/projection-work-delivery.js";
+import { renderKnowledgeProjection } from "./knowledge-projection.js";
 import { renderAllFromDb } from "./markdown-renderer.js";
 import { gsdProjectionRoot, gsdRoot } from "./paths.js";
 import {
@@ -75,6 +76,12 @@ export async function rebuildMarkdownProjectionsFromDb(
 
   const deliveryBatch = captureCurrentProjectionWork();
   const rendered = await renderAllFromDb(basePath);
+  try {
+    if (renderKnowledgeProjection(basePath).written) rendered.rendered++;
+    else rendered.skipped++;
+  } catch (err) {
+    rendered.errors.push(`knowledge: ${(err as Error).message}`);
+  }
   const delivered = rendered.errors.length === 0
     ? settleProjectionWork(deliveryBatch, { outcome: "rendered", contentHash: projectionTreeHash(basePath) })
     : settleProjectionWork(deliveryBatch, { outcome: "failed", error: rendered.errors.join("\n") });

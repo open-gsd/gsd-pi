@@ -542,6 +542,40 @@ describe("workflow MCP tools", () => {
     }
   });
 
+  it("gsd_capture_thought writes rule, pattern and gotcha rows with K/P/L ids and renders KNOWLEDGE.md in the child", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const tool = server.tools.find((t) => t.name === "gsd_capture_thought");
+      assert.ok(tool, "gsd_capture_thought must be registered");
+      openDatabase(join(base, ".gsd", "gsd.db"));
+
+      for (const [category, content] of [
+        ["rule", "Never commit gsd.db"],
+        ["pattern", "Seam types at the vendor boundary"],
+        ["gotcha", "WAL file grows without checkpoint"],
+      ]) {
+        const result = await tool.handler({ projectDir: base, category, content }) as { isError?: boolean };
+        assert.notEqual(result.isError, true, `gsd_capture_thought ${category} must succeed`);
+      }
+
+      const rows = _getAdapter()!
+        .prepare("SELECT category, structured_fields FROM memories WHERE superseded_by IS NULL ORDER BY seq")
+        .all() as Array<{ category: string; structured_fields: string }>;
+      assert.deepEqual(
+        rows.map((row) => [row.category, JSON.parse(row.structured_fields).sourceKnowledgeId]),
+        [["rule", "K001"], ["pattern", "P001"], ["gotcha", "L001"]],
+      );
+      const md = readFileSync(join(base, ".gsd", "KNOWLEDGE.md"), "utf-8");
+      assert.match(md, /## Rules\n\n\| # \| Scope \| Rule \| Why \| Added \|\n\|---\|-------\|------\|-----\|-------\|\n\| K001 \| project \| Never commit gsd\.db \|/);
+      assert.match(md, /\| P001 \| Seam types at the vendor boundary \|/);
+      assert.match(md, /\| L001 \| WAL file grows without checkpoint \|/);
+    } finally {
+      cleanup(base);
+    }
+  });
+
   it("gsd_checkpoint_db reports failure when a busy reader blocks the checkpoint", async () => {
     const base = makeTmpBase();
     const dbPath = join(base, ".gsd", "gsd.db");

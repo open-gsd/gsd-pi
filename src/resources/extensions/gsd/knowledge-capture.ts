@@ -1,126 +1,104 @@
-// gsd-pi — KNOWLEDGE.md write-side cutover (ADR-013 Stage 2c).
+// gsd-pi — KNOWLEDGE capture: the one write path for Rules, Patterns and Lessons.
 //
-// Replaces the legacy `appendKnowledge` file-append path for Patterns and
-// Lessons with `createMemory` calls. Rules (K###) continue to flow through
-// the legacy file-append because they are intentionally not migrated to
-// memories per ADR-013 line 39.
+// `/gsd knowledge`, `capture_thought` and MCP `gsd_capture_thought` all call
+// `captureKnowledgeEntry`. Each capture writes one `memories` row carrying a
+// `sourceKnowledgeId` (K###, P### or L###) and then renders KNOWLEDGE.md from
+// the database, so the file shows the entry at once.
 //
-// Next-ID assignment is the cross-surface stable rule: read the existing
-// `.gsd/KNOWLEDGE.md` for the highest <prefix>### in that section, AND read
-// the memories table for the highest `sourceKnowledgeId` with the matching
-// prefix, take the max, and increment. This stays stable across the
-// knowledge backfill mid-run (when some rows exist only in the file and
-// others only in memories) and on a fresh project where neither has any
-// entries yet.
+// Next-ID assignment takes the max <prefix>### from the memories table and
+// from the existing `.gsd/KNOWLEDGE.md`. The file side is the import bridge:
+// it reserves ids of file rows that are not imported into the database yet,
+// so a new capture cannot take the id of a row the render still keeps.
 
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { createMemory } from "./memory-store.js";
 import { parseKnowledgeRows, readKnowledgeMd } from "./knowledge-parser.js";
-import { logWarning } from "./workflow-logger.js";
+import { renderKnowledgeProjection } from "./knowledge-projection.js";
 
-export type PatternLessonType = "pattern" | "lesson";
+export type KnowledgeEntryType = "rule" | "pattern" | "lesson";
+
+/** Memory category used for each knowledge entry type. */
+const KNOWLEDGE_CATEGORY: Record<KnowledgeEntryType, string> = {
+  rule: "rule",
+  pattern: "pattern",
+  lesson: "gotcha",
+};
+
+export interface CaptureKnowledgeOptions {
+  confidence?: number;
+  tags?: string[];
+  /** Extra structured cells (e.g. where/notes, rootCause/fix). The knowledge id is always assigned here. */
+  structuredFields?: Record<string, unknown> | null;
+}
 
 export interface CaptureKnowledgeResult {
   /** The assigned <prefix>### identifier (e.g. "P004"). */
   id: string;
-  /** Whether the memory row was actually written. False only when the
-   *  DB is unavailable or the createMemory call returned undefined. */
-  written: boolean;
+  /** The memories row id (e.g. "MEM012"). */
+  memoryId: string;
+  /** Set when the row was written but KNOWLEDGE.md could not be rendered. */
+  projectionError?: string;
 }
 
 /**
- * Append a new Pattern or Lesson by writing it as a memory row carrying a
- * `sourceKnowledgeId` marker. The next session's KNOWLEDGE.md projection
- * render (`knowledge-projection.ts`) picks it up and emits the row into the
- * appropriate section.
- *
- * `entryText` is treated as the row's primary description cell (Pattern for
- * patterns, "What Happened" for lessons). Auxiliary cells (Where/Notes for
- * patterns; Root Cause/Fix/Scope for lessons) are left empty — the projection
- * renders `—` for empty cells. Users who need richer structure can call
- * `capture_thought` directly with a fuller `structuredFields` payload.
+ * Write a Rule, Pattern or Lesson as one memories row with the next
+ * knowledge id, then render KNOWLEDGE.md. Throws when the text is empty, the
+ * database is not available, or the insert fails. A render failure after the
+ * row is written is returned as `projectionError`, not thrown.
  */
 export function captureKnowledgeEntry(
   basePath: string,
-  type: PatternLessonType,
+  type: KnowledgeEntryType,
   entryText: string,
   scope: string,
+  options: CaptureKnowledgeOptions = {},
 ): CaptureKnowledgeResult {
   const cleaned = entryText.trim();
-  const idPrefix = type === "pattern" ? "P" : "L";
-  const id = nextKnowledgeId(basePath, idPrefix);
+  if (!cleaned) throw new Error(`${type} text is required`);
+  if (!isDbAvailable()) throw new Error(`GSD database is not available; cannot capture ${type}`);
 
-  if (!cleaned) {
-    return { id, written: false };
-  }
+  const scopeText = scope.trim() || "project";
+  const prefix = type === "rule" ? "K" : type === "pattern" ? "P" : "L";
+  const id = nextKnowledgeId(basePath, prefix);
+  const cells: Record<string, unknown> =
+    type === "rule"
+      ? { sourceKnowledgeTable: "rules", rule: cleaned, scopeText, why: "", added: "manual" }
+      : type === "pattern"
+        ? { sourceKnowledgeTable: "patterns", pattern: cleaned, where: "", notes: "" }
+        : { sourceKnowledgeTable: "lessons", whatHappened: cleaned, rootCause: "", fix: "", scopeText };
 
-  if (!isDbAvailable()) {
-    logWarning("knowledge-capture", "DB unavailable; cannot persist knowledge entry");
-    return { id, written: false };
-  }
+  const memoryId = createMemory({
+    category: KNOWLEDGE_CATEGORY[type],
+    content: cleaned,
+    scope: scopeText,
+    confidence: options.confidence ?? 0.85,
+    tags: options.tags,
+    structuredFields: { ...cells, ...options.structuredFields, sourceKnowledgeId: id },
+  });
+  if (!memoryId) throw new Error(`GSD database is not available; cannot capture ${type}`);
 
   try {
-    const category = type === "pattern" ? "pattern" : "gotcha";
-    const structuredFields: Record<string, unknown> =
-      type === "pattern"
-        ? {
-            sourceKnowledgeId: id,
-            sourceKnowledgeTable: "patterns",
-            pattern: cleaned,
-            where: "",
-            notes: "",
-          }
-        : {
-            sourceKnowledgeId: id,
-            sourceKnowledgeTable: "lessons",
-            whatHappened: cleaned,
-            rootCause: "",
-            fix: "",
-            scopeText: scope,
-          };
-
-    const memoryId = createMemory({
-      category,
-      content: cleaned,
-      scope: scope || "project",
-      confidence: 0.85,
-      structuredFields,
-    });
-
-    return { id, written: !!memoryId };
+    renderKnowledgeProjection(basePath);
+    return { id, memoryId };
   } catch (e) {
-    logWarning(
-      "knowledge-capture",
-      `failed to persist ${type} entry as memory: ${(e as Error).message}`,
-    );
-    return { id, written: false };
+    return { id, memoryId, projectionError: (e as Error).message };
   }
 }
 
 /**
- * Compute the next <prefix>### identifier across both the legacy
- * `.gsd/KNOWLEDGE.md` and the `memories.structured_fields.sourceKnowledgeId`
- * surface. Takes the max numeric suffix from either side and increments.
- *
- * Padded to three digits to match the existing `appendKnowledge` convention.
- * Exported for tests; production callers go through `captureKnowledgeEntry`.
+ * Compute the next <prefix>### identifier: the max numeric suffix in the
+ * memories table and in not-yet-imported KNOWLEDGE.md rows, plus one.
+ * Padded to three digits. Exported for tests.
  */
 export function nextKnowledgeId(basePath: string, prefix: "K" | "P" | "L"): string {
-  const fromFile = maxIdInFile(basePath, prefix);
-  const fromMemories = maxIdInMemories(prefix);
-  const next = Math.max(fromFile, fromMemories) + 1;
+  const next = Math.max(maxIdInFile(basePath, prefix), maxIdInMemories(prefix)) + 1;
   return `${prefix}${String(next).padStart(3, "0")}`;
 }
 
 function maxIdInFile(basePath: string, prefix: "K" | "P" | "L"): number {
-  const content = readKnowledgeMd(basePath);
-  if (!content.trim()) return 0;
-  const expectedTable =
-    prefix === "K" ? "rules" : prefix === "P" ? "patterns" : "lessons";
-
   let max = 0;
-  for (const row of parseKnowledgeRows(content)) {
-    if (row.table !== expectedTable) continue;
+  for (const row of parseKnowledgeRows(readKnowledgeMd(basePath))) {
+    if (!row.id.startsWith(prefix)) continue;
     const num = parseInt(row.id.slice(1), 10);
     if (Number.isFinite(num) && num > max) max = num;
   }
@@ -128,33 +106,24 @@ function maxIdInFile(basePath: string, prefix: "K" | "P" | "L"): number {
 }
 
 function maxIdInMemories(prefix: "K" | "P" | "L"): number {
-  if (!isDbAvailable()) return 0;
   const adapter = _getAdapter();
-  if (!adapter) return 0;
-  try {
-    const rows = adapter
-      .prepare(
-        "SELECT structured_fields FROM memories WHERE structured_fields LIKE :pattern",
-      )
-      .all({ ":pattern": `%"sourceKnowledgeId":"${prefix}%` }) as Array<{
-      structured_fields: string | null;
-    }>;
-    let max = 0;
-    for (const row of rows) {
-      if (!row.structured_fields) continue;
-      let sf: Record<string, unknown>;
-      try {
-        sf = JSON.parse(row.structured_fields) as Record<string, unknown>;
-      } catch {
-        continue;
-      }
-      const sourceId = sf["sourceKnowledgeId"];
-      if (typeof sourceId !== "string" || !sourceId.startsWith(prefix)) continue;
-      const num = parseInt(sourceId.slice(1), 10);
-      if (Number.isFinite(num) && num > max) max = num;
+  if (!adapter) throw new Error("GSD database is not available; cannot allocate a knowledge id");
+  const rows = adapter
+    .prepare("SELECT structured_fields FROM memories WHERE structured_fields LIKE :pattern")
+    .all({ ":pattern": `%"sourceKnowledgeId":"${prefix}%` }) as Array<{ structured_fields: string | null }>;
+  let max = 0;
+  for (const row of rows) {
+    if (!row.structured_fields) continue;
+    let sf: Record<string, unknown>;
+    try {
+      sf = JSON.parse(row.structured_fields) as Record<string, unknown>;
+    } catch {
+      continue;
     }
-    return max;
-  } catch {
-    return 0;
+    const sourceId = sf["sourceKnowledgeId"];
+    if (typeof sourceId !== "string" || !sourceId.startsWith(prefix)) continue;
+    const num = parseInt(sourceId.slice(1), 10);
+    if (Number.isFinite(num) && num > max) max = num;
   }
+  return max;
 }

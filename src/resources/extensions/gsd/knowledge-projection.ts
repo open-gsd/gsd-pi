@@ -1,60 +1,65 @@
-// gsd-pi — KNOWLEDGE.md hybrid projection renderer (ADR-013 Stage 2b).
+// gsd-pi — KNOWLEDGE.md projection renderer (ADR-046).
 //
-// Renders `.gsd/KNOWLEDGE.md` as a hybrid file:
-//   - Rules section: read directly from the existing KNOWLEDGE.md (manual,
-//     per ADR-013 line 39 — Rules are not migrated to memories).
-//   - Patterns section: read from `memories` where `category = "pattern"`
-//     AND `structured_fields.sourceKnowledgeId` is set (matches the marker
-//     written by knowledge-backfill.ts).
-//   - Lessons Learned section: read from `memories` where
-//     `category = "gotcha"` AND `structured_fields.sourceKnowledgeId` is set.
+// Renders `.gsd/KNOWLEDGE.md` from the `memories` table:
+//   - Rules section:   active memories with `category = "rule"`.
+//   - Patterns:        active memories with `category = "pattern"`.
+//   - Lessons Learned: active memories with `category = "gotcha"`.
+// The `#` cell is `structured_fields.sourceKnowledgeId` (K/P/L###) when set,
+// else the memory id. Captures assign a knowledge id (knowledge-capture.ts).
 //
-// Triggered opportunistically by `buildBeforeAgentStartResult` after the
-// knowledge backfill runs. Output is byte-stable when nothing has changed
-// (atomic write). The Rules section is preserved verbatim — including
-// indentation, trailing whitespace, and comments — so manual edits to that
-// section continue to round-trip through `/gsd knowledge`.
+// Import bridge (until the explicit KNOWLEDGE import lands): a K/P/L row in
+// the existing file whose id has no memories row at all is not imported yet.
+// It is kept in the render so the render does not erase it. Once a row with
+// that id exists in the database, the database row wins.
 //
-// Memories captured directly via `capture_thought` (without a
-// `sourceKnowledgeId` marker) are intentionally NOT rendered into
-// KNOWLEDGE.md. They remain accessible via the loadMemoryBlock auto-injection
-// surface; KNOWLEDGE.md projects only the KNOWLEDGE.md-originating subset.
+// Called after every knowledge capture, by the Projection Worker rebuild, and
+// at session start. Output is byte-stable when nothing has changed.
 
 import { atomicWriteSync } from "./atomic-write.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import {
   KNOWLEDGE_SECTIONS,
   knowledgeMdPath,
+  parseKnowledgeRows,
   readKnowledgeMd,
+  type KnowledgeTable,
 } from "./knowledge-parser.js";
-import { logWarning } from "./workflow-logger.js";
-
-const RULES_HEADING = "## Rules";
-const PATTERNS_HEADING = "## Patterns";
-const LESSONS_HEADING = "## Lessons Learned";
-
-const PATTERNS_HEADER = "| # | Pattern | Where | Notes |";
-const PATTERNS_SEPARATOR = "|---|---------|-------|-------|";
-
-const LESSONS_HEADER = "| # | What Happened | Root Cause | Fix | Scope |";
-const LESSONS_SEPARATOR = "|---|--------------|------------|-----|-------|";
 
 const DEFAULT_INTRO = [
   "# Project Knowledge",
   "",
   "Append-only register of project-specific rules, patterns, and lessons learned.",
   "Agents read this before every unit. Add entries when you discover something worth remembering.",
-  "",
 ].join("\n");
 
-interface KnowledgeMemoryRow {
-  sourceId: string;
-  structured: Record<string, unknown>;
-}
+const TABLES: Record<KnowledgeTable, { heading: string; header: string; separator: string }> = {
+  rules: {
+    heading: "## Rules",
+    header: "| # | Scope | Rule | Why | Added |",
+    separator: "|---|-------|------|-----|-------|",
+  },
+  patterns: {
+    heading: "## Patterns",
+    header: "| # | Pattern | Where | Notes |",
+    separator: "|---|---------|-------|-------|",
+  },
+  lessons: {
+    heading: "## Lessons Learned",
+    header: "| # | What Happened | Root Cause | Fix | Scope |",
+    separator: "|---|--------------|------------|-----|-------|",
+  },
+};
 
-interface KnowledgeMemoryReadResult {
-  ok: boolean;
-  rows: KnowledgeMemoryRow[];
+const TABLE_BY_CATEGORY: Record<string, KnowledgeTable> = {
+  rule: "rules",
+  pattern: "patterns",
+  gotcha: "lessons",
+};
+
+interface RenderRow {
+  id: string;
+  /** All cells including the leading `#` cell, unescaped. */
+  cells: string[];
 }
 
 export interface KnowledgeProjectionResult {
@@ -62,178 +67,98 @@ export interface KnowledgeProjectionResult {
   content: string;
 }
 
-/**
- * Read pattern memories that originated from KNOWLEDGE.md, ordered by
- * `sourceKnowledgeId` (lexicographic — P001 < P002 < P010). Memories whose
- * structuredFields fail to parse are skipped silently; they are diagnosed
- * separately by the memory-consolidation scanner.
- */
-function readKnowledgeMemories(category: "pattern" | "gotcha"): KnowledgeMemoryReadResult {
-  if (!isDbAvailable()) return { ok: false, rows: [] };
-  const adapter = _getAdapter();
-  if (!adapter) return { ok: false, rows: [] };
-  try {
-    const rows = adapter
-      .prepare(
-        "SELECT structured_fields FROM memories WHERE category = :cat AND structured_fields IS NOT NULL AND superseded_by IS NULL",
-      )
-      .all({ ":cat": category }) as Array<{ structured_fields: string | null }>;
+function text(sf: Record<string, unknown>, key: string): string {
+  const value = sf[key];
+  return typeof value === "string" ? value : "";
+}
 
-    const out: KnowledgeMemoryRow[] = [];
-    for (const row of rows) {
-      if (!row.structured_fields) continue;
-      let sf: Record<string, unknown>;
+function memoryCells(table: KnowledgeTable, id: string, content: string, scope: string, sf: Record<string, unknown>): string[] {
+  if (table === "rules") {
+    return [id, text(sf, "scopeText") || scope, text(sf, "rule") || content, text(sf, "why") || "—", text(sf, "added") || "—"];
+  }
+  if (table === "patterns") {
+    return [id, text(sf, "pattern") || content, text(sf, "where") || "—", text(sf, "notes") || "—"];
+  }
+  return [id, text(sf, "whatHappened") || content, text(sf, "rootCause") || "—", text(sf, "fix") || "—", text(sf, "scopeText") || scope];
+}
+
+/**
+ * Read the knowledge rows to render from the database, plus every
+ * `sourceKnowledgeId` held by any memories row (active or superseded).
+ * Throws when the database is not available.
+ */
+function readDbKnowledge(): { rows: Record<KnowledgeTable, RenderRow[]>; knownIds: Set<string> } {
+  const adapter = isDbAvailable() ? _getAdapter() : null;
+  if (!adapter) throw new Error("GSD database is not available; cannot render KNOWLEDGE.md");
+
+  const rows: Record<KnowledgeTable, RenderRow[]> = { rules: [], patterns: [], lessons: [] };
+  const knownIds = new Set<string>();
+  const all = adapter
+    .prepare("SELECT id, category, content, scope, superseded_by, structured_fields FROM memories")
+    .all() as Array<{
+    id: string;
+    category: string;
+    content: string;
+    scope: string | null;
+    superseded_by: string | null;
+    structured_fields: string | null;
+  }>;
+
+  for (const row of all) {
+    let sf: Record<string, unknown> = {};
+    if (row.structured_fields) {
       try {
         sf = JSON.parse(row.structured_fields) as Record<string, unknown>;
       } catch {
-        continue;
+        // Malformed structured fields are reported by the consolidation scanner.
       }
-      const sourceId = sf["sourceKnowledgeId"];
-      if (typeof sourceId !== "string" || sourceId.length === 0) continue;
-      out.push({ sourceId, structured: sf });
     }
-    // Lexicographic sort matches the docstring contract (P001 < P002 < P010).
-    // DB seq order is creation-time; sorting by sourceId stabilizes the
-    // rendered output across reruns.
-    out.sort((a, b) => a.sourceId.localeCompare(b.sourceId));
-    return { ok: true, rows: out };
-  } catch {
-    return { ok: false, rows: [] };
+    const knowledgeId = text(sf, "sourceKnowledgeId");
+    if (knowledgeId) knownIds.add(knowledgeId);
+
+    const table = TABLE_BY_CATEGORY[row.category];
+    if (!table || row.superseded_by) continue;
+    const id = knowledgeId || row.id;
+    rows[table].push({ id, cells: memoryCells(table, id, row.content, row.scope || "project", sf) });
   }
+  return { rows, knownIds };
 }
 
-function escapeCell(value: string | undefined): string {
-  return (value ?? "")
-    .replace(/\s+/g, " ")
-    .replace(/\|/g, "\\|")
-    .trim();
-}
-
-function renderPatternsSection(memories: KnowledgeMemoryRow[]): string[] {
-  const lines = [PATTERNS_HEADING, "", PATTERNS_HEADER, PATTERNS_SEPARATOR];
-  for (const m of memories) {
-    const pattern = escapeCell(typeof m.structured["pattern"] === "string" ? (m.structured["pattern"] as string) : "");
-    const where = escapeCell(typeof m.structured["where"] === "string" ? (m.structured["where"] as string) : "");
-    const notes = escapeCell(typeof m.structured["notes"] === "string" ? (m.structured["notes"] as string) : "");
-    lines.push(`| ${m.sourceId} | ${pattern} | ${where || "—"} | ${notes || "—"} |`);
-  }
-  lines.push("");
-  return lines;
-}
-
-function renderLessonsSection(memories: KnowledgeMemoryRow[]): string[] {
-  const lines = [LESSONS_HEADING, "", LESSONS_HEADER, LESSONS_SEPARATOR];
-  for (const m of memories) {
-    const what = escapeCell(typeof m.structured["whatHappened"] === "string" ? (m.structured["whatHappened"] as string) : "");
-    const rootCause = escapeCell(typeof m.structured["rootCause"] === "string" ? (m.structured["rootCause"] as string) : "");
-    const fix = escapeCell(typeof m.structured["fix"] === "string" ? (m.structured["fix"] as string) : "");
-    const scope = escapeCell(typeof m.structured["scopeText"] === "string" ? (m.structured["scopeText"] as string) : "");
-    lines.push(`| ${m.sourceId} | ${what} | ${rootCause || "—"} | ${fix || "—"} | ${scope || "project"} |`);
-  }
-  lines.push("");
-  return lines;
+function escapeCell(value: string): string {
+  return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
 }
 
 /**
- * Extract the Rules section (heading + table) from the existing
- * `KNOWLEDGE.md` content, verbatim. Returns an empty default section
- * (heading + empty table) when the source has no `## Rules` heading.
- */
-function extractRulesSection(existing: string): string[] {
-  const lines = existing.split("\n");
-  const startIdx = lines.findIndex((l) => l.trim() === RULES_HEADING);
-  if (startIdx === -1) {
-    return [
-      RULES_HEADING,
-      "",
-      "| # | Scope | Rule | Why | Added |",
-      "|---|-------|------|-----|-------|",
-      "",
-    ];
-  }
-
-  // Find the next H2 heading that ends the Rules section.
-  let endIdx = lines.length;
-  for (let i = startIdx + 1; i < lines.length; i++) {
-    if (lines[i]!.startsWith("## ")) {
-      endIdx = i;
-      break;
-    }
-  }
-
-  // Strip trailing blank lines from the captured slice — the assembled
-  // output adds its own separator blank line between sections.
-  const slice = lines.slice(startIdx, endIdx);
-  while (slice.length > 0 && slice[slice.length - 1]!.trim() === "") {
-    slice.pop();
-  }
-  slice.push("");
-  return slice;
-}
-
-/**
- * Extract the intro prose (anything before `## Rules`) verbatim, preserving
- * any title (`# Project Knowledge`), comments, and description text. Falls
- * back to the `DEFAULT_INTRO` template when the source has no Rules heading
- * yet.
- */
-function extractIntro(existing: string): string {
-  if (!existing.trim()) return DEFAULT_INTRO;
-  const lines = existing.split("\n");
-  const rulesIdx = lines.findIndex((l) => l.trim() === RULES_HEADING);
-  if (rulesIdx === -1) return DEFAULT_INTRO;
-  // Trim trailing blank lines so the assembly adds its own separator.
-  const slice = lines.slice(0, rulesIdx);
-  while (slice.length > 0 && slice[slice.length - 1]!.trim() === "") {
-    slice.pop();
-  }
-  slice.push("");
-  return slice.join("\n");
-}
-
-/**
- * Render the hybrid `KNOWLEDGE.md`: manual Rules + projected Patterns +
- * projected Lessons. Returns the rendered content and a flag indicating
- * whether the file was written (skipped when content is byte-identical to
- * what's on disk).
- *
- * Best-effort: catches all errors and returns `{ written: false, content: "" }`.
+ * Render `KNOWLEDGE.md` from the database. Returns the rendered content and
+ * whether the file was written (skipped when byte-identical to disk).
+ * Throws when the database is unavailable or the write fails.
  */
 export function renderKnowledgeProjection(basePath: string): KnowledgeProjectionResult {
-  try {
-    const existing = readKnowledgeMd(basePath);
-    const intro = extractIntro(existing);
-    const rules = extractRulesSection(existing);
-    const patternMemories = readKnowledgeMemories("pattern");
-    const lessonMemories = readKnowledgeMemories("gotcha");
-    if (!patternMemories.ok || !lessonMemories.ok) {
-      return { written: false, content: existing };
-    }
-    const patterns = renderPatternsSection(patternMemories.rows);
-    const lessons = renderLessonsSection(lessonMemories.rows);
+  const { rows, knownIds } = readDbKnowledge();
+  const existing = readKnowledgeMd(basePath);
 
-    const introText = intro
-      .replace(/\n{3,}/g, "\n\n")
-      .replace(/\s+$/g, "");
-    const projectedText = [...patterns, ...lessons]
-      .join("\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .replace(/\s+$/g, "");
-    const content = [introText, rules.join("\n"), projectedText]
-      .join("\n")
-      .replace(/\s+$/g, "")
-      + "\n";
-
-    if (content === existing) {
-      return { written: false, content };
-    }
-
-    atomicWriteSync(knowledgeMdPath(basePath), content, "utf-8");
-    return { written: true, content };
-  } catch (e) {
-    logWarning("renderer", `KNOWLEDGE.md projection render failed: ${(e as Error).message}`);
-    return { written: false, content: "" };
+  // Import bridge: keep file rows whose id the database has never held.
+  for (const fileRow of parseKnowledgeRows(existing)) {
+    if (knownIds.has(fileRow.id)) continue;
+    knownIds.add(fileRow.id);
+    rows[fileRow.table].push({ id: fileRow.id, cells: fileRow.cells });
   }
+
+  const sections = KNOWLEDGE_SECTIONS.map(({ table }) => {
+    const { heading, header, separator } = TABLES[table];
+    // Knowledge ids (K/P/L###) first, then rows that only have a memory id.
+    const tableRows = rows[table]
+      .sort((a, b) => Number(a.id.startsWith("MEM")) - Number(b.id.startsWith("MEM")) || a.id.localeCompare(b.id))
+      .map((row) => `| ${row.cells.map(escapeCell).join(" | ")} |`);
+    return [heading, "", header, separator, ...tableRows].join("\n");
+  });
+  const content = [DEFAULT_INTRO, ...sections].join("\n\n") + "\n";
+
+  if (content === existing) {
+    return { written: false, content };
+  }
+  atomicWriteSync(knowledgeMdPath(basePath), content, "utf-8");
+  return { written: true, content };
 }
 
 // Re-export the section headings so tests can assert on the canonical

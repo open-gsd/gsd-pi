@@ -3914,6 +3914,7 @@ export function registerWorkflowTools(
     "preference",
     "environment",
     "pattern",
+    "rule",
   ]);
 
   const captureThoughtSchema = z.object({
@@ -3939,7 +3940,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_capture_thought",
-    "Record a durable project insight into the GSD memory store. Categories: architecture, convention, gotcha, preference, environment, pattern. Mirrors the in-process capture_thought tool for external MCP clients.",
+    "Record a durable project insight into the GSD memory store. Categories: architecture, convention, gotcha, preference, environment, pattern, rule. Rule, pattern and gotcha captures get a K/P/L id and appear in KNOWLEDGE.md at once. Mirrors the in-process capture_thought tool for external MCP clients.",
     captureThoughtParams,
     async (args: Record<string, unknown>) => {
       const { projectDir, ...params } = parseWorkflowArgs(captureThoughtSchema, args);
@@ -3948,7 +3949,7 @@ export function registerWorkflowTools(
         const { executeMemoryCapture } = await importWorkflowRuntimeModule<any>(
           "../../../src/resources/extensions/gsd/tools/memory-tools.js",
         );
-        return executeMemoryCapture(params);
+        return executeMemoryCapture(params, projectDir);
       });
     },
   );

@@ -5,8 +5,8 @@
 //      section boundaries
 //   2. backfill: Patterns -> memories(category=pattern), Lessons ->
 //      memories(category=gotcha), Rules NOT migrated, idempotent
-//   3. projection: hybrid output preserves manual Rules verbatim while
-//      projecting Patterns + Lessons from memories
+//   3. projection: Rules, Patterns + Lessons render from memories; file rows
+//      with no DB row yet are kept until they are imported
 //   4. bootstrap path: backfill + projection round-trip produces a stable
 //      file that re-reading reconstitutes the same memory set
 
@@ -35,6 +35,7 @@ import {
   splitPipeRow,
 } from "../knowledge-parser.ts";
 import { renderKnowledgeProjection } from "../knowledge-projection.ts";
+import { createMemory } from "../memory-store.ts";
 
 function makeTmpBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-knowledge-stage2b-"));
@@ -207,16 +208,30 @@ test("backfill returns 0 when KNOWLEDGE.md is absent", () => {
 
 // ─── renderKnowledgeProjection ─────────────────────────────────────────────
 
-test("projection preserves the manual Rules section verbatim", () => {
+test("projection renders Rules from rule rows; a file Rule with a DB row loses to the DB", () => {
   const base = makeTmpBase();
   try {
     writeKnowledgeMd(base, FIXTURE);
     backfillKnowledgeToMemories(base);
+    createMemory({
+      category: "rule",
+      content: "All timestamps in UTC, stored as ISO strings",
+      scope: "project",
+      structuredFields: {
+        sourceKnowledgeId: "K001",
+        sourceKnowledgeTable: "rules",
+        rule: "All timestamps in UTC, stored as ISO strings",
+        scopeText: "project",
+        why: "clarity",
+        added: "2026-02-01",
+      },
+    });
     renderKnowledgeProjection(base);
 
     const rendered = readFileSync(knowledgeMdPath(base), "utf-8");
-    // Both K-rows must appear unchanged.
-    assert.match(rendered, /\| K001 \| project \| All timestamps in UTC \| clarity \| 2026-01-01 \|/);
+    assert.match(rendered, /\| K001 \| project \| All timestamps in UTC, stored as ISO strings \| clarity \| 2026-02-01 \|/);
+    assert.doesNotMatch(rendered, /\| K001 \| project \| All timestamps in UTC \| clarity \| 2026-01-01 \|/);
+    // K002 has no DB row yet (not imported): the import bridge keeps it.
     assert.match(rendered, /\| K002 \| M001 \| Never trust user input \| safety \| 2026-01-02 \|/);
   } finally {
     cleanup(base);

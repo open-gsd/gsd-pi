@@ -2,7 +2,7 @@
 // the Patterns/Lessons backfill, and the hybrid projection renderer
 // (ADR-013 Stage 2a/2b).
 //
-// The KNOWLEDGE.md format is locked in `files.ts:appendKnowledge`:
+// The KNOWLEDGE.md format is locked in `knowledge-projection.ts`:
 //
 //   # Project Knowledge
 //

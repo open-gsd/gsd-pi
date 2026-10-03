@@ -66,7 +66,7 @@ interface KnowledgeRow {
  * Parse `.gsd/KNOWLEDGE.md` into rows, one per table entry. Skips the table
  * header and separator lines; ignores rows from unrecognized sections.
  *
- * The format is locked in `files.ts:appendKnowledge` — three `## ` sections
+ * The format is locked in `knowledge-projection.ts` — three `## ` sections
  * (Rules, Patterns, Lessons Learned), each a Markdown table. Row IDs are
  * `K###` / `P###` / `L###`.
  */

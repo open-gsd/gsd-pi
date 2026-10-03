@@ -380,7 +380,7 @@ test("#830 knowledge command opens the project DB before capturing patterns", as
   assert.equal(row.content, "Capture works on a cold session");
   assert.equal(JSON.parse(row.structured_fields).sourceKnowledgeId, "P001");
   assert.deepEqual(notifications.at(-1), {
-    message: "Captured pattern P001 to memories; KNOWLEDGE.md will render it on next session start.",
+    message: 'Saved pattern P001 to KNOWLEDGE.md: "Capture works on a cold session"',
     level: "success",
   });
 });

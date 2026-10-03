@@ -664,8 +664,8 @@ export function loadKnowledgeBlock(gsdHomeDir: string, cwd: string): { block: st
   //    ADR-013 Stage 2b: Patterns and Lessons are projected from the
   //    memories table and already reach the LLM via loadMemoryBlock. Inject
   //    only the intro prose + `## Rules` section here to avoid duplicating
-  //    Patterns/Lessons content in the prompt. Rules stay manual per
-  //    ADR-013 line 39 and have no memory equivalent.
+  //    Patterns/Lessons content in the prompt. Rules are rendered into
+  //    this file from `memories` rows with category "rule".
   let projectKnowledge = "";
   const knowledgePath = resolveGsdRootFile(cwd, "KNOWLEDGE");
   if (existsSync(knowledgePath)) {
