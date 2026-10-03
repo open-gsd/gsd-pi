@@ -40,7 +40,7 @@ test("/gsd discard confirms and calls the primitive directly", async (t) => {
   const handled = await withCommandCwd(base, () => handleWorkflowCommand("discard M001", ctx as any, {} as any));
 
   assert.equal(handled, true);
-  assert.equal(getMilestone("M001"), null);
+  assert.equal(getMilestone("M001")?.status, "skipped", "row kept as a tombstone");
   assert.ok(notifications.includes("Discarded M001."));
 });
 

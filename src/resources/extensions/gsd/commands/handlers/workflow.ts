@@ -124,6 +124,15 @@ function requireNotAutoActive(commandName: string, ctx: ExtensionCommandContext)
   return true;
 }
 
+// Park, unpark and discard run Domain Operations, so a cold session must open
+// the database first (#3385: commands can arrive before anything opened it).
+async function blockWithoutDb(commandName: string, basePath: string, ctx: ExtensionCommandContext): Promise<boolean> {
+  const { ensureDbOpen } = await import("../../bootstrap/dynamic-tools.js");
+  if (await ensureDbOpen(basePath)) return false;
+  ctx.ui.notify(`${commandName}: GSD database is not available.`, "error");
+  return true;
+}
+
 // ─── Custom Workflow Subcommands ─────────────────────────────────────────
 
 const RESERVED_SUBCOMMANDS = new Set([
@@ -648,6 +657,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
   if (trimmed === "park" || trimmed.startsWith("park ")) {
     if (requireNotAutoActive("/gsd park", ctx)) return true;
     const basePath = projectRoot();
+    if (await blockWithoutDb("/gsd park", basePath, ctx)) return true;
     const arg = trimmed.replace(/^park\s*/, "").trim();
     const { id: parsedId, reason: parsedReason } = parseParkArgs(arg);
     let targetId = parsedId ?? "";
@@ -681,6 +691,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
   if (trimmed === "unpark" || trimmed.startsWith("unpark ")) {
     if (requireNotAutoActive("/gsd unpark", ctx)) return true;
     const basePath = projectRoot();
+    if (await blockWithoutDb("/gsd unpark", basePath, ctx)) return true;
     const arg = trimmed.replace(/^unpark\s*/, "").trim();
     let targetId = arg;
     if (!targetId) {
@@ -718,6 +729,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
       return true;
     }
     const targetId = args[0]!;
+    if (await blockWithoutDb("/gsd discard", projectRoot(), ctx)) return true;
     const confirmed = await showConfirm(ctx, {
       title: "Discard milestone?",
       message: `This will permanently delete ${targetId} and all its contents.`,
