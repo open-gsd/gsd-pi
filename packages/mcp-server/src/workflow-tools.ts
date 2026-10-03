@@ -2818,13 +2818,13 @@ export function registerWorkflowTools(
     "gsd_decision_save",
     "Record a project decision to the GSD database and regenerate DECISIONS.md.",
     decisionSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(decisionSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_decision_save", projectDir);
       const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.saveDecisionToDb(params, projectDir);
+        return bridge.saveDecisionToDb(params, projectDir, mcpPlanningInvocation("gsd_decision_save", extra));
       });
       return { content: [{ type: "text" as const, text: `Saved decision ${result.id}` }] };
     },
@@ -2834,14 +2834,14 @@ export function registerWorkflowTools(
     "gsd_save_decision",
     "Alias for gsd_decision_save. Record a project decision to the GSD database and regenerate DECISIONS.md.",
     decisionSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_decision", "gsd_decision_save");
       const parsed = parseWorkflowArgs(decisionSaveSchema, args);
       const { projectDir, ...params } = parsed;
       await enforceWorkflowWriteGate("gsd_decision_save", projectDir);
       const result = await runSerializedWorkflowDbOperation(projectDir, async () => {
         const bridge = await importBridgeModule();
-        return bridge.saveDecisionToDb(params, projectDir);
+        return bridge.saveDecisionToDb(params, projectDir, mcpPlanningInvocation("gsd_decision_save", extra));
       });
       return { content: [{ type: "text" as const, text: `Saved decision ${result.id}` }] };
     },

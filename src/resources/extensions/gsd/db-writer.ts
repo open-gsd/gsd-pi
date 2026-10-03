@@ -24,6 +24,11 @@ import type { MilestoneScope, GsdWorkspace } from './workspace.js';
 import { createWorkspace, scopeMilestone } from './workspace.js';
 import { createMemory } from './memory-store.js';
 import { synthesizeDecisionMemoryContent } from './memory-backfill.js';
+import { executeDomainOperation } from './db/domain-operation.js';
+import { getDb } from './db/engine.js';
+import { readDomainOperationFence } from './db/writers/lifecycle-commands.js';
+import { planningOperationPayload } from './planning-domain-operation.js';
+import { internalPlanningInvocation, type PlanningInvocation } from './planning-invocation.js';
 
 async function writeGsdProjection(
   basePath: string,
@@ -538,19 +543,19 @@ type NormalizedSaveDecisionFields = Omit<
 };
 
 /**
- * Save a new decision to DB and regenerate DECISIONS.md.
- * Auto-assigns the next ID via nextDecisionId().
+ * Save a new decision through the decision.save Domain Operation and
+ * regenerate DECISIONS.md. The ID is allocated inside the operation, so a
+ * replay with the same idempotency key returns the original ID and writes
+ * nothing. A failed write throws and leaves DECISIONS.md untouched.
  *
- * Concurrency: uses an async mutex (promise chain) to serialize the entire
- * operation — ID generation, DB upsert, file read, markdown regeneration,
- * and file write — preventing parallel callers from overwriting each other's
- * output (last-writer-wins race condition).
- *
- * Returns the assigned ID.
+ * Concurrency: uses an async mutex (promise chain) to serialize the
+ * projection regen and file write so parallel callers in one process do not
+ * overwrite each other's output (last-writer-wins race condition).
  */
 export async function saveDecisionToDb(
   fields: SaveDecisionFields,
   basePath: string,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<{ id: string }> {
   // Serialize via async mutex: each call waits for the previous one to
   // complete before starting, preventing interleaved DB + file writes.
@@ -584,55 +589,52 @@ export async function saveDecisionToDb(
     // Reversal: a code revert of this change restores the upsertDecision
     // call. Memory rows written between merge and revert stay durable; the
     // legacy table simply doesn't grow during the cutover window.
-    const id = nextDecisionIdAcrossSurfaces(adapter);
-
-    // The mirror-to-memories write is what persists the new decision. Must
-    // run before the projection regen — the regen sources from memories
-    // (Stage 2a) and would otherwise miss the just-saved decision. Pass
-    // the normalized field set so defaults (revisable, made_by, source)
-    // are recorded on the memory row.
+    //
+    // The ID, the memory row and any deferral commit in one Domain
+    // Operation. A failed memory write aborts the operation.
     const sliceRef = extractDeferredSliceRef(fields);
-    if (sliceRef) {
-      db.immediateTransaction(() => {
-        if (!db.getSlice(sliceRef.milestoneId, sliceRef.sliceId)) {
-          throw new Error(`Slice ${sliceRef.milestoneId}/${sliceRef.sliceId} does not exist`);
-        }
-        if (!persistDecisionToMemory(id, normalized)) {
-          throw new Error('Unable to persist deferral decision');
-        }
-        db.updateSliceStatus(sliceRef.milestoneId, sliceRef.sliceId, 'deferred');
-      });
-    } else {
-      mirrorDecisionToMemory(id, normalized);
-    }
+    const fence = readDomainOperationFence(invocation.idempotencyKey);
+    let savedId: string | undefined;
+    const operation = executeDomainOperation({
+      operationType: 'decision.save',
+      idempotencyKey: invocation.idempotencyKey,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: invocation.actorType,
+      ...(invocation.actorId ? { actorId: invocation.actorId } : {}),
+      sourceTransport: invocation.sourceTransport,
+      ...(invocation.traceId ? { traceId: invocation.traceId } : {}),
+      ...(invocation.turnId ? { turnId: invocation.turnId } : {}),
+      payload: planningOperationPayload(normalized),
+    }, () => {
+      const id = nextDecisionIdAcrossSurfaces(adapter);
+      if (sliceRef && !db.getSlice(sliceRef.milestoneId, sliceRef.sliceId)) {
+        throw new Error(`Slice ${sliceRef.milestoneId}/${sliceRef.sliceId} does not exist`);
+      }
+      if (!persistDecisionToMemory(id, normalized)) {
+        throw new Error(`Unable to persist decision ${id}`);
+      }
+      if (sliceRef) db.updateSliceStatus(sliceRef.milestoneId, sliceRef.sliceId, 'deferred');
+      savedId = id;
+      return {
+        events: [{
+          eventType: 'decision.saved',
+          entityType: 'decision',
+          entityId: id,
+          payload: { decisionId: id },
+          destinations: ['projection'],
+        }],
+        projections: [{ projectionKey: 'decisions', projectionKind: 'markdown', rendererVersion: '1' }],
+      };
+    });
+    const id = savedId ?? replayedDecisionId(operation.operationId);
 
     // Fetch all decisions (including superseded for the full register).
-    // ADR-013 Stage 2a: source from the `memories` table. The Phase 5
-    // dual-write keeps memories in sync with each decision save; the backfill
+    // ADR-013 Stage 2a: source from the `memories` table; the backfill
     // (memory-backfill.ts) absorbs the historical chain and drift-heals
     // superseded_by on every session start.
     const { getAllDecisionsFromMemories } = await import('./context-store.js');
-    let allDecisions: Decision[] = getAllDecisionsFromMemories();
-    if (!allDecisions.some(d => d.id === id)) {
-      logWarning('projection', 'just-saved decision missing from memories after mirror; injecting fallback for projection', {
-        fn: 'saveDecisionToDb',
-        decisionId: id,
-      });
-      const nextSeq = allDecisions.reduce((max, d) => Math.max(max, d.seq ?? 0), 0) + 1;
-      const fallback: Decision = {
-        seq: nextSeq,
-        id,
-        when_context: normalized.when_context,
-        scope: normalized.scope,
-        decision: normalized.decision,
-        choice: normalized.choice,
-        rationale: normalized.rationale,
-        revisable: normalized.revisable,
-        made_by: normalized.made_by,
-        superseded_by: null,
-      };
-      allDecisions = [...allDecisions, fallback];
-    }
+    const allDecisions: Decision[] = getAllDecisionsFromMemories();
 
     const filePath = resolveGsdRootFile(basePath, 'DECISIONS');
 
@@ -705,19 +707,15 @@ function persistDecisionToMemory(
   }) !== null;
 }
 
-function mirrorDecisionToMemory(
-  id: string,
-  normalizedFields: NormalizedSaveDecisionFields,
-): void {
-  try {
-    persistDecisionToMemory(id, normalizedFields);
-  } catch (mirrorErr) {
-    logError('manifest', 'memory-store mirror write failed', {
-      fn: 'saveDecisionToDb',
-      decisionId: id,
-      error: String((mirrorErr as Error).message),
-    });
+function replayedDecisionId(operationId: string): string {
+  const row = getDb()
+    .prepare("SELECT entity_id FROM workflow_domain_events WHERE operation_id = :operation_id AND event_type = 'decision.saved'")
+    .get({ ':operation_id': operationId });
+  const id = row?.['entity_id'];
+  if (typeof id !== 'string' || id.length === 0) {
+    throw new Error(`decision.save operation ${operationId} has no stored decision id`);
   }
+  return id;
 }
 
 /**

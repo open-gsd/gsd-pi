@@ -537,6 +537,59 @@ describe("ADR-008 parity: shared workflow write tools native vs MCP", () => {
       },
     });
   });
+
+  it("gsd_decision_save is one decision.save operation per call and a replay writes nothing on both transports", async () => {
+    const counts = () => {
+      const db = _getAdapter();
+      assert.ok(db);
+      return {
+        operations: Number(db.prepare(
+          "SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'decision.save'",
+        ).get()?.["count"]),
+        decisions: Number(db.prepare(
+          "SELECT COUNT(*) AS count FROM memories WHERE structured_fields LIKE '%\"sourceDecisionId\":\"D%'",
+        ).get()?.["count"]),
+        projectionWork: Number(db.prepare(
+          "SELECT COUNT(*) AS count FROM workflow_projection_work WHERE projection_key = 'decisions'",
+        ).get()?.["count"]),
+      };
+    };
+    const outputText = (result: unknown) =>
+      ((result as { content: Array<{ text: string }> }).content[0]?.text ?? "");
+
+    const nativeBase = makeTmpBase();
+    try {
+      const first = await runNativeDbTool(nativeBase, "gsd_decision_save", DECISION_SAVE_ARGS);
+      const replay = await runNativeDbTool(nativeBase, "gsd_decision_save", DECISION_SAVE_ARGS);
+      assert.equal(outputText(first), "Saved decision D001");
+      assert.equal(outputText(replay), "Saved decision D001", "native replay must return the original id");
+      assert.deepEqual(counts(), { operations: 1, decisions: 1, projectionWork: 1 });
+    } finally {
+      cleanup(nativeBase);
+    }
+
+    const mcpBase = makeTmpBase();
+    try {
+      openDatabase(join(mcpBase, ".gsd", "gsd.db"));
+      closeDatabase();
+      const server = makeMockServer();
+      registerWorkflowTools(server as Parameters<typeof registerWorkflowTools>[0]);
+      const tool = server.tools.find((entry) => entry.name === "gsd_decision_save");
+      assert.ok(tool);
+      const args = { projectDir: mcpBase, ...DECISION_SAVE_ARGS };
+      const keyed = { _meta: { "io.opengsd/idempotency-key": "decision-replay" } };
+      const first = await tool.handler(args, keyed);
+      const replay = await tool.handler(args, keyed);
+      assert.equal(outputText(first), "Saved decision D001");
+      assert.equal(outputText(replay), "Saved decision D001", "MCP replay must return the original id");
+      const unkeyed = await tool.handler(args, {});
+      assert.equal((unkeyed as { isError?: boolean }).isError, true, "an MCP mutation without a stable key must be refused");
+      assert.match(outputText(unkeyed), /requires replay-stable private request metadata/);
+      assert.deepEqual(counts(), { operations: 1, decisions: 1, projectionWork: 1 });
+    } finally {
+      cleanup(mcpBase);
+    }
+  });
 });
 
 const SLICE_LIFECYCLE_CASES = [
@@ -867,7 +920,7 @@ const OPERATION_ONLY_CASES = [
   {
     tool: "gsd_decision_save",
     args: { ...DECISION_SAVE_ARGS, when_context: "parity matrix", made_by: "agent" },
-    passesWith: "P15",
+    passesWith: null,
   },
   { tool: "gsd_summary_save", args: SUMMARY_SAVE_ARGS, passesWith: "P15" },
 ] as const;
@@ -909,11 +962,13 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
           await call(gateCase);
           fence.restore();
 
-          expectedFail(gateCase.passesWith, () => {
+          const gate = () => {
             assert.deepEqual(fence.violations, [], "no workflow-table write outside a Domain Operation");
             assert.equal(afterFirstCall - before, 1, "one call commits one operation");
             assert.equal(operationCount() - afterFirstCall, 0, "a replay commits no operation");
-          });
+          };
+          if (gateCase.passesWith) expectedFail(gateCase.passesWith, gate);
+          else gate();
         });
       });
     }

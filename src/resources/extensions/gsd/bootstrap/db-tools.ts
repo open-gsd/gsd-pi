@@ -246,7 +246,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_decision_save (formerly gsd_save_decision) ─────────────────────
 
 	const decisionSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -278,6 +278,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					made_by: params.made_by,
 				},
 				basePath,
+				piPlanningInvocation("gsd_decision_save", toolCallId),
 			);
 			return {
 				content: [{ type: "text" as const, text: `Saved decision ${id}` }],
