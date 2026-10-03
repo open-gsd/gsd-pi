@@ -50,7 +50,8 @@ function byteOffset(text: string, characterOffset: number): number {
 function tableCells(text: string, lineStart: number): Cell[] {
   const pipes: number[] = [];
   for (let index = 0; index < text.length; index += 1) {
-    if (text[index] === "|") pipes.push(index);
+    // generateDecisionsMd writes a pipe inside a cell as `\|`.
+    if (text[index] === "|" && text[index - 1] !== "\\") pipes.push(index);
   }
   const cells: Cell[] = [];
   for (let index = 0; index + 1 < pipes.length; index += 1) {
@@ -62,7 +63,8 @@ function tableCells(text: string, lineStart: number): Cell[] {
     const startCharacter = from + leading;
     const endCharacter = Math.max(startCharacter, to - trailing);
     cells.push({
-      value: value.trim(),
+      // Undo the cell encoding of generateDecisionsMd: `\|` is a pipe, `<br>` a newline.
+      value: value.trim().replace(/\\\|/g, "|").replace(/<br>/g, "\n"),
       start: lineStart + byteOffset(text, startCharacter),
       end: lineStart + byteOffset(text, endCharacter),
     });
@@ -324,6 +326,7 @@ function requirementSections(file: LegacyImportDecodedSourceFile): RequirementSe
     const fields = new Map<string, Cell>();
     let usedUnderscoreAlias = false;
     let end = line.end;
+    let last: Cell | undefined;
     for (const candidate of file.lines) {
       if (candidate.start <= line.start || candidate.start >= boundary) continue;
       if (/^##\s+/.test(candidate.text)) break;
@@ -333,17 +336,24 @@ function requirementSections(file: LegacyImportDecodedSourceFile): RequirementSe
         if (file.bytes[end] === 10) end += 1;
       }
       const match = candidate.text.match(/^-\s+([^:]+):\s*(.*)$/);
-      if (match === null) continue;
-      const name = normalizedFieldName(match[1]);
-      if (name === undefined) continue;
+      const name = match === null ? undefined : normalizedFieldName(match[1]);
+      if (match === null || name === undefined) {
+        // generateRequirementsMd writes a multi-line value as raw lines under
+        // its bullet, so a line that starts no known field continues the last one.
+        if (last !== undefined) last.value += `\n${candidate.text}`;
+        continue;
+      }
       usedUnderscoreAlias ||= match[1].includes("_");
       const valueCharacter = candidate.text.length - match[2].length;
-      fields.set(name, {
+      last = {
         value: match[2].trim(),
         start: candidate.start + byteOffset(candidate.text, valueCharacter),
         end: candidate.start + byteOffset(candidate.text, candidate.text.length),
-      });
+      };
+      fields.set(name, last);
     }
+    // The blank line that ends a section is not part of the last value.
+    for (const field of fields.values()) field.value = field.value.trimEnd();
     return {
       start: line.start,
       end,

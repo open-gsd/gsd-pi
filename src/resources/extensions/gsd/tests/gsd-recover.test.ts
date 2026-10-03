@@ -26,7 +26,7 @@ import {
 import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
-import { generateDecisionsMd, generateRequirementsMd } from '../db-writer.ts';
+import { generateDecisionsMd, generateRequirementsMd, saveDecisionToDb, saveRequirementToDb } from '../db-writer.ts';
 import { getAllDecisionsFromMemories } from '../context-store.ts';
 import { captureCurrentLegacyImportBaseSnapshot } from '../legacy-import-preview-base.ts';
 import { createLegacyImportPreview } from '../legacy-import-preview.ts';
@@ -1370,8 +1370,8 @@ describe('gsd-recover', async () => {
         when_context: 'M001',
         scope: 'architecture',
         decision: 'Storage engine',
-        choice: 'SQLite',
-        rationale: 'One file',
+        choice: 'SQLite | one file',
+        rationale: 'line one\nline two',
         revisable: 'No',
         made_by: 'human',
         source: 'discussion',
@@ -1382,12 +1382,12 @@ describe('gsd-recover', async () => {
         class: 'functional',
         status: 'active',
         description: 'Recover restores registries',
-        why: 'A lost database must not lose them',
+        why: 'line one\n\nline two',
         source: 'user',
         primary_owner: 'M001/S01',
         supporting_slices: 'none',
         validation: 'unmapped',
-        notes: '',
+        notes: 'a | b',
         full_content: '',
         superseded_by: null,
       }]));
@@ -1416,13 +1416,61 @@ describe('gsd-recover', async () => {
         getAllDecisionsFromMemories().map(({ id, decision, choice, rationale, made_by }) => (
           { id, decision, choice, rationale, made_by }
         )),
-        [{ id: 'D001', decision: 'Storage engine', choice: 'SQLite', rationale: 'One file', made_by: 'human' }],
+        [{ id: 'D001', decision: 'Storage engine', choice: 'SQLite | one file', rationale: 'line one\nline two', made_by: 'human' }],
       );
       assert.deepEqual(
-        _getAdapter()!.prepare('SELECT id, status, description, primary_owner FROM requirements').all(),
-        [{ id: 'R001', status: 'active', description: 'Recover restores registries', primary_owner: 'M001/S01' }],
+        _getAdapter()!.prepare('SELECT id, status, description, why, primary_owner, notes FROM requirements').all(),
+        [{
+          id: 'R001',
+          status: 'active',
+          description: 'Recover restores registries',
+          why: 'line one\n\nline two',
+          primary_owner: 'M001/S01',
+          notes: 'a | b',
+        }],
       );
       assert.ok(getMilestone('M001'));
+    } finally {
+      closeDatabase();
+      cleanup(base);
+    }
+  });
+
+  test('recover on a database in sync with its registries changes no decision and no requirement', async () => {
+    const base = createFixtureBase();
+    try {
+      writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+      openDatabase(join(base, '.gsd', 'gsd.db'));
+      // The real writers save the rows and render DECISIONS.md and REQUIREMENTS.md.
+      await saveDecisionToDb({
+        scope: 'architecture',
+        decision: 'Separator',
+        choice: 'a | b',
+        rationale: 'line one\nline two',
+        made_by: 'human',
+      }, base);
+      await saveRequirementToDb({
+        class: 'functional',
+        description: 'Recover keeps registries',
+        why: 'line one\n\nline two',
+        source: 'user',
+        notes: 'a | b',
+      }, base);
+      const decisionsBefore = getAllDecisionsFromMemories();
+      const requirementsBefore = _getAdapter()!.prepare('SELECT * FROM requirements').all();
+
+      const first = makeCtx();
+      await handleRecover(first.ctx, base);
+      const preview = first.notes.at(-1)?.message ?? '';
+      assert.doesNotMatch(preview, /(decision|requirement):/, 'the Preview changes no registry row');
+      const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+      assert.ok(approval, 'no diagnosis blocks the Preview');
+
+      const second = makeCtx();
+      await handleRecover(second.ctx, base, approval);
+      assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+      assert.deepEqual(getAllDecisionsFromMemories(), decisionsBefore);
+      assert.deepEqual(_getAdapter()!.prepare('SELECT * FROM requirements').all(), requirementsBefore);
     } finally {
       closeDatabase();
       cleanup(base);
