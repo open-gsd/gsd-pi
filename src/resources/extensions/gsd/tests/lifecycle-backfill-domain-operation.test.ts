@@ -444,11 +444,11 @@ test("open work under an already completed milestone fails the preview; once pro
   assert.equal(lifecycleStatus("M001", "S01", "T01"), "ready");
 });
 
-test("a backfilled open milestone can be discarded", () => {
+test("a backfilled open milestone can be discarded", async () => {
   seedOldDatabase();
   applyLifecycleBackfill(base);
 
-  assert.equal(discardMilestone(base, "M002"), true);
+  assert.equal(await discardMilestone(base, "M002"), true);
 
   assert.equal(lifecycleStatus("M002"), "cancelled");
   assert.equal(lifecycleStatus("M002", "S01"), "cancelled");
