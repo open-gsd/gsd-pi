@@ -264,10 +264,14 @@ export async function handleDoctor(args: string, ctx: ExtensionCommandContext, p
   const scope = await selectDoctorScope(projectRoot(), requestedScope);
   const effectiveScope = mode === "audit" ? requestedScope : scope;
   const repairs = (mode === "fix" || mode === "heal" || fixFlag) && !dryRun;
-  // Only a repair run may create the database. A plain or dry run opens it when it exists.
+  // Only a repair run may create the database. A plain or dry run opens it when
+  // it exists, and still refuses a project whose database is lost.
   if (repairs || existsSync(resolveGsdPathContract(projectRoot()).projectDb)) {
     const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
     await ensureDbOpen(projectRoot());
+  } else {
+    const { assertWorkflowAuthorityNotLost } = await import("./db-workspace.js");
+    assertWorkflowAuthorityNotLost(projectRoot());
   }
   const report = await runGSDDoctor(projectRoot(), {
     fix: repairs || dryRun,

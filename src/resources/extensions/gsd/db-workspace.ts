@@ -227,6 +227,15 @@ function authorityMissingError(location: Pick<WorkflowDatabaseLocation, "project
   );
 }
 
+/**
+ * Read-only form of the lost-authority refusal, for a command that must not
+ * create a database: throws authority-missing and opens nothing.
+ */
+export function assertWorkflowAuthorityNotLost(basePath: string): void {
+  const location = resolveWorkflowDatabaseLocation(basePath);
+  if (hasWorkflowHistoryWithoutDatabase(location)) throw authorityMissingError(location);
+}
+
 export function isAuthorityMissingError(err: unknown): boolean {
   return err instanceof GSDError && err.message.startsWith("authority-missing:");
 }
