@@ -151,6 +151,26 @@ test("stale-render repair does not restore files of a discarded milestone", asyn
   assert.equal(existsSync(milestoneDir), false);
 });
 
+test("discard removes a milestone directory that holds a roadmap and a nested slice file", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-discard-nested-tree-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  const milestoneDir = join(base, ".gsd", "milestones", "M001");
+  const sliceDir = join(milestoneDir, "slices", "S01");
+  mkdirSync(sliceDir, { recursive: true });
+  writeFileSync(join(milestoneDir, "M001-ROADMAP.md"), "# M001: First\n", "utf8");
+  writeFileSync(join(sliceDir, "S01-PLAN.md"), "# S01: Slice\n", "utf8");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "First", status: "active" });
+
+  assert.equal(await discardMilestone(base, "M001"), true);
+
+  assert.equal(existsSync(milestoneDir), false, "discard removed the roadmap and the nested slice file");
+  assert.equal(getMilestone("M001")?.status, "skipped", "row kept as a tombstone");
+});
+
 test("planning refuses a discarded milestone as a dependency", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-discard-plan-dependency-"));
   t.after(() => {

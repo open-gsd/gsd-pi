@@ -6176,6 +6176,10 @@ fn remove_claimed_tree_at(
         }
         let mut entries = Vec::new();
         collect_tree_deletion_entries(claimed, "", &mut entries)?;
+        // The manifest is read back in its canonical order (deepest first).
+        // Walk order differs from that for a nested tree, so sort before the
+        // manifest is written and compared with what was committed.
+        sort_tree_deletion_entries(&mut entries);
         if MUTATION_BOUNDARY_FAULT
             .compare_exchange(14, 0, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()

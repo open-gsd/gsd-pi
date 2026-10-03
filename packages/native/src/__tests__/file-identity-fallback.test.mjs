@@ -148,7 +148,10 @@ function projectionTreeDigest(lock, treePath) {
 // its deletion manifest by renaming inside that same directory. On Windows a
 // rename that makes the kernel open the claimed directory collides with the
 // claim itself (ERROR_SHARING_VIOLATION / os error 32) on every attempt.
-test("replayable tree deletion removes a populated tree it holds exclusively", (t) => {
+// The tree is nested, with a top-level file that sorts before the directory:
+// the manifest is read back in its canonical order (deepest first), so the
+// entries written must use that order too or the commit check rejects them.
+test("replayable tree deletion removes a nested tree it holds exclusively", (t) => {
   const root = mkdtempSync(join(tmpdir(), "gsd-native-projection-tree-delete-"));
   const previousNativePreference = process.env.GSD_NATIVE_PREFER_LOCAL;
   let lock;
@@ -170,9 +173,9 @@ test("replayable tree deletion removes a populated tree it holds exclusively", (
   lock = acquireProjectionRootIdentityLock(root, stat.dev.toString(), stat.ino.toString());
 
   const tree = "phases/01-m001";
-  lock.createDirectory(tree);
-  lock.writeFile(`${tree}/CONTEXT.md`, Buffer.from("# Context\n"));
+  lock.createDirectory(`${tree}/slices`);
   lock.writeFile(`${tree}/ROADMAP.md`, Buffer.from("# Roadmap\n"));
+  lock.writeFile(`${tree}/slices/S01-PLAN.md`, Buffer.from("# Plan\n"));
   lock.writeFile("phases/KEEP.md", Buffer.from("# Sibling\n"));
 
   const identity = lock.pathIdentity(tree);
