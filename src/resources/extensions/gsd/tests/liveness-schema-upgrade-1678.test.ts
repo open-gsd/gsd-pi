@@ -400,5 +400,18 @@ test("#1678: same-process doctor fix reports and repairs missing liveness schema
   );
   assert.deepEqual(schemaObjects(), expectedSchemaObjects());
   assert.deepEqual(getOpenWedge(basePath), { ok: true, wedge: null });
-  assert.deepEqual(snapshotWorkflowRows(), rowsBefore, "doctor repair must preserve workflow state and completion timestamps");
+  // Doctor repair also renders the missing ROADMAP and PLAN of the open
+  // milestone, which adds their artifact rows. The seeded rows must not change.
+  const rowsAfter = snapshotWorkflowRows();
+  const seededPaths = new Set(rowsBefore.artifacts.map((row) => row.path));
+  assert.deepEqual(
+    { ...rowsAfter, artifacts: rowsAfter.artifacts.filter((row) => seededPaths.has(row.path)) },
+    rowsBefore,
+    "doctor repair must preserve workflow state and completion timestamps",
+  );
+  assert.deepEqual(
+    rowsAfter.artifacts.filter((row) => !seededPaths.has(row.path)).map((row) => row.artifact_type).sort(),
+    ["PLAN", "ROADMAP"],
+    "the only new artifact rows are the files the milestone render writes",
+  );
 });
