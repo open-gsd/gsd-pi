@@ -276,7 +276,7 @@ complete-milestone
 ### 6a. Sequential Chains
 
 ```
-STATE.md
+gsd.db (derived GSDState)
   └─► auto.ts
         └─► auto-dispatch.ts (DISPATCH_RULES, first match)
               │

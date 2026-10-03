@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: Prepare a clean cross-session handoff so the next agent can pick up where you left off. Writes a focused `continue.md` in the active slice dir and ensures `STATE.md` + summary artifacts are current. Use when asked to "hand off", "prepare handoff", "pause work", "bookmark this", "I'll come back to this later", before running out of context budget, or ending a long session with unfinished work.
+description: Prepare a clean cross-session handoff so the next agent can pick up where you left off. Writes a focused `continue.md` in the active slice dir and ensures summary artifacts are current. Use when asked to "hand off", "prepare handoff", "pause work", "bookmark this", "I'll come back to this later", before running out of context budget, or ending a long session with unfinished work.
 ---
 
 <objective>
