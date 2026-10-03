@@ -606,3 +606,48 @@ test('workflow-projections: renderStateProjection quarantines STATE.md only afte
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('workflow-projections: an unchanged STATE.md render does not rewrite .compat.json', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'gsd-projection-state-marker-idle-'));
+  const markerPath = join(base, '.gsd', '.compat.json');
+  openDatabase(':memory:');
+  try {
+    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
+    await renderStateProjection(base);
+    const marker = JSON.parse(readFileSync(markerPath, 'utf-8'));
+    marker.lastProjectedAt = '2000-01-01T00:00:00.000Z';
+    const before = JSON.stringify(marker, null, 2);
+    writeFileSync(markerPath, before);
+
+    assert.deepEqual(await renderStateProjection(base), { stale: false });
+    assert.equal(readFileSync(markerPath, 'utf-8'), before);
+
+    insertMilestone({ id: 'M002', title: 'Second', status: 'queued' });
+    assert.deepEqual(await renderStateProjection(base), { stale: false });
+    assert.notEqual(readFileSync(markerPath, 'utf-8'), before, 'a changed render records the new baseline');
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('workflow-projections: a compat marker failure does not mark STATE.md stale', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'gsd-projection-state-marker-fail-'));
+  const statePath = join(base, '.gsd', 'STATE.md');
+  openDatabase(':memory:');
+  try {
+    mkdirSync(join(base, '.gsd', '.compat.json'), { recursive: true });
+    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
+
+    assert.deepEqual(await renderStateProjection(base), { stale: false });
+
+    invalidateStateCache();
+    assert.equal(
+      readFileSync(statePath, 'utf-8'),
+      renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+    );
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
