@@ -50,8 +50,10 @@ alias tables in tools, commands, or orchestration modules.
   their IDs cannot be reused until the matching reopen command succeeds. Stale
   PLAN cleanup removes only content still owned by the compatibility marker or
   PLAN artifact; a user-modified file is preserved.
-- Restore, hierarchy replacement, milestone discard, and worktree teardown fail
-  closed when they would erase or strand adopted canonical history.
+- Restore, hierarchy replacement, and worktree teardown fail closed when they
+  would erase or strand adopted canonical history. Milestone discard erases
+  nothing: it cancels the milestone and its open descendants in one Domain
+  Operation and keeps the rows as tombstones.
 
 ## Integration boundaries
 
@@ -130,7 +132,7 @@ alias tables in tools, commands, or orchestration modules.
   every runtime mode and produces the cutover dossier. It does not switch
   production reads or dependency eligibility to canonical authority.
 - Production read cutover, canonical dependency eligibility, prepared/settled
-  closeout effects, merge/publication settlement, park/unpark/discard,
+  closeout effects, merge/publication settlement,
   projection-worker redesign, legacy cascade deletion, and compatibility
   retirement remain later work. Until then active-Slice selection may still
   recognize legacy `skipped`; the later cutover must consume its current Waiver
@@ -193,7 +195,7 @@ receipt is final authority.
 
 The dossier remains `NO_GO` for read-authority cutover while production reads,
 dependency eligibility, integrated Slice source/UAT identity, closeout and
-merge settlement, park/unpark/discard, Projection Work redesign, legacy cascade
+merge settlement, Projection Work redesign, legacy cascade
 deletion, or compatibility retirement remain deferred. Missing evidence or an
 automatable failure returns to agent-owned repair. Work stops for a person only
 when access/authority is unavailable or a genuinely ambiguous product choice
