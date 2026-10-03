@@ -17,6 +17,7 @@ import type { MilestoneRow } from "./db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
 import type { VerificationEvidenceRow } from "./db-verification-evidence-rows.js";
 import { atomicWriteSync } from "./atomic-write.js";
+import { recordCompatProjectionWrite } from "./compat/compat-marker.js";
 import { join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
 import { logWarning } from "./workflow-logger.js";
@@ -410,7 +411,9 @@ export async function renderStateProjection(basePath: string): Promise<{ stale: 
     const content = renderStateContent(await deriveState(basePath, { syncQueueOrder: false }));
     const dir = gsdRoot(basePath);
     mkdirSync(dir, { recursive: true });
-    atomicWriteSync(join(dir, "STATE.md"), content);
+    const statePath = join(dir, "STATE.md");
+    atomicWriteSync(statePath, content);
+    recordCompatProjectionWrite(basePath, statePath, content, []);
     return { stale: false };
   } catch (err) {
     logWarning("projection", `renderStateProjection failed: ${(err as Error).message}`);

@@ -22,6 +22,7 @@ import { captureCurrentLegacyImportBaseSnapshot } from "../legacy-import-preview
 import { gsdRoot, MIGRATION_STAGING_DIR_PREFIX } from "../paths.js";
 import { loadManagedProjectionPaths } from "../managed-projection-history.js";
 import { deriveState, invalidateStateCache } from "../state.js";
+import { renderStateProjection } from "../workflow-projections.js";
 import {
   archiveLegacyPlanningDirectory,
   canonicalForwardMigrationProjection,
@@ -543,6 +544,7 @@ async function completeMigrationPublication(
     auditOperationId: recordedAudit.operation.operationId,
     outputHashes,
   });
+  await renderStateProjection(record.targetRoot);
   return result;
 }
 

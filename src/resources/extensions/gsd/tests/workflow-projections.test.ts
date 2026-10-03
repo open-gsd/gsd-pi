@@ -3,7 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { regenerateIfMissing, renderPlanContent, renderPlanProjection, renderStateContent, renderStateProjection, renderSummaryContent, renderSummaryProjection } from '../workflow-projections.ts';
@@ -572,6 +572,35 @@ test('workflow-projections: renderStateProjection writes active milestone from D
     const content = readFileSync(statePath, 'utf-8');
     assert.ok(content.includes('**Active Milestone:** M001: DB Milestone'));
     assert.ok(content.includes('**M001:** DB Milestone'));
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('workflow-projections: renderStateProjection quarantines STATE.md only after an external edit', async () => {
+  const base = mkdtempSync(join(tmpdir(), 'gsd-projection-state-baseline-'));
+  const statePath = join(base, '.gsd', 'STATE.md');
+  const quarantineRoot = join(base, '.gsd', 'quarantine', 'projections');
+  openDatabase(':memory:');
+  try {
+    await renderStateProjection(base);
+    const first = readFileSync(statePath, 'utf-8');
+
+    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
+    await renderStateProjection(base);
+    assert.notEqual(readFileSync(statePath, 'utf-8'), first, 'the second render changed STATE.md');
+    assert.equal(existsSync(quarantineRoot), false, 'a normal render keeps no copy of its own previous output');
+
+    const edited = '# GSD State\n\nExternal edit\n';
+    writeFileSync(statePath, edited);
+    insertMilestone({ id: 'M002', title: 'Second', status: 'queued' });
+    await renderStateProjection(base);
+
+    const stamps = readdirSync(quarantineRoot);
+    assert.equal(stamps.length, 1);
+    assert.equal(readFileSync(join(quarantineRoot, stamps[0]!, 'gsd', 'STATE.md'), 'utf-8'), edited);
+    assert.notEqual(readFileSync(statePath, 'utf-8'), edited);
   } finally {
     closeDatabase();
     rmSync(base, { recursive: true, force: true });

@@ -38,6 +38,8 @@ import {
   verifyMigrationProjection,
 } from "../migrate/audit.ts";
 import { assertMigrationDbReadiness, executeMigrationWrite, importWrittenMigrationToDb, migrationFailureMessage, sweepStaleMigrationStaging } from "../migrate/execution.ts";
+import { renderStateContent } from "../workflow-projections.ts";
+import { deriveState } from "../state.ts";
 import { formatPlan, formatRoadmap, writeGSDDirectory } from "../migrate/writer.ts";
 import {
   _setManagedMutationBoundaryForTest,
@@ -529,6 +531,11 @@ test("executeMigrationWrite records audit artifacts and verifies DB-backed proje
       formatPlan(project.milestones[0]!.slices[0]!),
     );
     assert.equal(result.verification.dbReadiness.registry, 2, "imported and preserved authority are readable by deriveState");
+    assert.equal(
+      readFileSync(join(base, ".gsd", "STATE.md"), "utf8"),
+      renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+      "migration leaves a STATE.md rendered from the imported database",
+    );
     assert.notEqual(result.verification.dbReadiness.phase, "not-checked", "readiness gate ran before audit");
   } finally {
     cleanup(base);
