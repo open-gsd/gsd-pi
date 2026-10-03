@@ -17,7 +17,8 @@ import {
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import { queryJournal } from "../journal.js";
 import { AutoSession } from "../auto/session.js";
-import { openDatabase, closeDatabase, insertMilestone, _getAdapter } from "../gsd-db.js";
+import { openDatabase, closeDatabase, getMilestone, insertMilestone, _getAdapter } from "../gsd-db.js";
+import { peekLogs, setStderrLoggingEnabled, _resetLogs } from "../workflow-logger.js";
 import { registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease } from "../db/milestone-leases.js";
 
@@ -659,6 +660,40 @@ test("exitMilestone leaves a dirty worktree intact when auto-commit fails (#1492
       (m) => m.level === "error" && m.msg.includes(wtPath) && m.msg.includes("left intact"),
     ),
     `expected error notify naming the worktree path, got: ${JSON.stringify(ctx.messages)}`,
+  );
+});
+
+test("exitMilestone merge does not create a 'complete' row for a milestone with no DB row", (t) => {
+  const previousCwd = process.cwd();
+  const base = makeGitRepoBase({ isolation: "worktree" });
+  const previousStderr = setStderrLoggingEnabled(false);
+  t.after(() => {
+    setStderrLoggingEnabled(previousStderr);
+    _resetLogs();
+    cleanupRepoBase(base, previousCwd);
+  });
+  execFileSync("git", ["checkout", "-b", "milestone/M001"], { cwd: base, stdio: "pipe" });
+  execFileSync("git", ["checkout", "main"], { cwd: base, stdio: "pipe" });
+  const wt = join(base, ".gsd", "worktrees", "M001");
+  execFileSync("git", ["worktree", "add", wt, "milestone/M001"], { cwd: base, stdio: "pipe" });
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# M001\n- [x] S01: Slice one\n");
+  openDatabase(":memory:");
+  _resetLogs();
+  process.chdir(wt);
+
+  const result = new WorktreeLifecycle(
+    makeSession({ basePath: wt, originalBasePath: base }),
+    makeDeps(),
+  ).exitMilestone("M001", { merge: true }, makeCtx());
+
+  assert.deepEqual(result, { ok: true, merged: true, codeFilesChanged: true });
+  assert.equal(getMilestone("M001"), null);
+  assert.ok(
+    peekLogs().some(
+      (e) => e.severity === "error" && e.message.includes("M001 but it has no DB row; not creating one"),
+    ),
+    `expected no-DB-row error log, got: ${JSON.stringify(peekLogs())}`,
   );
 });
 

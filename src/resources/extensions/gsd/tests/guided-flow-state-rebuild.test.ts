@@ -20,6 +20,7 @@ import {
   openDatabase,
   closeDatabase,
   _getAdapter,
+  getMilestone,
   insertMilestone,
   insertSlice,
   insertTask,
@@ -108,9 +109,10 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
     assert.ok(md.includes("Current Work") || md.includes("M070"), "State markdown should include milestone title or ID");
   });
 
-  test("checkAutoStartAfterDiscuss trusts manifest when DB milestone read is stale", () => {
+  test("checkAutoStartAfterDiscuss ignores state-manifest and recovers the missing DB row from CONTEXT.md", () => {
     base = createFixtureBase();
     openDatabase(":memory:");
+    assert.equal(getMilestone("M001"), null);
 
     writeFile(base, "milestones/M001/M001-CONTEXT.md", "# M001: Planned\n");
     writeFile(base, "STATE.md", "# GSD State\n\n**Active Milestone:** M001: Planned\n");
@@ -134,6 +136,8 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
     const accepted = checkAutoStartAfterDiscuss();
 
     assert.equal(accepted, true);
+    // A manifest veto would return before the R3b insert and leave no row.
+    assert.equal(getMilestone("M001")?.status, "queued");
     assert.equal(notifications.some(n => n.level === "error" && n.message.includes("no DB row exists")), false);
     assert.ok(
       notifications.some(
