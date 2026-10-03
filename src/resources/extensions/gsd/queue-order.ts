@@ -89,10 +89,14 @@ export function renderQueueOrder(basePath: string, order: string[]): void {
 
 /** Render QUEUE-ORDER.json from milestones.sequence. Returns the file path. */
 export function renderQueueOrderFromDb(basePath: string): string {
-  renderQueueOrder(basePath, getAllMilestones()
-    .filter((milestone) => (milestone.sequence ?? 0) > 0 && !isDiscardedMilestoneStatus(milestone.status))
-    .map((milestone) => milestone.id));
+  renderQueueOrder(basePath, queueOrderFromDb());
   return queueOrderPath(basePath);
+}
+
+function queueOrderFromDb(): string[] {
+  return getAllMilestones()
+    .filter((milestone) => (milestone.sequence ?? 0) > 0 && !isDiscardedMilestoneStatus(milestone.status))
+    .map((milestone) => milestone.id);
 }
 
 /**
@@ -137,15 +141,20 @@ function loadDependencyGraph(): { depsMap: Map<string, string[]>; closedIds: Set
  * milestones.sequence and drop the listed depends_on edges, then render
  * QUEUE-ORDER.json from the committed sequence.
  *
+ * The effective order is the listed ids, then each open, non-parked milestone
+ * the order does not list, in its current relative order. Returns the
+ * committed queue order.
+ *
  * Throws when the order names an unknown or closed milestone, repeats an id,
- * or puts a milestone before one it still depends on.
+ * or when the effective order puts a milestone before one it still depends
+ * on or has a dependency that does not exist.
  */
 export function reorderMilestones(
   basePath: string,
   order: string[],
   depsToRemove: ReadonlyArray<{ milestone: string; dep: string }> = [],
   invocation?: ExecutionInvocation,
-): void {
+): string[] {
   if (!isDbAvailable()) throw new Error("milestone reorder requires the GSD database");
   const request = queueOperationRequest(
     "milestone.reorder",
@@ -163,13 +172,20 @@ export function reorderMilestones(
     for (const edge of depsToRemove) {
       depsMap.set(edge.milestone, (depsMap.get(edge.milestone) ?? []).filter((dep) => dep !== edge.dep));
     }
-    // An open milestone that the order does not list (for example a parked one)
-    // is still a valid dependency, so missing_dep is not an error here.
-    const violation = validateQueueOrder(order, depsMap, closedIds)
-      .violations.find((entry) => entry.type !== "missing_dep");
+    // A parked milestone that the order does not list is not in the queue, but
+    // it is still a valid dependency.
+    const listed = new Set(order);
+    const outsideQueue = new Set(closedIds);
+    const effectiveOrder = [...order];
+    for (const milestone of getAllMilestones()) {
+      if (listed.has(milestone.id) || closedIds.has(milestone.id)) continue;
+      if (milestone.status === "parked") outsideQueue.add(milestone.id);
+      else effectiveOrder.push(milestone.id);
+    }
+    const violation = validateQueueOrder(effectiveOrder, depsMap, outsideQueue).violations[0];
     if (violation) throw new Error(violation.message);
 
-    setMilestoneQueueOrder(order);
+    setMilestoneQueueOrder(effectiveOrder);
     for (const edge of depsToRemove) {
       const milestone = getMilestone(edge.milestone);
       if (!milestone) throw new Error(`milestone ${edge.milestone} does not exist`);
@@ -190,7 +206,9 @@ export function reorderMilestones(
       }],
     };
   });
-  renderQueueOrderFromDb(basePath);
+  const committedOrder = queueOrderFromDb();
+  renderQueueOrder(basePath, committedOrder);
+  return committedOrder;
 }
 
 /**

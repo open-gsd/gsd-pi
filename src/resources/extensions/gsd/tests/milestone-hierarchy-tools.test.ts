@@ -230,6 +230,40 @@ describe("milestone hierarchy tools", () => {
     assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations WHERE operation_type = 'milestone.reorder'"), 0);
   });
 
+  test("reorder checks dependencies against the full order: listed ids, then the unlisted open milestones in their current order", async () => {
+    await executeMilestoneSetDependencies(
+      { milestoneId: "M002", dependsOn: ["M001"] }, base, piExecutionInvocation("gsd_milestone_set_dependencies", "deps"));
+    const reorder = (order: string[], key: string) =>
+      executeMilestoneReorder({ order }, base, piExecutionInvocation("gsd_milestone_reorder", key));
+    const sequenceBefore = getAllMilestones().map((milestone) => [milestone.id, milestone.sequence]);
+
+    assert.match(errorText(await reorder(["M002"], "partial-blocked")), /M002 cannot run before M001/);
+    assert.deepEqual(getAllMilestones().map((milestone) => [milestone.id, milestone.sequence]), sequenceBefore);
+    assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations WHERE operation_type = 'milestone.reorder'"), 0);
+
+    const moved = await reorder(["M003"], "partial");
+    assert.ok(!moved.isError, moved.content[0]!.text);
+    assert.match(moved.content[0]!.text, /M003 → M001 → M002/);
+    assert.deepEqual(getAllMilestones().map((milestone) => milestone.id), ["M003", "M001", "M002"]);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(base, ".gsd", "QUEUE-ORDER.json"), "utf-8")).order,
+      ["M003", "M001", "M002"],
+    );
+
+    // The unlisted milestones keep their current relative order, not the id order.
+    assert.ok(!(await reorder(["M001"], "front")).isError);
+    assert.deepEqual(getAllMilestones().map((milestone) => milestone.id), ["M001", "M003", "M002"]);
+
+    // An unlisted parked milestone has no place in the queue and stays a valid dependency.
+    await executeMilestonePark(
+      { milestoneId: "M001", reason: "Waiting on the vendor" }, base, piExecutionInvocation("gsd_milestone_park", "park"));
+    assert.ok(!(await reorder(["M002"], "parked-dependency")).isError);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(base, ".gsd", "QUEUE-ORDER.json"), "utf-8")).order,
+      ["M002", "M003"],
+    );
+  });
+
   test("set dependencies replaces the list and refuses unknown, self, discarded, cyclic and closed targets", async () => {
     const setDependencies = (milestoneId: string, dependsOn: string[], key: string) =>
       executeMilestoneSetDependencies(
