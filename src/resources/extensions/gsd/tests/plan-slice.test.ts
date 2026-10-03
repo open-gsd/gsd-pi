@@ -1213,6 +1213,47 @@ test('handlePlanSlice rejects omitted completed tasks without changing slice or 
   }
 });
 
+test('an override rewrite on a slice with a completed task uses gsd_plan_task and a task-free gsd_plan_slice', async () => {
+  const base = makeTmpBase();
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+
+  try {
+    seedParentSlice();
+    const { tasks, ...sliceFields } = validParams();
+    const first = await handlePlanSlice({ ...sliceFields, tasks }, base);
+    assert.ok(!('error' in first), `unexpected error: ${'error' in first ? first.error : ''}`);
+    completeTask('T01', '2026-05-12T00:00:00.000Z');
+    const completedBefore = getTask('M001', 'S02', 'T01');
+
+    // This is the path the rewrite-docs prompt names: slice fields without a
+    // task list, then one gsd_plan_task call per rewritten or new task.
+    const slice = await handlePlanSlice({ ...sliceFields, goal: 'Goal after the override.' }, base);
+    assert.ok(!('error' in slice), `unexpected error: ${'error' in slice ? slice.error : ''}`);
+    const pendingTask = { milestoneId: 'M001', sliceId: 'S02', ...tasks[1] };
+    const rewritten = await handlePlanTask({ ...pendingTask, title: 'Task after the override' }, base);
+    assert.ok(!('error' in rewritten), `unexpected error: ${'error' in rewritten ? rewritten.error : ''}`);
+    const added = await handlePlanTask({ ...pendingTask, taskId: 'T03', title: 'New task from the override' }, base);
+    assert.ok(!('error' in added), `unexpected error: ${'error' in added ? added.error : ''}`);
+
+    assert.equal(getSlice('M001', 'S02')?.goal, 'Goal after the override.');
+    assert.deepEqual(getSliceTasks('M001', 'S02').map((task) => [task.id, task.title, task.status]), [
+      ['T01', 'Write slice handler', 'complete'],
+      ['T02', 'Task after the override', 'pending'],
+      ['T03', 'New task from the override', 'pending'],
+    ]);
+    assert.deepEqual(getTask('M001', 'S02', 'T01'), completedBefore, 'the completed task must stay as it was');
+
+    // A task list is refused whether it keeps or drops the completed task.
+    for (const taskList of [tasks, [tasks[1]]]) {
+      const refused = await handlePlanSlice({ ...sliceFields, tasks: taskList }, base);
+      assert.ok('error' in refused, 'a task list must be refused when a task is complete');
+      assert.match(refused.error, /completed task T01/);
+    }
+  } finally {
+    cleanup(base);
+  }
+});
+
 test('handlePlanSlice preserves an unowned combined PLAN when only cancelled tasks remain', async () => {
   const base = makeTmpBase();
   openDatabase(join(base, '.gsd', 'gsd.db'));
