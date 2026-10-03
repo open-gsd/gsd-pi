@@ -126,7 +126,9 @@ the realpath of the one checkout root the database belongs to. The first open
 binds an unbound database. Every later open from another root, such as a second
 clone that resolves to the same state directory or a copied `gsd.db`, is
 refused with `checkout-unbound` until `/gsd db bind` explicitly moves the
-binding. Worktrees belong to the checkout that created them. One resolver
+binding. An internal reopen that holds only the database path has no root to
+compare, so it checks that the file is the one its bound checkout resolves to.
+Worktrees belong to the checkout that created them. One resolver
 (`resolveGsdPathContract`) finds the database, anchored on `gsd.db` and
 preferences, never on projection files. The binding is not identity: Import
 Application restore and Forward Repair match a backup by `project_id`, so a
@@ -137,8 +139,10 @@ root, the next open refuses until `/gsd db bind`.
 Committed `.gsd/` markdown (tracked mode, team repositories) is an export, not
 shared authority. A clone with milestone projections and no database, or a
 database with no milestone rows beside a planned (ROADMAP) projection, fails
-closed with `authority-missing` in every entry point until Import Application
-(`/gsd recover`) or a restore. Guided entry holds a changed tracked projection
+closed with `authority-missing` in every entry point and every internal reopen
+until Import Application (`/gsd recover`) or a restore. A `/gsd recover` that
+applies nothing closes the handle it opened, so the same process refuses the
+database again. Guided entry holds a changed tracked projection
 the same way before its markdown self-heal. A tracked projection changed by pull, merge,
 rebase, or branch switch raises one "changed outside GSD" state before
 dispatch: the user imports it through Import Preview or discards it with a

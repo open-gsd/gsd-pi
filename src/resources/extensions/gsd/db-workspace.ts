@@ -235,6 +235,18 @@ export function isCheckoutUnboundError(err: unknown): boolean {
   return err instanceof GSDError && err.message.startsWith("checkout-unbound:");
 }
 
+/** The checkout root the open database is bound to; undefined when it cannot be read. */
+function readBoundCheckoutRoot(projectDb: string): unknown {
+  try {
+    return _getAdapter()?.prepare("SELECT project_root_realpath FROM project_authority WHERE singleton = 1").get()?.["project_root_realpath"];
+  } catch (err) {
+    // Schema init always creates project_authority; an unreadable row is a
+    // query failure the caller's own reads report, not a binding verdict.
+    logWarning("engine", `could not read the checkout binding of ${projectDb}: ${(err as Error).message}`);
+    return undefined;
+  }
+}
+
 /**
  * One database belongs to one checkout. project_authority records the bound
  * checkout root: the first open binds an unbound database, and an open from
@@ -247,17 +259,8 @@ function enforceCheckoutBinding(basePath: string, projectDb: string, rebind: boo
   const contract = resolveGsdPathContract(basePath);
   if (contract.isWorktree) return null;
   const root = normalizeRealPath(contract.projectRoot);
-  const db = _getAdapter();
-  let bound: unknown;
-  try {
-    bound = db?.prepare("SELECT project_root_realpath FROM project_authority WHERE singleton = 1").get()?.["project_root_realpath"];
-  } catch (err) {
-    // Schema init always creates project_authority; an unreadable row is a
-    // query failure the caller's own reads report, not a binding verdict.
-    logWarning("engine", `could not read the checkout binding of ${projectDb}: ${(err as Error).message}`);
-    return null;
-  }
-  if (!db || typeof bound !== "string" || bound === root) return null;
+  const bound = readBoundCheckoutRoot(projectDb);
+  if (typeof bound !== "string" || bound === root) return null;
   if (bound !== "" && !rebind) {
     return new GSDError(
       GSD_STALE_STATE,
@@ -284,6 +287,29 @@ function enforceCheckoutBinding(basePath: string, projectDb: string, rebind: boo
   return null;
 }
 
+/**
+ * A path-only open has no checkout root to compare, so the open database must
+ * be the file its bound checkout resolves to. A copied or moved gsd.db is
+ * refused here too. Returns the refusal, or null when the open may proceed.
+ */
+function enforcePathBinding(projectDb: string): GSDError | null {
+  const bound = readBoundCheckoutRoot(projectDb);
+  if (typeof bound !== "string" || bound === "") return null;
+  if (normalizeRealPath(resolveGsdPathContract(bound).projectDb) === normalizeRealPath(projectDb)) return null;
+  return new GSDError(
+    GSD_STALE_STATE,
+    `checkout-unbound: ${projectDb} belongs to the checkout at ${bound}, which does not resolve to this file. ` +
+    "GSD refused to open it so two checkouts never share one workflow database. " +
+    "Run /gsd db bind in the checkout that now owns this database.",
+  );
+}
+
+/** True when the process-global handle is already open on this database file. */
+function isOpenAt(projectDb: string): boolean {
+  const openPath = isDbAvailable() ? getDbPath() : null;
+  return openPath !== null && normalizeRealPath(openPath) === normalizeRealPath(projectDb);
+}
+
 function openWorkflowDatabaseWithMode(
   basePath: string,
   createIfMissing: boolean,
@@ -303,8 +329,7 @@ function openWorkflowDatabaseWithMode(
   }
   // A handle this process already admitted (an earlier open, or the explicit
   // createEmptyAuthority import path) is not judged again.
-  const openPath = isDbAvailable() ? getDbPath() : null;
-  const alreadyOpen = openPath !== null && normalizeRealPath(openPath) === normalizeRealPath(location.projectDb);
+  const alreadyOpen = isOpenAt(location.projectDb);
   try {
     const opened = createIfMissing
       ? openDatabase(location.projectDb)
@@ -370,12 +395,24 @@ export function openExistingWorkflowDatabase(basePath: string): WorkflowDatabase
   return openWorkflowDatabaseWithMode(basePath, false);
 }
 
+/**
+ * Reopen seam for callers that hold only a database path. It runs the same
+ * empty-database refusal as the workspace open, and the binding check that a
+ * path allows. A handle this process already admitted is not judged again.
+ */
 export function openWorkflowDatabasePath(path: string): boolean {
-  if (path !== ":memory:") {
-    const location = { projectGsd: dirname(path), projectDb: path };
-    if (hasWorkflowHistoryWithoutDatabase(location)) throw authorityMissingError(location);
-  }
-  return openDatabase(path);
+  if (path === ":memory:") return openDatabase(path);
+  const location = { projectGsd: dirname(path), projectDb: path };
+  if (hasWorkflowHistoryWithoutDatabase(location)) throw authorityMissingError(location);
+  const alreadyOpen = isOpenAt(path);
+  if (!openDatabase(path)) return false;
+  if (alreadyOpen) return true;
+  const refusal = isEmptyDatabaseBesidePlannedProjections(location.projectGsd)
+    ? authorityMissingError(location)
+    : enforcePathBinding(path);
+  if (!refusal) return true;
+  closeDatabase();
+  throw refusal;
 }
 
 /**
@@ -447,7 +484,7 @@ export function ensureWorkflowDbAtPath(dbPath: string | null): boolean {
   try {
     return openWorkflowDatabasePath(dbPath);
   } catch (err) {
-    if (isSchemaTooNewError(err) || isAuthorityMissingError(err)) throw err;
+    if (isSchemaTooNewError(err) || isAuthorityMissingError(err) || isCheckoutUnboundError(err)) throw err;
     logWarning("reconcile", `ensureWorkflowDbAtPath could not reopen DB: ${(err as Error).message}`);
     return false;
   }

@@ -748,6 +748,9 @@ export async function handleRecover(
   // missing, and the next recover reuses the parked database so its sealed
   // Preview hash stays valid.
   let createdDbPath: string | null = null;
+  // The import open admits an empty database beside projections. When nothing
+  // is applied the handle is closed, so later entry points judge it again.
+  let openedForImport = false;
   if (!dbAvailable()) {
     // Explicit import is the one operator path that may start an empty
     // database beside existing markdown.
@@ -757,6 +760,7 @@ export async function handleRecover(
     if (lost) moveDatabaseFiles(`${dbPath}.recover-pending`, dbPath);
     const opened = openWorkflowDatabase(basePath, { createEmptyAuthority: true });
     if (opened.ok && lost) createdDbPath = dbPath;
+    openedForImport = opened.ok;
     if (!opened.ok) {
       const detail = opened.error?.message ?? opened.reason;
       ctx.ui.notify(
@@ -925,10 +929,10 @@ export async function handleRecover(
     logWarning("command", `recover failed: ${message}`);
     ctx.ui.notify(`gsd recover failed: ${message}`, "error");
   } finally {
-    if (createdDbPath !== null && !appliedPreview) {
+    if (openedForImport && !appliedPreview) {
       const { closeWorkflowDatabase } = await import("./db-workspace.js");
       closeWorkflowDatabase();
-      moveDatabaseFiles(createdDbPath, `${createdDbPath}.recover-pending`);
+      if (createdDbPath !== null) moveDatabaseFiles(createdDbPath, `${createdDbPath}.recover-pending`);
     }
   }
 }
