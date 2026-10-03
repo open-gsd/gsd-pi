@@ -19,32 +19,9 @@ mode: team
 
 This enables unique milestone IDs, push branches, and pre-merge checks in one setting. Override individual settings on top of `mode: team` as needed.
 
-### 2. Configure `.gitignore`
+### 2. Know what is shared
 
-Share planning artifacts while keeping runtime files local:
-
-```bash
-# Runtime / ephemeral (per-developer)
-.gsd/completed-units*.json
-.gsd/state-manifest.json
-.gsd/STATE.md
-.gsd/metrics.json
-.gsd/activity/
-.gsd/runtime/
-.gsd/worktrees/
-.gsd/gsd.db*
-.gsd/journal/
-.gsd/doctor-history.jsonl
-.gsd/event-log.jsonl
-.gsd/phases/**/continue.md
-.gsd/phases/**/*-CONTINUE.md
-.gsd/milestones/**/continue.md
-.gsd/milestones/**/*-CONTINUE.md
-```
-
-**Shared** (committed): preferences, PROJECT.md, REQUIREMENTS.md, DECISIONS.md, and flat-phase artifacts under `.gsd/phases/`. Legacy projects may still share `.gsd/milestones/` until migrated.
-
-**Local** (gitignored): metrics, state cache, worktrees, activity logs, database files, journals.
+The workflow database is never committed, and every checkout has its own. Committed `.gsd/` markdown is an export for review, not shared authority: it enters a database only through an explicit `/gsd recover` import. GSD keeps its runtime files out of git for you. See the [authoritative team guide](../../docs/user-docs/working-in-teams.md#2-know-what-is-shared) for the bound-checkout rules and the import flow after a clone or pull.
 
 ### 3. Commit
 

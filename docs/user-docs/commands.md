@@ -108,6 +108,7 @@ After writing the file, GSD attempts to open it in a browser using the local pla
 | `/gsd recover <recoveryActionId>` | Resume one repaired Task recovery abort or remediation after supplying repair and verification evidence |
 | `/gsd rebuild markdown` | Preserve externally edited modeled projections under `.gsd/quarantine/projections/`, then rebuild from the canonical database without importing markdown |
 | `/gsd rebuild database` | Reserved for DB-native rebuilds; does not import markdown projections |
+| `/gsd db bind` | Make this checkout the one the project database belongs to, after the bound checkout was moved or deleted; see [Working in Teams](working-in-teams.md#2-know-what-is-shared) |
 | `/gsd language <language\|off\|clear>` | Set or clear the global response language |
 
 Use `/gsd run-hook <hook-name> <unit-type> <unit-id>` to trigger a configured hook. Run `/gsd run-hook` without arguments for the supported unit types. The ID must match the selected type's scope: for example, `review complete-milestone M001`, `review plan-slice M001/S01`, or `review execute-task M001/S01/T01` after `/gsd run-hook`. Unique milestone IDs such as `M001-abc123` also work, including within slice and task IDs. Unsupported unit types are rejected with the supported-type list; an invalid ID reports the expected format for its type before the hook is triggered.

@@ -784,6 +784,8 @@ updated_at           TEXT NOT NULL DEFAULT ''
 
 - Exactly one row is seeded with a generated 32-character lowercase hex
   `project_id`; fresh and upgraded databases begin at revision/epoch `0`.
+- `project_root_realpath` is the bound checkout root (`''` until the first
+  open binds it), not identity; see ADR-046, "One database per bound checkout".
 - `schema_version` remains the DDL compatibility version and is not this domain
   revision.
 
