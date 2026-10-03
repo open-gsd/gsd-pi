@@ -458,6 +458,9 @@ describe("ADR-008 parity: shared workflow write tools native vs MCP", () => {
       args: SUMMARY_SAVE_ARGS,
       seed: (base) => {
         mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
+        // Milestone content without gsd.db is authority-missing; give the project its authority.
+        openDatabase(join(base, ".gsd", "gsd.db"));
+        closeDatabase();
       },
       nativeRun: (base, args) => executeSummarySave(args as Parameters<typeof executeSummarySave>[0], base),
       assertEquivalent: ({ nativeBase, mcpBase }) => {
