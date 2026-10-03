@@ -34,6 +34,7 @@ import { clearPathCache } from "../paths.ts";
 import { detectStaleRenders, getCurrentProjectStateVersion, renderRoadmapFromDb } from "../markdown-renderer.ts";
 import { preserveProjectionChanges, rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
 import { detectArtifactDbDrift } from "../state-reconciliation/drift/artifact-db.ts";
+import { recordLegacyMilestoneEvents, unimportedLegacyMilestoneEvents } from "../milestone-reopen-events.ts";
 import { appendEvent } from "../workflow-events.ts";
 import { invalidateStateCache } from "../state.ts";
 import {
@@ -2150,13 +2151,13 @@ test("#2398: an explicit reopen between dispatches exempts a receiptless retry",
   // D1 genuinely completed and was explicitly reopened; D2 is a later
   // receiptless retry. The active milestone is legitimately active.
   seedCompletedCloseoutDispatch("M001", "2026-09-17T07:00:00.000Z", "2026-09-17T07:01:00.000Z");
-  seedDurableMilestoneCompletedEvent("M001", "2026-09-17T07:00:30.000Z");
-  appendEvent(base, {
-    cmd: "reopen-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-09-17T08:00:00.000Z",
-    actor: "agent",
-  });
+  recordLegacyMilestoneEvents(
+    [
+      { kind: "completed", milestoneId: "M001", occurredAt: "2026-09-17T07:00:30.000Z" },
+      { kind: "reopened", milestoneId: "M001", occurredAt: "2026-09-17T08:00:00.000Z" },
+    ],
+    "operator",
+  );
   seedCompletedCloseoutDispatch("M001", "2026-09-17T09:00:00.000Z", "2026-09-17T09:01:00.000Z");
 
   const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
@@ -2169,29 +2170,32 @@ test("#2398: an explicit reopen between dispatches exempts a receiptless retry",
   );
 });
 
-test("#2398: legacy underscore ledger spellings count for completion and reopen", (t) => {
+test("#2398: event-log.jsonl completion and reopen count only after an explicit import", (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
 
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Test", status: "active" });
-  // Legacy file ledger records the completion (and a later reopen) with the
-  // underscore vocabulary.
+  seedCompletedCloseoutDispatch("M001", "2026-09-17T07:00:00.000Z", "2026-09-17T07:01:00.000Z");
+  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
+  const reopenedDrifts = () =>
+    detectArtifactDbDrift(state, { basePath: base, state })
+      .filter((d) => d.kind === "completed-milestone-reopened").length;
+
+  // The legacy file ledger records the completion with the underscore vocabulary.
   appendEvent(base, {
     cmd: "complete_milestone",
     params: { milestoneId: "M001" },
     ts: "2026-09-17T07:00:30.000Z",
     actor: "agent",
   });
-  seedCompletedCloseoutDispatch("M001", "2026-09-17T07:00:00.000Z", "2026-09-17T07:01:00.000Z");
+  assert.equal(reopenedDrifts(), 0, "a completion that only the file ledger holds is not read");
 
-  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
-  const withLegacyCompletion = detectArtifactDbDrift(state, { basePath: base, state });
-  assert.equal(
-    withLegacyCompletion.filter((d) => d.kind === "completed-milestone-reopened").length,
-    1,
-    "underscore completion receipts must still back the drift",
-  );
+  assert.deepEqual(unimportedLegacyMilestoneEvents(base), [
+    { kind: "completed", milestoneId: "M001", occurredAt: "2026-09-17T07:00:30.000Z" },
+  ]);
+  recordLegacyMilestoneEvents(unimportedLegacyMilestoneEvents(base), "operator");
+  assert.equal(reopenedDrifts(), 1, "the imported completion backs the drift");
 
   appendEvent(base, {
     cmd: "reopen_milestone",
@@ -2199,12 +2203,11 @@ test("#2398: legacy underscore ledger spellings count for completion and reopen"
     ts: "2026-09-17T08:00:00.000Z",
     actor: "agent",
   });
-  const afterLegacyReopen = detectArtifactDbDrift(state, { basePath: base, state });
-  assert.equal(
-    afterLegacyReopen.filter((d) => d.kind === "completed-milestone-reopened").length,
-    0,
-    "underscore reopen receipts must exempt the milestone",
-  );
+  assert.equal(reopenedDrifts(), 1, "a reopen that only the file ledger holds is not read");
+
+  recordLegacyMilestoneEvents(unimportedLegacyMilestoneEvents(base), "operator");
+  assert.equal(reopenedDrifts(), 0, "the imported reopen exempts the milestone");
+  assert.deepEqual(unimportedLegacyMilestoneEvents(base), [], "nothing is left to import");
 });
 
 test("ADR-017: completed milestone dispatch history blocks accidental re-planning", async (t) => {

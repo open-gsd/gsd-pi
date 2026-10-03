@@ -114,6 +114,8 @@ export type DoctorIssueCode =
   | "projection_work_unrendered"
   // OVERRIDES.md block that the database does not hold
   | "override_file_block_unimported"
+  // event-log.jsonl milestone reopen or completion that the database does not hold
+  | "legacy_milestone_event_unimported"
   | "escalation_legacy_response_unapplied"
   // Legacy/canonical lifecycle shadow drift (#2440)
   | "lifecycle_shadow_mismatch"

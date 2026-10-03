@@ -17,7 +17,13 @@ import {
   pruneArtifactRows,
 } from "./gsd-db.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
-import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
+import {
+  completedEventCoversDispatch,
+  isAfter,
+  latestExplicitReopenAt,
+  recordLegacyMilestoneEvents,
+  unimportedLegacyMilestoneEvents,
+} from "./milestone-reopen-events.js";
 import {
   gsdProjectionRoot,
   gsdRoot,
@@ -728,7 +734,7 @@ export async function checkEngineHealth(
   options?: {
     repair?: boolean;
     repairDbLock?: boolean;
-    /** With `repair`: import OVERRIDES.md blocks the database does not hold. Set only for a doctor run the operator asked for. */
+    /** With `repair`: import OVERRIDES.md blocks and event-log.jsonl milestone events the database does not hold. Set only for a doctor run the operator asked for. */
     importFileOverrides?: boolean;
     lockRecovery?: {
       inspectHolders: typeof inspectWorkflowDbLockHolders;
@@ -823,6 +829,20 @@ export async function checkEngineHealth(
         fixable: false,
       });
     }
+  }
+
+  // Before the reopen checks below, so that they read what this run imports.
+  try {
+    if (isDbAvailable()) {
+      checkUnimportedLegacyMilestoneEvents(
+        basePath,
+        issues,
+        fixesApplied,
+        options?.repair === true && options.importFileOverrides === true,
+      );
+    }
+  } catch {
+    // Non-fatal — the legacy milestone event check must never block doctor
   }
 
   // ── DB constraint violation detection (full doctor only, not pre-dispatch per D-10) ──
@@ -1067,8 +1087,8 @@ export async function checkEngineHealth(
         for (const row of reopened) {
           if (flagged.has(row.id)) continue;
           const completedAt = row.ended_at ?? row.started_at ?? null;
-          if (!completedEventCoversDispatch(basePath, row.id, row.started_at)) continue;
-          const reopenAt = latestExplicitReopenAt(basePath, row.id);
+          if (!completedEventCoversDispatch(row.id, row.started_at)) continue;
+          const reopenAt = latestExplicitReopenAt(row.id);
           if (reopenAt && (!completedAt || Date.parse(reopenAt) > Date.parse(completedAt))) continue;
           flagged.add(row.id);
           issues.push({
@@ -1201,7 +1221,7 @@ export async function checkEngineHealth(
         const seen = new Set<string>();
         for (const row of rows) {
           if (!artifactExistsOnDisk(basePath, row.path, row)) continue;
-          const reopenAt = latestExplicitReopenAt(basePath, row.milestone_id);
+          const reopenAt = latestExplicitReopenAt(row.milestone_id);
           if (!isAfter(row.imported_at, reopenAt)) continue;
           const isSliceSummary = row.slice_id && !row.task_id && row.slice_status && !isInactiveStatus(row.slice_status);
           const isTaskSummary = row.slice_id && row.task_id && (!row.task_status || !isClosedStatus(row.task_status));
@@ -1367,6 +1387,43 @@ function checkUnimportedOverrides(
         : `OVERRIDES.md override ${block.timestamp} ("${block.change}") has unknown scope "${block.scope}" and cannot be imported. Set its scope to active or resolved, then run \`/gsd doctor --fix\`.`,
       file: ".gsd/OVERRIDES.md",
       fixable: importable(block),
+    });
+  }
+}
+
+/**
+ * Milestone reopens and completions that only event-log.jsonl holds are not
+ * read by drift detection. Report each one; import them on request.
+ */
+function checkUnimportedLegacyMilestoneEvents(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  doImport: boolean,
+): void {
+  const events = unimportedLegacyMilestoneEvents(basePath);
+  if (events.length === 0) return;
+  let importError = "";
+  if (doImport) {
+    try {
+      recordLegacyMilestoneEvents(events, "operator");
+      fixesApplied.push(
+        `imported ${events.length} milestone event(s) from event-log.jsonl: ${events.map((event) => `${event.milestoneId} ${event.kind}`).join(", ")}`,
+      );
+      return;
+    } catch (err) {
+      importError = ` The import failed: ${(err as Error).message}.`;
+    }
+  }
+  for (const event of events) {
+    issues.push({
+      severity: "warning",
+      code: "legacy_milestone_event_unimported",
+      scope: "milestone",
+      unitId: event.milestoneId,
+      message: `event-log.jsonl says milestone ${event.milestoneId} was ${event.kind} at ${event.occurredAt}, but the database has no such event and the file is not read. Run \`/gsd doctor --fix\` to import it.${importError}`,
+      file: ".gsd/event-log.jsonl",
+      fixable: true,
     });
   }
 }

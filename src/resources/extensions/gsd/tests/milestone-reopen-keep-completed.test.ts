@@ -21,6 +21,7 @@ import {
   openDatabase,
   reopenMilestoneCascade,
 } from "../gsd-db.ts";
+import { latestExplicitReopenAt } from "../milestone-reopen-events.ts";
 import { clearPathCache, targetTaskFile } from "../paths.ts";
 import { isClosedStatus } from "../status-guards.ts";
 import { handleReopenMilestone } from "../tools/reopen-milestone.ts";
@@ -118,6 +119,7 @@ test("keepCompleted handler preserves task completed_at and SUMMARY files", asyn
     readFileSync(summaryPath, "utf8").startsWith(SUMMARY_BODY),
     "SUMMARY keeps the stored summary",
   );
+  assert.ok(latestExplicitReopenAt("M001"), "the unadopted reopen records its event in the database");
 });
 
 test("omitted keepCompleted still resets completed tasks and deletes SUMMARYs", async (t) => {

@@ -21,7 +21,7 @@ import {
 } from "../gsd-db.ts";
 import { getEligibleSlicesFromRows } from "../slice-parallel-eligibility.ts";
 import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
-import { appendEvent } from "../workflow-events.ts";
+import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.ts";
 
 // The expected answer is stated here, independent of any predicate under test.
 const RAW_STATUS_TABLE: ReadonlyArray<readonly [status: string, closed: boolean]> = [
@@ -136,12 +136,10 @@ for (const [status, closed] of [
       "trace-1", "worker-1", 1, "M001", "complete-milestone", "M001", "completed", 1,
       "2026-01-01T00:00:00.000Z", "2026-01-01T00:00:01.000Z",
     );
-    appendEvent(base, {
-      cmd: "complete-milestone",
-      params: { milestoneId: "M001" },
-      ts: "2026-01-01T00:00:00.500Z",
-      actor: "agent",
-    });
+    recordLegacyMilestoneEvents(
+      [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:00.500Z" }],
+      "operator",
+    );
 
     const issues: Array<{ code: string }> = [];
     await checkEngineHealth(base, issues as never[], []);

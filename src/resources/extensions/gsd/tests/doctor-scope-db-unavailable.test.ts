@@ -23,7 +23,7 @@ import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import { runGSDDoctor } from "../doctor.ts";
 import { MEMORIES_FTS_REBUILT_KEY } from "../db-memory-fts-schema.ts";
 import { getProjectGSDPreferencesPath } from "../preferences.ts";
-import { appendEvent } from "../workflow-events.ts";
+import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.ts";
 import { renderPlanFromDb, renderRoadmapFromDb } from "../markdown-renderer.ts";
 import { openWorkflowDatabase } from "../db-workspace.ts";
 
@@ -386,18 +386,14 @@ test("checkEngineHealth reads canonical reopen events from worktree bases", asyn
   );
   // #2398: the doctor gate requires the completion receipt before the reopen
   // comparison — seed it so this test still exercises the reopen exemption.
-  appendEvent(base, {
-    cmd: "complete-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:00.500Z",
-    actor: "agent",
-  });
-  appendEvent(base, {
-    cmd: "reopen-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:02.000Z",
-    actor: "agent",
-  });
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:00.500Z" }],
+    "operator",
+  );
+  recordLegacyMilestoneEvents(
+    [{ kind: "reopened", milestoneId: "M001", occurredAt: "2026-01-01T00:00:02.000Z" }],
+    "operator",
+  );
 
   const issues: any[] = [];
   await checkEngineHealth(worktree, issues, []);
@@ -432,18 +428,14 @@ test("checkEngineHealth treats explicit reopen as authoritative when dispatch ti
   ).run("trace-1", "worker-1", 1, "M001", "complete-milestone", "M001", "completed", 1, "", "");
   // #2398: with dispatch timestamps missing, the completion event itself is
   // the proof — seed it so this test still exercises the reopen exemption.
-  appendEvent(base, {
-    cmd: "complete-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:01.000Z",
-    actor: "agent",
-  });
-  appendEvent(base, {
-    cmd: "reopen-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:02.000Z",
-    actor: "agent",
-  });
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:01.000Z" }],
+    "operator",
+  );
+  recordLegacyMilestoneEvents(
+    [{ kind: "reopened", milestoneId: "M001", occurredAt: "2026-01-01T00:00:02.000Z" }],
+    "operator",
+  );
 
   const issues: any[] = [];
   await checkEngineHealth(base, issues, []);
@@ -488,12 +480,10 @@ test("checkEngineHealth still flags completion history backed by a covering mile
     "2026-01-01T00:00:01.000Z",
   );
   // Receipt minted inside the closeout: after started_at, before ended_at.
-  appendEvent(base, {
-    cmd: "complete-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:00.500Z",
-    actor: "agent",
-  });
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:00.500Z" }],
+    "operator",
+  );
 
   const issues: any[] = [];
   await checkEngineHealth(base, issues, []);
@@ -538,12 +528,10 @@ test("checkEngineHealth ignores a completion receipt older than the dispatch row
     "2026-01-01T02:00:01.000Z",
   );
   // A receipt from an earlier completion cycle predates this receiptless row.
-  appendEvent(base, {
-    cmd: "complete-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2026-01-01T00:00:30.000Z",
-    actor: "agent",
-  });
+  recordLegacyMilestoneEvents(
+    [{ kind: "completed", milestoneId: "M001", occurredAt: "2026-01-01T00:00:30.000Z" }],
+    "operator",
+  );
 
   const issues: any[] = [];
   await checkEngineHealth(base, issues, []);

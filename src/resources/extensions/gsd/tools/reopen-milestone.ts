@@ -24,6 +24,7 @@ import type { ExecutionInvocation } from "../execution-invocation.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
+import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.js";
 import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
@@ -285,6 +286,7 @@ export async function handleReopenMilestone(
       superseded ||= flushed.superseded;
       if (!superseded && isCurrent()) await writeManifestAndFlush(basePath);
       if (!canonicalReceipt) {
+        const reopenedAt = new Date().toISOString();
         appendEvent(basePath, {
           cmd: "reopen-milestone",
           params: {
@@ -293,11 +295,16 @@ export async function handleReopenMilestone(
             slicesReset: slicesResetCount,
             tasksReset: tasksResetCount,
           },
-          ts: new Date().toISOString(),
+          ts: reopenedAt,
           actor: "agent",
           actor_name: params.actorName,
           trigger_reason: params.triggerReason,
         });
+        // Drift detection reads the reopen from the database, never from the file ledger.
+        recordLegacyMilestoneEvents(
+          [{ kind: "reopened", milestoneId: params.milestoneId, occurredAt: reopenedAt }],
+          "agent",
+        );
       }
     }
   } catch (hookErr) {

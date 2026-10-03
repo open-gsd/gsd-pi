@@ -28,6 +28,7 @@ import { removeProjectionFileSync } from "../atomic-write.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
+import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.js";
 import { appendEvent } from "../workflow-events.js";
 import { logWarning, logError } from "../workflow-logger.js";
 import {
@@ -429,14 +430,20 @@ export async function handleCompleteMilestone(
   if (!canonicalReceipt) {
     try {
       if (!alreadyComplete) {
+        const eventAt = new Date().toISOString();
         appendEvent(artifactBasePath, {
           cmd: "complete-milestone",
           params: { milestoneId: params.milestoneId },
-          ts: new Date().toISOString(),
+          ts: eventAt,
           actor: "agent",
           actor_name: params.actorName,
           trigger_reason: params.triggerReason,
         });
+        // Drift detection reads the completion from the database, never from the file ledger.
+        recordLegacyMilestoneEvents(
+          [{ kind: "completed", milestoneId: params.milestoneId, occurredAt: eventAt }],
+          "agent",
+        );
       }
     } catch (eventErr) {
       logError("tool", `complete-milestone event log FAILED — completion invisible to reconciliation`, { error: (eventErr as Error).message });

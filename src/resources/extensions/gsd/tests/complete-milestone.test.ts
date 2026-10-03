@@ -22,6 +22,7 @@ import {
   updateSliceStatus,
   getMilestone,
 } from '../gsd-db.ts';
+import { completedEventCoversDispatch } from '../milestone-reopen-events.ts';
 import {
   handleCompleteMilestone,
   type CompleteMilestoneParams,
@@ -177,6 +178,9 @@ console.log('\n=== complete-milestone: handler happy path ===');
 
     // (c) A complete-milestone event was appended exactly once.
     assertEq(countCompleteMilestoneEvents(basePath), 1, 'exactly one complete-milestone event should be recorded');
+
+    // (d) The completion event is in the database; drift detection does not read the file ledger.
+    assertTrue(completedEventCoversDispatch('M001', m!.completed_at), 'completion event should be recorded in the database');
   }
 
   cleanupDir(basePath);

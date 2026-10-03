@@ -108,11 +108,10 @@ function completedMilestoneDispatches(
 }
 
 function hasExplicitReopenAfter(
-  basePath: string,
   milestoneId: string,
   completedDispatchAt: string | null | undefined,
 ): boolean {
-  const reopenAt = latestExplicitReopenAt(basePath, milestoneId);
+  const reopenAt = latestExplicitReopenAt(milestoneId);
   if (!reopenAt) return false;
   if (!completedDispatchAt) return true;
   return Date.parse(reopenAt) > Date.parse(completedDispatchAt);
@@ -274,7 +273,7 @@ function detectArtifactDbStatusDriftForMilestone(
   const milestone = getAllMilestones().find((m) => m.id === milestoneId);
   if (!milestone || isClosedStatus(milestone.status)) return [];
 
-  const latestReopen = latestExplicitReopenAt(basePath, milestoneId);
+  const latestReopen = latestExplicitReopenAt(milestoneId);
   const artifacts = safeListArtifactRows(milestoneId).filter((row) =>
     isAfter(row.imported_at, latestReopen),
   );
@@ -644,8 +643,8 @@ function computeArtifactDbDrift(
     for (const dispatch of completedMilestoneDispatches(milestone.id)) {
       const completedAt = dispatch.ended_at ?? dispatch.started_at ?? null;
       if (
-        completedEventCoversDispatch(ctx.basePath, milestone.id, dispatch.started_at) &&
-        !hasExplicitReopenAfter(ctx.basePath, milestone.id, completedAt)
+        completedEventCoversDispatch(milestone.id, dispatch.started_at) &&
+        !hasExplicitReopenAfter(milestone.id, completedAt)
       ) {
         drifts.push({
           kind: "completed-milestone-reopened",
