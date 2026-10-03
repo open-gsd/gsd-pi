@@ -141,6 +141,7 @@ export function observeExternalMarkdownEdits(
   const records: ExternalMarkdownEditDrift[] = [];
   let markerChanged = false;
   for (const [projectionPath, entry] of entries) {
+    if (projectionPath === "STATE.md") continue;
     const abs = join(basePath, ".gsd", projectionPath);
     if (!existsSync(abs)) continue;
     const actual = computeProjectionSha(readFileSync(abs, "utf-8"));
