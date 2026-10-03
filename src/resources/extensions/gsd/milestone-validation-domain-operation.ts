@@ -19,6 +19,8 @@ import {
   type ValidateMilestoneWriteResult,
 } from "./db/writers/milestone-validation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { insertAssessment } from "./gsd-db.js";
+import { insertMilestoneValidationGates } from "./milestone-validation-gates.js";
 
 export interface MilestoneValidationCriterionInput {
   criterionKey: string;
@@ -59,6 +61,17 @@ export interface ValidateMilestoneInput {
   summary: string;
   output: DomainJsonValue;
   criteria: ValidateMilestoneCriterionInput[];
+  /**
+   * Legacy assessment and quality-gate rows that phase derivation still reads.
+   * They commit inside the same operation so no crash can split them from the
+   * canonical verdict.
+   */
+  legacyAssessment?: {
+    path: string;
+    fullContent: string;
+    status: string;
+    gateSliceId: string;
+  };
 }
 
 interface OperationReceipt {
@@ -512,6 +525,24 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     payload,
   }, (context) => {
     written = writeMilestoneValidation(context, writeInput);
+    if (input.legacyAssessment) {
+      insertAssessment({
+        path: input.legacyAssessment.path,
+        milestoneId,
+        sliceId: null,
+        taskId: null,
+        status: input.legacyAssessment.status,
+        scope: "milestone-validation",
+        fullContent: input.legacyAssessment.fullContent,
+        createdAt: written.endedAt,
+      });
+      insertMilestoneValidationGates(
+        milestoneId,
+        input.legacyAssessment.gateSliceId,
+        input.legacyAssessment.status,
+        written.endedAt,
+      );
+    }
     const subjectiveProofs = currentRequiredSubjectiveProofs(
       written.lifecycleId,
       testedSourceRevision,

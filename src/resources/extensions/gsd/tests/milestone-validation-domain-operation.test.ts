@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import type { DomainOperationContext } from "../db/domain-operation.ts";
+import {
+  _setDomainOperationFaultForTest,
+  type DomainOperationContext,
+} from "../db/domain-operation.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import { readMilestoneCloseoutReadiness } from "../db/milestone-closeout-readiness.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
@@ -191,6 +194,7 @@ function sourceRevision(basePath: string): string {
 }
 
 afterEach(() => {
+  _setDomainOperationFaultForTest(null);
   clearPathCache();
   clearParseCache();
   closeDatabase();
@@ -267,6 +271,29 @@ test("Milestone validation commits one immutable receipt and exact replay adds n
     row("SELECT COUNT(*) AS count FROM workflow_operations").count,
     Number(operationsBefore) + 1,
     "one accepted public command must create exactly one Domain Operation",
+  );
+});
+
+test("adopted validation commits the assessment and gates inside the milestone.validate operation", async () => {
+  const basePath = makeBase();
+  _setDomainOperationFaultForTest("after-commit", "milestone.validate");
+
+  await assert.rejects(
+    validate(basePath, "milestone-validate/public/atomic-carrier"),
+    /domain operation fault: after-commit/,
+  );
+
+  const operation = db().prepare(`
+    SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'milestone.validate'
+  `).get() as { count: number };
+  assert.equal(operation.count, 1, "the operation committed before the fault");
+  const assessment = db().prepare(`
+    SELECT status FROM assessments WHERE milestone_id = 'M001' AND scope = 'milestone-validation'
+  `).get() as { status: string } | undefined;
+  assert.equal(assessment?.status, "pass", "the legacy assessment must commit with the operation");
+  assert.ok(
+    Number(row(`SELECT COUNT(*) AS count FROM quality_gates WHERE milestone_id = 'M001'`).count) > 0,
+    "milestone validation gates must commit with the operation",
   );
 });
 

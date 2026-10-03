@@ -198,6 +198,7 @@ function recordCanonicalValidation(input: {
   validationPath: string;
   artifactBasePath: string;
   requiredClasses: string[];
+  gateSliceId: string;
   invocation: ExecutionInvocation;
 }): ValidateMilestoneReceipt | { error: string } {
   const evidenceByClass = new Map<string, MilestoneVerificationEvidence[]>();
@@ -319,6 +320,12 @@ function recordCanonicalValidation(input: {
   return validateMilestone({
     invocation: input.invocation,
     milestoneId: input.params.milestoneId,
+    legacyAssessment: {
+      path: input.validationPath,
+      fullContent: input.validationMd,
+      status: input.params.verdict,
+      gateSliceId: input.gateSliceId,
+    },
     testedSourceRevision: sourceRevision,
     policyId: "milestone-validation",
     policyVersion: "1",
@@ -451,6 +458,9 @@ export async function handleValidateMilestone(
     getMilestone(effectiveParams.milestoneId)?.title,
   );
 
+  const slices = getMilestoneSlices(effectiveParams.milestoneId);
+  const gateSliceId = slices.length > 0 ? slices[0].id : "_milestone";
+
   const canonical = canonicalInvocation
     ? recordCanonicalValidation({
         params: effectiveParams,
@@ -458,6 +468,7 @@ export async function handleValidateMilestone(
         validationPath,
         artifactBasePath,
         requiredClasses,
+        gateSliceId,
         invocation: canonicalInvocation,
       })
     : undefined;
@@ -485,12 +496,10 @@ export async function handleValidateMilestone(
   // Write DB before disk so a crash between the two leaves a recoverable
   // state: the DB row exists but the file is missing, which projection
   // rendering can regenerate. The inverse (file exists, no DB row) is
-  // harder to detect and recover from (#2725).
-  const validatedAt = canonical?.endedAt ?? new Date().toISOString();
-  const slices = getMilestoneSlices(effectiveParams.milestoneId);
-  const gateSliceId = slices.length > 0 ? slices[0].id : "_milestone";
-
-  if (canonical?.status !== "replayed") {
+  // harder to detect and recover from (#2725). Adopted Milestones already
+  // committed these rows inside the milestone.validate operation.
+  if (!canonical) {
+    const validatedAt = new Date().toISOString();
     transaction(() => {
       insertAssessment({
         path: validationPath,
