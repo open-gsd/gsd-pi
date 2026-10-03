@@ -57,7 +57,7 @@ See also:
    auto.ts loop ──► back to auto-dispatch.ts
 ```
 
-`QUEUE-ORDER.json` follows the same projection rule as every other generated artifact. The `/gsd queue` reorder writes `milestones.sequence` through the `milestone.reorder` Domain Operation and then renders the file. No startup, state derivation, dispatch, reconciliation or `/gsd sync` path reads the file back into the database.
+`QUEUE-ORDER.json` is a projection of `milestones.sequence`. `/gsd queue` and the `gsd_milestone_reorder` tool (used by `/gsd rethink`) change the order through the `milestone.reorder` Domain Operation, which renders the file. No startup, state derivation, dispatch, reconciliation or `/gsd sync` path reads the file back into the database.
 
 The current lifecycle authority and cutover boundaries are owned by the
 [architecture overview](./dev/architecture.md) and the
@@ -136,14 +136,14 @@ The task-bearing planning payloads use camel-case `requiredWorkflowTools` on `gs
 |--------|----------|-----------|----------------------|
 | `replan-slice` | project_authority, workflow_operations, workflow_item_lifecycles, slices, tasks | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, slices, tasks (including execution-compatible `required_workflow_tools`), replan_history, quality_gates; removed pending tasks become `skipped` / `cancelled` | NN-MM-PLAN.md, NN-MM-REPLAN.md |
 | `replan-task` | project_authority, workflow_operations, workflow_item_lifecycles, slices, tasks, current recovery evidence | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, one pending task planning row (including execution-compatible `required_workflow_tools`), replan_history | re-renders the task/slice PLAN projection before replacement execution |
-| `rethink` | milestones, slices, artifacts | Slice cancellation through `gsd_skip_slice`; a reorder goes through `/gsd queue` (`milestone.reorder`) | PARKED.md |
+| `rethink` | milestones, slices, artifacts | Slice cancellation through `gsd_skip_slice`; milestone park, unpark, discard, reorder and dependency changes through the `gsd_milestone_*` tools, one Domain Operation each | QUEUE-ORDER.json and PARKED.md, rendered from the DB |
 | `rewrite-docs` | decisions, requirements, artifacts | decisions, requirements, artifacts | DECISIONS.md, REQUIREMENTS.md, slice plans with embedded task planning |
 | `doctor-heal` | slices, tasks, artifacts | artifacts (repair CONTEXT/SUMMARY/UAT) | repairs existing artifacts |
 | `review-migration` | milestones, slices, tasks, artifacts, decisions, requirements | — (read-only audit) | — |
 | `scan` | — | — | STACK.md, INTEGRATIONS.md, ARCHITECTURE.md |
 | `debug-diagnose` | memories | memories (INSERT pattern/gotcha), memories (hit_count++) | — |
 | `forensics` | audit_events, gate_runs, turn_git_transactions | — (read-only) | — |
-| `triage-captures` | none (captures are file-only) | none (captures are file-only) | CAPTURES.md |
+| `triage-captures` | artifacts (CAPTURES) | artifacts (CAPTURES, updated classifications) | CAPTURES.md |
 | `add-tests` | tasks, slices | — | test files (via code execution) |
 | `heal-skill` | — | — | skill-review-queue.md |
 

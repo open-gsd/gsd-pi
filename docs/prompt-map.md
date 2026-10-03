@@ -248,7 +248,7 @@ complete-milestone
 |--------|---------|-----------------|
 | `replan-slice.md` | Replan after a blocker discovered mid-slice. Preserves completed Tasks; every updated Task declares execution-compatible `requiredWorkflowTools`. | `gsd_replan_slice` |
 | `replan-task.md` | Replace one pending Task plan for a durable recovery action. Declares execution-compatible `requiredWorkflowTools` before a replacement Attempt can be claimed. | `gsd_replan_task` |
-| `rethink.md` | Reorder, park, unpark, skip, or discard milestones. | `gsd_skip_slice`; a reorder goes through `/gsd queue`, which writes DB sequence and renders `QUEUE-ORDER.json` |
+| `rethink.md` | Reorder, park, unpark, skip, or discard milestones, and change dependencies. | `gsd_skip_slice`, `gsd_milestone_reorder`, `gsd_milestone_park`, `gsd_milestone_unpark`, `gsd_milestone_discard`, `gsd_milestone_set_dependencies`; `QUEUE-ORDER.json` and `PARKED.md` are rendered from the DB |
 | `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. | git merge (main tree CWD) |
 | `reassess-roadmap.md` | *(see Completion Flow above)* | — |
 | `rewrite-docs.md` | Apply OVERRIDES.md changes across all planning docs. | — |

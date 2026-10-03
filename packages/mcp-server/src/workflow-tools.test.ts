@@ -1763,6 +1763,26 @@ describe("workflow MCP tools", () => {
         name: "gsd_milestone_reopen",
         params: { milestoneId: "M001", reason: "Must not execute." },
       },
+      {
+        name: "gsd_milestone_park",
+        params: { milestoneId: "M001", reason: "Must not execute." },
+      },
+      {
+        name: "gsd_milestone_unpark",
+        params: { milestoneId: "M001" },
+      },
+      {
+        name: "gsd_milestone_discard",
+        params: { milestoneId: "M001", reason: "Must not execute." },
+      },
+      {
+        name: "gsd_milestone_reorder",
+        params: { order: ["M001"] },
+      },
+      {
+        name: "gsd_milestone_set_dependencies",
+        params: { milestoneId: "M001", dependsOn: [] },
+      },
     ];
 
     for (const entry of cases) {
@@ -1879,6 +1899,11 @@ export const executeSkipSlice = (params, projectDir, invocation) =>
   captureSliceLifecycle("skip", params, projectDir, invocation);
 export const executeMilestoneReopen = (params, projectDir, invocation) =>
   captureMilestoneLifecycle("reopen", params, projectDir, invocation);
+export const executeMilestonePark = noop;
+export const executeMilestoneUnpark = noop;
+export const executeMilestoneDiscard = noop;
+export const executeMilestoneReorder = noop;
+export const executeMilestoneSetDependencies = noop;
 
 export const executeTaskReopen = async (params, projectDir, invocation) => {
   const capturePath = process.env.GSD_TEST_TASK_REOPEN_CAPTURE_PATH;

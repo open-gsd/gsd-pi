@@ -30,6 +30,11 @@ const EXTRA_SCOPED_GSD_LIFECYCLE_TOOLS = [
   "gsd_task_recovery_resume",
   "gsd_slice_reopen",
   "gsd_milestone_reopen",
+  "gsd_milestone_park",
+  "gsd_milestone_unpark",
+  "gsd_milestone_discard",
+  "gsd_milestone_reorder",
+  "gsd_milestone_set_dependencies",
 ] as const;
 
 const SCOPED_GSD_LIFECYCLE_TOOLS = new Set(

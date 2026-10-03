@@ -2902,6 +2902,142 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
 	registerWorkflowTool(pi, reopenMilestoneTool);
 
+	// ─── Milestone hierarchy: park, unpark, discard, reorder, dependencies ──
+
+	type MilestoneHierarchyExecutor =
+		| "executeMilestonePark"
+		| "executeMilestoneUnpark"
+		| "executeMilestoneDiscard"
+		| "executeMilestoneReorder"
+		| "executeMilestoneSetDependencies";
+
+	const milestoneHierarchyExecute =
+		(toolName: string, executor: MilestoneHierarchyExecutor) =>
+		async (
+			toolCallId: string,
+			params: any,
+			_signal: AbortSignal | undefined,
+			_onUpdate: unknown,
+			_ctx: unknown,
+		) => {
+			const executors = await loadWorkflowExecutors();
+			return executors[executor](
+				params,
+				resolveWorkflowToolBasePath(_ctx, params),
+				piExecutionInvocation(toolName, toolCallId),
+			);
+		};
+
+	const hierarchyMilestoneId = Type.String({
+		description: "Milestone ID (e.g. M003)",
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_park",
+		label: "Park Milestone",
+		description:
+			"Park a Milestone in one SQLite Domain Operation: it leaves the run, keeps all its work, and can be unparked later. The PARKED marker file is rendered from the database.",
+		promptSnippet: "Park a GSD Milestone (reversible)",
+		promptGuidelines: [
+			"Use gsd_milestone_park to shelve a milestone. Never create or edit a PARKED.md file; the database is the only source of park state.",
+			"A closed milestone cannot be parked.",
+		],
+		parameters: Type.Object({
+			milestoneId: hierarchyMilestoneId,
+			reason: Type.String({
+				minLength: 1,
+				description: "Why the milestone is parked",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_park",
+			"executeMilestonePark",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_unpark",
+		label: "Unpark Milestone",
+		description:
+			"Return a parked Milestone to the run in one SQLite Domain Operation. The PARKED marker file is removed after the commit.",
+		promptSnippet: "Unpark a parked GSD Milestone",
+		promptGuidelines: [
+			"Use gsd_milestone_unpark to reactivate a parked milestone. Never delete the PARKED.md file by hand.",
+		],
+		parameters: Type.Object({ milestoneId: hierarchyMilestoneId }),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_unpark",
+			"executeMilestoneUnpark",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_discard",
+		label: "Discard Milestone",
+		description:
+			"Discard a Milestone in one SQLite Domain Operation: the Milestone and its open Slices and Tasks are cancelled with a Waiver, its id is never reused, and its files, worktree and branch are removed after the commit. This cannot be undone.",
+		promptSnippet: "Discard a GSD Milestone permanently",
+		promptGuidelines: [
+			"Use gsd_milestone_discard only after the user explicitly confirmed the discard. Never delete a milestone directory by hand.",
+			"A complete milestone cannot be discarded. Prefer gsd_milestone_park when the milestone has completed work.",
+		],
+		parameters: Type.Object({
+			milestoneId: hierarchyMilestoneId,
+			reason: Type.String({
+				minLength: 1,
+				description: "Why the milestone is discarded (recorded in the Waiver)",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_discard",
+			"executeMilestoneDiscard",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_reorder",
+		label: "Reorder Milestones",
+		description:
+			"Set the execution order of the open Milestones in one SQLite Domain Operation. QUEUE-ORDER.json is rendered from the database.",
+		promptSnippet: "Set the execution order of open GSD Milestones",
+		promptGuidelines: [
+			"Use gsd_milestone_reorder to change the queue order. Never write QUEUE-ORDER.json by hand.",
+			"List only open milestone IDs, first to run first. The tool refuses an order that puts a milestone before one it depends on; change the dependency first with gsd_milestone_set_dependencies.",
+		],
+		parameters: Type.Object({
+			order: Type.Array(Type.String(), {
+				minItems: 1,
+				description: "Open milestone IDs in execution order",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_reorder",
+			"executeMilestoneReorder",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_set_dependencies",
+		label: "Set Milestone Dependencies",
+		description:
+			"Replace the depends_on list of one open Milestone in one SQLite Domain Operation.",
+		promptSnippet: "Set which Milestones a GSD Milestone depends on",
+		promptGuidelines: [
+			"Use gsd_milestone_set_dependencies to change dependencies. Never edit depends_on in a CONTEXT.md file; the database is the only source.",
+			"dependsOn replaces the whole list; pass [] to remove all dependencies. Unknown or discarded milestones and dependency cycles are refused.",
+		],
+		parameters: Type.Object({
+			milestoneId: hierarchyMilestoneId,
+			dependsOn: Type.Array(Type.String(), {
+				description: "Milestone IDs that must be complete first",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_set_dependencies",
+			"executeMilestoneSetDependencies",
+		),
+	});
+
 	// ─── gsd_save_gate_result ──────────────────────────────────────────────
 
 	const saveGateResultExecute = async (

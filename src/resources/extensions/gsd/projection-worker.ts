@@ -43,6 +43,7 @@ import {
   SLICE_LIFECYCLE_PROJECTION_KIND,
   TASK_LIFECYCLE_PROJECTION_KIND,
 } from "./projection-identity.js";
+import { renderQueueOrderFromDb } from "./queue-order.js";
 import { PROJECTION_LOCK_TRANSIENT_BACKOFF_MS } from "./recovery-policy.js";
 import { deriveState, invalidateStateCache } from "./state.js";
 import { isDiscardedMilestoneStatus } from "./status-guards.js";
@@ -136,6 +137,12 @@ async function renderKnowledgeFile(root: string): Promise<void> {
   noteRenderedProjectionFile(knowledgeMdPath(root), renderKnowledgeProjection(root).content);
 }
 
+/** QUEUE-ORDER.json is the projection of milestones.sequence (milestone.reorder). */
+async function renderQueueOrderFile(root: string): Promise<void> {
+  const queueOrderPath = renderQueueOrderFromDb(root);
+  noteRenderedProjectionFile(queueOrderPath, readFileSync(queueOrderPath, "utf-8"));
+}
+
 /**
  * Kind-to-renderer registry. Each kind that production code enqueues has a
  * renderer. Returns null for any other kind or key: such a row is never
@@ -146,6 +153,7 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
   if (HIERARCHY_KINDS.has(kind)) return hierarchyTarget(segments.slice(1));
   if (MILESTONE_KINDS.has(kind)) return hierarchyTarget(segments.slice(1, 2));
   if (STATE_KINDS.has(kind)) return { target: "state", render: renderStateFile };
+  if (kind === "queue-order") return { target: "queue-order", render: renderQueueOrderFile };
   if (kind !== MARKDOWN_PROJECTION_KIND) return null;
   if (segments[0] === "legacy-import") return { target: "all", render: renderAllFromDb };
   if (key.startsWith(MILESTONE_REBUILD_KEY_PREFIX)) {

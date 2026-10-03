@@ -21,14 +21,16 @@ import {
 } from "./gsd-db.js";
 import { getDb } from "./db/engine.js";
 import type { DomainOperationContext } from "./db/domain-operation.js";
+import type { ExecutionInvocation } from "./execution-invocation.js";
 import {
   adoptOrTransitionLifecycle,
   grantCancellationWaiver,
   readDomainOperationFence,
+  type CancellationWaiverInput,
 } from "./db/writers/lifecycle-commands.js";
 import { removeWorktree } from "./worktree-manager.js";
 import { logWarning } from "./workflow-logger.js";
-import { isAutoActive } from "./auto.js";
+import { isAutoActive } from "./auto-runtime-state.js";
 import { adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
 import { removeManagedProjectionTreeExactSync } from "./managed-projection-history.js";
 import { GSDError, GSD_STALE_STATE } from "./errors.js";
@@ -66,21 +68,38 @@ const EVENT_TYPES: Record<MilestoneCommand, string> = {
   discard: "milestone.discarded",
 };
 
+/** A tool call that already committed under its key; its retry replays the receipt. */
+function isReplay(invocation: ExecutionInvocation | undefined): boolean {
+  return invocation !== undefined && readDomainOperationFence(invocation.idempotencyKey).replay;
+}
+
+/**
+ * Run one milestone Domain Operation. A slash command has no call identity,
+ * so its key is the project revision. A tool call passes its invocation: the
+ * key is the tool-call key, and a retry of the same call replays the receipt.
+ * `eventDetails` holds values that differ between a call and its retry (the
+ * park time); they go in the event only, not in the replay-checked request.
+ */
 function runMilestoneOperation(
   command: MilestoneCommand,
   milestoneId: string,
   payload: Record<string, string | boolean>,
   apply: (context: Readonly<DomainOperationContext>) => void,
+  invocation?: ExecutionInvocation,
+  eventDetails: Record<string, string> = {},
 ): void {
-  const fence = readDomainOperationFence();
+  const fence = readDomainOperationFence(invocation?.idempotencyKey);
   const fullPayload = { milestoneId, ...payload };
   executeDomainOperation({
     operationType: `milestone.${command}`,
-    idempotencyKey: `command/${command}/${milestoneId}/${fence.revision}`,
+    idempotencyKey: invocation?.idempotencyKey ?? `command/${command}/${milestoneId}/${fence.revision}`,
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: "operator",
-    sourceTransport: "internal",
+    actorType: invocation?.actorType ?? "operator",
+    ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),
+    sourceTransport: invocation?.sourceTransport ?? "internal",
+    ...(invocation?.traceId ? { traceId: invocation.traceId } : {}),
+    ...(invocation?.turnId ? { turnId: invocation.turnId } : {}),
     payload: fullPayload,
   }, (context) => {
     apply(context);
@@ -89,7 +108,7 @@ function runMilestoneOperation(
         eventType: EVENT_TYPES[command],
         entityType: "milestone",
         entityId: milestoneId,
-        payload: fullPayload,
+        payload: { ...fullPayload, ...eventDetails },
         destinations: ["db"],
       }],
       projections: [{
@@ -144,20 +163,26 @@ export async function parkMilestone(
   basePath: string,
   milestoneId: string,
   reason: string,
-  options: { fromAutoLoop?: boolean } = {},
+  options: { fromAutoLoop?: boolean; invocation?: ExecutionInvocation } = {},
 ): Promise<boolean> {
   if (!options.fromAutoLoop) assertNotAutoActive("park milestone");
   assertDbAvailable("parkMilestone", milestoneId);
   const milestone = getMilestone(milestoneId);
   // Do not park a closed milestone — it would corrupt depends_on satisfaction.
-  if (!milestone || milestone.status === "parked" || isClosedStatus(milestone.status)) return false;
+  if (
+    !isReplay(options.invocation) &&
+    (!milestone || milestone.status === "parked" || isClosedStatus(milestone.status))
+  ) return false;
 
   try {
-    runMilestoneOperation("park", milestoneId, {
-      parked: true,
-      reason,
-      parkedAt: new Date().toISOString(),
-    }, (context) => writeMilestoneParkStatus(context, milestoneId, true));
+    runMilestoneOperation(
+      "park",
+      milestoneId,
+      { parked: true, reason },
+      (context) => writeMilestoneParkStatus(context, milestoneId, true),
+      options.invocation,
+      { parkedAt: new Date().toISOString() },
+    );
   } catch (err) {
     throw new Error(`parkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
   }
@@ -174,14 +199,18 @@ export async function parkMilestone(
  * marker is removed. Returns false when the milestone is not parked in the
  * database. Throws when the database write fails.
  */
-export async function unparkMilestone(basePath: string, milestoneId: string): Promise<boolean> {
+export async function unparkMilestone(
+  basePath: string,
+  milestoneId: string,
+  invocation?: ExecutionInvocation,
+): Promise<boolean> {
   assertNotAutoActive("unpark milestone");
   assertDbAvailable("unparkMilestone", milestoneId);
-  if (getMilestone(milestoneId)?.status !== "parked") return false;
+  if (!isReplay(invocation) && getMilestone(milestoneId)?.status !== "parked") return false;
 
   try {
     runMilestoneOperation("unpark", milestoneId, { parked: false }, (context) =>
-      writeMilestoneParkStatus(context, milestoneId, false));
+      writeMilestoneParkStatus(context, milestoneId, false), invocation);
   } catch (err) {
     throw new Error(`unparkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
   }
@@ -231,6 +260,7 @@ function cancelMilestoneHierarchy(
   context: Readonly<DomainOperationContext>,
   milestoneId: string,
   reason: string,
+  grantedBy: Pick<CancellationWaiverInput, "grantedByActorType" | "grantedByActorId">,
 ): void {
   const rows = loadDiscardRows(milestoneId);
   if (rows.some((row) => row.lifecycle_status === "in_progress" && row.task_id !== null)) {
@@ -263,8 +293,7 @@ function cancelMilestoneHierarchy(
     lifecycleId: milestoneLifecycleId,
     scope: `milestone:${milestoneId}`,
     rationale: reason,
-    grantedByActorType: "user",
-    grantedByActorId: "gsd-cli-operator",
+    ...grantedBy,
   });
 }
 
@@ -273,19 +302,29 @@ function cancelMilestoneHierarchy(
  * its open work, then the worktree, milestone directory and queue entry are
  * removed as projection cleanup. Returns false when the milestone is not in
  * the database. Throws when the milestone is complete or the write fails.
+ *
+ * The slash command records the Waiver as granted by the user. A tool call
+ * comes from the agent, so its Waiver is granted by policy, like a slice skip.
  */
-export async function discardMilestone(basePath: string, milestoneId: string): Promise<boolean> {
+export async function discardMilestone(
+  basePath: string,
+  milestoneId: string,
+  options: { reason?: string; invocation?: ExecutionInvocation } = {},
+): Promise<boolean> {
   assertNotAutoActive("discard milestone");
   assertDbAvailable("discardMilestone", milestoneId);
   const milestone = getMilestone(milestoneId);
   if (!milestone) return false;
-  if (isClosedStatus(milestone.status)) {
+  if (!isReplay(options.invocation) && isClosedStatus(milestone.status)) {
     throw new Error(`${milestoneId} is already closed (${milestone.status}) and cannot be discarded`);
   }
 
-  const reason = "Discarded by user";
+  const reason = options.reason ?? "Discarded by user";
+  const grantedBy = options.invocation
+    ? { grantedByActorType: "policy" as const, grantedByActorId: options.invocation.actorId ?? null }
+    : { grantedByActorType: "user" as const, grantedByActorId: "gsd-cli-operator" };
   runMilestoneOperation("discard", milestoneId, { reason }, (context) =>
-    cancelMilestoneHierarchy(context, milestoneId, reason));
+    cancelMilestoneHierarchy(context, milestoneId, reason, grantedBy), options.invocation);
 
   try {
     removeWorktree(basePath, milestoneId, {

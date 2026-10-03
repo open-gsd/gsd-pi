@@ -33,6 +33,7 @@ import {
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
 import { registerMemoryTools } from "../../../src/resources/extensions/gsd/bootstrap/memory-tools.ts";
 import { registerQueryTools } from "../../../src/resources/extensions/gsd/bootstrap/query-tools.ts";
+import { parkMilestone } from "../../../src/resources/extensions/gsd/milestone-actions.ts";
 import {
   claimTaskAttempt,
   settleTaskAttempt,
@@ -928,7 +929,8 @@ describe("Slice lifecycle persistent retry parity", () => {
 // ADR-046 gate G4, and the projection-ownership leg of G5. `passesWith` names
 // the cutover package that routes the tool through one Domain Operation. The
 // headless transport registers the same native tools in an RPC child and has
-// no leg here.
+// no leg here. `prepare` puts the fixture in the state the tool needs. The
+// milestone tools run in an order that each one can follow: discard is last.
 // `piTool` is the native name when it differs from the MCP name. `seed` runs
 // before the write fence is set. `renderPassesWith` names the package that
 // stops the tool's inline render from writing a workflow table.
@@ -939,6 +941,7 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
   passesWith: string | null;
   renderPassesWith?: string;
   seed?: () => void;
+  prepare?: (base: string) => Promise<unknown>;
 }> = [
   { tool: "gsd_slice_complete", args: SLICE_LIFECYCLE_CASES[0].args, passesWith: "P35" },
   {
@@ -998,6 +1001,16 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
     args: { category: "environment", content: "The gate fixture runs on a temporary project root." },
     passesWith: null,
   },
+  { tool: "gsd_milestone_park", args: { milestoneId: "M001", reason: "Parity park" }, passesWith: null },
+  {
+    tool: "gsd_milestone_unpark",
+    args: { milestoneId: "M001" },
+    passesWith: null,
+    prepare: (base) => parkMilestone(base, "M001", "Parity park"),
+  },
+  { tool: "gsd_milestone_reorder", args: { order: ["M001"] }, passesWith: null },
+  { tool: "gsd_milestone_set_dependencies", args: { milestoneId: "M001", dependsOn: [] }, passesWith: null },
+  { tool: "gsd_milestone_discard", args: { milestoneId: "M001", reason: "Parity discard" }, passesWith: null },
 ];
 
 function operationCount(): number {
@@ -1032,8 +1045,9 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
     for (const gateCase of OPERATION_ONLY_CASES) {
       const label = `${gateCase.tool}${gateCase.args.category ? ` (${gateCase.args.category})` : ""}`;
       it(`${transport} ${label}: one operation per call, none on replay, no write outside it`, async () => {
-        await withOperationOnlyFixture(transport, async (call) => {
+        await withOperationOnlyFixture(transport, async (call, base) => {
           gateCase.seed?.();
+          await gateCase.prepare?.(base);
           const before = operationCount();
           const fence = fenceWorkflowWrites();
           const first = await call(gateCase);

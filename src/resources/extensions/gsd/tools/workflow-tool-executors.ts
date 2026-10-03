@@ -34,6 +34,13 @@ export {
   resolveMilestoneStatusObservationContext,
   resolveMilestoneStatusObservationTokenState,
 } from "../milestone-status-observation-context.js";
+export {
+  executeMilestoneDiscard,
+  executeMilestonePark,
+  executeMilestoneReorder,
+  executeMilestoneSetDependencies,
+  executeMilestoneUnpark,
+} from "./milestone-hierarchy.js";
 import { emitLifecycleShadowObservation } from "../uok/audit.js";
 import { extractMilestoneSeq } from "../milestone-ids.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
