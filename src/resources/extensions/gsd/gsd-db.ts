@@ -192,17 +192,17 @@ export function upsertRequirement(r: Requirement): void {
 }
 
 export function clearArtifacts(): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   try { transaction(() => getDbOrNull()!.exec("DELETE FROM artifacts")); } catch (e) { logWarning("db", `clearArtifacts failed: ${(e as Error).message}`); }
 }
 
 export function clearDecisions(): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   try { transaction(() => getDbOrNull()!.exec("DELETE FROM decisions")); } catch (e) { logWarning("db", `clearDecisions failed: ${(e as Error).message}`); }
 }
 
 export function clearRequirements(): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   try { transaction(() => getDbOrNull()!.exec("DELETE FROM requirements")); } catch (e) { logWarning("db", `clearRequirements failed: ${(e as Error).message}`); }
 }
 
@@ -753,7 +753,7 @@ export function repairTaskCompletionFromSummary(t: {
 }
 
 export function setTaskBlockerDiscovered(milestoneId: string, sliceId: string, taskId: string, discovered: boolean): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE tasks SET blocker_discovered = :discovered WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
   ).run({ ":discovered": discovered ? 1 : 0, ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
@@ -896,7 +896,7 @@ export function clearTaskEscalationFlags(
 export function claimEscalationOverride(
   milestoneId: string, sliceId: string, sourceTaskId: string,
 ): boolean {
-  if (!getDbOrNull()!) return false;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   return immediateTransaction(() => {
     const now = new Date().toISOString();
     const result = getDbOrNull()!.prepare(
@@ -1465,7 +1465,7 @@ export function saveGateResult(g: {
 
 
 export function markAllGatesOmitted(milestoneId: string, sliceId: string): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE quality_gates SET status = 'complete', verdict = 'omitted', evaluated_at = :now
      WHERE milestone_id = :mid AND slice_id = :sid AND status = 'pending'`,
@@ -1481,7 +1481,7 @@ export function markPendingGatesOmittedForTurn(
   sliceId: string,
   turn: OwnerTurn,
 ): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   const gateIds = [...getGateIdsForTurn(turn)];
   if (gateIds.length === 0) return;
   const placeholders = gateIds.map((_, i) => `:gid${i}`).join(",");
@@ -1522,7 +1522,7 @@ export function insertGateRun(entry: {
   retryable: boolean;
   evaluatedAt: string;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `INSERT INTO gate_runs (
       trace_id, turn_id, gate_id, gate_type, unit_type, unit_id, milestone_id, slice_id, task_id,
@@ -1565,7 +1565,7 @@ export function upsertTurnGitTransaction(entry: {
   metadata?: Record<string, unknown>;
   updatedAt: string;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `INSERT OR REPLACE INTO turn_git_transactions (
       trace_id, turn_id, unit_type, unit_id, stage, action, push, status, error, metadata_json, updated_at
@@ -1598,7 +1598,7 @@ export function recordMilestoneCommitAttribution(entry: {
   files: string[];
   createdAt: string;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => {
     getDbOrNull()!!.prepare(
       `INSERT OR REPLACE INTO milestone_commit_attributions (
@@ -1654,7 +1654,7 @@ export function insertAuditEvent(entry: {
   ts: string;
   payload: Record<string, unknown>;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => {
     getDbOrNull()!!.prepare(
       `INSERT OR IGNORE INTO audit_events (

@@ -6,6 +6,7 @@ import { join } from "node:path";
 
 import { createTurnObserver } from "../uok/loop-adapter.ts";
 import { hasActiveWriterToken, resetWriterTokensForTests } from "../uok/writer.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function readAuditPayloads(basePath: string): Array<Record<string, unknown>> {
   const path = join(basePath, ".gsd", "audit", "events.jsonl");
@@ -20,7 +21,10 @@ function readAuditPayloads(basePath: string): Array<Record<string, unknown>> {
 test("uok turn observer adds writer sequence metadata to audit events", (t) => {
   const basePath = mkdtempSync(join(tmpdir(), "gsd-uok-loop-writer-"));
   resetWriterTokensForTests();
+  // Audit events are DB rows first; the JSONL is their projection (ADR-046).
+  openDatabase(":memory:");
   t.after(() => {
+    closeDatabase();
     resetWriterTokensForTests();
     rmSync(basePath, { recursive: true, force: true });
   });
