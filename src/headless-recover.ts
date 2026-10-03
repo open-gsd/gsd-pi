@@ -212,8 +212,9 @@ export async function handleRecover(
   const opened = modules.openWorkflowDatabase(basePath, { createEmptyAuthority: true })
   if (!opened.ok) {
     // Refuse-newer version skew forwards the exact engine message (T003 spike,
-    // mandate 3); every other open failure keeps the generic message.
-    if (opened.reason === 'schema-too-new' && opened.error instanceof Error) {
+    // mandate 3), and so does a database bound to another checkout (it names
+    // /gsd db bind); every other open failure keeps the generic message.
+    if ((opened.reason === 'schema-too-new' || opened.reason === 'checkout-unbound') && opened.error instanceof Error) {
       process.stderr.write(`[headless] recover: ${opened.error.message}\n`)
     } else {
       process.stderr.write(`[headless] recover: failed to open or create the GSD database at ${basePath}\n`)

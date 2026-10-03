@@ -685,3 +685,35 @@ test("headless recover forwards the exact refuse-newer message for a newer-schem
     "the generic open-failure message is replaced for the schema-too-new case",
   );
 });
+
+test("headless recover tells the user to run /gsd db bind in a copied checkout", async (t) => {
+  const base = makeMarkdownFixture();
+  const copy = mkdtempSync(join(tmpdir(), "gsd-headless-recover-copy-"));
+  const previousWrite = process.stderr.write;
+  const stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+    rmSync(copy, { recursive: true, force: true });
+  });
+
+  // The first open binds the database to `base`; the copy carries that binding.
+  assert.equal(await ensureDbOpen(base), true);
+  closeDatabase();
+  cpSync(join(base, ".gsd"), join(copy, ".gsd"), { recursive: true });
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  const result = await handleHeadlessRecover(copy);
+
+  assert.equal(result.exitCode, 1, "a database bound to another checkout is a recover failure");
+  assert.match(stderr.join(""), /checkout-unbound: .*run \/gsd db bind here/s);
+  assert.doesNotMatch(
+    stderr.join(""),
+    /failed to open or create the GSD database/,
+    "the generic open-failure message is replaced for the checkout-unbound case",
+  );
+});
