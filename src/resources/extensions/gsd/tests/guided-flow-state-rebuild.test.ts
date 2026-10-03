@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { rebuildState } from "../doctor.ts";
 import { renderStateContent } from "../workflow-projections.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 import {
   openDatabase,
   closeDatabase,
@@ -89,7 +90,7 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
     assert.ok(rebuilt.includes("M010"), "Rebuilt STATE.md should reference M010");
     assert.ok(!rebuilt.includes("M008"), "Rebuilt STATE.md should NOT reference stale M008");
     invalidateStateCache();
-    assert.equal(rebuilt, renderStateContent(await deriveState(base, { syncQueueOrder: false })), "one renderer writes STATE.md");
+    assert.equal(rebuilt, renderStateContent(await deriveState(base)), "one renderer writes STATE.md");
   });
 
   test("rebuildState keeps STATE.md unchanged when the DB is closed", async () => {
@@ -103,7 +104,7 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
     assert.equal(readFileSync(join(base, ".gsd", "STATE.md"), "utf-8"), stale, "no DB-unavailable page is written");
   });
 
-  test("checkAutoStartAfterDiscuss ignores state-manifest and recovers the missing DB row from CONTEXT.md", () => {
+  test("checkAutoStartAfterDiscuss creates no milestone row from state-manifest.json or CONTEXT.md", () => {
     base = createFixtureBase();
     openDatabase(":memory:");
     assert.equal(getMilestone("M001"), null);
@@ -129,17 +130,10 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
 
     const accepted = checkAutoStartAfterDiscuss();
 
-    assert.equal(accepted, true);
-    // A manifest veto would return before the R3b insert and leave no row.
-    assert.equal(getMilestone("M001")?.status, "queued");
-    assert.equal(notifications.some(n => n.level === "error" && n.message.includes("no DB row exists")), false);
-    assert.ok(
-      notifications.some(
-        n =>
-          n.level === "success" &&
-          n.message.includes("Milestone M001 context captured. Continuing the planning pipeline."),
-      ),
-    );
+    assert.equal(accepted, false);
+    assert.equal(getMilestone("M001"), null, "neither file creates the milestone row");
+    assert.equal(notifications.some(n => n.level === "error" && n.message.includes("no DB row exists")), true);
+    assert.equal(notifications.some(n => n.level === "success"), false);
     clearPendingAutoStart(base);
   });
 
@@ -150,6 +144,7 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
     assert.ok(db, "database should be open");
     db.exec("DROP TABLE milestones");
     db.exec("CREATE TABLE milestones (id TEXT PRIMARY KEY)");
+    saveContextArtifact("M001");
 
     writeFile(base, "milestones/M001/M001-CONTEXT.md", "# M001: Planned\n");
     writeFile(base, "STATE.md", "# GSD State\n\n**Active Milestone:** M001: Planned\n");
@@ -183,6 +178,7 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
     assert.ok(db, "database should be open");
     db.exec("DROP TABLE milestones");
     db.exec("CREATE TABLE milestones (id TEXT PRIMARY KEY)");
+    saveContextArtifact("M001");
 
     writeFile(base, "milestones/M001/M001-CONTEXT.md", "# M001: Planned\n");
     writeFile(base, "STATE.md", "# GSD State\n\n**Active Milestone:** M001: Planned\n");

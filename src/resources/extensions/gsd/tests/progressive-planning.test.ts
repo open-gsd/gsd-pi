@@ -16,7 +16,6 @@ import {
   setSliceSketchFlag,
   getSlice,
 } from "../gsd-db.ts";
-import { autoHealSketchFlags } from "../state-reconciliation/drift/sketch-flag.ts";
 import { deriveState, deriveStateFromDb, invalidateStateCache } from "../state.ts";
 import { reconcileBeforeDispatch } from "../state-reconciliation.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
@@ -205,7 +204,7 @@ test("ADR-011: refining + flag flipped OFF mid-milestone → falls through to pl
   }
 });
 
-test("ADR-011: existing PLAN + stale sketch flag heals via reconcileBeforeDispatch, then dispatch routes past refining (progressive_planning ON)", async (t) => {
+test("P16: a PLAN file on disk never clears is_sketch through derive, reconcile or dispatch", async (t) => {
   const originalCwd = process.cwd();
   const base = makeFlatFixtureBase();
   t.after(() => cleanup(base, originalCwd));
@@ -217,24 +216,21 @@ test("ADR-011: existing PLAN + stale sketch flag heals via reconcileBeforeDispat
     join(flatPhaseDir(base), "01-02-PLAN.md"),
     realPlanContent("S02"),
   );
+  const worktreePath = join(base, "worker");
+  mkdirSync(worktreePath, { recursive: true });
   process.chdir(base);
 
-  // Derivation is pure (ADR-017): a stale sketch flag (PLAN on disk but
-  // is_sketch=1) yields 'refining' and must NOT mutate the DB. Healing is
-  // owned by reconcileBeforeDispatch, which runs before every dispatch.
   invalidateStateCache();
-  const beforeReconcile = await deriveStateFromDb(base);
-  assert.equal(beforeReconcile.activeSlice?.id, "S02");
-  assert.equal(beforeReconcile.phase, "refining", "derive alone must not heal the stale sketch flag");
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "derive must not mutate is_sketch");
+  const fromWorktree = await deriveState(worktreePath, { projectRootForReads: base });
+  assert.equal(fromWorktree.phase, "refining");
 
   const reconcile = await reconcileBeforeDispatch(base);
   assert.equal(reconcile.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 0, "reconcile clears the stale sketch flag once PLAN exists");
 
   invalidateStateCache();
   const state = await deriveStateFromDb(base);
-  assert.equal(state.phase, "planning", "re-derive advances past refining once the flag is healed");
+  assert.equal(state.activeSlice?.id, "S02");
+  assert.equal(state.phase, "refining", "the sketch gate holds while the DB flag is set");
 
   const ctx: DispatchContext = {
     basePath: base,
@@ -244,96 +240,11 @@ test("ADR-011: existing PLAN + stale sketch flag heals via reconcileBeforeDispat
     prefs: { phases: { progressive_planning: true, reassess_after_slice: false } } as any,
   };
   const result = await resolveDispatch(ctx);
-  assert.equal(result.action, "dispatch", "planning phase dispatches plan-slice, not dead-ends");
-});
-
-test("ADR-011: autoHealSketchFlags flips is_sketch=0 when PLAN file exists", async (t) => {
-  const originalCwd = process.cwd();
-  const base = makeFixtureBase();
-  t.after(() => cleanup(base, originalCwd));
-
-  seedMilestoneWithSketchedS02(base);
-  writeS01Artifacts(base);
-  // Simulate crash between plan-slice write and sketch flip: PLAN.md exists
-  // but is_sketch is still 1.
-  writeFileSync(
-    join(base, ".gsd", "milestones", "M001", "slices", "S02", "S02-PLAN.md"),
-    "# S02 Plan\n",
-  );
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "pre: flagged as sketch");
-
-  const { existsSync } = await import("node:fs");
-  autoHealSketchFlags("M001", (sid) => {
-    const planPath = join(base, ".gsd", "milestones", "M001", "slices", sid, `${sid}-PLAN.md`);
-    return existsSync(planPath);
-  });
-
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 0, "post-heal: flag cleared");
-});
-
-test("ADR-011: reconcileBeforeDispatch auto-heals stale sketch flag when PLAN exists", async (t) => {
-  const originalCwd = process.cwd();
-  const base = makeFlatFixtureBase();
-  t.after(() => cleanup(base, originalCwd));
-
-  seedMilestoneWithSketchedS02(base);
-  writeFlatS01Artifacts(base);
-  writePreferences(base, "phases:\n  skip_research: false");
-  // Simulate plan-slice completion where PLAN exists but is_sketch was not flipped.
-  writeFileSync(
-    join(flatPhaseDir(base), "01-02-PLAN.md"),
-    realPlanContent("S02"),
-  );
-  process.chdir(base);
-
-  // Pure derivation reports the stale flag as 'refining' without repairing it.
-  invalidateStateCache();
-  const stale = await deriveStateFromDb(base);
-  assert.equal(stale.phase, "refining", "derive alone must not heal the stale flag");
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "is_sketch unchanged before reconcile");
-
-  // Reconciliation owns the repair (ADR-017 stale-sketch-flag drift handler).
-  const reconcile = await reconcileBeforeDispatch(base);
-  assert.equal(reconcile.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 0, "reconcile should clear stale is_sketch");
-
-  invalidateStateCache();
-  const healed = await deriveStateFromDb(base);
-  assert.equal(healed.phase, "planning", "state advances past refining once the stale flag is healed");
-});
-
-test("ADR-011: deriveState stays pure across worktree/canonical-root; healing belongs to reconcile at the canonical artifact root", async (t) => {
-  const originalCwd = process.cwd();
-  const base = makeFlatFixtureBase();
-  t.after(() => cleanup(base, originalCwd));
-
-  seedMilestoneWithSketchedS02(base);
-  writeFlatS01Artifacts(base);
-  writePreferences(base, "phases:\n  skip_research: false");
-  writeFileSync(
-    join(flatPhaseDir(base), "01-02-PLAN.md"),
-    realPlanContent("S02"),
-  );
-  const worktreePath = join(base, "worker");
-  mkdirSync(worktreePath, { recursive: true });
-  process.chdir(worktreePath);
-
-  // Deriving from the worktree with reads routed to the canonical artifact
-  // root resolves DB state but never mutates it (ADR-017: derive is pure).
-  // The legacy projectRootForReads-driven heal is gone; healing now happens
-  // in reconcileBeforeDispatch, which auto runs against canonicalProjectRoot.
-  invalidateStateCache();
-  const beforeReconcile = await deriveState(worktreePath, { projectRootForReads: base });
-  assert.equal(beforeReconcile.phase, "refining", "derive alone must not heal, even via projectRootForReads");
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "derive must not mutate is_sketch");
-
-  const reconcile = await reconcileBeforeDispatch(base);
-  assert.equal(reconcile.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 0, "reconcile at the canonical root heals the stale flag");
-
-  invalidateStateCache();
-  const healed = await deriveState(worktreePath, { projectRootForReads: base });
-  assert.equal(healed.phase, "planning", "re-derive advances past refining once healed at the canonical root");
+  assert.equal(result.action, "dispatch");
+  if (result.action === "dispatch") {
+    assert.equal(result.unitType, "refine-slice", "a PLAN file does not skip refinement");
+  }
+  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "only a plan tool clears is_sketch");
 });
 
 test("ADR-011: schema v16 is idempotent — re-opening DB preserves is_sketch and sketch_scope columns", async (t) => {

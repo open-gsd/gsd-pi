@@ -28,7 +28,7 @@ export interface MilestoneReadinessInput {
 
 export interface HandoffReadinessInput {
   milestoneId: string;
-  contextFile: string | null;
+  hasContext: boolean;
 }
 
 export function classifyMilestoneReadiness(input: MilestoneReadinessInput): MilestoneReadiness {
@@ -88,7 +88,7 @@ export function assessMilestoneHandoffReadiness(
 ): MilestoneReadiness {
   return classifyMilestoneReadiness({
     status: getMilestone(input.milestoneId)?.status,
-    hasContext: input.contextFile != null,
+    hasContext: input.hasContext,
     sliceCount: getMilestoneSlices(input.milestoneId).length,
   });
 }

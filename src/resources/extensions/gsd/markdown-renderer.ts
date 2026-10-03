@@ -309,6 +309,33 @@ function projectionEntities(opts: {
   return entities;
 }
 
+/** True when the artifacts row already stores exactly these rendered bytes. */
+function artifactRowHoldsRender(
+  artifactPath: string,
+  stamped: string,
+  opts: {
+    artifact_type: string;
+    milestone_id: string;
+    slice_id?: string;
+    task_id?: string;
+  },
+): boolean {
+  const artifact = getArtifact(artifactPath);
+  if (
+    !artifact ||
+    artifact.full_content !== stamped ||
+    artifact.artifact_type !== opts.artifact_type ||
+    artifact.milestone_id !== opts.milestone_id ||
+    (artifact.slice_id ?? null) !== (opts.slice_id ?? null) ||
+    (artifact.task_id ?? null) !== (opts.task_id ?? null)
+  ) {
+    return false;
+  }
+  // insertArtifact recomputes content_hash on every write; a row whose hash
+  // diverged (NULL or stale) must be repaired, not skipped (#2349).
+  return getArtifactContentHash(artifactPath) === createHash("sha256").update(stamped).digest("hex");
+}
+
 function projectionWriteAlreadyApplied(
   absPath: string,
   artifactPath: string,
@@ -328,24 +355,7 @@ function projectionWriteAlreadyApplied(
     return false;
   }
   if (!disk.equals(Buffer.from(stamped, "utf-8"))) return false;
-
-  const artifact = getArtifact(artifactPath);
-  if (
-    !artifact ||
-    artifact.full_content !== stamped ||
-    artifact.artifact_type !== opts.artifact_type ||
-    artifact.milestone_id !== opts.milestone_id ||
-    (artifact.slice_id ?? null) !== (opts.slice_id ?? null) ||
-    (artifact.task_id ?? null) !== (opts.task_id ?? null)
-  ) {
-    return false;
-  }
-  // insertArtifact recomputes content_hash on every write; a row whose hash
-  // diverged (NULL or stale) must be repaired, not skipped (#2349).
-  const storedHash = getArtifactContentHash(artifactPath);
-  if (storedHash !== createHash("sha256").update(stamped).digest("hex")) {
-    return false;
-  }
+  if (!artifactRowHoldsRender(artifactPath, stamped, opts)) return false;
 
   if (basePath) {
     try {
@@ -393,14 +403,18 @@ async function writeAndStore(
   await saveFile(absPath, stamped);
 
   try {
-    insertArtifact({
-      path: artifactPath,
-      artifact_type: opts.artifact_type,
-      milestone_id: opts.milestone_id,
-      slice_id: opts.slice_id ?? null,
-      task_id: opts.task_id ?? null,
-      full_content: stamped,
-    });
+    // A repair of a changed or deleted file re-renders bytes the row already
+    // holds; that render must not write the database.
+    if (!artifactRowHoldsRender(artifactPath, stamped, opts)) {
+      insertArtifact({
+        path: artifactPath,
+        artifact_type: opts.artifact_type,
+        milestone_id: opts.milestone_id,
+        slice_id: opts.slice_id ?? null,
+        task_id: opts.task_id ?? null,
+        full_content: stamped,
+      });
+    }
   } catch (error) {
     // Disk is a rebuildable projection, but callers must not report success
     // without its authoritative artifact lineage. The unstored disk copy is

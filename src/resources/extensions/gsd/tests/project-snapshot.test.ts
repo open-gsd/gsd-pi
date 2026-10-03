@@ -461,7 +461,7 @@ test("readProjectSnapshotFromDb returns null when no database exists", async (t)
   assert.equal(existsSync(join(root, ".gsd", "gsd.db")), false, "missing DB must not be created");
 });
 
-test("snapshot and progress reads never mutate milestone sequence from QUEUE-ORDER.json (runtime derive still repairs)", async (t) => {
+test("snapshot, progress and runtime derive never mutate milestone sequence from QUEUE-ORDER.json", async (t) => {
   const fixture = await createWorkflowAuthorityFixture();
   t.after(() => fixture.cleanup());
 
@@ -497,15 +497,14 @@ test("snapshot and progress reads never mutate milestone sequence from QUEUE-ORD
     "progress read must not mirror QUEUE-ORDER.json into DB sequence",
   );
 
-  // The runtime derive path (sync enabled) still repairs sequence from the
-  // file. deriveState is cache-first, so invalidate like a fresh runtime
-  // derive (the read above populated the cache).
+  // deriveState is cache-first, so invalidate like a fresh runtime derive
+  // (the read above populated the cache).
   invalidateStateCache();
   await deriveState(fixture.root);
   assert.deepEqual(
     getAllMilestones().map((m) => m.id),
-    ["M001", "M002", "M003"],
-    "runtime derive must keep the queue-order projection repair",
+    ["M002", "M001", "M003"],
+    "runtime derive must not mirror QUEUE-ORDER.json into DB sequence",
   );
 });
 

@@ -54,7 +54,7 @@ function statePath(base: string): string {
 
 async function expectedState(base: string): Promise<string> {
   invalidateStateCache();
-  return renderStateContent(await deriveState(base, { syncQueueOrder: false }));
+  return renderStateContent(await deriveState(base));
 }
 
 /** Overwrite STATE.md with stale bytes, run the mutation, then require the one DB render. */

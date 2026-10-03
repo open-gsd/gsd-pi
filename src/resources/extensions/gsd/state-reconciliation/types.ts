@@ -9,7 +9,6 @@ import type { GSDState } from "../types.js";
  * recognizes. Each variant carries the identifiers its matching repair needs.
  */
 export type DriftRecord =
-  | { kind: "stale-sketch-flag"; mid: string; sid: string }
   | { kind: "unmerged-merge-state"; basePath: string }
   | { kind: "stale-render"; renderPath: string; reason: string }
   | { kind: "stale-worker"; lockPath: string; pid: number }
@@ -39,11 +38,6 @@ export type DriftRecord =
       milestoneId: string;
       dbStatus: string;
       completedDispatchAt?: string | null;
-    }
-  | {
-      kind: "missing-completion-timestamp";
-      entity: "task" | "slice" | "milestone";
-      ids: string[];
     }
   | {
       kind: "external-markdown-edit";

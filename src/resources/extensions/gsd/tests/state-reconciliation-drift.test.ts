@@ -1,15 +1,15 @@
 // Project/App: gsd-pi
 // File Purpose: ADR-017 contract tests for drift-driven State Reconciliation.
-// Covers sketch-flag (#5700), merge-state (#5701), stale-render (#5702),
-// stale-worker (#5703), unregistered-milestone (#5704), roadmap-divergence
-// (#5705), and missing-completion-timestamp (#5706) drift end-to-end, plus
+// Covers merge-state (#5701), stale-render (#5702), stale-worker (#5703),
+// unregistered-milestone (#5704) and roadmap-divergence (#5705) drift
+// end-to-end, the absence of file-based sketch and completion repairs, plus
 // the repair-throw and persistent-drift error paths and Recovery
 // Classification mapping for ReconciliationFailedError.
 
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -92,7 +92,7 @@ function cleanup(base: string): void {
   }
 }
 
-test("ADR-017 (#5700): sketch-flag drift detected and repaired end-to-end", async (t) => {
+test("P16: a real PLAN on disk does not clear is_sketch through reconciliation", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
 
@@ -110,134 +110,12 @@ test("ADR-017 (#5700): sketch-flag drift detected and repaired end-to-end", asyn
     isSketch: true,
     sketchScope: "limited",
   });
-
-  // Simulate the post-crash scenario: a *real* PLAN.md (a decomposed task)
-  // exists on disk but the is_sketch flag is still 1.
+  // A decomposed PLAN with a real task exists on disk; only gsd_plan_slice and
+  // gsd_plan_task may clear the flag, inside their Domain Operation.
   writeFileSync(
     join(base, ".gsd", "phases", "01-test", "01-02-PLAN.md"),
     makeStalePlanContent("S02", [{ id: "T01", title: "Build the feature", done: false }]),
   );
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "pre: flagged as sketch");
-
-  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
-  const result = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => state,
-  });
-
-  assert.equal(result.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 0, "post: flag cleared");
-  // #1634: the fixture never renders ROADMAP.md, so the roadmap-missing
-  // handler also repairs on this pass — scope the assertion to the kind under
-  // test.
-  const sketchRepairs = result.repaired.filter((d) => d.kind === "stale-sketch-flag");
-  assert.equal(sketchRepairs.length, 1);
-  if (sketchRepairs[0]?.kind === "stale-sketch-flag") {
-    assert.equal(sketchRepairs[0].mid, "M001");
-    assert.equal(sketchRepairs[0].sid, "S02");
-  }
-});
-
-test("#1287: stub/placeholder PLAN does NOT clear the sketch flag", async (t) => {
-  const base = makeFixtureBase();
-  t.after(() => cleanup(base));
-
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Test", status: "active" });
-  insertSlice({
-    id: "S02",
-    milestoneId: "M001",
-    title: "Feature",
-    status: "pending",
-    risk: "medium",
-    depends: [],
-    demo: "S02 demo.",
-    sequence: 1,
-    isSketch: true,
-    sketchScope: "limited",
-  });
-
-  const planPath = join(base, ".gsd", "phases", "01-test", "01-02-PLAN.md");
-
-  // A bare stub PLAN (no decomposed tasks) must not clear the flag.
-  writeFileSync(planPath, "# S02 Plan\n");
-  clearRendererCaches();
-  let state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
-  let result = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => state,
-  });
-  assert.equal(result.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "stub PLAN: flag stays set");
-  assert.equal(result.repaired.filter((d) => d.kind === "stale-sketch-flag").length, 0, "stub PLAN: no repair");
-
-  // A projection round-trip stub whose only task is a synthetic "Plan NN"
-  // placeholder (migrate/transformer.buildTaskTitle) must also not clear it.
-  writeFileSync(
-    planPath,
-    makeStalePlanContent("S02", [{ id: "T01", title: "Plan 01", done: false }]),
-  );
-  clearRendererCaches();
-  state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
-  result = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => state,
-  });
-  assert.equal(result.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "placeholder task: flag stays set");
-  assert.equal(result.repaired.filter((d) => d.kind === "stale-sketch-flag").length, 0, "placeholder task: no repair");
-
-  // buildTaskTitle also emits `${phase} ${plan}` (e.g. "00 01") when the plan
-  // frontmatter carries phase/plan. This projected placeholder must not clear
-  // the flag either.
-  writeFileSync(
-    planPath,
-    makeStalePlanContent("S02", [{ id: "T01", title: "00 01", done: false }]),
-  );
-  clearRendererCaches();
-  state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
-  result = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => state,
-  });
-  assert.equal(result.ok, true);
-  assert.equal(
-    getSlice("M001", "S02")?.is_sketch,
-    1,
-    "phase/plan placeholder task: flag stays set",
-  );
-  assert.equal(result.repaired.filter((d) => d.kind === "stale-sketch-flag").length, 0, "phase/plan placeholder task: no repair");
-});
-
-test("T013: a state-version-stamped stub PLAN still does NOT clear the sketch flag", async (t) => {
-  const base = makeFixtureBase();
-  t.after(() => cleanup(base));
-
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Test", status: "active" });
-  insertSlice({
-    id: "S02",
-    milestoneId: "M001",
-    title: "Feature",
-    status: "pending",
-    risk: "medium",
-    depends: [],
-    demo: "S02 demo.",
-    sequence: 1,
-    isSketch: true,
-    sketchScope: "limited",
-  });
-
-  // The sketch judgment is about PLAN *content*, not projection freshness, so
-  // a stub carrying a current state-version stamp must still be parsed and
-  // rejected — the stamp only proves it was rendered from this DB state.
-  const version = getCurrentProjectStateVersion();
-  writeFileSync(
-    join(base, ".gsd", "phases", "01-test", "01-02-PLAN.md"),
-    `${makeStalePlanContent("S02", [{ id: "T01", title: "Plan 01", done: false }])}` +
-      `<!-- gsd:state-version=${version.revision}:${version.authorityEpoch} -->\n`,
-  );
-  clearRendererCaches();
 
   const result = await reconcileBeforeDispatch(base, {
     invalidateStateCache: () => {},
@@ -245,61 +123,13 @@ test("T013: a state-version-stamped stub PLAN still does NOT clear the sketch fl
   });
 
   assert.equal(result.ok, true);
-  assert.equal(
-    getSlice("M001", "S02")?.is_sketch,
-    1,
-    "stamped stub PLAN: flag stays set (no stamp short-circuit)",
-  );
-  assert.equal(result.repaired.filter((d) => d.kind === "stale-sketch-flag").length, 0, "stamped stub PLAN: no repair");
-});
-
-test("#1288: real tasks shaped like `word + number` still clear the sketch flag", async (t) => {
-  const base = makeFixtureBase();
-  t.after(() => cleanup(base));
-
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Test", status: "active" });
-  insertSlice({
-    id: "S02",
-    milestoneId: "M001",
-    title: "Feature",
-    status: "pending",
-    risk: "medium",
-    depends: [],
-    demo: "S02 demo.",
-    sequence: 1,
-    isSketch: true,
-    sketchScope: "limited",
-  });
-
-  const planPath = join(base, ".gsd", "phases", "01-test", "01-02-PLAN.md");
-
-  // `Step 1` / `RFC 1234` match the loose `word + number` shape but are genuine
-  // decomposed tasks. buildTaskTitle only emits `${phase} ${plan}` with a
-  // digit-led phase, so these must NOT be read as placeholders (#1288): a real
-  // plan-slice like this must still clear the stale is_sketch flag.
-  writeFileSync(
-    planPath,
-    makeStalePlanContent("S02", [
-      { id: "T01", title: "Step 1", done: false },
-      { id: "T02", title: "RFC 1234", done: false },
-    ]),
-  );
-  clearRendererCaches();
-  const state = makeState({ activeMilestone: { id: "M001", title: "Test" } });
-  const result = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => state,
-  });
-  assert.equal(result.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 0, "real task titles: flag cleared");
-  assert.equal(result.repaired.filter((d) => d.kind === "stale-sketch-flag").length, 1, "real task titles: repaired once");
+  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "the PLAN file does not change the DB flag");
 });
 
 test("ADR-017 (#5700): repair failure throws ReconciliationFailedError with shape", async () => {
-  const seenDrift: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const seenDrift: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const handler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => [seenDrift],
     repair: () => {
       throw new Error("simulated repair failure");
@@ -316,7 +146,7 @@ test("ADR-017 (#5700): repair failure throws ReconciliationFailedError with shap
     (err: unknown) => {
       assert.ok(err instanceof ReconciliationFailedError, "must be ReconciliationFailedError");
       assert.equal(err.failures.length, 1);
-      assert.equal(err.failures[0]?.drift.kind, "stale-sketch-flag");
+      assert.equal(err.failures[0]?.drift.kind, "unregistered-milestone");
       assert.ok(err.failures[0]?.cause instanceof Error);
       assert.equal((err.failures[0]?.cause as Error).message, "simulated repair failure");
       assert.equal(err.pass, 0);
@@ -366,10 +196,10 @@ test("ADR-017 (#5700): a detector failure degrades to a blocker without aborting
 
   let repairCount = 0;
   const workingHandler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () =>
       repairCount === 0
-        ? [{ kind: "stale-sketch-flag", mid: "M001", sid: "S02" }]
+        ? [{ kind: "unregistered-milestone", milestoneId: "M001" }]
         : [],
     repair: () => {
       repairCount++;
@@ -386,7 +216,7 @@ test("ADR-017 (#5700): a detector failure degrades to a blocker without aborting
   // The working handler (registered AFTER the thrower) still detected + repaired.
   assert.equal(repairCount, 1, "later handler must still run despite earlier detect failure");
   assert.equal(result.repaired.length, 1);
-  assert.equal(result.repaired[0]?.kind, "stale-sketch-flag");
+  assert.equal(result.repaired[0]?.kind, "unregistered-milestone");
   // The detector failure surfaces as a blocker so dispatch is still gated.
   assert.ok(
     result.blockers.some(
@@ -398,9 +228,9 @@ test("ADR-017 (#5700): a detector failure degrades to a blocker without aborting
 
 test("ADR-017 (#5700): persistent drift after cap=2 throws ReconciliationFailedError", async () => {
   // Detect always returns one drift; repair is a no-op (drift never goes away).
-  const persistent: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const persistent: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const handler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => [persistent],
     repair: () => {
       /* no-op: drift cannot be cleared */
@@ -418,7 +248,7 @@ test("ADR-017 (#5700): persistent drift after cap=2 throws ReconciliationFailedE
       assert.ok(err instanceof ReconciliationFailedError);
       assert.equal(err.failures.length, 0);
       assert.equal(err.persistentDrift.length, 1);
-      assert.equal(err.persistentDrift[0]?.kind, "stale-sketch-flag");
+      assert.equal(err.persistentDrift[0]?.kind, "unregistered-milestone");
       return true;
     },
   );
@@ -428,7 +258,7 @@ test("ADR-017 (#5700): classifyFailure recognizes ReconciliationFailedError", ()
   const err = new ReconciliationFailedError({
     failures: [
       {
-        drift: { kind: "stale-sketch-flag", mid: "M001", sid: "S02" },
+        drift: { kind: "unregistered-milestone", milestoneId: "M001" },
         cause: new Error("boom"),
       },
     ],
@@ -444,9 +274,9 @@ test("ADR-017 (#5700): classifyFailure recognizes ReconciliationFailedError", ()
 });
 
 test("ADR-017: terminal drift blockers return blockers instead of repair exceptions", async () => {
-  const record: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const record: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const handler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => [record],
     blocker: () => "manual drift review required",
     repair: () => {
@@ -466,7 +296,7 @@ test("ADR-017: terminal drift blockers return blockers instead of repair excepti
 });
 
 test("ADR-017: terminal blockers return a state snapshot refreshed after co-occurring repairs", async () => {
-  const repairDrift: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const repairDrift: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const terminalDrift: DriftRecord = {
     kind: "completed-milestone-reopened",
     milestoneId: "M001",
@@ -474,7 +304,7 @@ test("ADR-017: terminal blockers return a state snapshot refreshed after co-occu
   };
   let repaired = false;
   const repairHandler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: (state) => (state.nextAction === "before repair" ? [repairDrift] : []),
     repair: () => {
       repaired = true;
@@ -508,7 +338,7 @@ test("ADR-017: terminal drift blockers take precedence over co-occurring repair 
     milestoneId: "M001",
     dbStatus: "active",
   };
-  const repairDrift: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const repairDrift: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const terminalHandler: DriftHandler = {
     kind: "completed-milestone-reopened",
     detect: () => [terminalDrift],
@@ -518,7 +348,7 @@ test("ADR-017: terminal drift blockers take precedence over co-occurring repair 
     },
   };
   const repairHandler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => [repairDrift],
     repair: () => {
       throw new Error("simulated repair failure");
@@ -536,7 +366,7 @@ test("ADR-017: terminal drift blockers take precedence over co-occurring repair 
 });
 
 test("ADR-017: terminal drift found after repair cap returns blockers", async () => {
-  const repairDrift: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const repairDrift: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const terminalDrift: DriftRecord = {
     kind: "completed-milestone-reopened",
     milestoneId: "M001",
@@ -544,7 +374,7 @@ test("ADR-017: terminal drift found after repair cap returns blockers", async ()
   };
   let repairCount = 0;
   const repairHandler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => (repairCount < 2 ? [repairDrift] : []),
     repair: () => {
       repairCount++;
@@ -571,7 +401,7 @@ test("ADR-017: terminal drift found after repair cap returns blockers", async ()
 });
 
 test("ADR-017: final persistent drift mixed with blockers still fails closed", async () => {
-  const repairDrift: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const repairDrift: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const terminalDrift: DriftRecord = {
     kind: "completed-milestone-reopened",
     milestoneId: "M001",
@@ -579,7 +409,7 @@ test("ADR-017: final persistent drift mixed with blockers still fails closed", a
   };
   let repairCount = 0;
   const repairHandler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => [repairDrift],
     repair: () => {
       repairCount++;
@@ -605,7 +435,7 @@ test("ADR-017: final persistent drift mixed with blockers still fails closed", a
       assert.ok(err instanceof ReconciliationFailedError);
       assert.deepEqual(err.persistentDrift.map((d) => d.kind).sort(), [
         "completed-milestone-reopened",
-        "stale-sketch-flag",
+        "unregistered-milestone",
       ]);
       return true;
     },
@@ -1938,9 +1768,9 @@ test("ADR-017 (#1370): roadmap-divergence skips completed milestone sharing acti
   assert.equal(readFileSync(roadmapPath, "utf-8"), activeRoadmap);
 });
 
-// ─── #5706: missing-completion-timestamp drift ──────────────────────────────
+// ─── P16: SUMMARY mtime never writes completed_at ────────────────────────────
 
-test("ADR-017 (#5706): task with SUMMARY but null completed_at → backfilled", async (t) => {
+test("P16: a SUMMARY file does not backfill a null completed_at through reconciliation", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-adr017-completion-task-"));
   const tasksDir = join(base, ".gsd", "phases", "01-test");
   mkdirSync(tasksDir, { recursive: true });
@@ -1953,18 +1783,10 @@ test("ADR-017 (#5706): task with SUMMARY but null completed_at → backfilled", 
   insertMilestone({ id: "M001", title: "Test", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], demo: "", sequence: 1 });
   insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
-
-  // Move T01 to complete WITHOUT setting completed_at (simulating drift after
-  // an external recovery path or a partial state migration).
   updateTaskStatus("M001", "S01", "T01", "complete", undefined);
-  // SUMMARY.md attests to completion on disk.
-  const summaryPath = join(tasksDir, "T01-SUMMARY.md");
-  writeFileSync(summaryPath, "# T01 Summary\n");
-  const summaryMtimeMs = statSync(summaryPath).mtime.getTime();
-
-  const taskBefore = getSliceTasks("M001", "S01").find((t) => t.id === "T01");
-  assert.equal(taskBefore?.status, "complete");
-  assert.equal(taskBefore?.completed_at, null, "pre: completed_at is null");
+  updateSliceStatus("M001", "S01", "complete", undefined);
+  writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "# T01 Summary\n");
+  writeFileSync(join(tasksDir, "01-01-SUMMARY.md"), "# S01 Summary\n");
 
   const result = await reconcileBeforeDispatch(base, {
     invalidateStateCache: () => {},
@@ -1972,60 +1794,8 @@ test("ADR-017 (#5706): task with SUMMARY but null completed_at → backfilled", 
   });
 
   assert.equal(result.ok, true);
-  const taskAfter = getSliceTasks("M001", "S01").find((t) => t.id === "T01");
-  assert.ok(taskAfter?.completed_at, "post: completed_at populated");
-  const completedAtMs = Date.parse(taskAfter?.completed_at ?? "");
-  assert.ok(Number.isFinite(completedAtMs), "post: completed_at is parseable ISO string");
-  assert.equal(completedAtMs, summaryMtimeMs, "post: completed_at derived from SUMMARY mtime");
-  const drift = result.repaired.find((d) => d.kind === "missing-completion-timestamp");
-  assert.ok(drift, "drift recorded");
-  if (drift?.kind === "missing-completion-timestamp") {
-    assert.equal(drift.entity, "task");
-    assert.deepEqual(drift.ids, ["M001/S01/T01"]);
-  }
-});
-
-test("ADR-017 (#5706): repair is idempotent — re-running preserves the timestamp", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-adr017-completion-idempotent-"));
-  const sliceDir = join(base, ".gsd", "phases", "01-test");
-  mkdirSync(sliceDir, { recursive: true });
-  t.after(() => {
-    try { closeDatabase(); } catch { /* noop */ }
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M001", title: "Test", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], demo: "", sequence: 1 });
-  updateSliceStatus("M001", "S01", "complete", undefined);
-  const summaryPath = join(sliceDir, "01-01-SUMMARY.md");
-  writeFileSync(summaryPath, "# S01 Summary\n");
-  const summaryMtimeMs = statSync(summaryPath).mtime.getTime();
-
-  const firstResult = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => makeState({ activeMilestone: { id: "M001", title: "Test" } }),
-  });
-  assert.equal(firstResult.ok, true);
-  const tsAfterFirst = getSlice("M001", "S01")?.completed_at;
-  assert.ok(tsAfterFirst, "first pass: completed_at populated");
-  const completedAtMs = Date.parse(tsAfterFirst ?? "");
-  assert.ok(Number.isFinite(completedAtMs), "first pass: completed_at is parseable ISO string");
-  assert.equal(completedAtMs, summaryMtimeMs, "first pass: completed_at derived from SUMMARY mtime");
-
-  // Second pass — drift is already cleared, no record should appear, and
-  // the existing timestamp is untouched.
-  const secondResult = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => makeState({ activeMilestone: { id: "M001", title: "Test" } }),
-  });
-  assert.equal(secondResult.ok, true);
-  assert.equal(
-    secondResult.repaired.some((d) => d.kind === "missing-completion-timestamp"),
-    false,
-    "second pass: no drift detected after first repair",
-  );
-  assert.equal(getSlice("M001", "S01")?.completed_at, tsAfterFirst, "timestamp unchanged");
+  assert.equal(getSliceTasks("M001", "S01").find((task) => task.id === "T01")?.completed_at, null);
+  assert.equal(getSlice("M001", "S01")?.completed_at, null);
 });
 
 test("ADR-017: artifact/DB status divergence fails closed instead of importing completion artifacts", async (t) => {
@@ -2691,9 +2461,9 @@ test("ADR-017 (#5707): reconcileBeforeSpawn surfaces blockers as ok=false", asyn
 });
 
 test("ADR-017 (#5707): reconcileBeforeSpawn catches ReconciliationFailedError → ok=false", async () => {
-  const persistent: DriftRecord = { kind: "stale-sketch-flag", mid: "M001", sid: "S02" };
+  const persistent: DriftRecord = { kind: "unregistered-milestone", milestoneId: "M001" };
   const handler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => [persistent],
     repair: () => { /* no-op: drift cannot be cleared, persists past cap=2 */ },
   };
@@ -2706,18 +2476,18 @@ test("ADR-017 (#5707): reconcileBeforeSpawn catches ReconciliationFailedError �
 
   assert.equal(result.ok, false);
   if (!result.ok) {
-    assert.match(result.reason, /stale-sketch-flag/);
+    assert.match(result.reason, /unregistered-milestone/);
   }
 });
 
 test("ADR-017 (#5707): reconcileBeforeSpawn reports repaired drift in ok=true reason", async () => {
   let detectCalls = 0;
   const handler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => {
       detectCalls++;
       return detectCalls === 1
-        ? [{ kind: "stale-sketch-flag", mid: "M001", sid: "S02" }]
+        ? [{ kind: "unregistered-milestone", milestoneId: "M001" }]
         : [];
     },
     repair: () => { /* repair "succeeds" — second detect returns empty */ },
@@ -2731,7 +2501,7 @@ test("ADR-017 (#5707): reconcileBeforeSpawn reports repaired drift in ok=true re
 
   assert.equal(result.ok, true);
   if (result.ok) {
-    assert.match(result.reason ?? "", /stale-sketch-flag/);
+    assert.match(result.reason ?? "", /unregistered-milestone/);
   }
 });
 
@@ -2804,15 +2574,15 @@ test("ADR-017 (#5700): cascading drift triggers second pass within cap", async (
   // (cascading); repair fixes it. Third call would see no drift. Cap=2 means
   // we have exactly two repair passes available.
   const detectedSequence: DriftRecord[][] = [
-    [{ kind: "stale-sketch-flag", mid: "M001", sid: "S02" }],
-    [{ kind: "stale-sketch-flag", mid: "M001", sid: "S03" }],
+    [{ kind: "unregistered-milestone", milestoneId: "M001" }],
+    [{ kind: "unregistered-milestone", milestoneId: "M002" }],
     [],
   ];
   let detectCallIdx = 0;
   const repaired: DriftRecord[] = [];
 
   const handler: DriftHandler = {
-    kind: "stale-sketch-flag",
+    kind: "unregistered-milestone",
     detect: () => detectedSequence[detectCallIdx++] ?? [],
     repair: (record) => {
       repaired.push(record);
@@ -2830,7 +2600,7 @@ test("ADR-017 (#5700): cascading drift triggers second pass within cap", async (
   assert.equal(repaired.length, 2);
 });
 
-test("deriveState is pure: stale sketch healed only via reconcileBeforeDispatch", async (t) => {
+test("deriveState and reconcileBeforeDispatch never clear a sketch flag from a PLAN file", async (t) => {
   const base = makeFixtureBase();
   t.after(() => cleanup(base));
 
@@ -2862,18 +2632,18 @@ test("deriveState is pure: stale sketch healed only via reconcileBeforeDispatch"
 
   const result = await reconcileBeforeDispatch(base);
   assert.equal(result.ok, true);
-  assert.equal(getSlice("M001", "S02")?.is_sketch, 0, "reconcile clears sketch flag");
+  assert.equal(getSlice("M001", "S02")?.is_sketch, 1, "reconcile does not clear the sketch flag from a file");
 
   invalidateStateCache();
   const afterReconcile = await deriveState(base);
-  assert.notEqual(afterReconcile.phase, "refining", "derive after reconcile advances past sketch gate");
+  assert.equal(afterReconcile.phase, "refining", "the sketch gate holds until a plan tool clears the flag");
 });
 
 test("pre-dispatch reconciliation excludes projection observations", () => {
   assert.equal(RECONCILIATION_REPAIR_PHASES.length, 2);
   assert.equal(handlerPhaseIndex("external-markdown-edit"), -1);
   assert.equal(handlerPhaseIndex("external-planning-edit"), -1);
-  assert.ok(handlerPhaseIndex("stale-sketch-flag") < handlerPhaseIndex("stale-render"));
+  assert.ok(handlerPhaseIndex("unregistered-milestone") < handlerPhaseIndex("stale-render"));
 });
 
 test("custom reconciliation blockers retain their structured drift evidence", async () => {

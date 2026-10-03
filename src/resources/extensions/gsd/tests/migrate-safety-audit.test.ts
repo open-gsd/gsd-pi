@@ -532,7 +532,7 @@ test("executeMigrationWrite records audit artifacts and verifies DB-backed proje
     assert.equal(result.verification.dbReadiness.registry, 2, "imported and preserved authority are readable by deriveState");
     assert.equal(
       readFileSync(join(base, ".gsd", "STATE.md"), "utf8"),
-      renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+      renderStateContent(await deriveState(base)),
       "migration leaves a STATE.md rendered from the imported database",
     );
     assert.notEqual(result.verification.dbReadiness.phase, "not-checked", "readiness gate ran before audit");

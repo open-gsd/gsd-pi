@@ -195,9 +195,7 @@ function buildCurrent(state: GSDState): DbProjectSnapshotCurrent {
  * snapshot was assembled and the current section may tear relative to the
  * transactional sections under concurrent commits — the stability-retry loop
  * bounds but does not eliminate that (same contract as readProgressFromDb).
- * Reads never mutate: the queue-order projection sync stays a runtime
- * derive/dispatch repair, so the snapshot reports DB-authoritative order
- * as-is even when QUEUE-ORDER.json is newer.
+ * Milestone order comes from milestones.sequence, never from QUEUE-ORDER.json.
  */
 export async function readProjectSnapshotFromDb(
   basePath: string,
@@ -205,14 +203,14 @@ export async function readProjectSnapshotFromDb(
 ): Promise<DbProjectSnapshot | null> {
   const previousDbPath = opts.preserveGlobalDbHandle ? getDbPath() : null;
   try {
-    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath, { syncQueueOrder: false });
+    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath);
     if (!openedRequestedDb || !isDbAvailable()) return null;
 
     invalidateStateCache();
     for (let attempt = 1; ; attempt++) {
       const before = readStabilityToken();
       const dbRead = readSnapshotDb();
-      const state = await deriveState(basePath, { syncQueueOrder: false });
+      const state = await deriveState(basePath);
       const after = readStabilityToken();
 
       if (stabilityTokensMatch(before, after) || attempt === MAX_REVISION_ATTEMPTS) {

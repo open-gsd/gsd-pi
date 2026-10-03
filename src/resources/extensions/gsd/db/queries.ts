@@ -356,20 +356,6 @@ export function getRequirementCounts(): {
   return rowsToRequirementCounts(rows);
 }
 
-/**
- * ADR-017 raw primitive: returns slice IDs in a milestone whose is_sketch flag
- * is still 1. The stale-sketch-flag drift handler at
- * `state-reconciliation/drift/sketch-flag.ts` composes this with PLAN.md
- * existence checks to detect drift, then writes via `setSliceSketchFlag`.
- */
-export function getSketchedSliceIds(milestoneId: string): string[] {
-  if (!getDbOrNull()!) return [];
-  const rows = getDbOrNull()!.prepare(
-    `SELECT id FROM slices WHERE milestone_id = :mid AND is_sketch = 1`,
-  ).all({ ":mid": milestoneId }) as Array<{ id: string }>;
-  return rows.map((r) => r.id);
-}
-
 export function getSlice(milestoneId: string, sliceId: string): SliceRow | null {
   if (!getDbOrNull()!) return null;
   const row = getDbOrNull()!.prepare("SELECT * FROM slices WHERE milestone_id = :mid AND id = :sid").get({ ":mid": milestoneId, ":sid": sliceId });

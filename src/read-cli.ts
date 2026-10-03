@@ -170,8 +170,7 @@ async function tryReadProgressFromDb(
  * After this guard, `gsd read progress` prefers a DB-derived payload
  * (state/progress-from-db.ts via the extension runtime). Unlike the
  * preflight, that read opens the DB through the engine's normal path: it
- * runs pending migrations and syncs the milestone queue-order projection —
- * the same contract as `gsd headless status`. A locked or unreadable DB
+ * runs pending migrations. A locked or unreadable DB
  * falls back to markdown; a failed DB-backed read refuses loudly instead.
  */
 async function assertProjectDbSchemaSupported(

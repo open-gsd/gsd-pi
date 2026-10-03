@@ -26,9 +26,7 @@ import {
   getPendingGatesForTurn,
   markPendingGatesOmittedForTurn,
   getMilestone,
-  insertArtifact,
   insertAssessment,
-  setSliceSketchFlag,
   transaction,
   getAssessment,
   getSliceRunUatAssessment,
@@ -332,9 +330,9 @@ export async function readUatGateVerdict(
       return null;
     }
 
-    // Backfilled assessments (#1258) are placeholders created during milestone
-    // validation for completed slices that never produced a real UAT ASSESSMENT
-    // (e.g. artifact-driven UAT that was never dispatched). Their fabricated
+    // Backfilled assessments (#1258) are placeholders that older versions created
+    // during milestone validation for completed slices that never produced a real
+    // UAT ASSESSMENT (e.g. artifact-driven UAT that was never dispatched). Their fabricated
     // verdict must not be treated as a genuine UAT sign-off — otherwise "never
     // checked" is silently read as "passed". Skip the placeholder and fall
     // through to the authoritative run-uat DB row (which stays null unless a
@@ -573,114 +571,10 @@ export function findMissingSummaries(basePath: string, mid: string): string[] {
     .map(s => s.id);
 }
 
-function stringField(row: Record<string, unknown> | null, key: string): string | null {
-  const value = row?.[key];
-  return typeof value === "string" ? value : null;
-}
-
-function stripGsdPrefix(path: string): string {
-  return path.startsWith(".gsd/") ? path.slice(".gsd/".length) : path;
-}
-
-// Scope marker for assessments fabricated by the milestone-validation backfill
-// (#1258). It keeps these placeholders distinguishable from genuine `run-uat`
-// sign-offs so `readUatGateVerdict` never mistakes "never checked" for "passed".
+// Scope marker of assessment rows that older versions fabricated during
+// milestone validation (#1258). No code writes this scope any more; the reader
+// keeps it so a legacy placeholder is never read as a genuine `run-uat` sign-off.
 const BACKFILL_ASSESSMENT_SCOPE = "backfill";
-
-function persistSliceAssessmentBackfill(
-  assessmentRelPath: string,
-  mid: string,
-  sliceId: string,
-  content: string,
-  fabricated: boolean,
-): void {
-  const artifactPath = stripGsdPrefix(assessmentRelPath);
-  const existingAssessment =
-    getAssessment(assessmentRelPath) ??
-    getAssessment(artifactPath);
-  // A newly fabricated placeholder is filed under a distinct scope; a pre-existing
-  // on-disk ASSESSMENT keeps its real scope (default `run-uat`) so genuine
-  // sign-offs are still honored.
-  const scope = fabricated
-    ? BACKFILL_ASSESSMENT_SCOPE
-    : stringField(existingAssessment, "scope") ?? "run-uat";
-  const status = stringField(existingAssessment, "status") ??
-    extractVerdict(content)?.toLowerCase() ??
-    "unknown";
-
-  transaction(() => {
-    insertArtifact({
-      path: artifactPath,
-      artifact_type: "ASSESSMENT",
-      milestone_id: mid,
-      slice_id: sliceId,
-      task_id: null,
-      full_content: content,
-    });
-    if (!getAssessment(assessmentRelPath)) {
-      insertAssessment({
-        path: assessmentRelPath,
-        milestoneId: mid,
-        sliceId,
-        taskId: null,
-        status,
-        scope,
-        fullContent: content,
-      });
-    }
-  });
-}
-
-function backfillMissingAssessmentsFromSummaries(basePath: string, mid: string): void {
-  // DB-authoritative (ADR-017): no markdown fallback. Without DB rows there
-  // is nothing to backfill.
-  if (!isDbAvailable()) return;
-  // Canonical closed vocabulary (complete/done/skipped/closed) — a skipped or
-  // closed slice with a SUMMARY gets the same assessment backfill treatment.
-  for (const sliceId of getClosedSliceIds(mid)) {
-    const summaryPath = resolveSliceFile(basePath, mid, sliceId, "SUMMARY");
-    if (!summaryPath || !existsSync(summaryPath)) continue;
-
-    const assessmentPath = resolveSliceFile(basePath, mid, sliceId, "ASSESSMENT")
-      ?? join(basePath, relSliceFile(basePath, mid, sliceId, "ASSESSMENT"));
-    if (!assessmentPath) continue;
-
-    const assessmentRelPath = relSliceFile(basePath, mid, sliceId, "ASSESSMENT");
-    const now = new Date().toISOString();
-    const didCreateAssessment = !existsSync(assessmentPath);
-    const content = didCreateAssessment ? [
-      "---",
-      `sliceId: ${sliceId}`,
-      "verdict: PASS",
-      // Distinguishing marker (#1258): this ASSESSMENT was fabricated to satisfy
-      // the per-slice artifact requirement, NOT produced by a real UAT run. It
-      // must not be read as a genuine UAT sign-off.
-      "backfilled: true",
-      "verified: false",
-      `date: ${now}`,
-      "---",
-      "",
-      `# Assessment — ${sliceId}`,
-      "",
-      "Auto-created during milestone validation because this completed slice had a SUMMARY but no ASSESSMENT artifact.",
-      "This is a placeholder: no UAT was executed for this slice, so its verdict is not an independent sign-off.",
-      "No additional reassessment changes were detected in this backfill step.",
-      "",
-    ].join("\n") : readFileSync(assessmentPath, "utf-8");
-
-    if (isDbAvailable()) {
-      try {
-        persistSliceAssessmentBackfill(assessmentRelPath, mid, sliceId, content, didCreateAssessment);
-      } catch (err) {
-        logWarning("dispatch", `failed to backfill assessment DB rows for ${mid}/${sliceId}: ${(err as Error).message}`);
-      }
-    }
-
-    if (didCreateAssessment) {
-      atomicWriteSync(assessmentPath, content, "utf-8");
-    }
-  }
-}
 
 function recordAdoptedMilestoneValidationWaiver(
   basePath: string,
@@ -1482,23 +1376,11 @@ export const DISPATCH_RULES: DispatchRule[] = [
     // PLAN.md is only a projection, so plan-slice/refine-slice handlers must
     // explicitly clear `is_sketch` when a sketch becomes a full plan.
     name: "refining → refine-slice",
-    match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry, sessionProvider, preview }) => {
+    match: async ({ state, mid, midTitle, basePath, prefs, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "refining") return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice.id;
       const sTitle = state.activeSlice.title;
-
-      // Crash recovery: if PLAN exists but DB still says sketch, heal and
-      // skip so the next loop re-derives phase from corrected DB state.
-      if (isDbAvailable()) {
-        const planFile = resolveSliceFile(basePath, mid, sid, "PLAN");
-        if (planFile && existsSync(planFile)) {
-          // Preview shares the skip decision; only the heal write is
-          // suppressed.
-          if (!preview) setSliceSketchFlag(mid, sid, false);
-          return { action: "skip" };
-        }
-      }
 
       const progressiveOn = prefs?.phases?.progressive_planning === true;
       if (!progressiveOn) {
@@ -2017,13 +1899,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
           };
         }
       }
-
-      // #6225: validation requires per-slice ASSESSMENT artifacts (MV02), but
-      // the default auto path can complete all slices without creating them.
-      // Backfill no-change assessments for completed slices that already have
-      // SUMMARY evidence before dispatching validate-milestone. Preview skips
-      // the backfill writes; the dispatch decision below is unaffected.
-      if (!adoptedMilestone && !preview) backfillMissingAssessmentsFromSummaries(basePath, mid);
 
       // #4781 phase 2: trivial-scope milestones skip the dedicated validate
       // unit — complete-milestone's own verification steps (3/4/5 in the

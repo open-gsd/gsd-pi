@@ -527,7 +527,7 @@ test('workflow-projections: renderStateProjection renders the DB state even when
     assert.deepEqual(await renderStateProjection(base), { stale: false });
 
     invalidateStateCache();
-    const expected = renderStateContent(await deriveState(base, { syncQueueOrder: false }));
+    const expected = renderStateContent(await deriveState(base));
     assert.equal(readFileSync(statePath, 'utf-8'), expected, 'STATE.md bytes come from the DB, not the manifest file');
     assert.ok(!expected.includes('M001: Existing'));
   } finally {
@@ -609,7 +609,7 @@ for (const layout of ['real', 'symlinked', 'worktree'] as const) {
       invalidateStateCache();
       assert.equal(
         readFileSync(statePath, 'utf-8'),
-        renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+        renderStateContent(await deriveState(base)),
       );
       assert.equal(existsSync(join(gsdDir, 'quarantine')), false);
       assert.equal(existsSync(join(root, 'home', '.gsd', 'quarantine')), false);

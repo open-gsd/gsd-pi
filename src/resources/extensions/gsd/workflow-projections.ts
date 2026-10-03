@@ -406,8 +406,7 @@ export async function renderStateProjection(basePath: string): Promise<{ stale: 
       });
       return { stale: true };
     }
-    // A projection render must not import QUEUE-ORDER.json into the DB.
-    const content = renderStateContent(await deriveState(basePath, { syncQueueOrder: false }));
+    const content = renderStateContent(await deriveState(basePath));
     const dir = gsdRoot(basePath);
     mkdirSync(dir, { recursive: true });
     atomicWriteSync(join(dir, "STATE.md"), content);

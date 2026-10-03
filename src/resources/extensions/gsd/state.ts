@@ -25,7 +25,7 @@ import {
   type DeriveStateOptions,
 } from './state/derive/index.js';
 import { deriveStateFromDb } from './state/derive/from-db.js';
-import { getRequestedMilestoneLock, syncQueueOrderProjectionToDb } from './state/derive/db-open.js';
+import { getRequestedMilestoneLock } from './state/derive/db-open.js';
 
 export {
   deriveState,
@@ -171,7 +171,6 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
 
   // DB-first: query milestones table for the first non-complete, non-parked milestone
   if (isDbAvailable()) {
-    syncQueueOrderProjectionToDb(basePath);
     const allMilestones = getAllMilestones();
     if (allMilestones.length > 0) {
       for (const m of allMilestones) {

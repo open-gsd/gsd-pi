@@ -1,7 +1,8 @@
 // gsd-pi + Regression tests for checkAutoStartAfterDiscuss handoff copy (R3b)
 //
-// Missing-row repair may accept a context handoff, but "Milestone X ready."
-// is reserved for executable plans with persisted slices in DB mode.
+// Missing-row repair may accept a handoff whose CONTEXT artifact row is in the
+// database, but "Milestone X ready." is reserved for executable plans with
+// persisted slices. A CONTEXT.md file alone never writes the database.
 
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -28,7 +29,7 @@ import {
   clearPendingGate,
 } from "../bootstrap/write-gate.ts";
 import { getMilestoneScopedArtifacts } from "../db/queries.ts";
-import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 
 interface MockCapture {
   notifies: Array<{ msg: string; level: string }>;
@@ -95,9 +96,10 @@ describe("checkAutoStartAfterDiscuss ready-notify DB guard (R3b)", () => {
     }
   });
 
-  test("repairs a missing milestone DB row and accepts context-captured handoff", () => {
+  test("repairs a missing milestone row when a saved CONTEXT artifact row exists", () => {
     base = mkBase();
     openDatabase(":memory:");
+    saveContextArtifact("M001");
 
     cap = mkCapture();
     setPendingAutoStart(base, {
@@ -189,11 +191,10 @@ describe("checkAutoStartAfterDiscuss ready-notify DB guard (R3b)", () => {
     assert.ok(successReady, "must announce 'Milestone M001 ready.' on success");
   });
 
-  test("registers out-of-band CONTEXT.md in the DB so derive no longer reports needs-discussion (#2107)", async () => {
+  test("refuses a CONTEXT.md that was not saved to the database and writes no artifact row (#2107)", () => {
     base = mkBase();
     openDatabase(":memory:");
-    // Milestone row exists but no CONTEXT artifact row — the context was
-    // written out-of-band (not via gsd_summary_save), so the DB never saw it.
+    // The milestone row exists; the context was written to disk only.
     insertMilestone({ id: "M001", title: "Ready Guard Test", status: "needs-discussion" });
 
     cap = mkCapture();
@@ -205,32 +206,30 @@ describe("checkAutoStartAfterDiscuss ready-notify DB guard (R3b)", () => {
       pi: mkPi(cap),
     });
 
-    const result = checkAutoStartAfterDiscuss();
-    assert.equal(result, true, "handoff with on-disk context and existing row must be accepted");
+    assert.equal(checkAutoStartAfterDiscuss(), false, "a file with no artifact row is not a handoff");
+    assert.deepEqual(getMilestoneScopedArtifacts("M001"), [], "the file is not registered in the database");
+    assert.equal(_getPendingAutoStart(base)?.milestoneId, "M001", "the handoff stays pending");
+    assert.equal(cap.notifies.length, 1);
+    assert.equal(cap.notifies[0]!.level, "error");
+    assert.match(cap.notifies[0]!.msg, /CONTEXT\.md is on disk but not in the database.*gsd_summary_save/);
+  });
 
-    const contextRows = getMilestoneScopedArtifacts("M001").filter(
-      (a) => a.artifact_type === "CONTEXT",
-    );
-    assert.equal(contextRows.length, 1, "out-of-band CONTEXT.md must be registered as a DB artifact");
-    assert.equal(
-      contextRows[0]!.path,
-      "milestones/M001/M001-CONTEXT.md",
-      "registered path must match the canonical gsd_summary_save layout",
-    );
-    assert.equal(
-      contextRows[0]!.full_content,
-      "# M001: Ready Guard Test\n\nContext.\n",
-      "registered content must come from the on-disk file",
-    );
+  test("a CONTEXT.md on disk never creates the milestone row", () => {
+    base = mkBase();
+    openDatabase(":memory:");
 
-    invalidateStateCache();
-    const dbState = await deriveStateFromDb(base);
-    assert.notEqual(
-      dbState.phase,
-      "needs-discussion",
-      "derive must not re-enter discuss after the handoff accepted context",
-    );
-    assert.equal(dbState.phase, "pre-planning", "milestone with context but no slices is pre-planning");
-    assert.equal(dbState.activeMilestone?.id, "M001", "M001 must be the active milestone");
+    cap = mkCapture();
+    setPendingAutoStart(base, {
+      basePath: base,
+      milestoneId: "M001",
+      startAuto: false,
+      ctx: mkCtx(cap),
+      pi: mkPi(cap),
+    });
+
+    assert.equal(checkAutoStartAfterDiscuss(), false);
+    assert.equal(getMilestone("M001"), null, "no placeholder row from a file");
+    assert.equal(cap.notifies.some(n => n.level === "success"), false);
+    assert.equal(cap.notifies.some(n => n.level === "error" && /no DB row exists/.test(n.msg)), true);
   });
 });

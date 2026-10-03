@@ -8,8 +8,7 @@
 //   Gate                       Expected-fail checks and the package that makes them pass
 //   G1 files deleted           dispatch decision P24, prompt P23, artifact verification P24,
 //                              MCP read tools P30
-//   G2 files poisoned          prompt P23, no projection reads P23, reconcile writes P16,
-//                              MCP read tools P30
+//   G2 files poisoned          prompt P23, no projection reads P23, MCP read tools P30
 //   G3 canonical wins          P23
 //   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save P15
 //   G5 render failure          handler writes no projection P12
@@ -172,7 +171,7 @@ describe("G2: files-poisoned run", () => {
     expectedFail("P23", () => assert.deepEqual(projectionReads, []));
 
     await reconcileBeforeDispatch(base);
-    expectedFail("P16", () => assert.deepEqual(snapshotWorkflowTables(), tablesBefore));
+    assert.deepEqual(snapshotWorkflowTables(), tablesBefore, "reconciliation writes no workflow row from a file");
   });
 });
 
@@ -375,7 +374,7 @@ describe("G5: a render failure after commit does not lose the projection", () =>
     invalidateStateCache();
     assert.equal(
       readFileSync(join(base, ".gsd", "STATE.md"), "utf-8"),
-      renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+      renderStateContent(await deriveState(base)),
     );
   });
 });

@@ -442,12 +442,11 @@ function checkReplanTrigger(basePath: string, milestoneId: string, sliceId: stri
 export async function deriveStateFromDb(
   basePath: string,
   _artifactReadRoot: string = basePath,
-  options: { syncQueueOrder?: boolean } = {},
 ): Promise<GSDState> {
   // Use the canonical read root (matches the caller's DB-open call in
   // derive/index.ts) — a worktree basePath can resolve to a different (or
   // nonexistent) DB path than the canonical project root.
-  if (!ensureExistingWorkflowDbOpen(_artifactReadRoot, options)) {
+  if (!ensureExistingWorkflowDbOpen(_artifactReadRoot)) {
     return buildDbUnavailableState();
   }
 
@@ -548,10 +547,9 @@ export async function deriveStateFromDb(
   const { activeSlice } = activeSliceContext;
   const activeSliceRow = activeSliceContext.activeSliceRow;
 
-  // ADR-011: DB slice metadata is authoritative for sketch refinement.
-  // Stale sketch flags (PLAN on disk but is_sketch=1) are repaired by
-  // sketchFlagHandler via reconcileBeforeDispatch — not during derivation.
-  // PLAN.md and preference flags are projections/configuration and are
+  // ADR-011: DB slice metadata is authoritative for sketch refinement. Only
+  // gsd_plan_slice and gsd_plan_task clear is_sketch, inside their Domain
+  // Operation. PLAN.md and preference flags are projections/configuration and are
   // deliberately not used to infer whether the slice itself is a sketch.
   if (activeSliceRow?.is_sketch === 1) {
     return buildDerivedState(

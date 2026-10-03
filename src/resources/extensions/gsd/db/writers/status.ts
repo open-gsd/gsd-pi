@@ -142,16 +142,6 @@ function genericCompletionWrite(t: StatusTransition, row: StatusRow): Completion
       preserveExisting: t.preserveCompletion ?? false,
     };
   }
-  if (
-    (row.canonicalStatus === "completed" || row.canonicalStatus === "cancelled") &&
-    row.status !== null &&
-    isClosedStatus(row.status) &&
-    isClosedStatus(t.status) &&
-    row.completedAt === null &&
-    t.completedAt != null
-  ) {
-    return { completedAt: t.completedAt, preserveExisting: false };
-  }
   return {
     completedAt: null,
     preserveExisting: row.completedAt !== null,

@@ -31,3 +31,11 @@ test("planner is not part of the /gsd command surface", () => {
     "planner should not expose nested completions",
   );
 });
+
+test("sync is a listed top-level command and completes from its prefix", () => {
+  assert.match(GSD_COMMAND_DESCRIPTION, /\|sync\|/);
+  assert.equal(
+    getGsdArgumentCompletions("syn").some((completion) => completion.value === "sync"),
+    true,
+  );
+});

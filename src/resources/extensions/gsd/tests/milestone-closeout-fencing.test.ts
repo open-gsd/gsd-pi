@@ -214,7 +214,7 @@ test("generic legacy writers preserve canonical completion across terminal alias
       true,
     ));
     assert.equal(getMilestone("M001")?.status, "closed");
-    assert.equal(getMilestone("M001")?.completed_at, "2026-07-14T12:00:00.000Z");
+    assert.equal(getMilestone("M001")?.completed_at, null, "a generic write never backfills completed_at on an adopted row");
     assert.equal(lifecycleStatus(), "completed");
     assert.deepEqual(readDomainOperationFence(), fenceBefore);
     assert.equal(operationCount(), operationsBefore);
@@ -413,7 +413,7 @@ test("full Markdown import cannot close an adopted ready milestone", () => {
   }
 });
 
-test("closed-to-closed timestamp repair remains allowed", () => {
+test("a closed-to-closed generic write does not backfill completed_at on an adopted row", () => {
   const base = makeBase("gsd-adopted-closed-repair-");
   try {
     adoptMilestone("completed");
@@ -426,7 +426,7 @@ test("closed-to-closed timestamp repair remains allowed", () => {
       true,
     ));
     assert.equal(getMilestone("M001")?.status, "complete");
-    assert.equal(getMilestone("M001")?.completed_at, "2026-07-14T12:00:00.000Z");
+    assert.equal(getMilestone("M001")?.completed_at, null);
     assert.equal(lifecycleStatus(), "completed");
     assert.equal(operationCount(), operationsBefore);
   } finally {

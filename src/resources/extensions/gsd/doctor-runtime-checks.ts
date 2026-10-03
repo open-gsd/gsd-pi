@@ -445,7 +445,7 @@ export async function checkRuntimeHealth(
 
     if (existsSync(milestonesDir(basePath))) {
       invalidateStateCache();
-      const freshContent = renderStateContent(await deriveState(basePath, { syncQueueOrder: false }));
+      const freshContent = renderStateContent(await deriveState(basePath));
       // With no DB there is nothing authoritative to compare against.
       if (isDbAvailable() && !existsSync(stateFilePath)) {
         issues.push({
