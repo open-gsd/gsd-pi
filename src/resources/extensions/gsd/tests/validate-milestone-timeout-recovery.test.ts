@@ -70,3 +70,31 @@ test("validate-milestone recovery steers to gsd_validate_milestone instead of wr
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("research-slice recovery names the save tool instead of telling the agent to write the file", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-research-timeout-recovery-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
+
+  const harness = recordingHarness();
+  const context = recoveryContext(base, Date.now());
+  // First attempt, then the final (escalated) attempt.
+  for (const attempt of [1, 2]) {
+    await recoverTimedOutUnit(harness.ctx, harness.pi, "research-slice", "M001/S01", "idle", context);
+    const steering = harness.messages[attempt - 1]?.content ?? "";
+    assert.match(steering, /S01-RESEARCH\.md are blocked/);
+    assert.match(steering, /gsd_summary_save/);
+    assert.doesNotMatch(steering, /write the (?:required )?(?:artifact|file)/i);
+  }
+});
+
+test("execute-task and complete-slice expected output is the tool call, not a checkbox edit", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-completion-diagnosis-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const task = diagnoseExpectedArtifact("execute-task", "M001/S01/T01", base) ?? "";
+  const slice = diagnoseExpectedArtifact("complete-slice", "M001/S01", base) ?? "";
+  assert.match(task, /gsd_task_complete/);
+  assert.match(slice, /gsd_slice_complete/);
+  assert.doesNotMatch(`${task} ${slice}`, /marked \[x\]/);
+});

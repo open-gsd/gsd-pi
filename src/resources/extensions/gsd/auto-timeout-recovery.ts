@@ -13,9 +13,11 @@ import {
 } from "./unit-runtime.js";
 import {
   diagnoseExpectedArtifact,
+  resolveExpectedArtifactPath,
   verifyExpectedArtifact,
   writeBlockerPlaceholder,
 } from "./auto-recovery.js";
+import { blockedWriteReason } from "./write-intercept.js";
 
 import { bumpAndResolveSynthetic } from "./auto/resolve.js";
 import { finalizeProjectResearchTimeout } from "./project-research-policy.js";
@@ -125,7 +127,8 @@ export async function recoverTimedOutUnit(
             `Current durability status: ${formatExecuteTaskRecoveryStatus(status)}.`,
             "Do not keep exploring.",
             "Immediately finish the required durable output for this unit.",
-            "If full completion is impossible, write the partial artifact/state needed for recovery and make the blocker explicit.",
+            "If full completion is impossible, call `gsd_task_complete` with what is done and state the blocker in the summary.",
+            "Do not edit the plan or summary files; they are rendered from the database.",
           ];
 
       const recoveryTrigger = getInFlightToolCount() === 0;
@@ -236,6 +239,11 @@ export async function recoverTimedOutUnit(
       harnessAbort: undefined,
     });
 
+    // A projection is saved through its tool; name the tool, not the file.
+    const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
+    const projectionRule = artifactPath ? blockedWriteReason(artifactPath) : null;
+    const saveRule = projectionRule ? [projectionRule] : [];
+
     const steeringLines = unitType === "validate-milestone"
       ? [
           `**${isEscalation ? "FINAL " : ""}${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — persist the canonical validation now.**`,
@@ -252,10 +260,11 @@ export async function recoverTimedOutUnit(
             `You are still executing ${unitType} ${unitId}.`,
             `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts} — next failure skips this unit.`,
             `Expected durable output: ${expected}.`,
-            "You MUST write the artifact file NOW, even if incomplete.",
-            "Write whatever you have — partial research, preliminary findings, best-effort analysis.",
+            "You MUST save the durable output NOW, even if incomplete.",
+            "Save whatever you have — partial research, preliminary findings, best-effort analysis.",
             "A partial artifact is infinitely better than no artifact.",
-            "If you are truly blocked, write the file with a BLOCKER section explaining why.",
+            "If you are truly blocked, save it with a BLOCKER section explaining why.",
+            ...saveRule,
           ]
         : [
             `**${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — stay in auto-mode.**`,
@@ -263,8 +272,9 @@ export async function recoverTimedOutUnit(
             `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts}.`,
             `Expected durable output: ${expected}.`,
             "Stop broad exploration.",
-            "Write the required artifact now.",
-            "If blocked, write the partial artifact and explicitly record the blocker instead of going silent.",
+            "Save the required output now.",
+            "If blocked, save the partial output and explicitly record the blocker instead of going silent.",
+            ...saveRule,
           ];
 
     const recoveryTrigger = getInFlightToolCount() === 0;

@@ -310,10 +310,10 @@ export function diagnoseExpectedArtifact(
     case "refine-slice":
       return `${relSliceFile(base, mid, sid!, "PLAN")} with embedded refined task plans`;
     case "execute-task": {
-      return `Task ${tid} marked [x] in ${relSliceFile(base, mid, sid!, "PLAN")} + summary written`;
+      return `Task ${tid} completed in the database through gsd_task_complete (the tool renders the summary and ${relSliceFile(base, mid, sid!, "PLAN")})`;
     }
     case "complete-slice":
-      return `Slice ${sid} marked [x] in ${relMilestoneFile(base, mid, "ROADMAP")} + summary + UAT written`;
+      return `Slice ${sid} completed in the database through gsd_slice_complete (the tool renders the summary, the UAT and ${relMilestoneFile(base, mid, "ROADMAP")})`;
     case "replan-slice":
       return `${relSliceFile(base, mid, sid!, "REPLAN")} + updated ${relSliceFile(base, mid, sid!, "PLAN")}`;
     case "triage-captures":
