@@ -26,6 +26,7 @@ import {
 import { join } from "node:path";
 
 import { withFileLockSync } from "./file-lock.js";
+import { isDbAvailable } from "./gsd-db.js";
 import { appendNotification } from "./notification-store.js";
 import { buildAuditEnvelope, emitUokAuditEvent } from "./uok/audit.js";
 import { isUnifiedAuditEnabled } from "./uok/audit-toggle.js";
@@ -302,7 +303,7 @@ function _push(
     _buffer.shift();
   }
 
-  if (_auditBasePath && isUnifiedAuditEnabled(_auditBasePath)) {
+  if (_auditBasePath && isDbAvailable() && isUnifiedAuditEnabled(_auditBasePath)) {
     try {
       emitUokAuditEvent(
         _auditBasePath,

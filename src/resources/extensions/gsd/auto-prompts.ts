@@ -1238,7 +1238,8 @@ export async function inlineRequirementsFromDb(
 }
 
 /**
- * Inline project context from the DB. An empty project row returns null.
+ * Inline project context from the DB. With the DB open and no project row,
+ * falls back to the `.gsd/PROJECT.md` file via inlineGsdRootFile.
  * Returns an explicit unavailable block when the DB is unavailable or the read fails.
  */
 export async function inlineProjectFromDb(
@@ -1249,7 +1250,8 @@ export async function inlineProjectFromDb(
     if (isDbAvailable()) {
       const { queryProject } = await import("./context-store.js");
       const content = queryProject();
-      return content ? `### Project\nSource: \`.gsd/PROJECT.md\`\n\n${content}` : null;
+      if (content) return `### Project\nSource: \`.gsd/PROJECT.md\`\n\n${content}`;
+      return inlineGsdRootFile(base, "project.md", "Project");
     }
   } catch (err) {
     logWarning("prompt", `inlineProjectFromDb failed: ${err instanceof Error ? err.message : String(err)}`);

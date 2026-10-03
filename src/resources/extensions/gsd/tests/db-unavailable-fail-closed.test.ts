@@ -10,12 +10,12 @@ import { join } from "node:path";
 import { registerDbTools } from "../bootstrap/db-tools.ts";
 import { handleStatus } from "../commands/handlers/core.ts";
 import { withCommandCwd } from "../commands/context.ts";
-import { closeDatabase, insertAuditEvent, setTaskBlockerDiscovered } from "../gsd-db.ts";
+import { closeDatabase, insertAuditEvent, openDatabase, setTaskBlockerDiscovered } from "../gsd-db.ts";
 import { inlineDecisionsFromDb, inlineProjectFromDb, inlineRequirementsFromDb } from "../auto-prompts.ts";
 import { buildTurnTimeline } from "../uok/timeline.ts";
 import { clearReservedMilestoneIds } from "../milestone-ids.ts";
 import { UokGateRunner } from "../uok/gate-runner.ts";
-import { _resetLogs, drainLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
+import { _resetLogs, drainLogs, logWarning, setLogBasePath, setStderrLoggingEnabled } from "../workflow-logger.ts";
 
 type RegisteredPiTool = {
   name: string;
@@ -130,6 +130,37 @@ describe("DB unavailable: fail closed", () => {
       assert.match(String(block), /unavailable: workflow DB is unavailable/);
       assert.doesNotMatch(String(block), /FILE (DECISION|REQUIREMENT|PROJECT)/);
     }
+  });
+
+  test("project prompt uses the PROJECT.md file when the open DB has no project row", async () => {
+    const openBase = mkdtempSync(join(tmpdir(), "gsd-db-open-"));
+    try {
+      mkdirSync(join(openBase, ".gsd"), { recursive: true });
+      writeFileSync(join(openBase, ".gsd", "PROJECT.md"), "# Project\n\nFILE PROJECT BODY\n", "utf-8");
+      assert.equal(openDatabase(join(openBase, ".gsd", "gsd.db")), true);
+
+      assert.match(String(await inlineProjectFromDb(openBase)), /FILE PROJECT BODY/);
+    } finally {
+      closeDatabase();
+      rmSync(openBase, { recursive: true, force: true });
+    }
+  });
+
+  test("a warning logged with the DB closed is recorded once, not in a logging loop", (t) => {
+    const previousStderr = setStderrLoggingEnabled(false);
+    t.after(() => {
+      setStderrLoggingEnabled(previousStderr);
+      _resetLogs();
+    });
+    _resetLogs();
+    setLogBasePath(base);
+
+    logWarning("engine", "warning with no DB");
+
+    assert.deepEqual(
+      drainLogs().map((entry) => `${entry.severity}: ${entry.message}`),
+      ["warn: warning with no DB"],
+    );
   });
 
   test("turn timeline refuses to read the JSONL projection", () => {
