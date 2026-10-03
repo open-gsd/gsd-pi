@@ -465,12 +465,14 @@ test("verifyExpectedArtifact: reactive-execute passes when all dispatched summar
   try {
     const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
     mkdirSync(tasksDir, { recursive: true });
+    openDatabase(join(repo, ".gsd", "gsd.db"));
     writeFileSync(join(tasksDir, "T02-SUMMARY.md"), "---\nid: T02\n---\n# T02: Done\n");
     writeFileSync(join(tasksDir, "T03-SUMMARY.md"), "---\nid: T03\n---\n# T03: Done\n");
 
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive+T02,T03", repo);
     assert.equal(result, true, "Should pass when all dispatched task summaries exist");
   } finally {
+    closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });
@@ -481,12 +483,14 @@ test("verifyExpectedArtifact: reactive-execute fails when a dispatched summary i
   try {
     const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
     mkdirSync(tasksDir, { recursive: true });
+    openDatabase(join(repo, ".gsd", "gsd.db"));
     // Only T02 has a summary, T03 does not
     writeFileSync(join(tasksDir, "T02-SUMMARY.md"), "---\nid: T02\n---\n# T02: Done\n");
 
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive+T02,T03", repo);
     assert.equal(result, false, "Should fail when dispatched task T03 summary is missing");
   } finally {
+    closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });
@@ -497,12 +501,14 @@ test("verifyExpectedArtifact: reactive-execute fails even with pre-existing summ
   try {
     const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
     mkdirSync(tasksDir, { recursive: true });
+    openDatabase(join(repo, ".gsd", "gsd.db"));
     // T01 summary exists from before, but T02 and T03 were dispatched
     writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01: Prior\n");
 
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive+T02,T03", repo);
     assert.equal(result, false, "Pre-existing T01 summary should not satisfy T02,T03 batch");
   } finally {
+    closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });
@@ -513,12 +519,14 @@ test("verifyExpectedArtifact: reactive-execute legacy format (no batch IDs) fall
   try {
     const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
     mkdirSync(tasksDir, { recursive: true });
+    openDatabase(join(repo, ".gsd", "gsd.db"));
     writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01\n");
 
     // Legacy format without +batch suffix
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive", repo);
     assert.equal(result, true, "Legacy format should fall back to any-summary check");
   } finally {
+    closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });

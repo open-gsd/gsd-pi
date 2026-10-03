@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { appendCapture, markCaptureExecuted, markCaptureResolved } from "../captures.ts";
 import { resolveExpectedArtifactPath, verifyExpectedArtifact } from "../auto-recovery.ts";
 import { drainLogs } from "../workflow-logger.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function makeProject(t: { after: (fn: () => void) => void }): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-sidecar-artifact-"));
@@ -100,6 +101,8 @@ test("sidecar unit path resolver documents CAPTURES.md state verification", (t) 
 
 test("unknown artifact contract warning distinguishes missing contracts from missing dirs", (t) => {
   const base = makeProject(t);
+  openDatabase(":memory:");
+  t.after(closeDatabase);
   drainLogs();
 
   assert.equal(

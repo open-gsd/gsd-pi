@@ -194,7 +194,12 @@ export function refreshRecoveryDbForArtifact(
         message: `Stuck recovery cannot confirm canonical Task Attempt readiness for execute-task ${unitId} because the workflow DB is unavailable.`,
       };
     }
-    return { ok: true };
+    return {
+      ok: false,
+      fatal: false,
+      reason: "db-unavailable",
+      message: `Stuck recovery cannot confirm canonical state for ${unitType} ${unitId} because the workflow DB is unavailable.`,
+    };
   }
 
   if (unitType === "execute-task") {

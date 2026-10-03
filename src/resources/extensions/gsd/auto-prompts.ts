@@ -1133,8 +1133,20 @@ export async function inlineGsdRootFile(
 // ─── DB-Aware Inline Helpers ──────────────────────────────────────────────
 
 /**
+ * Explicit block for a DB read that could not run. The prompt never gets the
+ * markdown projection instead: it is not workflow authority (ADR-046).
+ */
+function dbReadUnavailableBlock(label: string, reason: string): string {
+  return `### ${label}\n\n${label} unavailable: ${reason}. Do not reconstruct them from \`.gsd/\` markdown files.`;
+}
+
+function dbReadErrorMessage(err: unknown): string {
+  return `DB read failed (${err instanceof Error ? err.message : String(err)})`;
+}
+
+/**
  * Inline decisions with optional milestone scoping from the DB.
- * Falls back to filesystem via inlineGsdRootFile only when DB is unavailable.
+ * Returns an explicit unavailable block when the DB is unavailable or the read fails.
  *
  * Cascade logic (R005):
  * 1. Query with { milestoneId, scope } if scope provided
@@ -1178,14 +1190,14 @@ export async function inlineDecisionsFromDb(
     }
   } catch (err) {
     logWarning("prompt", `inlineDecisionsFromDb failed: ${err instanceof Error ? err.message : String(err)}`);
+    return dbReadUnavailableBlock("Decisions", dbReadErrorMessage(err));
   }
-  // DB unavailable — fall back to filesystem
-  return inlineGsdRootFile(base, "decisions.md", "Decisions");
+  return dbReadUnavailableBlock("Decisions", "workflow DB is unavailable");
 }
 
 /**
  * Inline requirements with optional milestone and slice scoping from the DB.
- * Falls back to filesystem via inlineGsdRootFile only when DB is unavailable.
+ * Returns an explicit unavailable block when the DB is unavailable or the read fails.
  */
 export async function inlineRequirementsFromDb(
   base: string, milestoneId?: string, sliceId?: string, level?: InlineLevel,
@@ -1220,13 +1232,14 @@ export async function inlineRequirementsFromDb(
     }
   } catch (err) {
     logWarning("prompt", `inlineRequirementsFromDb failed: ${err instanceof Error ? err.message : String(err)}`);
+    return dbReadUnavailableBlock("Requirements", dbReadErrorMessage(err));
   }
-  return inlineGsdRootFile(base, "requirements.md", "Requirements");
+  return dbReadUnavailableBlock("Requirements", "workflow DB is unavailable");
 }
 
 /**
- * Inline project context from the DB.
- * Falls back to filesystem via inlineGsdRootFile when DB unavailable or empty.
+ * Inline project context from the DB. An empty project row returns null.
+ * Returns an explicit unavailable block when the DB is unavailable or the read fails.
  */
 export async function inlineProjectFromDb(
   base: string,
@@ -1236,14 +1249,13 @@ export async function inlineProjectFromDb(
     if (isDbAvailable()) {
       const { queryProject } = await import("./context-store.js");
       const content = queryProject();
-      if (content) {
-        return `### Project\nSource: \`.gsd/PROJECT.md\`\n\n${content}`;
-      }
+      return content ? `### Project\nSource: \`.gsd/PROJECT.md\`\n\n${content}` : null;
     }
   } catch (err) {
     logWarning("prompt", `inlineProjectFromDb failed: ${err instanceof Error ? err.message : String(err)}`);
+    return dbReadUnavailableBlock("Project", dbReadErrorMessage(err));
   }
-  return inlineGsdRootFile(base, "project.md", "Project");
+  return dbReadUnavailableBlock("Project", "workflow DB is unavailable");
 }
 
 function onDemandProjectBlock(reason: string): string {

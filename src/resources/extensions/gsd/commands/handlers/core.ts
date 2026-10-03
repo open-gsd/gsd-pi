@@ -211,8 +211,15 @@ function buildAdditionalCommandsHelpLines(): string[] {
 export async function handleStatus(ctx: ExtensionCommandContext): Promise<void> {
   const basePath = projectRoot();
   // Open DB in cold sessions so status uses DB-backed state, not filesystem fallback (#3385)
-  const { ensureDbOpen } = await import("../../bootstrap/dynamic-tools.js");
-  await ensureDbOpen();
+  const { openWorkflowDatabase } = await import("../../db-workspace.js");
+  const { formatWorkflowDatabaseOpenFailure } = await import("../../bootstrap/dynamic-tools.js");
+  const opened = openWorkflowDatabase(basePath);
+  // No .gsd dir means no project yet. Any other open failure is reported,
+  // never shown as "no milestones" (ADR-046).
+  if (!opened.ok && opened.reason !== "missing-gsd-dir") {
+    ctx.ui.notify(`Cannot read GSD status: ${formatWorkflowDatabaseOpenFailure(opened)}`, "error");
+    return;
+  }
   const state = await deriveState(basePath);
 
   if (state.registry.length === 0) {

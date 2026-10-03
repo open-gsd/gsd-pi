@@ -13,7 +13,6 @@ import {
   getPendingGatesForTurn,
 } from "./gsd-db.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
-import { isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
 import { isClosedStatus } from "./status-guards.js";
@@ -295,6 +294,15 @@ export function verifyExpectedArtifact(
     return hasCompleteProjectResearch(base);
   }
 
+  // Fail closed: milestone, slice and task state is DB-authoritative
+  // (ADR-046). With no open DB there is nothing to verify these units
+  // against, and a file on disk is not proof. The project-level and sidecar
+  // units above have no DB representation yet.
+  if (!isDbAvailable()) {
+    logWarning("recovery", `verify-fail ${unitType} ${unitId}: DB unavailable, cannot verify unit artifact`);
+    return false;
+  }
+
   if (unitType === "reactive-execute") {
     const { milestone: mid, slice: sid, task: batchPart } = parseUnitId(unitId);
     if (!mid || !sid || !batchPart) return false;
@@ -333,7 +341,6 @@ export function verifyExpectedArtifact(
     if (gateIds.length === 0) return true;
 
     try {
-      if (!isDbAvailable()) return false;
       const pending = getPendingGatesForTurn(mid, sid, "gate-evaluate");
       const pendingIds = new Set<string>(pending.map((g) => g.gate_id));
       for (const gid of gateIds) {
@@ -357,13 +364,6 @@ export function verifyExpectedArtifact(
     const roadmapFile = resolveExpectedArtifactPath("plan-milestone", mid, base);
     if (!roadmapFile || !existsSync(roadmapFile)) {
       logWarning("recovery", `verify-fail ${unitType} ${unitId}: roadmap missing`);
-      return false;
-    }
-    // Fail closed: slice state is DB-authoritative (ADR-017). Without the DB
-    // there is nothing to verify against, and an empty slice list would
-    // silently turn this verify-fail into a verify-pass.
-    if (!isDbAvailable()) {
-      logWarning("recovery", `verify-fail ${unitType} ${unitId}: DB unavailable, cannot verify slice RESEARCH coverage`);
       return false;
     }
     try {
@@ -390,7 +390,7 @@ export function verifyExpectedArtifact(
     }
   }
 
-  if (unitType === "execute-task" && isDbAvailable()) {
+  if (unitType === "execute-task") {
     const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
     if (!mid || !sid || !tid) return false;
     try {
@@ -401,7 +401,7 @@ export function verifyExpectedArtifact(
     }
   }
 
-  if (unitType === "validate-milestone" && isDbAvailable()) {
+  if (unitType === "validate-milestone") {
     const { milestone } = parseUnitId(unitId);
     if (!milestone) return false;
     try {
@@ -444,14 +444,6 @@ export function verifyExpectedArtifact(
     return false;
   }
 
-  if (unitType === "validate-milestone") {
-    const validationContent = readFileSync(absPath, "utf-8");
-    if (!isValidationTerminal(validationContent)) {
-      logWarning("recovery", `verify-fail ${unitType} ${unitId}: validation not terminal (len=${validationContent.length}) at ${absPath}`);
-      return false;
-    }
-  }
-
   if (unitType === "run-uat") {
     const assessmentContent = readFileSync(absPath, "utf-8");
     if (!hasVerdict(assessmentContent)) {
@@ -491,14 +483,12 @@ export function verifyExpectedArtifact(
           tasksBlock.length > 0 &&
           (/^\s*- \[[xX ]\] \*\*T\d+/m.test(tasksBlock) ||
             /^\s*#{2,4}\s+T\d+\s*(?:--|—|:)/m.test(tasksBlock));
-        if (isDbAvailable()) {
-          const refreshed = refreshWorkflowDatabaseFromDisk();
-          if (refreshed) {
-            const tasks = getSliceTasks(mid, sid);
-            if (tasks.length > 0) {
-              taskIds = tasks.map(t => t.id);
-              dbPrimary = true;
-            }
+        const refreshed = refreshWorkflowDatabaseFromDisk();
+        if (refreshed) {
+          const tasks = getSliceTasks(mid, sid);
+          if (tasks.length > 0) {
+            taskIds = tasks.map(t => t.id);
+            dbPrimary = true;
           }
         }
 
@@ -535,19 +525,6 @@ export function verifyExpectedArtifact(
     }
   }
 
-  if (unitType === "execute-task") {
-    // Fail closed: Task completion is DB-authoritative (ADR-017). Reaching
-    // here means the DB-backed readiness read above did not run or did not
-    // confirm the Attempt, and a `- [x] **T0N:` checkbox in a PLAN projection
-    // is not evidence of completion — accepting it turned a verify-fail into a
-    // verify-pass whenever the DB was unavailable.
-    logWarning(
-      "recovery",
-      `verify-fail ${unitType} ${unitId}: ${isDbAvailable() ? "no settled Task Attempt in the DB" : "DB unavailable"}, cannot confirm task completion`,
-    );
-    return false;
-  }
-
   if (unitType === "complete-slice") {
     const { milestone: mid, slice: sid } = parseUnitId(unitId);
     if (mid && sid) {
@@ -560,11 +537,11 @@ export function verifyExpectedArtifact(
         if (dbSlice.status !== "complete") return false;
       } else {
         // Fail closed: slice completion is DB-authoritative (ADR-017). A
-        // missing row (or an unavailable DB) is not evidence of completion,
-        // so never fall through to a pass here.
+        // missing row is not evidence of completion, so never fall through to
+        // a pass here.
         logWarning(
           "recovery",
-          `verify-fail ${unitType} ${unitId}: ${isDbAvailable() ? "no slice row in the DB" : "DB unavailable"}, cannot confirm slice completion`,
+          `verify-fail ${unitType} ${unitId}: no slice row in the DB, cannot confirm slice completion`,
         );
         return false;
       }

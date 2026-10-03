@@ -31,6 +31,8 @@ import {
 function createFixtureBase(prefix = "gsd-recovery-logs-"): string {
   const base = mkdtempSync(join(tmpdir(), prefix));
   mkdirSync(join(base, ".gsd", "milestones"), { recursive: true });
+  // Milestone-scoped verification needs an open DB (ADR-046).
+  openDatabase(join(base, ".gsd", "gsd.db"));
   return base;
 }
 
@@ -91,6 +93,7 @@ test("plan-milestone verify-fail logs a recovery warning naming the zero-slice r
     assert.equal(recovery!.severity, "warn");
     assert.match(recovery!.message, /verify-fail plan-milestone M001: roadmap has zero slices/u);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -110,25 +113,7 @@ test("run-uat verify-fail logs a recovery warning when the assessment has no ver
     assert.equal(recovery!.severity, "warn");
     assert.match(recovery!.message, /verify-fail run-uat M001\/S01: assessment missing verdict/u);
   } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("validate-milestone verify-fail logs a recovery warning when the validation is not terminal", () => {
-  const base = createFixtureBase();
-  try {
-    const dir = milestoneDir(base, "M001");
-    // No `verdict:` → isValidationTerminal() returns false → warning fires.
-    writeFileSync(join(dir, "M001-VALIDATION.md"), "# Validation\n\nStill in progress.\n", "utf-8");
-
-    const { result, logs } = verifyAndCaptureLogs("validate-milestone", "M001", base);
-
-    assert.equal(result, false, "non-terminal validation must fail verification");
-    const recovery = findRecovery(logs);
-    assert.ok(recovery, "a recovery warning must be logged");
-    assert.equal(recovery!.severity, "warn");
-    assert.match(recovery!.message, /verify-fail validate-milestone M001: validation not terminal/u);
-  } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -149,6 +134,7 @@ test("verify-fail logs a recovery warning when an expected artifact file is abse
     assert.equal(recovery!.severity, "warn");
     assert.match(recovery!.message, /verify-fail complete-slice M001\/S01: existsSync false/u);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -172,6 +158,7 @@ test("a passing verification produces no recovery warnings", () => {
       "no recovery warning should be logged on success",
     );
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -198,6 +185,7 @@ test("plan-slice verify-fail logs a recovery warning when the plan has no task e
       /verify-fail plan-slice M001\/S01: plan has no task checkbox\/heading/u,
     );
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -223,6 +211,7 @@ test("plan-slice verify-fail logs a recovery warning when the tasks dir is missi
       /verify-fail plan-slice M001\/S01: tasks dir missing/u,
     );
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -249,6 +238,7 @@ test("plan-slice verify-fail logs a recovery warning when an individual task art
       /verify-fail plan-slice M001\/S01: task artifact missing for T01/u,
     );
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -273,6 +263,7 @@ test("parallel-research verify-fail logs a recovery warning when the roadmap is 
       /verify-fail research-slice M001\/parallel-research: roadmap missing/u,
     );
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -375,12 +366,14 @@ test("plan-milestone verify logs a recovery warning when the roadmap parser thro
     assert.match(recovery!.message, /forced roadmap parse failure/u);
   } finally {
     restore();
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
 test("complete-slice verify fails closed and logs a recovery warning when the DB is unavailable", () => {
   const base = createFixtureBase("gsd-recovery-logs-cs-parse-");
+  closeDatabase();
   try {
     const dir = sliceDir(base, "M001", "S01");
     // complete-slice verification: SUMMARY + UAT present, but this fixture base
@@ -399,14 +392,16 @@ test("complete-slice verify fails closed and logs a recovery warning when the DB
     const recovery = logs.find((e) => e.component === "recovery" && /verify-fail complete-slice M001\/S01/u.test(e.message));
     assert.ok(recovery, "a recovery warning must be logged");
     assert.match(recovery!.message, /DB unavailable/u);
-    assert.match(recovery!.message, /cannot confirm slice completion/u);
+    assert.match(recovery!.message, /cannot verify unit artifact/u);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
 test("parallel-research verify fails closed and logs a recovery warning when the DB is unavailable", () => {
   const base = createFixtureBase("gsd-recovery-logs-prr-throw-");
+  closeDatabase();
   try {
     const dir = milestoneDir(base, "M001");
     // A real ROADMAP so verification clears the roadmap-missing guard, but this
@@ -424,14 +419,16 @@ test("parallel-research verify fails closed and logs a recovery warning when the
     const recovery = logs.find((e) => e.component === "recovery" && /verify-fail research-slice M001\/parallel-research/u.test(e.message));
     assert.ok(recovery, "a recovery warning must be logged");
     assert.match(recovery!.message, /DB unavailable/u);
-    assert.match(recovery!.message, /cannot verify slice RESEARCH coverage/u);
+    assert.match(recovery!.message, /cannot verify unit artifact/u);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
 test("execute-task verify fails closed and logs a recovery warning when the DB is unavailable", () => {
   const base = createFixtureBase("gsd-recovery-logs-et-nodb-");
+  closeDatabase();
   try {
     const dir = sliceDir(base, "M001", "S01");
     mkdirSync(join(dir, "tasks"), { recursive: true });
@@ -453,8 +450,9 @@ test("execute-task verify fails closed and logs a recovery warning when the DB i
     assert.ok(recovery, "a recovery warning must be logged");
     assert.equal(recovery!.severity, "warn");
     assert.match(recovery!.message, /DB unavailable/u);
-    assert.match(recovery!.message, /cannot confirm task completion/u);
+    assert.match(recovery!.message, /cannot verify unit artifact/u);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -478,6 +476,7 @@ test("complete-milestone verify fails closed and logs a recovery warning when th
     assert.match(recovery!.message, /closeout proof failed/u);
     assert.match(recovery!.message, /cannot confirm milestone closeout/u);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });

@@ -92,7 +92,7 @@ test("execute-task with the DB unavailable — checked checkbox [x] fails closed
   const recovery = logs.find((e) => e.component === "recovery" && /verify-fail execute-task M001\/S01\/T01/u.test(e.message));
   assert.ok(recovery, "a recovery warning must name why completion could not be confirmed");
   assert.match(recovery!.message, /DB unavailable/u);
-  assert.match(recovery!.message, /cannot confirm task completion/u);
+  assert.match(recovery!.message, /cannot verify unit artifact/u);
 });
 
 test("execute-task with the DB unavailable — checked checkbox [X] (uppercase) also fails closed", (t) => {
@@ -253,6 +253,8 @@ test("#852: discuss-milestone falls back to project root when CONTEXT not in wor
   closeDatabase();
   const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-fallback-proj-"));
   try {
+    mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
+    openDatabase(join(projectRoot, ".gsd", "gsd.db"));
     // Flat-phase CONTEXT lives at the project root.
     const phaseDir = join(projectRoot, ".gsd", "phases", "15-m015");
     mkdirSync(phaseDir, { recursive: true });
@@ -284,6 +286,8 @@ test("#852: discuss-milestone passes when CONTEXT is in the worktree (no fallbac
   closeDatabase();
   const projectRoot = mkdtempSync(join(tmpdir(), "gsd-wt-present-"));
   try {
+    mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
+    openDatabase(join(projectRoot, ".gsd", "gsd.db"));
     // CONTEXT lives in BOTH the project root AND the worktree.
     const projPhase = join(projectRoot, ".gsd", "phases", "15-m015");
     mkdirSync(projPhase, { recursive: true });
@@ -347,6 +351,8 @@ test("#870: discuss-milestone falls back to project root when base IS the canoni
   closeDatabase();
   const projectRoot = mkdtempSync(join(tmpdir(), "gsd-canonical-wt-"));
   try {
+    mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
+    openDatabase(join(projectRoot, ".gsd", "gsd.db"));
     // CONTEXT lives ONLY at the project root (flat-phase layout).
     const phaseDir = join(projectRoot, ".gsd", "phases", "15-m015");
     mkdirSync(phaseDir, { recursive: true });
@@ -376,6 +382,8 @@ test("#870: discuss-milestone also falls back when base is the legacy-layout wor
   closeDatabase();
   const projectRoot = mkdtempSync(join(tmpdir(), "gsd-legacy-wt-"));
   try {
+    mkdirSync(join(projectRoot, ".gsd"), { recursive: true });
+    openDatabase(join(projectRoot, ".gsd", "gsd.db"));
     const phaseDir = join(projectRoot, ".gsd", "phases", "15-m015");
     mkdirSync(phaseDir, { recursive: true });
     writeFileSync(join(phaseDir, "15-CONTEXT.md"), "# M015 context\n");

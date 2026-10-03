@@ -5,10 +5,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { verifyExpectedArtifact } from "../auto-recovery.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function createFixtureBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-plan-milestone-artifact-"));
   mkdirSync(join(base, ".gsd", "milestones"), { recursive: true });
+  // Milestone-scoped verification needs an open DB (ADR-046).
+  openDatabase(join(base, ".gsd", "gsd.db"));
   return base;
 }
 
@@ -41,6 +44,7 @@ test("#3405: plan-milestone roadmap stub does not count as a verified artifact",
     const result = verifyExpectedArtifact("plan-milestone", "M001", base);
     assert.equal(result, false, "zero-slice roadmap stubs must fail verification");
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -63,6 +67,7 @@ test("#3405: plan-milestone roadmap with real slices still passes artifact verif
     const result = verifyExpectedArtifact("plan-milestone", "M001", base);
     assert.equal(result, true, "real roadmap slices should keep passing verification");
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -83,6 +88,7 @@ test("plan-milestone verification accepts legacy ROADMAP.md via shared resolver"
     const result = verifyExpectedArtifact("plan-milestone", "M001", base);
     assert.equal(result, true, "legacy unprefixed ROADMAP.md should resolve");
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -97,6 +103,7 @@ test("discuss-milestone verification accepts legacy CONTEXT.md via shared resolv
     const result = verifyExpectedArtifact("discuss-milestone", "M001", base);
     assert.equal(result, true, "legacy unprefixed CONTEXT.md should resolve");
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
