@@ -15,6 +15,8 @@ import { registerExecTools } from "../bootstrap/exec-tools.ts";
 import { registerJournalTools } from "../bootstrap/journal-tools.ts";
 import { registerMemoryTools } from "../bootstrap/memory-tools.ts";
 import { registerQueryTools } from "../bootstrap/query-tools.ts";
+import { shouldBlockPlanningUnit, shouldBlockQueueExecution } from "../bootstrap/write-gate.ts";
+import { resolveManifest } from "../unit-context-manifest.ts";
 
 const promptsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "prompts");
 const promptNames = readdirSync(promptsDir).filter((file) => file.endsWith(".md")).map((file) => file.slice(0, -3));
@@ -95,13 +97,38 @@ for (const name of promptNames) {
   });
 }
 
+/** The gsd tools a rendered prompt names. */
+function gsdToolsIn(rendered: string): string[] {
+  return [...new Set([...rendered.matchAll(/\bgsd_[a-z_]*[a-z]\b(?![_*])/g)].map((match) => match[0]))];
+}
+
 test("rendered prompts name only registered gsd tools", () => {
   const registered = registeredToolNames();
   const unknown: string[] = [];
   for (const name of promptNames) {
-    for (const match of render(name).matchAll(/\bgsd_[a-z_]*[a-z]\b(?![_*])/g)) {
-      if (!registered.has(match[0])) unknown.push(`${name}: ${match[0]}`);
+    for (const tool of gsdToolsIn(render(name))) {
+      if (!registered.has(tool)) unknown.push(`${name}: ${tool}`);
     }
   }
-  assert.deepEqual([...new Set(unknown)], []);
+  assert.deepEqual(unknown, []);
+});
+
+test("the queue phase can call every gsd tool the queue prompt names", () => {
+  const refused = gsdToolsIn(render("queue")).filter((tool) => shouldBlockQueueExecution(tool, "", true).block);
+  assert.deepEqual(refused, []);
+});
+
+test("the discuss-milestone unit can call the dependency tool its prompts name", () => {
+  const policy = resolveManifest("discuss-milestone")?.tools;
+  assert.ok(policy, "discuss-milestone must have a tools policy");
+  for (const prompt of ["discuss", "discuss-headless"]) {
+    assert.ok(gsdToolsIn(render(prompt)).includes("gsd_milestone_set_dependencies"), `${prompt} names the tool`);
+  }
+  for (const toolName of ["gsd_milestone_set_dependencies", "mcp__gsd-workflow__gsd_milestone_set_dependencies"]) {
+    const result = shouldBlockPlanningUnit(
+      toolName, "", process.cwd(), "discuss-milestone", policy, undefined,
+      { milestoneId: "M002", dependsOn: ["M001"] }, "M002",
+    );
+    assert.equal(result.block, false, result.reason);
+  }
 });

@@ -151,6 +151,7 @@ export const UNIT_REGISTRY = {
         "gsd_requirement_update",
         "gsd_plan_milestone",
         "gsd_milestone_generate_id",
+        "gsd_milestone_set_dependencies",
       ],
       requiredWorkflowTools: [
         "ask_user_questions",

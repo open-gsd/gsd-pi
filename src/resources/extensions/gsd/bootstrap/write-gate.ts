@@ -50,7 +50,11 @@ const QUEUE_SAFE_TOOLS = new Set([
   // Discussion & planning tools
   "ask_user_questions",
   "gsd_milestone_generate_id",
+  "gsd_milestone_set_dependencies",
   "gsd_summary_save",
+  "gsd_requirement_save",
+  "gsd_requirement_update",
+  "gsd_decision_save",
   // Web research tools used during queue discussion
   "search-the-web", "resolve_library", "get_library_docs", "fetch_page",
   "search_and_read",
@@ -1157,7 +1161,7 @@ export function shouldBlockQueueExecutionInSnapshot(
       block: true,
       reason: `Blocked: /gsd queue is a planning tool — it creates milestones, not executes work. ` +
         `Cannot ${toolName} to "${input}" during queue mode. ` +
-        `Write CONTEXT.md files and update PROJECT.md/QUEUE.md instead.`,
+        `Save milestone context and project changes with gsd_summary_save instead.`,
     };
   }
 
