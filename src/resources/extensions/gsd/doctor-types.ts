@@ -62,6 +62,7 @@ export type DoctorIssueCode =
   | "duplicate_task_id"
   | "task_file_not_in_plan"
   | "stale_replan_file"
+  | "orphan_reopen_reason_file"
   | "future_timestamp"
   // Worktree lifecycle checks
   | "worktree_branch_merged"

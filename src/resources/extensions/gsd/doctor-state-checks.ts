@@ -1,5 +1,5 @@
-import { existsSync, mkdirSync, lstatSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { join, relative } from "node:path";
 
 import { loadFile, parseSummary, saveFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
 import { getMilestone, getMilestoneSlices, getPlanMilestoneRecoveryBlock, getSliceTasks } from "./gsd-db.js";
@@ -376,6 +376,29 @@ export async function checkGsdStateHealth(
       // slices/<SID>/ subdir), which makes tasksDir a single directory shared by
       // every slice in the milestone rather than this slice's own.
       const tasksDirIsShared = !!slicePath && !!milestonePath && slicePath === milestonePath;
+
+      // ── Leftover T##-REOPEN.json from a build that kept the reopen reason in a file ──
+      // The reopen reason is the task.reopened DB event; this file is never read.
+      for (const dir of new Set([tasksDir, slicePath])) {
+        if (!dir) continue;
+        let names: string[] = [];
+        try { names = readdirSync(dir); } catch { /* non-fatal */ }
+        for (const f of names) {
+          if (!f.endsWith("-REOPEN.json")) continue;
+          const reopenPath = join(dir, f);
+          const relReopenPath = relative(basePath, reopenPath);
+          if (issues.some(i => i.code === "orphan_reopen_reason_file" && i.file === relReopenPath)) continue;
+          const diskTaskId = f.replace(/-REOPEN\.json$/, "");
+          issues.push({ severity: "info", code: "orphan_reopen_reason_file", scope: "task",
+            unitId: `${unitId}/${diskTaskId}`,
+            message: `Task ${unitId}/${diskTaskId} has a leftover ${f} from an older build — the reopen reason is a database row now and this file is not read`,
+            file: relReopenPath, fixable: true });
+          if (shouldFix("orphan_reopen_reason_file")) {
+            rmSync(reopenPath, { force: true });
+            fixesApplied.push(`removed leftover ${f} for ${unitId}/${diskTaskId}`);
+          }
+        }
+      }
       if (!tasksDir) {
         // Pending slices haven't been planned yet — tasks/ is created on demand.
         // Skipped slices may legitimately never create tasks/.

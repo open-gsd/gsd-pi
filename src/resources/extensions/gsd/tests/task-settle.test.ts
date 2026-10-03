@@ -976,11 +976,15 @@ function readLatestAttemptResult(attemptId: string): string {
   return String(result.id);
 }
 
-function writeJournalPauseLines(dir: string): void {
+function writeJournalPauseLines(
+  dir: string,
+  eventTypes: string[] = ["verification-paused", "post-unit-finalize-end"],
+  ts: string = new Date().toISOString(),
+): void {
   mkdirSync(join(dir, ".gsd"), { recursive: true });
-  for (const eventType of ["verification-paused", "post-unit-finalize-end"]) {
+  for (const eventType of eventTypes) {
     emitJournalEvent(dir, {
-      ts: new Date().toISOString(),
+      ts,
       flowId: "flow-verification-pause",
       seq: 3,
       eventType: eventType as never,
@@ -1050,7 +1054,7 @@ test("verification-paused reconcile throws when the durable receipt is missing (
   );
 });
 
-test("an injected journal line does not authorize a verification-paused reconcile", async () => {
+test("a journal line does not authorize a verification-paused reconcile outside the operator command", async () => {
   const { dir } = seedVerificationPausedStrand();
   // Both journal shapes that used to count as the receipt.
   writeJournalPauseLines(dir);
@@ -1071,6 +1075,80 @@ test("an injected journal line does not authorize a verification-paused reconcil
     /verification-pause receipt/,
   );
   assert.equal(taskLifecycleStatus(), "in_progress");
+});
+
+for (const eventType of ["verification-paused", "post-unit-finalize-end"]) {
+  test(`the operator settle imports a pre-upgrade ${eventType} journal receipt once as a legacy-journal DB event`, async () => {
+    const { attemptId, dir } = seedVerificationPausedStrand();
+    writeJournalPauseLines(dir, [eventType]);
+
+    const dryRun = planTaskSettle(TASK, "release verification-paused task", {
+      reconcileLifecycle: true,
+      legacyJournalBasePath: dir,
+    });
+    assert.deepEqual(
+      dryRun.lifecycleRows.map((entry) => `${entry.currentStatus}->${entry.targetStatus}`),
+      ["in_progress->paused", "paused->ready"],
+    );
+    assert.equal(
+      row("SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'task.verification.paused'").count,
+      0,
+      "a dry run writes nothing",
+    );
+
+    const applied = await applyTaskSettle({
+      invocation: invocation("settle/reconcile/legacy-journal"),
+      task: TASK,
+      reason: "release verification-paused task",
+      basePath: dir,
+      reconcileLifecycle: true,
+      legacyJournalBasePath: dir,
+    });
+    assert.equal(applied.reconciled, true);
+    assert.equal(taskLifecycleStatus(), "ready");
+    const events = db().prepare(
+      "SELECT payload_json FROM workflow_domain_events WHERE event_type = 'task.verification.paused'",
+    ).all() as Array<{ payload_json: string }>;
+    assert.deepEqual(
+      events.map((event) => JSON.parse(event.payload_json)),
+      [{ attemptId, source: "legacy-journal" }],
+    );
+
+    await applyTaskSettle({
+      invocation: invocation("settle/reconcile/legacy-journal/2"),
+      task: TASK,
+      reason: "release verification-paused task",
+      basePath: dir,
+      reconcileLifecycle: true,
+      legacyJournalBasePath: dir,
+    });
+    assert.equal(
+      row("SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'task.verification.paused'").count,
+      1,
+      "the journal receipt is imported once",
+    );
+  });
+}
+
+test("the operator settle refuses a journal receipt written before the latest Attempt settled", async () => {
+  const { dir } = seedVerificationPausedStrand();
+  writeJournalPauseLines(dir, undefined, "2000-01-01T00:00:00.000Z");
+  await assert.rejects(
+    () => applyTaskSettle({
+      invocation: invocation("settle/reconcile/stale-journal"),
+      task: TASK,
+      reason: "release verification-paused task",
+      basePath: dir,
+      reconcileLifecycle: true,
+      legacyJournalBasePath: dir,
+    }),
+    /verification-pause receipt/,
+  );
+  assert.equal(taskLifecycleStatus(), "in_progress");
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_domain_events WHERE event_type = 'task.verification.paused'").count,
+    0,
+  );
 });
 
 test("the verification-pause receipt survives deleting the journal and runtime files", () => {
