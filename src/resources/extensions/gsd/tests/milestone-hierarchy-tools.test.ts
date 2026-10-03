@@ -113,7 +113,7 @@ describe("milestone hierarchy tools", () => {
       invalidateStateCache();
       assert.equal(
         readFileSync(statePath, "utf-8"),
-        renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+        renderStateContent(await deriveState(base)),
         `${call.tool} renders STATE.md from the database after the commit`,
       );
       assert.equal(revision(), revisionBefore + 1, `${call.tool} advances the revision by one`);
