@@ -60,6 +60,7 @@ import {
 import { handleReopenMilestone } from "../../tools/reopen-milestone.ts";
 import { internalExecutionInvocation } from "../../execution-invocation.ts";
 import { seedSliceCompletionAuthority } from "../slice-completion-fixture.ts";
+import { seedPrerequisiteCompletionEvidence } from "../workflow-authority-fixture.ts";
 import { claimTaskAttempt } from "../../task-execution-domain-operation.ts";
 import { recordTaskTechnicalVerdict } from "../../task-verification-domain-operation.ts";
 import { publishVerifiedTaskCompletion } from "../../task-completion-compatibility-adapter.ts";
@@ -442,6 +443,9 @@ describe("state-machine-live-validation", () => {
       insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "in_progress" });
       insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Impl", status: "complete" });
       insertTask({ id: "T01", sliceId: "S02", milestoneId: "M001", title: "Impl", status: "pending" });
+      // S01 and S01/T01 are legacy completions: without completion evidence
+      // the lifecycle backfill adopts them as open work and S02 cannot close.
+      seedPrerequisiteCompletionEvidence();
 
       // Complete task
       const taskResult = await handleCompleteTask(makeTaskParams("T01", "S02", "M001") as any, base);
