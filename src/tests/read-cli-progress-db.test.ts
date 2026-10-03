@@ -171,7 +171,7 @@ test("gsd read progress falls back when the DB disappears before the DB reader o
 
   assert.equal(run.exitCode, 0);
   const envelope = JSON.parse(run.stdout);
-  assert.equal(envelope.data.phase, "plan");
+  assert.equal(envelope.data.phase, "planning");
   assert.deepEqual(envelope.data.readMetadata, { source: "projection", authority: "projection-fallback" });
 });
 
@@ -227,7 +227,7 @@ test("gsd read progress does not invoke the DB reader when no DB exists", async 
   assert.equal(calls, 0);
   const envelope = JSON.parse(run.stdout);
   assert.equal(envelope.kind, "progress");
-  assert.equal(envelope.data.phase, "plan");
+  assert.equal(envelope.data.phase, "planning");
   assert.deepEqual(envelope.data.readMetadata, { source: "projection", authority: "projection-fallback" });
 });
 
