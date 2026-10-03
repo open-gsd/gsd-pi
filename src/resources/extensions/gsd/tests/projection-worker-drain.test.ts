@@ -335,7 +335,8 @@ test("each kind that production code enqueues is rendered and settled", async ()
   const requirementsPath = join(base, ".gsd", "REQUIREMENTS.md");
   const statePath = join(base, ".gsd", "STATE.md");
   rmSync(requirementsPath);
-  assert.equal(existsSync(statePath), false);
+  // The fixture's mutations already rendered STATE.md; remove it so the drain must write it.
+  rmSync(statePath);
   const rows: Array<[kind: string, key: string]> = [
     ["state", "project/authority"],
     ["milestone-status", "milestone/m001/active"],
