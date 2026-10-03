@@ -4,7 +4,11 @@
 export const promptGoldenUnits = [
   {
     unitType: "plan-slice",
-    phase2StartChars: 19259,
+    // Re-baseline (19259 -> 19494): project knowledge is now read from the
+    // database, and this DB-less fixture gets the explicit 141-char
+    // "Project Knowledge unavailable" block (block + separator). Measured
+    // 11652 chars here; 141 / 0.6 = 235 keeps the headroom unchanged.
+    phase2StartChars: 19494,
     requiredMarkers: [
       "UNIT: Plan Slice S01",
       "Inlined Context",
@@ -48,7 +52,10 @@ export const promptGoldenUnits = [
     // stalled auto-mode runs. Measured 9487 chars here; floor(16000 * 0.6) =
     // 9600 restores roughly the headroom the #846 adjustment used, which
     // 15900's 9540 cap had shrunk to 53 chars.
-    phase2StartChars: 16000,
+    // Re-baseline (16000 -> 16235): the same 141-char "Project Knowledge
+    // unavailable" block as plan-slice. Measured 9690 chars here; 141 / 0.6 =
+    // 235 keeps the headroom unchanged.
+    phase2StartChars: 16235,
     requiredMarkers: [
       "UNIT: Complete Slice S01",
       "Tool Surface",
