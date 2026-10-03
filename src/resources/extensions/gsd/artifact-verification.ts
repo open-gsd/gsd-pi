@@ -37,6 +37,11 @@ import {
 import { hasVerdict } from "./verdict-parser.js";
 import { validateArtifact } from "./schemas/validate.js";
 import { getProjectResearchStatus } from "./project-research-policy.js";
+import {
+  isSetupArtifactSaved,
+  isWorkflowPreferencesCaptured,
+  readResearchDecision,
+} from "./project-setup-facts.js";
 import { isGsdWorktreePath } from "./worktree-root.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
@@ -165,25 +170,6 @@ export function resolveArtifactVerificationBase(unitId: string, base: string): s
   return resolveCanonicalMilestoneRoot(base, milestone);
 }
 
-function hasCapturedWorkflowPrefs(base: string): boolean {
-  const prefsPath = resolveExpectedArtifactPath("workflow-preferences", "WORKFLOW-PREFS", base);
-  if (!prefsPath || !existsSync(prefsPath)) return false;
-  const content = readFileSync(prefsPath, "utf-8");
-  const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
-  return !!match && /^workflow_prefs_captured:\s*true\s*$/m.test(match[1]);
-}
-
-function hasValidResearchDecision(base: string): boolean {
-  const decisionPath = resolveExpectedArtifactPath("research-decision", "RESEARCH-DECISION", base);
-  if (!decisionPath || !existsSync(decisionPath)) return false;
-  try {
-    const cfg = JSON.parse(readFileSync(decisionPath, "utf-8")) as Record<string, unknown>;
-    return cfg.decision === "research" || cfg.decision === "skip";
-  } catch {
-    return false;
-  }
-}
-
 function hasCompleteProjectResearch(base: string): boolean {
   return getProjectResearchStatus(base).complete;
 }
@@ -244,7 +230,7 @@ export function verifyExpectedArtifact(
   }
 
   if (unitType === "workflow-preferences") {
-    return hasCapturedWorkflowPrefs(base);
+    return isWorkflowPreferencesCaptured();
   }
 
   if (unitType === "replan-task") {
@@ -273,18 +259,18 @@ export function verifyExpectedArtifact(
     return false;
   }
 
+  // Deep setup stages are verified against database rows. The rendered
+  // PROJECT.md and REQUIREMENTS.md are projections and are not read.
   if (unitType === "discuss-project") {
-    const projectPath = resolveExpectedArtifactPath(unitType, unitId, base);
-    return !!projectPath && existsSync(projectPath) && validateArtifact(projectPath, "project").ok;
+    return isSetupArtifactSaved("project");
   }
 
   if (unitType === "discuss-requirements") {
-    const requirementsPath = resolveExpectedArtifactPath(unitType, unitId, base);
-    return !!requirementsPath && existsSync(requirementsPath) && validateArtifact(requirementsPath, "requirements").ok;
+    return isSetupArtifactSaved("requirements");
   }
 
   if (unitType === "research-decision") {
-    return hasValidResearchDecision(base);
+    return readResearchDecision() !== null;
   }
 
   if (unitType === "research-project") {

@@ -2,7 +2,7 @@
 
 Capture the project research decision. This stage runs ONCE per project, after `discuss-requirements` and before any milestone-level work. It asks the user whether to run domain research now, then records the decision so downstream dispatch rules know what to do.
 
-This is a **fixed-question** stage. Do NOT do open Socratic interviewing. Ask the one question below, capture the answer, write the marker file, end.
+This is a **fixed-question** stage. Do NOT do open Socratic interviewing. Ask the one question below, capture the answer, record it, end.
 
 **Structured questions available: {{structuredQuestionsAvailable}}**
 
@@ -36,29 +36,18 @@ Then say: "Domain research finds table-stakes capabilities, ecosystem norms, and
 
 Once the answer is captured:
 
-1. Make sure `.gsd/runtime/` exists: `mkdir -p .gsd/runtime/`
-2. Write `.gsd/runtime/research-decision.json` containing:
-
-   ```json
-   {
-     "decision": "research" | "skip",
-     "decided_at": "<ISO 8601 timestamp>",
-     "source": "research-decision"
-   }
-   ```
+1. Call `gsd_research_decision_save` with `decision: "research"` or `decision: "skip"`. The database is the only record of the decision; do not write a file.
 
    - Use `"research"` if the user picked "Yes" or answered yes/y in plain text
    - Use `"skip"` if the user picked "Skip" or answered no/n
-   - Always include `"source": "research-decision"`
-   - Optional for ambiguous or "Other / let me explain" answers: add an `inference_note` field to the JSON. Do not put inference text in chat.
-3. Print exactly one of these one-line confirmations in chat:
+2. Print exactly one of these one-line confirmations in chat:
 
 ```text
 Research decision: research
 Research decision: skip
 ```
 
-4. Say exactly:
+3. Say exactly:
 
 ```text
 Research decision recorded.
@@ -70,7 +59,7 @@ Nothing else.
 
 ## Critical rules
 
-- One question, one turn, write file, done. No follow-ups.
+- One question, one turn, one `gsd_research_decision_save` call, done. No follow-ups.
 - Do NOT actually run research in this stage — that's a separate dispatch unit (`research-project`) that fires only if the decision is `research`.
 - Do NOT call `ask_user_questions` more than once per turn.
 - If the user picks "Other / let me explain" or gives an ambiguous freeform answer, treat it as "skip" (the recommended choice). Do not change the required confirmation strings.

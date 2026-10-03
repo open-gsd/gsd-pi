@@ -164,6 +164,7 @@ test("deep project setup units declare required workflow MCP tools", () => {
   ]);
   assert.deepEqual(getRequiredWorkflowToolsForGuidedUnit("research-decision"), [
     "ask_user_questions",
+    "gsd_research_decision_save",
   ]);
   assert.deepEqual(getRequiredWorkflowToolsForAutoUnit("discuss-project"), [
     "ask_user_questions",
@@ -176,6 +177,7 @@ test("deep project setup units declare required workflow MCP tools", () => {
   ]);
   assert.deepEqual(getRequiredWorkflowToolsForAutoUnit("research-decision"), [
     "ask_user_questions",
+    "gsd_research_decision_save",
   ]);
 });
 

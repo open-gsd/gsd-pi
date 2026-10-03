@@ -40,6 +40,7 @@ export {
   executeMilestoneSetDependencies,
   executeMilestoneUnpark,
 } from "./milestone-hierarchy.js";
+export { executeResearchDecisionSave } from "./research-decision.js";
 import { emitLifecycleShadowObservation } from "../uok/audit.js";
 import { extractMilestoneSeq } from "../milestone-ids.js";
 import { registerMilestones } from "../milestone-registration.js";

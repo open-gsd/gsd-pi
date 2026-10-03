@@ -2833,7 +2833,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		| "executeMilestoneUnpark"
 		| "executeMilestoneDiscard"
 		| "executeMilestoneReorder"
-		| "executeMilestoneSetDependencies";
+		| "executeMilestoneSetDependencies"
+		| "executeResearchDecisionSave";
 
 	const milestoneHierarchyExecute =
 		(toolName: string, executor: MilestoneHierarchyExecutor) =>
@@ -2959,6 +2960,27 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		execute: milestoneHierarchyExecute(
 			"gsd_milestone_set_dependencies",
 			"executeMilestoneSetDependencies",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_research_decision_save",
+		label: "Save Research Decision",
+		description:
+			"Record the project research decision (research or skip) in one SQLite Domain Operation.",
+		promptSnippet: "Record whether to run project research before milestone planning",
+		promptGuidelines: [
+			"Use gsd_research_decision_save to record the user's answer to the project research question. Never write .gsd/runtime/research-decision.json; the database is the only source of the decision.",
+			"research runs the project research stage before milestone planning. skip goes straight to milestone work. No recorded decision means skip.",
+		],
+		parameters: Type.Object({
+			decision: StringEnum(["research", "skip"], {
+				description: "research or skip",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_research_decision_save",
+			"executeResearchDecisionSave",
 		),
 	});
 

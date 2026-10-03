@@ -1783,6 +1783,10 @@ describe("workflow MCP tools", () => {
         name: "gsd_milestone_set_dependencies",
         params: { milestoneId: "M001", dependsOn: [] },
       },
+      {
+        name: "gsd_research_decision_save",
+        params: { decision: "research" },
+      },
     ];
 
     for (const entry of cases) {
@@ -1905,6 +1909,7 @@ export const executeMilestoneUnpark = noop;
 export const executeMilestoneDiscard = noop;
 export const executeMilestoneReorder = noop;
 export const executeMilestoneSetDependencies = noop;
+export const executeResearchDecisionSave = noop;
 
 export const executeTaskReopen = async (params, projectDir, invocation) => {
   const capturePath = process.env.GSD_TEST_TASK_REOPEN_CAPTURE_PATH;
@@ -2396,6 +2401,7 @@ export const executeMilestoneUnpark = noop;
 export const executeMilestoneDiscard = noop;
 export const executeMilestoneReorder = noop;
 export const executeMilestoneSetDependencies = noop;
+export const executeResearchDecisionSave = noop;
 `;
     writeFileSync(mockModulePath, mockSource, "utf-8");
     process.env.GSD_WORKFLOW_EXECUTORS_MODULE = mockModulePath;

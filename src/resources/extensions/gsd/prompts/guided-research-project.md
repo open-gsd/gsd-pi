@@ -87,7 +87,7 @@ Prompt:
 Once all 4 tasks return:
 
 1. Verify `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md` exist. If any are missing, retry that task once.
-2. Print a concise summary in chat: one sentence per dimension, what each found or why blocked. The runtime clears the dispatch marker after this unit exits.
+2. Print a concise summary in chat: one sentence per dimension, what each found or why blocked.
 3. Say exactly: `"Project research complete."` — nothing else.
 
 ---

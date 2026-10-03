@@ -415,6 +415,16 @@ function hasCycle(slices: Array<{ id: string; depends: string[] }>): boolean {
 
 // ─── Entry point ────────────────────────────────────────────────────────
 
+/** Validate PROJECT or REQUIREMENTS content that is already in memory (a database artifact row). */
+export function validateArtifactContent(
+  content: string,
+  kind: "project" | "requirements",
+): ValidationResult {
+  return kind === "project"
+    ? validateProjectContent(content)
+    : validateRequirementsContent(content, null, new Map());
+}
+
 export function validateArtifact(
   filePath: string,
   kind: ArtifactKind,

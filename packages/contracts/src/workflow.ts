@@ -265,6 +265,14 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		auditEvent: "workflow.milestone.set_dependencies",
 	},
 	{
+		canonicalName: "gsd_research_decision_save",
+		aliases: [],
+		schemaId: "workflow.research_decision.save",
+		executorId: "executeResearchDecisionSave",
+		writePolicy: "write",
+		auditEvent: "workflow.research_decision.save",
+	},
+	{
 		canonicalName: "gsd_milestone_status",
 		aliases: [],
 		schemaId: "workflow.milestone.status",

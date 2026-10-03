@@ -486,8 +486,8 @@ export const UNIT_REGISTRY = {
     phaseChain: ["discuss", "planning"],
     promptTemplate: "guided-research-decision",
     toolContract: {
-      allowedGsdTools: ["gsd_summary_save"],
-      requiredWorkflowTools: ["ask_user_questions"],
+      allowedGsdTools: ["gsd_research_decision_save"],
+      requiredWorkflowTools: ["ask_user_questions", "gsd_research_decision_save"],
     },
   },
   // research-project dispatches 4 parallel scout subagents (Task calls); each scout

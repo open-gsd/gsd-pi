@@ -42,13 +42,7 @@ test("Deep mode: setPlanningDepth creates PREFERENCES.md when missing", (t) => {
   assert.strictEqual(frontmatter.branch_model, "single");
   assert.strictEqual(frontmatter.uat_dispatch, true);
   assert.deepStrictEqual(frontmatter.models, { executor_class: "balanced" });
-  assert.ok(existsSync(join(base, ".gsd", "runtime", "research-decision.json")));
-  const researchDecision = JSON.parse(
-    readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"),
-  );
-  assert.strictEqual(researchDecision.decision, "skip");
-  assert.strictEqual(researchDecision.source, "workflow-preferences");
-  assert.strictEqual(researchDecision.reason, "deterministic-default");
+  assert.equal(existsSync(join(base, ".gsd", "runtime")), false, "no research decision file is written");
 });
 
 test("Deep mode: setPlanningDepth updates existing planning_depth", (t) => {
@@ -150,23 +144,4 @@ test("Deep mode: setPlanningDepth can flip back to light", (t) => {
 
   const { frontmatter } = readFrontmatter(join(base, ".gsd", "PREFERENCES.md"));
   assert.strictEqual(frontmatter.planning_depth, "light");
-});
-
-test("Deep mode: setPlanningDepth preserves explicit user research decision", (t) => {
-  const base = makeBase();
-  t.after(() => { try { rmSync(base, { recursive: true, force: true }); } catch {} });
-
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(
-    join(base, ".gsd", "runtime", "research-decision.json"),
-    JSON.stringify({ decision: "research", source: "research-decision", decided_at: "2026-04-27T00:00:00Z" }),
-  );
-
-  setPlanningDepth(base, "deep");
-
-  const researchDecision = JSON.parse(
-    readFileSync(join(base, ".gsd", "runtime", "research-decision.json"), "utf-8"),
-  );
-  assert.strictEqual(researchDecision.decision, "research");
-  assert.strictEqual(researchDecision.source, "research-decision");
 });

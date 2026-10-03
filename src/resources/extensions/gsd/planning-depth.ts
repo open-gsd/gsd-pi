@@ -10,10 +10,6 @@ import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import { atomicWriteSync } from "./atomic-write.js";
 import { clearGSDPreferencesCache, getProjectGSDPreferencesPath } from "./preferences.js";
 import { logWarning } from "./workflow-logger.js";
-import {
-  researchDecisionPath,
-  writeDefaultResearchSkipDecision,
-} from "./deep-project-setup-policy.js";
 
 const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
 
@@ -36,9 +32,6 @@ export function setPlanningDepth(
   }
 
   writeProjectPreferencesParts(path, frontmatter, body);
-  if (depth === "deep") {
-    ensureResearchDecisionDefault(basePath);
-  }
 }
 
 export function ensureWorkflowPreferencesCaptured(basePath: string): void {
@@ -49,7 +42,6 @@ export function ensureWorkflowPreferencesCaptured(basePath: string): void {
   applyDeepWorkflowPreferenceDefaults(frontmatter);
 
   writeProjectPreferencesParts(path, frontmatter, body);
-  ensureResearchDecisionDefault(basePath);
 }
 
 function readProjectPreferencesParts(path: string): {
@@ -118,21 +110,4 @@ function applyDeepWorkflowPreferenceDefaults(frontmatter: Record<string, unknown
   }
   frontmatter.models = models;
   frontmatter.workflow_prefs_captured = true;
-}
-
-function ensureResearchDecisionDefault(basePath: string): void {
-  const decisionPath = researchDecisionPath(basePath);
-  if (existsSync(decisionPath)) {
-    try {
-      const parsed = JSON.parse(readFileSync(decisionPath, "utf-8")) as Record<string, unknown>;
-      const source = typeof parsed.source === "string" ? parsed.source : undefined;
-      if (parsed.decision === "research" && (source === "research-decision" || source === "user")) {
-        return;
-      }
-      if (parsed.decision === "skip" && source !== "workflow-preferences") return;
-    } catch {
-      // Invalid runtime marker is replaced with the default decision.
-    }
-  }
-  writeDefaultResearchSkipDecision(basePath);
 }

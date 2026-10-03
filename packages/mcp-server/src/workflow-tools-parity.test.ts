@@ -1016,6 +1016,7 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
   { tool: "gsd_milestone_reorder", args: { order: ["M001"] }, passesWith: null },
   { tool: "gsd_milestone_set_dependencies", args: { milestoneId: "M001", dependsOn: [] }, passesWith: null },
   { tool: "gsd_milestone_discard", args: { milestoneId: "M001", reason: "Parity discard" }, passesWith: null },
+  { tool: "gsd_research_decision_save", args: { decision: "research" }, passesWith: null },
 ];
 
 function operationCount(): number {

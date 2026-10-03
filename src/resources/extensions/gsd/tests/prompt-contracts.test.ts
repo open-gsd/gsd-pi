@@ -363,7 +363,7 @@ test("workflow preferences prompt writes defaults without interactive questions"
   assert.match(prompt, /commit_policy:\s*per-task/);
   assert.match(prompt, /branch_model:\s*single/);
   assert.match(prompt, /research:\s*skip/);
-  assert.match(prompt, /"decision": "skip"/);
+  assert.doesNotMatch(prompt, /research-decision\.json/);
   assert.doesNotMatch(prompt, /research:\s*research/);
   assert.doesNotMatch(prompt, /Ask all three questions/i);
   assert.doesNotMatch(prompt, /Ask all four questions/i);
@@ -374,7 +374,7 @@ test("project research prompt dispatches scout agents allowed by planning-dispat
   const prompt = readPrompt("guided-research-project");
   assert.match(prompt, /agent:\s*"\{\{scoutAgentType\}\}"/);
   assert.match(prompt, /Do not use `agent: "researcher"`/);
-  assert.match(prompt, /runtime clears the dispatch marker/i);
+  assert.doesNotMatch(prompt, /dispatch marker/i);
   assert.doesNotMatch(prompt, /Delete `\.gsd\/runtime\/research-project-inflight`/);
 });
 
@@ -402,7 +402,8 @@ test("guided research decision prompt keeps exact chat confirmation strings", ()
   assert.match(prompt, /^Research decision: research$/m);
   assert.match(prompt, /^Research decision recorded\.$/m);
   assert.match(prompt, /Skip \(Recommended\)/);
-  assert.match(prompt, /"source": "research-decision"/);
+  assert.match(prompt, /Call `gsd_research_decision_save` with `decision: "research"` or `decision: "skip"`/);
+  assert.doesNotMatch(prompt, /research-decision\.json/);
   assert.match(prompt, /Do not change the required confirmation strings/i);
   assert.doesNotMatch(prompt, /note the inference in the chat confirmation line/i);
 });

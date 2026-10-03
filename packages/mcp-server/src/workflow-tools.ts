@@ -517,6 +517,11 @@ type WorkflowToolExecutors = {
     basePath: string,
     invocation: ExecutionInvocation,
   ) => Promise<unknown>;
+  executeResearchDecisionSave: (
+    params: { decision: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
 };
 
 type WorkflowWriteGateModule = {
@@ -826,6 +831,7 @@ function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors
     "executeMilestoneDiscard",
     "executeMilestoneReorder",
     "executeMilestoneSetDependencies",
+    "executeResearchDecisionSave",
   ];
 
   return Array.isArray(record.SUPPORTED_SUMMARY_ARTIFACT_TYPES) &&
@@ -2628,6 +2634,12 @@ const milestoneSetDependenciesParams = {
 };
 const milestoneSetDependenciesSchema = z.object(milestoneSetDependenciesParams);
 
+const researchDecisionSaveParams = {
+  projectDir: projectDirParam,
+  decision: z.enum(["research", "skip"]).describe("research: run project research before milestone planning. skip: go straight to milestone work."),
+};
+const researchDecisionSaveSchema = z.object(researchDecisionSaveParams);
+
 const milestoneStatusParams = {
   projectDir: projectDirParam,
   milestoneId: z.string().describe("Milestone ID to query (e.g. M001)"),
@@ -3820,6 +3832,18 @@ export function registerWorkflowTools(
       const invocation = mcpWorkflowExecutionInvocation("gsd_milestone_set_dependencies", extra);
       return handleMilestoneHierarchyTool("gsd_milestone_set_dependencies", projectDir, params.milestoneId, (executors) =>
         executors.executeMilestoneSetDependencies(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_research_decision_save",
+    "Record the project research decision (research or skip) in one SQLite Domain Operation. The deep project setup gate reads this decision from the database.",
+    researchDecisionSaveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(researchDecisionSaveSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_research_decision_save", extra);
+      return handleMilestoneHierarchyTool("gsd_research_decision_save", projectDir, null, (executors) =>
+        executors.executeResearchDecisionSave(params, projectDir, invocation));
     },
   );
 

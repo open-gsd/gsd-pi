@@ -183,7 +183,7 @@ export function resolveExpectedArtifactPath(
     case "discuss-requirements":
       return join(gsdRoot(base), "REQUIREMENTS.md");
     case "research-decision":
-      return join(gsdRoot(base), "runtime", "research-decision.json");
+      return null;
     case "research-project":
       return join(gsdRoot(base), "research", "PROJECT-RESEARCH-BLOCKER.md");
     case "discuss-milestone": {
@@ -283,13 +283,13 @@ export function diagnoseExpectedArtifact(
   const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
   switch (unitType) {
     case "workflow-preferences":
-      return ".gsd/PREFERENCES.md with workflow_prefs_captured: true";
+      return "deep workflow preferences captured in the database";
     case "discuss-project":
-      return ".gsd/PROJECT.md (valid project context)";
+      return "a valid PROJECT artifact saved with gsd_summary_save";
     case "discuss-requirements":
-      return ".gsd/REQUIREMENTS.md (valid requirements registry)";
+      return "a valid REQUIREMENTS artifact saved with gsd_summary_save";
     case "research-decision":
-      return ".gsd/runtime/research-decision.json with decision research|skip";
+      return "a research decision (research|skip) recorded with gsd_research_decision_save";
     case "research-project":
       return ".gsd/research/{STACK,FEATURES,ARCHITECTURE,PITFALLS}.md with at least one real research file; blocker-only outputs stop";
     case "discuss-milestone":

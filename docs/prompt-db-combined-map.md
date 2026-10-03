@@ -75,10 +75,10 @@ Each row = one prompt file. Columns show which DB tables it touches and how.
 
 | Prompt | DB Reads | DB Writes | Disk Artifact Written |
 |--------|----------|-----------|----------------------|
-| `guided-workflow-preferences` | — | runtime_kv (research-decision seed) | PREFERENCES.md |
+| `guided-workflow-preferences` | — | — | PREFERENCES.md |
 | `guided-discuss-project` | — | artifacts (PROJECT) | PROJECT.md |
 | `guided-discuss-requirements` | requirements | requirements (INSERT), artifacts (REQUIREMENTS) | REQUIREMENTS.md |
-| `guided-research-decision` | runtime_kv | runtime_kv (research-decision.json key) | — |
+| `guided-research-decision` | workflow_domain_events | workflow_operations, workflow_domain_events (`project.setup.record`) | — |
 | `guided-research-project` | milestones, artifacts | artifacts (RESEARCH × 4 aspects) | M##-RESEARCH.md |
 
 ### Milestone Planning Phase
@@ -162,11 +162,10 @@ artifacts WHERE artifact_type='PROJECT' missing    → guided-discuss-project
 
 requirements table empty                           → guided-discuss-requirements
 
-runtime_kv[scope='global', key='research-decision']
-  absent or value='pending'                        → guided-research-decision
-
-runtime_kv[research-decision]='deep' AND
-  M##-RESEARCH artifacts missing                   → guided-research-project × 4 subagents
+newest project.setup.recorded event for 'research-decision'
+  absent or decision='skip'                        → no project research (default)
+  decision='research' AND
+  .gsd/research/ files missing                     → guided-research-project × 4 subagents
 
 milestones.status='active' AND
   artifacts WHERE artifact_type='CONTEXT' missing  → discuss / guided-discuss-milestone

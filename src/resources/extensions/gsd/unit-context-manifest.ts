@@ -728,8 +728,8 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     },
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
-  // research-decision: lightweight one-question yes/no unit. Writes a
-  // marker JSON; no project artifacts needed.
+  // research-decision: lightweight one-question yes/no unit. Records the
+  // decision in the database; no project artifacts needed.
   "research-decision": {
     skills: { mode: "none" },
     knowledge: "none",

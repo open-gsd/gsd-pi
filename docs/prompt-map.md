@@ -145,10 +145,10 @@ guided-research-project  (deep mode only — 4 parallel subagents)
 
 | Prompt | Purpose | Key Tools Called |
 |--------|---------|-----------------|
-| `guided-workflow-preferences.md` | Write `.gsd/PREFERENCES.md` with defaults; pre-seeds `research-decision.json`. No user questions. | — |
+| `guided-workflow-preferences.md` | Write `.gsd/PREFERENCES.md` with defaults. No user questions. | — |
 | `guided-discuss-project.md` | Interview-style project scoping. Classifies project shape (tiny/small/medium/large). | `ask_user_questions`, `gsd_summary_save(PROJECT)` |
 | `guided-discuss-requirements.md` | Interview-style requirements capture. | `ask_user_questions`, `gsd_requirement_save`, `gsd_summary_save(REQUIREMENTS)` |
-| `guided-research-decision.md` | Single fixed-question gate: opt into deep research or proceed lean. | `ask_user_questions` → writes `runtime/research-decision.json` |
+| `guided-research-decision.md` | Single fixed-question gate: opt into deep research or proceed lean. | `ask_user_questions`, `gsd_research_decision_save` |
 | `guided-research-project.md` | Spawns 4 parallel scout subagents (stack, features, architecture, pitfalls). Headless. | `subagent` × 4 |
 
 ### 5c. Milestone Planning Flow
@@ -290,7 +290,7 @@ gsd.db (derived GSDState)
               │              │ writes REQUIREMENTS.md
               │              │
               ├── [gate]  guided-research-decision
-              │              │ writes research-decision.json
+              │              │ gsd_research_decision_save
               │              │
               ├── [deep]  guided-research-project ──► 4× subagent
               │              │ writes RESEARCH artifacts
@@ -383,7 +383,7 @@ Phase                   Artifact Written
 guided-workflow-preferences  →  .gsd/PREFERENCES.md
 guided-discuss-project       →  .gsd/PROJECT.md
 guided-discuss-requirements  →  .gsd/REQUIREMENTS.md
-guided-research-decision     →  .gsd/runtime/research-decision.json
+guided-research-decision     →  (no file; decision recorded in the database)
 guided-research-project      →  .gsd/phases/<NN-slug>/<NN>-RESEARCH.md (×4 aspects)
 
 discuss / guided-discuss-milestone  →  .gsd/phases/<NN-slug>/<NN>-CONTEXT.md
