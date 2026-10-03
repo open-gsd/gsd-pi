@@ -13,7 +13,6 @@ import {
   gsdRoot,
 } from './paths.js';
 
-import { findMilestoneIds } from './milestone-ids.js';
 import { isClosedStatus } from './status-guards.js';
 import { join } from 'path';
 import { existsSync } from 'node:fs';
@@ -163,17 +162,11 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
   // open milestone in queue order.
   const milestoneLock = getRequestedMilestoneLock();
   if (milestoneLock) {
-    if (isDbAvailable()) {
-      const locked = getAllMilestones().find(m => m.id === milestoneLock);
-      if (!locked || isClosedStatus(locked.status) || locked.status === "parked") return null;
-      return locked.id;
-    }
-
-    const milestoneIds = findMilestoneIds(basePath);
-    if (!milestoneIds.includes(milestoneLock)) return null;
-    const lockedParked = resolveMilestoneFile(basePath, milestoneLock, "PARKED");
-    if (lockedParked) return null;
-    return milestoneLock;
+    // Fail closed: with no DB the locked milestone cannot be confirmed open.
+    if (!isDbAvailable()) return null;
+    const locked = getAllMilestones().find(m => m.id === milestoneLock);
+    if (!locked || isClosedStatus(locked.status) || locked.status === "parked") return null;
+    return locked.id;
   }
 
   // DB-first: query milestones table for the first non-complete, non-parked milestone

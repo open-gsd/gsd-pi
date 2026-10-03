@@ -1943,7 +1943,12 @@ async function handleMilestoneActions(
       declineLabel: "Cancel",
     });
     if (confirmed) {
-      discardMilestone(basePath, milestoneId);
+      try {
+        discardMilestone(basePath, milestoneId);
+      } catch (err) {
+        ctx.ui.notify(`Could not discard ${milestoneId}: ${(err as Error).message}`, "error");
+        return true;
+      }
       ctx.ui.notify(`Discarded ${milestoneId}.`, "info");
       return true;
     }
@@ -2627,7 +2632,12 @@ export async function showSmartEntry(
           declineLabel: "Cancel",
         });
         if (confirmed) {
-          discardMilestone(basePath, milestoneId);
+          try {
+            discardMilestone(basePath, milestoneId);
+          } catch (err) {
+            ctx.ui.notify(`Could not discard ${milestoneId}: ${(err as Error).message}`, "error");
+            return;
+          }
           return showSmartEntry(ctx, pi, basePath, options);
         }
       }

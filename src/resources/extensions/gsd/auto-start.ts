@@ -89,8 +89,6 @@ import {
   resolveProjectRootDbPath,
 } from "./db-workspace.js";
 import { isClosedStatus } from "./status-guards.js";
-import { classifyMilestoneSummaryContent } from "./milestone-summary-classifier.js";
-import { extractVerdict } from "./verdict-parser.js";
 import { auditOrphanedPreflightStashes } from "./orphan-stash-audit.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
 
@@ -106,7 +104,6 @@ import type { AutoSession } from "./auto/session.js";
 import {
   existsSync,
   mkdirSync,
-  readFileSync,
   readdirSync,
   rmSync,
 } from "node:fs";
@@ -860,30 +857,10 @@ export function findUnmergedCompletedMilestone(
   return _selectResumableMilestone(
     milestoneBranches,
     mergedBranches,
-    (milestoneId) => {
-      if (isDbAvailable()) {
-        const row = getMilestone(milestoneId);
-        if (row) return row.status === "complete";
-      }
-      return isCompletedMilestoneOnDisk(basePath, milestoneId);
-    },
+    // DB status is the only completion authority; no DB or no row is not complete.
+    (milestoneId) => isDbAvailable() && getMilestone(milestoneId)?.status === "complete",
     (branch) => nativeCommitCountBetween(basePath, mainBranch, branch),
   );
-}
-
-function isCompletedMilestoneOnDisk(basePath: string, milestoneId: string): boolean {
-  const summaryPath = resolveMilestoneFile(basePath, milestoneId, "SUMMARY");
-  const validationPath = resolveMilestoneFile(basePath, milestoneId, "VALIDATION");
-  if (!summaryPath || !validationPath) return false;
-
-  try {
-    const summary = readFileSync(summaryPath, "utf-8");
-    if (classifyMilestoneSummaryContent(summary) === "failure") return false;
-    const validation = readFileSync(validationPath, "utf-8");
-    return extractVerdict(validation) != null;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -1235,22 +1212,13 @@ export async function bootstrapAutoSession(
     // Clean stale runtime unit files for completed milestones (#887).
     // DB-authoritative: when DB is available, require DB status to be closed
     // before clearing runtime units. A SUMMARY file alone is no longer
-    // trusted as proof of completion (#4663). Fall back to SUMMARY-file
-    // presence only when DB is unavailable (legacy/pre-migration).
+    // trusted as proof of completion (#4663). With no DB nothing is cleared.
     cleanStaleRuntimeUnits(
       gsdRoot(base),
       (mid) => {
-        if (isDbAvailable()) {
-          const row = getMilestone(mid);
-          return !!row && isClosedStatus(row.status);
-        }
-        const summaryFile = resolveMilestoneFile(base, mid, "SUMMARY");
-        if (!summaryFile) return false;
-        try {
-          return classifyMilestoneSummaryContent(readFileSync(summaryFile, "utf-8")) !== "failure";
-        } catch {
-          return false;
-        }
+        if (!isDbAvailable()) return false;
+        const row = getMilestone(mid);
+        return !!row && isClosedStatus(row.status);
       },
     );
 

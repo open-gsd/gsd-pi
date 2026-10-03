@@ -11,7 +11,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { parkMilestone, unparkMilestone } from "../milestone-actions.ts";
+import { discardMilestone, parkMilestone, unparkMilestone } from "../milestone-actions.ts";
 import {
   openDatabase,
   closeDatabase,
@@ -142,19 +142,22 @@ test("unparkMilestone repairs parked DB state when PARKED.md is missing (#3707)"
   }
 });
 
-test("park/unpark are safe when DB is not available (#2694 guard)", () => {
+test("park/unpark/discard throw and change no file when DB is not available", (t) => {
   const base = createBase();
-  try {
-    // No openDatabase — DB not available
-    // park/unpark should still work (filesystem-only, no throw)
-    const parked = parkMilestone(base, "M001", "test");
-    assert.ok(parked, "parkMilestone succeeds without DB");
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  closeDatabase();
+  const mDir = join(base, ".gsd", "milestones", "M001");
+  const parkedPath = join(mDir, "M001-PARKED.md");
 
-    const unparked = unparkMilestone(base, "M001");
-    assert.ok(unparked, "unparkMilestone succeeds without DB");
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
+  assert.throws(() => parkMilestone(base, "M001", "test"), /parkMilestone M001 refused: database unavailable/);
+  assert.equal(existsSync(parkedPath), false, "park must not write the PARKED marker");
+
+  writeFileSync(parkedPath, "---\nreason: \"kept\"\n---\n");
+  assert.throws(() => unparkMilestone(base, "M001"), /unparkMilestone M001 refused: database unavailable/);
+  assert.equal(existsSync(parkedPath), true, "unpark must not remove the PARKED marker");
+
+  assert.throws(() => discardMilestone(base, "M001"), /discardMilestone M001 refused: database unavailable/);
+  assert.equal(existsSync(join(mDir, "M001-CONTEXT.md")), true, "discard must not remove the milestone directory");
 });
 
 test("parkMilestone throws when DB sync fails and does not claim success (#2255)", (t) => {

@@ -19,7 +19,7 @@ import {
   openDatabase,
 } from "../gsd-db.ts";
 import { createWorktree } from "../worktree-manager.ts";
-import { _resetLogs, drainLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
+import { _resetLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
 
@@ -94,6 +94,11 @@ function initGitRepo(base: string): void {
   run("git branch -M main", base);
 }
 
+function openMilestoneDb(base: string, mid: string): void {
+  assert.ok(openDatabase(join(base, '.gsd', 'gsd.db')), 'database opens');
+  insertMilestone({ id: mid, title: mid, status: 'active' });
+}
+
 function clearCaches(): void {
   clearPathCache();
   invalidateStateCache();
@@ -111,6 +116,7 @@ test('parkMilestone creates PARKED.md', () => {
     try {
       createMilestone(base, 'M001', { withRoadmap: true });
       clearCaches();
+      openMilestoneDb(base, 'M001');
 
       const success = parkMilestone(base, 'M001', 'Priority shift');
       assert.ok(success, 'parkMilestone returns true');
@@ -129,6 +135,7 @@ test('parkMilestone fails if already parked', () => {
     try {
       createMilestone(base, 'M001', { withRoadmap: true });
       clearCaches();
+      openMilestoneDb(base, 'M001');
 
       parkMilestone(base, 'M001', 'First park');
       const secondPark = parkMilestone(base, 'M001', 'Second park');
@@ -145,6 +152,7 @@ test('unparkMilestone removes PARKED.md', () => {
     try {
       createMilestone(base, 'M001', { withRoadmap: true });
       clearCaches();
+      openMilestoneDb(base, 'M001');
 
       parkMilestone(base, 'M001', 'Test reason');
       assert.ok(isParked(base, 'M001'), 'milestone is parked');
@@ -163,6 +171,7 @@ test('unparkMilestone fails if not parked', () => {
     try {
       createMilestone(base, 'M001', { withRoadmap: true });
       clearCaches();
+      openMilestoneDb(base, 'M001');
 
       const result = unparkMilestone(base, 'M001');
       assert.ok(!result, 'unparkMilestone returns false when not parked');
@@ -200,6 +209,7 @@ test('discardMilestone removes directory', async () => {
       _resetLogs();
       createMilestone(base, 'M001', { withRoadmap: true });
       clearCaches();
+      openMilestoneDb(base, 'M001');
 
       const mDir = join(base, '.gsd', 'milestones', 'M001');
       assert.ok(existsSync(mDir), 'milestone dir exists before discard');
@@ -207,11 +217,7 @@ test('discardMilestone removes directory', async () => {
       const success = discardMilestone(base, 'M001');
       assert.ok(success, 'discardMilestone returns true');
       assert.ok(!existsSync(mDir), 'milestone dir removed after discard');
-      const logs = drainLogs();
-      assert.ok(
-        logs.some((entry) => entry.message.includes('discardMilestone DB cleanup skipped for M001: database unavailable')),
-        'discardMilestone warns when DB cleanup is skipped',
-      );
+      assert.equal(getMilestone('M001'), null, 'milestone row removed from DB');
     } finally {
       setStderrLoggingEnabled(previousStderr);
       cleanup(base);
@@ -225,6 +231,7 @@ test('discardMilestone updates queue order', () => {
       createMilestone(base, 'M001', { withRoadmap: true });
       createMilestone(base, 'M002', { withRoadmap: true });
       clearCaches();
+      openMilestoneDb(base, 'M001');
 
       // Write a queue order that includes M001
       const queuePath = join(base, '.gsd', 'QUEUE-ORDER.json');

@@ -11,7 +11,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { _resolveStopAutoMilestoneId, _selectStopAutoWorktreeExit } from "../auto.ts";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { _resolveStopAutoMilestoneId, _selectStopAutoWorktreeExit, stopAuto } from "../auto.ts";
+import { autoSession } from "../auto-runtime-state.ts";
+import { closeDatabase } from "../gsd-db.ts";
+import { WorktreeLifecycle } from "../worktree-lifecycle.ts";
 
 test("#5576: stopAuto should check milestone completion status before choosing exit strategy", () => {
   assert.equal(
@@ -92,4 +98,39 @@ test("#6273: stopAuto does not infer non-milestone worktree names", () => {
     _resolveStopAutoMilestoneId(null, "/repo/.gsd/worktrees/feature-x"),
     null,
   );
+});
+
+test("stopAuto preserves the branch instead of merging when the DB is unavailable, even with a SUMMARY on disk", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-stop-no-db-"));
+  const previousCwd = process.cwd();
+  const exits: Array<{ milestoneId: string; merge: boolean }> = [];
+  t.mock.method(WorktreeLifecycle.prototype, "exitMilestone", (milestoneId: string, opts: { merge: boolean }) => {
+    exits.push({ milestoneId, merge: opts.merge });
+    return { ok: true };
+  });
+  t.mock.method(WorktreeLifecycle.prototype, "restoreToProjectRoot", () => {});
+  t.after(() => {
+    autoSession.reset();
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const milestoneDir = join(base, ".gsd", "milestones", "M001");
+  mkdirSync(milestoneDir, { recursive: true });
+  writeFileSync(join(milestoneDir, "M001-SUMMARY.md"), "---\nid: M001\n---\n\n# M001 — Complete\n", "utf-8");
+  closeDatabase();
+
+  autoSession.reset();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.originalBasePath = base;
+  autoSession.currentMilestoneId = "M001";
+
+  await stopAuto(
+    { hasUI: false, ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {}, setHeader: () => {} } } as any,
+    undefined,
+    "test stop",
+  );
+
+  assert.deepEqual(exits, [{ milestoneId: "M001", merge: false }], "no DB must preserve, never merge");
 });

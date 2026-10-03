@@ -1,11 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Classify milestone readiness from DB status, slices, and artifacts.
 
-import { readFileSync } from "node:fs";
 import type { Phase } from "./types.js";
-import { getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
-import { parseRoadmapSlices } from "./roadmap-slices.js";
-import { logWarning } from "./workflow-logger.js";
+import { getMilestone, getMilestoneSlices } from "./gsd-db.js";
 
 export type MilestoneReadinessKind =
   | "queued-shell"
@@ -32,7 +29,6 @@ export interface MilestoneReadinessInput {
 export interface HandoffReadinessInput {
   milestoneId: string;
   contextFile: string | null;
-  roadmapFile: string | null;
 }
 
 export function classifyMilestoneReadiness(input: MilestoneReadinessInput): MilestoneReadiness {
@@ -86,30 +82,14 @@ export function describeMilestoneReadinessPhase(
   }
 }
 
-function executablePlanSliceCount(milestoneId: string, roadmapFile: string | null): number {
-  if (isDbAvailable()) {
-    return getMilestoneSlices(milestoneId).length;
-  }
-  if (!roadmapFile) return 0;
-  try {
-    return parseRoadmapSlices(readFileSync(roadmapFile, "utf-8")).length;
-  } catch (e) {
-    logWarning(
-      "guided",
-      `failed to parse roadmap slices for ${milestoneId}: ${(e as Error).message}`,
-    );
-    return 0;
-  }
-}
-
+/** Readiness reads DB rows only; the caller has already required an open DB. */
 export function assessMilestoneHandoffReadiness(
   input: HandoffReadinessInput,
 ): MilestoneReadiness {
-  const milestone = isDbAvailable() ? getMilestone(input.milestoneId) : null;
   return classifyMilestoneReadiness({
-    status: milestone?.status,
+    status: getMilestone(input.milestoneId)?.status,
     hasContext: input.contextFile != null,
-    sliceCount: executablePlanSliceCount(input.milestoneId, input.roadmapFile),
+    sliceCount: getMilestoneSlices(input.milestoneId).length,
   });
 }
 

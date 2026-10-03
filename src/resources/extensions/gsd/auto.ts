@@ -201,7 +201,6 @@ import {
   reconcileMergeState,
   verifyExpectedArtifact,
 } from "./auto-recovery.js";
-import { classifyMilestoneSummaryContent } from "./milestone-summary-classifier.js";
 import { resolveDispatch, DISPATCH_RULES, milestoneIdsDispatchCompatible } from "./auto-dispatch.js";
 import { getErrorMessage } from "./error-utils.js";
 import { recoverFailedMigration } from "./migrate-external.js";
@@ -1838,29 +1837,15 @@ export async function stopAuto(
         // leave a file behind without the milestone actually being done,
         // which previously caused stopAuto to merge a failed milestone and
         // emit a misleading metadata-only merge warning (#4175).
-        // DB-unavailable projects fall back to SUMMARY-file presence.
+        // With no DB the milestone is never treated as complete: the branch
+        // is preserved, never merged on a file's word (ADR-046).
         let milestoneComplete = false;
         try {
           if (isDbAvailable()) {
             const dbRow = getMilestone(stopMilestoneId);
             milestoneComplete = dbRow?.status === "complete";
           } else {
-            const summaryPath = resolveMilestoneFile(
-              s.originalBasePath || s.basePath,
-              stopMilestoneId,
-              "SUMMARY",
-            );
-            if (!summaryPath) {
-              // Also check in the worktree path (SUMMARY may not be synced yet)
-              const wtSummaryPath = resolveMilestoneFile(
-                s.basePath,
-                stopMilestoneId,
-                "SUMMARY",
-              );
-              milestoneComplete = wtSummaryPath !== null;
-            } else {
-              milestoneComplete = true;
-            }
+            logWarning("engine", `stopAuto: DB unavailable, preserving ${stopMilestoneId} branch instead of merging`, { file: "auto.ts" });
           }
         } catch (err) {
           // Non-fatal — fall through to preserveBranch path
@@ -2824,8 +2809,8 @@ export async function startAuto(
           );
         if (shouldResumePausedSession) {
           // Validate the milestone still exists and isn't already complete (#1664).
-          // DB status is authoritative when available; SUMMARY.md is a legacy
-          // fallback only for unmigrated/offline projects.
+          // DB status is the only authority; with no DB the milestone is not
+          // treated as terminal and the open failure is reported (ADR-046).
           const mDir = resolveMilestonePath(base, meta.milestoneId);
           let summaryIsTerminal = false;
           let dbAvailable = isDbAvailable();
@@ -2840,14 +2825,10 @@ export async function startAuto(
           if (dbAvailable) {
             summaryIsTerminal = !!milestoneRow && isClosedStatus(milestoneRow.status);
           } else {
-            const summaryFile = resolveMilestoneFile(base, meta.milestoneId, "SUMMARY");
-            if (summaryFile) {
-              try {
-                summaryIsTerminal = classifyMilestoneSummaryContent(readFileSync(summaryFile, "utf-8")) !== "failure";
-              } catch {
-                summaryIsTerminal = false;
-              }
-            }
+            ctx.ui.notify(
+              `Cannot check paused milestone ${meta.milestoneId}: workflow DB is unavailable.`,
+              "error",
+            );
           }
           // #1643 / #1644 share this seam: `routePausedSessionResume` subsumes
           // `getSupersedingActiveMilestoneId` here — it discards a missing or

@@ -2,8 +2,6 @@
 // File Purpose: Git-based detection of milestone implementation evidence for closeout guards.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
   getCompletedMilestoneTaskFileHints,
@@ -15,7 +13,6 @@ import {
 } from "./gsd-db.js";
 import { readIntegrationBranch } from "./git-service.js";
 import { logWarning } from "./workflow-logger.js";
-import { resolveTasksDir } from "./paths.js";
 
 /** Large enough for unbounded milestone-history git log scans in big repos. */
 const GIT_LOG_MAX_BUFFER = 16 * 1024 * 1024;
@@ -430,7 +427,7 @@ function commitMatchesMilestone(basePath: string, message: string, milestoneId: 
   if (/^GSD-Task:\s*S[^/\s]+\/T\S+/m.test(message)) {
     if (files.some((file) => isMilestoneArtifactPath(file, milestoneId))) return true;
     if (commitMessageMentionsMilestone(message, milestoneId)) return true;
-    const taskTrailerOwnership = getTaskOwnershipStatus(basePath, message, milestoneId);
+    const taskTrailerOwnership = getTaskOwnershipStatus(message, milestoneId);
     if (taskTrailerOwnership === true) return true;
     if (taskTrailerOwnership === false) return false;
     // taskTrailerOwnership === null: unknown ownership. Apply fallback only
@@ -443,12 +440,11 @@ function commitMatchesMilestone(basePath: string, message: string, milestoneId: 
 
 /**
  * Tri-state task ownership probe.
- * true => DB or local files confirm this milestone owns the task.
+ * true => DB confirms this milestone owns the task.
  * false => DB is available and this milestone is registered, but task is absent.
- * null => ownership unknown (milestone not in DB yet, or no DB + no local files).
+ * null => ownership unknown (milestone not in DB yet, or no DB).
  */
 function getTaskOwnershipStatus(
-  basePath: string,
   message: string,
   milestoneId: string,
 ): true | false | null {
@@ -456,24 +452,9 @@ function getTaskOwnershipStatus(
   if (!match) return null;
   const [, sliceId, taskId] = match;
 
-  if (isDbAvailable()) {
-    if (!getMilestone(milestoneId)) return null;
-    return getTask(milestoneId, sliceId, taskId) ? true : false;
-  }
-
-  // DB unavailable: fallback to local task-file presence.
-  const tasksDir = resolveTasksDir(basePath, milestoneId, sliceId);
-  if (
-    tasksDir
-    && (
-      existsSync(join(tasksDir, `${taskId}-PLAN.md`))
-      || existsSync(join(tasksDir, `${taskId}-SUMMARY.md`))
-    )
-  ) {
-    return true;
-  }
-
-  return null;
+  // No DB means ownership is unknown; task files are not ownership evidence.
+  if (!isDbAvailable() || !getMilestone(milestoneId)) return null;
+  return getTask(milestoneId, sliceId, taskId) ? true : false;
 }
 
 function commitMessageMentionsMilestone(message: string, milestoneId: string): boolean {

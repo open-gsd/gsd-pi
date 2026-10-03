@@ -922,6 +922,11 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	) => {
 		try {
 			const basePath = resolveCtxCwd(_ctx);
+			// Milestone IDs are allocated against DB rows; with no DB, refuse
+			// before a preview reservation is consumed (ADR-046).
+			if (!(await ensureDbOpen(basePath))) {
+				throw new Error("workflow DB is unavailable");
+			}
 			// Claim a reserved ID if the guided-flow already previewed one to the user.
 			// This guarantees the ID shown in the UI matches the one materialised on disk.
 			const {
@@ -943,7 +948,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				};
 			}
 
-			await ensureDbOpen(basePath);
 			const { getAllMilestones } = await import("../gsd-db.js");
 			const existingIds = [
 				...findMilestoneIds(basePath),
@@ -983,24 +987,18 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	/**
 	 * Insert a minimal DB row for a milestone ID so it's visible to the state
 	 * machine. Uses INSERT OR IGNORE — safe to call even if gsd_plan_milestone
-	 * later writes the full row. Silently skips if the DB isn't available yet
-	 * (pre-migration).
+	 * later writes the full row. Throws when the DB is unavailable or the
+	 * insert fails, so the tool never reports an ID that has no row.
 	 */
 	async function ensureMilestoneDbRow(
 		milestoneId: string,
 		basePath: string,
 	): Promise<void> {
-		const dbAvailable = await ensureDbOpen(basePath);
-		if (!dbAvailable) return;
-		try {
-			const { insertMilestone } = await import("../gsd-db.js");
-			insertMilestone({ id: milestoneId, status: "queued" });
-		} catch (e) {
-			logError(
-				"tool",
-				`insertMilestone failed for ${milestoneId}: ${(e as Error).message}`,
-			);
+		if (!(await ensureDbOpen(basePath))) {
+			throw new Error("workflow DB is unavailable");
 		}
+		const { insertMilestone } = await import("../gsd-db.js");
+		insertMilestone({ id: milestoneId, status: "queued" });
 	}
 
 	const milestoneGenerateIdTool = {

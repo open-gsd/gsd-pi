@@ -25,7 +25,7 @@ import type { PreflightResult, PostflightResult } from "./clean-root-preflight.j
 
 import type { AutoSession } from "./auto/session.js";
 import { debugLog } from "./debug-logger.js";
-import { logWarning } from "./workflow-logger.js";
+import { logError, logWarning } from "./workflow-logger.js";
 import { emitJournalEvent } from "./journal.js";
 import { emitWorktreeCreated, emitWorktreeMerged } from "./worktree-telemetry.js";
 import {
@@ -52,7 +52,7 @@ import { loadEffectiveGSDPreferences, getIsolationMode } from "./preferences.js"
 import { isolationDegradedFallbackGuidance, worktreeCreationFailedGuidance } from "./guidance.js";
 import { invalidateAllCaches } from "./cache.js";
 import { resolveMilestoneFile } from "./paths.js";
-import { getMilestone, insertMilestone, isDbAvailable, updateMilestoneStatus } from "./gsd-db.js";
+import { getMilestone, isDbAvailable, updateMilestoneStatus } from "./gsd-db.js";
 import { isClosedStatus } from "./status-guards.js";
 import type { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
@@ -98,14 +98,17 @@ export function resetRecentWorktreeMergeFailuresForTest(): void {
   recentWorktreeMergeFailures.clear();
 }
 
+// The git merge has already run, so a DB gap is logged as an error, never
+// papered over by inventing a 'complete' row (ADR-046).
 function markMilestoneClosedAfterMerge(milestoneId: string, completedAt: string): void {
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable()) {
+    logError("worktree", `Merged ${milestoneId} but cannot mark it complete: workflow DB is unavailable`);
+    return;
+  }
   try {
     const existing = getMilestone(milestoneId);
     if (!existing) {
-      insertMilestone({ id: milestoneId, title: milestoneId, status: "complete" });
-      updateMilestoneStatus(milestoneId, "complete", completedAt);
-      invalidateAllCaches();
+      logError("worktree", `Merged ${milestoneId} but it has no DB row; not creating one`);
       return;
     }
     if (!isClosedStatus(existing.status)) {

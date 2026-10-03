@@ -41,6 +41,7 @@ import { isAutoActive } from "./auto.js";
 import { isClosedStatus } from "./status-guards.js";
 import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
 import { removeManagedProjectionTreeExactSync } from "./managed-projection-history.js";
+import { GSDError, GSD_STALE_STATE } from "./errors.js";
 
 /**
  * Writer-side assert for mutations that race with auto-mode's squash merge (#4704).
@@ -53,6 +54,16 @@ function assertNotAutoActive(action: string): void {
     throw new Error(
       `${action} cannot run while auto-mode is active. Stop auto-mode first with /gsd stop.`,
     );
+  }
+}
+
+/**
+ * Milestone status lives in the DB. With no open DB these actions refuse
+ * before touching any file, worktree or branch (ADR-046).
+ */
+function assertDbAvailable(action: string, milestoneId: string): void {
+  if (!isDbAvailable()) {
+    throw new GSDError(GSD_STALE_STATE, `${action} ${milestoneId} refused: database unavailable`);
   }
 }
 
@@ -112,17 +123,13 @@ function syncAdoptedMilestoneParkStatus(milestoneId: string, parked: boolean): v
  */
 export function parkMilestone(basePath: string, milestoneId: string, reason: string): boolean {
   assertNotAutoActive("park milestone");
+  assertDbAvailable("parkMilestone", milestoneId);
   const mDir = resolveMilestonePath(basePath, milestoneId);
   if (!mDir || !existsSync(mDir)) return false;
 
   // Guard: do not park a completed milestone — it would corrupt depends_on satisfaction
-  const dbAvailable = isDbAvailable();
-  const milestone = dbAvailable ? getMilestone(milestoneId) : null;
+  const milestone = getMilestone(milestoneId);
   if (milestone && isClosedStatus(milestone.status)) return false;
-  if (!dbAvailable) {
-    const summaryFile = resolveMilestoneFile(basePath, milestoneId, "SUMMARY");
-    if (summaryFile) return false;
-  }
 
   // Use relMilestoneFile for layout-aware path (legacy: M001-PARKED.md, flat-phase: 01-PARKED.md)
   const parkedPath = join(basePath, relMilestoneFile(basePath, milestoneId, "PARKED"));
@@ -143,16 +150,14 @@ export function parkMilestone(basePath: string, milestoneId: string, reason: str
   // DB write FIRST (#2256): if the sync fails, no marker file is written, so
   // the park can be retried instead of being stuck as file-parked/DB-active.
   // The failure propagates (#2255) — callers must not report success.
-  if (dbAvailable) {
-    try {
-      if (isMilestoneLifecycleAdopted(milestoneId)) {
-        syncAdoptedMilestoneParkStatus(milestoneId, true);
-      } else {
-        updateMilestoneStatus(milestoneId, "parked");
-      }
-    } catch (err) {
-      throw new Error(`parkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
+  try {
+    if (isMilestoneLifecycleAdopted(milestoneId)) {
+      syncAdoptedMilestoneParkStatus(milestoneId, true);
+    } else {
+      updateMilestoneStatus(milestoneId, "parked");
     }
+  } catch (err) {
+    throw new Error(`parkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
   }
   // If the marker write fails after the DB sync, the row is parked with no
   // marker on disk. That state is recoverable in both directions: a retry
@@ -166,37 +171,37 @@ export function parkMilestone(basePath: string, milestoneId: string, reason: str
 // ─── Unpark ────────────────────────────────────────────────────────────────
 
 /**
- * Unpark a milestone — removes the PARKED.md marker file.
+ * Unpark a milestone — records the DB status, then removes the PARKED.md marker file.
  * Returns true if successfully unparked, false if milestone not found or not parked.
+ * Throws if the DB sync fails; the marker is kept so the retry starts clean.
  */
 export function unparkMilestone(basePath: string, milestoneId: string): boolean {
   assertNotAutoActive("unpark milestone");
+  assertDbAvailable("unparkMilestone", milestoneId);
   const mDir = resolveMilestonePath(basePath, milestoneId);
   if (!mDir || !existsSync(mDir)) return false;
 
   // Use relMilestoneFile for layout-aware path (legacy: M001-PARKED.md, flat-phase: 01-PARKED.md)
   const parkedPath = join(basePath, relMilestoneFile(basePath, milestoneId, "PARKED"));
   const hadParkedFile = existsSync(parkedPath);
-  const dbThinksParked = isDbAvailable() && getMilestone(milestoneId)?.status === "parked";
+  const dbThinksParked = getMilestone(milestoneId)?.status === "parked";
 
   // Recover the reverse desync too: DB can still say "parked" even when the
   // PARKED marker was lost on disk, and /gsd unpark should repair that state.
   if (!hadParkedFile && !dbThinksParked) return false;
 
+  // Sync DB status FIRST so deriveStateFromDb picks up the unparked milestone (#2694)
+  try {
+    if (isMilestoneLifecycleAdopted(milestoneId)) {
+      syncAdoptedMilestoneParkStatus(milestoneId, false);
+    } else {
+      updateMilestoneStatus(milestoneId, "active");
+    }
+  } catch (err) {
+    throw new Error(`unparkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
+  }
   if (hadParkedFile) {
     removeProjectionFileSync(parkedPath);
-  }
-  // Sync DB status so deriveStateFromDb picks up the unparked milestone (#2694)
-  if (isDbAvailable()) {
-    try {
-      if (isMilestoneLifecycleAdopted(milestoneId)) {
-        syncAdoptedMilestoneParkStatus(milestoneId, false);
-      } else {
-        updateMilestoneStatus(milestoneId, "active");
-      }
-    } catch (err) {
-      logWarning("engine", `unparkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
-    }
   }
   invalidateAllCaches();
   return true;
@@ -208,15 +213,19 @@ export function unparkMilestone(basePath: string, milestoneId: string): boolean 
  * Discard a milestone — permanently removes the milestone directory and
  * prunes it from QUEUE-ORDER.json if present.
  * Returns true if successfully discarded, false if milestone not found.
+ * The DB rows are deleted first; a DB failure throws before any file,
+ * worktree or branch is removed.
  */
 export function discardMilestone(basePath: string, milestoneId: string): boolean {
   assertNotAutoActive("discard milestone");
+  assertDbAvailable("discardMilestone", milestoneId);
   const mDir = resolveMilestonePath(basePath, milestoneId);
   const hasMilestoneDir = !!mDir && existsSync(mDir);
-  const hasDbMilestone = isDbAvailable() && getMilestone(milestoneId) !== null;
+  const hasDbMilestone = getMilestone(milestoneId) !== null;
   if (!hasMilestoneDir && !hasDbMilestone) return false;
   if (hasDbMilestone) {
     assertNoAdoptedLifecycleHistory("discardMilestone", [milestoneId]);
+    deleteMilestone(milestoneId);
   }
 
   try {
@@ -236,16 +245,6 @@ export function discardMilestone(basePath: string, milestoneId: string): boolean
   const order = loadQueueOrder(basePath);
   if (order && order.includes(milestoneId)) {
     saveQueueOrder(basePath, order.filter(id => id !== milestoneId));
-  }
-
-  if (isDbAvailable()) {
-    try {
-      deleteMilestone(milestoneId);
-    } catch (err) {
-      logWarning("engine", `discardMilestone DB cleanup failed for ${milestoneId}: ${(err as Error).message}`);
-    }
-  } else {
-    logWarning("engine", `discardMilestone DB cleanup skipped for ${milestoneId}: database unavailable`);
   }
 
   invalidateAllCaches();

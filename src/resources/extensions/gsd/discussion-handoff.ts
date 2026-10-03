@@ -16,7 +16,6 @@ import { clearParseCache } from "./files.js";
 import { clearPathCache, gsdRoot, resolveGsdRootFile, resolveMilestoneFile, relMilestoneFile } from "./paths.js";
 import { _getPendingAutoStart, deletePendingAutoStart, type PendingAutoStartEntry } from "./pending-auto-start.js";
 import { logWarning } from "./workflow-logger.js";
-import { readManifest } from "./workflow-manifest.js";
 import { removeProjectionFileSync } from "./atomic-write.js";
 import { invalidateStateCache } from "./state.js";
 
@@ -54,19 +53,6 @@ export function scheduleAutoStartAfterIdle(
     });
 }
 
-function manifestContainsMilestone(basePath: string, milestoneId: string): boolean {
-  try {
-    const manifest = readManifest(basePath);
-    return (
-      Array.isArray(manifest?.milestones) &&
-      manifest.milestones.some(m => m.id === milestoneId)
-    );
-  } catch (e) {
-    logWarning("guided", `R3b: failed to read state manifest: ${(e as Error).message}`);
-    return false;
-  }
-}
-
 function notifyDbRowRecoveryFailed(entry: PendingAutoStartEntry): void {
   entry.ctx.ui.notify(
     `Milestone ${entry.milestoneId}: DB row recovery failed ${entry.r3bRecoveryCount} times. ` +
@@ -94,17 +80,9 @@ function ensureMilestoneRowForAcceptedHandoff(
     return false;
   }
 
-  const { basePath, milestoneId } = entry;
+  const { milestoneId } = entry;
   const milestoneRow = getMilestone(milestoneId);
   if (milestoneRow) return true;
-
-  if (manifestContainsMilestone(basePath, milestoneId)) {
-    logWarning(
-      "guided",
-      `R3b: getMilestone(${milestoneId}) returned null but manifest has the row — treating as stale read`,
-    );
-    return true;
-  }
 
   if (!contextFile) {
     entry.ctx.ui.notify(
@@ -318,7 +296,6 @@ export function checkAutoStartAfterDiscuss(lookupBasePath?: string): boolean {
   const readiness = assessMilestoneHandoffReadiness({
     milestoneId,
     contextFile,
-    roadmapFile,
   });
   ctx.ui.notify(
     formatAcceptedDiscussHandoffMessage(milestoneId, readiness),

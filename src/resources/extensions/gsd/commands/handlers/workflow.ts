@@ -697,7 +697,13 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
         return true;
       }
     }
-    const success = unparkMilestone(basePath, targetId);
+    let success: boolean;
+    try {
+      success = unparkMilestone(basePath, targetId);
+    } catch (err) {
+      ctx.ui.notify(`Could not unpark ${targetId}: ${(err as Error).message}`, "error");
+      return true;
+    }
     ctx.ui.notify(
       success ? `Unparked ${targetId}. It will resume its normal position in the queue.` : `Could not unpark ${targetId} — milestone not found or not parked.`,
       success ? "info" : "warning",
@@ -722,7 +728,13 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
       ctx.ui.notify(`Discard of ${targetId} cancelled.`, "info");
       return true;
     }
-    const success = discardMilestone(projectRoot(), targetId);
+    let success: boolean;
+    try {
+      success = discardMilestone(projectRoot(), targetId);
+    } catch (err) {
+      ctx.ui.notify(`Could not discard ${targetId}: ${(err as Error).message}`, "error");
+      return true;
+    }
     ctx.ui.notify(
       success ? `Discarded ${targetId}.` : `Could not discard ${targetId} — milestone not found.`,
       success ? "info" : "warning",
