@@ -3801,7 +3801,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_milestone_reorder",
-    "Set the execution order of the open Milestones in one SQLite Domain Operation. An order that puts a Milestone before one it depends on is refused. QUEUE-ORDER.json is rendered from the database.",
+    "Set the execution order of the open Milestones in one SQLite Domain Operation. List every open Milestone in the wanted order; one that is not listed keeps its relative position after the listed ones. An order that puts a Milestone before one it depends on is refused. QUEUE-ORDER.json is rendered from the database.",
     milestoneReorderParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const { projectDir, ...params } = parseWorkflowArgs(milestoneReorderSchema, args);

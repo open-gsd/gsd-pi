@@ -26,7 +26,7 @@ Change execution order of pending/active milestones:
 gsd_milestone_reorder({ order: ["M003", "M001", "M002"] })
 ```
 
-Only include non-complete milestone IDs. The tool refuses an order that breaks a dependency.
+List every open (non-complete) milestone ID in the order you want. A milestone you do not list keeps its relative position after the listed ones. The tool refuses an order that breaks a dependency.
 
 ### Park a milestone
 
@@ -69,7 +69,7 @@ gsd_milestone_discard({ milestoneId: "M003", reason: "Superseded by M005" })
 
 ### Add a new milestone
 
-Use `gsd_milestone_generate_id` for the next ID, then call `gsd_summary_save` with `milestone_id: {ID}`, `artifact_type: "CONTEXT"`, and scope/goals/success criteria as `content`. The tool writes disk and DB. Call `gsd_milestone_reorder` for placement.
+Use `gsd_milestone_generate_id` for the next ID, then call `gsd_summary_save` with `milestone_id: {ID}`, `artifact_type: "CONTEXT"`, and scope/goals/success criteria as `content`. The tool writes disk and DB. Call `gsd_milestone_reorder` with the full open order for placement.
 
 ### Update dependencies
 

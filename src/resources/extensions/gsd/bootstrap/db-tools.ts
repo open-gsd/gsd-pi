@@ -2922,11 +2922,11 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		name: "gsd_milestone_reorder",
 		label: "Reorder Milestones",
 		description:
-			"Set the execution order of the open Milestones in one SQLite Domain Operation. QUEUE-ORDER.json is rendered from the database.",
+			"Set the execution order of the open Milestones in one SQLite Domain Operation. List every open Milestone in the wanted order; one that is not listed keeps its relative position after the listed ones. An order that puts a Milestone before one it depends on is refused. QUEUE-ORDER.json is rendered from the database.",
 		promptSnippet: "Set the execution order of open GSD Milestones",
 		promptGuidelines: [
 			"Use gsd_milestone_reorder to change the queue order. Never write QUEUE-ORDER.json by hand.",
-			"List only open milestone IDs, first to run first. The tool refuses an order that puts a milestone before one it depends on; change the dependency first with gsd_milestone_set_dependencies.",
+			"List every open milestone ID, first to run first; a milestone you do not list keeps its relative position after the listed ones. The tool refuses an order that puts a milestone before one it depends on; change the dependency first with gsd_milestone_set_dependencies.",
 		],
 		parameters: Type.Object({
 			order: Type.Array(Type.String(), {
