@@ -8,7 +8,6 @@
  * cancellation is durable.
  */
 
-import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolveMilestonePath } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
@@ -23,6 +22,7 @@ import { getDb } from "./db/engine.js";
 import type { DomainOperationContext } from "./db/domain-operation.js";
 import {
   adoptOrTransitionLifecycle,
+  grantCancellationWaiver,
   readDomainOperationFence,
 } from "./db/writers/lifecycle-commands.js";
 import { removeWorktree } from "./worktree-manager.js";
@@ -256,26 +256,12 @@ function cancelMilestoneHierarchy(
         ? { entity: "slice", milestoneId, sliceId: row.slice_id!, status: "skipped" }
         : { entity: "milestone", milestoneId, status: "skipped" });
   }
-  getDb().prepare(`
-    INSERT INTO workflow_waivers (
-      waiver_id, project_id, lifecycle_id, waiver_status, scope, rationale,
-      granted_by_actor_type, granted_by_actor_id, granted_at,
-      operation_id, project_revision, authority_epoch
-    ) VALUES (
-      :waiver_id, :project_id, :lifecycle_id, 'active', :scope, :rationale,
-      'user', 'gsd-cli-operator', :granted_at,
-      :operation_id, :project_revision, :authority_epoch
-    )
-  `).run({
-    ":waiver_id": randomUUID(),
-    ":project_id": context.projectId,
-    ":lifecycle_id": milestoneLifecycleId,
-    ":scope": `milestone:${milestoneId}`,
-    ":rationale": reason,
-    ":granted_at": new Date().toISOString(),
-    ":operation_id": context.operationId,
-    ":project_revision": context.resultingRevision,
-    ":authority_epoch": context.resultingAuthorityEpoch,
+  grantCancellationWaiver(context, {
+    lifecycleId: milestoneLifecycleId,
+    scope: `milestone:${milestoneId}`,
+    rationale: reason,
+    grantedByActorType: "user",
+    grantedByActorId: "gsd-cli-operator",
   });
 }
 

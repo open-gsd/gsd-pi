@@ -1,8 +1,6 @@
 // Project/App: gsd-pi
 // File Purpose: Replay-safe Task reopen and cancellation Domain Operations.
 
-import { randomUUID } from "node:crypto";
-
 import {
   executeDomainOperation,
   type DomainJsonValue,
@@ -17,8 +15,10 @@ import { normalizeLegacyLifecycleStatus } from "./db/lifecycle-shadow-comparison
 import {
   adoptOrTransitionLifecycle,
   appendKernelCheckpoint,
+  grantCancellationWaiver,
   readDomainOperationFence,
   readLifecycleShadowComparison,
+  revokeActiveWaivers,
   settleAttemptWithResult,
   type CanonicalLifecycleStatus,
   type LifecycleShadowRecord,
@@ -151,41 +151,18 @@ function grantTaskCancellationWaiver(
     throw new Error("A user-authorized Task cancellation requires actor identity");
   }
   const requirementId = `task-cancellation:${taskEntity(task)}`;
-  getDb().prepare(`
-    INSERT OR IGNORE INTO requirements (id, class, status, description, source)
-    VALUES (:id, 'cancellation', 'waived', :description, 'task-cancel')
-  `).run({
-    ":id": requirementId,
-    ":description": `Cancellation of task ${taskEntity(task)} authorized by task.cancel`,
+  return grantCancellationWaiver(context, {
+    lifecycleId,
+    scope: taskCancellationWaiverScope(task),
+    rationale,
+    grantedByActorType: actorType,
+    grantedByActorId: actorId,
+    requirement: {
+      id: requirementId,
+      description: `Cancellation of task ${taskEntity(task)} authorized by task.cancel`,
+      source: "task-cancel",
+    },
   });
-  const waiverId = randomUUID();
-  getDb().prepare(`
-    INSERT INTO workflow_waivers (
-      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
-      waiver_status, scope, rationale, granted_by_actor_type,
-      granted_by_actor_id, granted_at,
-      operation_id, project_revision, authority_epoch
-    ) VALUES (
-      :waiver_id, :project_id, :lifecycle_id, :requirement_id, NULL,
-      'active', :scope, :rationale, :actor_type,
-      :actor_id, :granted_at,
-      :operation_id, :project_revision, :authority_epoch
-    )
-  `).run({
-    ":waiver_id": waiverId,
-    ":project_id": context.projectId,
-    ":lifecycle_id": lifecycleId,
-    ":requirement_id": requirementId,
-    ":scope": taskCancellationWaiverScope(task),
-    ":rationale": rationale,
-    ":actor_type": actorType,
-    ":actor_id": actorId,
-    ":granted_at": new Date().toISOString(),
-    ":operation_id": context.operationId,
-    ":project_revision": context.resultingRevision,
-    ":authority_epoch": context.resultingAuthorityEpoch,
-  });
-  return waiverId;
 }
 
 function revokeTaskCancellationWaivers(
@@ -221,21 +198,7 @@ function revokeTaskCancellationWaivers(
       rationale: `Task ${taskEntity(task)} reopened: ${reason}`,
     });
   }
-  getDb().prepare(`
-    UPDATE workflow_waivers
-    SET waiver_status = 'revoked', ended_at = :ended_at,
-        ended_operation_id = :operation_id,
-        ended_project_revision = :project_revision,
-        ended_authority_epoch = :authority_epoch
-    WHERE lifecycle_id = :lifecycle_id AND scope = :scope AND waiver_status = 'active'
-  `).run({
-    ":ended_at": new Date().toISOString(),
-    ":operation_id": context.operationId,
-    ":project_revision": context.resultingRevision,
-    ":authority_epoch": context.resultingAuthorityEpoch,
-    ":lifecycle_id": lifecycleId,
-    ":scope": taskCancellationWaiverScope(task),
-  });
+  revokeActiveWaivers(context, lifecycleId, taskCancellationWaiverScope(task));
 }
 
 function mutation(

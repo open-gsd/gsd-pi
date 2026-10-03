@@ -1046,3 +1046,81 @@ export function settleAttemptWithResult(
     outcome: input.outcome,
   };
 }
+
+export interface CancellationWaiverInput {
+  lifecycleId: string;
+  scope: string;
+  rationale: string;
+  grantedByActorType: "user" | "policy";
+  grantedByActorId: string | null;
+  /** When set, the 'waived' cancellation Requirement the Waiver covers; created if missing. */
+  requirement?: { id: string; description: string; source: string };
+}
+
+/** Insert the active Waiver that records why cancelled work no longer needs to run. */
+export function grantCancellationWaiver(
+  context: Readonly<DomainOperationContext>,
+  input: CancellationWaiverInput,
+): string {
+  if (input.requirement) {
+    getDb().prepare(`
+      INSERT OR IGNORE INTO requirements (id, class, status, description, source)
+      VALUES (:id, 'cancellation', 'waived', :description, :source)
+    `).run({
+      ":id": input.requirement.id,
+      ":description": input.requirement.description,
+      ":source": input.requirement.source,
+    });
+  }
+  const waiverId = randomUUID();
+  getDb().prepare(`
+    INSERT INTO workflow_waivers (
+      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_status, scope, rationale, granted_by_actor_type,
+      granted_by_actor_id, granted_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :waiver_id, :project_id, :lifecycle_id, :requirement_id, NULL,
+      'active', :scope, :rationale, :actor_type,
+      :actor_id, :granted_at,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ":waiver_id": waiverId,
+    ":project_id": context.projectId,
+    ":lifecycle_id": input.lifecycleId,
+    ":requirement_id": input.requirement?.id ?? null,
+    ":scope": input.scope,
+    ":rationale": input.rationale,
+    ":actor_type": input.grantedByActorType,
+    ":actor_id": input.grantedByActorId,
+    ":granted_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  });
+  return waiverId;
+}
+
+/** Revoke every active Waiver for one lifecycle and scope. */
+export function revokeActiveWaivers(
+  context: Readonly<DomainOperationContext>,
+  lifecycleId: string,
+  scope: string,
+): void {
+  getDb().prepare(`
+    UPDATE workflow_waivers
+    SET waiver_status = 'revoked', ended_at = :ended_at,
+        ended_operation_id = :operation_id,
+        ended_project_revision = :project_revision,
+        ended_authority_epoch = :authority_epoch
+    WHERE lifecycle_id = :lifecycle_id AND scope = :scope AND waiver_status = 'active'
+  `).run({
+    ":ended_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+    ":lifecycle_id": lifecycleId,
+    ":scope": scope,
+  });
+}
