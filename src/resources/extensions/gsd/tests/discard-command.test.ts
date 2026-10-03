@@ -15,6 +15,8 @@ import { detectStaleRenders } from "../markdown-renderer.ts";
 import { repairStaleRenders } from "../state-reconciliation/drift/stale-render.ts";
 import { renderTopLevelQueueFromDb, renderTopLevelRoadmapFromDb } from "../workflow-projections.ts";
 import { discardMilestone } from "../milestone-actions.ts";
+import { persistMilestonePlan } from "../milestone-planning-persistence.ts";
+import { internalPlanningInvocation } from "../planning-invocation.ts";
 import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 
 test("/gsd discard confirms and calls the primitive directly", async (t) => {
@@ -147,4 +149,39 @@ test("stale-render repair does not restore files of a discarded milestone", asyn
   assert.equal(existsSync(milestoneDir), false, "discard removed the milestone files");
   assert.equal(await repairStaleRenders(base), 0);
   assert.equal(existsSync(milestoneDir), false);
+});
+
+test("planning refuses a discarded milestone as a dependency", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-discard-plan-dependency-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "First", status: "active" });
+  assert.equal(discardMilestone(base, "M001"), true);
+
+  const result = await persistMilestonePlan({
+    milestoneId: "M003",
+    title: "Third",
+    vision: "Depends on discarded work.",
+    dependsOn: ["M001"],
+    slices: [{
+      sliceId: "S01",
+      title: "Foundation",
+      risk: "medium",
+      depends: [],
+      demo: "S01 demo.",
+      goal: "Lay the foundation.",
+      successCriteria: "It exists.",
+      proofLevel: "demo",
+      integrationClosure: "none",
+      observabilityImpact: "none",
+    }],
+  }, base, internalPlanningInvocation());
+
+  assert.ok("error" in result);
+  assert.match(result.error, /M001 was discarded/);
+  assert.equal(getMilestone("M003"), null);
 });

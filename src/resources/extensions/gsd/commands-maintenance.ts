@@ -317,6 +317,14 @@ export async function handleSkip(unitArg: string, ctx: ExtensionCommandContext, 
   }
   const { invalidateAllCaches } = await import("./cache.js");
   invalidateAllCaches();
+  try {
+    const { rebuildState } = await import("./doctor.js");
+    await rebuildState(basePath);
+    const { flushWorkflowProjections } = await import("./projection-flush.js");
+    await flushWorkflowProjections(basePath, { milestoneId: parts[0] });
+  } catch (error) {
+    logWarning("command", `gsd skip projection refresh failed: ${(error as Error).message}`);
+  }
   ctx.ui.notify(`Skipped: ${unit}. Cancelled with a Waiver; it will not be dispatched.`, "success");
 }
 

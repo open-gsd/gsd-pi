@@ -27,7 +27,7 @@ import { flushWorkflowProjections } from "./projection-flush.js";
 import { writeManifestAndFlush } from "./workflow-manifest.js";
 import { appendEvent } from "./workflow-events.js";
 import { logWarning } from "./workflow-logger.js";
-import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
 
 export interface PersistMilestonePlanSlice {
   sliceId: string;
@@ -137,6 +137,9 @@ function validatePlanPromotion(
       const dep = getMilestone(depId);
       if (!dep) {
         return `depends_on references unknown milestone: ${depId}`;
+      }
+      if (isDiscardedMilestoneStatus(dep.status)) {
+        return `depends_on milestone ${depId} was discarded and can never be complete; remove it from depends_on`;
       }
       if (!isClosedStatus(dep.status)) {
         return `depends_on milestone ${depId} is not yet complete (status: ${dep.status})`;

@@ -3,11 +3,12 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { handleSkip } from "../commands-maintenance.ts";
+import { targetMilestoneFile } from "../paths.ts";
 import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 import {
   _getAdapter,
@@ -124,6 +125,19 @@ describe("/gsd skip", () => {
       assert.equal(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM workflow_operations").get()!["count"], before);
     });
   }
+
+  test("a slice skip refreshes the STATE.md and ROADMAP.md renders", async () => {
+    const { ctx, notes } = makeCtx();
+
+    await handleSkip("M001/S01", ctx, base);
+
+    assert.equal(notes.at(-1)?.level, "success", notes.at(-1)?.message);
+    const stateMd = readFileSync(join(base, ".gsd", "STATE.md"), "utf8");
+    assert.match(stateMd, /\*\*Active Slice:\*\* S02/, stateMd);
+    const roadmap = readFileSync(targetMilestoneFile(base, "M001", "ROADMAP", "Milestone"), "utf8");
+    assert.ok(roadmap.includes("S02"), roadmap);
+    assert.equal(roadmap.includes("S01: First") || roadmap.includes("**S01"), false, roadmap);
+  });
 
   test("an unknown unit fails loudly and writes nothing", async () => {
     const { ctx, notes } = makeCtx();
