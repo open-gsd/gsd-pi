@@ -271,6 +271,7 @@ export async function handleDoctor(args: string, ctx: ExtensionCommandContext, p
     scope: effectiveScope,
     includeBuild,
     includeTests,
+    importFileOverrides: true,
   });
 
   if (jsonMode) {

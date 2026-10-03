@@ -86,7 +86,7 @@ Teams configured to track planning artifacts in git (i.e. with `mode: team` and 
 
 ### Steering during execution
 
-`/gsd steer` records the override in the project database, which the project root and every worktree share. `.gsd/OVERRIDES.md` is rendered from the database. Edits to an override that GSD rendered are not read back. For one release, an override block that the database does not hold (written by an older release, or committed by a teammate) is kept and imported. The override does not modify the approved plan docs on `main`; the plan changes that the rewrite unit makes appear in the code PR diff alongside the implementation.
+`/gsd steer` records the override in the project database, which the project root and every worktree share. `.gsd/OVERRIDES.md` is rendered from the database. Edits to an override that GSD rendered are not read back. An override block that the database does not hold (written by an older release, by hand, or committed by a teammate) stays in the file but is not active: `/gsd doctor` reports it, and `/gsd doctor --fix` imports it. The override does not modify the approved plan docs on `main`; the plan changes that the rewrite unit makes appear in the code PR diff alongside the implementation.
 
 ### Automated gates
 

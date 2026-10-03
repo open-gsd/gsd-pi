@@ -146,7 +146,7 @@ export async function selectDoctorScope(basePath: string, requestedScope?: strin
   return state.registry[0]?.id;
 }
 
-export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; dryRun?: boolean; scope?: string; fixLevel?: "task" | "all"; isolationMode?: "none" | "worktree" | "branch"; includeBuild?: boolean; includeTests?: boolean }): Promise<DoctorReport> {
+export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; dryRun?: boolean; scope?: string; fixLevel?: "task" | "all"; isolationMode?: "none" | "worktree" | "branch"; includeBuild?: boolean; includeTests?: boolean; importFileOverrides?: boolean }): Promise<DoctorReport> {
   const issues: DoctorIssue[] = [];
   const fixesApplied: string[] = [];
   const fix = options?.fix === true;
@@ -231,6 +231,7 @@ export async function runGSDDoctor(basePath: string, options?: { fix?: boolean; 
   await checkEngineHealth(basePath, issues, fixesApplied, {
     repair: fix && !dryRun,
     repairDbLock: shouldFix("db_locked"),
+    importFileOverrides: options?.importFileOverrides,
   });
 
   // Lifecycle shadow observation-loss accounting (#2442): surface audit events

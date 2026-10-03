@@ -29,6 +29,7 @@ import {
 import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from "./status-guards.js";
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
 import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
+import { importFileOverrides, unimportedFileOverrides, type FileOverride } from "./overrides.js";
 import { isUnplannedMilestone, milestoneRenderArtifactPaths } from "./markdown-renderer.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { parseProjectionPlan } from "./schemas/parsers.js";
@@ -724,6 +725,8 @@ export async function checkEngineHealth(
   options?: {
     repair?: boolean;
     repairDbLock?: boolean;
+    /** With `repair`: import OVERRIDES.md blocks the database does not hold. Set only for a doctor run the operator asked for. */
+    importFileOverrides?: boolean;
     lockRecovery?: {
       inspectHolders: typeof inspectWorkflowDbLockHolders;
       terminateHolders: typeof terminateDormantWorkflowDbLockHolders;
@@ -1239,6 +1242,54 @@ export async function checkEngineHealth(
     }
   } catch {
     // Non-fatal — the Projection Work check must never block doctor
+  }
+
+  if (isDbAvailable()) {
+    checkUnimportedOverrides(
+      basePath,
+      issues,
+      fixesApplied,
+      options?.repair === true && options.importFileOverrides === true,
+    );
+  }
+}
+
+/** OVERRIDES.md blocks the database does not hold are not active. Report each one; import the valid ones on request. */
+function checkUnimportedOverrides(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  doImport: boolean,
+): void {
+  const importable = (block: FileOverride) => block.scope === "active" || block.scope === "resolved";
+  const blocks = unimportedFileOverrides(basePath);
+  let imported: FileOverride[] = [];
+  let importError = "";
+  if (doImport) {
+    try {
+      imported = blocks.filter(importable);
+      importFileOverrides(basePath, imported);
+      if (imported.length > 0) {
+        fixesApplied.push(`imported ${imported.length} override(s) from OVERRIDES.md: ${imported.map((block) => block.timestamp).join(", ")}`);
+      }
+    } catch (err) {
+      imported = [];
+      importError = ` The import failed: ${(err as Error).message}.`;
+    }
+  }
+  for (const block of blocks) {
+    if (imported.includes(block)) continue;
+    issues.push({
+      severity: "warning",
+      code: "override_file_block_unimported",
+      scope: "project",
+      unitId: block.timestamp,
+      message: importable(block)
+        ? `OVERRIDES.md override ${block.timestamp} ("${block.change}", ${block.scope}) is not in the database and is not active. Run \`/gsd doctor --fix\` to import it.${importError}`
+        : `OVERRIDES.md override ${block.timestamp} ("${block.change}") has unknown scope "${block.scope}" and cannot be imported. Set its scope to active or resolved, then run \`/gsd doctor --fix\`.`,
+      file: ".gsd/OVERRIDES.md",
+      fixable: importable(block),
+    });
   }
 }
 

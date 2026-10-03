@@ -109,11 +109,12 @@ What shipped:
   is rendered from `memories` rows, but is not a pure projection yet: file rows
   with no database row are kept in the render until the KNOWLEDGE import exists.
 - Steer overrides (`/gsd steer`) are `override.*` events of Domain Operations.
-  OVERRIDES.md is rendered from them, but is not a pure projection yet: for one
-  release, a file block that no database override holds (written by an older
-  release, or committed by a teammate) is kept in the render, is active for
-  dispatch and prompts, and is imported by the next resolve or rewrite attempt.
-  A block the database holds is never read back.
+  OVERRIDES.md is a one-way render of them: dispatch, prompts and artifact
+  verification read only the database. A file block that no database override
+  holds (written by an older release, by hand, or committed by a teammate) is
+  not active. The render keeps it, doctor reports it as a warning, and
+  `/gsd doctor --fix` imports it with an `override.import` Domain Operation. A
+  block with an unknown scope is reported and is not imported.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).

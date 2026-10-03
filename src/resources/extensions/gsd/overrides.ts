@@ -95,30 +95,36 @@ function activeOverrides(): OverrideRow[] {
   return readOverrides().filter((row) => row.scope === "active");
 }
 
+/** One `## Override:` block of OVERRIDES.md. `scope` is the file text, not validated. */
+export interface FileOverride extends Omit<Override, "scope"> {
+  scope: string;
+}
+
 /**
- * Import bridge, for one release: the `## Override:` blocks of OVERRIDES.md
- * whose timestamp no database override holds. An older release kept overrides
- * only in this file, and in team mode a teammate's commit brings new blocks.
- * A block the database holds is never read: the database row wins.
+ * The `## Override:` blocks of OVERRIDES.md whose timestamp no database
+ * override holds (written by an older release, by hand, or by a teammate's
+ * commit). They are not active: doctor reports them and `doctor --fix` imports them.
  */
-function unimportedFileOverrides(basePath: string, known: readonly Override[]): Override[] {
+export function unimportedFileOverrides(basePath: string): FileOverride[] {
   const path = resolveGsdRootFile(basePath, "OVERRIDES");
   if (!existsSync(path)) return [];
-  const knownTimestamps = new Set(known.map((override) => override.timestamp));
-  return readFileSync(path, "utf-8").split(/^## Override: /m).slice(1).flatMap((block): Override[] => {
+  const knownTimestamps = new Set(readOverrides().map((override) => override.timestamp));
+  return readFileSync(path, "utf-8").split(/^## Override: /m).slice(1).flatMap((block): FileOverride[] => {
     const field = (name: string) => block.match(new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "m"))?.[1]?.trim() ?? "";
     const timestamp = block.split("\n", 1)[0]!.trim();
     const change = field("Change");
     if (!change || knownTimestamps.has(timestamp)) return [];
-    const scope = (field("Scope") || "active") === "active" ? "active" : "resolved";
-    return [{ timestamp, change, scope, appliedAt: field("Applied-at") }];
+    return [{ timestamp, change, scope: field("Scope") || "active", appliedAt: field("Applied-at") }];
   });
 }
 
-/** Record the un-imported file blocks as override events, so that a rewrite attempt counts against them and resolution covers them. */
-function importFileOverrides(basePath: string): void {
-  if (!isDbAvailable()) return;
-  const overrides = unimportedFileOverrides(basePath, readOverrides());
+/** doctor --fix: record file blocks as override events in one override.import Domain Operation. An unknown scope fails loud. */
+export function importFileOverrides(basePath: string, overrides: readonly FileOverride[]): void {
+  for (const { timestamp, scope } of overrides) {
+    if (scope !== "active" && scope !== "resolved") {
+      throw new Error(`OVERRIDES.md override ${timestamp} has unknown scope "${scope}"`);
+    }
+  }
   if (overrides.length === 0) return;
   const timestamps = overrides.map((override) => override.timestamp);
   runOverrideOperation(basePath, "override.import", { timestamps }, (revision) =>
@@ -132,23 +138,18 @@ function importFileOverrides(basePath: string): void {
     }));
 }
 
-/** Overrides not yet resolved, with the file blocks not imported yet. Empty when no database is open. */
-export function loadActiveOverrides(basePath: string): Override[] {
-  if (!isDbAvailable()) return [];
-  const rows = readOverrides();
-  return [
-    ...rows.map(({ id: _id, rewriteAttempts: _attempts, ...override }) => override),
-    ...unimportedFileOverrides(basePath, rows),
-  ].filter((override) => override.scope === "active");
+/** Overrides not yet resolved, read only from the database. Empty when no database is open. */
+export function loadActiveOverrides(_basePath: string): Override[] {
+  return activeOverrides().map(({ id: _id, rewriteAttempts: _attempts, ...override }) => override);
 }
 
-/** Write OVERRIDES.md from the database. A file block that is not imported yet is kept. */
+/** Write OVERRIDES.md from the database. A file block that is not imported yet is kept, so that doctor can import it. */
 export function renderOverridesProjection(basePath: string): void {
   const rows = readOverrides();
   if (rows.length === 0) return;
   const overrides = [
     ...rows,
-    ...unimportedFileOverrides(basePath, rows).map((override) => ({ ...override, rewriteAttempts: 0 })),
+    ...unimportedFileOverrides(basePath).map((override) => ({ ...override, rewriteAttempts: 0 })),
   ];
   const content = [
     "# GSD Overrides",
@@ -194,7 +195,6 @@ export function resolveAllOverrides(basePath: string): void {
 
 /** Count one rewrite-docs dispatch against every active override (the rewrite circuit breaker). */
 export function recordRewriteAttempt(basePath: string): void {
-  importFileOverrides(basePath);
   const overrideIds = activeOverrides().map((row) => row.id);
   if (overrideIds.length === 0) return;
   runOverrideOperation(basePath, "override.rewrite_attempt", { overrideIds }, () =>

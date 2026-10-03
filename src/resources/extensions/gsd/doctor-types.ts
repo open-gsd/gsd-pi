@@ -111,6 +111,8 @@ export type DoctorIssueCode =
   | "projection_work_pending"
   | "projection_work_dead_letter"
   | "projection_work_unrendered"
+  // OVERRIDES.md block that the database does not hold
+  | "override_file_block_unimported"
   // Legacy/canonical lifecycle shadow drift (#2440)
   | "lifecycle_shadow_mismatch"
   // Milestone filesystem/DB drift (#4996)

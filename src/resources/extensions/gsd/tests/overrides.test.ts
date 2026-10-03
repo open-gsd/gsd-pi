@@ -12,16 +12,20 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent
 
 import { verifyExpectedArtifact } from "../artifact-verification.ts";
 import { DISPATCH_RULES, type DispatchContext } from "../auto-dispatch.ts";
+import { checkEngineHealth } from "../doctor-engine-checks.ts";
+import type { DoctorIssue } from "../doctor-types.ts";
 import { handleSteer } from "../commands-handlers.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { formatOverridesSection, type Override } from "../files.ts";
 import { _getAdapter, closeDatabase, insertMilestone, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import {
   getRewriteCount,
+  importFileOverrides,
   loadActiveOverrides,
   recordRewriteAttempt,
   registerOverride,
   resolveAllOverrides,
+  unimportedFileOverrides,
 } from "../overrides.ts";
 import { preserveProjectionChangesBeforeDispatch, projectionRendererFor } from "../projection-worker.ts";
 import { invalidateStateCache } from "../state.ts";
@@ -57,6 +61,16 @@ function operations(type: string): number {
     "SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = :type",
   ).get({ ":type": type });
   return Number(row?.["count"]);
+}
+
+async function overrideIssues(
+  base: string,
+  options: { repair?: boolean; importFileOverrides?: boolean },
+  fixesApplied: string[] = [],
+): Promise<DoctorIssue[]> {
+  const issues: DoctorIssue[] = [];
+  await checkEngineHealth(base, issues, fixesApplied, options);
+  return issues.filter((issue) => issue.code === "override_file_block_unimported");
 }
 
 function rewriteDocsRule() {
@@ -127,9 +141,50 @@ describe("steer overrides in the database", () => {
     assert.ok(result.action === "dispatch" && !result.prompt.includes("**Scope:** active"), "the agent is not told to edit OVERRIDES.md");
   });
 
-  test("a legacy OVERRIDES.md active override dispatches rewrite-docs after upgrade and survives the render", async () => {
+  test("an OVERRIDES.md block the database does not hold does not affect dispatch, prompts or verification", async () => {
     writeFileSync(overridesPath, LEGACY_OVERRIDES, "utf-8");
 
+    assert.deepEqual(loadActiveOverrides(base), []);
+    assert.equal(verifyExpectedArtifact("rewrite-docs", "M001", base), true);
+    assert.equal(await rewriteDocsRule().match(dispatchContext(base)), null);
+    assert.equal(operations("override.import"), 0, "dispatch imports nothing");
+
+    registerOverride(base, "Use Postgres instead of SQLite", "M001/S01/T03");
+
+    assert.deepEqual(loadActiveOverrides(base).map((override) => override.change), ["Use Postgres instead of SQLite"]);
+    const result = await rewriteDocsRule().match(dispatchContext(base));
+    assert.equal(result?.action, "dispatch");
+    assert.ok(result.action === "dispatch" && result.prompt.includes("Use Postgres instead of SQLite"));
+    assert.ok(result.action === "dispatch" && !result.prompt.includes("Legacy active override"));
+    assert.equal(operations("override.import"), 0);
+
+    const rendered = readFileSync(overridesPath, "utf-8");
+    assert.match(rendered, /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* active/, "the render keeps the block for doctor");
+    assert.match(rendered, /\*\*Change:\*\* Legacy resolved override\n\*\*Scope:\*\* resolved/);
+  });
+
+  test("doctor reports an un-imported OVERRIDES.md block and imports it only on the operator's --fix", async () => {
+    writeFileSync(overridesPath, LEGACY_OVERRIDES, "utf-8");
+
+    let issues = await overrideIssues(base, {});
+    assert.deepEqual(issues.map((issue) => [issue.severity, issue.unitId, issue.fixable]), [
+      ["warning", "2026-03-13T09:00:00.000Z", true],
+      ["warning", "2026-03-14T10:00:00.000Z", true],
+    ]);
+    assert.match(issues[1]!.message, /Legacy active override/);
+
+    // A fix run that no operator asked for (auto-mode resume) does not import.
+    issues = await overrideIssues(base, { repair: true });
+    assert.equal(issues.length, 2);
+    assert.equal(operations("override.import"), 0);
+    assert.deepEqual(loadActiveOverrides(base), []);
+
+    const fixesApplied: string[] = [];
+    issues = await overrideIssues(base, { repair: true, importFileOverrides: true }, fixesApplied);
+
+    assert.deepEqual(issues, []);
+    assert.equal(operations("override.import"), 1);
+    assert.ok(fixesApplied.some((fix) => fix.includes("2026-03-14T10:00:00.000Z")));
     assert.deepEqual(loadActiveOverrides(base), [{
       timestamp: "2026-03-14T10:00:00.000Z",
       change: "Legacy active override",
@@ -137,40 +192,34 @@ describe("steer overrides in the database", () => {
       appliedAt: "M001/S01/T02",
     }]);
     assert.equal(verifyExpectedArtifact("rewrite-docs", "M001", base), false);
-
     const result = await rewriteDocsRule().match(dispatchContext(base));
-
     assert.equal(result?.action, "dispatch");
     assert.ok(result.action === "dispatch" && result.prompt.includes("Legacy active override"));
-    assert.equal(operations("override.import"), 1);
     assert.equal(getRewriteCount(), 1, "the dispatch is counted against the imported override");
-    const rendered = readFileSync(overridesPath, "utf-8");
-    assert.match(rendered, /## Override: 2026-03-14T10:00:00\.000Z\n\n\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* active\n\*\*Applied-at:\*\* M001\/S01\/T02/);
-    assert.match(rendered, /## Override: 2026-03-13T09:00:00\.000Z\n\n\*\*Change:\*\* Legacy resolved override\n\*\*Scope:\*\* resolved/);
+    assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Legacy resolved override\n\*\*Scope:\*\* resolved/);
 
-    assert.equal((await rewriteDocsRule().match(dispatchContext(base)))?.action, "dispatch");
-    assert.equal(getRewriteCount(), 2);
+    assert.deepEqual(await overrideIssues(base, { repair: true, importFileOverrides: true }), []);
     assert.equal(operations("override.import"), 1, "a block the database holds is not imported again");
 
     resolveAllOverrides(base);
 
     assert.deepEqual(loadActiveOverrides(base), []);
-    assert.equal(verifyExpectedArtifact("rewrite-docs", "M001", base), true);
     assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* resolved/);
   });
 
-  test("the first steer after upgrade keeps the legacy OVERRIDES.md overrides", () => {
-    writeFileSync(overridesPath, LEGACY_OVERRIDES, "utf-8");
+  test("an OVERRIDES.md block with an unknown scope is reported, kept and never imported", async () => {
+    writeFileSync(overridesPath, LEGACY_OVERRIDES.replace("**Scope:** active", "**Scope:** paused"), "utf-8");
 
-    registerOverride(base, "Use Postgres instead of SQLite", "M001/S01/T03");
+    const issues = await overrideIssues(base, { repair: true, importFileOverrides: true });
 
-    const rendered = readFileSync(overridesPath, "utf-8");
-    assert.match(rendered, /\*\*Change:\*\* Use Postgres instead of SQLite\n\*\*Scope:\*\* active/);
-    assert.match(rendered, /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* active/);
-    assert.match(rendered, /\*\*Change:\*\* Legacy resolved override\n\*\*Scope:\*\* resolved/);
-    assert.deepEqual(
-      loadActiveOverrides(base).map((override) => override.change).sort(),
-      ["Legacy active override", "Use Postgres instead of SQLite"],
+    assert.deepEqual(issues.map((issue) => [issue.unitId, issue.fixable]), [["2026-03-14T10:00:00.000Z", false]]);
+    assert.match(issues[0]!.message, /unknown scope "paused"/);
+    assert.equal(operations("override.import"), 1, "the valid block is imported");
+    assert.deepEqual(loadActiveOverrides(base), []);
+    assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* paused/);
+    assert.throws(
+      () => importFileOverrides(base, unimportedFileOverrides(base)),
+      /2026-03-14T10:00:00\.000Z has unknown scope "paused"/,
     );
   });
 
