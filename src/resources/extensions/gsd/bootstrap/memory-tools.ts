@@ -10,6 +10,7 @@ import { Type, StringEnum } from "@gsd/pi-ai";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
 import { ensureDbOpen, resolveCtxCwd } from "./dynamic-tools.js";
+import { piPlanningInvocation } from "../planning-invocation.js";
 import {
   executeGsdGraph,
   executeMemoryCapture,
@@ -54,7 +55,7 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
         }),
       ),
     }),
-    async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
+    async execute(toolCallId, params, _signal, _onUpdate, _ctx) {
       const basePath = resolveCtxCwd(_ctx);
       const ok = await ensureDbOpen(basePath);
       if (!ok) {
@@ -64,7 +65,11 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
           isError: true,
         };
       }
-      return executeMemoryCapture(params as Parameters<typeof executeMemoryCapture>[0], basePath);
+      return executeMemoryCapture(
+        params as Parameters<typeof executeMemoryCapture>[0],
+        basePath,
+        piPlanningInvocation("capture_thought", toolCallId),
+      );
     },
   });
 

@@ -25,10 +25,7 @@ import type { MilestoneScope, GsdWorkspace } from './workspace.js';
 import { createWorkspace, scopeMilestone } from './workspace.js';
 import { createMemory } from './memory-store.js';
 import { synthesizeDecisionMemoryContent } from './memory-backfill.js';
-import { executeDomainOperation } from './db/domain-operation.js';
-import { getDb } from './db/engine.js';
-import { readDomainOperationFence } from './db/writers/lifecycle-commands.js';
-import { planningOperationPayload } from './planning-domain-operation.js';
+import { executeRecordDomainOperation } from './record-domain-operation.js';
 import { internalPlanningInvocation, type PlanningInvocation } from './planning-invocation.js';
 
 async function writeGsdProjection(
@@ -363,23 +360,23 @@ export interface SaveRequirementFields {
 }
 
 /**
- * Save a new requirement to DB and regenerate REQUIREMENTS.md.
- * Auto-assigns the next ID via nextRequirementId().
- *
- * The ID computation and insert are wrapped in a single transaction
- * to prevent parallel race conditions (same pattern as saveDecisionToDb).
+ * Save a new requirement through the requirement.save Domain Operation and
+ * regenerate REQUIREMENTS.md. The ID is allocated inside the operation, so a
+ * replay with the same idempotency key returns the original ID and writes
+ * nothing.
  *
  * Returns the assigned ID.
  */
 export async function saveRequirementToDb(
   fields: SaveRequirementFields,
   basePath: string,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<{ id: string }> {
   try {
     const db = await import('./gsd-db.js');
 
-    // Atomic ID assignment + insert inside a transaction.
-    const txResult = db.transaction(() => {
+    // ID assignment and insert commit in one Domain Operation.
+    const mutate = () => {
       const adapter = db._getAdapter();
       if (!adapter) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
 
@@ -419,9 +416,17 @@ export async function saveRequirementToDb(
       };
 
       db.upsertRequirement(requirement);
-      return { id: nextId };
+      return { entityId: nextId, result: { id: nextId } };
+    };
+    const { id } = executeRecordDomainOperation({
+      operationType: 'requirement.save',
+      invocation,
+      payload: fields,
+      eventType: 'requirement.saved',
+      entityType: 'requirement',
+      projectionKeys: ['planning/requirements'],
+      mutate,
     });
-    const { id } = txResult;
 
     try {
       await regenerateRequirementsMarkdown(basePath);
@@ -603,37 +608,21 @@ export async function saveDecisionToDb(
     // memory write aborts the operation.
     // Decision text never changes lifecycle status: a slice is cancelled
     // only through its own Domain Operation (gsd_skip_slice).
-    const fence = readDomainOperationFence(invocation.idempotencyKey);
-    let savedId: string | undefined;
-    const operation = executeDomainOperation({
+    const { decisionId: id } = executeRecordDomainOperation({
       operationType: 'decision.save',
-      idempotencyKey: invocation.idempotencyKey,
-      expectedRevision: fence.revision,
-      expectedAuthorityEpoch: fence.authorityEpoch,
-      actorType: invocation.actorType,
-      ...(invocation.actorId ? { actorId: invocation.actorId } : {}),
-      sourceTransport: invocation.sourceTransport,
-      ...(invocation.traceId ? { traceId: invocation.traceId } : {}),
-      ...(invocation.turnId ? { turnId: invocation.turnId } : {}),
-      payload: planningOperationPayload(normalized),
-    }, () => {
-      const id = nextDecisionIdAcrossSurfaces(adapter);
-      if (!persistDecisionToMemory(id, normalized)) {
-        throw new Error(`Unable to persist decision ${id}`);
-      }
-      savedId = id;
-      return {
-        events: [{
-          eventType: 'decision.saved',
-          entityType: 'decision',
-          entityId: id,
-          payload: { decisionId: id },
-          destinations: ['projection'],
-        }],
-        projections: [{ projectionKey: 'decisions', projectionKind: 'markdown', rendererVersion: '1' }],
-      };
+      invocation,
+      payload: normalized,
+      eventType: 'decision.saved',
+      entityType: 'decision',
+      projectionKeys: ['decisions'],
+      mutate: () => {
+        const decisionId = nextDecisionIdAcrossSurfaces(adapter);
+        if (!persistDecisionToMemory(decisionId, normalized)) {
+          throw new Error(`Unable to persist decision ${decisionId}`);
+        }
+        return { entityId: decisionId, result: { decisionId } };
+      },
     });
-    const id = savedId ?? replayedDecisionId(operation.operationId);
 
     // Fetch all decisions (including superseded for the full register).
     // ADR-013 Stage 2a: source from the `memories` table; the backfill
@@ -714,56 +703,58 @@ function persistDecisionToMemory(
   }) !== null;
 }
 
-function replayedDecisionId(operationId: string): string {
-  const row = getDb()
-    .prepare("SELECT entity_id FROM workflow_domain_events WHERE operation_id = :operation_id AND event_type = 'decision.saved'")
-    .get({ ':operation_id': operationId });
-  const id = row?.['entity_id'];
-  if (typeof id !== 'string' || id.length === 0) {
-    throw new Error(`decision.save operation ${operationId} has no stored decision id`);
-  }
-  return id;
-}
-
 // ─── Update Requirement in DB + Regenerate Markdown ───────────────────────
 
 /**
- * Update a requirement in DB and regenerate REQUIREMENTS.md.
- * Fetches existing requirement, merges updates, upserts, then regenerates.
+ * Update a requirement through the requirement.update Domain Operation and
+ * regenerate REQUIREMENTS.md. The operation fetches the existing requirement,
+ * merges the updates and upserts. A replay writes nothing.
  */
 export async function updateRequirementInDb(
   id: string,
   updates: Partial<Requirement>,
   basePath: string,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<void> {
   try {
     const db = await import('./gsd-db.js');
 
-    const existing = db.getRequirementById(id);
+    executeRecordDomainOperation({
+      operationType: 'requirement.update',
+      invocation,
+      payload: { id, updates },
+      eventType: 'requirement.updated',
+      entityType: 'requirement',
+      projectionKeys: ['planning/requirements'],
+      mutate: () => {
+        const existing = db.getRequirementById(id);
 
-    const base: Requirement = existing ?? {
-      id,
-      class: '',
-      status: 'active',
-      description: '',
-      why: '',
-      source: '',
-      primary_owner: '',
-      supporting_slices: '',
-      validation: '',
-      notes: '',
-      full_content: '',
-      superseded_by: null,
-    };
+        const base: Requirement = existing ?? {
+          id,
+          class: '',
+          status: 'active',
+          description: '',
+          why: '',
+          source: '',
+          primary_owner: '',
+          supporting_slices: '',
+          validation: '',
+          notes: '',
+          full_content: '',
+          superseded_by: null,
+        };
 
-    // Merge updates into existing (or skeleton)
-    const merged: Requirement = {
-      ...base,
-      ...updates,
-      id: base.id, // ID cannot be changed
-    };
+        // Merge updates into existing (or skeleton)
+        const merged: Requirement = {
+          ...base,
+          ...updates,
+          id: base.id, // ID cannot be changed
+        };
 
-    db.upsertRequirement(merged);
+        db.upsertRequirement(merged);
+        return { entityId: id, result: { id } };
+      },
+    });
 
     try {
       await regenerateRequirementsMarkdown(basePath);

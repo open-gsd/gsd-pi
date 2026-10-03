@@ -59,7 +59,11 @@ function work(key: string): WorkRow {
   return row;
 }
 
-/** The fixture saves a decision, which enqueues a "decisions" row. Settle it so each test starts with no backlog. */
+/**
+ * The fixture saves a decision and a requirement, which enqueue a "decisions"
+ * row and a "planning/requirements" row. Settle them so each test starts with
+ * no backlog.
+ */
 async function createDrainedFixture(): Promise<WorkflowAuthorityFixture> {
   const created = await createWorkflowAuthorityFixture();
   try {
@@ -195,10 +199,16 @@ test("worktree and project root each get a rendered state", async () => {
   assert.ok(rootRoadmap && existsSync(rootRoadmap), "project root ROADMAP is rendered");
   assert.ok(worktreeRoadmap && existsSync(worktreeRoadmap), "worktree ROADMAP is rendered");
   assert.notEqual(rootRoadmap, worktreeRoadmap);
-  // The fixture decision row also gets a receipt. DECISIONS.md is a project-root
-  // file, so its path relative to the worktree gives a different file-set hash.
-  const { [work("decisions").projection_work_id]: decisionsReceipt, ...receipts } = readProjectionRootReceipts(worktree);
+  // The fixture decision and requirement rows also get a receipt. DECISIONS.md
+  // and REQUIREMENTS.md are project-root files, so their path relative to the
+  // worktree gives a different file-set hash.
+  const {
+    [work("decisions").projection_work_id]: decisionsReceipt,
+    [work("planning/requirements").projection_work_id]: requirementsReceipt,
+    ...receipts
+  } = readProjectionRootReceipts(worktree);
   assert.match(String(decisionsReceipt), /^sha256:[0-9a-f]{64}$/);
+  assert.match(String(requirementsReceipt), /^sha256:[0-9a-f]{64}$/);
   assert.deepEqual(
     receipts,
     { [row.projection_work_id]: row.rendered_content_hash },
@@ -348,6 +358,7 @@ test("each kind that production code enqueues is rendered and settled", async ()
     ["task-execution", "execution/m001/s01/t01"],
     ["lifecycle-shadow-repair", "lifecycle-shadow-repair/m001/s02"],
     ["markdown", "planning/requirements"],
+    ["markdown", "knowledge"],
   ];
   for (const [kind, key] of rows) seed(kind, key);
 
@@ -361,6 +372,7 @@ test("each kind that production code enqueues is rendered and settled", async ()
   }
   assert.match(readFileSync(statePath, "utf-8"), /M001/, "the state kinds render STATE.md");
   assert.match(readFileSync(requirementsPath, "utf-8"), /SQLite is authoritative/);
+  assert.match(readFileSync(join(base, ".gsd", "KNOWLEDGE.md"), "utf-8"), /## Rules/, "the knowledge key renders KNOWLEDGE.md");
   const roadmap = resolveMilestoneFile(base, "M001", "ROADMAP");
   assert.ok(roadmap && existsSync(roadmap), "the milestone kinds render the milestone files");
   const s01Plan = resolveSliceFile(base, "M001", "S01", "PLAN");

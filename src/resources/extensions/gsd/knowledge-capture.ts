@@ -1,20 +1,22 @@
 // gsd-pi — KNOWLEDGE capture: the one write path for Rules, Patterns and Lessons.
 //
 // `/gsd knowledge`, `capture_thought` and MCP `gsd_capture_thought` all call
-// `captureKnowledgeEntry`. Each capture writes one `memories` row carrying a
-// `sourceKnowledgeId` (K###, P### or L###) and then renders KNOWLEDGE.md from
-// the database, so the file shows the entry at once.
+// `captureKnowledgeEntry`. Each capture is one knowledge.capture Domain
+// Operation that writes one `memories` row carrying a `sourceKnowledgeId`
+// (K###, P### or L###). KNOWLEDGE.md is then rendered from the database, so
+// the file shows the entry at once.
 //
 // Next-ID assignment takes the max <prefix>### from the memories table and
 // from the existing `.gsd/KNOWLEDGE.md`. The file side is the import bridge:
 // it reserves ids of file rows that are not imported into the database yet,
 // so a new capture cannot take the id of a row the render still keeps.
 
-import { immediateTransaction } from "./db/engine.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { createMemory } from "./memory-store.js";
 import { parseKnowledgeRows, readKnowledgeMd } from "./knowledge-parser.js";
 import { renderKnowledgeProjection } from "./knowledge-projection.js";
+import { internalPlanningInvocation, type PlanningInvocation } from "./planning-invocation.js";
+import { executeRecordDomainOperation } from "./record-domain-operation.js";
 
 export type KnowledgeEntryType = "rule" | "pattern" | "lesson";
 
@@ -30,6 +32,8 @@ export interface CaptureKnowledgeOptions {
   tags?: string[];
   /** Extra structured cells (e.g. where/notes, rootCause/fix). The knowledge id is always assigned here. */
   structuredFields?: Record<string, unknown> | null;
+  /** Transport identity of the call. A replay with the same key returns the first result. */
+  invocation?: PlanningInvocation;
 }
 
 export interface CaptureKnowledgeResult {
@@ -43,9 +47,10 @@ export interface CaptureKnowledgeResult {
 
 /**
  * Write a Rule, Pattern or Lesson as one memories row with the next
- * knowledge id, then render KNOWLEDGE.md. Throws when the text is empty, the
- * database is not available, or the insert fails. A render failure after the
- * row is written is returned as `projectionError`, not thrown.
+ * knowledge id in one knowledge.capture Domain Operation, then render
+ * KNOWLEDGE.md. Throws when the text is empty, the database is not available,
+ * or the insert fails. A render failure after the row is written is returned
+ * as `projectionError`, not thrown.
  */
 export function captureKnowledgeEntry(
   basePath: string,
@@ -67,19 +72,34 @@ export function captureKnowledgeEntry(
         ? { sourceKnowledgeTable: "patterns", pattern: cleaned, where: "", notes: "" }
         : { sourceKnowledgeTable: "lessons", whatHappened: cleaned, rootCause: "", fix: "", scopeText };
 
-  const { id, memoryId } = immediateTransaction(() => {
-    const id = nextKnowledgeId(basePath, prefix);
-    const memoryId = createMemory({
-      category: KNOWLEDGE_CATEGORY[type],
-      content: cleaned,
+  const { id, memoryId } = executeRecordDomainOperation({
+    operationType: "knowledge.capture",
+    invocation: options.invocation ?? internalPlanningInvocation(),
+    payload: {
+      type,
+      text: cleaned,
       scope: scopeText,
-      confidence: options.confidence ?? 0.85,
+      confidence: options.confidence,
       tags: options.tags,
-      structuredFields: { ...cells, ...options.structuredFields, sourceKnowledgeId: id },
-    });
-    return { id, memoryId };
+      structuredFields: options.structuredFields,
+    },
+    eventType: "knowledge.captured",
+    entityType: "memory",
+    projectionKeys: ["knowledge"],
+    mutate: () => {
+      const id = nextKnowledgeId(basePath, prefix);
+      const memoryId = createMemory({
+        category: KNOWLEDGE_CATEGORY[type],
+        content: cleaned,
+        scope: scopeText,
+        confidence: options.confidence ?? 0.85,
+        tags: options.tags,
+        structuredFields: { ...cells, ...options.structuredFields, sourceKnowledgeId: id },
+      });
+      if (!memoryId) throw new Error(`GSD database is not available; cannot capture ${type}`);
+      return { entityId: memoryId, result: { id, memoryId } };
+    },
   });
-  if (!memoryId) throw new Error(`GSD database is not available; cannot capture ${type}`);
 
   try {
     renderKnowledgeProjection(basePath);

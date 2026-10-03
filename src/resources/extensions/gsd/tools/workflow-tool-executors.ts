@@ -80,7 +80,8 @@ import type { CompleteSliceParams, EscalationOption } from "../types.js";
 import { handleCompleteSlice } from "./complete-slice.js";
 import type { PlanMilestoneParams } from "./plan-milestone.js";
 import { handlePlanMilestone } from "./plan-milestone.js";
-import type { PlanningInvocation } from "../planning-invocation.js";
+import { internalPlanningInvocation, type PlanningInvocation } from "../planning-invocation.js";
+import { executeRecordDomainOperation } from "../record-domain-operation.js";
 import type { PlanSliceParams } from "./plan-slice.js";
 import { handlePlanSlice } from "./plan-slice.js";
 import type { ReplanSliceParams } from "./replan-slice.js";
@@ -2106,6 +2107,7 @@ export async function executeReassessRoadmap(
 export async function executeSaveGateResult(
   params: SaveGateResultParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const harnessAbort = blockIfHarnessAbortedUnit("save_gate_result", basePath);
   if (harnessAbort) return harnessAbort;
@@ -2140,14 +2142,29 @@ export async function executeSaveGateResult(
   }
 
   try {
-    saveGateResult({
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      gateId: params.gateId,
-      taskId: params.taskId ?? "",
-      verdict: params.verdict,
-      rationale: params.rationale,
-      findings: params.findings ?? "",
+    // The verdict and its gate_runs ledger row commit in one Domain Operation.
+    executeRecordDomainOperation({
+      operationType: "gate-result.save",
+      invocation,
+      payload: params,
+      eventType: "gate-result.saved",
+      entityType: "quality-gate",
+      projectionKeys: [`planning/${params.milestoneId}/${params.sliceId}`.toLowerCase()],
+      mutate: () => {
+        saveGateResult({
+          milestoneId: params.milestoneId,
+          sliceId: params.sliceId,
+          gateId: params.gateId,
+          taskId: params.taskId ?? "",
+          verdict: params.verdict,
+          rationale: params.rationale,
+          findings: params.findings ?? "",
+        });
+        return {
+          entityId: [params.milestoneId, params.sliceId, params.taskId, params.gateId].filter(Boolean).join("/"),
+          result: { gateId: params.gateId, verdict: params.verdict },
+        };
+      },
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -2533,6 +2550,7 @@ export async function executeReplanTask(
 export async function executeReworkBriefSave(
   params: ReworkBriefSaveExecutorParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
@@ -2543,7 +2561,7 @@ export async function executeReworkBriefSave(
     };
   }
   try {
-    const result = await handleReworkBriefSave(params);
+    const result = await handleReworkBriefSave(params, invocation);
     if ("error" in result) {
       return {
         content: [{ type: "text", text: `Error saving rework brief: ${result.error}` }],

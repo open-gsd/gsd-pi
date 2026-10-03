@@ -22,6 +22,7 @@ import {
   type ProjectionWorkClaim,
 } from "./db/writers/projection-work-delivery.js";
 import { getAllMilestones, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
+import { knowledgeMdPath } from "./knowledge-parser.js";
 import { renderKnowledgeProjection } from "./knowledge-projection.js";
 import {
   renderAllFromDb,
@@ -131,6 +132,10 @@ async function renderStateFile(root: string): Promise<void> {
   noteRenderedProjectionFile(statePath, readFileSync(statePath, "utf-8"));
 }
 
+async function renderKnowledgeFile(root: string): Promise<void> {
+  noteRenderedProjectionFile(knowledgeMdPath(root), renderKnowledgeProjection(root).content);
+}
+
 /**
  * Kind-to-renderer registry. Each kind that production code enqueues has a
  * renderer. Returns null for any other kind or key: such a row is never
@@ -157,6 +162,7 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
   if (key === "decisions" || key === "planning/decisions") {
     return { target: "decisions", render: regenerateDecisionsMarkdown };
   }
+  if (key === "knowledge") return { target: "knowledge", render: renderKnowledgeFile };
   if (segments[0] !== "planning") return null;
   if (key === "planning/requirements") return { target: "requirements", render: regenerateRequirementsMarkdown };
   return hierarchyTarget(segments.slice(1));

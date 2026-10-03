@@ -23,6 +23,8 @@ import {
   type CaptureKnowledgeResult,
   type KnowledgeEntryType,
 } from "../knowledge-capture.js";
+import { internalPlanningInvocation, type PlanningInvocation } from "../planning-invocation.js";
+import { executeRecordDomainOperation } from "../record-domain-operation.js";
 
 // ─── Shared result shape (matches tools/workflow-tool-executors.ts) ─────────
 
@@ -82,9 +84,15 @@ const KNOWLEDGE_TYPE_BY_CATEGORY: Record<string, KnowledgeEntryType> = {
 
 /**
  * Execute capture_thought. `basePath` is the project root; rule, pattern and
- * gotcha captures get a knowledge id there and re-render KNOWLEDGE.md.
+ * gotcha captures get a knowledge id there and re-render KNOWLEDGE.md. Each
+ * capture is one Domain Operation: a replay with the same invocation key
+ * writes nothing and returns the first result.
  */
-export function executeMemoryCapture(params: MemoryCaptureParams, basePath: string): ToolExecutionResult {
+export function executeMemoryCapture(
+  params: MemoryCaptureParams,
+  basePath: string,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
+): ToolExecutionResult {
   if (!isDbAvailable()) return dbUnavailable("memory_capture");
 
   const category = (params.category ?? "").trim().toLowerCase();
@@ -118,10 +126,28 @@ export function executeMemoryCapture(params: MemoryCaptureParams, basePath: stri
   let knowledge: CaptureKnowledgeResult | undefined;
   try {
     if (knowledgeType) {
-      knowledge = captureKnowledgeEntry(basePath, knowledgeType, content, scope, { confidence, tags, structuredFields });
+      knowledge = captureKnowledgeEntry(basePath, knowledgeType, content, scope, {
+        confidence,
+        tags,
+        structuredFields,
+        invocation,
+      });
       id = knowledge.memoryId;
     } else {
-      id = createMemory({ category, content, confidence, scope, tags, structuredFields });
+      id = executeRecordDomainOperation({
+        operationType: "memory.capture",
+        invocation,
+        payload: { category, content, confidence, scope, tags, structuredFields },
+        eventType: "memory.captured",
+        entityType: "memory",
+        // KNOWLEDGE.md is the rendered file of the memory store.
+        projectionKeys: ["knowledge"],
+        mutate: () => {
+          const memoryId = createMemory({ category, content, confidence, scope, tags, structuredFields });
+          if (!memoryId) throw new Error("GSD database is not available");
+          return { entityId: memoryId, result: { memoryId } };
+        },
+      }).memoryId;
     }
   } catch (err) {
     // Surface the underlying SQL message (e.g. "database disk image is

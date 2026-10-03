@@ -367,7 +367,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_requirement_update (formerly gsd_update_requirement) ───────────
 
 	const requirementUpdateExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -405,7 +405,12 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				updates.primary_owner = params.primary_owner;
 			if (params.supporting_slices !== undefined)
 				updates.supporting_slices = params.supporting_slices;
-			await updateRequirementInDb(params.id, updates, basePath);
+			await updateRequirementInDb(
+				params.id,
+				updates,
+				basePath,
+				piPlanningInvocation("gsd_requirement_update", toolCallId),
+			);
 			return {
 				content: [
 					{ type: "text" as const, text: `Updated requirement ${params.id}` },
@@ -496,7 +501,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_requirement_save ─────────────────────────────────────────────
 
 	const requirementSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -535,6 +540,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					notes: params.notes,
 				},
 				basePath,
+				piPlanningInvocation("gsd_requirement_save", toolCallId),
 			);
 			return {
 				content: [
@@ -2395,7 +2401,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_rework_brief_save ─────────────────────────────────────────────
 
 	const reworkBriefSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -2405,6 +2411,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		return executeReworkBriefSave(
 			params,
 			resolveWorkflowToolBasePath(_ctx, params),
+			piPlanningInvocation("gsd_rework_brief_save", toolCallId),
 		);
 	};
 
@@ -2892,7 +2899,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_save_gate_result ──────────────────────────────────────────────
 
 	const saveGateResultExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -2902,6 +2909,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		return executeSaveGateResult(
 			params,
 			resolveWorkflowToolBasePath(_ctx, params),
+			piExecutionInvocation("gsd_save_gate_result", toolCallId),
 		);
 	};
 

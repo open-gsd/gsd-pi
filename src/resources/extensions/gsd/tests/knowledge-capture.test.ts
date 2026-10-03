@@ -119,7 +119,8 @@ describe("knowledge capture", () => {
       ["pattern", "Seam types at the vendor boundary"],
       ["gotcha", "WAL file grows without checkpoint"],
     ]) {
-      const result = await captureThought.execute("call", { category, content }, undefined, undefined, { cwd: base });
+      // One tool-call id is one operation, so each capture has its own id.
+      const result = await captureThought.execute(`call-${category}`, { category, content }, undefined, undefined, { cwd: base });
       assert.equal(result.isError, undefined, `capture_thought ${category} must succeed`);
     }
 

@@ -159,7 +159,7 @@ mcp_call(server="my-server", tool="<tool_name>", args={...})
 - 如果某个 server 依赖本机路径、个人服务或本地 secrets，更适合放在 `.gsd/mcp.json`
 - 对内置的 `gsd-workflow` server，如果是从 worktree 或 wrapper 启动，请把 `GSD_WORKFLOW_PROJECT_ROOT` 设为规范项目根目录。打包的 server 会用它定位 workflow 工具路径，并用它作为 `$GSD_HOME/mcp-instances.json` 中的单项目 stale-process registry key。
 - 打包的 `gsd-workflow` MCP server 默认只暴露 canonical workflow tool 名称。只有仍在调用旧 alias 名称的客户端才需要设置 `GSD_MCP_ADVERTISE_ALIASES=1`。原生进程内 GSD 工具使用 `GSD_ADVERTISE_TOOL_ALIASES=1`。
-- 自定义客户端调用 `gsd_plan_milestone`、`gsd_plan_slice`、`gsd_plan_task`、`gsd_replan_slice`、`gsd_replan_task`、`gsd_reassess_roadmap`、`gsd_decision_save`（别名 `gsd_save_decision`）或 `gsd_task_recovery_resume` 时，必须发送非空的私有 `_meta["io.opengsd/idempotency-key"]`，并在重试时复用同一个值。它属于 transport metadata，不是公开 tool 参数；缺少该身份时会在 mutation 前失败。
+- 自定义客户端调用 `gsd_plan_milestone`、`gsd_plan_slice`、`gsd_plan_task`、`gsd_replan_slice`、`gsd_replan_task`、`gsd_reassess_roadmap`、`gsd_decision_save`（别名 `gsd_save_decision`）、`gsd_requirement_save`、`gsd_requirement_update`、`gsd_save_gate_result`、`gsd_rework_brief_save`、`gsd_capture_thought` 或 `gsd_task_recovery_resume` 时，必须发送非空的私有 `_meta["io.opengsd/idempotency-key"]`，并在重试时复用同一个值。它属于 transport metadata，不是公开 tool 参数；缺少该身份时会在 mutation 前失败。
 - 需要 GSD workflow 工具的 Claude Code 会话是 fail-closed 的：如果启动时 `gsd-workflow` 不存在、仍为 pending、failed、disabled，或缺少必需工具，GSD 会在第一个 model turn 前中止该 unit 并重试，而不是允许工具调用落到不完整的 surface 上。
 
 ## 环境变量

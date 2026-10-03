@@ -26,10 +26,12 @@ import { fileURLToPath } from "node:url";
 import {
   closeDatabase,
   getTask,
+  insertGateRow,
   openDatabase,
   _getAdapter,
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
+import { registerMemoryTools } from "../../../src/resources/extensions/gsd/bootstrap/memory-tools.ts";
 import {
   claimTaskAttempt,
   settleTaskAttempt,
@@ -205,6 +207,7 @@ async function runNativeDbTool(
   base: string,
   toolName: string,
   args: Record<string, unknown>,
+  toolCallId = "parity-call",
 ): Promise<unknown> {
   const registrations: Array<{
     name: string;
@@ -216,14 +219,16 @@ async function runNativeDbTool(
       ctx: unknown,
     ) => Promise<unknown>;
   }> = [];
-  registerDbTools({
+  const pi = {
     registerTool(tool: (typeof registrations)[number]) {
       registrations.push(tool);
     },
-  } as Parameters<typeof registerDbTools>[0]);
+  } as Parameters<typeof registerDbTools>[0];
+  registerDbTools(pi);
+  registerMemoryTools(pi);
   const tool = registrations.find((entry) => entry.name === toolName);
   if (!tool) throw new Error(`native db tool ${toolName} not registered`);
-  return tool.execute("parity-call", args, undefined, undefined, { cwd: base });
+  return tool.execute(toolCallId, args, undefined, undefined, { cwd: base });
 }
 
 async function runNativeAndMcpParity(input: {
@@ -915,7 +920,17 @@ describe("Slice lifecycle persistent retry parity", () => {
 // the cutover package that routes the tool through one Domain Operation. The
 // headless transport registers the same native tools in an RPC child and has
 // no leg here.
-const OPERATION_ONLY_CASES = [
+// `piTool` is the native name when it differs from the MCP name. `seed` runs
+// before the write fence is set. `renderPassesWith` names the package that
+// stops the tool's inline render from writing a workflow table.
+const OPERATION_ONLY_CASES: ReadonlyArray<{
+  tool: string;
+  piTool?: string;
+  args: Record<string, unknown>;
+  passesWith: string | null;
+  renderPassesWith?: string;
+  seed?: () => void;
+}> = [
   { tool: "gsd_slice_complete", args: SLICE_LIFECYCLE_CASES[0].args, passesWith: "P35" },
   {
     tool: "gsd_decision_save",
@@ -923,7 +938,58 @@ const OPERATION_ONLY_CASES = [
     passesWith: null,
   },
   { tool: "gsd_summary_save", args: SUMMARY_SAVE_ARGS, passesWith: "P15" },
-] as const;
+  {
+    tool: "gsd_requirement_save",
+    args: {
+      class: "core-capability",
+      description: "Operation-only requirement",
+      why: "Lock one Domain Operation per requirement save",
+      source: "M001",
+    },
+    passesWith: null,
+  },
+  {
+    tool: "gsd_requirement_update",
+    args: { id: "R001", status: "validated", validation: "G4 gate" },
+    passesWith: null,
+  },
+  {
+    tool: "gsd_save_gate_result",
+    args: { milestoneId: "M001", sliceId: "S02", gateId: "Q3", verdict: "pass", rationale: "No auth surface." },
+    passesWith: null,
+    // The inline plan render stores an artifacts row after the operation commits.
+    renderPassesWith: "P12",
+    seed: () => insertGateRow({ milestoneId: "M001", sliceId: "S02", gateId: "Q3", scope: "slice" }),
+  },
+  {
+    tool: "gsd_rework_brief_save",
+    args: {
+      milestoneId: "M001",
+      sliceId: "S02",
+      taskId: "T01",
+      findings: [{
+        findingId: "F1",
+        severity: "advisory",
+        description: "Name is unclear",
+        requiredFix: "Rename the helper",
+        verificationCommands: ["npm test"],
+      }],
+    },
+    passesWith: null,
+  },
+  {
+    tool: "gsd_capture_thought",
+    piTool: "capture_thought",
+    args: { category: "pattern", content: "Route every record write through one Domain Operation." },
+    passesWith: null,
+  },
+  {
+    tool: "gsd_capture_thought",
+    piTool: "capture_thought",
+    args: { category: "environment", content: "The gate fixture runs on a temporary project root." },
+    passesWith: null,
+  },
+];
 
 function operationCount(): number {
   return Number(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM workflow_operations").get()?.count);
@@ -941,10 +1007,12 @@ async function withOperationOnlyFixture(
       completedTaskIds: ["T01"],
       runId: `${transport}-operation-only`,
     });
-    await run((gateCase) => transport === "pi"
-      ? runNativeDbTool(fixture.root, gateCase.tool, gateCase.args)
-      : callMcpLifecycleTool(fixture.root, gateCase.tool, gateCase.args, `operation-only-${gateCase.tool}`),
-    fixture.root);
+    await run((gateCase) => {
+      const key = `operation-only-${OPERATION_ONLY_CASES.indexOf(gateCase)}`;
+      return transport === "pi"
+        ? runNativeDbTool(fixture.root, gateCase.piTool ?? gateCase.tool, gateCase.args, key)
+        : callMcpLifecycleTool(fixture.root, gateCase.tool, gateCase.args, key);
+    }, fixture.root);
   } finally {
     fixture.cleanup();
   }
@@ -953,19 +1021,30 @@ async function withOperationOnlyFixture(
 describe("G4: workflow tables are written only inside a Domain Operation", () => {
   for (const transport of ["pi", "mcp"] as const) {
     for (const gateCase of OPERATION_ONLY_CASES) {
-      it(`${transport} ${gateCase.tool}: one operation per call, none on replay, no write outside it`, async () => {
+      const label = `${gateCase.tool}${gateCase.args.category ? ` (${gateCase.args.category})` : ""}`;
+      it(`${transport} ${label}: one operation per call, none on replay, no write outside it`, async () => {
         await withOperationOnlyFixture(transport, async (call) => {
+          gateCase.seed?.();
           const before = operationCount();
           const fence = fenceWorkflowWrites();
-          await call(gateCase);
+          const first = await call(gateCase);
           const afterFirstCall = operationCount();
-          await call(gateCase);
+          const replay = await call(gateCase);
           fence.restore();
 
-          const gate = () => {
+          const fenceGate = () =>
             assert.deepEqual(fence.violations, [], "no workflow-table write outside a Domain Operation");
+          const gate = () => {
+            if (gateCase.renderPassesWith) expectedFail(gateCase.renderPassesWith, fenceGate);
+            else fenceGate();
             assert.equal(afterFirstCall - before, 1, "one call commits one operation");
             assert.equal(operationCount() - afterFirstCall, 0, "a replay commits no operation");
+            assert.ok(!(first as { isError?: boolean }).isError, "the call succeeds");
+            assert.deepEqual(
+              (replay as { content: unknown }).content,
+              (first as { content: unknown }).content,
+              "a replay returns the result of the first call",
+            );
           };
           if (gateCase.passesWith) expectedFail(gateCase.passesWith, gate);
           else gate();
@@ -977,6 +1056,7 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
       await withOperationOnlyFixture(transport, async (call, base) => {
         const wroteProjections: string[] = [];
         for (const gateCase of OPERATION_ONLY_CASES) {
+          gateCase.seed?.();
           const before = snapshotProjections(base);
           const result = await call(gateCase);
           assert.ok(!(result as { isError?: boolean }).isError, `${gateCase.tool} must succeed`);
