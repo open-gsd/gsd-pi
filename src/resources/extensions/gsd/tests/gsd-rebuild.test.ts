@@ -530,7 +530,7 @@ test("unbaselined root requirement writes preserve existing bytes", async (t) =>
   assert.deepEqual(readFileSync(quarantined[0]!), editedBytes);
 });
 
-test("handleRebuild database target is reserved and does not import markdown", async () => {
+test("handleRebuild has no database target: it shows usage and does not import markdown", async () => {
   const base = makeBase();
   try {
     openDatabase(join(base, ".gsd", "gsd.db"));
@@ -551,13 +551,14 @@ test("handleRebuild database target is reserved and does not import markdown", a
     const { ctx, notes } = makeCtx();
     await handleRebuild(ctx, base, "database");
 
-    assert.equal(existsSync(summaryPath), true, "reserved DB rebuild must not move projection files");
+    assert.equal(existsSync(summaryPath), true, "an unknown rebuild target must not move projection files");
     const task = getTask("M001", "S01", "T01");
-    assert.equal(task?.status, "pending", "reserved DB rebuild must not mutate task status");
-    assert.equal(task?.full_summary_md, "", "reserved DB rebuild must not import markdown");
-    assert.match(notes.at(-1)?.message ?? "", /reserved/);
-    assert.match(notes.at(-1)?.message ?? "", /\/gsd recover/);
-    assert.equal(notes.at(-1)?.kind, "warning");
+    assert.equal(task?.status, "pending", "an unknown rebuild target must not mutate task status");
+    assert.equal(task?.full_summary_md, "", "an unknown rebuild target must not import markdown");
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]?.message ?? "", /^Usage:\n {2}\/gsd rebuild markdown /);
+    assert.doesNotMatch(notes[0]?.message ?? "", /database/i);
+    assert.equal(notes[0]?.kind, "warning");
   } finally {
     cleanup(base);
   }

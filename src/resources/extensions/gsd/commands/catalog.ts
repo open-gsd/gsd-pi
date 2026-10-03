@@ -246,7 +246,6 @@ const NESTED_COMPLETIONS: CompletionMap = {
   ],
   rebuild: [
     { cmd: "markdown", desc: "Rebuild markdown projections from the canonical DB" },
-    { cmd: "database", desc: "Reserved for DB-native rebuilds; does not import markdown" },
   ],
   db: [
     { cmd: "bind", desc: "Make this checkout the one the project database belongs to (after a move or re-clone)" },

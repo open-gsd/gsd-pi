@@ -169,7 +169,6 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd cleanup        Remove merged branches or snapshots  [branches|snapshots]",
     "  /gsd closeout       Recover failed git closeout actions  [status|retry|resolve] [unit-id]",
     "  /gsd rebuild markdown  Rebuild markdown projections from the canonical DB",
-    "  /gsd rebuild database  Reserved for DB-native rebuilds; does not import markdown",
     "  /gsd recover           Preview an evidence-bound DB import after loss/corruption",
     "  /gsd recover <id>      Resume one repaired Task recovery abort (prompts for repair evidence)",
     "  /gsd db restore-backup List or restore a verified pre-migration database backup (destructive)",

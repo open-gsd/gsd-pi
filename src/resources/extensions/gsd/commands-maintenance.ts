@@ -949,12 +949,11 @@ function moveDatabaseFiles(from: string, to: string): void {
   }
 }
 
-type RebuildTarget = "markdown" | "database" | "usage";
+type RebuildTarget = "markdown" | "usage";
 
 function parseRebuildTarget(args: string): RebuildTarget {
   const trimmed = args.trim().toLowerCase();
   if (!trimmed || trimmed === "markdown") return "markdown";
-  if (trimmed === "database" || trimmed === "db") return "database";
   return "usage";
 }
 
@@ -1080,20 +1079,6 @@ export async function handleRebuild(ctx: ExtensionCommandContext, basePath: stri
       [
         "Usage:",
         "  /gsd rebuild markdown   Rebuild markdown projections from the canonical DB",
-        "  /gsd rebuild database   Reserved for DB-native rebuilds; does not import markdown",
-      ].join("\n"),
-      "warning",
-    );
-    return;
-  }
-
-  if (target === "database") {
-    ctx.ui.notify(
-      [
-        "gsd rebuild database is reserved for DB-native rebuilds.",
-        "It will not import markdown projections into the DB.",
-        "For normal realignment, run /gsd rebuild markdown.",
-        "If the DB is lost or corrupt and markdown is the source to import, run /gsd recover and approve its exact Preview hash.",
       ].join("\n"),
       "warning",
     );
