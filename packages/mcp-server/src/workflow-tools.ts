@@ -2606,6 +2606,12 @@ const taskSettleParams = {
   reconcileLifecycle: z.boolean().optional().describe(
     "After settling or an interrupted Attempt, adopt ready/completed; after a succeeded Attempt, adopt completed. Preserve SUMMARYs",
   ),
+  // #2202 operator closeout, mirrored from the native surface (db-tools.ts):
+  // without this field zod strips the key and the #2202 blocker → replan path
+  // is unreachable from MCP hosts (#2536).
+  settleDisposition: z.literal("blocker-accepted").optional().describe(
+    "#2202 operator closeout: accept a discovered blocker and close the Task terminal (no rerun, no fabricated success). Requires the latest Attempt settled failed/blocker-discovered at the route stage and no running Attempt. Mutually exclusive with reconcileLifecycle. Then replan the slice with this task as blockerTaskId.",
+  ),
 };
 const taskSettleSchema = z.object(taskSettleParams);
 
@@ -3693,7 +3699,7 @@ export function registerWorkflowTools(
 
   server.tool(
     "gsd_task_settle",
-    "Operator tool: settle a Task's orphaned running Attempt as interrupted. Dry-run by default — prints the exact rows it would change; mutation requires apply: true. Optional reconcileLifecycle adopts ready/completed to match tasks.status without deleting SUMMARYs.",
+    "Operator tool: settle a Task's orphaned running Attempt as interrupted. Dry-run by default — prints the exact rows it would change; mutation requires apply: true. Optional reconcileLifecycle adopts ready/completed to match tasks.status without deleting SUMMARYs. Optional settleDisposition 'blocker-accepted' closes a Task whose latest Attempt failed as blocker-discovered: terminal closeout with blocker provenance, then replan via gsd_replan_slice (mutually exclusive with reconcileLifecycle).",
     taskSettleParams,
     async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(taskSettleSchema, args);

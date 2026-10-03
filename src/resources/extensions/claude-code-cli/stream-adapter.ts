@@ -2771,6 +2771,82 @@ async function pumpSdkMessages(
 				// readiness retry can never inherit the previous attempt's
 				// measurement.
 				let lastMainLoopAssistantUsage: SDKAssistantMessage["message"]["usage"] | null = null;
+				// Background tasks (run_in_background Agent/Bash) the CLI reported via
+				// `task_started` and has not yet closed with `task_notification`. While
+				// any are pending, the CLI keeps this process alive after `result` and
+				// runs each completion as a follow-up turn on this same stream, ending
+				// in another `result`. Returning at the first `result` orphaned that
+				// follow-up work (#2534): it ran unseen against the working tree and
+				// its output never reached the user.
+				const pendingBackgroundTasks = new Set<string>();
+				let deferredResult: SDKResultMessage | null = null;
+				let backgroundWaitStatusShown = false;
+				// The CLI re-sends `init` for every follow-up turn it runs after a
+				// background-task notification; the readiness gate (which can abort and
+				// re-run the whole prompt) applies to the first one only.
+				let sawInit = false;
+				// Whether a follow-up turn has started after a deferred result. If the
+				// stream then ends without that turn's own `result`, the turn was
+				// interrupted mid-follow-up and must not be reported as a clean
+				// completion.
+				let followUpTurnStarted = false;
+				const clearBackgroundWaitStatus = (): void => {
+					if (!backgroundWaitStatusShown) return;
+					backgroundWaitStatusShown = false;
+					uiContext?.setStatus?.("gsd-step", "");
+				};
+				// Move the finished turn's builder content into the ordered accumulators
+				// (same boundary the synthetic `user` message uses) so a later turn
+				// cannot drop it.
+				const foldBuilderIntoIntermediate = (): void => {
+					if (!builder) return;
+					for (const [contentIndex, block] of builder.message.content.entries()) {
+						if (block.type === "text" && block.text) {
+							intermediateTextBlocks.push({ type: "text", text: block.text });
+						} else if (block.type === "thinking" && block.thinking) {
+							intermediateTextBlocks.push({ type: "thinking", thinking: block.thinking });
+						} else if (block.type === "toolCall" || block.type === "serverToolUse") {
+							intermediateToolBlocks.push(block);
+							toolCompletionTargetsById.set(block.id, { partial: builder.message, contentIndex });
+						}
+					}
+					builder = null;
+				};
+				// Shared terminal/deferred-EOF finalization so both paths get the same
+				// usage, live-context and fallback-text accounting.
+				const buildTurnFinalMessage = (result: SDKResultMessage): AssistantMessage => {
+					const finalContent = buildFinalAssistantContent({
+						intermediateToolBlocks,
+						intermediateTextBlocks,
+						pendingContent: builder?.message.content,
+						toolResultsById,
+						lastThinkingContent,
+						lastTextContent,
+						fallbackResultText:
+							result.subtype === "success" && result.result ? result.result : undefined,
+					});
+					const usage = mapUsage(result.usage, result.total_cost_usd);
+					if (lastMainLoopAssistantUsage) {
+						// Live end-of-turn context from the SDK's final main-loop call.
+						// The terminal result usage is cumulative across the internal
+						// loop, so overflow detection and the context gauge prefer this
+						// per-call value when present (#2358, #2359).
+						usage.liveContextTokens =
+							lastMainLoopAssistantUsage.input_tokens +
+							(lastMainLoopAssistantUsage.cache_read_input_tokens ?? 0) +
+							(lastMainLoopAssistantUsage.cache_creation_input_tokens ?? 0);
+					}
+					return {
+						role: "assistant",
+						content: finalContent,
+						api: "anthropic-messages",
+						provider: "claude-code",
+						model: modelId,
+						usage,
+						stopReason: result.is_error ? "error" : "stop",
+						timestamp: Date.now(),
+					};
+				};
 				const controller = new AbortController();
 				const forwardAbort = (): void => controller.abort();
 				if (options?.signal) {
@@ -2814,49 +2890,68 @@ async function pumpSdkMessages(
 								subtype?: string;
 								tools?: string[];
 								mcp_servers?: { name: string; status: string }[];
+								task_id?: string;
 							};
+							if (init.subtype === "task_started" && typeof init.task_id === "string") {
+								pendingBackgroundTasks.add(init.task_id);
+							} else if (init.subtype === "task_notification" && typeof init.task_id === "string") {
+								pendingBackgroundTasks.delete(init.task_id);
+								if (deferredResult && backgroundWaitStatusShown) {
+									uiContext?.setStatus?.("gsd-step", pendingBackgroundTasks.size > 0
+										? `Waiting for ${pendingBackgroundTasks.size} background task(s) to finish (Esc stops them)`
+										: "Background tasks finished; continuing the turn");
+								}
+							}
 							if (init.subtype === "init") {
-								const readinessError = await resolveClaudeCodeToolSurfaceReadinessError({
-									unitType: gsdPhase,
-									workflowServerName: workflowMcpServerName,
-									projectRoot,
-									observation: { tools: init.tools ?? [], mcpServers: init.mcp_servers ?? [] },
-									allowPendingToolSearchHydration,
-								});
-								if (readinessError) {
-									const retryDelayMs = resolveClaudeCodeToolSurfaceReadinessRetryDelayMs(
-										readinessError,
-										readinessAttempt,
-										workflowMcpPreflightVerified,
-									);
-									if (retryDelayMs !== null && !options?.signal?.aborted) {
-										controller.abort();
-										const progressMessage = buildWorkflowMcpReadinessProgressMessage({
-											unitType: gsdPhase ?? "workflow unit",
-											workflowServerName: workflowMcpServerName ?? "workflow",
-											stage: "retry",
-											attempt: readinessAttempt + 1,
-											delayMs: retryDelayMs,
-										});
-										pushWorkflowMcpReadinessProgressEvent({
-											stream,
-											partial: initialPartial,
-											state: readinessProgressState,
-											message: progressMessage,
-										});
-										uiContext?.setStatus?.("gsd-step", progressMessage);
-										await delay(retryDelayMs, options?.signal);
-										uiContext?.setStatus?.("gsd-step", "");
-										continue sdkAttemptLoop;
-									}
-									controller.abort();
-									clearMilestoneStatusObservation();
-									stream.push({
-										type: "error",
-										reason: "error",
-										error: makeErrorMessage(modelId, readinessError),
+								if (!sawInit) {
+									sawInit = true;
+									const readinessError = await resolveClaudeCodeToolSurfaceReadinessError({
+										unitType: gsdPhase,
+										workflowServerName: workflowMcpServerName,
+										projectRoot,
+										observation: { tools: init.tools ?? [], mcpServers: init.mcp_servers ?? [] },
+										allowPendingToolSearchHydration,
 									});
-									return;
+									if (readinessError) {
+										const retryDelayMs = resolveClaudeCodeToolSurfaceReadinessRetryDelayMs(
+											readinessError,
+											readinessAttempt,
+											workflowMcpPreflightVerified,
+										);
+										if (retryDelayMs !== null && !options?.signal?.aborted) {
+											controller.abort();
+											const progressMessage = buildWorkflowMcpReadinessProgressMessage({
+												unitType: gsdPhase ?? "workflow unit",
+												workflowServerName: workflowMcpServerName ?? "workflow",
+												stage: "retry",
+												attempt: readinessAttempt + 1,
+												delayMs: retryDelayMs,
+											});
+											pushWorkflowMcpReadinessProgressEvent({
+												stream,
+												partial: initialPartial,
+												state: readinessProgressState,
+												message: progressMessage,
+											});
+											uiContext?.setStatus?.("gsd-step", progressMessage);
+											await delay(retryDelayMs, options?.signal);
+											uiContext?.setStatus?.("gsd-step", "");
+											continue sdkAttemptLoop;
+										}
+										controller.abort();
+										clearMilestoneStatusObservation();
+										stream.push({
+											type: "error",
+											reason: "error",
+											error: makeErrorMessage(modelId, readinessError),
+										});
+										return;
+									}
+								} else if (deferredResult) {
+									// A follow-up turn started after a deferred result; if the
+									// stream ends before its own `result`, the turn is
+									// interrupted, not complete.
+									followUpTurnStarted = true;
 								}
 							}
 							break;
@@ -3034,45 +3129,72 @@ async function pumpSdkMessages(
 							break;
 						}
 
-						// -- Result (terminal) --
+						// -- Result (terminal, unless background tasks are pending) --
 						case "result": {
 							const result = msg as SDKResultMessage;
-							const finalContent = buildFinalAssistantContent({
-								intermediateToolBlocks,
-								intermediateTextBlocks,
-								pendingContent: builder?.message.content,
-								toolResultsById,
-								lastThinkingContent,
-								lastTextContent,
-								fallbackResultText:
-									result.subtype === "success" && result.result ? result.result : undefined,
-							});
-
-							const usage = mapUsage(result.usage, result.total_cost_usd);
-							if (lastMainLoopAssistantUsage) {
-								// Live end-of-turn context from the SDK's final main-loop
-								// call. The terminal result usage is cumulative across the
-								// internal loop, so overflow detection and the context
-								// gauge prefer this per-call value when present (#2358,
-								// #2359). Additive field: existing usage fields (and
-								// persisted sessions) stay untouched. Cache counts are
-								// nullable in the native API shape and read as 0.
-								usage.liveContextTokens =
-									lastMainLoopAssistantUsage.input_tokens +
-									(lastMainLoopAssistantUsage.cache_read_input_tokens ?? 0) +
-									(lastMainLoopAssistantUsage.cache_creation_input_tokens ?? 0);
+							if (pendingBackgroundTasks.size > 0 && result.subtype === "success" && !result.is_error) {
+								// Not terminal: the CLI keeps the process alive and runs each
+								// pending background completion as a follow-up turn on this
+								// same stream, ending in another `result`. Keep the turn open
+								// and keep reading (#2534) so the follow-up work stays visible
+								// and its output reaches the user. Error results (is_error or
+								// an error subtype) must not wait: they end the turn and close
+								// the process below.
+								foldBuilderIntoIntermediate();
+								// The deferred turn's scalar mirrors (complete `assistant`
+								// messages that never built a partial) belong to this turn —
+								// capture them into the ordered accumulators (thinking before
+								// text, matching the turn's own block order), then reset them
+								// so the final assembly cannot re-append an earlier turn's
+								// text as the scalar fallback.
+								if (lastThinkingContent && !intermediateTextBlocks.some((block) => block.type === "thinking" && block.thinking === lastThinkingContent)) {
+									intermediateTextBlocks.push({ type: "thinking", thinking: lastThinkingContent });
+								}
+								if (lastTextContent && !intermediateTextBlocks.some((block) => block.type === "text" && block.text === lastTextContent)) {
+									intermediateTextBlocks.push({ type: "text", text: lastTextContent });
+								}
+								lastTextContent = "";
+								lastThinkingContent = "";
+								if (
+									result.result
+									&& !intermediateTextBlocks.some((block) => block.type === "text" && block.text === result.result)
+								) {
+									intermediateTextBlocks.push({ type: "text", text: result.result });
+								}
+								deferredResult = result;
+								// The deferring turn finished cleanly; only a follow-up turn
+								// started AFTER this point and dying before its own result
+								// counts as an interruption.
+								followUpTurnStarted = false;
+								backgroundWaitStatusShown = true;
+								uiContext?.setStatus?.("gsd-step", `Waiting for ${pendingBackgroundTasks.size} background task(s) to finish (Esc stops them)`);
+								break;
 							}
-
-							const finalMessage: AssistantMessage = {
-								role: "assistant",
-								content: finalContent,
-								api: "anthropic-messages",
-								provider: "claude-code",
-								model: modelId,
-								usage,
-								stopReason: result.is_error ? "error" : "stop",
-								timestamp: Date.now(),
-							};
+							clearBackgroundWaitStatus();
+							if (pendingBackgroundTasks.size > 0) {
+								// Error result with background tasks still running: terminate
+								// the process so they cannot keep mutating the working tree
+								// unobserved after this turn is reported (#2534).
+								try {
+									(queryResult as { close?: () => void }).close?.();
+								} catch (closeError) {
+									console.warn("[claude-code] query close after error result failed:", closeError);
+								}
+							}
+							const finalMessage = buildTurnFinalMessage(result);
+							if (deferredResult && result.subtype === "success" && result.result) {
+								// This turn's own final text must reach the user even when
+								// nothing streamed for it (buildFinalAssistantContent suppresses
+								// the scalar fallback once earlier content exists). Appended
+								// after assembly so it cannot duplicate or reorder pending or
+								// scalar content from the turn itself.
+								const alreadyPresent = finalMessage.content.some(
+									(block) => block.type === "text" && block.text === result.result,
+								);
+								if (!alreadyPresent) {
+									finalMessage.content.push({ type: "text", text: result.result });
+								}
+							}
 
 							clearMilestoneStatusObservation();
 							if (result.is_error) {
@@ -3090,6 +3212,32 @@ async function pumpSdkMessages(
 				}
 				} finally {
 					options?.signal?.removeEventListener("abort", forwardAbort);
+					clearBackgroundWaitStatus();
+				}
+
+				if (deferredResult && !followUpTurnStarted && !options?.signal?.aborted) {
+					// The process exited while a `result` was deferred and no follow-up
+					// turn had started (e.g. the CLI delivered the completion without
+					// needing another model turn, or killed the remaining background
+					// tasks on exit). Report what the turn did produce instead of a
+					// stream-exhausted error (#2534). A follow-up turn that started but
+					// never produced its own `result` stays an interruption and falls
+					// through to the exhaustion handler below.
+					const result = deferredResult;
+					const finalMessage = buildTurnFinalMessage(result);
+					if (pendingBackgroundTasks.size > 0) {
+						finalMessage.content.push({
+							type: "text",
+							text: `\n\n[claude-code] The session ended while ${pendingBackgroundTasks.size} background task(s) were still running; their results were not delivered.`,
+						});
+					}
+					clearMilestoneStatusObservation();
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: finalMessage,
+					});
+					return;
 				}
 
 				// The SDK stream ended without a terminal `result` message and

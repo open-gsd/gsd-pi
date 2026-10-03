@@ -14,7 +14,7 @@ import { createProjectionDirectorySync, removeProjectionFileSync } from "./atomi
 import { logWarning } from "./workflow-logger.js";
 import { isClosedStatus, isDiscardedMilestoneStatus, isHiddenFromRoadmap, toStatus } from "./status-guards.js";
 import { isCanonicalStagedTaskSummaryState } from "./task-summary-projection-policy.js";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import {
   getAllMilestones,
   getMilestone,
@@ -887,17 +887,93 @@ interface ArtifactWrite {
   artifact: ArtifactRow;
 }
 
+/**
+ * Absolute projection path for a milestone-scoped artifact row's stored
+ * location, or null when the row carries no usable path. Stored paths are
+ * projection-root-relative; some legacy rows keep a ".gsd/" prefix.
+ */
+function milestoneArtifactStoredPath(basePath: string, artifact: ArtifactRow): string | null {
+  if (!artifact.path) return null;
+  const rel = artifact.path.replace(/^\.gsd[/\\]/, "");
+  if (rel.startsWith("/") || rel.startsWith("\\") || rel.split(/[/\\]/).includes("..")) return null;
+  return join(gsdProjectionRoot(basePath), rel);
+}
+
+/**
+ * Per-row projection targets for milestone-scoped artifact rows (#2535).
+ *
+ * Rows sharing an artifact_type live at different files: a milestone
+ * ASSESSMENT at NN-ASSESSMENT.md and the gsd_reassess_roadmap row (also
+ * stored as artifact_type ASSESSMENT) at NN-ROADMAP-ASSESSMENT.md. Deriving
+ * every target from artifact_type alone collapses the group onto one file —
+ * the render overwrites one row's content with the other's, and the drift
+ * check diffs the wrong file, emitting a stale-render reason no repair branch
+ * handles.
+ *
+ * Within a type group exactly one row owns the canonical target — the row
+ * whose stored path already is the canonical file, else the row whose stored
+ * basename matches it, else the first row in path order. Every other row
+ * keeps its own filename in the canonical milestone directory, which also
+ * carries rows through a phase-dir rename without resurrecting the old
+ * directory. Single-row groups resolve to the canonical target unchanged
+ * (legacy-compat filenames still heal, and flat-phase migration still renders
+ * flat-phase rows).
+ */
+function resolveMilestoneArtifactTargets(
+  basePath: string,
+  milestoneId: string,
+  artifacts: ArtifactRow[],
+  milestoneTitle?: string,
+): Map<string, string> {
+  const targets = new Map<string, string>();
+  const groupByType = new Map<string, ArtifactRow[]>();
+  for (const artifact of artifacts) {
+    const group = groupByType.get(artifact.artifact_type) ?? [];
+    group.push(artifact);
+    groupByType.set(artifact.artifact_type, group);
+  }
+  for (const artifact of artifacts) {
+    const canonical = targetMilestoneFile(basePath, milestoneId, artifact.artifact_type, milestoneTitle);
+    const group = groupByType.get(artifact.artifact_type)!;
+    if (group.length === 1) {
+      targets.set(artifact.path, canonical);
+      continue;
+    }
+    const canonicalOwner =
+      group.find((row) => milestoneArtifactStoredPath(basePath, row) === canonical)
+      ?? group.find((row) => {
+        const stored = milestoneArtifactStoredPath(basePath, row);
+        return stored !== null && basename(stored) === basename(canonical);
+      })
+      // Foreign basenames (e.g. legacy M001-*.md rows rendered into a flat
+      // phase dir during migration): the first row in path order owns the
+      // canonical name so the siblings still keep their own filenames and
+      // their content survives layout translation.
+      ?? group[0];
+    if (canonicalOwner === artifact) {
+      targets.set(artifact.path, canonical);
+      continue;
+    }
+    const stored = milestoneArtifactStoredPath(basePath, artifact);
+    targets.set(artifact.path, stored ? join(dirname(canonical), basename(stored)) : canonical);
+  }
+  return targets;
+}
+
 /** The milestone-scoped artifact rows that the render writes, each with its target file. */
 function milestoneArtifactWrites(basePath: string, milestoneId: string): ArtifactWrite[] {
   const milestone = getMilestone(milestoneId);
   const milestoneComplete = toStatus(milestone?.status ?? "") === "complete";
-  return getMilestoneScopedArtifacts(milestoneId)
+  const rows = getMilestoneScopedArtifacts(milestoneId);
+  const targets = resolveMilestoneArtifactTargets(basePath, milestoneId, rows, milestone?.title);
+  return rows
     .filter((artifact) =>
       artifact.artifact_type !== "ROADMAP"
       && !(artifact.artifact_type.toUpperCase() === "SUMMARY" && !milestoneComplete)
       && artifact.full_content.trim() !== "")
     .map((artifact) => {
-      const absPath = targetMilestoneFile(basePath, milestoneId, artifact.artifact_type, milestone?.title);
+      const absPath = targets.get(artifact.path)
+        ?? targetMilestoneFile(basePath, milestoneId, artifact.artifact_type, milestone?.title);
       return { absPath, artifactPath: toArtifactPath(absPath, basePath), artifact };
     });
 }
@@ -1432,13 +1508,16 @@ function projectionRenderIntents(basePath: string): ProjectionRenderIntent[] {
     }
 
     const milestoneComplete = toStatus(milestone.status) === "complete";
-    for (const artifact of getMilestoneScopedArtifacts(milestone.id)) {
+    const milestoneArtifacts = getMilestoneScopedArtifacts(milestone.id);
+    const artifactTargets = resolveMilestoneArtifactTargets(basePath, milestone.id, milestoneArtifacts, milestone.title);
+    for (const artifact of milestoneArtifacts) {
       const artifactType = artifact.artifact_type.toUpperCase();
       if (artifact.artifact_type === "ROADMAP") continue;
       if (artifactType === "SUMMARY" && !milestoneComplete) continue;
       if (!artifact.full_content.trim()) continue;
       record(
-        targetMilestoneFile(basePath, milestone.id, artifact.artifact_type, milestone.title),
+        artifactTargets.get(artifact.path)
+          ?? targetMilestoneFile(basePath, milestone.id, artifact.artifact_type, milestone.title),
         artifact.full_content,
         `${artifactType} for ${milestone.id} differs from DB render intent`,
       );

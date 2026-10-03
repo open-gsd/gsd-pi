@@ -2303,6 +2303,108 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
     }
   });
 
+  it("declares settleDisposition and forwards it to the shared settle executor (#2536)", async (t) => {
+    // #2536: the MCP gsd_task_settle schema did not declare settleDisposition,
+    // so zod stripped the key and the #2202 blocker → replan closeout was
+    // unreachable from MCP hosts. Locks in both halves of the contract: the
+    // schema advertises the field (host discoverability) and the handler
+    // forwards it verbatim to executeTaskSettle (which enforces the
+    // reconcileLifecycle mutual exclusion).
+    const base = makeTmpBase();
+    const capturePath = join(base, "captured-settle-args.json");
+    const mockModulePath = join(base, "mock-executors.mjs");
+    const prevModule = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const prevCapture = process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH;
+    t.after(() => {
+      if (prevModule === undefined) {
+        delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+      } else {
+        process.env.GSD_WORKFLOW_EXECUTORS_MODULE = prevModule;
+      }
+      if (prevCapture === undefined) {
+        delete process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH;
+      } else {
+        process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH = prevCapture;
+      }
+      cleanup(base);
+    });
+
+    const mockSource = `
+import { readFileSync, writeFileSync } from "node:fs";
+
+const noop = async () => ({ content: [{ type: "text", text: "noop" }] });
+
+export const executeTaskSettle = async (params, projectDir, invocation) => {
+  const capturePath = process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH;
+  if (capturePath) {
+    writeFileSync(capturePath, JSON.stringify({ params, projectDir, invocation }, null, 2));
+  }
+  return { content: [{ type: "text", text: "mock task settle" }] };
+};
+
+export const executeTaskComplete = noop;
+export const executeTaskReopen = noop;
+export const executeTaskRecoveryResume = noop;
+export const executeSliceComplete = noop;
+export const executeSliceReopen = noop;
+export const executeSkipSlice = noop;
+export const executeCompleteMilestone = noop;
+export const executeMilestoneReopen = noop;
+export const executeValidateMilestone = noop;
+export const executeReassessRoadmap = noop;
+export const executeSaveGateResult = noop;
+export const executeSummarySave = noop;
+export const executeUatResultSave = noop;
+export const executePlanMilestone = noop;
+export const executePlanSlice = noop;
+export const executeReplanSlice = noop;
+export const executeReplanTask = noop;
+export const executeReworkBriefSave = noop;
+export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = ["SUMMARY", "UAT", "CONTEXT", "PLAN"];
+export const resolveMilestoneStatusObservationTokenState = () => "malformed";
+export const executeMilestoneStatus = noop;
+`;
+    writeFileSync(mockModulePath, mockSource, "utf-8");
+    process.env.GSD_WORKFLOW_EXECUTORS_MODULE = mockModulePath;
+    process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH = capturePath;
+
+    const { registerWorkflowTools: freshRegisterWorkflowTools } = await import(
+      cacheBustedWorkflowToolsImport("task-settle-disposition")
+    );
+    const server = makeMockServer();
+    freshRegisterWorkflowTools(server as any);
+    const settleTool = server.tools.find((candidate) => candidate.name === "gsd_task_settle");
+    assert.ok(settleTool, "task settle tool should be registered");
+    assert.ok(
+      "settleDisposition" in settleTool.params,
+      "MCP schema must declare settleDisposition so hosts can discover the #2202 closeout (#2536)",
+    );
+
+    await settleTool.handler({
+      projectDir: base,
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      reason: "blocker accepted at route stage",
+      apply: true,
+      settleDisposition: "blocker-accepted",
+    }, {
+      _meta: { "io.opengsd/idempotency-key": "stable-task-settle" },
+    });
+
+    assert.ok(existsSync(capturePath), "mock executor should have written captured args to disk");
+    const captured = JSON.parse(readFileSync(capturePath, "utf-8"));
+    assert.equal(
+      captured.params.settleDisposition,
+      "blocker-accepted",
+      "settleDisposition must reach the shared executor — zod must not strip it (#2536)",
+    );
+    assert.equal(captured.params.projectDir, undefined, "projectDir must not leak into executor params");
+    assert.equal(captured.params.milestoneId, "M001");
+    assert.equal(captured.params.taskId, "T01");
+    assert.equal(captured.projectDir, realpathSync(base));
+  });
+
   it("gsd_complete_task alias delegates to gsd_task_complete behavior", async () => {
     const base = makeTmpBase();
     try {

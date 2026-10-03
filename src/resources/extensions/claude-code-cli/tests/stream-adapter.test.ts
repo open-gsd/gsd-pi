@@ -59,7 +59,7 @@ import { _setAutoActiveForTest } from "../../gsd/auto.ts";
 import { autoSession } from "../../gsd/auto-runtime-state.ts";
 import { getInFlightToolCount, hasInteractiveToolInFlight, clearInFlightTools, isInteractiveElicitationInFlight } from "../../gsd/auto-tool-tracking.ts";
 import { clearMcpConfigCache } from "../../mcp-client/manager.ts";
-import { UNIT_TOOL_CONTRACTS } from "../../gsd/unit-tool-contracts.ts";
+import { UNIT_TOOL_CONTRACTS, getRequiredWorkflowToolsForUnit } from "../../gsd/unit-tool-contracts.ts";
 
 // ---------------------------------------------------------------------------
 // Env helpers — `GSD_WORKFLOW_MCP_*` save/restore
@@ -5354,5 +5354,404 @@ describe("stream-adapter — interactive legacy gsd-core skill guard (#2369)", (
 		pushEnv("GSD_CLAUDE_CODE_LEGACY_SKILL_FILTER", "0");
 		const options = buildInteractiveOptions();
 		assert.equal(options.hooks, undefined);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2534 — background task results keep the turn open
+// ---------------------------------------------------------------------------
+
+function makeSdkResult(
+	uuid: string,
+	sessionId: string,
+	overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+	return {
+		type: "result",
+		subtype: "success",
+		uuid,
+		session_id: sessionId,
+		duration_ms: 1,
+		duration_api_ms: 1,
+		is_error: false,
+		num_turns: 1,
+		result: "done",
+		stop_reason: "end_turn",
+		total_cost_usd: 0,
+		usage: {
+			input_tokens: 0,
+			output_tokens: 0,
+			cache_read_input_tokens: 0,
+			cache_creation_input_tokens: 0,
+		},
+		...overrides,
+	};
+}
+
+function makeSdkSystem(subtype: string, sessionId: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+	return { type: "system", subtype, uuid: `sys-${subtype}`, session_id: sessionId, ...extra };
+}
+
+describe("stream-adapter — background task results (#2534)", () => {
+	test("keeps the turn open after a result while background tasks are pending and ends at the follow-up turn's result", async () => {
+		const sid = "session-2534a";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch agents and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Waiting on the agents." } }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: rewrite docs" });
+					// First result: background task still pending — not terminal.
+					yield makeSdkResult("r1", sid, { result: "Waiting on the agents.", total_cost_usd: 0.01 });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" });
+					// Follow-up turn the CLI runs for the notification.
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "FINISHED" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					// Terminal result: nothing pending. total_cost_usd is cumulative.
+					yield makeSdkResult("r2", sid, { result: "FINISHED", total_cost_usd: 0.03, num_turns: 2 });
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1, "exactly one done event");
+		assert.equal(events.some((event) => event.type === "error"), false);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.ok(texts.includes("Waiting on the agents."), "the finished turn's text must survive");
+		assert.ok(texts.includes("FINISHED"), "the follow-up turn's text must be included");
+		assert.equal(
+			texts.filter((text: string) => text === "Waiting on the agents.").length,
+			1,
+			"the deferred result text must not be duplicated",
+		);
+		assert.equal(done[0].message.usage.cost.total, 0.03, "usage must come from the LAST (cumulative) result");
+	});
+
+	test("surfaces a waiting status while background tasks settle and clears it at the terminal result", async () => {
+		const sid = "session-2534b";
+		const statuses: string[] = [];
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				extensionUIContext: {
+					setStatus(key: string, value: string) {
+						if (key === "gsd-step") statuses.push(value);
+					},
+				},
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-2", description: "Agent: y" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "failed", output_file: "/tmp/out-1", summary: "boom" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-2", status: "completed", output_file: "/tmp/out-2", summary: "done" });
+					// The follow-up turn produced no streamed content of its own; its
+					// only output is the terminal result text.
+					yield makeSdkResult("r2", sid, { result: "FINISHED" });
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false);
+		assert.ok(
+			statuses.includes("Waiting for 2 background task(s) to finish (Esc stops them)"),
+			`waiting status must count both tasks; got ${JSON.stringify(statuses)}`,
+		);
+		assert.ok(statuses.includes("Waiting for 1 background task(s) to finish (Esc stops them)"));
+		assert.ok(statuses.includes("Background tasks finished; continuing the turn"));
+		assert.equal(statuses[statuses.length - 1], "", "status must be cleared at the terminal result");
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.deepEqual(texts, ["WAITING", "FINISHED"]);
+	});
+
+	test("reports output from multiple deferred turns when the stream ends after both settle", async () => {
+		const sid = "session-2534b2";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-2", description: "Agent: y" });
+					// A complete assistant message that never built a partial: its text
+					// must be captured once at the deferral, not re-appended later as
+					// the scalar fallback.
+					yield { type: "assistant", uuid: "a1", session_id: sid, parent_tool_use_id: null, message: { id: "msg-1", type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [{ type: "text", text: "WAITING-ONE" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } };
+					// First deferral (two tasks pending).
+					yield makeSdkResult("r1", sid, { result: "WAITING-ONE" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/o1", summary: "done" });
+					// Follow-up turn starts, then defers again on the remaining task.
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield makeSdkResult("r2", sid, { result: "WAITING-TWO" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-2", status: "completed", output_file: "/tmp/o2", summary: "done" });
+					// The CLI exits after delivering the last notification without
+					// needing another model turn.
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false, "a settled multi-deferral turn must not report stream-exhausted");
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.deepEqual(texts, ["WAITING-ONE", "WAITING-TWO"]);
+	});
+
+	test("closes the SDK query when an error result lands with background tasks still pending", async () => {
+		const sid = "session-2534c";
+		let closeCalls = 0;
+		const messages: Record<string, unknown>[] = [
+			makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" }),
+			makeSdkResult("r1", sid, {
+				subtype: "error_during_execution",
+				is_error: true,
+				errors: ["boom"],
+				result: undefined,
+			}),
+		];
+		const queryResult = {
+			close() {
+				closeCalls += 1;
+			},
+			[Symbol.asyncIterator]() {
+				let index = 0;
+				return {
+					next: async () =>
+						index < messages.length
+							? { value: messages[index++], done: false }
+							: { value: undefined, done: true },
+				};
+			},
+		};
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: () => queryResult,
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), true, "the error result must surface");
+		assert.equal(closeCalls, 1, "the underlying query must be closed so pending tasks stop");
+	});
+
+	test("treats non-success result subtypes as terminal even when is_error is false", async () => {
+		// The SDK can emit error_max_turns / error_max_budget_usd results with
+		// is_error: false; deferring on those would keep the process alive after a
+		// failed turn. Only success results may be deferred.
+		const sid = "session-2534c2";
+		let closeCalls = 0;
+		const messages: Record<string, unknown>[] = [
+			makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" }),
+			makeSdkResult("r1", sid, {
+				subtype: "error_max_turns",
+				is_error: false,
+				errors: ["max turns reached"],
+				result: undefined,
+			}),
+		];
+		const queryResult = {
+			close() {
+				closeCalls += 1;
+			},
+			[Symbol.asyncIterator]() {
+				let index = 0;
+				return {
+					next: async () =>
+						index < messages.length
+							? { value: messages[index++], done: false }
+							: { value: undefined, done: true },
+				};
+			},
+		};
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: () => queryResult,
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(closeCalls, 1, "a non-success result must not be deferred while tasks are pending");
+		assert.equal(events.filter((event) => event.type === "done").length, 1);
+	});
+
+	test("reports deferred turn output when the stream ends with tasks still pending", async () => {
+		const sid = "session-2534d";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					// Stream ends (CLI killed the pending task on exit) — no follow-up
+					// turn, no terminal result.
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1, "a deferred result must end as done, not stream-exhausted");
+		assert.equal(events.some((event) => event.type === "error"), false);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.ok(texts.includes("WAITING"), "the deferred turn's result text must be reported");
+		assert.ok(
+			texts.some((text: string) => text.includes("background task(s) were still running")),
+			"undelivered background tasks must be surfaced",
+		);
+	});
+
+	test("keeps stream-exhausted semantics when a started follow-up turn never finishes", async () => {
+		const sid = "session-2534e";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" });
+					// The follow-up turn starts (its own init) and streams partially,
+					// then the process dies without producing its `result`.
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial follow-u" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					// EOF without the follow-up turn's result.
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.filter((event) => event.type === "done").length, 0, "an interrupted follow-up turn must not complete cleanly");
+		const errors = events.filter((event) => event.type === "error");
+		assert.equal(errors.length, 1);
+		assert.equal(errors[0].error?.errorMessage, "stream_exhausted_without_result");
+	});
+
+	test("runs the tool-surface readiness gate on the first init only when a follow-up turn re-inits", async (t) => {
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-bg-init-gate-"));
+		t.after(() => rmSync(cwd, { recursive: true, force: true }));
+		const context: Context = {
+			systemPrompt: "UNIT: Run UAT",
+			messages: [{ role: "user", content: "Run UAT." } as Message],
+		};
+		_setAutoActiveForTest(true);
+		autoSession.currentUnit = { type: "run-uat", id: "M001/S001", startedAt: 0, workspaceRoot: cwd } as never;
+		t.after(() => {
+			autoSession.currentUnit = null;
+			_setAutoActiveForTest(false);
+		});
+		const requiredTools = getRequiredWorkflowToolsForUnit("run-uat")
+			.map((tool) => `mcp__gsd-workflow__${tool}`);
+		const sid = "session-2534f";
+		let queryCalls = 0;
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			context,
+			{
+				cwd,
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					queryCalls += 1;
+					yield {
+						type: "system",
+						subtype: "init",
+						tools: requiredTools,
+						mcp_servers: [{ name: "gsd-workflow", status: "connected" }],
+					};
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					// Follow-up turn re-inits with an empty tool surface; the gate
+					// must not re-run (it would abort and re-run the whole prompt).
+					yield {
+						type: "system",
+						subtype: "init",
+						tools: [],
+						mcp_servers: [{ name: "gsd-workflow", status: "connected" }],
+					};
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" });
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "FINISHED" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield makeSdkResult("r2", sid, { result: "FINISHED" });
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(queryCalls, 1, "a follow-up-turn init must not restart the SDK query");
+		assert.equal(events.some((event) => event.type === "error"), false);
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.ok(texts.includes("FINISHED"), "the follow-up turn's output must reach the user");
 	});
 });

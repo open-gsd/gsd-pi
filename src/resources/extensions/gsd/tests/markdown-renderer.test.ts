@@ -36,6 +36,7 @@ import {
   renderPlanFromDb,
   renderTaskPlanFromDb,
   renderRoadmapFromDb,
+  renderMilestoneArtifactsFromDb,
   detectStaleRenders,
   detectProjectionDrift,
   getCurrentProjectStateVersion,
@@ -1470,6 +1471,272 @@ test('── markdown-renderer: detectProjectionDrift finds roadmap checkbox mis
     closeDatabase();
     cleanupDir(tmpDir);
   }
+});
+
+test('── markdown-renderer: milestone ASSESSMENT and ROADMAP-ASSESSMENT rows drift-check their own files (#2535) ──', (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const roadmapAssessmentContent = '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n';
+  const assessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md');
+  const roadmapAssessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md');
+  fs.writeFileSync(assessmentPath, assessmentContent);
+  fs.writeFileSync(roadmapAssessmentPath, roadmapAssessmentContent);
+  // Both rows are milestone-scoped with artifact_type ASSESSMENT — the
+  // gsd_reassess_roadmap row stores the same type at a different path.
+  insertArtifact({
+    path: 'phases/01-test/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'phases/01-test/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: roadmapAssessmentContent,
+  });
+  clearAllCaches();
+
+  assert.deepStrictEqual(
+    detectProjectionDrift(tmpDir),
+    [],
+    'each milestone-scoped ASSESSMENT row matches its own file — no drift (#2535)',
+  );
+
+  fs.writeFileSync(assessmentPath, assessmentContent + '\nEXTERNAL_EDIT\n');
+  clearAllCaches();
+  assert.ok(
+    detectProjectionDrift(tmpDir).some(s => pathsEqual(s.path, assessmentPath) && s.reason.includes('ASSESSMENT for M001 differs')),
+    'a real edit to NN-ASSESSMENT.md is still detected',
+  );
+
+  fs.writeFileSync(assessmentPath, assessmentContent);
+  fs.writeFileSync(roadmapAssessmentPath, roadmapAssessmentContent + '\nEXTERNAL_EDIT\n');
+  clearAllCaches();
+  assert.ok(
+    detectProjectionDrift(tmpDir).some(s => pathsEqual(s.path, roadmapAssessmentPath) && s.reason.includes('ASSESSMENT for M001 differs')),
+    'NN-ROADMAP-ASSESSMENT.md is drift-checked against its own row (#2535)',
+  );
+});
+
+test('── markdown-renderer: missing ROADMAP-ASSESSMENT file does not flag the ASSESSMENT file as drifted (#2535) ──', (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const assessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md');
+  fs.writeFileSync(assessmentPath, assessmentContent);
+  // The roadmap row's projection was deleted from disk; its DB row remains.
+  insertArtifact({
+    path: 'phases/01-test/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'phases/01-test/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n',
+  });
+  clearAllCaches();
+
+  assert.deepStrictEqual(
+    detectProjectionDrift(tmpDir),
+    [],
+    'the missing roadmap row file must not collapse onto NN-ASSESSMENT.md and flag false drift (#2535)',
+  );
+});
+
+test('── markdown-renderer: renderMilestoneArtifactsFromDb writes milestone ASSESSMENT rows to their own paths (#2535) ──', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  insertArtifact({
+    path: 'phases/01-test/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n',
+  });
+  insertArtifact({
+    path: 'phases/01-test/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n',
+  });
+  clearAllCaches();
+
+  await renderMilestoneArtifactsFromDb(tmpDir, 'M001');
+
+  const assessmentContent = fs.readFileSync(
+    path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md'), 'utf-8');
+  assert.ok(
+    assessmentContent.includes('PLAIN-ASSESSMENT-CONTENT') && !assessmentContent.includes('ROADMAP-REASSESS-CONTENT'),
+    'NN-ASSESSMENT.md keeps its own row content (#2535)',
+  );
+  const roadmapAssessmentContent = fs.readFileSync(
+    path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md'), 'utf-8');
+  assert.ok(
+    roadmapAssessmentContent.includes('ROADMAP-REASSESS-CONTENT') && !roadmapAssessmentContent.includes('PLAIN-ASSESSMENT-CONTENT'),
+    'NN-ROADMAP-ASSESSMENT.md is re-rendered from its own row (#2535)',
+  );
+
+  const storedAssessment = getArtifact('phases/01-test/01-ASSESSMENT.md');
+  assert.ok(
+    storedAssessment && storedAssessment.full_content.includes('PLAIN-ASSESSMENT-CONTENT') && !storedAssessment.full_content.includes('ROADMAP-REASSESS-CONTENT'),
+    'the NN-ASSESSMENT.md row is not overwritten by the roadmap row (#2535)',
+  );
+  const storedRoadmapAssessment = getArtifact('phases/01-test/01-ROADMAP-ASSESSMENT.md');
+  assert.ok(
+    storedRoadmapAssessment && storedRoadmapAssessment.full_content.includes('ROADMAP-REASSESS-CONTENT') && !storedRoadmapAssessment.full_content.includes('PLAIN-ASSESSMENT-CONTENT'),
+    'the NN-ROADMAP-ASSESSMENT.md row keeps its own content (#2535)',
+  );
+});
+
+test('── markdown-renderer: stale phase-dir rows render into the canonical dir without recreating the old one (#2535) ──', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  // The phase dir was renamed on disk; the rows still point at the old name.
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const roadmapAssessmentContent = '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n';
+  fs.writeFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md'), assessmentContent);
+  fs.writeFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md'), roadmapAssessmentContent);
+  insertArtifact({
+    path: 'phases/01-old/01-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'phases/01-old/01-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: roadmapAssessmentContent,
+  });
+  clearAllCaches();
+
+  await renderMilestoneArtifactsFromDb(tmpDir, 'M001');
+
+  assert.ok(
+    !fs.existsSync(path.join(tmpDir, '.gsd', 'phases', '01-old')),
+    'the obsolete phase directory is not recreated (#2535)',
+  );
+  assert.ok(
+    fs.readFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md'), 'utf-8').includes('PLAIN-ASSESSMENT-CONTENT'),
+    'the canonical-dir ASSESSMENT file is rendered from its row',
+  );
+  assert.ok(
+    fs.readFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ROADMAP-ASSESSMENT.md'), 'utf-8').includes('ROADMAP-REASSESS-CONTENT'),
+    'the roadmap reassessment keeps its own filename in the canonical dir (#2535)',
+  );
+
+  clearAllCaches();
+  assert.deepStrictEqual(
+    detectProjectionDrift(tmpDir),
+    [],
+    'renamed-dir rows are drift-checked against their translated canonical-dir files (#2535)',
+  );
+});
+
+test('── markdown-renderer: legacy-named ASSESSMENT rows keep both contents when rendered into a flat phase dir (#2535) ──', async (t) => {
+  const tmpDir = makeTmpDir();
+  t.after(() => cleanupDir(tmpDir));
+  const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
+  openDatabase(dbPath);
+  clearAllCaches();
+
+  // Flat-phase layout on disk (legacy milestones/ tree already moved aside by
+  // migration) while the rows still carry legacy basenames. Neither basename
+  // matches the canonical 01-ASSESSMENT.md, so the resolver's first-in-path
+  // order owner fallback applies.
+  insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
+  scaffoldDirs(tmpDir, 'M001', []);
+
+  const assessmentContent = '# M001 Assessment\n\nPLAIN-ASSESSMENT-CONTENT\n';
+  const roadmapAssessmentContent = '# M001 Roadmap Assessment\n\nROADMAP-REASSESS-CONTENT\n';
+  insertArtifact({
+    path: 'milestones/M001/M001-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: assessmentContent,
+  });
+  insertArtifact({
+    path: 'milestones/M001/M001-ROADMAP-ASSESSMENT.md',
+    artifact_type: 'ASSESSMENT',
+    milestone_id: 'M001',
+    slice_id: null,
+    task_id: null,
+    full_content: roadmapAssessmentContent,
+  });
+  clearAllCaches();
+
+  await renderMilestoneArtifactsFromDb(tmpDir, 'M001');
+
+  const assessmentPath = path.join(tmpDir, '.gsd', 'phases', '01-test', '01-ASSESSMENT.md');
+  assert.ok(
+    fs.readFileSync(assessmentPath, 'utf-8').includes('PLAIN-ASSESSMENT-CONTENT')
+      && !fs.readFileSync(assessmentPath, 'utf-8').includes('ROADMAP-REASSESS-CONTENT'),
+    'the canonical flat file carries the plain assessment content, not the roadmap reassessment (#2535)',
+  );
+  assert.ok(
+    fs.readFileSync(path.join(tmpDir, '.gsd', 'phases', '01-test', 'M001-ROADMAP-ASSESSMENT.md'), 'utf-8').includes('ROADMAP-REASSESS-CONTENT'),
+    'the legacy roadmap reassessment keeps its own filename and content in the flat dir (#2535)',
+  );
+  const storedAssessment = getArtifact('phases/01-test/01-ASSESSMENT.md');
+  assert.ok(
+    storedAssessment && storedAssessment.full_content.includes('PLAIN-ASSESSMENT-CONTENT'),
+    'the flat-phase row for the plain assessment survives (#2535)',
+  );
+  const storedRoadmapAssessment = getArtifact('phases/01-test/M001-ROADMAP-ASSESSMENT.md');
+  assert.ok(
+    storedRoadmapAssessment && storedRoadmapAssessment.full_content.includes('ROADMAP-REASSESS-CONTENT'),
+    'the flat-phase row for the roadmap reassessment survives (#2535)',
+  );
 });
 
 test('── markdown-renderer: renderRoadmapFromDb reads worktree roadmap projection ──', async () => {
