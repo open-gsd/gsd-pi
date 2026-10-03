@@ -8,7 +8,7 @@
 // resolveMilestoneValidationVerdict) is pinned by D005 and unchanged.
 
 import type { ActiveRef, GSDState, MilestoneRegistryEntry, Phase } from '../../types.js';
-import { isClosedStatus, isInactiveStatus, normalizeLegacyLifecycleStatus } from '../../status-guards.js';
+import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from '../../status-guards.js';
 import { parseProject } from '../../schemas/parsers.js';
 import {
   queryDecisions,
@@ -454,7 +454,7 @@ export async function deriveStateFromDb(
   const requirements = getRequirementCounts();
 
   const allMilestones = getAllMilestones()
-    .filter(m => normalizeLegacyLifecycleStatus(m.status) !== 'cancelled');
+    .filter(m => !isDiscardedMilestoneStatus(m.status));
 
   const milestoneLock = getRequestedMilestoneLock();
   const milestones = milestoneLock

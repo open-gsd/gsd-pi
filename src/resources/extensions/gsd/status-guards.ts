@@ -177,6 +177,15 @@ export function isInactiveStatus(status: string): boolean {
   return isClosedStatus(status) || isDeferredStatus(status);
 }
 
+/**
+ * Returns true when a milestone was discarded: its row is a tombstone that
+ * keeps the id reserved. A discarded milestone is not complete, is not listed
+ * in state or top-level renders, and has no projection files.
+ */
+export function isDiscardedMilestoneStatus(status: string): boolean {
+  return normalizeLegacyLifecycleStatus(status) === "cancelled";
+}
+
 /** Returns true when a prior milestone should not block dispatch ordering. */
 export function isSkippedForDispatch(status: string): boolean {
   return isClosedStatus(status) || status === "parked" || isDeferredStatus(status);

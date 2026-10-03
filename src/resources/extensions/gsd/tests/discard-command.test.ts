@@ -3,14 +3,17 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
 import { handleWorkflowCommand } from "../commands/handlers/workflow.ts";
 import { withCommandCwd } from "../commands/context.ts";
-import { closeDatabase, getMilestone, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, getMilestone, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
+import { detectStaleRenders } from "../markdown-renderer.ts";
+import { repairStaleRenders } from "../state-reconciliation/drift/stale-render.ts";
+import { renderTopLevelQueueFromDb, renderTopLevelRoadmapFromDb } from "../workflow-projections.ts";
 import { discardMilestone } from "../milestone-actions.ts";
 import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 
@@ -94,4 +97,54 @@ test("a discarded milestone is not complete and does not satisfy a dependency", 
   assert.notEqual(state.activeMilestone?.id, "M002");
   assert.deepEqual(state.registry, [{ id: "M002", title: "Second", status: "pending", dependsOn: ["M001"] }]);
   assert.deepEqual(state.progress?.milestones, { done: 0, total: 1 });
+});
+
+test("QUEUE.md and ROADMAP.md renders omit a discarded milestone", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-discard-renders-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "First", status: "active" });
+  insertMilestone({ id: "M002", title: "Second", status: "queued" });
+  const render = () => {
+    renderTopLevelQueueFromDb(base);
+    renderTopLevelRoadmapFromDb(base);
+    return ["QUEUE.md", "ROADMAP.md"].map((name) => readFileSync(join(base, ".gsd", name), "utf8"));
+  };
+  for (const content of render()) assert.ok(content.includes("**M002: Second**"));
+
+  assert.equal(discardMilestone(base, "M002"), true);
+
+  for (const content of render()) {
+    assert.ok(content.includes("**M001: First**"));
+    assert.equal(content.includes("M002"), false, content);
+  }
+});
+
+test("stale-render repair does not restore files of a discarded milestone", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-discard-stale-render-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  const milestoneDir = join(base, ".gsd", "milestones", "M001");
+  mkdirSync(milestoneDir, { recursive: true });
+  writeFileSync(join(milestoneDir, "M001-ROADMAP.md"), "# M001: First\n", "utf8");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "First", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active", risk: "low", depends: [] });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Done", status: "complete", fullSummaryMd: "# T01 summary\n" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Open", status: "pending" });
+  assert.equal(detectStaleRenders(base).length, 1, "the completed task summary is missing before discard");
+
+  assert.equal(discardMilestone(base, "M001"), true);
+
+  assert.deepEqual(detectStaleRenders(base), []);
+  assert.equal(existsSync(milestoneDir), false, "discard removed the milestone files");
+  assert.equal(await repairStaleRenders(base), 0);
+  assert.equal(existsSync(milestoneDir), false);
 });

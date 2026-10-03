@@ -21,7 +21,7 @@ import { join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { logWarning } from "./workflow-logger.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
 import { deriveState } from "./state.js";
 import type { GSDState } from "./types.js";
 import { renderPlanFromDb, renderRoadmapFromDb, writeTaskSummaryProjection } from "./markdown-renderer.js";
@@ -169,6 +169,7 @@ export function renderTopLevelRoadmapContent(milestones: readonly MilestoneRow[]
   const lines: string[] = ["# Roadmap", "", "## Milestones", ""];
 
   for (const milestone of milestones) {
+    if (isDiscardedMilestoneStatus(milestone.status)) continue;
     const title = stripIdPrefix(milestone.title || milestone.id, milestone.id);
     const depends = milestone.depends_on && milestone.depends_on.length > 0
       ? milestone.depends_on.join(", ")
@@ -189,7 +190,8 @@ export function renderTopLevelRoadmapFromDb(basePath: string): void {
 
 export function renderTopLevelQueueFromDb(basePath: string): void {
   const milestones = getAllMilestones();
-  const pending = milestones.filter(m => m.status !== "complete" && m.status !== "done");
+  const pending = milestones.filter(m =>
+    m.status !== "complete" && m.status !== "done" && !isDiscardedMilestoneStatus(m.status));
   const lines: string[] = ["# Queue", ""];
 
   if (pending.length === 0) {

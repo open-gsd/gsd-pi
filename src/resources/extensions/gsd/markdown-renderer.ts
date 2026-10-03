@@ -12,7 +12,7 @@
 import { readFileSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { createProjectionDirectorySync, removeProjectionFileSync } from "./atomic-write.js";
 import { logWarning } from "./workflow-logger.js";
-import { isClosedStatus, isHiddenFromRoadmap, normalizeLegacyLifecycleStatus, toStatus } from "./status-guards.js";
+import { isClosedStatus, isDiscardedMilestoneStatus, isHiddenFromRoadmap, toStatus } from "./status-guards.js";
 import { isCanonicalStagedTaskSummaryState } from "./task-summary-projection-policy.js";
 import { dirname, join } from "node:path";
 import {
@@ -1131,7 +1131,7 @@ export async function renderAllFromDb(basePath: string): Promise<RenderAllResult
   for (const milestone of milestones) {
     // A cancelled (discarded) milestone keeps its rows as a tombstone but has
     // no projection tree; rendering one would bring removed files back.
-    if (normalizeLegacyLifecycleStatus(milestone.status) === "cancelled") {
+    if (isDiscardedMilestoneStatus(milestone.status)) {
       result.skipped++;
       continue;
     }
@@ -1514,7 +1514,7 @@ function detectStaleRendersImpl(basePath: string): StaleEntry[] {
   // both packaged (.js) and source (.ts via the strip-types loader) contexts —
   // the same form a dozen other modules already use.
   const stale: StaleEntry[] = [];
-  const milestones = getAllMilestones();
+  const milestones = getAllMilestones().filter((milestone) => !isDiscardedMilestoneStatus(milestone.status));
 
   for (const milestone of milestones) {
     const slices = getMilestoneSlices(milestone.id);
