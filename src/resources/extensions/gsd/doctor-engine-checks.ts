@@ -26,7 +26,7 @@ import {
   resolveSliceFile,
   resolveTaskFile,
 } from "./paths.js";
-import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
+import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from "./status-guards.js";
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
 import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
 import { isUnplannedMilestone, milestoneRenderArtifactPaths } from "./markdown-renderer.js";
@@ -1261,6 +1261,7 @@ function milestonesWithMissingFiles(
   issues: DoctorIssue[],
 ): Array<{ id: string; roadmapMissing: boolean; restorable: DoctorIssue[] }> {
   return getAllMilestones()
+    .filter((milestone) => !isDiscardedMilestoneStatus(milestone.status))
     .map((milestone) => ({
       id: milestone.id,
       roadmapMissing: !isClosedStatus(milestone.status)

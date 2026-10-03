@@ -13,7 +13,7 @@ import { checkEngineHealth, checkProjectionWork } from "../doctor-engine-checks.
 import type { DoctorIssue } from "../doctor-types.ts";
 import { readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
 import { _getAdapter, insertArtifact, insertMilestone } from "../gsd-db.ts";
-import { resolveMilestoneFile, resolveSliceFile } from "../paths.ts";
+import { resolveMilestoneFile, resolveSliceFile, resolveTaskFile } from "../paths.ts";
 import {
   drainProjectionWork,
   readProjectionRootReceipts,
@@ -256,22 +256,20 @@ test("doctor and status show failed and unrendered Projection Work, and repair d
 test("a failing row of another milestone does not make a milestone flush stale", async () => {
   fixture = await createWorkflowAuthorityFixture();
   const base = fixture.root;
-  // M002 is not in the database, so its renderer fails on every attempt.
-  seedLifecycle(
-    { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "in_progress" },
-    "other-milestone",
-    "slice-lifecycle",
-    "lifecycle/m002/s01",
-  );
+  insertMilestone({ id: "M002", title: "Second", status: "queued", planning: { vision: "Ship the second." } });
+  _setManagedMutationBoundaryForTest((_boundary, path) => {
+    if (path.includes("02-second") && path.endsWith("ROADMAP.md")) throw new Error("disk refuses M002 ROADMAP");
+  });
+  seed("milestone-lifecycle", "lifecycle/m002");
 
   assert.deepEqual(await flushWorkflowProjections(base, { milestoneId: "M001" }), {
     milestoneId: "M001",
     stale: false,
     superseded: false,
   });
-  const failed = work("lifecycle/m002/s01");
+  const failed = work("lifecycle/m002");
   assert.equal(failed.attempt_count, 1, "the flush drained the M002 row");
-  assert.match(failed.last_error, /milestone m002 is not in the database/);
+  assert.match(failed.last_error, /disk refuses M002 ROADMAP/);
 
   _setManagedMutationBoundaryForTest((_boundary, path) => {
     if (path.endsWith("-PLAN.md")) throw new Error("disk refuses PLAN");
@@ -565,4 +563,61 @@ test("doctor repair commits no requeue for a missing artifact that the milestone
     "SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'projection.requeue'",
   ).get() as { count: number };
   assert.equal(requeues.count, 0);
+});
+
+test("a row of a missing or discarded milestone settles once as obsolete and renders no file at any root", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const root = fixture.root;
+  const worktree = join(root, ".gsd-worktrees", "M001");
+  mkdirSync(join(worktree, ".gsd"), { recursive: true });
+  insertMilestone({ id: "M003", title: "Discarded", status: "skipped", planning: { vision: "Was planned." } });
+  seed("slice-lifecycle", "lifecycle/m002/s01");
+  seed("markdown", "planning/m003");
+
+  const drained = await drainProjectionWork(worktree);
+
+  assert.deepEqual(drained.errors, []);
+  assert.equal(drained.delivered, 2);
+  for (const key of ["lifecycle/m002/s01", "planning/m003"]) {
+    const row = work(key);
+    assert.equal(row.delivery_state, "rendered", key);
+    assert.equal(row.attempt_count, 1, key);
+    assert.equal(row.last_error, "", key);
+  }
+  assert.deepEqual(readProjectionWorkBacklog(worktree), [], "obsolete rows are not counted as failures");
+  for (const at of [root, worktree]) {
+    assert.equal(resolveMilestoneFile(at, "M003", "ROADMAP"), null, "no file of the discarded milestone is created");
+  }
+  const issues: DoctorIssue[] = [];
+  await checkProjectionWork(worktree, issues, [], false);
+  assert.deepEqual(issues, [], "doctor reports nothing for them");
+  assert.equal((await drainProjectionWork(worktree, { now: LATER() })).delivered, 0, "settled once");
+});
+
+test("doctor repair restores a deleted task SUMMARY, which the milestone render writes", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  _getAdapter()!.prepare(`
+    UPDATE tasks SET full_summary_md = '# T01 summary\n'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `).run();
+  await rebuildMarkdownProjectionsFromDb(base);
+  const summary = resolveTaskFile(base, "M001", "S01", "T01", "SUMMARY");
+  assert.ok(summary && existsSync(summary), "the rebuild renders the task SUMMARY");
+  rmSync(summary);
+
+  const reported: DoctorIssue[] = [];
+  await checkEngineHealth(base, reported, []);
+  assert.deepEqual(
+    reported.filter((issue) => issue.code === "artifact_file_missing").map((issue) => issue.unitId),
+    ["M001/S01/T01"],
+  );
+
+  const repaired: DoctorIssue[] = [];
+  const fixes: string[] = [];
+  await checkEngineHealth(base, repaired, fixes, { repair: true });
+
+  assert.ok(existsSync(summary), "repair renders the task SUMMARY again");
+  assert.deepEqual(fixes, ["delivered 1 Projection Work row(s)", "re-rendered missing projections for M001"]);
+  assert.deepEqual(repaired.filter((issue) => issue.code === "artifact_file_missing"), []);
 });

@@ -162,6 +162,14 @@ export function isHiddenFromRoadmap(status: string): boolean {
   return status === "skipped";
 }
 
+/**
+ * Returns true when a milestone row was kept after a discard: its legacy
+ * status is skipped. The files of a discarded milestone are not projected.
+ */
+export function isDiscardedMilestoneStatus(status: string): boolean {
+  return status === "skipped";
+}
+
 /** Returns true when a slice status indicates it was deferred by a decision. */
 export function isDeferredStatus(status: string): boolean {
   return status === "deferred";

@@ -924,7 +924,9 @@ function sliceArtifactWrites(basePath: string, milestoneId: string, sliceId: str
 /**
  * Artifact paths (relative to the projection root) of the files that the
  * milestone render writes from the database: the ROADMAP of a planned
- * milestone, and each milestone and slice artifact row that is not skipped.
+ * milestone, each milestone and slice artifact row that is not skipped, the
+ * slice PLAN that lists the tasks, the slice SUMMARY and UAT, and each task
+ * SUMMARY.
  */
 export function milestoneRenderArtifactPaths(basePath: string, milestoneId: string): Set<string> {
   const paths = new Set<string>();
@@ -936,6 +938,19 @@ export function milestoneRenderArtifactPaths(basePath: string, milestoneId: stri
   for (const write of milestoneArtifactWrites(basePath, milestoneId)) paths.add(write.artifactPath);
   for (const slice of getMilestoneSlices(milestoneId)) {
     for (const write of sliceArtifactWrites(basePath, milestoneId, slice.id)) paths.add(write.artifactPath);
+    if (getActivePlanTasks(milestoneId, slice.id).length > 0) {
+      paths.add(toArtifactPath(planProjectionPath(basePath, milestoneId, slice.id), basePath));
+    }
+    for (const target of sliceSummaryTargets(basePath, milestoneId, slice.id)) {
+      paths.add(toArtifactPath(target.absPath, basePath));
+    }
+    for (const task of getSliceTasks(milestoneId, slice.id)) {
+      if (!taskSummaryIsProjected(milestoneId, slice.id, task)) continue;
+      paths.add(toArtifactPath(
+        targetTaskFile(basePath, milestoneId, slice.id, task.id, "SUMMARY", milestone.title),
+        basePath,
+      ));
+    }
   }
   return paths;
 }
@@ -1037,6 +1052,16 @@ export async function renderPlanCheckboxes(
 
 // ─── Task Summary Rendering ───────────────────────────────────────────────
 
+/** True when the task has a summary that the render writes: published, or a canonical staged one. */
+function taskSummaryIsProjected(milestoneId: string, sliceId: string, task: TaskRow): boolean {
+  if (!task.full_summary_md) return false;
+  const status = toStatus(task.status);
+  // Published completions keep projecting.
+  if (status === "complete") return true;
+  return status === "in_progress"
+    && isCanonicalStagedTaskSummaryState({ milestoneId, sliceId, taskId: task.id });
+}
+
 /**
  * Render a task summary from DB to disk.
  * Reads full_summary_md from the tasks table and writes it to the appropriate file.
@@ -1050,18 +1075,7 @@ export async function renderTaskSummary(
   taskId: string,
 ): Promise<boolean> {
   const task = getTask(milestoneId, sliceId, taskId);
-  const status = task ? toStatus(task.status) : null;
-  if (!task || !task.full_summary_md) {
-    return false;
-  }
-  if (status === "complete") {
-    // Published completions keep projecting.
-  } else if (
-    status !== "in_progress" ||
-    !isCanonicalStagedTaskSummaryState({ milestoneId, sliceId, taskId })
-  ) {
-    return false;
-  }
+  if (!task || !taskSummaryIsProjected(milestoneId, sliceId, task)) return false;
 
   await writeTaskSummaryProjection(
     basePath,
@@ -1111,41 +1125,34 @@ export async function renderSliceSummary(
   milestoneId: string,
   sliceId: string,
 ): Promise<boolean> {
+  const targets = sliceSummaryTargets(basePath, milestoneId, sliceId);
+  for (const { artifactType, absPath, content } of targets) {
+    mkdirSync(dirname(absPath), { recursive: true });
+    await writeAndStore(absPath, toArtifactPath(absPath, basePath), content, {
+      artifact_type: artifactType,
+      milestone_id: milestoneId,
+      slice_id: sliceId,
+    }, basePath);
+  }
+  return targets.length > 0;
+}
+
+/** The SUMMARY and UAT files that the render writes for a complete slice. */
+function sliceSummaryTargets(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+): Array<{ artifactType: "SUMMARY" | "UAT"; absPath: string; content: string }> {
   const slice = getSlice(milestoneId, sliceId);
-  if (!slice || toStatus(slice.status) !== "complete") {
-    return false; // No slice data — skip silently
-  }
-
+  if (!slice || toStatus(slice.status) !== "complete") return [];
   const milestoneTitle = getMilestone(milestoneId)?.title;
-  let wrote = false;
-
-  if (slice.full_summary_md) {
-    const summaryAbs = targetSliceFile(basePath, milestoneId, sliceId, "SUMMARY", milestoneTitle);
-    mkdirSync(dirname(summaryAbs), { recursive: true });
-    const summaryArtifact = toArtifactPath(summaryAbs, basePath);
-
-    await writeAndStore(summaryAbs, summaryArtifact, slice.full_summary_md, {
-      artifact_type: "SUMMARY",
-      milestone_id: milestoneId,
-      slice_id: sliceId,
-    }, basePath);
-    wrote = true;
-  }
-
-  if (slice.full_uat_md) {
-    const uatAbs = targetSliceFile(basePath, milestoneId, sliceId, "UAT", milestoneTitle);
-    mkdirSync(dirname(uatAbs), { recursive: true });
-    const uatArtifact = toArtifactPath(uatAbs, basePath);
-
-    await writeAndStore(uatAbs, uatArtifact, slice.full_uat_md, {
-      artifact_type: "UAT",
-      milestone_id: milestoneId,
-      slice_id: sliceId,
-    }, basePath);
-    wrote = true;
-  }
-
-  return wrote;
+  return ([["SUMMARY", slice.full_summary_md], ["UAT", slice.full_uat_md]] as const)
+    .filter(([, content]) => Boolean(content))
+    .map(([artifactType, content]) => ({
+      artifactType,
+      absPath: targetSliceFile(basePath, milestoneId, sliceId, artifactType, milestoneTitle),
+      content,
+    }));
 }
 
 // ─── Render All From DB ───────────────────────────────────────────────────

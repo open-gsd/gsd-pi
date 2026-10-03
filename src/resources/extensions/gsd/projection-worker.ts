@@ -44,6 +44,7 @@ import {
 } from "./projection-identity.js";
 import { PROJECTION_LOCK_TRANSIENT_BACKOFF_MS } from "./recovery-policy.js";
 import { deriveState, invalidateStateCache } from "./state.js";
+import { isDiscardedMilestoneStatus } from "./status-guards.js";
 import { detectArtifactDbDrift } from "./state-reconciliation/drift/artifact-db.js";
 import { renderStateProjection } from "./workflow-projections.js";
 
@@ -92,16 +93,20 @@ const STATE_KINDS = new Set(["state", "milestone-status", "migration-audit"]);
 /** Key prefix of the doctor repair work that renders every file of one milestone. */
 export const MILESTONE_REBUILD_KEY_PREFIX = "rebuild/";
 
-function findMilestone(segment: string) {
+/**
+ * The milestone that a key segment names, or null when the row is obsolete:
+ * the milestone is not in the database, or it was discarded. An obsolete row
+ * renders no file and settles with the hash of an empty file set.
+ */
+function findProjectedMilestone(segment: string) {
   const milestone = getAllMilestones().find((row) => row.id.toLowerCase() === segment);
-  if (!milestone) throw new Error(`milestone ${segment} is not in the database`);
-  return milestone;
+  return milestone && !isDiscardedMilestoneStatus(milestone.status) ? milestone : null;
 }
 
 /**
- * The file set of one milestone, slice, or task. An id that is not in the
- * database (for example a task that a replan removed) falls back to the file
- * set of its parent, which lists it.
+ * The file set of one milestone, slice, or task. A slice or task id that is
+ * not in the database (for example a task that a replan removed) falls back to
+ * the file set of its parent, which lists it.
  */
 function hierarchyTarget(ids: string[]): ProjectionRenderTarget | null {
   const [milestoneSegment, sliceSegment, taskSegment] = ids;
@@ -109,7 +114,8 @@ function hierarchyTarget(ids: string[]): ProjectionRenderTarget | null {
   return {
     target: ["hierarchy", ...ids.slice(0, 3)].join("/"),
     render: async (root) => {
-      const milestone = findMilestone(milestoneSegment);
+      const milestone = findProjectedMilestone(milestoneSegment);
+      if (!milestone) return;
       const slice = getMilestoneSlices(milestone.id).find((row) => row.id.toLowerCase() === sliceSegment);
       if (!slice) return renderMilestoneFilesFromDb(root, milestone.id);
       const task = getSliceTasks(milestone.id, slice.id).find((row) => row.id.toLowerCase() === taskSegment);
@@ -139,7 +145,13 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
   if (segments[0] === "legacy-import") return { target: "all", render: renderAllFromDb };
   if (key.startsWith(MILESTONE_REBUILD_KEY_PREFIX)) {
     if (!segments[1]) return null;
-    return { target: key, render: (root) => renderMilestoneFromDb(root, findMilestone(segments[1]!).id) };
+    return {
+      target: key,
+      render: async (root) => {
+        const milestone = findProjectedMilestone(segments[1]!);
+        if (milestone) return renderMilestoneFromDb(root, milestone.id);
+      },
+    };
   }
   if (segments[0] !== "planning") return null;
   if (key === "planning/decisions") return { target: "decisions", render: regenerateDecisionsMarkdown };
