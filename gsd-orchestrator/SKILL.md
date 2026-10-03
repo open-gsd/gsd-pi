@@ -121,7 +121,7 @@ GSD creates and manages all state in `.gsd/`:
   PROJECT.md          # What this project is
   REQUIREMENTS.md     # Capability contract
   DECISIONS.md        # Architectural decisions (append-only)
-  KNOWLEDGE.md        # Persistent project knowledge (manual rules, memory-projected patterns/lessons)
+  KNOWLEDGE.md        # Persistent project knowledge (rules, patterns and lessons rendered from the database)
   STATE.md            # Current phase and next action
   milestones/
     M001-xxxxx/

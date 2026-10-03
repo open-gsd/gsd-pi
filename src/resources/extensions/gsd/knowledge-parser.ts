@@ -1,6 +1,6 @@
 // gsd-pi — KNOWLEDGE.md parsing helpers shared by the consolidation scanner,
-// the Patterns/Lessons backfill, and the hybrid projection renderer
-// (ADR-013 Stage 2a/2b).
+// the Patterns/Lessons backfill (ADR-013 Stage 2a), the capture path, and
+// the projection renderer (ADR-046).
 //
 // The KNOWLEDGE.md format is locked in `knowledge-projection.ts`:
 //

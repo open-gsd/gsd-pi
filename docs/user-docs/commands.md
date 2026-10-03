@@ -44,7 +44,7 @@
 | `/gsd knowledge` | Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild. |
 | `/gsd memory` | Query and forget project memories |
 | `/gsd eval-review <sliceId>` | Audit a slice's AI evaluation strategy and write a scored `<sliceId>-EVAL-REVIEW.md`. Flags: `--force` overwrites; `--show` prints the existing audit. See [eval-review](eval-review.md). |
-| `/gsd extract-learnings <MID>` | Extract structured Decisions, Lessons, Patterns, and Surprises from a completed milestone — writes `<MID>-LEARNINGS.md` audit trail, persists durable knowledge through the memory/decision stores, and projects reviewable knowledge into `.gsd/KNOWLEDGE.md` on the next session start. Runs automatically at milestone completion. |
+| `/gsd extract-learnings <MID>` | Extract structured Decisions, Lessons, Patterns, and Surprises from a completed milestone — writes `<MID>-LEARNINGS.md` audit trail, persists durable knowledge through the memory/decision stores, and renders each captured Pattern and Lesson into `.gsd/KNOWLEDGE.md`. Runs automatically at milestone completion. |
 | `/gsd fast` | Toggle service tier for supported models (prioritized API routing) |
 | `/gsd rate` | Rate last unit's model tier (over/ok/under) — improves adaptive routing |
 | `/gsd changelog` | Show categorized release notes |

@@ -106,7 +106,8 @@ What shipped:
 - Projections written through `markdown-renderer.ts` (ROADMAP, PLAN, SUMMARY,
   and the other Milestone and Slice artifacts) carry the DB state-version
   stamp. STATE.md, DECISIONS.md, and `.planning/` carry no stamp. KNOWLEDGE.md
-  is not a pure projection: its Rules section exists on disk only.
+  is rendered from `memories` rows, but is not a pure projection yet: file rows
+  with no database row are kept in the render until the KNOWLEDGE import exists.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).

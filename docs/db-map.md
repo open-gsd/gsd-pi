@@ -2129,7 +2129,7 @@ execution evidence remain authoritative.
 | `gsd_slice_reopen` | project_authority, workflow operations/lifecycles, workflow_waivers, slices, tasks, immutable execution history | project_authority, workflow operations/events/outbox/Projection Work, Slice/Task lifecycles, workflow_waivers, slices, tasks, quality_gates | repairs/removes Slice, UAT, Task SUMMARY, PLAN, ROADMAP, and STATE projections after commit |
 | `gsd_milestone_reopen` | project_authority, workflow operations/lifecycles, Waivers and Requirement Dispositions, milestones, slices, tasks, active Attempts, dependent Milestones | project_authority, workflow operations/events/outbox/Projection Work, Milestone/Slice/Task lifecycles, Waiver dispositions, milestones, slices, tasks, quality_gates | fenced removal or repair of Milestone, Slice, UAT, Task, PLAN, ROADMAP, and STATE projections after commit |
 | `gsd_save_gate_result` | quality_gates | quality_gates, gate_runs (same transaction) | — |
-| `capture_thought` | memories | memories | KNOWLEDGE.md projection for Patterns/Lessons (both backfilled and newly captured) |
+| `capture_thought` | memories | memories | KNOWLEDGE.md, rendered after each `rule`, `pattern` or `gotcha` capture |
 | `memory_query` | memories, memories_fts, memory_embeddings | memories (hit_count++) | — |
 
 Slice lifecycle writers own the taskless Q8 companion gate. Planning or

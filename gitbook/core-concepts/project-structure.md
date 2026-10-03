@@ -52,7 +52,7 @@ The `.gsd/` directory looks like this:
   PROJECT.md          — living description of what the project is
   REQUIREMENTS.md     — requirement contract (active/validated/deferred)
   DECISIONS.md        — projected architectural decisions log
-  KNOWLEDGE.md        — manual rules plus projected patterns and lessons
+  KNOWLEDGE.md        — rules, patterns and lessons rendered from the database
   RUNTIME.md          — runtime context: API endpoints, env vars, services
   STATE.md            — quick-glance status of current work
   PREFERENCES.md      — project-level preferences (optional)
@@ -77,7 +77,7 @@ GSD may also create sibling runtime directories next to `.gsd/`. `.gsd-worktrees
 | `PROJECT.md` | High-level project description, updated as the project evolves |
 | `REQUIREMENTS.md` | Formal requirement contract — tracks what's active, validated, and deferred |
 | `DECISIONS.md` | Projected architectural decisions with rationale, rendered from memory-backed decision rows |
-| `KNOWLEDGE.md` | Manual Rules plus memory-projected Patterns and Lessons. GSD injects Rules from the file and injects Patterns/Lessons through the memory block at the start of every task |
+| `KNOWLEDGE.md` | Rules, Patterns and Lessons rendered from the database. GSD injects Rules from the file and injects Patterns/Lessons through the memory block at the start of every task |
 | `RUNTIME.md` | Runtime context like API URLs, ports, and environment variables |
 | `gsd.db` | Authoritative runtime state for workflow hierarchy, completion, requirements, memory-backed decisions/knowledge, and summaries |
 | `STATE.md` | Current status at a glance — rendered from the database, don't edit manually |

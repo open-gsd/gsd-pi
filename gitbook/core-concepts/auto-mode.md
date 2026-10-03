@@ -38,9 +38,9 @@ If post-merge stash restore fails after a successful milestone merge, auto mode 
 
 ## State Authority
 
-The GSD database is the runtime source of truth for milestones, slices, tasks, requirements, summaries, and completion status. Durable decisions and project knowledge use the same database through the `memories` table: decisions are stored as `architecture` memories, and KNOWLEDGE patterns/lessons are stored as `pattern`/`gotcha` memories.
+The GSD database is the runtime source of truth for milestones, slices, tasks, requirements, summaries, and completion status. Durable decisions and project knowledge use the same database through the `memories` table: decisions are stored as `architecture` memories, and KNOWLEDGE rules/patterns/lessons are stored as `rule`/`pattern`/`gotcha` memories.
 
-Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and the Patterns/Lessons sections of `.gsd/KNOWLEDGE.md` are projected from memory rows; editing those projections does not override the database unless a GSD command imports or saves the change. The Rules section of `KNOWLEDGE.md` remains manually authored and is preserved separately.
+Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and `.gsd/KNOWLEDGE.md` is projected from memory rows; editing those projections does not override the database unless a GSD command imports or saves the change.
 
 Milestone, slice, and task planning, task and slice replanning, and roadmap reassessment commit through replay-safe domain operations. Retries reuse the original durable result instead of applying hierarchy changes twice. Removed pending slices and tasks retain their identity as cancelled history and are omitted from active roadmap and plan projections; explicitly reopen them before reusing their IDs.
 
