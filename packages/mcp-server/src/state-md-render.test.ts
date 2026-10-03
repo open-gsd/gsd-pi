@@ -30,6 +30,7 @@ import { rebuildMarkdownProjectionsFromDb } from "../../../src/resources/extensi
 import { seedSliceCompletionAuthority } from "../../../src/resources/extensions/gsd/tests/slice-completion-fixture.ts";
 import {
   createWorkflowAuthorityFixture,
+  seedPrerequisiteCompletionEvidence,
   type WorkflowAuthorityFixture,
 } from "../../../src/resources/extensions/gsd/tests/workflow-authority-fixture.ts";
 import { registerWorkflowTools } from "./workflow-tools.ts";
@@ -91,6 +92,7 @@ function callTool(transport: Transport, base: string, name: string, args: Record
 
 async function openFixture(t: TestContext): Promise<WorkflowAuthorityFixture> {
   const fixture = await createWorkflowAuthorityFixture();
+  seedPrerequisiteCompletionEvidence();
   t.after(() => fixture.cleanup());
   return fixture;
 }

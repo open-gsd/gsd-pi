@@ -26,7 +26,10 @@ import {
   type ExecutionInvocation,
 } from "../execution-invocation.js";
 import { seedSliceCompletionAuthority } from "./slice-completion-fixture.js";
-import { createWorkflowAuthorityFixture } from "./workflow-authority-fixture.js";
+import {
+  createWorkflowAuthorityFixture,
+  seedPrerequisiteCompletionEvidence,
+} from "./workflow-authority-fixture.js";
 import {
   createWorkflowFaultHarness,
   type WorkflowFaultHarness,
@@ -89,6 +92,7 @@ function handleCompleteSlice(
 }
 
 function seedCompletionBoundary(): void {
+  seedPrerequisiteCompletionEvidence();
   updateTaskStatus("M001", "S02", "T01", "complete", "2026-07-11T00:00:00.000Z");
   seedSliceCompletionAuthority({
     milestoneId: "M001",
