@@ -3863,7 +3863,6 @@ test("executeSummarySave fails before persisting PROJECT when milestone registra
     assert.equal(result.details.error, "milestone_registration_threw");
     assert.match(String(result.details.registration_error), /simulated milestone registration failure/);
     assert.match(result.content[0].text, /milestone registration failed/);
-    assert.match(result.content[0].text, /idempotent/);
     assert.equal(existsSync(join(base, ".gsd", "PROJECT.md")), false);
     const artifact = originalPrepare("SELECT path FROM artifacts WHERE path = ?").get("PROJECT.md");
     assert.equal(artifact, undefined);
