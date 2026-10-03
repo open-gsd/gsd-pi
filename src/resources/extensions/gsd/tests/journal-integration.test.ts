@@ -156,6 +156,7 @@ function makeMockDeps(
     rebuildState: async () => {},
     resolveModelId: (id: string, models: any[]) => models.find((m: any) => m.id === id),
     emitJournalEvent: capture.emitJournalEvent,
+    recordVerificationPause: () => {},
   };
 
   return { ...baseDeps, ...overrides };

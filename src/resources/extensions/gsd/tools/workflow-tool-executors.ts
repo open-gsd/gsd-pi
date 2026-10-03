@@ -1467,7 +1467,7 @@ export async function executeTaskSettle(
       invocation,
       task,
       reason: params.reason,
-      // settleOptions carries basePath for the verification-paused receipt gate.
+      // settleOptions carries basePath for verified publication.
       ...settleOptions,
     });
     if (!result.settled && !result.reconciled && !result.published) {

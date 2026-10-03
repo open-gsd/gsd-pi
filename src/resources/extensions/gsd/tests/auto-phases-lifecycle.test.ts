@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -189,27 +189,49 @@ test("runFinalize persists the durable verification-pause receipt (#2334)", asyn
     startedAt: Date.now(),
   };
 
+  const recorded: Array<[string, string]> = [];
   const result = await runFinalizeWithDeps(s, {
     runPostUnitVerification: async () => "pause",
     emitJournalEvent: (entry: JournalEntry) => emitJournalEventFn(base, entry),
+    recordVerificationPause: (unitType: string, unitId: string) => {
+      recorded.push([unitType, unitId]);
+    },
   });
 
   assert.equal(result.action, "break");
   assert.equal(result.reason, "verification-pause");
   assert.equal(s.currentUnit, null);
+  assert.deepEqual(recorded, [["execute-task", "M001/S01/T01"]]);
+});
 
-  const journalDir = join(base, ".gsd", "journal");
-  const files = readdirSync(journalDir).filter((f) => f.endsWith(".jsonl"));
-  const entries = files.flatMap((f) =>
-    readFileSync(join(journalDir, f), "utf-8")
-      .split("\n")
-      .filter(Boolean)
-      .map((line) => JSON.parse(line) as JournalEntry),
+test("runFinalize still pauses and warns when the verification-pause receipt cannot be recorded", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-finalize-verification-pause-fail-"));
+  t.after(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  const s = new AutoSession();
+  s.basePath = base;
+  s.currentUnit = {
+    type: "execute-task",
+    id: "M001/S01/T01",
+    startedAt: Date.now(),
+  };
+  const notices: Array<[string, string]> = [];
+  const result = await runFinalizeWithDeps(s, {
+    runPostUnitVerification: async () => "pause",
+    emitJournalEvent: () => {},
+    recordVerificationPause: () => {
+      throw new Error("database is closed");
+    },
+  }, { ui: { notify: (message: string, level: string) => notices.push([message, level]) } });
+
+  assert.equal(result.action, "break");
+  assert.equal(result.reason, "verification-pause");
+  assert.ok(
+    notices.some(([message, level]) => level === "warning" && /verification-pause receipt.*database is closed/.test(message)),
+    "a lost receipt must be reported, not swallowed",
   );
-  const receipt = entries.find((entry) => entry.eventType === "verification-paused");
-  assert.ok(receipt, "finalize must persist the verification-pause receipt");
-  assert.equal((receipt.data as Record<string, unknown>).unitId, "M001/S01/T01");
-  assert.equal((receipt.data as Record<string, unknown>).unitType, "execute-task");
 });
 
 test("runFinalize keeps a durable Task verification retry agent-owned across repeated failure signatures", async (t) => {

@@ -322,10 +322,21 @@ export async function runFinalize(
     }
 
     if (verificationResult === "pause") {
-      // #2334 — persist the pause context durably. Without this receipt a
-      // succeeded Attempt stranded here has no sanctioned exit: the task-settle
-      // verification-paused reconcile gate reads this journal record as proof
-      // that the finalizer — not the operator — stopped the unit here.
+      // #2334 — persist the pause durably. Without this receipt a succeeded
+      // Attempt stranded here has no sanctioned exit: the task-settle
+      // verification-paused reconcile gate reads this DB row as proof that the
+      // finalizer — not the operator — stopped the unit here.
+      try {
+        deps.recordVerificationPause(iterData.unitType, iterData.unitId);
+      } catch (err) {
+        const message =
+          `Could not record the verification-pause receipt for ${iterData.unitId}: ` +
+          `${err instanceof Error ? err.message : String(err)}. gsd task settle --reconcile-lifecycle ` +
+          "will refuse this Task until a new pause is recorded.";
+        logWarning("engine", message);
+        ctx.ui.notify(message, "warning");
+      }
+      // Diagnostic only; nothing reads this line as authority.
       deps.emitJournalEvent({
         ts: new Date().toISOString(),
         flowId: ic.flowId,

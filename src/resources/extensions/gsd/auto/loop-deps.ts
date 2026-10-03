@@ -375,6 +375,9 @@ export interface LoopDeps {
   // Journal
   emitJournalEvent: (entry: JournalEntry) => void;
 
+  // Durable verification-pause receipt (DB) for the task-settle reconcile gate
+  recordVerificationPause: (unitType: string, unitId: string) => void;
+
   // UOK (optional, flag-gated)
   uokObserver?: UokTurnObserver;
 }

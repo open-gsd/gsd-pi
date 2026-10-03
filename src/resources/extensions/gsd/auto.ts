@@ -206,6 +206,7 @@ import { getErrorMessage } from "./error-utils.js";
 import { recoverFailedMigration } from "./migrate-external.js";
 import { initRegistry, convertDispatchRules } from "./rule-registry.js";
 import { emitJournalEvent as _emitJournalEvent, type JournalEntry } from "./journal.js";
+import { recordTaskVerificationPause } from "./task-settle.js";
 import { isClosedStatus } from "./status-guards.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
@@ -2683,6 +2684,12 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
 
     // Journal
     emitJournalEvent: (entry: JournalEntry) => _emitJournalEvent(s.basePath, entry),
+    recordVerificationPause: (unitType: string, unitId: string) => {
+      if (unitType !== "execute-task") return;
+      const { milestone, slice, task } = parseUnitId(unitId);
+      if (!slice || !task) return;
+      recordTaskVerificationPause({ milestoneId: milestone, sliceId: slice, taskId: task });
+    },
 
     // Clean-root preflight gate (#2909)
     preflightCleanRoot,
