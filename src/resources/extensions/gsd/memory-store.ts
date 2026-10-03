@@ -14,6 +14,7 @@ import {
   incrementMemoryHitCount,
   supersedeMemoryRow,
   markMemoryUnitProcessed,
+  CAP_AND_DECAY_ROWS_SQL,
   decayMemoriesBefore,
   supersedeLowestRankedMemories,
   deleteMemoryEmbedding,
@@ -753,11 +754,10 @@ export function decayStaleMemories(thresholdUnits = 20): string[] {
     const cutoff = row['processed_at'] as string;
     const affected = adapter.prepare(
       `SELECT id FROM memories
-       WHERE superseded_by IS NULL
+       WHERE ${CAP_AND_DECAY_ROWS_SQL}
          AND updated_at < :cutoff
          AND confidence > 0.1
-         AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceDecisionId"%')
-         AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceKnowledgeId"%')`,
+         AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceDecisionId"%')`,
     ).all({ ':cutoff': cutoff }).map((r) => r['id'] as string);
 
     decayMemoriesBefore(cutoff, new Date().toISOString());
@@ -770,9 +770,9 @@ export function decayStaleMemories(thresholdUnits = 20): string[] {
 /**
  * Supersede lowest-ranked memories when count exceeds cap. Cascades to the
  * embedding and relation rows so those tables don't grow unboundedly.
- * KNOWLEDGE entries (category 'rule', or any row with a K/P/L
- * `sourceKnowledgeId`) are not counted and never superseded, so the cap never
- * removes a row from KNOWLEDGE.md. Decay skips them for the same reason.
+ * KNOWLEDGE Rules (category 'rule') are not counted and never superseded;
+ * decay skips them too. Patterns and Lessons are subject to both, and
+ * KNOWLEDGE.md is rendered again after they change.
  */
 export function enforceMemoryCap(max = 50): void {
   if (!isDbAvailable()) return;
@@ -781,7 +781,7 @@ export function enforceMemoryCap(max = 50): void {
 
   try {
     const countRow = adapter.prepare(
-      `SELECT count(*) as cnt FROM memories WHERE superseded_by IS NULL AND category <> 'rule' AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceKnowledgeId"%')`,
+      `SELECT count(*) as cnt FROM memories WHERE ${CAP_AND_DECAY_ROWS_SQL}`,
     ).get();
     const count = (countRow?.['cnt'] as number) ?? 0;
     if (count <= max) return;
@@ -790,7 +790,7 @@ export function enforceMemoryCap(max = 50): void {
     // Capture the about-to-be-superseded IDs first so we can cascade cleanup.
     const victims = adapter.prepare(
       `SELECT id FROM memories
-       WHERE superseded_by IS NULL AND category <> 'rule' AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceKnowledgeId"%')
+       WHERE ${CAP_AND_DECAY_ROWS_SQL}
        ORDER BY (confidence * (1.0 + hit_count * 0.1)) ASC
        LIMIT :limit`,
     ).all({ ':limit': excess }).map((row) => row['id'] as string);

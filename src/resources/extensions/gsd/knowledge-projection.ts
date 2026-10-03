@@ -30,6 +30,7 @@ import { atomicWriteSync } from "./atomic-write.js";
 import { recordCompatProjectionWrite } from "./compat/compat-marker.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { gsdRoot } from "./paths.js";
+import { logWarning } from "./workflow-logger.js";
 import {
   KNOWLEDGE_SECTIONS,
   knowledgeMdPath,
@@ -224,6 +225,30 @@ function buildKnowledgeMarkdown(existing: string): { content: string; empty: boo
   return { content, empty };
 }
 
+/** The block a prompt shows in place of project knowledge when the database cannot be read. */
+export function knowledgeUnavailableBlock(reason: string): string {
+  return `Project Knowledge unavailable: ${reason}. Do not reconstruct them from \`.gsd/\` markdown files.`;
+}
+
+/**
+ * Every local knowledge row for the memory import: the category and content
+ * of each memories row (active or superseded) and of each K/P/L row in the
+ * file, plus every knowledge id they hold. Throws when the database is not
+ * available.
+ */
+export function readLocalKnowledgeIndex(basePath: string): { contents: Array<{ category: string; content: string }>; ids: Set<string> } {
+  const adapter = isDbAvailable() ? _getAdapter() : null;
+  if (!adapter) throw new Error("GSD database is not available; cannot read local knowledge rows");
+  const contents = adapter.prepare("SELECT category, content FROM memories").all() as Array<{ category: string; content: string }>;
+  const ids = readDbKnowledge().knownIds;
+  for (const row of parseKnowledgeRows(readKnowledgeMd(basePath))) {
+    ids.add(row.id);
+    const category = Object.keys(TABLE_BY_CATEGORY).find((key) => TABLE_BY_CATEGORY[key] === row.table)!;
+    contents.push({ category, content: row.cells[row.table === "rules" ? 2 : 1] ?? "" });
+  }
+  return { contents, ids };
+}
+
 /**
  * The one knowledge reader: KNOWLEDGE.md content built from the database
  * (plus the import bridge), whatever the file on disk holds. Returns "" when
@@ -266,19 +291,28 @@ export function readUnimportedPatternsAndLessons(basePath: string): string {
 
 /**
  * Render `KNOWLEDGE.md` from the database. Returns the rendered content and
- * whether the file was written (skipped when byte-identical to disk). Records
- * the render baseline so the next render does not copy GSD's own output to
- * quarantine. The external-edit observer skips KNOWLEDGE.md, so the baseline
- * never makes it move or hold the file. Throws when the database is
- * unavailable or the write fails.
+ * whether the file was written (skipped when byte-identical to disk). When
+ * the bytes changed, records the render baseline so the next render does not
+ * copy GSD's own output to quarantine; a baseline that cannot be recorded is
+ * a warning, because the file is rendered. The external-edit observer skips
+ * KNOWLEDGE.md, so the baseline never makes it move or hold the file.
+ * `bridgeBasePath` names the checkout whose file supplies the import bridge
+ * when `basePath` has no KNOWLEDGE.md yet (a new worktree). Throws when the
+ * database is unavailable or the write fails.
  */
-export function renderKnowledgeProjection(basePath: string): KnowledgeProjectionResult {
+export function renderKnowledgeProjection(basePath: string, bridgeBasePath = basePath): KnowledgeProjectionResult {
   const existing = readKnowledgeMd(basePath);
-  const { content } = buildKnowledgeMarkdown(existing);
+  const { content } = buildKnowledgeMarkdown(existing || readKnowledgeMd(bridgeBasePath));
   const path = knowledgeMdPath(basePath);
   const written = content !== existing;
-  if (written) atomicWriteSync(path, content, "utf-8");
-  recordCompatProjectionWrite(dirname(gsdRoot(basePath)), path, content, []);
+  if (written) {
+    atomicWriteSync(path, content, "utf-8");
+    try {
+      recordCompatProjectionWrite(dirname(gsdRoot(basePath)), path, content, []);
+    } catch (e) {
+      logWarning("knowledge-projection", `KNOWLEDGE.md rendered, compat baseline not recorded: ${(e as Error).message}`);
+    }
+  }
   return { written, content };
 }
 

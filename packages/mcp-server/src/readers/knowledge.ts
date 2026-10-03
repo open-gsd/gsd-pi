@@ -21,6 +21,8 @@ export interface KnowledgeEntry {
 export interface KnowledgeResult {
   entries: KnowledgeEntry[];
   counts: { rules: number; patterns: number; lessons: number };
+  /** Set only on the file read: the database was not available, so the rows come from the KNOWLEDGE.md projection. */
+  readMetadata?: { source: 'projection'; authority: 'projection-fallback' };
 }
 
 // ---------------------------------------------------------------------------
@@ -103,14 +105,18 @@ export function knowledgeResultFromMarkdown(content: string): KnowledgeResult {
   };
 }
 
-/** Display-only file read, used when the project database cannot be opened. */
+/**
+ * Display-only file read, used when the project database cannot be opened.
+ * The result is labelled as a projection fallback so the caller can tell it
+ * from a database read.
+ */
 export function readKnowledge(projectDir: string): KnowledgeResult {
   const gsd = resolveGsdRoot(projectDir);
   const knowledgePath = resolveRootFile(gsd, 'KNOWLEDGE.md');
+  const content = existsSync(knowledgePath) ? readFileSync(knowledgePath, 'utf-8') : '';
 
-  if (!existsSync(knowledgePath)) {
-    return { entries: [], counts: { rules: 0, patterns: 0, lessons: 0 } };
-  }
-
-  return knowledgeResultFromMarkdown(readFileSync(knowledgePath, 'utf-8'));
+  return {
+    ...knowledgeResultFromMarkdown(content),
+    readMetadata: { source: 'projection', authority: 'projection-fallback' },
+  };
 }

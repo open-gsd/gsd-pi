@@ -33,6 +33,8 @@ import {
   syncWorktreeStateBack,
 } from '../auto-worktree-sync.ts';
 import { describe, test } from 'node:test';
+import { closeDatabase, openDatabase } from '../gsd-db.ts';
+import { createMemory } from '../memory-store.ts';
 import assert from 'node:assert/strict';
 
 
@@ -791,25 +793,52 @@ describe('worktree-sync-milestones', async () => {
     }
   }
 
-  // ─── KNOWLEDGE.md worktree copy is refreshed, not copied once ─────────
-  console.log('\n=== KNOWLEDGE.md worktree copy is refreshed on every sync ===');
+  // ─── Worktree KNOWLEDGE.md is rendered from the database ──────────────
+  console.log('\n=== worktree KNOWLEDGE.md is rendered from the database, not copied ===');
   {
     const mainBase = createBase('knowledge-main');
     const wtBase = createBase('knowledge-wt');
+    const wtKnowledge = join(wtBase, '.gsd', 'KNOWLEDGE.md');
+    const wtMarker = join(wtBase, '.gsd', '.compat.json');
+    const rule = (id: string, content: string) =>
+      createMemory({ category: 'rule', content, structuredFields: { sourceKnowledgeId: id, rule: content } });
 
     try {
-      writeFileSync(join(mainBase, '.gsd', 'KNOWLEDGE.md'), '# Knowledge v1\n');
-      syncGsdStateToWorktree(mainBase, wtBase);
-      assert.equal(readFileSync(join(wtBase, '.gsd', 'KNOWLEDGE.md'), 'utf-8'), '# Knowledge v1\n');
+      openDatabase(join(mainBase, '.gsd', 'gsd.db'));
+      rule('K001', 'Rule from the database');
+      // The root file is stale (no K001) and holds one row that is not imported yet.
+      writeFileSync(
+        join(mainBase, '.gsd', 'KNOWLEDGE.md'),
+        '# Project Knowledge\n\n## Rules\n\n| # | Scope | Rule | Why | Added |\n|---|-------|------|-----|-------|\n| K009 | project | File only rule | — | — |\n',
+      );
 
-      writeFileSync(join(mainBase, '.gsd', 'KNOWLEDGE.md'), '# Knowledge v2\n');
-      syncGsdStateToWorktree(mainBase, wtBase);
-      assert.equal(readFileSync(join(wtBase, '.gsd', 'KNOWLEDGE.md'), 'utf-8'), '# Knowledge v2\n', 'state sync refreshes KNOWLEDGE.md');
+      const { synced } = syncGsdStateToWorktree(mainBase, wtBase);
 
-      writeFileSync(join(mainBase, '.gsd', 'KNOWLEDGE.md'), '# Knowledge v3\n');
+      assert.ok(synced.includes('KNOWLEDGE.md'));
+      const first = readFileSync(wtKnowledge, 'utf-8');
+      assert.match(first, /\| K001 \| project \| Rule from the database \|/, 'state sync renders the database row');
+      assert.match(first, /\| K009 \| project \| File only rule \|/, 'a new worktree keeps the not-yet-imported root row');
+      const baseline = JSON.parse(readFileSync(wtMarker, 'utf-8')).projections['KNOWLEDGE.md'];
+      assert.ok(baseline, 'the written render records its baseline in the worktree');
+
+      // A note in the worktree file must stay; the stale root file must not come back.
+      writeFileSync(wtKnowledge, first.replace('## Patterns', 'Worktree note\n\n## Patterns'));
+      writeFileSync(join(mainBase, '.gsd', 'KNOWLEDGE.md'), '# Stale root file\n');
+      rule('K002', 'Second database rule');
       syncProjectRootToWorktree(mainBase, wtBase, 'M001');
-      assert.equal(readFileSync(join(wtBase, '.gsd', 'KNOWLEDGE.md'), 'utf-8'), '# Knowledge v3\n', 'projection sync refreshes KNOWLEDGE.md');
+
+      const second = readFileSync(wtKnowledge, 'utf-8');
+      assert.match(second, /\| K002 \| project \| Second database rule \|/, 'projection sync renders the new database row');
+      assert.match(second, /Worktree note/, 'worktree file content is not overwritten by the root file');
+      assert.doesNotMatch(second, /Stale root file/);
+
+      rmSync(wtMarker);
+      assert.ok(!syncGsdStateToWorktree(mainBase, wtBase).synced.includes('KNOWLEDGE.md'), 'an unchanged render is not a sync');
+      syncProjectRootToWorktree(mainBase, wtBase, 'M001');
+      assert.equal(readFileSync(wtKnowledge, 'utf-8'), second);
+      assert.ok(!existsSync(wtMarker), 'an unchanged render records no baseline');
     } finally {
+      closeDatabase();
       cleanup(mainBase);
       cleanup(wtBase);
     }

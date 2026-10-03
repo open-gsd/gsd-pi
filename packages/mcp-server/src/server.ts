@@ -1505,7 +1505,7 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_knowledge',
-    'Get the project knowledge base: rules, patterns, and lessons learned accumulated during development. No session required — reads the workflow database when the GSD runtime is available, .gsd/KNOWLEDGE.md otherwise.',
+    'Get the project knowledge base: rules, patterns, and lessons learned accumulated during development. No session required — reads the workflow database when the GSD runtime is available, .gsd/KNOWLEDGE.md otherwise (the result then carries readMetadata { source: projection, authority: projection-fallback }).',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
     },

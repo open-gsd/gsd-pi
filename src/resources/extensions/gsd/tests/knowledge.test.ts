@@ -17,6 +17,8 @@ import { tmpdir } from 'node:os';
 import { GSD_ROOT_FILES, resolveGsdRootFile } from '../paths.ts';
 import { inlineGsdRootFile, inlineKnowledgeBudgeted } from '../auto-prompts.ts';
 import { loadKnowledgeBlock } from '../bootstrap/system-context.ts';
+import { aggregatePriorContext } from '../preparation.ts';
+import { _resetLogs, peekLogs } from '../workflow-logger.ts';
 import { closeDatabase, openDatabase } from '../gsd-db.ts';
 import { createMemory } from '../memory-store.ts';
 
@@ -424,16 +426,43 @@ test('loadKnowledgeBlock: project Rules come from the database when the file is 
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test('loadKnowledgeBlock: the file is not a fallback when the database is not open', () => {
+test('loadKnowledgeBlock: with no database the block says Project Knowledge is unavailable and a warning is logged', () => {
   const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'gsd-kb-')));
   const gsdHome = join(tmp, 'home');
   const cwd = join(tmp, 'project');
   mkdirSync(join(cwd, '.gsd'), { recursive: true });
   mkdirSync(join(gsdHome, 'agent'), { recursive: true });
   writeFileSync(join(cwd, '.gsd', 'KNOWLEDGE.md'), 'K001: Use real DB');
+  _resetLogs();
 
-  assert.strictEqual(loadKnowledgeBlock(gsdHome, cwd).block, '');
+  const { block } = loadKnowledgeBlock(gsdHome, cwd);
 
+  assert.match(block, /## Project Knowledge/);
+  assert.match(block, /Project Knowledge unavailable: workflow DB is unavailable/);
+  assert.ok(!block.includes('K001: Use real DB'), 'the file is not a fallback');
+  assert.ok(
+    peekLogs().some((entry) => entry.severity === 'warn' && /project knowledge read failed: workflow DB is unavailable/.test(entry.message)),
+  );
+
+  _resetLogs();
+  rmSync(tmp, { recursive: true, force: true });
+});
+
+test('aggregatePriorContext: with no database the knowledge section says Project Knowledge is unavailable and a warning is logged', async () => {
+  const tmp = realpathSync(mkdtempSync(join(tmpdir(), 'gsd-kb-')));
+  mkdirSync(join(tmp, '.gsd'), { recursive: true });
+  writeFileSync(join(tmp, '.gsd', 'KNOWLEDGE.md'), 'K001: Use real DB');
+  _resetLogs();
+
+  const brief = await aggregatePriorContext(tmp);
+
+  assert.match(brief.knowledge, /Project Knowledge unavailable: workflow DB is unavailable/);
+  assert.ok(!brief.knowledge.includes('K001: Use real DB'), 'the file is not a fallback');
+  assert.ok(
+    peekLogs().some((entry) => entry.severity === 'warn' && /project knowledge not read: workflow DB is unavailable/.test(entry.message)),
+  );
+
+  _resetLogs();
   rmSync(tmp, { recursive: true, force: true });
 });
 

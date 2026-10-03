@@ -18,7 +18,8 @@ import {
 } from "./detection.js";
 import { loadFile } from "./files.js";
 import { isDbAvailable } from "./gsd-db.js";
-import { readKnowledgeMarkdown } from "./knowledge-projection.js";
+import { knowledgeUnavailableBlock, readKnowledgeMarkdown } from "./knowledge-projection.js";
+import { logWarning } from "./workflow-logger.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
@@ -888,7 +889,13 @@ export async function aggregatePriorContext(basePath: string): Promise<PriorCont
   const requirements = parseRequirements(requirementsContent);
 
   // Load knowledge from the database (readKnowledgeMarkdown), not the file on disk
-  const knowledgeContent = isDbAvailable() ? readKnowledgeMarkdown(basePath) : "";
+  let knowledgeContent: string;
+  if (isDbAvailable()) {
+    knowledgeContent = readKnowledgeMarkdown(basePath);
+  } else {
+    logWarning("prompt", "prior context: project knowledge not read: workflow DB is unavailable");
+    knowledgeContent = knowledgeUnavailableBlock("workflow DB is unavailable");
+  }
   const knowledge = truncateSection(knowledgeContent, MAX_SECTION_CHARS);
 
   // Load milestone summaries

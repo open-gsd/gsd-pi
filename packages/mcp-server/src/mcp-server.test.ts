@@ -1043,6 +1043,46 @@ describe('createMcpServer tool registration', () => {
     assert.deepEqual(knowledge.entries, [
       { id: 'K001', type: 'rule', scope: 'project', content: 'Database rule', addedAt: '2026-02-01' },
     ]);
+    assert.equal(knowledge.readMetadata, undefined, 'a database read is not labelled as a fallback');
+  });
+
+  it('registered gsd_knowledge labels the file read as a projection fallback when the database is unavailable', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-knowledge-fallback-'));
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    mkdirSync(join(projectDir, '.gsd'));
+    writeFileSync(
+      join(projectDir, '.gsd', 'KNOWLEDGE.md'),
+      [
+        '# Project Knowledge',
+        '',
+        '## Rules',
+        '',
+        '| # | Scope | Rule | Why | Added |',
+        '|---|-------|------|-----|-------|',
+        '| K001 | project | File rule | why | 2026-01-01 |',
+        '',
+      ].join('\n'),
+    );
+
+    const previousExecutors = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const previousWriteGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    const previousBridgeDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+    t.after(() => {
+      restoreEnvironmentValue('GSD_WORKFLOW_EXECUTORS_MODULE', previousExecutors);
+      restoreEnvironmentValue('GSD_WORKFLOW_WRITE_GATE_MODULE', previousWriteGate);
+      restoreEnvironmentValue('GSD_WORKFLOW_BRIDGE_TEST_DISABLE', previousBridgeDisable);
+    });
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const knowledgeTool = (server as any)._registeredTools?.gsd_knowledge;
+    const result = await knowledgeTool.handler({ projectDir });
+    const knowledge = JSON.parse(result.content[0].text);
+
+    assert.deepEqual(knowledge.entries.map((entry: { id: string }) => entry.id), ['K001']);
+    assert.deepEqual(knowledge.readMetadata, { source: 'projection', authority: 'projection-fallback' });
   });
 
   // Flat-phase fixture mirroring the extension renderer's output:

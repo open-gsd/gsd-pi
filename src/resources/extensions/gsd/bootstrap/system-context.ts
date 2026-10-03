@@ -14,7 +14,7 @@ import { renderRuntimeContractForSystemPrompt } from "../runtime-contract.js";
 import { resolveModelWithFallbacksForUnit } from "../preferences-models.js";
 import { gsdRoot, resolveGsdRootFile, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
 import { extractIntroAndRules } from "../knowledge-parser.js";
-import { readKnowledgeMarkdown, readUnimportedPatternsAndLessons } from "../knowledge-projection.js";
+import { knowledgeUnavailableBlock, readKnowledgeMarkdown, readUnimportedPatternsAndLessons } from "../knowledge-projection.js";
 import { isDbAvailable } from "../gsd-db.js";
 import { ensureCodebaseMapFresh, readCodebaseMap } from "../codebase-generator.js";
 import { resolveRepositoryProjectRoot } from "../repository-registry.js";
@@ -648,18 +648,19 @@ export function loadKnowledgeBlock(gsdHomeDir: string, cwd: string): { block: st
   //    so inject only the intro prose + `## Rules` section for those. A
   //    Pattern or Lesson that exists only in the file (fresh clone, pulled
   //    teammate row) has no memories row, so inject it here.
-  //    Without an open database there is no project knowledge to inject.
+  //    Without a readable database the block says so: the file is not a
+  //    fallback, and the Rules must not go missing without a notice.
   let projectKnowledge = "";
   const knowledgePath = resolveGsdRootFile(cwd, "KNOWLEDGE");
-  if (isDbAvailable()) {
-    try {
-      projectKnowledge = [
-        extractIntroAndRules(readKnowledgeMarkdown(cwd)).trim(),
-        readUnimportedPatternsAndLessons(cwd),
-      ].filter(Boolean).join("\n\n");
-    } catch (e) {
-      logWarning("bootstrap", `project knowledge read failed: ${(e as Error).message}`);
-    }
+  try {
+    if (!isDbAvailable()) throw new Error("workflow DB is unavailable");
+    projectKnowledge = [
+      extractIntroAndRules(readKnowledgeMarkdown(cwd)).trim(),
+      readUnimportedPatternsAndLessons(cwd),
+    ].filter(Boolean).join("\n\n");
+  } catch (e) {
+    logWarning("bootstrap", `project knowledge read failed: ${(e as Error).message}`);
+    projectKnowledge = knowledgeUnavailableBlock((e as Error).message);
   }
 
   if (!globalKnowledge && !projectKnowledge) {

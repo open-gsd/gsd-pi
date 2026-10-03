@@ -18,7 +18,7 @@ import {
 } from "./auto-worktree-cleanup.js";
 import { dirIsContentBearingLegacyMilestone, resolveGsdPathContract } from "./paths.js";
 import type { MilestoneScope } from "./workspace.js";
-import { WorktreeStateProjection } from "./worktree-state-projection.js";
+import { renderWorktreeKnowledge, WorktreeStateProjection } from "./worktree-state-projection.js";
 import { logWarning } from "./workflow-logger.js";
 
 const PROJECT_PREFERENCES_FILE = "PREFERENCES.md";
@@ -32,7 +32,6 @@ const ROOT_STATE_FILES = [
   "DECISIONS.md",
   "REQUIREMENTS.md",
   "PROJECT.md",
-  "KNOWLEDGE.md",
   "OVERRIDES.md",
   "QUEUE.md",
   "metrics.json",
@@ -134,6 +133,7 @@ export function syncGsdStateToWorktree(
 
   mkdirSync(wtGsd, { recursive: true });
   syncRootStateFiles(mainGsd, wtGsd, synced);
+  if (renderWorktreeKnowledge(mainBasePath, worktreePath_)) synced.push("KNOWLEDGE.md");
   syncProjectPreferences(mainGsd, wtGsd, synced);
   syncMilestoneLayouts(mainGsd, wtGsd, synced);
 
@@ -148,9 +148,7 @@ function syncRootStateFiles(
   for (const file of ROOT_STATE_FILES) {
     const src = join(mainGsd, file);
     const dst = join(wtGsd, file);
-    // KNOWLEDGE.md is a database render at the project root: refresh the
-    // worktree copy on every sync instead of copying it once.
-    if (!existsSync(src) || (existsSync(dst) && file !== "KNOWLEDGE.md")) continue;
+    if (!existsSync(src) || existsSync(dst)) continue;
 
     try {
       cpSync(src, dst);

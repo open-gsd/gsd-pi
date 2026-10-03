@@ -33,6 +33,7 @@ import {
 } from "../knowledge-parser.ts";
 import { readKnowledgeEntries, readKnowledgeMarkdown, renderKnowledgeProjection } from "../knowledge-projection.ts";
 import { createMemory } from "../memory-store.ts";
+import { _resetLogs, peekLogs } from "../workflow-logger.ts";
 
 function makeTmpBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-knowledge-stage2b-"));
@@ -438,6 +439,44 @@ test("readKnowledgeMarkdown returns empty when there is no knowledge", () => {
   try {
     assert.equal(readKnowledgeMarkdown(base), "");
   } finally {
+    cleanup(base);
+  }
+});
+
+test("render: the compat baseline is recorded only when the bytes changed", () => {
+  const base = makeTmpBase();
+  try {
+    createMemory({ category: "rule", content: "Baseline rule", structuredFields: { sourceKnowledgeId: "K001" } });
+    const markerPath = join(base, ".gsd", ".compat.json");
+
+    assert.equal(renderKnowledgeProjection(base).written, true);
+    const marker = JSON.parse(readFileSync(markerPath, "utf-8")) as { projections: Record<string, unknown> };
+    assert.ok(marker.projections["KNOWLEDGE.md"], "a written render records its baseline");
+
+    rmSync(markerPath);
+    assert.equal(renderKnowledgeProjection(base).written, false);
+    assert.equal(existsSync(markerPath), false, "an unchanged render does not touch the marker");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("render: a marker that cannot be written is a warning, not a render failure", () => {
+  const base = makeTmpBase();
+  _resetLogs();
+  try {
+    createMemory({ category: "rule", content: "Rendered rule", structuredFields: { sourceKnowledgeId: "K001" } });
+    // A directory at the marker path makes the marker write fail.
+    mkdirSync(join(base, ".gsd", ".compat.json", "blocker"), { recursive: true });
+
+    const result = renderKnowledgeProjection(base);
+
+    assert.equal(result.written, true);
+    assert.match(readFileSync(knowledgeMdPath(base), "utf-8"), /\| K001 \| project \| Rendered rule \|/);
+    const warnings = peekLogs().filter((entry) => entry.severity === "warn").map((entry) => entry.message);
+    assert.ok(warnings.some((message) => /compat baseline not recorded/.test(message)), warnings.join("\n"));
+  } finally {
+    _resetLogs();
     cleanup(base);
   }
 });
