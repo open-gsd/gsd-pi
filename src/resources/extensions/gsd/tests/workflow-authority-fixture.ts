@@ -36,7 +36,9 @@ function openFixtureDatabase(dbPath: string): void {
 }
 
 export async function createWorkflowAuthorityFixture(): Promise<WorkflowAuthorityFixture> {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-workflow-authority-")));
+  // Native realpath, as in paths.ts normalizeRealPath: on Windows the JS
+  // variant keeps 8.3 short names, so tools would see another DB path and reopen.
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), "gsd-workflow-authority-")));
   const dbPath = join(root, ".gsd", "gsd.db");
   let cleanedUp = false;
 
