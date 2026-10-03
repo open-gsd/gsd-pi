@@ -940,8 +940,15 @@ function activateDeferredApprovalGate(basePath: string): void {
   hostWriteGateAdapter.setPending(gateId, basePath);
 }
 
+// External engines / MCP relays may pass ask_user_questions arguments in odd
+// shapes (#2530): `?? []` only guards null/undefined, so a string or object
+// reaches array methods and throws. Treat any non-array `questions` as absent.
+function asQuestionArray(value: unknown): Array<{ id?: unknown }> {
+  return Array.isArray(value) ? (value as Array<{ id?: unknown }>) : [];
+}
+
 function extractGateQuestionId(input: unknown): string | undefined {
-  const questions: Array<{ id?: unknown }> = (input as { questions?: unknown })?.questions as Array<{ id?: unknown }> ?? [];
+  const questions = asQuestionArray((input as { questions?: unknown })?.questions);
   const match = questions.find((question) => typeof question?.id === "string" && isGateQuestionId(question.id));
   return typeof match?.id === "string" ? match.id : undefined;
 }
@@ -2031,7 +2038,8 @@ export function registerHooks(
 
     const details = resolveAskUserQuestionsGateDetails(event);
 
-    const questions: any[] = (event.input as any)?.questions ?? details?.questions ?? [];
+    const inputQuestions: unknown = (event.input as any)?.questions;
+    const questions: any[] = Array.isArray(inputQuestions) ? inputQuestions : asQuestionArray(details?.questions);
     const gateResult = applyAskUserQuestionsGateResult({
       basePath,
       questions,
