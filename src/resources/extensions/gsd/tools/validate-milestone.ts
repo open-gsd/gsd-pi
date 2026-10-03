@@ -23,7 +23,7 @@ import { clearPathCache, targetMilestoneFile } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { saveFile, clearParseCache } from "../files.js";
-import { invalidateStateCache } from "../state.js";
+import { renderStateProjection } from "../workflow-projections.js";
 import { VALIDATION_VERDICTS, isValidMilestoneVerdict } from "../verdict-parser.js";
 import { insertMilestoneValidationGates } from "../milestone-validation-gates.js";
 import { logWarning } from "../workflow-logger.js";
@@ -554,9 +554,9 @@ export async function handleValidateMilestone(
     });
   }
 
-  invalidateStateCache();
   clearPathCache();
   clearParseCache();
+  projectionStale ||= (await renderStateProjection(basePath)).stale;
 
   const prefs = loadEffectiveGSDPreferences()?.preferences;
   const gatesEnabled = opts?.uokGatesEnabled ?? resolveUokFlags(prefs).gates;

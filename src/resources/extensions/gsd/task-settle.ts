@@ -32,6 +32,7 @@ import {
 } from "./task-execution-domain-operation.js";
 import { readTaskRecoveryRoute } from "./task-recovery-domain-operation.js";
 import { readTaskTechnicalVerdict } from "./task-verification-domain-operation.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 export interface TaskSettleTask {
   milestoneId: string;
@@ -724,6 +725,7 @@ export async function applyTaskSettle(input: {
       summaryPath: publication.summaryPath,
     };
   }
+  if (settled || reconciled || published) await renderStateProjection(input.basePath);
   return {
     ...plan,
     lifecycleRows,

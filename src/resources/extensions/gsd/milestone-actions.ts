@@ -11,6 +11,7 @@
 import { existsSync } from "node:fs";
 import { resolveMilestonePath } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
+import { renderStateProjection } from "./workflow-projections.js";
 import { loadQueueOrder, renderQueueOrder } from "./queue-order.js";
 import {
   executeDomainOperation,
@@ -139,12 +140,12 @@ function renderParkedMarkerAfterCommit(basePath: string, milestoneId: string): v
  * Returns false when the milestone is not in the database, already parked,
  * or closed. Throws when the database write fails (#2255).
  */
-export function parkMilestone(
+export async function parkMilestone(
   basePath: string,
   milestoneId: string,
   reason: string,
   options: { fromAutoLoop?: boolean } = {},
-): boolean {
+): Promise<boolean> {
   if (!options.fromAutoLoop) assertNotAutoActive("park milestone");
   assertDbAvailable("parkMilestone", milestoneId);
   const milestone = getMilestone(milestoneId);
@@ -162,6 +163,7 @@ export function parkMilestone(
   }
   renderParkedMarkerAfterCommit(basePath, milestoneId);
   invalidateAllCaches();
+  await renderStateProjection(basePath);
   return true;
 }
 
@@ -172,7 +174,7 @@ export function parkMilestone(
  * marker is removed. Returns false when the milestone is not parked in the
  * database. Throws when the database write fails.
  */
-export function unparkMilestone(basePath: string, milestoneId: string): boolean {
+export async function unparkMilestone(basePath: string, milestoneId: string): Promise<boolean> {
   assertNotAutoActive("unpark milestone");
   assertDbAvailable("unparkMilestone", milestoneId);
   if (getMilestone(milestoneId)?.status !== "parked") return false;
@@ -185,6 +187,7 @@ export function unparkMilestone(basePath: string, milestoneId: string): boolean 
   }
   renderParkedMarkerAfterCommit(basePath, milestoneId);
   invalidateAllCaches();
+  await renderStateProjection(basePath);
   return true;
 }
 
@@ -271,7 +274,7 @@ function cancelMilestoneHierarchy(
  * removed as projection cleanup. Returns false when the milestone is not in
  * the database. Throws when the milestone is complete or the write fails.
  */
-export function discardMilestone(basePath: string, milestoneId: string): boolean {
+export async function discardMilestone(basePath: string, milestoneId: string): Promise<boolean> {
   assertNotAutoActive("discard milestone");
   assertDbAvailable("discardMilestone", milestoneId);
   const milestone = getMilestone(milestoneId);
@@ -302,6 +305,7 @@ export function discardMilestone(basePath: string, milestoneId: string): boolean
   }
 
   invalidateAllCaches();
+  await renderStateProjection(basePath);
   return true;
 }
 

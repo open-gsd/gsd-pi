@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 
-import { loadFile, saveFile } from "./files.js";
+import { loadFile } from "./files.js";
 import { _getAdapter, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
 import { isInactiveStatus } from "./status-guards.js";
 import {
@@ -9,9 +10,10 @@ import {
   resolveWorkflowDatabaseLocation,
 } from "./db-workspace.js";
 import { hasRequiredSchemaFeature } from "./db-required-schema.js";
-import { resolveMilestoneFile, milestonesDir, legacyMilestonesDir, resolveGsdRootFile } from "./paths.js";
+import { resolveMilestoneFile, milestonesDir, legacyMilestonesDir, gsdRoot } from "./paths.js";
 import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
+import { renderStateProjection } from "./workflow-projections.js";
 import { loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.js";
 import { appendDoctorHistory } from "./doctor-history.js";
 import { checkWorkspaceRepositoryHealth } from "./doctor-workspace-checks.js";
@@ -106,69 +108,15 @@ function validatePreferenceShape(preferences: GSDPreferences): string[] {
   return issues;
 }
 
-/** Build STATE.md content from derived state. Exported for guided-flow pre-dispatch rebuild (#3475). */
-export function buildStateMarkdown(state: Awaited<ReturnType<typeof deriveState>>): string {
-  const lines: string[] = [];
-  lines.push("# GSD State", "");
-
-  const activeMilestone = state.activeMilestone
-    ? `${state.activeMilestone.id}: ${state.activeMilestone.title}`
-    : "None";
-  const activeSlice = state.activeSlice
-    ? `${state.activeSlice.id}: ${state.activeSlice.title}`
-    : "None";
-
-  lines.push(`**Active Milestone:** ${activeMilestone}`);
-  lines.push(`**Active Slice:** ${activeSlice}`);
-  lines.push(`**Phase:** ${state.phase}`);
-  if (state.requirements) {
-    lines.push(`**Requirements Status:** ${state.requirements.active} active \u00b7 ${state.requirements.validated} validated \u00b7 ${state.requirements.deferred} deferred \u00b7 ${state.requirements.outOfScope} out of scope`);
-  }
-  lines.push("");
-  lines.push("## Milestone Registry");
-
-  for (const entry of state.registry) {
-    const glyph = entry.status === "complete" ? "\u2705" : entry.status === "active" ? "\uD83D\uDD04" : entry.status === "parked" ? "\u23F8\uFE0F" : "\u2B1C";
-    lines.push(`- ${glyph} **${entry.id}:** ${entry.title}`);
-  }
-
-  lines.push("");
-  lines.push("## Recent Decisions");
-  if (state.recentDecisions.length > 0) {
-    for (const decision of state.recentDecisions) lines.push(`- ${decision}`);
-  } else {
-    lines.push("- None recorded");
-  }
-
-  lines.push("");
-  lines.push("## Blockers");
-  if (state.blockers.length > 0) {
-    for (const blocker of state.blockers) lines.push(`- ${blocker}`);
-  } else {
-    lines.push("- None");
-  }
-
-  lines.push("");
-  lines.push("## Next Action");
-  lines.push(state.nextAction || "None");
-  lines.push("");
-
-  return lines.join("\n");
-}
-
 async function updateStateFile(basePath: string, fixesApplied: string[]): Promise<void> {
-  const state = await deriveState(basePath);
-  const path = resolveGsdRootFile(basePath, "STATE");
-  await saveFile(path, buildStateMarkdown(state));
-  fixesApplied.push(`updated ${path}`);
+  const { stale } = await renderStateProjection(basePath);
+  if (!stale) fixesApplied.push(`updated ${join(gsdRoot(basePath), "STATE.md")}`);
 }
 
-/** Rebuild STATE.md from current DB state. Exported for auto-mode post-hooks. */
+/** Rebuild STATE.md from the DB. Exported for auto-mode post-hooks. */
 export async function rebuildState(basePath: string): Promise<void> {
   invalidateAllCaches();
-  const state = await deriveState(basePath);
-  const path = resolveGsdRootFile(basePath, "STATE");
-  await saveFile(path, buildStateMarkdown(state));
+  await renderStateProjection(basePath);
 }
 
 export async function selectDoctorScope(basePath: string, requestedScope?: string): Promise<string | undefined> {

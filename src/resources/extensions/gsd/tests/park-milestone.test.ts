@@ -105,11 +105,11 @@ describe('park-milestone', () => {
     rmSync(base, { recursive: true, force: true });
   });
 
-  test('parks a DB-only milestone with no directory in one Domain Operation', () => {
+  test('parks a DB-only milestone with no directory in one Domain Operation', async () => {
     insertMilestone({ id: 'M001', title: 'DB only', status: 'queued' });
     const before = revision();
 
-    assert.equal(parkMilestone(base, 'M001', 'Priority shift'), true);
+    assert.equal(await parkMilestone(base, 'M001', 'Priority shift'), true);
 
     assert.equal(getMilestone('M001')!.status, 'parked');
     assert.equal(lifecycleStatus("item_kind = 'milestone' AND milestone_id = 'M001'"), 'paused');
@@ -120,62 +120,62 @@ describe('park-milestone', () => {
     assert.equal(existsSync(join(base, '.gsd', 'milestones', 'M001')), false, 'no directory is created');
   });
 
-  test('renders PARKED.md from the park record and a second park changes nothing', () => {
+  test('renders PARKED.md from the park record and a second park changes nothing', async () => {
     createMilestoneDir(base, 'M001');
     insertMilestone({ id: 'M001', title: 'On disk', status: 'active' });
 
-    parkMilestone(base, 'M001', 'First "park"');
+    await parkMilestone(base, 'M001', 'First "park"');
     const marker = readFileSync(join(base, '.gsd', 'milestones', 'M001', 'M001-PARKED.md'), 'utf-8');
     assert.match(marker, /reason: "First \\"park\\""/);
     const after = revision();
 
-    assert.equal(parkMilestone(base, 'M001', 'Second park'), false);
+    assert.equal(await parkMilestone(base, 'M001', 'Second park'), false);
     assert.equal(revision(), after);
     assert.equal(getParkedReason('M001'), 'First "park"');
   });
 
-  test('a PARKED.md marker on disk is not park state', () => {
+  test('a PARKED.md marker on disk is not park state', async () => {
     const mDir = createMilestoneDir(base, 'M001');
     insertMilestone({ id: 'M001', title: 'Active', status: 'active' });
     writeFileSync(join(mDir, 'M001-PARKED.md'), '---\nreason: "hand written"\n---\n', 'utf-8');
 
     assert.equal(isParked('M001'), false);
-    assert.equal(unparkMilestone(base, 'M001'), false);
-    assert.equal(parkMilestone(base, 'M001', 'real park'), true);
+    assert.equal(await unparkMilestone(base, 'M001'), false);
+    assert.equal(await parkMilestone(base, 'M001', 'real park'), true);
     assert.equal(getParkedReason('M001'), 'real park');
   });
 
-  test('unpark restores the milestone and removes the marker after the commit', () => {
+  test('unpark restores the milestone and removes the marker after the commit', async () => {
     createMilestoneDir(base, 'M001');
     insertMilestone({ id: 'M001', title: 'On disk', status: 'active' });
-    parkMilestone(base, 'M001', 'Test reason');
+    await parkMilestone(base, 'M001', 'Test reason');
     assert.ok(existsSync(join(base, '.gsd', 'milestones', 'M001', 'M001-PARKED.md')));
 
-    assert.equal(unparkMilestone(base, 'M001'), true);
+    assert.equal(await unparkMilestone(base, 'M001'), true);
 
     assert.equal(getMilestone('M001')!.status, 'active');
     assert.equal(lifecycleStatus("item_kind = 'milestone' AND milestone_id = 'M001'"), 'in_progress');
     assert.equal(operations('milestone.unpark'), 1);
     assert.equal(existsSync(join(base, '.gsd', 'milestones', 'M001', 'M001-PARKED.md')), false);
     assert.equal(getParkedReason('M001'), null);
-    assert.equal(unparkMilestone(base, 'M001'), false, 'unpark of an unparked milestone is refused');
+    assert.equal(await unparkMilestone(base, 'M001'), false, 'unpark of an unparked milestone is refused');
   });
 
   test('getActiveMilestoneId skips a parked milestone', async () => {
     insertMilestone({ id: 'M001', title: 'Parked', status: 'active' });
     insertMilestone({ id: 'M002', title: 'Active', status: 'active' });
 
-    parkMilestone(base, 'M001', 'Testing');
+    await parkMilestone(base, 'M001', 'Testing');
 
     assert.equal(await getActiveMilestoneId(base), 'M002');
   });
 
-  test('the auto loop abandon override parks the milestone while auto-mode is active', () => {
+  test('the auto loop abandon override parks the milestone while auto-mode is active', async () => {
     insertMilestone({ id: 'M001', title: 'Abandoned', status: 'active' });
     _setAutoActiveForTest(true);
 
-    assert.throws(() => parkMilestone(base, 'M001', 'abandon this milestone'), /auto-mode is active/);
-    assert.equal(parkMilestone(base, 'M001', 'abandon this milestone', { fromAutoLoop: true }), true);
+    await assert.rejects(() => parkMilestone(base, 'M001', 'abandon this milestone'), /auto-mode is active/);
+    assert.equal(await parkMilestone(base, 'M001', 'abandon this milestone', { fromAutoLoop: true }), true);
 
     assert.equal(getMilestone('M001')!.status, 'parked');
     assert.equal(getParkedReason('M001'), 'abandon this milestone');
@@ -203,7 +203,7 @@ describe('park-milestone', () => {
     const wt = createWorktree(base, 'M001', { branch: 'milestone/M001' });
     const before = revision();
 
-    assert.equal(discardMilestone(base, 'M001'), true);
+    assert.equal(await discardMilestone(base, 'M001'), true);
 
     assert.equal(operations('milestone.discard'), 1);
     assert.equal(revision(), before + 1);
@@ -223,24 +223,24 @@ describe('park-milestone', () => {
     assert.equal(existsSync(mDir), false, 'a full render does not bring the discarded tree back');
   });
 
-  test('a failed discard keeps the milestone files', () => {
+  test('a failed discard keeps the milestone files', async () => {
     const mDir = createMilestoneDir(base, 'M001');
     insertMilestone({ id: 'M001', title: 'Discard me', status: 'active' });
     _getAdapter()!.exec(
       "CREATE TRIGGER fail_milestone_update BEFORE UPDATE ON milestones BEGIN SELECT RAISE(ABORT, 'simulated discard failure'); END;",
     );
 
-    assert.throws(() => discardMilestone(base, 'M001'), /simulated discard failure/);
+    await assert.rejects(() => discardMilestone(base, 'M001'), /simulated discard failure/);
 
     assert.equal(getMilestone('M001')!.status, 'active');
     assert.equal(existsSync(mDir), true, 'files are removed only after the commit');
   });
 
-  test('discard refuses a completed milestone and an unknown one', () => {
+  test('discard refuses a completed milestone and an unknown one', async () => {
     insertMilestone({ id: 'M001', title: 'Done', status: 'complete' });
 
-    assert.throws(() => discardMilestone(base, 'M001'), /already closed/);
-    assert.equal(discardMilestone(base, 'M404'), false);
+    await assert.rejects(() => discardMilestone(base, 'M001'), /already closed/);
+    assert.equal(await discardMilestone(base, 'M404'), false);
     assert.equal(operations('milestone.discard'), 0);
   });
 });

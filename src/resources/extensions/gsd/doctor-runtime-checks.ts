@@ -4,8 +4,9 @@ import { basename, dirname, join } from "node:path";
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import { removeLockDirectory } from "./session-lock.js";
 import { cleanNumberedGsdVariants } from "./repo-identity.js";
-import { milestonesDir, gsdRoot, resolveGsdRootFile, milestoneDirExists } from "./paths.js";
-import { deriveState, isGhostMilestone, isReusableGhostMilestone } from "./state.js";
+import { milestonesDir, gsdRoot, milestoneDirExists } from "./paths.js";
+import { deriveState, invalidateStateCache, isGhostMilestone, isReusableGhostMilestone } from "./state.js";
+import { renderStateContent, renderStateProjection } from "./workflow-projections.js";
 import { saveFile } from "./files.js";
 import { nativeIsRepo, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
 import { readCrashLock, isLockProcessAlive, clearStaleWorkerLock } from "./crash-recovery.js";
@@ -440,11 +441,13 @@ export async function checkRuntimeHealth(
 
   // ── STATE.md health ───────────────────────────────────────────────────
   try {
-    const stateFilePath = resolveGsdRootFile(basePath, "STATE");
-    const milestonesPath = milestonesDir(basePath);
+    const stateFilePath = join(gsdRoot(basePath), "STATE.md");
 
-    if (existsSync(milestonesPath)) {
-      if (!existsSync(stateFilePath)) {
+    if (existsSync(milestonesDir(basePath))) {
+      invalidateStateCache();
+      const freshContent = renderStateContent(await deriveState(basePath, { syncQueueOrder: false }));
+      // With no DB there is nothing authoritative to compare against.
+      if (isDbAvailable() && !existsSync(stateFilePath)) {
         issues.push({
           severity: "warning",
           code: "state_file_missing",
@@ -455,44 +458,22 @@ export async function checkRuntimeHealth(
           fixable: true,
         });
 
-        if (shouldFix("state_file_missing")) {
-          const state = await deriveState(basePath);
-          await saveFile(stateFilePath, buildStateMarkdownForCheck(state));
+        if (shouldFix("state_file_missing") && !(await renderStateProjection(basePath)).stale) {
           fixesApplied.push("created STATE.md from derived state");
         }
-      } else {
-        // Check if STATE.md is stale by comparing active milestone/slice/phase
-        const currentContent = readFileSync(stateFilePath, "utf-8");
-        const state = await deriveState(basePath);
-        const freshContent = buildStateMarkdownForCheck(state);
+      } else if (isDbAvailable() && readFileSync(stateFilePath, "utf-8") !== freshContent) {
+        issues.push({
+          severity: "warning",
+          code: "state_file_stale",
+          scope: "project",
+          unitId: "project",
+          message: "STATE.md is stale — its content differs from the database state",
+          file: ".gsd/STATE.md",
+          fixable: true,
+        });
 
-        // Extract key fields for comparison — don't compare full content
-        // since timestamp/formatting differences are normal
-        const extractFields = (content: string) => {
-          const milestone = content.match(/\*\*Active Milestone:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-          const slice = content.match(/\*\*Active Slice:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-          const phase = content.match(/\*\*Phase:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-          return { milestone, slice, phase };
-        };
-
-        const current = extractFields(currentContent);
-        const fresh = extractFields(freshContent);
-
-        if (current.milestone !== fresh.milestone || current.slice !== fresh.slice || current.phase !== fresh.phase) {
-          issues.push({
-            severity: "warning",
-            code: "state_file_stale",
-            scope: "project",
-            unitId: "project",
-            message: `STATE.md is stale — shows "${current.phase}" but derived state is "${fresh.phase}"`,
-            file: ".gsd/STATE.md",
-            fixable: true,
-          });
-
-          if (shouldFix("state_file_stale")) {
-            await saveFile(stateFilePath, freshContent);
-            fixesApplied.push("rebuilt STATE.md from derived state");
-          }
+        if (shouldFix("state_file_stale") && !(await renderStateProjection(basePath)).stale) {
+          fixesApplied.push("rebuilt STATE.md from derived state");
         }
       }
     }
@@ -890,57 +871,4 @@ export async function checkRuntimeHealth(
   } catch {
     // Non-fatal — orphan milestone DB row check failed
   }
-}
-
-/**
- * Build STATE.md markdown content from derived state.
- * Local helper used by checkRuntimeHealth for STATE.md drift detection and repair.
- */
-function buildStateMarkdownForCheck(state: Awaited<ReturnType<typeof deriveState>>): string {
-  const lines: string[] = [];
-  lines.push("# GSD State", "");
-
-  const activeMilestone = state.activeMilestone
-    ? `${state.activeMilestone.id}: ${state.activeMilestone.title}`
-    : "None";
-  const activeSlice = state.activeSlice
-    ? `${state.activeSlice.id}: ${state.activeSlice.title}`
-    : "None";
-
-  lines.push(`**Active Milestone:** ${activeMilestone}`);
-  lines.push(`**Active Slice:** ${activeSlice}`);
-  lines.push(`**Phase:** ${state.phase}`);
-  if (state.requirements) {
-    lines.push(`**Requirements Status:** ${state.requirements.active} active · ${state.requirements.validated} validated · ${state.requirements.deferred} deferred · ${state.requirements.outOfScope} out of scope`);
-  }
-  lines.push("");
-  lines.push("## Milestone Registry");
-
-  for (const entry of state.registry) {
-    const glyph = entry.status === "complete" ? "\u2705" : entry.status === "active" ? "\uD83D\uDD04" : entry.status === "parked" ? "\u23F8\uFE0F" : "\u2B1C";
-    lines.push(`- ${glyph} **${entry.id}:** ${entry.title}`);
-  }
-
-  lines.push("");
-  lines.push("## Recent Decisions");
-  if (state.recentDecisions.length > 0) {
-    for (const decision of state.recentDecisions) lines.push(`- ${decision}`);
-  } else {
-    lines.push("- None recorded");
-  }
-
-  lines.push("");
-  lines.push("## Blockers");
-  if (state.blockers.length > 0) {
-    for (const blocker of state.blockers) lines.push(`- ${blocker}`);
-  } else {
-    lines.push("- None");
-  }
-
-  lines.push("");
-  lines.push("## Next Action");
-  lines.push(state.nextAction || "None");
-  lines.push("");
-
-  return lines.join("\n");
 }

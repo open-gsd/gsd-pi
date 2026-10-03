@@ -19,13 +19,11 @@ import type { VerificationEvidenceRow } from "./db-verification-evidence-rows.js
 import { atomicWriteSync } from "./atomic-write.js";
 import { join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { logWarning } from "./workflow-logger.js";
 import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
-import { deriveState } from "./state.js";
+import { deriveState, invalidateStateCache } from "./state.js";
 import type { GSDState } from "./types.js";
 import { renderPlanFromDb, renderRoadmapFromDb, writeTaskSummaryProjection } from "./markdown-renderer.js";
-import { readManifest } from "./workflow-manifest.js";
 import { gsdRoot, resolveMilestoneFile, resolveSliceFile, resolveTaskFile } from "./paths.js";
 import { removeOwnedPlanProjection } from "./projection-cleanup.js";
 import { stripIdPrefix } from "./strip-id-prefix.js";
@@ -330,8 +328,7 @@ export async function renderSummaryProjection(basePath: string, milestoneId: str
 // ─── STATE.md Projection ────────────────────────────────────────────────
 
 /**
- * Render STATE.md content from GSDState.
- * Matches the buildStateMarkdown output format from doctor.ts exactly.
+ * Render STATE.md content from GSDState. The only STATE.md content builder.
  * Pure function — no side effects.
  */
 export function renderStateContent(state: GSDState): string {
@@ -388,10 +385,14 @@ export function renderStateContent(state: GSDState): string {
 }
 
 /**
- * Render STATE.md projection to disk.
+ * Render STATE.md projection to disk. This is the only STATE.md writer: every
+ * mutation, the full rebuild, doctor, and guided entry call it after commit.
  * Derives state from DB, renders content, writes via atomicWriteSync.
+ * When the DB is unavailable the file is left unchanged and stale is returned.
  */
 export async function renderStateProjection(basePath: string): Promise<{ stale: boolean }> {
+  // A render follows a commit, so a cached derive from before it is stale.
+  invalidateStateCache();
   try {
     if (!isDbAvailable()) return { stale: true };
     // Probe DB handle — adapter may be set but underlying handle closed
@@ -405,25 +406,11 @@ export async function renderStateProjection(basePath: string): Promise<{ stale: 
       });
       return { stale: true };
     }
-    const state = await deriveState(basePath);
-    const content = renderStateContent(state);
+    // A projection render must not import QUEUE-ORDER.json into the DB.
+    const content = renderStateContent(await deriveState(basePath, { syncQueueOrder: false }));
     const dir = gsdRoot(basePath);
-    const statePath = join(dir, "STATE.md");
-    const milestoneTotal = state.progress?.milestones?.total ?? 0;
-    if (milestoneTotal === 0 && existsSync(statePath)) {
-      try {
-        const manifest = readManifest(basePath);
-        const existingContent = (await readFile(statePath, "utf-8")).trim();
-        if (Array.isArray(manifest?.milestones) && manifest.milestones.length > 0 && existingContent.length > 0) {
-          logWarning("projection", "renderStateProjection: refusing to overwrite non-empty STATE.md with empty state while manifest has milestones");
-          return { stale: true };
-        }
-      } catch (err) {
-        logWarning("projection", `renderStateProjection: unable to inspect existing STATE.md guard, proceeding with write: ${(err as Error).message}`);
-      }
-    }
     mkdirSync(dir, { recursive: true });
-    atomicWriteSync(statePath, content);
+    atomicWriteSync(join(dir, "STATE.md"), content);
     return { stale: false };
   } catch (err) {
     logWarning("projection", `renderStateProjection failed: ${(err as Error).message}`);
@@ -542,7 +529,7 @@ export async function regenerateIfMissing(
       filePath = join(basePath, ".gsd", "milestones", milestoneId, "slices", sliceId, "tasks");
       break;
     case "STATE":
-      filePath = join(basePath, ".gsd", "STATE.md");
+      filePath = join(gsdRoot(basePath), "STATE.md");
       break;
   }
 

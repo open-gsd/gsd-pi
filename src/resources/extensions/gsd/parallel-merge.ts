@@ -21,6 +21,7 @@ import { removeSessionStatus } from "./session-status-io.js";
 import type { WorkerInfo } from "./parallel-orchestrator.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning } from "./workflow-logger.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -214,6 +215,7 @@ export async function mergeCompletedMilestone(
 
   // Clean up parallel session status — only on a real merge.
   removeSessionStatus(basePath, milestoneId);
+  await renderStateProjection(basePath);
 
   return {
     milestoneId,

@@ -16,6 +16,7 @@ import { gsdRoot, resolveTasksDir, resolveSlicePath, resolveTaskFile, buildTaskF
 import { sendDesktopNotification } from "./notifications.js";
 import { getDb, getTask, getSlice, getSliceTasks } from "./gsd-db.js";
 import { renderPlanCheckboxes } from "./markdown-renderer.js";
+import { renderStateProjection } from "./workflow-projections.js";
 import { UNIT_REGISTRY } from "./unit-registry.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
@@ -251,9 +252,9 @@ export async function handleUndo(args: string, ctx: ExtensionCommandContext, _pi
       }
     }
   } finally {
-    // 4. Re-derive state — always invalidate caches even if git operations fail
+    // 4. Re-render STATE.md — always invalidate caches even if git operations fail
     invalidateAllCaches();
-    await deriveState(basePath);
+    await renderStateProjection(basePath);
   }
 
   // Build result message
@@ -401,6 +402,7 @@ export async function handleUndoTask(
 
   // Invalidate caches
   invalidateAllCaches();
+  await renderStateProjection(basePath);
 
   const results: string[] = [`Reset task ${mid}/${sid}/${tid} to "pending".`];
   if (summaryDeleted) results.push("  - Deleted task summary file");

@@ -481,6 +481,8 @@ export async function rebuildMarkdownProjectionsFromDb(
   } catch (err) {
     rendered.errors.push(`knowledge: ${(err as Error).message}`);
   }
+  // STATE.md is part of the full rebuild, with or without a Projection Work row of kind "state".
+  if ((await renderStateProjection(basePath)).stale) rendered.errors.push("STATE.md: render failed");
   const drained = await repairProjectionWork(basePath);
   invalidateStateCache();
 

@@ -14,6 +14,7 @@ import {
   type TaskSettleTask,
 } from "./task-settle.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 function parseTaskSettleArgs(args: string): {
   task: TaskSettleTask;
@@ -115,6 +116,7 @@ export async function handleTaskSettle(
         ctx.ui.notify(`gsd task settle: ${unit} is already closed as blocker-accepted — nothing to do.`, "info");
         return;
       }
+      await renderStateProjection(basePath);
       ctx.ui.notify(
         `Accepted blocker for ${unit}: Task closed as blocker-accepted; Attempt ${result.attemptId} and its ` +
         `failed Result remain history and the route head is consumed (no re-route). ` +

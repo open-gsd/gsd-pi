@@ -2,9 +2,8 @@
  * Regression test for #3475: guided-flow must rebuild STATE.md from derived
  * state before dispatching workflows.
  *
- * Verifies that buildStateMarkdown() produces content matching the derived
- * state (not a stale on-disk cache), and that the rebuild helper is wired
- * correctly from doctor.ts.
+ * Verifies that rebuildState() writes the one STATE.md render of the derived
+ * state (not a stale on-disk cache) and keeps the file when the DB is closed.
  */
 
 import { describe, test, afterEach } from "node:test";
@@ -14,8 +13,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { deriveState, invalidateStateCache } from "../state.ts";
-import { buildStateMarkdown, rebuildState } from "../doctor.ts";
-import { resolveGsdRootFile } from "../paths.ts";
+import { rebuildState } from "../doctor.ts";
+import { renderStateContent } from "../workflow-projections.ts";
 import {
   openDatabase,
   closeDatabase,
@@ -84,29 +83,24 @@ describe("guided-flow STATE.md rebuild (#3475)", () => {
     await rebuildState(base);
 
     // Read the rebuilt STATE.md
-    const statePath = resolveGsdRootFile(base, "STATE");
-    const rebuilt = readFileSync(statePath, "utf-8");
+    const rebuilt = readFileSync(join(base, ".gsd", "STATE.md"), "utf-8");
 
     // Should contain M010, NOT M008
     assert.ok(rebuilt.includes("M010"), "Rebuilt STATE.md should reference M010");
     assert.ok(!rebuilt.includes("M008"), "Rebuilt STATE.md should NOT reference stale M008");
+    invalidateStateCache();
+    assert.equal(rebuilt, renderStateContent(await deriveState(base, { syncQueueOrder: false })), "one renderer writes STATE.md");
   });
 
-  test("buildStateMarkdown produces correct active milestone from GSDState", async () => {
+  test("rebuildState keeps STATE.md unchanged when the DB is closed", async () => {
     base = createFixtureBase();
-    openDatabase(":memory:");
+    const stale = "# GSD State\n\n**Active Milestone:** M070: Current Work\n";
+    writeFile(base, "STATE.md", stale);
+    closeDatabase();
 
-    insertMilestone({ id: "M070", title: "Current Work", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M070", title: "First Slice", status: "active", risk: "low", depends: [] });
-    writeFile(base, "milestones/M070/M070-CONTEXT.md", "# M070: Current Work");
-    writeFile(base, "milestones/M070/M070-ROADMAP.md", "# M070\n\n## Slices\n\n- [ ] **S01: First Slice**");
+    await rebuildState(base);
 
-    invalidateStateCache();
-    const state = await deriveState(base);
-    const md = buildStateMarkdown(state);
-
-    assert.ok(md.includes("M070"), "State markdown should include active milestone M070");
-    assert.ok(md.includes("Current Work") || md.includes("M070"), "State markdown should include milestone title or ID");
+    assert.equal(readFileSync(join(base, ".gsd", "STATE.md"), "utf-8"), stale, "no DB-unavailable page is written");
   });
 
   test("checkAutoStartAfterDiscuss ignores state-manifest and recovers the missing DB row from CONTEXT.md", () => {

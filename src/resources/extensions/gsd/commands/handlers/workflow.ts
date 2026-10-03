@@ -676,7 +676,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     const reason = parsedReason || "Parked via /gsd park";
     let success: boolean;
     try {
-      success = parkMilestone(basePath, targetId, reason);
+      success = await parkMilestone(basePath, targetId, reason);
     } catch (err) {
       // #2255: the park did not take (e.g. DB sync failed) — surface it as an error.
       ctx.ui.notify(`Could not park ${targetId}: ${(err as Error).message}`, "error");
@@ -710,7 +710,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     }
     let success: boolean;
     try {
-      success = unparkMilestone(basePath, targetId);
+      success = await unparkMilestone(basePath, targetId);
     } catch (err) {
       ctx.ui.notify(`Could not unpark ${targetId}: ${(err as Error).message}`, "error");
       return true;
@@ -742,7 +742,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     }
     let success: boolean;
     try {
-      success = discardMilestone(projectRoot(), targetId);
+      success = await discardMilestone(projectRoot(), targetId);
     } catch (err) {
       ctx.ui.notify(`Could not discard ${targetId}: ${(err as Error).message}`, "error");
       return true;

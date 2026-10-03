@@ -92,7 +92,7 @@ test("a discarded milestone is not complete and does not satisfy a dependency", 
   invalidateStateCache();
   assert.equal((await deriveStateFromDb(base)).activeMilestone?.id, "M001");
 
-  assert.equal(discardMilestone(base, "M001"), true);
+  assert.equal(await discardMilestone(base, "M001"), true);
 
   invalidateStateCache();
   const state = await deriveStateFromDb(base);
@@ -101,7 +101,7 @@ test("a discarded milestone is not complete and does not satisfy a dependency", 
   assert.deepEqual(state.progress?.milestones, { done: 0, total: 1 });
 });
 
-test("QUEUE.md and ROADMAP.md renders omit a discarded milestone", (t) => {
+test("QUEUE.md and ROADMAP.md renders omit a discarded milestone", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-discard-renders-"));
   t.after(() => {
     closeDatabase();
@@ -118,7 +118,7 @@ test("QUEUE.md and ROADMAP.md renders omit a discarded milestone", (t) => {
   };
   for (const content of render()) assert.ok(content.includes("**M002: Second**"));
 
-  assert.equal(discardMilestone(base, "M002"), true);
+  assert.equal(await discardMilestone(base, "M002"), true);
 
   for (const content of render()) {
     assert.ok(content.includes("**M001: First**"));
@@ -143,7 +143,7 @@ test("stale-render repair does not restore files of a discarded milestone", asyn
   insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Open", status: "pending" });
   assert.equal(detectStaleRenders(base).length, 1, "the completed task summary is missing before discard");
 
-  assert.equal(discardMilestone(base, "M001"), true);
+  assert.equal(await discardMilestone(base, "M001"), true);
 
   assert.deepEqual(detectStaleRenders(base), []);
   assert.equal(existsSync(milestoneDir), false, "discard removed the milestone files");
@@ -160,7 +160,7 @@ test("planning refuses a discarded milestone as a dependency", async (t) => {
   mkdirSync(join(base, ".gsd"), { recursive: true });
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "First", status: "active" });
-  assert.equal(discardMilestone(base, "M001"), true);
+  assert.equal(await discardMilestone(base, "M001"), true);
 
   const result = await persistMilestonePlan({
     milestoneId: "M003",

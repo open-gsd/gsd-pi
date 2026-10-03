@@ -12,7 +12,7 @@
 //                              MCP read tools P30
 //   G3 canonical wins          P23
 //   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save P15
-//   G5 render failure          STATE.md delivery P08, handler writes no projection P12
+//   G5 render failure          handler writes no projection P12
 //   G6 evidence before unlock  slice P24, milestone P27
 //   G7 epoch fence             direct UPDATE outside an operation P34
 //   G8 legacy counters         P36
@@ -50,6 +50,7 @@ import { drainProjectionWork } from "../projection-worker.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { reconcileBeforeDispatch } from "../state-reconciliation/index.ts";
 import { executeMilestoneStatus } from "../tools/workflow-tool-executors.ts";
+import { renderStateContent } from "../workflow-projections.ts";
 import {
   deleteProjections,
   expectedFail,
@@ -370,7 +371,12 @@ describe("G5: a render failure after commit does not lose the projection", () =>
     );
     await drainProjectionWork(base, { now: new Date(Date.now() + 86_400_000) });
     assert.equal(work("project/authority").delivery_state, "rendered");
-    assert.ok(existsSync(join(base, ".gsd", "STATE.md")));
+    // Work of kind "state" is settled as rendered, so STATE.md must hold the one render of the DB state.
+    invalidateStateCache();
+    assert.equal(
+      readFileSync(join(base, ".gsd", "STATE.md"), "utf-8"),
+      renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+    );
   });
 });
 

@@ -90,10 +90,9 @@ export function clearProjectRootStateFiles(
   const gsdDir = gsdRoot(basePath);
   // Phase C pt 2: auto.lock removed from this list — the file is gone
   // (migrated to the workers + unit_dispatches + runtime_kv tables). The
-  // remaining transient files (STATE.md, {MID}-META.json) are still
-  // worth removing on teardown.
+  // remaining transient file ({MID}-META.json) is still worth removing on
+  // teardown. STATE.md is a DB projection and is never deleted here.
   const transientFiles = [
-    join(gsdDir, "STATE.md"),
     // Integration-branch META now lives flat at .gsd/<MID>-META.json (ADR-045).
     milestoneMetaPath(basePath, milestoneId),
     // Legacy location — still cleaned for pre-migration trees.

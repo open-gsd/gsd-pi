@@ -187,6 +187,8 @@ test("adopted complete-milestone commits through projection obstruction and repa
   await seedAdoptedMilestone(basePath);
 
   const statePath = join(basePath, ".gsd", "STATE.md");
+  // Validation already rendered STATE.md; replace it with a directory to obstruct the next render.
+  rmSync(statePath, { force: true });
   mkdirSync(statePath);
   const stableInvocation = invocation("milestone-complete/projection-obstruction");
   const obstructed = await handleCompleteMilestone(

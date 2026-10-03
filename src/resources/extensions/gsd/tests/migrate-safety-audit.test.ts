@@ -3883,7 +3883,7 @@ test("milestone projection mutations honor the publication claim", () => {
     const release = claimProjectionMaintenance(databasePath);
     try {
       // The park commits in the DB; only the marker render is fenced.
-      assert.equal(parkMilestone(base, "M001", "hold"), true);
+      assert.equal(await parkMilestone(base, "M001", "hold"), true);
     } finally {
       release();
     }

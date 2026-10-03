@@ -14,7 +14,7 @@ import {
 } from "../../escalation.js";
 import { saveDecisionToDb } from "../../db-writer.js";
 import { loadEffectiveGSDPreferences } from "../../preferences.js";
-import { invalidateStateCache } from "../../state.js";
+import { renderStateProjection } from "../../workflow-projections.js";
 import { emitUokAuditEvent, buildAuditEnvelope } from "../../uok/audit.js";
 
 function helpMessage(): string {
@@ -155,7 +155,7 @@ export async function handleEscalateCommand(
     const taskId = row.id;
 
     const result = resolveEscalation(basePath, milestoneId, row.slice_id, taskId, choice, rationale);
-    invalidateStateCache();
+    await renderStateProjection(basePath);
 
     if (result.status !== "resolved" && result.status !== "rejected-to-blocker") {
       ctx.ui.notify(result.message, result.status === "invalid-choice" ? "warning" : "error");

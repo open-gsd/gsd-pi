@@ -1819,7 +1819,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           const decision = detectAbandonMilestone(overrides, s.currentMilestoneId);
           if (decision.shouldPark && s.currentMilestoneId) {
             const { parkMilestone } = await import("./milestone-actions.js");
-            const parked = parkMilestone(s.basePath, s.currentMilestoneId, decision.reason, { fromAutoLoop: true });
+            const parked = await parkMilestone(s.basePath, s.currentMilestoneId, decision.reason, { fromAutoLoop: true });
             if (parked) {
               ctx.ui.notify(`Milestone ${s.currentMilestoneId} parked: "${decision.reason}"`, "info");
             } else {

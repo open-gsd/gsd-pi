@@ -502,7 +502,9 @@ test("unbaselined root requirement writes preserve existing bytes", async (t) =>
   }, base);
 
   assert.notDeepEqual(readFileSync(requirementsPath), editedBytes);
-  const quarantined = listFiles(join(base, ".gsd", "quarantine", "projections"));
+  // The write also renders STATE.md, which is unbaselined after .compat.json was removed.
+  const quarantined = listFiles(join(base, ".gsd", "quarantine", "projections"))
+    .filter((path) => !path.includes("STATE"));
   assert.equal(quarantined.length, 1);
   assert.deepEqual(readFileSync(quarantined[0]!), editedBytes);
 });

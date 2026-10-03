@@ -450,6 +450,8 @@ test("fresh-process exact replay repairs an obstructed Slice cancellation projec
   const idempotencyKey = "test/workflow-authority-faults/fresh-process-cancel-repair";
   const invocation = internalExecutionInvocation(idempotencyKey);
   const statePath = join(fixture.root, ".gsd", "STATE.md");
+  // The fixture's requirement and decision saves rendered STATE.md; obstruct it with a directory.
+  rmSync(statePath, { force: true });
   mkdirSync(statePath, { recursive: true });
 
   const committed = await executeSkipSlice(params, fixture.root, invocation);

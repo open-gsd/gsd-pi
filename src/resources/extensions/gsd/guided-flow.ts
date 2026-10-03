@@ -15,7 +15,7 @@ import {
   requiresInteractiveMenu,
   isInteractiveCommandContext,
 } from "./command-feedback.js";
-import { loadFile, saveFile } from "./files.js";
+import { loadFile } from "./files.js";
 import { isDbAvailable, getMilestone, getMilestoneSlices, insertMilestone } from "./gsd-db.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
@@ -30,6 +30,7 @@ import {
 } from "./auto-prompts.js";
 import { deriveState, isGhostMilestone } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
+import { renderStateProjection } from "./workflow-projections.js";
 import { startAutoDetached } from "./auto.js";
 import { clearLock } from "./crash-recovery.js";
 import {
@@ -1380,12 +1381,7 @@ export async function showDiscuss(
   // Rebuild STATE.md from derived state before any dispatch (#3475).
   // Without this, guided prompts read a stale STATE.md cache and the
   // agent bootstraps from the wrong milestone.
-  try {
-    const { buildStateMarkdown } = await import("./doctor.js");
-    await saveFile(resolveGsdRootFile(basePath, "STATE"), buildStateMarkdown(state));
-  } catch (err) {
-    logWarning("guided", `STATE.md rebuild failed: ${(err as Error).message}`);
-  }
+  await renderStateProjection(basePath);
 
   if (target) {
     const slash = target.indexOf("/");
@@ -1921,7 +1917,7 @@ async function handleMilestoneActions(
 
     let success: boolean;
     try {
-      success = parkMilestone(basePath, milestoneId, reasonText);
+      success = await parkMilestone(basePath, milestoneId, reasonText);
     } catch (err) {
       // #2255: the park did not take (e.g. DB sync failed) — surface it as an error.
       ctx.ui.notify(`Could not park ${milestoneId}: ${(err as Error).message}`, "error");
@@ -1944,7 +1940,7 @@ async function handleMilestoneActions(
     });
     if (confirmed) {
       try {
-        discardMilestone(basePath, milestoneId);
+        await discardMilestone(basePath, milestoneId);
       } catch (err) {
         ctx.ui.notify(`Could not discard ${milestoneId}: ${(err as Error).message}`, "error");
         return true;
@@ -2179,12 +2175,7 @@ export async function showSmartEntry(
   const state = await deriveState(basePath);
 
   // Rebuild STATE.md from derived state before any dispatch (#3475).
-  try {
-    const { buildStateMarkdown } = await import("./doctor.js");
-    await saveFile(resolveGsdRootFile(basePath, "STATE"), buildStateMarkdown(state));
-  } catch (err) {
-    logWarning("guided", `STATE.md rebuild failed: ${(err as Error).message}`);
-  }
+  await renderStateProjection(basePath);
 
   // ── Deep planning mode kickoff ────────────────────────────────────────
   // When `planning_depth: deep` is set (e.g. via `/gsd new-project --deep`)
@@ -2520,7 +2511,7 @@ export async function showSmartEntry(
     } else if (choice === "park") {
       let success: boolean;
       try {
-        success = parkMilestone(basePath, milestoneId, "Validation attention deferred by user");
+        success = await parkMilestone(basePath, milestoneId, "Validation attention deferred by user");
       } catch (err) {
         // #2255: the park did not take (e.g. DB sync failed) — surface it as an error.
         ctx.ui.notify(`Could not park ${milestoneId}: ${(err as Error).message}`, "error");
@@ -2641,7 +2632,7 @@ export async function showSmartEntry(
         });
         if (confirmed) {
           try {
-            discardMilestone(basePath, milestoneId);
+            await discardMilestone(basePath, milestoneId);
           } catch (err) {
             ctx.ui.notify(`Could not discard ${milestoneId}: ${(err as Error).message}`, "error");
             return;

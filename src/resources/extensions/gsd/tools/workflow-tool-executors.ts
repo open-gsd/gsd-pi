@@ -110,6 +110,7 @@ import {
 import { logError, logWarning } from "../workflow-logger.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
+import { renderStateProjection } from "../workflow-projections.js";
 import { loadEffectiveGSDPreferences } from "../preferences.js";
 import { parseProject } from "../schemas/parsers.js";
 import { autoSession, getAutoRuntimeSnapshot, isAutoActive } from "../auto-runtime-state.js";
@@ -1403,6 +1404,7 @@ export async function executeTaskSettle(
           },
         };
       }
+      await renderStateProjection(basePath);
       return {
         content: [{
           type: "text",
@@ -1623,13 +1625,7 @@ export async function executeSkipSlice(
     invalidateStateCache();
     let projectionStale = false;
     try {
-      const { rebuildState } = await import("../doctor.js");
-      await rebuildState(basePath);
-    } catch (err) {
-      projectionStale = true;
-      logError("tool", `skip_slice rebuildState failed: ${(err as Error).message}`, { tool: "gsd_skip_slice" });
-    }
-    try {
+      // The flush renders STATE.md with the milestone projections.
       const flushed = await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
       projectionStale ||= flushed.stale;
     } catch (err) {
@@ -2174,7 +2170,7 @@ export async function executeSaveGateResult(
       { error: err instanceof Error ? err.message : String(err) },
     );
   }
-  invalidateStateCache();
+  projectionStale ||= (await renderStateProjection(basePath)).stale;
 
   const projectionNotice = projectionStale ? ". The readable plan update is pending repair." : "";
   return {
@@ -2267,7 +2263,7 @@ export async function executeUatResultSave(
       retryable: run.params.verdict !== "PASS",
       evaluatedAt: run.evaluatedAt,
     });
-    invalidateStateCache();
+    await renderStateProjection(basePath);
     if (run.hasHuman) {
       appendNotification(
         `UAT for ${run.params.milestoneId}/${run.params.sliceId} has NEEDS-HUMAN checks awaiting human validation`,

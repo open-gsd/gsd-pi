@@ -18,6 +18,7 @@ import { recordCompatProjectionWrite } from './compat/compat-marker.js';
 import { GSDError, GSD_STALE_STATE, GSD_IO_ERROR } from './errors.js';
 import { logWarning, logError } from './workflow-logger.js';
 import { invalidateStateCache } from './state.js';
+import { renderStateProjection } from './workflow-projections.js';
 import { clearPathCache } from './paths.js';
 import { clearParseCache } from './files.js';
 import type { MilestoneScope, GsdWorkspace } from './workspace.js';
@@ -430,6 +431,7 @@ export async function saveRequirementToDb(
     invalidateStateCache();
     clearPathCache();
     clearParseCache();
+    await renderStateProjection(basePath);
 
     return { id };
   } catch (err) {
@@ -675,6 +677,7 @@ export async function saveDecisionToDb(
     invalidateStateCache();
     clearPathCache();
     clearParseCache();
+    await renderStateProjection(basePath);
 
     return { id };
   } catch (err) {
@@ -772,6 +775,7 @@ export async function updateRequirementInDb(
     invalidateStateCache();
     clearPathCache();
     clearParseCache();
+    await renderStateProjection(basePath);
   } catch (err) {
     logError('manifest', 'updateRequirementInDb failed', { fn: 'updateRequirementInDb', error: String((err as Error).message) });
     throw err;
