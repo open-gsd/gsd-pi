@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { checkRemoteAutoSession, forceStopAutoRemote } from "../auto.ts";
-import { openDatabase, closeDatabase, _getAdapter } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, isDbAvailable, _getAdapter } from "../gsd-db.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.ts";
 import { normalizeRealPath } from "../paths.ts";
@@ -122,6 +122,34 @@ test("forceStopAutoRemote escalates a live remote PID and releases worker state"
     "released",
     "force stop should release held milestone leases",
   );
+  assert.equal(readCrashLock(base), null, "force stop should remove the visible remote lock");
+});
+
+test("forceStopAutoRemote with no open DB still reports the killed PID and removes the lock", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+
+  // The /gsd auto and /gsd next guards run before the workflow DB is opened,
+  // so the forcing process reads the remote session from auto.lock only.
+  assert.equal(isDbAvailable(), false, "precondition: no workflow DB is open");
+  const pid = 626_262;
+  writeLegacyLock(base, pid);
+
+  const signals: Array<NodeJS.Signals | 0> = [];
+  const originalKill = process.kill;
+  process.kill = ((target: number, signal?: NodeJS.Signals | number) => {
+    assert.equal(target, pid);
+    signals.push((signal ?? 0) as NodeJS.Signals | 0);
+    return true;
+  }) as typeof process.kill;
+  t.after(() => {
+    process.kill = originalKill;
+  });
+
+  const result = forceStopAutoRemote(base);
+
+  assert.ok(signals.includes("SIGKILL"), "precondition: the PID was escalated to SIGKILL");
+  assert.deepEqual(result, { found: true, pid });
   assert.equal(readCrashLock(base), null, "force stop should remove the visible remote lock");
 });
 

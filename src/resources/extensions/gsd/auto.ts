@@ -1195,18 +1195,25 @@ export function forceStopAutoRemote(projectRoot: string): {
       // tests, via mocked liveness). The stop decision was made above, so
       // retire the force-stopped worker's row and leases explicitly instead
       // of leaning on teardown timing.
-      const stoppedRoot = normalizeRealPath(projectRoot);
-      markWorkerStoppingByPid(stoppedRoot, lock.pid);
-      // Release leases for EVERY row sharing this pid+root — repeated
-      // step-mode runs in one process leave older retired rows behind, and
-      // the current lease holder may not be the first match.
-      for (const w of getAllAutoWorkers()) {
-        if (
-          w.pid === lock.pid
-          && normalizeRealPath(w.project_root_realpath) === stoppedRoot
-        ) {
-          forceReleaseLeasesForWorker(w.worker_id);
+      // Best-effort: the remote-session guards run before the workflow DB is
+      // opened, and the PID is already killed. A failed retirement must not
+      // skip clearLock or report the stop as failed.
+      try {
+        const stoppedRoot = normalizeRealPath(projectRoot);
+        markWorkerStoppingByPid(stoppedRoot, lock.pid);
+        // Release leases for EVERY row sharing this pid+root — repeated
+        // step-mode runs in one process leave older retired rows behind, and
+        // the current lease holder may not be the first match.
+        for (const w of getAllAutoWorkers()) {
+          if (
+            w.pid === lock.pid
+            && normalizeRealPath(w.project_root_realpath) === stoppedRoot
+          ) {
+            forceReleaseLeasesForWorker(w.worker_id);
+          }
         }
+      } catch (err) {
+        logWarning("session", `force-stopped worker ${lock.pid} not retired: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
       }
     }
     clearLock(projectRoot);
