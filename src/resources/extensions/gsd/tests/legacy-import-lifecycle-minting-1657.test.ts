@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Regression proof (#1657/#1658) that an applied legacy import mints canonical
-// companion authority — lifecycle rows for every imported hierarchy row and a Q8 quality
-// gate for every imported slice.
+// companion authority — lifecycle rows for every imported hierarchy row and a pending Q8
+// quality gate for every open imported slice.
 
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -12,6 +12,8 @@ import { afterEach, test } from "node:test";
 
 import { prepareLegacyImportBackup } from "../legacy-import-backup.ts";
 import { applyLegacyImport } from "../legacy-import-application.ts";
+import { inspectLegacyImportApplicationEvidence } from "../legacy-import-application-evidence.ts";
+import { verifyLegacyImportApplicationResult } from "../legacy-import-application-result.ts";
 import { createLegacyImportPreview } from "../legacy-import-preview.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../legacy-import-preview-base.ts";
 import { type DbAdapter } from "../db-adapter.ts";
@@ -62,7 +64,7 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
     destination_directory: destination,
     label: "pre-application",
   });
-  applyLegacyImport({
+  const receipt = applyLegacyImport({
     invocation: {
       idempotencyKey: "legacy-import/lifecycle-minting-1657",
       sourceTransport: "internal",
@@ -131,33 +133,26 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
   `);
   assert.deepEqual(mismatched, []);
 
-  // #1658: gsd_slice_complete requires exactly one Q8 quality gate per slice,
-  // so every imported slice must carry the row the canonical seam would have
-  // seeded — pending while the slice is open, complete (verdict "omitted",
-  // since the import carries no readiness evidence) once the slice closed.
-  const gatelessSlices = rows(`
-    SELECT slice.milestone_id, slice.id FROM slices slice
+  // #1658: every open imported slice carries the pending Q8 quality gate the
+  // canonical seam would have seeded. A slice imported as completed carries no
+  // gate row: the import has no readiness evidence, and a closed verdict that
+  // no evaluation produced would be fabricated.
+  const gateStates = rows(`
+    SELECT lifecycle.lifecycle_status, gate.status AS gate_status, COUNT(*) AS slices
+    FROM workflow_item_lifecycles lifecycle
     LEFT JOIN quality_gates gate
-      ON gate.milestone_id = slice.milestone_id AND gate.slice_id = slice.id
+      ON gate.milestone_id = lifecycle.milestone_id AND gate.slice_id = lifecycle.slice_id
      AND gate.gate_id = 'Q8' AND (gate.task_id = '' OR gate.task_id IS NULL)
-    WHERE gate.gate_id IS NULL
+    WHERE lifecycle.item_kind = 'slice'
+    GROUP BY lifecycle.lifecycle_status, gate.status
+    ORDER BY lifecycle.lifecycle_status
   `);
-  assert.deepEqual(gatelessSlices, []);
-  const wrongStateGates = rows(`
-    SELECT gate.milestone_id, gate.slice_id, gate.status, gate.verdict,
-           lifecycle.lifecycle_status
-    FROM quality_gates gate
-    JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'slice'
-     AND lifecycle.milestone_id = gate.milestone_id
-     AND lifecycle.slice_id = gate.slice_id
-     AND lifecycle.task_id IS NULL
-    WHERE gate.gate_id = 'Q8' AND (gate.task_id = '' OR gate.task_id IS NULL)
-      AND CASE
-        WHEN lifecycle.lifecycle_status = 'completed'
-          THEN gate.status != 'complete' OR gate.verdict != 'omitted'
-        ELSE gate.status != 'pending'
-      END
-  `);
-  assert.deepEqual(wrongStateGates, []);
+  assert.deepEqual(gateStates, [
+    { lifecycle_status: "completed", gate_status: null, slices: 2 },
+    { lifecycle_status: "ready", gate_status: "pending", slices: 5 },
+  ]);
+  assert.deepEqual(rows("SELECT * FROM gate_runs"), []);
+  // Restore and Forward Repair verify the retained Application against the
+  // live database; a completed slice with no gate row must still verify.
+  verifyLegacyImportApplicationResult(inspectLegacyImportApplicationEvidence(receipt.operationId));
 });

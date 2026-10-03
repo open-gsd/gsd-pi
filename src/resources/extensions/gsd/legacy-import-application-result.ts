@@ -86,6 +86,8 @@ function instructionMatches(
     return row?.value["lifecycle_status"] === instruction.lifecycleStatus;
   }
   if (instruction.action === "seed-quality-gate") {
+    // A slice imported as completed gets no gate row, so nothing is asserted.
+    if (instruction.gateStatus === "complete") return true;
     // quality_gates is not a Preview base row set, so the seeded Q8 row is
     // verified directly against the live database the snapshot was captured
     // from. Only existence is asserted — post-import slice work legitimately

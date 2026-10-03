@@ -12,7 +12,7 @@ import { getDb, getDbPath } from "./db/engine.js";
 import { isFailedVerificationResult } from "./db/queries.js";
 import {
   adoptOrTransitionLifecycle,
-  grantCancellationWaiver,
+  grantLegacyAttestedCancellationWaiver,
   readDomainOperationFence,
   type CanonicalLifecycleStatus,
 } from "./db/writers/lifecycle-commands.js";
@@ -302,12 +302,6 @@ function requireProjectRootDatabase(basePath: string): void {
   }
 }
 
-function cancellationScope(item: LifecycleBackfillItem): string {
-  if (item.itemKind === "milestone") return `milestone:${item.milestoneId}`;
-  if (item.itemKind === "slice") return `slice:${item.milestoneId}/${item.sliceId}`;
-  return `${item.milestoneId}/${item.sliceId}/${item.taskId} cancellation`;
-}
-
 function projectLegacy(
   context: Parameters<typeof projectCanonicalStatusToLegacy>[0],
   item: LifecycleBackfillItem,
@@ -379,12 +373,14 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
       if (item.projectedLegacyStatus !== null) projectLegacy(context, item, item.projectedLegacyStatus);
       let waiverId: string | null = null;
       if (item.lifecycleStatus === "cancelled") {
-        waiverId = grantCancellationWaiver(context, {
+        waiverId = grantLegacyAttestedCancellationWaiver(context, {
           lifecycleId: lifecycle.lifecycleId,
-          scope: cancellationScope(item),
+          itemKind: item.itemKind,
+          milestoneId: item.milestoneId,
+          sliceId: item.sliceId,
+          taskId: item.taskId,
           rationale: `Legacy-attested cancellation adopted by lifecycle backfill ` +
             `(raw status ${JSON.stringify(item.rawStatus)}, rule ${item.rule})`,
-          grantedByActorType: "policy",
           grantedByActorId: "lifecycle-backfill",
         });
         waivers++;

@@ -606,8 +606,12 @@ function hasCurrentCancellationAuthorization(lifecycleId: string, completedAt: s
       AND (waiver.expires_at IS NULL OR waiver.expires_at > :completed_at)
       AND (
         disposition.disposition_id IS NOT NULL
-        -- Legacy-attested cancellation minted by the lifecycle backfill.
-        OR (operation.operation_type = 'lifecycle.backfill' AND waiver.requirement_id IS NULL)
+        -- Legacy-attested cancellation minted by the lifecycle backfill or by
+        -- an Import Application.
+        OR (
+          operation.operation_type IN ('lifecycle.backfill', 'import.apply')
+          AND waiver.requirement_id IS NULL
+        )
       )
       AND NOT EXISTS (
         SELECT 1 FROM workflow_requirement_dispositions successor

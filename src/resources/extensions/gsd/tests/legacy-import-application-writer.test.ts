@@ -8,34 +8,28 @@ import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
 import {
-  SCHEMA_VERSION,
   _getAdapter,
   closeDatabase,
   openDatabase,
 } from "../gsd-db.ts";
-import {
-  executeDomainOperation,
-  executeImportDomainOperation,
-  type DomainOperationContext,
-  type DomainOperationMutation,
-  type ImportDomainOperationRequest,
-} from "../db/domain-operation.ts";
+import { executeDomainOperation } from "../db/domain-operation.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import { applyLegacyImportApplicationPlan } from "../db/writers/legacy-import-application.ts";
 import { LegacyImportApplicationError } from "../legacy-import-application-error.ts";
-import type {
-  LegacyImportApplicationPlan,
-  LegacyImportApplicationPlanInstruction,
-} from "../legacy-import-application-plan.ts";
+import type { LegacyImportApplicationPlanInstruction } from "../legacy-import-application-plan.ts";
 import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
-  sealLegacyImportPreview,
-  type LegacyImportPreviewArtifact,
 } from "../legacy-import-preview.ts";
+import {
+  applyImport,
+  emptyPreview,
+  mutation,
+  planFor,
+  type WriterResult,
+} from "./helpers/legacy-import-writer-harness.ts";
 
 type SqlRow = Record<string, unknown>;
-type WriterResult = ReturnType<typeof applyLegacyImportApplicationPlan>;
 
 const tempDirs = new Set<string>();
 let importSequence = 0;
@@ -68,105 +62,6 @@ function count(table: string): number {
   return Number(row(`SELECT COUNT(*) AS count FROM ${table}`)["count"] ?? 0);
 }
 
-function emptyPreview(
-  baseProjectRevision = 0,
-  baseAuthorityEpoch = 0,
-  identity = "default",
-): LegacyImportPreviewArtifact {
-  const emptyHash = hashLegacyImportValue([]);
-  return sealLegacyImportPreview({
-    import_kind: "legacy-markdown",
-    importer_version: "1",
-    base: {
-      snapshot_schema_version: 1,
-      database_schema_version: SCHEMA_VERSION,
-      authority: {
-        singleton: 1,
-        project_id: "project-1",
-        project_root_realpath: `/tmp/project-1/${identity}`,
-        revision: baseProjectRevision,
-        authority_epoch: baseAuthorityEpoch,
-        created_at: "2026-07-17T00:00:00.000Z",
-        updated_at: "2026-07-17T00:00:00.000Z",
-      },
-      rows: [],
-      relevant_rows_hash: emptyHash,
-    },
-    source_set_hash: emptyHash,
-    change_set_hash: emptyHash,
-    counts: { create: 0, update: 0, delete: 0, preserve: 0, unparsed: 0, unresolved: 0 },
-    sources: [],
-    changes: [],
-    diagnoses: [],
-    resolutions: [],
-  });
-}
-
-function deepFreeze<T>(value: T, seen = new Set<object>()): T {
-  if (value === null || typeof value !== "object" || seen.has(value)) return value;
-  seen.add(value);
-  for (const child of Object.values(value)) deepFreeze(child, seen);
-  return Object.freeze(value);
-}
-
-function planFor(
-  artifact: LegacyImportPreviewArtifact,
-  instructions: readonly LegacyImportApplicationPlanInstruction[],
-  overrides: Partial<LegacyImportApplicationPlan> = {},
-): LegacyImportApplicationPlan {
-  const mutationCounts = {
-    create: instructions.filter((entry) => entry.action === "create").length,
-    update: instructions.filter((entry) => entry.action === "update").length,
-    delete: instructions.filter((entry) => entry.action === "delete").length,
-    replaceSliceDependencies: instructions.filter((entry) => entry.action === "replace-slice-dependencies").length,
-    deleteSliceDependencies: instructions.filter((entry) => entry.action === "delete-slice-dependencies").length,
-    adoptLifecycle: instructions.filter((entry) => entry.action === "adopt-lifecycle").length,
-    seedQualityGate: instructions.filter((entry) => entry.action === "seed-quality-gate").length,
-  };
-  const affectedTargets = instructions
-    .filter((entry) => entry.action !== "preserve")
-    .map((entry) => ({ targetKind: entry.targetKind, targetKey: entry.targetKey }));
-  const changeIds = instructions.flatMap((entry) => [...entry.changeIds]);
-  const receiptCounts = { ...artifact.preview.counts };
-  const plan: LegacyImportApplicationPlan = {
-    planSchemaVersion: 2,
-    previewId: artifact.preview.preview_id,
-    previewHash: artifact.preview_hash,
-    baseProjectRevision: artifact.preview.base_project_revision,
-    baseAuthorityEpoch: artifact.preview.base_authority_epoch,
-    receiptCounts,
-    instructions: structuredClone(instructions),
-    accounting: {
-      sourceIds: [], diagnosisIds: [], resolutionIds: [], changeIds,
-      preserveChangeIds: instructions
-        .filter((entry) => entry.action === "preserve")
-        .flatMap((entry) => [...entry.changeIds]),
-      unparsedSourceIds: [],
-    },
-    mutationCounts,
-    affectedTargets,
-    eventFacts: {
-      previewId: artifact.preview.preview_id,
-      previewHash: artifact.preview_hash,
-      sourceSetHash: artifact.preview.source_set_hash,
-      changeSetHash: artifact.preview.change_set_hash,
-      receiptCounts,
-      mutationCounts,
-      affectedTargetHashes: affectedTargets.map((target) => hashLegacyImportValue({
-        kind: target.targetKind,
-        key: target.targetKey,
-      })),
-      sourceCount: 0,
-      diagnosisCount: 0,
-      resolutionCount: 0,
-      preserveCount: receiptCounts.preserve,
-      unparsedCount: receiptCounts.unparsed,
-    },
-    projectionKeys: [`legacy-import/${artifact.preview.preview_id}`],
-    ...overrides,
-  };
-  return deepFreeze(structuredClone(plan));
-}
 
 function rowInstruction(
   action: "create" | "update" | "delete",
@@ -194,109 +89,6 @@ function decisionInstruction(
     values,
     changeIds: [changeId],
   };
-}
-
-function importRequest(artifact: LegacyImportPreviewArtifact): ImportDomainOperationRequest {
-  importSequence += 1;
-  return {
-    operationType: "import.apply",
-    idempotencyKey: `legacy-import/writer-${importSequence}`,
-    expectedRevision: artifact.preview.base_project_revision,
-    expectedAuthorityEpoch: artifact.preview.base_authority_epoch,
-    actorType: "agent",
-    actorId: "legacy-import-writer-test",
-    sourceTransport: "internal",
-    traceId: `trace-${importSequence}`,
-    turnId: `turn-${importSequence}`,
-    payload: artifact,
-  };
-}
-
-function insertImportApplication(
-  context: Readonly<DomainOperationContext>,
-  artifact: LegacyImportPreviewArtifact,
-): void {
-  const preview = artifact.preview;
-  db().prepare(`
-    INSERT INTO workflow_import_applications (
-      operation_id, project_id, import_kind, importer_version,
-      preview_schema_version, preview_id, preview_hash,
-      base_project_revision, base_authority_epoch, base_database_schema_version,
-      source_set_hash, change_set_hash,
-      create_count, update_count, delete_count, preserve_count, unparsed_count, unresolved_count,
-      preview_json,
-      backup_ref, backup_sha256, backup_byte_size, backup_schema_version,
-      backup_project_revision, backup_authority_epoch, backup_quick_check, backup_verified_at,
-      applied_at, resulting_project_revision, resulting_authority_epoch
-    ) VALUES (
-      :operation_id, :project_id, :import_kind, :importer_version,
-      :preview_schema_version, :preview_id, :preview_hash,
-      :base_project_revision, :base_authority_epoch, :base_database_schema_version,
-      :source_set_hash, :change_set_hash,
-      :create_count, :update_count, :delete_count, :preserve_count, :unparsed_count, :unresolved_count,
-      :preview_json,
-      '/tmp/verified-backup.sqlite', :backup_sha256, 1, :backup_schema_version,
-      :backup_project_revision, :backup_authority_epoch, 'ok', '2026-07-17T00:00:00.000Z',
-      '2026-07-17T00:00:01.000Z', :resulting_project_revision, :resulting_authority_epoch
-    )
-  `).run({
-    ":operation_id": context.operationId,
-    ":project_id": context.projectId,
-    ":import_kind": preview.import_kind,
-    ":importer_version": preview.importer_version,
-    ":preview_schema_version": preview.preview_schema_version,
-    ":preview_id": preview.preview_id,
-    ":preview_hash": artifact.preview_hash,
-    ":base_project_revision": preview.base_project_revision,
-    ":base_authority_epoch": preview.base_authority_epoch,
-    ":base_database_schema_version": preview.base_database_schema_version,
-    ":source_set_hash": preview.source_set_hash,
-    ":change_set_hash": preview.change_set_hash,
-    ":create_count": preview.counts.create,
-    ":update_count": preview.counts.update,
-    ":delete_count": preview.counts.delete,
-    ":preserve_count": preview.counts.preserve,
-    ":unparsed_count": preview.counts.unparsed,
-    ":unresolved_count": preview.counts.unresolved,
-    ":preview_json": canonicalLegacyImportJson(preview),
-    ":backup_sha256": `sha256:${"2".repeat(64)}`,
-    ":backup_schema_version": preview.base_database_schema_version,
-    ":backup_project_revision": preview.base_project_revision,
-    ":backup_authority_epoch": preview.base_authority_epoch,
-    ":resulting_project_revision": context.resultingRevision,
-    ":resulting_authority_epoch": context.resultingAuthorityEpoch,
-  });
-}
-
-function mutation(plan: LegacyImportApplicationPlan): DomainOperationMutation {
-  return {
-    events: [{
-      eventType: "legacy-import.applied",
-      entityType: "legacy-import",
-      entityId: plan.previewId,
-      payload: { previewId: plan.previewId, previewHash: plan.previewHash },
-      destinations: ["projection"],
-    }],
-    projections: [{
-      projectionKey: plan.projectionKeys[0]!,
-      projectionKind: "markdown",
-      rendererVersion: "v1",
-    }],
-  };
-}
-
-function applyImport(
-  artifact: LegacyImportPreviewArtifact,
-  plan: LegacyImportApplicationPlan,
-): WriterResult {
-  let writerResult: WriterResult | undefined;
-  executeImportDomainOperation(importRequest(artifact), (context) => {
-    writerResult = applyLegacyImportApplicationPlan(context, plan);
-    insertImportApplication(context, artifact);
-    return mutation(plan);
-  });
-  assert.ok(writerResult);
-  return writerResult;
 }
 
 function targetHash(targetKind: string, targetKey: string): string {
@@ -858,6 +650,84 @@ test("writer adopts only a missing lifecycle at state version zero without fabri
     /^legacy import lifecycle already exists or was not adopted exactly$/,
   );
   assert.deepEqual(durableSnapshot(), before);
+});
+
+test("writer mints one legacy-attested Waiver for each lifecycle adopted as cancelled and for no other", () => {
+  openFixture();
+  seedHierarchy();
+  db().prepare("INSERT INTO tasks (milestone_id, slice_id, id, title, status) VALUES ('M001', 'S01', 'T02', 'Open', 'pending')")
+    .run();
+  const artifact = emptyPreview();
+  const adopt = (
+    itemKind: "slice" | "task",
+    taskId: string | null,
+    lifecycleStatus: "cancelled" | "ready",
+  ): LegacyImportApplicationPlanInstruction => ({
+    action: "adopt-lifecycle",
+    lifecycleAction: "create",
+    targetKind: `${itemKind}-lifecycle`,
+    targetKey: taskId === null ? "M001/S01" : `M001/S01/${taskId}`,
+    itemKind,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId,
+    lifecycleStatus,
+    changeIds: [`adopt-${itemKind}-${taskId ?? "slice"}`],
+  });
+
+  applyImport(artifact, planFor(artifact, [
+    adopt("slice", null, "cancelled"),
+    adopt("task", "T01", "cancelled"),
+    adopt("task", "T02", "ready"),
+  ]));
+
+  assert.deepEqual(rows(`
+    SELECT lifecycle.item_kind, lifecycle.task_id, waiver.scope, waiver.waiver_status,
+           waiver.requirement_id, waiver.blocker_id, waiver.granted_by_actor_type,
+           operation.operation_type
+    FROM workflow_waivers waiver
+    JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = waiver.lifecycle_id
+    JOIN workflow_operations operation ON operation.operation_id = waiver.operation_id
+    ORDER BY lifecycle.item_kind, lifecycle.task_id
+  `), [
+    {
+      item_kind: "slice", task_id: null, scope: "slice:M001/S01", waiver_status: "active",
+      requirement_id: null, blocker_id: null, granted_by_actor_type: "policy", operation_type: "import.apply",
+    },
+    {
+      item_kind: "task", task_id: "T01", scope: "M001/S01/T01 cancellation", waiver_status: "active",
+      requirement_id: null, blocker_id: null, granted_by_actor_type: "policy", operation_type: "import.apply",
+    },
+  ]);
+});
+
+test("writer seeds a pending Q8 gate for an open slice and no gate for a slice imported as completed", () => {
+  openFixture();
+  seedHierarchy();
+  db().prepare("INSERT INTO slices (milestone_id, id, title, status) VALUES ('M001', 'S02', 'Done', 'complete')")
+    .run();
+  const artifact = emptyPreview();
+  const seed = (sliceId: string, gateStatus: "pending" | "complete"): LegacyImportApplicationPlanInstruction => ({
+    action: "seed-quality-gate",
+    targetKind: "slice-quality-gate",
+    targetKey: `M001/${sliceId}`,
+    milestoneId: "M001",
+    sliceId,
+    gateStatus,
+    changeIds: [`seed-${sliceId}`],
+  });
+
+  const result = applyImport(artifact, planFor(artifact, [seed("S01", "pending"), seed("S02", "complete")]));
+
+  assertInstructionResults(result, [
+    { action: "seed-quality-gate", targetKind: "slice-quality-gate", targetKey: "M001/S01", expectedAffectedRows: 1 },
+    { action: "seed-quality-gate", targetKind: "slice-quality-gate", targetKey: "M001/S02", expectedAffectedRows: 0 },
+  ]);
+  assert.deepEqual(
+    rows("SELECT slice_id, gate_id, scope, status, verdict FROM quality_gates ORDER BY slice_id"),
+    [{ slice_id: "S01", gate_id: "Q8", scope: "slice", status: "pending", verdict: "" }],
+  );
+  assert.equal(count("gate_runs"), 0);
 });
 
 test("writer validates assessment and artifact parents against the exact live hierarchy", () => {

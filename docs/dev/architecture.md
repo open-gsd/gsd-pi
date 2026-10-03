@@ -46,6 +46,8 @@ Before an adopted Milestone records a new validation receipt, validation runs a 
 
 No completion adopts a row on legacy status alone. Slice completion, Milestone validation, and Milestone completion refuse a descendant with no lifecycle row. The `lifecycle.backfill` Domain Operation (`lifecycle-backfill-domain-operation.ts`, run by `/gsd db adopt --apply`) is the one path that adopts every such row; it is an explicit operator step and never runs on database open or migration. See [`/gsd db adopt`](../user-docs/commands.md) for its rules.
 
+An Import Application adopts only the rows in its sealed Preview. A row it adopts as cancelled (legacy `skipped`, `deferred` or `cancelled`) gets the same legacy-attested Waiver as the backfill, so Slice closeout, Milestone closeout and reopen accept it. A slice imported as completed gets no Q8 quality gate row, because the import has no gate evidence; an open imported slice gets a pending one. The import still adopts a completion from the legacy source without the backfill's evidence rule.
+
 Repair happens before validation, not during completion. Descendant lifecycle writes intentionally make older validation receipts stale, so the new pass receipt must be recorded after repair. If a project already has a pass receipt from before this repair, rerun Milestone validation once; do not edit SQLite or lifecycle projections manually.
 
 Milestone queue position is `milestones.sequence`, written by the `milestone.reorder` Domain Operation; `.gsd/QUEUE-ORDER.json` is its render. State derivation never reads that file into the database; the [DB map](../db-map.md) owns the details. All generated `.gsd` artifacts are projections unless an explicit import or recovery command reads them.

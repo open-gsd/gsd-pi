@@ -232,7 +232,11 @@ function expectedInstructionResults(prepared: PreparedApplicationCase): Array<Re
           || row.value["depends_on_slice_id"] === instruction.sliceId)).length;
       return { ...identity, expectedAffectedRows: 0, affectedRows: deleted };
     }
-    if (instruction.action === "preserve") {
+    if (
+      instruction.action === "preserve"
+      // A slice imported as completed gets no Q8 gate row.
+      || (instruction.action === "seed-quality-gate" && instruction.gateStatus === "complete")
+    ) {
       return { ...identity, expectedAffectedRows: 0, affectedRows: 0 };
     }
     return { ...identity, expectedAffectedRows: 1, affectedRows: 1 };

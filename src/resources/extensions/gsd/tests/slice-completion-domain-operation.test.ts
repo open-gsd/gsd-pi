@@ -27,6 +27,7 @@ import {
   settleTaskAttempt,
 } from "../task-execution-domain-operation.ts";
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.ts";
+import { applyImport, emptyPreview, planFor } from "./helpers/legacy-import-writer-harness.ts";
 import {
   grantTaskWaiver,
   recordTaskRequirementDisposition,
@@ -541,6 +542,37 @@ test("Slice completion accepts the legacy-attested Waiver of a backfilled skippe
 
   applyLifecycleBackfill(base);
   const result = completeSlice(validInput("slice-complete/backfilled-skipped-child"));
+
+  assert.equal(result.status, "committed");
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion accepts the legacy-attested Waiver of a skipped child adopted by an Import Application", () => {
+  makeBase();
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Skipped in the legacy source', 'skipped', 3)
+  `);
+  finishTaskWithOptionalEvidence(true);
+  const fence = readDomainOperationFence();
+  const artifact = emptyPreview(fence.revision, fence.authorityEpoch);
+  applyImport(artifact, planFor(artifact, [{
+    action: "adopt-lifecycle",
+    lifecycleAction: "create",
+    targetKind: "task-lifecycle",
+    targetKey: "M001/S01/T03",
+    itemKind: "task",
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T03",
+    lifecycleStatus: "cancelled",
+    changeIds: ["adopt-T03"],
+  }]));
+
+  const result = completeSlice(validInput("slice-complete/import-skipped-child"));
 
   assert.equal(result.status, "committed");
   assert.equal(row(`

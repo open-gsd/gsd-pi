@@ -1102,6 +1102,38 @@ export function grantCancellationWaiver(
   return waiverId;
 }
 
+/**
+ * Insert the one Waiver of a legacy row adopted as cancelled. The legacy
+ * status is the only attestation, so the Waiver covers no requirement.
+ * Closeout accepts it by scope and by the adopting operation type
+ * (lifecycle.backfill or import.apply); reopen revokes it by scope.
+ */
+export function grantLegacyAttestedCancellationWaiver(
+  context: Readonly<DomainOperationContext>,
+  input: {
+    lifecycleId: string;
+    itemKind: LifecycleIdentity["itemKind"];
+    milestoneId: string;
+    sliceId: string | null;
+    taskId: string | null;
+    rationale: string;
+    grantedByActorId: string;
+  },
+): string {
+  const scope = input.itemKind === "milestone"
+    ? `milestone:${input.milestoneId}`
+    : input.itemKind === "slice"
+      ? `slice:${input.milestoneId}/${input.sliceId}`
+      : `${input.milestoneId}/${input.sliceId}/${input.taskId} cancellation`;
+  return grantCancellationWaiver(context, {
+    lifecycleId: input.lifecycleId,
+    scope,
+    rationale: input.rationale,
+    grantedByActorType: "policy",
+    grantedByActorId: input.grantedByActorId,
+  });
+}
+
 /** Revoke every active Waiver for one lifecycle and scope. */
 export function revokeActiveWaivers(
   context: Readonly<DomainOperationContext>,

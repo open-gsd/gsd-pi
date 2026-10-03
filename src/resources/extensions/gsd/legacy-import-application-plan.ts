@@ -98,6 +98,11 @@ export interface LegacyImportApplicationQualityGateInstruction {
   readonly targetKey: string;
   readonly milestoneId: string;
   readonly sliceId: string;
+  /**
+   * "pending" seeds the pending Q8 row of an open slice. "complete" marks a
+   * slice imported as completed: it gets no gate row. The instruction stays
+   * in the sealed plan so retained Applications still validate.
+   */
   readonly gateStatus: "pending" | "complete";
   readonly changeIds: readonly string[];
 }
@@ -919,10 +924,10 @@ export function compileLegacyImportApplicationPlan(value: unknown): LegacyImport
   //   lifecycle claim; explicit status evidence keeps authority. The status
   //   mapping mirrors the planning adoption seam (milestone-planning-persistence):
   //   terminal statuses adopt as-is, in-flight work adopts as "ready".
-  //   #1658: complete-slice requires exactly one Q8 quality gate per slice
-  //   (pending while open — the row plan_slice seeds; complete once closed —
-  //   the state completeSliceHierarchy leaves behind). Derive one Q8 claim per
-  //   created slice, mirroring whichever lifecycle authority won above.
+  //   #1658: an open slice needs the pending Q8 quality gate that plan_slice
+  //   seeds. Derive one Q8 claim per created slice, mirroring whichever
+  //   lifecycle authority won above. The writer seeds a row only for
+  //   "pending"; a slice imported as completed gets no gate row.
   const qualityGateClaims: LegacyImportApplicationQualityGateInstruction[] = [];
   for (const row of rows.values()) {
     if (row.action !== "create") continue;
