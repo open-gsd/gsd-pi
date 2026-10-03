@@ -20,6 +20,8 @@ import {
 } from "../gsd-db.ts";
 import { openWorkflowDatabase } from "../db-workspace.ts";
 import { invalidateAllCaches } from "../cache.ts";
+import { handleDoctor } from "../commands-handlers.ts";
+import { withCommandCwd } from "../commands/context.ts";
 
 function runGit(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" });
@@ -120,4 +122,24 @@ test("plain doctor changes no file, no git state and no row", async (t) => {
   assert.equal(runGit(["status", "--porcelain"], base), gitBefore);
   assert.ok(existsSync(join(base, ".git", "MERGE_HEAD")));
   assert.deepEqual(snapshotRows(), rowsBefore);
+});
+
+test("plain /gsd doctor does not create a database", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-no-create-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  closeDatabase();
+
+  const notifications: string[] = [];
+  const ctx = { ui: { notify: (message: string) => notifications.push(message) } } as any;
+  await withCommandCwd(base, async () => {
+    await handleDoctor("--json", ctx, {} as any);
+    await handleDoctor("--dry-run --json", ctx, {} as any);
+  });
+
+  assert.equal(notifications.length, 2, "both runs report");
+  assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false);
 });

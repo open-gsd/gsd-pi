@@ -1,15 +1,15 @@
-import { existsSync, mkdirSync, lstatSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, lstatSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 
-import { loadFile, parseSummary, saveFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
-import { getMilestone, getMilestoneSlices, getPlanMilestoneRecoveryBlock, getSliceTasks } from "./gsd-db.js";
-import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, legacyMilestonesDir, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, resolveGsdRootFile, relMilestonePath } from "./paths.js";
+import { loadFile, parseSummary, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
+import { getActiveRequirements, getMilestone, getMilestoneSlices, getPlanMilestoneRecoveryBlock, getSliceTasks } from "./gsd-db.js";
+import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, legacyMilestonesDir, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, relMilestonePath } from "./paths.js";
 import { findMilestoneIds } from "./milestone-ids.js";
 import { deriveState } from "./state.js";
 import { isClosedStatus, isInactiveStatus, isSkippedForDispatch } from "./status-guards.js";
 
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
-import type { RoadmapSliceEntry } from "./types.js";
+import type { Requirement, RoadmapSliceEntry } from "./types.js";
 import { runProviderChecks } from "./doctor-providers.js";
 import { validateTitle } from "./validation.js";
 
@@ -18,18 +18,15 @@ function matchesScope(unitId: string, scope?: string): boolean {
   return unitId === scope || unitId.startsWith(`${scope}/`);
 }
 
-function auditRequirements(content: string | null): DoctorIssue[] {
-  if (!content) return [];
+/** Audit the requirement rows of the database. REQUIREMENTS.md is a projection and is not read. */
+function auditRequirements(requirements: readonly Requirement[]): DoctorIssue[] {
   const issues: DoctorIssue[] = [];
-  const blocks = content.split(/^###\s+/m).slice(1);
 
-  for (const block of blocks) {
-    const idMatch = block.match(/^(R\d+)/);
-    if (!idMatch) continue;
-    const requirementId = idMatch[1];
-    const status = block.match(/^-\s+Status:\s+(.+)$/m)?.[1]?.trim().toLowerCase() ?? "";
-    const owner = block.match(/^-\s+Primary owning slice:\s+(.+)$/m)?.[1]?.trim().toLowerCase() ?? "";
-    const notes = block.match(/^-\s+Notes:\s+(.+)$/m)?.[1]?.trim().toLowerCase() ?? "";
+  for (const requirement of requirements) {
+    const requirementId = requirement.id;
+    const status = requirement.status.trim().toLowerCase();
+    const owner = requirement.primary_owner.trim().toLowerCase();
+    const notes = requirement.notes.trim();
 
     if (status === "active" && (!owner || owner === "none" || owner === "none yet")) {
       // #4414: Downgrade to warning. A newly-created requirement has
@@ -96,9 +93,7 @@ export async function checkGsdStateHealth(
   },
 ): Promise<void> {
   const { fix, shouldFix, scope } = options;
-  const requirementsPath = resolveGsdRootFile(basePath, "REQUIREMENTS");
-  const requirementsContent = await loadFile(requirementsPath);
-  issues.push(...auditRequirements(requirementsContent));
+  issues.push(...auditRequirements(getActiveRequirements()));
 
   const state = await deriveState(basePath);
 
@@ -148,35 +143,19 @@ export async function checkGsdStateHealth(
     const milestonePath = resolveMilestonePath(basePath, milestoneId);
 
     // Validate milestone title for delimiter characters that break state documents.
+    // The title is a database value; an edit of the ROADMAP projection would
+    // not change it, so doctor only reports.
     const milestoneTitleIssue = validateTitle(milestone.title);
     if (milestoneTitleIssue) {
-      const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-      let wasFixed = false;
-      if (shouldFix("delimiter_in_title") && roadmapFile) {
-        try {
-          const raw = readFileSync(roadmapFile, "utf-8");
-          // Replace em/en dashes with " - " in the H1 title line only
-          const sanitized = raw.replace(/^(# .*)$/m, (line) =>
-            line.replace(/[\u2014\u2013]/g, "-"),
-          );
-          if (sanitized !== raw) {
-            await saveFile(roadmapFile, sanitized);
-            fixesApplied.push(`sanitized delimiter characters in ${milestoneId} title`);
-            wasFixed = true;
-          }
-        } catch { /* non-fatal — report the warning below */ }
-      }
-      if (!wasFixed) {
-        issues.push({
-          severity: "warning",
-          code: "delimiter_in_title",
-          scope: "milestone",
-          unitId: milestoneId,
-          message: `Milestone ${milestoneId} ${milestoneTitleIssue}. Rename the milestone to remove these characters to prevent state corruption.`,
-          file: relMilestoneFile(basePath, milestoneId, "ROADMAP"),
-          fixable: true,
-        });
-      }
+      issues.push({
+        severity: "warning",
+        code: "delimiter_in_title",
+        scope: "milestone",
+        unitId: milestoneId,
+        message: `Milestone ${milestoneId} ${milestoneTitleIssue}. Rename the milestone to remove these characters to prevent state corruption.`,
+        file: relMilestoneFile(basePath, milestoneId, "ROADMAP"),
+        fixable: false,
+      });
     }
 
     const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
@@ -315,9 +294,6 @@ export async function checkGsdStateHealth(
       // Validate slice title for delimiter characters.
       const sliceTitleIssue = validateTitle(slice.title);
       if (sliceTitleIssue) {
-        // Slice titles live inside the roadmap H1/checkbox lines — the milestone-level
-        // fix above already sanitizes the roadmap file. For slices we only report, because
-        // the title comes from the checkbox text and requires careful regex to fix safely.
         issues.push({
           severity: "warning",
           code: "delimiter_in_title",

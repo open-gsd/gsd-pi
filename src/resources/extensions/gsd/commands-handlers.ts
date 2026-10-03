@@ -12,7 +12,7 @@ import { createRequire } from "node:module";
 import { join, resolve as resolvePath, sep, win32 as pathWin32 } from "node:path";
 import { homedir } from "node:os";
 import { deriveState } from "./state.js";
-import { gsdRoot } from "./paths.js";
+import { gsdRoot, resolveGsdPathContract } from "./paths.js";
 import { gsdHome } from "./gsd-home.js";
 import { appendCapture, hasPendingCaptures, loadPendingCaptures } from "./captures.js";
 import { registerOverride } from "./overrides.js";
@@ -263,10 +263,14 @@ export async function handleDoctor(args: string, ctx: ExtensionCommandContext, p
   const { jsonMode, dryRun, fixFlag, includeBuild, includeTests, mode, requestedScope } = parseDoctorArgs(args);
   const scope = await selectDoctorScope(projectRoot(), requestedScope);
   const effectiveScope = mode === "audit" ? requestedScope : scope;
-  const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
-  await ensureDbOpen(projectRoot());
+  const repairs = (mode === "fix" || mode === "heal" || fixFlag) && !dryRun;
+  // Only a repair run may create the database. A plain or dry run opens it when it exists.
+  if (repairs || existsSync(resolveGsdPathContract(projectRoot()).projectDb)) {
+    const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
+    await ensureDbOpen(projectRoot());
+  }
   const report = await runGSDDoctor(projectRoot(), {
-    fix: mode === "fix" || mode === "heal" || dryRun || fixFlag,
+    fix: repairs || dryRun,
     dryRun,
     scope: effectiveScope,
     includeBuild,
