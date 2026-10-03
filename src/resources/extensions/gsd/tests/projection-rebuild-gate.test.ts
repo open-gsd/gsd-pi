@@ -276,6 +276,42 @@ describe("G1: projection rebuild from the database alone", () => {
     );
   });
 
+  test("a slice SUMMARY replay does not write over the milestone SUMMARY when the phase directory is missing", async () => {
+    fixture = await createWorkflowAuthorityFixture();
+    const base = fixture.root;
+    const gsd = join(base, ".gsd");
+    await seedMatrix(base);
+    const db = _getAdapter();
+    assert.ok(db, "database must be open");
+    // S01 of M001: the plan-number-only slice name 01-SUMMARY.md is also the milestone SUMMARY name.
+    const milestoneSummary = `${PHASE}/01-SUMMARY.md`;
+    db.prepare("UPDATE milestones SET status = 'complete' WHERE id = 'M001'").run();
+    insertArtifact({
+      path: milestoneSummary,
+      artifact_type: "SUMMARY",
+      milestone_id: "M001",
+      slice_id: null,
+      task_id: null,
+      full_content: "---\nid: M001\n---\n\n# M001: Milestone summary\n",
+    });
+    // The rebuild opens the database again, so the adapter is read at each call.
+    const artifactRows = () => _getAdapter()!.prepare(
+      "SELECT path, artifact_type, slice_id, full_content FROM artifacts ORDER BY path",
+    ).all();
+    assert.deepEqual((await rebuildMarkdownProjectionsFromDb(base)).errors, []);
+    const control = bytesOf(markdownFiles(gsd));
+    const controlRows = artifactRows();
+    assert.match(control[milestoneSummary] ?? "", /# M001: Milestone summary/);
+    assert.match(control[`${PHASE}/01-01-SUMMARY.md`] ?? "", /# S01: Completed prerequisite/);
+
+    rmSync(join(gsd, "phases"), { recursive: true, force: true });
+    assert.deepEqual((await rebuildMarkdownProjectionsFromDb(base)).errors, []);
+
+    assert.deepEqual(bytesOf(markdownFiles(gsd)), control);
+    assert.deepEqual(artifactRows(), controlRows, "the rebuild changes no artifact row");
+    assert.equal(existsSync(join(gsd, "quarantine")), false, "the rebuild quarantines none of its own files");
+  });
+
   test("the .planning projection has no wall-clock field, and is not restored without the marker file", async () => {
     fixture = await createWorkflowAuthorityFixture();
     const base = fixture.root;

@@ -1021,7 +1021,8 @@ function milestoneArtifactWrites(basePath: string, milestoneId: string): Artifac
 
 /** The slice-scoped artifact rows that the render writes, each with its target file. */
 function sliceArtifactWrites(basePath: string, milestoneId: string, sliceId: string): ArtifactWrite[] {
-  const sliceComplete = toStatus(getSlice(milestoneId, sliceId)?.status ?? "") === "complete";
+  const slice = getSlice(milestoneId, sliceId);
+  const sliceComplete = toStatus(slice?.status ?? "") === "complete";
   const replanned = latestSliceReplan(milestoneId, sliceId) !== null;
   return getSliceScopedArtifacts(milestoneId, sliceId)
     .filter((artifact) => {
@@ -1030,6 +1031,11 @@ function sliceArtifactWrites(basePath: string, milestoneId: string, sliceId: str
       // The replan event is the structured source of REPLAN; its row is not replayed.
       if (artifactType === "REPLAN" && replanned) return false;
       if ((artifactType === "SUMMARY" || artifactType === "UAT") && !sliceComplete) return false;
+      // The slice row is the structured source of SUMMARY and UAT (renderSliceSummary).
+      // A replay can also resolve to the milestone SUMMARY file: for S01 of M001,
+      // the plan-number-only name 01-SUMMARY.md is the milestone file name.
+      if (artifactType === "SUMMARY" && slice?.full_summary_md) return false;
+      if (artifactType === "UAT" && slice?.full_uat_md) return false;
       return !(artifactType === "PLAN" && isAutoRecoveryPlaceholderPlan(artifact.full_content));
     })
     .map((artifact) => {
