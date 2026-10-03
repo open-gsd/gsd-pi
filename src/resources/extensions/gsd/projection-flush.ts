@@ -5,7 +5,7 @@
 // renderer yet (STATE.md, QUEUE.md, root ROADMAP), then wakes the Projection
 // Worker to deliver the durable work the mutation enqueued.
 
-import { drainProjectionWork } from "./projection-worker.js";
+import { drainProjectionWork, projectionTargetCoversMilestone } from "./projection-worker.js";
 import { renderAllProjections } from "./workflow-projections.js";
 
 export interface ProjectionFlushScope {
@@ -44,11 +44,11 @@ export async function flushWorkflowProjections(
     ? await renderAllProjections(basePath, scope.milestoneId)
     : null;
   const drained = await drainProjectionWork(basePath);
-  // The drain covers the whole project; only this milestone's failures make this flush stale.
-  const ownTargets = new Set([`milestone/${scope.milestoneId.toLowerCase()}`, "all"]);
+  // The drain covers the whole project; only failures that touch this milestone make this flush stale.
+  const ownFailure = drained.failedTargets.some((target) => projectionTargetCoversMilestone(target, scope.milestoneId));
   return {
     milestoneId: scope.milestoneId,
-    stale: rendered.stale || superseded || repaired?.stale === true || drained.failedTargets.some((target) => ownTargets.has(target)),
+    stale: rendered.stale || superseded || repaired?.stale === true || ownFailure,
     superseded,
   };
 }

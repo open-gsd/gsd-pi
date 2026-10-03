@@ -1,7 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: Single-writer transitions for durable Projection Work delivery.
 
+import { executeDomainOperation } from "../domain-operation.js";
 import { getDbOrNull, immediateTransaction } from "../engine.js";
+import { readDomainOperationFence } from "./lifecycle-commands.js";
 
 /** A current (unsuperseded) Projection Work head. */
 export interface ProjectionWorkHead {
@@ -183,4 +185,34 @@ export function settleFailedProjectionWork(
     ":settled_at": settledAt,
     ":retry_at": laterIso(settledAt, retryAt),
   });
+}
+
+/**
+ * Enqueue a new head for each projection in one Domain Operation, so the
+ * Projection Worker renders it again. A delivery row cannot leave dead_letter,
+ * so the new head supersedes it. Does nothing for an empty list.
+ */
+export function requeueProjectionWork(
+  projections: ReadonlyArray<{ projectionKey: string; projectionKind: string }>,
+): void {
+  if (projections.length === 0) return;
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "projection.requeue",
+    idempotencyKey: `projection-requeue/${fence.revision}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "operator",
+    sourceTransport: "internal",
+    payload: { projectionKeys: projections.map((projection) => projection.projectionKey) },
+  }, () => ({
+    events: projections.map((projection) => ({
+      eventType: "projection.requeued",
+      entityType: "projection",
+      entityId: projection.projectionKey,
+      payload: { projectionKind: projection.projectionKind },
+      destinations: ["db"],
+    })),
+    projections: projections.map((projection) => ({ ...projection, rendererVersion: "1" })),
+  }));
 }

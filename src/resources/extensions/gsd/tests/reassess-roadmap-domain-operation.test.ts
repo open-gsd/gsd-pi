@@ -2,7 +2,7 @@
 // File Purpose: Domain Operation contracts for roadmap reassessment.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -633,17 +633,7 @@ test("removing a slice preserves externally edited plan projections", async () =
     sliceChanges: { modified: [], added: [], removed: ["S02"] },
   }, base, invocation("reassess/preserve-external-plan"));
   assert.ok(!("error" in result));
-  // The Projection Worker renders the plan from the database again; the
-  // managed write keeps the external bytes in quarantine first.
-  const quarantine = join(base, ".gsd", "quarantine");
-  assert.ok(
-    (readdirSync(quarantine, { recursive: true }) as string[])
-      .map((entry) => join(quarantine, entry))
-      .filter((path) => statSync(path).isFile())
-      .some((path) => readFileSync(path, "utf8") === "# Manually maintained plan\n"),
-    "the externally edited plan is preserved in quarantine",
-  );
-  assert.notEqual(readFileSync(planned.planPath, "utf8"), "# Manually maintained plan\n");
+  assert.equal(readFileSync(planned.planPath, "utf8"), "# Manually maintained plan\n");
 });
 
 test("removing a slice rejects completed descendants without residue", async () => {

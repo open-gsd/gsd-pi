@@ -2,12 +2,12 @@
 // File Purpose: Deep module owning projection observation, preservation, rendering, and durable delivery.
 
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 
-import { collectRenderedProjectionFiles } from "./compat/compat-marker.js";
+import { collectRenderedProjectionFiles, noteRenderedProjectionFile } from "./compat/compat-marker.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
-import { regenerateDecisionsMarkdown } from "./db-writer.js";
+import { regenerateDecisionsMarkdown, regenerateRequirementsMarkdown } from "./db-writer.js";
 import { milestoneLeaseTtlSeconds } from "./db/milestone-leases.js";
 import { getRuntimeKv, setRuntimeKv } from "./db/runtime-kv.js";
 import {
@@ -16,13 +16,21 @@ import {
   listDueProjectionWork,
   listExpiredProjectionClaims,
   listProjectionWorkHeads,
+  requeueProjectionWork,
   settleFailedProjectionWork,
   settleRenderedProjectionWork,
   type ProjectionWorkClaim,
 } from "./db/writers/projection-work-delivery.js";
-import { getAllMilestones } from "./gsd-db.js";
+import { getAllMilestones, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
 import { renderKnowledgeProjection } from "./knowledge-projection.js";
-import { renderAllFromDb, renderMilestoneFromDb, type RenderAllResult } from "./markdown-renderer.js";
+import {
+  renderAllFromDb,
+  renderMilestoneFilesFromDb,
+  renderMilestoneFromDb,
+  renderSliceFilesFromDb,
+  renderTaskFilesFromDb,
+  type RenderAllResult,
+} from "./markdown-renderer.js";
 import { gsdProjectionRoot, gsdRoot, normalizeRealPath, resolveGsdPathContract } from "./paths.js";
 import {
   preserveProjectionEvidence,
@@ -37,6 +45,7 @@ import {
 import { PROJECTION_LOCK_TRANSIENT_BACKOFF_MS } from "./recovery-policy.js";
 import { deriveState, invalidateStateCache } from "./state.js";
 import { detectArtifactDbDrift } from "./state-reconciliation/drift/artifact-db.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 export interface RebuildMarkdownProjectionsResult {
   rendered: number;
@@ -52,7 +61,7 @@ export interface ProjectionDrainResult {
   /** Projection Work rows settled as rendered at the project root. */
   delivered: number;
   errors: string[];
-  /** Renderer targets (for example milestone/m001) that failed in this drain. */
+  /** Renderer targets (for example hierarchy/m001/s01) that failed in this drain. */
   failedTargets: string[];
 }
 
@@ -62,44 +71,87 @@ export interface ProjectionRenderTarget {
   render: (root: string) => Promise<RenderAllResult | void>;
 }
 
-// Kinds whose operations change only hierarchy rows of one milestone. The
-// milestone file set (roadmap, artifacts, plans, summaries) is their projection.
-const MILESTONE_SCOPED_KINDS = new Set([
+// Kinds whose key names a milestone, slice, or task after its first segment.
+// The projection of such a row is the file set of that one item.
+const HIERARCHY_KINDS = new Set([
   MILESTONE_LIFECYCLE_PROJECTION_KIND,
   SLICE_LIFECYCLE_PROJECTION_KIND,
   TASK_LIFECYCLE_PROJECTION_KIND,
   "task-execution",
+  "task-recovery",
+  "task-verification",
   "lifecycle-shadow-repair",
 ]);
 
-function milestoneTarget(segment: string | undefined): ProjectionRenderTarget | null {
-  if (!segment) return null;
+// Kinds whose key names a milestone and then an id that is not a slice.
+const MILESTONE_KINDS = new Set(["milestone-validation", "milestone-subjective-uat"]);
+
+// Kinds whose operations change no hierarchy file; STATE.md is their projection.
+const STATE_KINDS = new Set(["state", "milestone-status", "migration-audit"]);
+
+/** Key prefix of the doctor repair work that renders every file of one milestone. */
+export const MILESTONE_REBUILD_KEY_PREFIX = "rebuild/";
+
+function findMilestone(segment: string) {
+  const milestone = getAllMilestones().find((row) => row.id.toLowerCase() === segment);
+  if (!milestone) throw new Error(`milestone ${segment} is not in the database`);
+  return milestone;
+}
+
+/**
+ * The file set of one milestone, slice, or task. An id that is not in the
+ * database (for example a task that a replan removed) falls back to the file
+ * set of its parent, which lists it.
+ */
+function hierarchyTarget(ids: string[]): ProjectionRenderTarget | null {
+  const [milestoneSegment, sliceSegment, taskSegment] = ids;
+  if (!milestoneSegment) return null;
   return {
-    target: `milestone/${segment}`,
+    target: ["hierarchy", ...ids.slice(0, 3)].join("/"),
     render: async (root) => {
-      const milestone = getAllMilestones().find((row) => row.id.toLowerCase() === segment);
-      if (!milestone) throw new Error(`milestone ${segment} is not in the database`);
-      return renderMilestoneFromDb(root, milestone.id);
+      const milestone = findMilestone(milestoneSegment);
+      const slice = getMilestoneSlices(milestone.id).find((row) => row.id.toLowerCase() === sliceSegment);
+      if (!slice) return renderMilestoneFilesFromDb(root, milestone.id);
+      const task = getSliceTasks(milestone.id, slice.id).find((row) => row.id.toLowerCase() === taskSegment);
+      if (!task) return renderSliceFilesFromDb(root, milestone.id, slice.id);
+      return renderTaskFilesFromDb(root, milestone.id, slice.id, task.id);
     },
   };
 }
 
+async function renderStateFile(root: string): Promise<void> {
+  if ((await renderStateProjection(root)).stale) throw new Error("STATE.md was not rendered");
+  const statePath = join(gsdRoot(root), "STATE.md");
+  noteRenderedProjectionFile(statePath, readFileSync(statePath, "utf-8"));
+}
+
 /**
- * Kind-to-renderer registry. Returns null when no renderer owns the row's kind
- * and key: such a row is never claimed and stays pending, so it is never
- * reported as rendered. Kinds without a renderer today: state, milestone-status,
- * milestone-validation, milestone-subjective-uat, task-recovery,
- * task-verification, migration-audit, and the planning/requirements key.
+ * Kind-to-renderer registry. Each kind that production code enqueues has a
+ * renderer. Returns null for any other kind or key: such a row is never
+ * claimed and stays pending, so it is never reported as rendered.
  */
 export function projectionRendererFor(kind: string, key: string): ProjectionRenderTarget | null {
   const segments = key.split("/");
-  if (MILESTONE_SCOPED_KINDS.has(kind)) return milestoneTarget(segments[1]);
+  if (HIERARCHY_KINDS.has(kind)) return hierarchyTarget(segments.slice(1));
+  if (MILESTONE_KINDS.has(kind)) return hierarchyTarget(segments.slice(1, 2));
+  if (STATE_KINDS.has(kind)) return { target: "state", render: renderStateFile };
   if (kind !== MARKDOWN_PROJECTION_KIND) return null;
   if (segments[0] === "legacy-import") return { target: "all", render: renderAllFromDb };
+  if (key.startsWith(MILESTONE_REBUILD_KEY_PREFIX)) {
+    if (!segments[1]) return null;
+    return { target: key, render: (root) => renderMilestoneFromDb(root, findMilestone(segments[1]!).id) };
+  }
   if (segments[0] !== "planning") return null;
   if (key === "planning/decisions") return { target: "decisions", render: regenerateDecisionsMarkdown };
-  if (key === "planning/requirements") return null;
-  return milestoneTarget(segments[1]);
+  if (key === "planning/requirements") return { target: "requirements", render: regenerateRequirementsMarkdown };
+  return hierarchyTarget(segments.slice(1));
+}
+
+/** True when the render target writes files of the milestone, or files of the whole project. */
+export function projectionTargetCoversMilestone(target: string, milestoneId: string): boolean {
+  const segments = target.split("/");
+  if (segments[0] !== "hierarchy" && segments[0] !== "rebuild") return target === "all" || target === "state";
+  return segments[1] === milestoneId.toLowerCase();
 }
 
 function realPath(path: string): string {
@@ -156,37 +208,60 @@ function recordFailure(claim: ProjectionWorkClaim, error: string, now: Date): vo
 }
 
 const ROOT_RECEIPTS_KEY = "projection-root-receipts";
-type RootReceipts = Record<string, string>;
+const ALL_DELIVERY_STATES = ["pending", "claimed", "rendered", "dead_letter"] as const;
+
+/** A failed render of one row at a derived root. An empty retry time means it stopped retrying. */
+interface RootFailure {
+  attemptCount: number;
+  lastError: string;
+  nextAttemptAt: string;
+}
+/** Per Projection Work id: the file-set hash rendered at the root, or the failure of the last attempt. */
+type RootReceipts = Record<string, string | RootFailure>;
 
 /**
  * A worktree holds a derived copy of the project-root projections. Render each
- * current rendered row there once and keep a receipt (row id to file-set hash)
- * for that root. Receipts are soft state: losing one only causes a re-render.
+ * current row there once and keep a receipt (row id to file-set hash) for that
+ * root. A failed render is kept as a failure receipt and retried on the same
+ * schedule as project-root work. The worktree copy does not wait for the
+ * project-root render of the row.
  */
-async function refreshDerivedRoot(root: string, result: ProjectionDrainResult): Promise<void> {
+async function refreshDerivedRoot(root: string, result: ProjectionDrainResult, now: Date): Promise<void> {
   const rootId = realPath(root);
   const receipts = getRuntimeKv<RootReceipts>("global", rootId, ROOT_RECEIPTS_KEY) ?? {};
   const current: RootReceipts = {};
   const renders = new Map<string, Promise<string>>();
-  for (const head of listProjectionWorkHeads(["rendered"])) {
+  for (const head of listProjectionWorkHeads(ALL_DELIVERY_STATES)) {
     const id = head.projection_work_id;
-    if (receipts[id]) {
-      current[id] = receipts[id]!;
+    const prior = receipts[id];
+    if (typeof prior === "string") {
+      current[id] = prior;
       continue;
     }
     const renderer = projectionRendererFor(head.projection_kind, head.projection_key);
     if (!renderer) continue;
+    if (prior && (prior.nextAttemptAt === "" || Date.parse(prior.nextAttemptAt) > now.getTime())) {
+      current[id] = prior;
+      continue;
+    }
     try {
       current[id] = await renderTarget(renders, root, renderer);
     } catch (error) {
-      result.errors.push(`${head.projection_key} at ${root}: ${(error as Error).message}`);
+      const lastError = (error as Error).message;
+      const attemptCount = (prior?.attemptCount ?? 0) + 1;
+      current[id] = {
+        attemptCount,
+        lastError,
+        nextAttemptAt: retryAt(attemptCount, now)?.toISOString() ?? "",
+      };
+      result.errors.push(`${head.projection_key} at ${root}: ${lastError}`);
       result.failedTargets.push(renderer.target);
     }
   }
   setRuntimeKv("global", rootId, ROOT_RECEIPTS_KEY, current);
 }
 
-/** Rendered-state receipts of one derived root (worktree), by Projection Work id. */
+/** Receipts of one derived root (worktree), by Projection Work id: a file-set hash, or the last failure. */
 export function readProjectionRootReceipts(root: string): RootReceipts {
   return getRuntimeKv<RootReceipts>("global", realPath(root), ROOT_RECEIPTS_KEY) ?? {};
 }
@@ -232,8 +307,49 @@ export async function drainProjectionWork(
     }
   }
 
-  if (isWorktree) await refreshDerivedRoot(workRoot, result);
+  if (isWorktree) await refreshDerivedRoot(workRoot, result, now);
   return result;
+}
+
+/**
+ * Repair delivery: enqueue new work for each dead-lettered row and for the
+ * whole file set of each given milestone, forget the failures of the worktree
+ * copy, then drain. A row that renders this time is no longer dead-lettered.
+ */
+export async function repairProjectionWork(
+  basePath: string,
+  milestoneIds: readonly string[] = [],
+): Promise<ProjectionDrainResult> {
+  const requeue = [
+    ...listProjectionWorkHeads(["dead_letter"])
+      .filter((head) => projectionRendererFor(head.projection_kind, head.projection_key) !== null)
+      .map((head) => ({ projectionKey: head.projection_key, projectionKind: head.projection_kind })),
+    ...milestoneIds.map((id) => ({
+      projectionKey: `${MILESTONE_REBUILD_KEY_PREFIX}${id.toLowerCase()}`,
+      projectionKind: MARKDOWN_PROJECTION_KIND,
+    })),
+  ];
+  const notRequeued: ProjectionDrainResult = { delivered: 0, errors: [], failedTargets: [] };
+  try {
+    requeueProjectionWork(requeue);
+  } catch (error) {
+    notRequeued.errors.push(`Projection Work was not requeued: ${(error as Error).message}`);
+    notRequeued.failedTargets.push(...requeue.map((projection) => projection.projectionKey));
+  }
+  const { workRoot, isWorktree } = resolveGsdPathContract(basePath);
+  if (isWorktree) {
+    const rootId = realPath(workRoot);
+    const receipts = getRuntimeKv<RootReceipts>("global", rootId, ROOT_RECEIPTS_KEY) ?? {};
+    setRuntimeKv("global", rootId, ROOT_RECEIPTS_KEY, Object.fromEntries(
+      Object.entries(receipts).filter(([, receipt]) => typeof receipt === "string"),
+    ));
+  }
+  const drained = await drainProjectionWork(basePath);
+  return {
+    delivered: drained.delivered,
+    errors: [...notRequeued.errors, ...drained.errors],
+    failedTargets: [...notRequeued.failedTargets, ...drained.failedTargets],
+  };
 }
 
 export interface ProjectionWorkBacklogEntry {
@@ -245,11 +361,17 @@ export interface ProjectionWorkBacklogEntry {
   nextAttemptAt: string;
   /** False when no registered renderer owns the row; it stays pending. */
   hasRenderer: boolean;
+  /** Set when the entry is the failed worktree copy of the row, not the project-root delivery. */
+  root?: string;
 }
 
-/** Current Projection Work that is not rendered: pending, in flight, or dead-lettered. */
-export function readProjectionWorkBacklog(): ProjectionWorkBacklogEntry[] {
-  return listProjectionWorkHeads(["pending", "claimed", "dead_letter"]).map((head) => ({
+/**
+ * Current Projection Work that is not rendered: pending, in flight, or
+ * dead-lettered at the project root, and, for a worktree `basePath`, each row
+ * whose worktree copy failed.
+ */
+export function readProjectionWorkBacklog(basePath?: string): ProjectionWorkBacklogEntry[] {
+  const entries: ProjectionWorkBacklogEntry[] = listProjectionWorkHeads(["pending", "claimed", "dead_letter"]).map((head) => ({
     projectionKey: head.projection_key,
     projectionKind: head.projection_kind,
     deliveryState: head.delivery_state,
@@ -258,6 +380,25 @@ export function readProjectionWorkBacklog(): ProjectionWorkBacklogEntry[] {
     nextAttemptAt: head.next_attempt_at,
     hasRenderer: projectionRendererFor(head.projection_kind, head.projection_key) !== null,
   }));
+  if (!basePath) return entries;
+  const { workRoot, isWorktree } = resolveGsdPathContract(basePath);
+  if (!isWorktree) return entries;
+  const receipts = readProjectionRootReceipts(workRoot);
+  for (const head of listProjectionWorkHeads(ALL_DELIVERY_STATES)) {
+    const failure = receipts[head.projection_work_id];
+    if (!failure || typeof failure === "string") continue;
+    entries.push({
+      projectionKey: head.projection_key,
+      projectionKind: head.projection_kind,
+      deliveryState: failure.nextAttemptAt === "" ? "dead_letter" : "pending",
+      attemptCount: failure.attemptCount,
+      lastError: failure.lastError,
+      nextAttemptAt: failure.nextAttemptAt,
+      hasRenderer: true,
+      root: workRoot,
+    });
+  }
+  return entries;
 }
 
 function resolveDiskArtifactPath(basePath: string, artifactPath: string): string {
@@ -300,7 +441,7 @@ export function describeHeldProjectionChanges(basePath: string, held: readonly s
   ].join(" ");
 }
 
-/** Rebuild all readable projections from database authority, then drain durable work. */
+/** Rebuild all readable projections from database authority, then repair and drain durable work. */
 export async function rebuildMarkdownProjectionsFromDb(
   basePath: string,
 ): Promise<RebuildMarkdownProjectionsResult> {
@@ -324,7 +465,7 @@ export async function rebuildMarkdownProjectionsFromDb(
   } catch (err) {
     rendered.errors.push(`knowledge: ${(err as Error).message}`);
   }
-  const drained = await drainProjectionWork(basePath);
+  const drained = await repairProjectionWork(basePath);
   invalidateStateCache();
 
   return {

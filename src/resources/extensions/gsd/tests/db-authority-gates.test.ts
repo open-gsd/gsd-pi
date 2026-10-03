@@ -367,10 +367,8 @@ describe("G5: a render failure after commit does not lose the projection", () =>
       "project/authority",
     );
     await drainProjectionWork(base, { now: new Date(Date.now() + 86_400_000) });
-    expectedFail("P08", () => {
-      assert.equal(work("project/authority").delivery_state, "rendered");
-      assert.ok(existsSync(join(base, ".gsd", "STATE.md")));
-    });
+    assert.equal(work("project/authority").delivery_state, "rendered");
+    assert.ok(existsSync(join(base, ".gsd", "STATE.md")));
   });
 });
 

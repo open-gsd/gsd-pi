@@ -422,32 +422,8 @@ export async function saveRequirementToDb(
     });
     const { id } = txResult;
 
-    // Fetch all requirements for full file regeneration
-    const adapter = db._getAdapter();
-    let allRequirements: Requirement[] = [];
-    if (adapter) {
-      const rows = adapter.prepare('SELECT * FROM requirements ORDER BY id').all();
-      allRequirements = rows.map(row => ({
-        id: row['id'] as string,
-        class: row['class'] as string,
-        status: row['status'] as string,
-        description: row['description'] as string,
-        why: row['why'] as string,
-        source: row['source'] as string,
-        primary_owner: row['primary_owner'] as string,
-        supporting_slices: row['supporting_slices'] as string,
-        validation: row['validation'] as string,
-        notes: row['notes'] as string,
-        full_content: row['full_content'] as string,
-        superseded_by: (row['superseded_by'] as string) ?? null,
-      }));
-    }
-
-    const nonSuperseded = allRequirements.filter(r => r.superseded_by == null);
-    const md = generateRequirementsMd(nonSuperseded);
-    const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
     try {
-      await writeGsdProjection(basePath, filePath, md);
+      await regenerateRequirementsMarkdown(basePath);
     } catch (diskErr) {
       logWarning('projection', 'REQUIREMENTS.md projection write failed; DB requirement remains committed', { fn: 'saveRequirementToDb', id, error: String((diskErr as Error).message) });
     }
@@ -516,6 +492,37 @@ export async function regenerateDecisionsMarkdown(basePath: string): Promise<voi
   const intent = await readDecisionsProjectionIntent(basePath);
   if (!intent) return;
   await writeGsdProjection(basePath, intent.path, intent.content);
+}
+
+/**
+ * Re-project root REQUIREMENTS.md from the requirement rows, with no
+ * requirement being added or changed. Writes nothing when there are no
+ * requirement rows and no file.
+ */
+export async function regenerateRequirementsMarkdown(basePath: string): Promise<void> {
+  const db = await import('./gsd-db.js');
+  const rows = db._getAdapter()?.prepare('SELECT * FROM requirements ORDER BY id').all() ?? [];
+  const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
+  if (rows.length === 0 && !existsSync(filePath)) return;
+  const requirements: Requirement[] = rows.map(row => ({
+    id: row['id'] as string,
+    class: row['class'] as string,
+    status: row['status'] as string,
+    description: row['description'] as string,
+    why: row['why'] as string,
+    source: row['source'] as string,
+    primary_owner: row['primary_owner'] as string,
+    supporting_slices: row['supporting_slices'] as string,
+    validation: row['validation'] as string,
+    notes: row['notes'] as string,
+    full_content: row['full_content'] as string,
+    superseded_by: (row['superseded_by'] as string) ?? null,
+  }));
+  await writeGsdProjection(
+    basePath,
+    filePath,
+    generateRequirementsMd(requirements.filter(r => r.superseded_by == null)),
+  );
 }
 
 // ─── Save Decision to DB + Regenerate Markdown ────────────────────────────
@@ -755,35 +762,8 @@ export async function updateRequirementInDb(
 
     db.upsertRequirement(merged);
 
-    // Fetch ALL requirements (including superseded) for full file regeneration
-    const adapter = db._getAdapter();
-    let allRequirements: Requirement[] = [];
-    if (adapter) {
-      const rows = adapter.prepare('SELECT * FROM requirements ORDER BY id').all();
-      allRequirements = rows.map(row => ({
-        id: row['id'] as string,
-        class: row['class'] as string,
-        status: row['status'] as string,
-        description: row['description'] as string,
-        why: row['why'] as string,
-        source: row['source'] as string,
-        primary_owner: row['primary_owner'] as string,
-        supporting_slices: row['supporting_slices'] as string,
-        validation: row['validation'] as string,
-        notes: row['notes'] as string,
-        full_content: row['full_content'] as string,
-        superseded_by: (row['superseded_by'] as string) ?? null,
-      }));
-    }
-
-    // Filter to non-superseded for the markdown file
-    // (superseded requirements don't appear in section headings)
-    const nonSuperseded = allRequirements.filter(r => r.superseded_by == null);
-
-    const md = generateRequirementsMd(nonSuperseded);
-    const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
     try {
-      await writeGsdProjection(basePath, filePath, md);
+      await regenerateRequirementsMarkdown(basePath);
     } catch (diskErr) {
       logWarning('projection', 'REQUIREMENTS.md projection write failed; DB requirement update remains committed', { fn: 'updateRequirementInDb', id, error: String((diskErr as Error).message) });
     }

@@ -28,7 +28,7 @@ import {
 } from "./paths.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
-import { drainProjectionWork, readProjectionWorkBacklog } from "./projection-worker.js";
+import { MILESTONE_REBUILD_KEY_PREFIX, readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { parseProjectionPlan } from "./schemas/parsers.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
@@ -388,6 +388,21 @@ function checkProjectionCheckboxDbStatus(basePath: string, milestoneIds: string[
       }
     }
   }
+}
+
+function isClearedByMilestoneReRender(
+  basePath: string,
+  issue: DoctorIssue,
+  reRenderedMilestoneIds: Set<string>,
+): boolean {
+  if (issue.code === "artifact_file_missing") {
+    return Boolean(issue.file) && artifactExistsOnDisk(basePath, issue.file!);
+  }
+  if (issue.code !== "checkbox_db_status_divergence" || issue.scope !== "slice") return false;
+  const milestoneId = issue.unitId.split("/")[0] ?? "";
+  if (!reRenderedMilestoneIds.has(milestoneId)) return false;
+  const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+  return Boolean(roadmapPath && issue.file) && issue.file === relativeFile(basePath, roadmapPath!);
 }
 
 function artifactExistsOnDisk(basePath: string, artifactPath: string, row?: ArtifactRow): boolean {
@@ -1221,8 +1236,27 @@ export async function checkEngineHealth(
 }
 
 /**
- * Report current Projection Work that is not rendered. Under repair, drain
- * due work first. Exported for direct testing.
+ * Open milestones whose ROADMAP file is not on disk, and milestones that own a
+ * database artifact whose file is not on disk.
+ */
+function milestonesWithMissingFiles(basePath: string, issues: DoctorIssue[]): string[] {
+  const missingArtifactUnits = new Set(
+    issues.filter((issue) => issue.code === "artifact_file_missing").map((issue) => issue.unitId.split("/")[0]),
+  );
+  return getAllMilestones()
+    .filter((milestone) => {
+      if (missingArtifactUnits.has(milestone.id)) return true;
+      if (isClosedStatus(milestone.status)) return false;
+      const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
+      return !roadmapPath || !existsSync(roadmapPath);
+    })
+    .map((milestone) => milestone.id);
+}
+
+/**
+ * Report current Projection Work that is not rendered. Under repair, first
+ * requeue dead-lettered work and the file set of each milestone with a missing
+ * file, drain, and clear the issues the render fixed. Exported for direct testing.
  */
 export async function checkProjectionWork(
   basePath: string,
@@ -1231,11 +1265,19 @@ export async function checkProjectionWork(
   repair: boolean,
 ): Promise<void> {
   if (repair) {
-    const drained = await drainProjectionWork(basePath);
+    const missing = milestonesWithMissingFiles(basePath, issues);
+    const drained = await repairProjectionWork(basePath, missing);
     if (drained.delivered > 0) fixesApplied.push(`delivered ${drained.delivered} Projection Work row(s)`);
+    const reRendered = new Set(missing.filter((id) =>
+      !drained.failedTargets.includes(`${MILESTONE_REBUILD_KEY_PREFIX}${id.toLowerCase()}`)));
+    for (const id of reRendered) fixesApplied.push(`re-rendered missing projections for ${id}`);
+    for (let i = issues.length - 1; i >= 0; i--) {
+      if (isClearedByMilestoneReRender(basePath, issues[i]!, reRendered)) issues.splice(i, 1);
+    }
   }
   const unowned = new Map<string, number>();
-  for (const entry of readProjectionWorkBacklog()) {
+  for (const entry of readProjectionWorkBacklog(basePath)) {
+    const where = entry.root ? ` at ${entry.root}` : "";
     if (!entry.hasRenderer) {
       unowned.set(entry.projectionKind, (unowned.get(entry.projectionKind) ?? 0) + 1);
       continue;
@@ -1246,9 +1288,9 @@ export async function checkProjectionWork(
         code: "projection_work_dead_letter",
         scope: "project",
         unitId: entry.projectionKey,
-        message: `Projection ${entry.projectionKey} (${entry.projectionKind}) stopped retrying after ${entry.attemptCount} failed attempt(s): ${entry.lastError}. Its files stay stale until the next change to it or \`/gsd rebuild markdown\`.`,
+        message: `Projection ${entry.projectionKey} (${entry.projectionKind})${where} stopped retrying after ${entry.attemptCount} failed attempt(s): ${entry.lastError}. Its files stay stale until the next change to it, a doctor repair, or \`/gsd rebuild markdown\`.`,
         file: ".gsd/gsd.db",
-        fixable: false,
+        fixable: true,
       });
       continue;
     }
@@ -1258,10 +1300,10 @@ export async function checkProjectionWork(
       scope: "project",
       unitId: entry.projectionKey,
       message: entry.attemptCount > 0
-        ? `Projection ${entry.projectionKey} (${entry.projectionKind}) failed ${entry.attemptCount} time(s): ${entry.lastError}. Next attempt at ${entry.nextAttemptAt}.`
+        ? `Projection ${entry.projectionKey} (${entry.projectionKind})${where} failed ${entry.attemptCount} time(s): ${entry.lastError}. Next attempt at ${entry.nextAttemptAt}.`
         : `Projection ${entry.projectionKey} (${entry.projectionKind}) is ${entry.deliveryState} and not rendered yet.`,
       file: ".gsd/gsd.db",
-      fixable: true,
+      fixable: entry.attemptCount === 0,
     });
   }
   if (unowned.size > 0) {

@@ -678,7 +678,7 @@ export function formatTextStatus(state: GSDState, basePath?: string): string {
     }
   }
   try {
-    const backlog = readProjectionWorkBacklog();
+    const backlog = readProjectionWorkBacklog(basePath);
     if (backlog.length > 0) {
       const owned = backlog.filter((entry) => entry.hasRenderer);
       const dead = owned.filter((entry) => entry.deliveryState === "dead_letter").length;
