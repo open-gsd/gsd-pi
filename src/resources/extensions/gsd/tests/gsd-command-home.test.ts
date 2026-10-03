@@ -288,6 +288,10 @@ test("showGsdHome renders the five-slot home text without an interactive TUI", a
       ].join("\n"),
     );
     writeFileSync(join(milestoneDir, "M001-SUMMARY.md"), "# M001 Summary\n\nComplete.");
+    // History without gsd.db is authority-missing; give the project its database.
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Complete Milestone", status: "complete" });
+    closeDatabase();
 
     await showGsdHome(
       {
