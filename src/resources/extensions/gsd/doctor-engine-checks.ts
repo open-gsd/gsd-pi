@@ -37,6 +37,7 @@ import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { isCanonicalStagedTaskSummaryProjection } from "./task-summary-projection-classification.js";
 import { isMilestoneLifecycleAdopted, readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
 import { isDeadLocalAutoWorker } from "./db/auto-workers.js";
+import { countUnadoptedHierarchyRows } from "./lifecycle-backfill-domain-operation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   captureMilestoneVerificationSourceRevision,
@@ -868,6 +869,25 @@ export async function checkEngineHealth(
         reportMilestoneLifecycleShadowDrift(issues);
       } catch {
         // Non-fatal — lifecycle shadow drift diagnostics failed
+      }
+
+      try {
+        const unadopted = countUnadoptedHierarchyRows();
+        if (unadopted > 0) {
+          issues.push({
+            severity: "warning",
+            code: "lifecycle_missing_shadow",
+            scope: "project",
+            unitId: "project",
+            message:
+              `${unadopted} milestone, slice or task row(s) have no canonical lifecycle row. ` +
+              "Run /gsd db adopt to preview the one-time backfill, then /gsd db adopt --apply.",
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+        }
+      } catch {
+        // Non-fatal — lifecycle coverage diagnostics failed
       }
 
       // a. Orphaned tasks (task.slice_id points to non-existent slice)

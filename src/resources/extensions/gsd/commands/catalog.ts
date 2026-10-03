@@ -250,6 +250,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
   ],
   db: [
     { cmd: "bind", desc: "Make this checkout the one the project database belongs to (after a move or re-clone)" },
+    { cmd: "adopt", desc: "Preview, or with --apply run, the one-time lifecycle backfill of every unadopted row" },
     { cmd: "restore-backup", desc: "List or restore a verified pre-migration database backup (destructive; requires --consent)" },
   ],
   task: [

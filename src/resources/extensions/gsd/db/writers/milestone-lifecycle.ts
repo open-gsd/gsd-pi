@@ -13,7 +13,6 @@ import {
 } from "../lifecycle-shadow-comparison.js";
 import { getDb } from "../engine.js";
 import {
-  adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
   readLifecycleShadowComparison,
   requireActiveDomainOperationContext,
@@ -359,15 +358,24 @@ function currentSliceCancellationAuthorization(
     JOIN workflow_operations operation
       ON operation.operation_id = waiver.operation_id
      AND operation.project_id = waiver.project_id
-     AND operation.operation_type = 'slice.cancel'
     JOIN workflow_domain_events cancelled
       ON cancelled.operation_id = waiver.operation_id
      AND cancelled.project_id = waiver.project_id
-     AND cancelled.event_type = 'slice.cancelled'
      AND cancelled.entity_type = 'slice'
      AND cancelled.entity_id = :entity_id
-     AND json_extract(cancelled.payload_json, '$.sliceLifecycleId') = waiver.lifecycle_id
      AND json_extract(cancelled.payload_json, '$.waiverId') = waiver.waiver_id
+     AND (
+       (
+         operation.operation_type = 'slice.cancel'
+         AND cancelled.event_type = 'slice.cancelled'
+         AND json_extract(cancelled.payload_json, '$.sliceLifecycleId') = waiver.lifecycle_id
+       ) OR (
+         -- Legacy-attested cancellation minted by the lifecycle backfill.
+         operation.operation_type = 'lifecycle.backfill'
+         AND cancelled.event_type = 'lifecycle.backfilled'
+         AND json_extract(cancelled.payload_json, '$.lifecycleId') = waiver.lifecycle_id
+       )
+     )
     WHERE waiver.project_id = :project_id
       AND waiver.lifecycle_id = :lifecycle_id
       AND waiver.waiver_status = 'active'
@@ -412,12 +420,12 @@ function currentTaskCancellationAuthorization(
     JOIN workflow_operations waiver_operation
       ON waiver_operation.operation_id = waiver.operation_id
      AND waiver_operation.project_id = waiver.project_id
-    JOIN workflow_requirement_dispositions disposition
+    LEFT JOIN workflow_requirement_dispositions disposition
       ON disposition.project_id = waiver.project_id
      AND disposition.requirement_id = waiver.requirement_id
      AND disposition.waiver_id = waiver.waiver_id
      AND disposition.disposition = 'waived'
-    JOIN workflow_operations disposition_operation
+    LEFT JOIN workflow_operations disposition_operation
       ON disposition_operation.operation_id = disposition.operation_id
      AND disposition_operation.project_id = disposition.project_id
     WHERE waiver.project_id = :project_id
@@ -439,6 +447,13 @@ function currentTaskCancellationAuthorization(
           AND waiver.requirement_id = :plan_reconciliation_requirement
           AND waiver_operation.operation_type IN ('workflow.slice.plan', 'workflow.slice.replan')
           AND disposition_operation.operation_type = 'workflow.slice.plan.authorization'
+        )
+        OR (
+          -- Legacy-attested cancellation minted by the lifecycle backfill:
+          -- no requirement, so no disposition can exist.
+          waiver.scope = :scope
+          AND waiver_operation.operation_type = 'lifecycle.backfill'
+          AND waiver.requirement_id IS NULL
         )
       )
       AND NOT EXISTS (
@@ -466,7 +481,7 @@ function currentTaskCancellationAuthorization(
     taskId,
     lifecycleId: row.lifecycleId!,
     waiverId: authorization.waiver_id,
-    dispositionId: authorization.disposition_id!,
+    dispositionId: authorization.disposition_id,
   }));
 }
 
@@ -586,19 +601,6 @@ export function completeMilestoneHierarchy(
     );
   }
 
-  // Closeout is the compatibility adoption path for work completed before
-  // canonical lifecycle authority existed. Existing lifecycles are preserved,
-  // and every non-completed or mismatched descendant still fails below.
-  for (const row of [...loadSlices(context, milestoneId), ...loadTasks(context, milestoneId)]) {
-    if (row.lifecycleId || normalizeLegacyLifecycleStatus(row.legacyStatus) !== "completed") continue;
-    adoptLifecycleIfMissing(context, {
-      itemKind: row.itemKind,
-      milestoneId,
-      ...(row.sliceId ? { sliceId: row.sliceId } : {}),
-      ...(row.taskId ? { taskId: row.taskId } : {}),
-      lifecycleStatus: "completed",
-    });
-  }
   const slices = loadSlices(context, milestoneId);
   if (slices.length === 0) {
     throw new MilestoneLifecycleValidationError(`no slices found for Milestone ${milestoneId}`);

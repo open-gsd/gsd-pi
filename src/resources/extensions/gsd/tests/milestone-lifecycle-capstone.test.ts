@@ -33,6 +33,7 @@ import {
   reopenMilestone,
   type MilestoneCompletionCloseout,
 } from "../milestone-lifecycle-domain-operation.ts";
+import { applyLifecycleBackfill } from "../lifecycle-backfill-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
 import { handleSkip } from "../commands-maintenance.ts";
 import { handleCompleteSlice } from "../tools/complete-slice.ts";
@@ -206,7 +207,7 @@ function currentSourceRevision(root: string): string {
   return source.snapshot.aggregateRevision;
 }
 
-function createFixture(input: { taskWaiverScope?: string } = {}): CapstoneFixture {
+function createFixture(input: { taskWaiverScope?: string; backfill?: boolean } = {}): CapstoneFixture {
   const root = mkdtempSync(join(tmpdir(), "gsd-milestone-capstone-"));
   tempDirs.add(root);
   mkdirSync(join(root, ".gsd", "milestones", "M001"), { recursive: true });
@@ -243,6 +244,24 @@ function createFixture(input: { taskWaiverScope?: string } = {}): CapstoneFixtur
     INSERT INTO requirements (id, class, status, description) VALUES
       ('REQ-T02-CANCEL', 'quality-attribute', 'active', 'T02 omission remains explicit');
   `);
+  if (input.backfill) {
+    // An old database: the legacy rows carry completion evidence but no
+    // lifecycle rows or Waivers. The backfill is the only adopter.
+    db().exec(`
+      UPDATE slices SET completed_at = '2026-07-14T00:00:00.000Z', full_summary_md = 'Delivered'
+      WHERE milestone_id = 'M001' AND id = 'S01';
+      UPDATE tasks
+      SET completed_at = '2026-07-14T00:00:00.000Z', full_summary_md = 'Done', verification_result = 'passed'
+      WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01';
+    `);
+    applyLifecycleBackfill(root);
+    return {
+      root,
+      dbPath,
+      sourceRevision: currentSourceRevision(root),
+      waiverIds: rows("SELECT waiver_id FROM workflow_waivers ORDER BY scope").map((waiver) => String(waiver.waiver_id)),
+    };
+  }
   executeAtFence("test.milestone-capstone.seed", "fixture/milestone-capstone/seed", (context) => {
     adoptOrTransitionLifecycle(context, {
       itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready",
@@ -773,6 +792,37 @@ test("closeout rejects a task-recovery Waiver wearing the plan-reconciliation sc
       completionRequest("capstone/decoy/complete", fixture.sourceRevision),
     ),
     /Cancelled Task S01\/T02 requires a current Waiver disposition/,
+  );
+});
+
+test("closeout and reopen resolve the legacy-attested Waivers minted by lifecycle backfill", { concurrency: false }, async () => {
+  // P21: a backfilled skipped Slice and Task carry one Waiver each, written by
+  // the lifecycle.backfill operation. Milestone closeout must accept them and
+  // full-redo reopen must revoke them.
+  const fixture = createFixture({ backfill: true });
+  const waiver = (scope: string) => String(row(`
+    SELECT waiver_id FROM workflow_waivers WHERE scope = '${scope}'
+  `).waiver_id);
+  assert.equal(fixture.waiverIds.length, 3, "one Waiver per skipped row");
+
+  await validate(fixture.root, "capstone/backfill/validate");
+  const completed = completeMilestone(
+    completionRequest("capstone/backfill/complete", fixture.sourceRevision),
+  );
+
+  assert.equal(completed.status, "committed");
+  assert.deepEqual(completed.cancelledSliceIds, ["S02"]);
+  assert.deepEqual(completed.cancelledTaskIds, ["S01/T02", "S02/T03"]);
+  assert.deepEqual(
+    [...completed.waiverIds].sort(),
+    [waiver("slice:M001/S02"), waiver("M001/S01/T02 cancellation")].sort(),
+  );
+
+  const reopened = reopenMilestone(reopenRequest("capstone/backfill/reopen"));
+  assert.equal(reopened.status, "committed");
+  assert.deepEqual(
+    rows("SELECT DISTINCT waiver_status FROM workflow_waivers"),
+    [{ waiver_status: "revoked" }],
   );
 });
 

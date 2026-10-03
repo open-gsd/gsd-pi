@@ -2,7 +2,7 @@
 // File Purpose: Executable contracts for evidence-backed atomic Slice completion.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -20,6 +20,7 @@ import {
   appendKernelCheckpoint,
 } from "../db/writers/lifecycle-commands.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
+import { applyLifecycleBackfill } from "../lifecycle-backfill-domain-operation.ts";
 import * as sliceLifecycle from "../slice-lifecycle-domain-operation.ts";
 import {
   claimTaskAttempt,
@@ -192,10 +193,11 @@ function insertClaimedDispatch(taskId: string): number {
   return Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id);
 }
 
-function makeBase(): void {
+function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-slice-completion-domain-"));
   tempDirs.add(base);
-  assert.equal(openDatabase(join(base, "gsd.db")), true);
+  mkdirSync(join(base, ".gsd"));
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
   db().exec(`
     INSERT INTO milestones (id, title, status, created_at)
     VALUES ('M001', 'Slice lifecycle', 'planned', '2026-07-14T00:00:00.000Z');
@@ -236,6 +238,7 @@ function makeBase(): void {
       });
     }
   });
+  return base;
 }
 
 function claimTask(taskId = "T01"): string {
@@ -521,6 +524,29 @@ test("Slice completion rejects a cancelled child without a current authorized Wa
     /waiver|authorized|omission/i,
   );
   assert.deepEqual(durableSnapshot(), before, "unwaived-child rejection must leave exact zero residue");
+});
+
+test("Slice completion accepts the legacy-attested Waiver of a backfilled skipped child", () => {
+  const base = makeBase();
+  // T03 is an old row: legacy 'skipped', no lifecycle row and no Waiver.
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Skipped before lifecycle authority', 'skipped', 3)
+  `);
+  finishTaskWithOptionalEvidence(true);
+  assert.throws(
+    () => completeSlice(validInput("slice-complete/unadopted-skipped-child")),
+    /Task T03 is missing canonical lifecycle authority/,
+  );
+
+  applyLifecycleBackfill(base);
+  const result = completeSlice(validInput("slice-complete/backfilled-skipped-child"));
+
+  assert.equal(result.status, "committed");
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
 });
 
 test("Slice completion self-heals a missing Q8 gate (#1679)", () => {

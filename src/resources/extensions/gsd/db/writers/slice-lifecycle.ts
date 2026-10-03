@@ -595,13 +595,20 @@ function hasCurrentCancellationAuthorization(lifecycleId: string, completedAt: s
   return Boolean(getDb().prepare(`
     SELECT 1
     FROM workflow_waivers waiver
-    JOIN workflow_requirement_dispositions disposition
+    JOIN workflow_operations operation
+      ON operation.operation_id = waiver.operation_id
+    LEFT JOIN workflow_requirement_dispositions disposition
       ON disposition.waiver_id = waiver.waiver_id
      AND disposition.requirement_id = waiver.requirement_id
      AND disposition.disposition = 'waived'
     WHERE waiver.lifecycle_id = :lifecycle_id
       AND waiver.waiver_status = 'active'
       AND (waiver.expires_at IS NULL OR waiver.expires_at > :completed_at)
+      AND (
+        disposition.disposition_id IS NOT NULL
+        -- Legacy-attested cancellation minted by the lifecycle backfill.
+        OR (operation.operation_type = 'lifecycle.backfill' AND waiver.requirement_id IS NULL)
+      )
       AND NOT EXISTS (
         SELECT 1 FROM workflow_requirement_dispositions successor
         WHERE successor.supersedes_disposition_id = disposition.disposition_id

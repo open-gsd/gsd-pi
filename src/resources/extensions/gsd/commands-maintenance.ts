@@ -17,10 +17,13 @@ import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { nativeBranchList, nativeDetectMainBranch, nativeBranchListMerged, nativeBranchDelete, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
 import { logWarning } from "./workflow-logger.js";
 import type { DbAdapter } from "./db-adapter.js";
+import { backupDatabaseBeforeMigration } from "./db-migration-backup.js";
+import { _getAdapter } from "./db/engine.js";
 import {
   applyPreparedVerifiedRecoverApplication,
   loadRetainedVerifiedRecoverApplication,
   closeWorkflowDatabase,
+  getWorkflowDatabasePath,
   isWorkflowDatabaseOpen,
   loadVerifiedRecoverApplication,
   openWorkflowDatabase,
@@ -1826,6 +1829,71 @@ export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): vo
   }
   if (!wasOpen) closeWorkflowDatabase();
   ctx.ui.notify(`gsd db bind: ${result.location.projectDb} now belongs to this checkout.`, "info");
+}
+
+/**
+ * `gsd db adopt` — preview, and with `--apply` run, the lifecycle.backfill
+ * Domain Operation that adopts every milestone, slice and task row with no
+ * lifecycle row. `--apply` first writes a verified backup beside the database
+ * so `/gsd db restore-backup` can roll the change back.
+ */
+export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: string, args = ""): Promise<void> {
+  const { isAutoActive } = await import("./auto.js");
+  if (isAutoActive()) {
+    ctx.ui.notify("gsd db adopt: stop auto-mode first with /gsd stop.", "error");
+    return;
+  }
+  const wasOpen = isWorkflowDatabaseOpen();
+  const opened = openWorkflowDatabase(basePath);
+  if (!opened.ok) {
+    ctx.ui.notify(`gsd db adopt: ${opened.error?.message ?? opened.reason}`, "error");
+    return;
+  }
+  try {
+    const { applyLifecycleBackfill, previewLifecycleBackfill } = await import("./lifecycle-backfill-domain-operation.js");
+    const preview = previewLifecycleBackfill();
+    if (preview.unknownStatuses.length > 0) {
+      ctx.ui.notify(
+        `gsd db adopt: unknown legacy statuses, nothing adopted:\n${
+          preview.unknownStatuses.map((entry) => `  ${entry.row}: ${JSON.stringify(entry.rawStatus)}`).join("\n")
+        }`,
+        "error",
+      );
+      return;
+    }
+    if (preview.items.length === 0) {
+      ctx.ui.notify("gsd db adopt: every milestone, slice and task already has a lifecycle row.", "info");
+      return;
+    }
+    const byRule = new Map<string, number>();
+    for (const item of preview.items) byRule.set(item.rule, (byRule.get(item.rule) ?? 0) + 1);
+    const summary = [...byRule].map(([rule, count]) => `  ${rule}: ${count}`).join("\n");
+    if (!/(^|\s)--apply(\s|$)/.test(args)) {
+      ctx.ui.notify(
+        `gsd db adopt: ${preview.items.length} row(s) would be adopted:\n${summary}\n` +
+          "Run /gsd db adopt --apply to adopt them in one operation (a verified backup is written first).",
+        "info",
+      );
+      return;
+    }
+    const adapter = _getAdapter();
+    const dbPath = getWorkflowDatabasePath();
+    if (!adapter || !dbPath) throw new Error("database is not open");
+    const version = Number(adapter.prepare("SELECT MAX(version) AS version FROM schema_version").get()?.["version"]);
+    backupDatabaseBeforeMigration(adapter, dbPath, version, { existsSync, copyFileSync, logWarning });
+    const result = applyLifecycleBackfill(basePath);
+    ctx.ui.notify(
+      `gsd db adopt: adopted ${result.adopted} row(s) in operation ${result.operationId} ` +
+        `(${result.waivers} legacy-attested Waiver(s)).\n${summary}` +
+        (result.findings.length > 0 ? `\nCompletion without evidence, adopted as open work:\n  ${result.findings.join("\n  ")}` : "") +
+        "\nA verified backup was written beside the database; /gsd db restore-backup lists it.",
+      "info",
+    );
+  } catch (err) {
+    ctx.ui.notify(`gsd db adopt: ${(err as Error).message}`, "error");
+  } finally {
+    if (!wasOpen) closeWorkflowDatabase();
+  }
 }
 
 /**

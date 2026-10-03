@@ -148,7 +148,10 @@ export async function handleReopenMilestone(
         case "milestone-not-found":
           return { error: `milestone not found: ${params.milestoneId}` };
         case "canonical-authority-present":
-          return { error: `refusing legacy reopen for partially adopted Milestone ${params.milestoneId}` };
+          return {
+            error: `refusing legacy reopen for partially adopted Milestone ${params.milestoneId}; ` +
+              "run /gsd db adopt --apply to adopt every lifecycle row, then reopen",
+          };
         case "milestone-not-closed":
           return { error: `milestone ${params.milestoneId} is not closed (status: ${outcome.status}) — nothing to reopen` };
       }

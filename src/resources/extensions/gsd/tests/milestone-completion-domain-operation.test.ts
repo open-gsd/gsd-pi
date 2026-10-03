@@ -728,7 +728,9 @@ test("Milestone completion commits one receipt and preserves every descendant fa
   assert.deepEqual(descendantSnapshot(), descendantsBefore, "completion must verify descendants without rewriting them");
 });
 
-test("Milestone completion adopts missing completed legacy descendant lifecycles", async () => {
+test("Milestone completion refuses legacy-complete descendants that have no lifecycle row", async () => {
+  // Closeout is not an adoption path: unadopted rows are adopted only by the
+  // lifecycle.backfill Domain Operation (/gsd db adopt).
   const basePath = await prepareFixture(() => {
     insertSlice({ id: "S00", milestoneId: "M001", status: "complete" });
     insertTask({ id: "T00", sliceId: "S00", milestoneId: "M001", status: "complete" });
@@ -737,10 +739,6 @@ test("Milestone completion adopts missing completed legacy descendant lifecycles
       WHERE milestone_id = 'M001' AND id = 'S01'
     `).run();
   });
-  assert.equal(row(`
-    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
-    WHERE milestone_id = 'M001' AND slice_id = 'S00'
-  `).count, 0);
 
   const result = await handleCompleteMilestone({
     milestoneId: "M001",
@@ -748,31 +746,16 @@ test("Milestone completion adopts missing completed legacy descendant lifecycles
     ...closeout(),
   }, basePath, invocation("milestone-complete/public/legacy-descendants"));
 
-  assert.ok(!("error" in result), `unexpected error: ${"error" in result ? result.error : ""}`);
-  assert.ok(result.operationId);
-  const payload = JSON.parse(String(row(`
-    SELECT payload_json FROM workflow_domain_events
-    WHERE operation_id = '${result.operationId}' AND event_type = 'milestone.completed'
-  `).payload_json)) as Record<string, unknown>;
-  assert.ok((payload["completedSliceIds"] as string[]).includes("S00"));
-  assert.ok((payload["completedTaskIds"] as string[]).includes("S00/T00"));
-  assert.deepEqual(rows(`
-    SELECT item_kind, lifecycle_status, state_version, last_operation_id
-    FROM workflow_item_lifecycles
+  assert.ok("error" in result, "completion must refuse an unadopted descendant");
+  assert.match(result.error, /Slice S00 is missing canonical lifecycle authority/);
+  assert.equal(row(`
+    SELECT COUNT(*) AS count FROM workflow_item_lifecycles
     WHERE milestone_id = 'M001' AND slice_id = 'S00'
-    ORDER BY item_kind
-  `), [{
-    item_kind: "slice",
-    lifecycle_status: "completed",
-    state_version: 0,
-    last_operation_id: result.operationId,
-  }, {
-    item_kind: "task",
-    lifecycle_status: "completed",
-    state_version: 0,
-    last_operation_id: result.operationId,
-  }]);
-  assert.deepEqual(proveMilestoneCloseout("M001", { summaryArtifactBasePath: basePath }), { ok: true });
+  `).count, 0, "closeout must not adopt lifecycle rows");
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'milestone' AND milestone_id = 'M001'
+  `).lifecycle_status, "ready", "the milestone stays open");
 });
 
 test("Milestone completion replays its receipt and conflicts on changed closeout", async () => {
