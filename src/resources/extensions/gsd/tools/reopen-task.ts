@@ -15,7 +15,6 @@ import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
-import { writeReopenReason } from "../reopen-reason.js";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { removeProjectionFileSync } from "../atomic-write.js";
@@ -74,6 +73,10 @@ export async function handleReopenTask(
         taskId: params.taskId,
       },
       reason: params.reason?.trim() || "Task reopened for execution follow-up",
+      // #1272: a supplied reason is the gate's diagnosis. The reopen event
+      // carries it to the next execute-task dispatch; without it the executor
+      // re-runs the (still-green) scoped verify and re-completes the task.
+      injectReason: Boolean(params.reason?.trim()),
     });
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
@@ -119,20 +122,6 @@ export async function handleReopenTask(
     logWarning("tool", `reopen-task artifact cleanup warning: ${(cleanupErr as Error).message}`);
   }
   clearPathCache();
-
-  // ── Persist the reopen reason for the next execute-task dispatch (#1272) ──
-  // Without this, the re-dispatched executor receives the original task plan
-  // and verify command with zero signal that it was reopened — it re-runs the
-  // (still-green) scoped verify and re-completes the task, never touching the
-  // regression the gate actually caught. buildExecuteTaskPrompt claims this
-  // artifact and prepends the diagnosis to the next dispatch.
-  if (params.reason && params.reason.trim() !== "") {
-    try {
-      writeReopenReason(basePath, params.milestoneId, params.sliceId, params.taskId, params.reason);
-    } catch (reasonErr) {
-      logWarning("tool", `reopen-task reason persistence warning: ${(reasonErr as Error).message}`);
-    }
-  }
 
   // ── Post-mutation hook ───────────────────────────────────────────────────
   try {
