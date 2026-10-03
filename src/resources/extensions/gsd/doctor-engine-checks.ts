@@ -1138,8 +1138,24 @@ export async function checkEngineHealth(
         }
         // One Domain Operation deletes every stale row, so the prune has an
         // operation row and a revision.
-        pruneArtifactRows({ name: "doctor", actorType: "operator" }, staleRows.map((row) => row.path));
-        fixesApplied.push(...staleRows.map(staleArtifactPruneMessage));
+        try {
+          pruneArtifactRows({ name: "doctor", actorType: "operator" }, staleRows.map((row) => row.path));
+          fixesApplied.push(...staleRows.map(staleArtifactPruneMessage));
+        } catch (err) {
+          // A refused prune (stale view, revision conflict) leaves the rows: report each one.
+          for (const row of staleRows) {
+            const issuePath = artifactPathRelativeToGsd(row.path);
+            issues.push({
+              severity: "error",
+              code: "artifact_file_missing",
+              scope: artifactScope(row),
+              unitId: artifactUnitId(row),
+              message: `Artifact ${issuePath} has a stale database row and the prune was refused: ${err instanceof Error ? err.message : String(err)}`,
+              file: issuePath,
+              fixable: true,
+            });
+          }
+        }
       } catch {
         // Non-fatal — artifact file existence check failed
       }
