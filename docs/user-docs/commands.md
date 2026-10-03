@@ -122,7 +122,7 @@ The two `/gsd recover` forms serve different recovery domains. Use the no-argume
 | `/gsd new-project [--deep]` | Bootstrap a new project; `--deep` enables staged project-level discovery |
 | `/gsd new-milestone [--deep]` | Create a new milestone; `--deep` opts the project into deep planning mode |
 | `/gsd skip` | Cancel a slice or task with a Waiver so auto-mode does not dispatch it |
-| `/gsd undo` | Revert last completed unit |
+| `/gsd undo` | Show the exact effect of an undo of the last completed unit recorded in the database; `/gsd undo --force` then reopens that task, slice, or milestone and stages a revert of its git commits. A unit of any other type is refused |
 | `/gsd undo-task` | Reopen a terminal task through canonical DB recovery authority, then refresh projections |
 | `/gsd reset-slice` | Reopen the full terminal slice and every terminal task in one guarded database operation, preserve prior execution history, then refresh readable status |
 | `/gsd park` | Park a milestone — skip without deleting |
@@ -514,7 +514,7 @@ Non-TTY equivalent of the no-argument `/gsd recover` database-import preview and
 gsd headless recover
 ```
 
-The first call prints the sealed Import Preview and exits without applying the import. Review that output, then rerun with the exact `--preview=<preview-hash>` value it prints. That approved run performs the Import Application and assessment.
+The first call prints the sealed Import Preview and exits without applying the import. Review that output, then rerun with the exact `--preview=<preview-hash>` value it prints. That approved run performs the Import Application and assessment. If the Preview has an item that needs a decision, the run exits `1` and applies nothing; see [Migration from v1](./migration.md#post-migration) for the `--choice` options that resolve it.
 
 If assessment recommends destructive restore, rerun with the printed `--application=<operation-id> --restore --consent=proceed:destructive-database-restore:<evidence-hash>` values. Restore is permanently unavailable after any later canonical write or Authority Epoch cutover; follow the printed `--application=<operation-id> --forward-repair` route instead. When Forward Repair reports genuine overlap, supply one printed evidence-bound `--choice` for each target.
 

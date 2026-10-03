@@ -67,6 +67,10 @@ If an existing project has legacy markdown artifacts that you explicitly want to
 
 `/gsd recover` fingerprints the legacy source and current database and prints an exact Preview hash. Re-run it with `--preview=<sha256>` to create and independently verify a retained backup, apply that unchanged preview through one atomic Import Application, and assess the safe next action. It updates only modeled preview targets; database rows absent from markdown are not cleared. The command prints the Application ID and retained backup path.
 
+When the Preview has an item that needs a decision, `/gsd recover` applies nothing and lists each item. An item that you can decide shows a `--choice=<diagnosis-id>.preserved` option, which keeps that source preserved and not imported; other items need a fix in the source markdown. Re-run with the shown `--choice` options to seal a new Preview, then approve the new Preview hash. A `--choice` value that is not valid is rejected before the import is applied.
+
+A plain `/gsd recover` continues the last Import Application only while that Application is the canonical operation head and has no restore or Forward Repair. After a later canonical write, a plain `/gsd recover` makes a new Preview, and the earlier Application is available only through `--application`.
+
 If assessment recommends restoring the pre-import database, rerun the command with the exact `--application`, `--restore`, and evidence-bound `--consent` values it printed. Restore is available only while that Import Application remains the canonical operation head. Any later canonical write or Authority Epoch cutover closes the restore window permanently; use the printed `--forward-repair` route instead. Forward Repair preserves later accepted work and asks for explicit `--choice` evidence only when imported and later canonical changes genuinely overlap.
 
 Normal runtime never derives authority from markdown implicitly. Use `/gsd rebuild markdown` for ordinary database-to-markdown realignment.
