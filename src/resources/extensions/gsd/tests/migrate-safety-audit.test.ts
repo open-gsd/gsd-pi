@@ -475,7 +475,6 @@ test("executeMigrationWrite records audit artifacts and verifies DB-backed proje
       result.written.artifactPaths.map((path) => path.slice(gsdRoot(base).length + 1)).sort(),
       [
         "PROJECT.md",
-        "STATE.md",
         "milestones/M001/M001-CONTEXT.md",
         "milestones/M001/M001-RESEARCH.md",
       ],
