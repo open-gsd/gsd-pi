@@ -268,6 +268,8 @@ test("direct /gsd auto source only resumes paused-session metadata for recoverab
 test("direct /gsd auto skips paused-session replay when recovered unit already completed", async () => {
   const base = makeTmpBase();
   try {
+    // Slice-scoped artifact verification needs an open DB (ADR-046).
+    openFixtureDb(base);
     writeRoadmap(base, false);
     const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     const tasksDir = join(sliceDir, "tasks");
