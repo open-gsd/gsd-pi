@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { shouldBlockAutoUnitToolCall } from "../auto-unit-tool-scope.ts";
 import { piExecutionInvocation } from "../execution-invocation.ts";
 import {
   _getAdapter,
@@ -127,6 +128,13 @@ describe("milestone hierarchy tools", () => {
       assert.deepEqual(retry.content, first.content, `${call.tool} retry returns the first answer`);
       assert.equal(revision(), revisionBefore + 1, `${call.tool} retry does not advance the revision`);
       assert.equal(operationCount(), operationsBefore + 1, `${call.tool} retry commits no operation`);
+    }
+  });
+
+  test("an auto-mode unit cannot call the milestone hierarchy tools", () => {
+    for (const call of CALLS) {
+      assert.equal(shouldBlockAutoUnitToolCall("execute-task", call.tool).block, true, call.tool);
+      assert.equal(shouldBlockAutoUnitToolCall("plan-milestone", `mcp__gsd-workflow__${call.tool}`).block, true, call.tool);
     }
   });
 
