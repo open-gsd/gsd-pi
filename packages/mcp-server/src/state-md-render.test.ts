@@ -292,6 +292,10 @@ describe("STATE.md render after workflow commands and rebuild", () => {
   });
 
   it("/gsd escalate resolve renders STATE.md", async (t) => {
+    // Registered before the fixture cleanup (hooks run in order): Windows
+    // cannot remove a directory that is the process working directory.
+    const previousCwd = process.cwd();
+    t.after(() => process.chdir(previousCwd));
     const fixture = await openFixture(t);
     const base = fixture.root;
     writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nversion: 1\nphases:\n  mid_execution_escalation: true\n---\n");
@@ -313,9 +317,7 @@ describe("STATE.md render after workflow commands and rebuild", () => {
     const notes: string[] = [];
     const ctx = { ui: { notify: (message: string) => notes.push(message) } } as unknown as Parameters<typeof handleEscalateCommand>[1];
     // Escalation preferences are read from the working directory.
-    const previousCwd = process.cwd();
     process.chdir(base);
-    t.after(() => process.chdir(previousCwd));
 
     await assertRendersState(base, "escalate resolve", () =>
       withCommandCwd(base, () => handleEscalateCommand("resolve S02/T01 reject-blocker none fit", ctx, {} as Parameters<typeof handleEscalateCommand>[2])));

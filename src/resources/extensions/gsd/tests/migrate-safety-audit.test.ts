@@ -3879,7 +3879,7 @@ test("projection mutation gate flags .gsd-headed template literal paths", () => 
   }
 });
 
-test("milestone projection mutations honor the publication claim", () => {
+test("milestone projection mutations honor the publication claim", async () => {
   const base = makeBase("gsd-migrate-milestone-actions-fence-");
   try {
     mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
