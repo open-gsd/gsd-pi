@@ -2,7 +2,7 @@
 // File Purpose: Projection Worker per-key drain: renderer registry, retry and dead_letter, target roots.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
@@ -620,4 +620,28 @@ test("doctor repair restores a deleted task SUMMARY, which the milestone render 
   assert.ok(existsSync(summary), "repair renders the task SUMMARY again");
   assert.deepEqual(fixes, ["delivered 1 Projection Work row(s)", "re-rendered missing projections for M001"]);
   assert.deepEqual(repaired.filter((issue) => issue.code === "artifact_file_missing"), []);
+});
+
+test("a legacy-import drain and a full rebuild create no file of a discarded milestone", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  insertMilestone({ id: "M002", title: "Discarded", status: "skipped", planning: { vision: "Was planned." } });
+  seed("markdown", "legacy-import/restore");
+
+  const drained = await drainProjectionWork(base);
+
+  assert.deepEqual(drained.errors, []);
+  assert.equal(work("legacy-import/restore").delivery_state, "rendered");
+  const roadmap = resolveMilestoneFile(base, "M001", "ROADMAP");
+  assert.ok(roadmap && existsSync(roadmap), "the drain renders the other milestone");
+  assert.equal(resolveMilestoneFile(base, "M002", "ROADMAP"), null, "the drain creates no M002 file");
+
+  assert.deepEqual((await rebuildMarkdownProjectionsFromDb(base)).errors, []);
+
+  assert.equal(resolveMilestoneFile(base, "M002", "ROADMAP"), null, "the rebuild creates no M002 file");
+  assert.equal(
+    readdirSync(join(base, ".gsd"), { recursive: true }).some((entry) => /(^|[\\/])02-/.test(String(entry))),
+    false,
+    "no M002 directory exists",
+  );
 });

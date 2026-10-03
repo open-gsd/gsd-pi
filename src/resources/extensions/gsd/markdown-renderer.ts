@@ -1169,7 +1169,7 @@ export interface RenderAllResult {
  */
 export async function renderAllFromDb(basePath: string): Promise<RenderAllResult> {
   const result: RenderAllResult = { rendered: 0, skipped: 0, errors: [] };
-  const milestones = getAllMilestones();
+  const milestones = getAllMilestones().filter((milestone) => !isDiscardedMilestoneStatus(milestone.status));
 
   // Pre-fetch slices once per milestone and batch-load all tasks in one query
   // family, avoiding an N+1 (previously one task query per slice).
