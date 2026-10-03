@@ -30,17 +30,6 @@ git add .gsd/PREFERENCES.md
 git commit -m "chore: enable GSD team workflow"
 ```
 
-## `commit_docs: false`
-
-For teams where only some members use GSD:
-
-```yaml
-git:
-  commit_docs: false
-```
-
-Adds `.gsd/` to `.gitignore` entirely. The developer gets structured planning without affecting teammates.
-
 ## Parallel development
 
 Multiple developers run auto mode simultaneously on different milestones. Each developer gets their own worktree and unique `milestone/<MID>` branch. Milestone dependencies can be declared in the phase context frontmatter:

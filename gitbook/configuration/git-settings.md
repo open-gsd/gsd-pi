@@ -71,7 +71,6 @@ git:
   main_branch: main           # primary branch name
   merge_strategy: squash      # "squash" or "merge"
   isolation: none             # "none" (default), "worktree", or "branch"
-  commit_docs: true           # commit .gsd/ artifacts to git
   manage_gitignore: true      # let GSD manage .gitignore
   auto_pr: false              # create PR on milestone completion
   pr_target_branch: develop   # PR target branch
@@ -152,17 +151,6 @@ Example hook:
 cp "$SOURCE_DIR/.env" "$WORKTREE_DIR/.env"
 ln -sf "$SOURCE_DIR/assets" "$WORKTREE_DIR/assets"
 ```
-
-## Keeping `.gsd/` Local
-
-For teams where only some members use GSD:
-
-```yaml
-git:
-  commit_docs: false
-```
-
-This adds `.gsd/` to `.gitignore` entirely. You get structured planning without affecting teammates who don't use GSD.
 
 ## Commit Format
 

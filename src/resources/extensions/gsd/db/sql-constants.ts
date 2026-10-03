@@ -71,3 +71,52 @@ export const CURRENT_TASK_RECOVERY_CAUSAL_AUTHORITY_SQL = `(
  *  drift from `isClosedStatus()`. Renders as `'complete', 'done', 'skipped',
  *  'closed', 'cancelled', 'blocker-accepted'`. */
 export const TERMINAL_STATUS_SQL = RAW_CLOSED_STATUSES.map((s) => `'${s}'`).join(", ");
+
+/** Event that marks an Open Question as a Task escalation. */
+export const TASK_ESCALATION_OPENED_EVENT = "task.escalation.opened";
+
+/** SQL condition, correlated with a `tasks` row: the Task has an escalation question in the given status. */
+function taskEscalationExistsSql(statusCondition: string): string {
+  return `EXISTS (
+  SELECT 1
+  FROM workflow_item_lifecycles escalation_lifecycle
+  JOIN workflow_open_questions escalation_question
+    ON escalation_question.lifecycle_id = escalation_lifecycle.lifecycle_id
+   AND escalation_question.project_id = escalation_lifecycle.project_id
+  CROSS JOIN workflow_domain_events escalation_event
+    ON escalation_event.project_id = escalation_lifecycle.project_id
+   AND escalation_event.entity_type = 'task'
+   AND escalation_event.entity_id = escalation_lifecycle.milestone_id || '/' || escalation_lifecycle.slice_id || '/' || escalation_lifecycle.task_id
+   AND escalation_event.event_type = '${TASK_ESCALATION_OPENED_EVENT}'
+   AND json_extract(escalation_event.payload_json, '$.questionId') = escalation_question.question_id
+  WHERE escalation_lifecycle.item_kind = 'task'
+    AND escalation_lifecycle.milestone_id = tasks.milestone_id
+    AND escalation_lifecycle.slice_id = tasks.slice_id
+    AND escalation_lifecycle.task_id = tasks.id
+    AND escalation_question.question_status ${statusCondition}
+)`;
+}
+
+/** Event that records the user's response to a Task escalation. */
+export const TASK_ESCALATION_RESOLVED_EVENT = "task.escalation.resolved";
+
+/**
+ * SQL condition, correlated with a `tasks` row: the Task has a resolved
+ * escalation from before the database stored them, held in the resolve event.
+ */
+const TASK_HAS_LEGACY_RESOLUTION_SQL = `EXISTS (
+  SELECT 1
+  FROM project_authority legacy_authority
+  CROSS JOIN workflow_domain_events legacy_event
+    ON legacy_event.project_id = legacy_authority.project_id
+   AND legacy_event.entity_type = 'task'
+   AND legacy_event.entity_id = tasks.milestone_id || '/' || tasks.slice_id || '/' || tasks.id
+   AND legacy_event.event_type = '${TASK_ESCALATION_RESOLVED_EVENT}'
+   AND json_extract(legacy_event.payload_json, '$.legacy') IS NOT NULL
+)`;
+
+/** True when the Task has a current escalation: an open or answered question, or a resolved legacy escalation. */
+export const TASK_HAS_ESCALATION_SQL = `(${taskEscalationExistsSql("!= 'withdrawn'")} OR ${TASK_HAS_LEGACY_RESOLUTION_SQL})`;
+
+/** True when the Task has an open escalation question. This is the pause. */
+export const TASK_HAS_OPEN_ESCALATION_SQL = taskEscalationExistsSql("= 'open'");

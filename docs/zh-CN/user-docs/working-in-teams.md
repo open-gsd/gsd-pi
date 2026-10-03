@@ -31,17 +31,6 @@ git add .gsd/PREFERENCES.md
 git commit -m "chore: enable GSD team workflow"
 ```
 
-## `commit_docs: false`
-
-如果团队里只有部分成员使用 GSD，或者公司策略要求仓库保持干净：
-
-```yaml
-git:
-  commit_docs: false
-```
-
-这会把整个 `.gsd/` 加入 `.gitignore`，让所有产物都保留在本地。这样使用 GSD 的开发者仍然能获得结构化规划的好处，而不会影响不使用 GSD 的同事。
-
 ## 迁移现有项目
 
 如果你当前项目里对 `.gsd/` 做了整目录忽略：

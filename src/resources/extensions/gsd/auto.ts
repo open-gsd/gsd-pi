@@ -64,7 +64,6 @@ import { clearActivityLogState } from "./activity-log.js";
 import {
   synthesizeCrashRecovery,
   getDeepDiagnostic,
-  readActiveMilestoneId,
 } from "./session-forensics.js";
 import {
   writeLock,
@@ -184,7 +183,6 @@ import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
 import { autoWorktreeBranch, enterBranchModeForMilestone } from "./auto-worktree-branch-lifecycle.js";
 import { createAutoWorktree } from "./auto-worktree-creation.js";
 import { enterAutoWorktree, isInAutoWorktree } from "./auto-worktree-entry.js";
-import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
 import { checkResourcesStale, readResourceVersion } from "./auto-worktree-resource-version.js";
 import { escapeStaleWorktree } from "./auto-worktree-runtime-cleanup.js";
 import { teardownWarmedBrowserDaemons } from "./browser-daemon-auto-prep.js";
@@ -206,6 +204,7 @@ import { getErrorMessage } from "./error-utils.js";
 import { recoverFailedMigration } from "./migrate-external.js";
 import { initRegistry, convertDispatchRules } from "./rule-registry.js";
 import { emitJournalEvent as _emitJournalEvent, type JournalEntry } from "./journal.js";
+import { recordTaskVerificationPause } from "./task-settle.js";
 import { isClosedStatus } from "./status-guards.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
@@ -2646,11 +2645,7 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
     startUnitSupervision,
 
     // Prompt helpers
-    getDeepDiagnostic: (basePath: string) => {
-      const mid = readActiveMilestoneId(basePath);
-      const wtPath = mid ? getAutoWorktreePath(basePath, mid) : undefined;
-      return getDeepDiagnostic(basePath, wtPath ?? undefined);
-    },
+    getDeepDiagnostic,
     isDbAvailable,
     reorderForCaching,
 
@@ -2683,6 +2678,12 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
 
     // Journal
     emitJournalEvent: (entry: JournalEntry) => _emitJournalEvent(s.basePath, entry),
+    recordVerificationPause: (unitType: string, unitId: string) => {
+      if (unitType !== "execute-task") return;
+      const { milestone, slice, task } = parseUnitId(unitId);
+      if (!slice || !task) return;
+      recordTaskVerificationPause({ milestoneId: milestone, sliceId: slice, taskId: task });
+    },
 
     // Clean-root preflight gate (#2909)
     preflightCleanRoot,

@@ -7,6 +7,7 @@ import { basename, join } from "node:path";
 
 import { discoverProjects } from "../../web/project-discovery-service.ts";
 import { detectMonorepo } from "../../web/bridge-service.ts";
+import { renderStateContent } from "../../resources/extensions/gsd/workflow-projections.ts";
 
 // ---------------------------------------------------------------------------
 // Fixture setup — standard multi-project root
@@ -266,5 +267,40 @@ describe("project-discovery with monorepo root as devRoot", () => {
   test("monorepo entry has correct kind (brownfield when no .gsd)", () => {
     const results = discoverProjects(monorepoPnpm);
     assert.equal(results[0].kind, "brownfield");
+  });
+});
+
+describe("project-discovery — STATE.md progress fallback", () => {
+  test("reads every milestone row and empty refs that the STATE.md renderer writes", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-progress-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    mkdirSync(join(root, "app", ".gsd"), { recursive: true });
+    writeFileSync(
+      join(root, "app", ".gsd", "STATE.md"),
+      renderStateContent({
+        activeMilestone: { id: "M002-ab12cd", title: "Payments platform" },
+        activeSlice: null,
+        activeTask: null,
+        phase: "planning",
+        recentDecisions: [],
+        blockers: [],
+        nextAction: "Plan milestone M002-ab12cd.",
+        registry: [
+          { id: "M001", title: "Core setup", status: "complete" },
+          { id: "M002-ab12cd", title: "Payments platform", status: "active" },
+          { id: "M003", title: "Reporting", status: "parked" },
+          { id: "M004", title: "Dashboard", status: "pending" },
+        ],
+      }),
+    );
+
+    const [project] = discoverProjects(root, true);
+    assert.deepStrictEqual(project.progress, {
+      activeMilestone: "M002-ab12cd: Payments platform",
+      activeSlice: null,
+      phase: "planning",
+      milestonesCompleted: 1,
+      milestonesTotal: 4,
+    });
   });
 });

@@ -1936,7 +1936,7 @@ test("#2348: a legacy blocker write for a watchdog-settled Task records the bloc
   assert.match(readFileSync(planPath, "utf8"), /\[ \][^\n]*\*\*T01/);
 });
 
-test("#2348: the legacy refusal still writes the escalation artifact for a recorded blocker", async () => {
+test("#2348: the legacy refusal still records the escalation question for a recorded blocker", async () => {
   const { basePath, attemptId } = createFixture();
   settleTaskAttempt({
     invocation: invocation("task-completion/watchdog-settle-escalation"),
@@ -1946,9 +1946,8 @@ test("#2348: the legacy refusal still writes the escalation artifact for a recor
     summary: "The supervisor settled the stalled Attempt without an executor Result.",
     output: {},
   });
-  // The escalation readable artifact is not a completion projection: its
-  // disposition is committed with the Task, so it must survive the refusal
-  // instead of leaving a dangling artifact path behind.
+  // The escalation is not a completion projection, so it must survive the
+  // refusal as an Open Question on the Task lifecycle that pauses the slice.
   writeFileSync(join(basePath, ".gsd", "PREFERENCES.md"), "---\nphases:\n  mid_execution_escalation: true\n---\n");
   clearGSDPreferencesCache();
   const previousCwd = process.cwd();
@@ -1985,12 +1984,19 @@ test("#2348: the legacy refusal still writes the escalation artifact for a recor
 
     assert.ok("error" in result, "the refusal must still carry the recovery-context error");
     assert.match(result.error, /no running Attempt/);
-    const artifactPath = String(row(`
-      SELECT escalation_artifact_path AS p
-      FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
-    `).p);
-    assert.match(artifactPath, /T01-ESCALATION\.json$/);
-    assert.equal(existsSync(artifactPath), true, "the escalation artifact must survive the projection refusal");
+    assert.deepEqual(row(`
+      SELECT question.question_text, question.question_status, task.escalation_pending
+      FROM workflow_open_questions question
+      JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = question.lifecycle_id
+      JOIN tasks task
+        ON task.milestone_id = lifecycle.milestone_id
+       AND task.slice_id = lifecycle.slice_id
+       AND task.id = lifecycle.task_id
+    `), {
+      question_text: "Should execution pause for the hard blocker?",
+      question_status: "open",
+      escalation_pending: 1,
+    }, "the escalation question must survive the projection refusal");
     assert.equal(
       Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY'").count),
       0,

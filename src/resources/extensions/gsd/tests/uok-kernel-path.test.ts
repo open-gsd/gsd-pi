@@ -21,7 +21,7 @@ import {
   isUnifiedAuditEnabled,
   setUnifiedAuditEnabled,
 } from "../uok/audit-toggle.ts";
-import { writeEscalationArtifact } from "../escalation.ts";
+import { buildAuditEnvelope, emitUokAuditEvent } from "../uok/audit.ts";
 import { peekLogs, _resetLogs } from "../workflow-logger.ts";
 
 function makeBasePath(): string {
@@ -299,24 +299,12 @@ test("runAutoLoopWithUok treats kernel-enter audit failures as telemetry-only", 
     );
     assert.equal(filtered.eligible.length, 1);
 
-    mkdirSync(join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), {
-      recursive: true,
-    });
-    writeEscalationArtifact(basePath, {
-      version: 1,
-      taskId: "T01",
-      sliceId: "S01",
-      milestoneId: "M001",
-      question: "Choose a path",
-      options: [
-        { id: "a", label: "A", tradeoffs: "First path" },
-        { id: "b", label: "B", tradeoffs: "Second path" },
-      ],
-      recommendation: "a",
-      recommendationRationale: "Test recommendation",
-      continueWithDefault: false,
-      createdAt: new Date().toISOString(),
-    });
+    emitUokAuditEvent(basePath, buildAuditEnvelope({
+      traceId: "escalation:M001:S01:T01",
+      category: "gate",
+      type: "escalation-manual-attention-created",
+      payload: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    }));
   };
 
   await runAutoLoopWithUok(args);
@@ -335,20 +323,11 @@ test("runAutoLoopWithUok treats kernel-enter audit failures as telemetry-only", 
   );
 
   assert.doesNotThrow(() => {
-    writeEscalationArtifact(basePath, {
-      version: 1,
-      taskId: "T02",
-      sliceId: "S01",
-      milestoneId: "M001",
-      question: "Continue?",
-      options: [
-        { id: "yes", label: "Yes", tradeoffs: "Continue" },
-        { id: "no", label: "No", tradeoffs: "Stop" },
-      ],
-      recommendation: "yes",
-      recommendationRationale: "Audit stayed disabled after degraded enter",
-      continueWithDefault: true,
-      createdAt: new Date().toISOString(),
-    });
+    emitUokAuditEvent(basePath, buildAuditEnvelope({
+      traceId: "escalation:M001:S01:T02",
+      category: "gate",
+      type: "escalation-manual-attention-created",
+      payload: { milestoneId: "M001", sliceId: "S01", taskId: "T02" },
+    }));
   });
 });

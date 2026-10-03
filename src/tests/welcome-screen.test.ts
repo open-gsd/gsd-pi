@@ -320,3 +320,38 @@ test('priming with no lock set leaves the projection rendering untouched', async
   assert.match(out, /legacy next action/, 'projection next action renders when unlocked')
 })
 
+// ── Database state supplied by the caller ────────────────────────────────────
+
+test('database state replaces a contradicting STATE.md projection', (t) => {
+  setupLockFixture(t, '', 'none')
+
+  const out = strip(capture({
+    version: '1.0.0',
+    width: 160,
+    state: { milestone: 'M002: Payments platform', phase: 'executing', slice: 'S01: Refund flow', nextAction: 'Execute T01' },
+  }))
+  assert.match(out, /Project\s+M002: Payments platform · executing · S01: Refund flow/)
+  assert.match(out, /Command\s+Execute T01/)
+  assert.doesNotMatch(out, /M001|evaluating-gates|legacy/, 'nothing from STATE.md is shown')
+})
+
+test('database state with no active milestone renders idle, not the STATE.md milestone', (t) => {
+  setupLockFixture(t, '', 'none')
+
+  const out = strip(capture({ version: '1.0.0', width: 140, state: { phase: 'complete' } }))
+  assert.match(out, /No active GSD project/)
+  assert.doesNotMatch(out, /M001|legacy/, 'nothing from STATE.md is shown')
+})
+
+test('the STATE.md fallback does not show a "None" slice', (t) => {
+  const tmp = setupLockFixture(t, '', 'none')
+  writeFileSync(
+    join(tmp, '.gsd', 'STATE.md'),
+    '**Active Milestone:** M001: Todo App\n**Active Slice:** None\n**Phase:** planning\n',
+  )
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M001: Todo App · planning/)
+  assert.doesNotMatch(out, /None/, 'an empty active slice is not a status part')
+})
+

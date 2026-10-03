@@ -83,7 +83,7 @@ export type { ArtifactRow, MilestoneRow } from "./db-milestone-artifact-rows.js"
 export type { ActiveTaskSummary, IdStatusSummary, TaskStatusCounts } from "./db-lightweight-query-rows.js";
 export type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
 
-import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
+import { TASK_HAS_ESCALATION_SQL, TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
 import { applyStatusTransition } from "./db/writers/status.js";
 export { projectCanonicalStatusToLegacy } from "./db/writers/status.js";
 import {
@@ -844,34 +844,38 @@ export function setSliceUatMd(milestoneId: string, sliceId: string, uatMd: strin
 
 // ─── ADR-011 Phase 2 escalation helpers ──────────────────────────────────
 
-/** Set pause-on-escalation state on a completed task. Mutually exclusive with awaiting_review. */
+/**
+ * Set pause-on-escalation state on a task. Mutually exclusive with awaiting_review.
+ * A new escalation has a new answer to deliver, so the override claim is reset.
+ */
 export function setTaskEscalationPending(
   milestoneId: string, sliceId: string, taskId: string,
-  artifactPath: string,
 ): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE tasks
        SET escalation_pending = 1,
            escalation_awaiting_review = 0,
-           escalation_artifact_path = :path
+           escalation_override_applied_at = NULL
      WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-  ).run({ ":path": artifactPath, ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
+  ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
 }
 
-/** Set awaiting-review state (artifact exists and requires explicit user review). Mutually exclusive with pending. */
+/**
+ * Set awaiting-review state (the escalation requires explicit user review). Mutually exclusive with pending.
+ * A new escalation has a new answer to deliver, so the override claim is reset.
+ */
 export function setTaskEscalationAwaitingReview(
   milestoneId: string, sliceId: string, taskId: string,
-  artifactPath: string,
 ): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE tasks
        SET escalation_awaiting_review = 1,
            escalation_pending = 0,
-           escalation_artifact_path = :path
+           escalation_override_applied_at = NULL
      WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-  ).run({ ":path": artifactPath, ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
+  ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
 }
 
 /** Clear escalation-pending and awaiting-review flags once the user has resolved it. */
@@ -903,7 +907,7 @@ export function claimEscalationOverride(
          SET escalation_override_applied_at = :now
        WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid
          AND escalation_override_applied_at IS NULL
-         AND escalation_artifact_path IS NOT NULL`,
+         AND ${TASK_HAS_ESCALATION_SQL}`,
     ).run({ ":now": now, ":mid": milestoneId, ":sid": sliceId, ":tid": sourceTaskId });
     // node:sqlite surfaces `changes` on the run result.
     const changes = (result as { changes?: number }).changes ?? 0;

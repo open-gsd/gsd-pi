@@ -4,7 +4,7 @@
 >
 > **When to read this:** At the start of any session working on GSD-managed work, or when loaded by `/gsd`.
 >
-> **After reading this, always read `.gsd/STATE.md` to find out what's next.**
+> **After reading this, always call `gsd_project_snapshot` to find out what's next.** It reads the project database. `.gsd/STATE.md` is a rendered copy of that status; do not use it as the source.
 > If the milestone has a `NN-CONTEXT.md`, read that too. If the active slice has an `NN-MM-CONTEXT.md`, read that as well — these files contain project-specific decisions, reference paths, and implementation guidance that this generic methodology doc does not.
 
 In a DB-backed gsd-pi project, these files are readable projections and context,
@@ -17,17 +17,17 @@ state.
 
 ## Quick Start: "What's next?"
 
-Read these files in order and act on what they say:
+Do these steps in order and act on what they say:
 
-1. **`.gsd/STATE.md`** — Where are we? What's the next action?
-2. **`.gsd/phases/<NN-slug>/<NN>-ROADMAP.md`** — What's the plan? Which slices are done? (`STATE.md` tells you which milestone is active)
+1. Call **`gsd_project_snapshot`** — Where are we? What's the next action?
+2. **`.gsd/phases/<NN-slug>/<NN>-ROADMAP.md`** — What's the plan? Which slices are done? (the snapshot tells you which milestone is active)
 3. **`.gsd/phases/<NN-slug>/<NN>-CONTEXT.md`** — Milestone-level project decisions, reference paths, constraints. Read this before doing implementation work.
 4. If a slice is active and has one, read **`<NN>-<MM>-CONTEXT.md`** — Slice-specific decisions and constraints.
 5. If a slice is active, read its **`<NN>-<MM>-PLAN.md`** — Which tasks exist? Which are done?
 6. If `.gsd/CODEBASE.md` exists, skim it for fast structural orientation before broad code exploration.
 7. If a task was interrupted, check for **`continue.md`** in the active slice directory — Resume from there.
 
-Then do the thing `STATE.md` says to do next.
+Then do the next action that the snapshot reports.
 
 ---
 
@@ -49,7 +49,7 @@ All artifacts live in `.gsd/` at the project root:
 
 ```
 .gsd/
-  STATE.md                                  # Dashboard — always read first (derived cache; runtime, gitignored)
+  STATE.md                                  # Status projection rendered from the database — do not edit (runtime, gitignored)
   DECISIONS.md                              # Append-only decisions register
   CODEBASE.md                               # Generated codebase map cache (auto-refreshed by GSD)
   phases/
@@ -161,27 +161,6 @@ The boundary map is a **planning artifact** — not runnable code. It:
 Task plan content lives inside the slice plan. There is no standalone task-level PLAN file in the flat-phase layout; layout-aware task PLAN paths resolve to the owning `<NN>-<MM>-PLAN.md`.
 
 **Must-haves are what make verification mechanically checkable.** Truths are checked by running commands or reading output. Artifacts are checked by confirming files exist with real content. Key links are checked by confirming imports/references actually connect the pieces.
-
-### `STATE.md`
-
-```markdown
-# GSD State
-
-**Active Milestone:** M001 — Title
-**Active Slice:** S02 — Slice Title
-**Active Task:** T01 — Task Title
-**Phase:** Executing
-
-## Recent Decisions
-- Decision 1
-- Decision 2
-
-## Blockers
-- None (or list blockers)
-
-## Next Action
-Exact next thing to do.
-```
 
 ### `CONTEXT.md` / `S##-CONTEXT.md` (from discuss phase)
 
@@ -503,9 +482,9 @@ The EXACT first thing to do when resuming. Not vague. Specific.
 
 ## State Management
 
-### `STATE.md` is a derived cache
+### `STATE.md` is a projection
 
-It is NOT the source of truth. It's a convenience dashboard.
+It is NOT the source of truth. GSD renders it from the database after every lifecycle tool call. Do not edit it, and do not read status from it: call `gsd_project_snapshot`.
 
 **Authority and review surfaces:**
 
@@ -514,12 +493,13 @@ It is NOT the source of truth. It's a convenience dashboard.
 - `S##-T##-SUMMARY.md` records the readable Task outcome in flat-phase projects (legacy `T##-SUMMARY.md` is still readable).
 - `S##-SUMMARY.md` and `M###-SUMMARY.md` project compressed Slice and Milestone outcomes.
 
-**Refresh `STATE.md` through the workflow** after every significant action so it projects:
+`STATE.md` shows:
 
-- Active milestone/slice/task
-- Recent decisions (last 3-5)
+- Active milestone and slice, and the phase
+- The milestone registry
+- Recent decisions
 - Blockers
-- Next action (most important — this is what a fresh session reads first)
+- Next action
 
 ### Reconciliation
 
@@ -633,7 +613,7 @@ This methodology doc is generic. Project-specific guidance belongs in the milest
 
 ## Checklist for a Fresh Session
 
-1. Read `.gsd/STATE.md` — what's the next action?
+1. Call `gsd_project_snapshot` — what's the next action?
 2. Check for `continue.md` in the active slice — is there interrupted work?
 3. If resuming: read `continue.md`, delete it, pick up from "Next Action".
 4. If starting fresh: read the active slice's `<NN>-<MM>-PLAN.md`, find the next incomplete task.
@@ -642,13 +622,13 @@ This methodology doc is generic. Project-specific guidance belongs in the milest
 7. Do the work.
 8. Verify the must-haves.
 9. Write the summary.
-10. Mark done, update `STATE.md`, advance.
-11. If context is getting full or you're done for now: write `continue.md` if mid-task, or update `STATE.md` with next action if between tasks.
+10. Record completion through the GSD completion tool (`gsd_task_complete`, `gsd_slice_complete`), then advance.
+11. If context is getting full or you're done for now: write `continue.md` if mid-task. Between tasks nothing more is needed; the database holds the next action.
 
 ## When Context Gets Large
 
 If you sense context pressure (many files read, long execution, lots of tool output):
 
 1. **If mid-task:** Write `continue.md` with exact resume state. Tell the user: "Context is getting full. I've saved progress to continue.md. Start a new session and run `/gsd` to pick up where you left off, or `/gsd auto` to resume in auto-execution mode."
-2. **If between tasks:** Just update `STATE.md` with the next action. No continue file needed — the next session will read STATE.md and pick up the next task cleanly.
+2. **If between tasks:** No continue file needed — completed work is in the database, and the next session reads the next action with `gsd_project_snapshot`.
 3. **Don't fight it.** The whole system is designed for this. A fresh session with the right files loaded is better than a stale session with degraded reasoning.

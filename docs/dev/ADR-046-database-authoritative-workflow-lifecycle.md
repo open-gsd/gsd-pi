@@ -126,7 +126,9 @@ the realpath of the one checkout root the database belongs to. The first open
 binds an unbound database. Every later open from another root, such as a second
 clone that resolves to the same state directory or a copied `gsd.db`, is
 refused with `checkout-unbound` until `/gsd db bind` explicitly moves the
-binding. Worktrees belong to the checkout that created them. One resolver
+binding. An internal reopen that holds only the database path has no root to
+compare, so it checks that the file is the one its bound checkout resolves to.
+Worktrees belong to the checkout that created them. One resolver
 (`resolveGsdPathContract`) finds the database, anchored on `gsd.db` and
 preferences, never on projection files. The binding is not identity: Import
 Application restore and Forward Repair match a backup by `project_id`, so a
@@ -137,8 +139,10 @@ root, the next open refuses until `/gsd db bind`.
 Committed `.gsd/` markdown (tracked mode, team repositories) is an export, not
 shared authority. A clone with milestone projections and no database, or a
 database with no milestone rows beside a planned (ROADMAP) projection, fails
-closed with `authority-missing` in every entry point until Import Application
-(`/gsd recover`) or a restore. Guided entry holds a changed tracked projection
+closed with `authority-missing` in every entry point and every internal reopen
+until Import Application (`/gsd recover`) or a restore. A `/gsd recover` that
+applies nothing closes the handle it opened, so the same process refuses the
+database again. Guided entry holds a changed tracked projection
 the same way before its markdown self-heal. A tracked projection changed by pull, merge,
 rebase, or branch switch raises one "changed outside GSD" state before
 dispatch: the user imports it through Import Preview or discards it with a
@@ -356,7 +360,7 @@ column when a migration gate passes.
 |---|---|---|
 | ADR-003 Pipeline Simplification | Superseded before adoption. Research remains first-class, resumable Milestone work rather than being merged into planning or reduced to optional artifacts; its ceremony-reduction goal remains valid through the shared Lifecycle Kernel, automated verification, and durable closeout. | Partly. ADR-003 was not adopted. The shared Lifecycle Kernel and durable closeout are not complete. |
 | ADR-009 Unified Orchestration Kernel | Superseded for workflow orchestration. Provider/model/TOS policy remains independently valid. | Not assessed. |
-| ADR-011 Progressive Planning and Escalation | Progressive refinement retained; file-backed escalation, DAG, broad pauses, and forward-only correction superseded. | Not yet. Escalation is still a file artifact (`escalation.ts`). |
+| ADR-011 Progressive Planning and Escalation | Progressive refinement retained; file-backed escalation, DAG, broad pauses, and forward-only correction superseded. | Partly. A Task escalation is an Open Question with a choice interaction and an Answer in the database (`escalation.ts`); no escalation file is written. Only a Task with a canonical lifecycle can escalate. DAG, broad pauses, and forward-only correction are not yet replaced. |
 | ADR-013 Memory Store Consolidation | Amended. `memories` remains canonical for reusable cross-session knowledge, while workflow Decisions and their lifecycle effects move to the Conversation domain; memory extraction is noncritical follow-on work. KNOWLEDGE.md Rules are `memories` rows (`category = rule`, `sourceKnowledgeId` K###); this supersedes ADR-013's file-owned Rules. | Not yet. Workflow Decisions are still `memories` rows. The Conversation domain is not in production. |
 | ADR-014 Auto Orchestration Deep Module | Amended and generalized into the shared Lifecycle Kernel. | Not yet. The Lifecycle Kernel is not the sole sequencer for every unit type and entry point. |
 | ADR-015 Runtime Invariant Modules | Retained with database-only reconciliation and typed module results. | Partly. The modules are retained. Reconciliation still compares projection files. |

@@ -28,7 +28,7 @@ import {
   isDbAvailable,
 } from "./gsd-db.js";
 import type { TaskRow } from "./db-task-slice-rows.js";
-import { formatEscalationForDisplay, readEscalationArtifact } from "./escalation.js";
+import { formatEscalationForDisplay, readTaskEscalation } from "./escalation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import type { GSDPreferences } from "./preferences-types.js";
 import { isInactiveStatus } from "./status-guards.js";
@@ -791,8 +791,8 @@ function isBlockerDiscoveredAttempt(
 
 /**
  * Pause message for a staged blocker (#2148): surface the blocker description
- * and, when the ADR-011 escalation artifact exists and is unresolved, its
- * question/options/recommendation. The artifact is opt-in
+ * and, when the Task has an unresolved ADR-011 escalation in the database, its
+ * question/options/recommendation. The escalation is opt-in
  * (phases.mid_execution_escalation), so the attempt's staged summary is the
  * always-available fallback.
  */
@@ -809,8 +809,7 @@ function describeBlockerPause(
     lines.push(`Blocker: ${attempt.resultSummary}`);
   }
   if (isDbAvailable()) {
-    const artifactPath = getTask(milestoneId, sliceId, taskId)?.escalation_artifact_path;
-    const artifact = artifactPath ? readEscalationArtifact(artifactPath) : null;
+    const artifact = readTaskEscalation(milestoneId, sliceId, taskId);
     if (artifact && !artifact.respondedAt) {
       lines.push("", formatEscalationForDisplay(artifact));
     }

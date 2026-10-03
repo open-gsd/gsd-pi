@@ -43,19 +43,26 @@ function readProjectProgress(projectPath: string): ProjectProgressInfo | null {
     let milestonesCompleted = 0;
     let milestonesTotal = 0;
 
+    // The renderer writes "None" for an empty active milestone or slice.
+    const field = (line: string, label: string): string | null => {
+      const value = line.replace(label, "").trim();
+      return value && value !== "None" ? value : null;
+    };
+
     for (const line of lines) {
       const trimmed = line.trim();
 
       if (trimmed.startsWith("**Active Milestone:**")) {
-        activeMilestone = trimmed.replace("**Active Milestone:**", "").trim() || null;
+        activeMilestone = field(trimmed, "**Active Milestone:**");
       } else if (trimmed.startsWith("**Active Slice:**")) {
-        activeSlice = trimmed.replace("**Active Slice:**", "").trim() || null;
+        activeSlice = field(trimmed, "**Active Slice:**");
       } else if (trimmed.startsWith("**Phase:**")) {
         phase = trimmed.replace("**Phase:**", "").trim() || null;
       } else if (trimmed.startsWith("- ✅")) {
         milestonesCompleted++;
         milestonesTotal++;
-      } else if (trimmed.startsWith("- 🔄")) {
+      } else if (/^- (🔄|⬜|⏸)/u.test(trimmed)) {
+        // Active, pending and parked milestones all count toward the total.
         milestonesTotal++;
       }
     }

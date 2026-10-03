@@ -1996,7 +1996,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
       assert.ok(reopenMilestoneTool, "milestone reopen tool should be registered");
       assert.ok(reopenMilestoneAlias, "milestone reopen alias should be registered");
 
-      // Mirrors the ADR-011 escalation schema: question + 2-4 options
+      // Mirrors the ADR-011 escalation schema: question + 2-3 options
       // (each with id/label/tradeoffs) + recommendation + rationale +
       // continueWithDefault flag.
       const escalationPayload = {

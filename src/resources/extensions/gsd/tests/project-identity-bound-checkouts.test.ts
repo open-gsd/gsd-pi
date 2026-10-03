@@ -11,11 +11,14 @@ import { join } from "node:path";
 import { bootstrapAutoSession } from "../auto-start.ts";
 import { AutoSession } from "../auto/session.ts";
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.ts";
-import { handleDbBind, handleRebuild } from "../commands-maintenance.ts";
+import { handleDbBind, handleRebuild, handleRecover } from "../commands-maintenance.ts";
 import {
+  ensureWorkflowDbAtPath,
   ensureWorkflowDbForBase,
   getWorkflowDatabasePath,
+  isWorkflowDatabaseOpen,
   openWorkflowDatabase,
+  openWorkflowDatabasePath,
   resolveProjectRootDbPath,
 } from "../db-workspace.ts";
 import { GitServiceImpl } from "../git-service.ts";
@@ -140,6 +143,25 @@ test("a copied database with another root is refused for writes", async () => {
   assert.equal(boundRoot(copiedDb), source, "the refused open must not rebind the copy");
 });
 
+test("a path-only open refuses a database that its bound checkout does not resolve to", () => {
+  const source = tempDir("gsd-bound-path-source-");
+  const copy = tempDir("gsd-bound-path-copy-");
+  mkdirSync(join(source, ".gsd"));
+  mkdirSync(join(copy, ".gsd"));
+  assert.equal(openWorkflowDatabase(source).ok, true);
+  insertMilestone({ id: "M001", title: "Source work", status: "active" });
+  closeDatabase();
+  const sourceDb = join(source, ".gsd", "gsd.db");
+  const copiedDb = join(copy, ".gsd", "gsd.db");
+  copyFileSync(sourceDb, copiedDb);
+
+  assert.throws(() => openWorkflowDatabasePath(copiedDb), /checkout-unbound: .*belongs to the checkout at/s);
+  assert.throws(() => ensureWorkflowDbAtPath(copiedDb), /checkout-unbound/);
+  assert.equal(isWorkflowDatabaseOpen(), false, "a refused path-only open leaves no handle");
+  assert.equal(boundRoot(copiedDb), source, "the refused open must not rebind the copy");
+  assert.equal(ensureWorkflowDbAtPath(sourceDb), true, "the bound checkout's own database still reopens by path");
+});
+
 test("an empty database bound to another root beside a ROADMAP is bound here, then imported", () => {
   const old = tempDir("gsd-bound-old-");
   const moved = tempDir("gsd-bound-moved-");
@@ -230,6 +252,39 @@ for (const existingDb of ["none", "schema-only"] as const) test(`a re-clone with
     }
     assert.equal(openWorkflowDatabase(clone, { createEmptyAuthority: true }).ok, true, "the explicit import path still opens it");
   }
+});
+
+/** A schema-only database (as an older GSD created it) beside one planned milestone. */
+function emptyDatabaseBesideRoadmap(prefix: string): { base: string; dbPath: string } {
+  const base = tempDir(prefix);
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  const dbPath = join(base, ".gsd", "gsd.db");
+  assert.equal(openDatabase(dbPath), true);
+  closeDatabase();
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# M001: Pulled plan\n");
+  return { base, dbPath };
+}
+
+test("the internal reopen seams refuse an empty database beside a planned milestone", () => {
+  const { base, dbPath } = emptyDatabaseBesideRoadmap("gsd-empty-seams-");
+  const recoverInstruction = /authority-missing: .*\/gsd recover/s;
+
+  assert.throws(() => ensureWorkflowDbForBase(base), recoverInstruction);
+  assert.throws(() => ensureWorkflowDbAtPath(dbPath), recoverInstruction);
+  assert.throws(() => openWorkflowDatabasePath(dbPath), recoverInstruction);
+  assert.equal(isWorkflowDatabaseOpen(), false, "a refused reopen leaves no handle");
+  assert.equal(openWorkflowDatabase(base).reason, "authority-missing", "a reopen seam must not admit the database for a later entry point");
+});
+
+test("a declined recover leaves the empty database refused in the same process", async () => {
+  const { base } = emptyDatabaseBesideRoadmap("gsd-empty-declined-");
+  const { ctx, notes } = makeCtx();
+
+  await handleRecover(ctx, base);
+
+  assert.match(notes.at(-1)?.message ?? "", /No database changes made/, JSON.stringify(notes));
+  await assert.rejects(ensureDbOpen(base), /authority-missing: .*\/gsd recover/s);
+  await assert.rejects(executeSummarySave({} as never, base), /authority-missing/);
 });
 
 function listFiles(dir: string): string[] {

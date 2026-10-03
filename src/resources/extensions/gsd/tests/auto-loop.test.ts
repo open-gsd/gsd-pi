@@ -1794,6 +1794,7 @@ function makeMockDeps(
     rebuildState: async () => {},
     resolveModelId: (id: string, models: any[]) => models.find((m: any) => m.id === id),
     emitJournalEvent: () => {},
+    recordVerificationPause: () => {},
   };
 
   const merged = { ...baseDeps, ...overrides, callLog };

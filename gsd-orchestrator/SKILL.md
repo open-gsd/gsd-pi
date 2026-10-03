@@ -108,7 +108,7 @@ echo "$RESULT" | jq '{status: .status, phase: .phase, cost: .cost.total}'
 | Code | Meaning | Your action |
 |------|---------|-------------|
 | `0`  | Success | Check deliverables, verify output, report completion |
-| `1`  | Error or timeout | Inspect stderr, check `.gsd/STATE.md`, retry or escalate |
+| `1`  | Error or timeout | Inspect stderr, check `gsd headless query`, retry or escalate |
 | `10` | Blocked | Query state for blocker details, steer around it or escalate to human |
 | `11` | Cancelled | Process was interrupted — resume with `--resume <sessionId>` or restart |
 </exit_codes>

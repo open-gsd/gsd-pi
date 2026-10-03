@@ -160,6 +160,17 @@ describe('buildGraph', () => {
     assert.ok(graph.nodes.length > 0, `Expected nodes, got ${graph.nodes.length}`);
   });
 
+  it('adds the active milestone node for an id with a unique suffix', async (t) => {
+    const suffixProject = tmpProject();
+    t.after(() => rmSync(suffixProject, { recursive: true, force: true }));
+    writeFixture(suffixProject, '.gsd/STATE.md', '# GSD State\n\n**Active Milestone:** M001-ab12cd: Auth System\n');
+    const graph = await buildGraph(suffixProject);
+    assert.ok(
+      graph.nodes.some((n) => n.id === 'milestone:M001-ab12cd'),
+      `expected the suffix-id milestone node, got ${graph.nodes.map((n) => n.id).join(', ')}`,
+    );
+  });
+
   it('produces a non-empty set of edges for a project with artifacts', async () => {
     // Previous `edgeCount >= 0` was a pure tautology. For a project
     // with STATE/KNOWLEDGE/LEARNINGS/milestone artifacts, the graph

@@ -125,7 +125,11 @@ export async function handleTaskSettle(
       );
       return;
     }
-    const settleOptions = { reconcileLifecycle: parsed.reconcileLifecycle, basePath };
+    const settleOptions = {
+      reconcileLifecycle: parsed.reconcileLifecycle,
+      basePath,
+      legacyJournalBasePath: basePath,
+    };
     if (!parsed.apply) {
       const plan = planTaskSettle(parsed.task, parsed.reason, settleOptions);
       if (plan.rows.length === 0 && plan.lifecycleRows.length === 0 && !plan.publication) {
@@ -157,7 +161,8 @@ export async function handleTaskSettle(
       invocation: cliInvocation(),
       task: parsed.task,
       reason: parsed.reason,
-      // settleOptions carries basePath for the verification-paused receipt gate.
+      // settleOptions carries basePath for verified publication and for the
+      // one-time import of a pre-upgrade journal verification-pause receipt.
       ...settleOptions,
     });
     if (!result.settled && !result.reconciled && !result.published) {

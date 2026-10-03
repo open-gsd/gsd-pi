@@ -28,7 +28,7 @@ import {
 import { rowToGate } from "../db-gate-rows.js";
 import { rowToArtifact, rowToMilestone, type ArtifactRow, type MilestoneRow } from "../db-milestone-artifact-rows.js";
 import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "../db-task-slice-rows.js";
-import { TERMINAL_STATUS_SQL } from "./sql-constants.js";
+import { TASK_HAS_ESCALATION_SQL, TASK_HAS_OPEN_ESCALATION_SQL, TERMINAL_STATUS_SQL } from "./sql-constants.js";
 import {
   compareLifecycleShadow,
   normalizeCanonicalLifecycleStatus,
@@ -780,36 +780,72 @@ export function getCompletedMilestoneTaskFileHints(milestoneId: string): string[
 /** Find the most recent resolved-but-unapplied escalation override in a slice. */
 export function findUnappliedEscalationOverride(
   milestoneId: string, sliceId: string,
-): { taskId: string; artifactPath: string } | null {
+): { taskId: string } | null {
   if (!getDbOrNull()!) return null;
-  // Filter BOTH flags: escalation_pending=0 AND escalation_awaiting_review=0
-  // ensures we only claim overrides the user has explicitly resolved.
-  // Without the awaiting_review filter, continueWithDefault=true artifacts
-  // (not yet responded to) would be prematurely claimed, causing the override
-  // to be lost when the user later resolves (#ADR-011 Phase 2 peer-review Bug 2).
+  // The pending override is an answered escalation question that no prompt has
+  // claimed. An open question is not claimable: the user has not responded, so
+  // a claim would lose the override (#ADR-011 Phase 2 peer-review Bug 2).
   const row = getDbOrNull()!.prepare(
-    `SELECT id, escalation_artifact_path AS path
+    `SELECT id
        FROM tasks
       WHERE milestone_id = :mid AND slice_id = :sid
-        AND escalation_artifact_path IS NOT NULL
+        AND ${TASK_HAS_ESCALATION_SQL}
+        AND NOT ${TASK_HAS_OPEN_ESCALATION_SQL}
         AND escalation_override_applied_at IS NULL
-        AND escalation_pending = 0
-        AND escalation_awaiting_review = 0
       ORDER BY sequence DESC, id DESC
       LIMIT 1`,
   ).get({ ":mid": milestoneId, ":sid": sliceId }) as
-    | { id: string; path: string | null }
+    | { id: string }
     | undefined;
-  if (!row || !row.path) return null;
-  return { taskId: row.id, artifactPath: row.path };
+  if (!row) return null;
+  return { taskId: row.id };
 }
 
-/** List tasks with active escalation artifacts across a milestone (for /gsd escalate list). */
+/**
+ * SQL condition on a `tasks` row: an escalation from before the database stored
+ * them, which the user resolved and no prompt has claimed. Limited to a Task in
+ * an open slice of an open milestone that still has a next task to receive it.
+ */
+const UNAPPLIED_LEGACY_ESCALATION_SQL = `(
+  escalation_artifact_path IS NOT NULL
+  AND escalation_pending = 0
+  AND escalation_awaiting_review = 0
+  AND escalation_override_applied_at IS NULL
+  AND NOT ${TASK_HAS_ESCALATION_SQL}
+  AND EXISTS (
+    SELECT 1 FROM slices open_slice
+    JOIN milestones open_milestone ON open_milestone.id = open_slice.milestone_id
+    WHERE open_slice.milestone_id = tasks.milestone_id
+      AND open_slice.id = tasks.slice_id
+      AND open_slice.status NOT IN (${TERMINAL_STATUS_SQL})
+      AND open_milestone.status NOT IN (${TERMINAL_STATUS_SQL})
+  )
+  AND EXISTS (
+    SELECT 1 FROM tasks next_task
+    WHERE next_task.milestone_id = tasks.milestone_id
+      AND next_task.slice_id = tasks.slice_id
+      AND next_task.status NOT IN (${TERMINAL_STATUS_SQL})
+  )
+)`;
+
+/** List every Task whose resolved pre-database escalation is not applied (for doctor). */
+export function listUnappliedLegacyEscalations(): TaskRow[] {
+  if (!getDbOrNull()!) return [];
+  const rows = getDbOrNull()!.prepare(
+    `SELECT * FROM tasks WHERE ${UNAPPLIED_LEGACY_ESCALATION_SQL} ORDER BY milestone_id, slice_id, sequence, id`,
+  ).all();
+  return rows.map(rowToTask);
+}
+
+/** List tasks with escalations across a milestone (for /gsd escalate list). */
 export function listEscalationArtifacts(milestoneId: string, includeResolved: boolean = false): TaskRow[] {
   if (!getDbOrNull()!) return [];
+  // A pause flag with no question row is an escalation from before the
+  // database stored them. It stays listed so the user can resolve it.
+  const legacyPause = `((escalation_pending = 1 OR escalation_awaiting_review = 1) AND NOT ${TASK_HAS_ESCALATION_SQL})`;
   const filter = includeResolved
-    ? "escalation_artifact_path IS NOT NULL"
-    : "(escalation_pending = 1 OR escalation_awaiting_review = 1) AND escalation_artifact_path IS NOT NULL";
+    ? `(${TASK_HAS_ESCALATION_SQL} OR ${legacyPause} OR ${UNAPPLIED_LEGACY_ESCALATION_SQL})`
+    : `(${TASK_HAS_OPEN_ESCALATION_SQL} OR ${legacyPause})`;
   const rows = getDbOrNull()!.prepare(
     `SELECT * FROM tasks WHERE milestone_id = :mid AND ${filter} ORDER BY slice_id, sequence, id`,
   ).all({ ":mid": milestoneId });

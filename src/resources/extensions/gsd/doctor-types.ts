@@ -62,6 +62,7 @@ export type DoctorIssueCode =
   | "duplicate_task_id"
   | "task_file_not_in_plan"
   | "stale_replan_file"
+  | "orphan_reopen_reason_file"
   | "future_timestamp"
   // Worktree lifecycle checks
   | "worktree_branch_merged"
@@ -113,6 +114,7 @@ export type DoctorIssueCode =
   | "projection_work_unrendered"
   // OVERRIDES.md block that the database does not hold
   | "override_file_block_unimported"
+  | "escalation_legacy_response_unapplied"
   // Legacy/canonical lifecycle shadow drift (#2440)
   | "lifecycle_shadow_mismatch"
   | "lifecycle_missing_shadow"

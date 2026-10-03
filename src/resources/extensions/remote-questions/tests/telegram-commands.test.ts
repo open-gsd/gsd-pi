@@ -28,6 +28,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { isCommand, handleCommand, type CommandSender } from "../commands.ts";
+import { closeDatabase, openDatabase } from "../../gsd/gsd-db.ts";
+import { setRuntimeKv } from "../../gsd/db/runtime-kv.ts";
+import { PAUSED_SESSION_KV_KEY } from "../../gsd/interrupted-session.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -114,31 +117,38 @@ test("/status returns GSD state text (idle when no active session)", async (t) =
   );
 });
 
-test("/status reads paused-session.json when present", async (t) => {
+test("/status reads the paused session from the DB, not paused-session.json", async (t) => {
   const dir = makeBasePath();
   const { sender, messages } = makeCapturingSender();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
 
-  // Write a fake paused-session.json
-  const pausedMeta = {
+  // A leftover file from an older build is not paused state.
+  writeFileSync(
+    join(dir, ".gsd", "runtime", "paused-session.json"),
+    JSON.stringify({ milestoneId: "M009", unitType: "execute-task", unitId: "M009/S01/T01" }),
+    "utf-8",
+  );
+  await handleCommand("/status", sender, dir);
+  assert.match(messages[0], /State: idle/);
+  assert.doesNotMatch(messages[0], /M009/);
+
+  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
     milestoneId: "M001",
     unitType: "execute-task",
     unitId: "M001/S01/T01",
     pausedAt: "2026-01-01T12:00:00.000Z",
-  };
-  writeFileSync(
-    join(dir, ".gsd", "runtime", "paused-session.json"),
-    JSON.stringify(pausedMeta),
-    "utf-8",
-  );
-
+  });
   await handleCommand("/status", sender, dir);
 
-  assert.equal(messages.length, 1);
-  const reply = messages[0];
-  // Project prefix must be present
+  const reply = messages[1];
   assert.ok(reply.startsWith("📁"), `Expected project prefix, got: ${reply}`);
-  assert.ok(reply.includes("M001"), `Expected milestone ID in status, got: ${reply}`);
+  assert.match(reply, /State: paused/);
+  assert.match(reply, /Milestone: M001/);
+  assert.match(reply, /Unit: execute-task \/ M001\/S01\/T01/);
 });
 
 // ─── /pause ──────────────────────────────────────────────────────────────────

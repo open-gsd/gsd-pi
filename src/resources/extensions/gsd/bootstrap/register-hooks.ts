@@ -51,6 +51,7 @@ import { maybePauseAutoForApprovalGate, resetPendingGatePauseGuard } from "./pen
 import { saveActivityLog } from "../activity-log.js";
 import { recordToolCall as safetyRecordToolCall, recordToolResult as safetyRecordToolResult, saveEvidenceToDisk } from "../safety/evidence-collector.js";
 import { parseUnitId } from "../unit-id.js";
+import { stripIdPrefix } from "../strip-id-prefix.js";
 import { classifyCommand } from "../safety/destructive-guard.js";
 import {
   confirmDestructiveCommand,
@@ -124,8 +125,15 @@ function clearCurrentUnitToolErrorHarnessAbort(toolName: string): void {
   );
 }
 
+type WelcomeProjectState = { milestone?: string; phase?: string; slice?: string; nextAction?: string };
+
 type WelcomeScreenModule = {
-  buildWelcomeScreenLines(opts: { version: string; remoteChannel?: string; width?: number }): string[];
+  buildWelcomeScreenLines(opts: {
+    version: string;
+    remoteChannel?: string;
+    width?: number;
+    state?: WelcomeProjectState;
+  }): string[];
   /** Optional: resolve GSD_MILESTONE_LOCK before the first sync render (#2360). */
   primeMilestoneLock?: () => Promise<void>;
 };
@@ -157,7 +165,31 @@ async function loadWelcomeScreenModule(): Promise<WelcomeScreenModule | undefine
   return undefined;
 }
 
-async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
+/**
+ * Project status for the welcome header, read from the database. Undefined
+ * means there is no database or it could not be opened; only then does the
+ * welcome screen fall back to the STATE.md projection.
+ */
+async function readWelcomeStateFromDb(basePath: string): Promise<WelcomeProjectState | undefined> {
+  try {
+    const { readProgressFromDb } = await import("../state/progress-from-db.js");
+    const progress = await readProgressFromDb(basePath);
+    if (!progress) return undefined;
+    const label = (ref: { id: string; title: string } | null): string | undefined =>
+      ref ? `${ref.id}: ${stripIdPrefix(ref.title, ref.id)}` : undefined;
+    return {
+      milestone: label(progress.activeMilestone),
+      slice: label(progress.activeSlice),
+      phase: progress.phase,
+      nextAction: progress.nextAction || undefined,
+    };
+  } catch {
+    // The header is cosmetic: a database that cannot be read falls back to the projection.
+    return undefined;
+  }
+}
+
+async function installWelcomeHeader(ctx: ExtensionContext, basePath: string): Promise<void> {
   if (!ctx.hasUI || typeof ctx.ui?.setHeader !== "function") return;
 
   try {
@@ -167,6 +199,7 @@ async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
     // Resolve the milestone lock up front — the header render itself is sync.
     // Older welcome-screen builds without priming simply skip this.
     await welcome.primeMilestoneLock?.();
+    const state = await readWelcomeStateFromDb(basePath);
 
     let remoteChannel: string | undefined;
     try {
@@ -185,6 +218,7 @@ async function installWelcomeHeader(ctx: ExtensionContext): Promise<void> {
             version: process.env.GSD_VERSION || "0.0.0",
             remoteChannel,
             width,
+            state,
           });
           cachedWidth = width;
           return cachedLines;
@@ -223,6 +257,7 @@ export const MINIMAL_GSD_TOOL_NAMES = [
   "gsd_exec_search",
   "gsd_resume",
   "gsd_milestone_status",
+  "gsd_project_snapshot",
   "gsd_checkpoint_db",
   "gsd_plan_milestone",
   "memory_query",
@@ -1279,7 +1314,7 @@ export function registerHooks(
       if (isAutoActive() || isAutoPaused()) {
         suppressWelcomeHeader(ctx);
       } else {
-        await installWelcomeHeader(ctx);
+        await installWelcomeHeader(ctx, basePath);
       }
     }
     await loadToolApiKeysForSession();

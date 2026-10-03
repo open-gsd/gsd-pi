@@ -6,8 +6,10 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent
 import { projectRoot } from "../context.js";
 import { getActiveMilestoneId } from "../../state.js";
 import {
-  readEscalationArtifact,
+  readTaskEscalation,
+  readLegacyEscalation,
   formatEscalationForDisplay,
+  formatLegacyEscalationNotice,
   resolveEscalation,
   listActionableEscalations,
   listAllEscalations,
@@ -37,14 +39,19 @@ function helpMessage(): string {
 
 function formatListEntries(
   rows: ReturnType<typeof listActionableEscalations>,
-  basePath: string,
 ): string {
   if (rows.length === 0) return "No escalations.";
   return rows.map((t) => {
-    const art = t.escalation_artifact_path ? readEscalationArtifact(t.escalation_artifact_path) : null;
-    const status = t.escalation_pending ? "PENDING (paused)" : t.escalation_awaiting_review ? "awaiting-review" : "resolved";
-    const question = art?.question ?? "(artifact missing)";
-    return `  ${t.slice_id}/${t.id}  [${status}]  ${question}`;
+    const escalation = readTaskEscalation(t.milestone_id, t.slice_id, t.id);
+    // A listed Task with no question row has an escalation from before the
+    // database stored them: a pause, or a response that is not applied.
+    if (!escalation) {
+      return t.escalation_pending || t.escalation_awaiting_review
+        ? `  ${t.slice_id}/${t.id}  [PENDING (paused)]  (question not in the database — run /gsd escalate show ${t.id})`
+        : `  ${t.slice_id}/${t.id}  [resolved, NOT applied]  (response is not in the database and is not carried into the next task — run /gsd doctor --fix)`;
+    }
+    const status = escalation.respondedAt ? "resolved" : escalation.continueWithDefault ? "awaiting-review" : "PENDING (paused)";
+    return `  ${t.slice_id}/${t.id}  [${status}]  ${escalation.question}`;
   }).join("\n");
 }
 
@@ -81,7 +88,7 @@ export async function handleEscalateCommand(
   if (trimmed === "list" || trimmed === "list --all" || trimmed === "--all") {
     const includeAll = trimmed.includes("--all");
     const rows = includeAll ? listAllEscalations(milestoneId) : listActionableEscalations(milestoneId);
-    const body = formatListEntries(rows, basePath);
+    const body = formatListEntries(rows);
     ctx.ui.notify(
       `${includeAll ? "All escalations" : "Actionable escalations"} for ${milestoneId}:\n${body}`,
       "info",
@@ -119,16 +126,16 @@ export async function handleEscalateCommand(
       ctx.ui.notify(`Task ${ref} matches multiple slices. Use Sxx/Tyy format.`, "warning");
       return;
     }
-    if (row === "not-found" || !row.escalation_artifact_path) {
+    if (row === "not-found") {
       ctx.ui.notify(`No escalation found for ${ref} in ${milestoneId}.`, "warning");
       return;
     }
-    const art = readEscalationArtifact(row.escalation_artifact_path);
-    if (!art) {
-      ctx.ui.notify(`Escalation artifact at ${row.escalation_artifact_path} is missing or malformed.`, "error");
+    const escalation = readTaskEscalation(milestoneId, row.slice_id, row.id) ?? readLegacyEscalation(basePath, row);
+    if (!escalation) {
+      ctx.ui.notify(formatLegacyEscalationNotice(row), "warning");
       return;
     }
-    ctx.ui.notify(formatEscalationForDisplay(art), "info");
+    ctx.ui.notify(formatEscalationForDisplay(escalation), "info");
     return;
   }
 
@@ -165,7 +172,7 @@ export async function handleEscalateCommand(
     // Persist the user's choice as a decision (only for resolved, not reject-blocker).
     if (result.status === "resolved") {
       try {
-        const art = row.escalation_artifact_path ? readEscalationArtifact(row.escalation_artifact_path) : null;
+        const art = readTaskEscalation(milestoneId, row.slice_id, taskId);
         const scope = `${milestoneId}/${row.slice_id}/${taskId}`;
         const decisionText = art?.question ?? `escalation on ${taskId}`;
         const choiceLabel = choice === "accept"

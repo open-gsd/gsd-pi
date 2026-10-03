@@ -998,7 +998,7 @@ describe('createMcpServer tool registration', () => {
     const result = await progressTool.handler({ projectDir });
     const progress = JSON.parse(result.content[0].text);
     assert.deepEqual(progress.activeMilestone, { id: 'M999', title: 'Projection Only' });
-    assert.equal(progress.phase, 'plan');
+    assert.equal(progress.phase, 'planning');
     assert.deepEqual(progress.readMetadata, { source: 'projection', authority: 'projection-fallback' });
   });
 

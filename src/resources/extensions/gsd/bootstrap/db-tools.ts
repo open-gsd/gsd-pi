@@ -1521,8 +1521,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 							}),
 							{
 								minItems: 2,
-								maxItems: 4,
-								description: "2–4 options the user can choose between.",
+								maxItems: 3,
+								description: "2–3 options the user can choose between.",
 							},
 						),
 						recommendation: Type.String({

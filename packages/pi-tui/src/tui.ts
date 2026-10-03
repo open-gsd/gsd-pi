@@ -331,6 +331,13 @@ export class TUI extends Container {
 	// with -1 sentinels and would otherwise hide a coalesced real resize.
 	private flushedAtWidth = 0;
 	private flushedAtHeight = 0;
+	// Frame discarded by a forced render: requestRender(true) resets
+	// previousLines to [], which would leave the shrink path (#2541) no base to
+	// verify the flushed prefix against. The stashed top is the physical screen
+	// top the reset wiped (previousViewportTop = 0). Both consumed by the next
+	// doRender.
+	private forcedRenderBaseLines?: string[];
+	private forcedRenderBaseViewportTop?: number;
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<InputListener>();
 
@@ -662,6 +669,10 @@ export class TUI extends Container {
 			return;
 		}
 		if (force) {
+			if (this.previousLines.length > 0) {
+				this.forcedRenderBaseLines = this.previousLines;
+				this.forcedRenderBaseViewportTop = this.previousViewportTop;
+			}
 			this.previousLines = [];
 			this.previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
 			this.previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
@@ -1093,6 +1104,66 @@ export class TUI extends Container {
 	}
 
 	/**
+	 * Whether a forced repaint of a shrinking frame can keep the retained
+	 * screen top instead of repainting from the new viewport top (#2541).
+	 * Repainting from the new viewport top re-writes the overlap — lines
+	 * already committed to scrollback — a second time. When the frame prefix
+	 * above the retained top is byte-identical (deletions only removed content
+	 * at/below the old viewport, e.g. a torn-down pinned zone) and the overlap
+	 * is small, the freed rows can simply be left blank at the bottom, the
+	 * same end state the pure-deletion path leaves. Larger overlaps refill the
+	 * screen so the blank-viewport behavior (#613) is preserved; the pinned
+	 * zone this exists for is capped at ~40% of the viewport plus borders,
+	 * well under half. Unforced frames never take this path: there the
+	 * differential renderer handles bottom deletions in place over the padded
+	 * retained layout.
+	 *
+	 * The boundary is the committed physical screen top (`top`), not
+	 * flushedLineCount: a clean repaint that re-committed the overlap (a reflow
+	 * fallback) moves the real boundary below the mark, and painting from the
+	 * mark would erase on-screen content. The mark must have caught up to at
+	 * least the physical top for the skipped prefix to be verified scrollback;
+	 * optimistic marks (top > flushed) reject.
+	 */
+	private keepsFlushedTop(
+		baseLines: string[] | undefined,
+		newLines: string[],
+		height: number,
+		top: number,
+	): boolean {
+		if (top <= 0 || top > this.flushedLineCount || this.overlayStack.length > 0) {
+			return false;
+		}
+		if (!baseLines || baseLines.length <= newLines.length) {
+			return false;
+		}
+		// Only frames still taller than the screen qualify: a frame that now
+		// fits on screen is bottom-anchored and repaints from its first line.
+		const newTop = newLines.length - height;
+		if (newTop <= 0) {
+			return false;
+		}
+		const overlap = top - newTop;
+		if (overlap <= 0 || overlap > Math.floor(height / 2)) {
+			return false;
+		}
+		for (let i = 0; i < top; i++) {
+			if (baseLines[i] !== newLines[i]) {
+				return false;
+			}
+		}
+		// An image placement inside the overlap would be deleted without
+		// replacement (the repaint starts below it); the refill path re-emits
+		// it, so keep that behavior when images cross the boundary.
+		for (let i = newTop; i < top; i++) {
+			if (isImageLine(newLines[i])) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	/**
 	 * Record the lines committed in the frame we just rendered. We snapshot the
 	 * Kitty image ids here (not just at the start of the next render) because a
 	 * forced full render resets previousLines to [] before doRender runs — the
@@ -1234,6 +1305,48 @@ export class TUI extends Container {
 		// Render all components to get new lines
 		let newLines = this.render(width);
 
+		// A kept-flushed-top commit (#2541) leaves the physical screen top above
+		// the bottom-aligned position, with blank rows at the bottom. Pad the
+		// frame with trailing blanks so the bottom-aligned invariant
+		// (length - height == screen top) keeps holding for every consumer —
+		// overlay compositing, cursor extraction, mouse mapping, differential
+		// math — while the freed rows persist. Only small overlaps stay
+		// retained (larger shrinks refill the screen, #613); the prefix above
+		// the retained top must still match the committed frame, else retention
+		// is stale and the next repaint re-anchors naturally. A forced render
+		// has no committed frame to compare against (previousLines is reset),
+		// so it never pads here — the kept-top writer handles that path.
+		const retainedTop = this.previousViewportTop;
+		if (
+			retainedTop > 0 &&
+			retainedTop <= this.flushedLineCount &&
+			this.flushedAtWidth === width &&
+			this.flushedAtHeight === height &&
+			newLines.length < retainedTop + height &&
+			retainedTop + height - newLines.length <= Math.floor(height / 2) &&
+			this.previousLines.length >= retainedTop
+		) {
+			// Committed lines carry the segment-reset suffix (applyLineResets),
+			// so compare the new lines in the same committed form.
+			let prefixMatches = true;
+			for (let i = 0; i < retainedTop; i++) {
+				const line = newLines[i];
+				const committed = isImageLine(line)
+					? line
+					: normalizeTerminalOutput(line) + TUI.SEGMENT_RESET;
+				if (this.previousLines[i] !== committed) {
+					prefixMatches = false;
+					break;
+				}
+			}
+			if (prefixMatches) {
+				newLines = [
+					...newLines,
+					...Array.from({ length: retainedTop + height - newLines.length }, () => ""),
+				];
+			}
+		}
+
 		if (
 			newLines === this._lastRenderedComponents &&
 			this.overlayStack.length === 0 &&
@@ -1255,7 +1368,7 @@ export class TUI extends Container {
 		this.baseContentLineCount = newLines.length;
 
 		// Extract cursor position before applying line resets (marker must be found first)
-		const cursorPos = this.extractCursorPosition(newLines, height);
+		let cursorPos = this.extractCursorPosition(newLines, height);
 
 		newLines = this.applyLineResets(newLines);
 
@@ -1263,7 +1376,22 @@ export class TUI extends Container {
 		// deletions move content up, so lines the mark claims are flushed may
 		// now sit at other indices. Demote the mark to the viewport top — the
 		// only boundary still plausible for the new layout — so later clean
-		// repaints cannot skip content that took its place (#2415).
+		// repaints cannot skip content that took its place (#2415). A forced
+		// render that keeps the retained top (#2541) never demotes here: its
+		// previousLines were reset, so the shrink condition is false.
+		const forcedRender = this.previousLines.length === 0;
+		const forcedRenderBaseLines = this.forcedRenderBaseLines;
+		this.forcedRenderBaseLines = undefined;
+		// requestRender(true) wipes previousViewportTop alongside the frame;
+		// the physical screen top it discarded is what the kept-top path needs.
+		const forcedBaseTop = this.forcedRenderBaseViewportTop;
+		this.forcedRenderBaseViewportTop = undefined;
+		const keptTop = forcedBaseTop ?? 0;
+		const keepFlushedTop =
+			forcedRender &&
+			this.flushedAtWidth === width &&
+			this.flushedAtHeight === height &&
+			this.keepsFlushedTop(forcedRenderBaseLines, newLines, height, keptTop);
 		if (newLines.length < this.previousLines.length) {
 			this.flushedLineCount = Math.min(this.flushedLineCount, Math.max(0, newLines.length - height));
 		}
@@ -1366,7 +1494,48 @@ export class TUI extends Container {
 			if (!debugRedraw) return;
 			const logPath = path.join(os.homedir(), ".pi", "agent", "pi-debug.log");
 			const msg = `[${new Date().toISOString()}] fullRender: ${reason} (prev=${this.previousLines.length}, new=${newLines.length}, height=${height})\n`;
+			fs.mkdirSync(path.dirname(logPath), { recursive: true });
 			fs.appendFileSync(logPath, msg);
+		};
+
+		// Repaint with the flushed prefix as the screen top (#2541): the frame
+		// shrank but the scrollback prefix is untouched, so the viewport is
+		// drawn from the committed physical screen top down and the freed rows
+		// are left blank at the bottom — the same end state the pure-deletion
+		// path leaves. Later appends fill them in; nothing already in
+		// scrollback is re-committed. The TUI owns the whole screen here (the
+		// frame once overflowed it).
+		const repaintFromFlushedTop = (): void => {
+			const top = keptTop;
+			let buffer = this.useSynchronizedOutput ? "\x1b[?2026h" : "";
+			// This full-screen repaint clears rows with \x1b[2K only; delete the
+			// prior frame's Kitty placements so displaced images don't linger.
+			buffer += this.deleteKittyImages(this.previousKittyImageIds);
+			buffer += "\x1b[1;1H";
+			for (let row = 0; row < height; row++) {
+				if (row > 0) buffer += "\r\n";
+				buffer += "\x1b[2K";
+				let line = newLines[top + row] ?? "";
+				if (!isImageLine(line) && visibleWidth(line) > width) {
+					line = truncateToWidth(line, width);
+				}
+				buffer += line;
+			}
+			if (this.useSynchronizedOutput) buffer += "\x1b[?2026l";
+			this.terminal.write(buffer);
+			// Commit the frame padded with the freed rows so the bottom-aligned
+			// invariant (length - height == screen top) keeps holding for every
+			// consumer while the blanks persist (#2541).
+			newLines = [...newLines, ...Array.from({ length: top + height - newLines.length }, () => "")];
+			this.baseContentLineCount = newLines.length;
+			// A cursor marker above the retained top is not on screen; positioning
+			// the hardware cursor there would record an unreachable row (the
+			// movement clamps at the screen top) and mis-aim later writes.
+			if (cursorPos && cursorPos.row < top) {
+				cursorPos = null;
+			}
+			this._shrinkDebounceActive = false;
+			commitFrame("set", top + height - 1);
 		};
 
 		const repaintBottomAnchoredShortBlock = (): void => {
@@ -1394,6 +1563,12 @@ export class TUI extends Container {
 		if (this.previousLines.length === 0 && !widthChanged && !heightChanged) {
 			logRedraw("first render");
 			fullRender(false);
+			return;
+		}
+
+		if (keepFlushedTop) {
+			logRedraw(`shrink keeps flushed top (${keptTop}) instead of re-emitting scrollback`);
+			repaintFromFlushedTop();
 			return;
 		}
 
@@ -1547,13 +1722,18 @@ export class TUI extends Container {
 			return;
 		}
 
-		const previousContentViewportTop = getViewportTop(this.previousLines.length);
+		const previousContentViewportTop = prevViewportTop;
 		if (firstChanged < previousContentViewportTop) {
 			// A mid-buffer reflow (for example markdown code-fence borders or prose word-wrap)
 			// shifted a line across the scrollback/viewport boundary. Clamping would leave
 			// the displaced line frozen in scrollback and re-emit it in the live region,
 			// producing a verbatim duplicate. Fall back to a clean repaint; the repaint is
 			// viewport-bounded (see fullRender), so it never re-commits the flushed prefix.
+			// The physical screen top (previousViewportTop, not
+			// previousLines.length - height) is the boundary that matters: a
+			// kept-flushed-top shrink (#2541) leaves blank rows at the bottom, so
+			// the two differ and the length-based estimate would aim the cursor
+			// above the screen.
 			logRedraw(
 				`firstChanged < viewportTop (${firstChanged} < ${previousContentViewportTop}) — full repaint to avoid duplicate`,
 			);

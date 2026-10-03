@@ -3022,12 +3022,13 @@ export async function buildExecuteTaskPrompt(
   // #1272: inject a pending reopen reason into this task's prompt. When a gate
   // (e.g. complete-slice's full-suite run) reopened the task via gsd_task_reopen
   // with a diagnosis, surface it here so the re-dispatched executor fixes the
-  // regression instead of re-running the original (green) scoped verify. Claim
-  // is one-shot (artifact deleted on read). Not feature-gated — a reopened task
-  // must always know why. Prepended so it sits above the plan anchor.
+  // regression instead of re-running the original (green) scoped verify. The
+  // reason is the DB reopen event and stays pending until a new Attempt is
+  // claimed. Not feature-gated — a reopened task must always know why.
+  // Prepended so it sits above the plan anchor.
   try {
-    const { claimReopenReasonForInjection } = await import("./reopen-reason.js");
-    const reopenClaimed = claimReopenReasonForInjection(base, mid, sid, tid);
+    const { readPendingReopenReason } = await import("./reopen-reason.js");
+    const reopenClaimed = isDbAvailable() ? readPendingReopenReason(mid, sid, tid) : null;
     if (reopenClaimed) {
       const block = reopenClaimed.injectionBlock + "\n\n---\n\n";
       phaseAnchorSection = phaseAnchorSection
@@ -3056,7 +3057,7 @@ export async function buildExecuteTaskPrompt(
   if (prefs?.preferences?.phases?.mid_execution_escalation === true) {
     try {
       const { claimOverrideForInjection } = await import("./escalation.js");
-      const claimed = claimOverrideForInjection(base, mid, sid);
+      const claimed = claimOverrideForInjection(mid, sid);
       if (claimed) {
         const block = claimed.injectionBlock + "\n\n---\n\n";
         phaseAnchorSection = phaseAnchorSection

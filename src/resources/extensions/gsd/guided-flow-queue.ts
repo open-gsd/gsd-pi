@@ -28,6 +28,7 @@ import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { loadQueueOrder, sortByQueueOrder, reorderMilestones } from "./queue-order.js";
 import { findMilestoneIds, nextMilestoneId } from "./milestone-ids.js";
 import { isFutureMilestoneStatus } from "./status-guards.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 const QUEUE_ARTIFACT_EXCERPT_MAX_CHARS = 20_000;
 const QUEUE_EXISTING_MILESTONES_CONTEXT_MAX_CHARS = 120_000;
@@ -153,6 +154,8 @@ export async function handleQueueReorder(
     return;
   }
   invalidateAllCaches();
+  // The order decides the registry and the active milestone in STATE.md.
+  await renderStateProjection(basePath);
 
   try {
     nativeAddPaths(basePath, [".gsd/QUEUE-ORDER.json"]);

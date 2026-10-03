@@ -2,7 +2,8 @@ import assert from "node:assert";
 import { describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { deleteKittyImage, encodeKitty } from "../src/terminal-image.ts";
-import { type Component, TUI } from "../src/tui.ts";
+import type { MouseEvent } from "../src/mouse.ts";
+import { CURSOR_MARKER, type Component, TUI } from "../src/tui.ts";
 import { VirtualTerminal } from "./virtual-terminal.ts";
 
 class TestComponent implements Component {
@@ -691,6 +692,358 @@ describe("TUI full repaint scrollback safety (issues #2307 / #2415)", () => {
 		assert.ok(terminal.getViewport().join("\n").includes("Line 11"), "content stays visible after forced render");
 
 		tui.stop();
+	});
+});
+
+describe("TUI shrink scrollback safety (issue #2541)", () => {
+	// GSD tears down its pinned "Latest Output" zone at the end of a tool-using
+	// turn, shrinking a frame taller than the screen by a few lines. Repainting
+	// from the new viewport top re-writes the overlap — lines already committed
+	// to scrollback — a second time. When the flushed prefix is untouched and
+	// the overlap is small, the repaint must keep the flushed mark as the
+	// screen top and leave the freed rows blank at the bottom instead.
+
+	async function setupTallFrameWithPinnedBlock(): Promise<{
+		terminal: VirtualTerminal;
+		tui: TUI;
+		component: TestComponent;
+	}> {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		const component = new TestComponent();
+		tui.addChild(component);
+		component.lines = [
+			...Array.from({ length: 10 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 2 }, (_, i) => `PIN ${i}`),
+		];
+		tui.start();
+		await terminal.waitForRender();
+		return { terminal, tui, component };
+	}
+
+	function assertEachLineOnce(terminal: VirtualTerminal, last: number): void {
+		const buffer = terminal.getScrollBuffer();
+		for (let i = 0; i <= last; i++) {
+			assert.strictEqual(
+				buffer.filter((row) => row === `Line ${i}`).length,
+				1,
+				`Line ${i} must appear exactly once in the terminal buffer`,
+			);
+		}
+	}
+
+	class MouseRecordingComponent implements Component {
+		lines: string[] = [];
+		lastRow: number | null = null;
+		render(_width: number): string[] {
+			return this.lines;
+		}
+		invalidate(): void {}
+		handleMouse(event: MouseEvent): void {
+			this.lastRow = event.y;
+		}
+	}
+
+	it("forced shrink keeps the flushed top instead of re-emitting scrollback", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+		assertEachLineOnce(terminal, 9); // sanity: transcript committed exactly once
+
+		// Teardown: the pinned block disappears and a forced render is requested
+		// (tearDownPinnedZone({ realignViewport: true })).
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 9);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		// The freed rows fill normally with later output.
+		component.lines = [...Array.from({ length: 10 }, (_, i) => `Line ${i}`), "Line 10", "Line 11"];
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 11);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 11"),
+			`appended content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("unforced tall-to-tall shrink keeps the flushed top instead of re-emitting scrollback", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+		assertEachLineOnce(terminal, 9);
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 9);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("forced repaint after a kept-flushed-top shrink stays duplicate-free", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// A later forced repaint of the unchanged (still blank-padded) frame
+		// must not drop below the flushed mark and re-commit the overlap.
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		assertEachLineOnce(terminal, 9);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("edit above the kept flushed top falls back to a safe repaint", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// Edit a line inside the overlap: index 6 sits above the retained
+		// screen top (flushed mark 7) but at/below the length-based viewport
+		// estimate, so a stale boundary would aim the differential cursor at
+		// the wrong screen row. The repaint must fall back safely and keep
+		// every line correct.
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[6] = "EDITED 6";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		assert.ok(buffer.includes("EDITED 6"), `edited line must be rendered: ${JSON.stringify(buffer)}`);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 7").length,
+			1,
+			`line 7 must survive exactly once: ${JSON.stringify(buffer)}`,
+		);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+
+		// A later forced repaint of the unchanged frame must not paint from the
+		// stale flushed mark (which would erase the edit from the screen and
+		// lose it entirely — the edit lives below the mark now).
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const bufferAfterForced = terminal.getScrollBuffer();
+		assert.ok(
+			bufferAfterForced.includes("EDITED 6"),
+			`edited line must survive the later forced repaint: ${JSON.stringify(bufferAfterForced)}`,
+		);
+		assert.ok(
+			terminal.getViewport().join("\n").includes("Line 9"),
+			`latest content stays visible: ${JSON.stringify(terminal.getViewport())}`,
+		);
+	});
+
+	it("mouse hit-testing follows the kept-flushed-top screen layout", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		t.after(() => tui.stop());
+		const component = new MouseRecordingComponent();
+		tui.addChild(component);
+		component.lines = [
+			...Array.from({ length: 10 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 2 }, (_, i) => `PIN ${i}`),
+		];
+		tui.start();
+		await terminal.waitForRender();
+
+		// Shrink with a kept flushed top: screen row 0 now shows Line 7.
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		(tui as unknown as { dispatchMouse(event: { x: number; y: number; type: string }): void }).dispatchMouse({
+			x: 1,
+			y: 1,
+			type: "press",
+		});
+		assert.strictEqual(component.lastRow, 7, `screen row 0 must map to content row 7, got ${component.lastRow}`);
+
+		// An ordinary same-length edit keeps the physical layout: the mapping
+		// must not fall back to the bottom-aligned length estimate (5).
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[8] = "EDITED 8";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		(tui as unknown as { dispatchMouse(event: { x: number; y: number; type: string }): void }).dispatchMouse({
+			x: 1,
+			y: 1,
+			type: "press",
+		});
+		assert.strictEqual(component.lastRow, 7, `mapping must persist across edits, got ${component.lastRow}`);
+	});
+
+	it("shrink larger than half the screen still refills the viewport", async (t) => {
+		// #613: a big shrink repaints from the new viewport top so the screen
+		// never goes mostly blank. The overlap bound preserves that contract;
+		// the re-committed overlap on this path is the accepted refill behavior.
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 6 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.every((row) => row.trim() !== ""),
+			`viewport must be fully repainted: ${JSON.stringify(viewport)}`,
+		);
+		assert.ok(viewport.join("\n").includes("Line 5"), "latest content stays visible");
+	});
+
+	it("overlays composite at the bottom of a kept-flushed-top screen", async (t) => {
+		const terminal = new VirtualTerminal(40, 5);
+		const tui = new TUI(terminal);
+		t.after(() => tui.stop());
+		const component = new MouseRecordingComponent();
+		tui.addChild(component);
+		component.lines = [
+			...Array.from({ length: 10 }, (_, i) => `Line ${i}`),
+			...Array.from({ length: 2 }, (_, i) => `PIN ${i}`),
+		];
+		tui.start();
+		await terminal.waitForRender();
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		// Open a one-line overlay: it must render inside the viewport (at the
+		// bottom of the physical screen) and receive clicks at that row.
+		const overlay = new MouseRecordingComponent();
+		overlay.lines = ["OVERLAY"];
+		tui.showOverlay(overlay, { anchor: "bottom-left" });
+		await terminal.waitForRender();
+
+		const viewport = terminal.getViewport();
+		assert.ok(
+			viewport.some((row) => row.includes("OVERLAY")),
+			`overlay must render on screen: ${JSON.stringify(viewport)}`,
+		);
+		const overlayRow = viewport.findIndex((row) => row.includes("OVERLAY"));
+		(overlay as { lastRow: number | null }).lastRow = null;
+		(tui as unknown as { dispatchMouse(event: { x: number; y: number; type: string }): void }).dispatchMouse({
+			x: 1,
+			y: overlayRow + 1,
+			type: "press",
+		});
+		assert.strictEqual(overlay.lastRow, 0, `click on overlay row ${overlayRow} must hit the overlay`);
+	});
+
+	it("cursor marker above the retained top does not corrupt later edits", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// A cursor marker appears on line 6 — above the retained screen top
+		// (7). It is not on screen, so cursor tracking must not record an
+		// unreachable position; a later edit of line 8 must land on line 8.
+		const withMarker = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		withMarker[6] = `Line 6${CURSOR_MARKER}`;
+		component.lines = withMarker;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[6] = "Line 6";
+		edited[8] = "EDITED 8";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		assert.ok(buffer.includes("EDITED 8"), `edited line 8 must be rendered: ${JSON.stringify(buffer)}`);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 9").length,
+			1,
+			`line 9 must appear exactly once: ${JSON.stringify(buffer)}`,
+		);
+	});
+
+	it("forced render with a marker above the kept top does not corrupt later edits", async (t) => {
+		const { terminal, tui, component } = await setupTallFrameWithPinnedBlock();
+		t.after(() => tui.stop());
+
+		component.lines = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		tui.requestRender(true);
+		await terminal.waitForRender();
+		assertEachLineOnce(terminal, 9);
+
+		// A cursor marker above the retained screen top (7) must not pull the
+		// recorded cursor row above the screen during the kept-top repaint.
+		const withMarker = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		withMarker[6] = `Line 6${CURSOR_MARKER}`;
+		component.lines = withMarker;
+		tui.requestRender(true);
+		await terminal.waitForRender();
+
+		const edited = Array.from({ length: 10 }, (_, i) => `Line ${i}`);
+		edited[6] = "Line 6";
+		edited[8] = "EDITED 8";
+		component.lines = edited;
+		tui.requestRender();
+		await terminal.waitForRender();
+
+		const buffer = terminal.getScrollBuffer();
+		assert.ok(buffer.includes("EDITED 8"), `edited line 8 must be rendered: ${JSON.stringify(buffer)}`);
+		const viewport = terminal.getViewport();
+		assert.strictEqual(
+			viewport[0],
+			"Line 7",
+			`screen row 0 must still show Line 7: ${JSON.stringify(viewport)}`,
+		);
+		assert.strictEqual(
+			viewport[1],
+			"EDITED 8",
+			`screen row 1 must show the edit: ${JSON.stringify(viewport)}`,
+		);
+		assert.strictEqual(
+			viewport[2],
+			"Line 9",
+			`screen row 2 must still show Line 9: ${JSON.stringify(viewport)}`,
+		);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 7").length,
+			1,
+			`line 7 must appear exactly once: ${JSON.stringify(buffer)}`,
+		);
+		assert.strictEqual(
+			buffer.filter((row) => row === "Line 9").length,
+			1,
+			`line 9 must appear exactly once: ${JSON.stringify(buffer)}`,
+		);
 	});
 });
 

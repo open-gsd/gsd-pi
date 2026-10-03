@@ -39,6 +39,7 @@ export const CACHE_MAX = 50;
  *   - gsd_milestone_generate_id: generates milestone IDs (discuss.md multi-milestone)
  *   - gsd_requirement_save: creates requirements during discuss
  *   - gsd_requirement_update: updates requirements during discuss
+ *   - gsd_project_snapshot: reads status (the workflow protocol tells every dispatch to call it)
  */
 export const DISCUSS_TOOLS_ALLOWLIST: readonly string[] = [
   // Context / summary writing
@@ -52,6 +53,8 @@ export const DISCUSS_TOOLS_ALLOWLIST: readonly string[] = [
   // Requirement updates
   "gsd_requirement_save",
   "gsd_requirement_update",
+  // Status read (workflow protocol)
+  "gsd_project_snapshot",
 ];
 
 // ─── Context Injection ────────────────────────────────────────────────────────

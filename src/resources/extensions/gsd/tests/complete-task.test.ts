@@ -637,10 +637,10 @@ console.log('\n=== complete-task: disabled hard-blocker escalation rejects befor
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// complete-task: hard-blocker escalation projection write failure
+// complete-task: an honored escalation needs a canonical Task lifecycle
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-task: escalation write failure preserves completion ===');
+console.log('\n=== complete-task: legacy escalation is rejected before completion ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
@@ -650,12 +650,8 @@ console.log('\n=== complete-task: escalation write failure preserves completion 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
 
-  // A directory at the artifact path makes the final atomic rename fail while
-  // leaving the earlier SUMMARY and PLAN writes available.
-  fs.mkdirSync(path.join(path.dirname(planPath), 'T01-ESCALATION.json'));
   const result = await withWorkingDirectory(basePath, () => handleCompleteTask({
     ...makeValidParams(),
-    blockerDiscovered: true,
     escalation: {
       question: 'Should execution pause for the hard blocker?',
       options: makeEscalationOptions(),
@@ -665,24 +661,19 @@ console.log('\n=== complete-task: escalation write failure preserves completion 
     },
   }, basePath));
 
-  assertTrue('error' in result, 'hard-blocker escalation write failure should return an error');
+  assertTrue('error' in result, 'an escalation on a Task without a canonical lifecycle should be rejected');
   if ('error' in result) {
-    assertMatch(result.error, /escalation write failed/, 'error should identify the escalation projection');
-    assertMatch(result.error, /completion remains committed/, 'error should report durable completion');
+    assertMatch(result.error, /escalation requires a canonical Task lifecycle for M001\/S01\/T01/, 'error should name the missing lifecycle');
   }
-  const task = getTask('M001', 'S01', 'T01');
-  assertEq(task?.status, 'complete', 'task completion should remain committed');
-  assertEq(task?.escalation_pending, 1, 'hard-blocker recovery intent should remain pending');
-  assertEq(task?.escalation_awaiting_review, 0, 'hard blocker should not be marked awaiting review');
-  assertMatch(task?.escalation_artifact_path ?? '', /T01-ESCALATION\.json$/, 'recovery intent should retain the artifact path');
+  assertEq(getTask('M001', 'S01', 'T01'), null, 'a rejected escalation should not create or complete the task');
   const evidence = _getAdapter()!.prepare(
     "SELECT COUNT(*) AS count FROM verification_evidence WHERE task_id = 'T01' AND slice_id = 'S01' AND milestone_id = 'M001'"
   ).get();
-  assertEq(evidence?.['count'], 1, 'verification evidence should remain committed');
-  const eventLogPath = path.join(basePath, '.gsd', 'event-log.jsonl');
-  const eventLog = fs.existsSync(eventLogPath) ? fs.readFileSync(eventLogPath, 'utf8') : '';
-  assertTrue(eventLog.length > 0, 'post-mutation event log should still be written');
-  assertMatch(eventLog, /"cmd":"complete-task"/, 'event log should record completion');
+  assertEq(evidence?.['count'], 0, 'a rejected escalation should not persist verification evidence');
+  assertTrue(
+    !fs.existsSync(path.join(path.dirname(planPath), 'T01-ESCALATION.json')),
+    'no escalation file should be written',
+  );
 
   cleanupDir(basePath);
   cleanup(dbPath);
@@ -823,9 +814,6 @@ console.log('\n=== complete-task: disabled soft escalation still completes ===')
   const result = await withWorkingDirectory(basePath, () => handleCompleteTask(params, basePath));
 
   assertTrue(!('error' in result), 'soft escalation should still complete when escalation handling is disabled');
-  if (!('error' in result)) {
-    assertTrue(!result.escalation, 'disabled preference should not return escalation metadata');
-  }
 
   const task = getTask('M001', 'S01', 'T01');
   assertTrue(task !== null, 'task row should exist');

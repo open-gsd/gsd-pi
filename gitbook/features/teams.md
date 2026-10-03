@@ -37,17 +37,6 @@ git add .gsd/PREFERENCES.md
 git commit -m "chore: enable GSD team workflow"
 ```
 
-## Keeping `.gsd/` Local
-
-For teams where only some members use GSD:
-
-```yaml
-git:
-  commit_docs: false
-```
-
-This gitignores `.gsd/` entirely. You get structured planning without affecting teammates.
-
 ## Parallel Development
 
 Multiple developers can run auto mode simultaneously on different milestones. Each developer:

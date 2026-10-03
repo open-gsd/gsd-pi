@@ -438,12 +438,18 @@ export function reopenTask(input: {
   invocation: ExecutionInvocation;
   task: TaskLifecycleIdentity;
   reason: string;
+  /**
+   * The reason is a diagnosis for the executor: the next execute-task dispatch
+   * shows it until a new Attempt is claimed (see reopen-reason.ts).
+   */
+  injectReason?: boolean;
 }): TaskLifecycleReceipt {
   const reason = requireText(input.reason, "reason");
+  const inject: { injectReason?: true } = input.injectReason === true ? { injectReason: true } : {};
   const operation = executeDomainOperation(operationRequest(
     "task.reopen",
     input.invocation,
-    { task: taskPayload(input.task), reason },
+    { task: taskPayload(input.task), reason, ...inject },
   ), (context) => {
     const state = loadTaskState(input.task);
     requireOpenParents(state, "reopen");
@@ -487,6 +493,7 @@ export function reopenTask(input: {
       lifecycleId: lifecycle.lifecycleId,
       workCheckpointId: checkpoint.checkpointId,
       reason,
+      ...inject,
       shadow: shadowPayload(shadow),
     });
   });

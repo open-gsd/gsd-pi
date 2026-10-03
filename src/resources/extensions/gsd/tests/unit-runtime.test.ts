@@ -76,8 +76,6 @@ console.log("\n=== execute-task durability inspection ===");
   let status = await inspectExecuteTaskDurability(base, "M100/S02/T09");
   assert.ok(status !== null, "status exists");
   assert.deepStrictEqual(status!.summaryExists, false, "summary initially missing");
-  assert.deepStrictEqual(status!.taskChecked, false, "task initially unchecked");
-  assert.deepStrictEqual(status!.nextActionAdvanced, false, "next action initially stale");
   assert.ok(/summary missing/i.test(formatExecuteTaskRecoveryStatus(status!)), "diagnostic mentions summary");
 
   writeFileSync(join(tasksDir, "T09-SUMMARY.md"), "# done\n", "utf-8");
@@ -91,9 +89,11 @@ console.log("\n=== execute-task durability inspection ===");
 
   status = await inspectExecuteTaskDurability(base, "M100/S02/T09");
   assert.deepStrictEqual(status!.summaryExists, true, "summary found after write");
-  assert.deepStrictEqual(status!.taskChecked, true, "task checked after update");
-  assert.deepStrictEqual(status!.nextActionAdvanced, true, "next action advanced after update");
-  assert.deepStrictEqual(formatExecuteTaskRecoveryStatus(status!), "all durable task artifacts present", "clean diagnostic when complete");
+  assert.deepStrictEqual(
+    formatExecuteTaskRecoveryStatus(status!),
+    "DB task status is not closed",
+    "a checked PLAN box and an advanced STATE.md do not close the task",
+  );
 }
 
 console.log("\n=== runtime record cleanup ===");
@@ -123,9 +123,30 @@ console.log("\n=== execute-task durability trusts closed DB task status ===");
     assert.ok(status !== null, "db-complete: status exists");
     assert.equal(status!.dbComplete, true, "db-complete: closed DB status is captured");
     assert.equal(status!.summaryExists, false, "db-complete: summary can still be missing");
-    assert.equal(status!.taskChecked, false, "db-complete: checkbox can still be unchecked");
-    assert.equal(status!.nextActionAdvanced, false, "db-complete: next action can still point at task");
     assert.equal(formatExecuteTaskRecoveryStatus(status!), "DB task status is closed");
+    assert.deepStrictEqual(
+      Object.keys(status!).sort(),
+      ["dbComplete", "mustHaveCount", "mustHavesMentionedInSummary", "summaryExists", "summaryPath"],
+      "db-complete: status carries no PLAN checkbox or STATE.md field",
+    );
+
+    // The inverse contradiction: PLAN and STATE.md say T02 is done, the DB says pending.
+    insertTask({ id: "T02", milestoneId: "M300", sliceId: "S01", title: "Open Task", status: "pending" });
+    writeFileSync(
+      join(dbBase, ".gsd", "milestones", "M300", "slices", "S01", "S01-PLAN.md"),
+      "# S01\n\n## Tasks\n\n- [x] **T02: Open Task** `est:10m`\n",
+      "utf-8",
+    );
+    writeFileSync(join(dbBase, ".gsd", "STATE.md"), "## Next Action\nExecute T03 for S01: later task\n", "utf-8");
+    writeFileSync(
+      join(dbBase, ".gsd", "milestones", "M300", "slices", "S01", "tasks", "T02-SUMMARY.md"),
+      "# done\n",
+      "utf-8",
+    );
+    clearPathCache();
+    const open = await inspectExecuteTaskDurability(dbBase, "M300/S01/T02");
+    assert.equal(open!.dbComplete, false, "db-pending: files cannot close the task");
+    assert.equal(formatExecuteTaskRecoveryStatus(open!), "DB task status is not closed");
   } finally {
     closeDatabase();
     rmSync(dbBase, { recursive: true, force: true });
@@ -192,9 +213,8 @@ console.log("\n=== must-haves: all mentioned in summary ===");
   assert.deepStrictEqual(status!.mustHaveCount, 3, "mh-all: mustHaveCount is 3");
   assert.deepStrictEqual(status!.mustHavesMentionedInSummary, 3, "mh-all: all 3 must-haves mentioned");
   assert.deepStrictEqual(status!.summaryExists, true, "mh-all: summary exists");
-  assert.deepStrictEqual(status!.taskChecked, true, "mh-all: task checked");
   const diag = formatExecuteTaskRecoveryStatus(status!);
-  assert.deepStrictEqual(diag, "all durable task artifacts present", "mh-all: diagnostic is clean when all must-haves met");
+  assert.deepStrictEqual(diag, "DB task status is not closed", "mh-all: no must-have gap is reported when all must-haves are met");
 }
 
 console.log("\n=== must-haves: partially mentioned in summary ===");

@@ -79,11 +79,11 @@ export interface TaskSettlePlan {
 export interface TaskSettleOptions {
   reconcileLifecycle?: boolean;
   /**
-   * Project root used to read the durable verification-pause receipt from the
-   * journal (#2334). Without it the verification-paused reconcile target is
-   * unreachable — the gate fails closed rather than trusting an unproven pause.
+   * Operator command only: the project root whose journal can hold a
+   * verification-pause receipt written before the receipt became a DB event.
+   * Dispatch, the auto loop, and the agent tool never set this.
    */
-  basePath?: string;
+  legacyJournalBasePath?: string;
 }
 
 interface RunningAttemptRow {
@@ -288,67 +288,123 @@ function planCompletionProof(
 // A finalizer verification pause strands a succeeded Attempt: the legacy Task
 // stays in_progress, no Attempt is running, and every operator route refuses.
 // The sanctioned exit is a receipt-gated reconcile to ready — gated on the
-// durable journal receipt the finalize pause branch writes, so only the
+// durable DB receipt the finalize pause branch records, so only the
 // finalizer (never an operator hand-edit) can vouch for the pause. Failed
 // verification never qualifies: the Attempt outcome must be succeeded.
+// The journal line the finalizer also writes is a diagnostic, never proof —
+// except once, in the operator command, for a Task paused before the receipt
+// became a DB event: that line is imported as the DB event with source
+// 'legacy-journal'.
+
+const VERIFICATION_PAUSED_EVENT = "task.verification.paused";
 
 interface VerificationPauseReceipt {
   ts: string;
-  flowId: string;
-  eventType: string;
+  attemptId: string;
 }
 
-function readVerificationPauseReceipt(
-  basePath: string | undefined,
+/**
+ * Record the finalizer's verification pause as a Domain Operation event bound
+ * to the Task's latest Attempt. Returns the Attempt id, or null when the Task
+ * has no Attempt (nothing a receipt could vouch for).
+ */
+export function recordTaskVerificationPause(
   task: TaskSettleTask,
-  settledAt: string | null,
-): VerificationPauseReceipt | null {
-  if (!basePath) return null;
-  const unit = `${task.milestoneId}/${task.sliceId}/${task.taskId}`;
-  // The dedicated receipt is written by the finalize pause branch. The generic
-  // finalize-end record predates the dedicated receipt and keeps projects
-  // stranded before #2334 recoverable without a fresh pause.
-  const dedicated = queryJournal(basePath, { eventType: "verification-paused", unitId: unit });
-  const finalizeEnds = queryJournal(basePath, { eventType: "post-unit-finalize-end", unitId: unit })
-    .filter((entry) => entry.data?.["reason"] === "verification-pause");
-  // Freshness binds the receipt to the current execution: a receipt written
-  // before the latest Attempt's Result belongs to an earlier pause and must
-  // never vouch for this settlement (a superseding Attempt re-owns the exit).
-  const settledMs = settledAt ? Date.parse(settledAt) : NaN;
-  const candidates = [...dedicated, ...finalizeEnds]
-    .filter((entry) => {
-      if (Number.isNaN(settledMs)) return false;
-      const entryMs = Date.parse(entry.ts);
-      return !Number.isNaN(entryMs) && entryMs >= settledMs;
-    })
-    .sort((a, b) => a.ts.localeCompare(b.ts));
-  const latest = candidates[candidates.length - 1];
+  source?: "legacy-journal",
+): string | null {
+  const latest = readLatestTaskAttempt(task);
   if (!latest) return null;
-  return { ts: latest.ts, flowId: latest.flowId, eventType: latest.eventType };
+  const entityId = unitId(task);
+  const idempotencyKey = `internal:auto:task.verification.pause:${latest.attemptId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: "task.verification.pause",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: {
+      milestoneId: task.milestoneId,
+      sliceId: task.sliceId,
+      taskId: task.taskId,
+      attemptId: latest.attemptId,
+    },
+  }, () => ({
+    events: [{
+      eventType: VERIFICATION_PAUSED_EVENT,
+      entityType: "task",
+      entityId,
+      payload: { attemptId: latest.attemptId, ...(source ? { source } : {}) },
+      destinations: ["projection"],
+    }],
+    projections: [{
+      projectionKey: `lifecycle/${entityId}`.toLowerCase(),
+      projectionKind: TASK_LIFECYCLE_PROJECTION_KIND,
+      rendererVersion: "1",
+    }],
+  }));
+  return latest.attemptId;
 }
 
-function readLatestSucceededAttemptSettledAt(task: TaskSettleTask): string | null {
-  const row = getDb().prepare(`
-    SELECT result.created_at AS settled_at
-    FROM workflow_item_lifecycles lifecycle
-    JOIN workflow_execution_attempts attempt
-      ON attempt.lifecycle_id = lifecycle.lifecycle_id
-     AND attempt.project_id = lifecycle.project_id
-    JOIN workflow_attempt_results result
-      ON result.attempt_id = attempt.attempt_id
-     AND result.project_id = attempt.project_id
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-    ORDER BY attempt.attempt_number DESC
-    LIMIT 1
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) as { settled_at?: string } | undefined;
-  return row?.settled_at ? String(row.settled_at) : null;
+// The receipt must name the latest Attempt: a pause recorded for an earlier
+// Attempt must never vouch for this settlement (a superseding Attempt re-owns
+// the exit).
+function readVerificationPauseReceipt(
+  task: TaskSettleTask,
+  attemptId: string | undefined,
+): VerificationPauseReceipt | null {
+  if (!attemptId) return null;
+  const rows = getDb().prepare(`
+    SELECT created_at, payload_json
+    FROM workflow_domain_events
+    WHERE event_type = :event_type
+      AND entity_type = 'task'
+      AND entity_id = :entity_id
+    ORDER BY project_revision DESC, event_index DESC
+  `).all({
+    ":event_type": VERIFICATION_PAUSED_EVENT,
+    ":entity_id": unitId(task),
+  }) as Array<{ created_at: string; payload_json: string }>;
+  for (const row of rows) {
+    const payload = JSON.parse(row.payload_json) as { attemptId?: unknown };
+    if (payload.attemptId === attemptId) return { ts: String(row.created_at), attemptId };
+  }
+  return null;
+}
+
+// The journal receipt of a pre-upgrade pause. A journal line has no Attempt
+// id, so freshness binds it to the Attempt: a line written before the latest
+// Attempt's Result belongs to an earlier pause.
+function readLegacyJournalPauseReceipt(
+  basePath: string,
+  task: TaskSettleTask,
+  attemptId: string,
+): VerificationPauseReceipt | null {
+  const result = getDb().prepare(`
+    SELECT created_at FROM workflow_attempt_results WHERE attempt_id = :attempt_id
+  `).get({ ":attempt_id": attemptId }) as { created_at?: string } | undefined;
+  const settledMs = result?.created_at ? Date.parse(String(result.created_at)) : NaN;
+  if (Number.isNaN(settledMs)) return null;
+  const unit = unitId(task);
+  const latest = [
+    ...queryJournal(basePath, { eventType: "verification-paused", unitId: unit }),
+    ...queryJournal(basePath, { eventType: "post-unit-finalize-end", unitId: unit })
+      .filter((entry) => entry.data?.["reason"] === "verification-pause"),
+  ]
+    .filter((entry) => Date.parse(entry.ts) >= settledMs)
+    .sort((a, b) => a.ts.localeCompare(b.ts))
+    .at(-1);
+  return latest ? { ts: latest.ts, attemptId } : null;
+}
+
+function importLegacyJournalPauseReceipt(basePath: string, task: TaskSettleTask): void {
+  if (requireSingleRunningAttempt(task) !== null || !isVerificationPausedCandidate(task)) return;
+  const attemptId = readLatestTaskAttempt(task)?.attemptId;
+  if (!attemptId || readVerificationPauseReceipt(task, attemptId)) return;
+  if (readLegacyJournalPauseReceipt(basePath, task, attemptId)) {
+    recordTaskVerificationPause(task, "legacy-journal");
+  }
 }
 
 function isVerificationPausedCandidate(task: TaskSettleTask): boolean {
@@ -419,8 +475,8 @@ function planLifecycleReconcile(
     throw new Error(
       verificationPaused
         ? "gsd_task_settle: reconcileLifecycle of a verification-paused in-progress Task " +
-          "requires the durable verification-pause receipt in the journal; none was found " +
-          "(the receipt is written by the auto finalizer when verification pauses)"
+          "requires the durable verification-pause receipt for its latest Attempt; none was found " +
+          "(the receipt is recorded by the auto finalizer when verification pauses)"
         : "gsd_task_settle: reconcileLifecycle requires an interrupted Attempt or a succeeded " +
           "Attempt with tasks.status complete (settle the running Attempt first)",
     );
@@ -562,18 +618,16 @@ export function planTaskSettle(
   // routing to publication: the pause must be proven, never assumed.
   const verificationPaused =
     attempt === null && options.reconcileLifecycle === true && isVerificationPausedCandidate(task);
-  const pauseReceipt = verificationPaused
-    ? readVerificationPauseReceipt(
-        options.basePath,
-        task,
-        readLatestSucceededAttemptSettledAt(task),
-      )
-    : null;
+  const latestAttemptId = verificationPaused ? readLatestTaskAttempt(task)?.attemptId : undefined;
+  const pauseReceipt = readVerificationPauseReceipt(task, latestAttemptId)
+    ?? (latestAttemptId && options.legacyJournalBasePath
+      ? readLegacyJournalPauseReceipt(options.legacyJournalBasePath, task, latestAttemptId)
+      : null);
   if (verificationPaused && !pauseReceipt) {
     throw new Error(
       "gsd_task_settle: reconcileLifecycle of a verification-paused in-progress Task " +
-      "requires the durable verification-pause receipt in the journal; none was found " +
-      "(the receipt is written by the auto finalizer when verification pauses)",
+      "requires the durable verification-pause receipt for its latest Attempt; none was found " +
+      "(the receipt is recorded by the auto finalizer when verification pauses)",
     );
   }
   const publication = attempt === null && !pauseReceipt
@@ -634,15 +688,18 @@ export async function applyTaskSettle(input: {
   reason: string;
   basePath: string;
   reconcileLifecycle?: boolean;
+  legacyJournalBasePath?: string;
 }): Promise<TaskSettlePlan & {
   settled: boolean;
   reconciled: boolean;
   resultId?: string;
   published?: { attemptId: string; status: "committed" | "replayed"; summaryPath: string };
 }> {
+  if (input.reconcileLifecycle && input.legacyJournalBasePath) {
+    importLegacyJournalPauseReceipt(input.legacyJournalBasePath, input.task);
+  }
   const plan = planTaskSettle(input.task, input.reason, {
     reconcileLifecycle: input.reconcileLifecycle,
-    basePath: input.basePath,
   });
   let settled = false;
   let resultId: string | undefined;
@@ -699,7 +756,6 @@ export async function applyTaskSettle(input: {
   if (input.reconcileLifecycle && !plan.publication) {
     const after = planTaskSettle(input.task, input.reason, {
       reconcileLifecycle: true,
-      basePath: input.basePath,
     });
     lifecycleRows = after.lifecycleRows;
     proof = after.proof;

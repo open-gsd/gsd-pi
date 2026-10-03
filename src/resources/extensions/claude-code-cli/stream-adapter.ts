@@ -2804,6 +2804,28 @@ async function pumpSdkMessages(
 					backgroundWaitStatusShown = false;
 					uiContext?.setStatus?.("gsd-step", "");
 				};
+				// buildFinalAssistantContent lists every tool block before every
+				// text block (tools merged first, prose appended after), so the
+				// final message disagreed with the order the turn streamed in —
+				// and the TUI's message_end rebuild re-laid the turn as "all
+				// tools, then all prose", duplicating paragraphs that had already
+				// scrolled into the terminal's scrollback (#2540). Rank each block
+				// when it is first captured and restore that order after assembly.
+				const captureOrder = new WeakMap<object, number>();
+				let captureNext = 0;
+				const markCaptureOrder = <T extends object>(block: T): T => {
+					if (!captureOrder.has(block)) captureOrder.set(block, captureNext++);
+					return block;
+				};
+				// Blocks without a rank (scalar fallbacks created inside
+				// buildFinalAssistantContent) sort last, where they already were.
+				const assembleFinalContent = (
+					params: Parameters<typeof buildFinalAssistantContent>[0],
+				): AssistantMessage["content"] => {
+					for (const block of params.pendingContent ?? []) markCaptureOrder(block);
+					const rank = (block: object): number => captureOrder.get(block) ?? Number.MAX_SAFE_INTEGER;
+					return buildFinalAssistantContent(params).sort((a, b) => rank(a) - rank(b));
+				};
 				// Move the finished turn's builder content into the ordered accumulators
 				// (same boundary the synthetic `user` message uses) so a later turn
 				// cannot drop it.
@@ -2811,11 +2833,11 @@ async function pumpSdkMessages(
 					if (!builder) return;
 					for (const [contentIndex, block] of builder.message.content.entries()) {
 						if (block.type === "text" && block.text) {
-							intermediateTextBlocks.push({ type: "text", text: block.text });
+							intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: block.text }));
 						} else if (block.type === "thinking" && block.thinking) {
-							intermediateTextBlocks.push({ type: "thinking", thinking: block.thinking });
+							intermediateTextBlocks.push(markCaptureOrder({ type: "thinking", thinking: block.thinking }));
 						} else if (block.type === "toolCall" || block.type === "serverToolUse") {
-							intermediateToolBlocks.push(block);
+							intermediateToolBlocks.push(markCaptureOrder(block));
 							toolCompletionTargetsById.set(block.id, { partial: builder.message, contentIndex });
 						}
 					}
@@ -2823,8 +2845,8 @@ async function pumpSdkMessages(
 				};
 				// Shared terminal/deferred-EOF finalization so both paths get the same
 				// usage, live-context and fallback-text accounting.
-				const buildTurnFinalMessage = (result: SDKResultMessage): AssistantMessage => {
-					const finalContent = buildFinalAssistantContent({
+			const buildTurnFinalMessage = (result: SDKResultMessage): AssistantMessage => {
+				const finalContent = assembleFinalContent({
 						intermediateToolBlocks,
 						intermediateTextBlocks,
 						pendingContent: builder?.message.content,
@@ -3028,6 +3050,18 @@ async function pumpSdkMessages(
 									const localContentIndex = assistantEvent.contentIndex;
 									const globalContentIndex = contentIndexBase + localContentIndex;
 									emittedContentCount = Math.max(emittedContentCount, globalContentIndex + 1);
+									// The `start` event's partial is the provider's live message:
+									// pi-agent-core builds each `toolcall_start` block from it
+									// (`providerPartialMessage.content[event.contentIndex]`), and
+									// native providers keep theirs populated. Mirror every streamed
+									// block here at the shifted index, or the lookup misses and
+									// every tool starts as `{ id: "", name: "" }` — rendered
+									// "unknown", and because all such rows share the empty id, the
+									// next tool reuses the previous pending row (#2539).
+									const streamedBlock = builder?.message.content[localContentIndex];
+									if (streamedBlock) {
+										initialPartial.content[globalContentIndex] = streamedBlock;
+									}
 									stream.push({ ...assistantEvent, contentIndex: globalContentIndex });
 									if (assistantEvent.type === "toolcall_start" && builder) {
 										// Local index — the block lives in the builder's own content.
@@ -3080,13 +3114,13 @@ async function pumpSdkMessages(
 										// turn commits [prose][elicitation] segments across several
 										// synthetic-user boundaries, and overwriting a single
 										// scalar would drop every explanation but the last.
-										intermediateTextBlocks.push({ type: "text", text: block.text });
+										intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: block.text }));
 									} else if (block.type === "thinking" && block.thinking) {
 										lastThinkingContent = block.thinking;
-										intermediateTextBlocks.push({ type: "thinking", thinking: block.thinking });
+										intermediateTextBlocks.push(markCaptureOrder({ type: "thinking", thinking: block.thinking }));
 									} else if (block.type === "toolCall" || block.type === "serverToolUse") {
 										// Collect tool blocks for externalToolExecution rendering
-										intermediateToolBlocks.push(block);
+										intermediateToolBlocks.push(markCaptureOrder(block));
 										toolCompletionTargetsById.set(block.id, {
 											partial: builder.message,
 											// Shifted index — the synthetic toolcall_end below must
@@ -3198,10 +3232,10 @@ async function pumpSdkMessages(
 								// so the final assembly cannot re-append an earlier turn's
 								// text as the scalar fallback.
 								if (lastThinkingContent && !intermediateTextBlocks.some((block) => block.type === "thinking" && block.thinking === lastThinkingContent)) {
-									intermediateTextBlocks.push({ type: "thinking", thinking: lastThinkingContent });
+									intermediateTextBlocks.push(markCaptureOrder({ type: "thinking", thinking: lastThinkingContent }));
 								}
 								if (lastTextContent && !intermediateTextBlocks.some((block) => block.type === "text" && block.text === lastTextContent)) {
-									intermediateTextBlocks.push({ type: "text", text: lastTextContent });
+									intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: lastTextContent }));
 								}
 								lastTextContent = "";
 								lastThinkingContent = "";
@@ -3209,7 +3243,7 @@ async function pumpSdkMessages(
 									result.result
 									&& !intermediateTextBlocks.some((block) => block.type === "text" && block.text === result.result)
 								) {
-									intermediateTextBlocks.push({ type: "text", text: result.result });
+									intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: result.result }));
 								}
 								deferredResult = result;
 								// The deferring turn finished cleanly; only a follow-up turn

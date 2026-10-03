@@ -276,6 +276,7 @@ function makeMockDeps(overrides?: Partial<LoopDeps>): LoopDeps & { callLog: stri
     emitJournalEvent: (entry) => {
       callLog.push(`journal:${entry.eventType}`);
     },
+    recordVerificationPause: () => {},
   };
 
   return { ...baseDeps, ...overrides, callLog };
