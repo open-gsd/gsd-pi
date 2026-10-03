@@ -226,7 +226,7 @@ sequence                INTEGER DEFAULT 0                  ← V23
 
 - Index: `idx_milestones_status` (status)
 - Status values: `active`, `closed`, `queued`
-- `sequence` is the canonical DB ordering used to choose the next open milestone. `.gsd/QUEUE-ORDER.json` is the durable operator reorder contract for `/gsd rethink` and `/gsd phase`; when present, state derivation mirrors that file into `milestones.sequence` before dispatch.
+- `sequence` is the canonical DB ordering used to choose the next open milestone. The `/gsd queue` reorder writes it through the `milestone.reorder` Domain Operation and then renders `.gsd/QUEUE-ORDER.json` from the committed order. Prompt-driven flows such as `/gsd rethink` still write `.gsd/QUEUE-ORDER.json` directly; when the file is present, state derivation mirrors it into `milestones.sequence` before dispatch.
 
 ---
 
