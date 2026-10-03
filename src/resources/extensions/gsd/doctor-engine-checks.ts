@@ -1211,7 +1211,7 @@ export async function checkEngineHealth(
     // Non-fatal — DB constraint checks failed entirely
   }
 
-  // Checkbox-vs-DB divergence detection runs before projection drift auto-fix
+  // Checkbox-vs-DB divergence detection runs before Projection Work repair
   // so stale re-renders cannot overwrite manually edited markdown first. Runs
   // inside its own try/catch: getAllMilestones / getMilestoneSlices /
   // getSliceTasks issue prepared queries that can throw on a corrupt or locked

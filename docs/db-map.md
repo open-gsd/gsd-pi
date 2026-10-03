@@ -767,8 +767,8 @@ V31 created these tables on fresh databases and transactionally upgraded V30
 databases. Production now routes milestone/slice/task planning, task/slice
 replanning, roadmap reassessment, Task execution/recovery/publication, and Slice
 complete/cancel/reopen/reset through Domain Operations and lifecycle primitives.
-Milestone lifecycle commands, UAT orchestration, import application, and the
-projection worker remain separate later cutovers.
+Milestone lifecycle commands, UAT orchestration, and import application remain
+separate later cutovers.
 
 #### `project_authority`
 
