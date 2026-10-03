@@ -31,7 +31,7 @@ Typical invocation points:
 
 Find the active milestone:
 
-1. Read `.gsd/STATE.md` — it names the active milestone.
+1. Call `gsd_project_snapshot` — it names the active milestone.
 2. If no milestone is active, ask the user whether this is a new milestone (create directory + files) or appending to an existing one.
 3. For a new milestone, use `gsd_milestone_new` or the `/gsd new-milestone` flow — do not create directories by hand.
 

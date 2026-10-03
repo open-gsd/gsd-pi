@@ -8,7 +8,7 @@ Leave the project in a state where a fresh agent with no memory of this session 
 </objective>
 
 <context>
-GSD already writes `STATE.md` (rebuilt after each unit) and summary files (`M###-SUMMARY.md`, `S##-SUMMARY.md`, `T##-SUMMARY.md`). The gap is the *mid-task* handoff: you're partway through a task, context is getting long, and the next session shouldn't start by re-deriving your mental state.
+GSD already renders `STATE.md` (from the database, after every lifecycle tool call) and summary files (`M###-SUMMARY.md`, `S##-SUMMARY.md`, `T##-SUMMARY.md`). The gap is the *mid-task* handoff: you're partway through a task, context is getting long, and the next session shouldn't start by re-deriving your mental state.
 
 `continue.md` exists for exactly this — see `auto-prompts.ts`, `guided-flow.ts`, `phase-anchor.ts`, `state.ts`. This skill is the deliberate authoring ritual.
 
@@ -21,7 +21,7 @@ Invocation points:
 </context>
 
 <core_principle>
-**WRITE FOR A STRANGER.** The next reader is not you. They do not have this conversation. They have `STATE.md`, `continue.md`, the last summary, and the code. That has to be enough.
+**WRITE FOR A STRANGER.** The next reader is not you. They do not have this conversation. They have the project snapshot (`gsd_project_snapshot`), `continue.md`, the last summary, and the code. That has to be enough.
 
 **CURRENT STATE ONLY.** `continue.md` is ephemeral — it says "pick up HERE." It is not a log of what you did; that goes in summaries. It is not a plan for future work; that lives in the plan files.
 
@@ -85,7 +85,7 @@ Example: "The session refactor moved `expiresAt` from optional to required in `S
 
 ## Step 4: Sanity check
 
-Read `STATE.md` + `continue.md` + the most recent summary as if you were a fresh agent. Ask:
+Call `gsd_project_snapshot`, then read `continue.md` + the most recent summary as if you were a fresh agent. Ask:
 
 1. Do I know what to do next?
 2. Do I know why?
@@ -119,6 +119,6 @@ If any answer is no, the handoff is incomplete. Fix it before stopping.
 - [ ] Completed tasks were marked done via `gsd_*` tools, not by hand-edited checkboxes.
 - [ ] `KNOWLEDGE.md` and `DECISIONS.md` have been updated if anything notable was learned.
 - [ ] Background processes are not orphaned.
-- [ ] A cold-read of `STATE.md` + `continue.md` + latest summary would produce the right next action.
+- [ ] A cold-read of the project snapshot + `continue.md` + latest summary would produce the right next action.
 
 </success_criteria>
