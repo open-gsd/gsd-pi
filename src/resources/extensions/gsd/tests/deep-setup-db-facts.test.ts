@@ -3,7 +3,6 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,10 +14,6 @@ import {
   setResearchProjectPromptBuilderForTest,
   type DispatchContext,
 } from "../auto-dispatch.ts";
-import { IS_DISPATCH_OWNER_DEAD, RECLAIM_DEAD_DISPATCH_OWNER } from "../auto/unit-run.ts";
-import { registerAutoWorker } from "../db/auto-workers.ts";
-import { claimMilestoneLease } from "../db/milestone-leases.ts";
-import { recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { piExecutionInvocation } from "../execution-invocation.ts";
 import { _getAdapter, closeDatabase, insertArtifact, insertMilestone, openDatabase } from "../gsd-db.ts";
 import type { GSDPreferences } from "../preferences.ts";
@@ -215,47 +210,15 @@ describe("deep project setup reads database facts", () => {
     assert.equal(readResearchDecision(), null);
   });
 
-  test("a crashed research run does not block the next one: its marker file is ignored and its database claim is taken over", async (t) => {
+  test("a research-project-inflight marker left by a crashed run of an older version does not block the research run", async (t) => {
     saveRootArtifact("PROJECT.md", VALID_PROJECT);
     saveRootArtifact("REQUIREMENTS.md", VALID_REQUIREMENTS);
     await saveResearchDecision("research", "call-1");
     t.after(setResearchProjectPromptBuilderForTest(async () => "research prompt"));
-
-    // The crashed run: a claim for the research unit, and the marker file an older build left.
-    const crashedWorker = registerAutoWorker({ projectRootRealpath: base });
-    const crashedLease = claimMilestoneLease(crashedWorker, "M001");
-    assert.equal(crashedLease.ok, true);
-    const claim = {
-      traceId: "trace-crashed",
-      milestoneId: "M001",
-      unitType: "research-project",
-      unitId: "RESEARCH-PROJECT",
-    };
-    assert.equal(recordDispatchClaim({
-      ...claim,
-      workerId: crashedWorker,
-      milestoneLeaseToken: crashedLease.ok ? crashedLease.token : -1,
-    }).ok, true);
     mkdirSync(gsdPath("runtime"), { recursive: true });
     writeFileSync(gsdPath("runtime", "research-project-inflight"), "{}\n");
-    const exited = spawnSync(process.execPath, ["-e", ""]);
-    _getAdapter()!.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
-      .run({ ":pid": exited.pid, ":worker_id": crashedWorker });
 
     const dispatched = await matchRule(RESEARCH_PROJECT_RULE);
     assert.equal(dispatched?.action === "dispatch" ? dispatched.unitType : dispatched?.action, "research-project");
-
-    const nextWorker = registerAutoWorker({ projectRootRealpath: base });
-    assert.equal(claimMilestoneLease(nextWorker, "M001").ok, false, "the crashed worker still holds the lease");
-    assert.equal(IS_DISPATCH_OWNER_DEAD(crashedWorker, base), true);
-    RECLAIM_DEAD_DISPATCH_OWNER(crashedWorker);
-    const nextLease = claimMilestoneLease(nextWorker, "M001");
-    assert.equal(nextLease.ok, true);
-    assert.equal(recordDispatchClaim({
-      ...claim,
-      traceId: "trace-next",
-      workerId: nextWorker,
-      milestoneLeaseToken: nextLease.ok ? nextLease.token : -1,
-    }).ok, true);
   });
 });

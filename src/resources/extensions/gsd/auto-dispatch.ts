@@ -1080,8 +1080,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
     // research files is missing. Spawns one orchestrator session that fans
     // out 4 parallel subagents (stack, features, architecture, pitfalls).
     // Skipped entirely when the user did not choose research.
-    // One orchestrator owns the fan-out through its unit dispatch claim in the
-    // database; a claim held by a dead worker is taken over.
     name: "deep: pre-planning (research approved, files missing) → research-project",
     match: async ({ state, basePath, prefs, structuredQuestionsAvailable, sessionProvider }) => {
       if (prefs?.planning_depth !== "deep") return null;

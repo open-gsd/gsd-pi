@@ -619,9 +619,7 @@ async function dispatchNextDeepProjectSetupStage(entry: PendingDeepProjectSetupE
   let result: Awaited<ReturnType<(typeof DISPATCH_RULES)[number]["match"]>> = null;
   for (const rule of DISPATCH_RULES) {
     // Only evaluate foreground setup gates here. Later deep rules such as
-    // research-project run under an auto-mode unit dispatch claim and must be
-    // left to auto-mode once the interview is
-    // complete.
+    // research-project are left to auto-mode once the interview is complete.
     if (!FOREGROUND_DEEP_SETUP_RULE_NAMES.has(rule.name)) continue;
     result = await rule.match(dispatchCtx);
     if (result) break;
