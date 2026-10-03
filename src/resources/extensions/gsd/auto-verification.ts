@@ -791,8 +791,8 @@ function isBlockerDiscoveredAttempt(
 
 /**
  * Pause message for a staged blocker (#2148): surface the blocker description
- * and, when the ADR-011 escalation artifact exists and is unresolved, its
- * question/options/recommendation. The artifact is opt-in
+ * and, when the Task has an unresolved ADR-011 escalation in the database, its
+ * question/options/recommendation. The escalation is opt-in
  * (phases.mid_execution_escalation), so the attempt's staged summary is the
  * always-available fallback.
  */
