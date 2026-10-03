@@ -34,6 +34,7 @@ import {
   type MilestoneCompletionCloseout,
 } from "../milestone-lifecycle-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
+import { handleSkip } from "../commands-maintenance.ts";
 import { handleCompleteSlice } from "../tools/complete-slice.ts";
 import { handlePlanSlice } from "../tools/plan-slice.ts";
 import { handleReplanSlice } from "../tools/replan-slice.ts";
@@ -518,6 +519,45 @@ afterEach(() => {
   tempDirs.clear();
 });
 
+async function planTwoTaskSlice(sliceTitle: string, goal: string, key: string): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), "gsd-milestone-capstone-"));
+  tempDirs.add(root);
+  mkdirSync(join(root, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# M001\n");
+  writeFileSync(join(root, "src", "input.ts"), "export const input = true;\n");
+  writeFileSync(join(root, "source.ts"), "export const source = 'capstone-r1';\n");
+  runGit(root, ["init"]);
+  runGit(root, ["config", "user.email", "test@example.com"]);
+  runGit(root, ["config", "user.name", "Test"]);
+  runGit(root, ["add", "source.ts"]);
+  runGit(root, ["commit", "-m", "fixture r1"]);
+
+  const dbPath = join(root, ".gsd", "gsd.db");
+  assert.equal(openDatabase(dbPath), true);
+  insertMilestone({ id: "M001", title: "Milestone lifecycle capstone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: sliceTitle, status: "pending" });
+
+  const task = (taskId: string, title: string) => ({
+    taskId,
+    title,
+    description: `${title} description`,
+    estimate: "30m",
+    files: ["src/input.ts"],
+    verify: "node --test",
+    inputs: ["src/input.ts"],
+    expectedOutput: ["src/input.ts"],
+  });
+  const planned = await handlePlanSlice({
+    milestoneId: "M001",
+    sliceId: "S01",
+    goal,
+    tasks: [task("T01", "Delivered blocker"), task("T02", "Superseded work")],
+  }, root, invocation(`${key}/plan`));
+  assert.ok(!("error" in planned), `planning failed: ${"error" in planned ? planned.error : ""}`);
+  return root;
+}
+
 test("deep hierarchy rejects stale source, then completes and fully reopens from current DB facts", { concurrency: false }, async () => {
   const fixture = createFixture();
   await validate(fixture.root, "capstone/deep/validate-r1");
@@ -645,41 +685,11 @@ test("replan-cancelled task closes and reopens its milestone through the plan-re
   // #2346/#2432/#2451: a replan that removes a pending task must mint the
   // task-cancellation authorization closeout demands, so the replanned slice
   // completes and the milestone closes without manual waiver surgery.
-  const root = mkdtempSync(join(tmpdir(), "gsd-milestone-capstone-"));
-  tempDirs.add(root);
-  mkdirSync(join(root, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
-  mkdirSync(join(root, "src"), { recursive: true });
-  writeFileSync(join(root, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# M001\n");
-  writeFileSync(join(root, "src", "input.ts"), "export const input = true;\n");
-  writeFileSync(join(root, "source.ts"), "export const source = 'capstone-r1';\n");
-  runGit(root, ["init"]);
-  runGit(root, ["config", "user.email", "test@example.com"]);
-  runGit(root, ["config", "user.name", "Test"]);
-  runGit(root, ["add", "source.ts"]);
-  runGit(root, ["commit", "-m", "fixture r1"]);
-
-  const dbPath = join(root, ".gsd", "gsd.db");
-  assert.equal(openDatabase(dbPath), true);
-  insertMilestone({ id: "M001", title: "Milestone lifecycle capstone", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Replanned Slice", status: "pending" });
-
-  const task = (taskId: string, title: string) => ({
-    taskId,
-    title,
-    description: `${title} description`,
-    estimate: "30m",
-    files: ["src/input.ts"],
-    verify: "node --test",
-    inputs: ["src/input.ts"],
-    expectedOutput: ["src/input.ts"],
-  });
-  const planned = await handlePlanSlice({
-    milestoneId: "M001",
-    sliceId: "S01",
-    goal: "Seed a slice whose pending work a replan will cancel.",
-    tasks: [task("T01", "Delivered blocker"), task("T02", "Superseded work")],
-  }, root, invocation("capstone/replan/plan"));
-  assert.ok(!("error" in planned), `planning failed: ${"error" in planned ? planned.error : ""}`);
+  const root = await planTwoTaskSlice(
+    "Replanned Slice",
+    "Seed a slice whose pending work a replan will cancel.",
+    "capstone/replan",
+  );
 
   // Publish T01 with a full verdict-backed completion proof, then remove T02
   // through the replan removal path under test.
@@ -764,4 +774,68 @@ test("closeout rejects a task-recovery Waiver wearing the plan-reconciliation sc
     ),
     /Cancelled Task S01\/T02 requires a current Waiver disposition/,
   );
+});
+
+test("a /gsd skip task cancellation lets the slice and milestone close and reopen", { concurrency: false }, async () => {
+  // P14: the Waiver task.cancel writes must be the form slice closeout,
+  // milestone closeout and full-redo reopen all resolve.
+  const root = await planTwoTaskSlice(
+    "Skipped Task Slice",
+    "Seed a slice whose pending task the operator skips.",
+    "capstone/skip",
+  );
+  const notes: Array<{ message: string; level: string }> = [];
+  await handleSkip(
+    "M001/S01/T02",
+    { ui: { notify: (message: string, level: string) => notes.push({ message, level }) } } as any,
+    root,
+  );
+  assert.equal(notes.at(-1)?.level, "success", notes.at(-1)?.message);
+  const skipWaiver = row(`
+    SELECT waiver.waiver_id
+    FROM workflow_waivers waiver
+    JOIN workflow_operations operation ON operation.operation_id = waiver.operation_id
+    WHERE waiver.waiver_status = 'active' AND operation.operation_type = 'task.cancel'
+  `);
+  assert.ok(skipWaiver.waiver_id, "the skip must record an active task.cancel Waiver");
+
+  seedSliceCompletionAuthority({
+    milestoneId: "M001",
+    sliceId: "S01",
+    completedTaskIds: ["T01"],
+  });
+  const sliceCompleted = await handleCompleteSlice({
+    sliceId: "S01",
+    milestoneId: "M001",
+    sliceTitle: "Skipped Task Slice",
+    oneLiner: "Delivered T01; T02 was skipped.",
+    narrative: "T01 delivered; the operator skipped T02.",
+    verification: "Focused tests pass.",
+    uatContent: "## Smoke Test\n\nVerify happy path.",
+    operationalReadiness: "- Health signal: smoke check passes\n- Failure signal: test failure",
+  }, root, invocation("capstone/skip/complete-slice"));
+  assert.ok(!("error" in sliceCompleted), `slice completion failed: ${"error" in sliceCompleted ? sliceCompleted.error : ""}`);
+  db().prepare(`
+    DELETE FROM quality_gates
+    WHERE milestone_id = 'M001' AND status = 'pending'
+  `).run();
+
+  await validate(root, "capstone/skip/validate");
+  const completed = completeMilestone(
+    completionRequest("capstone/skip/complete", currentSourceRevision(root)),
+  );
+  assert.equal(completed.status, "committed");
+  assert.deepEqual(completed.cancelledTaskIds, ["S01/T02"]);
+  assert.deepEqual(completed.waiverIds, [String(skipWaiver.waiver_id)]);
+
+  const reopened = reopenMilestone(reopenRequest("capstone/skip/reopen"));
+  assert.equal(reopened.status, "committed");
+  assert.equal(row(`
+    SELECT waiver_status FROM workflow_waivers WHERE waiver_id = '${String(skipWaiver.waiver_id)}'
+  `).waiver_status, "revoked");
+  assert.equal(row(`
+    SELECT disposition FROM workflow_requirement_dispositions
+    WHERE requirement_id = 'task-cancellation:M001/S01/T02'
+    ORDER BY project_revision DESC LIMIT 1
+  `).disposition, "unsatisfied");
 });

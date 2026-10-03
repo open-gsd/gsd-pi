@@ -427,7 +427,8 @@ function currentTaskCancellationAuthorization(
       AND (
         (
           waiver.scope = :scope
-          AND waiver_operation.operation_type = 'task.waiver.grant'
+          -- task.cancel (/gsd skip) grants its own cancellation Waiver.
+          AND waiver_operation.operation_type IN ('task.waiver.grant', 'task.cancel')
           AND disposition_operation.operation_type = 'task.disposition.record'
         )
         OR (

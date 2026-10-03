@@ -66,7 +66,7 @@ describe("/gsd skip", () => {
 
     assert.equal(notes.at(-1)?.level, "success", notes.at(-1)?.message);
     assert.equal(getTask("M001", "S01", "T01")?.status, "skipped");
-    assert.deepEqual(waivers("task:M001/S01/T01"), [{
+    assert.deepEqual(waivers("M001/S01/T01 cancellation"), [{
       waiver_status: "active",
       granted_by_actor_type: "user",
       lifecycle_status: "cancelled",
