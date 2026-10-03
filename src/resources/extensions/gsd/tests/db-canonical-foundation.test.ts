@@ -457,3 +457,85 @@ test("faulted v30 migration leaves no v31 state and retries cleanly", () => {
     retried.close();
   }
 });
+
+const OUTBOX_AUDIT_COLUMNS = ["outbox_id", "event_id", "destination", "available_at"];
+
+function outboxColumns(db: RawDb): string[] {
+  return db.prepare("PRAGMA table_info(workflow_outbox)").all().map((column) => String(column.name));
+}
+
+function outboxPendingIndexExists(db: RawDb): boolean {
+  return Boolean(
+    db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = 'idx_workflow_outbox_pending'").get(),
+  );
+}
+
+test("fresh database keeps the outbox as an audit link with no delivery columns", (t) => {
+  const dbPath = createDatabasePath();
+  assert.equal(openDatabase(dbPath), true);
+  closeDatabase();
+
+  const raw = openRawDatabase(dbPath);
+  t.after(() => raw.close());
+  assert.deepEqual(outboxColumns(raw), OUTBOX_AUDIT_COLUMNS);
+  assert.equal(outboxPendingIndexExists(raw), false);
+});
+
+test("v50 upgrade drops the outbox delivery columns and keeps every audit row", (t) => {
+  const dbPath = createDatabasePath();
+  assert.equal(openDatabase(dbPath), true);
+  closeDatabase();
+
+  // Rebuild the v50 outbox shape: the delivery columns and their index.
+  const v50 = openRawDatabase(dbPath);
+  v50.exec(`
+    ALTER TABLE workflow_outbox ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0);
+    ALTER TABLE workflow_outbox ADD COLUMN claimed_by TEXT DEFAULT NULL;
+    ALTER TABLE workflow_outbox ADD COLUMN claim_expires_at TEXT DEFAULT NULL;
+    ALTER TABLE workflow_outbox ADD COLUMN delivered_at TEXT DEFAULT NULL;
+    ALTER TABLE workflow_outbox ADD COLUMN last_error TEXT DEFAULT NULL;
+    CREATE INDEX idx_workflow_outbox_pending ON workflow_outbox(delivered_at, available_at, outbox_id);
+    DELETE FROM schema_version;
+    INSERT INTO schema_version (version, applied_at) VALUES (50, '2026-09-01T00:00:00.000Z');
+
+    INSERT INTO workflow_operations (
+      operation_id, project_id, operation_type, idempotency_key,
+      expected_revision, resulting_revision,
+      expected_authority_epoch, resulting_authority_epoch,
+      actor_type, actor_id, source_transport, request_hash, created_at
+    )
+    SELECT
+      'op-v50', project_id, 'test.operation', 'idem-v50',
+      0, 1, 0, 0, 'agent', 'test-agent', 'test', 'request-v50', '2026-09-01T00:00:01.000Z'
+    FROM project_authority WHERE singleton = 1;
+    INSERT INTO workflow_domain_events (
+      event_id, operation_id, event_index, project_id, project_revision,
+      authority_epoch, event_type, entity_type, entity_id, payload_json, created_at
+    )
+    SELECT
+      'event-v50', 'op-v50', 0, project_id, 1,
+      0, 'test.done', 'project', project_id, '{}', '2026-09-01T00:00:02.000Z'
+    FROM project_authority WHERE singleton = 1;
+    INSERT INTO workflow_outbox (event_id, destination, available_at, attempt_count, last_error)
+    VALUES ('event-v50', 'projection', '2026-09-01T00:00:03.000Z', 2, 'never read');
+  `);
+  assert.equal(outboxColumns(v50).length, OUTBOX_AUDIT_COLUMNS.length + 5);
+  v50.close();
+
+  assert.equal(openDatabase(dbPath), true);
+  closeDatabase();
+
+  const upgraded = openRawDatabase(dbPath);
+  t.after(() => upgraded.close());
+  assert.equal(maxSchemaVersion(upgraded), SCHEMA_VERSION);
+  assert.deepEqual(outboxColumns(upgraded), OUTBOX_AUDIT_COLUMNS);
+  assert.equal(outboxPendingIndexExists(upgraded), false);
+  assert.deepEqual(
+    { ...upgraded.prepare("SELECT event_id, destination, available_at FROM workflow_outbox").get() },
+    { event_id: "event-v50", destination: "projection", available_at: "2026-09-01T00:00:03.000Z" },
+  );
+  assert.throws(
+    () => upgraded.exec("DELETE FROM workflow_outbox"),
+    /outbox rows are durable history/,
+  );
+});

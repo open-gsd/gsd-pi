@@ -24,7 +24,7 @@ import {
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
 
 const V51_MESSAGE =
-  "gsd.db schema is v51, newer than the v50 this gsd-pi supports. " +
+  "gsd.db schema is v52, newer than the v51 this gsd-pi supports. " +
   "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
 
 function makeProject(version: "current" | "newer" | "missing"): string {
@@ -36,7 +36,7 @@ function makeProject(version: "current" | "newer" | "missing"): string {
       if (version === "newer") {
         const db = _getAdapter();
         assert.ok(db);
-        recordSchemaVersion(db, 51);
+        recordSchemaVersion(db, 52);
       }
     } finally {
       closeDatabase();

@@ -124,6 +124,7 @@ history below explains each migration without duplicating that live value.
 | V46 | **State-DB cutover stamp**: records schema version 46 and stamps `PRAGMA application_id` and `PRAGMA user_version`; adds no tables |
 | V47 | **Same-lease Attempt settlement** (#1740): extends the Attempt dispatch-scope transition trigger so a worker holding its own milestone lease can settle its own running Attempt after its coordination dispatch is gone; adds no tables |
 | V48 | **Task execution-tool requirements**: adds `tasks.required_workflow_tools` as a non-null JSON-array column defaulting to `[]`; planning and replanning persist the workflow tools each Task expects its execution unit to expose |
+| V51 | **Outbox as audit link**: drops `workflow_outbox` delivery columns (`attempt_count`, `claimed_by`, `claim_expires_at`, `delivered_at`, `last_error`) and `idx_workflow_outbox_pending`; `workflow_projection_work` is the only delivery queue |
 
 ---
 
@@ -849,20 +850,16 @@ outbox_id        INTEGER PRIMARY KEY AUTOINCREMENT
 event_id         TEXT NOT NULL
 destination      TEXT NOT NULL
 available_at     TEXT NOT NULL DEFAULT ''
-attempt_count    INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0)
-claimed_by       TEXT DEFAULT NULL
-claim_expires_at TEXT DEFAULT NULL
-delivered_at     TEXT DEFAULT NULL
-last_error       TEXT DEFAULT NULL
 FOREIGN KEY event_id → workflow_domain_events(event_id)
 ```
 
 - `(event_id, destination)` is unique.
 - Inserts whose generated identity exceeds JavaScript's maximum safe integer
   abort with `outbox identity exceeds safe integer range`.
-- Delete attempts abort with `outbox rows are durable history`; delivery fields
-  remain operationally mutable.
-- Index: `idx_workflow_outbox_pending` (delivered_at, available_at, outbox_id)
+- Delete attempts abort with `outbox rows are durable history`.
+- The outbox is an audit link only. `workflow_projection_work` is the only
+  delivery queue; schema v51 dropped the unused delivery columns and the
+  `idx_workflow_outbox_pending` index.
 
 These four tables are deliberately distinct from existing narrower concepts:
 `audit_events` remains optional operational telemetry,

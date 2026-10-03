@@ -486,15 +486,15 @@ test("legacy corpus manifest seals exact structure and aggregate accounting", ()
   assert.deepEqual(manifest.cases.map((entry) => entry.name), caseNames);
   assert.deepEqual(manifest.totals, {
     cases: 26,
-    sources: 184,
+    sources: 185,
     changes: 205,
-    diagnoses: 100,
-    resolutions: 100,
+    diagnoses: 101,
+    resolutions: 101,
     create: 103,
     update: 3,
     delete: 1,
     preserve: 98,
-    mapped: 72,
+    mapped: 73,
     preserved: 73,
     unparsed: 31,
     ignored_with_reason: 8,
@@ -768,7 +768,7 @@ test("workflow_import_applications rejects an incomplete Preview envelope", () =
 });
 
 test("legacy import surface registry pins the deterministic Preview envelope contract", () => {
-  assert.equal(SCHEMA_VERSION, 50, "legacy import contract targets the accepted v50 schema");
+  assert.equal(SCHEMA_VERSION, 51, "legacy import contract targets the accepted v51 schema");
   assert.equal(LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION, SCHEMA_VERSION);
   assert.equal(LEGACY_IMPORT_PREVIEW_SCHEMA_VERSION, 1);
   assert.deepEqual(LEGACY_IMPORT_CHANGE_ACTIONS, ["create", "update", "delete", "preserve"]);
@@ -2472,8 +2472,8 @@ test("legacy corpus capstone classifies database targets and changes without app
 
   assert.deepEqual(sourceRows("db-target-matrix"), [
     ["corrupt/.gsd/gsd.db", "gsd-sqlite-target", "unparsed"],
-    ["current-v50/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
-    ["future-v51/.gsd/gsd.db", "gsd-sqlite-target", "unparsed"],
+    ["current-v51/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
+    ["future-v52/.gsd/gsd.db", "gsd-sqlite-target", "unparsed"],
     ["historical-v30/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["historical-v34/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["historical-v43/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
@@ -2482,6 +2482,7 @@ test("legacy corpus capstone classifies database targets and changes without app
     ["historical-v47/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["historical-v48/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["historical-v49/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
+    ["historical-v50/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["unversioned-populated/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["wal-present/.gsd/gsd.db", "gsd-sqlite-target", "mapped"],
     ["wal-present/.gsd/gsd.db-shm", "gsd-sqlite-target", "preserved"],
@@ -2490,7 +2491,7 @@ test("legacy corpus capstone classifies database targets and changes without app
   assert.deepEqual(changeRows("db-target-matrix"), []);
   assert.deepEqual(diagnosisRows("db-target-matrix"), [
     ["diagnosis-corrupt-database", "corrupt-database", "blocker", "database-corrupt"],
-    ["diagnosis-future-v51", "future-schema-version", "blocker", "database-future-v51"],
+    ["diagnosis-future-v52", "future-schema-version", "blocker", "database-future-v52"],
     ["diagnosis-historical-v30", "historical-schema-version", "info", "database-historical-v30"],
     ["diagnosis-historical-v34", "historical-schema-version", "info", "database-historical-v34"],
     ["diagnosis-historical-v43", "historical-schema-version", "info", "database-historical-v43"],
@@ -2499,12 +2500,13 @@ test("legacy corpus capstone classifies database targets and changes without app
     ["diagnosis-historical-v47", "historical-schema-version", "info", "database-historical-v47"],
     ["diagnosis-historical-v48", "historical-schema-version", "info", "database-historical-v48"],
     ["diagnosis-historical-v49", "historical-schema-version", "info", "database-historical-v49"],
+    ["diagnosis-historical-v50", "historical-schema-version", "info", "database-historical-v50"],
     ["diagnosis-unversioned-populated", "unversioned-populated-database", "warning", "database-unversioned-populated"],
     ["diagnosis-wal-sidecars", "wal-sidecars-present", "warning", "database-wal-main"],
   ]);
   assert.deepEqual(oracle("db-target-matrix").resolutions, [
     { diagnosis_id: "diagnosis-corrupt-database", disposition: "unsupported" },
-    { diagnosis_id: "diagnosis-future-v51", disposition: "unsupported" },
+    { diagnosis_id: "diagnosis-future-v52", disposition: "unsupported" },
     {
       diagnosis_id: "diagnosis-historical-v30",
       disposition: "mapped",
@@ -2546,6 +2548,11 @@ test("legacy corpus capstone classifies database targets and changes without app
       target: { kind: "database-target", key: "historical-v49/.gsd/gsd.db" },
     },
     {
+      diagnosis_id: "diagnosis-historical-v50",
+      disposition: "mapped",
+      target: { kind: "database-target", key: "historical-v50/.gsd/gsd.db" },
+    },
+    {
       diagnosis_id: "diagnosis-unversioned-populated",
       disposition: "mapped",
       target: { kind: "database-target", key: "unversioned-populated/.gsd/gsd.db" },
@@ -2571,8 +2578,8 @@ test("legacy corpus capstone classifies database targets and changes without app
     database.prepare("SELECT count(*) AS count FROM sqlite_master WHERE type = ? AND name = ?")
       .get(type, name)?.count === 1;
   const validTargetScenarios = [
-    "current-v50",
-    "future-v51",
+    "current-v51",
+    "future-v52",
     "historical-v30",
     "historical-v34",
     "historical-v43",
@@ -2581,6 +2588,7 @@ test("legacy corpus capstone classifies database targets and changes without app
     "historical-v47",
     "historical-v48",
     "historical-v49",
+    "historical-v50",
     "unversioned-populated",
   ];
   for (const scenario of validTargetScenarios) {
@@ -2592,8 +2600,8 @@ test("legacy corpus capstone classifies database targets and changes without app
       (database) => database.prepare("SELECT max(version) AS version FROM schema_version").get()?.version ?? 0,
     )])),
     {
-      "current-v50": 50,
-      "future-v51": 51,
+      "current-v51": 51,
+      "future-v52": 52,
       "historical-v30": 30,
       "historical-v34": 34,
       "historical-v43": 43,
@@ -2602,13 +2610,14 @@ test("legacy corpus capstone classifies database targets and changes without app
       "historical-v47": 47,
       "historical-v48": 48,
       "historical-v49": 49,
+      "historical-v50": 50,
       "unversioned-populated": 0,
     },
   );
   assert.equal(inspectTarget("historical-v30", (database) => objectExists(database, "table", "project_authority")), false);
   assert.equal(inspectTarget("historical-v34", (database) => objectExists(database, "table", "workflow_import_applications")), false);
   assert.equal(inspectTarget("historical-v43", (database) => objectExists(database, "trigger", "trg_workflow_lifecycle_reopen_authorization")), false);
-  assert.deepEqual(inspectTarget("current-v50", (database) => ({
+  assert.deepEqual(inspectTarget("current-v51", (database) => ({
     authority: objectExists(database, "table", "project_authority"),
     imports: objectExists(database, "table", "workflow_import_applications"),
     reopen: objectExists(database, "trigger", "trg_workflow_lifecycle_reopen_authorization"),
@@ -2826,13 +2835,13 @@ test("legacy corpus capstone classifies database targets and changes without app
     ]),
     [
       [
-        "sha256:0f4ac128a67db81aaa8b3d0bded3bb328ef89271a3cb90f727676b121c621e6f",
+        "sha256:9dd98a8c644f27d2adc0ec2a608e87c6f51bb3364c74c846b8365082dfaffeba",
         "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
-        "sha256:de9c661cc0a4f4ff5953f17376a26311ee3ec86d29a0f50b913eca3d3b237271",
-        "sha256:9842725944d7f094259b5908bb216155d8ca867dc62563ea15eeeb352e81f59f",
+        "sha256:b7d30d9dfee7e655e11e2d7bcce0e0128f55242ab13cb412a8da0a9865a2020e",
+        "sha256:7a44235fa4aa979f7e7d89cee5540c2f931837284b66e5e604b4e3eb19f71709",
       ],
       [
-        "sha256:b4aabf404fd865cd8c08c3ba929d6ba8d0ec981132ef1741c5a8fc9c406e4747",
+        "sha256:723185252192c6afcc80ddc634e98d92e80900dc9c624b92345bb05cef96b515",
         "sha256:5ee816447ea03a7c8d1ffb391c2b49e7dc3e3cc6ec348c06c777a166c9f51099",
         "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
         "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",

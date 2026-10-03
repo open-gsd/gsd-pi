@@ -93,6 +93,7 @@ import {
   applyMigrationV48TaskToolRequirements,
   applyMigrationV49MilestoneVerdictScope,
   applyMigrationV50BlockerAcceptedCloseout,
+  applyMigrationV51OutboxAuditLink,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -163,7 +164,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 50;
+export const SCHEMA_VERSION = 51;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -834,6 +835,15 @@ function migrateSchema(
       applyMigrationV50BlockerAcceptedCloseout(db);
       stampStateCutoverPragmas(db, 50);
       recordSchemaVersion(db, 50);
+    }
+
+    if (currentVersion < 51) {
+      // V51 — the outbox is an audit link only: drop the delivery columns no
+      // code ever read or updated. workflow_projection_work is the only
+      // delivery queue.
+      applyMigrationV51OutboxAuditLink(db);
+      stampStateCutoverPragmas(db, 51);
+      recordSchemaVersion(db, 51);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");

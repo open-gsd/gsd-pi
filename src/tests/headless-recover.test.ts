@@ -720,7 +720,7 @@ test("headless recover choice-required prints full executable forward-repair com
 });
 
 const V51_MESSAGE =
-  "gsd.db schema is v51, newer than the v50 this gsd-pi supports. " +
+  "gsd.db schema is v52, newer than the v51 this gsd-pi supports. " +
   "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
 
 test("headless recover forwards the exact refuse-newer message for a newer-schema project", async (t) => {
@@ -734,7 +734,7 @@ test("headless recover forwards the exact refuse-newer message for a newer-schem
   });
 
   assert.equal(await ensureDbOpen(base), true);
-  recordSchemaVersion(_getAdapter()!, 51);
+  recordSchemaVersion(_getAdapter()!, 52);
   closeDatabase();
   process.stderr.write = ((chunk: string | Uint8Array) => {
     stderr.push(String(chunk));

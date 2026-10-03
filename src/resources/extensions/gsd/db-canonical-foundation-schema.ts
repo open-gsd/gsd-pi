@@ -115,17 +115,15 @@ export function createCanonicalFoundationSchemaV31(db: DbAdapter): void {
     END
   `);
 
+  // The outbox is an audit link from each event to its destinations.
+  // workflow_projection_work is the only delivery queue; v51 dropped the
+  // never-used delivery columns from databases created before this DDL.
   db.exec(`
     CREATE TABLE IF NOT EXISTS workflow_outbox (
       outbox_id INTEGER PRIMARY KEY AUTOINCREMENT,
       event_id TEXT NOT NULL,
       destination TEXT NOT NULL,
       available_at TEXT NOT NULL DEFAULT '',
-      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-      claimed_by TEXT DEFAULT NULL,
-      claim_expires_at TEXT DEFAULT NULL,
-      delivered_at TEXT DEFAULT NULL,
-      last_error TEXT DEFAULT NULL,
       UNIQUE (event_id, destination),
       FOREIGN KEY (event_id) REFERENCES workflow_domain_events(event_id)
     )
@@ -139,10 +137,6 @@ export function createCanonicalFoundationSchemaV31(db: DbAdapter): void {
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_workflow_domain_events_entity
     ON workflow_domain_events(project_id, entity_type, entity_id, project_revision, event_index)
-  `);
-  db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_workflow_outbox_pending
-    ON workflow_outbox(delivered_at, available_at, outbox_id)
   `);
 
   db.exec(`
