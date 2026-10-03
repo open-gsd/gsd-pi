@@ -2342,6 +2342,7 @@ export const executeTaskSettle = async (params, projectDir, invocation) => {
   return { content: [{ type: "text", text: "mock task settle" }] };
 };
 
+export const runInToolSession = (_sessionKey, run) => run();
 export const executeTaskComplete = noop;
 export const executeTaskReopen = noop;
 export const executeTaskRecoveryResume = noop;
