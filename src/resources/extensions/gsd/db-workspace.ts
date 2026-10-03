@@ -131,7 +131,10 @@ export interface OpenWorkflowDatabaseOptions {
    * empty database although the project already holds workflow history.
    */
   createEmptyAuthority?: boolean;
-  /** Explicit /gsd db bind only: make this checkout the one the database belongs to. */
+  /**
+   * Explicit /gsd db bind only: make this checkout the one the database belongs
+   * to. The empty-database check does not run, so the caller must close the handle.
+   */
   bindCheckout?: boolean;
 }
 
@@ -308,7 +311,7 @@ function openWorkflowDatabaseWithMode(
     if (!opened) {
       return { ok: false, reason: "open-failed", location };
     }
-    if (!options.createEmptyAuthority && !alreadyOpen && isEmptyDatabaseBesidePlannedProjections(location.projectGsd)) {
+    if (!options.createEmptyAuthority && !options.bindCheckout && !alreadyOpen && isEmptyDatabaseBesidePlannedProjections(location.projectGsd)) {
       closeDatabase();
       return { ok: false, reason: "authority-missing", location, error: authorityMissingError(location) };
     }

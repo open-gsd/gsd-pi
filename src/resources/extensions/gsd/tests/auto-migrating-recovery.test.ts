@@ -6,10 +6,12 @@ import { tmpdir } from "node:os";
 
 import { recoverFailedMigration } from "../migrate-external.ts";
 import { externalGsdRoot } from "../repo-identity.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { drainLogs } from "../workflow-logger.ts";
 
-function createDatabase(path: string): void {
+function createDatabase(path: string, withWorkflowRows = true): void {
   assert.equal(openDatabase(path), true);
+  if (withWorkflowRows) insertMilestone({ id: "M001", title: "Current work", status: "active" });
   closeDatabase();
 }
 
@@ -113,6 +115,24 @@ test("recoverFailedMigration keeps .gsd.migrating when only projections prove th
 
   assert.equal(recoverFailedMigration(base), false);
   assert.ok(existsSync(join(base, ".gsd.migrating")), "the staged copy must stay until the database proves the state");
+});
+
+test("recoverFailedMigration keeps .gsd.migrating when an interrupted migration left a new schema-only database", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-migrating-schema-only-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+
+  const migratingPath = join(base, ".gsd.migrating");
+  mkdirSync(migratingPath, { recursive: true });
+  createDatabase(join(migratingPath, "gsd.db"));
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  createDatabase(join(base, ".gsd", "gsd.db"), false);
+
+  assert.equal(recoverFailedMigration(base), false);
+  assert.ok(existsSync(join(migratingPath, "gsd.db")), "the staged copy holds the only real database and must stay");
+  assert.ok(
+    drainLogs().some((entry) => entry.component === "migration" && entry.message.includes(migratingPath)),
+    "the kept staged copy must be reported",
+  );
 });
 
 test("recoverFailedMigration preserves contents of .gsd.migrating", (t) => {

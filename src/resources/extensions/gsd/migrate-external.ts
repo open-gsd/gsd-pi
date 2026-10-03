@@ -15,6 +15,7 @@ import { hasGitTrackedGsdFiles } from "./gitignore.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
 import { gsdRoot } from "./paths.js";
 import { openSqliteReadOnly } from "./sqlite-readonly.js";
+import { logWarning } from "./workflow-logger.js";
 
 export interface MigrationResult {
   migrated: boolean;
@@ -224,15 +225,18 @@ export function migrateToExternalState(basePath: string): MigrationResult {
 }
 
 /**
- * The current state is intact only when its database opens read-only and its
- * project_authority row is readable. Projection files such as STATE.md and
- * milestones/ prove nothing about the authority.
+ * The current state is intact only when its database opens read-only and holds
+ * workflow rows (milestones, decisions, requirements or memories). A
+ * schema-only database and projection files such as STATE.md and milestones/
+ * prove nothing about the authority.
  */
 export function isCurrentGsdStateIntactForMigratingCleanup(basePath: string): boolean {
   try {
     const { db } = openSqliteReadOnly(join(gsdRoot(basePath), "gsd.db"));
     try {
-      return db.prepare("SELECT project_id FROM project_authority WHERE singleton = 1").get() !== undefined;
+      return ["milestones", "decisions", "requirements", "memories"].some(
+        (table) => db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get() !== undefined,
+      );
     } finally {
       db.close();
     }
@@ -270,7 +274,10 @@ export function recoverFailedMigration(basePath: string): boolean {
 
   if (!existsSync(migratingPath)) return false;
   if (existsSync(localGsd)) {
-    if (!isCurrentGsdStateIntactForMigratingCleanup(basePath)) return false;
+    if (!isCurrentGsdStateIntactForMigratingCleanup(basePath)) {
+      logWarning("migration", `kept ${migratingPath}: the database in ${localGsd} holds no workflow rows, so the staged copy may be the only real state. Compare both directories before you delete one.`);
+      return false;
+    }
     if (!isLocalGsdExternalStateJunction(basePath, localGsd)) {
       try {
         const stat = lstatSync(localGsd);

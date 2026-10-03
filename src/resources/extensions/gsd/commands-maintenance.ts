@@ -19,6 +19,8 @@ import type { DbAdapter } from "./db-adapter.js";
 import {
   applyPreparedVerifiedRecoverApplication,
   loadRetainedVerifiedRecoverApplication,
+  closeWorkflowDatabase,
+  isWorkflowDatabaseOpen,
   loadVerifiedRecoverApplication,
   openWorkflowDatabase,
   prepareVerifiedRecoverApplication,
@@ -1779,11 +1781,13 @@ async function executeRestoreBackupPlan(plan: RestoreBackupPlan): Promise<"commi
  * refused like any other unbound checkout.
  */
 export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): void {
+  const wasOpen = isWorkflowDatabaseOpen();
   const result = openWorkflowDatabase(basePath, { bindCheckout: true });
   if (!result.ok) {
     ctx.ui.notify(`gsd db bind: ${result.error?.message ?? result.reason}`, "error");
     return;
   }
+  if (!wasOpen) closeWorkflowDatabase();
   ctx.ui.notify(`gsd db bind: ${result.location.projectDb} now belongs to this checkout.`, "info");
 }
 

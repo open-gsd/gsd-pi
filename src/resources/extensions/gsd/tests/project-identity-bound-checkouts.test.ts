@@ -140,6 +140,28 @@ test("a copied database with another root is refused for writes", async () => {
   assert.equal(boundRoot(copiedDb), source, "the refused open must not rebind the copy");
 });
 
+test("an empty database bound to another root beside a ROADMAP is bound here, then imported", () => {
+  const old = tempDir("gsd-bound-old-");
+  const moved = tempDir("gsd-bound-moved-");
+  mkdirSync(join(old, ".gsd"));
+  assert.equal(openWorkflowDatabase(old).ok, true);
+  closeDatabase();
+  mkdirSync(join(moved, ".gsd", "milestones", "M001"), { recursive: true });
+  const movedDb = join(moved, ".gsd", "gsd.db");
+  copyFileSync(join(old, ".gsd", "gsd.db"), movedDb);
+  writeFileSync(join(moved, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# M001: Pulled plan\n");
+
+  assert.equal(openWorkflowDatabase(moved).reason, "authority-missing");
+  assert.equal(openWorkflowDatabase(moved, { createEmptyAuthority: true }).reason, "checkout-unbound", "the import open is refused before the bind");
+
+  const { ctx, notes } = makeCtx();
+  handleDbBind(ctx, moved);
+  assert.equal(notes.at(-1)?.level, "info", JSON.stringify(notes));
+  assert.equal(boundRoot(movedDb), moved);
+  assert.equal(openWorkflowDatabase(moved).reason, "authority-missing", "the bind must not admit the empty database");
+  assert.equal(openWorkflowDatabase(moved, { createEmptyAuthority: true }).ok, true, "the /gsd recover open now succeeds");
+});
+
 for (const existingDb of ["none", "schema-only"] as const) test(`a re-clone with tracked projections and ${existingDb === "none" ? "no" : "a schema-only"} database blocks auto, guided, headless and MCP writes`, async () => {
   const origin = tempDir("gsd-tracked-origin-");
   initRepo(origin);
