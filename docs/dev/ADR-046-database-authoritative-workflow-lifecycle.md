@@ -266,8 +266,17 @@ Migration is additive and never runs two authorities.
    custom-definition storage.
 3. Backfill in one verified transaction. Preserve raw legacy values; map
    `skipped` only to cancellation and a provable Waiver; convert fabricated
-   completion to failed/interrupted work with remediation; treat unreliable
-   assessment history as unverified.
+   completion to failed/interrupted work with remediation (superseded by the
+   2026-10-03 note below); treat unreliable assessment history as unverified.
+
+   > **Note (2026-10-03):** the owner-decision default, as implemented by
+   > `lifecycle.backfill`, replaces "failed/interrupted work with remediation".
+   > A legacy completion with `completed_at`, a summary and a verification
+   > result that is not failed is adopted as completed with an
+   > `unverified-legacy` evidence marker. Every other legacy completion is
+   > adopted as open work (`ready` or `pending`) and reported as a finding.
+   > The per-item-kind evidence rule lives in
+   > `src/resources/extensions/gsd/lifecycle-backfill-domain-operation.ts`.
 4. Route one low-risk work family through the kernel, then auto, interactive,
    standard, custom, and parallel families with semantic shadow comparison.
    Shadow comparison observes outcomes; it never creates disk authority.
