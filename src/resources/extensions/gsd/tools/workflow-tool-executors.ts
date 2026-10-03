@@ -808,6 +808,10 @@ export async function executeSummarySave(
       }
     }
 
+    // A saved artifact can change the derived state: PROJECT registers
+    // milestones, and CONTEXT changes milestone readiness.
+    await renderStateProjection(basePath);
+
     return {
       content: [{ type: "text", text: `Saved ${params.artifact_type} artifact to ${relativePath}` }],
       details: {

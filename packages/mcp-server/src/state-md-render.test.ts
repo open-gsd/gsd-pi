@@ -19,6 +19,7 @@ import { claimTaskAttempt } from "../../../src/resources/extensions/gsd/task-exe
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
 import { discardMilestone, parkMilestone, unparkMilestone } from "../../../src/resources/extensions/gsd/milestone-actions.ts";
 import { handleUndo, handleUndoTask } from "../../../src/resources/extensions/gsd/undo.ts";
+import { handleQueueReorder } from "../../../src/resources/extensions/gsd/guided-flow-queue.ts";
 import { mergeCompletedMilestone } from "../../../src/resources/extensions/gsd/parallel-merge.ts";
 import { seedMergeReadyMilestone } from "../../../src/resources/extensions/gsd/tests/merge-ready-fixture.ts";
 import { handleEscalateCommand } from "../../../src/resources/extensions/gsd/commands/handlers/escalate.ts";
@@ -230,6 +231,27 @@ for (const transport of ["native", "mcp"] as const) {
       }));
     });
 
+    it("summary save renders STATE.md", async (t) => {
+      const fixture = await openFixture(t);
+      await assertRendersState(fixture.root, `${transport} summary save`, () => callTool(transport, fixture.root, "gsd_summary_save", {
+        artifact_type: "PROJECT",
+        content: [
+          "# Project",
+          "",
+          "## What This Is",
+          "",
+          "A project for the STATE.md check.",
+          "",
+          "## Milestone Sequence",
+          "",
+          "- [ ] M001: Authority Fixture - The fixture milestone.",
+          "- [ ] M002: Registered milestone - Registered by the PROJECT save.",
+          "",
+        ].join("\n"),
+      }));
+      assert.match(readFileSync(statePath(fixture.root), "utf-8"), /\*\*M002:\*\* Registered milestone/);
+    });
+
     it("UAT result renders STATE.md", async (t) => {
       const fixture = await openFixture(t);
       const evidenceId = `state-md-uat-${transport}`;
@@ -281,6 +303,28 @@ describe("STATE.md render after workflow commands and rebuild", () => {
     await assertRendersState(base, "discard", async () => assert.equal(await discardMilestone(base, "M002"), true));
     updateTaskStatus("M001", "S02", "T01", "complete");
     await assertRendersState(base, "undo-task", () => handleUndoTask("M001/S02/T01 --force", ctx, {} as Parameters<typeof handleUndoTask>[2], base));
+  });
+
+  it("/gsd queue reorder renders STATE.md", async (t) => {
+    const fixture = await openFixture(t);
+    const base = fixture.root;
+    insertMilestone({ id: "M002", title: "Second milestone", status: "queued" });
+    insertMilestone({ id: "M003", title: "Third milestone", status: "queued" });
+    const notes: string[] = [];
+    const ctx = {
+      hasUI: true,
+      ui: {
+        custom: async () => ({ order: ["M001", "M003", "M002"], depsToRemove: [] }),
+        notify: (message: string) => notes.push(message),
+      },
+    } as unknown as Parameters<typeof handleQueueReorder>[0];
+    invalidateStateCache();
+    const before = await deriveState(base, { syncQueueOrder: false });
+
+    await assertRendersState(base, "queue reorder", () => handleQueueReorder(ctx, base, before));
+    assert.ok(notes.some((note) => note.startsWith("Queue reordered: M001 → M003 → M002")), notes.join("\n"));
+    const rendered = readFileSync(statePath(base), "utf-8");
+    assert.ok(rendered.indexOf("**M003:**") < rendered.indexOf("**M002:**"), "the registry follows the new order");
   });
 
   it("/gsd undo --force renders STATE.md", async (t) => {
