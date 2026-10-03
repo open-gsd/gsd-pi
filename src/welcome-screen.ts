@@ -18,7 +18,8 @@ import stripAnsi from 'strip-ansi'
 import { GSD_PI_BRAND, GSD_PI_LOGO } from './logo.js'
 import { stripIdPrefix } from './resources/extensions/gsd/strip-id-prefix.js'
 
-interface GsdState {
+/** Project status shown in the header. */
+export interface WelcomeProjectState {
   milestone?: string
   phase?: string
   slice?: string
@@ -87,17 +88,20 @@ export function _resetMilestoneLockForTest(): void {
   lockedMilestone = undefined
 }
 
-function readGsdState(): GsdState | undefined {
+function readGsdState(dbState: WelcomeProjectState | undefined): WelcomeProjectState | undefined {
   // A resolved lock is the authority for what this session is bound to.
   if (lockedMilestone) return { milestone: lockedMilestone }
+  // The caller read the database: STATE.md is not consulted.
+  if (dbState) return dbState
   try {
     const raw = readFileSync(join(process.cwd(), '.gsd', 'STATE.md'), 'utf-8')
-    const state: GsdState = {}
+    const state: WelcomeProjectState = {}
     const milestone = raw.match(/^\*\*Active Milestone:\*\*\s*(.+)$/m)
     const activeMilestone = milestone?.[1].trim()
     if (activeMilestone && activeMilestone !== 'None') state.milestone = activeMilestone
     const slice = raw.match(/^\*\*Active Slice:\*\*\s*(.+)$/m)
-    if (slice) state.slice = slice[1].trim()
+    const activeSlice = slice?.[1].trim()
+    if (activeSlice && activeSlice !== 'None') state.slice = activeSlice
     const phase = raw.match(/^\*\*Phase:\*\*\s*(.+)$/m)
     if (phase) state.phase = phase[1].trim()
     // Accept both template shapes: inline "**Next Action:** ..." and the
@@ -140,6 +144,12 @@ export interface WelcomeScreenOptions {
   provider?: string
   remoteChannel?: string
   width?: number
+  /**
+   * Project status the caller read from the database. When set, the header
+   * shows it and does not read STATE.md. Leave unset only when the database
+   * is missing or cannot be opened.
+   */
+  state?: WelcomeProjectState
 }
 
 function getShortCwd(): string {
@@ -204,7 +214,7 @@ export function buildWelcomeScreenLines(opts: WelcomeScreenOptions): string[] {
   // "Welcome back" context lines — GSD state if available, else hint.
   // Intentionally avoids data already shown in the footer (model, provider,
   // pwd, branch).
-  const state = readGsdState()
+  const state = readGsdState(opts.state)
   let projectText = 'No active GSD project'
   let commandText = '/gsd start'
   let modeText = 'manual'
