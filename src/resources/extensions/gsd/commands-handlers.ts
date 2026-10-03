@@ -15,7 +15,7 @@ import { deriveState } from "./state.js";
 import { gsdRoot } from "./paths.js";
 import { gsdHome } from "./gsd-home.js";
 import { appendCapture, hasPendingCaptures, loadPendingCaptures } from "./captures.js";
-import { appendOverride } from "./files.js";
+import { registerOverride } from "./overrides.js";
 import {
   formatDoctorIssuesForPrompt,
   formatDoctorReport,
@@ -24,8 +24,7 @@ import {
   selectDoctorScope,
   filterDoctorIssues,
 } from "./doctor.js";
-import { isAutoActive, checkRemoteAutoSession } from "./auto.js";
-import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
+import { isAutoActive } from "./auto.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { currentDirectoryRoot, projectRoot } from "./commands/context.js";
 import { loadPrompt } from "./prompt-loader.js";
@@ -445,18 +444,11 @@ export async function handleSteer(change: string, ctx: ExtensionCommandContext, 
   const tid = state.activeTask?.id ?? "none";
   const appliedAt = `${mid}/${sid}/${tid}`;
 
-  // Resolve the correct target path: only route to a worktree when auto-mode
-  // is actively running there (in-process or remote). A worktree directory may
-  // exist from a previous session without being the active runtime path —
-  // writing there without a live session would silently drop the override.
-  const autoRunning = isAutoActive() || checkRemoteAutoSession(basePath).running;
-  const wtPath = autoRunning && mid !== "none"
-    ? getAutoWorktreePath(basePath, mid)
-    : null;
-  const targetPath = wtPath ?? basePath;
-  await appendOverride(targetPath, change, appliedAt);
+  // The override is a database row shared by the project root and every
+  // worktree; OVERRIDES.md is its render.
+  registerOverride(basePath, change, appliedAt);
 
-  const overrideLoc = wtPath ? "worktree `.gsd/OVERRIDES.md`" : "`.gsd/OVERRIDES.md`";
+  const overrideLoc = "`.gsd/OVERRIDES.md`";
 
   if (isAutoActive()) {
     pi.sendMessage({

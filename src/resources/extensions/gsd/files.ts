@@ -6,7 +6,7 @@
 import { promises as fs } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteAsync } from './atomic-write.js';
-import { resolveMilestoneFile, relMilestoneFile, resolveGsdRootFile } from './paths.js';
+import { resolveMilestoneFile, relMilestoneFile } from './paths.js';
 import { milestoneIdSort, findMilestoneIds } from './milestone-ids.js';
 
 import type {
@@ -804,71 +804,6 @@ export interface Override {
   appliedAt: string;
 }
 
-export async function appendOverride(basePath: string, change: string, appliedAt: string): Promise<void> {
-  const overridesPath = resolveGsdRootFile(basePath, "OVERRIDES");
-  const timestamp = new Date().toISOString();
-  const entry = [
-    `## Override: ${timestamp}`,
-    "",
-    `**Change:** ${change}`,
-    `**Scope:** active`,
-    `**Applied-at:** ${appliedAt}`,
-    "",
-    "---",
-    "",
-  ].join("\n");
-
-  const existing = await loadFile(overridesPath);
-  if (existing) {
-    await saveFile(overridesPath, existing.trimEnd() + "\n\n" + entry);
-  } else {
-    const header = [
-      "# GSD Overrides",
-      "",
-      "User-issued overrides that supersede plan document content.",
-      "",
-      "---",
-      "",
-    ].join("\n");
-    await saveFile(overridesPath, header + entry);
-  }
-}
-
-export async function loadActiveOverrides(basePath: string): Promise<Override[]> {
-  const overridesPath = resolveGsdRootFile(basePath, "OVERRIDES");
-  const content = await loadFile(overridesPath);
-  if (!content) return [];
-  return parseOverrides(content).filter(o => o.scope === "active");
-}
-
-export function parseOverrides(content: string): Override[] {
-  const overrides: Override[] = [];
-  const blocks = content.split(/^## Override: /m).slice(1);
-
-  for (const block of blocks) {
-    const lines = block.split("\n");
-    const timestamp = lines[0]?.trim() ?? "";
-    let change = "";
-    let scope: "active" | "resolved" = "active";
-    let appliedAt = "";
-
-    for (const line of lines) {
-      const changeMatch = line.match(/^\*\*Change:\*\*\s*(.+)$/);
-      if (changeMatch) change = changeMatch[1].trim();
-      const scopeMatch = line.match(/^\*\*Scope:\*\*\s*(.+)$/);
-      if (scopeMatch) scope = scopeMatch[1].trim() as "active" | "resolved";
-      const appliedMatch = line.match(/^\*\*Applied-at:\*\*\s*(.+)$/);
-      if (appliedMatch) appliedAt = appliedMatch[1].trim();
-    }
-
-    if (change) {
-      overrides.push({ timestamp, change, scope, appliedAt });
-    }
-  }
-
-  return overrides;
-}
-
 export function formatOverridesSection(overrides: Override[]): string {
   if (overrides.length === 0) return "";
 
@@ -885,12 +820,4 @@ export function formatOverridesSection(overrides: Override[]): string {
     entries,
     "",
   ].join("\n");
-}
-
-export async function resolveAllOverrides(basePath: string): Promise<void> {
-  const overridesPath = resolveGsdRootFile(basePath, "OVERRIDES");
-  const content = await loadFile(overridesPath);
-  if (!content) return;
-  const updated = content.replace(/\*\*Scope:\*\* active/g, "**Scope:** resolved");
-  await saveFile(overridesPath, updated);
 }

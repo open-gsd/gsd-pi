@@ -19,7 +19,8 @@ import { resolveRepositoryProjectRoot } from "../repository-registry.js";
 import { getActiveAutoWorktreeContext } from "../auto-worktree-session-registry.js";
 import { getActiveWorktreeName, getWorktreeOriginalCwd } from "../worktree-session-state.js";
 import { deriveState } from "../state.js";
-import { formatOverridesSection, formatShortcut, loadActiveOverrides, loadFile, parseContinue, parseSummary } from "../files.js";
+import { formatOverridesSection, formatShortcut, loadFile, parseContinue, parseSummary } from "../files.js";
+import { loadActiveOverrides } from "../overrides.js";
 import { toPosixPath } from "../../shared/mod.js";
 import { autoEnableCmuxPreferences } from "../commands-cmux.js";
 import { gsdHome } from "../gsd-home.js";
@@ -837,7 +838,7 @@ async function buildTaskExecutionContextInjection(
   const slicePlanExcerpt = extractSliceExecutionExcerpt(slicePlanContent, slicePlanRelPath);
   const priorTaskLines = await buildCarryForwardLines(basePath, milestoneId, sliceId, taskId);
   const resumeSection = await buildResumeSection(basePath, milestoneId, sliceId);
-  const activeOverrides = await loadActiveOverrides(basePath);
+  const activeOverrides = loadActiveOverrides();
   const overridesSection = formatOverridesSection(activeOverrides);
 
   return [

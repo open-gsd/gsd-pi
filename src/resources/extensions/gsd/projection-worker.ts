@@ -24,6 +24,7 @@ import {
 import { getAllMilestones, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
 import { knowledgeMdPath } from "./knowledge-parser.js";
 import { renderKnowledgeProjection } from "./knowledge-projection.js";
+import { renderOverridesProjection } from "./overrides.js";
 import {
   renderAllFromDb,
   renderMilestoneFilesFromDb,
@@ -163,6 +164,7 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
     return { target: "decisions", render: regenerateDecisionsMarkdown };
   }
   if (key === "knowledge") return { target: "knowledge", render: renderKnowledgeFile };
+  if (key === "overrides") return { target: "overrides", render: async (root) => renderOverridesProjection(root) };
   if (segments[0] !== "planning") return null;
   if (key === "planning/requirements") return { target: "requirements", render: regenerateRequirementsMarkdown };
   return hierarchyTarget(segments.slice(1));
@@ -489,6 +491,11 @@ export async function rebuildMarkdownProjectionsFromDb(
   }
   // STATE.md is part of the full rebuild, with or without a Projection Work row of kind "state".
   if ((await renderStateProjection(basePath)).stale) rendered.errors.push("STATE.md: render failed");
+  try {
+    renderOverridesProjection(basePath);
+  } catch (err) {
+    rendered.errors.push(`overrides: ${(err as Error).message}`);
+  }
   const drained = await repairProjectionWork(basePath);
   invalidateStateCache();
 

@@ -16,7 +16,8 @@
 import type { ExtensionContext, ExtensionAPI } from "@gsd/pi-coding-agent";
 import { deriveState } from "./state.js";
 import { logWarning, logError } from "./workflow-logger.js";
-import { loadFile, parseSummary, resolveAllOverrides } from "./files.js";
+import { loadFile, parseSummary } from "./files.js";
+import { loadActiveOverrides, resolveAllOverrides } from "./overrides.js";
 import { loadPrompt } from "./prompt-loader.js";
 import { isAwaitingUserInput } from "./consent-question.js";
 import {
@@ -1814,8 +1815,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         // state engine skips it. Without this, rewrite-docs only edits
         // markdown but the DB still has the milestone as active.
         try {
-          const { loadActiveOverrides } = await import("./files.js");
-          const overrides = await loadActiveOverrides(s.basePath);
+          const overrides = loadActiveOverrides();
           const decision = detectAbandonMilestone(overrides, s.currentMilestoneId);
           if (decision.shouldPark && s.currentMilestoneId) {
             const { parkMilestone } = await import("./milestone-actions.js");
@@ -1838,11 +1838,8 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           ctx.ui.notify(`Abandon detection failed — check logs. Overrides will still be resolved.`, "warning");
         }
 
-        await resolveAllOverrides(s.basePath);
-        // Reset both disk and in-memory counters. Disk counter is authoritative
-        // (survives restarts); in-memory is kept in sync for the current session.
-        const { setRewriteCount } = await import("./auto-dispatch.js");
-        setRewriteCount(s.basePath, 0);
+        // Rewrite attempts are counted per override, so resolving ends the count.
+        resolveAllOverrides(s.basePath);
         s.rewriteAttemptCount = 0;
         ctx.ui.notify("Override(s) resolved — rewrite-docs completed.", "info");
       });

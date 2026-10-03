@@ -24,7 +24,6 @@ import {
   resolveTaskFile,
   relSliceFile,
   clearPathCache,
-  resolveGsdRootFile,
   phaseDirMatchesMilestoneId,
 } from "./paths.js";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -42,6 +41,7 @@ import { isGsdWorktreePath } from "./worktree-root.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import { loadAllCaptures, loadPendingCaptures } from "./captures.js";
+import { loadActiveOverrides } from "./overrides.js";
 import { proveMilestoneCloseout } from "./milestone-closeout-proof.js";
 import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
 import {
@@ -240,10 +240,7 @@ export function verifyExpectedArtifact(
   clearParseCache();
 
   if (unitType === "rewrite-docs") {
-    const overridesPath = resolveGsdRootFile(base, "OVERRIDES");
-    if (!existsSync(overridesPath)) return true;
-    const content = readFileSync(overridesPath, "utf-8");
-    return !content.includes("**Scope:** active");
+    return loadActiveOverrides().length === 0;
   }
 
   if (unitType === "workflow-preferences") {

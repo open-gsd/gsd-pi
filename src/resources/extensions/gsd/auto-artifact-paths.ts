@@ -321,7 +321,7 @@ export function diagnoseExpectedArtifact(
     case "quick-task":
       return `.gsd/CAPTURES.md capture ${sid ?? "<capture-id>"} marked executed`;
     case "rewrite-docs":
-      return "Active overrides resolved in .gsd/OVERRIDES.md + plan documents updated";
+      return "Active overrides resolved in the GSD database + plan documents updated";
     case "reassess-roadmap":
       return `${relMilestoneFile(base, mid, "ROADMAP-ASSESSMENT")} (roadmap reassessment)`;
     case "run-uat":

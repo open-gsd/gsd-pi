@@ -9,7 +9,8 @@
  * utility.
  */
 
-import { loadFile, parseContinue, parseSummary, loadActiveOverrides, formatOverridesSection, parseTaskPlanFile } from "./files.js";
+import { loadFile, parseContinue, parseSummary, formatOverridesSection, parseTaskPlanFile } from "./files.js";
+import { loadActiveOverrides } from "./overrides.js";
 import type { Override } from "./files.js";
 import { extractVerdict } from "./verdict-parser.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
@@ -2390,7 +2391,7 @@ export async function buildResearchSlicePrompt(
 
   const depContent = await inlineDependencySummaries(mid, sid, base, resolveSummaryBudgetChars());
   trackPromptContext(contextTelemetry, "dependency-summaries", depContent.trim() ? "inline" : "skipped", depContent, depContent.trim() ? undefined : "none");
-  const activeOverrides = await loadActiveOverrides(base);
+  const activeOverrides = loadActiveOverrides();
   const overridesInline = formatOverridesSection(activeOverrides);
   if (overridesInline) {
     inlined.unshift(overridesInline);
@@ -2585,7 +2586,7 @@ async function renderSlicePrompt(options: {
   }
 
   const depContent = await inlineDependencySummaries(mid, sid, base, resolveSummaryBudgetChars());
-  const overridesInline = formatOverridesSection(await loadActiveOverrides(base));
+  const overridesInline = formatOverridesSection(loadActiveOverrides());
   if (overridesInline) {
     inlined.unshift(overridesInline);
     trackPromptContext(contextTelemetry, "overrides", "inline", overridesInline);
@@ -2971,7 +2972,7 @@ export async function buildExecuteTaskPrompt(
 
   const taskSummaryPath = join(base, `${relSlicePath(base, mid, sid)}/tasks/${tid}-SUMMARY.md`);
 
-  const activeOverrides = await loadActiveOverrides(base);
+  const activeOverrides = loadActiveOverrides();
   const overridesSection = formatOverridesSection(activeOverrides);
 
   // Compute verification budget for the executor's context window (issue #707)
@@ -3296,7 +3297,7 @@ export async function buildCompleteSlicePrompt(
   // Overrides section prepends to the top of the inlined context —
   // standard pattern for slice-level builders (until composer v2 lands
   // the prepend contract).
-  const completeActiveOverrides = await loadActiveOverrides(base);
+  const completeActiveOverrides = loadActiveOverrides();
   const completeOverridesInline = formatOverridesSection(completeActiveOverrides);
   if (completeOverridesInline) {
     trackPromptContext(contextTelemetry, "overrides", "inline", completeOverridesInline);
@@ -3847,7 +3848,7 @@ export async function buildReplanSlicePrompt(
   // Inline decisions
   const decisionsInline = await inlineDecisionsFromDb(base, mid);
   if (decisionsInline) inlined.push(decisionsInline);
-  const replanActiveOverrides = await loadActiveOverrides(base);
+  const replanActiveOverrides = loadActiveOverrides();
   const replanOverridesInline = formatOverridesSection(replanActiveOverrides);
   if (replanOverridesInline) inlined.unshift(replanOverridesInline);
 
@@ -4616,6 +4617,5 @@ export async function buildRewriteDocsPrompt(
     sliceTitle: sTitle,
     overrideContent,
     documentList,
-    overridesPath: relGsdRootFile("OVERRIDES"),
   }));
 }

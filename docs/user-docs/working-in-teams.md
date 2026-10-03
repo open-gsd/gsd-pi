@@ -86,7 +86,7 @@ Teams configured to track planning artifacts in git (i.e. with `mode: team` and 
 
 ### Steering during execution
 
-If the developer uses `/gsd steer` from within the auto-mode worktree, those adjustments remain local to that worktree and write to `.gsd/OVERRIDES.md` in the worktree — they don't modify the approved plan docs on `main`. These changes will appear in the code PR diff alongside the implementation. Running `/gsd steer` outside the worktree modifies whichever checkout it is run from.
+`/gsd steer` records the override in the project database, which the project root and every worktree share. `.gsd/OVERRIDES.md` is rendered from the database and is not read back. The override does not modify the approved plan docs on `main`; the plan changes that the rewrite unit makes appear in the code PR diff alongside the implementation.
 
 ### Automated gates
 

@@ -251,7 +251,7 @@ complete-milestone
 | `rethink.md` | Reorder, park, unpark, skip, or discard milestones. | `gsd_skip_slice`; a reorder goes through `/gsd queue`, which writes DB sequence and renders `QUEUE-ORDER.json` |
 | `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. | git merge (main tree CWD) |
 | `reassess-roadmap.md` | *(see Completion Flow above)* | — |
-| `rewrite-docs.md` | Apply OVERRIDES.md changes across all planning docs. | — |
+| `rewrite-docs.md` | Apply active steer overrides (database rows, rendered to OVERRIDES.md) across all planning docs. | — |
 | `review-migration.md` | Audit `.planning → .gsd` migration correctness. | `deriveState` |
 | `doctor-heal.md` | Repair broken GSD artifacts (summaries, UAT, CONTEXT). | — |
 | `scan.md` | Codebase scan → STACK.md, INTEGRATIONS.md, ARCHITECTURE.md. No tool calls. | writes `{{outputDir}}` |
@@ -452,7 +452,7 @@ truth is the `DISPATCH_RULES` array in `auto-dispatch.ts`; the canary test
 Priority  Rule                                          Fires When
 ────────  ────────────────────────────────────────────  ─────────────────────────
  1        escalating-task → pause-for-escalation        a task escalation is awaiting user review
- 2        rewrite-docs (override gate)                  OVERRIDES.md present and unprocessed
+ 2        rewrite-docs (override gate)                  active override rows in the database
  3        execution-entry phase (no context) → discuss  re-entry into a milestone with no CONTEXT
  4        summarizing → complete-slice                  slice in 'summarizing' phase
  5        run-uat (post-completion)                     tasks done, UAT pending

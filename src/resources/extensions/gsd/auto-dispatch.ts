@@ -16,7 +16,8 @@ import type { GSDState, TaskIO } from "./types.js";
 import type { GSDPreferences } from "./preferences.js";
 import { renderLanguageDirectiveForPrompt } from "./preferences.js";
 import type { MinimalModelRegistry } from "./context-budget.js";
-import { loadFile, extractUatType, loadActiveOverrides } from "./files.js";
+import { loadFile, extractUatType } from "./files.js";
+import { getRewriteCount, loadActiveOverrides, recordRewriteAttempt, resolveAllOverrides } from "./overrides.js";
 import { getUatBrowserToolSupportError, type UatType } from "./uat-policy.js";
 import {
   isDbAvailable,
@@ -630,29 +631,6 @@ function recordAdoptedMilestoneValidationWaiver(
 
 const MAX_REWRITE_ATTEMPTS = 3;
 
-// ─── Disk-persisted rewrite attempt counter ──────────────────────────────────
-// The counter must survive session restarts (crash recovery, pause/resume,
-// step-mode). Storing it on the in-memory session object caused the circuit
-// breaker to never trip — see https://github.com/open-gsd/gsd-pi/issues/2203
-function rewriteCountPath(basePath: string): string {
-  return join(gsdRoot(basePath), "runtime", "rewrite-count.json");
-}
-
-export function getRewriteCount(basePath: string): number {
-  try {
-    const data = JSON.parse(readFileSync(rewriteCountPath(basePath), "utf-8"));
-    return typeof data.count === "number" ? data.count : 0;
-  } catch {
-    return 0;
-  }
-}
-
-export function setRewriteCount(basePath: string, count: number): void {
-  const filePath = rewriteCountPath(basePath);
-  mkdirSync(join(gsdRoot(basePath), "runtime"), { recursive: true });
-  writeFileSync(filePath, JSON.stringify({ count, updatedAt: new Date().toISOString() }) + "\n");
-}
-
 // ─── Run-UAT dispatch counter (per-slice) ────────────────────────────────
 // Caps run-uat dispatches to prevent infinite replay when verification
 // commands fail before writing a verdict (#3624).
@@ -743,20 +721,14 @@ export const DISPATCH_RULES: DispatchRule[] = [
   {
     name: "rewrite-docs (override gate)",
     match: async ({ mid, midTitle, state, basePath, session, preview }) => {
-      const pendingOverrides = await loadActiveOverrides(basePath);
+      const pendingOverrides = loadActiveOverrides();
       if (pendingOverrides.length === 0) return null;
-      const count = getRewriteCount(basePath);
-      if (count >= MAX_REWRITE_ATTEMPTS) {
-        // Preview: same fall-through decision, no override resolution or
-        // counter reset persisted.
-        if (!preview) {
-          const { resolveAllOverrides } = await import("./files.js");
-          await resolveAllOverrides(basePath);
-          setRewriteCount(basePath, 0);
-        }
+      if (getRewriteCount() >= MAX_REWRITE_ATTEMPTS) {
+        // Preview: same fall-through decision, no override resolution persisted.
+        if (!preview) resolveAllOverrides(basePath);
         return null;
       }
-      if (!preview) setRewriteCount(basePath, count + 1);
+      if (!preview) recordRewriteAttempt(basePath);
       const unitId = state.activeSlice ? `${mid}/${state.activeSlice.id}` : mid;
       return {
         action: "dispatch",

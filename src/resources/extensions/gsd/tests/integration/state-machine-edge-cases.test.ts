@@ -1305,24 +1305,6 @@ describe("dispatch guard integration", () => {
     assert.ok(content.includes("`skip_milestone_validation` preference"), "should note it was skipped via the preference path (#4781)");
   });
 
-  test("rewrite-docs circuit breaker: exceeding MAX attempts resolves all overrides", async () => {
-    base = createFullFixture();
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Active", status: "active" });
-
-    // Write a rewrite count at the max
-    const runtimeDir = join(base, ".gsd", "runtime");
-    mkdirSync(runtimeDir, { recursive: true });
-    writeFileSync(
-      join(runtimeDir, "rewrite-count.json"),
-      JSON.stringify({ count: 3, updatedAt: new Date().toISOString() }),
-    );
-
-    // Import and check
-    const { getRewriteCount } = await import("../../auto-dispatch.ts");
-    assert.equal(getRewriteCount(base), 3, "rewrite count should be 3");
-  });
-
   test("replanning-slice with null activeSlice → stop (error)", async () => {
     base = createFullFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));

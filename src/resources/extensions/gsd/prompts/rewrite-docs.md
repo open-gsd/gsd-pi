@@ -25,9 +25,9 @@ An override was issued by the user that changes a fundamental decision or approa
    - For REQUIREMENTS.md: update requirement descriptions if the override changes what "done" means, but do not remove requirements.
    - For PROJECT.md: do not edit the projection directly. If the override changes project-level facts, persist the revised Project content through `gsd_summary_save` with `artifact_type: "PROJECT"` so the DB remains authoritative.
    - Milestone context files are reference only — do not modify them.
-4. Mark all active overrides as resolved: change `**Scope:** active` to `**Scope:** resolved` in `{{overridesPath}}`
+4. Do not edit `.gsd/OVERRIDES.md`. It is rendered from the GSD database, and the system marks these overrides resolved when this unit completes.
 5. Do not commit manually — the system auto-commits your changes after this unit completes.
 
-**You MUST update the relevant documents AND mark overrides as resolved in `{{overridesPath}}` before finishing.**
+**You MUST update the relevant documents before finishing.**
 
 When done, say: "Override applied across all documents." Say this exactly once — if you already said it in a prior message, do not repeat it.
