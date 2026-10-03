@@ -29,6 +29,7 @@ import {
   previewLifecycleBackfill,
 } from "../lifecycle-backfill-domain-operation.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
+import { compareLifecycleShadow } from "../db/lifecycle-shadow-comparison.ts";
 import { adoptOrTransitionLifecycle, readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
 import { handleReopenMilestone } from "../tools/reopen-milestone.ts";
 import { discardMilestone } from "../milestone-actions.ts";
@@ -117,7 +118,8 @@ function seedOldDatabase(): void {
     WHERE milestone_id = 'M001' AND id = 'S01';
   `);
 
-  // M002: open milestone with a completion that has no verification, open work, a sketch and a deferral.
+  // M002: open milestone with a completion that has no verification, open work, a sketch, a deferral
+  // and an in-flight slice that has no tasks.
   insertMilestone({ id: "M002", title: "Open", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M002", status: "in_progress" });
   insertTask({ id: "T01", milestoneId: "M002", sliceId: "S01", status: "done" });
@@ -125,6 +127,7 @@ function seedOldDatabase(): void {
   insertTask({ id: "T03", milestoneId: "M002", sliceId: "S01", status: "in-progress" });
   insertSlice({ id: "S02", milestoneId: "M002", status: "pending" });
   insertSlice({ id: "S03", milestoneId: "M002", status: "deferred" });
+  insertSlice({ id: "S04", milestoneId: "M002", status: "active" });
   completeTaskRow("M002", "S01", "T01", "");
 
   insertMilestone({ id: "M003", title: "Parked", status: "parked" });
@@ -157,13 +160,13 @@ afterEach(() => {
 test("backfill adopts every row of an old database in one operation with one event per row", () => {
   seedOldDatabase();
   // Opening the old database adopted nothing: the backfill is not a migration step.
-  assert.equal(unadoptedCount(), 15);
+  assert.equal(unadoptedCount(), 16);
   assert.equal(scalar("SELECT COUNT(*) FROM workflow_item_lifecycles"), 0);
   const revisionBefore = Number(scalar("SELECT revision FROM project_authority"));
 
   const result = applyLifecycleBackfill(base);
 
-  assert.equal(result.adopted, 15);
+  assert.equal(result.adopted, 16);
   assert.equal(unadoptedCount(), 0, "no hierarchy row is left without a lifecycle row");
   assert.equal(Number(scalar("SELECT revision FROM project_authority")), revisionBefore + 1);
   assert.deepEqual(
@@ -196,6 +199,7 @@ test("backfill adopts every row of an old database in one operation with one eve
     { entity_type: "slice", entity_id: "M002/S01", raw_status: "in_progress", completed_at: null, lifecycle_status: "ready", rule: "legacy-open", evidence: null },
     { entity_type: "slice", entity_id: "M002/S02", raw_status: "pending", completed_at: null, lifecycle_status: "pending", rule: "legacy-open", evidence: null },
     { entity_type: "slice", entity_id: "M002/S03", raw_status: "deferred", completed_at: null, lifecycle_status: "cancelled", rule: "legacy-cancelled", evidence: null },
+    { entity_type: "slice", entity_id: "M002/S04", raw_status: "active", completed_at: null, lifecycle_status: "ready", rule: "legacy-open", evidence: null },
     { entity_type: "task", entity_id: "M001/S01/T01", raw_status: "complete", completed_at: COMPLETED_AT, lifecycle_status: "completed", rule: "legacy-complete-evidenced", evidence: "unverified-legacy" },
     { entity_type: "task", entity_id: "M001/S01/T02", raw_status: "skipped", completed_at: null, lifecycle_status: "cancelled", rule: "legacy-cancelled", evidence: null },
     { entity_type: "task", entity_id: "M001/S02/T01", raw_status: "pending", completed_at: null, lifecycle_status: "cancelled", rule: "cancelled-with-parent", evidence: null },
@@ -206,6 +210,30 @@ test("backfill adopts every row of an old database in one operation with one eve
   for (const event of events) {
     const [milestoneId, sliceId, taskId] = String(event.entity_id).split("/");
     assert.equal(lifecycleStatus(milestoneId!, sliceId, taskId), event.lifecycle_status, String(event.entity_id));
+  }
+
+  // The legacy and canonical heads of every row agree: no row is left in a
+  // state that completion, validation, reopen or a status update refuses.
+  const heads = rows(`
+    SELECT 'milestone ' || m.id AS row, m.status AS legacy, l.lifecycle_status AS canonical
+    FROM milestones m JOIN workflow_item_lifecycles l
+      ON l.item_kind = 'milestone' AND l.milestone_id = m.id
+    UNION ALL
+    SELECT 'slice ' || s.milestone_id || '/' || s.id, s.status, l.lifecycle_status
+    FROM slices s JOIN workflow_item_lifecycles l
+      ON l.item_kind = 'slice' AND l.milestone_id = s.milestone_id AND l.slice_id = s.id
+    UNION ALL
+    SELECT 'task ' || t.milestone_id || '/' || t.slice_id || '/' || t.id, t.status, l.lifecycle_status
+    FROM tasks t JOIN workflow_item_lifecycles l
+      ON l.item_kind = 'task' AND l.milestone_id = t.milestone_id AND l.slice_id = t.slice_id AND l.task_id = t.id
+  `);
+  assert.equal(heads.length, 16);
+  for (const head of heads) {
+    const kind = compareLifecycleShadow(String(head.legacy), String(head.canonical)).kind;
+    assert.ok(
+      kind === "match" || kind === "semantic_match_exact_delta",
+      `${head.row}: legacy ${head.legacy} / canonical ${head.canonical} is ${kind}`,
+    );
   }
 
   // Each cancelled row has exactly one active legacy-attested Waiver; no other row has one.
@@ -240,17 +268,17 @@ test("/gsd db adopt previews without writing; --apply writes a backup and adopts
 
   const before = await missingShadowIssues();
   assert.equal(before.length, 1);
-  assert.match(before[0]!.message, /^15 milestone, slice or task row\(s\) have no canonical lifecycle row/);
+  assert.match(before[0]!.message, /^16 milestone, slice or task row\(s\) have no canonical lifecycle row/);
 
   await handleDbAdopt(ctx, base, "");
-  assert.match(notes[0]!.message, /15 row\(s\) would be adopted/);
-  assert.equal(unadoptedCount(), 15, "a preview adopts nothing");
+  assert.match(notes[0]!.message, /16 row\(s\) would be adopted/);
+  assert.equal(unadoptedCount(), 16, "a preview adopts nothing");
   assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations"), 0);
   assert.deepEqual(backups(), []);
 
   await handleDbAdopt(ctx, base, "--apply");
   assert.equal(notes[1]!.level, "info", notes[1]!.message);
-  assert.match(notes[1]!.message, /adopted 15 row\(s\)/);
+  assert.match(notes[1]!.message, /adopted 16 row\(s\)/);
   assert.equal(unadoptedCount(), 0);
   assert.equal(backups().length, 1, "the pre-backfill backup is the rollback");
   assert.deepEqual(await missingShadowIssues(), []);
@@ -351,6 +379,68 @@ test("a partially adopted closed milestone is refused by reopen until the backfi
   );
   assert.ok(!("error" in reopened), "error" in reopened ? reopened.error : "");
   assert.equal(lifecycleStatus("M001"), "ready");
+  assert.equal(lifecycleStatus("M001", "S01", "T01"), "ready");
+});
+
+test("open work under an already completed milestone fails the preview; once proven it adopts and the milestone reopens", async () => {
+  insertMilestone({ id: "M001", title: "Old", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "complete" });
+  // The Task has no verification: its legacy completion is unproven.
+  completeTaskRow("M001", "S01", "T01", "");
+  db().exec(`
+    UPDATE milestones SET completed_at = '${COMPLETED_AT}' WHERE id = 'M001';
+    UPDATE slices SET completed_at = '${COMPLETED_AT}', full_summary_md = 'Slice summary' WHERE milestone_id = 'M001';
+  `);
+  // Only the Milestone was adopted, as completed.
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.partial-adoption",
+    idempotencyKey: "test/backfill/completed-parent",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "completed" });
+    return {
+      events: [{ eventType: "test.adopted", entityType: "milestone", entityId: "M001", payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: "test/completed-parent", projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+
+  // Adopting these rows as open work would leave a completed parent with open children that reopen refuses.
+  assert.deepEqual(previewLifecycleBackfill().openUnderCompletedParent, [
+    { row: "task M001/S01/T01", rawStatus: "complete" },
+    { row: "slice M001/S01", rawStatus: "complete" },
+  ]);
+  assert.throws(
+    () => applyLifecycleBackfill(base),
+    (error: unknown) => error instanceof LifecycleBackfillRefusedError &&
+      /open work under a completed parent: task M001\/S01\/T01="complete", slice M001\/S01="complete"/.test(error.message),
+  );
+  const notes: Array<{ message: string; level: string }> = [];
+  const ctx = { ui: { notify: (message: string, level: string) => notes.push({ message, level }) } } as any;
+  await handleDbAdopt(ctx, base, "--apply");
+  assert.equal(notes[0]!.level, "error");
+  assert.match(notes[0]!.message, /open work under a completed parent, nothing adopted:\n  task M001\/S01\/T01: "complete"/);
+  assert.equal(unadoptedCount(), 2, "a refused backfill writes nothing");
+  assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations WHERE operation_type = 'lifecycle.backfill'"), 0);
+  assert.equal(getTask("M001", "S01", "T01")?.status, "complete");
+
+  // The operator records the missing verification; the rows now adopt as completed.
+  completeTaskRow("M001", "S01", "T01", "passed");
+  assert.equal(applyLifecycleBackfill(base).adopted, 2);
+  assert.equal(lifecycleStatus("M001", "S01"), "completed");
+  assert.equal(lifecycleStatus("M001", "S01", "T01"), "completed");
+
+  const reopened = await handleReopenMilestone(
+    { milestoneId: "M001" }, base, internalExecutionInvocation("test/backfill/reopen-completed-parent"),
+  );
+  assert.ok(!("error" in reopened), "error" in reopened ? reopened.error : "");
+  assert.equal(lifecycleStatus("M001"), "ready");
+  assert.equal(lifecycleStatus("M001", "S01"), "ready");
   assert.equal(lifecycleStatus("M001", "S01", "T01"), "ready");
 });
 

@@ -89,6 +89,19 @@ function handleCompleteSlice(
 }
 
 function seedCompletionBoundary(): void {
+  // The legacy-complete prerequisite S01 carries durable completion evidence,
+  // so the forward shadow repair adopts it. Without evidence it is an
+  // unresolved shadow that refuses slice completion.
+  const db = _getAdapter();
+  assert.ok(db, "workflow database must be open");
+  db.exec(`
+    UPDATE tasks
+    SET completed_at = '2026-07-10T00:00:00.000Z', verification_result = 'passed', full_summary_md = '# T01 summary'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01';
+    UPDATE slices
+    SET completed_at = '2026-07-10T00:00:00.000Z', full_summary_md = '# S01 summary'
+    WHERE milestone_id = 'M001' AND id = 'S01';
+  `);
   updateTaskStatus("M001", "S02", "T01", "complete", "2026-07-11T00:00:00.000Z");
   seedSliceCompletionAuthority({
     milestoneId: "M001",

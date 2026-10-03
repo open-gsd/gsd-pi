@@ -234,7 +234,9 @@ console.log('\n=== complete-slice: handler happy path ===');
   insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Second Slice', risk: 'low', depends: ['S01'], demo: 'advanced stuff', sequence: 2 });
   insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', status: 'complete', title: 'Task 1' });
   insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', status: 'complete', title: 'Task 2' });
-  insertTask({ id: 'T99', sliceId: 'S02', milestoneId: 'M001', status: 'complete', title: 'Sibling Task' });
+  // The sibling carries durable completion evidence: a legacy completion
+  // without it is an unresolved lifecycle shadow that refuses slice completion.
+  insertTask({ id: 'T99', sliceId: 'S02', milestoneId: 'M001', status: 'complete', title: 'Sibling Task', verificationResult: 'passed', fullSummaryMd: '# T99 summary' });
   seedSliceCompletionAuthority({
     milestoneId: 'M001',
     sliceId: 'S01',

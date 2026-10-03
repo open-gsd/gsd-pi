@@ -411,10 +411,9 @@ export interface LifecycleShadowRepairCandidate extends LifecycleShadowRepairIde
   reason: string | null;
   /**
    * Raw legacy verification_result for tasks (null for slices/milestones or
-   * when unrecorded). Distinguishes "never verified" bare legacy completions —
-   * completion's adoption territory when a canonically-completed sibling
-   * establishes the adoption pattern (#2070) — from rows with a recorded
-   * failed verification, which must never be silently repaired (#2002).
+   * when unrecorded). Distinguishes "never verified" bare legacy completions
+   * from rows with a recorded failed verification, which must never be
+   * silently repaired (#2002).
    * Free-text verification narratives (#2313) count as adoptable evidence;
    * only an explicit failure marker blocks repair.
    */
@@ -465,8 +464,7 @@ interface RepairEvidenceFacts {
  * (#2002). Legacy completion writes free-text verification narratives
  * (tools/complete-task.ts persists params.verification verbatim), so any
  * non-empty value that is not an explicit failure marker is adoptable
- * evidence (#2313) — matching the closeout adoption sweep, which never
- * gated on verification_result.
+ * evidence (#2313).
  */
 export function isFailedVerificationResult(verificationResult: string): boolean {
   return verificationResult.trim().toLowerCase() === "failed";

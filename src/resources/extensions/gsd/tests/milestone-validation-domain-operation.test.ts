@@ -679,6 +679,7 @@ test("Milestone validation refuses legacy descendant repair without durable evid
 
   assert.ok("error" in result, "unsupported legacy authority must block validation");
   assert.match(result.error, /unresolved canonical lifecycle shadows/i);
+  assert.match(result.error, /\/gsd db adopt --apply/, "the refusal names the remedy for unadopted rows");
   assert.match(result.error, /M001\/S01\/T01/);
   assert.match(result.error, /M001\/S01/);
   assert.equal(Number(row(`

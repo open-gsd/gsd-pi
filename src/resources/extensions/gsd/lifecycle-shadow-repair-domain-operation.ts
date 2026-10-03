@@ -530,7 +530,6 @@ export function repairMilestoneLifecycleShadowsForward(input: {
   const milestoneId = requireText(input.milestoneId, "milestoneId");
   return planAndRepairShadows(input.invocation, milestoneId, milestoneRepairItems(milestoneId), {
     gateOnMilestoneStatus: true,
-    adoptMissingShadows: false,
     adoptMissingOpenAuthority: true,
   });
 }
@@ -550,10 +549,6 @@ export function repairMilestoneShadowsForReopen(input: {
   const milestoneId = requireText(input.milestoneId, "milestoneId");
   return planAndRepairShadows(input.invocation, milestoneId, milestoneRepairItems(milestoneId), {
     gateOnMilestoneStatus: false,
-    // Reopen has no later completion sweep to adopt missing shadows — an
-    // evidence-backed descendant without a canonical row is adopted here,
-    // or terminal parity stays unreachably "missing canonical authority".
-    adoptMissingShadows: true,
     adoptMissingOpenAuthority: false,
   });
 }
@@ -574,7 +569,6 @@ export function repairSliceShadowsForReopen(input: {
   if (items.length <= 1) return { repaired: [], unresolved: [] };
   return planAndRepairShadows(input.invocation, milestoneId, items, {
     gateOnMilestoneStatus: false,
-    adoptMissingShadows: true,
     adoptMissingOpenAuthority: false,
   });
 }
@@ -585,7 +579,6 @@ function planAndRepairShadows(
   repairItems: LifecycleShadowRepairIdentity[],
   opts: {
     gateOnMilestoneStatus: boolean;
-    adoptMissingShadows: boolean;
     /** #2313: restore missing canonical open Milestone/Slice authority first (forward repair only). */
     adoptMissingOpenAuthority: boolean;
   },
@@ -619,16 +612,6 @@ function planAndRepairShadows(
     }
   }
 
-  // A canonically-completed sibling descendant proves the adoption pattern is
-  // established for this milestone (e.g. a partially-applied legacy import):
-  // bare legacy-complete stragglers are then swept in by milestone completion
-  // rather than blocking validation (#2070). Without that corroboration, an
-  // adopted milestone claiming readiness on unsubstantiated descendants is
-  // refused (#2002).
-  const corroborated = repairItems.some(
-    (item) => getLifecycleShadowRepairCandidate(item)?.canonicalStatus === "completed",
-  );
-
   const inScope: MilestoneRepairEntry[] = [];
   const unresolved: string[] = [];
 
@@ -650,22 +633,9 @@ function planAndRepairShadows(
       continue;
     }
     if (candidate.targetStatus !== "completed" || !candidate.evidence) {
-      if (
-        !opts.adoptMissingShadows &&
-        corroborated &&
-        candidate.canonicalStatus === null
-      ) {
-        // Adoption pattern established: this bare straggler — no durable
-        // completion evidence of its own — is swept in by milestone
-        // completion rather than blocking validation (#2070). Evidence-backed
-        // descendants never defer (#2313): slice completion has no sweep, so
-        // deferring them would leave "missing canonical lifecycle authority"
-        // where the evidence gate could have converged them. Reopen variants
-        // disable this exemption (#2440) — there is no later completion
-        // sweep, so missing shadows must be resolved now or reopen stays
-        // blocked.
-        continue;
-      }
+      // No completion adopts a legacy completion without durable evidence
+      // (#2002). A row with no canonical row is adopted only by the
+      // lifecycle.backfill Domain Operation (/gsd db adopt).
       unresolved.push(identity);
       continue;
     }

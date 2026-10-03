@@ -705,7 +705,7 @@ export function completeSliceHierarchy(
     const taskId = String(task["task_id"]);
     const lifecycleId = task["lifecycle_id"] ? String(task["lifecycle_id"]) : "";
     if (!lifecycleId || !task["lifecycle_status"]) {
-      throw new SliceLifecycleValidationError(`Task ${taskId} is missing canonical lifecycle authority`);
+      throw new SliceLifecycleValidationError(`Task ${taskId} is missing canonical lifecycle authority; run /gsd db adopt --apply to adopt it`);
     }
     if (runningAttempt(lifecycleId)) {
       throw new SliceLifecycleValidationError(`Task ${taskId} has a running Attempt descendant`);

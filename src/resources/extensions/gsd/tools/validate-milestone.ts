@@ -432,7 +432,8 @@ export async function handleValidateMilestone(
     });
     if (shadowRepair.unresolved.length > 0) {
       return {
-        error: `Milestone ${params.milestoneId} has unresolved canonical lifecycle shadows: ${shadowRepair.unresolved.join(", ")}`,
+        error: `Milestone ${params.milestoneId} has unresolved canonical lifecycle shadows: ${shadowRepair.unresolved.join(", ")}. ` +
+          "A listed row with no canonical lifecycle row is adopted by /gsd db adopt --apply.",
       };
     }
     if (shadowRepair.repaired.length > 0) {

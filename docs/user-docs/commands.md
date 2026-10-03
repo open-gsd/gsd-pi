@@ -109,7 +109,7 @@ After writing the file, GSD attempts to open it in a browser using the local pla
 | `/gsd rebuild markdown` | Preserve externally edited modeled projections under `.gsd/quarantine/projections/`, then rebuild from the canonical database without importing markdown |
 | `/gsd rebuild database` | Reserved for DB-native rebuilds; does not import markdown projections |
 | `/gsd db bind` | Make this checkout the one the project database belongs to, after the bound checkout was moved or deleted; see [Working in Teams](working-in-teams.md#2-know-what-is-shared) |
-| `/gsd db adopt` | Preview the one-time lifecycle backfill for a database made by an older GSD: each milestone, slice and task row with no lifecycle row, and the rule that will adopt it. Unknown statuses are listed and block the run |
+| `/gsd db adopt` | Preview the one-time lifecycle backfill for a database made by an older GSD: each milestone, slice and task row with no lifecycle row, and the rule that will adopt it. Unknown statuses, and rows that would become open work under a milestone or slice that is already completed, are listed and block the run |
 | `/gsd db adopt --apply` | Write a verified backup beside the database, then adopt every such row in one operation. Skipped and deferred rows become cancelled with a Waiver; a completion with no evidence becomes open work again. Roll back with `/gsd db restore-backup` |
 | `/gsd language <language\|off\|clear>` | Set or clear the global response language |
 

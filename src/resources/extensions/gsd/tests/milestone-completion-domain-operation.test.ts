@@ -728,17 +728,25 @@ test("Milestone completion commits one receipt and preserves every descendant fa
   assert.deepEqual(descendantSnapshot(), descendantsBefore, "completion must verify descendants without rewriting them");
 });
 
-test("Milestone completion refuses legacy-complete descendants that have no lifecycle row", async () => {
-  // Closeout is not an adoption path: unadopted rows are adopted only by the
-  // lifecycle.backfill Domain Operation (/gsd db adopt).
-  const basePath = await prepareFixture(() => {
-    insertSlice({ id: "S00", milestoneId: "M001", status: "complete" });
-    insertTask({ id: "T00", sliceId: "S00", milestoneId: "M001", status: "complete" });
-    db().prepare(`
-      UPDATE slices SET depends = '["S00"]'
-      WHERE milestone_id = 'M001' AND id = 'S01'
-    `).run();
+test("Milestone validation and completion refuse legacy-complete descendants that have no lifecycle row", async () => {
+  // Neither validation nor closeout is an adoption path: unadopted rows are
+  // adopted only by the lifecycle.backfill Domain Operation (/gsd db adopt).
+  // S01 is canonically completed; that sibling does not let S00 through.
+  const basePath = await prepareFixture();
+  insertSlice({ id: "S00", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T00", sliceId: "S00", milestoneId: "M001", status: "complete" });
+  db().prepare(`
+    UPDATE slices SET depends = '["S00"]'
+    WHERE milestone_id = 'M001' AND id = 'S01'
+  `).run();
+
+  const validated = await handleValidateMilestone(validation, basePath, {
+    invocation: invocation("milestone-validate/public/legacy-descendants"),
+    skipBrowserEvidenceGate: true,
   });
+  assert.ok("error" in validated, "validation must refuse an unadopted descendant");
+  assert.match(validated.error, /unresolved canonical lifecycle shadows: M001\/S00\/T00, M001\/S00\./);
+  assert.match(validated.error, /\/gsd db adopt --apply/);
 
   const result = await handleCompleteMilestone({
     milestoneId: "M001",
@@ -747,7 +755,7 @@ test("Milestone completion refuses legacy-complete descendants that have no life
   }, basePath, invocation("milestone-complete/public/legacy-descendants"));
 
   assert.ok("error" in result, "completion must refuse an unadopted descendant");
-  assert.match(result.error, /Slice S00 is missing canonical lifecycle authority/);
+  assert.match(result.error, /Slice S00 is missing canonical lifecycle authority; run \/gsd db adopt --apply/);
   assert.equal(row(`
     SELECT COUNT(*) AS count FROM workflow_item_lifecycles
     WHERE milestone_id = 'M001' AND slice_id = 'S00'

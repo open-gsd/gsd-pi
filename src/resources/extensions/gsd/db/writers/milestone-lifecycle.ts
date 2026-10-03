@@ -151,7 +151,7 @@ function changedRows(result: unknown): number {
 
 function requireMatchingShadow(row: HierarchyRow, identity: string): void {
   if (!row.lifecycleId || !row.lifecycleStatus) {
-    throw new MilestoneLifecycleValidationError(`${identity} is missing canonical lifecycle authority`);
+    throw new MilestoneLifecycleValidationError(`${identity} is missing canonical lifecycle authority; run /gsd db adopt --apply to adopt it`);
   }
   const comparison = compareLifecycleShadow(row.legacyStatus, row.lifecycleStatus);
   if (comparison.kind !== "match" && comparison.kind !== "semantic_match_exact_delta") {

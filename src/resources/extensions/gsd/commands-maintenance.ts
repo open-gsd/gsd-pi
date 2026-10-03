@@ -1850,13 +1850,23 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
     return;
   }
   try {
-    const { applyLifecycleBackfill, previewLifecycleBackfill } = await import("./lifecycle-backfill-domain-operation.js");
+    const { applyLifecycleBackfill, previewLifecycleBackfill, OPEN_UNDER_COMPLETED_PARENT_REMEDY } =
+      await import("./lifecycle-backfill-domain-operation.js");
     const preview = previewLifecycleBackfill();
     if (preview.unknownStatuses.length > 0) {
       ctx.ui.notify(
         `gsd db adopt: unknown legacy statuses, nothing adopted:\n${
           preview.unknownStatuses.map((entry) => `  ${entry.row}: ${JSON.stringify(entry.rawStatus)}`).join("\n")
         }`,
+        "error",
+      );
+      return;
+    }
+    if (preview.openUnderCompletedParent.length > 0) {
+      ctx.ui.notify(
+        `gsd db adopt: open work under a completed parent, nothing adopted:\n${
+          preview.openUnderCompletedParent.map((entry) => `  ${entry.row}: ${JSON.stringify(entry.rawStatus)}`).join("\n")
+        }\n${OPEN_UNDER_COMPLETED_PARENT_REMEDY}`,
         "error",
       );
       return;

@@ -536,7 +536,7 @@ test("Slice completion accepts the legacy-attested Waiver of a backfilled skippe
   finishTaskWithOptionalEvidence(true);
   assert.throws(
     () => completeSlice(validInput("slice-complete/unadopted-skipped-child")),
-    /Task T03 is missing canonical lifecycle authority/,
+    /Task T03 is missing canonical lifecycle authority; run \/gsd db adopt --apply/,
   );
 
   applyLifecycleBackfill(base);

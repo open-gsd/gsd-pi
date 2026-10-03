@@ -426,8 +426,7 @@ test("a recorded failed verification is rejected regardless of case or padding",
 // #2313: legacy completion (gsd_task_complete) persists the free-text
 // verification narrative verbatim, so only an explicit failure marker counts
 // as a recorded failed verification. Any other narrative is adoptable
-// evidence — matching the milestone-closeout adoption sweep, which never
-// gated on verification_result.
+// evidence.
 for (const variant of ["inconclusive", "needs-attention", "true", "banana", "NULL"]) {
   test(`a "${variant}" verification_result is adoptable free-text evidence (#2313)`, (t) => {
     openFixture(t);
@@ -832,15 +831,14 @@ test("repairMilestoneLifecycleShadowsForward runs task repairs before slice repa
   assert.deepEqual(result.repaired, ["M011", "M011/S01/T01", "M011/S01"]);
 });
 
-// ── Sibling corroboration (#2002 x #2070): a canonically-completed sibling
-// establishes the adoption pattern, deferring bare legacy-complete
-// stragglers to milestone completion; without it the strict gate applies. ──
+// ── Bare stragglers (#2002): milestone completion adopts nothing, so a
+// legacy-complete descendant without durable evidence is unresolved at
+// validation, with or without a canonically-completed sibling. ──
 
 function insertCanonicalCompletedSibling(milestoneId: string, sliceId: string, taskId: string): void {
-  // The corroboration sibling is a canonical shadow row; FK targets
-  // (workflow_operations) are not the subject here. The row must carry the
-  // database's actual project id — candidate lookups are project-scoped
-  // (#2440), so a foreign-project sibling corroborates nothing.
+  // The sibling is a canonical shadow row; FK targets (workflow_operations)
+  // are not the subject here. The row must carry the database's actual
+  // project id — candidate lookups are project-scoped (#2440).
   const projectId = String(db().prepare(
     "SELECT project_id FROM project_authority WHERE singleton = 1",
   ).get()?.["project_id"]);
@@ -851,7 +849,7 @@ function insertCanonicalCompletedSibling(milestoneId: string, sliceId: string, t
       lifecycle_status, state_version, created_at, updated_at,
       last_operation_id, last_project_revision, last_authority_epoch
     ) VALUES (
-      'corroboration-' || :task_id, :project_id, 'task', :milestone_id, :slice_id, :task_id,
+      'sibling-' || :task_id, :project_id, 'task', :milestone_id, :slice_id, :task_id,
       'completed', 1, '2026-07-02T00:00:00.000Z', '2026-07-02T00:00:00.000Z',
       'fixture-adopt', 1, 0
     )
@@ -859,11 +857,10 @@ function insertCanonicalCompletedSibling(milestoneId: string, sliceId: string, t
   db().exec("PRAGMA foreign_keys = ON");
 }
 
-test("an evidenced descendant is repaired while bare stragglers defer when a sibling is canonically complete", (t) => {
+test("a bare straggler with no lifecycle row is unresolved even when a sibling is canonically complete", (t) => {
   openFixture(t);
   insertCanonicalCompletedSibling("M001", "S01", "T01");
-  // T04 here: legacy complete, no durable evidence, canonical row absent —
-  // the exact bare straggler shape from #2070.
+  // T04 here: legacy complete, no durable evidence, canonical row absent.
   db().exec(`
     INSERT INTO tasks (
       milestone_id, slice_id, id, title, status, completed_at,
@@ -875,24 +872,23 @@ test("an evidenced descendant is repaired while bare stragglers defer when a sib
   `);
 
   const result = repairMilestoneLifecycleShadowsForward({
-    invocation: invocation("shadow-repair/corroboration/deferred"),
+    invocation: invocation("shadow-repair/straggler/sibling-complete"),
     milestoneId: "M001",
   });
 
-  // The evidenced T02 is repaired by the evidence gate (#2313 — slice
-  // completion has no sweep, so evidence-backed descendants must not defer).
-  // The bare T04 straggler is neither repaired nor unresolved — completion
-  // adopts it. Missing canonical open-item authority (Milestone + the
-  // legacy-open Slice) is restored first.
-  assert.deepEqual(result.repaired, ["M001", "M001/S01", "M001/S01/T02"]);
-  assert.deepEqual(result.unresolved, []);
+  // Missing canonical open-item authority (Milestone + the legacy-open
+  // Slice) is restored first. The bare T03 and T04 are unresolved: no later
+  // completion adopts them. Atomicity (#2002) reports the evidenced T02 as
+  // unresolved too, and no descendant Task is written.
+  assert.deepEqual(result.repaired, ["M001", "M001/S01"]);
+  assert.deepEqual([...result.unresolved].sort(), ["M001/S01/T02", "M001/S01/T03", "M001/S01/T04"]);
   assert.equal(db().prepare(`
     SELECT COUNT(*) AS count FROM workflow_item_lifecycles
     WHERE milestone_id = 'M001' AND item_kind = 'task'
-  `).get()?.["count"], 2, "only the evidenced T02 joins the sibling; the bare straggler is not adopted");
+  `).get()?.["count"], 1, "only the sibling's own row exists");
 });
 
-test("a bare straggler with recorded failed verification blocks even with sibling corroboration", (t) => {
+test("a bare straggler with recorded failed verification is unresolved when a sibling is canonically complete", (t) => {
   openFixture(t);
   insertCanonicalCompletedSibling("M001", "S01", "T01");
   db().exec(`
@@ -906,24 +902,24 @@ test("a bare straggler with recorded failed verification blocks even with siblin
   `);
 
   const result = repairMilestoneLifecycleShadowsForward({
-    invocation: invocation("shadow-repair/corroboration/failed"),
+    invocation: invocation("shadow-repair/straggler/failed"),
     milestoneId: "M001",
   });
 
   // #2313: missing canonical open-item authority is restored even when a
   // descendant stays unresolved — the failed verification must surface as its
   // own precise item instead of hiding behind the parent-authority gate.
-  // #2002's atomicity is unchanged: the evidenced T02 joins T05 in the
-  // unresolved report and no descendant Task is written.
+  // #2002's atomicity is unchanged: the evidenced T02 joins the bare T03 and
+  // the failed T05 in the unresolved report and no descendant Task is written.
   assert.deepEqual(result.repaired, ["M001", "M001/S01"]);
-  assert.deepEqual([...result.unresolved].sort(), ["M001/S01/T02", "M001/S01/T05"]);
+  assert.deepEqual([...result.unresolved].sort(), ["M001/S01/T02", "M001/S01/T03", "M001/S01/T05"]);
   assert.equal(db().prepare(`
     SELECT COUNT(*) AS count FROM workflow_item_lifecycles
     WHERE milestone_id = 'M001' AND item_kind = 'task'
-  `).get()?.["count"], 1, "only the corroborating sibling's own row exists");
+  `).get()?.["count"], 1, "only the sibling's own row exists");
 });
 
-test("without sibling corroboration a bare legacy-complete descendant is unresolved", (t) => {
+test("without a canonically complete sibling a bare legacy-complete descendant is unresolved", (t) => {
   openFixture(t);
   db().exec(`
     INSERT INTO tasks (
@@ -936,7 +932,7 @@ test("without sibling corroboration a bare legacy-complete descendant is unresol
   `);
 
   const result = repairMilestoneLifecycleShadowsForward({
-    invocation: invocation("shadow-repair/corroboration/unsubstantiated"),
+    invocation: invocation("shadow-repair/straggler/unsubstantiated"),
     milestoneId: "M001",
   });
 
