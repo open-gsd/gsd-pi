@@ -41,8 +41,10 @@ Before an adopted Milestone records a new validation receipt, validation runs a 
 - additionally requires a passing verification result for Tasks;
 - repairs Tasks before Slices so authority converges from the leaves upward;
 - records every transition through the replay-safe `lifecycle.shadow.repair` Domain Operation;
-- reports unsupported or conflicting shadows instead of forcing them; and
+- reports unsupported or conflicting shadows instead of forcing them, including a legacy-complete item with no lifecycle row and no durable evidence; and
 - leaves the strict Milestone completion guard unchanged.
+
+No completion adopts a row on legacy status alone. Slice completion, Milestone validation, and Milestone completion refuse a descendant with no lifecycle row. The `lifecycle.backfill` Domain Operation (`lifecycle-backfill-domain-operation.ts`, run by `/gsd db adopt --apply`) is the one path that adopts every such row; it is an explicit operator step and never runs on database open or migration. See [`/gsd db adopt`](../user-docs/commands.md) for its rules.
 
 Repair happens before validation, not during completion. Descendant lifecycle writes intentionally make older validation receipts stale, so the new pass receipt must be recorded after repair. If a project already has a pass receipt from before this repair, rerun Milestone validation once; do not edit SQLite or lifecycle projections manually.
 
