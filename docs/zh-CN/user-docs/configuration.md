@@ -469,7 +469,6 @@ git:
   main_branch: main           # 主分支名称
   merge_strategy: squash      # worktree 分支合并方式："squash" 或 "merge"
   isolation: none             # git isolation："none"（默认）、"worktree" 或 "branch"
-  commit_docs: true           # 是否把 .gsd/ 产物提交到 git（设为 false 时仅保留本地）
   manage_gitignore: true      # 设为 false 时，GSD 不再修改 .gitignore
   worktree_post_create: .gsd/hooks/post-worktree-create  # worktree 创建后执行的脚本
   auto_pr: false              # milestone 完成时自动创建 PR（要求 push_branches）
@@ -487,7 +486,6 @@ git:
 | `main_branch` | string | `"main"` | 主分支名称 |
 | `merge_strategy` | string | `"squash"` | worktree 分支合并方式：`"squash"`（合并为单个提交）或 `"merge"`（保留单独提交） |
 | `isolation` | string | `"none"` | 自动模式隔离方式：`"none"`（无隔离，直接提交到当前分支）、`"worktree"`（独立目录）或 `"branch"`（直接在项目根目录工作，适合子模块多的仓库）。`worktree` 要求有已提交的 `HEAD`；零提交仓库会临时按 `none` 运行，直到第一次提交存在 |
-| `commit_docs` | boolean | `true` | 是否把 `.gsd/` planning 产物提交到 git。设为 `false` 则仅保留本地 |
 | `manage_gitignore` | boolean | `true` | 设为 `false` 后，GSD 将完全不修改 `.gitignore`，不会添加基础规则，也不会做自愈 |
 | `worktree_post_create` | string | （无） | worktree 创建后执行的脚本。环境变量中会传入 `SOURCE_DIR` 和 `WORKTREE_DIR` |
 | `auto_pr` | boolean | `false` | milestone 完成时自动创建 pull request。要求 `auto_push: true` 且已安装认证 `gh` CLI |
@@ -861,7 +859,6 @@ git:
   auto_push: true
   merge_strategy: squash
   isolation: none             # "none"（默认）、"worktree" 或 "branch"
-  commit_docs: true
 
 # Skills
 skill_discovery: suggest

@@ -857,7 +857,6 @@ git:
   main_branch: main           # primary branch name
   merge_strategy: squash      # how worktree branches merge: "squash" or "merge"
   isolation: none             # git isolation: "none" (default), "worktree", or "branch"
-  commit_docs: true           # commit .gsd/ artifacts to git (set false to keep local)
   manage_gitignore: true      # set false to prevent GSD from modifying .gitignore
   worktree_post_create: .gsd/hooks/post-worktree-create  # script to run after worktree creation
   auto_pr: false              # create a PR on milestone completion (requires push_branches)
@@ -875,7 +874,6 @@ git:
 | `main_branch` | string | `"main"` | Primary branch name |
 | `merge_strategy` | string | `"squash"` | How worktree branches merge: `"squash"` (combine all commits) or `"merge"` (preserve individual commits) |
 | `isolation` | string | `"none"` | Auto-mode isolation: `"none"` (no isolation — commits on current branch, no worktree or milestone branch), `"worktree"` (separate directory), or `"branch"` (work in project root — useful for submodule-heavy repos). `worktree` requires a committed `HEAD`; zero-commit repos temporarily run as `none` until the first commit exists |
-| `commit_docs` | boolean | `true` | Commit `.gsd/` planning artifacts to git. Set `false` to keep local-only |
 | `manage_gitignore` | boolean | `true` | When `false`, GSD will not modify `.gitignore` at all — no baseline patterns, no self-healing. Use if you manage your own `.gitignore` |
 | `worktree_post_create` | string | (none) | Script to run after worktree creation. Receives `SOURCE_DIR` and `WORKTREE_DIR` env vars |
 | `auto_pr` | boolean | `false` | Automatically create a pull request when a milestone completes. Requires `auto_push: true` and `gh` CLI installed and authenticated |
@@ -1330,7 +1328,6 @@ git:
   auto_push: true
   merge_strategy: squash
   isolation: none             # "none" (default), "worktree", or "branch"
-  commit_docs: true
 
 # Skills
 skill_discovery: suggest

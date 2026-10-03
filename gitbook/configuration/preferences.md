@@ -283,7 +283,6 @@ git:
   auto_push: false
   merge_strategy: squash
   isolation: none
-  commit_docs: true
   auto_pr: false
 ```
 

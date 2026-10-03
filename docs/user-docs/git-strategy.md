@@ -152,7 +152,6 @@ mode: team    # shared repos — unique IDs, push branches, pre-merge checks
 | `git.pre_merge_check` | `false` | `true` |
 | `git.merge_strategy` | `"squash"` | `"squash"` |
 | `git.isolation` | `"none"` | `"none"` |
-| `git.commit_docs` | `true` | `true` |
 | `unique_milestone_ids` | `false` | `true` |
 
 Mode defaults are the lowest priority — any explicit preference overrides them. For example, `mode: solo` with `git.auto_push: false` gives you everything from solo except auto-push.
@@ -172,7 +171,6 @@ git:
   pre_merge_check: false      # pre-merge validation
   commit_type: feat           # override commit type prefix
   main_branch: main           # primary branch name
-  commit_docs: true           # commit .gsd/ to git
   isolation: none             # "none" (default), "worktree", or "branch"
   auto_pr: false              # create PR on milestone completion
   pr_target_branch: develop   # PR target branch (default: main)
@@ -192,10 +190,6 @@ git:
 This pushes the milestone branch and creates a PR targeting `develop` (or whichever branch you specify). Requires `gh` CLI installed and authenticated. See [git.auto_pr](./configuration.md#gitauto_pr) for details.
 
 ```
-
-### `commit_docs: false`
-
-When set to `false`, GSD adds `.gsd/` to `.gitignore` and keeps all planning artifacts local-only. Useful for teams where only some members use GSD, or when company policy requires a clean repository.
 
 ## Self-Healing
 
