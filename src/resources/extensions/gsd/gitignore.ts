@@ -49,6 +49,8 @@ export const GSD_RUNTIME_PATTERNS = [
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
   ".gsd/DISCUSSION-MANIFEST.json",
+  ".gsd/.compat.json", // local render baseline; a pulled copy would hide teammates' edits
+  ".gsd/quarantine/",
   ".gsd/milestones/**/*-CONTINUE.md",
   ".gsd/milestones/**/continue.md",
 ] as const;

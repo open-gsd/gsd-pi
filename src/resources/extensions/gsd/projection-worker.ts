@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 
 import { readCompatMarker } from "./compat/compat-marker.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -12,7 +12,7 @@ import {
   settleProjectionWork,
 } from "./db/writers/projection-work-delivery.js";
 import { renderAllFromDb } from "./markdown-renderer.js";
-import { gsdProjectionRoot, gsdRoot } from "./paths.js";
+import { gsdProjectionRoot, gsdRoot, normalizeRealPath } from "./paths.js";
 import {
   preserveProjectionEvidence,
   type ProjectionObservationResult,
@@ -54,6 +54,29 @@ export function preserveProjectionChanges(
   dryRun = false,
 ): Promise<ProjectionObservationResult> {
   return preserveProjectionEvidence(basePath, [], dryRun);
+}
+
+/**
+ * Before dispatch: preserve changed projection bytes, but hold a changed
+ * git-tracked projection (team mode) in place. A non-empty `held` means the
+ * caller must stop: see describeHeldProjectionChanges.
+ */
+export function preserveProjectionChangesBeforeDispatch(
+  basePath: string,
+): Promise<ProjectionObservationResult> {
+  return preserveProjectionEvidence(basePath, [], false, true);
+}
+
+/** The one "changed outside GSD" state: no dispatch on old content until the user chooses. */
+export function describeHeldProjectionChanges(basePath: string, held: readonly string[]): string {
+  const root = normalizeRealPath(basePath);
+  const files = held.map((path) => relative(root, normalizeRealPath(path)).split(sep).join("/")).join(", ");
+  return [
+    `Projection files changed outside GSD: ${files}.`,
+    "The database is authoritative, so GSD stopped before dispatch instead of overwriting them.",
+    "To keep the change, review it and run `/gsd recover` to import it through Import Preview.",
+    "To discard it, run `/gsd rebuild markdown` (the changed bytes are kept under .gsd/quarantine/).",
+  ].join(" ");
 }
 
 /** Rebuild all readable projections from database authority and settle their durable work. */

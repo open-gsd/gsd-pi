@@ -63,7 +63,7 @@ import { getErrorMessage } from "../error-utils.js";
 import { parseUnitId } from "../unit-id.js";
 import { logWarning } from "../workflow-logger.js";
 import { normalizeRealPath } from "../paths.js";
-import { preserveProjectionChanges } from "../projection-worker.js";
+import { describeHeldProjectionChanges, preserveProjectionChangesBeforeDispatch } from "../projection-worker.js";
 import { throwIfTransientProjectionLockError } from "../projection-root-errors.js";
 import { buildDispatchKey } from "./dispatch-key.js";
 import { stableClaimSignature } from "./lease-conflict-notice.js";
@@ -141,7 +141,7 @@ function now(): number {
  * @internal
  */
 let _projectionRebuildFn: ((projectRoot: string) => Promise<void>) | null = null;
-let _preserveProjectionChangesFn: typeof preserveProjectionChanges | null = null;
+let _preserveProjectionChangesFn: typeof preserveProjectionChangesBeforeDispatch | null = null;
 
 function noRemainingUnitsOutcome(stateSnapshot: GSDState): AutoTerminalOutcome {
   if (stateSnapshot.phase === "complete") {
@@ -671,8 +671,9 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
     }
   > {
     const activeBasePath = this.getLiveDispatchBasePath();
+    let held: readonly string[];
     try {
-      await (_preserveProjectionChangesFn ?? preserveProjectionChanges)(activeBasePath);
+      ({ held } = await (_preserveProjectionChangesFn ?? preserveProjectionChangesBeforeDispatch)(activeBasePath));
     } catch (error) {
       // Keep transient Windows projection-lock failures on the typed recovery
       // path so autoLoop receives their classification and bounded backoff.
@@ -684,6 +685,10 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
         reason,
         blockerDetails: [{ message: reason }],
       };
+    }
+    if (held.length > 0) {
+      const reason = describeHeldProjectionChanges(activeBasePath, held);
+      return { ok: false, reason, blockerDetails: [{ message: reason }] };
     }
     const result = await reconcileBeforeDispatch(activeBasePath);
     if (result.blockers.length > 0) {
@@ -1981,7 +1986,7 @@ export function _setProjectionRebuildFnForTests(
 
 /** @internal Test-only override for projection observation failures. */
 export function _setPreserveProjectionChangesFnForTests(
-  fn: typeof preserveProjectionChanges | null,
+  fn: typeof preserveProjectionChangesBeforeDispatch | null,
 ): () => void {
   _preserveProjectionChangesFn = fn;
   return () => { _preserveProjectionChangesFn = null; };

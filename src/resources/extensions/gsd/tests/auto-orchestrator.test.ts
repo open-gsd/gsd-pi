@@ -1347,6 +1347,27 @@ test("advance() propagates projection observation lock failures as typed pauses 
   assert.ok(!f.journalNames().includes("advance-blocked"));
 });
 
+test("advance() blocks dispatch while a tracked projection changed outside GSD is held", async (t) => {
+  const f = makeFixture();
+  t.after(() => f.cleanup());
+  const heldPath = join(f.base, ".gsd", "PROJECT.md");
+  writeFileSync(heldPath, "# Project\n\nPulled from a teammate.\n");
+  const restoreProjectionObservation = _setPreserveProjectionChangesFnForTests(async () => ({
+    preserved: [],
+    refreshedPassthrough: [],
+    held: [heldPath],
+  }));
+  t.after(restoreProjectionObservation);
+
+  const result = await f.orchestrator.advance();
+
+  assert.equal(result.kind, "blocked");
+  if (result.kind !== "blocked") return;
+  assert.match(result.reason, /changed outside GSD: \.gsd\/PROJECT\.md\..*\/gsd recover.*\/gsd rebuild markdown/s);
+  assert.ok(f.journalNames().includes("advance-blocked"));
+  assert.ok(!f.journalNames().includes("advance"));
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // closeout regression: live-base resolver after worktree cleanup
 // ─────────────────────────────────────────────────────────────────────────────

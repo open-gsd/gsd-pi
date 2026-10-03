@@ -385,6 +385,8 @@ export const RUNTIME_EXCLUSION_PATHS: readonly string[] = [
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
   ".gsd/DISCUSSION-MANIFEST.json",
+  ".gsd/.compat.json",
+  ".gsd/quarantine/",
 ];
 
 const runtimeFilesCleanedUpRepos = new Set<string>();
