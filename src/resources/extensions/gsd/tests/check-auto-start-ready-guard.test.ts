@@ -27,8 +27,10 @@ import {
 import {
   clearDiscussionFlowState,
   clearPendingGate,
+  markDepthVerified,
 } from "../bootstrap/write-gate.ts";
 import { getMilestoneScopedArtifacts } from "../db/queries.ts";
+import { executeSummarySave } from "../tools/workflow-tool-executors.ts";
 import { saveContextArtifact } from "./helpers/saved-context.ts";
 
 interface MockCapture {
@@ -189,6 +191,49 @@ describe("checkAutoStartAfterDiscuss ready-notify DB guard (R3b)", () => {
       (n) => n.level === "success" && /Milestone\s+M001\s+ready/i.test(n.msg),
     );
     assert.ok(successReady, "must announce 'Milestone M001 ready.' on success");
+    assert.deepEqual(
+      getMilestoneScopedArtifacts("M001"),
+      [],
+      "a planned milestone is accepted, but its CONTEXT.md file is still not registered",
+    );
+  });
+
+  test("the discuss flow the prompts prescribe ends with the CONTEXT row in the database", async () => {
+    // No CONTEXT.md is seeded: gsd_summary_save must write both the row and the file.
+    base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-ready-guard-")));
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Ready Guard Test", status: "active" });
+    markDepthVerified("M001", base);
+
+    const content = "# M001: Ready Guard Test\n\nSaved through the tool.\n";
+    const saved = await executeSummarySave(
+      { milestone_id: "M001", artifact_type: "CONTEXT", content },
+      base,
+    );
+    assert.notEqual(saved.isError, true, JSON.stringify(saved.content));
+    insertSlice({
+      id: "S01",
+      milestoneId: "M001",
+      title: "Executable Slice",
+      status: "pending",
+    });
+
+    cap = mkCapture();
+    setPendingAutoStart(base, {
+      basePath: base,
+      milestoneId: "M001",
+      startAuto: false,
+      ctx: mkCtx(cap),
+      pi: mkPi(cap),
+    });
+
+    assert.equal(checkAutoStartAfterDiscuss(), true);
+    assert.deepEqual(cap.notifies, [{ msg: "Milestone M001 ready.", level: "success" }]);
+    assert.deepEqual(
+      getMilestoneScopedArtifacts("M001").map(a => [a.artifact_type, a.full_content]),
+      [["CONTEXT", content]],
+    );
   });
 
   test("refuses a CONTEXT.md that was not saved to the database and writes no artifact row (#2107)", () => {

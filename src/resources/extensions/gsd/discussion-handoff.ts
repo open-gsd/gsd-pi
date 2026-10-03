@@ -251,7 +251,9 @@ export function checkAutoStartAfterDiscuss(lookupBasePath?: string): boolean {
   if (!ensureMilestoneRowForAcceptedHandoff(entry, hasDbContext)) return false;
   // State derivation reads the CONTEXT artifact row, not the file. A file with
   // no row would send auto-mode back into discuss on every start (#2107), so
-  // refuse the handoff and say how the context enters the database.
+  // refuse the handoff and say how the context enters the database. A milestone
+  // with slices is already planned and never routes back to discuss, so it is
+  // accepted; the file still stays out of the database.
   if (contextFile && !hasDbContext && getMilestoneSlices(milestoneId).length === 0) {
     ctx.ui.notify(
       `Milestone ${milestoneId}: CONTEXT.md is on disk but not in the database. ` +

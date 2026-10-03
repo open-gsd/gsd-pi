@@ -56,7 +56,7 @@ No startup, database-open, state-derivation, dispatch, reconciliation,
 | `*-PLAN.md` | Presence cleared `slices.is_sketch` at dispatch and in drift repair | Removed. Only `gsd_plan_slice` and `gsd_plan_task` clear the flag. |
 | `*-SUMMARY.md` | File mtime backfilled `completed_at` in drift repair | Removed. |
 | `*-ASSESSMENT.md` | Content became a `run-uat` assessment row before milestone validation | Removed. A missing assessment stays missing. |
-| `*-CONTEXT.md` | The discuss handoff registered the file as a CONTEXT artifact | Removed. `checkAutoStartAfterDiscuss` in `discussion-handoff.ts` refuses a handoff whose CONTEXT is on disk but not in the database and names `gsd_summary_save`. |
+| `*-CONTEXT.md` | The discuss handoff registered the file as a CONTEXT artifact | Removed. No path registers the file. The `discuss` and `discuss-headless` prompts save CONTEXT through `gsd_summary_save`. `checkAutoStartAfterDiscuss` in `discussion-handoff.ts` refuses a handoff whose CONTEXT is on disk but not in the database and names `gsd_summary_save`, but only while the milestone has no slices. When the milestone already has slices the handoff is accepted and the file stays unregistered. |
 | `state-manifest.json` | Blocked a STATE.md render and proved a milestone row | Removed. |
 | `event-log.jsonl` | Fallback source for reopen and completion timestamps (`milestone-reopen-events.ts`) | Still read. Removal needs an Import Application for legacy events. |
 | `KNOWLEDGE.md` | Patterns and Lessons copied into memories at session start (`bootstrap/system-context.ts`) | Still imported. Owned by the KNOWLEDGE cutover work. |

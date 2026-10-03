@@ -241,7 +241,7 @@ When writing context.md, preserve the user's exact terminology, emphasis, and fr
 **Structured sections from discussion layers:**
 When writing CONTEXT.md, include discussion-layer sections: **Scope**, **Architectural Decisions** with rationale/evidence/alternatives, **Error Handling Strategy**, and **Acceptance Criteria** specific enough for planning.
 
-4. Write `{{contextPath}}` — use the **Context** output template below. Preserve key risks, unknowns, existing codebase constraints, integration points, and relevant requirements surfaced during discussion.
+4. Call `gsd_summary_save` with `milestone_id: {{milestoneId}}`, `artifact_type: "CONTEXT"`, and full context markdown as `content`; the tool writes `{{contextPath}}` and persists to DB. A direct file write does not register the context. Use the **Context** output template below. Preserve key risks, unknowns, existing codebase constraints, integration points, and relevant requirements surfaced during discussion.
 
 **gsd_plan_milestone tool shape (NON-BYPASSABLE):** NEVER call `gsd_plan_milestone` with only `milestoneId` and `sliceId` — that is the `gsd_plan_slice` tool. Required fields: `milestoneId`, `title`, `vision`, `slices[]` (each slice needs `sliceId`, `title`, `risk`, `depends`, `demo`, `goal`). Build `slices[]` from the Roadmap Preview table you printed in chat.
 
@@ -255,7 +255,7 @@ Before emitting the ready phrase, verify in the CURRENT turn that you have:
 
 - [ ] Called `gsd_summary_save` for the PROJECT artifact (step 2)
 - [ ] Persisted requirements and called `gsd_summary_save` for the REQUIREMENTS artifact (step 3)
-- [ ] Written `{{contextPath}}` (step 4)
+- [ ] Called `gsd_summary_save` for the CONTEXT artifact at `{{contextPath}}` (step 4)
 - [ ] Called `gsd_plan_milestone` (step 5)
 
 If ANY box is unchecked, **STOP**. Do NOT emit the ready phrase. Emit the missing tool calls in this same turn. The system detects missing artifacts and will reject premature ready signals — you will be asked again and retries are capped.
@@ -286,7 +286,7 @@ Once the user confirms the milestone split:
 
 #### Phase 2: Primary milestone
 
-5. Write a full `CONTEXT.md` for the primary milestone (the one discussed in depth).
+5. Call `gsd_summary_save` with the primary milestone's `milestone_id` (the one discussed in depth), `artifact_type: "CONTEXT"`, and full context markdown as `content`; the tool writes `CONTEXT.md` and persists to DB. A direct file write does not register the context.
 
 **gsd_plan_milestone tool shape (NON-BYPASSABLE):** NEVER call `gsd_plan_milestone` with only `milestoneId` and `sliceId` — that is the `gsd_plan_slice` tool. Required fields: `milestoneId`, `title`, `vision`, `slices[]` (each slice needs `sliceId`, `title`, `risk`, `depends`, `demo`, `goal`). Build `slices[]` from the Roadmap Preview table you printed in chat.
 
@@ -310,7 +310,7 @@ If no dependencies, omit frontmatter. The confirmed dependency chain MUST appear
 
 For each remaining milestone **one at a time, in sequence**, choose the likely readiness mode from evidence, then present these options. **If `{{structuredQuestionsAvailable}}` is `true`:** use `ask_user_questions`. **If false:** use a plain-text numbered list. **Non-bypassable:** no response, ambiguity, or tool failure means re-ask; never auto-select.
 
-- **"Discuss now"** — Conduct focused discussion now while context is fresh (reflection -> investigation -> questioning -> depth verification), then write full `CONTEXT.md` and move to the next gate.
+- **"Discuss now"** — Conduct focused discussion now while context is fresh (reflection -> investigation -> questioning -> depth verification), then save full context with `gsd_summary_save` (that milestone's `milestone_id`, `artifact_type: "CONTEXT"`) and move to the next gate.
 - **"Write draft for later"** — Write `CONTEXT-DRAFT.md` with seed material, key ideas, provisional scope, and open questions. Mark it as draft. Downstream auto-mode pauses and offers "Discuss from draft"; final CONTEXT.md deletes the draft.
 - **"Just queue it"** — Leave the milestone without context. Directory exists from Phase 1. Downstream auto-mode pauses and starts full discussion from scratch.
 
@@ -359,7 +359,7 @@ Before emitting the ready phrase, verify in the CURRENT turn that you have:
 
 - [ ] Called `gsd_summary_save` for the PROJECT artifact (Phase 1)
 - [ ] Persisted requirements and called `gsd_summary_save` for the REQUIREMENTS artifact (Phase 1)
-- [ ] Written primary-milestone `CONTEXT.md` (Phase 2)
+- [ ] Called `gsd_summary_save` for the primary-milestone CONTEXT artifact (Phase 2)
 - [ ] Called `gsd_plan_milestone` for the primary milestone (Phase 2)
 - [ ] Written `.gsd/DISCUSSION-MANIFEST.json` with `gates_completed === total` (Phase 3)
 
