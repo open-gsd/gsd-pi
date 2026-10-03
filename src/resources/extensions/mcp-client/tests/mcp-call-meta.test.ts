@@ -100,15 +100,17 @@ test("mcp_call CallTool request params include replay-stable _meta (#1792)", asy
 	}
 });
 
-test("mcp_call waits as long as the workflow server timeout, not a fixed 60 s", async () => {
+test("mcp_call uses the workflow server timeout only for the gsd-workflow server", async () => {
 	const previousGsdHome = process.env.GSD_HOME;
 	const previousTimeout = process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+	const previousWorkflowName = process.env.GSD_WORKFLOW_MCP_NAME;
 	const originalCwd = process.cwd();
 	const projectDir = mkdtempSync(join(tmpdir(), "mcp-call-timeout-project-"));
 	const gsdHomeDir = mkdtempSync(join(tmpdir(), "mcp-call-timeout-home-"));
 
 	try {
 		process.env.GSD_HOME = gsdHomeDir;
+		delete process.env.GSD_WORKFLOW_MCP_NAME;
 		process.chdir(projectDir);
 		mkdirSync(join(projectDir, ".gsd"), { recursive: true });
 
@@ -132,7 +134,12 @@ test("mcp_call waits as long as the workflow server timeout, not a fixed 60 s", 
 		);
 		writeFileSync(
 			join(projectDir, ".mcp.json"),
-			JSON.stringify({ mcpServers: { slow: { command: process.execPath, args: [serverPath] } } }),
+			JSON.stringify({
+				mcpServers: {
+					"gsd-workflow": { command: process.execPath, args: [serverPath] },
+					other: { command: process.execPath, args: [serverPath] },
+				},
+			}),
 			"utf-8",
 		);
 
@@ -141,19 +148,21 @@ test("mcp_call waits as long as the workflow server timeout, not a fixed 60 s", 
 		const mcpCall = tools.get("mcp_call");
 		assert.ok(mcpCall, "mcp_call must be registered");
 		const ctx = { hasUI: true, ui: { confirm: async () => true } };
-		const call = (id: string) => mcpCall.execute(
+		const call = (server: string, id: string) => mcpCall.execute(
 			id,
-			{ server: "slow", tool: "slow_write", args: {} },
+			{ server, tool: "slow_write", args: {} },
 			new AbortController().signal,
 			() => {},
 			ctx,
 		);
 
 		process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "100";
-		await assert.rejects(call("timeout-short"), /timed out/i);
+		await assert.rejects(call("gsd-workflow", "timeout-short"), /timed out/i);
+		const other = await call("other", "timeout-other");
+		assert.equal(other.content[0]?.text, "committed");
 
 		process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "5000";
-		const result = await call("timeout-long");
+		const result = await call("gsd-workflow", "timeout-long");
 		assert.equal(result.content[0]?.text, "committed");
 	} finally {
 		await _resetMcpClientStateForTest();
@@ -162,6 +171,8 @@ test("mcp_call waits as long as the workflow server timeout, not a fixed 60 s", 
 		else process.env.GSD_HOME = previousGsdHome;
 		if (previousTimeout === undefined) delete process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
 		else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
+		if (previousWorkflowName === undefined) delete process.env.GSD_WORKFLOW_MCP_NAME;
+		else process.env.GSD_WORKFLOW_MCP_NAME = previousWorkflowName;
 		rmSync(projectDir, { recursive: true, force: true });
 		rmSync(gsdHomeDir, { recursive: true, force: true });
 	}
