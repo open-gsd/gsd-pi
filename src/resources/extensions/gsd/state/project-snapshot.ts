@@ -64,6 +64,8 @@ export interface DbProjectSnapshotMilestone {
   title: string;
   status: string;
   sequence: number;
+  /** Milestone Kind from the current milestone context; "delivery" when none is recorded. */
+  kind: string;
 }
 
 export interface DbProjectSnapshot {
@@ -114,6 +116,19 @@ interface SnapshotDbRead {
   milestones: DbProjectSnapshot["milestones"];
 }
 
+/** Milestone Kind per milestone, from the head (not superseded) context row. */
+function readMilestoneKinds(): Map<string, string> {
+  const rows = _getAdapter()!.prepare(`
+    SELECT context.milestone_id, context.milestone_kind
+    FROM workflow_milestone_contexts context
+    WHERE NOT EXISTS (
+      SELECT 1 FROM workflow_milestone_contexts successor
+      WHERE successor.supersedes_context_id = context.context_id
+    )
+  `).all();
+  return new Map(rows.map((row) => [String(row["milestone_id"]), String(row["milestone_kind"])]));
+}
+
 function readSnapshotDb(): SnapshotDbRead {
   return readTransaction(() => {
     const authorityRow = getProjectAuthorityRow();
@@ -147,6 +162,7 @@ function readSnapshotDb(): SnapshotDbRead {
     };
 
     const all = getAllMilestones();
+    const kinds = readMilestoneKinds();
     const truncated = all.length > MAX_SNAPSHOT_MILESTONES;
     const milestones = {
       items: all.slice(0, MAX_SNAPSHOT_MILESTONES).map((m) => ({
@@ -154,6 +170,7 @@ function readSnapshotDb(): SnapshotDbRead {
         title: m.title,
         status: m.status,
         sequence: m.sequence,
+        kind: kinds.get(m.id) ?? "delivery",
       })),
       truncated,
     };

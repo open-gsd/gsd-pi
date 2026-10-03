@@ -330,7 +330,7 @@ test("readProjectSnapshotFromDb assembles authority, current, progress, open ite
 
   assert.equal(snapshot.milestones.truncated, false);
   assert.deepEqual(snapshot.milestones.items, [
-    { id: "M001", title: "Authority Fixture", status: "active", sequence: 0 },
+    { id: "M001", title: "Authority Fixture", status: "active", sequence: 0, kind: "delivery" },
   ]);
 
   assert.equal(typeof snapshot.capturedAt, "string");
@@ -351,6 +351,33 @@ test("readProjectSnapshotFromDb is byte-deterministic at a stable revision", asy
   const firstPayload = JSON.stringify({ ...first, capturedAt: "<capturedAt>" });
   const secondPayload = JSON.stringify({ ...second, capturedAt: "<capturedAt>" });
   assert.equal(firstPayload, secondPayload);
+});
+
+test("readProjectSnapshotFromDb reads the Milestone Kind from the current context and defaults to delivery", async (t) => {
+  const fixture = await createWorkflowAuthorityFixture();
+  t.after(() => fixture.cleanup());
+  insertMilestone({ id: "M002", title: "No context", status: "queued" });
+  const insertContext = (contextId: string, kind: string, operationId: string, revision: number, supersedes: string | null) =>
+    _getAdapter()!.prepare(
+      `INSERT INTO workflow_milestone_contexts (
+         context_id, project_id, lifecycle_id, milestone_id, milestone_kind,
+         supersedes_context_id, created_at, operation_id, project_revision, authority_epoch
+       ) VALUES (?, ?, 'life-kind', 'M001', ?, ?, '2026-09-05T00:00:00.000Z', ?, ?, 0)`,
+    ).run(contextId, fixtureProjectId(), kind, supersedes, operationId, revision);
+  transaction(() => {
+    seedOperation("op-kind-a", SEED_REVISION_BASE);
+    seedOperation("op-kind-b", SEED_REVISION_BASE + 1);
+    seedMilestoneLifecycle("life-kind", "op-kind-a", SEED_REVISION_BASE);
+    insertContext("context-a", "discovery", "op-kind-a", SEED_REVISION_BASE, null);
+    insertContext("context-b", "research", "op-kind-b", SEED_REVISION_BASE + 1, "context-a");
+  });
+
+  const snapshot = await readProjectSnapshotFromDb(fixture.root);
+
+  assert.deepEqual(
+    snapshot?.milestones.items.map((m) => [m.id, m.kind]),
+    [["M001", "research"], ["M002", "delivery"]],
+  );
 });
 
 test("readProjectSnapshotFromDb truncates the milestone registry beyond the cap", async (t) => {
