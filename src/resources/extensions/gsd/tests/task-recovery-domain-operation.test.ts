@@ -2748,6 +2748,7 @@ test("reopenTask maps cancelled and skipped work to ready and pending", () => {
   });
   assert.equal(row(`SELECT lifecycle_status FROM workflow_item_lifecycles`).lifecycle_status, "cancelled");
   assert.equal(row(`SELECT status FROM tasks`).status, "skipped");
+  assert.equal(row(`SELECT waiver_status FROM workflow_waivers WHERE scope = 'task:M001/S01/T01'`).waiver_status, "active");
 
   reopenTask({
     invocation: invocation("task/reopen/cancelled"),
@@ -2758,6 +2759,7 @@ test("reopenTask maps cancelled and skipped work to ready and pending", () => {
     SELECT lifecycle_status FROM workflow_item_lifecycles WHERE lifecycle_id = :lifecycle_id
   `, { ":lifecycle_id": seeded.lifecycleId }).lifecycle_status, "ready");
   assert.equal(row(`SELECT status FROM tasks`).status, "pending");
+  assert.equal(row(`SELECT waiver_status FROM workflow_waivers WHERE scope = 'task:M001/S01/T01'`).waiver_status, "revoked");
 });
 
 test("cancelTask atomically interrupts running work before cancelling its lifecycle", () => {

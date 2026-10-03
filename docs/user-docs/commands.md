@@ -120,7 +120,7 @@ The two `/gsd recover` forms serve different recovery domains. Use the no-argume
 |---------|-------------|
 | `/gsd new-project [--deep]` | Bootstrap a new project; `--deep` enables staged project-level discovery |
 | `/gsd new-milestone [--deep]` | Create a new milestone; `--deep` opts the project into deep planning mode |
-| `/gsd skip` | Prevent a unit from auto-mode dispatch |
+| `/gsd skip` | Cancel a slice or task with a Waiver so auto-mode does not dispatch it |
 | `/gsd undo` | Revert last completed unit |
 | `/gsd undo-task` | Reopen a terminal task through canonical DB recovery authority, then refresh projections |
 | `/gsd reset-slice` | Reopen the full terminal slice and every terminal task in one guarded database operation, preserve prior execution history, then refresh readable status |

@@ -1,6 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Replay-safe Task reopen and cancellation Domain Operations.
 
+import { randomUUID } from "node:crypto";
+
 import {
   executeDomainOperation,
   type DomainJsonValue,
@@ -120,6 +122,74 @@ function shadowPayload(shadow: LifecycleShadowRecord): DomainJsonValue {
 
 function checkpointScope(task: TaskLifecycleIdentity): string {
   return `task:${taskEntity(task)}`.toLowerCase();
+}
+
+function taskCancellationWaiverScope(task: TaskLifecycleIdentity): string {
+  return `task:${taskEntity(task)}`;
+}
+
+/** Record why a cancelled Task no longer needs to run (no runtime "skipped" outcome). */
+function grantTaskCancellationWaiver(
+  context: Readonly<DomainOperationContext>,
+  invocation: ExecutionInvocation,
+  lifecycleId: string,
+  task: TaskLifecycleIdentity,
+  rationale: string,
+): string {
+  const actorType = invocation.actorType === "user" ? "user" : "policy";
+  const actorId = invocation.actorId?.trim() || null;
+  if (actorType === "user" && !actorId) {
+    throw new Error("A user-authorized Task cancellation requires actor identity");
+  }
+  const waiverId = randomUUID();
+  getDb().prepare(`
+    INSERT INTO workflow_waivers (
+      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_status, scope, rationale, granted_by_actor_type,
+      granted_by_actor_id, granted_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :waiver_id, :project_id, :lifecycle_id, NULL, NULL,
+      'active', :scope, :rationale, :actor_type,
+      :actor_id, :granted_at,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ":waiver_id": waiverId,
+    ":project_id": context.projectId,
+    ":lifecycle_id": lifecycleId,
+    ":scope": taskCancellationWaiverScope(task),
+    ":rationale": rationale,
+    ":actor_type": actorType,
+    ":actor_id": actorId,
+    ":granted_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  });
+  return waiverId;
+}
+
+function revokeTaskCancellationWaivers(
+  context: Readonly<DomainOperationContext>,
+  lifecycleId: string,
+  task: TaskLifecycleIdentity,
+): void {
+  getDb().prepare(`
+    UPDATE workflow_waivers
+    SET waiver_status = 'revoked', ended_at = :ended_at,
+        ended_operation_id = :operation_id,
+        ended_project_revision = :project_revision,
+        ended_authority_epoch = :authority_epoch
+    WHERE lifecycle_id = :lifecycle_id AND scope = :scope AND waiver_status = 'active'
+  `).run({
+    ":ended_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+    ":lifecycle_id": lifecycleId,
+    ":scope": taskCancellationWaiverScope(task),
+  });
 }
 
 function mutation(
@@ -388,6 +458,7 @@ export function reopenTask(input: {
       adoptedFromStatus: legacyStatus,
     });
     reopenLegacyTaskState(context, input.task);
+    revokeTaskCancellationWaivers(context, lifecycle.lifecycleId, input.task);
     deleteVerificationEvidence(state.milestoneId, state.sliceId, state.taskId);
     ensurePendingSliceQ8(context, input.task);
     const checkpoint = appendRecoveryWorkCheckpoint(context, {
@@ -489,6 +560,13 @@ export function cancelTask(input: {
       });
     }
     cancelLegacyTaskState(context, input.task);
+    const waiverId = grantTaskCancellationWaiver(
+      context,
+      input.invocation,
+      lifecycle.lifecycleId,
+      input.task,
+      reason,
+    );
     const checkpoint = appendRecoveryWorkCheckpoint(context, {
       lifecycleId: lifecycle.lifecycleId,
       scopeKey: checkpointScope(input.task),
@@ -507,6 +585,7 @@ export function cancelTask(input: {
     return mutation("task.cancelled", input.task, {
       lifecycleId: lifecycle.lifecycleId,
       workCheckpointId: checkpoint.checkpointId,
+      waiverId,
       reason,
       interruptedAttemptId: running?.attemptId ?? null,
       resultId: resultId ?? null,
