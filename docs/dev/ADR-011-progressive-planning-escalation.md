@@ -38,7 +38,7 @@
 | Gate-plane `manual-attention` wiring | ✅ | `src/resources/extensions/gsd/uok/gate-runner.ts:16-24`, fallback outcome in `src/resources/extensions/gsd/uok/gate-runner.ts:195-204` |
 | `refine-slice` prompt + builder | ✅ | `src/resources/extensions/gsd/prompts/refine-slice.md`; `auto-prompts.ts:2192-2225` (`buildRefineSlicePrompt`) |
 | Dispatch: `refining` → `refine-slice` (or fallback to `plan-slice`) | ✅ | `src/resources/extensions/gsd/auto-dispatch.ts:880-928` |
-| `is_sketch` auto-clear after PLAN written | ✅ | `src/resources/extensions/gsd/state-reconciliation/drift/sketch-flag.ts` — `sketchFlagHandler` registered in DRIFT_REGISTRY |
+| `is_sketch` cleared when the slice is planned | ✅ | `tools/plan-slice.ts` and `tools/plan-task.ts` clear the flag inside their Domain Operation. The file-based `sketchFlagHandler` drift repair was removed (ADR-046): a PLAN file never changes the flag |
 | Test coverage of pieces in isolation | ✅ | `src/resources/extensions/gsd/tests/progressive-planning.test.ts` — 12 tests |
 
 ### Outstanding (#5754)

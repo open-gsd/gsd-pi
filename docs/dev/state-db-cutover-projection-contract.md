@@ -43,16 +43,23 @@ database — a rendered view, not a record.
   (`renderAllFromDb` in `src/resources/extensions/gsd/markdown-renderer.ts`),
   not by parsing the file back into state.
 
-The discuss-to-plan handoff has a narrow compatibility exception:
-`checkAutoStartAfterDiscuss` in `discussion-handoff.ts` registers an on-disk
-CONTEXT artifact when the milestone row is available, the depth gate permits
-handoff, and the database has no milestone-scoped CONTEXT artifact. Existing
-CONTEXT rows are preserved. Registration leaves milestone status unchanged;
-state derivation still reads the database. Lookup or registration failures log
-a warning without rejecting the handoff. This exception does not register
-ROADMAP-only handoffs or import edits over an existing CONTEXT row. See the
-out-of-band CONTEXT regression in
-`src/resources/extensions/gsd/tests/check-auto-start-ready-guard.test.ts`.
+### Implicit disk ingress
+
+No startup, database-open, state-derivation, dispatch, reconciliation,
+`/gsd sync` or status-read path writes the database from a file. The gate is
+`src/resources/extensions/gsd/tests/implicit-disk-to-db-authority.test.ts`
+(part of G2 in `db-authority-gates.test.ts`).
+
+| File | Former implicit path | Status |
+|---|---|---|
+| `QUEUE-ORDER.json` | Mirrored into `milestones.sequence` on every derive | Removed. The file is a render of the `milestone.reorder` Domain Operation. |
+| `*-PLAN.md` | Presence cleared `slices.is_sketch` at dispatch and in drift repair | Removed. Only `gsd_plan_slice` and `gsd_plan_task` clear the flag. |
+| `*-SUMMARY.md` | File mtime backfilled `completed_at` in drift repair | Removed. |
+| `*-ASSESSMENT.md` | Content became a `run-uat` assessment row before milestone validation | Removed. A missing assessment stays missing. |
+| `*-CONTEXT.md` | The discuss handoff registered the file as a CONTEXT artifact | Removed. `checkAutoStartAfterDiscuss` in `discussion-handoff.ts` refuses a handoff whose CONTEXT is on disk but not in the database and names `gsd_summary_save`. |
+| `state-manifest.json` | Blocked a STATE.md render and proved a milestone row | Removed. |
+| `event-log.jsonl` | Fallback source for reopen and completion timestamps (`milestone-reopen-events.ts`) | Still read. Removal needs an Import Application for legacy events. |
+| `KNOWLEDGE.md` | Patterns and Lessons copied into memories at session start (`bootstrap/system-context.ts`) | Still imported. Owned by the KNOWLEDGE cutover work. |
 
 ## 2. Frozen format inventory
 
