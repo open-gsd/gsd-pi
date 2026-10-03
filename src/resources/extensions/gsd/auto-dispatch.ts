@@ -1923,7 +1923,8 @@ export const DISPATCH_RULES: DispatchRule[] = [
         //   flat-phase → phases/01-slug/01-VALIDATION.md
         // When the milestone dir is only in the project root (worktree has none),
         // write to the project root so the artifact lands in the canonical location.
-        const writeBase = resolveMilestonePath(artifactBasePath, mid) != null ? artifactBasePath : projectRoot;
+        let writeBase = projectRoot;
+        if (resolveMilestonePath(artifactBasePath, mid) != null) writeBase = artifactBasePath;
         const validationPath = join(writeBase, relMilestoneFile(writeBase, mid, "VALIDATION"));
         const skipSource = trivialVariant
           ? "trivial-scope pipeline variant"

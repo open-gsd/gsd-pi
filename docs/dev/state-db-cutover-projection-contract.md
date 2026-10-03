@@ -93,7 +93,8 @@ resolved alongside them.
   `/gsd migrate` commits its import.
 - It is never deleted. When the DB is unavailable the file stays unchanged and
   the render reports `stale`; no placeholder page is written.
-- It is fully derived and each render overwrites it. It has no baseline in
+- It is fully derived: each render replaces the file content, and writes
+  nothing when the content is already current. It has no baseline in
   `.gsd/.compat.json`, the write guard never copies it to quarantine, and the
   external-edit observer skips it, so it is never moved away.
 - A hand edit is lost on the next render by design.
@@ -129,7 +130,7 @@ Render entry points (all route through the single `writeAndStore` seam in
 `renderTaskSummary`, `renderReplanFromDb`, `renderRoadmapAssessmentFromDb`, and
 the sweep `renderAllFromDb`.
 
-The sweep also renders the files that carry no stamp: root `ROADMAP.md`,
+The sweep also renders the files that carry no stamp (§3.4): root `ROADMAP.md`,
 `QUEUE.md`, `REQUIREMENTS.md`, `DECISIONS.md`, the root narrative artifacts
 (`PROJECT.md` and the root drafts), and the milestone VALIDATION file from its
 assessment row. Each of these writes records a marker baseline, and a write is
@@ -188,9 +189,11 @@ reader that wants to compare content must strip it first
 
 ### 3.4 What is not stamped
 
-`STATE.md` (rendered by `workflow-projections.ts`), `DECISIONS.md` (written by
-the db-writer), and `.planning/` projections (planning-writer) are outside the
-`markdown-renderer.ts` write path and carry no stamp. A reader must therefore
+`STATE.md`, root `ROADMAP.md` and `QUEUE.md` (rendered by
+`workflow-projections.ts`), `DECISIONS.md`, `REQUIREMENTS.md`, `PROJECT.md` and
+the root drafts (written by the db-writer), the milestone VALIDATION file
+(`renderMilestoneValidation`), and `.planning/` projections (planning-writer)
+do not go through `writeAndStore` and carry no stamp. A reader must therefore
 treat "no stamp" as normal, never as evidence of tampering or staleness.
 
 ### 3.5 How drift detection uses it

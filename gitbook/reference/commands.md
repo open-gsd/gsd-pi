@@ -55,7 +55,6 @@
 | `/gsd migrate` | Migrate v1 `.planning` to DB-backed `.gsd` with backup and audit |
 | `/gsd recover` | See the [authoritative commands reference](../../docs/user-docs/commands.md) for the evidence-bound Preview, verified Import Application, and recovery contract |
 | `/gsd rebuild markdown` | Rebuild markdown projections from the canonical database; stale completion projections are quarantined, not imported |
-| `/gsd rebuild database` | Reserved for DB-native rebuilds; does not import markdown projections |
 | `/gsd codebase [generate\|update\|stats]` | Manage `.gsd/CODEBASE.md`; parent workspaces include declared child repositories under repo-labeled sections |
 
 ## Milestone Management

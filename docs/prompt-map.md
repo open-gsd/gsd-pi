@@ -260,7 +260,7 @@ complete-milestone
 | `debug-session-manager.md` | Manage debug session with checkpoint protocol. Structured return headers. | — |
 | `add-tests.md` | Generate tests for completed slices. | skill activation |
 | `triage-captures.md` | Classify user thoughts captured with `capture_thought`. | `ask_user_questions`, updates `CAPTURES.md` |
-| `queue.md` | Add future milestones to queue. | `gsd_milestone_generate_id`, `gsd_summary_save(CONTEXT)`, updates `QUEUE.md` |
+| `queue.md` | Add future milestones to queue. | `gsd_milestone_generate_id`, `gsd_summary_save(CONTEXT)`; `QUEUE.md` is rendered from the DB |
 
 ### 5h. Workflow Execution (one-off workflows, not milestone-driven)
 

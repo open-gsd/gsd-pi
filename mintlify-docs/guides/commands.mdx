@@ -65,7 +65,6 @@ Quick-task right-sizing flags are composable. Use `--discuss` to surface design 
 | `/gsd recover` | Preview a legacy markdown import, then approve its exact hash through a verified, backed-up Import Application |
 | `/gsd recover <recoveryActionId>` | Resume one repaired, terminal Task recovery abort after supplying repair and verification evidence |
 | `/gsd rebuild markdown` | Rebuild markdown projections from the canonical database; stale completion projections are quarantined, not imported |
-| `/gsd rebuild database` | Reserved for DB-native rebuilds; does not import markdown projections |
 
 The argument changes the recovery domain. Bare `/gsd recover` and its option-led forms handle legacy markdown/database import. Use `/gsd recover <recoveryActionId>` only after repairing the defect behind a terminal Task recovery abort: GSD checks that the action is still eligible, prompts for a repair summary and concrete verification evidence, and authorizes one fresh retry. Rerun `/gsd auto` after it succeeds. The headless recovery command below supports only the database-import flow.
 
