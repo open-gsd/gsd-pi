@@ -379,20 +379,16 @@ function registerProjectMilestoneSequence(content: string): string[] {
       }
       if (canonicalId && canonicalId !== milestone.id) {
         // An existing milestone already owns this sequence number. Treat the markdown
-        // line as referring to it: refresh the human title, and promote to complete
-        // when the line is checked — but never demote an in-flight milestone back to
-        // "queued" (the planner's row stays the single source of truth).
-        upsertMilestonePlanning(canonicalId, {
-          title: milestone.title,
-          ...(milestone.done ? { status: "complete" } : {}),
-        });
+        // line as referring to it and refresh only the human title: a checked box
+        // never completes a milestone (only gsd_complete_milestone does).
+        upsertMilestonePlanning(canonicalId, { title: milestone.title });
         registered.push(canonicalId);
         continue;
       }
       insertMilestone({
         id: milestone.id,
         title: milestone.title,
-        status: milestone.done ? "complete" : "queued",
+        status: "queued",
       });
       registered.push(milestone.id);
     }
