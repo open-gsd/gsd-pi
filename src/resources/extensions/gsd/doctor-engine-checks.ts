@@ -21,6 +21,7 @@ import {
   completedEventCoversDispatch,
   isAfter,
   latestExplicitReopenAt,
+  legacyReopenImportGuidance,
   recordLegacyMilestoneEvents,
   unimportedLegacyMilestoneEvents,
 } from "./milestone-reopen-events.js";
@@ -1261,7 +1262,10 @@ export async function checkEngineHealth(
             code: "artifact_db_status_divergence",
             scope: row.task_id ? "task" : row.slice_id ? "slice" : "milestone",
             unitId,
-            message: `Completion artifact ${row.path} exists while DB state for ${unitId} is still open or missing. Runtime will not import it silently; run explicit recovery/repair after review.`,
+            message: `Completion artifact ${row.path} exists while DB state for ${unitId} is still open or missing. ${
+              legacyReopenImportGuidance(basePath, row.milestone_id, row.imported_at) ??
+              "Runtime will not import it silently; run explicit recovery/repair after review."
+            }`,
             fixable: false,
           });
         }

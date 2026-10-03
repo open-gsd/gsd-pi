@@ -14,7 +14,9 @@ import {
   _getAdapter,
   closeDatabase,
   executeDomainOperation,
+  insertArtifact,
   insertMilestone,
+  insertSlice,
   openDatabase,
   readDomainOperationFence,
 } from "../gsd-db.ts";
@@ -23,6 +25,7 @@ import {
   latestExplicitReopenAt,
   unimportedLegacyMilestoneEvents,
 } from "../milestone-reopen-events.ts";
+import { reconcileBeforeDispatch } from "../state-reconciliation.ts";
 import { workflowEventArchivePath } from "../workflow-event-ledger.ts";
 import { appendEvent } from "../workflow-events.ts";
 
@@ -57,6 +60,20 @@ function rowCount(sql: string): number {
 
 function importOperations(): number {
   return rowCount("SELECT COUNT(*) AS n FROM workflow_operations WHERE operation_type = 'milestone.legacy_events.record'");
+}
+
+/** S01 is open again, and its SUMMARY row is older than the reopen that only the file ledger holds. */
+function seedSummaryRowFromBeforeTheReopen(): string {
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Reopened slice", status: "in_progress" });
+  const path = join(base, ".gsd", "S01-SUMMARY.md");
+  insertArtifact({ path, artifact_type: "SUMMARY", milestone_id: "M001", slice_id: "S01", task_id: null, full_content: "# S01 Summary\n" });
+  _getAdapter()!.prepare("UPDATE artifacts SET imported_at = :at").run({ ":at": COMPLETED_AT });
+  return path;
+}
+
+async function summaryDriftBlockers(): Promise<string[]> {
+  const result = await reconcileBeforeDispatch(base);
+  return result.blockers.filter((blocker) => blocker.includes("Artifact/DB status drift"));
 }
 
 async function unimportedIssues(
@@ -139,4 +156,45 @@ test("a file ledger event is not imported over a canonical event of the same kin
     { kind: "completed", milestoneId: "M001", occurredAt: COMPLETED_AT },
   ]);
   assert.notEqual(latestExplicitReopenAt("M001"), REOPENED_AT);
+});
+
+test("a milestone that an older release reopened: the dispatch blocker names doctor --fix, and the import clears it", async () => {
+  seedFileOnlyHistory();
+  seedSummaryRowFromBeforeTheReopen();
+
+  const blockers = await summaryDriftBlockers();
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0]!, /M001\/S01.*older release reopened milestone M001.*event-log\.jsonl.*`\/gsd doctor --fix`/);
+  assert.doesNotMatch(blockers[0]!, /gsd recover|gsd rebuild/, "neither command clears this drift");
+
+  await checkEngineHealth(base, [], [], { repair: true, importFileOverrides: true });
+
+  assert.deepEqual(await summaryDriftBlockers(), []);
+});
+
+test("a SUMMARY row newer than the file-only reopen keeps the recover guidance", async () => {
+  seedFileOnlyHistory();
+  seedSummaryRowFromBeforeTheReopen();
+  _getAdapter()!.prepare("UPDATE artifacts SET imported_at = :at").run({ ":at": "2026-07-16T10:00:00.000Z" });
+
+  const blockers = await summaryDriftBlockers();
+  assert.equal(blockers.length, 1);
+  assert.match(blockers[0]!, /gsd recover/);
+  assert.doesNotMatch(blockers[0]!, /doctor --fix/, "the import does not clear a row that is newer than the reopen");
+});
+
+test("doctor names doctor --fix for a completion artifact that a file-only reopen covers", async () => {
+  seedFileOnlyHistory();
+  writeFileSync(seedSummaryRowFromBeforeTheReopen(), "# S01 Summary\n");
+  const divergence = async (options: { repair?: boolean; importFileOverrides?: boolean }) => {
+    const issues: DoctorIssue[] = [];
+    await checkEngineHealth(base, issues, [], options);
+    return issues.filter((issue) => issue.code === "artifact_db_status_divergence");
+  };
+
+  const issues = await divergence({});
+  assert.deepEqual(issues.map((issue) => issue.unitId), ["M001/S01"]);
+  assert.match(issues[0]!.message, /older release reopened milestone M001.*event-log\.jsonl.*`\/gsd doctor --fix`/);
+
+  assert.deepEqual(await divergence({ repair: true, importFileOverrides: true }), []);
 });

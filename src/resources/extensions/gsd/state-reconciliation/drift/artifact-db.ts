@@ -32,7 +32,12 @@ import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
 import type { GSDState } from "../../types.js";
-import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "../../milestone-reopen-events.js";
+import {
+  completedEventCoversDispatch,
+  isAfter,
+  latestExplicitReopenAt,
+  legacyReopenImportGuidance,
+} from "../../milestone-reopen-events.js";
 import { isCanonicalStagedTaskSummaryProjection } from "../../task-summary-projection-classification.js";
 import { readLatestTaskAttempt } from "../../task-execution-domain-operation.js";
 import { quarantineProjectionEvidence } from "../../projection-observation.js";
@@ -717,8 +722,11 @@ function diskSliceIdDivergenceGuidance(record: DiskSliceIdDivergenceDrift): stri
  * disk aside but keeps the artifact row, so it cannot clear a drift that comes
  * from a stale row. Do not tell the user that it can.
  */
-function artifactDbStatusDivergenceExit(record: ArtifactDbStatusDivergenceDrift): string {
-  if (safeListArtifactRows(record.milestoneId).some((row) => row.path === record.artifactPath)) {
+function artifactDbStatusDivergenceExit(record: ArtifactDbStatusDivergenceDrift, basePath?: string): string {
+  const row = safeListArtifactRows(record.milestoneId).find((candidate) => candidate.path === record.artifactPath);
+  if (row) {
+    const legacyReopen = basePath ? legacyReopenImportGuidance(basePath, record.milestoneId, row.imported_at) : null;
+    if (legacyReopen) return legacyReopen;
     return (
       "This drift comes from a SUMMARY row in the database. " +
       "`/gsd rebuild markdown` moves the file on disk to quarantine and keeps that row, so this blocker can remain after a rebuild. " +
@@ -768,7 +776,7 @@ export async function repairArtifactDbDrift(
       `${record.sliceId ? `/${record.sliceId}` : ""}` +
       `${record.taskId ? `/${record.taskId}` : ""}: ${record.reason}. ` +
       "Runtime will not silently import completion artifacts into DB state. " +
-      artifactDbStatusDivergenceExit(record),
+      artifactDbStatusDivergenceExit(record, ctx.basePath),
   );
 }
 
@@ -795,7 +803,7 @@ export function describeArtifactDbDriftBlocker(
     `${record.sliceId ? `/${record.sliceId}` : ""}` +
     `${record.taskId ? `/${record.taskId}` : ""}: ${record.reason}. ` +
     "Runtime will not silently import completion artifacts into DB state. " +
-    artifactDbStatusDivergenceExit(record)
+    artifactDbStatusDivergenceExit(record, ctx?.basePath)
   );
 }
 

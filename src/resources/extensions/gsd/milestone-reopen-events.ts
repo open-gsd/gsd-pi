@@ -111,6 +111,28 @@ export function unimportedLegacyMilestoneEvents(basePath: string): LegacyMilesto
 }
 
 /**
+ * Recovery text for a completion artifact row that blocks only because an
+ * older release reopened its milestone and the reopen is in a file ledger:
+ * the row is not newer than that reopen, so the import clears the drift.
+ * Null when no such reopen covers the row. The file is read only to choose
+ * the message.
+ */
+export function legacyReopenImportGuidance(
+  basePath: string,
+  milestoneId: string,
+  artifactImportedAt: string | null,
+): string | null {
+  const reopen = unimportedLegacyMilestoneEvents(basePath).find(
+    (event) => event.kind === "reopened" && event.milestoneId === milestoneId,
+  );
+  if (!reopen || isAfter(artifactImportedAt, reopen.occurredAt)) return null;
+  return (
+    `An older release reopened milestone ${milestoneId}, and that reopen is only in event-log.jsonl, which runtime does not read. ` +
+    "Run `/gsd doctor --fix` to import the reopen. This artifact is not newer than the reopen, so it stops blocking after the import."
+  );
+}
+
+/**
  * Whether a milestone completion event confirms the completion carried by a
  * closeout dispatch that started at `dispatchStartedAt` (#2398). The event is
  * minted inside the closeout — between the dispatch's started_at and the
