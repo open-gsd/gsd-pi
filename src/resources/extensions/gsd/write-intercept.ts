@@ -5,8 +5,6 @@
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { classifyGsdLogicalPath } from "./projection-path-policy.js";
-
 /**
  * Patterns matching authoritative .gsd/ state files that agents must NOT write directly.
  *
@@ -120,17 +118,25 @@ export const BLOCKED_WRITE_ERROR = `Direct writes to .gsd/STATE.md and .gsd/gsd.
 - To save a requirement: call gsd_requirement_save or gsd_requirement_update
 STATE.md is rendered from the database after each of these calls.`;
 
+type ProjectionSaveTool = { name: RegExp; tool: string };
+
 /**
- * Managed projection kinds that have a save tool, keyed by file name.
+ * Managed projection kinds that have a save tool, keyed by file name: first
+ * the kinds the renderers write at the .gsd root, then the kinds they write
+ * below .gsd/milestones and .gsd/phases.
  * A managed file with no entry here (LEARNINGS, SECRETS, CONTINUE, ...) has no
  * save tool yet, so it stays writable: a refusal must name a real tool.
  */
-const PROJECTION_SAVE_TOOLS: Array<{ name: RegExp; tool: string }> = [
+const ROOT_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /^PROJECT\.md$/i, tool: 'gsd_summary_save with artifact_type "PROJECT"' },
   { name: /^REQUIREMENTS\.md$/i, tool: "gsd_requirement_save or gsd_requirement_update" },
   { name: /^DECISIONS\.md$/i, tool: "gsd_decision_save" },
   { name: /^KNOWLEDGE\.md$/i, tool: "capture_thought" },
   { name: /^QUEUE\.md$/i, tool: "gsd_milestone_reorder, gsd_milestone_park or gsd_milestone_discard" },
+  { name: /^ROADMAP\.md$/i, tool: "gsd_plan_milestone or gsd_reassess_roadmap" },
+];
+
+const HIERARCHY_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /(^|-)ROADMAP\.md$/i, tool: "gsd_plan_milestone or gsd_reassess_roadmap" },
   { name: /-PLAN\.md$/i, tool: "gsd_plan_slice, gsd_plan_task or gsd_replan_slice" },
   { name: /-REPLAN\.md$/i, tool: "gsd_replan_slice" },
@@ -153,9 +159,15 @@ function projectionSaveTool(filePath: string): string | null {
   let logical = parts.slice(root + 1);
   // External state layout: ~/.gsd/projects/<project>/...
   if (logical[0]?.toLowerCase() === "projects") logical = logical.slice(2);
-  if (logical.length === 0 || classifyGsdLogicalPath(logical.join("/")) !== "managed") return null;
+  if (logical.length === 0) return null;
+  // Only these paths are renderer output. The other .gsd directories
+  // (summaries, reports, research, ...) hold documents the agent writes.
+  const top = logical[0].toLowerCase();
+  const kinds = logical.length === 1
+    ? ROOT_PROJECTION_SAVE_TOOLS
+    : top === "milestones" || top === "phases" ? HIERARCHY_PROJECTION_SAVE_TOOLS : [];
   const name = logical[logical.length - 1];
-  return PROJECTION_SAVE_TOOLS.find((kind) => kind.name.test(name))?.tool ?? null;
+  return kinds.find((kind) => kind.name.test(name))?.tool ?? null;
 }
 
 function projectionWriteError(filePath: string, tool: string): string {

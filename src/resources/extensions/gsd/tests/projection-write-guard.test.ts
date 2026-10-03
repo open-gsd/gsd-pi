@@ -109,6 +109,29 @@ test("the external state layout and a worktree .gsd are covered", async () => {
   assert.match(worktree?.reason ?? "", /gsd_decision_save/);
 });
 
+test("a workflow file name outside the paths the renderers own is not blocked", async () => {
+  // /gsd milestone-summary writes its report to .gsd/summaries, named after the milestone.
+  const documents = [
+    ".gsd/summaries/M001-SUMMARY.md",
+    ".gsd/summaries/2026-10-03-project-summary.md",
+    ".gsd/reports/M001-SUMMARY.md",
+    ".gsd/captures/x-SUMMARY.md",
+    ".gsd/research/M001-RESEARCH.md",
+    ".gsd/notes/DECISIONS.md",
+    ".gsd/milestones/M001/DECISIONS.md",
+  ];
+  for (const relPath of documents) {
+    const attempts: Array<[string, Record<string, unknown>]> = [
+      ["write", { path: `${BASE}/${relPath}`, content: "x" }],
+      ["edit", { path: relPath, oldText: "a", newText: "b" }],
+      ["bash", { command: `echo done >> ${relPath}` }],
+    ];
+    for (const [toolName, input] of attempts) {
+      assert.equal(await guard(toolName, input), undefined, `${toolName} ${JSON.stringify(input)} must pass`);
+    }
+  }
+});
+
 test("reads, source files and .gsd files that have no save tool are not blocked", async () => {
   const roadmap = ".gsd/milestones/M001/M001-ROADMAP.md";
   const allowed: Array<[string, Record<string, unknown>]> = [
