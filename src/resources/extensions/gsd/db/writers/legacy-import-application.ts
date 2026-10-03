@@ -803,15 +803,31 @@ function adoptLifecycle(
   }
   // Same rule as lifecycle.backfill: a legacy skipped, deferred or cancelled
   // row is adopted as cancelled with one legacy-attested Waiver, so closeout
-  // and reopen do not refuse it. The raw status stays in the retained Preview.
+  // and reopen do not refuse it. An Import Application has one event for the
+  // whole import, so the Waiver rationale keeps the raw legacy status (the
+  // hierarchy row status that the Preview's plan wrote) and the rule used.
   if (instruction.lifecycleStatus === "cancelled") {
+    const table = instruction.itemKind === "milestone" ? "milestones"
+      : instruction.itemKind === "slice" ? "slices" : "tasks";
+    const rawStatus = getDb().prepare(`
+      SELECT status FROM ${table}
+      WHERE ${instruction.itemKind === "milestone" ? "id" : "milestone_id"} = :milestone_id
+        ${instruction.itemKind === "slice" ? "AND id = :slice_id" : ""}
+        ${instruction.itemKind === "task" ? "AND slice_id = :slice_id AND id = :task_id" : ""}
+    `).get({
+      ":milestone_id": instruction.milestoneId,
+      ...(instruction.itemKind === "milestone" ? {} : { ":slice_id": instruction.sliceId }),
+      ...(instruction.itemKind === "task" ? { ":task_id": instruction.taskId } : {}),
+    })?.["status"];
+    if (typeof rawStatus !== "string") fail("legacy import cancelled lifecycle has no hierarchy row status");
     grantLegacyAttestedCancellationWaiver(context, {
       lifecycleId: adopted.lifecycleId,
       itemKind: instruction.itemKind,
       milestoneId: instruction.milestoneId,
       sliceId: instruction.sliceId ?? null,
       taskId: instruction.taskId ?? null,
-      rationale: `Legacy-attested cancellation adopted by legacy import Preview ${previewId}`,
+      rationale: `Legacy-attested cancellation adopted by legacy import Preview ${previewId} ` +
+        `(raw status ${JSON.stringify(rawStatus)}, rule legacy-cancelled)`,
       grantedByActorId: "legacy-import",
     });
   }

@@ -382,7 +382,7 @@ test("a partially adopted closed milestone is refused by reopen until the backfi
   assert.equal(lifecycleStatus("M001", "S01", "T01"), "ready");
 });
 
-test("open work under an already completed milestone fails the preview; once proven it adopts and the milestone reopens", async () => {
+test("open work under an already completed milestone is adopted as cancelled, is listed, and the milestone reopens", async () => {
   insertMilestone({ id: "M001", title: "Old", status: "complete" });
   insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
   insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "complete" });
@@ -410,30 +410,34 @@ test("open work under an already completed milestone fails the preview; once pro
     };
   });
 
-  // Adopting these rows as open work would leave a completed parent with open children that reopen refuses.
+  // The unproven Task would be open work under the completed Milestone. The Slice is then terminal work.
   assert.deepEqual(previewLifecycleBackfill().openUnderCompletedParent, [
     { row: "task M001/S01/T01", rawStatus: "complete" },
-    { row: "slice M001/S01", rawStatus: "complete" },
   ]);
-  assert.throws(
-    () => applyLifecycleBackfill(base),
-    (error: unknown) => error instanceof LifecycleBackfillRefusedError &&
-      /open work under a completed parent: task M001\/S01\/T01="complete", slice M001\/S01="complete"/.test(error.message),
-  );
   const notes: Array<{ message: string; level: string }> = [];
   const ctx = { ui: { notify: (message: string, level: string) => notes.push({ message, level }) } } as any;
-  await handleDbAdopt(ctx, base, "--apply");
-  assert.equal(notes[0]!.level, "error");
-  assert.match(notes[0]!.message, /open work under a completed parent, nothing adopted:\n  task M001\/S01\/T01: "complete"/);
-  assert.equal(unadoptedCount(), 2, "a refused backfill writes nothing");
-  assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations WHERE operation_type = 'lifecycle.backfill'"), 0);
-  assert.equal(getTask("M001", "S01", "T01")?.status, "complete");
+  await handleDbAdopt(ctx, base);
+  assert.equal(notes[0]!.level, "info");
+  assert.match(
+    notes[0]!.message,
+    /Open work under a completed parent, adopted as cancelled:\n  task M001\/S01\/T01: "complete"/,
+  );
+  assert.equal(unadoptedCount(), 2, "the preview writes nothing");
 
-  // The operator records the missing verification; the rows now adopt as completed.
-  completeTaskRow("M001", "S01", "T01", "passed");
-  assert.equal(applyLifecycleBackfill(base).adopted, 2);
+  const result = applyLifecycleBackfill(base);
+
+  assert.equal(result.adopted, 2);
+  assert.equal(result.cancelledUnderCompletedParent.length, 1);
+  assert.match(result.cancelledUnderCompletedParent[0]!, /task M001\/S01\/T01 was legacy "complete" under a completed parent/);
   assert.equal(lifecycleStatus("M001", "S01"), "completed");
-  assert.equal(lifecycleStatus("M001", "S01", "T01"), "completed");
+  assert.equal(lifecycleStatus("M001", "S01", "T01"), "cancelled");
+  assert.equal(activeWaiverCount("M001", "S01", "T01"), 1);
+  assert.equal(getTask("M001", "S01", "T01")?.status, "skipped");
+  assert.deepEqual(rows(`
+    SELECT json_extract(payload_json, '$.rawStatus') AS raw_status, json_extract(payload_json, '$.rule') AS rule
+    FROM workflow_domain_events
+    WHERE event_type = 'lifecycle.backfilled' AND entity_id = 'M001/S01/T01'
+  `), [{ raw_status: "complete", rule: "cancelled-under-completed-parent" }]);
 
   const reopened = await handleReopenMilestone(
     { milestoneId: "M001" }, base, internalExecutionInvocation("test/backfill/reopen-completed-parent"),
@@ -441,7 +445,79 @@ test("open work under an already completed milestone fails the preview; once pro
   assert.ok(!("error" in reopened), "error" in reopened ? reopened.error : "");
   assert.equal(lifecycleStatus("M001"), "ready");
   assert.equal(lifecycleStatus("M001", "S01"), "ready");
-  assert.equal(lifecycleStatus("M001", "S01", "T01"), "ready");
+  assert.equal(activeWaiverCount("M001", "S01", "T01"), 0);
+});
+
+test("backfill grants one Waiver to each lifecycle row already adopted as cancelled with none, once", () => {
+  insertMilestone({ id: "M001", title: "Imported by an earlier build", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "skipped" });
+  insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending" });
+  insertSlice({ id: "S02", milestoneId: "M001", status: "deferred" });
+  // An earlier build adopted every row and gave the cancelled rows no Waiver.
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.earlier-build-adoption",
+    idempotencyKey: "test/backfill/earlier-build-adoption",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" });
+    adoptOrTransitionLifecycle(context, { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "cancelled",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T02", lifecycleStatus: "ready",
+    });
+    adoptOrTransitionLifecycle(context, { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "cancelled" });
+    return {
+      events: [{ eventType: "test.adopted", entityType: "milestone", entityId: "M001", payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: "test/earlier-build-adoption", projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+  assert.equal(unadoptedCount(), 0);
+  assert.equal(scalar("SELECT COUNT(*) FROM workflow_waivers"), 0);
+
+  const result = applyLifecycleBackfill(base);
+
+  assert.equal(result.adopted, 0);
+  assert.equal(result.waivers, 2);
+  assert.deepEqual(rows(`
+    SELECT waiver.scope, waiver.waiver_status, waiver.requirement_id, waiver.rationale,
+           operation.operation_type,
+           json_extract(event.payload_json, '$.rawStatus') AS raw_status,
+           json_extract(event.payload_json, '$.rule') AS rule,
+           json_extract(event.payload_json, '$.lifecycleId') = waiver.lifecycle_id AS bound
+    FROM workflow_waivers waiver
+    JOIN workflow_operations operation ON operation.operation_id = waiver.operation_id
+    JOIN workflow_domain_events event
+      ON event.operation_id = waiver.operation_id
+     AND event.event_type = 'lifecycle.backfilled'
+     AND json_extract(event.payload_json, '$.waiverId') = waiver.waiver_id
+    ORDER BY waiver.scope
+  `), [
+    {
+      scope: "M001/S01/T01 cancellation", waiver_status: "active", requirement_id: null,
+      rationale: 'Legacy-attested cancellation adopted before lifecycle backfill (raw status "skipped", rule adopted-cancelled-without-waiver)',
+      operation_type: "lifecycle.backfill", raw_status: "skipped", rule: "adopted-cancelled-without-waiver", bound: 1,
+    },
+    {
+      scope: "slice:M001/S02", waiver_status: "active", requirement_id: null,
+      rationale: 'Legacy-attested cancellation adopted before lifecycle backfill (raw status "deferred", rule adopted-cancelled-without-waiver)',
+      operation_type: "lifecycle.backfill", raw_status: "deferred", rule: "adopted-cancelled-without-waiver", bound: 1,
+    },
+  ]);
+  assert.equal(scalar("SELECT COUNT(*) FROM workflow_item_lifecycles WHERE state_version != 0"), 0, "no lifecycle row changed");
+  assert.equal(activeWaiverCount("M001", "S01", "T02"), 0);
+
+  // Idempotent: a second run finds nothing to grant and writes nothing.
+  assert.deepEqual(previewLifecycleBackfill().waiverRepairs, []);
+  assert.throws(() => applyLifecycleBackfill(base), LifecycleBackfillRefusedError);
+  assert.equal(scalar("SELECT COUNT(*) FROM workflow_waivers"), 2);
 });
 
 test("a backfilled open milestone can be discarded", async () => {

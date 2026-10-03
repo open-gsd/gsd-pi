@@ -657,7 +657,15 @@ test("writer mints one legacy-attested Waiver for each lifecycle adopted as canc
   seedHierarchy();
   db().prepare("INSERT INTO tasks (milestone_id, slice_id, id, title, status) VALUES ('M001', 'S01', 'T02', 'Open', 'pending')")
     .run();
+  db().exec(`
+    UPDATE slices SET status = 'deferred' WHERE milestone_id = 'M001' AND id = 'S01';
+    UPDATE tasks SET status = 'skipped' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01';
+  `);
   const artifact = emptyPreview();
+  // One event for the whole import: the Waiver rationale keeps the raw legacy status and the rule.
+  const rationale = (rawStatus: string) =>
+    `Legacy-attested cancellation adopted by legacy import Preview ${artifact.preview.preview_id} ` +
+    `(raw status "${rawStatus}", rule legacy-cancelled)`;
   const adopt = (
     itemKind: "slice" | "task",
     taskId: string | null,
@@ -684,7 +692,7 @@ test("writer mints one legacy-attested Waiver for each lifecycle adopted as canc
   assert.deepEqual(rows(`
     SELECT lifecycle.item_kind, lifecycle.task_id, waiver.scope, waiver.waiver_status,
            waiver.requirement_id, waiver.blocker_id, waiver.granted_by_actor_type,
-           operation.operation_type
+           operation.operation_type, waiver.rationale
     FROM workflow_waivers waiver
     JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = waiver.lifecycle_id
     JOIN workflow_operations operation ON operation.operation_id = waiver.operation_id
@@ -693,10 +701,12 @@ test("writer mints one legacy-attested Waiver for each lifecycle adopted as canc
     {
       item_kind: "slice", task_id: null, scope: "slice:M001/S01", waiver_status: "active",
       requirement_id: null, blocker_id: null, granted_by_actor_type: "policy", operation_type: "import.apply",
+      rationale: rationale("deferred"),
     },
     {
       item_kind: "task", task_id: "T01", scope: "M001/S01/T01 cancellation", waiver_status: "active",
       requirement_id: null, blocker_id: null, granted_by_actor_type: "policy", operation_type: "import.apply",
+      rationale: rationale("skipped"),
     },
   ]);
 });

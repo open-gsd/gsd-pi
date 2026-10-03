@@ -550,6 +550,34 @@ test("Slice completion accepts the legacy-attested Waiver of a backfilled skippe
   `).lifecycle_status, "completed");
 });
 
+test("Slice completion accepts a child adopted as cancelled with no Waiver once the backfill grants it", () => {
+  const base = makeBase();
+  // T03 is adopted as cancelled with no Waiver, as an Import Application of an earlier build left it.
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Skipped in the legacy source', 'skipped', 3)
+  `);
+  executeAtFence("test.earlier-build-import", "fixture/slice-completion/earlier-build-import", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T03", lifecycleStatus: "cancelled",
+    });
+  });
+  finishTaskWithOptionalEvidence(true);
+  assert.throws(
+    () => completeSlice(validInput("slice-complete/earlier-build-cancelled-child")),
+    /waiver|authorized|omission/i,
+  );
+
+  assert.equal(applyLifecycleBackfill(base).waivers, 1);
+  const result = completeSlice(validInput("slice-complete/backfill-waived-cancelled-child"));
+
+  assert.equal(result.status, "committed");
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
 test("Slice completion accepts the legacy-attested Waiver of a skipped child adopted by an Import Application", () => {
   makeBase();
   db().exec(`
