@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
-import { closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, getAllMilestones, insertMilestone, openDatabase } from "../gsd-db.ts";
 
 type HookHandler = (event: unknown, ctx: any) => Promise<void> | void;
 
@@ -89,6 +89,43 @@ test("session_start starts and gives explicit recovery guidance for legacy Markd
     "the migration must not touch disk",
   );
 });
+
+for (const database of ["missing", "schema-only"] as const) {
+  test(`session_start starts and names recovery for a planned legacy tree beside a ${database} database`, async (t) => {
+    const base = mkdtempSync(join(tmpdir(), "gsd-bootstrap-lost-authority-"));
+    t.after(() => {
+      closeDatabase();
+      rmSync(base, { recursive: true, force: true });
+    });
+
+    const roadmap = join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md");
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(roadmap, "# M001: Foundation\n", "utf-8");
+    const dbPath = join(base, ".gsd", "gsd.db");
+    if (database === "schema-only") {
+      openDatabase(dbPath);
+      closeDatabase();
+    }
+
+    const notifications: Array<{ message: string; level: string }> = [];
+
+    // The session must start: /gsd recover runs inside it.
+    await createSessionStartHandler()({}, makeContext(base, notifications));
+
+    const guidance = notifications.filter((entry) => /authority-missing/.test(entry.message));
+    assert.equal(guidance.length, 1, "one explicit instruction, not a thrown error");
+    assert.equal(guidance[0]?.level, "warning");
+    assert.match(guidance[0]?.message ?? "", /\/gsd recover/);
+    assert.equal(existsSync(dbPath), database === "schema-only", "no database is created");
+    assert.ok(existsSync(roadmap), "legacy layout should remain for recovery");
+    assert.equal(existsSync(join(base, ".gsd", "phases")), false, "nothing is imported or rendered implicitly");
+    assert.equal(existsSync(join(base, ".gsd-backups")), false, "the migration must not touch disk");
+    if (database === "schema-only") {
+      openDatabase(dbPath);
+      assert.deepEqual(getAllMilestones(), [], "the database stays empty until an explicit import");
+    }
+  });
+}
 
 test("session_start keeps old flat-phase migration backups", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-bootstrap-backup-retention-"));

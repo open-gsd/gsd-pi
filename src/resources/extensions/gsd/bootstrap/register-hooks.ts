@@ -1238,27 +1238,28 @@ export function registerHooks(
         const { needsFlatPhaseMigration } = await import("../flat-phase-migration.js");
         if (needsFlatPhaseMigration(basePath)) {
           const { ensureDbOpen } = await import("./dynamic-tools.js");
-          const opened = await ensureDbOpen(basePath);
-          if (opened) {
-            const { migrateToFlatPhase, FlatPhaseRecoveryRequiredError } = await import("../flat-phase-migration.js");
-            try {
-              await migrateToFlatPhase(basePath);
-            } catch (err) {
-              // Legacy markdown holds state the DB lacks. That is not a broken
-              // migration: the session must start so the operator can run the
-              // explicit import. Nothing was touched on disk.
-              if (!(err instanceof FlatPhaseRecoveryRequiredError)) throw err;
-              safetyLogWarning("bootstrap", err.message);
-              ctx.ui.notify(err.message, "warning");
+          const { migrateToFlatPhase, FlatPhaseRecoveryRequiredError } = await import("../flat-phase-migration.js");
+          const { isAuthorityMissingError } = await import("../db-workspace.js");
+          try {
+            if (!(await ensureDbOpen(basePath))) {
+              safetyLogWarning(
+                "bootstrap",
+                "flat-phase migration required: legacy .gsd/milestones/ layout detected but the workflow database could not be opened — fix database access before starting GSD",
+              );
+              throw new Error(
+                "flat-phase migration required but the workflow database could not be opened; fix database access before starting GSD",
+              );
             }
-          } else {
-            safetyLogWarning(
-              "bootstrap",
-              "flat-phase migration required: legacy .gsd/milestones/ layout detected but the workflow database could not be opened — fix database access before starting GSD",
-            );
-            throw new Error(
-              "flat-phase migration required but the workflow database could not be opened; fix database access before starting GSD",
-            );
+            await migrateToFlatPhase(basePath);
+          } catch (err) {
+            // Legacy markdown holds state the DB lacks, or the DB is missing or
+            // empty beside it. That is not a broken migration: the session must
+            // start so the operator can run the explicit import. No database
+            // was created and nothing was touched on disk.
+            if (!(err instanceof FlatPhaseRecoveryRequiredError) && !isAuthorityMissingError(err)) throw err;
+            const message = (err as Error).message;
+            safetyLogWarning("bootstrap", message);
+            ctx.ui.notify(message, "warning");
           }
         }
       }

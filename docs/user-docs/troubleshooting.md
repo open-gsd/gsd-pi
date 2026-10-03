@@ -213,7 +213,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 
 **Symptoms:** GSD exits during startup with a message like `flat-phase migration failed` or `flat-phase migration required but the workflow database could not be opened`.
 
-**Cause:** The project still has the legacy nested `.gsd/milestones/` layout. On startup, GSD must migrate it to the flat `.gsd/phases/` layout before path resolvers and state checks run. Markdown for milestone, slice, and task identities already known to the database is archived in the migration backup and re-rendered from database authority; it is not imported during startup. An unknown or ambiguous identity, a database hierarchy gap, an unavailable database, a backup/rename/delete failure, or an unverifiable flat-phase render stops startup before GSD can continue against mixed or invented state.
+**Cause:** The project still has the legacy nested `.gsd/milestones/` layout. On startup, GSD must migrate it to the flat `.gsd/phases/` layout before path resolvers and state checks run. Markdown for milestone, slice, and task identities already known to the database is archived in the migration backup and re-rendered from database authority; it is not imported during startup. A database that cannot be opened, a backup/rename/delete failure, or an unverifiable flat-phase render stops startup before GSD can continue against mixed or invented state. Legacy markdown that holds an identity the database lacks, or a missing or empty database beside planned legacy markdown, does not stop startup: GSD starts, changes nothing on disk, and shows one warning that names `/gsd recover`.
 
 **Fix:**
 
