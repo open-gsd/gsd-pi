@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -92,6 +92,7 @@ describe("milestone registration", () => {
       },
     );
     assert.deepEqual(registeredEvents(), [{ id: "M001", source: "generate-id", created: 1 }]);
+    assert.match(readFileSync(join(base, ".gsd", "STATE.md"), "utf-8"), /M001/, "STATE.md is rendered with the new milestone");
   });
 
   test("a retry of the same generate-id call returns the same id and writes nothing; a new call gets the next id", async () => {

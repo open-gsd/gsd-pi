@@ -12,6 +12,7 @@ import { readMilestoneRegistration, registerMilestones } from "../milestone-regi
 import { loadEffectiveGSDPreferences } from "../preferences.js";
 import { reorderMilestones, setMilestoneDependencies } from "../queue-order.js";
 import { logError } from "../workflow-logger.js";
+import { renderStateProjection } from "../workflow-projections.js";
 import type { ToolExecutionResult } from "./context-mode-tool-result.js";
 
 export interface MilestoneParkExecutorParams {
@@ -104,6 +105,7 @@ export async function executeMilestoneGenerateId(
       }
       registerMilestones([{ id }], "generate-id", invocation);
       invalidateAllCaches();
+      await renderStateProjection(basePath);
     }
     return {
       content: [{ type: "text", text: id }],
@@ -161,8 +163,9 @@ export function executeMilestoneReorder(
   invocation: ExecutionInvocation,
 ): Promise<ToolExecutionResult> {
   const { order } = params;
-  return runHierarchyTool("milestone_reorder", basePath, { order }, () => {
+  return runHierarchyTool("milestone_reorder", basePath, { order }, async () => {
     reorderMilestones(basePath, order, [], invocation);
+    await renderStateProjection(basePath);
     return `Queue order is now: ${order.join(" → ")}`;
   });
 }
@@ -173,8 +176,9 @@ export function executeMilestoneSetDependencies(
   invocation: ExecutionInvocation,
 ): Promise<ToolExecutionResult> {
   const { milestoneId, dependsOn } = params;
-  return runHierarchyTool("milestone_set_dependencies", basePath, { milestoneId, dependsOn }, () => {
+  return runHierarchyTool("milestone_set_dependencies", basePath, { milestoneId, dependsOn }, async () => {
     setMilestoneDependencies(milestoneId, dependsOn, invocation);
+    await renderStateProjection(basePath);
     return dependsOn.length > 0
       ? `Milestone ${milestoneId} now depends on: ${dependsOn.join(", ")}`
       : `Milestone ${milestoneId} now has no dependencies.`;

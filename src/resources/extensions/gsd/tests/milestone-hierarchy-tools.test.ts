@@ -3,7 +3,7 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -20,7 +20,7 @@ import {
 import { getParkedReason } from "../milestone-actions.ts";
 import { clearPathCache } from "../paths.ts";
 import { drainProjectionWork } from "../projection-worker.ts";
-import { invalidateStateCache } from "../state.ts";
+import { deriveState, invalidateStateCache } from "../state.ts";
 import {
   executeMilestoneDiscard,
   executeMilestonePark,
@@ -28,6 +28,7 @@ import {
   executeMilestoneSetDependencies,
   executeMilestoneUnpark,
 } from "../tools/workflow-tool-executors.ts";
+import { renderStateContent } from "../workflow-projections.ts";
 
 function scalar(sql: string, params: Record<string, unknown> = {}): unknown {
   return Object.values(_getAdapter()!.prepare(sql).get(params) ?? {})[0];
@@ -100,13 +101,21 @@ describe("milestone hierarchy tools", () => {
     },
   ];
 
-  test("each tool call commits one operation at revision +1, and a retry of the same call writes nothing", async () => {
+  test("each tool call commits one operation at revision +1, renders STATE.md, and a retry of the same call writes nothing", async () => {
+    const statePath = join(base, ".gsd", "STATE.md");
     for (const call of CALLS) {
       const revisionBefore = revision();
       const operationsBefore = operationCount();
+      writeFileSync(statePath, "# stale STATE.md\n");
 
       const first = await call.run("call-1");
       assert.ok(!first.isError, `${call.tool}: ${first.content[0]!.text}`);
+      invalidateStateCache();
+      assert.equal(
+        readFileSync(statePath, "utf-8"),
+        renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+        `${call.tool} renders STATE.md from the database after the commit`,
+      );
       assert.equal(revision(), revisionBefore + 1, `${call.tool} advances the revision by one`);
       assert.equal(operationCount(), operationsBefore + 1, `${call.tool} commits one operation`);
       assert.deepEqual(
