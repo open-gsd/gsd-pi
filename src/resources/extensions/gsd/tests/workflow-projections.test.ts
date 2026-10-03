@@ -3,7 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { regenerateIfMissing, renderPlanContent, renderPlanProjection, renderStateContent, renderStateProjection, renderSummaryContent, renderSummaryProjection } from '../workflow-projections.ts';
@@ -11,6 +11,7 @@ import type { SliceRow, TaskRow } from '../gsd-db.ts';
 import { closeDatabase, getArtifactsByPathPrefix, insertMilestone, insertSlice, insertTask, openDatabase } from '../gsd-db.ts';
 import { clearPathCache, _clearGsdRootCache, normalizeRealPath, resolveMilestoneFile, resolveTaskFile } from '../paths.ts';
 import { deriveState, invalidateStateCache } from '../state.ts';
+import { readCompatMarker } from '../compat/compat-marker.ts';
 import { clearParseCache } from '../files.ts';
 
 // ─── Test fixtures ────────────────────────────────────────────────────────
@@ -578,99 +579,46 @@ test('workflow-projections: renderStateProjection writes active milestone from D
   }
 });
 
-test('workflow-projections: renderStateProjection quarantines STATE.md only after an external edit', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'gsd-projection-state-baseline-'));
-  const statePath = join(base, '.gsd', 'STATE.md');
-  const quarantineRoot = join(base, '.gsd', 'quarantine', 'projections');
-  openDatabase(':memory:');
-  try {
-    await renderStateProjection(base);
-    const first = readFileSync(statePath, 'utf-8');
-
-    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
-    await renderStateProjection(base);
-    assert.notEqual(readFileSync(statePath, 'utf-8'), first, 'the second render changed STATE.md');
-    assert.equal(existsSync(quarantineRoot), false, 'a normal render keeps no copy of its own previous output');
-
-    const edited = '# GSD State\n\nExternal edit\n';
-    writeFileSync(statePath, edited);
-    insertMilestone({ id: 'M002', title: 'Second', status: 'queued' });
-    await renderStateProjection(base);
-
-    const stamps = readdirSync(quarantineRoot);
-    assert.equal(stamps.length, 1);
-    assert.equal(readFileSync(join(quarantineRoot, stamps[0]!, 'gsd', 'STATE.md'), 'utf-8'), edited);
-    assert.notEqual(readFileSync(statePath, 'utf-8'), edited);
-  } finally {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test('workflow-projections: an unchanged STATE.md render does not rewrite .compat.json', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'gsd-projection-state-marker-idle-'));
-  const markerPath = join(base, '.gsd', '.compat.json');
-  openDatabase(':memory:');
-  try {
-    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
-    await renderStateProjection(base);
-    const marker = JSON.parse(readFileSync(markerPath, 'utf-8'));
-    marker.lastProjectedAt = '2000-01-01T00:00:00.000Z';
-    const before = JSON.stringify(marker, null, 2);
-    writeFileSync(markerPath, before);
-
-    assert.deepEqual(await renderStateProjection(base), { stale: false });
-    assert.equal(readFileSync(markerPath, 'utf-8'), before);
-
-    insertMilestone({ id: 'M002', title: 'Second', status: 'queued' });
-    assert.deepEqual(await renderStateProjection(base), { stale: false });
-    assert.notEqual(readFileSync(markerPath, 'utf-8'), before, 'a changed render records the new baseline');
-  } finally {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test('workflow-projections: a compat marker failure does not mark STATE.md stale', async () => {
-  const base = mkdtempSync(join(tmpdir(), 'gsd-projection-state-marker-fail-'));
-  const statePath = join(base, '.gsd', 'STATE.md');
-  openDatabase(':memory:');
-  try {
-    mkdirSync(join(base, '.gsd', '.compat.json'), { recursive: true });
-    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
-
-    assert.deepEqual(await renderStateProjection(base), { stale: false });
-
-    invalidateStateCache();
-    assert.equal(
-      readFileSync(statePath, 'utf-8'),
-      renderStateContent(await deriveState(base, { syncQueueOrder: false })),
-    );
-  } finally {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test('workflow-projections: a normal STATE.md render from a worktree base path keeps no quarantine copy', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'gsd-projection-state-worktree-'));
-  const worktree = join(root, '.gsd', 'worktrees', 'M001');
-  const statePath = join(root, '.gsd', 'STATE.md');
-  mkdirSync(worktree, { recursive: true });
-  openDatabase(':memory:');
-  try {
-    assert.deepEqual(await renderStateProjection(worktree), { stale: false });
-    const first = readFileSync(statePath, 'utf-8');
-
-    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
-    assert.deepEqual(await renderStateProjection(worktree), { stale: false });
-
-    assert.notEqual(readFileSync(statePath, 'utf-8'), first, 'the second render changed STATE.md');
-    assert.equal(existsSync(join(root, '.gsd', 'quarantine', 'projections')), false);
-  } finally {
-    closeDatabase();
+for (const layout of ['real', 'symlinked', 'worktree'] as const) {
+  test(`workflow-projections: a hand-edited STATE.md is overwritten with no quarantine copy or baseline (${layout} .gsd)`, async () => {
+    const root = mkdtempSync(join(tmpdir(), `gsd-projection-state-${layout}-`));
+    const project = join(root, 'project');
+    const gsdDir = join(project, '.gsd');
+    if (layout === 'symlinked') {
+      const external = join(root, 'home', '.gsd', 'projects', 'abc');
+      mkdirSync(external, { recursive: true });
+      mkdirSync(project, { recursive: true });
+      symlinkSync(external, gsdDir, 'junction');
+    } else {
+      mkdirSync(gsdDir, { recursive: true });
+    }
+    const base = layout === 'worktree' ? join(gsdDir, 'worktrees', 'M001') : project;
+    mkdirSync(base, { recursive: true });
+    const statePath = join(gsdDir, 'STATE.md');
     _clearGsdRootCache();
     clearPathCache();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+    openDatabase(':memory:');
+    try {
+      insertMilestone({ id: 'M001', title: 'First', status: 'active' });
+      assert.deepEqual(await renderStateProjection(base), { stale: false });
+      writeFileSync(statePath, '# GSD State\n\nExternal edit\n');
+      insertMilestone({ id: 'M002', title: 'Second', status: 'queued' });
+
+      assert.deepEqual(await renderStateProjection(base), { stale: false });
+
+      invalidateStateCache();
+      assert.equal(
+        readFileSync(statePath, 'utf-8'),
+        renderStateContent(await deriveState(base, { syncQueueOrder: false })),
+      );
+      assert.equal(existsSync(join(gsdDir, 'quarantine')), false);
+      assert.equal(existsSync(join(root, 'home', '.gsd', 'quarantine')), false);
+      assert.equal('STATE.md' in readCompatMarker(project).projections, false);
+    } finally {
+      closeDatabase();
+      _clearGsdRootCache();
+      clearPathCache();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}

@@ -86,12 +86,10 @@ resolved alongside them.
   `/gsd migrate` commits its import.
 - It is never deleted. When the DB is unavailable the file stays unchanged and
   the render reports `stale`; no placeholder page is written.
-- Each changed render records its sha in `.gsd/.compat.json`, so a normal
-  render puts nothing in quarantine. An unchanged render does not rewrite the
-  marker, and a marker failure does not make the render stale.
-- A hand edit is replaced on the next render, and one copy of the edited bytes
-  is kept under `.gsd/quarantine/projections/`. The external-edit observer
-  skips `STATE.md`, so the file is never moved away.
+- It is fully derived and each render overwrites it. It has no baseline in
+  `.gsd/.compat.json`, the write guard never copies it to quarantine, and the
+  external-edit observer skips it, so it is never moved away.
+- A hand edit is lost on the next render by design.
 
 Regression tests:
 `src/resources/extensions/gsd/tests/workflow-projections.test.ts`,

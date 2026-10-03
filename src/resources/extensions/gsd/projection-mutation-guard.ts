@@ -83,6 +83,7 @@ export function preserveManagedProjectionBeforeMutation(
   const location = projectionLocation(filePath);
   if (!location || extname(location.relPath).toLocaleLowerCase("en-US") !== ".md") return false;
   if (location.rootName === ".gsd") {
+    if (location.relPath.toLocaleLowerCase("en-US") === "state.md") return false;
     if (classifyGsdLogicalPath(location.relPath) !== "managed") return false;
   } else if (isPlanningPassthrough(location.relPath)) {
     return false;

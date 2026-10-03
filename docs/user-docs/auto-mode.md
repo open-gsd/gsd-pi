@@ -4,7 +4,7 @@ Auto mode is GSD's autonomous execution engine. Run `/gsd auto`, walk away, come
 
 ## How It Works
 
-Auto mode is a **state machine driven by the GSD database at the project root**. It derives the next unit of work from the authoritative SQLite state, creates a fresh agent session, injects a focused prompt with all relevant context pre-inlined, and lets the LLM execute. When the LLM finishes, auto mode persists the result to the database, refreshes markdown projections such as `STATE.md`, and dispatches the next unit.
+Auto mode is a **state machine driven by the GSD database at the project root**. It derives the next unit of work from the authoritative SQLite state, creates a fresh agent session, injects a focused prompt with all relevant context pre-inlined, and lets the LLM execute. When the LLM finishes, auto mode persists the result to the database, refreshes markdown projections such as `STATE.md`, and dispatches the next unit. `STATE.md` is fully derived and overwritten on each refresh: a hand edit to it is lost by design, with no copy kept.
 
 ### The Loop
 

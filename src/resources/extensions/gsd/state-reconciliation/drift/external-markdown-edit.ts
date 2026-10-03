@@ -141,8 +141,7 @@ export function observeExternalMarkdownEdits(
   const records: ExternalMarkdownEditDrift[] = [];
   let markerChanged = false;
   for (const [projectionPath, entry] of entries) {
-    // STATE.md is fully derived: the next render replaces a hand edit and the
-    // write guard keeps a copy. Observing it here would move the file away.
+    // STATE.md is fully derived: the next render overwrites a hand edit.
     if (projectionPath === "STATE.md") continue;
     const abs = join(basePath, ".gsd", projectionPath);
     if (!existsSync(abs)) continue;

@@ -19,7 +19,6 @@ import {
   renderTaskPlanFromDb,
 } from "../markdown-renderer.ts";
 import { preserveProjectionChanges } from "../projection-worker.ts";
-import { renderStateProjection } from "../workflow-projections.ts";
 import { saveDecisionToDb, saveRequirementToDb } from "../db-writer.ts";
 import { computeProjectionSha, readCompatMarker } from "../compat/compat-marker.ts";
 import {
@@ -397,7 +396,7 @@ test("trusted marker baselines do not misclassify pending DB renders", async (t)
   assert.equal(existsSync(join(base, ".gsd", "quarantine", "projections")), false);
 });
 
-test("an edited STATE.md is never moved away and the next render restores it", async (t) => {
+test("the external-edit observer never moves an edited STATE.md", async (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   openDatabase(join(base, ".gsd", "gsd.db"));
@@ -406,6 +405,10 @@ test("an edited STATE.md is never moved away and the next render restores it", a
   await handleRebuild(ctx, base, "markdown");
   const statePath = join(base, ".gsd", "STATE.md");
   const rendered = readFileSync(statePath, "utf-8");
+  const markerPath = join(base, ".gsd", ".compat.json");
+  const marker = JSON.parse(readFileSync(markerPath, "utf-8"));
+  marker.projections["STATE.md"] = { sha: computeProjectionSha(rendered), entities: [] };
+  writeFileSync(markerPath, JSON.stringify(marker, null, 2));
   const edited = "# GSD State\n\nExternal edit\n";
   writeFileSync(statePath, edited);
 
@@ -413,13 +416,7 @@ test("an edited STATE.md is never moved away and the next render restores it", a
 
   assert.deepEqual(observation.preserved.map((entry) => entry.sourcePath), []);
   assert.equal(readFileSync(statePath, "utf-8"), edited);
-
-  assert.deepEqual(await renderStateProjection(base), { stale: false });
-
-  assert.equal(readFileSync(statePath, "utf-8"), rendered);
-  const quarantined = listFiles(join(base, ".gsd", "quarantine", "projections"));
-  assert.equal(quarantined.length, 1);
-  assert.equal(readFileSync(quarantined[0]!, "utf-8"), edited);
+  assert.equal(existsSync(join(base, ".gsd", "quarantine", "projections")), false);
 });
 
 test("projection writer preserves edited bytes at the mutation boundary", async (t) => {
@@ -528,9 +525,7 @@ test("unbaselined root requirement writes preserve existing bytes", async (t) =>
   }, base);
 
   assert.notDeepEqual(readFileSync(requirementsPath), editedBytes);
-  // The write also renders STATE.md, which is unbaselined after .compat.json was removed.
-  const quarantined = listFiles(join(base, ".gsd", "quarantine", "projections"))
-    .filter((path) => !path.includes("STATE"));
+  const quarantined = listFiles(join(base, ".gsd", "quarantine", "projections"));
   assert.equal(quarantined.length, 1);
   assert.deepEqual(readFileSync(quarantined[0]!), editedBytes);
 });

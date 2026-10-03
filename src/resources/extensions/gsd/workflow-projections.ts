@@ -17,12 +17,7 @@ import type { MilestoneRow } from "./db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
 import type { VerificationEvidenceRow } from "./db-verification-evidence-rows.js";
 import { atomicWriteSync } from "./atomic-write.js";
-import {
-  computeProjectionSha,
-  readCompatMarker,
-  recordCompatProjectionWrite,
-} from "./compat/compat-marker.js";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
 import { logWarning } from "./workflow-logger.js";
 import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
@@ -415,16 +410,7 @@ export async function renderStateProjection(basePath: string): Promise<{ stale: 
     const content = renderStateContent(await deriveState(basePath, { syncQueueOrder: false }));
     const dir = gsdRoot(basePath);
     mkdirSync(dir, { recursive: true });
-    const statePath = join(dir, "STATE.md");
-    atomicWriteSync(statePath, content);
-    try {
-      const markerBase = dirname(dir);
-      if (readCompatMarker(markerBase).projections["STATE.md"]?.sha !== computeProjectionSha(content)) {
-        recordCompatProjectionWrite(markerBase, statePath, content, []);
-      }
-    } catch (err) {
-      logWarning("projection", `STATE.md compat marker write failed: ${(err as Error).message}`);
-    }
+    atomicWriteSync(join(dir, "STATE.md"), content);
     return { stale: false };
   } catch (err) {
     logWarning("projection", `renderStateProjection failed: ${(err as Error).message}`);

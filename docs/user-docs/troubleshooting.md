@@ -642,6 +642,8 @@ rm .gsd/routing-history.json
 
 Doctor checks the authoritative database, refreshes `STATE.md` from derived database state, and fixes detected projection or runtime-file inconsistencies.
 
+`STATE.md` is fully derived from the database. GSD overwrites it after each change, so a hand edit to `STATE.md` is lost and no copy is kept. Change state through GSD commands instead.
+
 ### Recover database hierarchy from markdown
 
 Use this only when the database is missing, damaged, or known to be stale but the rendered milestone, slice, and task markdown on disk is the best available source:
