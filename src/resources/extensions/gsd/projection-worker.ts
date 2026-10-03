@@ -153,8 +153,11 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
       },
     };
   }
+  // decision.save enqueues "decisions"; the legacy import enqueues "planning/decisions".
+  if (key === "decisions" || key === "planning/decisions") {
+    return { target: "decisions", render: regenerateDecisionsMarkdown };
+  }
   if (segments[0] !== "planning") return null;
-  if (key === "planning/decisions") return { target: "decisions", render: regenerateDecisionsMarkdown };
   if (key === "planning/requirements") return { target: "requirements", render: regenerateRequirementsMarkdown };
   return hierarchyTarget(segments.slice(1));
 }

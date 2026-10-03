@@ -59,6 +59,20 @@ function work(key: string): WorkRow {
   return row;
 }
 
+/** The fixture saves a decision, which enqueues a "decisions" row. Settle it so each test starts with no backlog. */
+async function createDrainedFixture(): Promise<WorkflowAuthorityFixture> {
+  const created = await createWorkflowAuthorityFixture();
+  try {
+    const drained = await drainProjectionWork(created.root);
+    assert.deepEqual(drained.errors, []);
+    assert.deepEqual(readProjectionWorkBacklog(), []);
+  } catch (error) {
+    created.cleanup();
+    throw error;
+  }
+  return created;
+}
+
 const LATER = () => new Date(Date.now() + 86_400_000);
 
 const SLICE = { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "in_progress" } as const;
@@ -79,7 +93,7 @@ async function drainUntilDeadLetter(base: string, key: string): Promise<void> {
 }
 
 test("a row of a kind with no registered renderer is never settled as rendered", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   seedLifecycle(
     { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "in_progress" },
@@ -113,7 +127,7 @@ test("a row of a kind with no registered renderer is never settled as rendered",
 });
 
 test("a key that keeps failing retries on the backoff schedule and then dead-letters", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   const roadmapPath = resolveMilestoneFile(base, "M001", "ROADMAP");
   assert.equal(roadmapPath, null, "no ROADMAP is rendered yet");
@@ -156,7 +170,7 @@ test("a key that keeps failing retries on the backoff schedule and then dead-let
 });
 
 test("worktree and project root each get a rendered state", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const root = fixture.root;
   const worktree = join(root, ".gsd-worktrees", "M001");
   mkdirSync(join(worktree, ".gsd"), { recursive: true });
@@ -181,15 +195,19 @@ test("worktree and project root each get a rendered state", async () => {
   assert.ok(rootRoadmap && existsSync(rootRoadmap), "project root ROADMAP is rendered");
   assert.ok(worktreeRoadmap && existsSync(worktreeRoadmap), "worktree ROADMAP is rendered");
   assert.notEqual(rootRoadmap, worktreeRoadmap);
+  // The fixture decision row also gets a receipt. DECISIONS.md is a project-root
+  // file, so its path relative to the worktree gives a different file-set hash.
+  const { [work("decisions").projection_work_id]: decisionsReceipt, ...receipts } = readProjectionRootReceipts(worktree);
+  assert.match(String(decisionsReceipt), /^sha256:[0-9a-f]{64}$/);
   assert.deepEqual(
-    readProjectionRootReceipts(worktree),
+    receipts,
     { [row.projection_work_id]: row.rendered_content_hash },
     "the worktree records the same file-set hash for the same row",
   );
 });
 
 test("doctor and status show failed and unrendered Projection Work, and repair delivers due work", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   _setManagedMutationBoundaryForTest((_boundary, path) => {
     if (path.endsWith("ROADMAP.md")) throw new Error("disk refuses ROADMAP");
@@ -254,7 +272,7 @@ test("doctor and status show failed and unrendered Projection Work, and repair d
 });
 
 test("a failing row of another milestone does not make a milestone flush stale", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   insertMilestone({ id: "M002", title: "Second", status: "queued", planning: { vision: "Ship the second." } });
   _setManagedMutationBoundaryForTest((_boundary, path) => {
@@ -289,7 +307,7 @@ test("a failing row of another milestone does not make a milestone flush stale",
 });
 
 test("a task row renders the task file set, and a slice row renders the slice file set", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   seed("task-lifecycle", "lifecycle/m001/s01/t01");
 
@@ -312,7 +330,7 @@ test("a task row renders the task file set, and a slice row renders the slice fi
 });
 
 test("each kind that production code enqueues is rendered and settled", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   const requirementsPath = join(base, ".gsd", "REQUIREMENTS.md");
   const statePath = join(base, ".gsd", "STATE.md");
@@ -349,7 +367,7 @@ test("each kind that production code enqueues is rendered and settled", async ()
 });
 
 test("a failed worktree render is kept, retried on the schedule, and shown by doctor and status", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const root = fixture.root;
   const worktree = join(root, ".gsd-worktrees", "M001");
   mkdirSync(join(worktree, ".gsd"), { recursive: true });
@@ -401,7 +419,7 @@ test("a failed worktree render is kept, retried on the schedule, and shown by do
 });
 
 test("the worktree copy is rendered when the project-root render of the row fails", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const root = fixture.root;
   const worktree = join(root, ".gsd-worktrees", "M001");
   mkdirSync(join(worktree, ".gsd"), { recursive: true });
@@ -421,7 +439,7 @@ test("the worktree copy is rendered when the project-root render of the row fail
 });
 
 test("doctor repair re-renders a milestone whose ROADMAP file is missing and clears the issue", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   await rebuildMarkdownProjectionsFromDb(base);
   const roadmap = resolveMilestoneFile(base, "M001", "ROADMAP");
@@ -445,7 +463,7 @@ test("doctor repair re-renders a milestone whose ROADMAP file is missing and cle
 });
 
 test("doctor repair requeues a dead-lettered row, and the warning clears when it renders", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   _setManagedMutationBoundaryForTest((_boundary, path) => {
     if (path.endsWith("ROADMAP.md")) throw new Error("disk refuses ROADMAP");
@@ -470,7 +488,7 @@ test("doctor repair requeues a dead-lettered row, and the warning clears when it
 });
 
 test("a rebuild requeues a dead-lettered row, and the row is settled as rendered", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   _setManagedMutationBoundaryForTest((_boundary, path) => {
     if (path.endsWith("ROADMAP.md")) throw new Error("disk refuses ROADMAP");
@@ -488,7 +506,7 @@ test("a rebuild requeues a dead-lettered row, and the row is settled as rendered
 });
 
 test("doctor repair does not requeue or report an unplanned milestone, which has no ROADMAP by design", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   await rebuildMarkdownProjectionsFromDb(base);
   insertMilestone({ id: "M002", title: "", status: "queued" });
@@ -509,7 +527,7 @@ test("doctor repair does not requeue or report an unplanned milestone, which has
 });
 
 test("doctor repair requeues a dead-lettered milestone rebuild once and renders the missing ROADMAP", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   _setManagedMutationBoundaryForTest((_boundary, path) => {
     if (path.endsWith("ROADMAP.md")) throw new Error("disk refuses ROADMAP");
@@ -532,7 +550,7 @@ test("doctor repair requeues a dead-lettered milestone rebuild once and renders 
 });
 
 test("doctor repair commits no requeue for a missing artifact that the milestone render does not write", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   await rebuildMarkdownProjectionsFromDb(base);
   insertArtifact({
@@ -566,7 +584,7 @@ test("doctor repair commits no requeue for a missing artifact that the milestone
 });
 
 test("a row of a missing or discarded milestone settles once as obsolete and renders no file at any root", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const root = fixture.root;
   const worktree = join(root, ".gsd-worktrees", "M001");
   mkdirSync(join(worktree, ".gsd"), { recursive: true });
@@ -595,7 +613,7 @@ test("a row of a missing or discarded milestone settles once as obsolete and ren
 });
 
 test("doctor repair restores a deleted task SUMMARY, which the milestone render writes", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   _getAdapter()!.prepare(`
     UPDATE tasks SET full_summary_md = '# T01 summary\n'
@@ -623,7 +641,7 @@ test("doctor repair restores a deleted task SUMMARY, which the milestone render 
 });
 
 test("a legacy-import drain and a full rebuild create no file of a discarded milestone", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   insertMilestone({ id: "M002", title: "Discarded", status: "skipped", planning: { vision: "Was planned." } });
   seed("markdown", "legacy-import/restore");
@@ -647,7 +665,7 @@ test("a legacy-import drain and a full rebuild create no file of a discarded mil
 });
 
 test("doctor does not report a missing artifact file of a discarded milestone", async () => {
-  fixture = await createWorkflowAuthorityFixture();
+  fixture = await createDrainedFixture();
   const base = fixture.root;
   await rebuildMarkdownProjectionsFromDb(base);
   insertMilestone({ id: "M002", title: "Discarded", status: "skipped", planning: { vision: "Was planned." } });

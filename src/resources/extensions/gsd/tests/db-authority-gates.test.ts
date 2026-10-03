@@ -307,6 +307,8 @@ describe("G5: a render failure after commit does not lose the projection", () =>
     const base = await openFixture();
     insertMilestone({ id: "M002", title: "Second milestone", status: "active" });
     assert.deepEqual((await renderAllFromDb(base)).errors, []);
+    // The fixture saves a decision, which enqueues a "decisions" row. Settle it first.
+    assert.deepEqual((await drainProjectionWork(base)).errors, []);
     const roadmapPath = resolveMilestoneFile(base, "M001", "ROADMAP");
     assert.ok(roadmapPath && existsSync(roadmapPath), "fixture renders the M001 ROADMAP projection");
     const work = (key: string) => db().prepare(`
