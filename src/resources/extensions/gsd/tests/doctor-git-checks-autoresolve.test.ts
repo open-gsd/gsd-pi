@@ -61,7 +61,7 @@ test("doctor auto-resolves safe .gsd/ conflicts and only blocks on manual paths"
   const base = makeRepoWithConflict();
   t.after(() => rmSync(base, { recursive: true, force: true }));
 
-  const report = await runGSDDoctor(base, { isolationMode: "none" });
+  const report = await runGSDDoctor(base, { fix: true, isolationMode: "none" });
 
   const conflictIssue = report.issues.find((issue) => issue.code === "unresolved_git_conflicts");
   assert.ok(conflictIssue, "manual conflict should still be reported");
@@ -97,7 +97,7 @@ test("doctor clears conflicts entirely when all unmerged paths are safe", async 
 
   tryGit(["merge", "feature"], base);
 
-  const report = await runGSDDoctor(base, { isolationMode: "none" });
+  const report = await runGSDDoctor(base, { fix: true, isolationMode: "none" });
 
   assert.ok(
     !report.issues.some((issue) => issue.code === "unresolved_git_conflicts"),
@@ -134,7 +134,7 @@ test("doctor --dry-run does not mutate git state when safe conflicts are present
   tryGit(["merge", "feature"], base);
 
   // dry-run must not mutate git state even when all conflicts are safe
-  const report = await runGSDDoctor(base, { dryRun: true, isolationMode: "none" });
+  const report = await runGSDDoctor(base, { fix: true, dryRun: true, isolationMode: "none" });
 
   // MERGE_HEAD must still exist — dry-run is read-only
   assert.ok(
