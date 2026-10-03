@@ -116,5 +116,4 @@ export const BLOCKED_WRITE_ERROR = `Direct writes to .gsd/STATE.md and .gsd/gsd.
 - To complete a slice: call gsd_slice_complete(milestone_id, slice_id, summary, uat_result)
 - To save a decision: call gsd_decision_save(scope, decision, choice, rationale)
 - To save a requirement: call gsd_requirement_save or gsd_requirement_update
-- To settle a task attempt: call gsd_task_settle(milestone_id, slice_id, task_id, reason)
 STATE.md is rendered from the database after each of these calls.`;

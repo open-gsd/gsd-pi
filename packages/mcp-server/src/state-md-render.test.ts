@@ -7,16 +7,20 @@
 
 import { describe, it, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { clearPathCache } from "../../../src/resources/extensions/gsd/paths.ts";
-import { _getAdapter, insertMilestone, updateTaskStatus } from "../../../src/resources/extensions/gsd/gsd-db.ts";
+import { _getAdapter, closeDatabase, insertMilestone, openDatabase, updateTaskStatus } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { claimTaskAttempt } from "../../../src/resources/extensions/gsd/task-execution-domain-operation.ts";
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
 import { discardMilestone, parkMilestone, unparkMilestone } from "../../../src/resources/extensions/gsd/milestone-actions.ts";
-import { handleUndoTask } from "../../../src/resources/extensions/gsd/undo.ts";
+import { handleUndo, handleUndoTask } from "../../../src/resources/extensions/gsd/undo.ts";
+import { mergeCompletedMilestone } from "../../../src/resources/extensions/gsd/parallel-merge.ts";
+import { seedMergeReadyMilestone } from "../../../src/resources/extensions/gsd/tests/merge-ready-fixture.ts";
 import { handleEscalateCommand } from "../../../src/resources/extensions/gsd/commands/handlers/escalate.ts";
 import { withCommandCwd } from "../../../src/resources/extensions/gsd/commands/context.ts";
 import { buildEscalationArtifact, writeEscalationArtifact } from "../../../src/resources/extensions/gsd/escalation.ts";
@@ -199,6 +203,62 @@ for (const transport of ["native", "mcp"] as const) {
         apply: true,
       }));
     });
+
+    it("plan renders STATE.md", async (t) => {
+      const fixture = await openFixture(t);
+      await assertRendersState(fixture.root, `${transport} plan`, () => callTool(transport, fixture.root, "gsd_plan_milestone", {
+        milestoneId: "M002",
+        title: "Planned milestone",
+        vision: "Plan a milestone for the STATE.md check.",
+        slices: [{
+          sliceId: "S01",
+          title: "Planned slice",
+          risk: "low",
+          depends: [],
+          demo: "The plan is saved.",
+          goal: "Save the plan.",
+          successCriteria: "The roadmap renders from the DB.",
+          proofLevel: "integration",
+          integrationClosure: "None.",
+          observabilityImpact: "None.",
+        }],
+      }));
+    });
+
+    it("UAT result renders STATE.md", async (t) => {
+      const fixture = await openFixture(t);
+      const evidenceId = `state-md-uat-${transport}`;
+      mkdirSync(join(fixture.root, ".gsd", "exec"), { recursive: true });
+      writeFileSync(join(fixture.root, ".gsd", "exec", `${evidenceId}.meta.json`), JSON.stringify({
+        id: evidenceId,
+        exit_code: 0,
+        signal: null,
+        timed_out: false,
+        aborted: false,
+        metadata: { kind: "uat_exec", milestoneId: "M001", sliceId: "S01", checkId: "UAT-01", intent: "uat-artifact-check" },
+      }));
+      await assertRendersState(fixture.root, `${transport} UAT`, () => callTool(transport, fixture.root, "gsd_uat_result_save", {
+        milestoneId: "M001",
+        sliceId: "S01",
+        uatType: "artifact-driven",
+        verdict: "PASS",
+        checks: [{
+          id: "UAT-01",
+          description: "Artifact check passes",
+          mode: "artifact",
+          result: "PASS",
+          evidence: [{ kind: "gsd_uat_exec", ref: evidenceId }],
+          notes: "Passed.",
+        }],
+        presentation: {
+          surface: transport,
+          presentedTools: ["gsd_uat_exec", "gsd_uat_result_save", "gsd_resume", "gsd_milestone_status", "gsd_journal_query"],
+          blockedTools: ["gsd_exec", "gsd_summary_save", "gsd_save_gate_result"]
+            .map((name) => ({ name, reason: "forbidden during run-uat" })),
+        },
+        notes: "UAT passed for the STATE.md check.",
+      }));
+    });
   });
 }
 
@@ -216,6 +276,19 @@ describe("STATE.md render after workflow commands and rebuild", () => {
     await assertRendersState(base, "discard", async () => assert.equal(await discardMilestone(base, "M002"), true));
     updateTaskStatus("M001", "S02", "T01", "complete");
     await assertRendersState(base, "undo-task", () => handleUndoTask("M001/S02/T01 --force", ctx, {} as Parameters<typeof handleUndoTask>[2], base));
+  });
+
+  it("/gsd undo --force renders STATE.md", async (t) => {
+    const fixture = await openFixture(t);
+    const base = fixture.root;
+    mkdirSync(join(base, ".gsd", "activity"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "activity", "001-execute-task-M001-S02-T01.jsonl"), "");
+    updateTaskStatus("M001", "S02", "T01", "complete");
+    const notes: string[] = [];
+    const ctx = { ui: { notify: (message: string) => notes.push(message) } } as unknown as Parameters<typeof handleUndo>[1];
+
+    await assertRendersState(base, "undo", () => handleUndo("--force", ctx, {} as Parameters<typeof handleUndo>[2], base));
+    assert.ok(notes.some((note) => note.startsWith("Undone: execute-task (M001/S02/T01)")), notes.join("\n"));
   });
 
   it("/gsd escalate resolve renders STATE.md", async (t) => {
@@ -253,6 +326,42 @@ describe("STATE.md render after workflow commands and rebuild", () => {
     const fixture = await openFixture(t);
     await assertRendersState(fixture.root, "rebuild markdown", async () => {
       assert.deepEqual((await rebuildMarkdownProjectionsFromDb(fixture.root)).errors, []);
+    });
+  });
+});
+
+describe("STATE.md render after a parallel merge", () => {
+  it("mergeCompletedMilestone renders STATE.md on a real merge", async (t) => {
+    const run = (cmd: string, cwd: string) => execSync(cmd, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" });
+    const repo = realpathSync(mkdtempSync(join(tmpdir(), "state-md-merge-")));
+    const previousCwd = process.cwd();
+    t.after(() => {
+      process.chdir(previousCwd);
+      closeDatabase();
+      invalidateStateCache();
+      rmSync(repo, { recursive: true, force: true });
+    });
+    run("git init -b main", repo);
+    run("git config user.email test@test.com", repo);
+    run("git config user.name Test", repo);
+    mkdirSync(join(repo, ".gsd", "milestones", "M010"), { recursive: true });
+    writeFileSync(join(repo, ".gitignore"), ".gsd/worktrees/\n.gsd/gsd.db*\n.gsd/STATE.md\n");
+    writeFileSync(join(repo, ".gsd", "preferences.md"), "## Git\n- isolation: branch\n");
+    writeFileSync(join(repo, ".gsd", "milestones", "M010", "M010-ROADMAP.md"), "# M010: Merge\n\n## Slices\n- [x] **S01: Test Slice**\n");
+    run("git add .", repo);
+    run("git commit -m init", repo);
+    run("git checkout -b milestone/M010", repo);
+    writeFileSync(join(repo, "merged.ts"), "export const merged = true;\n");
+    run("git add .", repo);
+    run("git commit -m feat", repo);
+    run("git checkout main", repo);
+    seedMergeReadyMilestone(repo, "M010");
+    assert.ok(openDatabase(join(repo, ".gsd", "gsd.db")), "merge test database must open");
+    process.chdir(repo);
+
+    await assertRendersState(repo, "merge", async () => {
+      const result = await mergeCompletedMilestone(repo, "M010");
+      assert.equal(result.success, true, result.error);
     });
   });
 });
