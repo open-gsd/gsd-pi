@@ -320,15 +320,16 @@ export async function repairProjectionWork(
   basePath: string,
   milestoneIds: readonly string[] = [],
 ): Promise<ProjectionDrainResult> {
-  const requeue = [
-    ...listProjectionWorkHeads(["dead_letter"])
-      .filter((head) => projectionRendererFor(head.projection_kind, head.projection_key) !== null)
-      .map((head) => ({ projectionKey: head.projection_key, projectionKind: head.projection_kind })),
-    ...milestoneIds.map((id) => ({
-      projectionKey: `${MILESTONE_REBUILD_KEY_PREFIX}${id.toLowerCase()}`,
-      projectionKind: MARKDOWN_PROJECTION_KIND,
-    })),
-  ];
+  const byKey = new Map<string, { projectionKey: string; projectionKind: string }>();
+  for (const head of listProjectionWorkHeads(["dead_letter"])) {
+    if (projectionRendererFor(head.projection_kind, head.projection_key) === null) continue;
+    byKey.set(head.projection_key, { projectionKey: head.projection_key, projectionKind: head.projection_kind });
+  }
+  for (const id of milestoneIds) {
+    const projectionKey = `${MILESTONE_REBUILD_KEY_PREFIX}${id.toLowerCase()}`;
+    byKey.set(projectionKey, { projectionKey, projectionKind: MARKDOWN_PROJECTION_KIND });
+  }
+  const requeue = [...byKey.values()];
   const notRequeued: ProjectionDrainResult = { delivered: 0, errors: [], failedTargets: [] };
   try {
     requeueProjectionWork(requeue);

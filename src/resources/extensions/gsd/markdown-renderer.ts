@@ -776,6 +776,18 @@ export async function renderTaskPlanFromDb(
   return { taskPlanPath: absPath, content: stamped };
 }
 
+function isUnplanned(milestone: MilestoneRow, roadmapSlices: SliceRow[]): boolean {
+  return roadmapSlices.length === 0 && !milestone.vision.trim();
+}
+
+/** True when the milestone was never planned (zero roadmap slices, empty vision); it has no ROADMAP by design. */
+export function isUnplannedMilestone(milestone: MilestoneRow): boolean {
+  return isUnplanned(
+    milestone,
+    getMilestoneSlices(milestone.id).filter((slice) => !isHiddenFromRoadmap(slice.status)),
+  );
+}
+
 export async function renderRoadmapFromDb(
   basePath: string,
   milestoneId: string,
@@ -801,7 +813,7 @@ export async function renderRoadmapFromDb(
   // least one slice, so zero-slice + empty-vision is a reliable "never planned"
   // signal. Skip the write so verification sees a genuinely missing file (a
   // clear "write the ROADMAP" failure) instead of a misleading stub.
-  if (slices.length === 0 && !milestone.vision.trim()) {
+  if (isUnplanned(milestone, slices)) {
     logWarning(
       "projection",
       `renderRoadmapFromDb skipped unplanned milestone ${milestoneId} (zero slices, empty vision) — refusing to write a stub ROADMAP`,

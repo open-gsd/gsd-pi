@@ -28,7 +28,8 @@ import {
 } from "./paths.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
-import { MILESTONE_REBUILD_KEY_PREFIX, readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
+import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
+import { isUnplannedMilestone } from "./markdown-renderer.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { parseProjectionPlan } from "./schemas/parsers.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
@@ -1235,22 +1236,33 @@ export async function checkEngineHealth(
   }
 }
 
+function roadmapOnDisk(basePath: string, milestoneId: string): boolean {
+  const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+  return Boolean(roadmapPath) && existsSync(roadmapPath!);
+}
+
+function missingArtifactIssues(issues: DoctorIssue[], milestoneId: string): DoctorIssue[] {
+  return issues.filter((issue) =>
+    issue.code === "artifact_file_missing" && issue.unitId.split("/")[0] === milestoneId);
+}
+
 /**
- * Open milestones whose ROADMAP file is not on disk, and milestones that own a
- * database artifact whose file is not on disk.
+ * Milestones with a file to restore: an open, planned milestone whose ROADMAP
+ * file is not on disk, or a milestone that owns a database artifact whose file
+ * is not on disk. An unplanned milestone has no ROADMAP by design.
  */
-function milestonesWithMissingFiles(basePath: string, issues: DoctorIssue[]): string[] {
-  const missingArtifactUnits = new Set(
-    issues.filter((issue) => issue.code === "artifact_file_missing").map((issue) => issue.unitId.split("/")[0]),
-  );
+function milestonesWithMissingFiles(
+  basePath: string,
+  issues: DoctorIssue[],
+): Array<{ id: string; roadmapMissing: boolean }> {
   return getAllMilestones()
-    .filter((milestone) => {
-      if (missingArtifactUnits.has(milestone.id)) return true;
-      if (isClosedStatus(milestone.status)) return false;
-      const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
-      return !roadmapPath || !existsSync(roadmapPath);
-    })
-    .map((milestone) => milestone.id);
+    .map((milestone) => ({
+      id: milestone.id,
+      roadmapMissing: !isClosedStatus(milestone.status)
+        && !isUnplannedMilestone(milestone)
+        && !roadmapOnDisk(basePath, milestone.id),
+    }))
+    .filter(({ id, roadmapMissing }) => roadmapMissing || missingArtifactIssues(issues, id).length > 0);
 }
 
 /**
@@ -1266,10 +1278,14 @@ export async function checkProjectionWork(
 ): Promise<void> {
   if (repair) {
     const missing = milestonesWithMissingFiles(basePath, issues);
-    const drained = await repairProjectionWork(basePath, missing);
+    const drained = await repairProjectionWork(basePath, missing.map(({ id }) => id));
     if (drained.delivered > 0) fixesApplied.push(`delivered ${drained.delivered} Projection Work row(s)`);
-    const reRendered = new Set(missing.filter((id) =>
-      !drained.failedTargets.includes(`${MILESTONE_REBUILD_KEY_PREFIX}${id.toLowerCase()}`)));
+    const reRendered = new Set(missing
+      .filter(({ id, roadmapMissing }) =>
+        (roadmapMissing && roadmapOnDisk(basePath, id))
+        || missingArtifactIssues(issues, id).some((issue) =>
+          Boolean(issue.file) && artifactExistsOnDisk(basePath, issue.file!)))
+      .map(({ id }) => id));
     for (const id of reRendered) fixesApplied.push(`re-rendered missing projections for ${id}`);
     for (let i = issues.length - 1; i >= 0; i--) {
       if (isClearedByMilestoneReRender(basePath, issues[i]!, reRendered)) issues.splice(i, 1);

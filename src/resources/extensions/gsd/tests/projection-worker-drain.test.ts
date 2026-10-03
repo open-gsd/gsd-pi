@@ -11,7 +11,8 @@ import { formatTextStatus } from "../commands/handlers/core.ts";
 import { flushWorkflowProjections } from "../projection-flush.ts";
 import { checkEngineHealth, checkProjectionWork } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
-import { _getAdapter } from "../gsd-db.ts";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
+import { _getAdapter, insertMilestone } from "../gsd-db.ts";
 import { resolveMilestoneFile, resolveSliceFile } from "../paths.ts";
 import {
   drainProjectionWork,
@@ -486,4 +487,48 @@ test("a rebuild requeues a dead-lettered row, and the row is settled as rendered
   assert.equal(rebuilt.delivered, 1);
   assert.deepEqual(readProjectionWorkBacklog(), []);
   assert.equal(work("lifecycle/m001/s02").delivery_state, "rendered");
+});
+
+test("doctor repair does not requeue or report an unplanned milestone, which has no ROADMAP by design", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  await rebuildMarkdownProjectionsFromDb(base);
+  insertMilestone({ id: "M002", title: "", status: "queued" });
+  assert.equal(resolveMilestoneFile(base, "M002", "ROADMAP"), null);
+  const revision = readDomainOperationFence().revision;
+
+  const issues: DoctorIssue[] = [];
+  const fixes: string[] = [];
+  await checkProjectionWork(base, issues, fixes, true);
+
+  assert.deepEqual(fixes, [], "no re-render is reported");
+  assert.deepEqual(issues, []);
+  assert.equal(readDomainOperationFence().revision, revision, "no Domain Operation is committed");
+  const rebuildRows = _getAdapter()!.prepare(
+    "SELECT COUNT(*) AS count FROM workflow_projection_work WHERE projection_key = 'rebuild/m002'",
+  ).get() as { count: number };
+  assert.equal(rebuildRows.count, 0, "no work is enqueued for the unplanned milestone");
+});
+
+test("doctor repair requeues a dead-lettered milestone rebuild once and renders the missing ROADMAP", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  _setManagedMutationBoundaryForTest((_boundary, path) => {
+    if (path.endsWith("ROADMAP.md")) throw new Error("disk refuses ROADMAP");
+  });
+  const failedFixes: string[] = [];
+  await checkProjectionWork(base, [], failedFixes, true);
+  assert.deepEqual(failedFixes, [], "a render that failed is not reported as a re-render");
+  await drainUntilDeadLetter(base, "rebuild/m001");
+
+  _setManagedMutationBoundaryForTest(null);
+  const issues: DoctorIssue[] = [];
+  const fixes: string[] = [];
+  await checkProjectionWork(base, issues, fixes, true);
+
+  assert.deepEqual(issues, []);
+  assert.deepEqual(fixes, ["delivered 1 Projection Work row(s)", "re-rendered missing projections for M001"]);
+  assert.equal(work("rebuild/m001").delivery_state, "rendered");
+  const roadmap = resolveMilestoneFile(base, "M001", "ROADMAP");
+  assert.ok(roadmap && existsSync(roadmap));
 });
