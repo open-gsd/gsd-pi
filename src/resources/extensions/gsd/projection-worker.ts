@@ -52,6 +52,8 @@ export interface ProjectionDrainResult {
   /** Projection Work rows settled as rendered at the project root. */
   delivered: number;
   errors: string[];
+  /** Renderer targets (for example milestone/m001) that failed in this drain. */
+  failedTargets: string[];
 }
 
 /** The renderer that owns one Projection Work row. Rows with the same target share one render per drain. */
@@ -178,6 +180,7 @@ async function refreshDerivedRoot(root: string, result: ProjectionDrainResult): 
       current[id] = await renderTarget(renders, root, renderer);
     } catch (error) {
       result.errors.push(`${head.projection_key} at ${root}: ${(error as Error).message}`);
+      result.failedTargets.push(renderer.target);
     }
   }
   setRuntimeKv("global", rootId, ROOT_RECEIPTS_KEY, current);
@@ -199,7 +202,7 @@ export async function drainProjectionWork(
   options: { now?: Date } = {},
 ): Promise<ProjectionDrainResult> {
   const now = options.now ?? new Date();
-  const result: ProjectionDrainResult = { delivered: 0, errors: [] };
+  const result: ProjectionDrainResult = { delivered: 0, errors: [], failedTargets: [] };
   const { projectRoot, workRoot, isWorktree } = resolveGsdPathContract(basePath);
 
   for (const head of listExpiredProjectionClaims(now)) {
@@ -225,6 +228,7 @@ export async function drainProjectionWork(
       const message = (error as Error).message;
       recordFailure(claim, message, now);
       result.errors.push(`${head.projection_key}: ${message}`);
+      result.failedTargets.push(renderer.target);
     }
   }
 

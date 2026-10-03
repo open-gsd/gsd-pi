@@ -8,6 +8,7 @@ import { afterEach, test } from "node:test";
 
 import { _setManagedMutationBoundaryForTest } from "../atomic-write.ts";
 import { formatTextStatus } from "../commands/handlers/core.ts";
+import { flushWorkflowProjections } from "../projection-flush.ts";
 import { checkProjectionWork } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { _getAdapter } from "../gsd-db.ts";
@@ -184,7 +185,8 @@ test("doctor and status show failed and unrendered Projection Work, and repair d
     "state",
     "project/authority",
   );
-  await drainProjectionWork(base);
+  // A failure at a later time puts its retry time far past the repair drain below.
+  await drainProjectionWork(base, { now: LATER() });
 
   const issues: DoctorIssue[] = [];
   await checkProjectionWork(base, issues, [], false);
@@ -223,4 +225,41 @@ test("doctor and status show failed and unrendered Projection Work, and repair d
     ],
     "the failed row waits for its retry time and stays visible",
   );
+});
+
+test("a failing row of another milestone does not make a milestone flush stale", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  // M002 is not in the database, so its renderer fails on every attempt.
+  seedLifecycle(
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "in_progress" },
+    "other-milestone",
+    "slice-lifecycle",
+    "lifecycle/m002/s01",
+  );
+
+  assert.deepEqual(await flushWorkflowProjections(base, { milestoneId: "M001" }), {
+    milestoneId: "M001",
+    stale: false,
+    superseded: false,
+  });
+  const failed = work("lifecycle/m002/s01");
+  assert.equal(failed.attempt_count, 1, "the flush drained the M002 row");
+  assert.match(failed.last_error, /milestone m002 is not in the database/);
+
+  _setManagedMutationBoundaryForTest((_boundary, path) => {
+    if (path.endsWith("-PLAN.md")) throw new Error("disk refuses PLAN");
+  });
+  seedLifecycle(
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    "own-milestone",
+    "slice-lifecycle",
+    "lifecycle/m001/s01",
+  );
+  assert.equal(
+    (await flushWorkflowProjections(base, { milestoneId: "M001" })).stale,
+    true,
+    "a failing M001 row makes the M001 flush stale",
+  );
+  assert.match(work("lifecycle/m001/s01").last_error, /disk refuses PLAN/);
 });

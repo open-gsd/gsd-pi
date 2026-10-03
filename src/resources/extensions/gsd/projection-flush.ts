@@ -44,9 +44,11 @@ export async function flushWorkflowProjections(
     ? await renderAllProjections(basePath, scope.milestoneId)
     : null;
   const drained = await drainProjectionWork(basePath);
+  // The drain covers the whole project; only this milestone's failures make this flush stale.
+  const ownTargets = new Set([`milestone/${scope.milestoneId.toLowerCase()}`, "all"]);
   return {
     milestoneId: scope.milestoneId,
-    stale: rendered.stale || superseded || repaired?.stale === true || drained.errors.length > 0,
+    stale: rendered.stale || superseded || repaired?.stale === true || drained.failedTargets.some((target) => ownTargets.has(target)),
     superseded,
   };
 }
