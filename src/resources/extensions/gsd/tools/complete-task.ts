@@ -203,7 +203,9 @@ async function repairMissingTaskSummaryProjection(
     taskRow.slice_id,
     taskRow.id,
   );
-  const summaryMd = renderSummaryContent(taskRow, taskRow.slice_id, taskRow.milestone_id, []);
+  // The stored summary, as the full rebuild writes it. A render from the task
+  // columns gives other bytes when the stored summary has no frontmatter.
+  const summaryMd = taskRow.full_summary_md;
   const skipRoadmap = taskReferencesMilestoneRoadmap(
     artifactBasePath,
     taskRow.milestone_id,
