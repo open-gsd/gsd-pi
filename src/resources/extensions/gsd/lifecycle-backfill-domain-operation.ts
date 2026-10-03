@@ -33,7 +33,8 @@ export type LifecycleBackfillRule =
   | "cancelled-with-parent"
   | "cancelled-under-completed-parent"
   | "legacy-complete-evidenced"
-  | "legacy-complete-unproven";
+  | "legacy-complete-unproven"
+  | "legacy-complete-under-completed-parent";
 
 export interface LifecycleBackfillItem {
   itemKind: "milestone" | "slice" | "task";
@@ -79,7 +80,10 @@ export interface LifecycleBackfillResult {
   operationId: string;
   adopted: number;
   waivers: number;
-  /** Legacy completions without evidence, adopted as open work. */
+  /**
+   * Legacy completions without evidence: adopted as open work, or as
+   * completed (unverified legacy) under a completed parent.
+   */
   findings: string[];
   /** Open rows under a completed parent, adopted as cancelled. */
   cancelledUnderCompletedParent: string[];
@@ -172,8 +176,9 @@ function sliceKey(milestoneId: string, sliceId: string): string {
  * terminal Slices (Milestones). Other legacy completions adopt as open work.
  * Skipped, deferred and cancelled rows adopt as cancelled; open work under a
  * cancelled parent is cancelled with it. A row that would be open work under
- * a parent already adopted as completed is adopted as cancelled and listed
- * (owner decision 2026-10-03). A lifecycle row already adopted as cancelled
+ * a parent already adopted as completed is adopted as cancelled and listed;
+ * a legacy completion without evidence under such a parent stays completed
+ * as unverified legacy, with a finding (owner decisions 2026-10-03). A lifecycle row already adopted as cancelled
  * with no active Waiver is listed for its one legacy-attested Waiver.
  * Pure read: writes nothing.
  */
@@ -219,10 +224,15 @@ export function previewLifecycleBackfill(): LifecycleBackfillPreview {
     let lifecycleStatus: CanonicalLifecycleStatus;
     let rule: LifecycleBackfillRule;
     let projectedLegacyStatus: string | null = null;
+    const underCompletedParent = adoptedCompleted.has(row.milestoneId) ||
+      (row.taskId !== null && adoptedCompleted.has(sliceKey(row.milestoneId, row.sliceId!)));
     if (status === "completed") {
       if (completionProven) {
         lifecycleStatus = "completed";
         rule = "legacy-complete-evidenced";
+      } else if (underCompletedParent) {
+        lifecycleStatus = "completed";
+        rule = "legacy-complete-under-completed-parent";
       } else {
         lifecycleStatus = openStatus;
         rule = "legacy-complete-unproven";
@@ -249,11 +259,7 @@ export function previewLifecycleBackfill(): LifecycleBackfillPreview {
       rule = "cancelled-with-parent";
       projectedLegacyStatus = "skipped";
     }
-    if (
-      !TERMINAL.has(lifecycleStatus) &&
-      (adoptedCompleted.has(row.milestoneId) ||
-        (row.taskId !== null && adoptedCompleted.has(sliceKey(row.milestoneId, row.sliceId!))))
-    ) {
+    if (!TERMINAL.has(lifecycleStatus) && underCompletedParent) {
       openUnderCompletedParent.push({ row: `${row.itemKind} ${rowLabel(row)}`, rawStatus: row.status });
       lifecycleStatus = "cancelled";
       rule = "cancelled-under-completed-parent";
@@ -426,6 +432,10 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
         finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
           `without completion evidence; adopted as ${item.lifecycleStatus}`;
         findings.push(finding);
+      } else if (item.rule === "legacy-complete-under-completed-parent") {
+        finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
+          `without completion evidence under a completed parent; adopted as completed (unverified legacy)`;
+        findings.push(finding);
       } else if (item.rule === "cancelled-under-completed-parent") {
         finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
           `under a completed parent; adopted as cancelled`;
@@ -437,7 +447,9 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
         completedAt: item.completedAt,
         lifecycleStatus: item.lifecycleStatus,
         rule: item.rule,
-        evidence: item.rule === "legacy-complete-evidenced" ? "unverified-legacy" : null,
+        evidence: item.rule === "legacy-complete-evidenced" || item.rule === "legacy-complete-under-completed-parent"
+          ? "unverified-legacy"
+          : null,
         projectedLegacyStatus: item.projectedLegacyStatus,
         waiverId,
         finding,

@@ -1874,7 +1874,7 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
     ctx.ui.notify(
       `gsd db adopt: adopted ${result.adopted} row(s) in operation ${result.operationId} ` +
         `(${result.waivers} legacy-attested Waiver(s)).\n${summary}` +
-        (result.findings.length > 0 ? `\nCompletion without evidence, adopted as open work:\n  ${result.findings.join("\n  ")}` : "") +
+        (result.findings.length > 0 ? `\nCompletion without evidence:\n  ${result.findings.join("\n  ")}` : "") +
         "\nA verified backup was written beside the database; /gsd db restore-backup lists it.",
       "info",
     );
