@@ -147,12 +147,11 @@ test(".planning/ round-trip: re-projecting is idempotent (stable .planning/ cont
     return out;
   };
   const readFileSyncNormalized = (p: string): string => {
+    // No timestamp is stripped: STATE.md carries a database time, not the
+    // wall clock, so a second projection of the same database is identical.
     return readFileSync(p, "utf-8")
       .replace(/\r\n/g, "\n")
-      .replace(/[ \t]+\n/g, "\n")
-      // STATE.md carries a write-time timestamp that legitimately differs
-      // between projections — strip it so idempotency is checked on content.
-      .replace(/last_updated: ".*"/g, 'last_updated: "<ts>"');
+      .replace(/[ \t]+\n/g, "\n");
   };
 
   await writePlanningDirectory(base, "flat-phases");
