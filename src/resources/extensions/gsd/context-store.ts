@@ -146,7 +146,7 @@ function readDecisionsFromMemories(
 			if (sf["deleted"] === true) continue;
 
 			// Decision-level superseded status lives in structured_fields.superseded_by
-			// (written by mirrorDecisionToMemory / memory-backfill.ts). The top-level
+			// (written by saveDecisionToDb / memory-backfill.ts). The top-level
 			// memories.superseded_by column is intentionally never set for decision mirrors,
 			// so active-only filtering must be done here in the JS loop.
 			const supersededBy =

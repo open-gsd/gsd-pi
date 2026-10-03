@@ -2104,7 +2104,7 @@ execution evidence remain authoritative.
 
 | Tool | Tables READ | Tables WRITTEN | Disk Artifacts |
 |------|------------|----------------|----------------|
-| `gsd_decision_save` | memories | memories (`category = "architecture"`) | DECISIONS.md (projection) |
+| `gsd_decision_save` | project_authority, workflow_operations, memories, slices (deferral target only) | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, memories (`category = "architecture"`); slices status `deferred` when the decision defers a Slice | DECISIONS.md (projection) |
 | `gsd_requirement_save` | requirements | requirements | REQUIREMENTS.md |
 | `gsd_requirement_update` | requirements | requirements | REQUIREMENTS.md |
 | `gsd_summary_save` | milestones, slices, tasks | artifacts | M##/S##/T## artifact files |
