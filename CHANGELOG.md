@@ -8,6 +8,95 @@ This changelog starts from the `open-gsd/gsd-pi` ownership baseline. Earlier pro
 
 ## [Unreleased]
 
+## [1.21.0] - 2026-10-02
+
+### Added
+- **gsd**: persistent turn-state status indicator (#2374) (#2506)
+- **subagent**: show requested model, thinking, and elapsed time for parallel workers (#2498)
+- **gsd**: opt-in session-level idle watchdog for auto-mode (#2373) (#2493)
+- **pi**: phase_change extension event (#1999) (#2483)
+- **pi**: addTools/removeTools delta composition for adjust_tool_set (#1998) (#2480)
+- **pi**: expose gsd dispatch context on before_agent_start (#1997) (#2479)
+- **gsd**: show dynamic-routing tier in the live AUTO strip (#2395) (#2469)
+- **mcp-server**: disclose the client-connection lifetime of gsd_execute sessions (#2467)
+- **models**: add Claude Opus 5.5 and make it the default Anthropic model
+
+### Fixed
+- **gsd**: stop recording read-only gsd_exec_search as execution evidence (#2514)
+- **gsd**: surface planning_blocked in doctor, stop false missing_roadmap for never-planned milestones (#2512)
+- **gsd**: ignore workflow-MCP runtime settings file in baseline gitignore (#2509) (#2511)
+- **release**: ignore workflow-MCP runtime file in acceptance-bed evidence capture (#2508)
+- **gsd**: gate task publication on worktree integrity and surface audit observation loss (#2442) (#2507)
+- **gsd**: refuse legacy completion projections for canonical non-terminal Tasks (#2348) (#2505)
+- **pi-ai**: guard strict-param models (Sonnet 5.5) from rejected request params (#2504)
+- **gsd**: copy opt-in worktree-files allowlist into new worktrees (#2386) (#2503)
+- **gsd**: validation-source-drift recovery hint named an unparsable command (#2433) (#2434)
+- **gsd**: restore missing canonical open-item lifecycle authority in shadow repair (#2313) (#2492)
+- **auto**: watchdog pause orphaned in-flight unit attempts via premature lease release (#2429) (#2431)
+- **subagent**: revalidate child liveness so a dead child cannot stall a run forever (#2364) (#2466)
+- **gsd**: backlog commands silently deleted unparsed BACKLOG.md lines (#2446) (#2447)
+- **gsd**: DECISIONS.md renderer corrupts rows on multi-line decision fields (#2422) (#2423)
+- qualify task evidence from the final staged row (#2338) (#2400)
+- **gsd**: grace the just-claimed resumed successor on its first reconcile pass (#2416) (#2486)
+- **gsd**: stamped newline-less projections wedge reconciliation on phantom drift (#2427) (#2430)
+- retry stale worktree removal on transient locks (#1987) (#2401)
+- **test**: repair main CI regressions (uat-dispatch fixture hash, tiny-milestone e2e revision drift) (#2502)
+- **gsd**: label skill-health report as availability, not usage (#2495) (#2499)
+- **gsd**: classify finalize refusals as stop, not retry (#2046 minimal) (#2497)
+- **gsd**: pin capability_routing default contract to router default (#2397 stage 1) (#2496)
+- **gsd**: subjective UAT supersession by ID and actionable unsatisfied-criterion errors (#2341) (#2494)
+- **cli**: sanitize nested-install env and verify installed version after upgrade (#2435) (#2491)
+- **native**: latch unhealthy ProjectionRootIdentityLock, degrade to plain-fs fallbacks (#2355) (#2489)
+- **gsd**: skip UAT re-dispatch predating accepted milestone validation (#2347) (#2488)
+- **gsd**: converge lifecycle shadow drift at reopen and surface it in doctor (#2440) (#2487)
+- **mcp-server**: read flat-phase roadmap layout correctly (#2424) (#2485)
+- **gsd**: re-arm lease fencing across finalize retry (#2443) (#2484)
+- **gsd**: supervised quarantine of stale control-publication intents (#2154) (#2482)
+- **gsd**: mint task-cancellation waivers on replan and widen closeout readers (#2481)
+- **gsd**: retire journaled exchange after repeated transient replay failures (#2108) (#2478)
+- **gsd**: accept per-entry thinking on fallbacks[] entries (#1270) (#2477)
+- **gsd**: render decision choice/rationale into model-visible content (#2476)
+- **gsd**: frontmatter-aware, complexity-advisory subagent model guidance (#2475)
+- **claude-code**: register catalog Claude models and make thinking checks additive (#2437) (#2474)
+- **gsd**: notify on startup model fallback and survive torn models.json reads (#2077) (#2473)
+- **gsd**: collect artifact rows in liveness target hash for artifact-only units (#2384) (#2472)
+- **gsd**: receipt-gated verification-paused reconcile for stranded tasks (#2334) (#2471)
+- **gsd**: reject non-sha256 testedSourceRevision at milestone validation persistence (#2450) (#2470)
+- **gsd**: add /gsd wedge ack step-mode acknowledgment surface (#2159) (#2468)
+- **mcp-server**: name the holder and remedy when the single-writer guard refuses to start (#2465)
+- **subagent**: wake session when a detached dispatch completes (#2363) (#2464)
+- **tui**: stop clean repaints erasing lines never flushed to scrollback (#2463)
+- **pi-tui**: verify and expose modifyOtherKeys keyboard capability (#2372) (#2462)
+- **tui**: cap expanded tool card output and collapse \r frames (#2461)
+- **gsd**: make overlay fallback chord reachable on legacy terminals (#2371) (#2460)
+- **gsd**: honor GSD_MILESTONE_LOCK in the welcome header (#2459)
+- **gsd**: doctor stops prescribing unexecutable validate-milestone on closed milestones (#2439) (#2458)
+- **gsd**: gate completed-milestone-reopened drift on a covering milestone.completed event (#2457)
+- **gsd**: stop BROWSER_REQUIREMENT_RE flagging LLM snapshot compounds (#2436) (#2456)
+- **gsd**: reject CJK prose punctuation in verify commands at plan time and gate (#2455)
+- **pi-ai**: prefer live per-call context over cumulative claude-code usage (#2454)
+- **pi-ai**: strip images from is_error tool_result and hoist to sibling content (#2453)
+- **gsd**: record MCP workflow deadline timeouts as inconclusive, archive blocked evidence (#2452)
+- **gsd**: auto-prepare workflow MCP across providers (#731)
+- tolerate slow npm publish propagation
+- **gsd**: publish stranded durable task successes and detect the wedge (#2417)
+- **subagent**: name exit status, model, and stop reason when no valid final response (#2412)
+- **auto**: fold slice-level RESEARCH progress into parallel-research liveness snapshot (#2411)
+- **gsd**: Windows verify-gate and stale worktree removal fixes (#1987, #2087, #2338, #2399) (#2410)
+- **pi-coding-agent**: unwrap leaked parameter-wrapper strings in edit tool aliases
+- **pi-coding-agent**: recover edit tool calls that misname the edits field
+- **gsd**: recover from a stale milestone lease in the orchestrator dispatch claim path
+- use current cmux pane surface commands
+- capture Claude Code UI context before each agent turn
+- name missing slices in the browser evidence gate error
+- **model-router**: correct gpt-5.6-luna/terra capability-tier misclassification
+- **gsd**: rewrite-docs Context Mode guidance names only contracted tools
+- **gsd**: budgeted credential-cooldown retries no longer trip the liveness backstop
+
+### Changed
+- **models**: refresh generated model catalog (#2336)
+- optimize refreshToolRegistry with deterministic cache and active-tool guard
+
 ## [1.20.1] - 2026-09-18
 
 ### Fixed

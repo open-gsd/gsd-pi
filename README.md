@@ -28,16 +28,16 @@ See [CHANGELOG.md](./CHANGELOG.md) for release-by-release fixes and [Legacy Rele
 ## Latest Release Highlights
 
 <!-- release-highlights:start -->
-Latest release: **v1.20.1**
+Latest release: **v1.21.0**
 
-- **gsd:** Rebuild markdown skips projections whose write is already applied.
-- **gsd:** Reclaim milestone leases held by verifiably-dead local workers.
-- **gsd:** Journal and surface discarded scheduled wakeups on non-completed units.
-- **claude-code:** Shield gsd-core-owned skills from the interactive Skill surface.
-- **gsd:** Warn when gsd_plan_slice persists zero non-skipped tasks.
-- **mcp-server:** Resolve milestone projections on flat-phase-layout projects.
-- **claude-code:** Disallow Claude Code's native task tools under gsd-pi.
-- **gsd:** Uat_result_save rejects a PASS check citing failed uat_exec evidence.
+- **gsd:** Persistent turn-state status indicator (#2374) (#2506).
+- **subagent:** Show requested model, thinking, and elapsed time for parallel workers (#2498).
+- **gsd:** Opt-in session-level idle watchdog for auto-mode (#2373) (#2493).
+- **pi:** Phase_change extension event (#1999) (#2483).
+- **pi:** AddTools/removeTools delta composition for adjust_tool_set (#1998) (#2480).
+- **pi:** Expose gsd dispatch context on before_agent_start (#1997) (#2479).
+- **gsd:** Show dynamic-routing tier in the live AUTO strip (#2395) (#2469).
+- **mcp-server:** Disclose the client-connection lifetime of gsd_execute sessions (#2467).
 
 <!-- release-highlights:end -->
 
