@@ -644,6 +644,38 @@ describe('gsd-recover', async () => {
     }
   });
 
+  test('handleRecover resolves a requires-user diagnosis with the --choice token it prints', async () => {
+    const base = createFixtureBase();
+    try {
+      writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+      writeFile(base, 'milestones/M001/slices/S01/S01-RESEARCH.md', '# Research\n\nRetain these notes.\n');
+      openDatabase(join(base, '.gsd', 'gsd.db'));
+
+      const { ctx, notes } = makeCtx();
+      await handleRecover(ctx, base, previewApproval(base));
+
+      assert.equal(notes.at(-1)?.kind, 'error');
+      assert.match(notes.at(-1)?.message ?? '', /1 item\(s\) in the Preview need a decision/);
+      assert.equal(getMilestone('M001'), null, 'an unresolved Preview applies nothing');
+      const choice = /--choice=sha256:[0-9a-f]{64}\.preserved/u.exec(notes.at(-1)?.message ?? '')?.[0];
+      assert.ok(choice, 'the unresolved diagnosis is printed with its choice token');
+
+      // The choice seals a new Preview; the operator approves that hash.
+      await handleRecover(ctx, base, choice);
+      const resolvedHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(notes.at(-1)?.message ?? '')?.[1];
+      assert.ok(resolvedHash, 'the resolved Preview is shown for approval');
+      assert.notEqual(`--preview=${resolvedHash}`, previewApproval(base));
+      assert.equal(getMilestone('M001'), null, 'a choice without hash approval applies nothing');
+
+      await handleRecover(ctx, base, `${choice} --preview=${resolvedHash}`);
+      assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+      assert.ok(getMilestone('M001'));
+    } finally {
+      closeDatabase();
+      cleanup(base);
+    }
+  });
+
   test('handleRecover applies markdown after explicit confirmation without deleting existing authority', async () => {
     const base = createFixtureBase();
     try {
@@ -1151,6 +1183,59 @@ describe('gsd-recover', async () => {
       assert.equal(db.prepare('SELECT COUNT(*) AS count FROM workflow_import_applications').get()?.count, 1);
       assert.match(notes.at(-1)?.message ?? '', /loaded retained Import Application/);
       assert.match(notes.at(-1)?.message ?? '', new RegExp(lost.receipt.operationId));
+    } finally {
+      closeDatabase();
+      cleanup(base);
+    }
+  });
+
+  test('a second recover makes a new Preview once later work closed the first Restore Window', async () => {
+    const base = createFixtureBase();
+    try {
+      writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+      openDatabase(join(base, '.gsd', 'gsd.db'));
+      const { ctx, notes } = makeCtx();
+      await handleRecover(ctx, base, previewApproval(base));
+      assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+
+      const db = _getAdapter()!;
+      const first = db.prepare(`SELECT operation_id, resulting_project_revision, resulting_authority_epoch
+        FROM workflow_import_applications`).get()!;
+      executeDomainOperation({
+        operationType: 'milestone.describe',
+        idempotencyKey: 'gsd-recover/later-work',
+        expectedRevision: Number(first.resulting_project_revision),
+        expectedAuthorityEpoch: Number(first.resulting_authority_epoch),
+        actorType: 'agent',
+        sourceTransport: 'internal',
+        payload: { milestoneId: 'M001' },
+      }, () => ({
+        events: [{
+          eventType: 'milestone.described',
+          entityType: 'milestone',
+          entityId: 'M001',
+          payload: {},
+          destinations: ['projection'],
+        }],
+        projections: [{ projectionKey: 'milestone/m001', projectionKind: 'markdown', rendererVersion: 'v1' }],
+      }));
+      writeFile(base, 'milestones/M002/M002-ROADMAP.md', ROADMAP_M001.replace('# M001:', '# M002:'));
+
+      // A plain recover no longer steers to a revert of the first import.
+      await handleRecover(ctx, base, '');
+      assert.doesNotMatch(notes.at(-1)?.message ?? '', /loaded retained Import Application/);
+      const secondHash = /Re-run \/gsd recover --preview=(sha256:[0-9a-f]{64})/u.exec(notes.at(-1)?.message ?? '')?.[1];
+      assert.ok(secondHash, notes.at(-1)?.message);
+      assert.equal(getMilestone('M002'), null, 'the new Preview is not applied without approval');
+
+      await handleRecover(ctx, base, `--preview=${secondHash}`);
+      assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+      assert.ok(getMilestone('M002'));
+      assert.equal(db.prepare('SELECT COUNT(*) AS count FROM workflow_import_applications').get()?.count, 2);
+
+      // The first Application stays reachable by id.
+      await handleRecover(ctx, base, `--application=${String(first.operation_id)}`);
+      assert.match(notes.at(-1)?.message ?? '', /loaded retained Import Application/);
     } finally {
       closeDatabase();
       cleanup(base);

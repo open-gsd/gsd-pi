@@ -83,7 +83,10 @@ async function loadExtensionModules() {
     throw new Error('selected GSD extensions do not support recovery action parsing; synchronize the extension bundle')
   }
   if (typeof formatLegacyImportForwardRepairChoice !== 'function'
-    || typeof parseLegacyImportForwardRepairChoices !== 'function') {
+    || typeof parseLegacyImportForwardRepairChoices !== 'function'
+    || typeof choiceTokenModule.parseLegacyImportPreviewChoices !== 'function'
+    || typeof workspaceModule.resolvePreparedVerifiedRecoverApplication !== 'function'
+    || typeof workspaceModule.formatUnresolvedRecoverDiagnoses !== 'function') {
     throw new Error('selected GSD extensions do not support recovery choice tokens; synchronize the extension bundle')
   }
   return {
@@ -101,6 +104,16 @@ async function loadExtensionModules() {
     parseLegacyImportRecoveryAction: parseLegacyImportRecoveryAction as ParseLegacyImportRecoveryAction,
     formatLegacyImportForwardRepairChoice: formatLegacyImportForwardRepairChoice as FormatLegacyImportForwardRepairChoice,
     parseLegacyImportForwardRepairChoices: parseLegacyImportForwardRepairChoices as ParseLegacyImportForwardRepairChoices,
+    parseLegacyImportPreviewChoices: choiceTokenModule.parseLegacyImportPreviewChoices as (
+      args: string,
+    ) => PreviewResolutionChoice[],
+    resolvePreparedVerifiedRecoverApplication: workspaceModule.resolvePreparedVerifiedRecoverApplication as (
+      prepared: PreparedVerifiedRecoverApplication,
+      choices: readonly PreviewResolutionChoice[],
+    ) => PreparedVerifiedRecoverApplication,
+    formatUnresolvedRecoverDiagnoses: workspaceModule.formatUnresolvedRecoverDiagnoses as (
+      prepared: PreparedVerifiedRecoverApplication,
+    ) => string,
   }
 }
 
@@ -117,6 +130,11 @@ interface VerifiedRecoverApplicationResult {
 interface PreparedVerifiedRecoverApplication {
   preview: { preview_hash: string }
   authorizationText: string
+}
+
+interface PreviewResolutionChoice {
+  diagnosis_id: string
+  disposition: 'preserved'
 }
 
 interface RecoveryAssessment {
@@ -235,7 +253,21 @@ export async function handleRecover(
     if (retained) {
       application = retained
     } else {
-      const prepared = await modules.prepareVerifiedRecoverApplication(basePath)
+      // Reviewed --choice tokens resolve 'requires-user' diagnoses and seal a
+      // new Preview; its hash is the one the caller approves.
+      const previewChoices = modules.parseLegacyImportPreviewChoices(args.join(' '))
+      let prepared = await modules.prepareVerifiedRecoverApplication(basePath)
+      if (previewChoices.length > 0) {
+        prepared = modules.resolvePreparedVerifiedRecoverApplication(prepared, previewChoices)
+      }
+      const unresolved = modules.formatUnresolvedRecoverDiagnoses(prepared)
+      if (unresolved) {
+        process.stderr.write(
+          `[headless] recover: the Preview needs a decision before it can be applied:\n${unresolved}\n`
+            + '[headless] recover: import not applied; fix the source markdown or re-run with the shown --choice options, then approve the new Preview hash\n',
+        )
+        return { exitCode: 1 }
+      }
       const approvedPreviewHash = args
         .map((arg) => /^--preview=(sha256:[0-9a-f]{64})$/u.exec(arg)?.[1])
         .find((value): value is string => value !== undefined)

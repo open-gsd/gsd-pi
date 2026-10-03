@@ -1,4 +1,20 @@
 import type { LegacyImportForwardRepairChoice } from "./legacy-import-forward-repair-plan.js";
+import type { LegacyImportPreviewResolutionChoice } from "./legacy-import-preview.js";
+
+// A Preview resolution choice names one 'requires-user' diagnosis. The only
+// reviewed outcome is to keep its source preserved, not imported.
+const PREVIEW_CHOICE_PATTERN = /(?:^|\s)--choice=(sha256:[0-9a-f]{64})\.preserved(?=\s|$)/gu;
+
+export function formatLegacyImportPreviewChoice(diagnosisId: string): string {
+  return `--choice=${diagnosisId}.preserved`;
+}
+
+export function parseLegacyImportPreviewChoices(args: string): LegacyImportPreviewResolutionChoice[] {
+  return [...args.matchAll(PREVIEW_CHOICE_PATTERN)].map((match) => ({
+    diagnosis_id: match[1]!,
+    disposition: "preserved",
+  }));
+}
 
 export function formatLegacyImportForwardRepairChoice(
   choice: Pick<LegacyImportForwardRepairChoice, "instructionIndex" | "targetKind" | "targetKey" | "reviewHash">,
@@ -45,7 +61,7 @@ export function parseLegacyImportForwardRepairChoices(args: string): LegacyImpor
     identities.add(identity);
     choices.push(choice);
   }
-  if (args.replace(pattern, " ").includes("--choice=")) {
+  if (args.replace(pattern, " ").replace(PREVIEW_CHOICE_PATTERN, " ").includes("--choice=")) {
     throw new Error("recover Forward Repair choice token is invalid");
   }
   return choices;

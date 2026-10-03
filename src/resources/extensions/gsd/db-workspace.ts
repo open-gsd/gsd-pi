@@ -60,6 +60,7 @@ import {
   type LegacyImportPreviewCreateInput,
   type LegacyImportPreviewResolutionChoice,
 } from "./legacy-import-preview.js";
+import { formatLegacyImportPreviewChoice } from "./legacy-import-forward-repair-choice-token.js";
 import { drillLegacyImportBackupRestore } from "./legacy-import-restore-drill.js";
 import { inspectSqliteReadOnlySnapshot } from "./sqlite-readonly.js";
 import { atomicWriteSync } from "./atomic-write.js";
@@ -681,6 +682,35 @@ export function resolvePreparedVerifiedRecoverApplication(
   return { ...evidence, preview, authorizationText: recoverAuthorizationText(preview) };
 }
 
+/**
+ * The Preview diagnoses that block Import Application, one entry per
+ * diagnosis, each with the --choice token that resolves it when the operator
+ * may decide it. Empty when the Preview can be applied.
+ */
+export function formatUnresolvedRecoverDiagnoses(prepared: Readonly<PreparedVerifiedRecoverApplication>): string {
+  const preview = prepared.preview.preview;
+  const sourceById = new Map(preview.sources.map((source) => [source.source_id, source]));
+  const dispositionById = new Map(preview.resolutions.map((resolution) => (
+    [resolution.diagnosis_id, resolution.disposition] as const
+  )));
+  return preview.diagnoses
+    .filter((diagnosis) => {
+      const disposition = dispositionById.get(diagnosis.diagnosis_id);
+      return disposition === "requires-user" || disposition === "unsupported";
+    })
+    .map((diagnosis) => {
+      const source = sourceById.get(diagnosis.source_id);
+      const location = source
+        ? `${source.path}${diagnosis.locator.line === undefined ? "" : `:${diagnosis.locator.line}`}`
+        : diagnosis.source_id;
+      const choice = dispositionById.get(diagnosis.diagnosis_id) === "requires-user"
+        ? `\n    To keep this source preserved and not imported: ${formatLegacyImportPreviewChoice(diagnosis.diagnosis_id)}`
+        : "\n    No choice can resolve this; fix the source markdown.";
+      return `  [${diagnosis.code}] ${location}\n    ${diagnosis.message}${choice}`;
+    })
+    .join("\n");
+}
+
 export function prepareVerifiedRecoverBackup(basePath: string): LegacyImportVerifiedBackup {
   const evidence = prepareVerifiedRecoverEvidence(basePath);
   return prepareVerifiedImportEvidence(
@@ -1007,14 +1037,27 @@ export function loadVerifiedRecoverApplication(operationId: string): VerifiedRec
   return result;
 }
 
+/**
+ * The recover Application a plain `gsd recover` resumes: the one that is still
+ * the head of canonical history and has no restore or Forward Repair. Once a
+ * later Domain Operation commits, its Restore Window is closed and it is
+ * settled history: recover then makes a new Preview, and the old Application
+ * is reachable only through --application. Revisions are a strict sequence,
+ * so at most one Application matches.
+ */
 function retainedRecoverApplicationId(): string | null {
   const database = _getAdapter();
   if (!database) throw new Error("gsd recover lost its open project database");
-  const rows = database.prepare(`SELECT application.operation_id
+  const operationId = database.prepare(`SELECT application.operation_id
     FROM workflow_import_applications application
     JOIN workflow_operations operation USING (operation_id)
     WHERE operation.actor_id = 'gsd-recover'
       AND operation.idempotency_key GLOB 'legacy-import/recover/*'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_operations later
+        WHERE later.project_id = operation.project_id
+          AND later.resulting_revision > operation.resulting_revision
+      )
       AND NOT EXISTS (
         SELECT 1 FROM workflow_import_forward_repairs repair
         WHERE repair.application_operation_id = application.operation_id
@@ -1022,12 +1065,7 @@ function retainedRecoverApplicationId(): string | null {
       AND NOT EXISTS (
         SELECT 1 FROM workflow_import_restores restore
         WHERE restore.application_operation_id = application.operation_id
-      )
-    ORDER BY operation.created_at, application.operation_id`).all();
-  if (rows.length > 1) {
-    throw new Error("multiple retained recover Applications require an explicit --application selection");
-  }
-  const operationId = rows[0]?.["operation_id"];
+      )`).get()?.["operation_id"];
   return typeof operationId === "string" ? operationId : retainedLegacyImportRestoreOperationId();
 }
 

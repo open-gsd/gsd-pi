@@ -19,12 +19,14 @@ import { logWarning } from "./workflow-logger.js";
 import type { DbAdapter } from "./db-adapter.js";
 import {
   applyPreparedVerifiedRecoverApplication,
+  formatUnresolvedRecoverDiagnoses,
   loadRetainedVerifiedRecoverApplication,
   closeWorkflowDatabase,
   isWorkflowDatabaseOpen,
   loadVerifiedRecoverApplication,
   openWorkflowDatabase,
   prepareVerifiedRecoverApplication,
+  resolvePreparedVerifiedRecoverApplication,
   type PreparedVerifiedRecoverApplication,
 } from "./db-workspace.js";
 import {
@@ -34,8 +36,8 @@ import {
 import {
   formatLegacyImportForwardRepairChoice,
   parseLegacyImportForwardRepairChoices,
+  parseLegacyImportPreviewChoices,
 } from "./legacy-import-forward-repair-choice-token.js";
-import { LegacyImportApplicationError } from "./legacy-import-application-error.js";
 import { LEGACY_IMPORT_RESTORE_ASSESSMENT_CONSENT_SCHEMA_VERSION, type LegacyImportRestoreAssessmentConsent } from "./legacy-import-restore-assessment.js";
 import {
   preserveProjectionChanges,
@@ -725,36 +727,6 @@ export function formatLegacyImportError(err: StructuredLegacyImportError): strin
 }
 
 /**
- * Recover builds a "Preview" (a sealed proposal of what will change) before
- * applying anything. That Preview contains a list of diagnoses (things it
-* noticed) and resolutions (how each diagnosis was resolved) with a unresolved
-* counter. This function turns each unresolved into a full list of messages
-* explaining which and where are the unresolved issues.
- */
-function formatUnresolvedRecoverDiagnoses(prepared: Readonly<PreparedVerifiedRecoverApplication>): string {
-  const preview = prepared.preview.preview;
-  const sourceById = new Map(preview.sources.map((source) => [source.source_id, source]));
-  const unresolvedIds = new Set(
-    preview.resolutions
-      .filter((resolution) => resolution.disposition === "requires-user" || resolution.disposition === "unsupported")
-      .map((resolution) => resolution.diagnosis_id),
-  );
-  const unresolved = preview.diagnoses.filter((diagnosis) => unresolvedIds.has(diagnosis.diagnosis_id));
-  if (unresolved.length === 0) {
-    return "  (no diagnosis detail available — unresolved count is nonzero but no matching diagnosis was found)";
-  }
-  return unresolved
-    .map((diagnosis) => {
-      const source = sourceById.get(diagnosis.source_id);
-      const location = source
-        ? `${source.path}${diagnosis.locator.line === undefined ? "" : `:${diagnosis.locator.line}`}`
-        : diagnosis.source_id;
-      return `  [${diagnosis.code}] ${location}\n    ${diagnosis.message}`;
-    })
-    .join("\n");
-}
-
-/**
  * `gsd recover` — Explicitly import legacy markdown into canonical DB state.
  *
  * Applies one sealed Preview through the verified Import Application boundary,
@@ -812,7 +784,27 @@ export async function handleRecover(
       ? loadVerifiedRecoverApplication(applicationId)
       : loadRetainedVerifiedRecoverApplication();
     if (!application) {
-      const prepared = prepareVerifiedRecoverApplication(basePath);
+      // Reviewed --choice tokens resolve 'requires-user' diagnoses and seal a
+      // new Preview; its hash is the one the operator approves.
+      const previewChoices = parseLegacyImportPreviewChoices(args);
+      const prepared = previewChoices.length === 0
+        ? prepareVerifiedRecoverApplication(basePath)
+        : resolvePreparedVerifiedRecoverApplication(prepareVerifiedRecoverApplication(basePath), previewChoices);
+      const unresolved = formatUnresolvedRecoverDiagnoses(prepared);
+      if (unresolved) {
+        ctx.ui.notify(
+          [
+            `gsd recover: ${prepared.preview.preview.counts.unresolved} item(s) in the Preview need a decision before this can be applied.`,
+            "",
+            unresolved,
+            "",
+            "Fix the source markdown, or re-run gsd recover with the shown --choice options, then approve the new Preview hash.",
+            "No database changes made.",
+          ].join("\n"),
+          "error",
+        );
+        return;
+      }
       if (!(await confirmRecover(
         ctx,
         prepared,
@@ -820,32 +812,10 @@ export async function handleRecover(
         markdown,
         beforeDb,
       ))) return;
-      try {
-        application = applyPreparedVerifiedRecoverApplication(
-          prepared,
-          prepared.preview.preview_hash,
-        );
-      } catch (applyErr) {
-        if (
-          applyErr instanceof LegacyImportApplicationError
-          && applyErr.code === "LEGACY_IMPORT_APPLICATION_PREVIEW_UNRESOLVED"
-        ) {
-          ctx.ui.notify(
-            [
-              `gsd recover: ${applyErr.context.unresolved_count ?? "some"} item(s) in the Preview need a decision before this can be applied.`,
-              "",
-              formatUnresolvedRecoverDiagnoses(prepared),
-              "",
-              "Fix the source markdown, or re-run with the shown --choice options once available, then retry gsd recover.",
-              "",
-              formatLegacyImportErrorBaseline(applyErr),
-            ].join("\n"),
-            "error",
-          );
-          return;
-        }
-        throw applyErr;
-      }
+      application = applyPreparedVerifiedRecoverApplication(
+        prepared,
+        prepared.preview.preview_hash,
+      );
       appliedPreview = true;
     }
     const { backup } = application;

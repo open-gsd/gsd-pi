@@ -283,6 +283,44 @@ test("headless recover no longer requires a data-loss override for non-destructi
   assert.ok(getMilestone("M001"), "non-destructive recover imports approved markdown rows");
 });
 
+test("headless recover resolves a requires-user diagnosis with the --choice token it prints", async (t) => {
+  const base = makeMarkdownFixture();
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  // A slice research note has no modeled owner: the Preview cannot decide it.
+  writeFileSync(
+    join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-RESEARCH.md"),
+    "# Research\n\nRetain these notes.\n",
+  );
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  const unresolved = await handleHeadlessRecover(base);
+  assert.equal(unresolved.exitCode, 1);
+  const choice = /--choice=sha256:[0-9a-f]{64}\.preserved/u.exec(stderr.join(""))?.[0];
+  assert.ok(choice, stderr.join(""));
+
+  stderr = [];
+  const unapproved = await handleHeadlessRecover(base, [choice]);
+  assert.equal(unapproved.exitCode, 1);
+  const resolvedHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(resolvedHash, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, [choice, `--preview=${resolvedHash}`]);
+  assert.equal(result.exitCode, 0, stderr.join(""));
+  assert.match(stderr.join(""), /gsd-recover: recovered 1M\/1S\/1T hierarchy/u);
+  assert.equal(await ensureDbOpen(base), true);
+  assert.ok(getMilestone("M001"));
+});
+
 test("headless recover uses the entrypoint-neutral retained-backup Import Application path", async (t) => {
   const base = makeCorpusFixture();
   const previousWrite = process.stderr.write;
