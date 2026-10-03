@@ -651,3 +651,26 @@ test('workflow-projections: a compat marker failure does not mark STATE.md stale
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test('workflow-projections: a normal STATE.md render from a worktree base path keeps no quarantine copy', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'gsd-projection-state-worktree-'));
+  const worktree = join(root, '.gsd', 'worktrees', 'M001');
+  const statePath = join(root, '.gsd', 'STATE.md');
+  mkdirSync(worktree, { recursive: true });
+  openDatabase(':memory:');
+  try {
+    assert.deepEqual(await renderStateProjection(worktree), { stale: false });
+    const first = readFileSync(statePath, 'utf-8');
+
+    insertMilestone({ id: 'M001', title: 'First', status: 'active' });
+    assert.deepEqual(await renderStateProjection(worktree), { stale: false });
+
+    assert.notEqual(readFileSync(statePath, 'utf-8'), first, 'the second render changed STATE.md');
+    assert.equal(existsSync(join(root, '.gsd', 'quarantine', 'projections')), false);
+  } finally {
+    closeDatabase();
+    _clearGsdRootCache();
+    clearPathCache();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

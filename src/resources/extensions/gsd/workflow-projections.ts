@@ -19,11 +19,10 @@ import type { VerificationEvidenceRow } from "./db-verification-evidence-rows.js
 import { atomicWriteSync } from "./atomic-write.js";
 import {
   computeProjectionSha,
-  deriveCompatProjectionKey,
   readCompatMarker,
   recordCompatProjectionWrite,
 } from "./compat/compat-marker.js";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { mkdirSync, existsSync } from "node:fs";
 import { logWarning } from "./workflow-logger.js";
 import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
@@ -419,9 +418,9 @@ export async function renderStateProjection(basePath: string): Promise<{ stale: 
     const statePath = join(dir, "STATE.md");
     atomicWriteSync(statePath, content);
     try {
-      const key = deriveCompatProjectionKey(statePath, [join(basePath, ".gsd")]);
-      if (readCompatMarker(basePath).projections[key]?.sha !== computeProjectionSha(content)) {
-        recordCompatProjectionWrite(basePath, statePath, content, []);
+      const markerBase = dirname(dir);
+      if (readCompatMarker(markerBase).projections["STATE.md"]?.sha !== computeProjectionSha(content)) {
+        recordCompatProjectionWrite(markerBase, statePath, content, []);
       }
     } catch (err) {
       logWarning("projection", `STATE.md compat marker write failed: ${(err as Error).message}`);
