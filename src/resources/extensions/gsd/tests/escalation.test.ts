@@ -30,6 +30,7 @@ import {
   detectPendingEscalation,
   resolveEscalation,
   claimOverrideForInjection,
+  formatLegacyEscalationNotice,
 } from "../escalation.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import {
@@ -919,6 +920,92 @@ test("ADR-046: a new escalation on the same Task withdraws the open one", (t) =>
 
   assert.equal(resolveEscalation(base, "M001", "S01", "T93", "accept", "").status, "resolved");
   assert.equal(readTaskEscalation("M001", "S01", "T93")?.userChoice, "accept");
+});
+
+test("ADR-046: the answer to a second escalation on the same Task is injected after the first was claimed", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedCompletedTask(base, "T95");
+  const escalate = (question: string) => openEscalation(base, buildEscalationArtifact({
+    taskId: "T95", sliceId: "S01", milestoneId: "M001",
+    question, options: sampleOptions, recommendation: "A", recommendationRationale: "r",
+    continueWithDefault: false,
+  }));
+
+  escalate("First question?");
+  resolveEscalation(base, "M001", "S01", "T95", "B", "");
+  assert.match(claimOverrideForInjection("M001", "S01")!.injectionBlock, /First question\?[\s\S]*\(id: B\)/);
+
+  escalate("Second question?");
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "an open escalation has no override to claim");
+  resolveEscalation(base, "M001", "S01", "T95", "A", "");
+
+  const second = claimOverrideForInjection("M001", "S01");
+  assert.ok(second, "the second resolution must be injected");
+  assert.equal(second.sourceTaskId, "T95");
+  assert.match(second.injectionBlock, /Second question\?[\s\S]*\(id: A\)/);
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "the second override is consumed exactly once");
+});
+
+test("ADR-046: the question row decides the pause and the pending override, not the task flags", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedCompletedTask(base, "T96");
+  const setFlags = (value: 0 | 1) => _getAdapter()!.prepare(
+    "UPDATE tasks SET escalation_pending = :value, escalation_awaiting_review = :value WHERE id = 'T96'",
+  ).run({ ":value": value });
+  openEscalation(base, buildEscalationArtifact({
+    taskId: "T96", sliceId: "S01", milestoneId: "M001",
+    question: "Q", options: sampleOptions, recommendation: "A", recommendationRationale: "r",
+    continueWithDefault: false,
+  }));
+
+  // The flags are lost while the question is open: the pause stays.
+  setFlags(0);
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T96")!]), "T96");
+  assert.deepEqual(listEscalationArtifacts("M001", false).map((task) => task.id), ["T96"]);
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "an open question must not be claimed");
+
+  // The flags are stale after the answer: no pause, and the override is pending.
+  assert.equal(resolveEscalation(base, "M001", "S01", "T96", "B", "").status, "resolved");
+  setFlags(1);
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T96")!]), null);
+  assert.deepEqual(listEscalationArtifacts("M001", false), []);
+  assert.equal(claimOverrideForInjection("M001", "S01")?.sourceTaskId, "T96");
+});
+
+test("ADR-046: a pause flag from before the database stored escalations still pauses, and resolve clears it", (t) => {
+  // Upgrade state: the Task was paused by a T##-ESCALATION.json escalation, so
+  // the flag and the file path are set but no question row exists.
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
+  insertTask({ id: "T97", sliceId: "S01", milestoneId: "M001", title: "T", status: "complete" });
+  const legacyPath = ".gsd/milestones/M001/slices/S01/tasks/T97-ESCALATION.json";
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET escalation_pending = 1, escalation_artifact_path = :path WHERE id = 'T97'",
+  ).run({ ":path": legacyPath });
+
+  const task = getTask("M001", "S01", "T97")!;
+  assert.equal(detectPendingEscalation([task]), "T97", "auto mode must not pass the legacy hard blocker");
+  assert.deepEqual(listEscalationArtifacts("M001", false).map((row) => row.id), ["T97"]);
+  assert.deepEqual(listEscalationArtifacts("M001", true).map((row) => row.id), ["T97"]);
+  assert.ok(formatLegacyEscalationNotice(task).includes(legacyPath), "the notice names the legacy question file");
+
+  const result = resolveEscalation(base, "M001", "S01", "T97", "accept", "");
+  assert.equal(result.status, "legacy-cleared");
+  assert.ok(result.message.includes(legacyPath));
+  assert.match(result.message, /NOT recorded/);
+
+  const cleared = getTask("M001", "S01", "T97")!;
+  assert.equal(cleared.escalation_pending, 0);
+  assert.equal(detectPendingEscalation([cleared]), null);
+  assert.deepEqual(listEscalationArtifacts("M001", true), []);
+  assert.equal(countRows("workflow_answers"), 0, "a legacy pause has no question to answer");
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "a cleared legacy pause injects nothing");
+  assert.equal(resolveEscalation(base, "M001", "S01", "T97", "accept", "").status, "not-found");
 });
 
 test("ADR-046: an escalation is limited to the three options of a choice interaction", () => {

@@ -4,8 +4,11 @@
 //
 // An escalation is an Open Question on the Task lifecycle with a presented
 // choice interaction (ADR-046). The database rows are the only record: the
-// question, options, recommendation, and the user's answer. The legacy task
-// flags mirror the pause for state derivation. Scoped to execute-task only.
+// question, options, recommendation, and the user's answer. An open question
+// is the pause, and an answered question that no prompt has claimed is the
+// pending override. The legacy task pause flags are a written mirror. They are
+// read only for a Task that has no question row: an escalation from before the
+// database stored them, which still pauses. Scoped to execute-task only.
 
 import type { EscalationArtifact, EscalationOption } from "./types.js";
 import {
@@ -16,6 +19,7 @@ import {
   findUnappliedEscalationOverride,
   setTaskBlockerSource,
   listEscalationArtifacts,
+  getTask,
 } from "./gsd-db.js";
 import type { TaskRow } from "./db-task-slice-rows.js";
 import { executeDomainOperation } from "./db/domain-operation.js";
@@ -271,15 +275,37 @@ export function readTaskEscalation(
 // ─── Detection ────────────────────────────────────────────────────────────
 
 /**
- * Returns the task id of the first task with an unresolved escalation.
- * `continueWithDefault=true` escalations keep the awaiting_review flag for
- * compatibility, but still pause dispatch until the user explicitly responds.
+ * A pause flag on a Task that has no escalation question is a legacy pause: the
+ * escalation is from before the database stored them, and its question was in
+ * a T##-ESCALATION.json file that was never imported.
+ */
+function hasPauseFlag(task: TaskRow): boolean {
+  return task.escalation_pending === 1 || task.escalation_awaiting_review === 1;
+}
+
+/** What the user must know about a legacy pause, for `/gsd escalate`. */
+export function formatLegacyEscalationNotice(task: TaskRow): string {
+  return [
+    `Task ${task.id} (slice ${task.slice_id}) is paused by an escalation from before escalations were stored in the database.`,
+    task.escalation_artifact_path
+      ? `Its question is not in the database. Read it in ${task.escalation_artifact_path}.`
+      : "Its question is not in the database.",
+    `Clear the pause with: /gsd escalate resolve ${task.id} accept`,
+    "The response is not recorded and is not carried into the next task. Give your decision to the next task yourself.",
+  ].join("\n");
+}
+
+/**
+ * Returns the task id of the first task with an unresolved escalation: an open
+ * escalation question. `continueWithDefault=true` escalations also pause
+ * dispatch until the user explicitly responds. A legacy pause flag with no
+ * question row pauses too, so an escalation from before the upgrade is not
+ * passed silently.
  */
 export function detectPendingEscalation(tasks: TaskRow[]): string | null {
   for (const t of tasks) {
-    if (t.escalation_pending !== 1 && t.escalation_awaiting_review !== 1) continue;
     const escalation = readTaskEscalation(t.milestone_id, t.slice_id, t.id);
-    if (escalation && !escalation.respondedAt) return t.id;
+    if (escalation ? !escalation.respondedAt : hasPauseFlag(t)) return t.id;
   }
   return null;
 }
@@ -287,7 +313,7 @@ export function detectPendingEscalation(tasks: TaskRow[]): string | null {
 // ─── Resolution ───────────────────────────────────────────────────────────
 
 export interface ResolveEscalationResult {
-  status: "resolved" | "not-found" | "already-resolved" | "invalid-choice" | "rejected-to-blocker";
+  status: "resolved" | "not-found" | "already-resolved" | "invalid-choice" | "rejected-to-blocker" | "legacy-cleared";
   message: string;
   chosenOption?: EscalationOption;
 }
@@ -300,6 +326,9 @@ export interface ResolveEscalationResult {
  *  3) For "reject-blocker": set blocker_discovered=1 + blocker_source='reject-escalation'.
  * Then emit audit events.
  *
+ * A legacy pause (a pause flag with no question row) is only cleared: there is
+ * no question to answer, so the response is not stored.
+ *
  * Note: this does NOT persist a decision via saveDecisionToDb — the caller
  * (commands/handlers/escalate.ts) owns that step so it can fail gracefully
  * and surface the decision id in the user-visible message.
@@ -310,7 +339,19 @@ export function resolveEscalation(
 ): ResolveEscalationResult {
   const escalation = readTaskEscalation(milestoneId, sliceId, taskId);
   if (!escalation) {
-    return { status: "not-found", message: `No escalation found for ${milestoneId}/${sliceId}/${taskId}.` };
+    // A legacy pause has no question to answer. The user can only clear it.
+    const task = getTask(milestoneId, sliceId, taskId);
+    if (!task || !hasPauseFlag(task)) {
+      return { status: "not-found", message: `No escalation found for ${milestoneId}/${sliceId}/${taskId}.` };
+    }
+    clearTaskEscalationFlags(milestoneId, sliceId, taskId);
+    return {
+      status: "legacy-cleared",
+      message: [
+        `Cleared the pause on ${taskId}. Its escalation is from before escalations were stored in the database, so the question is not in the database${task.escalation_artifact_path ? ` (legacy file: ${task.escalation_artifact_path})` : ""}.`,
+        `The response "${choice}" is NOT recorded and is NOT carried into the next task. Give your decision to the next task yourself.`,
+      ].join("\n"),
+    };
   }
   if (escalation.respondedAt) {
     return { status: "already-resolved", message: `Escalation for ${taskId} was already resolved at ${escalation.respondedAt}.` };

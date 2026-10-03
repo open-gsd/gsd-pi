@@ -75,11 +75,9 @@ export const TERMINAL_STATUS_SQL = RAW_CLOSED_STATUSES.map((s) => `'${s}'`).join
 /** Event that marks an Open Question as a Task escalation. */
 export const TASK_ESCALATION_OPENED_EVENT = "task.escalation.opened";
 
-/**
- * SQL condition, correlated with a `tasks` row, that is true when the Task has
- * a current (open or answered) escalation question.
- */
-export const TASK_HAS_ESCALATION_SQL = `EXISTS (
+/** SQL condition, correlated with a `tasks` row: the Task has an escalation question in the given status. */
+function taskEscalationExistsSql(statusCondition: string): string {
+  return `EXISTS (
   SELECT 1
   FROM workflow_item_lifecycles escalation_lifecycle
   JOIN workflow_open_questions escalation_question
@@ -92,5 +90,12 @@ export const TASK_HAS_ESCALATION_SQL = `EXISTS (
     AND escalation_lifecycle.milestone_id = tasks.milestone_id
     AND escalation_lifecycle.slice_id = tasks.slice_id
     AND escalation_lifecycle.task_id = tasks.id
-    AND escalation_question.question_status != 'withdrawn'
+    AND escalation_question.question_status ${statusCondition}
 )`;
+}
+
+/** True when the Task has a current (open or answered) escalation question. */
+export const TASK_HAS_ESCALATION_SQL = taskEscalationExistsSql("!= 'withdrawn'");
+
+/** True when the Task has an open escalation question. This is the pause. */
+export const TASK_HAS_OPEN_ESCALATION_SQL = taskEscalationExistsSql("= 'open'");

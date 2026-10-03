@@ -8,6 +8,7 @@ import { getActiveMilestoneId } from "../../state.js";
 import {
   readTaskEscalation,
   formatEscalationForDisplay,
+  formatLegacyEscalationNotice,
   resolveEscalation,
   listActionableEscalations,
   listAllEscalations,
@@ -41,9 +42,12 @@ function formatListEntries(
   if (rows.length === 0) return "No escalations.";
   return rows.map((t) => {
     const escalation = readTaskEscalation(t.milestone_id, t.slice_id, t.id);
-    const status = t.escalation_pending ? "PENDING (paused)" : t.escalation_awaiting_review ? "awaiting-review" : "resolved";
-    const question = escalation?.question ?? "(question missing)";
-    return `  ${t.slice_id}/${t.id}  [${status}]  ${question}`;
+    // A listed Task with no question row is a legacy pause.
+    if (!escalation) {
+      return `  ${t.slice_id}/${t.id}  [PENDING (paused)]  (question not in the database — run /gsd escalate show ${t.id})`;
+    }
+    const status = escalation.respondedAt ? "resolved" : escalation.continueWithDefault ? "awaiting-review" : "PENDING (paused)";
+    return `  ${t.slice_id}/${t.id}  [${status}]  ${escalation.question}`;
   }).join("\n");
 }
 
@@ -118,9 +122,13 @@ export async function handleEscalateCommand(
       ctx.ui.notify(`Task ${ref} matches multiple slices. Use Sxx/Tyy format.`, "warning");
       return;
     }
-    const escalation = row === "not-found" ? null : readTaskEscalation(milestoneId, row.slice_id, row.id);
-    if (!escalation) {
+    if (row === "not-found") {
       ctx.ui.notify(`No escalation found for ${ref} in ${milestoneId}.`, "warning");
+      return;
+    }
+    const escalation = readTaskEscalation(milestoneId, row.slice_id, row.id);
+    if (!escalation) {
+      ctx.ui.notify(formatLegacyEscalationNotice(row), "warning");
       return;
     }
     ctx.ui.notify(formatEscalationForDisplay(escalation), "info");
@@ -153,7 +161,10 @@ export async function handleEscalateCommand(
     await renderStateProjection(basePath);
 
     if (result.status !== "resolved" && result.status !== "rejected-to-blocker") {
-      ctx.ui.notify(result.message, result.status === "invalid-choice" ? "warning" : "error");
+      ctx.ui.notify(
+        result.message,
+        result.status === "invalid-choice" || result.status === "legacy-cleared" ? "warning" : "error",
+      );
       return;
     }
 

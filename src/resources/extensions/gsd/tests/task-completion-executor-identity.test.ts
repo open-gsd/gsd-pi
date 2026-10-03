@@ -13,7 +13,7 @@ process.env.GSD_WORKFLOW_EXECUTORS_MODULE = fileURLToPath(
 );
 
 import { registerDbTools } from "../bootstrap/db-tools.ts";
-import { executeDomainOperation } from "../db/domain-operation.ts";
+import { _setDomainOperationFaultForTest, executeDomainOperation } from "../db/domain-operation.ts";
 import {
   adoptOrTransitionLifecycle,
   readDomainOperationFence,
@@ -240,6 +240,7 @@ function completeCanonicalFixture(): void {
 }
 
 afterEach(() => {
+  _setDomainOperationFaultForTest(null);
   closeDatabase();
   clearGSDPreferencesCache();
   delete process.env.GSD_ADVERTISE_TOOL_ALIASES;
@@ -509,6 +510,47 @@ test("a canonical escalation is stored as an Open Question, pauses the slice, an
   assert.equal(detectPendingEscalation(getSliceTasks("M001", "S01")), null);
   assert.equal(readTaskEscalation("M001", "S01", "T01")?.userChoice, "B");
   assert.equal(row("SELECT selected_option_id FROM workflow_answers").selected_option_id, "B");
+});
+
+test("a canonical escalation that cannot be recorded leaves the completion unstaged, and a retry stages it with the pause", async () => {
+  const basePath = createBase();
+  const attemptId = claimCanonicalAttempt(basePath);
+  writeFileSync(join(basePath, ".gsd", "PREFERENCES.md"), "---\nphases:\n  mid_execution_escalation: true\n---\n");
+  clearGSDPreferencesCache();
+  const params = {
+    ...completionParams(),
+    escalation: {
+      question: "Which recovery should run?",
+      options: [
+        { id: "A", label: "Repair", tradeoffs: "Fix now." },
+        { id: "B", label: "Pause", tradeoffs: "Wait for direction." },
+      ],
+      recommendation: "A",
+      recommendationRationale: "The repair is reversible.",
+      continueWithDefault: false,
+    },
+  } as never;
+
+  _setDomainOperationFaultForTest("before-cas", "task.escalation.open");
+  const failed = await executeTaskComplete(params, basePath, invocation("pi:gsd_task_complete:first-call"));
+
+  assert.equal(failed.isError, true);
+  assert.equal(row("SELECT COUNT(*) AS count FROM workflow_open_questions").count, 0);
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count,
+    0,
+    "a completion must not be staged when its hard-blocker escalation is not recorded",
+  );
+  assert.equal(row("SELECT attempt_state FROM workflow_execution_attempts").attempt_state, "running");
+
+  // A retry is a new tool call. The Attempt is still running, so it is accepted.
+  _setDomainOperationFaultForTest(null);
+  const retried = await executeTaskComplete(params, basePath, invocation("pi:gsd_task_complete:second-call"));
+
+  assert.notEqual(retried.isError, true, String(retried.content[0]?.text));
+  assert.equal((retried.details as Record<string, unknown>).attemptId, attemptId);
+  assert.equal(row("SELECT outcome FROM workflow_attempt_results").outcome, "succeeded");
+  assert.equal(detectPendingEscalation(getSliceTasks("M001", "S01")), "T01");
 });
 
 test("a canonical escalation with an invalid payload is rejected before the completion is staged", async () => {

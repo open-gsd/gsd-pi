@@ -844,7 +844,10 @@ export function setSliceUatMd(milestoneId: string, sliceId: string, uatMd: strin
 
 // ─── ADR-011 Phase 2 escalation helpers ──────────────────────────────────
 
-/** Set pause-on-escalation state on a task. Mutually exclusive with awaiting_review. */
+/**
+ * Set pause-on-escalation state on a task. Mutually exclusive with awaiting_review.
+ * A new escalation has a new answer to deliver, so the override claim is reset.
+ */
 export function setTaskEscalationPending(
   milestoneId: string, sliceId: string, taskId: string,
 ): void {
@@ -852,12 +855,16 @@ export function setTaskEscalationPending(
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE tasks
        SET escalation_pending = 1,
-           escalation_awaiting_review = 0
+           escalation_awaiting_review = 0,
+           escalation_override_applied_at = NULL
      WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
 }
 
-/** Set awaiting-review state (the escalation requires explicit user review). Mutually exclusive with pending. */
+/**
+ * Set awaiting-review state (the escalation requires explicit user review). Mutually exclusive with pending.
+ * A new escalation has a new answer to deliver, so the override claim is reset.
+ */
 export function setTaskEscalationAwaitingReview(
   milestoneId: string, sliceId: string, taskId: string,
 ): void {
@@ -865,7 +872,8 @@ export function setTaskEscalationAwaitingReview(
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE tasks
        SET escalation_awaiting_review = 1,
-           escalation_pending = 0
+           escalation_pending = 0,
+           escalation_override_applied_at = NULL
      WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
 }

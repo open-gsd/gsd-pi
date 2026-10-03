@@ -1035,7 +1035,7 @@ export async function executeTaskComplete(
       }
       // Escalation is honored only when phases.mid_execution_escalation is
       // enabled. It is validated before any side effect and recorded as an
-      // Open Question on the Task lifecycle after the completion is staged.
+      // Open Question on the Task lifecycle before the completion is staged.
       // When escalation is disabled, a soft escalation is dropped with a
       // warning and a hard blocker is rejected.
       let escalation: EscalationArtifact | null = null;
@@ -1090,6 +1090,17 @@ export async function executeTaskComplete(
       if (resolutionsToApply.length > 0) {
         applyReworkResolutions(resolutionsToApply);
       }
+      // Open the escalation before staging: staging settles the Attempt, and a
+      // settled Attempt accepts no new completion call. If the escalation
+      // fails here, the Attempt stays running and the worker can retry. If
+      // staging fails after it, the Task is paused with no staged completion,
+      // which is the safe failure.
+      if (escalation) {
+        openTaskEscalation(basePath, escalation, {
+          ...invocation,
+          idempotencyKey: `${invocation.idempotencyKey}:escalation`,
+        });
+      }
       const staged = await stageTaskCompletion({
         invocation,
         basePath,
@@ -1139,12 +1150,6 @@ export async function executeTaskComplete(
             recoveryRoute = null;
           }
         }
-      }
-      if (escalation) {
-        openTaskEscalation(basePath, escalation, {
-          ...invocation,
-          idempotencyKey: `${invocation.idempotencyKey}:escalation`,
-        });
       }
       const stagedText = staged.nextStage === "verify"
         ? `Staged task ${params.taskId}; awaiting host verification before completion.`
