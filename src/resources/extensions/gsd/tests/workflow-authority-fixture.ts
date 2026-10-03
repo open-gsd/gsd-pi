@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  _getAdapter,
   closeDatabase,
   insertMilestone,
   insertSlice,
@@ -82,6 +83,17 @@ export async function createWorkflowAuthorityFixture(): Promise<WorkflowAuthorit
         status: "pending",
         sequence: 1,
       });
+      // The legacy-complete prerequisite S01 carries durable completion
+      // evidence, so the forward shadow repair adopts it. Without evidence it
+      // is an unresolved shadow that refuses slice completion.
+      _getAdapter()!.exec(`
+        UPDATE tasks
+        SET completed_at = '2026-07-10T00:00:00.000Z', verification_result = 'passed', full_summary_md = '# T01 summary'
+        WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01';
+        UPDATE slices
+        SET completed_at = '2026-07-10T00:00:00.000Z', full_summary_md = '# S01 summary'
+        WHERE milestone_id = 'M001' AND id = 'S01';
+      `);
     });
 
     const requirement = await saveRequirementToDb(
