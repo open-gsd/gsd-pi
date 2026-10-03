@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { hostname } from "node:os";
 import { isAbsolute, join, relative, sep } from "node:path";
 
@@ -26,12 +26,9 @@ import {
   resolveSliceFile,
   resolveTaskFile,
 } from "./paths.js";
-import { deriveState } from "./state.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
-import { workflowEventLogPath } from "./workflow-event-ledger.js";
-import { readEvents } from "./workflow-events.js";
-import { flushWorkflowProjections } from "./projection-flush.js";
+import { drainProjectionWork, readProjectionWorkBacklog } from "./projection-worker.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
 import { parseProjectionPlan } from "./schemas/parsers.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
@@ -391,23 +388,6 @@ function checkProjectionCheckboxDbStatus(basePath: string, milestoneIds: string[
       }
     }
   }
-}
-
-function isClearedByMilestoneShellProjectionFlush(
-  basePath: string,
-  issue: DoctorIssue,
-  reRenderedMilestoneIds: Set<string>,
-): boolean {
-  if (issue.code !== "checkbox_db_status_divergence") return false;
-  if (issue.scope !== "slice") return false;
-
-  const milestoneId = issue.unitId.split("/")[0] ?? "";
-  if (!reRenderedMilestoneIds.has(milestoneId)) return false;
-
-  const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-  if (!roadmapPath || !issue.file) return false;
-
-  return issue.file === relativeFile(basePath, roadmapPath);
 }
 
 function artifactExistsOnDisk(basePath: string, artifactPath: string, row?: ArtifactRow): boolean {
@@ -1227,65 +1207,74 @@ export async function checkEngineHealth(
     // Non-fatal: checkbox-vs-DB divergence check must never block doctor
   }
 
-  // ── Projection drift detection ──────────────────────────────────────────
-  // If the DB is available, check whether markdown projections are stale
-  // relative to the event log and re-render them.
-  const reRenderedMilestoneIds: string[] = [];
+  // ── Projection Work ─────────────────────────────────────────────────────
+  // Durable Projection Work is the staleness record, not file times. Repair
+  // wakes the Projection Worker; then every current row that is not rendered
+  // is reported.
   try {
     if (isDbAvailable()) {
-      const eventLogPath = workflowEventLogPath(basePath);
-      const events = readEvents(eventLogPath);
-      if (events.length > 0) {
-        const lastEventTs = new Date(events[events.length - 1]!.ts).getTime();
-        const state = await deriveState(basePath);
-        for (const milestone of state.registry) {
-          if (milestone.status === "complete") continue;
-          const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
-          if (!roadmapPath || !existsSync(roadmapPath)) {
-            try {
-              const flushed = await flushWorkflowProjections(basePath, { milestoneId: milestone.id });
-              if (!flushed.stale) {
-                fixesApplied.push(`re-rendered missing projections for ${milestone.id}`);
-                reRenderedMilestoneIds.push(milestone.id);
-              }
-            } catch {
-              // Non-fatal — projection re-render failed
-            }
-            continue;
-          }
-          const projectionMtime = statSync(roadmapPath).mtimeMs;
-          if (lastEventTs > projectionMtime) {
-            try {
-              const flushed = await flushWorkflowProjections(basePath, { milestoneId: milestone.id });
-              if (!flushed.stale) {
-                fixesApplied.push(`re-rendered stale projections for ${milestone.id}`);
-                reRenderedMilestoneIds.push(milestone.id);
-              }
-            } catch {
-              // Non-fatal — projection re-render failed
-            }
-          }
-        }
-      }
+      await checkProjectionWork(basePath, issues, fixesApplied, options?.repair === true);
     }
   } catch {
-    // Non-fatal — projection drift check must never block doctor
+    // Non-fatal — the Projection Work check must never block doctor
   }
+}
 
-  if (reRenderedMilestoneIds.length > 0) {
-    const reRendered = new Set(reRenderedMilestoneIds);
-    for (let i = issues.length - 1; i >= 0; i--) {
-      const issue = issues[i]!;
-      // flushWorkflowProjections re-renders milestone shell projections (not
-      // slice PLAN.md files), so only clear stale ROADMAP checkbox diagnostics.
-      if (isClearedByMilestoneShellProjectionFlush(basePath, issue, reRendered)) {
-        issues.splice(i, 1);
-        continue;
-      }
-      if (issue.code === "artifact_file_missing" && issue.file && artifactExistsOnDisk(basePath, issue.file)) {
-        issues.splice(i, 1);
-      }
+/**
+ * Report current Projection Work that is not rendered. Under repair, drain
+ * due work first. Exported for direct testing.
+ */
+export async function checkProjectionWork(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  repair: boolean,
+): Promise<void> {
+  if (repair) {
+    const drained = await drainProjectionWork(basePath);
+    if (drained.delivered > 0) fixesApplied.push(`delivered ${drained.delivered} Projection Work row(s)`);
+  }
+  const unowned = new Map<string, number>();
+  for (const entry of readProjectionWorkBacklog()) {
+    if (!entry.hasRenderer) {
+      unowned.set(entry.projectionKind, (unowned.get(entry.projectionKind) ?? 0) + 1);
+      continue;
     }
+    if (entry.deliveryState === "dead_letter") {
+      issues.push({
+        severity: "warning",
+        code: "projection_work_dead_letter",
+        scope: "project",
+        unitId: entry.projectionKey,
+        message: `Projection ${entry.projectionKey} (${entry.projectionKind}) stopped retrying after ${entry.attemptCount} failed attempt(s): ${entry.lastError}. Its files stay stale until the next change to it or \`/gsd rebuild markdown\`.`,
+        file: ".gsd/gsd.db",
+        fixable: false,
+      });
+      continue;
+    }
+    issues.push({
+      severity: entry.attemptCount > 0 ? "warning" : "info",
+      code: "projection_work_pending",
+      scope: "project",
+      unitId: entry.projectionKey,
+      message: entry.attemptCount > 0
+        ? `Projection ${entry.projectionKey} (${entry.projectionKind}) failed ${entry.attemptCount} time(s): ${entry.lastError}. Next attempt at ${entry.nextAttemptAt}.`
+        : `Projection ${entry.projectionKey} (${entry.projectionKind}) is ${entry.deliveryState} and not rendered yet.`,
+      file: ".gsd/gsd.db",
+      fixable: true,
+    });
+  }
+  if (unowned.size > 0) {
+    const kinds = [...unowned].map(([kind, count]) => `${kind}: ${count}`).join(", ");
+    issues.push({
+      severity: "info",
+      code: "projection_work_unrendered",
+      scope: "project",
+      unitId: "projection-work",
+      message: `Projection Work with no registered renderer stays pending (${kinds}). These rows are never reported as rendered.`,
+      file: ".gsd/gsd.db",
+      fixable: false,
+    });
   }
 }
 

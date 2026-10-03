@@ -23,6 +23,7 @@ import {
   openDatabase,
   readDomainOperationFence,
 } from "../gsd-db.ts";
+import { stripProjectionStamp } from "../markdown-renderer.ts";
 import { clearPathCache } from "../paths.ts";
 import {
   handleCompleteMilestone,
@@ -428,6 +429,8 @@ test("superseded completion preserves a byte-identical summary owned by a newer 
   assert.equal(completion.current, false);
   assert.equal(completion.stale, true);
   assert.equal(completion.superseded, true);
-  assert.equal(readFileSync(completion.summaryPath, "utf8"), newerSummary);
+  // The Projection Worker re-renders the newer completion's summary from the
+  // DB, which adds the state-version stamp; the content is the newer one.
+  assert.equal(stripProjectionStamp(readFileSync(completion.summaryPath, "utf8")), newerSummary);
   assert.equal(getMilestone("M001")?.status, "complete");
 });

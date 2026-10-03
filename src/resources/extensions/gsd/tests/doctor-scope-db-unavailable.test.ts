@@ -12,7 +12,7 @@ import {
   openDatabase,
   _setStartupSchemaDetectionForTest,
 } from "../gsd-db.ts";
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { filterDoctorIssues } from "../doctor-format.ts";
@@ -236,92 +236,6 @@ test("checkEngineHealth reports checkbox divergence against DB status", async (t
     divergences.map((issue) => issue.unitId).sort(),
     ["M001/S01", "M001/S01/T01"],
   );
-});
-
-test("checkEngineHealth keeps PLAN checkbox divergence after stale projection flush", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-checkbox-plan-drift-"));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-
-  const gsdDir = join(base, ".gsd");
-  mkdirSync(gsdDir, { recursive: true });
-
-  openDatabase(join(gsdDir, "gsd.db"));
-  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], sequence: 1 });
-  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task", status: "complete", sequence: 1 });
-
-  const roadmap = await renderRoadmapFromDb(base, "M001");
-  if ("skipped" in roadmap) assert.fail("planned milestone should render a roadmap");
-  const plan = await renderPlanFromDb(base, "M001", "S01");
-
-  writeFileSync(roadmap.roadmapPath, readFileSync(roadmap.roadmapPath, "utf-8").replace("- [ ] **S01:", "- [x] **S01:"), "utf-8");
-  writeFileSync(plan.planPath, readFileSync(plan.planPath, "utf-8").replace("- [x] **T01**:", "- [ ] **T01**:"), "utf-8");
-  appendEvent(base, {
-    cmd: "complete-task",
-    params: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
-    ts: "2999-01-01T00:00:00.000Z",
-    actor: "agent",
-  });
-
-  const issues: any[] = [];
-  const fixes: string[] = [];
-  await checkEngineHealth(base, issues, fixes);
-
-  const divergences = issues.filter((issue) => issue.code === "checkbox_db_status_divergence");
-  assert.deepEqual(
-    divergences.map((issue) => issue.unitId),
-    ["M001/S01/T01"],
-    "stale ROADMAP divergence is cleared after re-render, but stale PLAN task divergence remains",
-  );
-  assert.ok(fixes.includes("re-rendered stale projections for M001"));
-  assert.match(readFileSync(plan.planPath, "utf-8"), /- \[ \] \*\*T01\*\*:/);
-});
-
-test("checkEngineHealth retains ROADMAP divergence when projection repair remains stale", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-roadmap-repair-stale-"));
-  const gsdDir = join(base, ".gsd");
-  mkdirSync(gsdDir, { recursive: true });
-  openDatabase(join(gsdDir, "gsd.db"));
-  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
-  insertSlice({
-    id: "S01",
-    milestoneId: "M001",
-    title: "Slice",
-    status: "pending",
-    risk: "low",
-    depends: [],
-    sequence: 1,
-  });
-  const roadmap = await renderRoadmapFromDb(base, "M001");
-  if ("skipped" in roadmap) assert.fail("planned milestone should render a roadmap");
-  writeFileSync(
-    roadmap.roadmapPath,
-    readFileSync(roadmap.roadmapPath, "utf-8").replace("- [ ] **S01:", "- [x] **S01:"),
-    "utf-8",
-  );
-  appendEvent(base, {
-    cmd: "complete-slice",
-    params: { milestoneId: "M001", sliceId: "S01" },
-    ts: "2999-01-01T00:00:00.000Z",
-    actor: "agent",
-  });
-
-  const roadmapDir = dirname(roadmap.roadmapPath);
-  chmodSync(roadmapDir, 0o555);
-  t.after(() => {
-    chmodSync(roadmapDir, 0o755);
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  const issues: any[] = [];
-  const fixes: string[] = [];
-  await checkEngineHealth(base, issues, fixes);
-
-  assert.deepEqual(
-    issues.filter((issue) => issue.code === "checkbox_db_status_divergence").map((issue) => issue.unitId),
-    ["M001/S01"],
-  );
-  assert.equal(fixes.includes("re-rendered stale projections for M001"), false);
 });
 
 test("checkEngineHealth ignores stale suffixed flat-phase duplicate when bare milestone exists", async (t) => {
@@ -1317,55 +1231,4 @@ test("checkEngineHealth reports missing CONTEXT and RESEARCH artifacts as user-c
     fixes.some((fix) => fix === "skipped user-authored RESEARCH artifact milestones/M002/M002-RESEARCH.md (content cannot be regenerated from the database)"),
     "repair output should explain skipped RESEARCH content",
   );
-});
-
-test("checkEngineHealth clears artifact_file_missing after projection re-render recreates the file", async (t) => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-stale-missing-artifact-"));
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-
-  const gsdDir = join(base, ".gsd");
-  mkdirSync(gsdDir, { recursive: true });
-
-  openDatabase(join(gsdDir, "gsd.db"));
-  insertMilestone({ id: "M001", title: "Foundation", status: "active", planning: { vision: "Ship the foundation." } });
-  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [], sequence: 1 });
-  insertArtifact({
-    path: "phases/01-foundation/01-ROADMAP.md",
-    artifact_type: "ROADMAP",
-    milestone_id: "M001",
-    slice_id: null,
-    task_id: null,
-    full_content: "# stale row only\n",
-  });
-  // CONTEXT is not re-rendered by flushWorkflowProjections, so its missing-file
-  // diagnostic must survive the post-re-render cleanup (guards against the
-  // clearing logic over-broadening to artifacts the same run did not recreate).
-  insertArtifact({
-    path: "phases/01-foundation/01-CONTEXT.md",
-    artifact_type: "CONTEXT",
-    milestone_id: "M001",
-    slice_id: null,
-    task_id: null,
-    full_content: "# stale context row only\n",
-  });
-  appendEvent(base, {
-    cmd: "plan-milestone",
-    params: { milestoneId: "M001" },
-    ts: "2999-01-01T00:00:00.000Z",
-    actor: "agent",
-  });
-
-  const issues: any[] = [];
-  const fixes: string[] = [];
-  await checkEngineHealth(base, issues, fixes);
-
-  assert.ok(fixes.includes("re-rendered missing projections for M001"));
-  assert.equal(
-    issues.some((issue) => issue.code === "artifact_file_missing" && issue.file === "phases/01-foundation/01-ROADMAP.md"),
-    false,
-    "doctor should not report a missing artifact that projection repair recreated in the same run",
-  );
-  const contextIssue = issues.find((issue) => issue.code === "artifact_user_content_missing" && issue.file === "phases/01-foundation/01-CONTEXT.md");
-  assert.ok(contextIssue, "doctor should still report missing user content that projection repair did not recreate");
-  assert.equal(contextIssue.severity, "warning");
 });

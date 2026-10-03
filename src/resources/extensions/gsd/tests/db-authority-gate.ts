@@ -145,12 +145,13 @@ export function snapshotWorkflowTables(): Record<string, unknown[]> {
 
 /**
  * Commit one Domain Operation that sets a canonical lifecycle row and enqueues
- * one Projection Work row of `projectionKind`.
+ * one Projection Work row of `projectionKind` under `projectionKey`.
  */
 export function seedLifecycle(
   input: Parameters<typeof adoptOrTransitionLifecycle>[1],
   key: string,
   projectionKind = "markdown",
+  projectionKey = `db-authority-gate/${key.toLowerCase()}`,
 ): void {
   const fence = readDomainOperationFence();
   executeDomainOperation({
@@ -173,7 +174,7 @@ export function seedLifecycle(
         destinations: ["projection"],
       }],
       projections: [{
-        projectionKey: `db-authority-gate/${key.toLowerCase()}`,
+        projectionKey,
         projectionKind,
         rendererVersion: "v1",
       }],

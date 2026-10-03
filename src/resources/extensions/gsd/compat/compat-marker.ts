@@ -5,12 +5,35 @@
 // gsd-pi's own writes from external edits whose exact bytes must be preserved.
 // gsd-core is oblivious to this file and ignores it.
 
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, isAbsolute, relative, resolve } from "node:path";
 import { atomicWriteSync } from "../atomic-write.js";
 import { computeProjectionSha } from "../projection-content-hash.js";
 import { isSafeProjectionKey, isValidCompatMarker } from "./compat-marker-validation.js";
 export { computeProjectionSha, normalizeForHash } from "../projection-content-hash.js";
+
+// Files a Projection Worker render wrote or confirmed, keyed by absolute path,
+// with the sha256 of the exact bytes on disk. Scoped to the async render call.
+const renderedProjectionFiles = new AsyncLocalStorage<Map<string, string>>();
+
+/** Note a projection file whose bytes are now on disk, for the render in progress. */
+export function noteRenderedProjectionFile(filePath: string, content: string): void {
+  renderedProjectionFiles.getStore()?.set(
+    resolve(filePath),
+    createHash("sha256").update(content).digest("hex"),
+  );
+}
+
+/** Run one render and return each projection file it wrote or confirmed, with that file's hash. */
+export async function collectRenderedProjectionFiles(
+  render: () => Promise<void>,
+): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  await renderedProjectionFiles.run(files, render);
+  return files;
+}
 
 /** Current marker schema version. Bump on breaking format changes + migrate. */
 export const COMPAT_MARKER_SCHEMA = 2;
@@ -193,6 +216,7 @@ export function recordCompatProjectionWrite(
   content: string,
   entities: string[],
 ): void {
+  noteRenderedProjectionFile(filePath, content);
   const projectionPath = deriveCompatProjectionKey(filePath, [join(basePath, ".gsd")]);
   // Projection keys are resolved under .gsd; never persist one that escapes
   // that root.

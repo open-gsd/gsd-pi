@@ -26,7 +26,7 @@
 // They search for parser names that no longer exist, so they cannot fail.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 
@@ -45,7 +45,8 @@ import {
 import { getLegacyTelemetry, resetLegacyTelemetry } from "../legacy-telemetry.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
 import { analyzeParallelEligibility } from "../parallel-eligibility.ts";
-import { rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
+import { resolveMilestoneFile } from "../paths.ts";
+import { drainProjectionWork } from "../projection-worker.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { reconcileBeforeDispatch } from "../state-reconciliation/index.ts";
 import { executeMilestoneStatus } from "../tools/workflow-tool-executors.ts";
@@ -302,17 +303,22 @@ describe("G4: the write fence used by the per-tool gates", () => {
 });
 
 describe("G5: a render failure after commit does not lose the projection", () => {
-  test("failed Projection Work stays pending and the next drain renders it", async () => {
+  test("only the failed key stays pending and the next drain renders it", async () => {
     const base = await openFixture();
+    insertMilestone({ id: "M002", title: "Second milestone", status: "active" });
     assert.deepEqual((await renderAllFromDb(base)).errors, []);
-    const roadmapPath = (readdirSync(join(base, ".gsd"), { recursive: true }) as string[])
-      .map((entry) => join(base, ".gsd", entry))
-      .find((path) => path.endsWith("ROADMAP.md"));
-    assert.ok(roadmapPath, "fixture renders a ROADMAP projection");
-    const work = () => db().prepare(`
-      SELECT delivery_state, last_error FROM workflow_projection_work
-      WHERE projection_key = 'db-authority-gate/render-failure'
-    `).get() as { delivery_state: string; last_error: string };
+    const roadmapPath = resolveMilestoneFile(base, "M001", "ROADMAP");
+    assert.ok(roadmapPath && existsSync(roadmapPath), "fixture renders the M001 ROADMAP projection");
+    const work = (key: string) => db().prepare(`
+      SELECT delivery_state, attempt_count, last_error, next_attempt_at, rendered_content_hash
+      FROM workflow_projection_work WHERE projection_key = :key
+    `).get({ ":key": key }) as {
+      delivery_state: string;
+      attempt_count: number;
+      last_error: string;
+      next_attempt_at: string;
+      rendered_content_hash: string | null;
+    };
 
     rmSync(roadmapPath);
     _setManagedMutationBoundaryForTest((_boundary, path) => {
@@ -321,26 +327,50 @@ describe("G5: a render failure after commit does not lose the projection", () =>
     seedLifecycle(
       { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "in_progress" },
       "render-failure",
-      "state",
+      "slice-lifecycle",
+      "lifecycle/m001/s02",
     );
-    const failed = await rebuildMarkdownProjectionsFromDb(base);
+    seedLifecycle(
+      { itemKind: "milestone", milestoneId: "M002", lifecycleStatus: "in_progress" },
+      "render-ok",
+      "milestone-lifecycle",
+      "lifecycle/m002",
+    );
+    const now = new Date();
+    const failed = await drainProjectionWork(base, { now });
 
-    assert.notDeepEqual(failed.errors, [], "the obstructed render reports an error");
-    assert.equal(work().delivery_state, "pending", "failed work is kept for the next drain");
-    assert.notEqual(work().last_error, "", "failed work records the error");
+    assert.equal(failed.delivered, 1, "the healthy key is delivered");
+    assert.match(failed.errors.join("\n"), /lifecycle\/m001\/s02: .*injected render failure/);
+    assert.equal(work("lifecycle/m001/s02").delivery_state, "pending", "failed work is kept for the next drain");
+    assert.match(work("lifecycle/m001/s02").last_error, /injected render failure/);
+    assert.equal(work("lifecycle/m001/s02").rendered_content_hash, null);
+    assert.equal(work("lifecycle/m002").delivery_state, "rendered");
+    assert.match(String(work("lifecycle/m002").rendered_content_hash), /^sha256:[0-9a-f]{64}$/);
 
     _setManagedMutationBoundaryForTest(null);
-    await new Promise((resolve) => setTimeout(resolve, 20)); // next_attempt_at is a few ms ahead
-    const retried = await rebuildMarkdownProjectionsFromDb(base);
+    assert.equal((await drainProjectionWork(base, { now })).delivered, 0, "no retry before the retry time");
+    const retried = await drainProjectionWork(base, { now: new Date(work("lifecycle/m001/s02").next_attempt_at) });
     const retriedBytes = readFileSync(roadmapPath, "utf-8");
 
     assert.deepEqual(retried.errors, []);
-    assert.equal(work().delivery_state, "rendered");
+    assert.equal(retried.delivered, 1);
+    assert.equal(work("lifecycle/m001/s02").delivery_state, "rendered");
+    assert.equal(work("lifecycle/m001/s02").last_error, "");
     rmSync(roadmapPath);
     assert.deepEqual((await renderAllFromDb(base)).errors, []);
     assert.equal(retriedBytes, readFileSync(roadmapPath, "utf-8"), "retry bytes equal a clean render");
-    // Work of kind "state" is settled as rendered, so STATE.md must exist.
-    expectedFail("P08", () => assert.ok(existsSync(join(base, ".gsd", "STATE.md"))));
+
+    seedLifecycle(
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "in_progress" },
+      "state-render",
+      "state",
+      "project/authority",
+    );
+    await drainProjectionWork(base, { now: new Date(Date.now() + 86_400_000) });
+    expectedFail("P08", () => {
+      assert.equal(work("project/authority").delivery_state, "rendered");
+      assert.ok(existsSync(join(base, ".gsd", "STATE.md")));
+    });
   });
 });
 

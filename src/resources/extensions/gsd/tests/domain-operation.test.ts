@@ -45,8 +45,10 @@ import {
 } from "../legacy-import-preview.ts";
 import { rebuildMarkdownProjectionsFromDb } from "../commands-maintenance.ts";
 import {
-  captureCurrentProjectionWork,
-  settleProjectionWork,
+  claimProjectionWork,
+  listDueProjectionWork,
+  settleFailedProjectionWork,
+  settleRenderedProjectionWork,
 } from "../db/writers/projection-work-delivery.ts";
 
 const tempDirs = new Set<string>();
@@ -407,28 +409,35 @@ test("one operation atomically commits provenance, ordered events, outbox, proje
   );
 });
 
-test("projection rebuild delivers current durable Projection Work", async (t) => {
+test("projection rebuild leaves work that no renderer owns pending", async (t) => {
   const dbPath = openFixture(t);
   execute();
 
   const result = await rebuildMarkdownProjectionsFromDb(dirname(dbPath));
 
   assert.deepEqual(result.errors, []);
-  const projection = row(`
-    SELECT delivery_state, attempt_count, rendered_content_hash
-    FROM workflow_projection_work
-  `);
-  assert.equal(projection["delivery_state"], "rendered");
-  assert.equal(projection["attempt_count"], 1);
-  assert.match(String(projection["rendered_content_hash"]), /^sha256:[0-9a-f]{64}$/);
+  assert.equal(result.delivered, 0);
+  assert.deepEqual(
+    row("SELECT delivery_state, attempt_count, rendered_content_hash FROM workflow_projection_work"),
+    { delivery_state: "pending", attempt_count: 0, rendered_content_hash: null },
+  );
 });
+
+function claimOnlyHead(now: Date) {
+  const [head] = listDueProjectionWork(now);
+  assert.ok(head, "one pending head is due");
+  const claim = claimProjectionWork(head, "test-worker", now, new Date(now.getTime() + 60_000));
+  assert.ok(claim, "the pending head is claimed");
+  return claim;
+}
 
 test("failed projection delivery records diagnostic retry state", (t) => {
   openFixture(t);
   execute();
+  const now = new Date();
+  const retryAt = new Date(now.getTime() + 1_000);
 
-  const batch = captureCurrentProjectionWork();
-  assert.equal(settleProjectionWork(batch, { outcome: "failed", error: "disk full" }), 1);
+  assert.equal(settleFailedProjectionWork(claimOnlyHead(now), "disk full", now, retryAt), true);
 
   const projection = row(`
     SELECT delivery_state, attempt_count, next_attempt_at, last_error
@@ -436,22 +445,36 @@ test("failed projection delivery records diagnostic retry state", (t) => {
   `);
   assert.equal(projection["delivery_state"], "pending");
   assert.equal(projection["attempt_count"], 1);
-  assert.match(String(projection["next_attempt_at"]), /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(projection["next_attempt_at"], retryAt.toISOString());
   assert.equal(projection["last_error"], "disk full");
+  assert.deepEqual(listDueProjectionWork(now), [], "the row is not due before its retry time");
+  assert.equal(listDueProjectionWork(retryAt).length, 1, "the row is due at its retry time");
 });
 
-test("projection delivery leaves work enqueued during rendering pending", (t) => {
+test("failed projection delivery without a retry time is dead-lettered", (t) => {
+  openFixture(t);
+  execute();
+  const now = new Date();
+
+  assert.equal(settleFailedProjectionWork(claimOnlyHead(now), "renderer crashed", now, null), true);
+
+  assert.deepEqual(
+    row("SELECT delivery_state, attempt_count, last_error, rendered_content_hash FROM workflow_projection_work"),
+    { delivery_state: "dead_letter", attempt_count: 1, last_error: "renderer crashed", rendered_content_hash: null },
+  );
+  assert.deepEqual(listDueProjectionWork(new Date(now.getTime() + 86_400_000)), []);
+});
+
+test("projection delivery cannot settle a claimed row that a newer revision superseded", (t) => {
   openFixture(t);
   const first = execute();
-  const renderedBatch = captureCurrentProjectionWork();
+  const now = new Date();
+  const claim = claimOnlyHead(now);
   const second = execute(
     request({ idempotencyKey: "transport/request-2", expectedRevision: 1 }),
   );
 
-  assert.equal(settleProjectionWork(renderedBatch, {
-    outcome: "rendered",
-    contentHash: `sha256:${"a".repeat(64)}`,
-  }), 0);
+  assert.equal(settleRenderedProjectionWork(claim, `sha256:${"a".repeat(64)}`, now), false);
   assert.deepEqual(
     rows(`
       SELECT projection_work_id, delivery_state, rendered_content_hash
@@ -461,7 +484,7 @@ test("projection delivery leaves work enqueued during rendering pending", (t) =>
     [
       {
         projection_work_id: first.projectionWorkIds[0],
-        delivery_state: "pending",
+        delivery_state: "claimed",
         rendered_content_hash: null,
       },
       {

@@ -19,6 +19,7 @@ import { buildVisualBriefPrompt, parseVisualBriefArgs, VISUAL_BRIEF_USAGE } from
 import { GSD_CORE_IMPLEMENTED_CATALOG } from "../../commands-gsd-core.js";
 import { GSD_CORE_ALIAS_CATALOG } from "../gsd-core-aliases.js";
 import { readCurrentTaskRecoveryRoute } from "../../task-recovery-domain-operation.js";
+import { readProjectionWorkBacklog } from "../../projection-worker.js";
 
 export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
   const summaryLines = [
@@ -675,6 +676,20 @@ export function formatTextStatus(state: GSDState, basePath?: string): string {
       // Status remains available for legacy/incomplete databases that do not
       // yet have the canonical Task recovery tables.
     }
+  }
+  try {
+    const backlog = readProjectionWorkBacklog();
+    if (backlog.length > 0) {
+      const owned = backlog.filter((entry) => entry.hasRenderer);
+      const dead = owned.filter((entry) => entry.deliveryState === "dead_letter").length;
+      const retrying = owned.filter((entry) => entry.deliveryState !== "dead_letter" && entry.attemptCount > 0).length;
+      lines.push(
+        `Projection Work not rendered: ${owned.length - dead - retrying} pending, ${retrying} retrying, ` +
+        `${dead} dead-lettered, ${backlog.length - owned.length} with no renderer`,
+      );
+    }
+  } catch {
+    // Status remains available for databases without the Projection Work table.
   }
   if (state.registry.length > 0) {
     lines.push("");

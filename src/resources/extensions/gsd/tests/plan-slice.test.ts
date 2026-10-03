@@ -494,7 +494,7 @@ test('handlePlanSlice renders plan artifacts under worktree-local .gsd while usi
     const worktreePlan = join(worktree, '.gsd', 'phases', '01-test', '01-02-PLAN.md');
     const projectPlan = join(base, '.gsd', 'phases', '01-test', '01-02-PLAN.md');
     assert.ok(existsSync(worktreePlan), 'slice plan should be rendered to worktree-local .gsd');
-    assert.ok(!existsSync(projectPlan), 'slice plan should not be rendered to project .gsd');
+    assert.ok(existsSync(projectPlan), 'the Projection Worker also renders the project root, so it is not left stale');
     assert.equal(result.planPath, realpathSync(worktreePlan));
   } finally {
     cleanup(base);

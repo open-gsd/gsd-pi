@@ -147,7 +147,8 @@ test("doctor --fix reports but does not settle the orphaned Attempt", async () =
   await checkEngineHealth(basePath, issues, fixes, { repair: true });
 
   assert.ok(issues.some((issue) => issue.code === "orphaned_running_attempt"));
-  assert.equal(fixes.length, 0);
+  // Repair also delivers due Projection Work; no other fix may be applied.
+  assert.deepEqual(fixes.filter((fix) => !/^delivered \d+ Projection Work row/.test(fix)), []);
   const state = db().prepare(
     "SELECT attempt_state AS state FROM workflow_execution_attempts WHERE attempt_id = :id",
   ).get({ ":id": attemptId }) as { state: string };

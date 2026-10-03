@@ -58,7 +58,13 @@ import { stripIdPrefix } from "./strip-id-prefix.js";
 import { renderMilestoneParkedMarker } from "./milestone-park-projection.js";
 import { invalidateStateCache } from "./state.js";
 import { clearPathCache, milestonesDir, legacyMilestonesDir, isLegacyMilestonesLayout, resolveMilestonePath, relSliceFile, canonicalPhaseDirName } from "./paths.js";
-import { readCompatMarker, writeCompatMarker, computeProjectionSha, deriveCompatProjectionKey } from "./compat/compat-marker.js";
+import {
+  readCompatMarker,
+  writeCompatMarker,
+  computeProjectionSha,
+  deriveCompatProjectionKey,
+  noteRenderedProjectionFile,
+} from "./compat/compat-marker.js";
 import type { RiskLevel } from "./types.js";
 import {
   phaseDirName,
@@ -381,6 +387,7 @@ async function writeAndStore(
 ): Promise<string> {
   const stamped = stampProjectionContent(content);
   if (projectionWriteAlreadyApplied(absPath, artifactPath, stamped, basePath, opts)) {
+    noteRenderedProjectionFile(absPath, stamped);
     return stamped;
   }
   await saveFile(absPath, stamped);
@@ -414,6 +421,7 @@ async function writeAndStore(
   }
 
   invalidateCaches();
+  noteRenderedProjectionFile(absPath, stamped);
   return stamped;
 }
 
@@ -1135,93 +1143,19 @@ export async function renderAllFromDb(basePath: string): Promise<RenderAllResult
       result.skipped++;
       continue;
     }
-    // Render roadmap checkboxes
-    try {
-      const ok = await renderRoadmapCheckboxes(basePath, milestone.id);
-      if (ok) result.rendered++;
-      else result.skipped++;
-    } catch (err) {
-      result.errors.push(`roadmap ${milestone.id}: ${(err as Error).message}`);
-    }
-
-    try {
-      const ok = await renderMilestoneArtifactsFromDb(basePath, milestone.id);
-      if (ok) result.rendered++;
-      else result.skipped++;
-    } catch (err) {
-      result.errors.push(`milestone artifacts ${milestone.id}: ${(err as Error).message}`);
-    }
-
-    try {
-      const ok = await renderMilestoneSummary(basePath, milestone.id);
-      if (ok) result.rendered++;
-      else result.skipped++;
-    } catch (err) {
-      result.errors.push(`milestone summary ${milestone.id}: ${(err as Error).message}`);
-    }
+    await renderMilestoneRows(
+      basePath,
+      milestone.id,
+      slicesByMilestone.get(milestone.id) ?? [],
+      tasksBySlice,
+      result,
+    );
 
     try {
       if (renderMilestoneParkedMarker(basePath, milestone.id)) result.rendered++;
       else result.skipped++;
     } catch (err) {
       result.errors.push(`parked marker ${milestone.id}: ${(err as Error).message}`);
-    }
-
-    // Iterate slices (pre-fetched above)
-    const slices = slicesByMilestone.get(milestone.id) ?? [];
-    for (const slice of slices) {
-      // Preserve slice-scoped artifacts imported from disk, including real PLAN
-      // fallback content when task rows cannot regenerate it.
-      try {
-        const ok = await renderSliceArtifactsFromDb(basePath, milestone.id, slice.id);
-        if (ok) result.rendered++;
-        else result.skipped++;
-      } catch (err) {
-        result.errors.push(
-          `slice artifacts ${milestone.id}/${slice.id}: ${(err as Error).message}`,
-        );
-      }
-
-      // Render plan checkboxes
-      try {
-        const ok = await renderPlanCheckboxes(basePath, milestone.id, slice.id);
-        if (ok) result.rendered++;
-        else result.skipped++;
-      } catch (err) {
-        result.errors.push(
-          `plan ${milestone.id}/${slice.id}: ${(err as Error).message}`,
-        );
-      }
-
-      // Render slice summary
-      try {
-        const ok = await renderSliceSummary(basePath, milestone.id, slice.id);
-        if (ok) result.rendered++;
-        else result.skipped++;
-      } catch (err) {
-        result.errors.push(
-          `slice summary ${milestone.id}/${slice.id}: ${(err as Error).message}`,
-        );
-      }
-
-      // Iterate tasks (batched above)
-      const tasks = tasksBySlice.get(`${milestone.id}\0${slice.id}`) ?? [];
-      for (const task of tasks) {
-        try {
-          const ok = await renderTaskSummary(
-            basePath,
-            milestone.id,
-            slice.id,
-            task.id,
-          );
-          if (ok) result.rendered++;
-          else result.skipped++;
-        } catch (err) {
-          result.errors.push(
-            `task summary ${milestone.id}/${slice.id}/${task.id}: ${(err as Error).message}`,
-          );
-        }
-      }
     }
   }
 
@@ -1261,6 +1195,106 @@ export async function renderAllFromDb(basePath: string): Promise<RenderAllResult
   }
 
   return result;
+}
+
+/** Render one milestone's roadmap, artifacts, plans, and summaries from the DB. */
+export async function renderMilestoneFromDb(
+  basePath: string,
+  milestoneId: string,
+): Promise<RenderAllResult> {
+  const result: RenderAllResult = { rendered: 0, skipped: 0, errors: [] };
+  const slices = getMilestoneSlices(milestoneId);
+  const tasksBySlice = getTasksBySliceIds(slices.map((slice) => ({ milestoneId, sliceId: slice.id })));
+  await renderMilestoneRows(basePath, milestoneId, slices, tasksBySlice, result);
+  return result;
+}
+
+async function renderMilestoneRows(
+  basePath: string,
+  milestoneId: string,
+  slices: SliceRow[],
+  tasksBySlice: ReturnType<typeof getTasksBySliceIds>,
+  result: RenderAllResult,
+): Promise<void> {
+  // Render roadmap checkboxes
+  try {
+    const ok = await renderRoadmapCheckboxes(basePath, milestoneId);
+    if (ok) result.rendered++;
+    else result.skipped++;
+  } catch (err) {
+    result.errors.push(`roadmap ${milestoneId}: ${(err as Error).message}`);
+  }
+
+  try {
+    const ok = await renderMilestoneArtifactsFromDb(basePath, milestoneId);
+    if (ok) result.rendered++;
+    else result.skipped++;
+  } catch (err) {
+    result.errors.push(`milestone artifacts ${milestoneId}: ${(err as Error).message}`);
+  }
+
+  try {
+    const ok = await renderMilestoneSummary(basePath, milestoneId);
+    if (ok) result.rendered++;
+    else result.skipped++;
+  } catch (err) {
+    result.errors.push(`milestone summary ${milestoneId}: ${(err as Error).message}`);
+  }
+
+  for (const slice of slices) {
+    // Preserve slice-scoped artifacts imported from disk, including real PLAN
+    // fallback content when task rows cannot regenerate it.
+    try {
+      const ok = await renderSliceArtifactsFromDb(basePath, milestoneId, slice.id);
+      if (ok) result.rendered++;
+      else result.skipped++;
+    } catch (err) {
+      result.errors.push(
+        `slice artifacts ${milestoneId}/${slice.id}: ${(err as Error).message}`,
+      );
+    }
+
+    // Render plan checkboxes
+    try {
+      const ok = await renderPlanCheckboxes(basePath, milestoneId, slice.id);
+      if (ok) result.rendered++;
+      else result.skipped++;
+    } catch (err) {
+      result.errors.push(
+        `plan ${milestoneId}/${slice.id}: ${(err as Error).message}`,
+      );
+    }
+
+    // Render slice summary
+    try {
+      const ok = await renderSliceSummary(basePath, milestoneId, slice.id);
+      if (ok) result.rendered++;
+      else result.skipped++;
+    } catch (err) {
+      result.errors.push(
+        `slice summary ${milestoneId}/${slice.id}: ${(err as Error).message}`,
+      );
+    }
+
+    // Iterate tasks (batched by the caller)
+    const tasks = tasksBySlice.get(`${milestoneId}\0${slice.id}`) ?? [];
+    for (const task of tasks) {
+      try {
+        const ok = await renderTaskSummary(
+          basePath,
+          milestoneId,
+          slice.id,
+          task.id,
+        );
+        if (ok) result.rendered++;
+        else result.skipped++;
+      } catch (err) {
+        result.errors.push(
+          `task summary ${milestoneId}/${slice.id}/${task.id}: ${(err as Error).message}`,
+        );
+      }
+    }
+  }
 }
 
 // ─── Stale Detection ──────────────────────────────────────────────────────

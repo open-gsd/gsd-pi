@@ -629,7 +629,8 @@ test("reopen and cancel survive projection obstruction while stale artifacts and
         SELECT 1 FROM workflow_projection_work successor
         WHERE successor.supersedes_projection_work_id = workflow_projection_work.projection_work_id
       )
-  `), { delivery_state: "pending", attempt_count: 0, last_error: "" });
+  `), { delivery_state: "rendered", attempt_count: 1, last_error: "" },
+  "the reopened task has no summary to render, so the obstruction does not block delivery");
 
   // Round trip B: ready -> cancel -> reopen. Legacy/canonical raw values
   // differ again (skipped vs cancelled) and must resolve the same way.
