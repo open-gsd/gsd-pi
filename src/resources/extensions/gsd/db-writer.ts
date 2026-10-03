@@ -590,9 +590,10 @@ export async function saveDecisionToDb(
     // call. Memory rows written between merge and revert stay durable; the
     // legacy table simply doesn't grow during the cutover window.
     //
-    // The ID, the memory row and any deferral commit in one Domain
-    // Operation. A failed memory write aborts the operation.
-    const sliceRef = extractDeferredSliceRef(fields);
+    // The ID and the memory row commit in one Domain Operation. A failed
+    // memory write aborts the operation.
+    // Decision text never changes lifecycle status: a slice is cancelled
+    // only through its own Domain Operation (gsd_skip_slice).
     const fence = readDomainOperationFence(invocation.idempotencyKey);
     let savedId: string | undefined;
     const operation = executeDomainOperation({
@@ -608,13 +609,9 @@ export async function saveDecisionToDb(
       payload: planningOperationPayload(normalized),
     }, () => {
       const id = nextDecisionIdAcrossSurfaces(adapter);
-      if (sliceRef && !db.getSlice(sliceRef.milestoneId, sliceRef.sliceId)) {
-        throw new Error(`Slice ${sliceRef.milestoneId}/${sliceRef.sliceId} does not exist`);
-      }
       if (!persistDecisionToMemory(id, normalized)) {
         throw new Error(`Unable to persist decision ${id}`);
       }
-      if (sliceRef) db.updateSliceStatus(sliceRef.milestoneId, sliceRef.sliceId, 'deferred');
       savedId = id;
       return {
         events: [{
@@ -716,31 +713,6 @@ function replayedDecisionId(operationId: string): string {
     throw new Error(`decision.save operation ${operationId} has no stored decision id`);
   }
   return id;
-}
-
-/**
- * Extract a milestone/slice reference from a deferral decision.
- *
- * Detects deferrals when the slice reference is part of the deferral phrase.
- *
- * Returns { milestoneId, sliceId } if found, null otherwise.
- */
-export function extractDeferredSliceRef(
-  fields: Pick<SaveDecisionFields, 'scope' | 'decision' | 'choice'>,
-): { milestoneId: string; sliceId: string } | null {
-  const defersSlicePattern =
-    /\bdefer(?:ral|red|ring|s)?\b\s+(?:(?:of|the)\s+)*(?:slice\s+)?\b(M\d{3,4})\/(S\d{2,3})\b/i;
-  const sliceIsDeferredPattern =
-    /\b(M\d{3,4})\/(S\d{2,3})\b\s+(?:is|was|will be|should be|can be)\s+defer(?:red|ring)?\b/i;
-
-  for (const text of [fields.choice, fields.decision, fields.scope]) {
-    const match = text.match(defersSlicePattern) ?? text.match(sliceIsDeferredPattern);
-    if (match) {
-      return { milestoneId: match[1].toUpperCase(), sliceId: match[2].toUpperCase() };
-    }
-  }
-
-  return null;
 }
 
 // ─── Update Requirement in DB + Regenerate Markdown ───────────────────────
