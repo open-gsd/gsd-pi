@@ -518,7 +518,7 @@ export async function handleKnowledge(args: string, ctx: ExtensionCommandContext
   const state = await deriveState(basePath);
   const scope = state.activeMilestone?.id
     ? `${state.activeMilestone.id}${state.activeSlice ? `/${state.activeSlice.id}` : ""}`
-    : "global";
+    : "project";
 
   // Rules, Patterns and Lessons are database rows; the capture renders
   // KNOWLEDGE.md from the database right after the write.

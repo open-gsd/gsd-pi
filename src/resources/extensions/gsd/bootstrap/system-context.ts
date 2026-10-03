@@ -14,6 +14,8 @@ import { renderRuntimeContractForSystemPrompt } from "../runtime-contract.js";
 import { resolveModelWithFallbacksForUnit } from "../preferences-models.js";
 import { gsdRoot, resolveGsdRootFile, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
 import { extractIntroAndRules } from "../knowledge-parser.js";
+import { readKnowledgeMarkdown } from "../knowledge-projection.js";
+import { isDbAvailable } from "../gsd-db.js";
 import { ensureCodebaseMapFresh, readCodebaseMap } from "../codebase-generator.js";
 import { resolveRepositoryProjectRoot } from "../repository-registry.js";
 import { getActiveAutoWorktreeContext } from "../auto-worktree-session-registry.js";
@@ -177,13 +179,10 @@ async function performSessionStartupMaintenance(
   }
   if (!dbOpen) return false;
 
-  // These backfills are independent idempotent migrations. Keep them on the
-  // startup path because their rows can affect the MEMORY block for this turn,
-  // but do not make their import/IO latencies add serially.
-  await Promise.allSettled([
-    runDecisionsMemoryBackfill(ctx),
-    runKnowledgeMemoryBackfill(basePath, ctx),
-  ]);
+  // Keep the decisions backfill on the startup path because its rows can
+  // affect the MEMORY block for this turn. KNOWLEDGE.md is never read into
+  // the database here: file content enters only through an explicit import.
+  await runDecisionsMemoryBackfill(ctx);
 
   // Mark session complete before scheduling deferred work so any concurrent
   // caller that observes the completed state does not re-enter maintenance.
@@ -233,24 +232,6 @@ async function runDecisionsMemoryBackfill(ctx: ExtensionContext): Promise<void> 
     }
   } catch (e) {
     logWarning("bootstrap", `decisions backfill failed: ${(e as Error).message}`);
-  }
-}
-
-async function runKnowledgeMemoryBackfill(
-  basePath: string,
-  ctx: ExtensionContext,
-): Promise<void> {
-  // ADR-013 Stage 2b: KNOWLEDGE.md Patterns + Lessons backfill. Idempotent
-  // and best-effort — first run migrates rows into memories; repeated turns
-  // skip this session-once maintenance.
-  try {
-    const { backfillKnowledgeToMemories } = await import("../knowledge-backfill.js");
-    const writtenK = backfillKnowledgeToMemories(basePath);
-    if (writtenK > 0) {
-      ctx.ui.notify(`GSD: backfilled ${writtenK} KNOWLEDGE.md row${writtenK === 1 ? "" : "s"} into the memory store.`, "info");
-    }
-  } catch (e) {
-    logWarning("bootstrap", `KNOWLEDGE.md backfill failed: ${(e as Error).message}`);
   }
 }
 
@@ -661,20 +642,18 @@ export function loadKnowledgeBlock(gsdHomeDir: string, cwd: string): { block: st
     }
   }
 
-  // 2. Project knowledge (.gsd/KNOWLEDGE.md) — project-specific.
-  //    ADR-013 Stage 2b: Patterns and Lessons are projected from the
-  //    memories table and already reach the LLM via loadMemoryBlock. Inject
-  //    only the intro prose + `## Rules` section here to avoid duplicating
-  //    Patterns/Lessons content in the prompt. Rules are rendered into
-  //    this file from `memories` rows with category "rule".
+  // 2. Project knowledge — project-specific, read from the database
+  //    (readKnowledgeMarkdown), not from the file on disk. Patterns and
+  //    Lessons already reach the LLM via loadMemoryBlock, so inject only the
+  //    intro prose + `## Rules` section here to avoid duplicating them.
+  //    Without an open database there is no project knowledge to inject.
   let projectKnowledge = "";
   const knowledgePath = resolveGsdRootFile(cwd, "KNOWLEDGE");
-  if (existsSync(knowledgePath)) {
+  if (isDbAvailable()) {
     try {
-      const raw = readFileSync(knowledgePath, "utf-8").trim();
-      if (raw) projectKnowledge = extractIntroAndRules(raw).trim();
+      projectKnowledge = extractIntroAndRules(readKnowledgeMarkdown(cwd)).trim();
     } catch (e) {
-      logWarning("bootstrap", `project knowledge file read failed: ${(e as Error).message}`);
+      logWarning("bootstrap", `project knowledge read failed: ${(e as Error).message}`);
     }
   }
 

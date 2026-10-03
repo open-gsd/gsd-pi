@@ -12,11 +12,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { loadKnowledgeBlock } from "../bootstrap/system-context.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { extractIntroAndRules } from "../knowledge-parser.ts";
 
 function makeTmpProject(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-knowledge-rules-only-"));
   mkdirSync(join(base, ".gsd"), { recursive: true });
+  // Project knowledge is read from the database; file rows not yet imported are kept.
+  openDatabase(join(base, ".gsd", "gsd.db"));
   return base;
 }
 
@@ -27,6 +30,11 @@ function makeTmpHome(): string {
 }
 
 function cleanup(...dirs: string[]): void {
+  try {
+    closeDatabase();
+  } catch {
+    /* noop */
+  }
   for (const dir of dirs) {
     try {
       rmSync(dir, { recursive: true, force: true });

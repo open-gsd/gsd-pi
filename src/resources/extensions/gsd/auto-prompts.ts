@@ -13,6 +13,7 @@ import { loadFile, parseContinue, parseSummary, formatOverridesSection, parseTas
 import { loadActiveOverrides } from "./overrides.js";
 import type { Override } from "./files.js";
 import { extractVerdict } from "./verdict-parser.js";
+import { readKnowledgeMarkdown } from "./knowledge-projection.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
 import {
   resolveMilestoneFile, resolveSliceFile, resolveSlicePath,
@@ -714,7 +715,14 @@ export async function inlineFileSmart(
   if (!content) {
     return `### ${label}\nSource: \`${relPath}\`\n\n_(not found — file does not exist yet)_`;
   }
+  return inlineContentSmart(content, relPath, label, query, threshold);
+}
 
+/** inlineFileSmart for content that is already in memory. */
+function inlineContentSmart(
+  content: string, relPath: string, label: string,
+  query?: string, threshold = 3000,
+): string {
   // For small files or no query, include full content
   if (content.length <= threshold || !query) {
     return `### ${label}\nSource: \`${relPath}\`\n\n${content.trim()}`;
@@ -1299,18 +1307,31 @@ function extractKeywords(title: string): string[] {
 }
 
 /**
- * Inline scoped KNOWLEDGE.md content based on keywords from slice title.
- * Reads KNOWLEDGE.md, filters to sections matching keywords, formats with header.
- * Returns null if no KNOWLEDGE.md exists or no sections match.
+ * Project knowledge for prompt inlines, read from the database
+ * (readKnowledgeMarkdown), never from the file on disk. `content` is "" when
+ * there is no knowledge; `unavailable` is the explicit block to inline when
+ * the DB is unavailable.
+ */
+async function readKnowledgeForPrompt(base: string): Promise<{ content: string; unavailable: string | null }> {
+  const { isDbAvailable } = await import("./gsd-db.js");
+  if (!isDbAvailable()) {
+    return { content: "", unavailable: dbReadUnavailableBlock("Project Knowledge", "workflow DB is unavailable") };
+  }
+  return { content: readKnowledgeMarkdown(base), unavailable: null };
+}
+
+/**
+ * Inline scoped project knowledge based on keywords from slice title.
+ * Reads knowledge from the database, filters to sections matching keywords,
+ * formats with header.
+ * Returns null if there is no knowledge or no sections match.
  */
 export async function inlineKnowledgeScoped(
   base: string,
   keywords: string[],
 ): Promise<string | null> {
-  const knowledgePath = resolveGsdRootFile(base, "KNOWLEDGE");
-  if (!existsSync(knowledgePath)) return null;
-
-  const content = await loadFile(knowledgePath);
+  const { content, unavailable } = await readKnowledgeForPrompt(base);
+  if (unavailable) return unavailable;
   if (!content) return null;
 
   // Import queryKnowledge from context-store
@@ -1332,7 +1353,7 @@ export async function inlineKnowledgeScoped(
  * real project) on every invocation. This helper scopes by caller-supplied
  * keywords and caps the payload at `maxChars` (default 12,000 chars).
  *
- * Returns null when no KNOWLEDGE.md exists or no entries match any keyword.
+ * Returns null when there is no knowledge or no entries match any keyword.
  */
 export async function inlineKnowledgeBudgeted(
   base: string,
@@ -1346,10 +1367,8 @@ export async function inlineKnowledgeBudgeted(
     ? Math.max(0, Math.min(Math.floor(raw), HARD_MAX_CHARS))
     : DEFAULT_MAX_CHARS;
 
-  const knowledgePath = resolveGsdRootFile(base, "KNOWLEDGE");
-  if (!existsSync(knowledgePath)) return null;
-
-  const content = await loadFile(knowledgePath);
+  const { content, unavailable } = await readKnowledgeForPrompt(base);
+  if (unavailable) return unavailable;
   if (!content) return null;
 
   const { queryKnowledge } = await import("./context-store.js");
@@ -2923,18 +2942,16 @@ export async function buildExecuteTaskPrompt(
     : priorSummaries;
   const carryForwardSection = await buildCarryForwardSection(effectivePriorSummaries, base);
 
-  // Inline project knowledge if available (smart-chunked for relevance)
-  const knowledgeAbsPath = resolveGsdRootFile(base, "KNOWLEDGE");
-  const knowledgeInlineET = existsSync(knowledgeAbsPath)
-    ? await inlineFileSmart(
-        knowledgeAbsPath,
+  // Inline project knowledge from the database if any (smart-chunked for relevance)
+  const knowledgeET = await readKnowledgeForPrompt(base);
+  const knowledgeContent = knowledgeET.unavailable ?? (knowledgeET.content
+    ? inlineContentSmart(
+        knowledgeET.content,
         relGsdRootFile("KNOWLEDGE"),
         "Project Knowledge",
         `${tTitle} ${sTitle}`,  // use task + slice title as relevance query
       )
-    : null;
-  // Only include if it has content (not a "not found" result)
-  const knowledgeContent = knowledgeInlineET && !knowledgeInlineET.includes("not found") ? knowledgeInlineET : null;
+    : null);
 
   // Knowledge graph: tight subgraph for this task (graceful — skipped if no graph.json)
   const graphBlockET = await inlineGraphSubgraph(base, `${tid} ${tTitle}`, { budget: 2000 });

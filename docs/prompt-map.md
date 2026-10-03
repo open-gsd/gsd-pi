@@ -94,9 +94,10 @@ Dynamic section
 ```
 
 Before this map is assembled, `buildBeforeAgentStartResult()` runs the
-session-start KNOWLEDGE backfill/projection path and then calls
-`loadKnowledgeBlock()`. That helper inlines only the Rules section of the project
-`.gsd/KNOWLEDGE.md` file; projected patterns and lessons are supplied through
+session-start KNOWLEDGE projection path and then calls
+`loadKnowledgeBlock()`. Session start never imports `.gsd/KNOWLEDGE.md` into the
+database. The helper inlines only the Rules section of the project knowledge,
+read from the database; projected patterns and lessons are supplied through
 the memories layer.
 
 Budget enforcement: `context-budget.ts` computes `preambleBudgetChars`, `summaryBudgetChars`, `verificationBudgetChars` from the model's context window. Sections are truncated at markdown section boundaries, not mid-sentence.

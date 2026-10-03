@@ -10,14 +10,26 @@
 // Import bridge (until the explicit KNOWLEDGE import lands): a K/P/L row in
 // the existing file whose id has no memories row at all is not imported yet.
 // It is kept in the render so the render does not erase it. Once a row with
-// that id exists in the database, the database row wins. The file intro and
-// free-form (non-table) lines under `## Rules` are kept the same way.
+// that id exists in the database, the database row wins. Content the render
+// does not model (the intro, non-table lines in the three sections, and any
+// other `## ` section) is kept verbatim the same way, so a render never drops
+// file content that the database does not hold. The file is never imported
+// into the database implicitly.
 //
-// Called after every knowledge capture, by the Projection Worker rebuild, and
-// at session start. Output is byte-stable when nothing has changed.
+// Readers (prompt inlines, visualizer, MCP gsd_knowledge, web) use
+// readKnowledgeMarkdown / readKnowledgeEntries, which build the same content
+// from the database, so a stale file on disk does not change what they see.
+//
+// Called after every knowledge capture, after memory commands that change
+// knowledge rows, by the Projection Worker rebuild, and at session start.
+// Output is byte-stable when nothing has changed.
+
+import { dirname } from "node:path";
 
 import { atomicWriteSync } from "./atomic-write.js";
+import { recordCompatProjectionWrite } from "./compat/compat-marker.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
+import { gsdRoot } from "./paths.js";
 import {
   KNOWLEDGE_SECTIONS,
   knowledgeMdPath,
@@ -129,65 +141,126 @@ function escapeCell(value: string): string {
   return value.replace(/\s+/g, " ").replace(/\|/g, "\\|").trim();
 }
 
-/**
- * Import bridge for free-form text: the intro (text before the first `## `
- * heading) and the Rules-section lines that are not table rows. Before
- * ADR-046 both were kept verbatim and reached the agent through
- * loadKnowledgeBlock, so the render keeps them until the KNOWLEDGE import
- * can carry them.
- */
-function fileProse(existing: string): { intro: string; ruleNotes: string[] } {
-  const lines = existing.split("\n");
-  const firstHeading = lines.findIndex((l) => l.trim().startsWith("## "));
-  const intro = lines.slice(0, firstHeading === -1 ? lines.length : firstHeading).join("\n").trim();
-  const ruleNotes: string[] = [];
-  const rulesStart = lines.findIndex((l) => l.trim() === TABLES.rules.heading);
-  if (rulesStart !== -1) {
-    for (const line of lines.slice(rulesStart + 1)) {
-      const trimmed = line.trim();
-      if (trimmed.startsWith("## ")) break;
-      // Table lines (header, separator, K### and memory-id rows) are rendered from rows.
-      if (!trimmed || /^\|\s*(#|-+|K\d+|MEM\d+)\s*\|/.test(trimmed)) continue;
-      ruleNotes.push(line);
-    }
-  }
-  return { intro: intro || DEFAULT_INTRO, ruleNotes };
+interface FileProse {
+  /** Text before the first `## ` heading; empty when the file has none. */
+  intro: string;
+  /** Non-table lines under each modeled section, in file order. */
+  notes: Record<KnowledgeTable, string[]>;
+  /** Every other `## ` section, verbatim, in file order. */
+  otherSections: string[];
 }
 
 /**
- * Render `KNOWLEDGE.md` from the database. Returns the rendered content and
- * whether the file was written (skipped when byte-identical to disk).
- * Throws when the database is unavailable or the write fails.
+ * Import bridge for file content the render does not model: the intro, the
+ * non-table lines under Rules, Patterns and Lessons Learned, and any other
+ * `## ` section. The render keeps them verbatim until the KNOWLEDGE import
+ * can carry them, so a render never drops them.
  */
-export function renderKnowledgeProjection(basePath: string): KnowledgeProjectionResult {
-  const { rows, knownIds } = readDbKnowledge();
-  const existing = readKnowledgeMd(basePath);
+function fileProse(existing: string): FileProse {
+  const lines = existing.split("\n");
+  const firstHeading = lines.findIndex((l) => l.trim().startsWith("## "));
+  const intro = lines.slice(0, firstHeading === -1 ? lines.length : firstHeading).join("\n").trim();
+  const notes: Record<KnowledgeTable, string[]> = { rules: [], patterns: [], lessons: [] };
+  const otherSections: string[][] = [];
+  let section: (typeof KNOWLEDGE_SECTIONS)[number] | undefined;
+  let other: string[] | undefined;
+  for (const line of firstHeading === -1 ? [] : lines.slice(firstHeading)) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("## ")) {
+      section = KNOWLEDGE_SECTIONS.find((s) => s.heading === trimmed);
+      other = section ? undefined : [line];
+      if (other) otherSections.push(other);
+      continue;
+    }
+    if (other) {
+      other.push(line);
+      continue;
+    }
+    if (!section) continue;
+    // Table lines (header, separator, K/P/L### and memory-id rows) are rendered from rows.
+    if (new RegExp(`^\\|\\s*(#|-+|${section.idPrefix}\\d+|MEM\\d+)\\s*\\|`).test(trimmed)) continue;
+    notes[section.table].push(line);
+  }
+  // Blank lines inside a note block are kept; the ones around it are layout.
+  for (const table of Object.keys(notes) as KnowledgeTable[]) {
+    const text = notes[table].join("\n").replace(/^\s*\n/, "").trimEnd();
+    notes[table] = text.trim() ? text.split("\n") : [];
+  }
+  return { intro, notes, otherSections: otherSections.map((s) => s.join("\n").trim()) };
+}
 
-  // Import bridge: keep file rows whose id the database has never held.
+/**
+ * The rows to show for each table: active database rows plus, until the
+ * KNOWLEDGE import exists, file rows whose id the database has never held.
+ * Knowledge ids (K/P/L###) first, then rows that only have a memory id.
+ * Throws when the database is not available.
+ */
+function knowledgeRows(existing: string): Record<KnowledgeTable, RenderRow[]> {
+  const { rows, knownIds } = readDbKnowledge();
   for (const fileRow of parseKnowledgeRows(existing)) {
     if (knownIds.has(fileRow.id)) continue;
     knownIds.add(fileRow.id);
     rows[fileRow.table].push({ id: fileRow.id, cells: fileRow.cells });
   }
+  for (const table of Object.keys(rows) as KnowledgeTable[]) {
+    rows[table].sort((a, b) => Number(a.id.startsWith("MEM")) - Number(b.id.startsWith("MEM")) || a.id.localeCompare(b.id));
+  }
+  return rows;
+}
 
-  const { intro, ruleNotes } = fileProse(existing);
-
+function buildKnowledgeMarkdown(existing: string): { content: string; empty: boolean } {
+  const rows = knowledgeRows(existing);
+  const { intro, notes, otherSections } = fileProse(existing);
   const sections = KNOWLEDGE_SECTIONS.map(({ table }) => {
     const { heading, header, separator } = TABLES[table];
-    // Knowledge ids (K/P/L###) first, then rows that only have a memory id.
-    const tableRows = rows[table]
-      .sort((a, b) => Number(a.id.startsWith("MEM")) - Number(b.id.startsWith("MEM")) || a.id.localeCompare(b.id))
-      .map((row) => `| ${row.cells.map(escapeCell).join(" | ")} |`);
-    const notes = table === "rules" && ruleNotes.length > 0 ? ["", ...ruleNotes] : [];
-    return [heading, "", header, separator, ...tableRows, ...notes].join("\n");
+    const tableRows = rows[table].map((row) => `| ${row.cells.map(escapeCell).join(" | ")} |`);
+    const tableNotes = notes[table].length > 0 ? ["", ...notes[table]] : [];
+    return [heading, "", header, separator, ...tableRows, ...tableNotes].join("\n");
   });
-  const content = [intro, ...sections].join("\n\n") + "\n";
+  const content = [intro || DEFAULT_INTRO, ...sections, ...otherSections].join("\n\n") + "\n";
+  const empty = !intro
+    && otherSections.length === 0
+    && KNOWLEDGE_SECTIONS.every(({ table }) => rows[table].length === 0 && notes[table].length === 0);
+  return { content, empty };
+}
 
-  if (content === existing) {
-    return { written: false, content };
-  }
-  atomicWriteSync(knowledgeMdPath(basePath), content, "utf-8");
-  return { written: true, content };
+/**
+ * The one knowledge reader: KNOWLEDGE.md content built from the database
+ * (plus the import bridge), whatever the file on disk holds. Returns "" when
+ * there is no knowledge to show. Throws when the database is not available.
+ */
+export function readKnowledgeMarkdown(basePath: string): string {
+  const { content, empty } = buildKnowledgeMarkdown(readKnowledgeMd(basePath));
+  return empty ? "" : content;
+}
+
+/**
+ * Structured form of readKnowledgeMarkdown: the cells of every row per table
+ * (leading `#` cell included). Throws when the database is not available.
+ */
+export function readKnowledgeEntries(basePath: string): Record<KnowledgeTable, string[][]> {
+  const rows = knowledgeRows(readKnowledgeMd(basePath));
+  return {
+    rules: rows.rules.map((row) => row.cells),
+    patterns: rows.patterns.map((row) => row.cells),
+    lessons: rows.lessons.map((row) => row.cells),
+  };
+}
+
+/**
+ * Render `KNOWLEDGE.md` from the database. Returns the rendered content and
+ * whether the file was written (skipped when byte-identical to disk). Records
+ * the render baseline so the next render does not treat GSD's own output as
+ * an external edit. Throws when the database is unavailable or the write fails.
+ */
+export function renderKnowledgeProjection(basePath: string): KnowledgeProjectionResult {
+  const existing = readKnowledgeMd(basePath);
+  const { content } = buildKnowledgeMarkdown(existing);
+  const path = knowledgeMdPath(basePath);
+  const written = content !== existing;
+  if (written) atomicWriteSync(path, content, "utf-8");
+  recordCompatProjectionWrite(dirname(gsdRoot(basePath)), path, content, []);
+  return { written, content };
 }
 
 // Re-export the section headings so tests can assert on the canonical

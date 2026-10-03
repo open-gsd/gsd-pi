@@ -278,7 +278,7 @@ Analyze the just-completed unit (${unitId}) for skill drift.
 
 4. **Assess drift severity**:
    - **None**: Agent followed skill correctly → write "No drift detected" to the summary and stop
-   - **Minor**: Agent found a better approach but skill isn't wrong → note in KNOWLEDGE.md
+   - **Minor**: Agent found a better approach but skill isn't wrong → capture it with \`capture_thought\` (category \`pattern\`); do not edit KNOWLEDGE.md
    - **Significant**: Skill has outdated or incorrect guidance → propose fix
 
 5. **If significant drift found**, write a heal suggestion to \`.gsd/skill-review-queue.md\`:

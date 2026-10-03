@@ -89,15 +89,8 @@ function parseKnowledgeMarkdown(content: string): KnowledgeEntry[] {
 // Public API
 // ---------------------------------------------------------------------------
 
-export function readKnowledge(projectDir: string): KnowledgeResult {
-  const gsd = resolveGsdRoot(projectDir);
-  const knowledgePath = resolveRootFile(gsd, 'KNOWLEDGE.md');
-
-  if (!existsSync(knowledgePath)) {
-    return { entries: [], counts: { rules: 0, patterns: 0, lessons: 0 } };
-  }
-
-  const content = readFileSync(knowledgePath, 'utf-8');
+/** Parse KNOWLEDGE.md content (from the database bridge or the file) into a KnowledgeResult. */
+export function knowledgeResultFromMarkdown(content: string): KnowledgeResult {
   const entries = parseKnowledgeMarkdown(content);
 
   return {
@@ -108,4 +101,16 @@ export function readKnowledge(projectDir: string): KnowledgeResult {
       lessons: entries.filter((e) => e.type === 'lesson').length,
     },
   };
+}
+
+/** Display-only file read, used when the project database cannot be opened. */
+export function readKnowledge(projectDir: string): KnowledgeResult {
+  const gsd = resolveGsdRoot(projectDir);
+  const knowledgePath = resolveRootFile(gsd, 'KNOWLEDGE.md');
+
+  if (!existsSync(knowledgePath)) {
+    return { entries: [], counts: { rules: 0, patterns: 0, lessons: 0 } };
+  }
+
+  return knowledgeResultFromMarkdown(readFileSync(knowledgePath, 'utf-8'));
 }

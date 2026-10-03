@@ -203,7 +203,7 @@ gsd headless prefs
 Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
 ```bash
-gsd headless knowledge "Always use UTC timestamps in API responses"
+gsd headless knowledge rule "Always use UTC timestamps in API responses"
 ```
 
 ## Additional Prompt-Driven Workflows

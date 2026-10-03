@@ -8,16 +8,15 @@
 // the migration is complete before any tables are dropped. Today's
 // `backfillDecisionsToMemories` writes a `structured_fields.sourceDecisionId`
 // marker on each migrated row; the scanner uses that marker for decisions
-// detection. A `sourceKnowledgeId` marker is reserved for the parallel
-// KNOWLEDGE.md backfill that Phase 6 will introduce — until that ships,
-// every KNOWLEDGE.md row is reported as unmigrated, which is the honest
-// state of the consolidation.
-
-import { existsSync, readFileSync } from "node:fs";
+// detection. KNOWLEDGE.md Rules, Patterns and Lessons are captured as
+// memories rows with a `sourceKnowledgeId` (K/P/L###). A KNOWLEDGE.md row
+// whose id has no such row exists only in the file: it is not imported into
+// the database, and the scanner reports it as a gap. Session start never
+// imports it.
 
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
+import { parseKnowledgeRows, readKnowledgeMd } from "./knowledge-parser.js";
 import { appendNotification } from "./notification-store.js";
-import { resolveGsdRootFile } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -46,71 +45,6 @@ export interface ConsolidationGapReport {
   totalGaps: number;
   /** Human-readable single-line summary suitable for notifications + logs. */
   summary: string;
-}
-
-// ─── KNOWLEDGE.md parsing ────────────────────────────────────────────────────
-
-const KNOWLEDGE_SECTIONS = [
-  { table: "rules" as const, heading: "## Rules", idPrefix: "K" },
-  { table: "patterns" as const, heading: "## Patterns", idPrefix: "P" },
-  { table: "lessons" as const, heading: "## Lessons Learned", idPrefix: "L" },
-];
-
-interface KnowledgeRow {
-  table: "rules" | "patterns" | "lessons";
-  id: string;
-  row: string;
-}
-
-/**
- * Parse `.gsd/KNOWLEDGE.md` into rows, one per table entry. Skips the table
- * header and separator lines; ignores rows from unrecognized sections.
- *
- * The format is locked in `knowledge-projection.ts` — three `## ` sections
- * (Rules, Patterns, Lessons Learned), each a Markdown table. Row IDs are
- * `K###` / `P###` / `L###`.
- */
-export function parseKnowledgeRows(content: string): KnowledgeRow[] {
-  const rows: KnowledgeRow[] = [];
-  if (!content.trim()) return rows;
-
-  // Slice the content into sections by heading. The leading text before the
-  // first ## heading is intro prose — ignored.
-  const lines = content.split("\n");
-  let activeSection: typeof KNOWLEDGE_SECTIONS[number] | undefined;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith("## ")) {
-      activeSection = KNOWLEDGE_SECTIONS.find((s) => s.heading === trimmed);
-      continue;
-    }
-    if (!activeSection) continue;
-    if (!trimmed.startsWith("|")) continue;
-
-    // Skip the table header rows: the column-titles line and the |---|---| separator.
-    // Real data rows start with `| <prefix>### |`.
-    const idMatch = new RegExp(`^\\|\\s*(${activeSection.idPrefix}\\d+)\\s*\\|`).exec(trimmed);
-    if (!idMatch) continue;
-
-    rows.push({
-      table: activeSection.table,
-      id: idMatch[1] ?? "",
-      row: trimmed,
-    });
-  }
-
-  return rows;
-}
-
-function knowledgeMdContent(basePath: string): string {
-  const path = resolveGsdRootFile(basePath, "KNOWLEDGE");
-  if (!existsSync(path)) return "";
-  try {
-    return readFileSync(path, "utf-8");
-  } catch {
-    return "";
-  }
 }
 
 // ─── DB queries ──────────────────────────────────────────────────────────────
@@ -204,7 +138,7 @@ const SAMPLE_LIMIT = 5;
 export function scanConsolidationGaps(basePath: string): ConsolidationGapReport {
   // ── Decisions ────────────────────────────────────────────────────────
   const decisions = getActiveDecisions();
-  const knowledgeRows = parseKnowledgeRows(knowledgeMdContent(basePath));
+  const knowledgeRows = parseKnowledgeRows(readKnowledgeMd(basePath));
   const memorySourceMarkers = decisions.length > 0 || knowledgeRows.length > 0
     ? getMemorySourceMarkers()
     : emptyMemorySourceMarkers();
@@ -229,8 +163,8 @@ export function scanConsolidationGaps(basePath: string): ConsolidationGapReport 
   let knowledgeMigrated = 0;
   for (const row of knowledgeRows) {
     knowledgeByTable[row.table] += 1;
-    // KNOWLEDGE.md backfill writes `sourceKnowledgeId`; rows without that
-    // marker are still reported as consolidation gaps.
+    // Captured knowledge rows carry `sourceKnowledgeId`; a file row whose id
+    // has no memories row is not imported yet and is reported as a gap.
     if (memorySourceMarkers.knowledgeIds.has(row.id)) {
       knowledgeMigrated += 1;
       continue;
@@ -239,7 +173,7 @@ export function scanConsolidationGaps(basePath: string): ConsolidationGapReport 
       knowledgeSamples.push({
         table: row.table,
         id: row.id,
-        row: row.row.length > 100 ? row.row.slice(0, 99) + "…" : row.row,
+        row: row.raw.length > 100 ? row.raw.slice(0, 99) + "…" : row.raw,
       });
     }
   }

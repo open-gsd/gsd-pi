@@ -45,6 +45,7 @@ interface GsdMcpBridge {
   upsertMilestonePlanning: (...args: any[]) => any;
   invalidateStateCache: (...args: any[]) => any;
   readProgressFromDb: (...args: any[]) => any;
+  readKnowledgeMarkdown: (projectDir: string) => string;
   loadEffectiveGSDPreferences: (...args: any[]) => any;
   saveDecisionToDb: (...args: any[]) => any;
   saveRequirementToDb: (...args: any[]) => any;
@@ -1374,6 +1375,23 @@ export async function readProjectProgressViaBridge(projectDir: string): Promise<
       return null;
     }
     return bridge.readProgressFromDb(projectDir);
+  });
+}
+
+/**
+ * KNOWLEDGE.md content built from the project database (gsd_knowledge).
+ * Returns null when the database cannot be opened, so the caller can use the
+ * display-only file read; once the database opens it is authoritative.
+ */
+export async function readKnowledgeViaBridge(projectDir: string): Promise<string | null> {
+  return runSerializedWorkflowOperation(async () => {
+    const bridge = await importBridgeModule();
+    const opened = bridge.openExistingWorkflowDatabase(projectDir);
+    if (!opened.ok) {
+      if (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound") throw opened.error;
+      return null;
+    }
+    return bridge.readKnowledgeMarkdown(projectDir);
   });
 }
 

@@ -86,8 +86,8 @@ test("#830 startup opens the project DB before projecting KNOWLEDGE.md", async (
   );
 });
 
-test("#896 startup maintenance skips repeated sentinel work in one session", async (t) => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-startup-maintenance-once-")));
+test("session start never imports hand-edited KNOWLEDGE.md rows into the database", async (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-startup-no-import-")));
   const originalCwd = process.cwd();
   const originalGsdHome = process.env.GSD_HOME;
   const gsdDir = join(base, ".gsd");
@@ -107,6 +107,18 @@ test("#896 startup maintenance skips repeated sentinel work in one session", asy
     rmSync(base, { recursive: true, force: true });
   });
 
+  assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+  createMemory({
+    category: "pattern",
+    content: "Captured through the database",
+    scope: "project",
+    structuredFields: { sourceKnowledgeId: "P001", sourceKnowledgeTable: "patterns", pattern: "Captured through the database" },
+  });
+  const snapshot = () => JSON.stringify(_getAdapter()!.prepare("SELECT * FROM memories ORDER BY id").all());
+  const before = snapshot();
+  closeDatabase();
+
+  // Hand edits: a new Rule, a new Pattern, a new Lesson, and a changed P001.
   writeFileSync(
     knowledgePath,
     [
@@ -116,25 +128,24 @@ test("#896 startup maintenance skips repeated sentinel work in one session", asy
       "",
       "| # | Scope | Rule | Why | Added |",
       "|---|-------|------|-----|-------|",
+      "| K001 | project | Hand-added rule | manual | 2026-01-01 |",
       "",
       "## Patterns",
       "",
       "| # | Pattern | Where | Notes |",
       "|---|---------|-------|-------|",
-      "| P001 | Run startup maintenance once | bootstrap | first pass |",
+      "| P001 | Hand-changed pattern text | bootstrap | edited |",
+      "| P002 | Hand-added pattern | bootstrap | manual |",
       "",
       "## Lessons Learned",
       "",
       "| # | What Happened | Root Cause | Fix | Scope |",
       "|---|--------------|------------|-----|-------|",
+      "| L001 | Hand-added lesson | manual | none | project |",
       "",
     ].join("\n"),
     "utf-8",
   );
-
-  assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
-  closeDatabase();
-  assert.equal(isDbAvailable(), false);
 
   let sessionId = "session-one";
   const ctx = {
@@ -142,68 +153,14 @@ test("#896 startup maintenance skips repeated sentinel work in one session", asy
     sessionManager: { getSessionId: () => sessionId },
     ui: { notify: () => undefined },
   } as unknown as ExtensionContext;
-
-  await buildBeforeAgentStartResult(
-    { prompt: "Inspect project knowledge", systemPrompt: "base system prompt" },
-    ctx,
-  );
+  await buildBeforeAgentStartResult({ prompt: "Inspect project knowledge", systemPrompt: "base" }, ctx);
   await _flushDeferredContextMaintenanceForTest(base);
-
-  const adapter = _getAdapter();
-  assert.ok(adapter);
-  const firstPass = adapter
-    .prepare("SELECT COUNT(*) AS count FROM memories WHERE structured_fields LIKE '%\"sourceKnowledgeId\":\"P001\"%'")
-    .get() as { count: number };
-  assert.equal(firstPass.count, 1, "first startup should backfill existing KNOWLEDGE.md row");
-
-  writeFileSync(
-    knowledgePath,
-    [
-      "# Project Knowledge",
-      "",
-      "## Rules",
-      "",
-      "| # | Scope | Rule | Why | Added |",
-      "|---|-------|------|-----|-------|",
-      "",
-      "## Patterns",
-      "",
-      "| # | Pattern | Where | Notes |",
-      "|---|---------|-------|-------|",
-      "| P001 | Run startup maintenance once | bootstrap | first pass |",
-      "| P002 | Do not re-run startup sentinels | bootstrap | second pass |",
-      "",
-      "## Lessons Learned",
-      "",
-      "| # | What Happened | Root Cause | Fix | Scope |",
-      "|---|--------------|------------|-----|-------|",
-      "",
-    ].join("\n"),
-    "utf-8",
-  );
-
-  await buildBeforeAgentStartResult(
-    { prompt: "Inspect project knowledge again", systemPrompt: "base system prompt" },
-    ctx,
-  );
-  await _flushDeferredContextMaintenanceForTest(base);
-
-  const secondPass = adapter
-    .prepare("SELECT COUNT(*) AS count FROM memories WHERE structured_fields LIKE '%\"sourceKnowledgeId\":\"P002\"%'")
-    .get() as { count: number };
-  assert.equal(secondPass.count, 0, "second startup in same session should not re-run KNOWLEDGE.md sentinel backfill");
-
   sessionId = "session-two";
-  await buildBeforeAgentStartResult(
-    { prompt: "Inspect project knowledge in a new session", systemPrompt: "base system prompt" },
-    ctx,
-  );
+  await buildBeforeAgentStartResult({ prompt: "Inspect project knowledge again", systemPrompt: "base" }, ctx);
   await _flushDeferredContextMaintenanceForTest(base);
 
-  const nextSessionPass = adapter
-    .prepare("SELECT COUNT(*) AS count FROM memories WHERE structured_fields LIKE '%\"sourceKnowledgeId\":\"P002\"%'")
-    .get() as { count: number };
-  assert.equal(nextSessionPass.count, 1, "startup maintenance should run once for a later session");
+  assert.equal(isDbAvailable(), true);
+  assert.equal(snapshot(), before, "session start must not write file content into the memories table");
 });
 
 test("#896 later turns reopen the project DB after startup maintenance is complete", async (t) => {

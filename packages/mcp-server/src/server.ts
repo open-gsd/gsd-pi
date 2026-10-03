@@ -28,13 +28,14 @@ import { readProgress } from './readers/state.js';
 import { readRoadmap } from './readers/roadmap.js';
 import { readHistory } from './readers/metrics.js';
 import { readCaptures } from './readers/captures.js';
-import { readKnowledge } from './readers/knowledge.js';
+import { knowledgeResultFromMarkdown, readKnowledge } from './readers/knowledge.js';
 import { buildGraph, writeGraph, writeSnapshot, graphStatus, graphQuery, graphDiff } from './readers/graph.js';
 import { resolveGsdRoot, findMilestoneIds, resolveMilestoneFile } from './readers/paths.js';
 import { runDoctorLite } from './readers/doctor-lite.js';
 import {
   hasWorkflowToolBridgeConfiguration,
   readProjectProgressViaBridge,
+  readKnowledgeViaBridge,
   registerWorkflowTools,
   validateProjectDir,
   warmWorkflowToolBridges,
@@ -1504,14 +1505,19 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_knowledge',
-    'Get the project knowledge base: rules, patterns, and lessons learned accumulated during development. No session required.',
+    'Get the project knowledge base: rules, patterns, and lessons learned accumulated during development. No session required — reads the workflow database when the GSD runtime is available, .gsd/KNOWLEDGE.md otherwise.',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
     },
     async (args: Record<string, unknown>) => {
       const { projectDir } = args as { projectDir: string };
       try {
-        return jsonContent(readKnowledge(validateProjectDir(projectDir)));
+        const dir = validateProjectDir(projectDir);
+        if (hasWorkflowToolBridgeConfiguration()) {
+          const fromDb = await readKnowledgeViaBridge(dir);
+          if (fromDb !== null) return jsonContent(knowledgeResultFromMarkdown(fromDb));
+        }
+        return jsonContent(readKnowledge(dir));
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }

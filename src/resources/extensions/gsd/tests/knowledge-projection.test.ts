@@ -1,14 +1,12 @@
-// ADR-013 Stage 2b — KNOWLEDGE.md backfill + hybrid projection tests.
+// ADR-046 — KNOWLEDGE.md parser, projection render and DB reader tests.
 //
-// Covers four behaviors:
+// Covers:
 //   1. parser: splits cells correctly, skips header/separator rows, respects
 //      section boundaries
-//   2. backfill: Patterns -> memories(category=pattern), Lessons ->
-//      memories(category=gotcha), Rules NOT migrated, idempotent
-//   3. projection: Rules, Patterns + Lessons render from memories; file rows
-//      with no DB row yet are kept until they are imported
-//   4. bootstrap path: backfill + projection round-trip produces a stable
-//      file that re-reading reconstitutes the same memory set
+//   2. projection: Rules, Patterns + Lessons render from memories; file rows
+//      with no DB row yet and unmodeled file content are kept until imported
+//   3. reader: readKnowledgeMarkdown / readKnowledgeEntries return database
+//      rows when the file on disk is stale
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -28,13 +26,12 @@ import {
   closeDatabase,
   openDatabase,
 } from "../gsd-db.ts";
-import { backfillKnowledgeToMemories } from "../knowledge-backfill.ts";
 import {
   knowledgeMdPath,
   parseKnowledgeRows,
   splitPipeRow,
 } from "../knowledge-parser.ts";
-import { renderKnowledgeProjection } from "../knowledge-projection.ts";
+import { readKnowledgeEntries, readKnowledgeMarkdown, renderKnowledgeProjection } from "../knowledge-projection.ts";
 import { createMemory } from "../memory-store.ts";
 
 function makeTmpBase(): string {
@@ -87,6 +84,35 @@ Agents read this before every unit. Add entries when you discover something wort
 | L001 | Cache poisoning | reused key | versioned key | project |
 `;
 
+
+/** Write the FIXTURE Patterns and Lessons as memories rows (what a capture or import writes). */
+function seedFixturePatternsAndLessons(): void {
+  for (const [id, pattern, where, notes] of [
+    ["P001", "Repository pattern", "services/", "guards"],
+    ["P002", "Adapter at the seam", "packages/pi-ai/", "observability"],
+  ]) {
+    createMemory({
+      category: "pattern",
+      content: pattern!,
+      scope: "project",
+      structuredFields: { sourceKnowledgeId: id, sourceKnowledgeTable: "patterns", pattern, where, notes },
+    });
+  }
+  createMemory({
+    category: "gotcha",
+    content: "Cache poisoning",
+    scope: "project",
+    structuredFields: {
+      sourceKnowledgeId: "L001",
+      sourceKnowledgeTable: "lessons",
+      whatHappened: "Cache poisoning",
+      rootCause: "reused key",
+      fix: "versioned key",
+      scopeText: "project",
+    },
+  });
+}
+
 // ─── splitPipeRow ──────────────────────────────────────────────────────────
 
 test("splitPipeRow extracts cells from a standard table row", () => {
@@ -116,103 +142,13 @@ test("parseKnowledgeRows captures cell values aligned with the section schema", 
   assert.equal(p1.cells[2], "services/");
 });
 
-// ─── backfillKnowledgeToMemories ───────────────────────────────────────────
-
-test("backfill migrates Patterns + Lessons but skips Rules", () => {
-  const base = makeTmpBase();
-  try {
-    writeKnowledgeMd(base, FIXTURE);
-    const written = backfillKnowledgeToMemories(base);
-    assert.equal(written, 3, "P001 + P002 + L001 should migrate; K rows skipped");
-
-    const adapter = _getAdapter();
-    assert.ok(adapter);
-
-    const knowledgeMemories = adapter
-      .prepare(
-        "SELECT category, structured_fields FROM memories WHERE structured_fields LIKE '%\"sourceKnowledgeId\":\"%' ORDER BY seq",
-      )
-      .all() as Array<{ category: string; structured_fields: string }>;
-
-    assert.equal(knowledgeMemories.length, 3);
-    const categoriesById: Record<string, string> = {};
-    for (const m of knowledgeMemories) {
-      const sf = JSON.parse(m.structured_fields) as { sourceKnowledgeId: string };
-      categoriesById[sf.sourceKnowledgeId] = m.category;
-    }
-    assert.equal(categoriesById["P001"], "pattern");
-    assert.equal(categoriesById["P002"], "pattern");
-    assert.equal(categoriesById["L001"], "gotcha");
-    assert.equal(categoriesById["K001"], undefined, "K001 must NOT be in memories");
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("backfill is idempotent — second run on the same file is a no-op", () => {
-  const base = makeTmpBase();
-  try {
-    writeKnowledgeMd(base, FIXTURE);
-    const first = backfillKnowledgeToMemories(base);
-    assert.equal(first, 3);
-    const second = backfillKnowledgeToMemories(base);
-    assert.equal(second, 0, "already-migrated rows must not be re-inserted");
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("backfill skips a knowledge row whose memory insert throws and continues later rows", () => {
-  const base = makeTmpBase();
-  try {
-    writeKnowledgeMd(base, FIXTURE);
-
-    const adapter = _getAdapter();
-    assert.ok(adapter);
-    adapter.exec(`
-      CREATE TRIGGER fail_p002_memory_insert
-      BEFORE INSERT ON memories
-      WHEN json_extract(NEW.structured_fields, '$.sourceKnowledgeId') = 'P002'
-      BEGIN
-        SELECT RAISE(ABORT, 'poison knowledge P002');
-      END
-    `);
-
-    const written = backfillKnowledgeToMemories(base);
-    assert.equal(written, 2, "one poisoned row should not abort the batch");
-
-    const rows = adapter
-      .prepare(
-        "SELECT structured_fields FROM memories WHERE structured_fields LIKE '%\"sourceKnowledgeId\":\"%' ORDER BY seq",
-      )
-      .all() as Array<{ structured_fields: string }>;
-
-    assert.deepEqual(
-      rows.map((row) => JSON.parse(row.structured_fields).sourceKnowledgeId),
-      ["P001", "L001"],
-      "rows after the poisoned knowledge entry should still be migrated",
-    );
-  } finally {
-    cleanup(base);
-  }
-});
-
-test("backfill returns 0 when KNOWLEDGE.md is absent", () => {
-  const base = makeTmpBase();
-  try {
-    assert.equal(backfillKnowledgeToMemories(base), 0);
-  } finally {
-    cleanup(base);
-  }
-});
-
 // ─── renderKnowledgeProjection ─────────────────────────────────────────────
 
 test("projection renders Rules from rule rows; a file Rule with a DB row loses to the DB", () => {
   const base = makeTmpBase();
   try {
     writeKnowledgeMd(base, FIXTURE);
-    backfillKnowledgeToMemories(base);
+    seedFixturePatternsAndLessons();
     createMemory({
       category: "rule",
       content: "All timestamps in UTC, stored as ISO strings",
@@ -242,7 +178,7 @@ test("projection renders Patterns + Lessons from memories", () => {
   const base = makeTmpBase();
   try {
     writeKnowledgeMd(base, FIXTURE);
-    backfillKnowledgeToMemories(base);
+    seedFixturePatternsAndLessons();
     // Wipe the original Patterns/Lessons table rows from the file so the
     // projection's output can ONLY come from memories. Keep Rules intact.
     writeKnowledgeMd(
@@ -279,7 +215,7 @@ test("projection excludes superseded knowledge memories", () => {
   const base = makeTmpBase();
   try {
     writeKnowledgeMd(base, FIXTURE);
-    backfillKnowledgeToMemories(base);
+    seedFixturePatternsAndLessons();
 
     const adapter = _getAdapter();
     assert.ok(adapter);
@@ -378,7 +314,12 @@ test("projection escapes pipes in memory content", () => {
 | P001 | Use A \\| B fallback | adapters/ | watch out |
 `,
     );
-    backfillKnowledgeToMemories(base);
+    createMemory({
+      category: "pattern",
+      content: "Use A | B fallback",
+      scope: "project",
+      structuredFields: { sourceKnowledgeId: "P001", pattern: "Use A | B fallback", where: "adapters/", notes: "watch out" },
+    });
     renderKnowledgeProjection(base);
     const rendered = readFileSync(knowledgeMdPath(base), "utf-8");
 
@@ -389,22 +330,113 @@ test("projection escapes pipes in memory content", () => {
   }
 });
 
-// ─── End-to-end round-trip ─────────────────────────────────────────────────
+// ─── Unmodeled content and render baseline ─────────────────────────────────
 
-test("backfill + projection round-trip: re-running backfill on rendered file is a no-op", () => {
+test("projection keeps unmodeled file content: free-form sections, notes, id-less rows", () => {
+  const base = makeTmpBase();
+  try {
+    writeKnowledgeMd(
+      base,
+      `# Project Knowledge
+
+Intro prose.
+
+## Rules
+
+| # | Scope | Rule | Why | Added |
+|---|-------|------|-----|-------|
+
+## Patterns
+
+| # | Pattern | Where | Notes |
+|---|---------|-------|-------|
+| added without an id | x | y |
+
+Pattern note kept as prose.
+
+## Deployment
+
+### Staging
+Always deploy staging first.
+`,
+    );
+    renderKnowledgeProjection(base);
+    const rendered = readFileSync(knowledgeMdPath(base), "utf-8");
+
+    assert.match(rendered, /Intro prose\./);
+    assert.match(rendered, /\| added without an id \| x \| y \|/);
+    assert.match(rendered, /Pattern note kept as prose\./);
+    assert.match(rendered, /## Deployment\n\n### Staging\nAlways deploy staging first\./);
+    assert.equal(renderKnowledgeProjection(base).written, false, "the kept content is byte-stable");
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("a file without a Rules heading keeps all of its content in the render", () => {
+  const base = makeTmpBase();
+  try {
+    writeKnowledgeMd(base, "Free-form knowledge with no headings at all.\n");
+    renderKnowledgeProjection(base);
+    assert.match(readFileSync(knowledgeMdPath(base), "utf-8"), /^Free-form knowledge with no headings at all\./);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("a render records its baseline, so the next render does not quarantine GSD's own output", () => {
+  const base = makeTmpBase();
+  const quarantine = join(base, ".gsd", "quarantine");
+  try {
+    renderKnowledgeProjection(base);
+    createMemory({ category: "rule", content: "Rule one", scope: "project", structuredFields: { sourceKnowledgeId: "K001", rule: "Rule one" } });
+    assert.equal(renderKnowledgeProjection(base).written, true);
+    assert.equal(existsSync(quarantine), false, "a render over GSD's own render is not an external edit");
+
+    writeKnowledgeMd(base, readFileSync(knowledgeMdPath(base), "utf-8") + "\nHand edit.\n");
+    createMemory({ category: "rule", content: "Rule two", scope: "project", structuredFields: { sourceKnowledgeId: "K002", rule: "Rule two" } });
+    renderKnowledgeProjection(base);
+    assert.equal(existsSync(quarantine), true, "a hand-edited file is still preserved before it is replaced");
+  } finally {
+    cleanup(base);
+  }
+});
+
+// ─── DB reader ─────────────────────────────────────────────────────────────
+
+test("readKnowledgeMarkdown and readKnowledgeEntries return database rows when the file is stale", () => {
   const base = makeTmpBase();
   try {
     writeKnowledgeMd(base, FIXTURE);
-    const initial = backfillKnowledgeToMemories(base);
-    assert.equal(initial, 3);
-
+    seedFixturePatternsAndLessons();
     renderKnowledgeProjection(base);
-    assert.ok(existsSync(knowledgeMdPath(base)));
+    // A row captured after the last render, and a file that still shows the old P001.
+    createMemory({
+      category: "rule",
+      content: "Fresh rule",
+      scope: "project",
+      structuredFields: { sourceKnowledgeId: "K003", rule: "Fresh rule", scopeText: "project", why: "new", added: "today" },
+    });
+    _getAdapter()!.prepare("UPDATE memories SET structured_fields = json_set(structured_fields, '$.pattern', 'Repository pattern v2') WHERE structured_fields LIKE '%\"P001\"%'").run();
 
-    // The rendered file contains the same P/L IDs as the source. A second
-    // backfill pass must NOT re-insert them.
-    const second = backfillKnowledgeToMemories(base);
-    assert.equal(second, 0, "round-trip rendered file must remain idempotent for backfill");
+    const markdown = readKnowledgeMarkdown(base);
+    assert.match(markdown, /\| K003 \| project \| Fresh rule \| new \| today \|/);
+    assert.match(markdown, /\| P001 \| Repository pattern v2 \|/);
+    assert.doesNotMatch(readFileSync(knowledgeMdPath(base), "utf-8"), /Fresh rule/, "the file itself is stale");
+
+    const entries = readKnowledgeEntries(base);
+    assert.deepEqual(entries.rules.map((cells) => cells[0]), ["K001", "K002", "K003"]);
+    assert.equal(entries.patterns[0]![1], "Repository pattern v2");
+    assert.deepEqual(entries.lessons.map((cells) => cells[0]), ["L001"]);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("readKnowledgeMarkdown returns empty when there is no knowledge", () => {
+  const base = makeTmpBase();
+  try {
+    assert.equal(readKnowledgeMarkdown(base), "");
   } finally {
     cleanup(base);
   }

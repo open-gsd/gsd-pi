@@ -228,6 +228,46 @@ test("loadVisualizerData opens the project DB for memory entries when none is op
   }
 });
 
+test("loadVisualizerData reads knowledge from the database when KNOWLEDGE.md is stale", async () => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-visualizer-knowledge-db-"));
+  try {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    createMemory({
+      category: "rule",
+      content: "Rule from the database",
+      scope: "project",
+      structuredFields: { sourceKnowledgeId: "K001", rule: "Rule from the database", scopeText: "project" },
+    });
+    createMemory({
+      category: "pattern",
+      content: "Pattern from the database",
+      structuredFields: { sourceKnowledgeId: "P001", pattern: "Pattern from the database" },
+    });
+    createMemory({
+      category: "gotcha",
+      content: "Lesson from the database",
+      structuredFields: { sourceKnowledgeId: "L001", whatHappened: "Lesson from the database" },
+    });
+    closeDatabase();
+    // The file on disk is stale: it shows an old K001 and no pattern or lesson.
+    writeFileSync(
+      join(base, ".gsd", "KNOWLEDGE.md"),
+      "# Project Knowledge\n\n## Rules\n\n| # | Scope | Rule | Why | Added |\n|---|-------|------|-----|-------|\n| K001 | project | Stale file rule | — | — |\n",
+    );
+
+    const data = await loadVisualizerData(base);
+
+    assert.deepEqual(data.knowledge.rules, [{ id: "K001", scope: "project", content: "Rule from the database" }]);
+    assert.deepEqual(data.knowledge.patterns, [{ id: "P001", content: "Pattern from the database" }]);
+    assert.deepEqual(data.knowledge.lessons, [{ id: "L001", content: "Lesson from the database" }]);
+    assert.equal(data.knowledge.exists, true);
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("loadVisualizerData caps memory content for visualizer payloads", async () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-visualizer-memory-cap-"));
   try {

@@ -444,7 +444,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 
 **What it means:** The ADR-013 memory-store consolidation preflight scanner found legacy knowledge that is not yet represented in the canonical `memories` table. It checks active `decisions` rows for matching `structured_fields.sourceDecisionId` markers and `.gsd/KNOWLEDGE.md` table rows for matching `sourceKnowledgeId` markers. The scanner is read-only and is intended to block destructive cutover until migration coverage is visible.
 
-**Fix:** Run `/gsd doctor` to inspect the counts and sample rows. Before cutover, complete the decisions or KNOWLEDGE.md backfill so the affected rows exist in `memories`; do not delete legacy `DECISIONS.md`, `KNOWLEDGE.md`, or database rows just to silence the warning.
+**Fix:** Run `/gsd doctor` to inspect the counts and sample rows. Decisions are backfilled into `memories` at session start. A `.gsd/KNOWLEDGE.md` row that exists only in the file is never imported at session start: it stays in the file, the render keeps it, and it is reported until it is imported. To put one in the database now, capture it again with `/gsd knowledge <rule|pattern|lesson> <text>`. Do not delete legacy `DECISIONS.md`, `KNOWLEDGE.md`, or database rows just to silence the warning.
 
 ### Transient `EBUSY` / `EPERM` / `EACCES` while writing `.gsd/` files
 

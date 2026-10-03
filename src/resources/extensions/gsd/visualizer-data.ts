@@ -28,6 +28,7 @@ import { runEnvironmentChecks, type EnvironmentCheckResult } from './doctor-envi
 import { computeProgressScore } from './progress-score.js';
 import { getHealthHistory } from './doctor-proactive.js';
 import { getActiveMemories, getActiveMemoriesRanked } from './memory-store.js';
+import { readKnowledgeEntries } from './knowledge-projection.js';
 
 import type { Phase } from './types.js';
 import type { CaptureEntry } from './captures.js';
@@ -566,45 +567,15 @@ async function loadChangelogAndVerifications(basePath: string, milestones: Visua
 // ─── Knowledge Loader ─────────────────────────────────────────────────────────
 
 function loadKnowledge(basePath: string): KnowledgeInfo {
-  const knowledgePath = resolveGsdRootFile(basePath, 'KNOWLEDGE');
-  if (!existsSync(knowledgePath)) {
-    return { rules: [], patterns: [], lessons: [], exists: false };
-  }
-
-  let content: string;
-  try {
-    content = readFileSync(knowledgePath, 'utf-8');
-  } catch {
-    return { rules: [], patterns: [], lessons: [], exists: false };
-  }
-
-  const rules: { id: string; scope: string; content: string }[] = [];
-  const patterns: { id: string; content: string }[] = [];
-  const lessons: { id: string; content: string }[] = [];
-
-  const lines = content.split('\n');
-  let currentSection = '';
-
-  for (const line of lines) {
-    if (line.startsWith('## Rules')) { currentSection = 'rules'; continue; }
-    if (line.startsWith('## Patterns')) { currentSection = 'patterns'; continue; }
-    if (line.startsWith('## Lessons')) { currentSection = 'lessons'; continue; }
-    if (line.startsWith('## ')) { currentSection = ''; continue; }
-
-    if (!line.startsWith('| ') || line.startsWith('| ---') || line.startsWith('| ID')) continue;
-    const cols = line.split('|').map(c => c.trim()).filter(c => c.length > 0);
-    if (cols.length < 2) continue;
-
-    if (currentSection === 'rules' && cols.length >= 3) {
-      rules.push({ id: cols[0], scope: cols[1], content: cols[2] });
-    } else if (currentSection === 'patterns' && cols.length >= 2) {
-      patterns.push({ id: cols[0], content: cols[1] });
-    } else if (currentSection === 'lessons' && cols.length >= 2) {
-      lessons.push({ id: cols[0], content: cols[1] });
-    }
-  }
-
-  return { rules, patterns, lessons, exists: true };
+  // Knowledge comes from the database (readKnowledgeEntries), not the file on disk.
+  if (!isDbAvailable()) return { rules: [], patterns: [], lessons: [], exists: false };
+  const entries = readKnowledgeEntries(basePath);
+  const rules = entries.rules.map(([id = '', scope = '', content = '']) => ({ id, scope, content }));
+  const patterns = entries.patterns.map(([id = '', content = '']) => ({ id, content }));
+  const lessons = entries.lessons.map(([id = '', content = '']) => ({ id, content }));
+  const exists = rules.length + patterns.length + lessons.length > 0
+    || existsSync(resolveGsdRootFile(basePath, 'KNOWLEDGE'));
+  return { rules, patterns, lessons, exists };
 }
 
 // ─── Memory Loader ────────────────────────────────────────────────────────────

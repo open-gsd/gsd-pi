@@ -17,6 +17,8 @@ import {
   type ProjectSignals,
 } from "./detection.js";
 import { loadFile } from "./files.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readKnowledgeMarkdown } from "./knowledge-projection.js";
 
 // ─── Types ──────────────────────────────────────────────────────────────────────
 
@@ -868,8 +870,8 @@ const MAX_PRIOR_CONTEXT_CHARS = 6000;
 /**
  * Aggregate prior context from GSD artifacts.
  *
- * Reads DECISIONS.md, REQUIREMENTS.md, KNOWLEDGE.md from the .gsd directory
- * and milestone summaries from each milestone's MILESTONE-SUMMARY.md file.
+ * Reads DECISIONS.md and REQUIREMENTS.md from the .gsd directory, knowledge from
+ * the database, and milestone summaries from each milestone's MILESTONE-SUMMARY.md file.
  *
  * @param basePath - Root directory of the project (contains .gsd/)
  * @returns PriorContextBrief with aggregated context
@@ -885,9 +887,9 @@ export async function aggregatePriorContext(basePath: string): Promise<PriorCont
   const requirementsContent = await loadFile(join(gsdPath, "REQUIREMENTS.md"));
   const requirements = parseRequirements(requirementsContent);
 
-  // Load knowledge
-  const knowledgeContent = await loadFile(join(gsdPath, "KNOWLEDGE.md"));
-  const knowledge = truncateSection(knowledgeContent || "", MAX_SECTION_CHARS);
+  // Load knowledge from the database (readKnowledgeMarkdown), not the file on disk
+  const knowledgeContent = isDbAvailable() ? readKnowledgeMarkdown(basePath) : "";
+  const knowledge = truncateSection(knowledgeContent, MAX_SECTION_CHARS);
 
   // Load milestone summaries
   const summaries = await loadMilestoneSummaries(gsdPath);

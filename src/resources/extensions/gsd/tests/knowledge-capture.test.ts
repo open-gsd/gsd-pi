@@ -101,7 +101,7 @@ describe("knowledge capture", () => {
     assert.deepEqual(knowledgeRows(), [
       { category: "rule", content: "Use real DB for integration tests", sourceKnowledgeId: "K001" },
     ]);
-    assert.match(section(readKnowledge(base), "## Rules"), /\| K001 \| global \| Use real DB for integration tests \|/);
+    assert.match(section(readKnowledge(base), "## Rules"), /\| K001 \| project \| Use real DB for integration tests \|/);
     assert.deepEqual(notifications.at(-1), {
       message: 'Saved rule K001 to KNOWLEDGE.md: "Use real DB for integration tests"',
       level: "success",
