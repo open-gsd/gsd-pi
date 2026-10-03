@@ -512,6 +512,26 @@ test("migrateToFlatPhase prunes legacy milestones artifact rows after flat rende
     rows.some((row) => row.path.startsWith("phases/")),
     "flat-phase render should leave replacement projection rows in the artifacts table",
   );
+
+  // The prune is one Domain Operation whose event lists every deleted path.
+  const operations = _getAdapter()!
+    .prepare("SELECT operation_id, actor_type FROM workflow_operations WHERE operation_type = 'artifact.rows.prune'")
+    .all();
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0]!["actor_type"], "system");
+  const event = _getAdapter()!
+    .prepare("SELECT payload_json FROM workflow_domain_events WHERE operation_id = :id")
+    .get({ ":id": operations[0]!["operation_id"] });
+  const payload = JSON.parse(String(event?.["payload_json"])) as { source: string; paths: string[] };
+  assert.equal(payload.source, "flat-phase-migration");
+  assert.deepEqual(
+    payload.paths.filter((path) => path.startsWith("milestones/")),
+    [
+      "milestones/M001/M001-ROADMAP.md",
+      "milestones/M001/slices/S01/S01-PLAN.md",
+      "milestones/M001/slices/S01/tasks/T01-PLAN.md",
+    ],
+  );
 });
 
 test("migrateToFlatPhase prunes stale flat-phase artifact rows that renderAll intentionally skips", async () => {

@@ -716,6 +716,20 @@ test("checkEngineHealth repair prunes stale phases artifact rows with present mi
     .prepare("SELECT path FROM artifacts ORDER BY path")
     .all() as Array<{ path: string }>;
   assert.deepEqual(rows.map((row) => row.path), []);
+
+  // The prune is one Domain Operation: it has an operation row, a new
+  // revision and an event that lists the deleted path.
+  const operations = _getAdapter()!
+    .prepare("SELECT operation_id, operation_type, expected_revision, resulting_revision FROM workflow_operations")
+    .all();
+  assert.equal(operations.length, 1);
+  assert.equal(operations[0]!["operation_type"], "artifact.rows.prune");
+  assert.equal(operations[0]!["resulting_revision"], Number(operations[0]!["expected_revision"]) + 1);
+  const event = _getAdapter()!
+    .prepare("SELECT event_type, payload_json FROM workflow_domain_events WHERE operation_id = :id")
+    .get({ ":id": operations[0]!["operation_id"] });
+  assert.equal(event?.["event_type"], "artifact.rows.pruned");
+  assert.deepEqual(JSON.parse(String(event?.["payload_json"])), { source: "doctor", paths: [stalePath] });
 });
 
 test("checkEngineHealth repair prunes stale phases artifact rows with renamed flat-phase files", async (t) => {

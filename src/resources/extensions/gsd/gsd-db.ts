@@ -61,6 +61,7 @@ export * from "./db/writers/lifecycle-commands.js";
 export * from "./db/writers/projection-kind-remediation.js";
 export * from "./db/writers/liveness-backstop.js";
 export * from "./db/writers/orphan-milestone-discard.js";
+export * from "./db/writers/artifact-row-prune.js";
 export { executeDomainOperation } from "./db/domain-operation.js";
 export type {
   DomainJsonValue,
@@ -1693,19 +1694,6 @@ export function deleteRequirementById(id: string): void {
 export function deleteArtifactByPath(path: string): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare("DELETE FROM artifacts WHERE path = :path").run({ ":path": path }));
-}
-
-/** Delete artifact rows whose paths share a DB-relative prefix. */
-export function deleteArtifactsByPathPrefix(prefix: string): number {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  return transaction(() => {
-    const likePrefix = `${prefix}%`;
-    const countRow = getDbOrNull()!.prepare(
-      "SELECT COUNT(*) AS count FROM artifacts WHERE path LIKE :prefix",
-    ).get({ ":prefix": likePrefix });
-    getDbOrNull()!.prepare("DELETE FROM artifacts WHERE path LIKE :prefix").run({ ":prefix": likePrefix });
-    return Number(countRow?.["count"] ?? 0);
-  });
 }
 
 /** List artifact rows whose paths share a DB-relative prefix. */

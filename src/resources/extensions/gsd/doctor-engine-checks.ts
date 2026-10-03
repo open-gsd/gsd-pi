@@ -4,7 +4,6 @@ import { isAbsolute, join, relative, sep } from "node:path";
 
 import type { DoctorIssue } from "./doctor-types.js";
 import {
-  deleteArtifactByPath,
   getAllMilestones,
   getMilestoneLifecycleShadowSnapshot,
   getMilestoneSlices,
@@ -15,6 +14,7 @@ import {
   repairWrongKindLifecycleProjections,
   _getAdapter,
   listUnappliedLegacyEscalations,
+  pruneArtifactRows,
 } from "./gsd-db.js";
 import { MEMORIES_FTS_REBUILT_KEY } from "./db-memory-fts-schema.js";
 import { completedEventCoversDispatch, isAfter, latestExplicitReopenAt } from "./milestone-reopen-events.js";
@@ -1101,17 +1101,14 @@ export async function checkEngineHealth(
             .filter((milestone) => isDiscardedMilestoneStatus(milestone.status))
             .map((milestone) => milestone.id),
         );
+        const staleRows: ArtifactRow[] = [];
         for (const row of artifactRows) {
           if (row.milestone_id && discardedMilestoneIds.has(row.milestone_id)) continue;
           const unitId = artifactUnitId(row);
           const issuePath = artifactPathRelativeToGsd(row.path);
           if (artifactExistsOnDisk(basePath, row.path)) continue;
           if (options?.repair && staleArtifactRowFixable(basePath, row, artifactRows)) {
-            // Route the write through the Single Writer owner (gsd-db.ts) instead
-            // of issuing raw DELETE SQL here — doctor is a read-only consumer and
-            // the single-writer invariant forbids write SQL outside the allowlist.
-            deleteArtifactByPath(row.path);
-            fixesApplied.push(staleArtifactPruneMessage(row));
+            staleRows.push(row);
             continue;
           }
           if (artifactExistsOnDisk(basePath, row.path, row)) continue;
@@ -1139,6 +1136,10 @@ export async function checkEngineHealth(
             fixable: staleArtifactRowFixable(basePath, row, artifactRows),
           });
         }
+        // One Domain Operation deletes every stale row, so the prune has an
+        // operation row and a revision.
+        pruneArtifactRows({ name: "doctor", actorType: "operator" }, staleRows.map((row) => row.path));
+        fixesApplied.push(...staleRows.map(staleArtifactPruneMessage));
       } catch {
         // Non-fatal — artifact file existence check failed
       }

@@ -8,11 +8,11 @@ import { join } from "node:path";
 import { renderAllFromDb, renderRoadmapFromDb } from "./markdown-renderer.js";
 import { isDiscardedMilestoneStatus } from "./status-guards.js";
 import {
-  deleteArtifactByPath,
   getAllMilestones,
   getArtifactsByPathPrefix,
   getMilestoneSlices,
   getSliceTasks,
+  pruneArtifactRows,
 } from "./gsd-db.js";
 import { withFileLock } from "./file-lock.js";
 import { countDbHierarchy, scanMarkdownHierarchy } from "./migration-auto-check.js";
@@ -297,18 +297,17 @@ function restoreFlatProjectionFromBackup(basePath: string, backupDir: string): v
   }
 }
 
-function pruneStaleFlatPhaseArtifactRows(basePath: string): number {
+function staleFlatPhaseArtifactPaths(basePath: string): string[] {
   const projectionRoot = gsdProjectionRoot(basePath);
-  let pruned = 0;
+  const paths: string[] = [];
   for (const row of getArtifactsByPathPrefix(`${LAYOUT_SEGMENTS.level1}/`)) {
     if (existsSync(join(projectionRoot, row.path))) continue;
     const staleTaskPlan = row.artifact_type.toUpperCase() === "PLAN" && Boolean(row.task_id);
     const skippedEmptyArtifact = row.full_content.trim() === "";
     if (!staleTaskPlan && !skippedEmptyArtifact) continue;
-    deleteArtifactByPath(row.path);
-    pruned++;
+    paths.push(row.path);
   }
-  return pruned;
+  return paths;
 }
 
 function rollbackPartialMigration(
@@ -591,11 +590,14 @@ async function migrateToFlatPhaseLocked(basePath: string): Promise<void> {
         .filter((milestone) => isDiscardedMilestoneStatus(milestone.status))
         .map((milestone) => milestone.id),
     );
-    for (const row of getArtifactsByPathPrefix("milestones/")) {
-      if (row.milestone_id && discardedIds.has(row.milestone_id)) continue;
-      deleteArtifactByPath(row.path);
-    }
-    pruneStaleFlatPhaseArtifactRows(basePath);
+    const legacyPaths = getArtifactsByPathPrefix("milestones/")
+      .filter((row) => !(row.milestone_id && discardedIds.has(row.milestone_id)))
+      .map((row) => row.path);
+    // One Domain Operation deletes both sets, so the prune has an operation row and a revision.
+    pruneArtifactRows(
+      { name: "flat-phase-migration", actorType: "system" },
+      [...legacyPaths, ...staleFlatPhaseArtifactPaths(basePath)],
+    );
   } catch (err) {
     logWarning("migration", `flat-phase migration could not prune legacy artifact rows: ${(err as Error).message}`);
     rollbackPartialMigration(basePath, backupDir, migratingPath, backupCreatedThisRun);
