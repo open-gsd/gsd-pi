@@ -2732,6 +2732,26 @@ async function pumpSdkMessages(
 				}
 			}
 
+			// The agent loop keeps ONE partial message per GSD turn and applies every
+			// event at `contentIndex`, but each SDK assistant message gets a fresh
+			// PartialMessageBuilder whose indices restart at 0 (the synthetic-user
+			// boundary in the `user` case below nulls the builder). Unshifted, a
+			// later sub-message overwrote the earlier blocks of the same turn in
+			// that partial — text B landed on index 0 next to text A — and the TUI
+			// segment walker merged them into one box that it re-created on every
+			// delta, leaving a frozen copy per delta in the chat (#2538). Offset
+			// each builder's local indices past everything already emitted so the
+			// streamed partial only ever grows. The adapter's final-message
+			// assembly (`intermediateToolBlocks` / `pendingContent` /
+			// `buildFinalAssistantContent`) is untouched — only the indices on
+			// events pushed to the stream shift. Declared per pump (not per
+			// attempt) so a readiness retry continues after the previous attempt's
+			// content; the base also stays past `initialPartial.content`, where
+			// readiness-progress text blocks live.
+			let emittedContentCount = 0;
+			const nextContentIndexBase = (): number =>
+				Math.max(initialPartial.content.length, emittedContentCount);
+
 			sdkAttemptLoop:
 			for (let readinessAttempt = 0; ; readinessAttempt++) {
 				let {
@@ -2742,6 +2762,7 @@ async function pumpSdkMessages(
 					toolCompletionTargetsById,
 					emittedExternalToolResultIds,
 				} = createSdkAttemptMessageState();
+				let contentIndexBase = nextContentIndexBase();
 				// Per-call usage of the last main-loop assistant event, per attempt.
 				// The terminal `result.usage` is cumulative across the SDK's
 				// internal tool-use loop, while each assistant event carries the
@@ -2847,20 +2868,35 @@ async function pumpSdkMessages(
 
 							const event = partial.event;
 
+							const priorBuilder = builder;
 							const result = handleClaudeCodePartialStreamEvent(builder, event, modelId);
 							builder = result.builder;
+							// A fresh builder (after a synthetic-user reset, or the first
+							// message_start of a retry attempt) restarts its local indices
+							// at 0 — rebase onto everything this pump already emitted (#2538).
+							if (builder && builder !== priorBuilder) {
+								contentIndexBase = nextContentIndexBase();
+							}
 							const assistantEvent = result.assistantEvent;
 							if (assistantEvent) {
-								stream.push(assistantEvent);
-								if (assistantEvent.type === "toolcall_start" && builder) {
-									const toolBlock = builder.message.content[assistantEvent.contentIndex];
-									if (toolBlock?.type === "toolCall") {
-										try {
-											await onExternalToolCall?.(toolBlock);
-										} catch (error) {
-											console.warn("[claude-code] onExternalToolCall callback failed:", error);
+								if ("contentIndex" in assistantEvent) {
+									const localContentIndex = assistantEvent.contentIndex;
+									const globalContentIndex = contentIndexBase + localContentIndex;
+									emittedContentCount = Math.max(emittedContentCount, globalContentIndex + 1);
+									stream.push({ ...assistantEvent, contentIndex: globalContentIndex });
+									if (assistantEvent.type === "toolcall_start" && builder) {
+										// Local index — the block lives in the builder's own content.
+										const toolBlock = builder.message.content[localContentIndex];
+										if (toolBlock?.type === "toolCall") {
+											try {
+												await onExternalToolCall?.(toolBlock);
+											} catch (error) {
+												console.warn("[claude-code] onExternalToolCall callback failed:", error);
+											}
 										}
 									}
+								} else {
+									stream.push(assistantEvent);
 								}
 							}
 							break;
@@ -2908,7 +2944,10 @@ async function pumpSdkMessages(
 										intermediateToolBlocks.push(block);
 										toolCompletionTargetsById.set(block.id, {
 											partial: builder.message,
-											contentIndex,
+											// Shifted index — the synthetic toolcall_end below must
+											// land on this tool's slot in the turn's single streamed
+											// partial, not in the sub-message's local one (#2538).
+											contentIndex: contentIndexBase + contentIndex,
 										});
 									}
 								}

@@ -287,6 +287,213 @@ describe("stream-adapter — Claude Code internal sub-turns (#337)", () => {
 	});
 });
 
+describe("stream-adapter — content-index continuity across SDK sub-messages (#2538)", () => {
+	// Streams one GSD turn laid out as two SDK assistant sub-messages separated
+	// by the synthetic user tool-result boundary: [text A, tool1] then
+	// [text B, tool2]. tool2 lives in a sub-message whose builder restarts at
+	// index 0, so both its stream events and its synthetic completion depend on
+	// the shifted index.
+	function* subMessageScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		// -- sub-message 1: text A + tool --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Alpha analysis." } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"command\":\"echo hi\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		// -- synthetic user boundary (resets the builder) --
+		yield {
+			type: "user",
+			uuid: "user-1",
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{
+					type: "tool_result",
+					tool_use_id: "tool-1",
+					content: "out-1",
+					is_error: false,
+				}],
+			},
+		};
+		// -- sub-message 2: text B + tool2 (fresh builder, local indices restart) --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Bravo summary." } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "Read", input: {} } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"file_path\":\"b.txt\"}" } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p2");
+		yield {
+			type: "user",
+			uuid: "user-2",
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{
+					type: "tool_result",
+					tool_use_id: "tool-2",
+					content: "out-2",
+					is_error: false,
+				}],
+			},
+		};
+		// -- sub-message 3: text C --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p3");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p3");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Charlie wrap-up." } }, "p3");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p3");
+		yield makeSdkSuccessResult("done");
+	}
+
+	function makeTurnPartial(): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "claude-code",
+			model: "claude-sonnet-4-6",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+	}
+
+	test("streamed event indices grow monotonically across sub-message boundaries", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: subMessageScenario,
+			} as any,
+		);
+
+		// Apply events the way pi-agent-core's agent loop applies them to its
+		// single turn partial: every event is written at
+		// `partial.content[event.contentIndex]` (provider-partial lookup and
+		// streaming tool-JSON accumulation are omitted — neither affects index
+		// routing).
+		const partial = makeTurnPartial();
+		const startIndices: string[] = [];
+		for await (const event of stream) {
+			switch (event.type) {
+				case "text_start":
+					partial.content[event.contentIndex] = { type: "text", text: "" };
+					startIndices.push(`text@${event.contentIndex}`);
+					break;
+				case "text_delta":
+					(partial.content[event.contentIndex] as any).text += event.delta;
+					break;
+				case "text_end":
+					(partial.content[event.contentIndex] as any).text = event.content;
+					break;
+				case "toolcall_start":
+					partial.content[event.contentIndex] = { type: "toolCall", id: "", name: "", arguments: {} };
+					startIndices.push(`toolcall@${event.contentIndex}`);
+					break;
+				case "toolcall_end":
+					partial.content[event.contentIndex] = { ...event.toolCall };
+					break;
+				case "done":
+				case "error":
+					break;
+				default:
+					break;
+			}
+		}
+
+		// Pre-fix, each fresh builder restarted at 0: text B landed on index 0
+		// overwriting text A, tool2 landed on index 1 overwriting tool1, and
+		// text C overwrote text B.
+		assert.deepEqual(startIndices, ["text@0", "toolcall@1", "text@2", "toolcall@3", "text@4"]);
+		assert.deepEqual(
+			partial.content.filter((block) => block.type === "text").map((block: any) => block.text),
+			["Alpha analysis.", "Bravo summary.", "Charlie wrap-up."],
+		);
+	});
+
+	test("synthetic toolcall_end lands on the tool's shifted slot in the turn partial", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: subMessageScenario,
+			} as any,
+		);
+
+		const partial = makeTurnPartial();
+		let finalMessage: AssistantMessage | undefined;
+		const toolcallEndIndices: number[] = [];
+		for await (const event of stream) {
+			switch (event.type) {
+				case "text_start":
+					partial.content[event.contentIndex] = { type: "text", text: "" };
+					break;
+				case "text_delta":
+					(partial.content[event.contentIndex] as any).text += event.delta;
+					break;
+				case "text_end":
+					(partial.content[event.contentIndex] as any).text = event.content;
+					break;
+				case "toolcall_start":
+					partial.content[event.contentIndex] = { type: "toolCall", id: "", name: "", arguments: {} };
+					break;
+				case "toolcall_end":
+					partial.content[event.contentIndex] = { ...event.toolCall };
+					toolcallEndIndices.push(event.contentIndex);
+					break;
+				case "done":
+					finalMessage = event.message;
+					break;
+				default:
+					break;
+			}
+		}
+
+		// The real-time synthetic completions (pushed at each synthetic-user
+		// boundary) must hit each tool's slot in the TURN partial — the shifted
+		// indices, not the builder-local ones — and carry the attached external
+		// results.
+		const tool1Slot = partial.content[1] as any;
+		assert.equal(tool1Slot?.type, "toolCall");
+		assert.equal(tool1Slot?.id, "tool-1");
+		assert.equal(tool1Slot?.externalResult?.content?.[0]?.text, "out-1");
+		const tool2Slot = partial.content[3] as any;
+		assert.equal(tool2Slot?.type, "toolCall");
+		assert.equal(tool2Slot?.id, "tool-2");
+		assert.equal(tool2Slot?.externalResult?.content?.[0]?.text, "out-2");
+		// Streaming end + synthetic completion per tool, both at the shifted
+		// turn-partial index (pre-fix both tool2 events landed on 1).
+		assert.deepEqual(toolcallEndIndices, [1, 1, 3, 3]);
+
+		// Final-message assembly is untouched by the index shift:
+		// [tool1, tool2, intermediate text A, pending text B, text C].
+		assert.deepEqual(
+			finalMessage?.content.map((block) => block.type === "toolCall" ? `tool:${block.id}` : (block as any).text),
+			["tool:tool-1", "tool:tool-2", "Alpha analysis.", "Bravo summary.", "Charlie wrap-up."],
+		);
+	});
+});
+
 // ---------------------------------------------------------------------------
 // Bug #2859 — stateless provider regression tests
 // ---------------------------------------------------------------------------
