@@ -791,6 +791,70 @@ test("runUnitPhase increments unitDispatchCount for repeated artifact-missing re
   assert.equal(ic.s.unitDispatchCount.get("execute-task/M001/S01/T01"), 2);
 });
 
+test("runUnitPhase completes a rewrite-docs unit before the host resolves its override", async (t) => {
+  const { registerOverride } = await import("../overrides.ts");
+  const base = makeTestBase("gsd-rewrite-docs-complete-");
+  t.after(() => {
+    try { closeDatabase(); } catch { /* noop */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active", depends_on: [] });
+  // Still active at unit end: the host resolves it later, in postUnitPreVerification.
+  registerOverride(base, "Use Postgres instead of SQLite", "M001/none/none");
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const outcomes: boolean[] = [];
+  const deps = makeMockDeps(capture, {
+    selectAndApplyModel: async () => ({ routing: { tier: "standard", modelDowngraded: false }, appliedModel: null }),
+    recordOutcome: (_unitType, _tier, success) => { outcomes.push(success); },
+  });
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "rewrite-docs",
+    unitId: "M001",
+    prompt: "apply the override",
+    finalPrompt: "apply the override",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "executing",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  const unitPromise = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+
+  const result = await unitPromise;
+  assert.equal(result.action, "next");
+
+  const endEvents = capture.events.filter(e => e.eventType === "unit-end");
+  assert.equal(endEvents.length, 1);
+  assert.equal((endEvents[0].data as any).status, "completed");
+  assert.equal((endEvents[0].data as any).artifactVerified, true);
+  assert.equal(ic.s.unitDispatchCount.has("rewrite-docs/M001"), false, "a later steer on the same unit id is not a retry");
+  assert.deepEqual(outcomes, [true], "the unit is not recorded as a routing failure");
+});
+
 test("runUnitPhase pre-dispatch model validation failures do not emit unit-start or dispatch runtime state", async (t) => {
   const capture = createEventCapture();
   const base = makeTestBase(`gsd-pre-dispatch-block-${randomUUID()}`);

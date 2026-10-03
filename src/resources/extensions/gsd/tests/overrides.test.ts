@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -18,20 +19,36 @@ import { _getAdapter, closeDatabase, insertMilestone, isDbAvailable, openDatabas
 import {
   getRewriteCount,
   loadActiveOverrides,
+  recordRewriteAttempt,
   registerOverride,
   resolveAllOverrides,
 } from "../overrides.ts";
-import { projectionRendererFor } from "../projection-worker.ts";
+import { preserveProjectionChangesBeforeDispatch, projectionRendererFor } from "../projection-worker.ts";
 import { invalidateStateCache } from "../state.ts";
 
-const LEGACY_ACTIVE_OVERRIDE = [
+// The file an older release wrote: overrides lived only in OVERRIDES.md.
+const LEGACY_OVERRIDES = [
   "# GSD Overrides",
+  "",
+  "User-issued overrides that supersede plan document content.",
+  "",
+  "---",
+  "",
+  "## Override: 2026-03-13T09:00:00.000Z",
+  "",
+  "**Change:** Legacy resolved override",
+  "**Scope:** resolved",
+  "**Applied-at:** M001/S01/T01",
+  "",
+  "---",
   "",
   "## Override: 2026-03-14T10:00:00.000Z",
   "",
-  "**Change:** Hand-written override",
+  "**Change:** Legacy active override",
   "**Scope:** active",
-  "**Applied-at:** M001/S01/T01",
+  "**Applied-at:** M001/S01/T02",
+  "",
+  "---",
   "",
 ].join("\n");
 
@@ -110,23 +127,68 @@ describe("steer overrides in the database", () => {
     assert.ok(result.action === "dispatch" && !result.prompt.includes("**Scope:** active"), "the agent is not told to edit OVERRIDES.md");
   });
 
-  test("an edited OVERRIDES.md with an active override does not dispatch rewrite-docs", async () => {
-    writeFileSync(overridesPath, LEGACY_ACTIVE_OVERRIDE, "utf-8");
+  test("a legacy OVERRIDES.md active override dispatches rewrite-docs after upgrade and survives the render", async () => {
+    writeFileSync(overridesPath, LEGACY_OVERRIDES, "utf-8");
 
-    assert.deepEqual(loadActiveOverrides(), []);
-    assert.equal(await rewriteDocsRule().match(dispatchContext(base)), null);
+    assert.deepEqual(loadActiveOverrides(base), [{
+      timestamp: "2026-03-14T10:00:00.000Z",
+      change: "Legacy active override",
+      scope: "active",
+      appliedAt: "M001/S01/T02",
+    }]);
+    assert.equal(verifyExpectedArtifact("rewrite-docs", "M001", base), false);
+
+    const result = await rewriteDocsRule().match(dispatchContext(base));
+
+    assert.equal(result?.action, "dispatch");
+    assert.ok(result.action === "dispatch" && result.prompt.includes("Legacy active override"));
+    assert.equal(operations("override.import"), 1);
+    assert.equal(getRewriteCount(), 1, "the dispatch is counted against the imported override");
+    const rendered = readFileSync(overridesPath, "utf-8");
+    assert.match(rendered, /## Override: 2026-03-14T10:00:00\.000Z\n\n\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* active\n\*\*Applied-at:\*\* M001\/S01\/T02/);
+    assert.match(rendered, /## Override: 2026-03-13T09:00:00\.000Z\n\n\*\*Change:\*\* Legacy resolved override\n\*\*Scope:\*\* resolved/);
+
+    assert.equal((await rewriteDocsRule().match(dispatchContext(base)))?.action, "dispatch");
+    assert.equal(getRewriteCount(), 2);
+    assert.equal(operations("override.import"), 1, "a block the database holds is not imported again");
+
+    resolveAllOverrides(base);
+
+    assert.deepEqual(loadActiveOverrides(base), []);
     assert.equal(verifyExpectedArtifact("rewrite-docs", "M001", base), true);
+    assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* resolved/);
+  });
+
+  test("the first steer after upgrade keeps the legacy OVERRIDES.md overrides", () => {
+    writeFileSync(overridesPath, LEGACY_OVERRIDES, "utf-8");
+
+    registerOverride(base, "Use Postgres instead of SQLite", "M001/S01/T03");
+
+    const rendered = readFileSync(overridesPath, "utf-8");
+    assert.match(rendered, /\*\*Change:\*\* Use Postgres instead of SQLite\n\*\*Scope:\*\* active/);
+    assert.match(rendered, /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* active/);
+    assert.match(rendered, /\*\*Change:\*\* Legacy resolved override\n\*\*Scope:\*\* resolved/);
+    assert.deepEqual(
+      loadActiveOverrides(base).map((override) => override.change).sort(),
+      ["Legacy active override", "Use Postgres instead of SQLite"],
+    );
   });
 
   test("rewrite-docs is verified by resolution in the database, not by file text", () => {
     registerOverride(base, "Switch to JWT auth", "M001/S01/T01");
-    writeFileSync(overridesPath, "**Scope:** resolved\n", "utf-8");
+    // The edit that an older rewrite-docs prompt told the agent to make.
+    writeFileSync(
+      overridesPath,
+      readFileSync(overridesPath, "utf-8").replace("**Scope:** active", "**Scope:** resolved"),
+      "utf-8",
+    );
     assert.equal(verifyExpectedArtifact("rewrite-docs", "M001", base), false);
+    assert.equal(loadActiveOverrides(base).length, 1);
 
     resolveAllOverrides(base);
 
     assert.equal(operations("override.resolve"), 1);
-    assert.deepEqual(loadActiveOverrides(), []);
+    assert.deepEqual(loadActiveOverrides(base), []);
     assert.equal(verifyExpectedArtifact("rewrite-docs", "M001", base), true);
     assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Switch to JWT auth\n\*\*Scope:\*\* resolved/);
 
@@ -147,7 +209,7 @@ describe("steer overrides in the database", () => {
     }
 
     assert.equal(await rule.match(dispatchContext(base)), null, "the fourth attempt gives up");
-    assert.deepEqual(loadActiveOverrides(), []);
+    assert.deepEqual(loadActiveOverrides(base), []);
     assert.equal(getRewriteCount(), 0, "resolution resets the count");
 
     registerOverride(base, "A new override starts a new count", "M001/S01/T02");
@@ -165,6 +227,33 @@ describe("steer overrides in the database", () => {
 
     assert.ok(existsSync(overridesPath));
     assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Prefer server components/);
+  });
+
+  test("override operations from a worktree leave nothing for dispatch to preserve or hold", async () => {
+    execFileSync("git", ["init", "--initial-branch=main"], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "test@test.com"], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: base, stdio: "ignore" });
+    writeFileSync(join(base, "README.md"), "# test\n");
+    execFileSync("git", ["add", "README.md"], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "chore: seed"], { cwd: base, stdio: "ignore" });
+    const worktree = join(base, ".gsd-worktrees", "M001");
+    execFileSync("git", ["worktree", "add", "-b", "milestone/M001", worktree], { cwd: base, stdio: "ignore" });
+
+    registerOverride(base, "Use Postgres instead of SQLite", "M001/S01/T01");
+    recordRewriteAttempt(worktree);
+
+    let observed = await preserveProjectionChangesBeforeDispatch(base);
+    assert.deepEqual(observed.preserved, []);
+    assert.deepEqual(observed.held, []);
+    assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Scope:\*\* active\n.*\n\*\*Rewrite-attempts:\*\* 1/);
+
+    resolveAllOverrides(worktree);
+
+    observed = await preserveProjectionChangesBeforeDispatch(base);
+    assert.deepEqual(observed.preserved, []);
+    assert.deepEqual(observed.held, []);
+    assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Scope:\*\* resolved/);
+    assert.equal(existsSync(join(worktree, ".gsd", "OVERRIDES.md")), false, "one OVERRIDES.md, at the project root");
   });
 
   test("registering an override without a database fails loud", () => {

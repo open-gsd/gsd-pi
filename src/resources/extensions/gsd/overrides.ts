@@ -1,8 +1,10 @@
 // Project/App: gsd-pi
 // File Purpose: Steer overrides as Domain Operation events; OVERRIDES.md is their render.
 
+import { existsSync, readFileSync } from "node:fs";
+
 import { atomicWriteSync } from "./atomic-write.js";
-import { recordCompatProjectionWrite } from "./compat/compat-marker.js";
+import { noteRenderedProjectionFile } from "./compat/compat-marker.js";
 import { getDbOrNull } from "./db/engine.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
@@ -11,12 +13,18 @@ import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
 import { resolveGsdRootFile } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
 
+interface OverrideEvent {
+  eventType: string;
+  entityId: string;
+  payload: DomainJsonValue;
+}
+
 /** Run one override Domain Operation, then render OVERRIDES.md from the committed rows. */
 function runOverrideOperation(
   basePath: string,
   operationType: string,
   payload: DomainJsonValue,
-  events: (revision: number) => Array<{ eventType: string; entityId: string; payload: DomainJsonValue }>,
+  events: (revision: number) => OverrideEvent[],
 ): void {
   if (!isDbAvailable()) throw new Error(`${operationType} requires the GSD database`);
   const fence = readDomainOperationFence();
@@ -54,7 +62,7 @@ interface OverrideRow extends Override {
 function readOverrides(): OverrideRow[] {
   const rows = getDbOrNull()?.prepare(`
     SELECT registered.entity_id AS id,
-           registered.created_at AS created_at,
+           COALESCE(json_extract(registered.payload_json, '$.timestamp'), registered.created_at) AS created_at,
            json_extract(registered.payload_json, '$.change') AS change,
            json_extract(registered.payload_json, '$.appliedAt') AS applied_at,
            EXISTS (
@@ -87,20 +95,66 @@ function activeOverrides(): OverrideRow[] {
   return readOverrides().filter((row) => row.scope === "active");
 }
 
-/** Overrides not yet resolved. Empty when no database is open. */
-export function loadActiveOverrides(): Override[] {
-  return activeOverrides().map(({ id: _id, rewriteAttempts: _attempts, ...override }) => override);
+/**
+ * Import bridge, for one release: the `## Override:` blocks of OVERRIDES.md
+ * whose timestamp no database override holds. An older release kept overrides
+ * only in this file, and in team mode a teammate's commit brings new blocks.
+ * A block the database holds is never read: the database row wins.
+ */
+function unimportedFileOverrides(basePath: string, known: readonly Override[]): Override[] {
+  const path = resolveGsdRootFile(basePath, "OVERRIDES");
+  if (!existsSync(path)) return [];
+  const knownTimestamps = new Set(known.map((override) => override.timestamp));
+  return readFileSync(path, "utf-8").split(/^## Override: /m).slice(1).flatMap((block): Override[] => {
+    const field = (name: string) => block.match(new RegExp(`^\\*\\*${name}:\\*\\*\\s*(.+)$`, "m"))?.[1]?.trim() ?? "";
+    const timestamp = block.split("\n", 1)[0]!.trim();
+    const change = field("Change");
+    if (!change || knownTimestamps.has(timestamp)) return [];
+    const scope = (field("Scope") || "active") === "active" ? "active" : "resolved";
+    return [{ timestamp, change, scope, appliedAt: field("Applied-at") }];
+  });
 }
 
-/** Write OVERRIDES.md from the database. Never read back as state. */
-export function renderOverridesProjection(basePath: string): void {
-  const overrides = readOverrides();
+/** Record the un-imported file blocks as override events, so that a rewrite attempt counts against them and resolution covers them. */
+function importFileOverrides(basePath: string): void {
+  if (!isDbAvailable()) return;
+  const overrides = unimportedFileOverrides(basePath, readOverrides());
   if (overrides.length === 0) return;
+  const timestamps = overrides.map((override) => override.timestamp);
+  runOverrideOperation(basePath, "override.import", { timestamps }, (revision) =>
+    overrides.flatMap(({ timestamp, change, scope, appliedAt }, index) => {
+      const entityId = `override-${revision}-${index}`;
+      const events: OverrideEvent[] = [
+        { eventType: "override.registered", entityId, payload: { change, appliedAt, timestamp } },
+      ];
+      if (scope === "resolved") events.push({ eventType: "override.resolved", entityId, payload: {} });
+      return events;
+    }));
+}
+
+/** Overrides not yet resolved, with the file blocks not imported yet. Empty when no database is open. */
+export function loadActiveOverrides(basePath: string): Override[] {
+  if (!isDbAvailable()) return [];
+  const rows = readOverrides();
+  return [
+    ...rows.map(({ id: _id, rewriteAttempts: _attempts, ...override }) => override),
+    ...unimportedFileOverrides(basePath, rows),
+  ].filter((override) => override.scope === "active");
+}
+
+/** Write OVERRIDES.md from the database. A file block that is not imported yet is kept. */
+export function renderOverridesProjection(basePath: string): void {
+  const rows = readOverrides();
+  if (rows.length === 0) return;
+  const overrides = [
+    ...rows,
+    ...unimportedFileOverrides(basePath, rows).map((override) => ({ ...override, rewriteAttempts: 0 })),
+  ];
   const content = [
     "# GSD Overrides",
     "",
     "User-issued overrides that supersede plan document content.",
-    "Rendered from the GSD database; edits to this file are not read.",
+    "Rendered from the GSD database; edits to the overrides below are not read.",
     "",
     "---",
     "",
@@ -118,7 +172,9 @@ export function renderOverridesProjection(basePath: string): void {
   ].join("\n");
   const path = resolveGsdRootFile(basePath, "OVERRIDES");
   atomicWriteSync(path, content, "utf-8");
-  recordCompatProjectionWrite(basePath, path, content, []);
+  // Not registered in the compat marker: a worktree base path writes this
+  // project-root file, and its own marker cannot hold a key outside its .gsd.
+  noteRenderedProjectionFile(path, content);
 }
 
 /** /gsd steer: record one override in an override.register Domain Operation. */
@@ -138,6 +194,7 @@ export function resolveAllOverrides(basePath: string): void {
 
 /** Count one rewrite-docs dispatch against every active override (the rewrite circuit breaker). */
 export function recordRewriteAttempt(basePath: string): void {
+  importFileOverrides(basePath);
   const overrideIds = activeOverrides().map((row) => row.id);
   if (overrideIds.length === 0) return;
   runOverrideOperation(basePath, "override.rewrite_attempt", { overrideIds }, () =>

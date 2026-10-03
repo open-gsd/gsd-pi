@@ -1815,7 +1815,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         // state engine skips it. Without this, rewrite-docs only edits
         // markdown but the DB still has the milestone as active.
         try {
-          const overrides = loadActiveOverrides();
+          const overrides = loadActiveOverrides(s.basePath);
           const decision = detectAbandonMilestone(overrides, s.currentMilestoneId);
           if (decision.shouldPark && s.currentMilestoneId) {
             const { parkMilestone } = await import("./milestone-actions.js");

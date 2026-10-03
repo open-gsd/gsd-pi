@@ -838,7 +838,7 @@ async function buildTaskExecutionContextInjection(
   const slicePlanExcerpt = extractSliceExecutionExcerpt(slicePlanContent, slicePlanRelPath);
   const priorTaskLines = await buildCarryForwardLines(basePath, milestoneId, sliceId, taskId);
   const resumeSection = await buildResumeSection(basePath, milestoneId, sliceId);
-  const activeOverrides = loadActiveOverrides();
+  const activeOverrides = loadActiveOverrides(basePath);
   const overridesSection = formatOverridesSection(activeOverrides);
 
   return [

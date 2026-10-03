@@ -2391,7 +2391,7 @@ export async function buildResearchSlicePrompt(
 
   const depContent = await inlineDependencySummaries(mid, sid, base, resolveSummaryBudgetChars());
   trackPromptContext(contextTelemetry, "dependency-summaries", depContent.trim() ? "inline" : "skipped", depContent, depContent.trim() ? undefined : "none");
-  const activeOverrides = loadActiveOverrides();
+  const activeOverrides = loadActiveOverrides(base);
   const overridesInline = formatOverridesSection(activeOverrides);
   if (overridesInline) {
     inlined.unshift(overridesInline);
@@ -2586,7 +2586,7 @@ async function renderSlicePrompt(options: {
   }
 
   const depContent = await inlineDependencySummaries(mid, sid, base, resolveSummaryBudgetChars());
-  const overridesInline = formatOverridesSection(loadActiveOverrides());
+  const overridesInline = formatOverridesSection(loadActiveOverrides(base));
   if (overridesInline) {
     inlined.unshift(overridesInline);
     trackPromptContext(contextTelemetry, "overrides", "inline", overridesInline);
@@ -2972,7 +2972,7 @@ export async function buildExecuteTaskPrompt(
 
   const taskSummaryPath = join(base, `${relSlicePath(base, mid, sid)}/tasks/${tid}-SUMMARY.md`);
 
-  const activeOverrides = loadActiveOverrides();
+  const activeOverrides = loadActiveOverrides(base);
   const overridesSection = formatOverridesSection(activeOverrides);
 
   // Compute verification budget for the executor's context window (issue #707)
@@ -3297,7 +3297,7 @@ export async function buildCompleteSlicePrompt(
   // Overrides section prepends to the top of the inlined context —
   // standard pattern for slice-level builders (until composer v2 lands
   // the prepend contract).
-  const completeActiveOverrides = loadActiveOverrides();
+  const completeActiveOverrides = loadActiveOverrides(base);
   const completeOverridesInline = formatOverridesSection(completeActiveOverrides);
   if (completeOverridesInline) {
     trackPromptContext(contextTelemetry, "overrides", "inline", completeOverridesInline);
@@ -3848,7 +3848,7 @@ export async function buildReplanSlicePrompt(
   // Inline decisions
   const decisionsInline = await inlineDecisionsFromDb(base, mid);
   if (decisionsInline) inlined.push(decisionsInline);
-  const replanActiveOverrides = loadActiveOverrides();
+  const replanActiveOverrides = loadActiveOverrides(base);
   const replanOverridesInline = formatOverridesSection(replanActiveOverrides);
   if (replanOverridesInline) inlined.unshift(replanOverridesInline);
 

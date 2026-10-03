@@ -721,7 +721,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
   {
     name: "rewrite-docs (override gate)",
     match: async ({ mid, midTitle, state, basePath, session, preview }) => {
-      const pendingOverrides = loadActiveOverrides();
+      const pendingOverrides = loadActiveOverrides(basePath);
       if (pendingOverrides.length === 0) return null;
       if (getRewriteCount() >= MAX_REWRITE_ATTEMPTS) {
         // Preview: same fall-through decision, no override resolution persisted.

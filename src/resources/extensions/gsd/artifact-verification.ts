@@ -240,7 +240,7 @@ export function verifyExpectedArtifact(
   clearParseCache();
 
   if (unitType === "rewrite-docs") {
-    return loadActiveOverrides().length === 0;
+    return loadActiveOverrides(base).length === 0;
   }
 
   if (unitType === "workflow-preferences") {

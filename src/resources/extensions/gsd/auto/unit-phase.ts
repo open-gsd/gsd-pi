@@ -961,7 +961,10 @@ export async function runUnitPhase(
     }
   }
 
-  const skipArtifactVerification = unitType.startsWith("hook/") || unitType === "custom-step";
+  // A rewrite-docs unit writes no artifact. Its completed turn is the
+  // completion; the host resolves the overrides later, in postUnitPreVerification.
+  const skipArtifactVerification = unitType.startsWith("hook/") || unitType === "custom-step" ||
+    (unitType === "rewrite-docs" && unitResult.status === "completed");
   let artifactVerified =
     skipArtifactVerification ||
     isTaskExecutionReadyForHostVerification(unitType, unitId) ||
