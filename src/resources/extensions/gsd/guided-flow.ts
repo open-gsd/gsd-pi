@@ -2108,6 +2108,14 @@ export async function showSmartEntry(
       if (result.action === "recovery-required") {
         if (result.recoveryCommand === "/gsd rebuild markdown") {
           if (shouldAttemptMarkdownAutoRebuild(result)) {
+            // A tracked projection changed by pull, merge, rebase or branch
+            // switch is never overwritten by a self-heal: stop for a choice.
+            const { describeHeldProjectionChanges, preserveProjectionChangesBeforeDispatch } = await import("./projection-worker.js");
+            const { held } = await preserveProjectionChangesBeforeDispatch(basePath);
+            if (held.length > 0) {
+              ctx.ui.notify(describeHeldProjectionChanges(basePath, held), "error");
+              return;
+            }
             try {
               const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
               const rebuild = await rebuildMarkdownProjectionsFromDb(basePath);
