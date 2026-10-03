@@ -3,9 +3,7 @@ import { dirname, join } from "node:path";
 import { atomicWriteSync } from "./atomic-write.js";
 import {
   gsdRoot,
-  relSliceFile,
   relTaskFile,
-  resolveSliceFile,
   resolveTaskFile,
 } from "./paths.js";
 import { loadFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
@@ -90,11 +88,8 @@ export function isInFlightRuntimePhase(phase: UnitRuntimePhase): boolean {
 }
 
 export interface ExecuteTaskRecoveryStatus {
-  planPath: string;
   summaryPath: string;
   summaryExists: boolean;
-  taskChecked: boolean;
-  nextActionAdvanced: boolean;
   dbComplete: boolean;
   mustHaveCount: number;
   mustHavesMentionedInSummary: number;
@@ -297,20 +292,12 @@ export async function inspectExecuteTaskDurability(
   const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
   if (!mid || !sid || !tid) return null;
 
-  const planAbs = resolveSliceFile(basePath, mid, sid, "PLAN");
   const summaryAbs = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
-  const stateAbs = join(gsdRoot(basePath), "STATE.md");
-
-  const planPath = relSliceFile(basePath, mid, sid, "PLAN");
   const summaryPath = relTaskFile(basePath, mid, sid, tid, "SUMMARY");
-
-  const planContent = planAbs ? await loadFile(planAbs) : null;
-  const stateContent = existsSync(stateAbs) ? readFileSync(stateAbs, "utf-8") : "";
   const summaryExists = !!(summaryAbs && existsSync(summaryAbs));
 
-  const escapedTid = tid.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const taskChecked = !!planContent && new RegExp(`^- \\[[xX]\\] \\*\\*${escapedTid}:`, "m").test(planContent);
-  const nextActionAdvanced = !new RegExp(`Execute ${tid}\\b`).test(stateContent);
+  // Task status comes from the database. The PLAN checkbox and the STATE.md
+  // next action are projections that can lag it, so they are not read.
   let dbComplete = false;
   if (isDbAvailable()) {
     refreshWorkflowDatabaseFromDisk();
@@ -338,11 +325,8 @@ export async function inspectExecuteTaskDurability(
   }
 
   return {
-    planPath,
     summaryPath,
     summaryExists,
-    taskChecked,
-    nextActionAdvanced,
     dbComplete,
     mustHaveCount,
     mustHavesMentionedInSummary,
@@ -351,12 +335,10 @@ export async function inspectExecuteTaskDurability(
 
 export function formatExecuteTaskRecoveryStatus(status: ExecuteTaskRecoveryStatus): string {
   if (status.dbComplete) return "DB task status is closed";
-  const missing = [] as string[];
+  const missing = ["DB task status is not closed"];
   if (!status.summaryExists) missing.push(`summary missing (${status.summaryPath})`);
-  if (!status.taskChecked) missing.push(`task checkbox unchecked in ${status.planPath}`);
-  if (!status.nextActionAdvanced) missing.push("state next action still points at the timed-out task");
   if (status.mustHaveCount > 0 && status.mustHavesMentionedInSummary < status.mustHaveCount) {
     missing.push(`must-have gap: ${status.mustHavesMentionedInSummary} of ${status.mustHaveCount} must-haves addressed in summary`);
   }
-  return missing.length > 0 ? missing.join("; ") : "all durable task artifacts present";
+  return missing.join("; ");
 }

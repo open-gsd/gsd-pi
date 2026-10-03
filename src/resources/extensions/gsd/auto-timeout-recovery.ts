@@ -115,8 +115,7 @@ export async function recoverTimedOutUnit(
             `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts}.`,
             `Current durability status: ${formatExecuteTaskRecoveryStatus(status)}.`,
             "You MUST finish the durable output NOW, even if incomplete.",
-            "Write the task summary with whatever you have accomplished so far.",
-            "Mark the task [x] in the plan. Commit your work.",
+            "Call `gsd_task_complete` with whatever you have accomplished so far. Commit your work.",
             "A partial summary is infinitely better than no summary.",
           ]
         : [

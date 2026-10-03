@@ -64,7 +64,6 @@ import { clearActivityLogState } from "./activity-log.js";
 import {
   synthesizeCrashRecovery,
   getDeepDiagnostic,
-  readActiveMilestoneId,
 } from "./session-forensics.js";
 import {
   writeLock,
@@ -184,7 +183,6 @@ import { getPriorSliceCompletionBlocker } from "./dispatch-guard.js";
 import { autoWorktreeBranch, enterBranchModeForMilestone } from "./auto-worktree-branch-lifecycle.js";
 import { createAutoWorktree } from "./auto-worktree-creation.js";
 import { enterAutoWorktree, isInAutoWorktree } from "./auto-worktree-entry.js";
-import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
 import { checkResourcesStale, readResourceVersion } from "./auto-worktree-resource-version.js";
 import { escapeStaleWorktree } from "./auto-worktree-runtime-cleanup.js";
 import { teardownWarmedBrowserDaemons } from "./browser-daemon-auto-prep.js";
@@ -2646,11 +2644,7 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
     startUnitSupervision,
 
     // Prompt helpers
-    getDeepDiagnostic: (basePath: string) => {
-      const mid = readActiveMilestoneId(basePath);
-      const wtPath = mid ? getAutoWorktreePath(basePath, mid) : undefined;
-      return getDeepDiagnostic(basePath, wtPath ?? undefined);
-    },
+    getDeepDiagnostic,
     isDbAvailable,
     reorderForCaching,
 
