@@ -346,9 +346,10 @@ test("each kind that production code enqueues is rendered and settled", async ()
   const statePath = join(base, ".gsd", "STATE.md");
   const queuePath = join(base, ".gsd", "QUEUE.md");
   const rootRoadmapPath = join(base, ".gsd", "ROADMAP.md");
+  const queueOrderPath = join(base, ".gsd", "QUEUE-ORDER.json");
   rmSync(requirementsPath);
   // The fixture's mutations already rendered the root files; remove them so the drain must write them.
-  for (const path of [statePath, queuePath, rootRoadmapPath]) rmSync(path, { force: true });
+  for (const path of [statePath, queuePath, rootRoadmapPath, queueOrderPath]) rmSync(path, { force: true });
   const rows: Array<[kind: string, key: string]> = [
     ["state", "project/authority"],
     ["milestone-status", "milestone/m001/active"],
@@ -362,7 +363,6 @@ test("each kind that production code enqueues is rendered and settled", async ()
     ["lifecycle-shadow-repair", "lifecycle-shadow-repair/m001/s02"],
     ["markdown", "planning/requirements"],
     ["markdown", "knowledge"],
-    ["queue-order", "queue-order"],
   ];
   for (const [kind, key] of rows) seed(kind, key);
 
@@ -379,7 +379,7 @@ test("each kind that production code enqueues is rendered and settled", async ()
   assert.match(readFileSync(rootRoadmapPath, "utf-8"), /M001/, "the state kinds render the root ROADMAP.md");
   assert.match(readFileSync(requirementsPath, "utf-8"), /SQLite is authoritative/);
   assert.match(readFileSync(join(base, ".gsd", "KNOWLEDGE.md"), "utf-8"), /## Rules/, "the knowledge key renders KNOWLEDGE.md");
-  assert.ok(existsSync(join(base, ".gsd", "QUEUE-ORDER.json")), "the queue-order kind renders QUEUE-ORDER.json");
+  assert.ok(existsSync(queueOrderPath), "the queue-order kind renders QUEUE-ORDER.json");
   const roadmap = resolveMilestoneFile(base, "M001", "ROADMAP");
   assert.ok(roadmap && existsSync(roadmap), "the milestone kinds render the milestone files");
   const s01Plan = resolveSliceFile(base, "M001", "S01", "PLAN");

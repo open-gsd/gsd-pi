@@ -96,7 +96,7 @@ const MILESTONE_KINDS = new Set(["milestone-validation", "milestone-subjective-u
 
 // Kinds whose operations change no hierarchy file. Their projection is the
 // root files that list the milestones: STATE.md, root ROADMAP.md and QUEUE.md.
-const STATE_KINDS = new Set(["state", "milestone-status", "migration-audit", "queue-order"]);
+const STATE_KINDS = new Set(["state", "milestone-status", "migration-audit"]);
 
 /** Key prefix of the doctor repair work that renders every file of one milestone. */
 export const MILESTONE_REBUILD_KEY_PREFIX = "rebuild/";
@@ -145,10 +145,14 @@ async function renderKnowledgeFile(root: string): Promise<void> {
   noteRenderedProjectionFile(knowledgeMdPath(root), renderKnowledgeProjection(root).content);
 }
 
-/** QUEUE-ORDER.json is the projection of milestones.sequence (milestone.reorder). */
+/**
+ * QUEUE-ORDER.json is the projection of milestones.sequence (milestone.reorder).
+ * The root files list the milestones in that sequence, so they render too.
+ */
 async function renderQueueOrderFile(root: string): Promise<void> {
   const queueOrderPath = renderQueueOrderFromDb(root);
   noteRenderedProjectionFile(queueOrderPath, readFileSync(queueOrderPath, "utf-8"));
+  await renderStateFile(root);
 }
 
 /**
