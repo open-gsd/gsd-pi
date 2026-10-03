@@ -288,6 +288,8 @@ function normalizedFieldName(name: string): string | undefined {
   }
 }
 
+const MULTI_LINE_REQUIREMENT_FIELDS = new Set(["description", "why", "validation", "notes"]);
+
 function categoryStatus(heading: string): string | undefined {
   switch (heading.trim().toLowerCase()) {
     case "active": return "active";
@@ -327,6 +329,7 @@ function requirementSections(file: LegacyImportDecodedSourceFile): RequirementSe
     let usedUnderscoreAlias = false;
     let end = line.end;
     let last: Cell | undefined;
+    let blanks = 0;
     for (const candidate of file.lines) {
       if (candidate.start <= line.start || candidate.start >= boundary) continue;
       if (/^##\s+/.test(candidate.text)) break;
@@ -338,22 +341,35 @@ function requirementSections(file: LegacyImportDecodedSourceFile): RequirementSe
       const match = candidate.text.match(/^-\s+([^:]+):\s*(.*)$/);
       const name = match === null ? undefined : normalizedFieldName(match[1]);
       if (match === null || name === undefined) {
-        // generateRequirementsMd writes a multi-line value as raw lines under
-        // its bullet, so a line that starts no known field continues the last one.
-        if (last !== undefined) last.value += `\n${candidate.text}`;
+        const text = candidate.text;
+        if (text.trim() === "") {
+          blanks += 1;
+          continue;
+        }
+        // generateRequirementsMd indents the later lines of a multi-line value.
+        // Plain wrapped text continues the value only directly below its bullet;
+        // each other line ends the value and is not imported.
+        if (last !== undefined && /^(?: {2}|\t)/.test(text)) {
+          last.value += "\n".repeat(blanks + 1) + text.replace(/^(?: {2}|\t)/, "");
+        } else if (last !== undefined && blanks === 0 && !/^(?:[-*#]|_{3,}\s*$)/.test(text)) {
+          last.value += `\n${text}`;
+        } else {
+          last = undefined;
+        }
+        blanks = 0;
         continue;
       }
+      blanks = 0;
       usedUnderscoreAlias ||= match[1].includes("_");
       const valueCharacter = candidate.text.length - match[2].length;
-      last = {
+      const cell = {
         value: match[2].trim(),
         start: candidate.start + byteOffset(candidate.text, valueCharacter),
         end: candidate.start + byteOffset(candidate.text, candidate.text.length),
       };
-      fields.set(name, last);
+      last = MULTI_LINE_REQUIREMENT_FIELDS.has(name) ? cell : undefined;
+      fields.set(name, cell);
     }
-    // The blank line that ends a section is not part of the last value.
-    for (const field of fields.values()) field.value = field.value.trimEnd();
     return {
       start: line.start,
       end,

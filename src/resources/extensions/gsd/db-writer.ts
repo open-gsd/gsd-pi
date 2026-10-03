@@ -151,6 +151,11 @@ const STATUS_SECTION_MAP: Array<{ status: string; heading: string }> = [
  * status sections are emitted too because the deep-mode validator treats their
  * presence as part of the canonical contract.
  */
+/** Keep the later lines of a multi-line value inside its bullet. */
+function indentLaterLines(value: string): string {
+  return value.replace(/\n(?=[^\n])/g, '\n  ');
+}
+
 export function generateRequirementsMd(requirements: Requirement[]): string {
   const lines: string[] = [];
 
@@ -179,13 +184,13 @@ export function generateRequirementsMd(requirements: Requirement[]): string {
       // Emit bullet fields — only those with content
       if (r.class) lines.push(`- Class: ${r.class}`);
       if (r.status) lines.push(`- Status: ${r.status}`);
-      if (r.description) lines.push(`- Description: ${r.description}`);
-      if (r.why) lines.push(`- Why it matters: ${r.why}`);
+      if (r.description) lines.push(`- Description: ${indentLaterLines(r.description)}`);
+      if (r.why) lines.push(`- Why it matters: ${indentLaterLines(r.why)}`);
       if (r.source) lines.push(`- Source: ${r.source}`);
       if (r.primary_owner) lines.push(`- Primary owning slice: ${r.primary_owner}`);
       if (r.supporting_slices) lines.push(`- Supporting slices: ${r.supporting_slices}`);
-      if (r.validation) lines.push(`- Validation: ${r.validation}`);
-      if (r.notes) lines.push(`- Notes: ${r.notes}`);
+      if (r.validation) lines.push(`- Validation: ${indentLaterLines(r.validation)}`);
+      if (r.notes) lines.push(`- Notes: ${indentLaterLines(r.notes)}`);
       lines.push('');
     }
   }
