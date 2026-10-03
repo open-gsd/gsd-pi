@@ -6,6 +6,8 @@
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -261,6 +263,36 @@ describe("knowledge capture", () => {
     assert.equal(nextKnowledgeId(base, "P"), "P003");
     assert.equal(nextKnowledgeId(base, "L"), "L002");
     assert.equal(nextKnowledgeId(base, "K"), "K001");
+  });
+
+  test("a capture waits for another process that holds the write lock and takes the next id", async () => {
+    // The second process holds the write lock with an uncommitted K001 rule, then commits.
+    const child = spawn(process.execPath, ["--no-warnings", "-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA busy_timeout = 5000");
+      db.exec("BEGIN IMMEDIATE");
+      const now = new Date().toISOString();
+      db.prepare("INSERT INTO memories (id, category, content, confidence, created_at, updated_at, structured_fields) VALUES (?, 'rule', 'Rule from the other process', 0.85, ?, ?, ?)")
+        .run("MEM-OTHER", now, now, JSON.stringify({ sourceKnowledgeTable: "rules", rule: "Rule from the other process", scopeText: "project", sourceKnowledgeId: "K001" }));
+      process.stdout.write("locked");
+      setTimeout(() => { db.exec("COMMIT"); db.close(); }, 300);
+    `, join(base, ".gsd", "gsd.db")], { stdio: ["ignore", "pipe", "inherit"] });
+    const exited = once(child, "exit");
+    await once(child.stdout, "data");
+
+    const result = captureKnowledgeEntry(base, "rule", "Rule from this process", "project");
+    const [exitCode] = await exited;
+
+    assert.equal(exitCode, 0);
+    assert.equal(result.id, "K002");
+    assert.deepEqual(knowledgeRows().map((row) => `${row.sourceKnowledgeId} ${row.content}`), [
+      "K001 Rule from the other process",
+      "K002 Rule from this process",
+    ]);
+    const rules = section(readKnowledge(base), "## Rules");
+    assert.match(rules, /Rule from the other process/);
+    assert.match(rules, /Rule from this process/);
   });
 
   test("deleting KNOWLEDGE.md does not reset ids: the DB holds them", () => {

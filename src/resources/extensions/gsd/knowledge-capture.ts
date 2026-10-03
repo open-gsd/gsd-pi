@@ -10,6 +10,7 @@
 // it reserves ids of file rows that are not imported into the database yet,
 // so a new capture cannot take the id of a row the render still keeps.
 
+import { immediateTransaction } from "./db/engine.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { createMemory } from "./memory-store.js";
 import { parseKnowledgeRows, readKnowledgeMd } from "./knowledge-parser.js";
@@ -59,7 +60,6 @@ export function captureKnowledgeEntry(
 
   const scopeText = scope.trim() || "project";
   const prefix = type === "rule" ? "K" : type === "pattern" ? "P" : "L";
-  const id = nextKnowledgeId(basePath, prefix);
   const cells: Record<string, unknown> =
     type === "rule"
       ? { sourceKnowledgeTable: "rules", rule: cleaned, scopeText, why: "", added: "manual" }
@@ -67,13 +67,17 @@ export function captureKnowledgeEntry(
         ? { sourceKnowledgeTable: "patterns", pattern: cleaned, where: "", notes: "" }
         : { sourceKnowledgeTable: "lessons", whatHappened: cleaned, rootCause: "", fix: "", scopeText };
 
-  const memoryId = createMemory({
-    category: KNOWLEDGE_CATEGORY[type],
-    content: cleaned,
-    scope: scopeText,
-    confidence: options.confidence ?? 0.85,
-    tags: options.tags,
-    structuredFields: { ...cells, ...options.structuredFields, sourceKnowledgeId: id },
+  const { id, memoryId } = immediateTransaction(() => {
+    const id = nextKnowledgeId(basePath, prefix);
+    const memoryId = createMemory({
+      category: KNOWLEDGE_CATEGORY[type],
+      content: cleaned,
+      scope: scopeText,
+      confidence: options.confidence ?? 0.85,
+      tags: options.tags,
+      structuredFields: { ...cells, ...options.structuredFields, sourceKnowledgeId: id },
+    });
+    return { id, memoryId };
   });
   if (!memoryId) throw new Error(`GSD database is not available; cannot capture ${type}`);
 
