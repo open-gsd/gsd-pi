@@ -8,7 +8,9 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { handleSkip } from "../commands-maintenance.ts";
-import { targetMilestoneFile } from "../paths.ts";
+import { detectStaleRenders, renderPlanFromDb } from "../markdown-renderer.ts";
+import { clearPathCache, targetMilestoneFile } from "../paths.ts";
+import { reconcileBeforeDispatch } from "../state-reconciliation.ts";
 import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 import {
   _getAdapter,
@@ -137,6 +139,27 @@ describe("/gsd skip", () => {
     const roadmap = readFileSync(targetMilestoneFile(base, "M001", "ROADMAP", "Milestone"), "utf8");
     assert.ok(roadmap.includes("S02"), roadmap);
     assert.equal(roadmap.includes("S01: First") || roadmap.includes("**S01"), false, roadmap);
+  });
+
+  test("a task skip in a unique-suffix milestone is repaired into the slice PLAN render by reconcile", async () => {
+    insertMilestone({ id: "M004-abc123", title: "Fourth", status: "queued" });
+    insertSlice({ id: "S01", milestoneId: "M004-abc123", title: "Only", status: "pending", risk: "low", depends: [] });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M004-abc123", title: "Skipped task", status: "pending" });
+    insertTask({ id: "T02", sliceId: "S01", milestoneId: "M004-abc123", title: "Kept task", status: "pending" });
+    const { planPath } = await renderPlanFromDb(base, "M004-abc123", "S01");
+    assert.ok(planPath.includes(join("phases", "04-abc123-")), planPath);
+    assert.ok(readFileSync(planPath, "utf8").includes("**T01**"));
+    clearPathCache();
+    const { ctx, notes } = makeCtx();
+
+    await handleSkip("M004-abc123/S01/T01", ctx, base);
+
+    assert.equal(notes.at(-1)?.level, "success", notes.at(-1)?.message);
+    await reconcileBeforeDispatch(base);
+    const plan = readFileSync(planPath, "utf8");
+    assert.equal(plan.includes("**T01**"), false, plan);
+    assert.ok(plan.includes("**T02**"), plan);
+    assert.deepEqual(detectStaleRenders(base), []);
   });
 
   test("an unknown unit fails loudly and writes nothing", async () => {

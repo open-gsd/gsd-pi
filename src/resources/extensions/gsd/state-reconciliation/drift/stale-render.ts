@@ -98,10 +98,11 @@ function canonicalizeMilestoneId(dirSegment: string): string {
   const baseId = dirSegment.match(/^(M\d+)(?:$|-)/i)?.[1];
   if (baseId && getMilestone(baseId)) return baseId;
 
-  // Flat-phase: e.g. 01-test → M001
-  const phaseMatch = dirSegment.match(/^(\d+)-/);
+  // Flat-phase: e.g. 01-test → M001, 04-abc123-fourth → M004-abc123
+  const phaseMatch = dirSegment.match(/^(\d+)-(?:([a-z0-9]{6})-)?/);
   if (phaseMatch) {
     const flatId = `M${String(parseInt(phaseMatch[1]!, 10)).padStart(3, "0")}`;
+    if (phaseMatch[2] && getMilestone(`${flatId}-${phaseMatch[2]}`)) return `${flatId}-${phaseMatch[2]}`;
     if (getMilestone(flatId)) return flatId;
   }
 
