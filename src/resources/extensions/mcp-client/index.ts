@@ -57,6 +57,20 @@ const pendingConnections = new Map<string, Promise<Client>>();
 const toolCache = new Map<string, McpToolSchema[]>();
 const trustedStdioServers = new Set<string>();
 const MCP_TRUST_CONFIRM_TIMEOUT_MS = 120_000;
+// Matches the GSD workflow MCP server (packages/mcp-server/src/workflow-tools.ts
+// getWorkflowOpTimeoutMs). A shorter client timeout reports failure while the
+// server operation still commits.
+const DEFAULT_MCP_CALL_TIMEOUT_MS = 5 * 60 * 1000;
+// Largest delay setTimeout accepts; GSD_MCP_WORKFLOW_TIMEOUT_MS=0 disables the timeout.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
+
+function mcpCallTimeoutMs(env: NodeJS.ProcessEnv = process.env): number {
+	const raw = env.GSD_MCP_WORKFLOW_TIMEOUT_MS?.trim();
+	if (!raw) return DEFAULT_MCP_CALL_TIMEOUT_MS;
+	const parsed = Number.parseInt(raw, 10);
+	if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_MCP_CALL_TIMEOUT_MS;
+	return parsed === 0 ? MAX_TIMER_DELAY_MS : parsed;
+}
 const emptyStdioTrustPromptQueue = Promise.resolve();
 let stdioTrustPromptQueue: Promise<void> = emptyStdioTrustPromptQueue;
 const activeStdioTrustApprovalAborts = new Set<(err: Error) => void>();
@@ -601,7 +615,7 @@ export default function (pi: ExtensionAPI) {
 						},
 					},
 					undefined,
-					{ signal, timeout: 60000 },
+					{ signal, timeout: mcpCallTimeoutMs() },
 				);
 
 				// Serialize result content to text

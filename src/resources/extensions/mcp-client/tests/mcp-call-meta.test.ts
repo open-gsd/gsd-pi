@@ -99,3 +99,70 @@ test("mcp_call CallTool request params include replay-stable _meta (#1792)", asy
 		rmSync(gsdHomeDir, { recursive: true, force: true });
 	}
 });
+
+test("mcp_call waits as long as the workflow server timeout, not a fixed 60 s", async () => {
+	const previousGsdHome = process.env.GSD_HOME;
+	const previousTimeout = process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+	const originalCwd = process.cwd();
+	const projectDir = mkdtempSync(join(tmpdir(), "mcp-call-timeout-project-"));
+	const gsdHomeDir = mkdtempSync(join(tmpdir(), "mcp-call-timeout-home-"));
+
+	try {
+		process.env.GSD_HOME = gsdHomeDir;
+		process.chdir(projectDir);
+		mkdirSync(join(projectDir, ".gsd"), { recursive: true });
+
+		const require = createRequire(import.meta.url);
+		const mcpModuleUrl = pathToFileURL(require.resolve("@modelcontextprotocol/sdk/server/mcp.js")).href;
+		const stdioModuleUrl = pathToFileURL(require.resolve("@modelcontextprotocol/sdk/server/stdio.js")).href;
+		const serverPath = join(projectDir, "slow-mcp-server.mjs");
+		writeFileSync(
+			serverPath,
+			[
+				`const { McpServer } = await import(${JSON.stringify(mcpModuleUrl)});`,
+				`const { StdioServerTransport } = await import(${JSON.stringify(stdioModuleUrl)});`,
+				'const server = new McpServer({ name: "slow", version: "1.0.0" }, { capabilities: { tools: {} } });',
+				'server.tool("slow_write", "Commit after a delay", {}, async () => {',
+				"  await new Promise((resolve) => setTimeout(resolve, 500));",
+				'  return { content: [{ type: "text", text: "committed" }] };',
+				"});",
+				"await server.connect(new StdioServerTransport());",
+			].join("\n"),
+			"utf-8",
+		);
+		writeFileSync(
+			join(projectDir, ".mcp.json"),
+			JSON.stringify({ mcpServers: { slow: { command: process.execPath, args: [serverPath] } } }),
+			"utf-8",
+		);
+
+		const { pi, tools } = createMockPi();
+		mcpClientExtension(pi as any);
+		const mcpCall = tools.get("mcp_call");
+		assert.ok(mcpCall, "mcp_call must be registered");
+		const ctx = { hasUI: true, ui: { confirm: async () => true } };
+		const call = (id: string) => mcpCall.execute(
+			id,
+			{ server: "slow", tool: "slow_write", args: {} },
+			new AbortController().signal,
+			() => {},
+			ctx,
+		);
+
+		process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "100";
+		await assert.rejects(call("timeout-short"), /timed out/i);
+
+		process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "5000";
+		const result = await call("timeout-long");
+		assert.equal(result.content[0]?.text, "committed");
+	} finally {
+		await _resetMcpClientStateForTest();
+		process.chdir(originalCwd);
+		if (previousGsdHome === undefined) delete process.env.GSD_HOME;
+		else process.env.GSD_HOME = previousGsdHome;
+		if (previousTimeout === undefined) delete process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS;
+		else process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = previousTimeout;
+		rmSync(projectDir, { recursive: true, force: true });
+		rmSync(gsdHomeDir, { recursive: true, force: true });
+	}
+});
