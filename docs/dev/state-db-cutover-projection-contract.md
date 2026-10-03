@@ -78,6 +78,26 @@ resolved alongside them.
 `workflow-projections.ts` (derived state → `atomicWriteSync`), **not** by the
 `markdown-renderer.ts` write path, and therefore carries **no** stamp (§3.4).
 
+`renderStateProjection()` is the only `STATE.md` writer and
+`renderStateContent()` is the only content builder. The contract:
+
+- It is rendered after each DB mutation (host and MCP child), in the full
+  rebuild (`projection-worker.ts`), by doctor, on guided entry, and after
+  `/gsd migrate` commits its import.
+- It is never deleted. When the DB is unavailable the file stays unchanged and
+  the render reports `stale`; no placeholder page is written.
+- Each changed render records its sha in `.gsd/.compat.json`, so a normal
+  render puts nothing in quarantine. An unchanged render does not rewrite the
+  marker, and a marker failure does not make the render stale.
+- A hand edit is replaced on the next render, and one copy of the edited bytes
+  is kept under `.gsd/quarantine/projections/`. The external-edit observer
+  skips `STATE.md`, so the file is never moved away.
+
+Regression tests:
+`src/resources/extensions/gsd/tests/workflow-projections.test.ts`,
+`src/resources/extensions/gsd/tests/gsd-rebuild.test.ts` (observer skip), and
+`packages/mcp-server/src/state-md-render.test.ts`.
+
 ### 2.2 Hierarchy projections — two layouts, both frozen
 
 Layout selection is per project and layout-aware
