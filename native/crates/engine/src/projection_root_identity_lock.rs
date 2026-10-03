@@ -2966,6 +2966,23 @@ fn decode_windows_tree_deletion_manifest(
     Ok(entries)
 }
 
+/// Renames a deletion manifest inside the claimed tree. The caller holds that
+/// tree's root with `share_mode(0)`, and a rename target that names a
+/// directory (a `RootDirectory` handle or a full path) makes the I/O manager
+/// open that directory for FILE_ADD_FILE. The exclusive hold refuses the open,
+/// so the rename fails with ERROR_SHARING_VIOLATION (os error 32) on every
+/// attempt. A bare name with a NULL `RootDirectory` is the NT simple rename:
+/// the file system renames inside the directory that already holds the source
+/// and opens no directory. `NtSetInformationFile` passes the bare name through
+/// unchanged; only the Win32 wrapper resolves it against the current directory.
+#[cfg(windows)]
+fn rename_windows_tree_deletion_manifest(file: &File, target: &Path) -> Result<()> {
+    let name = target
+        .file_name()
+        .ok_or_else(|| projection_error("projection deletion manifest name is invalid"))?;
+    rename_windows_handle(file, Path::new(name), None)
+}
+
 #[cfg(windows)]
 fn load_or_publish_windows_tree_deletion_manifest(
     root: &Path,
@@ -2995,7 +3012,7 @@ fn load_or_publish_windows_tree_deletion_manifest(
         let bytes = fs::read(&prepared).map_err(|error| projection_path_error(&prepared, error))?;
         let entries = decode_windows_tree_deletion_manifest(&bytes, root_identity, content_digest)?;
         let prepared_handle = open_windows_delete_node(&prepared)?;
-        rename_windows_handle(&prepared_handle, &committed, Some(root_handle))?;
+        rename_windows_tree_deletion_manifest(&prepared_handle, &committed)?;
         root_handle.sync_all().map_err(projection_error)?;
         return Ok(entries);
     }
@@ -3045,7 +3062,7 @@ fn load_or_publish_windows_tree_deletion_manifest(
     }
     file.write_all(&bytes).map_err(projection_error)?;
     file.sync_all().map_err(projection_error)?;
-    rename_windows_handle(&file, &prepared, Some(root_handle))?;
+    rename_windows_tree_deletion_manifest(&file, &prepared)?;
     root_handle.sync_all().map_err(projection_error)?;
     if MUTATION_BOUNDARY_FAULT
         .compare_exchange(9, 0, Ordering::SeqCst, Ordering::SeqCst)
@@ -3055,7 +3072,7 @@ fn load_or_publish_windows_tree_deletion_manifest(
             "simulated prepared deletion manifest crash",
         ));
     }
-    rename_windows_handle(&file, &committed, Some(root_handle))?;
+    rename_windows_tree_deletion_manifest(&file, &committed)?;
     root_handle.sync_all().map_err(projection_error)?;
     Ok(entries)
 }
