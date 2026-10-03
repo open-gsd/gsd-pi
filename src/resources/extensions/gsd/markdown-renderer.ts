@@ -870,34 +870,74 @@ export async function renderMilestoneArtifactsFromDb(
   basePath: string,
   milestoneId: string,
 ): Promise<boolean> {
-  const artifacts = getMilestoneScopedArtifacts(milestoneId);
-  if (artifacts.length === 0) return false;
-
-  const milestone = getMilestone(milestoneId);
-  const milestoneComplete = toStatus(milestone?.status ?? "") === "complete";
-
-  let wrote = false;
-  for (const artifact of artifacts) {
-    if (artifact.artifact_type === "ROADMAP") continue;
-    if (artifact.artifact_type.toUpperCase() === "SUMMARY" && !milestoneComplete) continue;
-    if (!artifact.full_content.trim()) continue;
-
-    const absPath = targetMilestoneFile(
-      basePath,
-      milestoneId,
-      artifact.artifact_type,
-      milestone?.title,
-    );
+  const writes = milestoneArtifactWrites(basePath, milestoneId);
+  for (const { absPath, artifactPath, artifact } of writes) {
     mkdirSync(dirname(absPath), { recursive: true });
-    const artifactPath = toArtifactPath(absPath, basePath);
     await writeAndStore(absPath, artifactPath, artifact.full_content, {
       artifact_type: artifact.artifact_type,
       milestone_id: milestoneId,
     }, basePath);
-    wrote = true;
   }
+  return writes.length > 0;
+}
 
-  return wrote;
+interface ArtifactWrite {
+  absPath: string;
+  artifactPath: string;
+  artifact: ArtifactRow;
+}
+
+/** The milestone-scoped artifact rows that the render writes, each with its target file. */
+function milestoneArtifactWrites(basePath: string, milestoneId: string): ArtifactWrite[] {
+  const milestone = getMilestone(milestoneId);
+  const milestoneComplete = toStatus(milestone?.status ?? "") === "complete";
+  return getMilestoneScopedArtifacts(milestoneId)
+    .filter((artifact) =>
+      artifact.artifact_type !== "ROADMAP"
+      && !(artifact.artifact_type.toUpperCase() === "SUMMARY" && !milestoneComplete)
+      && artifact.full_content.trim() !== "")
+    .map((artifact) => {
+      const absPath = targetMilestoneFile(basePath, milestoneId, artifact.artifact_type, milestone?.title);
+      return { absPath, artifactPath: toArtifactPath(absPath, basePath), artifact };
+    });
+}
+
+/** The slice-scoped artifact rows that the render writes, each with its target file. */
+function sliceArtifactWrites(basePath: string, milestoneId: string, sliceId: string): ArtifactWrite[] {
+  const sliceComplete = toStatus(getSlice(milestoneId, sliceId)?.status ?? "") === "complete";
+  return getSliceScopedArtifacts(milestoneId, sliceId)
+    .filter((artifact) => {
+      const artifactType = artifact.artifact_type.toUpperCase();
+      if (!artifact.full_content.trim()) return false;
+      if ((artifactType === "SUMMARY" || artifactType === "UAT") && !sliceComplete) return false;
+      return !(artifactType === "PLAN" && isAutoRecoveryPlaceholderPlan(artifact.full_content));
+    })
+    .map((artifact) => {
+      const absPath = join(
+        basePath,
+        relSliceFile(basePath, milestoneId, sliceId, artifact.artifact_type.toUpperCase()),
+      );
+      return { absPath, artifactPath: toArtifactPath(absPath, basePath), artifact };
+    });
+}
+
+/**
+ * Artifact paths (relative to the projection root) of the files that the
+ * milestone render writes from the database: the ROADMAP of a planned
+ * milestone, and each milestone and slice artifact row that is not skipped.
+ */
+export function milestoneRenderArtifactPaths(basePath: string, milestoneId: string): Set<string> {
+  const paths = new Set<string>();
+  const milestone = getMilestone(milestoneId);
+  if (!milestone) return paths;
+  if (!isUnplannedMilestone(milestone)) {
+    paths.add(toArtifactPath(targetMilestoneFile(basePath, milestoneId, "ROADMAP", milestone.title), basePath));
+  }
+  for (const write of milestoneArtifactWrites(basePath, milestoneId)) paths.add(write.artifactPath);
+  for (const slice of getMilestoneSlices(milestoneId)) {
+    for (const write of sliceArtifactWrites(basePath, milestoneId, slice.id)) paths.add(write.artifactPath);
+  }
+  return paths;
 }
 
 /** Render the canonical Milestone closeout from its immutable completion event. */
@@ -936,29 +976,16 @@ export async function renderSliceArtifactsFromDb(
   milestoneId: string,
   sliceId: string,
 ): Promise<boolean> {
-  const artifacts = getSliceScopedArtifacts(milestoneId, sliceId);
-  if (artifacts.length === 0) return false;
-  const sliceComplete = toStatus(getSlice(milestoneId, sliceId)?.status ?? "") === "complete";
-
-  let wrote = false;
-  for (const artifact of artifacts) {
-    const artifactType = artifact.artifact_type.toUpperCase();
-    if (!artifact.full_content.trim()) continue;
-    if ((artifactType === "SUMMARY" || artifactType === "UAT") && !sliceComplete) continue;
-    if (artifactType === "PLAN" && isAutoRecoveryPlaceholderPlan(artifact.full_content)) continue;
-
-    const absPath = join(basePath, relSliceFile(basePath, milestoneId, sliceId, artifactType));
+  const writes = sliceArtifactWrites(basePath, milestoneId, sliceId);
+  for (const { absPath, artifactPath, artifact } of writes) {
     createProjectionDirectorySync(dirname(absPath));
-    const artifactPath = toArtifactPath(absPath, basePath);
     await writeAndStore(absPath, artifactPath, artifact.full_content, {
-      artifact_type: artifactType,
+      artifact_type: artifact.artifact_type.toUpperCase(),
       milestone_id: milestoneId,
       slice_id: sliceId,
     }, basePath);
-    wrote = true;
   }
-
-  return wrote;
+  return writes.length > 0;
 }
 
 function isAutoRecoveryPlaceholderPlan(content: string): boolean {

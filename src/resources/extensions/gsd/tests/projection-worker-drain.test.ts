@@ -12,7 +12,7 @@ import { flushWorkflowProjections } from "../projection-flush.ts";
 import { checkEngineHealth, checkProjectionWork } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
-import { _getAdapter, insertMilestone } from "../gsd-db.ts";
+import { _getAdapter, insertArtifact, insertMilestone } from "../gsd-db.ts";
 import { resolveMilestoneFile, resolveSliceFile } from "../paths.ts";
 import {
   drainProjectionWork,
@@ -531,4 +531,38 @@ test("doctor repair requeues a dead-lettered milestone rebuild once and renders 
   assert.equal(work("rebuild/m001").delivery_state, "rendered");
   const roadmap = resolveMilestoneFile(base, "M001", "ROADMAP");
   assert.ok(roadmap && existsSync(roadmap));
+});
+
+test("doctor repair commits no requeue for a missing artifact that the milestone render does not write", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  await rebuildMarkdownProjectionsFromDb(base);
+  insertArtifact({
+    path: "milestones/M001/M001-MISSING.md",
+    artifact_type: "PLAN",
+    milestone_id: "M001",
+    slice_id: null,
+    task_id: null,
+    full_content: "# Missing\n",
+  });
+  const revision = readDomainOperationFence().revision;
+
+  for (const run of ["first", "second"]) {
+    const issues: DoctorIssue[] = [];
+    const fixes: string[] = [];
+    await checkEngineHealth(base, issues, fixes, { repair: true });
+
+    assert.deepEqual(fixes, [], `${run} repair applies no fix`);
+    assert.deepEqual(
+      issues.filter((issue) => issue.code === "artifact_file_missing").map(({ file, fixable }) => ({ file, fixable })),
+      [{ file: "milestones/M001/M001-MISSING.md", fixable: false }],
+      `${run} repair still reports the missing artifact`,
+    );
+  }
+
+  assert.equal(readDomainOperationFence().revision, revision, "no Domain Operation is committed");
+  const requeues = _getAdapter()!.prepare(
+    "SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'projection.requeue'",
+  ).get() as { count: number };
+  assert.equal(requeues.count, 0);
 });
