@@ -17,6 +17,8 @@ import {
   insertMilestone,
   openDatabase,
 } from "../gsd-db.ts";
+import { countUnadoptedHierarchyRows } from "../lifecycle-backfill-domain-operation.ts";
+import { discardMilestone, parkMilestone, unparkMilestone } from "../milestone-actions.ts";
 import { clearReservedMilestoneIds, reserveMilestoneId } from "../milestone-ids.ts";
 import { registerMilestones } from "../milestone-registration.ts";
 import { clearPathCache } from "../paths.ts";
@@ -44,6 +46,18 @@ function registeredEvents(): Array<Record<string, unknown>> {
     FROM workflow_domain_events WHERE event_type = 'milestone.registered'
     ORDER BY project_revision, event_index
   `).all().map((event) => ({ ...event }));
+}
+
+/** The milestone lifecycle row and the type of the operation that last wrote it. */
+function milestoneLifecycle(milestoneId: string): Record<string, unknown> | undefined {
+  const row = _getAdapter()!.prepare(`
+    SELECT lifecycle.lifecycle_status AS status, lifecycle.state_version AS version,
+           operation.operation_type AS writer
+    FROM workflow_item_lifecycles lifecycle
+    JOIN workflow_operations operation ON operation.operation_id = lifecycle.last_operation_id
+    WHERE lifecycle.item_kind = 'milestone' AND lifecycle.milestone_id = :milestone_id
+  `).get({ ":milestone_id": milestoneId });
+  return row ? { ...row } : undefined;
 }
 
 function generateId(base: string, callId: string) {
@@ -133,6 +147,37 @@ describe("milestone registration", () => {
     assert.deepEqual(registerMilestones([{ id: "M001", title: "Other title", retitle: true }], "test"), []);
     assert.equal(revision(), revisionBefore + 1, "a retitle is one operation");
     assert.equal(getMilestone("M001")?.title, "Other title");
+  });
+
+  test("registration adopts each new milestone as ready in the register operation, so no row is left for the backfill", async () => {
+    registerMilestones([{ id: "M001", title: "First" }, { id: "M002" }], "test");
+    await generateId(base, "call-1");
+
+    for (const id of ["M001", "M002", "M003"]) {
+      assert.deepEqual(
+        milestoneLifecycle(id),
+        { status: "ready", version: 0, writer: "milestone.register" },
+        `${id} gets its lifecycle row from the operation that registered it`,
+      );
+      assert.equal(getMilestone(id)?.status, "queued");
+    }
+    assert.equal(countUnadoptedHierarchyRows(), 0);
+    assert.equal(registerOperations(), 2, "adoption adds no operation of its own");
+  });
+
+  test("a registered milestone with no plan and no directory parks, unparks and discards by lifecycle transitions", async () => {
+    registerMilestones([{ id: "M001", title: "First" }, { id: "M002", title: "Second" }], "test");
+
+    assert.equal(await parkMilestone(base, "M001", "later"), true);
+    assert.deepEqual(milestoneLifecycle("M001"), { status: "paused", version: 1, writer: "milestone.park" });
+    assert.equal(getMilestone("M001")?.status, "parked");
+
+    assert.equal(await unparkMilestone(base, "M001"), true);
+    assert.deepEqual(milestoneLifecycle("M001"), { status: "in_progress", version: 2, writer: "milestone.unpark" });
+
+    assert.equal(await discardMilestone(base, "M002", { reason: "not needed" }), true);
+    assert.deepEqual(milestoneLifecycle("M002"), { status: "cancelled", version: 1, writer: "milestone.discard" });
+    assert.equal(getMilestone("M002")?.status, "skipped");
   });
 
   test("gsd_summary_save(PROJECT) registers the sequence in one milestone.register operation and a second save adds none", async (t) => {

@@ -2,7 +2,7 @@
 // File Purpose: The milestone.register Domain Operation, the one writer of a new milestone row before it is planned.
 
 import { getDb } from "./db/engine.js";
-import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { adoptOrTransitionLifecycle, readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import {
   executeDomainOperation,
@@ -33,7 +33,10 @@ function isRegistered(milestone: MilestoneRegistration): boolean {
  * operation always runs and is the receipt of the call, so a retry replays it
  * (see `readMilestoneRegistration`).
  *
- * The row gets no lifecycle row here. Planning, park and discard adopt it.
+ * A new row gets its lifecycle row in the same operation, as `ready`: the
+ * status that planning and the lifecycle backfill give an open milestone, and
+ * the one that park (`ready` to `paused`) can leave. A row that existed before
+ * this operation is adopted by planning, park, discard or the backfill.
  */
 export function registerMilestones(
   milestones: ReadonlyArray<MilestoneRegistration>,
@@ -61,12 +64,17 @@ export function registerMilestones(
         retitle: milestone.retitle === true,
       })),
     },
-  }, () => ({
+  }, (context) => ({
     events: milestones.map((milestone) => {
       const title = milestone.title ?? "";
       const existing = getMilestone(milestone.id);
       if (!existing) {
         insertMilestone({ id: milestone.id, title, status: "queued" });
+        adoptOrTransitionLifecycle(context, {
+          itemKind: "milestone",
+          milestoneId: milestone.id,
+          lifecycleStatus: "ready",
+        });
         created.push(milestone.id);
       } else if (milestone.retitle && title && existing.title !== title) {
         upsertMilestonePlanning(milestone.id, { title });
