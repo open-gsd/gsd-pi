@@ -45,7 +45,7 @@ describe('readProgress', () => {
 
 **Active Milestone:** M002: Auth System
 **Active Slice:** S01: Login flow
-**Phase:** execution
+**Phase:** executing
 **Requirements Status:** 5 active · 2 validated · 1 deferred · 0 out of scope
 
 ## Milestone Registry
@@ -88,9 +88,9 @@ Execute T02 in S01 — implement token refresh.
     assert.deepEqual(result.activeSlice, { id: 'S01', title: 'Login flow' });
   });
 
-  it('parses phase', () => {
+  it('reads the phase as written', () => {
     const result = readProgress(projectDir);
-    assert.equal(result.phase, 'execute');
+    assert.equal(result.phase, 'executing');
   });
 
   it('parses milestone counts from registry', () => {

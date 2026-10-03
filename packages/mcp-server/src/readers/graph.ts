@@ -134,7 +134,7 @@ function parseStateFile(gsdRoot: string, nodes: GraphNode[], _edges: GraphEdge[]
   }
 
   // Extract active milestone
-  const activeMilestoneMatch = content.match(/\*\*Active Milestone:\*\*\s+([A-Z]\d+):\s+(.+)/i);
+  const activeMilestoneMatch = content.match(/\*\*Active Milestone:\*\*\s+([A-Z]\d+(?:-[a-z0-9]{6})?):\s+(.+)/i);
   if (activeMilestoneMatch) {
     const [, milestoneId, title] = activeMilestoneMatch;
     const id = `milestone:${milestoneId}`;
