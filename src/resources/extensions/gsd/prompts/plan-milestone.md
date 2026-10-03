@@ -46,7 +46,7 @@ Before decomposing:
 
 {{sourceFilePaths}}
 
-If milestone research is inlined, trust it and skip redundant exploration. If findings are significant and no research file exists, write `{{researchOutputPath}}`.
+If milestone research is inlined, trust it and skip redundant exploration.
 
 Narrate decomposition reasoning in complete sentences: grouping, risk order, verification strategy.
 

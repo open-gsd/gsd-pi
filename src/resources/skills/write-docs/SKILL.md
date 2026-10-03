@@ -55,7 +55,7 @@ One round of clarifying questions. Then proceed.
 ## Stage 4: Wire it in
 
 1. Link to the new doc from relevant entry points (README.md index, docs/ sidebar, mintlify-docs config, etc.).
-2. If it documents a decision, also append a one-line entry to `.gsd/DECISIONS.md` pointing at the doc.
+2. If it documents a decision, also call `gsd_decision_save` with a one-line entry that points at the doc.
 3. If it's a public-facing change, flag for the next release notes / CHANGELOG update.
 
 </process>

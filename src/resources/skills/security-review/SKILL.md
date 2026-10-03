@@ -164,7 +164,7 @@ If the review found CRITICAL or HIGH issues:
 
 - Recommend filing a private security advisory (not a public issue) if the repo is public.
 - Flag the finding for `/gsd start hotfix` if it's in the scope of active work.
-- Append one line to `.gsd/DECISIONS.md` if the remediation involves an architectural change.
+- Call `gsd_decision_save` if the remediation involves an architectural change.
 
 </process>
 

@@ -292,26 +292,16 @@ Once the user confirms the milestone split:
 
 6. Call `gsd_plan_milestone` for **only the primary milestone**; detail-planning later milestones now is waste because the codebase will change. Include requirement coverage and definition of done.
 
-#### MANDATORY: depends_on Frontmatter in CONTEXT.md
+#### MANDATORY: Milestone dependencies
 
-Every CONTEXT.md for a milestone that depends on others MUST have YAML frontmatter with `depends_on`. The state machine reads this for execution order; without it, milestones may run out of order or in parallel.
-
-```yaml
----
-depends_on: [M001, M002]
----
-
-# M003: Title
-```
-
-If no dependencies, omit frontmatter. The confirmed dependency chain MUST appear in each CONTEXT.md frontmatter. Do NOT rely on QUEUE.md or PROJECT.md; the state machine reads CONTEXT.md frontmatter only.
+For every milestone that depends on others, call `gsd_milestone_set_dependencies` with its `milestoneId` and the full `dependsOn` list (for example `dependsOn: ["M001", "M002"]`). The database is the only source of execution order; without this call, milestones may run out of order or in parallel. Do NOT put `depends_on` in CONTEXT.md, QUEUE.md or PROJECT.md; those files are rendered from the database and are never read back.
 
 #### Phase 3: Sequential readiness gate for remaining milestones
 
 For each remaining milestone **one at a time, in sequence**, choose the likely readiness mode from evidence, then present these options. **If `{{structuredQuestionsAvailable}}` is `true`:** use `ask_user_questions`. **If false:** use a plain-text numbered list. **Non-bypassable:** no response, ambiguity, or tool failure means re-ask; never auto-select.
 
 - **"Discuss now"** — Conduct focused discussion now while context is fresh (reflection -> investigation -> questioning -> depth verification), then save full context with `gsd_summary_save` (that milestone's `milestone_id`, `artifact_type: "CONTEXT"`) and move to the next gate.
-- **"Write draft for later"** — Write `CONTEXT-DRAFT.md` with seed material, key ideas, provisional scope, and open questions. Mark it as draft. Downstream auto-mode pauses and offers "Discuss from draft"; final CONTEXT.md deletes the draft.
+- **"Write draft for later"** — Call `gsd_summary_save` with that milestone's `milestone_id` and `artifact_type: "CONTEXT-DRAFT"`: seed material, key ideas, provisional scope, and open questions. Mark it as draft. Downstream auto-mode pauses and offers "Discuss from draft"; saving the final CONTEXT removes the draft.
 - **"Just queue it"** — Leave the milestone without context. Directory exists from Phase 1. Downstream auto-mode pauses and starts full discussion from scratch.
 
 **When "Discuss now" is chosen — Technical Assumption Verification is MANDATORY:**

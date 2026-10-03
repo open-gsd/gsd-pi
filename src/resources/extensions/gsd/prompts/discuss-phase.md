@@ -19,7 +19,7 @@ You are running the GSD **discuss-phase** workflow — gather context for upcomi
 
 4. **`--auto` mode:** infer answers from the artifacts rather than asking, and record the inferences as assumptions to be confirmed later.
 
-5. **Record outcomes.** When the discussion settles, capture: decisions (to the Decisions Register via `/gsd knowledge rule` where durable), refined scope (to the milestone CONTEXT), open questions (to RESEARCH or `/gsd dispatch research`), and assumptions. Mark the milestone/slice as "Discussion Complete, Planning Pending".
+5. **Record outcomes.** When the discussion settles, capture: decisions (with `gsd_decision_save` where durable), refined scope (with `gsd_summary_save`, `artifact_type: "CONTEXT"`), open questions (to `/gsd dispatch research`), and assumptions.
 
 6. **Route.** Recommend the next step: `/gsd dispatch plan` to plan the milestone/slice, or `/gsd dispatch research` if open questions dominate.
 

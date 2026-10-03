@@ -431,7 +431,13 @@ export const UNIT_REGISTRY = {
     phaseChain: ["validation", "planning"],
     promptTemplate: "rewrite-docs",
     toolContract: {
-      allowedGsdTools: ["gsd_summary_save", "gsd_decision_save"],
+      allowedGsdTools: [
+        "gsd_plan_slice",
+        "gsd_plan_task",
+        "gsd_requirement_update",
+        "gsd_summary_save",
+        "gsd_decision_save",
+      ],
       requiredWorkflowTools: [],
     },
   },

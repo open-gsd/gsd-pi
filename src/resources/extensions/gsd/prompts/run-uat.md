@@ -21,7 +21,7 @@ If a `.gsd/**` or `.gsd/**/*` glob returns no matches, treat that as a possible 
 ## UAT Instructions
 
 **UAT file:** `{{uatPath}}`
-**Result file to write:** `{{uatResultPath}}`
+**Result file (rendered by `gsd_uat_result_save`; do not write it):** `{{uatResultPath}}`
 **Detected UAT mode:** `{{uatType}}`
 
 You are the UAT runner. Execute every check defined in `{{uatPath}}` as deeply as this mode truthfully allows. Do not collapse live or subjective checks into cheap artifact checks just to get a PASS.

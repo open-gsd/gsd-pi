@@ -162,7 +162,7 @@ export const CONTEXT_MODE_GUIDANCE_BY_UNIT: Readonly<Record<string, string>> = {
   "gate-evaluate":
     "Use `subagent` to dispatch tester agents, then persist each gate with `gsd_save_gate_result`; rely on testers for verification evidence.",
   "rewrite-docs":
-    "Use the preloaded context and the documents under review as the source of truth, editing documentation with ordinary file tools, then persist outcomes with `gsd_summary_save` or `gsd_decision_save` as appropriate.",
+    "Use the preloaded context and the documents under review as input, then apply the override through `gsd_plan_task`, `gsd_plan_slice`, `gsd_requirement_update`, `gsd_decision_save` or `gsd_summary_save` as appropriate. Do not edit files under `.gsd/`; they are rendered from the database.",
 };
 
 // Per-unit guidance for the nested render mode (renderMode: "nested"), used when this

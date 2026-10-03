@@ -240,6 +240,9 @@ const contextModeGuidanceOverrideExpectedTools: Record<string, readonly string[]
     "gsd_save_gate_result",
   ],
   "rewrite-docs": [
+    "gsd_plan_slice",
+    "gsd_plan_task",
+    "gsd_requirement_update",
     "gsd_summary_save",
     "gsd_decision_save",
   ],
@@ -392,7 +395,7 @@ test("Context Mode composer: narrow planning guidance steers only to contracted 
 });
 
 test("Context Mode composer: rewrite-docs guidance steers only to contracted save tools", () => {
-  const expectedTools = ["gsd_summary_save", "gsd_decision_save"];
+  const expectedTools = ["gsd_plan_slice", "gsd_plan_task", "gsd_requirement_update", "gsd_summary_save", "gsd_decision_save"];
   const disallowedTools = ["gsd_exec", "gsd_exec_search", "gsd_resume"];
 
   for (const renderMode of ["nested", "standalone"] as const) {

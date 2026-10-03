@@ -114,13 +114,13 @@ echo "$RESULT" | jq '{status: .status, phase: .phase, cost: .cost.total}'
 </exit_codes>
 
 <project_structure>
-GSD creates and manages all state in `.gsd/`:
+GSD keeps all state in its database (`.gsd/gsd.db`) and renders these files from it in `.gsd/`:
 
 ```
 .gsd/
   PROJECT.md          # What this project is
   REQUIREMENTS.md     # Capability contract
-  DECISIONS.md        # Architectural decisions (append-only)
+  DECISIONS.md        # Architectural decisions
   KNOWLEDGE.md        # Persistent project knowledge (rules, patterns and lessons rendered from the database)
   STATE.md            # Current phase and next action
   milestones/
@@ -136,7 +136,7 @@ GSD creates and manages all state in `.gsd/`:
           T01-SUMMARY.md       # Task completion summary
 ```
 
-State is derived from files on disk — checkboxes in ROADMAP.md and PLAN.md are the source of truth for completion. You never need to edit these files. GSD manages them. But you can read them to understand progress.
+The database is the source of truth. These files are renders: read them to understand progress, but never edit them — an edit does not change state and the next render discards it. For current state use `gsd headless query`.
 </project_structure>
 
 <flags>

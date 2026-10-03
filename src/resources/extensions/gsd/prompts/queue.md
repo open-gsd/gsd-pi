@@ -8,7 +8,7 @@ Before asking "What do you want to add?", check existing milestone context. If a
 
 1. Tell the user which milestones have draft contexts and summarize each after reading it.
 2. Use `ask_user_questions` to ask per-draft milestone:
-   - **"Discuss now"** — Treat the draft as primary topic. Run reflection -> investigation -> questions -> depth verification -> requirements -> roadmap, call `gsd_summary_save` with `artifact_type: "CONTEXT"`, then delete `CONTEXT-DRAFT.md`.
+   - **"Discuss now"** — Treat the draft as primary topic. Run reflection -> investigation -> questions -> depth verification -> requirements -> roadmap, then call `gsd_summary_save` with `artifact_type: "CONTEXT"`; the tool removes the draft.
    - **"Leave for later"** — Keep the draft. Auto-mode will keep pausing when it reaches this milestone.
 3. Resolve all draft discussions before new queue work.
 4. If no drafts exist in the context, skip this section entirely and proceed to "What do you want to add?"
@@ -106,15 +106,7 @@ The user confirms or corrects before you write. Use one depth verification per m
 Once the user is satisfied, in one pass for **each** new milestone:
 
 1. Call `gsd_milestone_generate_id`; never invent IDs. Then `mkdir -p .gsd/milestones/<ID>/slices`.
-2. Call `gsd_summary_save` with `artifact_type: "CONTEXT"` and full context markdown. The tool computes path and persists DB + disk. Capture intent, scope, risks, constraints, integration points, and requirements. Mark status "Queued — pending auto-mode execution." **If dependent, include YAML frontmatter:**
-
-   ```yaml
-   ---
-   depends_on: [M001, M002]
-   ---
-   ```
-
-   Auto-mode reads this to enforce order. List exact milestone IDs, including suffixes.
+2. Call `gsd_summary_save` with `artifact_type: "CONTEXT"` and full context markdown. The tool computes path and persists DB + disk. Capture intent, scope, risks, constraints, integration points, and requirements. Mark status "Queued — pending auto-mode execution." If the milestone depends on others, call `gsd_milestone_set_dependencies` with its `milestoneId` and the exact `dependsOn` milestone IDs, including suffixes. The database is the only source of execution order; do not put `depends_on` in the context file.
 
 After all milestone directories and context files are written:
 
@@ -124,7 +116,7 @@ After all milestone directories and context files are written:
 6. {{commitInstruction}}
 
 **Do NOT write roadmaps for queued milestones.**
-**Do NOT update `.gsd/STATE.md`.**
+**Do NOT update `.gsd/STATE.md` or `.gsd/QUEUE.md`; both are rendered from the database.**
 
 After writing the files and committing, say exactly: "Queued N milestone(s). Auto-mode will pick them up after current work completes." — nothing else.
 

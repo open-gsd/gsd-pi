@@ -166,26 +166,16 @@ Next steps:
 
 6. Call `gsd_plan_milestone` for **only the primary milestone**; detail-planning later milestones now is waste because the codebase will change. Include requirement coverage and definition of done.
 
-#### MANDATORY: depends_on Frontmatter in CONTEXT.md
+#### MANDATORY: Milestone dependencies
 
-Every CONTEXT.md for a milestone that depends on other milestones MUST have YAML frontmatter with `depends_on`. Auto-mode reads this for execution order.
-
-```yaml
----
-depends_on: [M001, M002]
----
-
-# M003: Title
-```
-
-If a milestone has no dependencies, omit frontmatter. Do NOT rely on QUEUE.md or PROJECT.md for dependency tracking; the state machine reads CONTEXT.md frontmatter only.
+For every milestone that depends on others, call `gsd_milestone_set_dependencies` with its `milestoneId` and the full `dependsOn` list (for example `dependsOn: ["M001", "M002"]`). The database is the only source of execution order; without this call, milestones may run out of order or in parallel. Do NOT put `depends_on` in CONTEXT.md, QUEUE.md or PROJECT.md; those files are rendered from the database and are never read back.
 
 #### Phase 3: Remaining milestones
 
 For each remaining milestone, in dependency order, autonomously decide the readiness mode:
 
 - **Write full context** — if the spec provides enough detail and investigation confirms feasibility. Save full context with `gsd_summary_save` (that milestone's `milestone_id`, `artifact_type: "CONTEXT"`), with technical assumptions verified against actual code.
-- **Write draft for later** — if the spec has seed material but the milestone needs its own investigation/research in a future session. Write a `CONTEXT-DRAFT.md` capturing seed material, key ideas, provisional scope, and open questions. **Downstream:** Auto-mode pauses at this milestone and prompts the user to discuss.
+- **Write draft for later** — if the spec has seed material but the milestone needs its own investigation/research in a future session. Call `gsd_summary_save` with that milestone's `milestone_id` and `artifact_type: "CONTEXT-DRAFT"`, capturing seed material, key ideas, provisional scope, and open questions. **Downstream:** Auto-mode pauses at this milestone and prompts the user to discuss.
 - **Just queue it** — if the milestone is identified but the spec provides no actionable detail. No context file written. **Downstream:** Auto-mode pauses and starts a full discussion from scratch.
 
 **Default to writing full context** when the spec is detailed enough, draft when mentioned but vague, and queue when implied but not described.
@@ -257,7 +247,7 @@ Next steps:
 - **Do focused research** — identify table stakes, domain standards, omissions, and scope traps.
 - **Use proper tools** — `gsd_plan_milestone` for roadmaps, `gsd_decision_save` for decisions, `gsd_milestone_generate_id` for IDs
 - **Print artifacts in chat** — requirements table, roadmap preview, depth summary. The TUI scrollback is the user's audit trail.
-- **Use depends_on frontmatter** for multi-milestone sequences
+- **Use `gsd_milestone_set_dependencies`** for multi-milestone sequences
 - **Anti-reduction rule** — if the spec describes a big vision, plan it. Phase complexity; do not cut it.
 - **Naming convention** — always use `gsd_milestone_generate_id` for IDs. Directories use bare IDs, files use ID-SUFFIX format.
 - **End with "Milestone {{milestoneId}} ready."** — this triggers auto-start detection

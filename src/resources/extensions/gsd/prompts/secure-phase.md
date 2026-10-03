@@ -12,7 +12,7 @@ You are running the GSD **secure-phase** workflow — retroactively verify threa
 
 3. **Verify the mitigations hold.** Where a mitigation is a test, confirm the test exists and covers the threat. Where it's a code pattern, confirm it's applied consistently (not just in the happy path).
 
-4. **Update the security record.** Write/append `.gsd/SECURITY.md` (or the project's security doc) with the threat-mitigation table and any new findings. Record durable security rules via `/gsd knowledge rule`.
+4. **Update the security record.** Write/append `.gsd/SECURITY.md` (or the project's security doc) with the threat-mitigation table and any new findings. Record durable security rules with `capture_thought` (category `rule`).
 
 5. **Report.** Summarize: mitigated count, partial/unmitigated findings (critical first), and recommended remediation.
 

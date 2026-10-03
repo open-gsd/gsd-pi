@@ -4,7 +4,7 @@ You are executing GSD auto-mode.
 
 ## UNIT: Rewrite Documents — Apply Override(s) for Milestone {{milestoneId}} ("{{milestoneTitle}}")
 
-An override was issued by the user that changes a fundamental decision or approach. Your job is to propagate this change across all active planning documents so they are internally consistent and future tasks execute correctly.
+An override was issued by the user that changes a fundamental decision or approach. Your job is to propagate this change across all active plans through the GSD tools so they are internally consistent and future tasks execute correctly.
 
 ## Active Override(s)
 
@@ -18,16 +18,16 @@ An override was issued by the user that changes a fundamental decision or approa
 
 1. Read each document listed above
 2. Identify all references to the overridden decision/approach
-3. Rewrite each document to reflect the new direction:
-   - For task plans (T##-PLAN.md): do NOT modify completed tasks (`[x]`) — they are historical. Rewrite incomplete tasks (`[ ]`) to align with the override. If a task is no longer needed, remove it. If new tasks are needed, add them following the ID sequence.
-   - For DECISIONS.md: append a new decision entry documenting the override and why. Do NOT delete prior decisions — mark them as superseded with a note.
-   - For slice plans (S##-PLAN.md): update Goal, Demo, and Verification sections if affected. Update Files Likely Touched if the override changes scope. Do NOT modify completed task entries.
-   - For REQUIREMENTS.md: update requirement descriptions if the override changes what "done" means, but do not remove requirements.
-   - For PROJECT.md: do not edit the projection directly. If the override changes project-level facts, persist the revised Project content through `gsd_summary_save` with `artifact_type: "PROJECT"` so the DB remains authoritative.
-   - Milestone context files are reference only — do not modify them.
+3. Apply the new direction through the tool that owns each document. The documents are rendered from the GSD database; do not write or edit them:
+   - Task plans (T##-PLAN.md): call `gsd_plan_task` for each incomplete task (`[ ]`) that must change, and for each new task (follow the ID sequence). Do NOT change completed tasks (`[x]`) — they are historical.
+   - Slice plans (S##-PLAN.md): if Goal, Demo, Verification or the task list changes, call `gsd_plan_slice` with the full task list: every completed task unchanged, the rewritten incomplete tasks, and no entry for an incomplete task that is no longer needed.
+   - DECISIONS.md: call `gsd_decision_save` with a new decision that documents the override and why; name the superseded decision in the rationale.
+   - REQUIREMENTS.md: call `gsd_requirement_update` if the override changes what "done" means. Do not remove requirements.
+   - PROJECT.md: if the override changes project-level facts, call `gsd_summary_save` with `artifact_type: "PROJECT"` and the revised Project content.
+   - Milestone context files are reference only — do not change them.
 4. Do not edit `.gsd/OVERRIDES.md`. It is rendered from the GSD database, and the system marks these overrides resolved when this unit completes.
 5. Do not commit manually — the system auto-commits your changes after this unit completes.
 
-**You MUST update the relevant documents before finishing.**
+**You MUST save the relevant changes through the tools before finishing.**
 
 When done, say: "Override applied across all documents." Say this exactly once — if you already said it in a prior message, do not repeat it.

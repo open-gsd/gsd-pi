@@ -32,7 +32,7 @@ When the conversation reaches natural conclusions (or the developer signals read
 | Backlog item | `/gsd backlog add` | Forward-looking ideas not ready for a milestone |
 | Knowledge | `/gsd knowledge lesson` | A lesson learned worth persisting |
 | Research | `/gsd dispatch research` | Open questions needing deeper investigation |
-| Requirement | `.gsd/CONTEXT.md` (append under "Domain glossary") | Clear requirements that emerged |
+| Requirement | `gsd_requirement_save` | Clear requirements that emerged |
 | New milestone | `/gsd new-milestone` | Scope large enough to warrant its own milestone |
 | Spike | `/gsd spike` | Feasibility uncertainty surfaced ("will this API work?") |
 | Sketch | `/gsd brief diagram` | Design direction unclear ("what should this look like?") |
@@ -43,7 +43,7 @@ Present the suggestions and ask the developer to pick, modify, or skip.
 
 ### Step 5 — Write selected outputs
 
-For each selected output, use the matching gsd-pi command or write to the destination listed above. Prefer invoking the gsd-pi command (e.g. `/gsd backlog add`, `/gsd knowledge lesson`) so state stays canonical.
+For each selected output, use the matching gsd-pi command or tool, or write to the destination listed above. Prefer invoking the gsd-pi command (e.g. `/gsd backlog add`, `/gsd knowledge lesson`) so state stays canonical.
 
 ### Step 6 — Close
 

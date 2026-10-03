@@ -77,8 +77,8 @@ Be opinionated. Pick one, or propose a hybrid that takes specific elements from 
 
 Once the user picks:
 
-- Append to `.gsd/DECISIONS.md` with the chosen shape and the reason.
-- If a slice is active, update `S##-CONTEXT.md` with the interface sketch.
+- Save the chosen shape and the reason with `gsd_decision_save`.
+- If a slice is active, save the interface sketch into the slice context with `gsd_summary_save` (`artifact_type: "CONTEXT"`, the `slice_id`).
 - Do not write the implementation — that happens during execute.
 
 </process>
@@ -98,6 +98,6 @@ Once the user picks:
 - [ ] Each design shows a real usage example, not a type signature in isolation.
 - [ ] Trade-offs are named per design.
 - [ ] A specific recommendation (or hybrid) is on the page with a reason.
-- [ ] The decision is captured in `.gsd/DECISIONS.md` or the active `S##-CONTEXT.md`.
+- [ ] The decision is saved with `gsd_decision_save`, or in the active slice context with `gsd_summary_save`.
 
 </success_criteria>

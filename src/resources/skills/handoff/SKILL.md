@@ -44,8 +44,8 @@ Answer briefly:
 Before writing `continue.md`:
 
 - **Any task that's actually done?** Use `gsd_task_complete` (or the equivalent tool) to toggle state. Do NOT edit checkboxes by hand. This triggers `STATE.md` rebuild and `T##-SUMMARY.md` generation.
-- **Any slice-level decisions worth preserving?** Append to `S##-CONTEXT.md` if the slice has one, or `.gsd/DECISIONS.md` if the decision was project-wide.
-- **Any patterns or traps future agents should know about?** Append a single line to `.gsd/KNOWLEDGE.md`.
+- **Any slice-level decisions worth preserving?** Save them with `gsd_decision_save`.
+- **Any patterns or traps future agents should know about?** Record each one with `capture_thought`.
 
 This shrinks what `continue.md` has to carry.
 
@@ -117,7 +117,7 @@ If any answer is no, the handoff is incomplete. Fix it before stopping.
 - [ ] `continue.md` exists in the active slice directory.
 - [ ] The "Next action" is concrete and executable without this session's context.
 - [ ] Completed tasks were marked done via `gsd_*` tools, not by hand-edited checkboxes.
-- [ ] `KNOWLEDGE.md` and `DECISIONS.md` have been updated if anything notable was learned.
+- [ ] Anything notable that was learned is saved with `capture_thought` or `gsd_decision_save`.
 - [ ] Background processes are not orphaned.
 - [ ] A cold-read of the project snapshot + `continue.md` + latest summary would produce the right next action.
 

@@ -30,7 +30,6 @@ test("plan-milestone prompt renders compact DB-backed planning guidance", async 
     skillDiscoveryMode: "filtered",
     skillDiscoveryInstructions: "Use only relevant skills.",
     sourceFilePaths: "- src/resources/extensions/gsd/prompts/plan-milestone.md",
-    researchOutputPath: ".gsd/milestones/M001/M001-RESEARCH.md",
     secretsOutputPath: ".gsd/milestones/M001/SECRETS.md",
   });
 

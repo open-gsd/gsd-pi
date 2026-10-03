@@ -1,6 +1,6 @@
 **Working directory:** `{{workingDirectory}}`. All file reads, writes, and shell commands MUST operate relative to this directory. Do NOT `cd` to any other directory.
 
-Discuss milestone {{milestoneId}} ("{{milestoneTitle}}"). Identify real gray areas, ask about them, then write `{{milestoneId}}-CONTEXT.md` in the milestone directory with the **Context** template below. If a `GSD Skill Preferences` block exists, use it to choose skills; artifact rules still apply.
+Discuss milestone {{milestoneId}} ("{{milestoneTitle}}"). Identify real gray areas, ask about them, then save the milestone context with `gsd_summary_save` (`artifact_type: "CONTEXT"`) using the **Context** template below. If a `GSD Skill Preferences` block exists, use it to choose skills; artifact rules still apply.
 
 **Structured questions available: {{structuredQuestionsAvailable}}**
 

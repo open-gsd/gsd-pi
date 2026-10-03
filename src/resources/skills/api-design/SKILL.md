@@ -163,7 +163,7 @@ If this is a new design, produce:
 <link or inline>
 ```
 
-Append architectural decisions to `.gsd/DECISIONS.md`.
+Save architectural decisions with `gsd_decision_save`; it renders `.gsd/DECISIONS.md`.
 
 </process>
 
@@ -187,6 +187,6 @@ Append architectural decisions to `.gsd/DECISIONS.md`.
 - [ ] A single error shape is used everywhere, with a machine-readable code.
 - [ ] Versioning stance is stated — even if the answer is "additive only for now."
 - [ ] OpenAPI/SDL reflects the design and lives in the repo.
-- [ ] Decisions appear in `.gsd/DECISIONS.md`.
+- [ ] Decisions are saved with `gsd_decision_save`.
 
 </success_criteria>
