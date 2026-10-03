@@ -183,7 +183,7 @@ export async function startMcpServer(options: {
     }
   })
 
-  // Connect to stdin/stdout transport
+  // Connect to the given transport, or to stdin/stdout by default
   const transport = options.transport ?? new StdioServerTransport()
   await server.connect(transport)
   process.stderr.write(`[gsd] MCP server started (v${version})\n`)
