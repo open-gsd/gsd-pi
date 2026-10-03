@@ -40,6 +40,11 @@ test("web undo of complete-slice reopens the slice in the DB", async () => {
     const info = await undoService.collectUndoInfo(base);
     assert.equal(info.lastUnitKey, "complete-slice/M001/S01");
     assert.equal(info.completedCount, 1);
+    assert.ok(
+      info.effects.includes("Reset 1 task(s) of the slice to pending"),
+      "the web confirm payload states the task reset",
+    );
+    assert.ok(info.effects.includes("Clear the slice summary and UAT in the database"));
 
     const result = await undoService.executeUndo(base);
     assert.equal(result.success, true, result.message);

@@ -181,6 +181,8 @@ export interface UndoUnitInfo {
   lastUnitKey: string | null;
   completedCount: number;
   commits: string[];
+  /** The exact changes undo makes for this Unit, shown before the operator confirms. */
+  effects: string[];
 }
 
 export interface UndoUnitResult {
@@ -226,18 +228,47 @@ function unitCommits(basePath: string, unit: CompletedUnit): string[] {
   return existsSync(activityDir) ? findCommitsForUnit(activityDir, unit.unitType, unit.unitId) : [];
 }
 
+function undoEffects(unit: CompletedUnit, commitCount: number): string[] {
+  const { milestoneId: mid, sliceId: sid, taskId: tid } = unit;
+  let effects: string[];
+  if (UNDO_TASK_UNIT_TYPES.has(unit.unitType) && sid && tid) {
+    effects = [
+      `Reopen task ${mid}/${sid}/${tid} in the database (status pending)`,
+      "Delete the task summary file",
+    ];
+  } else if (unit.unitType === "complete-slice" && sid) {
+    effects = [
+      `Reopen slice ${mid}/${sid} in the database`,
+      `Reset ${getSliceTasks(mid, sid).length} task(s) of the slice to pending`,
+      "Clear the slice summary and UAT in the database",
+      "Delete the slice summary, slice UAT and task summary files",
+    ];
+  } else if (unit.unitType === "complete-milestone") {
+    effects = [
+      `Reopen milestone ${mid} in the database; its slices and tasks stay complete`,
+      "Delete the milestone summary file",
+    ];
+  } else {
+    return [`Change nothing: a ${unit.unitType} unit has no reopen operation, so undo refuses it`];
+  }
+  if (commitCount > 0) effects.push(`Attempt to revert ${commitCount} git commit(s) (staged, not committed)`);
+  return effects;
+}
+
 /** Describe the Unit that /gsd undo and web undo would reopen. */
 export async function describeLastCompletedUnit(basePath: string): Promise<UndoUnitInfo> {
-  const empty: UndoUnitInfo = { lastUnitType: null, lastUnitId: null, lastUnitKey: null, completedCount: 0, commits: [] };
+  const empty: UndoUnitInfo = { lastUnitType: null, lastUnitId: null, lastUnitKey: null, completedCount: 0, commits: [], effects: [] };
   if (openUndoDatabase(basePath)) return empty;
   const { last, count } = readCompletedUnits();
   if (!last) return { ...empty, completedCount: count };
+  const commits = unitCommits(basePath, last);
   return {
     lastUnitType: last.unitType,
     lastUnitId: last.unitId,
     lastUnitKey: `${last.unitType}/${last.unitId}`,
     completedCount: count,
-    commits: unitCommits(basePath, last),
+    commits,
+    effects: undoEffects(last, commits.length),
   };
 }
 
@@ -291,8 +322,10 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
     if (!milestone) return { success: false, message: `Cannot undo ${label}: milestone not found in database.` };
     if (!isClosedStatus(milestone.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
     const terminal = lifecycleLastOperation("milestone", mid, null) ?? milestone.completed_at ?? `legacy:${milestone.status}`;
+    // Undo reverses only the complete-milestone Unit: slices, tasks and their
+    // summaries stay complete.
     const result = await executeMilestoneReopen(
-      { milestoneId: mid, reason: UNDO_UNIT_REOPEN_REASON },
+      { milestoneId: mid, reason: UNDO_UNIT_REOPEN_REASON, keepCompleted: true },
       basePath,
       internalExecutionInvocation(undoReopenKey("milestone", mid, terminal)),
     );
@@ -344,10 +377,8 @@ export async function handleUndo(args: string, ctx: ExtensionCommandContext, _pi
     ctx.ui.notify(
       `Will undo: ${info.lastUnitType} (${info.lastUnitId})\n` +
       `This will:\n` +
-      `  - Reopen its task, slice or milestone in the database\n` +
-      `  - Re-render the affected projections\n` +
-      `  - Attempt to revert associated git commits\n\n` +
-      `Run /gsd undo --force to confirm.`,
+      info.effects.map((effect) => `  - ${effect}\n`).join("") +
+      `\nRun /gsd undo --force to confirm.`,
       "warning",
     );
     return;

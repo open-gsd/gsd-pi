@@ -22,6 +22,7 @@ import {
   insertTask,
   getTask,
   getSlice,
+  getMilestone,
 } from "../gsd-db.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import {
@@ -171,6 +172,113 @@ test("handleUndo complete-slice reopens the slice in the DB for a suffixed miles
   } finally {
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("handleUndo complete-slice confirm text states the task reset and the cleared summary", async (t) => {
+  const base = makeTempDir("gsd-undo-slice-consent");
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "complete", risk: "low", depends: [] });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First task", status: "complete" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Second task", status: "complete" });
+  recordCompletedDispatch({
+    unitType: "complete-slice", unitId: "M001/S01",
+    milestoneId: "M001", sliceId: "S01", endedAt: "2026-07-13T01:00:00.000Z",
+  });
+  invalidateAllCaches();
+
+  const { notifications, ctx } = makeCtx();
+  await handleUndo("", ctx, {} as any, base);
+
+  const message = notifications[0]?.message ?? "";
+  assert.match(message, /Will undo: complete-slice \(M001\/S01\)/);
+  assert.match(message, /Reset 2 task\(s\) of the slice to pending/);
+  assert.match(message, /Clear the slice summary and UAT in the database/);
+  assert.equal(getSlice("M001", "S01")?.status, "complete");
+  assert.equal(getTask("M001", "S01", "T02")?.status, "complete");
+});
+
+test("handleUndo complete-milestone reopens only the milestone and keeps slices, tasks and summaries", async (t) => {
+  const base = makeTempDir("gsd-undo-complete-milestone");
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "complete" });
+  const items: LifecycleIdentity[] = [{ itemKind: "milestone", milestoneId: "M001" }];
+  for (const sid of ["S01", "S02"]) {
+    insertSlice({ id: sid, milestoneId: "M001", title: `Slice ${sid}`, status: "complete", risk: "low", depends: [] });
+    items.push({ itemKind: "slice", milestoneId: "M001", sliceId: sid });
+    for (const tid of ["T01", "T02"]) {
+      insertTask({ id: tid, sliceId: sid, milestoneId: "M001", title: `Task ${tid}`, status: "complete" });
+      items.push({ itemKind: "task", milestoneId: "M001", sliceId: sid, taskId: tid });
+    }
+  }
+  _getAdapter()!.exec("UPDATE slices SET full_summary_md = 'Slice summary', full_uat_md = 'Slice UAT'");
+  // Adopt the canonical lifecycle: the adopted reopen is the path that clears
+  // slice summaries when the completed hierarchy is not kept.
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.undo.milestone.completed",
+    idempotencyKey: "test:undo:fixture:milestone-completed",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    for (const item of items) {
+      adoptOrTransitionLifecycle(context, { ...item, lifecycleStatus: "completed", adoptedFromStatus: "completed" });
+    }
+    return {
+      events: [{
+        eventType: "test.undo.milestone.completed",
+        entityType: "milestone",
+        entityId: "M001",
+        payload: {},
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: "test/undo/milestone/completed",
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  recordCompletedDispatch({
+    unitType: "complete-milestone", unitId: "M001",
+    milestoneId: "M001", endedAt: "2026-07-13T01:00:00.000Z",
+  });
+  invalidateAllCaches();
+
+  const info = await describeLastCompletedUnit(base);
+  assert.deepEqual(info.effects, [
+    "Reopen milestone M001 in the database; its slices and tasks stay complete",
+    "Delete the milestone summary file",
+  ]);
+
+  const { notifications, ctx } = makeCtx();
+  await handleUndo("--force", ctx, {} as any, base);
+
+  assert.equal(notifications.at(-1)?.level, "success", notifications.at(-1)?.message);
+  assert.match(notifications.at(-1)?.message ?? "", /Reopened milestone M001 in the database/);
+  assert.equal(getMilestone("M001")?.status, "active");
+  for (const sid of ["S01", "S02"]) {
+    const slice = getSlice("M001", sid);
+    assert.equal(slice?.status, "complete");
+    assert.equal(slice?.full_summary_md, "Slice summary");
+    assert.equal(slice?.full_uat_md, "Slice UAT");
+    for (const tid of ["T01", "T02"]) {
+      assert.equal(getTask("M001", sid, tid)?.status, "complete");
+    }
   }
 });
 

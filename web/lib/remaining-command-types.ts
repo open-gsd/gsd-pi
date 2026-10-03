@@ -114,6 +114,8 @@ export interface UndoInfo {
   lastUnitKey: string | null
   completedCount: number
   commits: string[]
+  /** The exact changes undo makes for this unit, shown before the user confirms. */
+  effects: string[]
 }
 
 export interface UndoResult {
