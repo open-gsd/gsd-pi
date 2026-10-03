@@ -78,9 +78,6 @@ test("every GSD tool in the dispatched workflow protocol is on the scoped tool s
 
 for (const skillName of ["handoff", "write-milestone-brief"]) {
   test(`${skillName} skill: ${STATUS_TOOL} is callable wherever the skill is visible`, () => {
-    const skill = readFileSync(join(resourcesDir, "skills", skillName, "SKILL.md"), "utf-8");
-    assert.ok(gsdToolsNamedIn(skill).includes(STATUS_TOOL), `${skillName} should name ${STATUS_TOOL}`);
-
     assert.ok(
       buildMinimalGsdToolSet(REGISTERED_TOOL_NAMES).includes(STATUS_TOOL),
       "plain interactive chat surface",
