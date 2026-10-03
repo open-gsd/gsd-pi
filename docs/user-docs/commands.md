@@ -498,7 +498,9 @@ Any `/gsd` subcommand works as a positional argument — `gsd headless status`, 
 
 ### `gsd headless discard-milestone`
 
-Deletes one or more DB-only orphan milestone reservations without starting an RPC session or running projection reconciliation. The mandatory `--orphan-only` guard preflights the complete set and refuses if any target has hierarchy or artifact rows, planning content, a disk projection, queue/dependency references, a worktree or milestone branch, or an active lease/dispatch/worker. No target is deleted unless every target passes; successful deletion occurs in one transaction.
+Deletes one or more DB-only orphan milestone reservations without starting an RPC session or running projection reconciliation. The mandatory `--orphan-only` guard preflights the complete set and refuses if any target has a lifecycle row, hierarchy or artifact rows, planning content, a disk projection, queue/dependency references, a worktree or milestone branch, or an active lease/dispatch/worker. No target is deleted unless every target passes; successful deletion occurs in one transaction.
+
+A milestone that `gsd_milestone_generate_id` or a saved PROJECT Milestone Sequence registers gets a lifecycle row at registration. Lifecycle rows are durable history, so this command refuses such a milestone. Use `/gsd discard <milestone-id>` for it: the milestone is cancelled and stays in the database as a tombstone. This command deletes only reservations that have no lifecycle row, which are rows registered by an earlier version.
 
 ```bash
 gsd headless discard-milestone M015 --orphan-only
