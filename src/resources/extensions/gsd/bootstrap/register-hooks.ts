@@ -1240,8 +1240,17 @@ export function registerHooks(
           const { ensureDbOpen } = await import("./dynamic-tools.js");
           const opened = await ensureDbOpen(basePath);
           if (opened) {
-            const { migrateToFlatPhase } = await import("../flat-phase-migration.js");
-            await migrateToFlatPhase(basePath);
+            const { migrateToFlatPhase, FlatPhaseRecoveryRequiredError } = await import("../flat-phase-migration.js");
+            try {
+              await migrateToFlatPhase(basePath);
+            } catch (err) {
+              // Legacy markdown holds state the DB lacks. That is not a broken
+              // migration: the session must start so the operator can run the
+              // explicit import. Nothing was touched on disk.
+              if (!(err instanceof FlatPhaseRecoveryRequiredError)) throw err;
+              safetyLogWarning("bootstrap", err.message);
+              ctx.ui.notify(err.message, "warning");
+            }
           } else {
             safetyLogWarning(
               "bootstrap",
@@ -1257,20 +1266,6 @@ export function registerHooks(
       const message = err instanceof Error ? err.message : String(err);
       safetyLogWarning("bootstrap", `flat-phase migration failed: ${message}`);
       throw new Error(`flat-phase migration failed: ${message}`);
-    }
-
-    try {
-      const projectRoot = resolveWorktreeProjectRoot(basePath);
-      const { pruneStaleFlatPhaseBackups } = await import("../flat-phase-migration.js");
-      const pruned = pruneStaleFlatPhaseBackups(projectRoot);
-      if (pruned > 0) {
-        safetyLogWarning(
-          "bootstrap",
-          `pruned ${pruned} stale flat-phase migration backup(s) from .gsd-backups/ (retention exceeded)`,
-        );
-      }
-    } catch (err) {
-      safetyLogWarning("bootstrap", `flat-phase backup pruning: ${err instanceof Error ? err.message : String(err)}`);
     }
 
     // Apply show_token_cost preference (#1515)

@@ -158,7 +158,7 @@ Need help choosing settings? Use the [GSD Pi web configurator](https://pi.opengs
 gsd
 ```
 
-Run the setup flow, choose your preferred model provider, and open a project directory. Cursor Agent users can choose the `cursor-agent` provider after installing and authenticating the local `cursor-agent` CLI; its default model is `composer-2.5`, and `CURSOR_API_KEY` is supported as an auth signal. GSD stores project planning and runtime state in `.gsd/`, with gitignored sibling runtime directories such as `.gsd-backups/` for migration snapshots. Stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the flat-phase `.gsd/phases/` migration is complete.
+Run the setup flow, choose your preferred model provider, and open a project directory. Cursor Agent users can choose the `cursor-agent` provider after installing and authenticating the local `cursor-agent` CLI; its default model is `composer-2.5`, and `CURSOR_API_KEY` is supported as an auth signal. GSD stores project planning and runtime state in `.gsd/`, with gitignored sibling runtime directories such as `.gsd-backups/` for migration snapshots. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 For a full first-run walkthrough, see [Getting Started With gsd-pi](./docs/user-docs/getting-started.md).
 

@@ -35,7 +35,19 @@ import {
 const LEGACY_MIGRATING_SEGMENT = "milestones.migrating";
 const EXPLICIT_RECOVERY_REQUIRED =
   "flat-phase migration skipped: legacy markdown contains state absent from the canonical DB. " +
-  "Recommended: run `/gsd recover` and approve its exact Preview hash to import explicitly.";
+  "Recommended: run `/gsd recover` (or `gsd headless recover`) and approve its exact Preview hash to import explicitly.";
+
+/**
+ * The legacy tree holds state the DB lacks. Only an explicit import may bring
+ * it in, so callers must not treat this as a broken migration: session start
+ * has to continue so the operator can run `/gsd recover`.
+ */
+export class FlatPhaseRecoveryRequiredError extends Error {
+  constructor() {
+    super(EXPLICIT_RECOVERY_REQUIRED);
+    this.name = "FlatPhaseRecoveryRequiredError";
+  }
+}
 const RM_RETRY_OPTIONS = { recursive: true, force: true, maxRetries: 5, retryDelay: 100 } as const;
 type FlatPhaseMigrationStage = "before-remove" | "after-remove" | "before-move" | "after-move";
 let flatPhaseMigrationBoundaryForTest: ((stage: FlatPhaseMigrationStage, path: string) => void) | null = null;
@@ -385,50 +397,6 @@ export function isFlatPhaseMigrationInFlight(basePath: string): boolean {
   return hasLegacyMilestoneSubdirs(legacyMigratingPath(basePath));
 }
 
-/** Retention window before flat-phase migration backups are auto-pruned. */
-export const FLAT_PHASE_BACKUP_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
-
-/**
- * Remove stale flat-phase migration backups after the retention window.
- * Only runs when migration is complete (.gsd/phases/ exists, legacy layout gone).
- * Returns the number of migrate-* directories removed.
- */
-export function pruneStaleFlatPhaseBackups(basePath: string): number {
-  if (needsFlatPhaseMigration(basePath)) return 0;
-
-  const phasesPath = join(basePath, ".gsd", LAYOUT_SEGMENTS.level1);
-  if (!existsSync(phasesPath)) return 0;
-
-  const backupRoot = join(basePath, ".gsd-backups");
-  if (!existsSync(backupRoot)) return 0;
-
-  const now = Date.now();
-  let removed = 0;
-  for (const entry of readdirSync(backupRoot)) {
-    if (!entry.startsWith("migrate-")) continue;
-    const dirPath = join(backupRoot, entry);
-    try {
-      const st = statSync(dirPath);
-      if (!st.isDirectory()) continue;
-      if (now - st.mtimeMs < FLAT_PHASE_BACKUP_RETENTION_MS) continue;
-      rmSync(dirPath, { recursive: true, force: true });
-      removed++;
-    } catch {
-      // Non-fatal: leave backup for manual recovery.
-    }
-  }
-
-  try {
-    if (readdirSync(backupRoot).length === 0) {
-      rmSync(backupRoot, { recursive: true, force: true });
-    }
-  } catch {
-    // Non-fatal.
-  }
-
-  return removed;
-}
-
 /**
  * Migrate from legacy nested .gsd/milestones/ to flat-phase .gsd/phases/.
  *
@@ -450,7 +418,7 @@ export async function migrateToFlatPhase(basePath: string): Promise<void> {
   // database authority. Refuse before creating the persistent lock anchors so
   // an implicit migration attempt remains read-only.
   if (getAllMilestones().length === 0) {
-    throw new Error(EXPLICIT_RECOVERY_REQUIRED);
+    throw new FlatPhaseRecoveryRequiredError();
   }
 
   const migrationLockTarget = flatPhaseMigrationLockTarget(basePath);
@@ -502,7 +470,7 @@ async function migrateToFlatPhaseLocked(basePath: string): Promise<void> {
   // for known identities is archived in the migration backup, then rebuilt from DB.
   const legacySource = resumingInterrupted ? migratingPath : milestonesPath;
   if (legacyHierarchyContainsUnknownIdentity(basePath, legacySource)) {
-    throw new Error(EXPLICIT_RECOVERY_REQUIRED);
+    throw new FlatPhaseRecoveryRequiredError();
   }
 
   const milestonesBefore = getAllMilestones().length;

@@ -2,7 +2,7 @@
 // File Purpose: Tests the one-time migration from nested to flat-phase layout.
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync, existsSync, readdirSync, readFileSync, utimesSync } from "node:fs";
+import { mkdtempSync, mkdirSync, renameSync, rmSync, symlinkSync, writeFileSync, existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -13,7 +13,6 @@ import {
   _setFlatPhaseMigrationBoundaryForTest,
   migrateToFlatPhase,
   needsFlatPhaseMigration,
-  pruneStaleFlatPhaseBackups,
 } from "../flat-phase-migration.ts";
 import { openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice, insertTask, getAllMilestones, getMilestoneSlices, getSliceTasks, _getAdapter } from "../gsd-db.ts";
 import { writeCompatMarker } from "../compat/compat-marker.ts";
@@ -744,35 +743,4 @@ test("migrateToFlatPhase rejects ambiguous bare milestone aliases", async () => 
 
   assert.equal(existsSync(join(base, ".gsd", "milestones", "M001")), true);
   assert.equal(existsSync(join(base, ".gsd", "phases")), false);
-});
-
-test("pruneStaleFlatPhaseBackups removes migrate-* dirs older than retention window", async () => {
-  const base = makeTmp();
-  await migrateToFlatPhase(base);
-
-  const backupRoot = join(base, ".gsd-backups");
-  assert.ok(existsSync(backupRoot), "backup should exist immediately after migration");
-
-  const staleDir = join(backupRoot, "migrate-stale");
-  mkdirSync(staleDir, { recursive: true });
-  writeFileSync(join(staleDir, "marker.txt"), "old backup\n", "utf-8");
-  const staleDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
-  utimesSync(staleDir, staleDate, staleDate);
-
-  const removed = pruneStaleFlatPhaseBackups(base);
-  assert.equal(removed, 1, "stale migrate-* dir should be pruned");
-  assert.equal(existsSync(staleDir), false, "stale backup dir should be gone");
-  assert.ok(existsSync(backupRoot), "fresh migration backup should remain");
-});
-
-test("pruneStaleFlatPhaseBackups is a no-op while flat-phase migration is still needed", () => {
-  const base = makeTmp();
-  const backupRoot = join(base, ".gsd-backups", "migrate-stale");
-  mkdirSync(backupRoot, { recursive: true });
-  writeFileSync(join(backupRoot, "marker.txt"), "old backup\n", "utf-8");
-  const staleDate = new Date(Date.now() - 31 * 24 * 60 * 60 * 1000);
-  utimesSync(backupRoot, staleDate, staleDate);
-
-  assert.equal(pruneStaleFlatPhaseBackups(base), 0, "must not prune while migration is pending");
-  assert.ok(existsSync(backupRoot), "backup must remain until migration completes");
 });
