@@ -220,7 +220,7 @@ No manual intervention needed for transient errors — the session pauses briefl
 
 ### Incremental Memory
 
-GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. `KNOWLEDGE.md` keeps manual Rules as file-canonical entries, while Patterns and Lessons are captured as memories, backfilled from existing rows, and rendered into the file on session start.
+GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. Rules, Patterns and Lessons are memories rows written by `/gsd knowledge` or `capture_thought`; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
 At the start of each unit, GSD injects the manual Rules from project `KNOWLEDGE.md`; Patterns and Lessons reach the agent through the memory block. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
 

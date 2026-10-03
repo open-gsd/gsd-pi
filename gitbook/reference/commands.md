@@ -30,7 +30,7 @@
 | `/gsd export --html` | Generate HTML report for current milestone |
 | `/gsd export --html --all` | Generate reports for all milestones |
 | `/gsd update` | Update GSD to the latest version |
-| `/gsd knowledge` | Add persistent project knowledge. Rules append to `KNOWLEDGE.md`; patterns and lessons are captured as memories and projected back into `KNOWLEDGE.md`. |
+| `/gsd knowledge` | Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild. |
 | `/gsd fast` | Toggle service tier for supported models |
 | `/gsd rate` | Rate last unit's model tier (over/ok/under) |
 | `/gsd changelog` | Show release notes |

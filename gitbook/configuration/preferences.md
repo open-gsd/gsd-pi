@@ -335,7 +335,7 @@ custom_instructions:
   - "Prefer functional patterns over classes"
 ```
 
-For project-specific durable guidance, use `.gsd/KNOWLEDGE.md` instead. Rules are read from the file; patterns and lessons are persisted to the `memories` table and projected back into `KNOWLEDGE.md` on the next session start.
+For project-specific durable guidance, use `.gsd/KNOWLEDGE.md` instead. Rules, patterns and lessons are persisted to the `memories` table by `/gsd knowledge` or `capture_thought`, and `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
 ### `context_pause_threshold`
 

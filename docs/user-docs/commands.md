@@ -41,7 +41,7 @@
 | `/gsd report --html --all` | Generate retrospective reports for all milestones at once |
 | `/gsd update` | Update GSD in-session; `--models` refreshes models and pricing without a restart |
 | `/gsd upgrade` | Alias for `/gsd update` |
-| `/gsd knowledge` | Add persistent project knowledge. Rules remain manually maintained in `KNOWLEDGE.md`; patterns and lessons are memory-backed and projected into the file on the next session start. |
+| `/gsd knowledge` | Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild. |
 | `/gsd memory` | Query and forget project memories |
 | `/gsd eval-review <sliceId>` | Audit a slice's AI evaluation strategy and write a scored `<sliceId>-EVAL-REVIEW.md`. Flags: `--force` overwrites; `--show` prints the existing audit. See [eval-review](eval-review.md). |
 | `/gsd extract-learnings <MID>` | Extract structured Decisions, Lessons, Patterns, and Surprises from a completed milestone — writes `<MID>-LEARNINGS.md` audit trail, persists durable knowledge through the memory/decision stores, and projects reviewable knowledge into `.gsd/KNOWLEDGE.md` on the next session start. Runs automatically at milestone completion. |

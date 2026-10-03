@@ -108,4 +108,4 @@ GSD maintains a knowledge base that persists across sessions. Add rules, pattern
 /gsd knowledge lesson "The OAuth flow requires the redirect URL to match exactly"
 ```
 
-Rules append directly to `.gsd/KNOWLEDGE.md`. Patterns and Lessons are stored as memories, projected back into `.gsd/KNOWLEDGE.md` for review, and injected into task prompts through the memory block.
+Rules, Patterns and Lessons are stored as memories. `.gsd/KNOWLEDGE.md` is rendered from the database after each capture and on rebuild, for review. Patterns and Lessons are injected into task prompts through the memory block.
