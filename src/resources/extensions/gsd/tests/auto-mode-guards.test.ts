@@ -13,19 +13,22 @@ import { tmpdir } from 'node:os';
 
 import { parkMilestone, unparkMilestone, discardMilestone } from '../milestone-actions.ts';
 import { _setAutoActiveForTest } from '../auto.ts';
-import { closeDatabase, openDatabase } from '../gsd-db.ts';
+import { closeDatabase, insertMilestone, openDatabase } from '../gsd-db.ts';
 
 function createFixture(): string {
   const base = mkdtempSync(join(tmpdir(), 'gsd-guard-test-'));
   const mDir = join(base, '.gsd', 'milestones', 'M001');
   mkdirSync(mDir, { recursive: true });
   writeFileSync(join(mDir, 'M001-ROADMAP.md'), '# M001\n', 'utf-8');
+  openDatabase(':memory:');
+  insertMilestone({ id: 'M001', title: 'Guarded', status: 'active' });
   return base;
 }
 
 describe('auto-mode guards (milestone-actions)', () => {
   afterEach(() => {
     _setAutoActiveForTest(false);
+    closeDatabase();
   });
 
   test('parkMilestone throws when auto-mode is active', () => {
@@ -71,11 +74,9 @@ describe('auto-mode guards (milestone-actions)', () => {
     const base = createFixture();
     try {
       _setAutoActiveForTest(false);
-      openDatabase(join(base, '.gsd', 'gsd.db'));
       const result = parkMilestone(base, 'M001', 'baseline');
       assert.ok(result, 'park succeeds when auto is inactive');
     } finally {
-      closeDatabase();
       rmSync(base, { recursive: true, force: true });
     }
   });

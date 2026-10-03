@@ -33,9 +33,6 @@ import {
   getMilestoneSliceSummaries,
   getClosedSliceIds,
   getSliceTaskCounts,
-  deleteMilestone,
-  recordMilestoneCommitAttribution,
-  getMilestoneCommitAttributionShas,
   checkpointDatabase,
   refreshOpenDatabaseFromDisk,
   tryCreateMemoriesFts,
@@ -1238,29 +1235,6 @@ describe('gsd-db', () => {
       assert.equal(refreshOpenDatabaseFromDisk(), false);
       assert.equal(isDbAvailable(), false);
     });
-  });
-
-  // ─── milestone_commit_attributions teardown ───────────────────────────────
-
-  describe('milestone commit attribution teardown', () => {
-    test('deleteMilestone removes persisted milestone commit attributions', () => {
-      openDatabase(':memory:');
-      insertMilestone({ id: 'M001', title: 'Milestone', status: 'active' });
-      recordMilestoneCommitAttribution({
-        commitSha: '0123456789abcdef0123456789abcdef01234567',
-        milestoneId: 'M001',
-        source: 'backfill',
-        confidence: 0.8,
-        files: ['app.js'],
-        createdAt: '2026-05-05T00:00:00.000Z',
-      });
-
-      assert.deepEqual(getMilestoneCommitAttributionShas('M001'), ['0123456789abcdef0123456789abcdef01234567']);
-      deleteMilestone('M001');
-      assert.deepEqual(getMilestoneCommitAttributionShas('M001'), []);
-      closeDatabase();
-    });
-
   });
 
   // ─── getDbStatus ───────────────────────────────────────────────────────────

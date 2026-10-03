@@ -126,8 +126,8 @@ The two `/gsd recover` forms serve different recovery domains. Use the no-argume
 | `/gsd reset-slice` | Reopen the full terminal slice and every terminal task in one guarded database operation, preserve prior execution history, then refresh readable status |
 | `/gsd park` | Park a milestone — skip without deleting |
 | `/gsd unpark` | Reactivate a parked milestone |
-| `/gsd discard <milestone-id>` | Confirm and permanently discard one milestone without entering the smart-entry flow |
-| `/gsd rethink` | Conversational project reorganization — reorder, park, discard unadopted work, or add milestones |
+| `/gsd discard <milestone-id>` | Confirm and discard one milestone: it is cancelled in the database (kept as a tombstone) and its files are removed |
+| `/gsd rethink` | Conversational project reorganization — reorder, park, discard, or add milestones |
 | Discard milestone | Available via `/gsd` wizard → "Milestone actions" → "Discard"; milestones with adopted canonical lifecycle history must be parked instead |
 
 Milestone and slice titles created during planning must not contain forward slash (`/`), en dash, or em dash characters. GSD reserves those characters as state-document delimiters, so `plan-milestone` rejects titles that include them.

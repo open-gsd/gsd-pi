@@ -50,7 +50,6 @@ import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "./db-task-sl
 // existing `from "./gsd-db.js"` imports keep working.
 export * from "./db/engine.js";
 import { immediateTransaction, transaction, getDb, getDbOrNull, getDbPath } from "./db/engine.js";
-import { assertNoAdoptedLifecycleHistory } from "./db/writers/import-restore.js";
 
 // ─── Single Writer Layer re-exports ──────────────────────────────────────
 // Domain write subsystems live in db/writers/*; re-exported here so callers
@@ -1292,49 +1291,6 @@ export function deleteVerificationEvidence(milestoneId: string, sliceId: string,
   transaction(() => getDbOrNull()!.prepare(
     `DELETE FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid`,
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
-}
-
-export function deleteMilestone(milestoneId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => {
-    assertNoAdoptedLifecycleHistory("deleteMilestone", [milestoneId]);
-    getDbOrNull()!!.prepare(
-      `DELETE FROM verification_evidence WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM quality_gates WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM gate_runs WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM tasks WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slice_dependencies WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slices WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM replan_history WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM assessments WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM artifacts WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM milestone_commit_attributions WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM milestone_leases WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM milestones WHERE id = :mid`,
-    ).run({ ":mid": milestoneId });
-  });
 }
 
 export function updateSliceFields(milestoneId: string, sliceId: string, fields: {

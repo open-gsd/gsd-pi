@@ -1,4 +1,7 @@
-import { describe, test } from 'node:test';
+// Project/App: gsd-pi
+// File Purpose: Park, unpark and discard are Domain Operations for every milestone; files are renders.
+
+import { afterEach, beforeEach, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -8,75 +11,30 @@ import { execSync } from 'node:child_process';
 import { invalidateStateCache, getActiveMilestoneId } from '../state.ts';
 import { clearPathCache } from '../paths.ts';
 import { parkMilestone, unparkMilestone, discardMilestone, isParked, getParkedReason } from '../milestone-actions.ts';
+import { _setAutoActiveForTest } from '../auto.ts';
+import { adoptOrTransitionLifecycle } from '../db/writers/lifecycle-commands.ts';
 import {
+  _getAdapter,
   closeDatabase,
+  executeDomainOperation,
   getMilestone,
-  getMilestoneSlices,
-  getSliceTasks,
+  getSlice,
+  getTask,
+  insertArtifact,
   insertMilestone,
   insertSlice,
   insertTask,
   openDatabase,
+  readDomainOperationFence,
 } from "../gsd-db.ts";
 import { createWorktree } from "../worktree-manager.ts";
-import { _resetLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
+import { renderAllFromDb } from "../markdown-renderer.ts";
 
-// ─── Fixture Helpers ───────────────────────────────────────────────────────
-
-function createFixtureBase(): string {
-  const base = mkdtempSync(join(tmpdir(), 'gsd-park-test-'));
-  mkdirSync(join(base, '.gsd', 'milestones'), { recursive: true });
-  return base;
-}
-
-function createMilestone(base: string, mid: string, opts?: { withRoadmap?: boolean; withSummary?: boolean; dependsOn?: string[] }): void {
+function createMilestoneDir(base: string, mid: string): string {
   const mDir = join(base, '.gsd', 'milestones', mid);
   mkdirSync(mDir, { recursive: true });
-
-  if (opts?.dependsOn) {
-    writeFileSync(join(mDir, `${mid}-CONTEXT.md`), [
-      '---',
-      `depends_on: [${opts.dependsOn.join(', ')}]`,
-      '---',
-      '',
-      `# ${mid} Context`,
-    ].join('\n'), 'utf-8');
-  }
-
-  if (opts?.withRoadmap) {
-    writeFileSync(join(mDir, `${mid}-ROADMAP.md`), [
-      `# ${mid}: Test Milestone`,
-      '',
-      '## Vision',
-      'Test milestone for park/unpark testing.',
-      '',
-      '## Success Criteria',
-      '- [ ] Tests pass',
-      '',
-      '## Slices',
-      `- [${opts?.withSummary ? 'x' : ' '}] **S01: Setup** \`risk:low\` \`depends:[]\``,
-      '  - After this: Basic setup complete.',
-    ].join('\n'), 'utf-8');
-  }
-
-  if (opts?.withSummary) {
-    writeFileSync(join(mDir, `${mid}-SUMMARY.md`), [
-      '---',
-      `id: ${mid}`,
-      '---',
-      '',
-      `# ${mid} — Complete`,
-    ].join('\n'), 'utf-8');
-  }
-}
-
-function cleanup(base: string): void {
-  try {
-    closeDatabase();
-  } catch {
-    // ignore
-  }
-  rmSync(base, { recursive: true, force: true });
+  writeFileSync(join(mDir, `${mid}-ROADMAP.md`), `# ${mid}: Test Milestone\n`, 'utf-8');
+  return mDir;
 }
 
 function run(cmd: string, cwd: string): string {
@@ -85,7 +43,7 @@ function run(cmd: string, cwd: string): string {
 
 function initGitRepo(base: string): void {
   writeFileSync(join(base, "README.md"), "# test\n", "utf-8");
-  writeFileSync(join(base, ".gsd", "STATE.md"), "# State\n", "utf-8");
+  writeFileSync(join(base, ".gitignore"), ".gsd/gsd.db*\n", "utf-8");
   run("git init", base);
   run("git config user.email test@test.com", base);
   run("git config user.name Test", base);
@@ -94,215 +52,195 @@ function initGitRepo(base: string): void {
   run("git branch -M main", base);
 }
 
-function openMilestoneDb(base: string, mid: string): void {
-  assert.ok(openDatabase(join(base, '.gsd', 'gsd.db')), 'database opens');
-  insertMilestone({ id: mid, title: mid, status: 'active' });
+function scalar(sql: string, params: Record<string, unknown> = {}): unknown {
+  return Object.values(_getAdapter()!.prepare(sql).get(params) ?? {})[0];
 }
 
-function clearCaches(): void {
-  clearPathCache();
-  invalidateStateCache();
+function revision(): number {
+  return Number(scalar("SELECT revision FROM project_authority WHERE singleton = 1"));
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
-// Tests
-// ═══════════════════════════════════════════════════════════════════════════
+function operations(type: string): number {
+  return Number(scalar("SELECT COUNT(*) FROM workflow_operations WHERE operation_type = :type", { ":type": type }));
+}
 
-  // ─── Test 1: parkMilestone creates PARKED.md ──────────────────────────
+function lifecycleStatus(where: string): unknown {
+  return scalar(`SELECT lifecycle_status FROM workflow_item_lifecycles WHERE ${where}`);
+}
+
+function adoptMilestone(milestoneId: string): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.fixture.adopt-milestone",
+    idempotencyKey: `test/fixture/adopt/${milestoneId}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { milestoneId },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId, lifecycleStatus: "ready" });
+    adoptOrTransitionLifecycle(context, { itemKind: "slice", milestoneId, sliceId: "S01", lifecycleStatus: "ready" });
+    return {
+      events: [{ eventType: "test.fixture.adopted", entityType: "milestone", entityId: milestoneId, payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: `test/adopted/${milestoneId.toLowerCase()}`, projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+}
 
 describe('park-milestone', () => {
-test('parkMilestone creates PARKED.md', () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      clearCaches();
-      openMilestoneDb(base, 'M001');
+  let base: string;
 
-      const success = parkMilestone(base, 'M001', 'Priority shift');
-      assert.ok(success, 'parkMilestone returns true');
-      assert.ok(isParked(base, 'M001'), 'isParked returns true after parking');
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), 'gsd-park-test-'));
+    mkdirSync(join(base, '.gsd', 'milestones'), { recursive: true });
+    assert.ok(openDatabase(join(base, '.gsd', 'gsd.db')), 'database opens');
+    clearPathCache();
+    invalidateStateCache();
+  });
 
-      const reason = getParkedReason(base, 'M001');
-      assert.deepStrictEqual(reason, 'Priority shift', 'reason matches');
-    } finally {
-      cleanup(base);
-    }
-});
+  afterEach(() => {
+    _setAutoActiveForTest(false);
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
 
-  // ─── Test 2: parkMilestone is idempotent — fails if already parked ────
-test('parkMilestone fails if already parked', () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      clearCaches();
-      openMilestoneDb(base, 'M001');
+  test('parks a DB-only milestone with no directory in one Domain Operation', () => {
+    insertMilestone({ id: 'M001', title: 'DB only', status: 'queued' });
+    const before = revision();
 
-      parkMilestone(base, 'M001', 'First park');
-      const secondPark = parkMilestone(base, 'M001', 'Second park');
-      assert.ok(!secondPark, 'second parkMilestone returns false');
-      assert.deepStrictEqual(getParkedReason(base, 'M001'), 'First park', 'reason unchanged from first park');
-    } finally {
-      cleanup(base);
-    }
-});
+    assert.equal(parkMilestone(base, 'M001', 'Priority shift'), true);
 
-  // ─── Test 3: unparkMilestone removes PARKED.md ────────────────────────
-test('unparkMilestone removes PARKED.md', () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      clearCaches();
-      openMilestoneDb(base, 'M001');
+    assert.equal(getMilestone('M001')!.status, 'parked');
+    assert.equal(lifecycleStatus("item_kind = 'milestone' AND milestone_id = 'M001'"), 'paused');
+    assert.equal(operations('milestone.park'), 1);
+    assert.equal(revision(), before + 1);
+    assert.equal(isParked('M001'), true);
+    assert.equal(getParkedReason('M001'), 'Priority shift');
+    assert.equal(existsSync(join(base, '.gsd', 'milestones', 'M001')), false, 'no directory is created');
+  });
 
-      parkMilestone(base, 'M001', 'Test reason');
-      assert.ok(isParked(base, 'M001'), 'milestone is parked');
+  test('renders PARKED.md from the park record and a second park changes nothing', () => {
+    createMilestoneDir(base, 'M001');
+    insertMilestone({ id: 'M001', title: 'On disk', status: 'active' });
 
-      const success = unparkMilestone(base, 'M001');
-      assert.ok(success, 'unparkMilestone returns true');
-      assert.ok(!isParked(base, 'M001'), 'isParked returns false after unpark');
-    } finally {
-      cleanup(base);
-    }
-});
+    parkMilestone(base, 'M001', 'First "park"');
+    const marker = readFileSync(join(base, '.gsd', 'milestones', 'M001', 'M001-PARKED.md'), 'utf-8');
+    assert.match(marker, /reason: "First \\"park\\""/);
+    const after = revision();
 
-  // ─── Test 4: unparkMilestone fails if not parked ──────────────────────
-test('unparkMilestone fails if not parked', () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      clearCaches();
-      openMilestoneDb(base, 'M001');
+    assert.equal(parkMilestone(base, 'M001', 'Second park'), false);
+    assert.equal(revision(), after);
+    assert.equal(getParkedReason('M001'), 'First "park"');
+  });
 
-      const result = unparkMilestone(base, 'M001');
-      assert.ok(!result, 'unparkMilestone returns false when not parked');
-    } finally {
-      cleanup(base);
-    }
-});
+  test('a PARKED.md marker on disk is not park state', () => {
+    const mDir = createMilestoneDir(base, 'M001');
+    insertMilestone({ id: 'M001', title: 'Active', status: 'active' });
+    writeFileSync(join(mDir, 'M001-PARKED.md'), '---\nreason: "hand written"\n---\n', 'utf-8');
 
-  // ─── Test 7: getActiveMilestoneId skips parked ────────────────────────
-test('getActiveMilestoneId skips parked', async () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      createMilestone(base, 'M002', { withRoadmap: true });
-      clearCaches();
+    assert.equal(isParked('M001'), false);
+    assert.equal(unparkMilestone(base, 'M001'), false);
+    assert.equal(parkMilestone(base, 'M001', 'real park'), true);
+    assert.equal(getParkedReason('M001'), 'real park');
+  });
 
-      assert.ok(openDatabase(join(base, '.gsd', 'gsd.db')), 'database opens');
-      insertMilestone({ id: 'M001', title: 'Parked', status: 'active' });
-      insertMilestone({ id: 'M002', title: 'Active', status: 'active' });
+  test('unpark restores the milestone and removes the marker after the commit', () => {
+    createMilestoneDir(base, 'M001');
+    insertMilestone({ id: 'M001', title: 'On disk', status: 'active' });
+    parkMilestone(base, 'M001', 'Test reason');
+    assert.ok(existsSync(join(base, '.gsd', 'milestones', 'M001', 'M001-PARKED.md')));
 
-      parkMilestone(base, 'M001', 'Testing');
+    assert.equal(unparkMilestone(base, 'M001'), true);
 
-      const activeId = await getActiveMilestoneId(base);
-      assert.deepStrictEqual(activeId, 'M002', 'getActiveMilestoneId returns M002');
-    } finally {
-      cleanup(base);
-    }
-});
+    assert.equal(getMilestone('M001')!.status, 'active');
+    assert.equal(lifecycleStatus("item_kind = 'milestone' AND milestone_id = 'M001'"), 'in_progress');
+    assert.equal(operations('milestone.unpark'), 1);
+    assert.equal(existsSync(join(base, '.gsd', 'milestones', 'M001', 'M001-PARKED.md')), false);
+    assert.equal(getParkedReason('M001'), null);
+    assert.equal(unparkMilestone(base, 'M001'), false, 'unpark of an unparked milestone is refused');
+  });
 
-  // ─── Test 10: discardMilestone removes directory ──────────────────────
-test('discardMilestone removes directory', async () => {
-    const base = createFixtureBase();
-    const previousStderr = setStderrLoggingEnabled(false);
-    try {
-      _resetLogs();
-      createMilestone(base, 'M001', { withRoadmap: true });
-      clearCaches();
-      openMilestoneDb(base, 'M001');
+  test('getActiveMilestoneId skips a parked milestone', async () => {
+    insertMilestone({ id: 'M001', title: 'Parked', status: 'active' });
+    insertMilestone({ id: 'M002', title: 'Active', status: 'active' });
 
-      const mDir = join(base, '.gsd', 'milestones', 'M001');
-      assert.ok(existsSync(mDir), 'milestone dir exists before discard');
+    parkMilestone(base, 'M001', 'Testing');
 
-      const success = discardMilestone(base, 'M001');
-      assert.ok(success, 'discardMilestone returns true');
-      assert.ok(!existsSync(mDir), 'milestone dir removed after discard');
-      assert.equal(getMilestone('M001'), null, 'milestone row removed from DB');
-    } finally {
-      setStderrLoggingEnabled(previousStderr);
-      cleanup(base);
-    }
-});
+    assert.equal(await getActiveMilestoneId(base), 'M002');
+  });
 
-  // ─── Test 11: discardMilestone updates queue order ────────────────────
-test('discardMilestone updates queue order', () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      createMilestone(base, 'M002', { withRoadmap: true });
-      clearCaches();
-      openMilestoneDb(base, 'M001');
+  test('the auto loop abandon override parks the milestone while auto-mode is active', () => {
+    insertMilestone({ id: 'M001', title: 'Abandoned', status: 'active' });
+    _setAutoActiveForTest(true);
 
-      // Write a queue order that includes M001
-      const queuePath = join(base, '.gsd', 'QUEUE-ORDER.json');
-      writeFileSync(queuePath, JSON.stringify({ order: ['M001', 'M002'], updatedAt: new Date().toISOString() }), 'utf-8');
+    assert.throws(() => parkMilestone(base, 'M001', 'abandon this milestone'), /auto-mode is active/);
+    assert.equal(parkMilestone(base, 'M001', 'abandon this milestone', { fromAutoLoop: true }), true);
 
-      discardMilestone(base, 'M001');
+    assert.equal(getMilestone('M001')!.status, 'parked');
+    assert.equal(getParkedReason('M001'), 'abandon this milestone');
+  });
 
-      // Queue order should no longer include M001
-      const queueContent = JSON.parse(readFileSync(queuePath, 'utf-8'));
-      assert.ok(!queueContent.order.includes('M001'), 'M001 removed from queue order');
-      assert.ok(queueContent.order.includes('M002'), 'M002 still in queue order');
-    } finally {
-      cleanup(base);
-    }
-});
+  test('discard tombstones an adopted milestone and removes files after the commit', async () => {
+    const mDir = createMilestoneDir(base, 'M001');
+    createMilestoneDir(base, 'M002');
+    initGitRepo(base);
+    insertMilestone({ id: 'M001', title: 'Discard me', status: 'active' });
+    insertMilestone({ id: 'M002', title: 'Keep me', status: 'queued' });
+    insertSlice({ milestoneId: 'M001', id: 'S01', title: 'Open slice', status: 'pending' });
+    insertSlice({ milestoneId: 'M001', id: 'S02', title: 'Done slice', status: 'complete' });
+    insertTask({ milestoneId: 'M001', sliceId: 'S01', id: 'T01', title: 'Open task', status: 'pending' });
+    insertArtifact({
+      path: 'milestones/M001/M001-CONTEXT.md',
+      artifact_type: 'CONTEXT',
+      milestone_id: 'M001',
+      slice_id: null,
+      task_id: null,
+      full_content: '# M001 context\n',
+    });
+    adoptMilestone('M001');
+    writeFileSync(join(base, '.gsd', 'QUEUE-ORDER.json'), JSON.stringify({ order: ['M001', 'M002'] }), 'utf-8');
+    const wt = createWorktree(base, 'M001', { branch: 'milestone/M001' });
+    const before = revision();
 
-test('discardMilestone removes DB rows, worktree, and milestone branch', () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      initGitRepo(base);
-      clearCaches();
+    assert.equal(discardMilestone(base, 'M001'), true);
 
-      assert.ok(openDatabase(join(base, '.gsd', 'gsd.db')), 'database opens');
-      insertMilestone({ id: 'M001', title: 'Discard me', status: 'active' });
-      insertSlice({ milestoneId: 'M001', id: 'S01', title: 'Only slice', status: 'pending' });
-      insertTask({ milestoneId: 'M001', sliceId: 'S01', id: 'T01', title: 'Only task', status: 'pending' });
+    assert.equal(operations('milestone.discard'), 1);
+    assert.equal(revision(), before + 1);
+    assert.equal(getMilestone('M001')!.status, 'skipped', 'row kept as a tombstone');
+    assert.equal(getSlice('M001', 'S01')!.status, 'skipped');
+    assert.equal(getSlice('M001', 'S02')!.status, 'complete', 'closed work stays closed');
+    assert.equal(getTask('M001', 'S01', 'T01')!.status, 'skipped');
+    assert.equal(lifecycleStatus("item_kind = 'milestone' AND milestone_id = 'M001'"), 'cancelled');
+    assert.equal(lifecycleStatus("item_kind = 'task' AND milestone_id = 'M001'"), 'cancelled');
+    assert.equal(scalar("SELECT waiver_status FROM workflow_waivers WHERE scope = 'milestone:M001'"), 'active');
+    assert.equal(existsSync(mDir), false);
+    assert.equal(existsSync(wt.path), false);
+    assert.ok(!run('git branch', base).includes('milestone/M001'));
+    assert.deepEqual(JSON.parse(readFileSync(join(base, '.gsd', 'QUEUE-ORDER.json'), 'utf-8')).order, ['M002']);
 
-      const wt = createWorktree(base, 'M001', { branch: 'milestone/M001' });
-      assert.ok(existsSync(wt.path), 'worktree exists before discard');
-      assert.ok(run('git branch', base).includes('milestone/M001'), 'milestone branch exists before discard');
-      assert.ok(getMilestone('M001'), 'milestone exists in DB before discard');
-      assert.equal(getMilestoneSlices('M001').length, 1, 'slice exists in DB before discard');
-      assert.equal(getSliceTasks('M001', 'S01').length, 1, 'task exists in DB before discard');
+    await renderAllFromDb(base);
+    assert.equal(existsSync(mDir), false, 'a full render does not bring the discarded tree back');
+  });
 
-      const success = discardMilestone(base, 'M001');
-      assert.ok(success, 'discardMilestone returns true');
+  test('a failed discard keeps the milestone files', () => {
+    const mDir = createMilestoneDir(base, 'M001');
+    insertMilestone({ id: 'M001', title: 'Discard me', status: 'active' });
+    _getAdapter()!.exec(
+      "CREATE TRIGGER fail_milestone_update BEFORE UPDATE ON milestones BEGIN SELECT RAISE(ABORT, 'simulated discard failure'); END;",
+    );
 
-      assert.equal(getMilestone('M001'), null, 'milestone row removed from DB');
-      assert.equal(getMilestoneSlices('M001').length, 0, 'slice rows removed from DB');
-      assert.equal(getSliceTasks('M001', 'S01').length, 0, 'task rows removed from DB');
-      assert.ok(!existsSync(wt.path), 'worktree removed after discard');
-      assert.ok(!run('git branch', base).includes('milestone/M001'), 'milestone branch removed after discard');
-    } finally {
-      cleanup(base);
-    }
-});
+    assert.throws(() => discardMilestone(base, 'M001'), /simulated discard failure/);
 
-test('discardMilestone removes DB rows when milestone directory is already missing', () => {
-    const base = createFixtureBase();
-    try {
-      createMilestone(base, 'M001', { withRoadmap: true });
-      clearCaches();
+    assert.equal(getMilestone('M001')!.status, 'active');
+    assert.equal(existsSync(mDir), true, 'files are removed only after the commit');
+  });
 
-      assert.ok(openDatabase(join(base, '.gsd', 'gsd.db')), 'database opens');
-      insertMilestone({ id: 'M001', title: 'Discard me', status: 'active' });
-      insertSlice({ milestoneId: 'M001', id: 'S01', title: 'Only slice', status: 'pending' });
-      insertTask({ milestoneId: 'M001', sliceId: 'S01', id: 'T01', title: 'Only task', status: 'pending' });
+  test('discard refuses a completed milestone and an unknown one', () => {
+    insertMilestone({ id: 'M001', title: 'Done', status: 'complete' });
 
-      const mDir = join(base, '.gsd', 'milestones', 'M001');
-      rmSync(mDir, { recursive: true, force: true });
-      assert.ok(!existsSync(mDir), 'milestone dir removed before discard');
-
-      const success = discardMilestone(base, 'M001');
-      assert.ok(success, 'discardMilestone returns true when DB cleanup succeeds');
-      assert.equal(getMilestone('M001'), null, 'milestone row removed from DB');
-      assert.equal(getMilestoneSlices('M001').length, 0, 'slice rows removed from DB');
-      assert.equal(getSliceTasks('M001', 'S01').length, 0, 'task rows removed from DB');
-    } finally {
-      cleanup(base);
-    }
-});
-
+    assert.throws(() => discardMilestone(base, 'M001'), /already closed/);
+    assert.equal(discardMilestone(base, 'M404'), false);
+    assert.equal(operations('milestone.discard'), 0);
+  });
 });

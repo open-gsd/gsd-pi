@@ -659,7 +659,7 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
       }
       targetId = state.activeMilestone.id;
     }
-    if (isParked(basePath, targetId)) {
+    if (isParked(targetId)) {
       ctx.ui.notify(`${targetId} is already parked. Use /gsd unpark ${targetId} to reactivate.`, "info");
       return true;
     }

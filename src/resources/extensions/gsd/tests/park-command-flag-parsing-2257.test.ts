@@ -108,8 +108,8 @@ describe("park dispatch via handleWorkflowCommand (#2257)", () => {
     );
 
     assert.equal(handled, true);
-    assert.ok(isParked(base, "M001"), "M001 is parked");
-    assert.equal(getParkedReason(base, "M001"), "waiting on vendor");
+    assert.ok(isParked("M001"), "M001 is parked");
+    assert.equal(getParkedReason("M001"), "waiting on vendor");
     assert.ok(
       ctx.notifications.some((n) => n.message === "Parked M001. Run /gsd unpark M001 to reactivate."),
       "expected success notification for M001",
@@ -129,8 +129,8 @@ describe("park dispatch via handleWorkflowCommand (#2257)", () => {
     );
 
     assert.equal(handled, true);
-    assert.ok(isParked(base, "M001"), "active milestone M001 is parked");
-    assert.equal(getParkedReason(base, "M001"), "Parked via /gsd park");
+    assert.ok(isParked("M001"), "active milestone M001 is parked");
+    assert.equal(getParkedReason("M001"), "Parked via /gsd park");
     assert.ok(
       !ctx.notifications.some((n) => /Could not park/.test(n.message)),
       "expected no could-not-park failure",

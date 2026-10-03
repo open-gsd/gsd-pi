@@ -1819,12 +1819,12 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           const decision = detectAbandonMilestone(overrides, s.currentMilestoneId);
           if (decision.shouldPark && s.currentMilestoneId) {
             const { parkMilestone } = await import("./milestone-actions.js");
-            const parked = parkMilestone(s.basePath, s.currentMilestoneId, decision.reason);
+            const parked = parkMilestone(s.basePath, s.currentMilestoneId, decision.reason, { fromAutoLoop: true });
             if (parked) {
               ctx.ui.notify(`Milestone ${s.currentMilestoneId} parked: "${decision.reason}"`, "info");
             } else {
-              // Park refused: milestone directory missing, milestone already
-              // completed (SUMMARY present), or PARKED.md already exists.
+              // Park refused: milestone missing from the DB, already
+              // closed, or already parked.
               // resolveAllOverrides below will still consume the override —
               // surface this loudly so the user notices state drift rather
               // than silently losing the abandon directive.

@@ -15,7 +15,7 @@ import { deriveState } from "./state.js";
 import { gsdRoot } from "./paths.js";
 import { findMilestoneIds } from "./milestone-ids.js";
 import { loadQueueOrder, validateQueueOrder } from "./queue-order.js";
-import { isParked, getParkedReason } from "./milestone-actions.js";
+import { getParkedReason } from "./milestone-actions.js";
 import { getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
 import { buildExistingMilestonesContext } from "./guided-flow-queue.js";
 import { loadPrompt } from "./prompt-loader.js";
@@ -124,7 +124,7 @@ function buildRethinkData(
     // Add parked reason if applicable
     let statusDisplay = status;
     if (status === "parked") {
-      const reason = getParkedReason(basePath, mid);
+      const reason = getParkedReason(mid);
       if (reason) statusDisplay = `parked (${reason})`;
     }
 

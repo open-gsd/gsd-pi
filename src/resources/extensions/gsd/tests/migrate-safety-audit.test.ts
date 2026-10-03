@@ -92,9 +92,9 @@ import { withDatabaseMaintenanceClaim } from "../db/engine.ts";
 import { claimProjectionMaintenance } from "../database-maintenance-fence.ts";
 import { removeProjectionIfCurrent } from "../projection-cleanup.ts";
 import { classifyGsdLogicalPath } from "../projection-path-policy.ts";
-import { _removeDependsOnFromContextFilesForTest } from "../guided-flow-queue.ts";
 import { _removeContextDraftProjectionForTest } from "../tools/workflow-tool-executors.ts";
 import { parkMilestone } from "../milestone-actions.ts";
+import { renderMilestoneParkedMarker } from "../milestone-park-projection.ts";
 import { acquireProjectionRootIdentityLock } from "@gsd/native/file-identity";
 
 function makeBase(prefix: string): string {
@@ -3882,11 +3882,15 @@ test("milestone projection mutations honor the publication claim", () => {
     insertMilestone({ id: "M001", title: "Milestone", status: "pending" });
     const release = claimProjectionMaintenance(databasePath);
     try {
-      assert.throws(() => parkMilestone(base, "M001", "hold"), /maintenance|fenced/i);
+      // The park commits in the DB; only the marker render is fenced.
+      assert.equal(parkMilestone(base, "M001", "hold"), true);
     } finally {
       release();
     }
+    assert.equal(getMilestone("M001")?.status, "parked");
     assert.equal(existsSync(join(base, ".gsd", "milestones", "M001", "M001-PARKED.md")), false);
+    assert.equal(renderMilestoneParkedMarker(base, "M001"), true, "the marker renders once the claim is released");
+    assert.equal(existsSync(join(base, ".gsd", "milestones", "M001", "M001-PARKED.md")), true);
   } finally {
     cleanup(base);
   }
@@ -3905,30 +3909,6 @@ test("migration backup rejects a symlinked destination root", () => {
   } finally {
     cleanup(base);
     rmSync(outside, { recursive: true, force: true });
-  }
-});
-
-test("guided queue projection rewrites honor the publication claim", () => {
-  const base = makeBase("gsd-migrate-guided-queue-fence-");
-  try {
-    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
-    const databasePath = join(base, ".gsd", "gsd.db");
-    assert.equal(openDatabase(databasePath), true);
-    const contextPath = join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md");
-    const original = "---\ndepends_on: [M002]\n---\n# Context\n";
-    write(contextPath, original);
-    const release = claimProjectionMaintenance(databasePath);
-    try {
-      assert.throws(
-        () => _removeDependsOnFromContextFilesForTest(base, [{ milestone: "M001", dep: "M002" }]),
-        /maintenance|fenced/i,
-      );
-      assert.equal(readFileSync(contextPath, "utf8"), original);
-    } finally {
-      release();
-    }
-  } finally {
-    cleanup(base);
   }
 });
 

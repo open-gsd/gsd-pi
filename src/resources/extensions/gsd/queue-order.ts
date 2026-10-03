@@ -1,7 +1,8 @@
 /**
  * GSD Queue Order — Custom milestone execution ordering.
  *
- * Stores an explicit execution order in `.gsd/QUEUE-ORDER.json`.
+ * The execution order lives in milestones.sequence and is changed only by the
+ * milestone.reorder Domain Operation. `.gsd/QUEUE-ORDER.json` is its render.
  * When present, `findMilestoneIds()` uses this order instead of
  * the default numeric sort (milestoneIdSort).
  *
@@ -13,7 +14,15 @@ import { join } from "node:path";
 import { gsdRoot } from "./paths.js";
 import { milestoneIdSort } from "./milestone-ids.js";
 import { loadJsonFileOrNull, saveJsonFile } from "./json-persistence.js";
-import { isDbAvailable, setMilestoneQueueOrder } from "./gsd-db.js";
+import {
+  executeDomainOperation,
+  getAllMilestones,
+  getMilestone,
+  isDbAvailable,
+  setMilestoneQueueOrder,
+  upsertMilestonePlanning,
+} from "./gsd-db.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -64,19 +73,63 @@ export function loadQueueOrder(basePath: string): string[] | null {
 }
 
 /**
- * Save a custom queue order. When the DB connection is open, mirror the order
- * into milestone sequence; QUEUE-ORDER.json remains the durable file contract
- * for prompt-driven flows such as /gsd rethink.
+ * Write QUEUE-ORDER.json. The file is a projection of milestones.sequence;
+ * callers pass an order the database already holds.
  */
-export function saveQueueOrder(basePath: string, order: string[]): void {
-  if (isDbAvailable()) {
-    setMilestoneQueueOrder(order);
-  }
+export function renderQueueOrder(basePath: string, order: string[]): void {
   const data: QueueOrderFile = {
     order,
     updatedAt: new Date().toISOString(),
   };
   saveJsonFile(queueOrderPath(basePath), data);
+}
+
+/**
+ * Reorder milestones in one milestone.reorder Domain Operation: write
+ * milestones.sequence and drop the listed depends_on edges, then render
+ * QUEUE-ORDER.json from the committed sequence.
+ */
+export function reorderMilestones(
+  basePath: string,
+  order: string[],
+  depsToRemove: ReadonlyArray<{ milestone: string; dep: string }> = [],
+): void {
+  if (!isDbAvailable()) throw new Error("milestone reorder requires the GSD database");
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "milestone.reorder",
+    idempotencyKey: `command/reorder/${fence.revision}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "operator",
+    sourceTransport: "internal",
+    payload: { order, depsToRemove: depsToRemove.map((edge) => ({ ...edge })) },
+  }, () => {
+    setMilestoneQueueOrder(order);
+    for (const edge of depsToRemove) {
+      const milestone = getMilestone(edge.milestone);
+      if (!milestone) throw new Error(`milestone ${edge.milestone} does not exist`);
+      upsertMilestonePlanning(edge.milestone, { depends_on: milestone.depends_on.filter((dep) => dep !== edge.dep) });
+    }
+    return {
+      events: [{
+        eventType: "milestone.reordered",
+        entityType: "project",
+        entityId: "queue",
+        payload: { order, depsToRemove: depsToRemove.map((edge) => ({ ...edge })) },
+        destinations: ["db"],
+      }],
+      projections: [{
+        projectionKey: "queue-order",
+        projectionKind: "queue-order",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  const committed = getAllMilestones()
+    .filter((milestone) => (milestone.sequence ?? 0) > 0)
+    .map((milestone) => milestone.id);
+  renderQueueOrder(basePath, committed);
 }
 
 // ─── Sorting ─────────────────────────────────────────────────────────────────
@@ -123,7 +176,7 @@ export function pruneQueueOrder(basePath: string, validIds: string[]): void {
   const pruned = order.filter(id => validSet.has(id));
 
   if (pruned.length !== order.length) {
-    saveQueueOrder(basePath, pruned);
+    renderQueueOrder(basePath, pruned);
   }
 }
 

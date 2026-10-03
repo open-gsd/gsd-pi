@@ -21,7 +21,6 @@ import {
 import {
   _getAdapter,
   closeDatabase,
-  getAllMilestones,
   insertMilestone,
   insertSlice,
   insertTask,
@@ -30,7 +29,6 @@ import {
   updateSliceStatus,
   updateTaskStatus,
 } from "../gsd-db.ts";
-import { discardMilestone } from "../milestone-actions.ts";
 import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 import { reconcileWorktreeDbBeforeManualMerge } from "../worktree-command.ts";
 import { worktreePath } from "../worktree-manager.ts";
@@ -475,21 +473,4 @@ test("legacy projection renderers exclude cancelled slices and tasks", (t) => {
   writeCompatMarker(base, marker);
   renderPlanProjection(base, "M001", "S01");
   assert.equal(existsSync(planPath), false);
-});
-
-test("discard milestone fails before deleting projections when canonical lifecycle history exists", () => {
-  const base = tempDir("gsd-discard-adopted-");
-  const milestoneDir = join(base, ".gsd", "milestones", "M001");
-  mkdirSync(milestoneDir, { recursive: true });
-  writeFileSync(join(milestoneDir, "M001-ROADMAP.md"), "# Durable roadmap\n", "utf8");
-  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
-  seedLegacyHierarchy();
-  adoptHierarchy();
-
-  assert.throws(
-    () => discardMilestone(base, "M001"),
-    /adopted canonical lifecycle|canonical lifecycle history/i,
-  );
-  assert.equal(existsSync(milestoneDir), true);
-  assert.equal(getAllMilestones().some((milestone) => milestone.id === "M001"), true);
 });

@@ -1,36 +1,26 @@
 /**
  * GSD Milestone Actions — Park, Unpark, and Discard operations.
  *
- * Park: Creates a PARKED.md marker file. deriveState() skips parked milestones
- * when finding the active milestone, but keeps them in the registry.
- *
- * Unpark: Removes the PARKED.md marker. The milestone resumes normal state
- * derivation (active/pending depending on position and dependencies).
- *
- * Discard: Permanently removes the milestone directory. Also prunes
- * QUEUE-ORDER.json if the discarded milestone was in it.
+ * Each action is one Domain Operation that adopts the milestone lifecycle
+ * when it has none, so every milestone takes the same path. Files are
+ * projections handled after the commit: the PARKED marker is rendered from
+ * the park record, and discard removes the milestone tree only after the
+ * cancellation is durable.
  */
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import {
-  resolveMilestonePath,
-  resolveMilestoneFile,
-  buildMilestoneFileName,
-  relMilestoneFile,
-} from "./paths.js";
+import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { resolveMilestonePath } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
-import { loadQueueOrder, saveQueueOrder } from "./queue-order.js";
+import { loadQueueOrder, renderQueueOrder } from "./queue-order.js";
 import {
-  assertNoAdoptedLifecycleHistory,
-  deleteMilestone,
   executeDomainOperation,
   getMilestone,
   isDbAvailable,
   projectCanonicalStatusToLegacy,
-  updateMilestoneStatus,
 } from "./gsd-db.js";
-import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
+import { getDb } from "./db/engine.js";
+import type { DomainOperationContext } from "./db/domain-operation.js";
 import {
   adoptOrTransitionLifecycle,
   readDomainOperationFence,
@@ -38,16 +28,16 @@ import {
 import { removeWorktree } from "./worktree-manager.js";
 import { logWarning } from "./workflow-logger.js";
 import { isAutoActive } from "./auto.js";
-import { isClosedStatus } from "./status-guards.js";
-import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
+import { adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
 import { removeManagedProjectionTreeExactSync } from "./managed-projection-history.js";
 import { GSDError, GSD_STALE_STATE } from "./errors.js";
+import { readMilestoneParkRecord, renderMilestoneParkedMarker } from "./milestone-park-projection.js";
 
 /**
  * Writer-side assert for mutations that race with auto-mode's squash merge (#4704).
- * Auto-mode is confirmed not to call parkMilestone/discardMilestone/unparkMilestone
- * internally — these throws only surface invariant violations from new or forgotten
- * call sites, which is the correct failure mode to catch loudly.
+ * The auto loop itself may park an abandoned milestone between units
+ * (`fromAutoLoop`); any other call while auto-mode runs is an invariant
+ * violation and fails loudly.
  */
 function assertNotAutoActive(action: string): void {
   if (isAutoActive()) {
@@ -67,42 +57,42 @@ function assertDbAvailable(action: string, milestoneId: string): void {
   }
 }
 
-/**
- * Park/unpark through canonical lifecycle for adopted milestones (#2126).
- * Legacy `parked` maps to canonical `paused`; generic status writes reject
- * that mismatch on adopted rows.
- */
-function syncAdoptedMilestoneParkStatus(milestoneId: string, parked: boolean): void {
+type MilestoneCommand = "park" | "unpark" | "discard";
+
+const EVENT_TYPES: Record<MilestoneCommand, string> = {
+  park: "milestone.parked",
+  unpark: "milestone.unparked",
+  discard: "milestone.discarded",
+};
+
+function runMilestoneOperation(
+  command: MilestoneCommand,
+  milestoneId: string,
+  payload: Record<string, string | boolean>,
+  apply: (context: Readonly<DomainOperationContext>) => void,
+): void {
   const fence = readDomainOperationFence();
+  const fullPayload = { milestoneId, ...payload };
   executeDomainOperation({
-    operationType: parked ? "milestone.park" : "milestone.unpark",
-    idempotencyKey: `command/${parked ? "park" : "unpark"}/${milestoneId}/${fence.revision}`,
+    operationType: `milestone.${command}`,
+    idempotencyKey: `command/${command}/${milestoneId}/${fence.revision}`,
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: "operator",
     sourceTransport: "internal",
-    payload: { milestoneId, parked },
+    payload: fullPayload,
   }, (context) => {
-    adoptOrTransitionLifecycle(context, {
-      itemKind: "milestone",
-      milestoneId,
-      lifecycleStatus: parked ? "paused" : "in_progress",
-    });
-    projectCanonicalStatusToLegacy(context, {
-      entity: "milestone",
-      milestoneId,
-      status: parked ? "parked" : "active",
-    });
+    apply(context);
     return {
       events: [{
-        eventType: parked ? "milestone.parked" : "milestone.unparked",
+        eventType: EVENT_TYPES[command],
         entityType: "milestone",
         entityId: milestoneId,
-        payload: { milestoneId, parked },
+        payload: fullPayload,
         destinations: ["db"],
       }],
       projections: [{
-        projectionKey: `milestone/${milestoneId.toLowerCase()}/${parked ? "parked" : "active"}`,
+        projectionKey: `milestone/${milestoneId.toLowerCase()}/${command}`,
         projectionKind: "milestone-status",
         rendererVersion: "1",
       }],
@@ -110,60 +100,67 @@ function syncAdoptedMilestoneParkStatus(milestoneId: string, parked: boolean): v
   });
 }
 
+/**
+ * Legacy `parked` maps to canonical `paused`. A milestone without a lifecycle
+ * row is adopted in the same operation (#2126).
+ */
+function writeMilestoneParkStatus(
+  context: Readonly<DomainOperationContext>,
+  milestoneId: string,
+  parked: boolean,
+): void {
+  adoptOrTransitionLifecycle(context, {
+    itemKind: "milestone",
+    milestoneId,
+    lifecycleStatus: parked ? "paused" : "in_progress",
+    ...(parked ? {} : { adoptedFromStatus: "paused" as const }),
+  });
+  projectCanonicalStatusToLegacy(context, {
+    entity: "milestone",
+    milestoneId,
+    status: parked ? "parked" : "active",
+  });
+}
+
+function renderParkedMarkerAfterCommit(basePath: string, milestoneId: string): void {
+  try {
+    renderMilestoneParkedMarker(basePath, milestoneId);
+  } catch (err) {
+    logWarning("projection", `PARKED marker render failed for ${milestoneId}: ${(err as Error).message}`);
+  }
+}
+
 // ─── Park ──────────────────────────────────────────────────────────────────
 
 /**
- * Park a milestone — records status='parked' in the DB, then creates a
- * PARKED.md marker file with reason and timestamp. Parked milestones are
- * skipped during active-milestone discovery but stay on disk.
- * Returns true if successfully parked, false if milestone not found, already parked, or complete.
- * Throws if the DB sync fails (#2255): no marker file is written in that case,
- * so the caller never reports success for a park that did not take, and a
- * later retry starts clean instead of short-circuiting as already parked (#2256).
+ * Park a milestone: one milestone.park Domain Operation records status
+ * 'parked' with the reason and time, then the PARKED marker is rendered.
+ * Parked milestones are skipped during active-milestone discovery.
+ * Returns false when the milestone is not in the database, already parked,
+ * or closed. Throws when the database write fails (#2255).
  */
-export function parkMilestone(basePath: string, milestoneId: string, reason: string): boolean {
-  assertNotAutoActive("park milestone");
+export function parkMilestone(
+  basePath: string,
+  milestoneId: string,
+  reason: string,
+  options: { fromAutoLoop?: boolean } = {},
+): boolean {
+  if (!options.fromAutoLoop) assertNotAutoActive("park milestone");
   assertDbAvailable("parkMilestone", milestoneId);
-  const mDir = resolveMilestonePath(basePath, milestoneId);
-  if (!mDir || !existsSync(mDir)) return false;
-
-  // Guard: do not park a completed milestone — it would corrupt depends_on satisfaction
   const milestone = getMilestone(milestoneId);
-  if (milestone && isClosedStatus(milestone.status)) return false;
+  // Do not park a closed milestone — it would corrupt depends_on satisfaction.
+  if (!milestone || milestone.status === "parked" || isClosedStatus(milestone.status)) return false;
 
-  // Use relMilestoneFile for layout-aware path (legacy: M001-PARKED.md, flat-phase: 01-PARKED.md)
-  const parkedPath = join(basePath, relMilestoneFile(basePath, milestoneId, "PARKED"));
-  if (existsSync(parkedPath)) return false; // already parked
-
-  const content = [
-    "---",
-    `parked_at: ${new Date().toISOString()}`,
-    `reason: "${reason.replace(/"/g, '\\"')}"`,
-    "---",
-    "",
-    `# ${milestoneId} — Parked`,
-    "",
-    `> ${reason}`,
-    "",
-  ].join("\n");
-
-  // DB write FIRST (#2256): if the sync fails, no marker file is written, so
-  // the park can be retried instead of being stuck as file-parked/DB-active.
-  // The failure propagates (#2255) — callers must not report success.
   try {
-    if (isMilestoneLifecycleAdopted(milestoneId)) {
-      syncAdoptedMilestoneParkStatus(milestoneId, true);
-    } else {
-      updateMilestoneStatus(milestoneId, "parked");
-    }
+    runMilestoneOperation("park", milestoneId, {
+      parked: true,
+      reason,
+      parkedAt: new Date().toISOString(),
+    }, (context) => writeMilestoneParkStatus(context, milestoneId, true));
   } catch (err) {
     throw new Error(`parkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
   }
-  // If the marker write fails after the DB sync, the row is parked with no
-  // marker on disk. That state is recoverable in both directions: a retry
-  // re-runs the idempotent DB write and rewrites the marker, and
-  // unparkMilestone repairs DB-parked-without-marker (#3707).
-  atomicWriteSync(parkedPath, content, "utf-8");
+  renderParkedMarkerAfterCommit(basePath, milestoneId);
   invalidateAllCaches();
   return true;
 }
@@ -171,62 +168,135 @@ export function parkMilestone(basePath: string, milestoneId: string, reason: str
 // ─── Unpark ────────────────────────────────────────────────────────────────
 
 /**
- * Unpark a milestone — records the DB status, then removes the PARKED.md marker file.
- * Returns true if successfully unparked, false if milestone not found or not parked.
- * Throws if the DB sync fails; the marker is kept so the retry starts clean.
+ * Unpark a milestone: one milestone.unpark Domain Operation, then the PARKED
+ * marker is removed. Returns false when the milestone is not parked in the
+ * database. Throws when the database write fails.
  */
 export function unparkMilestone(basePath: string, milestoneId: string): boolean {
   assertNotAutoActive("unpark milestone");
   assertDbAvailable("unparkMilestone", milestoneId);
-  const mDir = resolveMilestonePath(basePath, milestoneId);
-  if (!mDir || !existsSync(mDir)) return false;
+  if (getMilestone(milestoneId)?.status !== "parked") return false;
 
-  // Use relMilestoneFile for layout-aware path (legacy: M001-PARKED.md, flat-phase: 01-PARKED.md)
-  const parkedPath = join(basePath, relMilestoneFile(basePath, milestoneId, "PARKED"));
-  const hadParkedFile = existsSync(parkedPath);
-  const dbThinksParked = getMilestone(milestoneId)?.status === "parked";
-
-  // Recover the reverse desync too: DB can still say "parked" even when the
-  // PARKED marker was lost on disk, and /gsd unpark should repair that state.
-  if (!hadParkedFile && !dbThinksParked) return false;
-
-  // Sync DB status FIRST so deriveStateFromDb picks up the unparked milestone (#2694)
   try {
-    if (isMilestoneLifecycleAdopted(milestoneId)) {
-      syncAdoptedMilestoneParkStatus(milestoneId, false);
-    } else {
-      updateMilestoneStatus(milestoneId, "active");
-    }
+    runMilestoneOperation("unpark", milestoneId, { parked: false }, (context) =>
+      writeMilestoneParkStatus(context, milestoneId, false));
   } catch (err) {
     throw new Error(`unparkMilestone DB sync failed for ${milestoneId}: ${(err as Error).message}`);
   }
-  if (hadParkedFile) {
-    removeProjectionFileSync(parkedPath);
-  }
+  renderParkedMarkerAfterCommit(basePath, milestoneId);
   invalidateAllCaches();
   return true;
 }
 
 // ─── Discard ───────────────────────────────────────────────────────────────
 
+interface DiscardRow {
+  slice_id: string | null;
+  task_id: string | null;
+  status: string;
+  lifecycle_status: string | null;
+}
+
+function loadDiscardRows(milestoneId: string): DiscardRow[] {
+  const lifecycleJoin = (kind: string, slice: string, task: string) => `
+    LEFT JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = '${kind}'
+     AND lifecycle.milestone_id = :milestone_id
+     AND lifecycle.slice_id IS ${slice}
+     AND lifecycle.task_id IS ${task}`;
+  return getDb().prepare(`
+    SELECT task.slice_id, task.id AS task_id, task.status, lifecycle.lifecycle_status
+    FROM tasks task ${lifecycleJoin("task", "task.slice_id", "task.id")}
+    WHERE task.milestone_id = :milestone_id
+    UNION ALL
+    SELECT slice.id, NULL, slice.status, lifecycle.lifecycle_status
+    FROM slices slice ${lifecycleJoin("slice", "slice.id", "NULL")}
+    WHERE slice.milestone_id = :milestone_id
+    UNION ALL
+    SELECT NULL, NULL, milestone.status, lifecycle.lifecycle_status
+    FROM milestones milestone ${lifecycleJoin("milestone", "NULL", "NULL")}
+    WHERE milestone.id = :milestone_id
+  `).all({ ":milestone_id": milestoneId }) as unknown as DiscardRow[];
+}
+
 /**
- * Discard a milestone — permanently removes the milestone directory and
- * prunes it from QUEUE-ORDER.json if present.
- * Returns true if successfully discarded, false if milestone not found.
- * The DB rows are deleted first; a DB failure throws before any file,
- * worktree or branch is removed.
+ * Tombstone the milestone: every open task, slice and the milestone itself
+ * moves to cancelled (legacy 'skipped') and a milestone-scoped Waiver records
+ * why. Closed work stays closed. Rows are kept, so the id is never reused.
+ */
+function cancelMilestoneHierarchy(
+  context: Readonly<DomainOperationContext>,
+  milestoneId: string,
+  reason: string,
+): void {
+  const rows = loadDiscardRows(milestoneId);
+  if (rows.some((row) => row.lifecycle_status === "in_progress" && row.task_id !== null)) {
+    throw new Error(`${milestoneId} has running task work; settle it first with /gsd task settle`);
+  }
+  let milestoneLifecycleId = "";
+  for (const row of rows) {
+    if (isClosedStatus(row.status) && row.task_id !== null) continue;
+    if (isClosedStatus(row.status) && row.slice_id !== null) continue;
+    const identity = row.task_id !== null
+      ? { itemKind: "task" as const, milestoneId, sliceId: row.slice_id!, taskId: row.task_id }
+      : row.slice_id !== null
+        ? { itemKind: "slice" as const, milestoneId, sliceId: row.slice_id }
+        : { itemKind: "milestone" as const, milestoneId };
+    const lifecycle = adoptOrTransitionLifecycle(context, {
+      ...identity,
+      lifecycleStatus: "cancelled",
+      ...(row.lifecycle_status === null
+        ? { adoptedFromStatus: adoptionLifecycleStatus(`${identity.itemKind} ${milestoneId}`, row.status) }
+        : {}),
+    });
+    if (identity.itemKind === "milestone") milestoneLifecycleId = lifecycle.lifecycleId;
+    projectCanonicalStatusToLegacy(context, identity.itemKind === "task"
+      ? { entity: "task", milestoneId, sliceId: row.slice_id!, taskId: row.task_id!, status: "skipped" }
+      : identity.itemKind === "slice"
+        ? { entity: "slice", milestoneId, sliceId: row.slice_id!, status: "skipped" }
+        : { entity: "milestone", milestoneId, status: "skipped" });
+  }
+  getDb().prepare(`
+    INSERT INTO workflow_waivers (
+      waiver_id, project_id, lifecycle_id, waiver_status, scope, rationale,
+      granted_by_actor_type, granted_by_actor_id, granted_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :waiver_id, :project_id, :lifecycle_id, 'active', :scope, :rationale,
+      'user', 'gsd-cli-operator', :granted_at,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ":waiver_id": randomUUID(),
+    ":project_id": context.projectId,
+    ":lifecycle_id": milestoneLifecycleId,
+    ":scope": `milestone:${milestoneId}`,
+    ":rationale": reason,
+    ":granted_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  });
+}
+
+/**
+ * Discard a milestone: one milestone.discard Domain Operation cancels it and
+ * its open work, then the worktree, milestone directory and queue entry are
+ * removed as projection cleanup. Returns false when the milestone is not in
+ * the database. Throws when the milestone is complete or the write fails.
  */
 export function discardMilestone(basePath: string, milestoneId: string): boolean {
   assertNotAutoActive("discard milestone");
   assertDbAvailable("discardMilestone", milestoneId);
-  const mDir = resolveMilestonePath(basePath, milestoneId);
-  const hasMilestoneDir = !!mDir && existsSync(mDir);
-  const hasDbMilestone = getMilestone(milestoneId) !== null;
-  if (!hasMilestoneDir && !hasDbMilestone) return false;
-  if (hasDbMilestone) {
-    assertNoAdoptedLifecycleHistory("discardMilestone", [milestoneId]);
-    deleteMilestone(milestoneId);
+  const milestone = getMilestone(milestoneId);
+  if (!milestone) return false;
+  if (isClosedStatus(milestone.status)) {
+    throw new Error(`${milestoneId} is already closed (${milestone.status}) and cannot be discarded`);
   }
+
+  const reason = "Discarded by user";
+  runMilestoneOperation("discard", milestoneId, { reason }, (context) =>
+    cancelMilestoneHierarchy(context, milestoneId, reason));
 
   try {
     removeWorktree(basePath, milestoneId, {
@@ -236,15 +306,13 @@ export function discardMilestone(basePath: string, milestoneId: string): boolean
   } catch (err) {
     logWarning("engine", `discardMilestone worktree cleanup failed for ${milestoneId}: ${(err as Error).message}`);
   }
-
-  if (hasMilestoneDir && mDir) {
+  const mDir = resolveMilestonePath(basePath, milestoneId);
+  if (mDir && existsSync(mDir)) {
     removeManagedProjectionTreeExactSync(basePath, mDir);
   }
-
-  // Prune from queue order if present
   const order = loadQueueOrder(basePath);
   if (order && order.includes(milestoneId)) {
-    saveQueueOrder(basePath, order.filter(id => id !== milestoneId));
+    renderQueueOrder(basePath, order.filter(id => id !== milestoneId));
   }
 
   invalidateAllCaches();
@@ -253,28 +321,12 @@ export function discardMilestone(basePath: string, milestoneId: string): boolean
 
 // ─── Query ─────────────────────────────────────────────────────────────────
 
-/**
- * Check whether a milestone is parked (PARKED.md exists).
- */
-export function isParked(basePath: string, milestoneId: string): boolean {
-  return !!resolveMilestoneFile(basePath, milestoneId, "PARKED");
+/** Whether the database records the milestone as parked. */
+export function isParked(milestoneId: string): boolean {
+  return isDbAvailable() && getMilestone(milestoneId)?.status === "parked";
 }
 
-/**
- * Read the park reason from PARKED.md frontmatter.
- * Returns null if the milestone is not parked or the reason can't be extracted.
- */
-export function getParkedReason(basePath: string, milestoneId: string): string | null {
-  const parkedFile = resolveMilestoneFile(basePath, milestoneId, "PARKED");
-  if (!parkedFile) return null;
-
-  try {
-    const content = readFileSync(parkedFile, "utf-8");
-    const match = content.match(/^---\n([\s\S]*?)\n---/);
-    if (!match) return null;
-    const reasonMatch = match[1].match(/reason:\s*"([^"]*?)"/);
-    return reasonMatch ? reasonMatch[1] : null;
-  } catch {
-    return null;
-  }
+/** The reason recorded by the park Domain Operation, or null. */
+export function getParkedReason(milestoneId: string): string | null {
+  return isDbAvailable() ? readMilestoneParkRecord(milestoneId)?.reason ?? null : null;
 }
