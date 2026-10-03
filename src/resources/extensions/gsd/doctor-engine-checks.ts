@@ -1283,7 +1283,7 @@ function checkUnimportedOverrides(
       severity: "warning",
       code: "override_file_block_unimported",
       scope: "project",
-      unitId: block.timestamp,
+      unitId: "project",
       message: importable(block)
         ? `OVERRIDES.md override ${block.timestamp} ("${block.change}", ${block.scope}) is not in the database and is not active. Run \`/gsd doctor --fix\` to import it.${importError}`
         : `OVERRIDES.md override ${block.timestamp} ("${block.change}") has unknown scope "${block.scope}" and cannot be imported. Set its scope to active or resolved, then run \`/gsd doctor --fix\`.`,

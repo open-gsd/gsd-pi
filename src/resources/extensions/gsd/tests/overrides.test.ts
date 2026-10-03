@@ -14,7 +14,7 @@ import { verifyExpectedArtifact } from "../artifact-verification.ts";
 import { DISPATCH_RULES, type DispatchContext } from "../auto-dispatch.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
-import { handleSteer } from "../commands-handlers.ts";
+import { handleDoctor, handleSteer } from "../commands-handlers.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { formatOverridesSection, type Override } from "../files.ts";
 import { _getAdapter, closeDatabase, insertMilestone, isDbAvailable, openDatabase } from "../gsd-db.ts";
@@ -168,10 +168,11 @@ describe("steer overrides in the database", () => {
 
     let issues = await overrideIssues(base, {});
     assert.deepEqual(issues.map((issue) => [issue.severity, issue.unitId, issue.fixable]), [
-      ["warning", "2026-03-13T09:00:00.000Z", true],
-      ["warning", "2026-03-14T10:00:00.000Z", true],
+      ["warning", "project", true],
+      ["warning", "project", true],
     ]);
-    assert.match(issues[1]!.message, /Legacy active override/);
+    assert.match(issues[0]!.message, /2026-03-13T09:00:00\.000Z/);
+    assert.match(issues[1]!.message, /2026-03-14T10:00:00\.000Z \("Legacy active override", active\)/);
 
     // A fix run that no operator asked for (auto-mode resume) does not import.
     issues = await overrideIssues(base, { repair: true });
@@ -207,13 +208,34 @@ describe("steer overrides in the database", () => {
     assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* resolved/);
   });
 
+  test("/gsd doctor names an un-imported OVERRIDES.md block and /gsd doctor fix imports it", async () => {
+    writeFileSync(overridesPath, LEGACY_OVERRIDES, "utf-8");
+    const notices: string[] = [];
+    const ctx = { ui: { notify: (message: string) => notices.push(message) } } as unknown as ExtensionCommandContext;
+    const pi = {} as ExtensionAPI;
+
+    await withCommandCwd(base, () => handleDoctor("", ctx, pi));
+
+    assert.match(notices[0]!, /OVERRIDES\.md override 2026-03-14T10:00:00\.000Z \("Legacy active override", active\) is not in the database/);
+    assert.equal(operations("override.import"), 0, "a plain doctor run imports nothing");
+    assert.deepEqual(loadActiveOverrides(base), []);
+
+    notices.length = 0;
+    await withCommandCwd(base, () => handleDoctor("fix", ctx, pi));
+
+    assert.equal(operations("override.import"), 1);
+    assert.match(notices[0]!, /imported 2 override\(s\) from OVERRIDES\.md/);
+    assert.doesNotMatch(notices[0]!, /is not in the database/);
+    assert.deepEqual(loadActiveOverrides(base).map((override) => override.change), ["Legacy active override"]);
+  });
+
   test("an OVERRIDES.md block with an unknown scope is reported, kept and never imported", async () => {
     writeFileSync(overridesPath, LEGACY_OVERRIDES.replace("**Scope:** active", "**Scope:** paused"), "utf-8");
 
     const issues = await overrideIssues(base, { repair: true, importFileOverrides: true });
 
-    assert.deepEqual(issues.map((issue) => [issue.unitId, issue.fixable]), [["2026-03-14T10:00:00.000Z", false]]);
-    assert.match(issues[0]!.message, /unknown scope "paused"/);
+    assert.deepEqual(issues.map((issue) => [issue.unitId, issue.fixable]), [["project", false]]);
+    assert.match(issues[0]!.message, /2026-03-14T10:00:00\.000Z .* unknown scope "paused"/);
     assert.equal(operations("override.import"), 1, "the valid block is imported");
     assert.deepEqual(loadActiveOverrides(base), []);
     assert.match(readFileSync(overridesPath, "utf-8"), /\*\*Change:\*\* Legacy active override\n\*\*Scope:\*\* paused/);

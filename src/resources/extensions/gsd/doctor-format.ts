@@ -29,7 +29,10 @@ export function summarizeDoctorIssues(issues: DoctorIssue[]): DoctorSummary {
 export function filterDoctorIssues(issues: DoctorIssue[], options?: { scope?: string; includeWarnings?: boolean; includeHistorical?: boolean }): DoctorIssue[] {
   let filtered = issues;
   if (options?.scope) filtered = filtered.filter(issue => matchesScope(issue.unitId, options.scope));
-  if (!options?.includeWarnings) filtered = filtered.filter(issue => issue.severity === "error");
+  // An un-imported override is inactive until the operator acts, so its warning is always reported.
+  if (!options?.includeWarnings) {
+    filtered = filtered.filter(issue => issue.severity === "error" || issue.code === "override_file_block_unimported");
+  }
   return filtered;
 }
 
