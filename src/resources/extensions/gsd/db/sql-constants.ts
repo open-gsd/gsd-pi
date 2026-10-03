@@ -97,8 +97,26 @@ function taskEscalationExistsSql(statusCondition: string): string {
 )`;
 }
 
-/** True when the Task has a current (open or answered) escalation question. */
-export const TASK_HAS_ESCALATION_SQL = taskEscalationExistsSql("!= 'withdrawn'");
+/** Event that records the user's response to a Task escalation. */
+export const TASK_ESCALATION_RESOLVED_EVENT = "task.escalation.resolved";
+
+/**
+ * SQL condition, correlated with a `tasks` row: the Task has a resolved
+ * escalation from before the database stored them, held in the resolve event.
+ */
+const TASK_HAS_LEGACY_RESOLUTION_SQL = `EXISTS (
+  SELECT 1
+  FROM project_authority legacy_authority
+  CROSS JOIN workflow_domain_events legacy_event
+    ON legacy_event.project_id = legacy_authority.project_id
+   AND legacy_event.entity_type = 'task'
+   AND legacy_event.entity_id = tasks.milestone_id || '/' || tasks.slice_id || '/' || tasks.id
+   AND legacy_event.event_type = '${TASK_ESCALATION_RESOLVED_EVENT}'
+   AND json_extract(legacy_event.payload_json, '$.legacy') IS NOT NULL
+)`;
+
+/** True when the Task has a current escalation: an open or answered question, or a resolved legacy escalation. */
+export const TASK_HAS_ESCALATION_SQL = `(${taskEscalationExistsSql("!= 'withdrawn'")} OR ${TASK_HAS_LEGACY_RESOLUTION_SQL})`;
 
 /** True when the Task has an open escalation question. This is the pause. */
 export const TASK_HAS_OPEN_ESCALATION_SQL = taskEscalationExistsSql("= 'open'");

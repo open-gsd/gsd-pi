@@ -43,6 +43,7 @@ import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { handleEscalateCommand } from "../commands/handlers/escalate.ts";
 import { withCommandCwd } from "../commands/context.ts";
+import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────
 
@@ -93,7 +94,7 @@ function adoptTaskLifecycle(taskId: string, sliceId: string = "S01"): void {
   });
 }
 
-function seedCompletedTask(base: string, taskId: string): void {
+function seedCompletedTask(base: string, taskId: string, adoptLifecycle: boolean = true): void {
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Test", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
@@ -101,7 +102,7 @@ function seedCompletedTask(base: string, taskId: string): void {
     id: taskId, sliceId: "S01", milestoneId: "M001", title: "Task",
     status: "complete",
   });
-  adoptTaskLifecycle(taskId);
+  if (adoptLifecycle) adoptTaskLifecycle(taskId);
 }
 
 let escalationSequence = 0;
@@ -986,13 +987,18 @@ const LEGACY_PATH = ".gsd/milestones/M001/slices/S01/tasks/T97-ESCALATION.json";
  */
 function seedLegacyEscalation(
   base: string,
-  options: { writeFile?: boolean; response?: { userChoice: string; userRationale: string } } = {},
+  options: {
+    writeFile?: boolean;
+    response?: { userChoice: string; userRationale: string };
+    fileOptions?: EscalationOption[];
+    adoptLifecycle?: boolean;
+  } = {},
 ): void {
-  seedCompletedTask(base, "T97");
+  seedCompletedTask(base, "T97", options.adoptLifecycle);
   if (options.writeFile !== false) {
     writeFileSync(join(base, LEGACY_PATH), JSON.stringify({
       version: 1, taskId: "T97", sliceId: "S01", milestoneId: "M001",
-      question: "Which store?", options: sampleOptions,
+      question: "Which store?", options: options.fileOptions ?? sampleOptions,
       recommendation: "A", recommendationRationale: "Flexible",
       continueWithDefault: false, createdAt: "2026-01-01T00:00:00.000Z",
       ...(options.response ? { respondedAt: "2026-01-02T00:00:00.000Z", ...options.response } : {}),
@@ -1008,6 +1014,27 @@ function operations(type: string): number {
     "SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = :type",
   ).get({ ":type": type });
   return Number(row?.["count"]);
+}
+
+const fourOptions: EscalationOption[] = [
+  ...sampleOptions,
+  { id: "C", label: "Key-value store", tradeoffs: "Fast; no queries." },
+  { id: "D", label: "Flat file", tradeoffs: "No dependency; no concurrency." },
+];
+
+/** Run `/gsd escalate <args>` in `base` and return what it told the user. */
+async function runEscalateCommand(base: string, args: string): Promise<string> {
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nversion: 1\nphases:\n  mid_execution_escalation: true\n---\n");
+  const previousCwd = process.cwd();
+  process.chdir(base);
+  try {
+    const notes: string[] = [];
+    const ctx = { ui: { notify: (message: string) => notes.push(message) } } as unknown as Parameters<typeof handleEscalateCommand>[1];
+    await withCommandCwd(base, () => handleEscalateCommand(args, ctx, {} as Parameters<typeof handleEscalateCommand>[2]));
+    return notes.join("\n");
+  } finally {
+    process.chdir(previousCwd);
+  }
 }
 
 async function legacyEscalationIssues(
@@ -1050,10 +1077,21 @@ test("ADR-046: a pre-upgrade escalation pause is resolved through task.escalatio
   assert.equal(resolveEscalation(base, "M001", "S01", "T97", "A", "").status, "already-resolved");
 });
 
-test("ADR-046: rejecting a pre-upgrade escalation pause starts the slice replan, also when its file is gone", (t) => {
+test("ADR-046: rejecting a pre-upgrade escalation pause starts the slice replan, also when its file is gone", async (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   seedLegacyEscalation(base, { writeFile: false });
+  // An active slice with a next task, so the derived state has a phase for S01.
+  insertTask({ id: "T98", sliceId: "S01", milestoneId: "M001", title: "Next", status: "pending" });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), [
+    "# M001: Test", "", "## Slices", "", "- [ ] **S01: Slice** `risk:low` `depends:[]`", "  > After this: done.", "",
+  ].join("\n"));
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"), [
+    "# S01: Slice", "", "## Tasks", "", "- [x] **T97: T** `est:10m`", "- [ ] **T98: Next** `est:10m`", "",
+  ].join("\n"));
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T98-PLAN.md"), "# T98: Next\n\nDo it.\n");
+  invalidateStateCache();
+  assert.equal((await deriveStateFromDb(base)).phase, "escalating-task", "the legacy pause holds the slice before the reject");
 
   const task = getTask("M001", "S01", "T97")!;
   assert.equal(detectPendingEscalation([task]), "T97");
@@ -1061,6 +1099,8 @@ test("ADR-046: rejecting a pre-upgrade escalation pause starts the slice replan,
 
   const invalid = resolveEscalation(base, "M001", "S01", "T97", "A", "");
   assert.equal(invalid.status, "invalid-choice", "an option id cannot be validated without the file");
+  assert.match(invalid.message, /missing or not readable/, "the message names the cause");
+  assert.ok(invalid.message.includes(LEGACY_PATH));
   assert.equal(getTask("M001", "S01", "T97")!.escalation_pending, 1);
 
   const result = resolveEscalation(base, "M001", "S01", "T97", "reject-blocker", "none fit");
@@ -1072,6 +1112,10 @@ test("ADR-046: rejecting a pre-upgrade escalation pause starts the slice replan,
   assert.equal(row.blocker_discovered, true);
   assert.equal(row.blocker_source, "reject-escalation");
   assert.equal(detectPendingEscalation([row]), null);
+  invalidateStateCache();
+  const state = await deriveStateFromDb(base);
+  assert.equal(state.phase, "replanning-slice");
+  assert.equal(state.activeSlice?.id, "S01");
   assert.equal(resolveEscalation(base, "M001", "S01", "T97", "accept", "").status, "not-found");
 });
 
@@ -1140,6 +1184,81 @@ test("ADR-046: a pre-upgrade escalation response whose file is gone is reported 
   assert.equal(reported.length, 1);
   assert.equal(reported[0]!.fixable, false);
   assert.equal(countRows("workflow_open_questions"), 0);
+});
+
+test("ADR-046: a pre-upgrade escalation with four options is shown, resolved with any option, and carried into the next task", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedLegacyEscalation(base, { fileOptions: fourOptions });
+
+  const shown = await runEscalateCommand(base, "show T97");
+  for (const option of fourOptions) assert.ok(shown.includes(`[${option.id}] ${option.label}`), shown);
+  assert.match(shown, /<A\|B\|C\|D\|accept\|reject-blocker>/);
+
+  const invalid = resolveEscalation(base, "M001", "S01", "T97", "Z", "");
+  assert.equal(invalid.status, "invalid-choice");
+  assert.match(invalid.message, /accept, reject-blocker, A, B, C, D/);
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T97")!]), "T97");
+
+  const result = resolveEscalation(base, "M001", "S01", "T97", "D", "no new dependency");
+  assert.equal(result.status, "resolved");
+  assert.equal(result.chosenOption?.id, "D");
+  assert.equal(operations("task.escalation.resolve"), 1);
+  assert.equal(countRows("workflow_interactions"), 0, "four options are not a choice interaction");
+
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T97")!]), null);
+  const stored = readTaskEscalation("M001", "S01", "T97")!;
+  assert.deepEqual(stored.options, fourOptions, "the database holds the full option list");
+  assert.equal(stored.userChoice, "D");
+  assert.match(await runEscalateCommand(base, "list --all"), /S01\/T97 {2}\[resolved\] {2}Which store\?/);
+  assert.equal(resolveEscalation(base, "M001", "S01", "T97", "A", "").status, "already-resolved");
+
+  const claim = claimOverrideForInjection("M001", "S01");
+  assert.equal(claim?.sourceTaskId, "T97");
+  assert.match(claim!.injectionBlock, /Flat file \(id: D\)/);
+  assert.match(claim!.injectionBlock, /no new dependency/);
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "the override is consumed once");
+});
+
+test("ADR-046: doctor --fix stores a pre-upgrade four-option escalation response for the next task", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedLegacyEscalation(base, { fileOptions: fourOptions, response: { userChoice: "C", userRationale: "speed first" } });
+  insertTask({ id: "T98", sliceId: "S01", milestoneId: "M001", title: "Next", status: "pending" });
+
+  const reported = await legacyEscalationIssues(base, false);
+  assert.equal(reported.length, 1);
+  assert.equal(reported[0]!.fixable, true);
+
+  assert.deepEqual(await legacyEscalationIssues(base, true), []);
+  assert.equal(operations("task.escalation.resolve"), 1);
+  assert.equal(detectPendingEscalation([getTask("M001", "S01", "T97")!]), null, "the conversion leaves no pause");
+  const claim = claimOverrideForInjection("M001", "S01");
+  assert.equal(claim?.sourceTaskId, "T97");
+  assert.match(claim!.injectionBlock, /Key-value store \(id: C\)/);
+  assert.match(claim!.injectionBlock, /speed first/);
+  assert.deepEqual(await legacyEscalationIssues(base, true), [], "a stored response is not reported again");
+});
+
+test("ADR-046: a pre-upgrade escalation pause on a Task with no canonical lifecycle resolves with the options show prints", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedLegacyEscalation(base, { adoptLifecycle: false });
+
+  const shown = await runEscalateCommand(base, "show T97");
+  assert.match(shown, /<A\|B\|accept\|reject-blocker>/);
+
+  const resolved = await runEscalateCommand(base, "resolve T97 B keep it simple");
+  assert.match(resolved, /Escalation resolved/);
+  assert.equal(operations("task.escalation.resolve"), 1);
+  assert.equal(countRows("workflow_open_questions"), 0, "a Task with no lifecycle has no question row");
+  assert.equal(getTask("M001", "S01", "T97")!.escalation_pending, 0);
+  assert.equal(readTaskEscalation("M001", "S01", "T97")?.userChoice, "B");
+
+  const claim = claimOverrideForInjection("M001", "S01");
+  assert.equal(claim?.sourceTaskId, "T97");
+  assert.match(claim!.injectionBlock, /JSON array \(id: B\)/);
+  assert.match(claim!.injectionBlock, /keep it simple/);
 });
 
 test("ADR-046: an escalation is limited to the three options of a choice interaction", () => {

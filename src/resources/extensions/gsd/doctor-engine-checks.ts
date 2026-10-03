@@ -1280,8 +1280,7 @@ export async function checkEngineHealth(
 /**
  * An escalation the user resolved before the database stored escalations has
  * its response only in a T##-ESCALATION.json file, so the next task does not
- * receive it. Report each one; under repair, convert it to question and answer
- * rows.
+ * receive it. Report each one; under repair, store it in the database.
  */
 function checkUnappliedLegacyEscalations(
   basePath: string,
@@ -1309,7 +1308,7 @@ function checkUnappliedLegacyEscalations(
       unitId,
       message: legacy
         ? `The user's response to the escalation of ${unitId} is from before escalations were stored in the database and is not carried into the next task. Run \`/gsd doctor --fix\` to store it.${convertError}`
-        : `The user's response to the escalation of ${unitId} is from before escalations were stored in the database and is not carried into the next task. It cannot be converted: the file is missing, has no valid response, or the Task has no canonical lifecycle. Give the decision to the next task yourself.`,
+        : `The user's response to the escalation of ${unitId} is from before escalations were stored in the database and is not carried into the next task. It cannot be converted: the file is missing or has no valid response. Give the decision to the next task yourself.`,
       ...(task.escalation_artifact_path ? { file: task.escalation_artifact_path } : {}),
       fixable: legacy !== null,
     });
