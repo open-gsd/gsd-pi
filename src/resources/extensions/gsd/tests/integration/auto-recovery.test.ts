@@ -151,7 +151,11 @@ test("verifyExpectedArtifact passes for run-uat when ASSESSMENT file exists (#28
   // Regression test: run-uat writes S##-ASSESSMENT.md via gsd_uat_result_save,
   // but verification looked for S##-UAT.md, causing false stuck retries.
   const base = makeTmpBase();
-  t.after(() => cleanup(base));
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   // Write the ASSESSMENT file (what gsd_uat_result_save actually produces)
   const assessPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-ASSESSMENT.md");
@@ -244,7 +248,11 @@ test("verifyExpectedArtifact rejects plan-slice with empty scaffold", (t) => {
 
 test("verifyExpectedArtifact accepts plan-slice with actual tasks", (t) => {
   const base = makeTmpBase();
-  t.after(() => cleanup(base));
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
   const tasksDir = join(sliceDir, "tasks");
@@ -268,7 +276,11 @@ test("verifyExpectedArtifact accepts plan-slice with actual tasks", (t) => {
 
 test("verifyExpectedArtifact accepts plan-slice with completed tasks", (t) => {
   const base = makeTmpBase();
-  t.after(() => cleanup(base));
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
   const tasksDir = join(sliceDir, "tasks");
@@ -294,7 +306,11 @@ test("verifyExpectedArtifact accepts plan-slice with completed tasks", (t) => {
 
 test("verifyExpectedArtifact plan-slice passes when all task plan files exist", (t) => {
   const base = makeTmpBase();
-  t.after(() => cleanup(base));
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const tasksDir = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
   const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
@@ -409,7 +425,11 @@ test("verifyExpectedArtifact plan-slice still fails when a DB-backed task plan f
 
 test("verifyExpectedArtifact accepts plan-slice with heading-style tasks (### T01 --)", (t) => {
   const base = makeTmpBase();
-  t.after(() => cleanup(base));
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
   const tasksDir = join(sliceDir, "tasks");
@@ -438,7 +458,11 @@ test("verifyExpectedArtifact accepts plan-slice with heading-style tasks (### T0
 
 test("verifyExpectedArtifact accepts plan-slice with colon-style heading tasks (### T01:)", (t) => {
   const base = makeTmpBase();
-  t.after(() => cleanup(base));
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
   const tasksDir = join(sliceDir, "tasks");
@@ -462,7 +486,11 @@ test("verifyExpectedArtifact accepts plan-slice with colon-style heading tasks (
 
 test("verifyExpectedArtifact accepts indented legacy plan-slice task markers", (t) => {
   const base = makeTmpBase();
-  t.after(() => cleanup(base));
+  t.after(() => {
+    closeDatabase();
+    cleanup(base);
+  });
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
   const tasksDir = join(sliceDir, "tasks");
