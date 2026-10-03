@@ -281,9 +281,24 @@ describe("STATE.md render after workflow commands and rebuild", () => {
   it("/gsd undo --force renders STATE.md", async (t) => {
     const fixture = await openFixture(t);
     const base = fixture.root;
-    mkdirSync(join(base, ".gsd", "activity"), { recursive: true });
-    writeFileSync(join(base, ".gsd", "activity", "001-execute-task-M001-S02-T01.jsonl"), "");
     updateTaskStatus("M001", "S02", "T01", "complete");
+    // Undo selects the last completed Unit from the unit_dispatches ledger.
+    const db = _getAdapter();
+    assert.ok(db, "fixture database must be open");
+    const at = "2026-07-13T00:00:00.000Z";
+    db.prepare(`
+      INSERT INTO workers (worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath)
+      VALUES ('state-md-undo-worker', 'test-host', 1, ?, 'test', ?, 'active', ?)
+    `).run(at, at, base);
+    db.prepare(`
+      INSERT INTO unit_dispatches (
+        trace_id, worker_id, milestone_lease_token, milestone_id, slice_id, task_id,
+        unit_type, unit_id, status, attempt_n, started_at, ended_at
+      ) VALUES (
+        'state-md-undo-trace', 'state-md-undo-worker', 1, 'M001', 'S02', 'T01',
+        'execute-task', 'M001/S02/T01', 'completed', 1, ?, ?
+      )
+    `).run(at, at);
     const notes: string[] = [];
     const ctx = { ui: { notify: (message: string) => notes.push(message) } } as unknown as Parameters<typeof handleUndo>[1];
 
