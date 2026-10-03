@@ -10,7 +10,8 @@
 // Import bridge (until the explicit KNOWLEDGE import lands): a K/P/L row in
 // the existing file whose id has no memories row at all is not imported yet.
 // It is kept in the render so the render does not erase it. Once a row with
-// that id exists in the database, the database row wins.
+// that id exists in the database, the database row wins. The file intro and
+// free-form (non-table) lines under `## Rules` are kept the same way.
 //
 // Called after every knowledge capture, by the Projection Worker rebuild, and
 // at session start. Output is byte-stable when nothing has changed.
@@ -129,6 +130,31 @@ function escapeCell(value: string): string {
 }
 
 /**
+ * Import bridge for free-form text: the intro (text before the first `## `
+ * heading) and the Rules-section lines that are not table rows. Before
+ * ADR-046 both were kept verbatim and reached the agent through
+ * loadKnowledgeBlock, so the render keeps them until the KNOWLEDGE import
+ * can carry them.
+ */
+function fileProse(existing: string): { intro: string; ruleNotes: string[] } {
+  const lines = existing.split("\n");
+  const firstHeading = lines.findIndex((l) => l.trim().startsWith("## "));
+  const intro = lines.slice(0, firstHeading === -1 ? lines.length : firstHeading).join("\n").trim();
+  const ruleNotes: string[] = [];
+  const rulesStart = lines.findIndex((l) => l.trim() === TABLES.rules.heading);
+  if (rulesStart !== -1) {
+    for (const line of lines.slice(rulesStart + 1)) {
+      const trimmed = line.trim();
+      if (trimmed.startsWith("## ")) break;
+      // Table lines (header, separator, K### and memory-id rows) are rendered from rows.
+      if (!trimmed || /^\|\s*(#|-+|K\d+|MEM\d+)\s*\|/.test(trimmed)) continue;
+      ruleNotes.push(line);
+    }
+  }
+  return { intro: intro || DEFAULT_INTRO, ruleNotes };
+}
+
+/**
  * Render `KNOWLEDGE.md` from the database. Returns the rendered content and
  * whether the file was written (skipped when byte-identical to disk).
  * Throws when the database is unavailable or the write fails.
@@ -144,15 +170,18 @@ export function renderKnowledgeProjection(basePath: string): KnowledgeProjection
     rows[fileRow.table].push({ id: fileRow.id, cells: fileRow.cells });
   }
 
+  const { intro, ruleNotes } = fileProse(existing);
+
   const sections = KNOWLEDGE_SECTIONS.map(({ table }) => {
     const { heading, header, separator } = TABLES[table];
     // Knowledge ids (K/P/L###) first, then rows that only have a memory id.
     const tableRows = rows[table]
       .sort((a, b) => Number(a.id.startsWith("MEM")) - Number(b.id.startsWith("MEM")) || a.id.localeCompare(b.id))
       .map((row) => `| ${row.cells.map(escapeCell).join(" | ")} |`);
-    return [heading, "", header, separator, ...tableRows].join("\n");
+    const notes = table === "rules" && ruleNotes.length > 0 ? ["", ...ruleNotes] : [];
+    return [heading, "", header, separator, ...tableRows, ...notes].join("\n");
   });
-  const content = [DEFAULT_INTRO, ...sections].join("\n\n") + "\n";
+  const content = [intro, ...sections].join("\n\n") + "\n";
 
   if (content === existing) {
     return { written: false, content };

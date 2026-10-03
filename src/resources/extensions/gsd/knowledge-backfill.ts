@@ -3,8 +3,9 @@
 // Idempotent migration of `.gsd/KNOWLEDGE.md` Patterns and Lessons rows into
 // the `memories` table. Patterns become memories with `category: "pattern"`;
 // Lessons become memories with `category: "gotcha"` (mirroring the ADR-013
-// line 38 contract). Rules (K###) are NOT migrated — they remain manually
-// maintained in `KNOWLEDGE.md` per ADR-013 line 39.
+// line 38 contract). Rules (K###) are NOT migrated here: new Rules are
+// captured as `category: "rule"` rows (knowledge-capture.ts, ADR-046) and
+// the projection keeps unimported file Rules until the KNOWLEDGE import.
 //
 // Idempotency is enforced by tagging each backfilled memory with
 // `structured_fields.sourceKnowledgeId = "<P|L>NNN"`. The

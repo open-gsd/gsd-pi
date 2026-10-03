@@ -17,6 +17,8 @@ import { withCommandCwd } from "../commands/context.ts";
 import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import { captureKnowledgeEntry, nextKnowledgeId } from "../knowledge-capture.ts";
 import { knowledgeMdPath } from "../knowledge-parser.ts";
+import { renderKnowledgeProjection } from "../knowledge-projection.ts";
+import { createMemory, enforceMemoryCap } from "../memory-store.ts";
 import { rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
 import { invalidateStateCache } from "../state.ts";
 import { executeMemoryCapture } from "../tools/memory-tools.ts";
@@ -189,6 +191,55 @@ describe("knowledge capture", () => {
     const md = readKnowledge(base);
     assert.match(section(md, "## Rules"), /\| K001 \| project \| Legacy file rule \| history \| 2026-01-01 \|\n\| K002 \| project \| New database rule \|/);
     assert.match(section(md, "## Patterns"), /\| P004 \| Legacy pattern \| services\/ \| preserved \|\n\| P005 \| New database pattern \|/);
+  });
+
+  test("import bridge: a custom intro and free-form Rules lines survive the render", () => {
+    writeFileSync(
+      knowledgeMdPath(base),
+      [
+        "# Project Knowledge",
+        "",
+        "Custom intro: read the vendor policy first.",
+        "",
+        "## Rules",
+        "",
+        "- Bullet rule: never touch vendor/",
+        "",
+        "| # | Scope | Rule | Why | Added |",
+        "|---|-------|------|-----|-------|",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    captureKnowledgeEntry(base, "rule", "New database rule", "project");
+    const first = readKnowledge(base);
+    captureKnowledgeEntry(base, "pattern", "Adapter at the seam", "project");
+    const md = readKnowledge(base);
+
+    assert.match(md, /^# Project Knowledge\n\nCustom intro: read the vendor policy first\.\n\n## Rules\n/);
+    const rules = section(md, "## Rules");
+    assert.match(rules, /\| K001 \| project \| New database rule \|/);
+    assert.equal(rules.split("- Bullet rule: never touch vendor/").length, 2, "free-form rule line is kept exactly once");
+    assert.equal(section(md, "## Rules"), section(first, "## Rules"), "a later render keeps the Rules section stable");
+  });
+
+  test("the memory cap never supersedes Rules, so they stay in KNOWLEDGE.md", () => {
+    for (const text of ["Rule one", "Rule two", "Rule three"]) {
+      captureKnowledgeEntry(base, "rule", text, "project");
+    }
+    for (let i = 0; i < 60; i++) {
+      createMemory({ category: "convention", content: `convention ${i}`, confidence: 0.9 });
+    }
+
+    enforceMemoryCap(50);
+    renderKnowledgeProjection(base);
+
+    const active = knowledgeRows();
+    assert.deepEqual(active.filter((row) => row.category === "rule").map((row) => row.sourceKnowledgeId), ["K001", "K002", "K003"]);
+    assert.equal(active.filter((row) => row.category !== "rule").length, 50, "the cap still applies to other memories");
+    const rules = section(readKnowledge(base), "## Rules");
+    for (const id of ["K001", "K002", "K003"]) assert.match(rules, new RegExp(`\\| ${id} \\| project \\| Rule `));
   });
 
   test("with a closed DB the capture fails loud and writes nothing", () => {

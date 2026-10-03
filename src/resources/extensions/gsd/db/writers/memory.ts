@@ -203,7 +203,7 @@ export function supersedeLowestRankedMemories(limit: number, now: string): void 
     `UPDATE memories SET superseded_by = 'CAP_EXCEEDED', updated_at = :now
      WHERE id IN (
        SELECT id FROM memories
-       WHERE superseded_by IS NULL
+       WHERE superseded_by IS NULL AND category <> 'rule'
        ORDER BY (confidence * (1.0 + hit_count * 0.1)) ASC
        LIMIT :limit
      )`,
