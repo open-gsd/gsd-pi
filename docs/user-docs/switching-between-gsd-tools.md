@@ -4,7 +4,7 @@ Both `@opengsd/gsd-core` and `@opengsd/gsd-pi` use the same `.gsd/` directory, b
 
 ## The shared contract
 
-gsd-core treats `.gsd/*.md` files as the source of truth. gsd-pi treats its SQLite database as canonical and uses those files only as projections. It never imports modeled markdown, `QUEUE-ORDER.json` or a hand-written `CONTEXT.md` implicitly during startup, state derivation, dispatch or `/gsd sync`. One implicit read remains: Patterns and Lessons in `.gsd/KNOWLEDGE.md` are copied into memories at session start. Use gsd-pi's planning and reopen tools for ordinary changes, or the verified `/gsd recover` Preview/Application flow when markdown is intentionally replacing missing or damaged database state.
+gsd-core treats `.gsd/*.md` files as the source of truth. gsd-pi treats its SQLite database as canonical and uses those files only as projections. It never imports modeled markdown, `QUEUE-ORDER.json` or a hand-written `CONTEXT.md` implicitly during startup, state derivation, dispatch or `/gsd sync`. One implicit read remains: Patterns and Lessons in `.gsd/KNOWLEDGE.md` are copied into memories at session start. A milestone reopen or completion that only `.gsd/event-log.jsonl` holds (written by an older release) is not read: `/gsd doctor` reports it and `/gsd doctor --fix` imports it. Use gsd-pi's planning and reopen tools for ordinary changes, or the verified `/gsd recover` Preview/Application flow when markdown is intentionally replacing missing or damaged database state.
 
 ## Recommended workflow: commit before switching
 
