@@ -141,16 +141,11 @@ describe("getTaskVerificationEvidence: unknown exit codes", () => {
 
   test("one unknown exit_code no longer disqualifies an otherwise passing set (#2213)", () => {
     if (!isDbAvailable()) return;
-    insertVerificationEvidence({
-      taskId: TID,
-      sliceId: SID,
-      milestoneId: MID,
-      command: "pnpm test",
-      exitCode: 0,
-      verdict: "pass",
-      durationMs: 10,
-    });
-    insertRawEvidence({ command: "pnpm lint", exitCode: null, verdict: "pass", durationMs: null });
+    // Both rows share one created_at: the reader returns only the latest
+    // completion batch (#2259), so two wall-clock stamps would split the set.
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    insertRawEvidence({ command: "pnpm test", exitCode: 0, verdict: "pass", durationMs: 10, createdAt });
+    insertRawEvidence({ command: "pnpm lint", exitCode: null, verdict: "pass", durationMs: null, createdAt });
 
     const evidence = getTaskVerificationEvidence(MID, SID, TID);
 
