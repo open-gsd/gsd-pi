@@ -239,7 +239,6 @@ export async function handlePlanTask(
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.task.plan",
       invocation,
-      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.task.planned",

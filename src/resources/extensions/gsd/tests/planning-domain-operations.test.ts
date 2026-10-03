@@ -653,6 +653,23 @@ test("planning events durably record lifecycle shadow comparisons", async () => 
   ]);
 });
 
+test("planning provenance comes from the transport invocation, not the model-supplied actorName", async () => {
+  const { base } = makeFixture();
+  seedPlanningParents();
+  const { actorId: _actorId, ...withoutActor } = invocation("plan-task/actor-provenance");
+  assertSuccess(await invoke<PlanTaskParams, PlanTaskResult>(
+    handlePlanTask as PlanningHandler<PlanTaskParams, PlanTaskResult>,
+    { ...taskParams(), actorName: "model-claimed-actor" },
+    base,
+    withoutActor,
+  ));
+
+  assert.equal(
+    row("SELECT actor_id FROM workflow_operations WHERE operation_type = 'workflow.task.plan'")["actor_id"],
+    null,
+  );
+});
+
 test("slice planning promotes only pending lifecycle state and rejects cancelled identity without residue", async () => {
   const { base } = makeFixture();
   seedPlanningParents();

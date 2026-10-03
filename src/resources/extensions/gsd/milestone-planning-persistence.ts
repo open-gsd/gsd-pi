@@ -227,7 +227,6 @@ function persistPlanOperation(
   return executePlanningDomainOperation({
     operationType: "workflow.milestone.plan",
     invocation,
-    actorId: params.actorName,
     payload: planningOperationPayload(params),
     event: {
       eventType: "workflow.milestone.planned",

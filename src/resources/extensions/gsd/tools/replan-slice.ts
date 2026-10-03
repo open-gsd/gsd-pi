@@ -238,7 +238,6 @@ export async function handleReplanSlice(
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.slice.replan",
       invocation,
-      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.slice.replanned",

@@ -150,7 +150,6 @@ export async function handleReplanTask(
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.task.replan",
       invocation,
-      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.task.replanned",

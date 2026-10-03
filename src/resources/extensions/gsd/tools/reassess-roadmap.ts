@@ -299,7 +299,6 @@ export async function handleReassessRoadmap(
     const receipt = executePlanningDomainOperation({
       operationType: "workflow.roadmap.reassess",
       invocation,
-      actorId: params.actorName,
       payload: planningOperationPayload(params),
       event: {
         eventType: "workflow.roadmap.reassessed",
