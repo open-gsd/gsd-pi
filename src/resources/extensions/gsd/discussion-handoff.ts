@@ -240,25 +240,32 @@ export function checkAutoStartAfterDiscuss(lookupBasePath?: string): boolean {
   if (!entry) return false;
 
   const { ctx, pi, basePath, milestoneId, step } = entry;
-  // Use layout-aware resolution so flat-phase projects (phases/NN-slug/)
-  // are found as well as legacy projects (milestones/MID/).
-  const contextFile = resolveMilestoneFile(basePath, milestoneId, "CONTEXT");
-  const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-  if (!contextFile && !roadmapFile) return false;
-
   if (hasBlockingDepthGate(entry)) return false;
+
+  // Database rows decide the handoff: a CONTEXT artifact row saved through
+  // gsd_summary_save, or planned slices. State derivation reads those rows,
+  // so a file with no row would send auto-mode back into discuss on every
+  // start (#2107). A milestone with slices is already planned and never routes
+  // back to discuss, so it is accepted without a CONTEXT row.
   const hasDbContext = isDbAvailable() &&
     getMilestoneScopedArtifacts(milestoneId).some(a => a.artifact_type === "CONTEXT");
+  const accepted = hasDbContext || (isDbAvailable() && getMilestoneSlices(milestoneId).length > 0);
+  // The files prove nothing. They only tell a discussion that has not written
+  // yet (wait silently) from one that wrote files and no rows (say why).
+  // Layout-aware resolution finds flat-phase (phases/NN-slug/) and legacy
+  // (milestones/MID/) projects.
+  const contextFile = resolveMilestoneFile(basePath, milestoneId, "CONTEXT");
+  const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
+  if (!accepted && !contextFile && !roadmapFile) return false;
+
   if (!ensureMilestoneRowForAcceptedHandoff(entry, hasDbContext)) return false;
-  // State derivation reads the CONTEXT artifact row, not the file. A file with
-  // no row would send auto-mode back into discuss on every start (#2107), so
-  // refuse the handoff and say how the context enters the database. A milestone
-  // with slices is already planned and never routes back to discuss, so it is
-  // accepted; the file still stays out of the database.
-  if (contextFile && !hasDbContext && getMilestoneSlices(milestoneId).length === 0) {
+  if (!accepted) {
     ctx.ui.notify(
-      `Milestone ${milestoneId}: CONTEXT.md is on disk but not in the database. ` +
-      `Save the context with gsd_summary_save (artifact_type "CONTEXT"); a file write does not register it.`,
+      contextFile
+        ? `Milestone ${milestoneId}: CONTEXT.md is on disk but not in the database. ` +
+          `Save the context with gsd_summary_save (artifact_type "CONTEXT"); a file write does not register it.`
+        : `Milestone ${milestoneId}: ROADMAP.md is on disk but the database has no slices. ` +
+          `Plan the milestone with gsd_plan_milestone; a file write does not register it.`,
       "error",
     );
     return false;

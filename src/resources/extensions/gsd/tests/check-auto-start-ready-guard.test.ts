@@ -270,6 +270,55 @@ describe("checkAutoStartAfterDiscuss ready-notify DB guard (R3b)", () => {
     assert.match(cap.notifies[0]!.msg, /CONTEXT\.md is on disk but not in the database.*gsd_summary_save/);
   });
 
+  test("accepts a CONTEXT artifact row when no CONTEXT.md or ROADMAP.md file is on disk", () => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-ready-guard-")));
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(":memory:");
+    insertMilestone({ id: "M001", title: "Ready Guard Test", status: "queued" });
+    saveContextArtifact("M001");
+
+    cap = mkCapture();
+    setPendingAutoStart(base, {
+      basePath: base,
+      milestoneId: "M001",
+      startAuto: false,
+      ctx: mkCtx(cap),
+      pi: mkPi(cap),
+    });
+
+    assert.equal(checkAutoStartAfterDiscuss(), true, "the database row is the handoff, not the file");
+    assert.deepEqual(cap.notifies, [{
+      msg: "Milestone M001 context captured. Continuing the planning pipeline.",
+      level: "success",
+    }]);
+  });
+
+  test("refuses a ROADMAP.md on disk when the database has no slices and no CONTEXT row", () => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-ready-guard-")));
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    writeFileSync(
+      join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
+      "# M001: Ready Guard Test\n\n## Slices\n\n- [ ] **S01: Written on disk only**\n",
+    );
+    openDatabase(":memory:");
+    insertMilestone({ id: "M001", title: "Ready Guard Test", status: "queued" });
+
+    cap = mkCapture();
+    setPendingAutoStart(base, {
+      basePath: base,
+      milestoneId: "M001",
+      startAuto: false,
+      ctx: mkCtx(cap),
+      pi: mkPi(cap),
+    });
+
+    assert.equal(checkAutoStartAfterDiscuss(), false, "a roadmap file with no slice rows is not a handoff");
+    assert.equal(_getPendingAutoStart(base)?.milestoneId, "M001", "the handoff stays pending");
+    assert.equal(cap.notifies.length, 1);
+    assert.equal(cap.notifies[0]!.level, "error");
+    assert.match(cap.notifies[0]!.msg, /ROADMAP\.md is on disk but the database has no slices.*gsd_plan_milestone/);
+  });
+
   test("a CONTEXT.md on disk never creates the milestone row", () => {
     base = mkBase();
     openDatabase(":memory:");
