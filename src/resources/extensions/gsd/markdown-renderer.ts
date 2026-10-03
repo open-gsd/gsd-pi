@@ -10,7 +10,7 @@
 // parseRoadmap(), parsePlan(), parseSummary() in files.ts.
 
 import { readFileSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { createProjectionDirectorySync, removeProjectionFileSync } from "./atomic-write.js";
+import { atomicWriteSync, createProjectionDirectorySync, removeProjectionFileSync } from "./atomic-write.js";
 import { logWarning } from "./workflow-logger.js";
 import { isClosedStatus, isDiscardedMilestoneStatus, isHiddenFromRoadmap, toStatus } from "./status-guards.js";
 import { isCanonicalStagedTaskSummaryState } from "./task-summary-projection-policy.js";
@@ -1451,7 +1451,7 @@ async function renderMilestoneFiles(
   await renderStep(result, `roadmap ${milestoneId}`, () => renderRoadmapCheckboxes(basePath, milestoneId));
   await renderStep(result, `roadmap assessment ${milestoneId}`, async () =>
     (await renderRoadmapAssessment(basePath, milestoneId)) !== null);
-  await renderStep(result, `validation ${milestoneId}`, () => renderMilestoneValidation(basePath, milestoneId));
+  await renderStep(result, `validation ${milestoneId}`, async () => renderMilestoneValidation(basePath, milestoneId));
   await renderStep(result, `milestone artifacts ${milestoneId}`, () => renderMilestoneArtifactsFromDb(basePath, milestoneId));
   await renderStep(result, `milestone summary ${milestoneId}`, () => renderMilestoneSummary(basePath, milestoneId));
 }
@@ -1953,20 +1953,21 @@ export async function renderRoadmapAssessment(
 /**
  * Render the milestone VALIDATION file from the latest validation assessment
  * row, which holds the file content. The row is found by milestone and scope,
- * not by file path. The tool and the full rebuild both call this. Nothing is
- * written when the file and its baseline already hold the content.
+ * not by file path. Every writer of the file and the full rebuild call this,
+ * after the row is committed. Nothing is written when the file and its
+ * baseline already hold the content.
  *
  * @returns true when the milestone has a validation assessment
  */
-export async function renderMilestoneValidation(
+export function renderMilestoneValidation(
   basePath: string,
   milestoneId: string,
-): Promise<boolean> {
+): boolean {
   const content = getLatestAssessmentByScope(milestoneId, "milestone-validation")?.["full_content"];
   if (typeof content !== "string" || !content.trim()) return false;
   const absPath = targetMilestoneFile(basePath, milestoneId, "VALIDATION", getMilestone(milestoneId)?.title);
   if (compatProjectionIsCurrent(basePath, absPath, content, [milestoneId])) return true;
-  await saveFile(absPath, content);
+  atomicWriteSync(absPath, content);
   recordCompatProjectionWrite(basePath, absPath, content, [milestoneId]);
   invalidateCaches();
   return true;

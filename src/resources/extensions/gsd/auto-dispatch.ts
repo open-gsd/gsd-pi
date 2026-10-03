@@ -52,7 +52,8 @@ import {
 } from "./paths.js";
 import { validateArtifact } from "./schemas/validate.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
-import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
+import { atomicWriteSync } from "./atomic-write.js";
+import { recordCompatProjectionWrite } from "./compat/compat-marker.js";
 import { logWarning, logError } from "./workflow-logger.js";
 import { dirname, join, sep } from "node:path";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
@@ -617,6 +618,7 @@ function recordAdoptedMilestoneValidationWaiver(
   ].join("\n");
   try {
     atomicWriteSync(validationPath, content, "utf-8");
+    recordCompatProjectionWrite(artifactBasePath, validationPath, content, [milestoneId]);
   } catch (error) {
     logWarning(
       "projection",
@@ -1942,45 +1944,32 @@ export const DISPATCH_RULES: DispatchRule[] = [
         // Preview shares the skip decision; the VALIDATION projection and the
         // DB-backed pass rows are dispatch effects and are not persisted.
         if (preview) return { action: "skip" };
-        atomicWriteSync(validationPath, content, "utf-8");
-        try {
-          // DB-backed state derivation keys off assessments, not only the file
-          // projection. Persist the skipped validation there too so the next
-          // loop iteration advances to completing-milestone instead of
-          // re-entering validating-milestone.
-          if (isDbAvailable()) {
-            transaction(() => {
-              insertAssessment({
-                path: validationPath,
-                milestoneId: mid,
-                sliceId: null,
-                taskId: null,
-                status: "pass",
-                scope: "milestone-validation",
-                fullContent: content,
-              });
-              const gateSliceId = getMilestoneSlices(mid)[0]?.id;
-              if (gateSliceId) {
-                insertMilestoneValidationGates(
-                  mid,
-                  gateSliceId,
-                  "pass",
-                  new Date().toISOString(),
-                );
-              }
-            });
-          }
-        } catch (err) {
-          try {
-            removeProjectionFileSync(validationPath);
-          } catch (unlinkErr) {
-            logWarning(
-              "dispatch",
-              `failed to remove skipped validation file after DB write failure for ${mid}: ${unlinkErr instanceof Error ? unlinkErr.message : String(unlinkErr)}`,
+        // DB-backed state derivation keys off assessments, so the next loop
+        // iteration advances to completing-milestone instead of re-entering
+        // validating-milestone. The file is rendered from the committed row,
+        // by the renderer that the validate tool and the full rebuild use.
+        transaction(() => {
+          insertAssessment({
+            path: validationPath,
+            milestoneId: mid,
+            sliceId: null,
+            taskId: null,
+            status: "pass",
+            scope: "milestone-validation",
+            fullContent: content,
+          });
+          const gateSliceId = getMilestoneSlices(mid)[0]?.id;
+          if (gateSliceId) {
+            insertMilestoneValidationGates(
+              mid,
+              gateSliceId,
+              "pass",
+              new Date().toISOString(),
             );
           }
-          throw err;
-        }
+        });
+        const { renderMilestoneValidation } = await import("./markdown-renderer.js");
+        renderMilestoneValidation(writeBase, mid);
         invalidateAllCaches();
         return { action: "skip" };
       }

@@ -41,7 +41,7 @@ import {
 } from "./verification-source-integrity.js";
 import { resolveRepositoryProjectRoot } from "./repository-registry.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
-import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
+import { renderMilestoneValidation } from "./markdown-renderer.js";
 
 export const CLOSEOUT_CONSISTENCY_BLOCKED_REASON = "closeout-consistency-blocked";
 
@@ -220,37 +220,30 @@ function recordCloseoutPassThroughValidationIfReady(
 
   const validationPath = join(basePath, relMilestoneFile(basePath, milestoneId, "VALIDATION"));
   const content = renderCloseoutPassThroughValidation(milestoneId);
-  atomicWriteSync(validationPath, content, "utf-8");
 
-  try {
-    transaction(() => {
-      insertAssessment({
-        path: validationPath,
-        milestoneId,
-        sliceId: null,
-        taskId: null,
-        status: "pass",
-        scope: "milestone-validation",
-        fullContent: content,
-      });
-      const gateSliceId = getMilestoneSlices(milestoneId)[0]?.id;
-      if (gateSliceId) {
-        insertMilestoneValidationGates(
-          milestoneId,
-          gateSliceId,
-          "pass",
-          new Date().toISOString(),
-        );
-      }
+  transaction(() => {
+    insertAssessment({
+      path: validationPath,
+      milestoneId,
+      sliceId: null,
+      taskId: null,
+      status: "pass",
+      scope: "milestone-validation",
+      fullContent: content,
     });
-  } catch (err) {
-    try {
-      removeProjectionFileSync(validationPath);
-    } catch {
-      // best effort cleanup
+    const gateSliceId = getMilestoneSlices(milestoneId)[0]?.id;
+    if (gateSliceId) {
+      insertMilestoneValidationGates(
+        milestoneId,
+        gateSliceId,
+        "pass",
+        new Date().toISOString(),
+      );
     }
-    throw err;
-  }
+  });
+  // The file is rendered from the committed row, by the renderer that the
+  // validate tool and the full rebuild use.
+  renderMilestoneValidation(basePath, milestoneId);
 
   invalidateAllCaches();
   return true;

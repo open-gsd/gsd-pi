@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
+import { removeProjectionFileSync } from "../atomic-write.ts";
 import { DISPATCH_RULES, type DispatchContext } from "../auto-dispatch.ts";
 import { checkCloseoutConsistencyGate } from "../closeout-consistency-gate.ts";
 import { isCompletedMilestoneTerminal } from "../milestone-closeout.ts";
@@ -20,6 +21,7 @@ import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts"
 import {
   _getAdapter,
   closeDatabase,
+  deleteAssessmentByScope,
   executeDomainOperation,
   getLatestAssessmentByScope,
   insertAssessment,
@@ -34,6 +36,8 @@ import {
 import { openWorkflowDatabase } from "../db-workspace.ts";
 import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
+import { renderMilestoneValidation } from "../markdown-renderer.ts";
+import { observeExternalMarkdownEdits } from "../state-reconciliation/drift/external-markdown-edit.ts";
 import { deriveStateFromDb } from "../state.ts";
 
 const tempDirs = new Set<string>();
@@ -237,6 +241,32 @@ test("adopted waiver replay is exact and projection loss cannot block closeout",
   });
 
   assert.ok(!("error" in completed), "canonical waiver should authorize completion");
+});
+
+test("the waiver VALIDATION file written after an invalidated validation is not an external edit", async () => {
+  const basePath = makeFixture();
+  const rule = DISPATCH_RULES.find((candidate) =>
+    candidate.name === "validating-milestone → validate-milestone"
+  );
+  assert.ok(rule);
+  const validationPath = join(basePath, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
+  // A rendered validation that gsd_reassess_roadmap then invalidates: the row
+  // and the file are removed, the baseline of the removed file stays.
+  insertAssessment({
+    path: validationPath,
+    milestoneId: "M001",
+    status: "needs-remediation",
+    scope: "milestone-validation",
+    fullContent: "---\nverdict: needs-remediation\n---\n\n# M001 Validation\n",
+  });
+  assert.equal(renderMilestoneValidation(basePath, "M001"), true);
+  deleteAssessmentByScope("M001", "milestone-validation");
+  removeProjectionFileSync(validationPath);
+
+  assert.equal((await rule.match(dispatchContext(basePath)))?.action, "dispatch");
+
+  assert.match(readFileSync(validationPath, "utf-8"), /authorization: waived/);
+  assert.deepEqual(observeExternalMarkdownEdits(basePath, true), []);
 });
 
 test("waiver persistence is atomic when the Domain Operation faults", async () => {

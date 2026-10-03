@@ -531,12 +531,12 @@ export async function handleValidateMilestone(
   try {
     // The same renderer as the full rebuild: it reads the validation row that
     // was just committed, so the tool and a rebuild write the same bytes.
-    await renderMilestoneValidation(artifactBasePath, effectiveParams.milestoneId);
+    renderMilestoneValidation(artifactBasePath, effectiveParams.milestoneId);
     const projectRoot = resolveWorktreeProjectRoot(basePath);
     if (projectRoot !== artifactBasePath) {
       // Mirror to project root using the project root's layout.
       try {
-        await renderMilestoneValidation(projectRoot, effectiveParams.milestoneId);
+        renderMilestoneValidation(projectRoot, effectiveParams.milestoneId);
       } catch (mirrorErr) {
         logWarning(
           "projection",
