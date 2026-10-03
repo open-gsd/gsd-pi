@@ -7,13 +7,14 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, cpSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, cpSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { externalGsdRoot, externalStateAlreadyExistsForProject, isInsideWorktree } from "./repo-identity.js";
 import { getErrorMessage } from "./error-utils.js";
 import { hasGitTrackedGsdFiles } from "./gitignore.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
-import { gsdRoot, milestonesDir, resolveGsdRootFile } from "./paths.js";
+import { gsdRoot } from "./paths.js";
+import { openSqliteReadOnly } from "./sqlite-readonly.js";
 
 export interface MigrationResult {
   migrated: boolean;
@@ -222,14 +223,19 @@ export function migrateToExternalState(basePath: string): MigrationResult {
   }
 }
 
+/**
+ * The current state is intact only when its database opens read-only and its
+ * project_authority row is readable. Projection files such as STATE.md and
+ * milestones/ prove nothing about the authority.
+ */
 export function isCurrentGsdStateIntactForMigratingCleanup(basePath: string): boolean {
   try {
-    const stateFile = resolveGsdRootFile(basePath, "STATE");
-    const milestonesPath = milestonesDir(basePath);
-    const dbPath = join(gsdRoot(basePath), "gsd.db");
-    const hasDbFile = existsSync(dbPath);
-    const hasNonEmptyDb = hasDbFile && statSync(dbPath).size > 0;
-    return existsSync(stateFile) && existsSync(milestonesPath) && hasNonEmptyDb;
+    const { db } = openSqliteReadOnly(join(gsdRoot(basePath), "gsd.db"));
+    try {
+      return db.prepare("SELECT project_id FROM project_authority WHERE singleton = 1").get() !== undefined;
+    } finally {
+      db.close();
+    }
   } catch {
     return false;
   }

@@ -20,6 +20,7 @@ import { test } from "node:test";
 
 import { migrateToExternalState } from "../migrate-external.ts";
 import { externalGsdRoot } from "../repo-identity.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function run(command: string, cwd: string): string {
   return execSync(command, {
@@ -96,12 +97,13 @@ test("an orphaned .gsd.migrating beside an intact .gsd is cleaned so migration c
   const { base, stateDir } = makeRepo("git@github.com:example/wedge-orphan.git");
   try {
     withStateDir(stateDir, () => {
-      // Intact current state: STATE.md + content-bearing milestones/ + a
-      // non-empty gsd.db — this `.gsd` is the authoritative source.
+      // Intact current state: a readable gsd.db authority beside its
+      // projections — this `.gsd` is the authoritative source.
       mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
       writeFileSync(join(base, ".gsd", "STATE.md"), "# state\n", "utf-8");
       writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# M001\n", "utf-8");
-      writeFileSync(join(base, ".gsd", "gsd.db"), "state\n", "utf-8");
+      assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+      closeDatabase();
       // Orphaned staging from a crashed prior attempt whose contents must
       // never land in the external state root.
       mkdirSync(join(base, ".gsd.migrating"), { recursive: true });
