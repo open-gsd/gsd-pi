@@ -486,11 +486,11 @@ describe("stream-adapter — content-index continuity across SDK sub-messages (#
 		// turn-partial index (pre-fix both tool2 events landed on 1).
 		assert.deepEqual(toolcallEndIndices, [1, 1, 3, 3]);
 
-		// Final-message assembly is untouched by the index shift:
-		// [tool1, tool2, intermediate text A, pending text B, text C].
+		// Final-message assembly is untouched by the index shift itself; the
+		// final content is chronological (#2540): each block in stream order.
 		assert.deepEqual(
 			finalMessage?.content.map((block) => block.type === "toolCall" ? `tool:${block.id}` : (block as any).text),
-			["tool:tool-1", "tool:tool-2", "Alpha analysis.", "Bravo summary.", "Charlie wrap-up."],
+			["Alpha analysis.", "tool:tool-1", "Bravo summary.", "tool:tool-2", "Charlie wrap-up."],
 		);
 	});
 });
@@ -640,6 +640,127 @@ describe("stream-adapter — start partial carries the streamed blocks (#2539)",
 // ---------------------------------------------------------------------------
 // Bug #2859 — stateless provider regression tests
 // ---------------------------------------------------------------------------
+
+describe("stream-adapter — final message preserves streamed block order (#2540)", () => {
+	// Same turn layout as the #2538 scenario: [text A, tool1] → synthetic-user
+	// boundary → [text B, tool2] → boundary → [text C].
+	function* interleavedScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		const boundary = (uuid: string, toolUseId: string, content: string) => ({
+			type: "user",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+			},
+		});
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Alpha analysis." } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"command\":\"echo hi\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		yield boundary("user-1", "tool-1", "out-1");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Bravo summary." } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "Read", input: {} } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"file_path\":\"b.txt\"}" } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p2");
+		yield boundary("user-2", "tool-2", "out-2");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p3");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p3");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Charlie wrap-up." } }, "p3");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p3");
+		yield makeSdkSuccessResult("done");
+	}
+
+	function streamedOrder(finalMessage: AssistantMessage): string[] {
+		return finalMessage.content.map((block) =>
+			block.type === "toolCall" ? `tool:${(block as any).id}` : (block as any).text
+		);
+	}
+
+	test("final message keeps the interleaved text/tool order the turn streamed in", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: interleavedScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		// Pre-fix buildFinalAssistantContent merged all tool blocks first and
+		// appended prose after, so the persisted message — and the TUI's
+		// message_end rebuild — re-laid the turn as "all tools, then all text":
+		// ["tool:tool-1", "tool:tool-2", "Alpha analysis.", "Bravo summary.",
+		// "Charlie wrap-up."]. The final message must match the streamed order
+		// instead, or the rebuild moves blocks the TUI already rendered.
+		assert.deepEqual(streamedOrder(finalMessage!), [
+			"Alpha analysis.",
+			"tool:tool-1",
+			"Bravo summary.",
+			"tool:tool-2",
+			"Charlie wrap-up.",
+		]);
+	});
+
+	test("external results stay attached and tool blocks keep their identity after reordering", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: interleavedScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		const completedToolRefs: AssistantMessage["content"] = [];
+		for await (const event of stream) {
+			if (event.type === "toolcall_end") completedToolRefs.push(event.toolCall);
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		const tools = finalMessage!.content.filter((block) => block.type === "toolCall") as any[];
+		assert.deepEqual(
+			tools.map((block) => [block.id, block.arguments?.command ?? block.arguments?.file_path, block.externalResult?.content?.[0]?.text]),
+			[
+				["tool-1", "echo hi", "out-1"],
+				["tool-2", "b.txt", "out-2"],
+			],
+		);
+		// Reordering must not rebuild blocks: the TUI matches pending tool
+		// components against the streamed block objects, so each synthetic
+		// toolcall_end's block must be the exact object in the final content.
+		assert.ok(completedToolRefs.length >= 2);
+		for (const ref of completedToolRefs) {
+			assert.ok(finalMessage!.content.includes(ref), "completed tool block kept its identity");
+		}
+	});
+});
 
 describe("stream-adapter — full context prompt (#2859)", () => {
 	test("buildPromptFromContext includes all user and assistant messages, not just the last user message", () => {
