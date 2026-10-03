@@ -157,7 +157,7 @@ auto_supervisor:
 
 GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. Rules, Patterns and Lessons are memories rows written by `/gsd knowledge` or `capture_thought`; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
-At the start of each unit, GSD injects the Rules section of project `KNOWLEDGE.md`; Patterns and Lessons reach the agent through the memory block. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
+At the start of each unit, GSD injects the project Rules, read from the database and not from the file; Patterns and Lessons reach the agent through the memory block. When the database is not available, the prompt shows a `Project Knowledge unavailable` block and GSD logs a warning; the file is not a fallback. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
 
 ### Verification enforcement
 

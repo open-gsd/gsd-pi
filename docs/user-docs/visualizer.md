@@ -84,7 +84,7 @@ Completed slice summaries, modified files, verification decisions, and establish
 
 ### 8. Knowledge
 
-Persistent project rules, patterns, and lessons from `.gsd/KNOWLEDGE.md`, plus active memory-store entries ranked by confidence and usage. Memory rows show their ID, category, scope, confidence, hit count, tags, and truncated content.
+Persistent project rules, patterns, and lessons read from the database (the rows that `.gsd/KNOWLEDGE.md` is rendered from), plus active memory-store entries ranked by confidence and usage. Memory rows show their ID, category, scope, confidence, hit count, tags, and truncated content.
 
 ### 9. Captures
 

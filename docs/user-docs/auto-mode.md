@@ -42,7 +42,7 @@ When milestone history contains only `.gsd/` artifact changes (for example plann
 
 The SQLite database is the runtime source of truth for milestones, slices, tasks, requirements, summaries, and completion status. Durable decisions and project knowledge use the same database through the `memories` table: decisions are stored as `architecture` memories, and KNOWLEDGE patterns/lessons are stored as `pattern`/`gotcha` memories.
 
-Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and the Patterns/Lessons sections of `.gsd/KNOWLEDGE.md` are projected from memory rows; editing those projections does not override the database unless a command imports or saves the change through GSD. The Rules section of `KNOWLEDGE.md` remains manually authored and is preserved separately.
+Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and `.gsd/KNOWLEDGE.md` is projected from memory rows; editing those projections does not override the database unless a command imports or saves the change through GSD.
 
 Execute-task units use durable Attempt records. Before the worker starts, auto mode must hold a milestone lease and coordination dispatch, move the canonical task lifecycle to `in_progress`, create a running Attempt, and append an `execute` Kernel checkpoint. If an old worker is replaced by a newer lease, the old Attempt is settled as `interrupted` and the replacement Attempt links back to it as retry history.
 
@@ -222,7 +222,7 @@ No manual intervention needed for transient errors — the session pauses briefl
 
 GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. Rules, Patterns and Lessons are memories rows written by `/gsd knowledge` or `capture_thought`; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
-At the start of each unit, GSD injects the Rules section of project `KNOWLEDGE.md`; Patterns and Lessons reach the agent through the memory block. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
+At the start of each unit, GSD injects the project Rules, read from the database and not from the file; Patterns and Lessons reach the agent through the memory block. When the database is not available, the prompt shows a `Project Knowledge unavailable` block and GSD logs a warning; the file is not a fallback. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
 
 ### Context Pressure Monitor
 
