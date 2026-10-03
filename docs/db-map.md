@@ -226,7 +226,7 @@ sequence                INTEGER DEFAULT 0                  ← V23
 
 - Index: `idx_milestones_status` (status)
 - Status values: `active`, `closed`, `queued`; `parked` after `/gsd park`; `skipped` for a discarded milestone, whose row stays as a tombstone that reserves the ID, is hidden from derived state and renders, and never satisfies a dependency
-- `sequence` is the canonical DB ordering used to choose the next open milestone. The `/gsd queue` reorder writes it through the `milestone.reorder` Domain Operation and then renders `.gsd/QUEUE-ORDER.json` from the committed order. Prompt-driven flows such as `/gsd rethink` still write `.gsd/QUEUE-ORDER.json` directly; when the file is present, state derivation mirrors it into `milestones.sequence` before dispatch.
+- `sequence` is the canonical DB ordering used to choose the next open milestone. The `/gsd queue` reorder writes it through the `milestone.reorder` Domain Operation and then renders `.gsd/QUEUE-ORDER.json` from the committed order. No path reads the file back into `milestones.sequence`.
 
 ---
 

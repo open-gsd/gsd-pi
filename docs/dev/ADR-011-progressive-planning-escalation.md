@@ -2,7 +2,7 @@
 
 **Status:** Accepted (partially landed — Phase 1 sketch planning and Phase 2 escalation verified at HEAD; #5754 e2e test and UOK refine audit events outstanding)
 
-> Implementation note (2026-08-01 audit): the trace confirms `is_sketch` / `sketch_scope` in `db-base-schema.ts:174-175`, `phases.progressive_planning` in `types.ts:425`, `escalation.ts`, `uok/gate-runner.ts`, `prompts/refine-slice.md`, `buildRefineSlicePrompt` (`auto-prompts.ts:2690`, dispatched from `auto-dispatch.ts:1450`), `state-reconciliation/drift/sketch-flag.ts`, and `tests/progressive-planning.test.ts`; the Outstanding (#5754) rows below remain unlanded.
+> Implementation note (2026-08-01 audit): the trace confirms `is_sketch` / `sketch_scope` in `db-base-schema.ts:174-175`, `phases.progressive_planning` in `types.ts:425`, `escalation.ts`, `uok/gate-runner.ts`, `prompts/refine-slice.md`, `buildRefineSlicePrompt` (`auto-prompts.ts:2690`, dispatched from `auto-dispatch.ts:1450`), and `tests/progressive-planning.test.ts`; the Outstanding (#5754) rows below remain unlanded.
 **Date:** 2026-04-17
 **Implemented:** 2026-04 to 2026-05 (Phase 1 + Phase 2 shipped; outstanding work tracked on #5754)
 **Author:** Alan Alwakeel (@OfficialDelta)
