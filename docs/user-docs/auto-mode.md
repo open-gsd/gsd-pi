@@ -130,7 +130,7 @@ Auto mode consumes the scheduled wakeup only for the same `basePath + unitType +
 
 ### Discovered Blockers at Verification
 
-When a task completion records a settled, failed `blocker-discovered` Attempt awaiting failure routing, the host verification gate pauses auto mode. The pause names the task and Attempt and includes the staged blocker summary when present. If the task has a readable, unresolved escalation artifact, the pause also displays its question, options, and recommendation. Use `/gsd escalate list` to inspect pending escalations.
+When a task completion records a settled, failed `blocker-discovered` Attempt awaiting failure routing, the host verification gate pauses auto mode. The pause names the task and Attempt and includes the staged blocker summary when present. If the task has an unresolved escalation, the pause also displays its question, options, and recommendation from the database. Use `/gsd escalate list` to inspect pending escalations.
 
 This pause surfaces the blocker; it does not authorize a retry or change failure routing. Although the message suggests `/gsd auto` after resolving the blocker, the failed Attempt still awaits routing and the task remains `in_progress`. Resuming can route that historical failure to an abort, so resolving an escalation alone does not guarantee continuation. A later successful Attempt can pass verification normally. Other failed Attempts still fail the verification gate's succeeded-Attempt requirement.
 

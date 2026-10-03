@@ -21,11 +21,14 @@ import {
 import {
   _getAdapter,
   closeDatabase,
+  getSliceTasks,
   openDatabase,
 } from "../gsd-db.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
 import { recordFailureAndSelectRecovery } from "../task-recovery-domain-operation.ts";
 import { executeTaskComplete } from "../tools/workflow-tool-executors.ts";
+import { detectPendingEscalation, readTaskEscalation, resolveEscalation } from "../escalation.ts";
+import { clearGSDPreferencesCache } from "../preferences.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 
 interface RegisteredTool {
@@ -238,6 +241,7 @@ function completeCanonicalFixture(): void {
 
 afterEach(() => {
   closeDatabase();
+  clearGSDPreferencesCache();
   delete process.env.GSD_ADVERTISE_TOOL_ALIASES;
   for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
   tempDirs.clear();
@@ -449,7 +453,92 @@ test("a canonical blocker submission records a failed Result and routes instead 
   });
 });
 
-test("canonical escalation fails closed until the durable adapter can persist it", async () => {
+test("a canonical escalation is stored as an Open Question, pauses the slice, and resolves from the database", async () => {
+  const basePath = createBase();
+  const attemptId = claimCanonicalAttempt(basePath);
+  writeFileSync(join(basePath, ".gsd", "PREFERENCES.md"), "---\nphases:\n  mid_execution_escalation: true\n---\n");
+  clearGSDPreferencesCache();
+  const params = {
+    ...completionParams(),
+    escalation: {
+      question: "Which recovery should run?",
+      options: [
+        { id: "A", label: "Repair", tradeoffs: "Fix now." },
+        { id: "B", label: "Pause", tradeoffs: "Wait for direction." },
+      ],
+      recommendation: "A",
+      recommendationRationale: "The repair is reversible.",
+      continueWithDefault: false,
+    },
+  } as never;
+
+  const result = await executeTaskComplete(params, basePath, invocation("pi:gsd_task_complete:escalation-call"));
+
+  assert.notEqual(result.isError, true, String(result.content[0]?.text));
+  assert.equal((result.details as Record<string, unknown>).attemptId, attemptId);
+  assert.match(String(result.content[0]?.text), /Escalation decision required: Which recovery should run\?/);
+  assert.match(String(result.content[0]?.text), /Resolve with: \/gsd escalate resolve T01 <A\|B\|accept\|reject-blocker>/);
+  assert.equal(row("SELECT outcome FROM workflow_attempt_results").outcome, "succeeded");
+  assert.deepEqual(row(`
+    SELECT question.question_text, question.question_status, interaction.interaction_kind,
+           lifecycle.item_kind, lifecycle.task_id
+    FROM workflow_open_questions question
+    JOIN workflow_interactions interaction ON interaction.question_id = question.question_id
+    JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = question.lifecycle_id
+  `), {
+    question_text: "Which recovery should run?",
+    question_status: "open",
+    interaction_kind: "choice",
+    item_kind: "task",
+    task_id: "T01",
+  });
+  assert.equal(
+    row("SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'task.escalation.open'").count,
+    1,
+  );
+  assert.equal(row("SELECT escalation_pending FROM tasks WHERE id = 'T01'").escalation_pending, 1);
+  assert.equal(detectPendingEscalation(getSliceTasks("M001", "S01")), "T01");
+
+  // A retry of the same tool call replays: no second question.
+  const replay = await executeTaskComplete(params, basePath, invocation("pi:gsd_task_complete:escalation-call"));
+  assert.notEqual(replay.isError, true, String(replay.content[0]?.text));
+  assert.equal(row("SELECT COUNT(*) AS count FROM workflow_open_questions").count, 1);
+
+  const resolved = resolveEscalation(basePath, "M001", "S01", "T01", "B", "Wait for the owner.");
+  assert.equal(resolved.status, "resolved");
+  assert.equal(detectPendingEscalation(getSliceTasks("M001", "S01")), null);
+  assert.equal(readTaskEscalation("M001", "S01", "T01")?.userChoice, "B");
+  assert.equal(row("SELECT selected_option_id FROM workflow_answers").selected_option_id, "B");
+});
+
+test("a canonical escalation with an invalid payload is rejected before the completion is staged", async () => {
+  const basePath = createBase();
+  claimCanonicalAttempt(basePath);
+  writeFileSync(join(basePath, ".gsd", "PREFERENCES.md"), "---\nphases:\n  mid_execution_escalation: true\n---\n");
+  clearGSDPreferencesCache();
+
+  const result = await executeTaskComplete({
+    ...completionParams(),
+    escalation: {
+      question: "Which recovery should run?",
+      options: [
+        { id: "A", label: "Repair", tradeoffs: "Fix now." },
+        { id: "B", label: "Pause", tradeoffs: "Wait for direction." },
+      ],
+      recommendation: "C",
+      recommendationRationale: "The repair is reversible.",
+      continueWithDefault: false,
+    },
+  } as never, basePath, invocation("pi:gsd_task_complete:invalid-escalation-call"));
+
+  assert.equal(result.isError, true);
+  assert.match(String(result.content[0]?.text), /escalation payload invalid/);
+  assert.equal(row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count, 0);
+  assert.equal(row("SELECT COUNT(*) AS count FROM workflow_open_questions").count, 0);
+  assert.equal(row("SELECT status FROM tasks WHERE id = 'T01'").status, "in_progress");
+});
+
+test("a canonical hard-blocker escalation is rejected when escalation is disabled", async () => {
   const basePath = createBase();
   claimCanonicalAttempt(basePath);
 
@@ -468,7 +557,7 @@ test("canonical escalation fails closed until the durable adapter can persist it
   } as never, basePath, invocation("pi:gsd_task_complete:escalation-call"));
 
   assert.equal(result.isError, true);
-  assert.match(String(result.content[0]?.text), /canonical.*escalation|escalation.*durable/i);
+  assert.match(String(result.content[0]?.text), /hard-blocker escalation.*mid_execution_escalation is disabled/);
   assert.equal(row("SELECT COUNT(*) AS count FROM workflow_attempt_results").count, 0);
   assert.equal(row("SELECT status FROM tasks WHERE id = 'T01'").status, "in_progress");
 });

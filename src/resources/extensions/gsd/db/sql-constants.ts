@@ -71,3 +71,26 @@ export const CURRENT_TASK_RECOVERY_CAUSAL_AUTHORITY_SQL = `(
  *  drift from `isClosedStatus()`. Renders as `'complete', 'done', 'skipped',
  *  'closed', 'cancelled', 'blocker-accepted'`. */
 export const TERMINAL_STATUS_SQL = RAW_CLOSED_STATUSES.map((s) => `'${s}'`).join(", ");
+
+/** Event that marks an Open Question as a Task escalation. */
+export const TASK_ESCALATION_OPENED_EVENT = "task.escalation.opened";
+
+/**
+ * SQL condition, correlated with a `tasks` row, that is true when the Task has
+ * a current (open or answered) escalation question.
+ */
+export const TASK_HAS_ESCALATION_SQL = `EXISTS (
+  SELECT 1
+  FROM workflow_item_lifecycles escalation_lifecycle
+  JOIN workflow_open_questions escalation_question
+    ON escalation_question.lifecycle_id = escalation_lifecycle.lifecycle_id
+   AND escalation_question.project_id = escalation_lifecycle.project_id
+  JOIN workflow_domain_events escalation_event
+    ON escalation_event.event_type = '${TASK_ESCALATION_OPENED_EVENT}'
+   AND json_extract(escalation_event.payload_json, '$.questionId') = escalation_question.question_id
+  WHERE escalation_lifecycle.item_kind = 'task'
+    AND escalation_lifecycle.milestone_id = tasks.milestone_id
+    AND escalation_lifecycle.slice_id = tasks.slice_id
+    AND escalation_lifecycle.task_id = tasks.id
+    AND escalation_question.question_status != 'withdrawn'
+)`;

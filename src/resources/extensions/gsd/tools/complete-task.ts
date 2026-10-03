@@ -10,6 +10,7 @@
  * completion, so recovery can repair disk from durable DB state.
  */
 
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { basename, isAbsolute, join, relative } from "node:path";
 
@@ -26,8 +27,6 @@ import {
   getTask,
   getUnresolvedBlockingReworkFindingsForTask,
   applyReworkResolutions,
-  setTaskEscalationPending,
-  setTaskEscalationAwaitingReview,
 } from "../gsd-db.js";
 import {
   getWorkflowDatabasePath,
@@ -67,9 +66,10 @@ import {
 } from "../task-completion-compatibility-adapter.js";
 import {
   buildEscalationArtifact,
-  escalationArtifactPath,
-  writeEscalationArtifact,
+  openTaskEscalation,
+  taskHasCanonicalLifecycle,
 } from "../escalation.js";
+import { internalExecutionInvocation } from "../execution-invocation.js";
 import { extractBlockerCategory } from "../out-of-surface-blocker.js";
 
 export interface CompleteTaskResult {
@@ -77,14 +77,10 @@ export interface CompleteTaskResult {
   sliceId: string;
   milestoneId: string;
   summaryPath: string;
-  escalation?: {
-    artifactPath: string;
-    question: string;
-    options: EscalationArtifact["options"];
-    recommendation: string;
-    recommendationRationale: string;
-    continueWithDefault: boolean;
-  };
+  escalation?: Pick<
+    EscalationArtifact,
+    "question" | "options" | "recommendation" | "recommendationRationale" | "continueWithDefault"
+  >;
   /**
    * True when this call re-completed an already-closed task from a turn that
    * had been superseded by timeout recovery or cancellation. The underlying
@@ -469,24 +465,19 @@ export async function handleCompleteTask(
   const workflowDbPath = getWorkflowDatabasePath();
 
   // ── ADR-011 Phase 2: validate escalation payload BEFORE any side effects ─
-  // Building the artifact runs the full shape validation (2-4 options, unique
-  // ids, recommendation references a real id). If the payload is malformed
-  // we must reject the call before marking the task complete, writing
-  // SUMMARY.md, flipping the plan checkbox, or closing execute-task gates —
-  // otherwise a rejected payload would leave the task marked complete with
-  // no escalation recorded, and the loop would silently advance past it.
-  // The transaction below stores the validated artifact path and escalation
-  // flag with completion; the readable JSON projection is written afterward.
+  // An escalation is an Open Question on the Task lifecycle. A malformed
+  // payload, or a Task with no canonical lifecycle to carry the question, is
+  // rejected before marking the task complete — otherwise the task would be
+  // complete with no escalation recorded, and the loop would silently advance
+  // past it. The question is written after the completion commits.
   const reworkResolutions = normalizeReworkResolution(params);
 
-  let validatedEscalationArtifact: ReturnType<typeof buildEscalationArtifact> | null = null;
-  let validatedEscalationPath: string | null = null;
-  let escalationWriteEnabled = false;
+  let validatedEscalation: EscalationArtifact | null = null;
   if (params.escalation) {
-    escalationWriteEnabled = loadEffectiveGSDPreferences()?.preferences?.phases?.mid_execution_escalation === true;
-    if (escalationWriteEnabled) {
+    const escalationEnabled = loadEffectiveGSDPreferences()?.preferences?.phases?.mid_execution_escalation === true;
+    if (escalationEnabled) {
       try {
-        validatedEscalationArtifact = buildEscalationArtifact({
+        validatedEscalation = buildEscalationArtifact({
           taskId: params.taskId,
           sliceId: params.sliceId,
           milestoneId: params.milestoneId,
@@ -501,23 +492,29 @@ export async function handleCompleteTask(
           error: `complete-task escalation payload invalid for ${params.milestoneId}/${params.sliceId}/${params.taskId}: ${(validationErr as Error).message}`,
         };
       }
-      validatedEscalationPath = escalationArtifactPath(
-        artifactBasePath,
-        params.milestoneId,
-        params.sliceId,
-        params.taskId,
-      );
-      if (!validatedEscalationPath) {
+      if (!taskHasCanonicalLifecycle(params.milestoneId, params.sliceId, params.taskId)) {
         return {
-          error: `complete-task escalation path unavailable for ${params.milestoneId}/${params.sliceId}/${params.taskId}; run doctor`,
+          error: `complete-task escalation requires a canonical Task lifecycle for ${params.milestoneId}/${params.sliceId}/${params.taskId}; plan the slice with gsd_plan_slice first`,
         };
       }
     } else if (params.escalation.continueWithDefault === false) {
       return {
         error: `complete-task received a hard-blocker escalation (continueWithDefault=false) but phases.mid_execution_escalation is disabled for ${params.milestoneId}/${params.sliceId}/${params.taskId}`,
       };
+    } else {
+      logWarning(
+        "tool",
+        `complete-task received escalation payload but phases.mid_execution_escalation is not enabled; ignoring (${params.milestoneId}/${params.sliceId}/${params.taskId})`,
+      );
     }
   }
+  // The legacy writer has no transport invocation, so each call is a new
+  // operation. A repeated escalation withdraws the earlier open question.
+  const recordEscalation = (escalation: EscalationArtifact): void => openTaskEscalation(
+    artifactBasePath,
+    escalation,
+    internalExecutionInvocation(`legacy:gsd_task_complete:escalation:${randomUUID()}`),
+  );
 
   transaction(() => {
     // State machine preconditions (inside txn for atomicity).
@@ -620,18 +617,6 @@ export async function handleCompleteTask(
       fullSummaryMd: summaryMd,
     });
 
-    if (validatedEscalationArtifact && validatedEscalationPath) {
-      const setEscalationState = validatedEscalationArtifact.continueWithDefault
-        ? setTaskEscalationAwaitingReview
-        : setTaskEscalationPending;
-      setEscalationState(
-        params.milestoneId,
-        params.sliceId,
-        params.taskId,
-        validatedEscalationPath,
-      );
-    }
-
     // Only persist resolutions that actually satisfy the evidence
     // requirement. The guard above admits a finding as long as ONE satisfying
     // entry exists, but applyReworkResolutions writes by findingId and lets the
@@ -685,13 +670,11 @@ export async function handleCompleteTask(
     // Recorded, not projected: the legacy row and its evidence are committed,
     // but the readable completion projections (SUMMARY, plan checkboxes,
     // milestone shell) stay off until the canonical lifecycle reaches a
-    // terminal disposition or recovery resumes the Task. The escalation
-    // readable artifact is not a completion projection — its state was
-    // committed with the Task above, so it is still written here; otherwise a
-    // committed escalation path would dangle with no artifact behind it.
-    if (validatedEscalationArtifact && validatedEscalationPath) {
+    // terminal disposition or recovery resumes the Task. The escalation is
+    // not a completion projection, so it is still recorded here.
+    if (validatedEscalation) {
       try {
-        writeEscalationArtifact(artifactBasePath, validatedEscalationArtifact);
+        recordEscalation(validatedEscalation);
       } catch (escalationErr) {
         logWarning(
           "tool",
@@ -764,34 +747,20 @@ export async function handleCompleteTask(
     };
   }
 
-  // ── ADR-011 Phase 2: write escalation artifact (opt-in) ────────────────
-  // Validation and authoritative escalation state were committed with the
-  // Task. This block only writes the readable artifact projection.
-  let escalationMetadata: CompleteTaskResult["escalation"] | undefined;
-  let escalationProjectionError: string | null = null;
-  if (validatedEscalationArtifact) {
+  // ── ADR-011 Phase 2: record the escalation question (opt-in) ───────────
+  let escalationRecorded = false;
+  let escalationError: string | null = null;
+  if (validatedEscalation) {
     try {
-      const escalationPath = writeEscalationArtifact(artifactBasePath, validatedEscalationArtifact);
-      escalationMetadata = {
-        artifactPath: escalationPath,
-        question: validatedEscalationArtifact.question,
-        options: validatedEscalationArtifact.options,
-        recommendation: validatedEscalationArtifact.recommendation,
-        recommendationRationale: validatedEscalationArtifact.recommendationRationale,
-        continueWithDefault: validatedEscalationArtifact.continueWithDefault,
-      };
+      recordEscalation(validatedEscalation);
+      escalationRecorded = true;
     } catch (escalationErr) {
       const msg = `complete-task escalation write failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}: ${(escalationErr as Error).message}`;
       logWarning("tool", msg);
-      if (validatedEscalationArtifact.continueWithDefault === false) {
-        escalationProjectionError = `${msg}; completion remains committed and the escalation projection is stale`;
+      if (validatedEscalation.continueWithDefault === false) {
+        escalationError = `${msg}; completion remains committed and the escalation is not recorded`;
       }
     }
-  } else if (params.escalation && !escalationWriteEnabled) {
-    logWarning(
-      "tool",
-      `complete-task received escalation payload but phases.mid_execution_escalation is not enabled; ignoring (${params.milestoneId}/${params.sliceId}/${params.taskId})`,
-    );
   }
 
   // Invalidate all caches
@@ -830,8 +799,8 @@ export async function handleCompleteTask(
     logError("tool", `complete-task event log FAILED — completion invisible to reconciliation`, { error: (eventErr as Error).message });
   }
 
-  if (escalationProjectionError) {
-    return { error: escalationProjectionError };
+  if (escalationError) {
+    return { error: escalationError };
   }
 
   return {
@@ -839,7 +808,15 @@ export async function handleCompleteTask(
     sliceId: params.sliceId,
     milestoneId: params.milestoneId,
     summaryPath,
-    ...(escalationMetadata ? { escalation: escalationMetadata } : {}),
+    ...(validatedEscalation && escalationRecorded ? {
+      escalation: {
+        question: validatedEscalation.question,
+        options: validatedEscalation.options,
+        recommendation: validatedEscalation.recommendation,
+        recommendationRationale: validatedEscalation.recommendationRationale,
+        continueWithDefault: validatedEscalation.continueWithDefault,
+      },
+    } : {}),
     ...(projectionStale ? { stale: true } : {}),
   };
 }

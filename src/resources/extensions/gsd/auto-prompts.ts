@@ -3057,7 +3057,7 @@ export async function buildExecuteTaskPrompt(
   if (prefs?.preferences?.phases?.mid_execution_escalation === true) {
     try {
       const { claimOverrideForInjection } = await import("./escalation.js");
-      const claimed = claimOverrideForInjection(base, mid, sid);
+      const claimed = claimOverrideForInjection(mid, sid);
       if (claimed) {
         const block = claimed.injectionBlock + "\n\n---\n\n";
         phaseAnchorSection = phaseAnchorSection

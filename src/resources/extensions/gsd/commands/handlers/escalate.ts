@@ -6,7 +6,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent
 import { projectRoot } from "../context.js";
 import { getActiveMilestoneId } from "../../state.js";
 import {
-  readEscalationArtifact,
+  readTaskEscalation,
   formatEscalationForDisplay,
   resolveEscalation,
   listActionableEscalations,
@@ -37,13 +37,12 @@ function helpMessage(): string {
 
 function formatListEntries(
   rows: ReturnType<typeof listActionableEscalations>,
-  basePath: string,
 ): string {
   if (rows.length === 0) return "No escalations.";
   return rows.map((t) => {
-    const art = t.escalation_artifact_path ? readEscalationArtifact(t.escalation_artifact_path) : null;
+    const escalation = readTaskEscalation(t.milestone_id, t.slice_id, t.id);
     const status = t.escalation_pending ? "PENDING (paused)" : t.escalation_awaiting_review ? "awaiting-review" : "resolved";
-    const question = art?.question ?? "(artifact missing)";
+    const question = escalation?.question ?? "(question missing)";
     return `  ${t.slice_id}/${t.id}  [${status}]  ${question}`;
   }).join("\n");
 }
@@ -81,7 +80,7 @@ export async function handleEscalateCommand(
   if (trimmed === "list" || trimmed === "list --all" || trimmed === "--all") {
     const includeAll = trimmed.includes("--all");
     const rows = includeAll ? listAllEscalations(milestoneId) : listActionableEscalations(milestoneId);
-    const body = formatListEntries(rows, basePath);
+    const body = formatListEntries(rows);
     ctx.ui.notify(
       `${includeAll ? "All escalations" : "Actionable escalations"} for ${milestoneId}:\n${body}`,
       "info",
@@ -119,16 +118,12 @@ export async function handleEscalateCommand(
       ctx.ui.notify(`Task ${ref} matches multiple slices. Use Sxx/Tyy format.`, "warning");
       return;
     }
-    if (row === "not-found" || !row.escalation_artifact_path) {
+    const escalation = row === "not-found" ? null : readTaskEscalation(milestoneId, row.slice_id, row.id);
+    if (!escalation) {
       ctx.ui.notify(`No escalation found for ${ref} in ${milestoneId}.`, "warning");
       return;
     }
-    const art = readEscalationArtifact(row.escalation_artifact_path);
-    if (!art) {
-      ctx.ui.notify(`Escalation artifact at ${row.escalation_artifact_path} is missing or malformed.`, "error");
-      return;
-    }
-    ctx.ui.notify(formatEscalationForDisplay(art), "info");
+    ctx.ui.notify(formatEscalationForDisplay(escalation), "info");
     return;
   }
 
@@ -165,7 +160,7 @@ export async function handleEscalateCommand(
     // Persist the user's choice as a decision (only for resolved, not reject-blocker).
     if (result.status === "resolved") {
       try {
-        const art = row.escalation_artifact_path ? readEscalationArtifact(row.escalation_artifact_path) : null;
+        const art = readTaskEscalation(milestoneId, row.slice_id, taskId);
         const scope = `${milestoneId}/${row.slice_id}/${taskId}`;
         const decisionText = art?.question ?? `escalation on ${taskId}`;
         const choiceLabel = choice === "accept"

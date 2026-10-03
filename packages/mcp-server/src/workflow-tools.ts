@@ -2517,7 +2517,7 @@ const taskCompleteParams = {
       id: z.string().describe("Short id (e.g. 'A', 'B') used by /gsd escalate resolve."),
       label: z.string().describe("One-line label."),
       tradeoffs: z.string().describe("1-2 sentences on the tradeoffs of this option."),
-    })).min(2).max(4).describe("2-4 options the user can choose between."),
+    })).min(2).max(3).describe("2-3 options the user can choose between."),
     recommendation: z.string().describe("Option id the executor recommends."),
     recommendationRationale: z.string().describe("Why the recommendation — 1-2 sentences."),
     continueWithDefault: z.boolean().describe(

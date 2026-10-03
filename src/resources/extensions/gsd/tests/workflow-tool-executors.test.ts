@@ -652,62 +652,53 @@ test("executeTaskComplete treats a malformed duplicate for an already-complete t
   }
 });
 
-test("executeTaskComplete creates the legacy escalation directory and surfaces its metadata", async () => {
+test("executeTaskComplete rejects an escalation on a Task without a canonical lifecycle", async (t) => {
   const base = makeTmpBase();
-  try {
-    openTestDb(base);
-    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), [
-      "---",
-      "version: 1",
-      "phases:",
-      "  mid_execution_escalation: true",
-      "---",
-    ].join("\n"));
-    const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(planDir, { recursive: true });
-    writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
-
-    const result = await inProjectDir(base, () => executeTaskComplete({
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-      oneLiner: "Completed task",
-      narrative: "Did the work but found an ambiguity.",
-      verification: "npm test",
-      escalation: {
-        question: "Should the cache use write-through or write-back?",
-        options: [
-          { id: "A", label: "Write-through", tradeoffs: "Simpler reads; slower writes." },
-          { id: "B", label: "Write-back", tradeoffs: "Faster writes; more flush complexity." },
-        ],
-        recommendation: "A",
-        recommendationRationale: "Current usage favors correctness over write latency.",
-        continueWithDefault: true,
-      },
-    }, base));
-
-    assert.equal(result.details.operation, "complete_task");
-    assert.match(
-      String(result.content[0]?.text),
-      /Task completed with escalation decision required: Should the cache use write-through or write-back\?/,
-    );
-    assert.match(String(result.content[0]?.text), /Resolve with: \/gsd escalate resolve T01/);
-    assert.equal((result.details.escalation as { question?: string }).question, "Should the cache use write-through or write-back?");
-
-    const db = _getAdapter();
-    assert.ok(db, "DB should be open");
-    const row = db!.prepare(
-      "SELECT escalation_pending, escalation_awaiting_review, escalation_artifact_path FROM tasks WHERE milestone_id = ? AND slice_id = ? AND id = ?",
-    ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
-    assert.equal(row?.escalation_pending, 0);
-    assert.equal(row?.escalation_awaiting_review, 1);
-    const expectedArtifactPath = join(normalizeRealPath(planDir), "tasks", "T01-ESCALATION.json");
-    assert.equal(row?.escalation_artifact_path, expectedArtifactPath);
-    assert.equal(existsSync(expectedArtifactPath), true);
-  } finally {
+  t.after(() => {
     closeDatabase();
     cleanup(base);
-  }
+  });
+  openTestDb(base);
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), [
+    "---",
+    "version: 1",
+    "phases:",
+    "  mid_execution_escalation: true",
+    "---",
+  ].join("\n"));
+  const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+  mkdirSync(planDir, { recursive: true });
+  writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
+
+  const result = await inProjectDir(base, () => executeTaskComplete({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    oneLiner: "Completed task",
+    narrative: "Did the work but found an ambiguity.",
+    verification: "npm test",
+    escalation: {
+      question: "Should the cache use write-through or write-back?",
+      options: [
+        { id: "A", label: "Write-through", tradeoffs: "Simpler reads; slower writes." },
+        { id: "B", label: "Write-back", tradeoffs: "Faster writes; more flush complexity." },
+      ],
+      recommendation: "A",
+      recommendationRationale: "Current usage favors correctness over write latency.",
+      continueWithDefault: true,
+    },
+  }, base));
+
+  assert.equal(result.isError, true);
+  assert.match(String(result.content[0]?.text), /escalation requires a canonical Task lifecycle for M001\/S01\/T01/);
+
+  const db = _getAdapter();
+  assert.ok(db, "DB should be open");
+  const row = db!.prepare(
+    "SELECT COUNT(*) AS count FROM tasks WHERE milestone_id = ? AND slice_id = ? AND id = ?",
+  ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
+  assert.equal(row?.count, 0, "the rejected escalation must not complete the task");
+  assert.equal(existsSync(join(planDir, "tasks", "T01-ESCALATION.json")), false);
 });
 
 test("executeTaskComplete surfaces stale readable status and duplicate repair metadata", async (t) => {
@@ -747,26 +738,6 @@ test("executeTaskComplete surfaces stale readable status and duplicate repair me
   assert.equal(ordinary.isError, undefined);
   assert.equal(ordinary.details.stale, true);
   assert.match(String(ordinary.content[0]?.text), /readable status update is pending repair/i);
-
-  const escalated = await inProjectDir(base, () => executeTaskComplete({
-    ...ordinaryParams,
-    taskId: "T02",
-    oneLiner: "Completed escalated task",
-    escalation: {
-      question: "Which publication route should be used?",
-      options: [
-        { id: "A", label: "Direct", tradeoffs: "Simple and immediate." },
-        { id: "B", label: "Queued", tradeoffs: "More durable but delayed." },
-      ],
-      recommendation: "A",
-      recommendationRationale: "The direct route is sufficient here.",
-      continueWithDefault: true,
-    },
-  }, base));
-
-  assert.equal(escalated.isError, undefined);
-  assert.equal(escalated.details.stale, true);
-  assert.match(String(escalated.content[0]?.text), /readable status update is pending repair/i);
 
   // The obstruction gate refuses to journal a write over the foreign ROADMAP.md
   // directory, so the retry converges once the obstruction is cleared

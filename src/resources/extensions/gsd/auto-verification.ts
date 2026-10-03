@@ -28,7 +28,7 @@ import {
   isDbAvailable,
 } from "./gsd-db.js";
 import type { TaskRow } from "./db-task-slice-rows.js";
-import { formatEscalationForDisplay, readEscalationArtifact } from "./escalation.js";
+import { formatEscalationForDisplay, readTaskEscalation } from "./escalation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import type { GSDPreferences } from "./preferences-types.js";
 import { isInactiveStatus } from "./status-guards.js";
@@ -809,8 +809,7 @@ function describeBlockerPause(
     lines.push(`Blocker: ${attempt.resultSummary}`);
   }
   if (isDbAvailable()) {
-    const artifactPath = getTask(milestoneId, sliceId, taskId)?.escalation_artifact_path;
-    const artifact = artifactPath ? readEscalationArtifact(artifactPath) : null;
+    const artifact = readTaskEscalation(milestoneId, sliceId, taskId);
     if (artifact && !artifact.respondedAt) {
       lines.push("", formatEscalationForDisplay(artifact));
     }

@@ -653,7 +653,7 @@ export async function deriveStateFromDb(
   // honored even if the user later toggles the flag off. Otherwise those
   // rows would silently orphan, the loop would advance past the paused task,
   // and the user's prior resolution never lands.
-  const escalatingTaskId = detectPendingEscalation(tasks, basePath);
+  const escalatingTaskId = detectPendingEscalation(tasks);
   if (escalatingTaskId) {
     return buildDerivedState(
       activeTaskStateContext,
