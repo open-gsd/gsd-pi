@@ -85,7 +85,7 @@ Before applying any reorder, verify:
 
 - A milestone **cannot** be scheduled before any milestone in `depends_on` (would_block)
 - Circular dependencies are forbidden
-- Dependencies on missing milestones are invalid (missing_dep)
+- A dependency on a missing milestone is invalid (missing_dep). The reorder tool reports it as a warning and does not refuse the order; remove it with `gsd_milestone_set_dependencies`
 - Completed milestones satisfy dependencies regardless of position
 
 If an order violates constraints, explain and suggest alternatives: remove dependency, reorder differently, or park the blocker.
