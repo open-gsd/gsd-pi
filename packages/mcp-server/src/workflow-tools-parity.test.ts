@@ -173,7 +173,7 @@ function cleanup(base: string): void {
 }
 
 function makeMockServer() {
-  type TestRequestExtra = { _meta?: Record<string, unknown> };
+  type TestRequestExtra = { _meta?: Record<string, unknown>; sessionId?: string };
   const tools: Array<{
     name: string;
     handler: (args: Record<string, unknown>, extra?: TestRequestExtra) => Promise<unknown>;
@@ -210,6 +210,7 @@ async function runNativeDbTool(
   toolName: string,
   args: Record<string, unknown>,
   toolCallId = "parity-call",
+  sessionId?: string,
 ): Promise<unknown> {
   const registrations: Array<{
     name: string;
@@ -231,7 +232,10 @@ async function runNativeDbTool(
   registerQueryTools(pi);
   const tool = registrations.find((entry) => entry.name === toolName);
   if (!tool) throw new Error(`native db tool ${toolName} not registered`);
-  return tool.execute(toolCallId, args, undefined, undefined, { cwd: base });
+  return tool.execute(toolCallId, args, undefined, undefined, {
+    cwd: base,
+    ...(sessionId ? { sessionManager: { getSessionId: () => sessionId } } : {}),
+  });
 }
 
 async function runNativeAndMcpParity(input: {
@@ -690,6 +694,7 @@ async function callMcpLifecycleTool(
   name: string,
   args: Record<string, unknown>,
   stableKey: string,
+  sessionId?: string,
 ): Promise<unknown> {
   const server = makeMockServer();
   registerWorkflowTools(server as Parameters<typeof registerWorkflowTools>[0]);
@@ -697,6 +702,7 @@ async function callMcpLifecycleTool(
   assert.ok(tool, `${name} must be registered on a fresh MCP server`);
   return tool.handler({ projectDir: base, ...args }, {
     _meta: { "io.opengsd/idempotency-key": stableKey },
+    ...(sessionId ? { sessionId } : {}),
   });
 }
 
@@ -1130,5 +1136,29 @@ describe("revision fencing: a mutation is checked against the session's last rea
         }
       });
     }
+
+    it(`${transport}: a stale read in one session does not block another session`, async () => {
+      const fixture = await createWorkflowAuthorityFixture();
+      try {
+        let calls = 0;
+        const call = (sessionId: string, tool: string, args: Record<string, unknown>) => {
+          const key = `revision-fence-session-${calls++}`;
+          return transport === "pi"
+            ? runNativeDbTool(fixture.root, tool, args, key, sessionId)
+            : callMcpLifecycleTool(fixture.root, tool, args, key, sessionId);
+        };
+        const before = requirementCount();
+
+        await call("session-a", "gsd_milestone_status", { milestoneId: "M001" });
+        moveRevision(`${transport}-two-sessions`);
+        const other = await call("session-b", "gsd_requirement_save", requirementArgs("Written by a session with no read"));
+        assert.match(text(other), /^Saved requirement R\d+$/, "the read of session A does not fence session B");
+        const stale = await call("session-a", "gsd_requirement_save", requirementArgs("Written on the stale view of session A"));
+        assert.match(text(stale), /stale view/, "session A is still held to its own read");
+        assert.equal(requirementCount(), before + 1);
+      } finally {
+        fixture.cleanup();
+      }
+    });
   }
 });
