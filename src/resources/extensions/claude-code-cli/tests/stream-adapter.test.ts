@@ -495,6 +495,148 @@ describe("stream-adapter — content-index continuity across SDK sub-messages (#
 	});
 });
 
+describe("stream-adapter — start partial carries the streamed blocks (#2539)", () => {
+	// Same turn layout as the #2538 scenario: [text A, tool1] → synthetic-user
+	// boundary → [text B, tool2] → boundary → [text C].
+	function* startPartialScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		const boundary = (uuid: string, toolUseId: string, content: string) => ({
+			type: "user",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+			},
+		});
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Alpha analysis." } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"command\":\"echo hi\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		yield boundary("user-1", "tool-1", "out-1");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Bravo summary." } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "Read", input: {} } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"file_path\":\"b.txt\"}" } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p2");
+		yield boundary("user-2", "tool-2", "out-2");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p3");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p3");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Charlie wrap-up." } }, "p3");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p3");
+		yield makeSdkSuccessResult("done");
+	}
+
+	test("toolcall_start blocks built from the start partial carry real ids and names", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: startPartialScenario,
+			} as any,
+		);
+
+		// Apply events exactly the way pi-agent-core's agent loop does: the
+		// `start` event's partial is the provider's live message, and each
+		// `toolcall_start` block is built from it at `event.contentIndex`.
+		let providerPartial: AssistantMessage | null = null;
+		let partial: AssistantMessage | null = null;
+		let turnResult: AssistantMessage | null = null;
+		const startedTools: Array<{ id: string; name: string }> = [];
+		for await (const event of stream) {
+			switch (event.type) {
+				case "start":
+					providerPartial = event.partial;
+					partial = { ...event.partial, content: event.partial.content.map((block) => ({ ...block })) };
+					break;
+				case "text_start":
+					if (partial) partial.content[event.contentIndex] = { type: "text", text: "" };
+					break;
+				case "text_delta":
+					if (partial) {
+						const block = partial.content[event.contentIndex];
+						if (block?.type === "text") block.text += event.delta;
+					}
+					break;
+				case "toolcall_start": {
+					const streamedBlock = providerPartial?.content[event.contentIndex];
+					const built = streamedBlock?.type === "toolCall"
+						? { ...streamedBlock, arguments: {} }
+						: { type: "toolCall" as const, id: "", name: "", arguments: {} };
+					if (partial) partial.content[event.contentIndex] = built;
+					startedTools.push({ id: built.id, name: built.name });
+					break;
+				}
+				case "done":
+					turnResult = event.message;
+					break;
+				case "error":
+					assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+					break;
+				default:
+					break;
+			}
+		}
+
+		// The turn must complete cleanly — identity at toolcall_start is the
+		// contract, not an error-path artifact.
+		assert.ok(turnResult, "stream must end with a successful done event");
+		// Pre-fix the start partial stayed empty, so both lookups missed and
+		// every tool started as { id: "", name: "" } — rendered "unknown" and
+		// colliding on the empty id in the TUI's pending-tool map.
+		assert.deepEqual(startedTools, [
+			{ id: "tool-1", name: "Bash" },
+			{ id: "tool-2", name: "Read" },
+		]);
+	});
+
+	test("start partial mirrors the full streamed layout across sub-message boundaries", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: startPartialScenario,
+			} as any,
+		);
+
+		let providerPartial: AssistantMessage | null = null;
+		let completed = false;
+		for await (const event of stream) {
+			if (event.type === "start") providerPartial = event.partial;
+			if (event.type === "done") completed = true;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+		assert.ok(completed, "stream must end with a successful done event");
+
+		// The provider partial is the live message: it must hold every streamed
+		// block at its (shifted) turn index, in stream order.
+		assert.deepEqual(
+			providerPartial?.content.map((block) =>
+				block.type === "text" ? block.text : block.type === "toolCall" ? `tool:${block.id}` : block.type
+			),
+			["Alpha analysis.", "tool:tool-1", "Bravo summary.", "tool:tool-2", "Charlie wrap-up."],
+		);
+		const tool2 = providerPartial?.content[3] as any;
+		assert.deepEqual(tool2?.arguments, { file_path: "b.txt" });
+	});
+});
+
 // ---------------------------------------------------------------------------
 // Bug #2859 — stateless provider regression tests
 // ---------------------------------------------------------------------------

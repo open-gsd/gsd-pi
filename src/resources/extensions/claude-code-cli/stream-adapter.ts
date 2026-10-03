@@ -3028,6 +3028,18 @@ async function pumpSdkMessages(
 									const localContentIndex = assistantEvent.contentIndex;
 									const globalContentIndex = contentIndexBase + localContentIndex;
 									emittedContentCount = Math.max(emittedContentCount, globalContentIndex + 1);
+									// The `start` event's partial is the provider's live message:
+									// pi-agent-core builds each `toolcall_start` block from it
+									// (`providerPartialMessage.content[event.contentIndex]`), and
+									// native providers keep theirs populated. Mirror every streamed
+									// block here at the shifted index, or the lookup misses and
+									// every tool starts as `{ id: "", name: "" }` — rendered
+									// "unknown", and because all such rows share the empty id, the
+									// next tool reuses the previous pending row (#2539).
+									const streamedBlock = builder?.message.content[localContentIndex];
+									if (streamedBlock) {
+										initialPartial.content[globalContentIndex] = streamedBlock;
+									}
 									stream.push({ ...assistantEvent, contentIndex: globalContentIndex });
 									if (assistantEvent.type === "toolcall_start" && builder) {
 										// Local index — the block lives in the builder's own content.
