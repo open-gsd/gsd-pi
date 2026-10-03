@@ -415,6 +415,10 @@ export async function renderStateProjection(basePath: string): Promise<{ stale: 
   } catch (err) {
     logWarning("projection", `renderStateProjection failed: ${(err as Error).message}`);
     return { stale: true };
+  } finally {
+    // The render's own derive must not stay cached: a later commit with no
+    // render of its own would be read back as this older state.
+    invalidateStateCache();
   }
 }
 
