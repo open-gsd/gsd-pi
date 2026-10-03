@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -26,7 +26,9 @@ test("startup database open treats merge JSONL as projection-only", async () => 
     await openProjectDbIfPresent(base);
 
     assert.deepEqual(getAllMilestones(), before);
-    assert.equal(Number(_getAdapter()!.prepare("SELECT total_changes() AS count").get()?.["count"]), 0);
+    // The only write is the first open binding the database to this checkout.
+    assert.equal(Number(_getAdapter()!.prepare("SELECT total_changes() AS count").get()?.["count"]), 1);
+    assert.equal(_getAdapter()!.prepare("SELECT project_root_realpath FROM project_authority").get()?.["project_root_realpath"], realpathSync(base));
   } finally {
     if (isDbAvailable()) closeDatabase();
     rmSync(base, { recursive: true, force: true });

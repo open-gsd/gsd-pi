@@ -1762,6 +1762,11 @@ export function getArtifactsByPathPrefix(prefix: string): ArtifactRow[] {
  * when a user capture requests a replan so the dispatcher can detect the
  * trigger via DB in addition to the on-disk REPLAN-TRIGGER.md marker.
  */
+/** Bind the open database to one checkout root (db-workspace enforces the binding). */
+export function setProjectRootBinding(root: string): void {
+  getDb().prepare("UPDATE project_authority SET project_root_realpath = :root WHERE singleton = 1").run({ ":root": root });
+}
+
 export function setSliceReplanTriggeredAt(milestoneId: string, sliceId: string, ts: string): void {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(

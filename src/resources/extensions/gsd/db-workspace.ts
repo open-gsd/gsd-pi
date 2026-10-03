@@ -26,6 +26,7 @@ import {
   openDatabaseByWorkspace,
   openIsolatedDatabase,
   refreshOpenDatabaseFromDisk,
+  setProjectRootBinding,
   vacuumDatabase,
   wasDbOpenAttempted,
 } from "./gsd-db.js";
@@ -182,18 +183,35 @@ function hasWorkflowHistoryWithoutDatabase(location: Pick<WorkflowDatabaseLocati
   } catch {
     // Absent database: fall through to the history check.
   }
-  const entries = (dir: string): string[] => {
-    try {
-      return readdirSync(dir);
-    } catch {
-      return [];
-    }
-  };
-  return ["phases", "milestones"].some((layout) => {
-    const container = join(location.projectGsd, layout);
-    return entries(container).some((milestone) => entries(join(container, milestone)).length > 0);
-  })
-    || entries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"));
+  return milestoneProjectionEntries(location.projectGsd).length > 0
+    || dirEntries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"));
+}
+
+function dirEntries(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+/** Entry names inside every milestone directory, in the `phases/` and legacy `milestones/` layouts. */
+function milestoneProjectionEntries(projectGsd: string): string[] {
+  return ["phases", "milestones"].flatMap((layout) => {
+    const container = join(projectGsd, layout);
+    return dirEntries(container).flatMap((milestone) => dirEntries(join(container, milestone)));
+  });
+}
+
+/**
+ * True when the open database has no milestone rows but `.gsd` holds a planned
+ * milestone (a ROADMAP projection), such as a re-clone of tracked `.gsd` beside
+ * a schema-only gsd.db. Only Import Application may fill it. Discussion scratch
+ * (CONTEXT or CONTEXT-DRAFT without a ROADMAP) is not planned work.
+ */
+function isEmptyDatabaseBesidePlannedProjections(projectGsd: string): boolean {
+  if (_getAdapter()?.prepare("SELECT 1 FROM milestones LIMIT 1").get() !== undefined) return false;
+  return milestoneProjectionEntries(projectGsd).some((entry) => entry.endsWith("ROADMAP.md"));
 }
 
 function authorityMissingError(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): GSDError {
@@ -246,7 +264,7 @@ function enforceCheckoutBinding(basePath: string, projectDb: string, rebind: boo
     );
   }
   try {
-    db.prepare("UPDATE project_authority SET project_root_realpath = :root WHERE singleton = 1").run({ ":root": root });
+    setProjectRootBinding(root);
   } catch (err) {
     if (rebind) throw err;
     // A replacement-observation handle is read-only; a later normal open binds.
@@ -279,12 +297,20 @@ function openWorkflowDatabaseWithMode(
   if (!options.createEmptyAuthority && hasWorkflowHistoryWithoutDatabase(location)) {
     return { ok: false, reason: "authority-missing", location, error: authorityMissingError(location) };
   }
+  // A handle this process already admitted (an earlier open, or the explicit
+  // createEmptyAuthority import path) is not judged again.
+  const openPath = isDbAvailable() ? getDbPath() : null;
+  const alreadyOpen = openPath !== null && normalizeRealPath(openPath) === normalizeRealPath(location.projectDb);
   try {
     const opened = createIfMissing
       ? openDatabase(location.projectDb)
       : openExistingDatabase(location.projectDb);
     if (!opened) {
       return { ok: false, reason: "open-failed", location };
+    }
+    if (!options.createEmptyAuthority && !alreadyOpen && isEmptyDatabaseBesidePlannedProjections(location.projectGsd)) {
+      closeDatabase();
+      return { ok: false, reason: "authority-missing", location, error: authorityMissingError(location) };
     }
     const unbound = enforceCheckoutBinding(basePath, location.projectDb, options.bindCheckout === true);
     if (unbound) {

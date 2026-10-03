@@ -19,6 +19,7 @@ import {
   resolveProjectRootDbPath,
 } from "../db-workspace.ts";
 import { GitServiceImpl } from "../git-service.ts";
+import { showSmartEntry } from "../guided-flow.ts";
 import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { describeHeldProjectionChanges, preserveProjectionChangesBeforeDispatch } from "../projection-worker.ts";
 import { ensureGsdSymlink } from "../repo-identity.ts";
@@ -139,7 +140,7 @@ test("a copied database with another root is refused for writes", async () => {
   assert.equal(boundRoot(copiedDb), source, "the refused open must not rebind the copy");
 });
 
-test("a re-clone with tracked projections and no database blocks auto, guided, headless and MCP writes", async () => {
+for (const existingDb of ["none", "schema-only"] as const) test(`a re-clone with tracked projections and ${existingDb === "none" ? "no" : "a schema-only"} database blocks auto, guided, headless and MCP writes`, async () => {
   const origin = tempDir("gsd-tracked-origin-");
   initRepo(origin);
   mkdirSync(join(origin, ".gsd", "phases", "01-foo"), { recursive: true });
@@ -155,6 +156,11 @@ test("a re-clone with tracked projections and no database blocks auto, guided, h
   git(clone, "config", "user.name", "Test");
   const dbPath = join(clone, ".gsd", "gsd.db");
   const recoverInstruction = /authority-missing: .*\/gsd recover/s;
+  if (existingDb === "schema-only") {
+    // An older GSD silently created an empty database beside the projections.
+    assert.equal(openDatabase(dbPath), true);
+    closeDatabase();
+  }
 
   // Guided flow and native tool handlers open through ensureDbOpen.
   await assert.rejects(ensureDbOpen(clone), recoverInstruction);
@@ -191,7 +197,17 @@ test("a re-clone with tracked projections and no database blocks auto, guided, h
   );
   assert.equal(ready, false);
   assert.match(notes.find((note) => note.level === "error")?.message ?? "", recoverInstruction, JSON.stringify(notes));
-  assert.equal(existsSync(dbPath), false, "no empty database may be created beside tracked projections");
+  if (existingDb === "none") {
+    assert.equal(existsSync(dbPath), false, "no empty database may be created beside tracked projections");
+  } else {
+    const { db } = openSqliteReadOnly(dbPath);
+    try {
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM milestones").get()?.["count"], 0, "nothing was written into the empty database");
+    } finally {
+      db.close();
+    }
+    assert.equal(openWorkflowDatabase(clone, { createEmptyAuthority: true }).ok, true, "the explicit import path still opens it");
+  }
 });
 
 function listFiles(dir: string): string[] {
@@ -201,7 +217,10 @@ function listFiles(dir: string): string[] {
     .map((entry) => join(entry.parentPath, entry.name));
 }
 
-test("a pulled projection change raises one 'changed outside GSD' state and no dispatch proceeds without a choice", async () => {
+/** A tracked project whose T01 summary a teammate changed; this checkout pulled it. */
+async function trackedProjectAfterPull(
+  teammateChange: (teammate: string) => void = () => {},
+): Promise<{ base: string; summaryPath: string; ctx: any }> {
   const base = tempDir("gsd-tracked-pull-");
   initRepo(base);
   mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
@@ -234,8 +253,14 @@ test("a pulled projection change raises one 'changed outside GSD' state and no d
   git(teammate, "config", "user.email", "mate@test.com");
   git(teammate, "config", "user.name", "Mate");
   writeFileSync(join(teammate, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-SUMMARY.md"), "# T01 Summary\n\nTeammate edit.\n");
+  teammateChange(teammate);
   git(teammate, "commit", "-qam", "teammate edit");
   git(base, "pull", "-q", "--ff-only", teammate, "main");
+  return { base, summaryPath, ctx };
+}
+
+test("a pulled projection change raises one 'changed outside GSD' state and no dispatch proceeds without a choice", async () => {
+  const { base, summaryPath, ctx } = await trackedProjectAfterPull();
 
   const observed = await preserveProjectionChangesBeforeDispatch(base);
   assert.deepEqual(observed.held, [summaryPath]);
@@ -262,6 +287,30 @@ test("a pulled projection change raises one 'changed outside GSD' state and no d
   assert.equal(quarantined.length, 1);
   assert.match(readFileSync(quarantined[0]!, "utf-8"), /Teammate edit/);
   assert.deepEqual((await preserveProjectionChangesBeforeDispatch(base)).held, []);
+});
+
+test("guided entry does not self-heal over a pulled projection change: it keeps the change and stops", async () => {
+  const roadmap = join(".gsd", "milestones", "M001", "M001-ROADMAP.md");
+  // The pull also deletes the roadmap, so the hierarchy check asks for a markdown rebuild.
+  const { base, summaryPath } = await trackedProjectAfterPull((teammate) => rmSync(join(teammate, roadmap)));
+  assert.equal(existsSync(join(base, roadmap)), false);
+  const notes: Array<{ message: string; level: string }> = [];
+
+  await showSmartEntry(
+    { hasUI: false, ui: { notify: (message: string, level: string) => notes.push({ message, level }), setStatus: () => {} } } as any,
+    {
+      sendMessage: () => { throw new Error("guided entry must not dispatch on old content"); },
+      getActiveTools: () => [],
+      setActiveTools: () => {},
+    } as any,
+    base,
+  );
+
+  assert.equal(notes.at(-1)?.level, "error", JSON.stringify(notes));
+  assert.match(notes.at(-1)?.message ?? "", /changed outside GSD: .*T01-SUMMARY\.md/);
+  assert.match(readFileSync(summaryPath, "utf-8"), /Teammate edit/, "the pulled change stays in place");
+  assert.equal(existsSync(join(base, roadmap)), false, "no rebuild ran");
+  assert.equal(existsSync(join(base, ".gsd", "quarantine")), false);
 });
 
 test("one resolver finds the database from gsd.db, not from projection files", () => {
