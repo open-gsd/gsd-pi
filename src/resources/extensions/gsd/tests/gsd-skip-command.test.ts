@@ -81,7 +81,7 @@ describe("/gsd skip", () => {
   test("a slice skip records cancellation plus Waiver and the dependent slice no longer waits for it", async () => {
     const { ctx, notes } = makeCtx();
 
-    await handleSkip("execute-task/M001/S01", ctx, base);
+    await handleSkip("M001/S01", ctx, base);
 
     assert.equal(notes.at(-1)?.level, "success", notes.at(-1)?.message);
     assert.equal(getSlice("M001", "S01")?.status, "skipped");
@@ -94,6 +94,36 @@ describe("/gsd skip", () => {
     const state = await deriveStateFromDb(base);
     assert.equal(state.activeSlice?.id, "S02");
   });
+
+  test("the milestone id keeps its lowercase suffix and the execute-task prefix names a task", async () => {
+    insertMilestone({ id: "M002-abc123", title: "Unique", status: "queued" });
+    insertSlice({ id: "S01", milestoneId: "M002-abc123", title: "First", status: "pending", risk: "low", depends: [] });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M002-abc123", title: "Task one", status: "pending" });
+    insertTask({ id: "T02", sliceId: "S01", milestoneId: "M002-abc123", title: "Task two", status: "pending" });
+    const { ctx, notes } = makeCtx();
+
+    await handleSkip("M002-abc123/s01/t01", ctx, base);
+    assert.equal(notes.at(-1)?.level, "success", notes.at(-1)?.message);
+    assert.equal(getTask("M002-abc123", "S01", "T01")?.status, "skipped");
+
+    await handleSkip("execute-task/M002-abc123/S01/T02", ctx, base);
+    assert.equal(notes.at(-1)?.level, "success", notes.at(-1)?.message);
+    assert.equal(getTask("M002-abc123", "S01", "T02")?.status, "skipped");
+  });
+
+  for (const unit of ["plan-slice/M001/S01", "research-slice/M001/S01", "execute-task/M001/S01"]) {
+    test(`${unit} is refused and the slice stays open`, async () => {
+      const { ctx, notes } = makeCtx();
+      const before = _getAdapter()!.prepare("SELECT COUNT(*) AS count FROM workflow_operations").get()!["count"];
+
+      await handleSkip(unit, ctx, base);
+
+      assert.equal(notes.at(-1)?.level, "warning");
+      assert.ok(notes.at(-1)?.message.includes(`"${unit}" is not a slice or task path`), notes.at(-1)?.message);
+      assert.equal(getSlice("M001", "S01")?.status, "active");
+      assert.equal(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM workflow_operations").get()!["count"], before);
+    });
+  }
 
   test("an unknown unit fails loudly and writes nothing", async () => {
     const { ctx, notes } = makeCtx();

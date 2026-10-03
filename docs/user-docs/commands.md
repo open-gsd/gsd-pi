@@ -128,7 +128,7 @@ The two `/gsd recover` forms serve different recovery domains. Use the no-argume
 | `/gsd unpark` | Reactivate a parked milestone |
 | `/gsd discard <milestone-id>` | Confirm and discard one milestone: it is cancelled in the database (kept as a tombstone) and its files are removed |
 | `/gsd rethink` | Conversational project reorganization — reorder, park, discard, or add milestones |
-| Discard milestone | Available via `/gsd` wizard → "Milestone actions" → "Discard"; milestones with adopted canonical lifecycle history must be parked instead |
+| Discard milestone | Available via `/gsd` wizard → "Milestone actions" → "Discard"; completed or closed milestones are refused |
 
 Milestone and slice titles created during planning must not contain forward slash (`/`), en dash, or em dash characters. GSD reserves those characters as state-document delimiters, so `plan-milestone` rejects titles that include them.
 

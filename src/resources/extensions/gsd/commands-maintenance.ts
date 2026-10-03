@@ -13,6 +13,7 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { deriveState } from "./state.js";
+import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { nativeBranchList, nativeDetectMainBranch, nativeBranchListMerged, nativeBranchDelete, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
 import { logWarning } from "./workflow-logger.js";
 import type { DbAdapter } from "./db-adapter.js";
@@ -262,17 +263,25 @@ export async function handleSkip(unitArg: string, ctx: ExtensionCommandContext, 
     return;
   }
 
-  // Accept "execute-task/M001/S01/T03", "M001/S01/T03", "M001/S01", "T03" or "S01".
-  let parts = unitArg.trim().replace(/^[a-z-]+\//, "").toUpperCase().split("/");
-  if (parts.length === 1 && /^[TS]\d+$/.test(parts[0])) {
+  // Accept "M001/S01/T03", "M001/S01", "T03", "S01" or "execute-task/M001/S01/T03".
+  let parts = unitArg.trim().split("/");
+  if (parts.length === 4 && parts[0] === "execute-task") parts = parts.slice(1);
+  if (parts.length === 1 && /^[TS]\d+$/i.test(parts[0])) {
     const state = await deriveState(basePath);
     const mid = state.activeMilestone?.id;
     const sid = state.activeSlice?.id;
-    if (parts[0].startsWith("T") && mid && sid) parts = [mid, sid, parts[0]];
-    else if (parts[0].startsWith("S") && mid) parts = [mid, parts[0]];
+    if (/^T/i.test(parts[0]) && mid && sid) parts = [mid, sid, parts[0]];
+    else if (/^S/i.test(parts[0]) && mid) parts = [mid, parts[0]];
   }
-  if ((parts.length !== 2 && parts.length !== 3) || parts.some((part) => !part)) {
-    ctx.ui.notify(usage, "warning");
+  parts = parts.map((part, index) => index === 0 ? part : part.toUpperCase());
+  const [milestoneId, sliceId, taskId] = parts;
+  if (
+    parts.length < 2 || parts.length > 3
+    || !MILESTONE_ID_RE.test(milestoneId)
+    || !/^S\d+$/.test(sliceId)
+    || (taskId !== undefined && !/^T\d+$/.test(taskId))
+  ) {
+    ctx.ui.notify(`gsd skip: "${unitArg.trim()}" is not a slice or task path. ${usage}`, "warning");
     return;
   }
 

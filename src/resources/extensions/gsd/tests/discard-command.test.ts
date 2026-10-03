@@ -10,7 +10,9 @@ import { test } from "node:test";
 
 import { handleWorkflowCommand } from "../commands/handlers/workflow.ts";
 import { withCommandCwd } from "../commands/context.ts";
-import { closeDatabase, getMilestone, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, getMilestone, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { discardMilestone } from "../milestone-actions.ts";
+import { deriveStateFromDb, invalidateStateCache } from "../state.ts";
 
 test("/gsd discard confirms and calls the primitive directly", async (t) => {
   const base = mkdtempSync(join(tmpdir(), "gsd-discard-command-"));
@@ -68,4 +70,28 @@ test("/gsd discard leaves the milestone when confirmation is declined", async (t
   assert.equal(handled, true);
   assert.notEqual(getMilestone("M001"), null);
   assert.ok(notifications.includes("Discard of M001 cancelled."));
+});
+
+test("a discarded milestone is not complete and does not satisfy a dependency", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-discard-dependency-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "First", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending", risk: "low", depends: [] });
+  insertMilestone({ id: "M002", title: "Second", status: "queued", depends_on: ["M001"] });
+  insertSlice({ id: "S01", milestoneId: "M002", title: "Slice", status: "pending", risk: "low", depends: [] });
+  invalidateStateCache();
+  assert.equal((await deriveStateFromDb(base)).activeMilestone?.id, "M001");
+
+  assert.equal(discardMilestone(base, "M001"), true);
+
+  invalidateStateCache();
+  const state = await deriveStateFromDb(base);
+  assert.notEqual(state.activeMilestone?.id, "M002");
+  assert.deepEqual(state.registry, [{ id: "M002", title: "Second", status: "pending", dependsOn: ["M001"] }]);
+  assert.deepEqual(state.progress?.milestones, { done: 0, total: 1 });
 });
