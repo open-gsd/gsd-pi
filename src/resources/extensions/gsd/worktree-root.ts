@@ -208,11 +208,13 @@ function resolveNearestBootstrappedGsdRoot(path: string): string | null {
   return null;
 }
 
+// The project root (and so the DB path) is anchored on the database and the
+// user's preferences, never on projection files such as milestones/.
 function hasGsdBootstrapArtifacts(gsdPath: string): boolean {
   return existsSync(gsdPath) &&
-    (existsSync(join(gsdPath, "PREFERENCES.md")) ||
-      existsSync(join(gsdPath, "preferences.md")) ||
-      existsSync(join(gsdPath, "milestones")));
+    (existsSync(join(gsdPath, "gsd.db")) ||
+      existsSync(join(gsdPath, "PREFERENCES.md")) ||
+      existsSync(join(gsdPath, "preferences.md")));
 }
 
 function resolveGitWorkingTreeRoot(path: string): string | null {

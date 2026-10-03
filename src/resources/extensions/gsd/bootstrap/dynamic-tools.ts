@@ -147,7 +147,7 @@ export function formatWorkflowDatabaseOpenFailure(
     return `ensureDbOpen failed — no .gsd directory found at ${result.location.projectGsd}`;
   }
 
-  if (result.reason === "authority-missing") {
+  if (result.reason === "authority-missing" || result.reason === "checkout-unbound") {
     return `ensureDbOpen failed — ${result.error.message}`;
   }
 
@@ -172,9 +172,11 @@ export async function ensureDbOpen(
   if (result.ok) return true;
 
   logWarning("bootstrap", formatWorkflowDatabaseOpenFailure(result));
-  // A too-new schema or a lost authority is not generic unavailability:
-  // throw the typed error so callers cannot degrade to "not available".
-  if (result.reason === "schema-too-new" || result.reason === "authority-missing") throw result.error;
+  // A too-new schema, a lost authority or another checkout's database is not
+  // generic unavailability: throw the typed error so callers cannot degrade.
+  if (result.reason === "schema-too-new" || result.reason === "authority-missing" || result.reason === "checkout-unbound") {
+    throw result.error;
+  }
   return false;
 }
 

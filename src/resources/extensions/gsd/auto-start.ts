@@ -1164,7 +1164,7 @@ export async function bootstrapAutoSession(
     // Workflow history without a database: stop before any state derivation
     // or dispatch can run against a missing authority.
     const firstDbOpen = openWorkflowDatabase(base);
-    if (!firstDbOpen.ok && firstDbOpen.reason === "authority-missing") {
+    if (!firstDbOpen.ok && (firstDbOpen.reason === "authority-missing" || firstDbOpen.reason === "checkout-unbound")) {
       ctx.ui.notify(firstDbOpen.error.message, "error");
       return releaseLockAndReturn();
     }
@@ -1773,7 +1773,7 @@ export async function bootstrapAutoSession(
     // ── DB lifecycle ──
     const gsdDbPath = resolveProjectRootDbPath(s.basePath);
     const initialDbOpen = openWorkflowDatabase(s.basePath);
-    if (!initialDbOpen.ok && (initialDbOpen.reason === "open-failed" || initialDbOpen.reason === "locked" || initialDbOpen.reason === "authority-missing")) {
+    if (!initialDbOpen.ok && (initialDbOpen.reason === "open-failed" || initialDbOpen.reason === "locked" || initialDbOpen.reason === "authority-missing" || initialDbOpen.reason === "checkout-unbound")) {
       logError("engine", `failed to initialize project database: ${initialDbOpen.error?.message ?? "open failed"}`);
     }
     if (_shouldAbortBootstrapForUnavailableDbForTest(gsdDbPath, isDbAvailable())) {

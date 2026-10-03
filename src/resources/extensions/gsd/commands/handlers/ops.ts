@@ -9,7 +9,7 @@ import { handleDoctor, handleCapture, handleKnowledge, handleRunHook, handleSkil
 import { handleInspect } from "../../commands-inspect.js";
 import { handleLogs } from "../../commands-logs.js";
 import { handleDebug } from "../../commands-debug.js";
-import { handleCleanupBranches, handleCleanupSnapshots, handleSkip, handleCleanupProjects, handleCleanupWorktrees, handleRecover, handleRebuild, handleSync, handleDbRestoreBackup } from "../../commands-maintenance.js";
+import { handleCleanupBranches, handleCleanupSnapshots, handleSkip, handleCleanupProjects, handleCleanupWorktrees, handleRecover, handleRebuild, handleSync, handleDbRestoreBackup, handleDbBind } from "../../commands-maintenance.js";
 import { handleExport } from "../../export.js";
 import { handleHistory } from "../../history.js";
 import { handleUndo } from "../../undo.js";
@@ -150,6 +150,10 @@ export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandCon
     // Projection destination is the invocation root (worktree-local inside an
     // active worktree); DB authority stays with the open project-scoped DB (#2232).
     await handleRebuild(ctx, currentDirectoryRoot(), trimmed.replace(/^rebuild\s*/, "").trim());
+    return true;
+  }
+  if (trimmed === "db bind") {
+    handleDbBind(ctx, projectRoot());
     return true;
   }
   if (trimmed === "db restore-backup" || trimmed.startsWith("db restore-backup ")) {

@@ -20,6 +20,7 @@ import {
   applyPreparedVerifiedRecoverApplication,
   loadRetainedVerifiedRecoverApplication,
   loadVerifiedRecoverApplication,
+  openWorkflowDatabase,
   prepareVerifiedRecoverApplication,
   type PreparedVerifiedRecoverApplication,
 } from "./db-workspace.js";
@@ -1770,6 +1771,20 @@ async function executeRestoreBackupPlan(plan: RestoreBackupPlan): Promise<"commi
     }
     throw error;
   }
+}
+
+/**
+ * `gsd db bind` — Make this checkout the one the project database belongs to.
+ * Use it when the bound checkout was moved or deleted; the old root is then
+ * refused like any other unbound checkout.
+ */
+export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): void {
+  const result = openWorkflowDatabase(basePath, { bindCheckout: true });
+  if (!result.ok) {
+    ctx.ui.notify(`gsd db bind: ${result.error?.message ?? result.reason}`, "error");
+    return;
+  }
+  ctx.ui.notify(`gsd db bind: ${result.location.projectDb} now belongs to this checkout.`, "info");
 }
 
 /**

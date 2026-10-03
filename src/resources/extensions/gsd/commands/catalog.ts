@@ -249,6 +249,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "database", desc: "Reserved for DB-native rebuilds; does not import markdown" },
   ],
   db: [
+    { cmd: "bind", desc: "Make this checkout the one the project database belongs to (after a move or re-clone)" },
     { cmd: "restore-backup", desc: "List or restore a verified pre-migration database backup (destructive; requires --consent)" },
   ],
   task: [

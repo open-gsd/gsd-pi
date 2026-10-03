@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,6 +18,9 @@ import {
   type DomainOperationContext,
 } from "../db/domain-operation.ts";
 import { insertAuthorityCutoverReceipt } from "../db/writers/authority-recovery.ts";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
+import { normalizeRealPath } from "../paths.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -524,6 +527,24 @@ test("later canonical work and active coordination close the cutover attempt wit
   const beforeCoordination = durableSnapshot();
   expectCode(
     () => cutoverProjectAuthority(input(activeEvidence)),
+    "PROJECT_AUTHORITY_CUTOVER_COORDINATION_ACTIVE",
+  );
+  assert.deepEqual(durableSnapshot(), beforeCoordination);
+});
+
+test("requireCoordinationIdle sees an auto worker of the checkout the database is bound to", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-authority-cutover-bound-"));
+  tempDirs.add(base);
+  mkdirSync(join(base, ".gsd"));
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  t.after(closeDatabase);
+  const evidence = seedApplication();
+  assert.equal(evidence.projectRootRealpath, normalizeRealPath(base), "the open binds the checkout root");
+  // Registered the way auto mode registers its session worker.
+  registerAutoWorker({ projectRootRealpath: normalizeRealPath(base) });
+  const beforeCoordination = durableSnapshot();
+  expectCode(
+    () => cutoverProjectAuthority(input(evidence)),
     "PROJECT_AUTHORITY_CUTOVER_COORDINATION_ACTIVE",
   );
   assert.deepEqual(durableSnapshot(), beforeCoordination);

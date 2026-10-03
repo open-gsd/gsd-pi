@@ -18,6 +18,7 @@ import type { Readable } from "node:stream";
 import { afterEach, test } from "node:test";
 
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
 import {
   clearMilestoneStatusObservationTurn,
   resolveMilestoneStatusObservationContext,
@@ -512,7 +513,9 @@ test("overlapping exact tokens remain isolated and a new turn scavenges expired 
 
 test("repeated status reads mutate observation telemetry but no workflow authority", { concurrency: false }, async () => {
   const fixture = createFixture();
-  assert.equal(openDatabase(fixture.dbPath), true);
+  // Open through the workspace seam, which binds the checkout once, so the
+  // snapshot covers only what the reads themselves change.
+  assert.equal(openWorkflowDatabase(fixture.root).ok, true);
   const before = authoritySnapshot();
   for (let index = 0; index < 12; index += 1) {
     const result = await executeMilestoneStatus({ milestoneId: "M001" }, fixture.root);

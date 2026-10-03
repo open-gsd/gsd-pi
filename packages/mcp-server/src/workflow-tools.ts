@@ -66,7 +66,7 @@ type WorkflowDatabaseOpenResult =
       reason: "missing-database" | "missing-gsd-dir" | "locked" | "open-failed";
       error?: Error;
     }
-  | { ok: false; reason: "schema-too-new" | "authority-missing"; error: Error };
+  | { ok: false; reason: "schema-too-new" | "authority-missing" | "checkout-unbound"; error: Error };
 
 async function importBridgeModule(): Promise<GsdMcpBridge> {
   return importLocalModule<GsdMcpBridge>("../../../src/resources/extensions/gsd/mcp-bridge.js");
@@ -1332,7 +1332,7 @@ export async function readProjectProgressViaBridge(projectDir: string): Promise<
     const bridge = await importBridgeModule();
     const opened = bridge.openExistingWorkflowDatabase(projectDir);
     if (!opened.ok) {
-      if (opened.reason === "schema-too-new") throw opened.error;
+      if (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound") throw opened.error;
       return null;
     }
     return bridge.readProgressFromDb(projectDir);
