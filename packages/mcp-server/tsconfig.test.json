@@ -14,6 +14,8 @@
     "dist",
     "**/*.d.ts",
     "src/**/*.d.ts",
+    "src/db-authority-gates.test.ts",
+    "src/state-md-render.test.ts",
     "src/workflow-tools.test.ts",
     "src/workflow-tools-parity.test.ts"
   ]
