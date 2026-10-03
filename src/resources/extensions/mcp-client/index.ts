@@ -66,7 +66,8 @@ const MCP_CALL_TIMEOUT_MS = 60_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 function mcpCallTimeoutMs(server: string, env: NodeJS.ProcessEnv = process.env): number {
-	if (server !== (env.GSD_WORKFLOW_MCP_NAME?.trim() || "gsd-workflow")) return MCP_CALL_TIMEOUT_MS;
+	const workflowServer = env.GSD_WORKFLOW_MCP_NAME?.trim() || "gsd-workflow";
+	if (server.trim().toLowerCase() !== workflowServer.toLowerCase()) return MCP_CALL_TIMEOUT_MS;
 	const raw = env.GSD_MCP_WORKFLOW_TIMEOUT_MS?.trim();
 	if (!raw) return DEFAULT_WORKFLOW_MCP_CALL_TIMEOUT_MS;
 	const parsed = Number.parseInt(raw, 10);

@@ -158,6 +158,8 @@ test("mcp_call uses the workflow server timeout only for the gsd-workflow server
 
 		process.env.GSD_MCP_WORKFLOW_TIMEOUT_MS = "100";
 		await assert.rejects(call("gsd-workflow", "timeout-short"), /timed out/i);
+		await assert.rejects(call("GSD-Workflow", "timeout-short-case"), /timed out/i);
+		await assert.rejects(call(" gsd-workflow", "timeout-short-space"), /timed out/i);
 		const other = await call("other", "timeout-other");
 		assert.equal(other.content[0]?.text, "committed");
 
