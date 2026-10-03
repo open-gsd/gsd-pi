@@ -9,7 +9,6 @@ import { renderAllFromDb, renderRoadmapFromDb } from "./markdown-renderer.js";
 import { isDiscardedMilestoneStatus } from "./status-guards.js";
 import {
   deleteArtifactByPath,
-  deleteArtifactsByPathPrefix,
   getAllMilestones,
   getArtifactsByPathPrefix,
   getMilestoneSlices,
@@ -613,11 +612,21 @@ async function migrateToFlatPhaseLocked(basePath: string): Promise<void> {
   }
 
   // 6. Verified — prune legacy artifact rows now that renderAllFromDb has
-  // re-inserted flat-phase rows for artifacts that still have files. Also
+  // re-inserted flat-phase rows for artifacts that still have files. The rows
+  // of a discarded milestone are kept: the render does not re-insert them, so
+  // they are the only copy of that content in the database. Also
   // prune flat-phase rows whose files the renderer intentionally no longer
   // materializes, such as task PLAN files and empty-content artifacts.
   try {
-    deleteArtifactsByPathPrefix("milestones/");
+    const discardedIds = new Set(
+      getAllMilestones()
+        .filter((milestone) => isDiscardedMilestoneStatus(milestone.status))
+        .map((milestone) => milestone.id),
+    );
+    for (const row of getArtifactsByPathPrefix("milestones/")) {
+      if (row.milestone_id && discardedIds.has(row.milestone_id)) continue;
+      deleteArtifactByPath(row.path);
+    }
     pruneStaleFlatPhaseArtifactRows(basePath);
   } catch (err) {
     logWarning("migration", `flat-phase migration could not prune legacy artifact rows: ${(err as Error).message}`);

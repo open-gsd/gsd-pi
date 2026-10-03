@@ -261,6 +261,42 @@ test("migrateToFlatPhase succeeds with discarded milestones and creates no phase
   );
 });
 
+test("migrateToFlatPhase keeps the artifact rows of a discarded milestone and writes no file for it", async () => {
+  const base = makeTmp();
+  insertMilestone({ id: "M002", title: "Discarded", status: "skipped", planning: { vision: "Was planned." } });
+  const rows = [
+    { path: "milestones/M002/M002-CONTEXT.md", artifact_type: "CONTEXT", full_content: "# Discarded context\n" },
+    { path: "milestones/M002/M002-RESEARCH.md", artifact_type: "RESEARCH", full_content: "# Discarded research\n" },
+  ];
+  for (const row of rows) {
+    insertArtifact({ ...row, milestone_id: "M002", slice_id: null, task_id: null });
+  }
+  insertArtifact({
+    path: "milestones/M001/M001-ROADMAP.md",
+    artifact_type: "ROADMAP",
+    milestone_id: "M001",
+    slice_id: null,
+    task_id: null,
+    full_content: "# M001: Foundation\n",
+  });
+
+  await migrateToFlatPhase(base);
+
+  const kept = _getAdapter()!.prepare(
+    "SELECT path, artifact_type, full_content FROM artifacts WHERE milestone_id = 'M002' ORDER BY path",
+  ).all().map((row) => ({ ...row }));
+  assert.deepEqual(kept, rows, "the rows of the discarded milestone keep their content");
+  const legacyM001 = _getAdapter()!.prepare(
+    "SELECT COUNT(*) AS count FROM artifacts WHERE path LIKE 'milestones/M001/%'",
+  ).get() as { count: number };
+  assert.equal(legacyM001.count, 0, "the legacy rows of the projected milestone are pruned");
+  assert.deepEqual(
+    readdirSync(join(base, ".gsd", "phases")).filter((entry) => !entry.startsWith(".")),
+    ["01-foundation"],
+    "no M002 file is written",
+  );
+});
+
 test("migrateToFlatPhase ignores unsupported .planning projection layout", async () => {
   const base = makeTmp();
   mkdirSync(join(base, ".planning", "milestones", "M001", "v1-phases"), { recursive: true });
