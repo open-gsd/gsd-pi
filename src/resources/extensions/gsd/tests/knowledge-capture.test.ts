@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -19,9 +19,9 @@ import { withCommandCwd } from "../commands/context.ts";
 import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import { captureKnowledgeEntry, nextKnowledgeId } from "../knowledge-capture.ts";
 import { knowledgeMdPath } from "../knowledge-parser.ts";
-import { renderKnowledgeProjection } from "../knowledge-projection.ts";
+import { readKnowledgeMarkdown, renderKnowledgeProjection } from "../knowledge-projection.ts";
 import { createMemory, enforceMemoryCap } from "../memory-store.ts";
-import { rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
+import { preserveProjectionChangesBeforeDispatch, rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
 import { invalidateStateCache } from "../state.ts";
 import { executeMemoryCapture } from "../tools/memory-tools.ts";
 
@@ -225,6 +225,56 @@ describe("knowledge capture", () => {
     assert.match(rules, /\| K001 \| project \| New database rule \|/);
     assert.equal(rules.split("- Bullet rule: never touch vendor/").length, 2, "free-form rule line is kept exactly once");
     assert.equal(section(md, "## Rules"), section(first, "## Rules"), "a later render keeps the Rules section stable");
+  });
+
+  /** Hand-add a file-only Pattern row and an unmodeled section to the rendered file. */
+  function handEditKnowledge(): void {
+    writeFileSync(
+      knowledgeMdPath(base),
+      readKnowledge(base).replace(
+        /(\| # \| Pattern \| Where \| Notes \|\n\|[-|]+\|\n)/,
+        "$1| P050 | Hand-added pattern | src/ | from a teammate |\n",
+      ) + "\n## My Notes\n\nKeep this section.\n",
+      "utf-8",
+    );
+  }
+
+  /** The hand edit is in the file on disk and in what the readers return. */
+  function assertHandEditKept(): void {
+    for (const content of [readKnowledge(base), readKnowledgeMarkdown(base)]) {
+      assert.match(section(content, "## Patterns"), /\| P050 \| Hand-added pattern \| src\/ \| from a teammate \|/);
+      assert.match(content, /## My Notes\n\nKeep this section\./);
+    }
+  }
+
+  test("import bridge: a hand-added row and section survive the pre-dispatch check and a markdown rebuild", async () => {
+    captureKnowledgeEntry(base, "rule", "Always pin SQLite version", "project");
+    handEditKnowledge();
+
+    const observed = await preserveProjectionChangesBeforeDispatch(base);
+    assert.deepEqual(observed.preserved, [], "KNOWLEDGE.md is not moved to quarantine");
+    assertHandEditKept();
+
+    const rebuild = await rebuildMarkdownProjectionsFromDb(base);
+    assert.deepEqual(rebuild.errors, []);
+    assert.equal(rebuild.quarantined, 0, "the rebuild does not move KNOWLEDGE.md either");
+    assertHandEditKept();
+  });
+
+  test("import bridge: a changed git-tracked KNOWLEDGE.md does not stop dispatch", async () => {
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: base, stdio: "ignore" });
+    captureKnowledgeEntry(base, "rule", "Always pin SQLite version", "project");
+    writeFileSync(join(base, ".gitignore"), ".gsd/gsd.db*\n.gsd/.compat.json\n.gsd/quarantine/\n");
+    git("init", "-q", "-b", "main");
+    git("add", "-A");
+    git("-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "-q", "-m", "knowledge");
+    handEditKnowledge();
+
+    const observed = await preserveProjectionChangesBeforeDispatch(base);
+
+    assert.deepEqual(observed.held, [], "there is no KNOWLEDGE import to send the user to, so nothing is held");
+    assert.deepEqual(observed.preserved, []);
+    assertHandEditKept();
   });
 
   test("the memory cap never supersedes Rules, so they stay in KNOWLEDGE.md", () => {

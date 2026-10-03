@@ -248,10 +248,29 @@ export function readKnowledgeEntries(basePath: string): Record<KnowledgeTable, s
 }
 
 /**
+ * The Patterns and Lessons Learned rows that exist only in the file: no
+ * memories row holds their id, so the MEMORY block cannot show them. Returned
+ * as their table sections for the system prompt, until the explicit KNOWLEDGE
+ * import exists. Returns "" when there are none. Throws when the database is
+ * not available.
+ */
+export function readUnimportedPatternsAndLessons(basePath: string): string {
+  const { knownIds } = readDbKnowledge();
+  const fileRows = parseKnowledgeRows(readKnowledgeMd(basePath)).filter((row) => !knownIds.has(row.id));
+  return (["patterns", "lessons"] as const)
+    .map((table) => ({ ...TABLES[table], rows: fileRows.filter((row) => row.table === table) }))
+    .filter(({ rows }) => rows.length > 0)
+    .map(({ heading, header, separator, rows }) => [heading, "", header, separator, ...rows.map((row) => row.raw)].join("\n"))
+    .join("\n\n");
+}
+
+/**
  * Render `KNOWLEDGE.md` from the database. Returns the rendered content and
  * whether the file was written (skipped when byte-identical to disk). Records
- * the render baseline so the next render does not treat GSD's own output as
- * an external edit. Throws when the database is unavailable or the write fails.
+ * the render baseline so the next render does not copy GSD's own output to
+ * quarantine. The external-edit observer skips KNOWLEDGE.md, so the baseline
+ * never makes it move or hold the file. Throws when the database is
+ * unavailable or the write fails.
  */
 export function renderKnowledgeProjection(basePath: string): KnowledgeProjectionResult {
   const existing = readKnowledgeMd(basePath);

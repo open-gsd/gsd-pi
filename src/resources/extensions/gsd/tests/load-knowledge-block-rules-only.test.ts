@@ -1,6 +1,8 @@
 // ADR-013 follow-up — loadKnowledgeBlock injects only Rules from project
-// KNOWLEDGE.md to avoid duplicating Patterns + Lessons content already
-// injected via loadMemoryBlock (Stage 2b cutover).
+// knowledge to avoid duplicating Patterns + Lessons content already
+// injected via loadMemoryBlock (Stage 2b cutover). Patterns and Lessons that
+// exist only in the file (not imported yet) have no memories row, so the
+// block injects those too.
 //
 // Global KNOWLEDGE.md (~/.gsd/agent/KNOWLEDGE.md) is NOT memory-projected
 // and still passes through with all three sections intact.
@@ -14,6 +16,7 @@ import { tmpdir } from "node:os";
 import { loadKnowledgeBlock } from "../bootstrap/system-context.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { extractIntroAndRules } from "../knowledge-parser.ts";
+import { createMemory } from "../memory-store.ts";
 
 function makeTmpProject(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-knowledge-rules-only-"));
@@ -42,6 +45,22 @@ function cleanup(...dirs: string[]): void {
       /* noop */
     }
   }
+}
+
+/** Write the FULL_KNOWLEDGE Pattern and Lesson as memories rows (what a capture writes). */
+function seedPatternAndLesson(): void {
+  createMemory({
+    category: "pattern",
+    content: "Repository pattern",
+    scope: "project",
+    structuredFields: { sourceKnowledgeId: "P001", pattern: "Repository pattern", where: "services/", notes: "guards" },
+  });
+  createMemory({
+    category: "gotcha",
+    content: "Cache poisoning",
+    scope: "project",
+    structuredFields: { sourceKnowledgeId: "L001", whatHappened: "Cache poisoning", rootCause: "reused key", fix: "versioned key" },
+  });
 }
 
 const FULL_KNOWLEDGE = `# Project Knowledge
@@ -109,11 +128,12 @@ test("extractIntroAndRules handles Rules as the only section (no Patterns/Lesson
 
 // ─── loadKnowledgeBlock integration ────────────────────────────────────────
 
-test("loadKnowledgeBlock trims project KNOWLEDGE.md to intro + Rules", () => {
+test("loadKnowledgeBlock trims project knowledge to intro + Rules when the database holds the Patterns and Lessons", () => {
   const base = makeTmpProject();
   const home = makeTmpHome();
   try {
     writeFileSync(join(base, ".gsd", "KNOWLEDGE.md"), FULL_KNOWLEDGE, "utf-8");
+    seedPatternAndLesson();
     const { block } = loadKnowledgeBlock(home, base);
 
     assert.match(block, /## Project Knowledge/);
@@ -126,6 +146,38 @@ test("loadKnowledgeBlock trims project KNOWLEDGE.md to intro + Rules", () => {
   } finally {
     cleanup(base, home);
   }
+});
+
+test("loadKnowledgeBlock injects Patterns and Lessons that exist only in the file (fresh clone, empty database)", (t) => {
+  const base = makeTmpProject();
+  const home = makeTmpHome();
+  t.after(() => cleanup(base, home));
+  writeFileSync(join(base, ".gsd", "KNOWLEDGE.md"), FULL_KNOWLEDGE, "utf-8");
+
+  const { block } = loadKnowledgeBlock(home, base);
+
+  // No memories row holds P001 or L001, so the MEMORY block cannot show them.
+  assert.match(block, /\| K001 \| project \| All timestamps in UTC/);
+  assert.match(block, /## Patterns\n\n.*\n.*\n\| P001 \| Repository pattern \| services\/ \| guards \|/);
+  assert.match(block, /## Lessons Learned\n\n.*\n.*\n\| L001 \| Cache poisoning \| reused key \| versioned key \| project \|/);
+});
+
+test("loadKnowledgeBlock injects only the file-only rows of a section, not the ones the database holds", (t) => {
+  const base = makeTmpProject();
+  const home = makeTmpHome();
+  t.after(() => cleanup(base, home));
+  writeFileSync(
+    join(base, ".gsd", "KNOWLEDGE.md"),
+    FULL_KNOWLEDGE.replace("| P001 |", "| P002 | Teammate pattern | lib/ | pulled |\n| P001 |"),
+    "utf-8",
+  );
+  seedPatternAndLesson();
+
+  const { block } = loadKnowledgeBlock(home, base);
+
+  assert.match(block, /\| P002 \| Teammate pattern \| lib\/ \| pulled \|/);
+  assert.equal(block.includes("P001"), false, "P001 has a memories row and reaches the LLM via the memory block");
+  assert.equal(block.includes("## Lessons Learned"), false, "no file-only Lesson, so no Lessons section");
 });
 
 test("loadKnowledgeBlock leaves global KNOWLEDGE.md intact (no memory projection there)", () => {
@@ -154,6 +206,7 @@ test("loadKnowledgeBlock with both global and project: global keeps full content
   try {
     writeFileSync(join(home, "agent", "KNOWLEDGE.md"), FULL_KNOWLEDGE, "utf-8");
     writeFileSync(join(base, ".gsd", "KNOWLEDGE.md"), FULL_KNOWLEDGE, "utf-8");
+    seedPatternAndLesson();
     const { block } = loadKnowledgeBlock(home, base);
 
     // Both sections present.

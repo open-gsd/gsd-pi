@@ -176,7 +176,7 @@ This check is not auto-fixable. `/gsd doctor fix` will not rewrite either side b
   <Accordion title="Startup warns that memory consolidation is incomplete">
     **Cause:** The ADR-013 preflight scanner found active `decisions` rows or `.gsd/KNOWLEDGE.md` rows that do not yet have matching entries in the canonical `memories` table.
 
-    **Fix:** Run `/gsd doctor` to inspect the counts and sample rows. Decisions are backfilled at session start. A `.gsd/KNOWLEDGE.md` row that exists only in the file is never imported at session start: the render keeps it and it is reported until it is imported. To put one in the database now, capture it again with `/gsd knowledge <rule|pattern|lesson> <text>`. Do not delete legacy knowledge files or database rows just to silence the warning.
+    **Fix:** Run `/gsd doctor` to inspect the counts and sample rows. Decisions are backfilled at session start. A `.gsd/KNOWLEDGE.md` row that exists only in the file (for example after a fresh clone or a pull of a teammate's rows) is never imported at session start. Nothing is lost: the row stays in the file, the render keeps it, and sessions still read it. There is no KNOWLEDGE import yet, so for these rows the warning stays and no action is needed. Do not capture the row again with `/gsd knowledge`: that adds a second row with a new id and does not clear the warning. Do not delete legacy knowledge files or database rows just to silence the warning.
   </Accordion>
 
   <Accordion title="EBUSY / EPERM / EACCES on Windows">

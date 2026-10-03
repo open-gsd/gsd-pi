@@ -211,6 +211,9 @@ test('loadKnowledgeBlock: strips patterns and lessons from project knowledge', (
       '| L001 | Missed cache | N/A | Add TTL | project |',
     ].join('\n'),
   );
+  // The database holds P001 and L001, so they reach the LLM via the memory block.
+  createMemory({ category: 'pattern', content: 'Prefer async', scope: 'project', structuredFields: { sourceKnowledgeId: 'P001', pattern: 'Prefer async' } });
+  createMemory({ category: 'gotcha', content: 'Missed cache', scope: 'project', structuredFields: { sourceKnowledgeId: 'L001', whatHappened: 'Missed cache' } });
 
   const result = loadKnowledgeBlock(gsdHome, cwd);
   assert.ok(result.block.includes('[KNOWLEDGE — Rules from KNOWLEDGE.md'));

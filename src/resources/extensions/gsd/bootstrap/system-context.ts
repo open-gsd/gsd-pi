@@ -14,7 +14,7 @@ import { renderRuntimeContractForSystemPrompt } from "../runtime-contract.js";
 import { resolveModelWithFallbacksForUnit } from "../preferences-models.js";
 import { gsdRoot, resolveGsdRootFile, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
 import { extractIntroAndRules } from "../knowledge-parser.js";
-import { readKnowledgeMarkdown } from "../knowledge-projection.js";
+import { readKnowledgeMarkdown, readUnimportedPatternsAndLessons } from "../knowledge-projection.js";
 import { isDbAvailable } from "../gsd-db.js";
 import { ensureCodebaseMapFresh, readCodebaseMap } from "../codebase-generator.js";
 import { resolveRepositoryProjectRoot } from "../repository-registry.js";
@@ -644,14 +644,19 @@ export function loadKnowledgeBlock(gsdHomeDir: string, cwd: string): { block: st
 
   // 2. Project knowledge — project-specific, read from the database
   //    (readKnowledgeMarkdown), not from the file on disk. Patterns and
-  //    Lessons already reach the LLM via loadMemoryBlock, so inject only the
-  //    intro prose + `## Rules` section here to avoid duplicating them.
+  //    Lessons with a memories row already reach the LLM via loadMemoryBlock,
+  //    so inject only the intro prose + `## Rules` section for those. A
+  //    Pattern or Lesson that exists only in the file (fresh clone, pulled
+  //    teammate row) has no memories row, so inject it here.
   //    Without an open database there is no project knowledge to inject.
   let projectKnowledge = "";
   const knowledgePath = resolveGsdRootFile(cwd, "KNOWLEDGE");
   if (isDbAvailable()) {
     try {
-      projectKnowledge = extractIntroAndRules(readKnowledgeMarkdown(cwd)).trim();
+      projectKnowledge = [
+        extractIntroAndRules(readKnowledgeMarkdown(cwd)).trim(),
+        readUnimportedPatternsAndLessons(cwd),
+      ].filter(Boolean).join("\n\n");
     } catch (e) {
       logWarning("bootstrap", `project knowledge read failed: ${(e as Error).message}`);
     }

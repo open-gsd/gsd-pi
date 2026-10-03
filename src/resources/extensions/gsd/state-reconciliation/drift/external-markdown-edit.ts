@@ -143,6 +143,13 @@ export function observeExternalMarkdownEdits(
   for (const [projectionPath, entry] of entries) {
     // STATE.md is fully derived: the next render overwrites a hand edit.
     if (projectionPath === "STATE.md") continue;
+    // KNOWLEDGE.md still holds content the database does not (file-only rows
+    // and unmodeled sections) until the explicit KNOWLEDGE import exists.
+    // Moving or holding it would lose that content, and there is no import to
+    // send the user to. Its render carries a changed file forward, and the
+    // write-time guard copies the changed bytes to quarantine. The compare
+    // ignores case because the legacy file name is `knowledge.md`.
+    if (projectionPath.toLowerCase() === "knowledge.md") continue;
     const abs = join(basePath, ".gsd", projectionPath);
     if (!existsSync(abs)) continue;
     const actual = computeProjectionSha(readFileSync(abs, "utf-8"));
