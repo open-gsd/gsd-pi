@@ -1069,13 +1069,10 @@ async function ensureMilestoneShell(basePath: string, milestoneId: string): Prom
   try {
     const { ensureDbOpen } = await import("./dynamic-tools.js");
     if (await ensureDbOpen(basePath)) {
-      const { getMilestone, insertMilestone } = await import("../gsd-db.js");
+      const { getMilestone } = await import("../gsd-db.js");
       if (!getMilestone(milestoneId)) {
-        insertMilestone({
-          id: milestoneId,
-          title: `New milestone ${milestoneId}`,
-          status: "queued",
-        });
+        const { registerMilestones } = await import("../milestone-registration.js");
+        registerMilestones([{ id: milestoneId, title: `New milestone ${milestoneId}` }], "discussion-capture");
       }
     }
   } catch (err) {

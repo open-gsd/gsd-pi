@@ -6,7 +6,8 @@ import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { startAutoDetached } from "./auto.js";
 import { extractDepthVerificationMilestoneId, getPendingGate } from "./bootstrap/write-gate.js";
-import { getMilestone, getMilestoneSlices, insertMilestone, isDbAvailable } from "./gsd-db.js";
+import { getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
+import { registerMilestones } from "./milestone-registration.js";
 import { getMilestoneScopedArtifacts } from "./db/queries.js";
 import {
   assessMilestoneHandoffReadiness,
@@ -112,9 +113,9 @@ function ensureMilestoneRowForAcceptedHandoff(
 
   let inserted = false;
   try {
-    inserted = insertMilestone({ id: milestoneId, title: milestoneId, status: "queued" });
+    inserted = registerMilestones([{ id: milestoneId, title: milestoneId }], "discussion-handoff-recovery").length > 0;
   } catch (e) {
-    logWarning("guided", `R3b: insertMilestone failed: ${(e as Error).message}`);
+    logWarning("guided", `R3b: milestone registration failed: ${(e as Error).message}`);
   }
 
   if (inserted) return true;

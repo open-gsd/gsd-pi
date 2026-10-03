@@ -9,7 +9,7 @@ import {
   clearPendingAutoStart,
   setPendingAutoStart,
 } from "../guided-flow.ts";
-import { closeDatabase, getMilestone } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, getMilestone } from "../gsd-db.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import {
   getPendingGate,
@@ -363,6 +363,16 @@ test("register-hooks persists first structured question round for new milestone 
 
   const row = getMilestone("M004");
   assert.equal(row?.status, "queued", "new milestone shell should be registered in the DB");
+  assert.deepEqual(
+    _getAdapter()!.prepare(`
+      SELECT event.entity_id, json_extract(event.payload_json, '$.source') AS source
+      FROM workflow_operations operation
+      JOIN workflow_domain_events event ON event.operation_id = operation.operation_id
+      WHERE operation.operation_type = 'milestone.register'
+    `).all().map((event) => ({ ...event })),
+    [{ entity_id: "M004", source: "discussion-capture" }],
+    "the shell row is written by one milestone.register Domain Operation",
+  );
 
   invalidateStateCache();
   const state = await deriveState(dir);

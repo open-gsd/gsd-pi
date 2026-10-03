@@ -14,14 +14,12 @@ import {
   getSliceTaskCounts,
   getTask,
   getUnresolvedBlockingReworkFindingsForTask,
-  insertMilestone,
   insertAssessment,
   insertAuditEvent,
   insertGateRun,
   readTransaction,
   saveGateResult,
   setSliceUatMd,
-  upsertMilestonePlanning,
   upsertQualityGate,
 } from "../gsd-db.js";
 import {
@@ -36,6 +34,7 @@ export {
 } from "../milestone-status-observation-context.js";
 export {
   executeMilestoneDiscard,
+  executeMilestoneGenerateId,
   executeMilestonePark,
   executeMilestoneReorder,
   executeMilestoneSetDependencies,
@@ -43,8 +42,8 @@ export {
 } from "./milestone-hierarchy.js";
 import { emitLifecycleShadowObservation } from "../uok/audit.js";
 import { extractMilestoneSeq } from "../milestone-ids.js";
+import { registerMilestones } from "../milestone-registration.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
-import { immediateTransaction } from "../db/engine.js";
 import { isClosedStatus } from "../status-guards.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
 import { generateRequirementsMd, saveArtifactToDb } from "../db-writer.js";
@@ -359,52 +358,28 @@ function projectMilestoneSequenceRepairNeeded(content: string): boolean {
 }
 
 function registerProjectMilestoneSequence(content: string): string[] {
-  return immediateTransaction(() => {
-    const parsed = parseProject(content);
-    const registered: string[] = [];
-    // Reconcile parsed IDs against existing DB milestones before inserting (#807).
-    // Under unique_milestone_ids the planner mints suffixed IDs (e.g. "M001-b1nole"),
-    // while PROJECT.md's template uses bare sequence IDs (e.g. "M001"). Inserting the
-    // bare ID verbatim mints a phantom milestone row that collides with the planner's
-    // canonical one: the bare row gets its own git worktree, and at dispatch time the
-    // worktree/session scope ("M001") disagrees with ctx.mid ("M001-b1nole"), pausing
-    // auto-mode with "Dispatch milestone mismatch". A project DB holds at most one
-    // milestone per sequence number, so map each parsed line onto the existing row
-    // that shares its sequence number instead of minting a duplicate bare-ID row.
-    const existingBySeq = existingMilestonesBySequence();
-    const adoptedIds = new Set<string>();
-    for (const milestone of parsed.milestones) {
-      const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
-      if (!canonical) continue;
-      const canonicalDone = adoptedMilestoneProjectionDone(canonical.id);
-      if (canonicalDone !== null) adoptedIds.add(canonical.id);
-    }
-
-    for (const milestone of parsed.milestones) {
-      const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
-      const canonicalId = canonical?.id;
-      if (canonicalId && adoptedIds.has(canonicalId)) {
-        upsertMilestonePlanning(canonicalId, { title: milestone.title });
-        registered.push(canonicalId);
-        continue;
-      }
-      if (canonicalId && canonicalId !== milestone.id) {
-        // An existing milestone already owns this sequence number. Treat the markdown
-        // line as referring to it and refresh only the human title: a checked box
-        // never completes a milestone (only gsd_complete_milestone does).
-        upsertMilestonePlanning(canonicalId, { title: milestone.title });
-        registered.push(canonicalId);
-        continue;
-      }
-      insertMilestone({
-        id: milestone.id,
-        title: milestone.title,
-        status: "queued",
-      });
-      registered.push(milestone.id);
-    }
-    return registered;
+  // Reconcile parsed IDs against existing DB milestones before inserting (#807).
+  // Under unique_milestone_ids the planner mints suffixed IDs (e.g. "M001-b1nole"),
+  // while PROJECT.md's template uses bare sequence IDs (e.g. "M001"). Inserting the
+  // bare ID verbatim mints a phantom milestone row that collides with the planner's
+  // canonical one: the bare row gets its own git worktree, and at dispatch time the
+  // worktree/session scope ("M001") disagrees with ctx.mid ("M001-b1nole"), pausing
+  // auto-mode with "Dispatch milestone mismatch". A project DB holds at most one
+  // milestone per sequence number, so map each parsed line onto the existing row
+  // that shares its sequence number instead of minting a duplicate bare-ID row.
+  const existingBySeq = existingMilestonesBySequence();
+  const milestones = parseProject(content).milestones.map((milestone) => {
+    const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
+    // An adopted row, or a row that owns the sequence number under another id,
+    // gets only its human title refreshed: a checked box never completes a
+    // milestone (only gsd_complete_milestone does).
+    const retitle = canonical !== undefined &&
+      (adoptedMilestoneProjectionDone(canonical.id) !== null || canonical.id !== milestone.id);
+    return { id: canonical?.id ?? milestone.id, title: milestone.title, retitle };
   });
+  // One milestone.register Domain Operation writes the new rows and the titles.
+  registerMilestones(milestones, "project-sequence");
+  return milestones.map((milestone) => milestone.id);
 }
 
 /** Minimal shape of a DB milestone row needed to re-render the sequence section. */
@@ -766,8 +741,7 @@ export async function executeSummarySave(
             type: "text",
             text:
               `Error: PROJECT.md was not saved because milestone registration failed: ${msg}. ` +
-              `The registration transaction was rolled back; resolve the underlying error and re-call gsd_summary_save(PROJECT). ` +
-              `INSERT OR IGNORE keeps the retry idempotent.`,
+              `The registration operation was rolled back; resolve the underlying error and re-call gsd_summary_save(PROJECT).`,
           }],
           details: {
             operation: "save_summary",

@@ -10,10 +10,8 @@ import { handleStart, handleTemplates, dispatchMarkdownPhasePlugin } from "../..
 import { gsdRoot } from "../../paths.js";
 import { deriveState } from "../../state.js";
 import { discardMilestone, isParked, parkMilestone, unparkMilestone } from "../../milestone-actions.js";
-import { loadEffectiveGSDPreferences } from "../../preferences.js";
 import { setPlanningDepth } from "../../planning-depth.js";
-import { nextMilestoneId, normalizeDiscussTarget } from "../../milestone-ids.js";
-import { findMilestoneIds } from "../../guided-flow.js";
+import { normalizeDiscussTarget } from "../../milestone-ids.js";
 import { currentDirectoryRoot, projectRoot } from "../context.js";
 import { createRun, listRuns } from "../../run-manager.js";
 import {
@@ -754,10 +752,4 @@ export async function handleWorkflowCommand(trimmed: string, ctx: ExtensionComma
     return true;
   }
   return false;
-}
-
-export function getNextMilestoneId(basePath: string): string {
-  const milestoneIds = findMilestoneIds(basePath);
-  const uniqueIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
-  return nextMilestoneId(milestoneIds, uniqueIds);
 }

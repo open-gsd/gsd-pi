@@ -927,99 +927,25 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_milestone_generate_id (formerly gsd_generate_milestone_id) ────
 
 	const milestoneGenerateIdExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		_params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
 		_ctx: unknown,
 	) => {
-		try {
-			const basePath = resolveCtxCwd(_ctx);
-			// Milestone IDs are allocated against DB rows; with no DB, refuse
-			// before a preview reservation is consumed (ADR-046).
-			if (!(await ensureDbOpen(basePath))) {
-				throw new Error("workflow DB is unavailable");
-			}
-			// Claim a reserved ID if the guided-flow already previewed one to the user.
-			// This guarantees the ID shown in the UI matches the one materialised on disk.
-			const {
-				claimReservedId,
-				findMilestoneIds,
-				getReservedMilestoneIds,
-				nextMilestoneId,
-			} = await import("../guided-flow.js");
-			const reserved = claimReservedId();
-			if (reserved) {
-				await ensureMilestoneDbRow(reserved, basePath);
-				return {
-					content: [{ type: "text" as const, text: reserved }],
-					details: {
-						operation: "generate_milestone_id",
-						id: reserved,
-						source: "reserved",
-					} as any,
-				};
-			}
-
-			const { getAllMilestones } = await import("../gsd-db.js");
-			const existingIds = [
-				...findMilestoneIds(basePath),
-				...getAllMilestones().map((m) => m.id),
-			];
-			const uniqueEnabled =
-				!!loadEffectiveGSDPreferences(basePath)?.preferences
-					?.unique_milestone_ids;
-			const allIds = [
-				...new Set([...existingIds, ...getReservedMilestoneIds()]),
-			];
-			const newId = nextMilestoneId(allIds, uniqueEnabled);
-			await ensureMilestoneDbRow(newId, basePath);
-			return {
-				content: [{ type: "text" as const, text: newId }],
-				details: {
-					operation: "generate_milestone_id",
-					id: newId,
-					existingCount: existingIds.length,
-					uniqueEnabled,
-				} as any,
-			};
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Error generating milestone ID: ${msg}`,
-					},
-				],
-				details: { operation: "generate_milestone_id", error: msg } as any,
-			};
-		}
+		const { executeMilestoneGenerateId } = await loadWorkflowExecutors();
+		return executeMilestoneGenerateId(
+			resolveCtxCwd(_ctx),
+			piExecutionInvocation("gsd_milestone_generate_id", toolCallId),
+		);
 	};
-
-	/**
-	 * Insert a minimal DB row for a milestone ID so it's visible to the state
-	 * machine. Uses INSERT OR IGNORE — safe to call even if gsd_plan_milestone
-	 * later writes the full row. Throws when the DB is unavailable or the
-	 * insert fails, so the tool never reports an ID that has no row.
-	 */
-	async function ensureMilestoneDbRow(
-		milestoneId: string,
-		basePath: string,
-	): Promise<void> {
-		if (!(await ensureDbOpen(basePath))) {
-			throw new Error("workflow DB is unavailable");
-		}
-		const { insertMilestone } = await import("../gsd-db.js");
-		insertMilestone({ id: milestoneId, status: "queued" });
-	}
 
 	const milestoneGenerateIdTool = {
 		name: "gsd_milestone_generate_id",
 		label: "Generate Milestone ID",
 		description:
-			"Generate the next milestone ID for a new GSD milestone. " +
-			"Scans existing milestones on disk and respects the unique_milestone_ids preference. " +
+			"Generate the next milestone ID for a new GSD milestone and register its database row. " +
+			"Respects the unique_milestone_ids preference. " +
 			"Always use this tool when creating a new milestone — never invent milestone IDs manually.",
 		promptSnippet:
 			"Generate a valid milestone ID (respects unique_milestone_ids preference)",
@@ -1047,9 +973,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					0,
 				);
 			}
-			let text = theme.fg("success", `Generated ${d?.id ?? "ID"}`);
-			if (d?.source === "reserved") text += theme.fg("dim", " (reserved)");
-			return new Text(text, 0, 0);
+			return new Text(theme.fg("success", `Generated ${d?.id ?? "ID"}`), 0, 0);
 		},
 	};
 

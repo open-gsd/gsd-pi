@@ -18,6 +18,7 @@ import {
 } from "../guided-flow.ts";
 import { drainLogs } from "../workflow-logger.ts";
 import {
+  _getAdapter,
   openDatabase,
   closeDatabase,
   insertMilestone,
@@ -123,6 +124,16 @@ describe("checkAutoStartAfterDiscuss ready-notify DB guard (R3b)", () => {
     const recovered = getMilestone("M001");
     assert.ok(recovered, "R3b recovery must insert a placeholder 'queued' DB row");
     assert.equal(recovered!.status, "queued", "placeholder row must have status 'queued'");
+    assert.deepEqual(
+      _getAdapter()!.prepare(`
+        SELECT event.entity_id, json_extract(event.payload_json, '$.source') AS source
+        FROM workflow_operations operation
+        JOIN workflow_domain_events event ON event.operation_id = operation.operation_id
+        WHERE operation.operation_type = 'milestone.register'
+      `).all().map((event) => ({ ...event })),
+      [{ entity_id: "M001", source: "discussion-handoff-recovery" }],
+      "the placeholder row is written by one milestone.register Domain Operation",
+    );
 
     assert.equal(
       cap.notifies.some(n => n.level === "warning"),

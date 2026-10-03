@@ -818,7 +818,7 @@ export async function renderRoadmapFromDb(
   );
 
   // Refuse to render a stub ROADMAP for an unplanned milestone (#852).
-  // A milestone row created by gsd_milestone_generate_id / ensureMilestoneDbRow
+  // A milestone row created by gsd_milestone_generate_id (milestone.register)
   // starts with title="" / vision="" and zero slices. Rendering that produces a
   // 38-byte stub (`# M015: M015\n\n**Vision:** \n\n## Slices`) which passes
   // existsSync but fails the plan-milestone "zero slices" content check —

@@ -1,11 +1,15 @@
 // Project/App: gsd-pi
-// File Purpose: Executors for the milestone hierarchy tools: park, unpark, discard, reorder and set dependencies.
+// File Purpose: Executors for the milestone hierarchy tools: generate id, park, unpark, discard, reorder and set dependencies.
 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import { invalidateAllCaches } from "../cache.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { getMilestone } from "../gsd-db.js";
 import { discardMilestone, parkMilestone, unparkMilestone } from "../milestone-actions.js";
+import { nextMilestoneIdReserved } from "../milestone-id-reservation.js";
+import { claimReservedId, findMilestoneIds } from "../milestone-ids.js";
+import { readMilestoneRegistration, registerMilestones } from "../milestone-registration.js";
+import { loadEffectiveGSDPreferences } from "../preferences.js";
 import { reorderMilestones, setMilestoneDependencies } from "../queue-order.js";
 import { logError } from "../workflow-logger.js";
 import type { ToolExecutionResult } from "./context-mode-tool-result.js";
@@ -71,6 +75,48 @@ function refusal(milestoneId: string, verb: string): Error {
   return new Error(status === undefined
     ? `milestone ${milestoneId} does not exist`
     : `milestone ${milestoneId} cannot be ${verb} (status: ${status})`);
+}
+
+/**
+ * Allocate the next milestone id and register its row in one
+ * milestone.register Domain Operation. A retry of the same tool call returns
+ * the id that the first call registered. The id shown by a guided-flow
+ * preview is claimed first. Milestone directory names are read only to avoid
+ * an id that an unregistered directory already uses.
+ */
+export async function executeMilestoneGenerateId(
+  basePath: string,
+  invocation: ExecutionInvocation,
+): Promise<ToolExecutionResult> {
+  try {
+    // Milestone ids are allocated against database rows; with no database,
+    // refuse before a preview reservation is consumed (ADR-046).
+    if (!(await ensureDbOpen(basePath))) throw new Error("workflow DB is unavailable");
+    let id = readMilestoneRegistration(invocation.idempotencyKey)?.[0];
+    if (!id) {
+      id = claimReservedId();
+      if (!id) {
+        // No preview is waiting, so the reservation set is empty: reserve the
+        // next id and claim it at once.
+        const uniqueEnabled = !!loadEffectiveGSDPreferences(basePath)?.preferences?.unique_milestone_ids;
+        nextMilestoneIdReserved(findMilestoneIds(basePath), uniqueEnabled, basePath);
+        id = claimReservedId()!;
+      }
+      registerMilestones([{ id }], "generate-id", invocation);
+      invalidateAllCaches();
+    }
+    return {
+      content: [{ type: "text", text: id }],
+      details: { operation: "generate_milestone_id", id },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return {
+      content: [{ type: "text", text: `Error generating milestone ID: ${message}` }],
+      details: { operation: "generate_milestone_id", error: message },
+      isError: true,
+    };
+  }
 }
 
 export function executeMilestonePark(

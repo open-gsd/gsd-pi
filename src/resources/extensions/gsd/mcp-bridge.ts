@@ -24,7 +24,7 @@ export {
   openDatabase,
   upsertMilestonePlanning,
 } from "./gsd-db.js";
-export { invalidateStateCache, isReusableGhostMilestone } from "./state.js";
+export { invalidateStateCache } from "./state.js";
 export { loadEffectiveGSDPreferences } from "./preferences.js";
 export {
   saveDecisionToDb,
@@ -32,10 +32,3 @@ export {
   updateRequirementInDb,
 } from "./db-writer.js";
 export { queryJournal } from "./journal.js";
-export {
-  claimReservedId,
-  findMilestoneIds,
-  getReservedMilestoneIds,
-  milestoneIdSort,
-  nextMilestoneId,
-} from "./milestone-ids.js";

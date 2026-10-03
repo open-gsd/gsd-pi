@@ -45,7 +45,7 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		aliases: ["gsd_generate_milestone_id"],
 		schemaId: "workflow.milestone.generate_id",
 		executorId: "executeMilestoneGenerateId",
-		writePolicy: "read",
+		writePolicy: "write",
 		auditEvent: "workflow.milestone.generate_id",
 	},
 	{

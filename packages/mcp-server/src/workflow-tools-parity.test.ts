@@ -1001,6 +1001,7 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
     args: { category: "environment", content: "The gate fixture runs on a temporary project root." },
     passesWith: null,
   },
+  { tool: "gsd_milestone_generate_id", args: {}, passesWith: null },
   { tool: "gsd_milestone_park", args: { milestoneId: "M001", reason: "Parity park" }, passesWith: null },
   {
     tool: "gsd_milestone_unpark",
