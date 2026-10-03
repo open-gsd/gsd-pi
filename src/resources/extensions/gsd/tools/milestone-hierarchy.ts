@@ -164,9 +164,12 @@ export function executeMilestoneReorder(
 ): Promise<ToolExecutionResult> {
   const { order } = params;
   return runHierarchyTool("milestone_reorder", basePath, { order }, async () => {
-    const committedOrder = reorderMilestones(basePath, order, [], invocation);
+    const committed = reorderMilestones(basePath, order, [], invocation);
     await renderStateProjection(basePath);
-    return `Queue order is now: ${committedOrder.join(" → ")}`;
+    return [
+      `Queue order is now: ${committed.order.join(" → ")}`,
+      ...committed.warnings.map((warning) => `Warning: ${warning}`),
+    ].join("\n");
   });
 }
 

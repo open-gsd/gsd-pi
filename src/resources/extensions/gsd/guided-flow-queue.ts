@@ -145,7 +145,9 @@ export async function handleQueueReorder(
   // One Domain Operation writes the order and drops the conflicting
   // depends_on edges; QUEUE-ORDER.json is rendered from the committed order.
   try {
-    reorderMilestones(basePath, result.order, result.depsToRemove);
+    for (const warning of reorderMilestones(basePath, result.order, result.depsToRemove).warnings) {
+      ctx.ui.notify(warning, "warning");
+    }
   } catch (err) {
     ctx.ui.notify(`Queue reorder failed: ${(err as Error).message}`, "error");
     return;

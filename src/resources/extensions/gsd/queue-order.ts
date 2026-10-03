@@ -143,18 +143,20 @@ function loadDependencyGraph(): { depsMap: Map<string, string[]>; closedIds: Set
  *
  * The effective order is the listed ids, then each open, non-parked milestone
  * the order does not list, in its current relative order. Returns the
- * committed queue order.
+ * committed queue order and one warning for each dependency of an open
+ * milestone that has no database row; no order can fix such a dependency, so
+ * it does not block the reorder.
  *
  * Throws when the order names an unknown or closed milestone, repeats an id,
  * or when the effective order puts a milestone before one it still depends
- * on or has a dependency that does not exist.
+ * on or has a dependency cycle.
  */
 export function reorderMilestones(
   basePath: string,
   order: string[],
   depsToRemove: ReadonlyArray<{ milestone: string; dep: string }> = [],
   invocation?: ExecutionInvocation,
-): string[] {
+): { order: string[]; warnings: string[] } {
   if (!isDbAvailable()) throw new Error("milestone reorder requires the GSD database");
   const request = queueOperationRequest(
     "milestone.reorder",
@@ -182,7 +184,8 @@ export function reorderMilestones(
       if (milestone.status === "parked") outsideQueue.add(milestone.id);
       else effectiveOrder.push(milestone.id);
     }
-    const violation = validateQueueOrder(effectiveOrder, depsMap, outsideQueue).violations[0];
+    const violation = validateQueueOrder(effectiveOrder, depsMap, outsideQueue)
+      .violations.find((entry) => entry.type !== "missing_dep");
     if (violation) throw new Error(violation.message);
 
     setMilestoneQueueOrder(effectiveOrder);
@@ -208,7 +211,14 @@ export function reorderMilestones(
   });
   const committedOrder = queueOrderFromDb();
   renderQueueOrder(basePath, committedOrder);
-  return committedOrder;
+  const milestones = getAllMilestones();
+  const knownIds = new Set(milestones.map((milestone) => milestone.id));
+  const warnings = milestones
+    .filter((milestone) => !isClosedStatus(milestone.status))
+    .flatMap((milestone) => milestone.depends_on
+      .filter((dep) => !knownIds.has(dep))
+      .map((dep) => `${milestone.id} depends on ${dep}, but ${dep} does not exist.`));
+  return { order: committedOrder, warnings };
 }
 
 /**

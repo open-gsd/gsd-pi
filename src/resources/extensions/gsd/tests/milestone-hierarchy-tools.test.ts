@@ -20,6 +20,7 @@ import {
 import { getParkedReason } from "../milestone-actions.ts";
 import { clearPathCache } from "../paths.ts";
 import { drainProjectionWork } from "../projection-worker.ts";
+import { reorderMilestones } from "../queue-order.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import {
   executeMilestoneDiscard,
@@ -262,6 +263,22 @@ describe("milestone hierarchy tools", () => {
       JSON.parse(readFileSync(join(base, ".gsd", "QUEUE-ORDER.json"), "utf-8")).order,
       ["M002", "M003"],
     );
+  });
+
+  test("reorder commits with a warning when a dependency has no database row", async () => {
+    insertMilestone({ id: "M004", title: "Fourth", status: "queued", depends_on: ["M099"] });
+
+    const result = await executeMilestoneReorder(
+      { order: ["M004", "M001"] }, base, piExecutionInvocation("gsd_milestone_reorder", "dangling"));
+
+    assert.ok(!result.isError, result.content[0]!.text);
+    assert.match(result.content[0]!.text, /Warning: M004 depends on M099, but M099 does not exist/);
+    assert.deepEqual(getAllMilestones().map((milestone) => milestone.id), ["M004", "M001", "M002", "M003"]);
+    assert.equal(scalar("SELECT COUNT(*) FROM workflow_operations WHERE operation_type = 'milestone.reorder'"), 1);
+    assert.deepEqual(reorderMilestones(base, ["M001", "M004"]), {
+      order: ["M001", "M004", "M002", "M003"],
+      warnings: ["M004 depends on M099, but M099 does not exist."],
+    });
   });
 
   test("set dependencies replaces the list and refuses unknown, self, discarded, cyclic and closed targets", async () => {
