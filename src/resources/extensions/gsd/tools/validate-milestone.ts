@@ -22,7 +22,8 @@ import {
 import { clearPathCache, targetMilestoneFile } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
-import { saveFile, clearParseCache } from "../files.js";
+import { clearParseCache } from "../files.js";
+import { renderMilestoneValidation } from "../markdown-renderer.js";
 import { renderStateProjection } from "../workflow-projections.js";
 import { VALIDATION_VERDICTS, isValidMilestoneVerdict } from "../verdict-parser.js";
 import { insertMilestoneValidationGates } from "../milestone-validation-gates.js";
@@ -528,18 +529,14 @@ export async function handleValidateMilestone(
   // ── Filesystem render (outside transaction) ────────────────────────────
   let projectionStale = false;
   try {
-    await saveFile(validationPath, validationMd);
+    // The same renderer as the full rebuild: it reads the validation row that
+    // was just committed, so the tool and a rebuild write the same bytes.
+    await renderMilestoneValidation(artifactBasePath, effectiveParams.milestoneId);
     const projectRoot = resolveWorktreeProjectRoot(basePath);
     if (projectRoot !== artifactBasePath) {
-      // Mirror to project root using the project root's layout (same logic as above).
-      const projectValidationPath = targetMilestoneFile(
-        projectRoot,
-        effectiveParams.milestoneId,
-        "VALIDATION",
-        getMilestone(effectiveParams.milestoneId)?.title,
-      );
+      // Mirror to project root using the project root's layout.
       try {
-        await saveFile(projectValidationPath, validationMd);
+        await renderMilestoneValidation(projectRoot, effectiveParams.milestoneId);
       } catch (mirrorErr) {
         logWarning(
           "projection",

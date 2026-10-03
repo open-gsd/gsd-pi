@@ -475,20 +475,12 @@ function resolveRoadmapForMerge(
   deps: WorktreeLifecycleDeps,
   searchPaths: string[],
   milestoneId: string,
-  notify: NotifyCtx["notify"],
-) {
-  const resolution = resolveRoadmapForMilestoneMerge(
+): string | null {
+  return resolveRoadmapForMilestoneMerge(
     searchPaths,
     milestoneId,
     (path) => readLifecycleFile(deps, path),
   );
-  if (resolution?.synthesized) {
-    notify(
-      `Synthesized ${milestoneId}-ROADMAP.md from database records for milestone merge.`,
-      "info",
-    );
-  }
-  return resolution;
 }
 
 function currentLifecycleBranch(
@@ -1156,14 +1148,13 @@ function _mergeWorktreeModeImpl(
     if (!isSamePathPhysical(worktreeBasePath, originalBasePath)) {
       roadmapSearchPaths.push(worktreeBasePath);
     }
-    const roadmapResolution = resolveRoadmapForMerge(
+    const roadmapContent = resolveRoadmapForMerge(
       deps,
       roadmapSearchPaths,
       milestoneId,
-      notify,
     );
 
-    if (!roadmapResolution) {
+    if (roadmapContent === null) {
       // No roadmap projection and no DB slice records — preserve the branch
       // so product commits are not orphaned (#1573).
       lifecycleTeardownAutoWorktree(deps, originalBasePath, milestoneId, {
@@ -1184,7 +1175,7 @@ function _mergeWorktreeModeImpl(
     const mergeResult = deps.mergeMilestone(
       originalBasePath,
       milestoneId,
-      roadmapResolution.content,
+      roadmapContent,
     );
 
     // #2945 Bug 3: mergeMilestoneToMain performs best-effort worktree
@@ -1326,13 +1317,12 @@ function _mergeBranchModeImpl(
       }
     }
 
-    const roadmapResolution = resolveRoadmapForMerge(
+    const roadmapContent = resolveRoadmapForMerge(
       deps,
       [worktreeBasePath],
       milestoneId,
-      notify,
     );
-    if (!roadmapResolution) {
+    if (roadmapContent === null) {
       debugLog("WorktreeLifecycle", {
         action: "mergeAndExit",
         milestoneId,
@@ -1351,7 +1341,7 @@ function _mergeBranchModeImpl(
     const mergeResult = deps.mergeMilestone(
       worktreeBasePath,
       milestoneId,
-      roadmapResolution.content,
+      roadmapContent,
     );
 
     if (mergeResult.codeFilesChanged) {

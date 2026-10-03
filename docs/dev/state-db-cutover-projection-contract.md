@@ -126,8 +126,17 @@ Render entry points (all route through the single `writeAndStore` seam in
 `markdown-renderer.ts`): `renderRoadmapFromDb`, `renderPlanFromDb`,
 `renderTaskPlanFromDb`, `renderMilestoneArtifactsFromDb`,
 `renderMilestoneSummary`, `renderSliceArtifactsFromDb`, `renderSliceSummary`,
-`renderTaskSummary`, `renderReplanFromDb`, `renderAssessmentFromDb`, and the
-sweep `renderAllFromDb`.
+`renderTaskSummary`, `renderReplanFromDb`, `renderRoadmapAssessmentFromDb`, and
+the sweep `renderAllFromDb`.
+
+The sweep also renders the files that carry no stamp: root `ROADMAP.md`,
+`QUEUE.md`, `REQUIREMENTS.md`, `DECISIONS.md`, the root narrative artifacts
+(`PROJECT.md` and the root drafts), and the milestone VALIDATION file from its
+assessment row. Each of these writes records a marker baseline, and a write is
+skipped when the file and its baseline already hold the content. REPLAN, the
+ROADMAP-ASSESSMENT and VALIDATION are rendered from their structured source
+(the replan event, the assessment row) by the same function in the tool and in
+the sweep.
 
 Every task-summary producer routes through `writeTaskSummaryProjection`, which
 owns layout-aware placement and delegates stamping, disk persistence, artifact

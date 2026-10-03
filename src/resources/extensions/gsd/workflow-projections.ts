@@ -8,24 +8,21 @@ import {
   _getAdapter,
   isDbAvailable,
   getAllMilestones,
-  getMilestone,
   getMilestoneSlices,
   getSliceTasks,
-  getVerificationEvidence,
 } from "./gsd-db.js";
 import type { MilestoneRow } from "./db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
-import type { VerificationEvidenceRow } from "./db-verification-evidence-rows.js";
 import { atomicWriteSync } from "./atomic-write.js";
+import { compatProjectionIsCurrent, recordCompatProjectionWrite } from "./compat/compat-marker.js";
 import { join } from "node:path";
-import { mkdirSync, existsSync } from "node:fs";
+import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { logWarning } from "./workflow-logger.js";
 import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
 import { deriveState, invalidateStateCache } from "./state.js";
 import type { GSDState } from "./types.js";
-import { renderPlanFromDb, renderRoadmapFromDb, writeTaskSummaryProjection } from "./markdown-renderer.js";
-import { gsdRoot, resolveMilestoneFile, resolveSliceFile, resolveTaskFile } from "./paths.js";
-import { removeOwnedPlanProjection } from "./projection-cleanup.js";
+import { renderPlanFromDb, renderRoadmapFromDb, renderTaskSummary } from "./markdown-renderer.js";
+import { gsdRoot, resolveMilestoneFile, resolveSliceFile } from "./paths.js";
 import { stripIdPrefix } from "./strip-id-prefix.js";
 export { stripIdPrefix };
 
@@ -82,24 +79,6 @@ export function renderPlanContent(sliceRow: SliceRow, taskRows: TaskRow[]): stri
   return lines.join("\n");
 }
 
-/**
- * Render PLAN.md projection to disk for a specific slice.
- * Queries DB via helper functions and persists through the canonical projection writer.
- */
-export function renderPlanProjection(basePath: string, milestoneId: string, sliceId: string): void {
-  const sliceRows = getMilestoneSlices(milestoneId);
-  const sliceRow = sliceRows.find(s => s.id === sliceId);
-  const planPath = join(basePath, ".gsd", "milestones", milestoneId, "slices", sliceId, `${sliceId}-PLAN.md`);
-  const taskRows = getSliceTasks(milestoneId, sliceId).filter((task) => task.status !== "skipped");
-  if (!sliceRow || sliceRow.status === "skipped" || taskRows.length === 0) {
-    removeOwnedPlanProjection(basePath, planPath);
-    return;
-  }
-
-  const content = renderPlanContent(sliceRow, taskRows);
-  atomicWriteSync(planPath, content);
-}
-
 // ─── ROADMAP.md Projection ───────────────────────────────────────────────
 
 /**
@@ -141,21 +120,6 @@ export function renderRoadmapContent(milestoneRow: MilestoneRow, sliceRows: Slic
   return lines.join("\n");
 }
 
-/**
- * Render ROADMAP.md projection to disk for a specific milestone.
- * Queries DB via helper functions, renders content, writes via atomicWriteSync.
- */
-export function renderRoadmapProjection(basePath: string, milestoneId: string): void {
-  const milestoneRow = getMilestone(milestoneId);
-  if (!milestoneRow) return;
-
-  const sliceRows = getMilestoneSlices(milestoneId).filter((slice) => slice.status !== "skipped");
-
-  const content = renderRoadmapContent(milestoneRow, sliceRows);
-  const dir = join(basePath, ".gsd", "milestones", milestoneId);
-  atomicWriteSync(join(dir, `${milestoneId}-ROADMAP.md`), content);
-}
-
 function milestoneStatusGlyph(status: string): string {
   if (status === "complete" || status === "done") return "\u2705";
   if (status === "active" || status === "in_progress") return "\uD83D\uDD04";
@@ -179,11 +143,22 @@ export function renderTopLevelRoadmapContent(milestones: readonly MilestoneRow[]
   return lines.join("\n");
 }
 
-export function renderTopLevelRoadmapFromDb(basePath: string): void {
-  const content = renderTopLevelRoadmapContent(getAllMilestones());
-  const dir = join(basePath, ".gsd");
+/**
+ * Write a file at the root of `.gsd` and record its bytes as the projection
+ * baseline, so a later change of the file is seen as an external edit.
+ * Nothing is written when the file and its baseline already hold the content.
+ */
+function writeRootProjection(basePath: string, fileName: string, content: string): void {
+  const dir = gsdRoot(basePath);
   mkdirSync(dir, { recursive: true });
-  atomicWriteSync(join(dir, "ROADMAP.md"), content);
+  const filePath = join(dir, fileName);
+  if (compatProjectionIsCurrent(basePath, filePath, content, [])) return;
+  atomicWriteSync(filePath, content);
+  recordCompatProjectionWrite(basePath, filePath, content, []);
+}
+
+export function renderTopLevelRoadmapFromDb(basePath: string): void {
+  writeRootProjection(basePath, "ROADMAP.md", renderTopLevelRoadmapContent(getAllMilestones()));
 }
 
 export function renderTopLevelQueueFromDb(basePath: string): void {
@@ -202,9 +177,7 @@ export function renderTopLevelQueueFromDb(basePath: string): void {
   }
 
   lines.push("");
-  const dir = join(basePath, ".gsd");
-  mkdirSync(dir, { recursive: true });
-  atomicWriteSync(join(dir, "QUEUE.md"), lines.join("\n"));
+  writeRootProjection(basePath, "QUEUE.md", lines.join("\n"));
 }
 
 // ─── SUMMARY.md Projection ──────────────────────────────────────────────
@@ -214,9 +187,7 @@ export function renderTopLevelQueueFromDb(basePath: string): void {
  * Single source of truth for summary rendering — used both at completion
  * time and at projection regeneration time (#2720).
  *
- * @param evidence - Optional verification evidence rows. When called from
- *   complete-task, these are passed directly. When called from projection
- *   regeneration, they are queried from the DB by renderSummaryProjection.
+ * @param evidence - Optional verification evidence rows, passed by complete-task.
  */
 export function renderSummaryContent(
   taskRow: TaskRow,
@@ -308,23 +279,6 @@ ${taskRow.key_files && taskRow.key_files.length > 0 ? taskRow.key_files.map(f =>
 `;
 }
 
-/**
- * Render SUMMARY.md projection to disk for a specific task.
- * Queries DB via helper functions, renders content, and persists through the
- * canonical task-summary projection seam.
- */
-export async function renderSummaryProjection(basePath: string, milestoneId: string, sliceId: string, taskId: string): Promise<boolean> {
-  const taskRows = getSliceTasks(milestoneId, sliceId);
-  const taskRow = taskRows.find(t => t.id === taskId);
-  if (!taskRow) return false;
-
-  const evidenceRows = getVerificationEvidence(milestoneId, sliceId, taskId);
-  const content = renderSummaryContent(taskRow, sliceId, milestoneId, evidenceRows);
-
-  await writeTaskSummaryProjection(basePath, milestoneId, sliceId, taskId, content);
-  return true;
-}
-
 // ─── STATE.md Projection ────────────────────────────────────────────────
 
 /**
@@ -409,7 +363,11 @@ export async function renderStateProjection(basePath: string): Promise<{ stale: 
     const content = renderStateContent(await deriveState(basePath));
     const dir = gsdRoot(basePath);
     mkdirSync(dir, { recursive: true });
-    atomicWriteSync(join(dir, "STATE.md"), content);
+    const statePath = join(dir, "STATE.md");
+    // A render of unchanged state writes nothing.
+    if (!existsSync(statePath) || readFileSync(statePath, "utf-8") !== content) {
+      atomicWriteSync(statePath, content);
+    }
     return { stale: false };
   } catch (err) {
     logWarning("projection", `renderStateProjection failed: ${(err as Error).message}`);
@@ -486,16 +444,14 @@ export async function renderAllProjections(
     // projection is missing key sections (Must-Haves, Verification, Files
     // Likely Touched) and corrupts multi-line task descriptions (#3651).
 
-    // Render SUMMARY.md for each completed task
-    const taskRows = getSliceTasks(milestoneId, slice.id);
-    const doneTasks = taskRows.filter(t => t.status === "done" || t.status === "complete");
-
-    for (const task of doneTasks) {
+    // Task SUMMARY.md: the same renderer as the full rebuild, so a flush and a
+    // rebuild write the same bytes.
+    for (const task of getSliceTasks(milestoneId, slice.id)) {
       try {
-        await renderSummaryProjection(basePath, milestoneId, slice.id, task.id);
+        await renderTaskSummary(basePath, milestoneId, slice.id, task.id);
       } catch (err) {
         stale = true;
-        logWarning("projection", `renderSummaryProjection failed for ${milestoneId}/${slice.id}/${task.id}: ${(err as Error).message}`);
+        logWarning("projection", `renderTaskSummary failed for ${milestoneId}/${slice.id}/${task.id}: ${(err as Error).message}`);
       }
     }
   }
@@ -514,7 +470,7 @@ export async function regenerateIfMissing(
   basePath: string,
   milestoneId: string,
   sliceId: string,
-  fileType: "PLAN" | "ROADMAP" | "SUMMARY" | "STATE",
+  fileType: "PLAN" | "ROADMAP" | "STATE",
 ): Promise<boolean> {
   let filePath: string;
 
@@ -527,32 +483,9 @@ export async function regenerateIfMissing(
     case "ROADMAP":
       filePath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP") ?? "";
       break;
-    case "SUMMARY":
-      // For SUMMARY, we regenerate all task summaries in the slice
-      filePath = join(basePath, ".gsd", "milestones", milestoneId, "slices", sliceId, "tasks");
-      break;
     case "STATE":
       filePath = join(gsdRoot(basePath), "STATE.md");
       break;
-  }
-
-  if (fileType === "SUMMARY") {
-    // Check each completed task's SUMMARY file individually (not just the directory)
-    const taskRows = getSliceTasks(milestoneId, sliceId);
-    const doneTasks = taskRows.filter(t => t.status === "done" || t.status === "complete");
-    let regenerated = 0;
-    for (const task of doneTasks) {
-      if (!resolveTaskFile(basePath, milestoneId, sliceId, task.id, "SUMMARY")) {
-        try {
-          if (await renderSummaryProjection(basePath, milestoneId, sliceId, task.id)) {
-            regenerated++;
-          }
-        } catch (err) {
-          logWarning("projection", `regenerateIfMissing SUMMARY failed for ${task.id}: ${(err as Error).message}`);
-        }
-      }
-    }
-    return regenerated > 0;
   }
 
   if (existsSync(filePath)) {

@@ -2,12 +2,11 @@
 // File Purpose: RED compatibility contracts for durable lifecycle adoption.
 
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test, type TestContext } from "node:test";
 
-import { computeProjectionSha, readCompatMarker, writeCompatMarker } from "../compat/compat-marker.ts";
 import { teardownAutoWorktree } from "../auto-worktree-teardown.ts";
 import {
   getActiveWorkspace,
@@ -26,17 +25,11 @@ import {
   insertTask,
   openDatabase,
   reconcileWorktreeDb,
-  updateSliceStatus,
-  updateTaskStatus,
 } from "../gsd-db.ts";
 import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 import { reconcileWorktreeDbBeforeManualMerge } from "../worktree-command.ts";
 import { worktreePath } from "../worktree-manager.ts";
 import { createWorkspace } from "../workspace.ts";
-import {
-  renderPlanProjection,
-  renderRoadmapProjection,
-} from "../workflow-projections.ts";
 
 const tempDirs = new Set<string>();
 
@@ -443,34 +436,4 @@ test("auto-worktree teardown preserves canonical divergence when the database st
     process.chdir(originalCwd);
   }
   t.after(() => process.chdir(originalCwd));
-});
-
-test("legacy projection renderers exclude cancelled slices and tasks", (t) => {
-  const database = openFixture(t);
-  const base = tempDir("gsd-active-projection-filter-");
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  closeDatabase();
-  assert.equal(openDatabase(database), true);
-
-  insertSlice({ milestoneId: "M001", id: "S02", title: "Cancelled slice", status: "pending" });
-  insertTask({ milestoneId: "M001", sliceId: "S02", id: "T02", title: "Cancelled slice task", status: "pending" });
-  updateSliceStatus("M001", "S02", "skipped");
-  updateTaskStatus("M001", "S01", "T01", "skipped");
-
-  renderRoadmapProjection(base, "M001");
-  const roadmap = readFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "utf8");
-  assert.doesNotMatch(roadmap, /S02|Cancelled slice/);
-
-  const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
-  mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
-  const planContent = "# stale cancelled task projection\n";
-  writeFileSync(planPath, planContent, "utf8");
-  const marker = readCompatMarker(base);
-  marker.projections["milestones/M001/slices/S01/S01-PLAN.md"] = {
-    sha: computeProjectionSha(planContent),
-    entities: ["M001/S01"],
-  };
-  writeCompatMarker(base, marker);
-  renderPlanProjection(base, "M001", "S01");
-  assert.equal(existsSync(planPath), false);
 });

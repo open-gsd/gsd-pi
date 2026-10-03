@@ -752,7 +752,7 @@ describe('db-writer', () => {
     }
   });
 
-  test('saveArtifactToDb — shrinkage guard preserves larger existing file', async () => {
+  test('saveArtifactToDb — a smaller save replaces a larger existing file and keeps its bytes in quarantine', async () => {
     const tmpDir = makeTmpDir();
     const dbPath = path.join(tmpDir, '.gsd', 'gsd.db');
     openDatabase(dbPath);
@@ -767,7 +767,7 @@ describe('db-writer', () => {
       fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, fullContent);
 
-      // Call saveArtifactToDb with abbreviated content — should trigger shrinkage guard
+      // The DB row is the authority: the file follows it, whatever the size.
       await saveArtifactToDb({
         path: relPath,
         artifact_type: 'RESEARCH',
@@ -775,15 +775,19 @@ describe('db-writer', () => {
         milestone_id: 'M001',
       }, tmpDir);
 
-      // Disk file should be preserved (not overwritten)
       assert.deepStrictEqual(
         fs.readFileSync(filePath, 'utf-8'),
-        fullContent,
-        'disk file preserved — shrinkage guard prevented overwrite',
+        abbreviatedContent,
+        'disk file has the saved content',
       );
 
-      // DB should keep the caller-provided content. The larger disk file is a
-      // stale projection, not runtime authority.
+      // The larger file was written outside GSD, so its bytes are kept as evidence.
+      const quarantineRoot = path.join(tmpDir, '.gsd', 'quarantine', 'projections');
+      const kept = (fs.readdirSync(quarantineRoot, { recursive: true }) as string[])
+        .map((entry) => path.join(quarantineRoot, entry))
+        .filter((entry) => fs.statSync(entry).isFile());
+      assert.deepStrictEqual(kept.map((entry) => fs.readFileSync(entry, 'utf-8')), [fullContent]);
+
       const adapter = _getAdapter();
       const row = adapter!
         .prepare('SELECT full_content FROM artifacts WHERE path = ?')

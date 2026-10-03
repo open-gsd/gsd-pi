@@ -19,7 +19,6 @@ import {
   adoptOrTransitionLifecycle,
   getMilestone,
   getMilestoneSlices,
-  getAssessment,
   getSlice,
   getSliceTasks,
   insertSlice,
@@ -34,7 +33,7 @@ import {
 import { invalidateStateCache } from "../state.js";
 import {
   renderRoadmapFromDb,
-  renderRoadmapAssessmentFromDb,
+  renderRoadmapAssessment,
   resolveRoadmapAssessmentProjectionPath,
 } from "../markdown-renderer.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
@@ -634,16 +633,8 @@ export async function handleReassessRoadmap(
     if ("skipped" in roadmapResult) {
       return { error: `roadmap render skipped: milestone ${params.milestoneId} has no planned slices` };
     }
-    const durableAssessment = getAssessment(
-      assessmentDbPathForRenderedFile(basePath, assessmentPath),
-    );
-    if (!durableAssessment) throw new Error("durable roadmap assessment not found");
-    const assessmentResult = await renderRoadmapAssessmentFromDb(basePath, params.milestoneId, {
-      verdict: String(durableAssessment["status"]),
-      assessment: String(durableAssessment["full_content"]),
-      completedSliceId: params.completedSliceId,
-      createdAt: String(durableAssessment["created_at"]),
-    });
+    const assessmentResult = await renderRoadmapAssessment(basePath, params.milestoneId);
+    if (!assessmentResult) throw new Error("durable roadmap assessment not found");
 
     // ── Remove stale VALIDATION file from disk (#2957) ────────────
     if (invalidatesMilestoneValidation) {

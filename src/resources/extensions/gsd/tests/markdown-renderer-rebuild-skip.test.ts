@@ -104,7 +104,7 @@ test("rebuild repairs a drifted file without rewriting clean ones", async () => 
   await renderToConvergence(base);
   const before = snapshotMarkdown(base);
   const planPath = findSnapshotPath(before, "-PLAN.md");
-  const roadmapPath = findSnapshotPath(before, "ROADMAP.md");
+  const roadmapPath = findSnapshotPath(before, "-ROADMAP.md");
 
   appendFileSync(planPath, ["external drift", ""].join("\n"));
 
@@ -121,7 +121,7 @@ test("rebuild restores a deleted artifact row without rewriting clean files", as
   await renderToConvergence(base);
   const before = snapshotMarkdown(base);
   const planPath = findSnapshotPath(before, "-PLAN.md");
-  const roadmapPath = findSnapshotPath(before, "ROADMAP.md");
+  const roadmapPath = findSnapshotPath(before, "-ROADMAP.md");
   const roadmapRow = getArtifactsByPathPrefix("").find((r) => r.artifact_type === "ROADMAP");
   assert.ok(roadmapRow, "expected a ROADMAP artifact row after the first render");
 
@@ -140,9 +140,9 @@ test("rebuild restores a deleted artifact row without rewriting clean files", as
 test("rebuild rewrites a projection whose compat-marker entry is missing", async () => {
   const base = makeProject();
   await renderAllFromDb(base);
-  const roadmapPath = findSnapshotPath(snapshotMarkdown(base), "ROADMAP.md");
+  const roadmapPath = findSnapshotPath(snapshotMarkdown(base), "-ROADMAP.md");
   const marker = readCompatMarker(base);
-  const roadmapKey = Object.keys(marker.projections).find((k) => k.endsWith("ROADMAP.md"));
+  const roadmapKey = Object.keys(marker.projections).find((k) => k.endsWith("-ROADMAP.md"));
   assert.ok(roadmapKey, `expected a ROADMAP marker entry, got ${JSON.stringify(Object.keys(marker.projections))}`);
 
   delete marker.projections[roadmapKey];
@@ -162,7 +162,7 @@ test("rebuild repairs an artifact row whose scope metadata is wrong", async () =
   await renderToConvergence(base);
   const before = snapshotMarkdown(base);
   const planPath = findSnapshotPath(before, "-PLAN.md");
-  const roadmapPath = findSnapshotPath(before, "ROADMAP.md");
+  const roadmapPath = findSnapshotPath(before, "-ROADMAP.md");
   // The stable-key PLAN row (render 1 can leave a ..-escaped ghost row behind;
   // see deriveCompatProjectionKey's fallback for not-yet-existing files).
   const planRow = getArtifactsByPathPrefix("").find((r) => r.artifact_type === "PLAN" && !r.path.includes(".."));
@@ -187,7 +187,7 @@ test("rebuild repairs a marker entry whose entity scope is wrong", async () => {
   await renderToConvergence(base);
   const before = snapshotMarkdown(base);
   const planPath = findSnapshotPath(before, "-PLAN.md");
-  const roadmapPath = findSnapshotPath(before, "ROADMAP.md");
+  const roadmapPath = findSnapshotPath(before, "-ROADMAP.md");
   const planKey = relative(join(base, ".gsd"), planPath);
   const marker = readCompatMarker(base);
   const entry = marker.projections[planKey];
@@ -213,7 +213,7 @@ test("rebuild repairs an artifact row whose content_hash is wrong", async () => 
   await renderToConvergence(base);
   const before = snapshotMarkdown(base);
   const planPath = findSnapshotPath(before, "-PLAN.md");
-  const roadmapPath = findSnapshotPath(before, "ROADMAP.md");
+  const roadmapPath = findSnapshotPath(before, "-ROADMAP.md");
   const planKey = relative(join(base, ".gsd"), planPath);
 
   getDbOrNull()!.prepare("UPDATE artifacts SET content_hash = :h WHERE path = :p")

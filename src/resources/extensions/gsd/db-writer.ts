@@ -9,12 +9,12 @@
 // parseDecisionsTable() and parseRequirementsSections() with field fidelity.
 
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import type { Decision, Requirement } from './types.js';
 import { summarizeRequirementsCoverage } from './requirements-backlog.js';
-import { resolveGsdRootFile } from './paths.js';
+import { gsdRoot, resolveGsdRootFile } from './paths.js';
 import { saveFile } from './files.js';
-import { recordCompatProjectionWrite } from './compat/compat-marker.js';
+import { compatProjectionIsCurrent, recordCompatProjectionWrite } from './compat/compat-marker.js';
 import { GSDError, GSD_STALE_STATE, GSD_IO_ERROR } from './errors.js';
 import { logWarning, logError } from './workflow-logger.js';
 import { invalidateStateCache } from './state.js';
@@ -34,6 +34,7 @@ async function writeGsdProjection(
   content: string,
   entities: string[] = [],
 ): Promise<void> {
+  if (compatProjectionIsCurrent(basePath, filePath, content, entities)) return;
   await saveFile(filePath, content);
   recordCompatProjectionWrite(basePath, filePath, content, entities);
 }
@@ -218,14 +219,6 @@ export function generateRequirementsMd(requirements: Requirement[]): string {
   lines.push(`- Unmapped active requirements: ${coverage.unmappedActive}`);
 
   return lines.join('\n') + '\n';
-}
-
-function isRootCanonicalArtifact(opts: SaveArtifactOpts): boolean {
-  if (opts.milestone_id || opts.slice_id || opts.task_id) return false;
-  return (
-    opts.artifact_type === 'PROJECT' ||
-    opts.artifact_type === 'REQUIREMENTS'
-  );
 }
 
 // ─── Next Decision ID ─────────────────────────────────────────────────────
@@ -504,13 +497,13 @@ export async function regenerateDecisionsMarkdown(basePath: string): Promise<voi
 /**
  * Re-project root REQUIREMENTS.md from the requirement rows, with no
  * requirement being added or changed. Writes nothing when there are no
- * requirement rows and no file.
+ * requirement rows and no file, and returns false.
  */
-export async function regenerateRequirementsMarkdown(basePath: string): Promise<void> {
+export async function regenerateRequirementsMarkdown(basePath: string): Promise<boolean> {
   const db = await import('./gsd-db.js');
   const rows = db._getAdapter()?.prepare('SELECT * FROM requirements ORDER BY id').all() ?? [];
   const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
-  if (rows.length === 0 && !existsSync(filePath)) return;
+  if (rows.length === 0 && !existsSync(filePath)) return false;
   const requirements: Requirement[] = rows.map(row => ({
     id: row['id'] as string,
     class: row['class'] as string,
@@ -530,6 +523,32 @@ export async function regenerateRequirementsMarkdown(basePath: string): Promise<
     filePath,
     generateRequirementsMd(requirements.filter(r => r.superseded_by == null)),
   );
+  return true;
+}
+
+/**
+ * Re-project the root narrative artifacts (PROJECT.md and the root drafts)
+ * from their artifact rows. These types have no structured source: the row is
+ * the content. REQUIREMENTS.md is not replayed from its row; it is rendered
+ * from the requirement rows. Returns false when there is no such row.
+ */
+export async function regenerateRootArtifactsMarkdown(basePath: string): Promise<boolean> {
+  const db = await import('./gsd-db.js');
+  const rows = db._getAdapter()?.prepare(
+    `SELECT artifact_type, full_content FROM artifacts
+     WHERE milestone_id IS NULL
+       AND artifact_type IN ('PROJECT', 'PROJECT-DRAFT', 'REQUIREMENTS-DRAFT')
+       AND TRIM(full_content) != ''
+     ORDER BY artifact_type`,
+  ).all() ?? [];
+  for (const row of rows) {
+    await writeGsdProjection(
+      basePath,
+      join(gsdRoot(basePath), `${row['artifact_type'] as string}.md`),
+      row['full_content'] as string,
+    );
+  }
+  return rows.length > 0;
 }
 
 // ─── Save Decision to DB + Regenerate Markdown ────────────────────────────
@@ -813,16 +832,6 @@ export async function saveArtifactToDbForWorkspace(
       contentToPersist = generateRequirementsMd(activeRequirements);
     }
 
-    let skipDiskWrite = false;
-    if (!isRootCanonicalArtifact(opts) && existsSync(fullPath)) {
-      const existingSize = statSync(fullPath).size;
-      const newSize = Buffer.byteLength(contentToPersist, 'utf-8');
-      if (existingSize > 0 && newSize < existingSize * 0.5) {
-        logWarning('projection', `new content (${newSize}B) is <50% of existing projection (${existingSize}B), preserving disk file while DB remains authoritative`, { fn: 'saveArtifactToDbForWorkspace', path: opts.path });
-        skipDiskWrite = true;
-      }
-    }
-
     db.insertArtifact({
       path: opts.path,
       artifact_type: opts.artifact_type,
@@ -832,13 +841,11 @@ export async function saveArtifactToDbForWorkspace(
       full_content: contentToPersist,
     });
 
-    if (!skipDiskWrite) {
-      try {
-        const basePath = dirname(gsdDir);
-        await writeGsdProjection(basePath, fullPath, contentToPersist);
-      } catch (diskErr) {
-        logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbForWorkspace', path: opts.path, error: String((diskErr as Error).message) });
-      }
+    try {
+      const basePath = dirname(gsdDir);
+      await writeGsdProjection(basePath, fullPath, contentToPersist);
+    } catch (diskErr) {
+      logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbForWorkspace', path: opts.path, error: String((diskErr as Error).message) });
     }
     invalidateStateCache();
     clearPathCache();
@@ -888,20 +895,6 @@ export async function saveArtifactToDbByScope(
       contentToPersist = generateRequirementsMd(activeRequirements);
     }
 
-    // Shrinkage guard: if the projection file already exists and the new
-    // content is significantly smaller (<50%), preserve the richer file on
-    // disk, but keep the DB row authoritative with the caller-provided content.
-    // Root canonical artifacts are exempt (rendered from canonical DB state).
-    let skipDiskWrite = false;
-    if (!isRootCanonicalArtifact(opts) && existsSync(fullPath)) {
-      const existingSize = statSync(fullPath).size;
-      const newSize = Buffer.byteLength(contentToPersist, 'utf-8');
-      if (existingSize > 0 && newSize < existingSize * 0.5) {
-        logWarning('projection', `new content (${newSize}B) is <50% of existing projection (${existingSize}B), preserving disk file while DB remains authoritative`, { fn: 'saveArtifactToDbByScope', path: opts.path });
-        skipDiskWrite = true;
-      }
-    }
-
     db.insertArtifact({
       path: opts.path,
       artifact_type: opts.artifact_type,
@@ -911,23 +904,22 @@ export async function saveArtifactToDbByScope(
       full_content: contentToPersist,
     });
 
-    // Write the file to disk (only if we're not preserving a richer existing file)
-    if (!skipDiskWrite) {
-      try {
-        const basePath = dirname(gsdDir);
-        await writeGsdProjection(
-          basePath,
-          fullPath,
-          contentToPersist,
-          [
-            opts.milestone_id,
-            opts.slice_id && `${opts.milestone_id}/${opts.slice_id}`,
-            opts.task_id && `${opts.milestone_id}/${opts.slice_id}/${opts.task_id}`,
-          ].filter((entity): entity is string => Boolean(entity)),
-        );
-      } catch (diskErr) {
-        logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbByScope', path: opts.path, error: String((diskErr as Error).message) });
-      }
+    // The DB row is the authority, so the file always follows it. A file that
+    // changed outside GSD is kept by the projection mutation guard, not here.
+    try {
+      const basePath = dirname(gsdDir);
+      await writeGsdProjection(
+        basePath,
+        fullPath,
+        contentToPersist,
+        [
+          opts.milestone_id,
+          opts.slice_id && `${opts.milestone_id}/${opts.slice_id}`,
+          opts.task_id && `${opts.milestone_id}/${opts.slice_id}/${opts.task_id}`,
+        ].filter((entity): entity is string => Boolean(entity)),
+      );
+    } catch (diskErr) {
+      logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbByScope', path: opts.path, error: String((diskErr as Error).message) });
     }
     // Invalidate file-read caches so deriveState() sees the updated markdown.
     // Do NOT clear the artifacts table — we just wrote to it intentionally.

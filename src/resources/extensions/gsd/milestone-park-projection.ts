@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Render the PARKED marker from the database park record.
 
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
@@ -56,7 +56,7 @@ export function renderMilestoneParkedMarker(basePath: string, milestoneId: strin
   // its existing marker is the only copy of the reason, so leave it in place.
   const record = readMilestoneParkRecord(milestoneId);
   if (!record) return false;
-  atomicWriteSync(parkedPath, [
+  const content = [
     "---",
     `parked_at: ${record.parkedAt}`,
     `reason: "${record.reason.replace(/"/g, '\\"')}"`,
@@ -66,6 +66,9 @@ export function renderMilestoneParkedMarker(basePath: string, milestoneId: strin
     "",
     `> ${record.reason}`,
     "",
-  ].join("\n"), "utf-8");
+  ].join("\n");
+  // A render of an unchanged park record writes nothing.
+  if (existsSync(parkedPath) && readFileSync(parkedPath, "utf-8") === content) return false;
+  atomicWriteSync(parkedPath, content, "utf-8");
   return true;
 }

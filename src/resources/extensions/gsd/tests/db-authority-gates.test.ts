@@ -17,6 +17,7 @@
 //   G8 legacy counters         P36
 //
 // Legs in other files:
+//   G1 projection rebuild from the database alone: tests/projection-rebuild-gate.test.ts
 //   G1/G2 for MCP read tools: packages/mcp-server/src/db-authority-gates.test.ts
 //   G4 per tool and transport, G5 handler writes: packages/mcp-server/src/workflow-tools-parity.test.ts
 //

@@ -49,7 +49,11 @@ import { PROJECTION_LOCK_TRANSIENT_BACKOFF_MS } from "./recovery-policy.js";
 import { deriveState, invalidateStateCache } from "./state.js";
 import { isDiscardedMilestoneStatus } from "./status-guards.js";
 import { detectArtifactDbDrift } from "./state-reconciliation/drift/artifact-db.js";
-import { renderStateProjection } from "./workflow-projections.js";
+import {
+  renderStateProjection,
+  renderTopLevelQueueFromDb,
+  renderTopLevelRoadmapFromDb,
+} from "./workflow-projections.js";
 
 export interface RebuildMarkdownProjectionsResult {
   rendered: number;
@@ -90,8 +94,9 @@ const HIERARCHY_KINDS = new Set([
 // Kinds whose key names a milestone and then an id that is not a slice.
 const MILESTONE_KINDS = new Set(["milestone-validation", "milestone-subjective-uat"]);
 
-// Kinds whose operations change no hierarchy file; STATE.md is their projection.
-const STATE_KINDS = new Set(["state", "milestone-status", "migration-audit"]);
+// Kinds whose operations change no hierarchy file. Their projection is the
+// root files that list the milestones: STATE.md, root ROADMAP.md and QUEUE.md.
+const STATE_KINDS = new Set(["state", "milestone-status", "migration-audit", "queue-order"]);
 
 /** Key prefix of the doctor repair work that renders every file of one milestone. */
 export const MILESTONE_REBUILD_KEY_PREFIX = "rebuild/";
@@ -129,6 +134,8 @@ function hierarchyTarget(ids: string[]): ProjectionRenderTarget | null {
 }
 
 async function renderStateFile(root: string): Promise<void> {
+  renderTopLevelRoadmapFromDb(root);
+  renderTopLevelQueueFromDb(root);
   if ((await renderStateProjection(root)).stale) throw new Error("STATE.md was not rendered");
   const statePath = join(gsdRoot(root), "STATE.md");
   noteRenderedProjectionFile(statePath, readFileSync(statePath, "utf-8"));
@@ -174,7 +181,14 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
   if (key === "knowledge") return { target: "knowledge", render: renderKnowledgeFile };
   if (key === "overrides") return { target: "overrides", render: async (root) => renderOverridesProjection(root) };
   if (segments[0] !== "planning") return null;
-  if (key === "planning/requirements") return { target: "requirements", render: regenerateRequirementsMarkdown };
+  if (key === "planning/requirements") {
+    return {
+      target: "requirements",
+      render: async (root) => {
+        await regenerateRequirementsMarkdown(root);
+      },
+    };
+  }
   return hierarchyTarget(segments.slice(1));
 }
 

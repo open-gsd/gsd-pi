@@ -121,8 +121,7 @@ After all milestone directories and context files are written:
 3. Refresh project state through `gsd_summary_save` with `artifact_type: "PROJECT"` and full PROJECT content that includes the new milestones in the Milestone Sequence; omit `milestone_id`.
 4. If the queued work introduces new in-scope capabilities or promotes Deferred items, persist those changes with `gsd_requirement_save` or `gsd_requirement_update`, then call `gsd_summary_save` with `artifact_type: "REQUIREMENTS"` so `.gsd/REQUIREMENTS.md` renders from DB rows.
 5. If discussion produced decisions relevant to existing work, call `gsd_decision_save` for each decision; the tool regenerates `.gsd/DECISIONS.md`.
-6. If `.gsd/QUEUE.md` is maintained, update it only as an audit projection of queued intent. Runtime queue state must come from the DB-backed milestone/context tool calls above.
-7. {{commitInstruction}}
+6. {{commitInstruction}}
 
 **Do NOT write roadmaps for queued milestones.**
 **Do NOT update `.gsd/STATE.md`.**

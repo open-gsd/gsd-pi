@@ -210,6 +210,36 @@ export function writeCompatMarker(basePath: string, marker: CompatMarker): void 
   atomicWriteSync(path, JSON.stringify(marker, null, 2));
 }
 
+/**
+ * True when the file and its marker baseline already hold `content` for
+ * `entities`. A projection write would then change nothing, so the caller
+ * skips it and a rebuild with no database change rewrites no file. The file
+ * still counts as a file of the render in progress.
+ */
+export function compatProjectionIsCurrent(
+  basePath: string,
+  filePath: string,
+  content: string,
+  entities: string[],
+): boolean {
+  let disk: string;
+  try {
+    disk = readFileSync(filePath, "utf-8");
+  } catch {
+    return false;
+  }
+  if (disk !== content) return false;
+  const projectionPath = deriveCompatProjectionKey(filePath, [join(basePath, ".gsd")]);
+  const entry = readCompatMarker(basePath).projections[projectionPath];
+  if (entry?.sha === computeProjectionSha(content)
+    && entry.entities.length === entities.length
+    && entities.every((entity, index) => entry.entities[index] === entity)) {
+    noteRenderedProjectionFile(filePath, content);
+    return true;
+  }
+  return false;
+}
+
 export function recordCompatProjectionWrite(
   basePath: string,
   filePath: string,

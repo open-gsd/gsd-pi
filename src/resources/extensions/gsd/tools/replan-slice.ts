@@ -15,7 +15,7 @@ import {
 import { invalidateStateCache } from "../state.js";
 import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
-import { renderPlanFromDb, renderReplanFromDb } from "../markdown-renderer.js";
+import { renderPlanFromDb, renderSliceReplan } from "../markdown-renderer.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
@@ -531,28 +531,8 @@ export async function handleReplanSlice(
       removeOwnedPlanProjection(basePath, taskPlanPath);
     }
     const renderResult = await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
-    const durableReplan = getLatestWorkflowDomainEvent(
-      "workflow.slice.replanned",
-      "slice",
-      `${params.milestoneId}/${params.sliceId}`,
-    );
-    if (!durableReplan) throw new Error("durable replan event not found");
-    const blockerTaskId = durableReplan.payload["blockerTaskId"];
-    const blockerDescription = durableReplan.payload["blockerDescription"];
-    const whatChanged = durableReplan.payload["whatChanged"];
-    if (
-      typeof blockerTaskId !== "string" ||
-      typeof blockerDescription !== "string" ||
-      typeof whatChanged !== "string"
-    ) {
-      throw new Error("durable replan event is missing projection data");
-    }
-    const replanResult = await renderReplanFromDb(basePath, params.milestoneId, params.sliceId, {
-      blockerTaskId,
-      blockerDescription,
-      whatChanged,
-      createdAt: durableReplan.createdAt,
-    });
+    const replanResult = await renderSliceReplan(basePath, params.milestoneId, params.sliceId);
+    if (!replanResult) throw new Error("durable replan event not found");
 
     // ── Invalidate caches ─────────────────────────────────────────
     invalidateStateCache();

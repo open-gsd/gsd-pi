@@ -1,58 +1,35 @@
 // Project/App: gsd-pi
-// File Purpose: Resolve milestone ROADMAP content for closeout merge when projection is missing.
+// File Purpose: Resolve milestone ROADMAP content for closeout merge from database rows.
 
-import { getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
+import { getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
+import { renderRoadmapContentFromDb } from "./markdown-renderer.js";
 import { resolveMilestoneFile } from "./paths.js";
-import { renderRoadmapContent, renderRoadmapProjection } from "./workflow-projections.js";
-
-export interface MilestoneMergeRoadmapResolution {
-  content: string;
-  synthesized: boolean;
-}
 
 /**
  * Resolve ROADMAP markdown for milestone merge.
  *
- * Closeout merge previously required an on-disk ROADMAP projection. Milestones
- * completed from slice-level planning can be DB-complete while the milestone
- * ROADMAP file was never rendered — leaving the branch stranded even though
- * slice rows and product commits exist. Synthesize from DB in that case.
+ * The database is the authority: when it holds slice rows for the milestone,
+ * the content is rendered from those rows and no ROADMAP file is read. A
+ * ROADMAP file is used only when the database has no slice rows for the
+ * milestone (or is unavailable).
  */
 export function resolveRoadmapForMilestoneMerge(
   searchPaths: string[],
   milestoneId: string,
   readContent: (path: string) => string,
-): MilestoneMergeRoadmapResolution | null {
+): string | null {
+  if (isDbAvailable() && getMilestoneSlices(milestoneId).length > 0) {
+    const content = renderRoadmapContentFromDb(milestoneId);
+    if (content) return content;
+  }
+
   const seen = new Set<string>();
   for (const basePath of searchPaths) {
     if (!basePath || seen.has(basePath)) continue;
     seen.add(basePath);
 
     const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-    if (roadmapPath) {
-      return { content: readContent(roadmapPath), synthesized: false };
-    }
+    if (roadmapPath) return readContent(roadmapPath);
   }
-
-  if (!isDbAvailable()) return null;
-
-  const milestone = getMilestone(milestoneId);
-  if (!milestone) return null;
-
-  const slices = getMilestoneSlices(milestoneId);
-  if (slices.length === 0) return null;
-
-  const persistBase = searchPaths.find(Boolean);
-  if (persistBase) {
-    try {
-      renderRoadmapProjection(persistBase, milestoneId);
-    } catch {
-      // Best-effort persistence; merge can proceed with in-memory content.
-    }
-  }
-
-  return {
-    content: renderRoadmapContent(milestone, slices),
-    synthesized: true,
-  };
+  return null;
 }
