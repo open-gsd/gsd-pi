@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 import { createBashTool, createEditTool, createReadTool, createWriteTool } from "@gsd/pi-coding-agent";
 
+import { runInToolSession } from "../db/domain-operation.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   getWorkflowDatabaseStatus,
@@ -30,6 +31,16 @@ export function safeWorkspaceCwd(): string {
     if (projectRoot && existsSync(projectRoot)) return projectRoot;
     return homedir();
   }
+}
+
+/**
+ * Run one Pi tool call in its transport session, so a mutation is checked
+ * against the revision that the session last read.
+ */
+export function runInPiToolSession<T>(ctx: unknown, run: () => T): T {
+  const sessionId = (ctx as { sessionManager?: { getSessionId?: () => unknown } } | undefined)
+    ?.sessionManager?.getSessionId?.();
+  return runInToolSession(`pi:${typeof sessionId === "string" ? sessionId : "default"}`, run);
 }
 
 export function resolveCtxCwd(ctx?: unknown): string {

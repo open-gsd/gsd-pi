@@ -9,7 +9,7 @@
 import { Type, StringEnum } from "@gsd/pi-ai";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
 
-import { ensureDbOpen, resolveCtxCwd } from "./dynamic-tools.js";
+import { ensureDbOpen, resolveCtxCwd, runInPiToolSession } from "./dynamic-tools.js";
 import { piPlanningInvocation } from "../planning-invocation.js";
 import {
   executeGsdGraph,
@@ -65,11 +65,11 @@ export function registerMemoryTools(pi: ExtensionAPI): void {
           isError: true,
         };
       }
-      return executeMemoryCapture(
+      return runInPiToolSession(_ctx, () => executeMemoryCapture(
         params as Parameters<typeof executeMemoryCapture>[0],
         basePath,
         piPlanningInvocation("capture_thought", toolCallId),
-      );
+      ));
     },
   });
 

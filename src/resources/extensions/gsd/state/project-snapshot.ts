@@ -6,6 +6,7 @@
 
 import { deriveState, invalidateStateCache } from "./derive/index.js";
 import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
+import { noteSessionRead } from "../db/domain-operation.js";
 import {
   _getAdapter,
   getAllMilestones,
@@ -216,6 +217,7 @@ export async function readProjectSnapshotFromDb(
       const after = readStabilityToken();
 
       if (stabilityTokensMatch(before, after) || attempt === MAX_REVISION_ATTEMPTS) {
+        noteSessionRead(dbRead.authority.revision);
         return {
           ...dbRead,
           current: buildCurrent(state),

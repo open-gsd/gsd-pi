@@ -80,6 +80,8 @@ import type { CompleteSliceParams, EscalationOption } from "../types.js";
 import { handleCompleteSlice } from "./complete-slice.js";
 import type { PlanMilestoneParams } from "./plan-milestone.js";
 import { handlePlanMilestone } from "./plan-milestone.js";
+import { noteSessionRead } from "../db/domain-operation.js";
+export { runInToolSession } from "../db/domain-operation.js";
 import { internalPlanningInvocation, type PlanningInvocation } from "../planning-invocation.js";
 import { executeRecordDomainOperation } from "../record-domain-operation.js";
 import type { PlanSliceParams } from "./plan-slice.js";
@@ -2725,6 +2727,8 @@ export async function executeMilestoneStatus(
       observationContext,
     );
     emitLifecycleShadowObservation(basePath, observation);
+    // A read whose revision query failed has no revision to fence the next write with.
+    if (observedRead.shadowSnapshot.queryError === undefined) noteSessionRead(observedRead.shadowSnapshot.projectRevision);
     return observedRead.response;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

@@ -4,7 +4,7 @@
 
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@gsd/pi-coding-agent";
-import { ensureDbOpen, resolveCtxCwd } from "./dynamic-tools.js";
+import { ensureDbOpen, resolveCtxCwd, runInPiToolSession } from "./dynamic-tools.js";
 import { checkpointWorkflowDatabase } from "../db-workspace.js";
 import { autoSession } from "../auto-runtime-state.js";
 import { getGuidedUnitContext } from "../guided-unit-context.js";
@@ -145,11 +145,11 @@ export function registerQueryTools(
       const basePath = resolveCtxCwd(ctx);
       const { executeMilestoneStatus } = await import("../tools/workflow-tool-executors.js");
       const sessionId = contextSessionId(ctx);
-      const result = await executeMilestoneStatus(
+      const result = await runInPiToolSession(ctx, () => executeMilestoneStatus(
         params,
         basePath,
         nativeMilestoneStatusContext(basePath, toolCallId, sessionId, captureSourceRevision),
-      );
+      ));
       if (result.details?.error === "db_unavailable") {
         return {
           content: [{ type: "text" as const, text: "Error: GSD database is not available. Cannot read milestone status." }],

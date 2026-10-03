@@ -1856,6 +1856,7 @@ const captureMilestoneValidation = async (params, projectDir, options) => {
 };
 
 export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = ["SUMMARY", "UAT", "CONTEXT", "PLAN"];
+export const runInToolSession = (_sessionKey, run) => run();
 export const resolveMilestoneStatusObservationTokenState = () => "malformed";
 export const executeMilestoneStatus = noop;
 export const executePlanMilestone = noop;

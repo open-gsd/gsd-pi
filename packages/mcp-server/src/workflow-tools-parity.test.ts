@@ -32,6 +32,7 @@ import {
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
 import { registerMemoryTools } from "../../../src/resources/extensions/gsd/bootstrap/memory-tools.ts";
+import { registerQueryTools } from "../../../src/resources/extensions/gsd/bootstrap/query-tools.ts";
 import {
   claimTaskAttempt,
   settleTaskAttempt,
@@ -43,6 +44,7 @@ import {
 import {
   expectedFail,
   fenceWorkflowWrites,
+  seedLifecycle,
   snapshotProjections,
 } from "../../../src/resources/extensions/gsd/tests/db-authority-gate.ts";
 import { seedSliceCompletionAuthority } from "../../../src/resources/extensions/gsd/tests/slice-completion-fixture.ts";
@@ -226,6 +228,7 @@ async function runNativeDbTool(
   } as Parameters<typeof registerDbTools>[0];
   registerDbTools(pi);
   registerMemoryTools(pi);
+  registerQueryTools(pi);
   const tool = registrations.find((entry) => entry.name === toolName);
   if (!tool) throw new Error(`native db tool ${toolName} not registered`);
   return tool.execute(toolCallId, args, undefined, undefined, { cwd: base });
@@ -1071,5 +1074,61 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
         expectedFail("P12", () => assert.deepEqual(wroteProjections, []));
       });
     });
+  }
+});
+
+describe("revision fencing: a mutation is checked against the session's last read", () => {
+  const requirementArgs = (description: string) => ({
+    class: "core-capability",
+    description,
+    why: "Lock the stale view rejection",
+    source: "M001",
+  });
+  const text = (result: unknown) => (result as { content: Array<{ text: string }> }).content[0]?.text ?? "";
+  const requirementCount = () =>
+    Number(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM requirements").get()?.count);
+  /** Another session commits one Domain Operation. */
+  const moveRevision = (key: string) => seedLifecycle(
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S02", lifecycleStatus: "in_progress" },
+    key,
+    "slice-lifecycle",
+  );
+
+  for (const transport of ["pi", "mcp"] as const) {
+    for (const readTool of ["gsd_milestone_status", "gsd_project_snapshot"]) {
+      it(`${transport}: a write after a stale ${readTool} read is rejected until the session reads again`, async () => {
+        const fixture = await createWorkflowAuthorityFixture();
+        try {
+          let calls = 0;
+          const call = (tool: string, args: Record<string, unknown>) => {
+            const key = `revision-fence-${calls++}`;
+            return transport === "pi"
+              ? runNativeDbTool(fixture.root, tool, args, key)
+              : callMcpLifecycleTool(fixture.root, tool, args, key);
+          };
+          const read = () => call(readTool, readTool === "gsd_milestone_status" ? { milestoneId: "M001" } : {});
+          const before = requirementCount();
+
+          await read();
+          moveRevision(`${transport}-${readTool}-first`);
+          const stale = await call("gsd_requirement_save", requirementArgs("Written on a stale view"));
+          assert.match(text(stale), /stale view: the project changed after this session last read it/);
+          const stillStale = await call("gsd_requirement_save", requirementArgs("Retried without a read"));
+          assert.match(text(stillStale), /stale view/, "a retry without a new read is rejected too");
+          assert.equal(requirementCount(), before, "a rejected write saves nothing");
+
+          await read();
+          const fresh = await call("gsd_requirement_save", requirementArgs("Written on a fresh view"));
+          assert.match(text(fresh), /^Saved requirement R\d+$/);
+
+          moveRevision(`${transport}-${readTool}-second`);
+          const unread = await call("gsd_requirement_save", requirementArgs("Written with no read since the last write"));
+          assert.match(text(unread), /^Saved requirement R\d+$/, "a write with no read uses the current revision");
+          assert.equal(requirementCount(), before + 2);
+        } finally {
+          fixture.cleanup();
+        }
+      });
+    }
   }
 });

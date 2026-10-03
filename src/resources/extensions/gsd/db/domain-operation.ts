@@ -1,6 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Atomic, revision-checked Domain Operation writer boundary.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -941,6 +942,33 @@ function requireMatchingImportForwardRepair(
   }
 }
 
+// Revision fencing: each transport session keeps, per project, the revision
+// that its last read tool returned. The next operation of that session must
+// still see that revision. A session with no read uses the current revision.
+const sessionReadRevisions = new Map<string, number>();
+const toolSession = new AsyncLocalStorage<string>();
+
+/** Run one tool call of a transport session. */
+export function runInToolSession<T>(sessionKey: string, run: () => T): T {
+  return toolSession.run(sessionKey, run);
+}
+
+function sessionReadKey(projectId: string): string | undefined {
+  const sessionKey = toolSession.getStore();
+  return sessionKey === undefined ? undefined : `${sessionKey}\n${projectId}`;
+}
+
+/**
+ * Record the project revision that a read tool returned to the session of the
+ * current tool call. Does nothing outside a tool session.
+ */
+export function noteSessionRead(revision: number): void {
+  if (toolSession.getStore() === undefined) return;
+  const authority = getDb().prepare("SELECT project_id FROM project_authority WHERE singleton = 1").get();
+  const key = authority ? sessionReadKey(String(authority["project_id"])) : undefined;
+  if (key !== undefined) sessionReadRevisions.set(key, revision);
+}
+
 function staleAuthority(request: DomainOperationRequestIdentity, authority: AuthorityRow): never {
   if (authority.revision !== request.expectedRevision) {
     throw new GSDError(
@@ -1009,6 +1037,16 @@ function executeDomainOperationCore(
       if (importForwardRepair) requireMatchingImportForwardRepair(existing, importForwardRepair);
       preCommit?.();
       return loadReceipt(existing, "replayed");
+    }
+
+    const readKey = sessionReadKey(authority.project_id);
+    const readRevision = readKey === undefined ? undefined : sessionReadRevisions.get(readKey);
+    if (readRevision !== undefined && readRevision !== authority.revision) {
+      throw new GSDError(
+        GSD_REVISION_CONFLICT,
+        `stale view: the project changed after this session last read it (read at revision ${readRevision}, ` +
+        `now ${authority.revision}). Read the project status again, then retry.`,
+      );
     }
 
     if (
@@ -1195,6 +1233,12 @@ function executeDomainOperationCore(
     preCommit?.();
     return loadReceipt(storedOperation, "committed");
   });
+
+  // The session's read is used up by its own committed write.
+  if (result.status === "committed") {
+    const readKey = sessionReadKey(result.projectId);
+    if (readKey !== undefined) sessionReadRevisions.delete(readKey);
+  }
 
   hitFault("after-commit", request.operationType);
   return result;

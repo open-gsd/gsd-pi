@@ -24,6 +24,7 @@ import {
 	resolveCtxCwd,
 	resolveTaskRecoveryResumeBasePath,
 	resolveWorkflowToolBasePath,
+	runInPiToolSession,
 } from "./dynamic-tools.js";
 import {
 	loadWriteGateSnapshot,
@@ -82,7 +83,12 @@ function registerAlias(
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- toolDef shape matches ToolDefinition but varies by schema
-function registerWorkflowTool(pi: ExtensionAPI, toolDef: any): void {
+function registerWorkflowTool(pi: ExtensionAPI, definition: any): void {
+	const toolDef = {
+		...definition,
+		execute: (...args: any[]) =>
+			runInPiToolSession(args[4], () => definition.execute(...args)),
+	};
 	pi.registerTool(toolDef);
 	if (process.env.GSD_ADVERTISE_TOOL_ALIASES !== "1") return; // canonical-only model surface (see plan 035)
 	for (const alias of aliasesForWorkflowTool(toolDef.name)) {

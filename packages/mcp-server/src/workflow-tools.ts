@@ -74,6 +74,7 @@ async function importBridgeModule(): Promise<GsdMcpBridge> {
 
 type WorkflowToolExecutors = {
   SUPPORTED_SUMMARY_ARTIFACT_TYPES: readonly string[];
+  runInToolSession: <T>(sessionKey: string, run: () => T) => T;
   MILESTONE_STATUS_OBSERVATION_TOKEN_ENV?: string;
   resolveMilestoneStatusObservationTokenState?: (
     basePath: string,
@@ -776,6 +777,7 @@ function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors
   if (!value || typeof value !== "object") return false;
   const record = value as Record<string, unknown>;
   const functionExports = [
+    "runInToolSession",
     "executeMilestoneStatus",
     "executePlanMilestone",
     "executePlanSlice",
@@ -2776,7 +2778,9 @@ function wrapServerWithErrorHandler(realServer: McpToolServer): McpToolServer {
     tool(name, description, params, handler) {
       return realServer.tool(name, description, params, async (args, extra) => {
         try {
-          return await handler(args, extra);
+          // A mutation is checked against the revision that this MCP session last read.
+          const { runInToolSession } = await getWorkflowToolExecutors();
+          return await runInToolSession(`mcp:${extra?.sessionId ?? "default"}`, () => handler(args, extra));
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
           return {
