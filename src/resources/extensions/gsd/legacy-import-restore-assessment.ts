@@ -558,8 +558,9 @@ function applicationMatchesInput(
     && application.backupAuthorityEpoch === backup.base_authority_epoch
     && application.backupQuickCheck === backup.quick_check
     && application.backupVerifiedAt === backup.verified_at
-    && application.projectId === backup.project_id
-    && application.projectRootRealpath === backup.project_root_realpath;
+    // The checkout root is a binding that /gsd db bind may move (and is '' in
+    // backups taken before binding existed), not identity: match project_id.
+    && application.projectId === backup.project_id;
 }
 
 function captureBackupBase(backupRef: string): LegacyImportBaseSnapshot {

@@ -1373,8 +1373,9 @@ function existingTerminalResult(input: RestoreInputSnapshot): LegacyImportLiveRe
   if (assessment.decision !== "already-restored") return null;
   const current = verifyOpenDatabaseIntegrity();
   if (
+    // The live checkout binding may differ from the backup's (see
+    // applicationMatchesInput); project_id is the identity.
     current.authority.project_id !== input.backup.project_id
-    || current.authority.project_root_realpath !== input.backup.project_root_realpath
     || current.authority.revision < input.backup.base_project_revision + 1
     || current.authority.authority_epoch < input.backup.base_authority_epoch
   ) {

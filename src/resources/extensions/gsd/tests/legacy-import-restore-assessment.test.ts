@@ -2,9 +2,9 @@
 // File Purpose: Read-only exact-head restore eligibility and recommendation contract.
 
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
@@ -41,6 +41,7 @@ import {
 import { SCHEMA_VERSION } from "../db/engine.ts";
 import type { LegacyImportForwardRepairPlan } from "../legacy-import-forward-repair-plan.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
 import {
   cutoverProjectAuthority,
   inspectProjectAuthorityCutoverEvidence,
@@ -77,13 +78,16 @@ function rows(sql: string): Array<Record<string, unknown>> {
   return db().prepare(sql).all();
 }
 
-function prepareCase(apply = true): PreparedCase {
+function prepareCase(apply = true, inProjectGsd = false): PreparedCase {
   sequence += 1;
   const workspace = mkdtempSync(join(tmpdir(), "gsd-restore-assessment-"));
   tempDirectories.add(workspace);
   const source = join(workspace, "source");
   const backupDirectory = join(workspace, "backups");
-  const databasePath = join(workspace, "canonical.sqlite");
+  const databasePath = inProjectGsd
+    ? join(workspace, "project", ".gsd", "gsd.db")
+    : join(workspace, "canonical.sqlite");
+  if (inProjectGsd) mkdirSync(dirname(databasePath), { recursive: true });
   cpSync(join(CORPUS_ROOT, "gsd-nested", "source"), source, {
     recursive: true,
     dereference: false,
@@ -325,6 +329,20 @@ test("exact head recommends restore, requires bound Consent, and remains read-on
   assert.equal(eligible.recommendation.question, null);
   assert.deepEqual(durableSnapshot(), before);
   assert.equal(hashLegacyImportValue([...readFileSync(prepared.backup.backup_ref)]), backupBytes);
+});
+
+test("an Import Application recorded before checkout binding stays restorable after bind and rebind", () => {
+  const prepared = prepareCase(true, true);
+  assert.equal(prepared.backup.project_root_realpath, "", "the backup was taken while the database was unbound");
+  closeDatabase();
+  const projectRoot = dirname(dirname(prepared.databasePath));
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+  assert.equal(row("SELECT project_root_realpath FROM project_authority").project_root_realpath, realpathSync(projectRoot));
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
+
+  // /gsd db bind moves the binding; the retained Application keeps its restore path.
+  db().prepare("UPDATE project_authority SET project_root_realpath = '/moved/checkout'").run();
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
 });
 
 test("later canonical work permanently recommends Forward Repair before coordination", () => {
