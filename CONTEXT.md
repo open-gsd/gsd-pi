@@ -108,6 +108,8 @@ What shipped:
   stamp. STATE.md, DECISIONS.md, and `.planning/` carry no stamp. KNOWLEDGE.md
   is rendered from `memories` rows, but is not a pure projection yet: file rows
   with no database row are kept in the render until the KNOWLEDGE import exists.
+- Steer overrides (`/gsd steer`) are `override.*` events of Domain Operations.
+  OVERRIDES.md is rendered from them and is never read back.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).
