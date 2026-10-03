@@ -6,6 +6,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, rmSync, statSync
 import { join } from "node:path";
 
 import { renderAllFromDb, renderRoadmapFromDb } from "./markdown-renderer.js";
+import { isDiscardedMilestoneStatus } from "./status-guards.js";
 import {
   deleteArtifactByPath,
   deleteArtifactsByPathPrefix,
@@ -86,8 +87,13 @@ function moveManagedTree(src: string, dst: string): void {
   flatPhaseMigrationBoundaryForTest?.("after-move", src);
 }
 
+/** The milestones that the render projects; a discarded milestone has no files. */
+function projectedMilestones() {
+  return getAllMilestones().filter((milestone) => !isDiscardedMilestoneStatus(milestone.status));
+}
+
 function expectedPhaseDirs(basePath: string): string[] {
-  return getAllMilestones().map((milestone) =>
+  return projectedMilestones().map((milestone) =>
     resolveMilestonePath(basePath, milestone.id) ??
       join(milestonesDir(basePath), canonicalPhaseDirName(milestone.id, milestone.title)),
   );
@@ -558,7 +564,7 @@ async function migrateToFlatPhaseLocked(basePath: string): Promise<void> {
   try {
     renderResult = await renderAllFromDb(basePath);
     // Slice-less milestones still need a phase directory for flat-phase layout.
-    for (const milestone of getAllMilestones()) {
+    for (const milestone of projectedMilestones()) {
       if (getMilestoneSlices(milestone.id).length > 0) continue;
       const roadmapResult = await renderRoadmapFromDb(basePath, milestone.id);
       if ("skipped" in roadmapResult) {

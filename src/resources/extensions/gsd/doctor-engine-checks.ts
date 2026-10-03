@@ -1071,7 +1071,13 @@ export async function checkEngineHealth(
           )
           .all() as ArtifactRow[];
 
+        const discardedMilestoneIds = new Set(
+          getAllMilestones()
+            .filter((milestone) => isDiscardedMilestoneStatus(milestone.status))
+            .map((milestone) => milestone.id),
+        );
         for (const row of artifactRows) {
+          if (row.milestone_id && discardedMilestoneIds.has(row.milestone_id)) continue;
           const unitId = artifactUnitId(row);
           const issuePath = artifactPathRelativeToGsd(row.path);
           if (artifactExistsOnDisk(basePath, row.path)) continue;

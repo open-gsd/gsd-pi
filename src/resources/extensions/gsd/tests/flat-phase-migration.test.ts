@@ -238,6 +238,29 @@ test("migrateToFlatPhase moves content from milestones/ to phases/", async () =>
   assert.ok(!existsSync(join(base, ".gsd", "milestones")), "milestones/ should be removed");
 });
 
+test("migrateToFlatPhase succeeds with discarded milestones and creates no phase directory for them", async () => {
+  const base = makeTmp();
+  insertMilestone({ id: "M002", title: "Discarded", status: "skipped", planning: { vision: "Was planned." } });
+  insertSlice({
+    milestoneId: "M002", id: "S01", title: "Discarded slice", status: "pending",
+    risk: "low", depends: [], demo: "none", sequence: 1,
+  });
+  insertTask({
+    milestoneId: "M002", sliceId: "S01", id: "T01", title: "Discarded task",
+    status: "pending", sequence: 1,
+  });
+  insertMilestone({ id: "M003", title: "Discarded shell", status: "skipped", planning: { vision: "Was planned." } });
+
+  await migrateToFlatPhase(base);
+
+  assert.ok(!existsSync(join(base, ".gsd", "milestones")), "milestones/ should be removed");
+  assert.deepEqual(
+    readdirSync(join(base, ".gsd", "phases")).filter((entry) => !entry.startsWith(".")),
+    ["01-foundation"],
+    "only the projected milestone has a phase directory",
+  );
+});
+
 test("migrateToFlatPhase ignores unsupported .planning projection layout", async () => {
   const base = makeTmp();
   mkdirSync(join(base, ".planning", "milestones", "M001", "v1-phases"), { recursive: true });

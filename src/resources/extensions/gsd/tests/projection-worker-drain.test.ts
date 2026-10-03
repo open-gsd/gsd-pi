@@ -645,3 +645,29 @@ test("a legacy-import drain and a full rebuild create no file of a discarded mil
     "no M002 directory exists",
   );
 });
+
+test("doctor does not report a missing artifact file of a discarded milestone", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  await rebuildMarkdownProjectionsFromDb(base);
+  insertMilestone({ id: "M002", title: "Discarded", status: "skipped", planning: { vision: "Was planned." } });
+  for (const milestoneId of ["M001", "M002"]) {
+    insertArtifact({
+      path: `milestones/${milestoneId}/${milestoneId}-MISSING.md`,
+      artifact_type: "PLAN",
+      milestone_id: milestoneId,
+      slice_id: null,
+      task_id: null,
+      full_content: "# Missing\n",
+    });
+  }
+
+  const issues: DoctorIssue[] = [];
+  await checkEngineHealth(base, issues, []);
+
+  assert.deepEqual(
+    issues.filter((issue) => issue.code === "artifact_file_missing").map((issue) => issue.unitId),
+    ["M001"],
+    "the row of the open milestone is reported; the row of the discarded milestone is not",
+  );
+});
