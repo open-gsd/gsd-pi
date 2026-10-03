@@ -29,6 +29,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { PartialMessageBuilder, ZERO_USAGE, mapUsage } from "./partial-builder.js";
 import { createLegacySkillGuardHook, isLegacySkillGuardDisabled } from "./legacy-skill-guard.js";
+import { PROJECTION_WRITE_GUARD_MATCHER, projectionWriteGuardHook } from "./projection-write-guard.js";
 import {
 	attachExternalResultsToToolBlocks,
 	buildFinalAssistantContent,
@@ -2416,9 +2417,12 @@ export function buildSdkOptions(
 		systemPrompt: { type: "preset", preset: "claude_code" },
 		disallowedTools,
 		...(allowedTools.length > 0 ? { allowedTools } : {}),
-		...(legacySkillGuardHook
-			? { hooks: { PreToolUse: [{ matcher: "Skill", hooks: [legacySkillGuardHook] }] } }
-			: {}),
+		hooks: {
+			PreToolUse: [
+				{ matcher: PROJECTION_WRITE_GUARD_MATCHER, hooks: [projectionWriteGuardHook] },
+				...(legacySkillGuardHook ? [{ matcher: "Skill", hooks: [legacySkillGuardHook] }] : []),
+			],
+		},
 		...(sdkMcpServers ? { mcpServers: sdkMcpServers } : {}),
 		...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 		betas: (

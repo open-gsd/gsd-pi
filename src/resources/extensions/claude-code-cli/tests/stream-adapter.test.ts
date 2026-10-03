@@ -5571,14 +5571,18 @@ describe("stream-adapter — interactive legacy gsd-core skill guard (#2369)", (
 		hookSpecificOutput?: { permissionDecision?: "allow" | "deny" | "ask"; permissionDecisionReason?: string };
 	};
 
+	function hasSkillHook(options: Record<string, unknown>): boolean {
+		const hooks = options.hooks as { PreToolUse?: Array<{ matcher?: string }> } | undefined;
+		return hooks?.PreToolUse?.some((entry) => entry.matcher === "Skill") ?? false;
+	}
+
 	async function invokeSkillHook(options: Record<string, unknown>, skillName: string): Promise<PreToolUseDecision> {
 		const hooks = options.hooks as
 			| { PreToolUse?: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<PreToolUseDecision>> }> }
 			| undefined;
-		const matchers = hooks?.PreToolUse;
-		assert.ok(Array.isArray(matchers) && matchers.length > 0, "expected a registered PreToolUse hook matcher");
-		assert.equal(matchers[0].matcher, "Skill");
-		return matchers[0].hooks[0]({
+		const skillMatcher = hooks?.PreToolUse?.find((entry) => entry.matcher === "Skill");
+		assert.ok(skillMatcher, "expected a registered PreToolUse Skill hook matcher");
+		return skillMatcher.hooks[0]({
 			hook_event_name: "PreToolUse",
 			tool_name: "Skill",
 			tool_input: { skill: skillName },
@@ -5610,14 +5614,77 @@ describe("stream-adapter — interactive legacy gsd-core skill guard (#2369)", (
 			cwd: join(scratch, "project"),
 			gsdPhase: "plan-milestone",
 		});
-		assert.equal(options.hooks, undefined);
+		assert.equal(hasSkillHook(options), false);
 		assert.ok((options.disallowedTools as string[]).includes("Skill"));
 	});
 
 	test("GSD_CLAUDE_CODE_LEGACY_SKILL_FILTER=0 removes the guard", () => {
 		pushEnv("GSD_CLAUDE_CODE_LEGACY_SKILL_FILTER", "0");
 		const options = buildInteractiveOptions();
-		assert.equal(options.hooks, undefined);
+		assert.equal(hasSkillHook(options), false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Projection write guard — Claude Code pre-executes Write/Edit/Bash, so the
+// native tool_call guard never fires. The PreToolUse hook is the guard.
+// ---------------------------------------------------------------------------
+
+describe("stream-adapter — projection write guard", () => {
+	type Decision = {
+		hookSpecificOutput?: { permissionDecision?: "allow" | "deny" | "ask"; permissionDecisionReason?: string };
+	};
+
+	async function preToolUse(
+		toolName: string,
+		toolInput: Record<string, unknown>,
+		gsdPhase?: string,
+	): Promise<Decision> {
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			...(gsdPhase ? { gsdPhase } : {}),
+		});
+		const hooks = options.hooks as
+			| { PreToolUse?: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<Decision>> }> }
+			| undefined;
+		const entry = hooks?.PreToolUse?.find((candidate) =>
+			new RegExp(`^(?:${candidate.matcher})$`).test(toolName));
+		assert.ok(entry, `expected a PreToolUse hook that matches ${toolName}`);
+		return entry.hooks[0]({
+			hook_event_name: "PreToolUse",
+			tool_name: toolName,
+			tool_input: toolInput,
+			tool_use_id: "tu_projection_1",
+		});
+	}
+
+	const roadmap = "/tmp/project/.gsd/milestones/M001/M001-ROADMAP.md";
+
+	for (const [toolName, toolInput] of [
+		["Write", { file_path: roadmap, content: "x" }],
+		["Edit", { file_path: roadmap, old_string: "a", new_string: "b" }],
+		["MultiEdit", { file_path: roadmap, edits: [] }],
+		["Bash", { command: `echo "- [x] S01" >> ${roadmap}` }],
+	] as const) {
+		test(`denies ${toolName} on a managed projection and names the tool, in interactive and auto runs`, async () => {
+			for (const gsdPhase of [undefined, "execute-task"]) {
+				const decision = await preToolUse(toolName, toolInput, gsdPhase);
+				assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");
+				assert.match(decision.hookSpecificOutput?.permissionDecisionReason ?? "", /gsd_plan_milestone/);
+			}
+		});
+	}
+
+	test("denies a write to STATE.md", async () => {
+		const decision = await preToolUse("Write", { file_path: "/tmp/project/.gsd/STATE.md", content: "x" });
+		assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");
+	});
+
+	test("allows source files and a bash read of a projection", async () => {
+		const write = await preToolUse("Write", { file_path: "/tmp/project/src/app.ts", content: "x" });
+		const read = await preToolUse("Bash", { command: `cat ${roadmap}` });
+		assert.notEqual(write.hookSpecificOutput?.permissionDecision, "deny");
+		assert.notEqual(read.hookSpecificOutput?.permissionDecision, "deny");
 	});
 });
 

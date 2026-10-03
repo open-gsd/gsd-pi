@@ -17,7 +17,7 @@ import { applyAskUserQuestionsGateResult, clearDiscussionFlowState, currentWrite
 import { canonicalToolName } from "../engine-hook-contract.js";
 import { resolveManifest } from "../unit-context-manifest.js";
 import { getIsolationMode, resolveEffectiveUnitIsolationMode } from "../preferences.js";
-import { isBlockedStateFile, isBashWriteToStateFile, BLOCKED_WRITE_ERROR } from "../write-intercept.js";
+import { blockedWriteReason, blockedBashWriteReason } from "../write-intercept.js";
 import { loadFile, saveFile, formatContinue } from "../files.js";
 import {
   autoSession,
@@ -1731,9 +1731,11 @@ export function registerHooks(
   // NATIVE_ONLY_TOOL_HOOKS — it never fires under external engines
   // (claude-code-cli pre-executes tools). The guards below (loop guard,
   // pending/deferred gate blocks, queue guard, planning-unit tools policy,
-  // worktree write gate, STATE.md single-writer, context-write depth gate)
-  // are therefore native-engine enforcement only. The write-gate arming
-  // concern has a universal mirror at tool_execution_start below.
+  // worktree write gate, context-write depth gate) are therefore native-engine
+  // enforcement only. The STATE.md/projection write block is mirrored for
+  // claude-code-cli by its PreToolUse hook (projection-write-guard.ts). The
+  // write-gate arming concern has a universal mirror at tool_execution_start
+  // below.
   pi.on("tool_call", async (event, ctx) => {
     const discussionBasePath = contextBasePath(ctx);
     const toolName = canonicalToolName(event.toolName);
@@ -1916,37 +1918,31 @@ export function registerHooks(
       }
     }
 
-    // ── Single-writer engine: block direct writes to STATE.md ──────────
-    // Covers write, edit, and bash tools to prevent bypass vectors.
+    // ── Depth gate: an unverified milestone CONTEXT write gets the depth
+    // question first; the projection block below then names the save tool.
     if (isToolCallEventType("write", event)) {
-      if (isBlockedStateFile(event.input.path)) {
-        return { block: true, reason: BLOCKED_WRITE_ERROR };
+      const result = shouldBlockContextWrite(
+        event.toolName,
+        event.input.path,
+        await getDiscussionMilestoneIdFor(discussionBasePath),
+        isQueuePhaseActive(discussionBasePath),
+        discussionBasePath,
+      );
+      if (result.block) {
+        return withDepthGateDisplayReason(result, "Depth check required before writing milestone context.");
       }
     }
 
-    if (isToolCallEventType("edit", event)) {
-      if (isBlockedStateFile(event.input.path)) {
-        return { block: true, reason: BLOCKED_WRITE_ERROR };
-      }
+    // ── Single-writer engine: block direct writes to STATE.md, gsd.db and
+    // managed projections. Covers write, edit, and bash to prevent bypass vectors.
+    if (isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
+      const reason = blockedWriteReason(event.input.path);
+      if (reason) return { block: true, reason };
     }
 
     if (isToolCallEventType("bash", event)) {
-      if (isBashWriteToStateFile(event.input.command)) {
-        return { block: true, reason: BLOCKED_WRITE_ERROR };
-      }
-    }
-
-    if (!isToolCallEventType("write", event)) return;
-
-    const result = shouldBlockContextWrite(
-      event.toolName,
-      event.input.path,
-      await getDiscussionMilestoneIdFor(discussionBasePath),
-      isQueuePhaseActive(discussionBasePath),
-      discussionBasePath,
-    );
-    if (result.block) {
-      return withDepthGateDisplayReason(result, "Depth check required before writing milestone context.");
+      const reason = blockedBashWriteReason(event.input.command);
+      if (reason) return { block: true, reason };
     }
   });
 

@@ -110,6 +110,15 @@ dependency, authorize recovery, roll back a committed operation, or block
 otherwise valid work. A full projection rebuild is idempotent from the
 database.
 
+Agents change a projection only through the tool that owns its state. The
+agent write guard (`write-intercept.ts`) refuses a direct write, edit or shell
+write to a managed projection that has a save tool and names that tool. It
+runs on the native engine (`tool_call`) and on claude-code-cli (PreToolUse
+hook). The command outputs under `.gsd/spikes`, `.gsd/sketches`,
+`.gsd/reviews` and `.gsd/codebase` are non-workflow documents: no workflow
+decision reads them, and agents write them directly. A
+`/gsd thread` has no typed row; it is a memory entry by prompt convention.
+
 Legacy disk content enters authority only through explicit Import Preview and
 Import Application. Preview is read-only, reports exact mappings and loss, and
 binds approval to source fingerprints, parser/schema versions, and database
