@@ -121,7 +121,7 @@ GSD keeps authoritative runtime state in the project-root SQLite database and re
 
 Flat-phase task summaries use `S##-T##-SUMMARY.md` so identical task IDs in different slices do not collide. GSD still resolves older flat `T##-SUMMARY.md` task summaries when reading legacy projects.
 
-GSD may also create sibling runtime directories next to `.gsd/`: `.gsd-worktrees/` for isolated milestone checkouts and `.gsd-backups/` for migration snapshots. Keep those directories local and gitignored; stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the project has completed the flat-phase `.gsd/phases/` migration.
+GSD may also create sibling runtime directories next to `.gsd/`: `.gsd-worktrees/` for isolated milestone checkouts and `.gsd-backups/` for migration snapshots. Keep those directories local and gitignored. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 `KNOWLEDGE.md` is rendered from the database. Rules, patterns and lessons added through `/gsd knowledge` are saved to the `memories` table and appear in the file at once. Manual edits to a row that the database holds are overwritten on the next render. See [Project Structure](../core-concepts/project-structure.md#adding-knowledge).
 

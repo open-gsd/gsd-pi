@@ -519,6 +519,37 @@ test("headless recover fails loud on a malformed --choice token", async (t) => {
   assert.doesNotMatch(stderr.join(""), /gsd-recover: recovered/);
 });
 
+test("headless recover rejects a mistyped Preview --choice token before the import is applied", async (t) => {
+  const base = makeMarkdownFixture();
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  const unapproved = await handleHeadlessRecover(base);
+  assert.equal(unapproved.exitCode, 1);
+  const previewHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(previewHash, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, [
+    `--preview=${previewHash}`,
+    `--choice=sha256:${"a".repeat(63)}.preserved`,
+  ]);
+
+  assert.equal(result.exitCode, 1);
+  assert.match(stderr.join(""), /malformed --choice token/);
+  assert.equal(await ensureDbOpen(base), true);
+  assert.ok(!getMilestone("M001"), "the import must not be applied");
+});
+
 test("headless recover prints a terminal message for an already-restored Application", async (t) => {
   const base = makeCorpusFixture();
   const previousWrite = process.stderr.write;

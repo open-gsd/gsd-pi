@@ -68,7 +68,7 @@ The `.gsd/` directory looks like this:
 
 Flat-phase task summaries use `S##-T##-SUMMARY.md` so identical task IDs in different slices do not collide. GSD still resolves older flat `T##-SUMMARY.md` task summaries when reading legacy projects.
 
-GSD may also create sibling runtime directories next to `.gsd/`. `.gsd-worktrees/` holds isolated milestone checkouts, and `.gsd-backups/` holds migration snapshots such as `.gsd-backups/migrate-*`. These sibling directories are local-only and gitignored; stale `migrate-*` backup snapshots are pruned after 30 days once the project has completed the flat-phase `.gsd/phases/` migration.
+GSD may also create sibling runtime directories next to `.gsd/`. `.gsd-worktrees/` holds isolated milestone checkouts, and `.gsd-backups/` holds migration snapshots such as `.gsd-backups/migrate-*`. These sibling directories are local-only and gitignored. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 ### Key Files
 

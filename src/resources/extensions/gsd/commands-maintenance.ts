@@ -776,6 +776,7 @@ export async function handleRecover(
 
   try {
     const action = parseLegacyImportRecoveryAction(args.trim().split(/\s+/u).filter(Boolean));
+    const forwardRepairChoices = parseLegacyImportForwardRepairChoices(args);
     const applicationId = requestedApplication(args);
     if (!applicationId && action !== "assess") {
       throw new Error("run gsd recover assessment first, then use its --application evidence");
@@ -822,7 +823,7 @@ export async function handleRecover(
     const recoveryAction = executeLegacyImportRecoveryAction(
       application,
       action,
-      parseLegacyImportForwardRepairChoices(args),
+      forwardRepairChoices,
       requestedRestoreConsent(args),
     );
     const recoveryAssessment = recoveryAction.status === "assessed"

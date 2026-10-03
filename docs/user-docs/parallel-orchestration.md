@@ -282,7 +282,7 @@ The coordinator runs stale detection during status refresh and either marks the 
 └── ...
 ```
 
-`.gsd/gsd.db*`, `.gsd/parallel/`, `.gsd/worktrees/`, `.gsd-worktrees/`, and `.gsd-backups/` are all local runtime artifacts and should remain gitignored. `.gsd-backups/` stores migration snapshots; stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the project has completed the flat-phase `.gsd/phases/` migration.
+`.gsd/gsd.db*`, `.gsd/parallel/`, `.gsd/worktrees/`, `.gsd-worktrees/`, and `.gsd-backups/` are all local runtime artifacts and should remain gitignored. `.gsd-backups/` stores migration snapshots. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 ## Troubleshooting
 

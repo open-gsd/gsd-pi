@@ -33,3 +33,11 @@ test("recover choice tokens reject blank target identities", () => {
     /choice token is invalid/,
   );
 });
+
+test("recover choice parsing rejects a mistyped Preview choice token", () => {
+  assert.deepEqual(parseLegacyImportForwardRepairChoices(`--choice=sha256:${"a".repeat(64)}.preserved`), []);
+  assert.throws(
+    () => parseLegacyImportForwardRepairChoices(`--choice=sha256:${"a".repeat(63)}.preserved`),
+    /choice token is invalid/,
+  );
+});

@@ -258,7 +258,8 @@ function undoEffects(unit: CompletedUnit, commitCount: number): string[] {
 /** Describe the Unit that /gsd undo and web undo would reopen. */
 export async function describeLastCompletedUnit(basePath: string): Promise<UndoUnitInfo> {
   const empty: UndoUnitInfo = { lastUnitType: null, lastUnitId: null, lastUnitKey: null, completedCount: 0, commits: [], effects: [] };
-  if (openUndoDatabase(basePath)) return empty;
+  const dbError = openUndoDatabase(basePath);
+  if (dbError) throw new Error(dbError);
   const { last, count } = readCompletedUnits();
   if (!last) return { ...empty, completedCount: count };
   const commits = unitCommits(basePath, last);
@@ -300,7 +301,12 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
     const task = getTask(mid, sid, tid);
     if (!task) return { success: false, message: `Cannot undo ${label}: task not found in database.` };
     if (!isClosedStatus(task.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
-    const summaryDeleted = await reopenTaskAndRefresh(basePath, mid, sid, tid);
+    let summaryDeleted: boolean;
+    try {
+      summaryDeleted = await reopenTaskAndRefresh(basePath, mid, sid, tid);
+    } catch (error) {
+      return { success: false, message: `Cannot undo ${label}: ${error instanceof Error ? error.message : String(error)}` };
+    }
     results.push(`  - Reopened task ${mid}/${sid}/${tid} in the database`);
     if (summaryDeleted) results.push("  - Deleted task summary file");
   } else if (unit.unitType === "complete-slice" && sid) {
@@ -369,6 +375,11 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
 /** /gsd undo: reopen the last completed Unit after an explicit --force. */
 export async function handleUndo(args: string, ctx: ExtensionCommandContext, _pi: ExtensionAPI, basePath: string): Promise<void> {
   if (!args.includes("--force")) {
+    const dbError = openUndoDatabase(basePath);
+    if (dbError) {
+      ctx.ui.notify(dbError, "warning");
+      return;
+    }
     const info = await describeLastCompletedUnit(basePath);
     if (!info.lastUnitType) {
       ctx.ui.notify("Nothing to undo — no completed unit is recorded in the database.", "info");

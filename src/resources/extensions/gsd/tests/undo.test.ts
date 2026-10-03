@@ -304,6 +304,53 @@ test("handleUndo refuses a unit with no reopen operation instead of reporting su
   }
 });
 
+test("undo preview reports an unreadable database instead of an empty ledger", async () => {
+  const base = makeTempDir("gsd-undo-no-db");
+  try {
+    closeDatabase();
+    invalidateAllCaches();
+
+    await assert.rejects(describeLastCompletedUnit(base), /GSD database is not available/);
+
+    const { notifications, ctx } = makeCtx();
+    await handleUndo("", ctx, {} as any, base);
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0]?.level, "warning");
+    assert.match(notifications[0]?.message ?? "", /GSD database is not available/);
+    assert.doesNotMatch(notifications[0]?.message ?? "", /no completed unit is recorded/);
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("handleUndo reports a refused task reopen as a failure result", async () => {
+  const base = makeTempDir("gsd-undo-task-refused");
+  try {
+    setupTaskFixture(base);
+    // The legacy row no longer matches the canonical lifecycle head.
+    _getAdapter()!.prepare("UPDATE tasks SET status = 'skipped' WHERE id = 'T01'").run();
+    recordCompletedDispatch({
+      unitType: "execute-task", unitId: "M001/S01/T01",
+      milestoneId: "M001", sliceId: "S01", taskId: "T01", endedAt: "2026-07-13T01:00:00.000Z",
+    });
+    invalidateAllCaches();
+
+    const result = await undoLastCompletedUnit(base);
+    assert.equal(result.success, false);
+    assert.match(result.message, /^Cannot undo execute-task \(M001\/S01\/T01\): /);
+
+    const { notifications, ctx } = makeCtx();
+    await handleUndo("--force", ctx, {} as any, base);
+    assert.equal(notifications[0]?.level, "warning");
+    assert.equal(getTask("M001", "S01", "T01")?.status, "skipped");
+    assert.equal(canonicalTaskHistory().reopenOperations, 0);
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
 test("undoLastCompletedUnit opens the project DB itself, as web undo calls it", async () => {
   const base = makeTempDir("gsd-undo-web");
   try {

@@ -245,6 +245,13 @@ export async function handleRecover(
     process.stderr.write('[headless] recover: assess first, then provide --application evidence\n')
     return { exitCode: 1 }
   }
+  let choices: ForwardRepairChoice[]
+  try {
+    choices = modules.parseLegacyImportForwardRepairChoices(args.join(' '))
+  } catch (error) {
+    process.stderr.write(`[headless] recover: malformed --choice token: ${recoveryErrorMessage(error)}\n`)
+    return { exitCode: 1 }
+  }
   let application: VerifiedRecoverApplicationResult
   try {
     const retained = applicationId
@@ -287,13 +294,6 @@ export async function handleRecover(
     return { exitCode: 1 }
   }
 
-  let choices: ForwardRepairChoice[]
-  try {
-    choices = modules.parseLegacyImportForwardRepairChoices(args.join(' '))
-  } catch (error) {
-    process.stderr.write(`[headless] recover: malformed --choice token: ${recoveryErrorMessage(error)}\n`)
-    return { exitCode: 1 }
-  }
   let recoveryAction: ReturnType<ExecuteLegacyImportRecoveryAction>
   try {
     const consentHash = args
