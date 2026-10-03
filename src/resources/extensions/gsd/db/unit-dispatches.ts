@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   _getAdapter,
+  getDb,
   isDbAvailable,
   transaction,
   insertAuditEvent,
@@ -280,8 +281,7 @@ export function recordDispatchClaim(input: RecordClaimInput): RecordClaimResult 
 
 /** Transition a `claimed` dispatch into `running`. */
 export function markRunning(dispatchId: number): void {
-  if (!isDbAvailable()) return;
-  const db = _getAdapter()!;
+  const db = getDb();
   transaction(() => {
     db.prepare(
       `UPDATE unit_dispatches SET status = 'running'
@@ -297,9 +297,8 @@ export interface CompleteOpts {
 
 /** Transition a dispatch into `completed`. */
 export function markCompleted(dispatchId: number, opts?: CompleteOpts): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date().toISOString();
-  const db = _getAdapter()!;
+  const db = getDb();
   let changes = 0;
   transaction(() => {
     const result = db.prepare(
@@ -347,13 +346,12 @@ export interface FailureOpts {
 
 /** Transition a dispatch into `failed`, optionally scheduling a retry. */
 export function markFailed(dispatchId: number, opts: FailureOpts): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date();
   const nowIso = now.toISOString();
   const nextRunIso = opts.retryAfterMs
     ? new Date(now.getTime() + opts.retryAfterMs).toISOString()
     : null;
-  const db = _getAdapter()!;
+  const db = getDb();
   let changes = 0;
   transaction(() => {
     const result = db.prepare(
@@ -396,9 +394,8 @@ export function markFailed(dispatchId: number, opts: FailureOpts): boolean {
 
 /** Transition a dispatch into `stuck`. */
 export function markStuck(dispatchId: number, reason: string): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date().toISOString();
-  const db = _getAdapter()!;
+  const db = getDb();
   const result = transaction(() => {
     return db.prepare(
       `UPDATE unit_dispatches
@@ -425,9 +422,8 @@ export function markStuck(dispatchId: number, reason: string): boolean {
 
 /** Transition a dispatch into `paused`. */
 export function markPaused(dispatchId: number): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date().toISOString();
-  const db = _getAdapter()!;
+  const db = getDb();
   const result = transaction(() => {
     return db.prepare(
       `UPDATE unit_dispatches
@@ -444,9 +440,8 @@ export function markPaused(dispatchId: number): boolean {
 
 /** Transition a dispatch into `canceled`. */
 export function markCanceled(dispatchId: number, reason: string): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date().toISOString();
-  const db = _getAdapter()!;
+  const db = getDb();
   const result = transaction(() => {
     return db.prepare(
       `UPDATE unit_dispatches
@@ -468,9 +463,8 @@ export function markCanceled(dispatchId: number, reason: string): boolean {
  * older orphaned dispatches wedged forever (#1773).
  */
 export function markActiveForWorkerCanceled(workerId: string, reason: string): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date().toISOString();
-  const db = _getAdapter()!;
+  const db = getDb();
   const result = transaction(() => {
     return db.prepare(
       `UPDATE unit_dispatches

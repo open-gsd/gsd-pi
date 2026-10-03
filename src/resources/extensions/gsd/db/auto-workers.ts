@@ -20,6 +20,7 @@ import { hostname } from "node:os";
 
 import {
   _getAdapter,
+  getDb,
   isDbAvailable,
   transaction,
   insertAuditEvent,
@@ -107,9 +108,8 @@ export function registerAutoWorker(opts: {
  * cleaned up by a janitor).
  */
 export function heartbeatAutoWorker(workerId: string): void {
-  if (!isDbAvailable()) return;
   const now = new Date().toISOString();
-  const db = _getAdapter()!;
+  const db = getDb();
   transaction(() => {
     db.prepare(
       `UPDATE workers SET last_heartbeat_at = :now WHERE worker_id = :worker_id AND status = 'active'`,
@@ -122,8 +122,7 @@ export function heartbeatAutoWorker(workerId: string): void {
  * worker's heartbeat has expired beyond the TTL window.
  */
 export function markWorkerCrashed(workerId: string): void {
-  if (!isDbAvailable()) return;
-  const db = _getAdapter()!;
+  const db = getDb();
   let changes = 0;
   transaction(() => {
     const result = db.prepare(
@@ -150,8 +149,7 @@ export function markWorkerCrashed(workerId: string): void {
  * cleanly shuts down auto-mode.
  */
 export function markWorkerStopping(workerId: string): void {
-  if (!isDbAvailable()) return;
-  const db = _getAdapter()!;
+  const db = getDb();
   transaction(() => {
     db.prepare(
       `UPDATE workers SET status = 'stopping' WHERE worker_id = :worker_id`,
@@ -167,9 +165,8 @@ export function markWorkerStoppingByPid(
   projectRootRealpath: string,
   pid: number,
 ): void {
-  if (!isDbAvailable()) return;
   if (!Number.isInteger(pid) || pid <= 0) return;
-  const db = _getAdapter()!;
+  const db = getDb();
   transaction(() => {
     db.prepare(
       `UPDATE workers

@@ -244,6 +244,10 @@ describe("#2442 worktree integrity gates task publication", () => {
   test("a healthy worktree does not pause a verified execute-task", async () => {
     const { postUnitPreVerification } = await import("../auto-post-unit.ts");
     const base = makeTmpBase();
+    // The Task is verified from the DB; with no DB the unit cannot be verified
+    // and post-unit pauses for that reason, not for worktree integrity.
+    seedDurableAttempt(base);
+    clearPathCache();
     // A real git worktree registration is what the integrity probe validates;
     // here a plain healthy project root also proves the no-op path: a unit
     // whose workspaceRoot is the (non-worktree) base must never pause.

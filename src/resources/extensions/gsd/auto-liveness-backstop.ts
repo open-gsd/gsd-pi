@@ -272,7 +272,6 @@ export function clearAbandonedCloseoutSignatures(
   unitType: string,
   unitId: string,
 ): void {
-  if (!isDbAvailable()) return;
   for (const guardId of ABANDONED_CLOSEOUT_SIGNATURE_GUARDS) {
     clearLivenessBlockSignatures({ scopeId, guardId, unitType, unitId });
   }

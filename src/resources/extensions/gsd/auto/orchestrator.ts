@@ -1904,7 +1904,12 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
     clearInFlightTools();
     const scopeId = this.backstopScopeId();
     if (scopeId) {
-      clearAbandonedCloseoutSignatures(scopeId, unit.unitType, unit.unitId);
+      try {
+        clearAbandonedCloseoutSignatures(scopeId, unit.unitType, unit.unitId);
+      } catch (err) {
+        // Best-effort: the abandon must still clear the active unit below.
+        logWarning("engine", `abandoned closeout signatures not cleared: ${getErrorMessage(err)}`);
+      }
     }
     this.status.activeUnit = undefined;
     this.pendingTargetSnapshot = null;

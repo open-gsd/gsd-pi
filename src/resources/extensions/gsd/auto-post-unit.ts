@@ -2570,12 +2570,14 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         !isDbAvailable() &&
         !completeSliceReplanSignalDetected(s, opts?.agentEndMessages)
       ) {
-        debugLog("postUnit", { phase: "artifact-verify-skip-db-unavailable", unitType: s.currentUnit.type, unitId: s.currentUnit.id });
+        debugLog("postUnit", { phase: "artifact-verify-db-unavailable", unitType: s.currentUnit.type, unitId: s.currentUnit.id });
         const dbSkipDiag = diagnoseExpectedArtifact(s.currentUnit.type, s.currentUnit.id, verificationBasePath);
         ctx.ui.notify(
-          `Artifact missing for ${s.currentUnit.type} ${s.currentUnit.id} — DB unavailable, skipping retry.${dbSkipDiag ? ` Expected: ${dbSkipDiag}` : ""}`,
+          `Artifact missing for ${s.currentUnit.type} ${s.currentUnit.id} — workflow DB is unavailable, so the unit cannot be verified. Auto-mode is paused; resume with /gsd auto once the DB opens.${dbSkipDiag ? ` Expected: ${dbSkipDiag}` : ""}`,
           "error",
         );
+        await pauseAuto(ctx, pi);
+        return "dispatched";
       } else if (!triggerArtifactVerified) {
         if (s.lastToolInvocationError && isToolUnavailableError(s.lastToolInvocationError)) {
           // Tool-unavailable is transient: the workflow MCP server registers

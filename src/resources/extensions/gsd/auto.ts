@@ -1862,11 +1862,11 @@ export async function stopAuto(
       if (s.workerId) {
         markWorkerStopping(s.workerId);
       }
-      s.workerId = null;
-      s.milestoneLeaseToken = null;
     } catch (e) {
       debugLog("stop-cleanup-coordination", { error: e instanceof Error ? e.message : String(e) });
     }
+    s.workerId = null;
+    s.milestoneLeaseToken = null;
 
     // ── Step 1b: Flush queued follow-up messages (#3512) ──
     // Late async notifications (async_job_result, gsd-auto-wrapup) can trigger
@@ -2172,14 +2172,6 @@ export async function stopAuto(
       if (s.basePath) clearPersistedHookState(s.basePath);
     } catch (e) {
       debugLog("stop-cleanup-metrics", { error: e instanceof Error ? e.message : String(e) });
-    }
-
-    // ── Step 12: Remove paused-session metadata (#1383) ──
-    // Phase C pt 2: deleteRuntimeKv replaces unlinkSync(paused-session.json).
-    try {
-      deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
-    } catch (err) { /* non-fatal */
-      logWarning("engine", `paused-session DB delete failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
 
     // ── Step 13: Restore original model + thinking (before reset clears IDs) ──

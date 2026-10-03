@@ -14,8 +14,7 @@
  * "Crashed" is detected via workers.status='active' + heartbeat past TTL,
  * cross-checked with the OS PID via isLockProcessAlive(). When the DB is
  * unavailable (fresh project before init), all readers return null and
- * writers no-op — preserving the historical "no lock means no prior
- * crash" semantics.
+ * the lock writers log a warning and skip their DB half.
  *
  * The journal-based emitCrashRecoveredUnitEnd is unchanged from the file
  * era — it queries the journal independently of the lock mechanism.
@@ -38,6 +37,7 @@ import { forceReleaseLeasesForWorker } from "./db/milestone-leases.js";
 import { markActiveForWorkerCanceled, type DispatchStatus } from "./db/unit-dispatches.js";
 import { getRuntimeKv, setRuntimeKv, deleteRuntimeKv } from "./db/runtime-kv.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
+import { logWarning } from "./workflow-logger.js";
 import { gsdRoot, normalizeRealPath } from "./paths.js";
 import { crashResumeHint } from "./guidance.js";
 import { atomicWriteSync } from "./atomic-write.js";
@@ -199,7 +199,10 @@ export function writeLock(
     // Best-effort — never throw from the lock writer.
   }
 
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable()) {
+    logWarning("recovery", "session file pointer not recorded: workflow DB is unavailable");
+    return;
+  }
   try {
     const projectRoot = normalizeRealPath(basePath);
     const worker = findActiveWorkerForCurrentProcess(projectRoot);
@@ -227,7 +230,10 @@ export function clearLock(basePath: string): void {
   const legacyLock = readLegacyLock(basePath);
   clearLegacyLockFile(basePath);
 
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable()) {
+    logWarning("recovery", "worker row not released: workflow DB is unavailable");
+    return;
+  }
   try {
     const projectRoot = normalizeRealPath(basePath);
     const staleWorker = findStaleWorkerForProject(projectRoot);
@@ -273,7 +279,10 @@ export function clearLock(basePath: string): void {
 export function clearStaleWorkerLock(basePath: string): void {
   clearLegacyLockFile(basePath);
 
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable()) {
+    logWarning("recovery", "stale worker row not cleared: workflow DB is unavailable");
+    return;
+  }
   try {
     const projectRoot = normalizeRealPath(basePath);
     const worker = findStaleWorkerForProject(projectRoot);

@@ -936,13 +936,13 @@ export async function runPostUnitVerification(
     // Structured evidence staged by gsd_task_complete for this Task (#1591).
     let taskEvidence: TaskVerificationEvidence[] = [];
     if (mid && sid && tid) {
-      if (isDbAvailable()) {
-        taskRow = getTask(mid, sid, tid);
-        sliceRow = getSlice(mid, sid);
-        taskPlanVerify = taskRow?.verify;
-        taskEvidence = getTaskVerificationEvidence(mid, sid, tid);
-      }
-      // When DB unavailable, taskPlanVerify stays undefined — gate runs without task-specific checks
+      // The Task verify command and its staged evidence exist only in the DB.
+      // A gate that runs without them would pass without the Task checks.
+      if (!isDbAvailable()) throw new Error("Host verification requires the workflow DB");
+      taskRow = getTask(mid, sid, tid);
+      sliceRow = getSlice(mid, sid);
+      taskPlanVerify = taskRow?.verify;
+      taskEvidence = getTaskVerificationEvidence(mid, sid, tid);
     }
 
     const verificationTargets = resolveVerificationTargets(s.basePath, prefs, taskRow, sliceRow);

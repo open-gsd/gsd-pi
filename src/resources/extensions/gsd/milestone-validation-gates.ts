@@ -11,7 +11,7 @@
  * dispatch rules, and state derivation. See gate-registry.ts.
  */
 
-import { isDbAvailable, upsertQualityGate } from "./gsd-db.js";
+import { upsertQualityGate } from "./gsd-db.js";
 import { getGatesForTurn } from "./gate-registry.js";
 
 /**
@@ -31,8 +31,6 @@ export function insertMilestoneValidationGates(
   verdict: string,
   evaluatedAt: string,
 ): void {
-  if (!isDbAvailable()) return;
-
   const gateVerdict = verdict === "pass" ? "pass" : "flag";
   const milestoneGates = getGatesForTurn("validate-milestone");
 

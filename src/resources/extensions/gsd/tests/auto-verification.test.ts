@@ -6,6 +6,7 @@ import {
 	runPostUnitVerification,
 } from "../auto-verification.ts";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "../constants.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { describeHostVerificationRationale } from "../verification-verdict.ts";
 import { cleanup, makeTempRepo } from "./test-utils.ts";
 
@@ -42,7 +43,10 @@ test("post-unit verification continues when no host-owned verification is needed
 	assert.equal(paused, false);
 });
 
-test("missing host command pauses without recording an auto-fix retry (#1943)", async () => {
+test("missing host command pauses without recording an auto-fix retry (#1943)", async (t) => {
+	// The gate reads the Task row from the DB and refuses to run without one.
+	openDatabase(":memory:");
+	t.after(() => closeDatabase());
 	let paused = false;
 	let recordedVerdict = false;
 	let routedFailure = false;
@@ -317,6 +321,8 @@ test("non-blocker failed attempt still throws at the verify gate (#2148)", async
 test("identical gate failures count 1/2, then 2/2, then exhaust into a durable abort (#1971)", async (t) => {
 	const basePath = makeTempRepo("gsd-auto-fix-retry-bound-");
 	t.after(() => cleanup(basePath));
+	openDatabase(":memory:");
+	t.after(() => closeDatabase());
 	const notifications: string[] = [];
 	let routeCalls = 0;
 	let attemptNumber = 0;

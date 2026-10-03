@@ -2416,7 +2416,12 @@ export async function executePlanMilestone(
       const leaseRefreshMs = (milestoneLeaseTtlSeconds() / 2) * 1000;
       leaseRefreshTimer = setInterval(() => {
         if (acquiredToken !== null && workerId !== null) {
-          refreshMilestoneLease(workerId, params.milestoneId, acquiredToken);
+          try {
+            refreshMilestoneLease(workerId, params.milestoneId, acquiredToken);
+          } catch (err) {
+            // A timer callback must not throw: an uncaught error ends the process.
+            logWarning("tool", `plan_milestone lease refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
         }
       }, leaseRefreshMs);
     }

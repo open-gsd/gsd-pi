@@ -98,15 +98,15 @@ test("complete-slice text mentioning gsd_task_reopen does not count as a handoff
       },
     );
 
-    assert.equal(result, "continue");
+    assert.equal(result, "dispatched");
     assert.equal(s.pendingVerificationRetry, null);
     assert.ok(
       notifications.every((message) => !message.includes("handed off via reopen/replan")),
       `plain text must not be treated as handoff, got: ${notifications.join("\n")}`,
     );
     assert.ok(
-      notifications.some((message) => message.includes("DB unavailable")),
-      `expected DB-unavailable fallback, got: ${notifications.join("\n")}`,
+      notifications.some((message) => message.includes("workflow DB is unavailable")),
+      `expected the DB-unavailable pause, got: ${notifications.join("\n")}`,
     );
   } finally {
     cleanup(base);
@@ -184,15 +184,15 @@ test("complete-slice text mentioning gsd_replan_slice does not count as a valid 
       },
     );
 
-    assert.equal(result, "continue");
+    assert.equal(result, "dispatched");
     assert.equal(s.pendingVerificationRetry, null);
     assert.ok(
       notifications.every((message) => !message.includes("valid replan outcome")),
       `plain text must not be treated as replan outcome, got: ${notifications.join("\n")}`,
     );
     assert.ok(
-      notifications.some((message) => message.includes("DB unavailable")),
-      `expected DB-unavailable fallback, got: ${notifications.join("\n")}`,
+      notifications.some((message) => message.includes("workflow DB is unavailable")),
+      `expected the DB-unavailable pause, got: ${notifications.join("\n")}`,
     );
   } finally {
     cleanup(base);
@@ -363,15 +363,15 @@ test("activity file whose only gsd_task_reopen mention is the unit prompt is not
     { skipSettleDelay: true, skipWorktreeSync: true },
   );
 
-  assert.equal(result, "continue");
+  assert.equal(result, "dispatched");
   assert.equal(s.pendingVerificationRetry, null);
   assert.ok(
     notifications.every((message) => !message.includes("handed off via reopen/replan")),
     `unit prompt alone must not read as handoff, got: ${notifications.join("\n")}`,
   );
   assert.ok(
-    notifications.some((message) => message.includes("DB unavailable")),
-    `expected DB-unavailable fallback, got: ${notifications.join("\n")}`,
+    notifications.some((message) => message.includes("workflow DB is unavailable")),
+    `expected the DB-unavailable pause, got: ${notifications.join("\n")}`,
   );
 });
 
@@ -473,7 +473,7 @@ test("ordinary message text mentioning the tools is not a handoff or replan", as
     { skipSettleDelay: true, skipWorktreeSync: true },
   );
 
-  assert.equal(result, "continue");
+  assert.equal(result, "dispatched");
   assert.ok(
     notifications.every((message) => !message.includes("handed off via reopen/replan")),
     `assistant/user text must not read as handoff, got: ${notifications.join("\n")}`,
@@ -483,8 +483,8 @@ test("ordinary message text mentioning the tools is not a handoff or replan", as
     `assistant/user text must not read as replan outcome, got: ${notifications.join("\n")}`,
   );
   assert.ok(
-    notifications.some((message) => message.includes("DB unavailable")),
-    `expected DB-unavailable fallback, got: ${notifications.join("\n")}`,
+    notifications.some((message) => message.includes("workflow DB is unavailable")),
+    `expected the DB-unavailable pause, got: ${notifications.join("\n")}`,
   );
 });
 
@@ -531,7 +531,7 @@ test("activity file whose only gsd_replan_slice mention is the unit prompt is no
     { skipSettleDelay: true, skipWorktreeSync: true },
   );
 
-  assert.equal(result, "continue");
+  assert.equal(result, "dispatched");
   assert.ok(
     notifications.every((message) => !message.includes("valid replan outcome")),
     `unit prompt alone must not read as replan outcome, got: ${notifications.join("\n")}`,
@@ -541,7 +541,7 @@ test("activity file whose only gsd_replan_slice mention is the unit prompt is no
     `unit prompt alone must not read as handoff, got: ${notifications.join("\n")}`,
   );
   assert.ok(
-    notifications.some((message) => message.includes("DB unavailable")),
-    `expected DB-unavailable fallback, got: ${notifications.join("\n")}`,
+    notifications.some((message) => message.includes("workflow DB is unavailable")),
+    `expected the DB-unavailable pause, got: ${notifications.join("\n")}`,
   );
 });

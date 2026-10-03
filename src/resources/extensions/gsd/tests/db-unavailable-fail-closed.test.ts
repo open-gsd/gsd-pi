@@ -15,6 +15,25 @@ import { inlineDecisionsFromDb, inlineProjectFromDb, inlineRequirementsFromDb } 
 import { buildTurnTimeline } from "../uok/timeline.ts";
 import { clearReservedMilestoneIds } from "../milestone-ids.ts";
 import { UokGateRunner } from "../uok/gate-runner.ts";
+import {
+  markActiveForWorkerCanceled,
+  markCanceled,
+  markCompleted,
+  markFailed,
+  markPaused,
+  markRunning,
+  markStuck,
+} from "../db/unit-dispatches.ts";
+import { deleteRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
+import { forceReleaseLeasesForWorker, refreshMilestoneLease, releaseMilestoneLease } from "../db/milestone-leases.ts";
+import { heartbeatAutoWorker, markWorkerCrashed, markWorkerStopping, markWorkerStoppingByPid } from "../db/auto-workers.ts";
+import { clearAbandonedCloseoutSignatures } from "../auto-liveness-backstop.ts";
+import { insertMilestoneValidationGates } from "../milestone-validation-gates.ts";
+import { clearLock, clearStaleWorkerLock, writeLock } from "../crash-recovery.ts";
+import { acquireSessionLock, releaseSessionLock } from "../session-lock.ts";
+import { postUnitPreVerification } from "../auto-post-unit.ts";
+import { runPostUnitVerification } from "../auto-verification.ts";
+import { AutoSession } from "../auto/session.ts";
 import { _resetLogs, drainLogs, logWarning, setLogBasePath, setStderrLoggingEnabled } from "../workflow-logger.ts";
 
 type RegisteredPiTool = {
@@ -92,6 +111,154 @@ describe("DB unavailable: fail closed", () => {
         payload: {},
       }),
       /No database open/,
+    );
+  });
+
+  test("coordination store writers throw instead of silently doing nothing", () => {
+    const writers: Record<string, () => unknown> = {
+      markRunning: () => markRunning(1),
+      markCompleted: () => markCompleted(1),
+      markFailed: () => markFailed(1, { errorSummary: "boom" }),
+      markStuck: () => markStuck(1, "stuck"),
+      markPaused: () => markPaused(1),
+      markCanceled: () => markCanceled(1, "canceled"),
+      markActiveForWorkerCanceled: () => markActiveForWorkerCanceled("worker-1", "signal-exit"),
+      setRuntimeKv: () => setRuntimeKv("global", "", "k", { v: 1 }),
+      deleteRuntimeKv: () => deleteRuntimeKv("global", "", "k"),
+      refreshMilestoneLease: () => refreshMilestoneLease("worker-1", "M001", 1),
+      releaseMilestoneLease: () => releaseMilestoneLease("worker-1", "M001", 1),
+      forceReleaseLeasesForWorker: () => forceReleaseLeasesForWorker("worker-1"),
+      heartbeatAutoWorker: () => heartbeatAutoWorker("worker-1"),
+      markWorkerCrashed: () => markWorkerCrashed("worker-1"),
+      markWorkerStopping: () => markWorkerStopping("worker-1"),
+      markWorkerStoppingByPid: () => markWorkerStoppingByPid(base, 4242),
+      clearAbandonedCloseoutSignatures: () => clearAbandonedCloseoutSignatures(base, "complete-slice", "M001/S01"),
+      insertMilestoneValidationGates: () => insertMilestoneValidationGates("M001", "S01", "pass", new Date().toISOString()),
+    };
+
+    for (const [name, write] of Object.entries(writers)) {
+      assert.throws(write, /No database open/, `${name} must throw with no open DB`);
+    }
+  });
+
+  test("lock writers log that their DB half was skipped", (t) => {
+    const previousStderr = setStderrLoggingEnabled(false);
+    t.after(() => {
+      setStderrLoggingEnabled(previousStderr);
+      _resetLogs();
+    });
+    _resetLogs();
+
+    writeLock(base, "execute-task", "M001/S01/T01", "/tmp/session.jsonl");
+    clearLock(base);
+    clearStaleWorkerLock(base);
+
+    assert.deepEqual(
+      drainLogs().filter((entry) => entry.component === "recovery").map((entry) => `${entry.severity}: ${entry.message}`),
+      [
+        "warn: session file pointer not recorded: workflow DB is unavailable",
+        "warn: worker row not released: workflow DB is unavailable",
+        "warn: stale worker row not cleared: workflow DB is unavailable",
+      ],
+    );
+  });
+
+  test("session lock over a dead holder is still acquired, and the unmarked worker row is logged", (t) => {
+    const previousStderr = setStderrLoggingEnabled(false);
+    t.after(() => {
+      releaseSessionLock(base);
+      setStderrLoggingEnabled(previousStderr);
+      _resetLogs();
+    });
+    _resetLogs();
+    const deadPid = 99999999;
+    writeFileSync(
+      join(base, ".gsd", "auto.lock"),
+      JSON.stringify({ pid: deadPid, startedAt: new Date().toISOString(), unitType: "execute-task", unitId: "M001/S01/T01" }),
+      "utf-8",
+    );
+
+    const result = acquireSessionLock(base);
+
+    assert.equal(result.acquired, true);
+    assert.ok(
+      drainLogs().some((entry) =>
+        entry.severity === "warn" && entry.message === `dead worker ${deadPid} not marked stopping: gsd-db: No database open`),
+      "the skipped worker-row update is logged",
+    );
+  });
+
+  test("post-unit pauses auto when the unit artifact is missing and no DB is open", async () => {
+    mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.currentUnit = { type: "complete-slice", id: "M001/S01", startedAt: Date.now() };
+    const notifications: string[] = [];
+    let pauseCalls = 0;
+
+    const result = await postUnitPreVerification(
+      {
+        s,
+        ctx: { ui: { notify: (message: string) => notifications.push(message) } } as never,
+        pi: {} as never,
+        buildSnapshotOpts: () => ({}) as never,
+        lockBase: () => base,
+        stopAuto: async () => {},
+        pauseAuto: async () => { pauseCalls += 1; },
+        updateProgressWidget: () => {},
+      },
+      { skipSettleDelay: true, skipWorktreeSync: true },
+    );
+
+    assert.equal(result, "dispatched");
+    assert.equal(pauseCalls, 1, "auto is paused, not continued to the next unit");
+    assert.ok(
+      notifications.some((message) => /^Artifact missing for complete-slice M001\/S01 — workflow DB is unavailable/.test(message)),
+      `expected the DB-unavailable pause notice, got: ${notifications.join("\n")}`,
+    );
+  });
+
+  test("host verification does not run the gate without the Task row", async () => {
+    let gateRuns = 0;
+    const notifications: string[] = [];
+
+    const result = await runPostUnitVerification({
+      s: {
+        basePath: base,
+        canonicalProjectRoot: base,
+        currentUnit: { type: "execute-task", id: "M001/S01/T01" },
+        lastTaskRecoveryAbortId: null,
+        pendingVerificationRetry: null,
+        verificationRetryCount: new Map<string, number>(),
+        verificationRetryFailureHashes: new Map<string, string>(),
+      },
+      ctx: { ui: { notify: (message: string) => notifications.push(message) } },
+      pi: {},
+      taskAuthority: {
+        readLatestTaskAttempt: () => ({
+          attemptId: "attempt-1",
+          resultId: "result-1",
+          state: "settled",
+          outcome: "succeeded",
+          nextStage: "verify",
+        }),
+        readTaskTechnicalVerdict: () => null,
+        recordTaskTechnicalVerdict: () => ({ verdictId: "verdict-1", evidenceId: "evidence-1" }),
+        invalidateTaskTechnicalPass: () => { throw new Error("must not invalidate"); },
+        routeTaskFailure: () => ({ action: "remediate", status: "applied", recoveryActionId: "ra-1" }),
+      },
+      runVerificationGate: () => {
+        gateRuns += 1;
+        return { passed: true, checks: [], discoverySource: "none", timestamp: Date.now() };
+      },
+    } as never, async () => {});
+
+    assert.equal(gateRuns, 0, "the gate must not run without the Task verify command");
+    assert.equal(result, "retry", "the gate error is routed as an inconclusive verdict, never a pass");
+    assert.ok(
+      notifications.some((message) => message.includes("Host verification requires the workflow DB")),
+      `expected the DB-unavailable gate error, got: ${notifications.join("\n")}`,
     );
   });
 
