@@ -124,6 +124,13 @@ function recoverPreview(base: string) {
         logical_path: ".gsd/milestones",
         presence: "optional",
       },
+      ...(["DECISIONS", "REQUIREMENTS", "KNOWLEDGE", "PROJECT", "QUEUE"] as const).map((stem) => ({
+        id: `project-root-${stem.toLowerCase()}`,
+        kind: "project" as const,
+        physical_path: join(base, ".gsd", `${stem}.md`),
+        logical_path: `.gsd/${stem}.md`,
+        presence: "optional" as const,
+      })),
     ],
   });
 }

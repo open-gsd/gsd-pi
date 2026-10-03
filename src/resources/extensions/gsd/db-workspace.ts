@@ -667,6 +667,10 @@ function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string 
     `Changes: ${counts.create} create, ${counts.update} update, ${counts.delete} delete, ${counts.preserve} preserve`,
     "Sources:",
     ...preview.preview.sources.map((source) => `  ${source.path} ${source.sha256} (${source.outcome})`),
+    "Not imported (the file stays on disk and gets no database row):",
+    ...preview.preview.sources
+      .filter((source) => source.outcome !== "mapped")
+      .map((source) => `  ${source.path} (${source.outcome})`),
     "Mappings:",
     ...preview.preview.changes.map((change) => (
       `  ${change.action} ${change.target.kind}:${change.target.key}`
@@ -683,6 +687,8 @@ function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string 
     ...preview.preview.resolutions.map((resolution) => `  ${JSON.stringify(resolution)}`),
   ].join("\n");
 }
+
+const RECOVER_ROOT_FILES = ["DECISIONS", "REQUIREMENTS", "KNOWLEDGE", "PROJECT", "QUEUE"] as const;
 
 function prepareVerifiedRecoverEvidence(basePath: string): PreparedVerifiedRecoverApplication {
   const location = resolveWorkflowDatabaseLocation(basePath);
@@ -702,6 +708,15 @@ function prepareVerifiedRecoverEvidence(basePath: string): PreparedVerifiedRecov
         logical_path: ".gsd/milestones",
         presence: "optional" as const,
       },
+      // Root registries and narrative. DECISIONS.md and REQUIREMENTS.md map to
+      // rows; the Preview lists the others as preserved and not imported.
+      ...RECOVER_ROOT_FILES.map((stem) => ({
+        id: `project-root-${stem.toLowerCase()}`,
+        kind: "project" as const,
+        physical_path: join(location.projectGsd, `${stem}.md`),
+        logical_path: `.gsd/${stem}.md`,
+        presence: "optional" as const,
+      })),
     ],
   });
   return { ...evidence, authorizationText: recoverAuthorizationText(evidence.preview) };

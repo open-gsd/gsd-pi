@@ -26,6 +26,8 @@ import {
 import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
+import { generateDecisionsMd, generateRequirementsMd } from '../db-writer.ts';
+import { getAllDecisionsFromMemories } from '../context-store.ts';
 import { captureCurrentLegacyImportBaseSnapshot } from '../legacy-import-preview-base.ts';
 import { createLegacyImportPreview } from '../legacy-import-preview.ts';
 import { fingerprintLegacyImportCorpusTree } from './helpers/legacy-import-corpus.ts';
@@ -221,6 +223,13 @@ function recoverPreview(base: string) {
         logical_path: '.gsd/milestones',
         presence: 'optional',
       },
+      ...(['DECISIONS', 'REQUIREMENTS', 'KNOWLEDGE', 'PROJECT', 'QUEUE'] as const).map((stem) => ({
+        id: `project-root-${stem.toLowerCase()}`,
+        kind: 'project' as const,
+        physical_path: join(base, '.gsd', `${stem}.md`),
+        logical_path: `.gsd/${stem}.md`,
+        presence: 'optional' as const,
+      })),
     ],
   });
 }
@@ -1343,6 +1352,77 @@ describe('gsd-recover', async () => {
       assert.match(message, /M009-rfuh2h/);
       assert.match(message, /S02/);
       assert.match(message, /no PLAN establishes it as a real slice\/task/);
+    } finally {
+      closeDatabase();
+      cleanup(base);
+    }
+  });
+
+  test('recover on a lost database restores decisions and requirements and lists every source it does not import', async () => {
+    const base = createFixtureBase();
+    try {
+      // The projections a project keeps after its gsd.db is lost.
+      writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+      writeFile(base, 'milestones/M001/M001-CONTEXT.md', '# M001 context\n\nWhy this milestone exists.\n');
+      writeFile(base, 'DECISIONS.md', generateDecisionsMd([{
+        seq: 1,
+        id: 'D001',
+        when_context: 'M001',
+        scope: 'architecture',
+        decision: 'Storage engine',
+        choice: 'SQLite',
+        rationale: 'One file',
+        revisable: 'No',
+        made_by: 'human',
+        source: 'discussion',
+        superseded_by: null,
+      }]));
+      writeFile(base, 'REQUIREMENTS.md', generateRequirementsMd([{
+        id: 'R001',
+        class: 'functional',
+        status: 'active',
+        description: 'Recover restores registries',
+        why: 'A lost database must not lose them',
+        source: 'user',
+        primary_owner: 'M001/S01',
+        supporting_slices: 'none',
+        validation: 'unmapped',
+        notes: '',
+        full_content: '',
+        superseded_by: null,
+      }]));
+      writeFile(base, 'KNOWLEDGE.md', '# Knowledge\n\n## Rules\n\n- Keep it small.\n');
+
+      const first = makeCtx();
+      await handleRecover(first.ctx, base);
+
+      const preview = first.notes.at(-1)?.message ?? '';
+      assert.equal(first.notes.at(-1)?.kind, 'warning');
+      const notImported = preview.slice(
+        preview.indexOf('Not imported'),
+        preview.indexOf('Mappings:'),
+      );
+      assert.match(notImported, /\.gsd\/KNOWLEDGE\.md \(preserved\)/);
+      assert.match(notImported, /\.gsd\/milestones\/M001\/M001-CONTEXT\.md \(preserved\)/);
+      assert.doesNotMatch(notImported, /DECISIONS\.md|REQUIREMENTS\.md|M001-ROADMAP\.md/);
+      const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+      assert.ok(approval, 'the Preview names the hash to approve');
+
+      const second = makeCtx();
+      await handleRecover(second.ctx, base, approval);
+
+      assert.equal(second.notes.at(-1)?.kind, 'success');
+      assert.deepEqual(
+        getAllDecisionsFromMemories().map(({ id, decision, choice, rationale, made_by }) => (
+          { id, decision, choice, rationale, made_by }
+        )),
+        [{ id: 'D001', decision: 'Storage engine', choice: 'SQLite', rationale: 'One file', made_by: 'human' }],
+      );
+      assert.deepEqual(
+        _getAdapter()!.prepare('SELECT id, status, description, primary_owner FROM requirements').all(),
+        [{ id: 'R001', status: 'active', description: 'Recover restores registries', primary_owner: 'M001/S01' }],
+      );
+      assert.ok(getMilestone('M001'));
     } finally {
       closeDatabase();
       cleanup(base);

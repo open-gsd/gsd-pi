@@ -67,6 +67,8 @@ If an existing project has legacy markdown artifacts that you explicitly want to
 
 `/gsd recover` fingerprints the legacy source and current database and prints an exact Preview hash. Re-run it with `--preview=<sha256>` to create and independently verify a retained backup, apply that unchanged preview through one atomic Import Application, and assess the safe next action. It updates only modeled preview targets; database rows absent from markdown are not cleared. The command prints the Application ID and retained backup path.
 
+The Preview reads `.gsd/phases`, `.gsd/milestones` and the root files `DECISIONS.md`, `REQUIREMENTS.md`, `KNOWLEDGE.md`, `PROJECT.md` and `QUEUE.md`. Decisions and requirements are imported as database records. The Preview lists under `Not imported` each source that it only preserves, for example `KNOWLEDGE.md` and a milestone `CONTEXT.md`. Such a file stays on disk and gets no database row.
+
 When the Preview has an item that needs a decision, `/gsd recover` applies nothing and lists each item. An item that you can decide shows a `--choice=<diagnosis-id>.preserved` option, which keeps that source preserved and not imported; other items need a fix in the source markdown. Re-run with the shown `--choice` options to seal a new Preview, then approve the new Preview hash. A `--choice` value that is not valid is rejected before the import is applied.
 
 A plain `/gsd recover` continues the last Import Application only while that Application is the canonical operation head and has no restore or Forward Repair. After a later canonical write, a plain `/gsd recover` makes a new Preview, and the earlier Application is available only through `--application`.
