@@ -2850,6 +2850,7 @@ test("autoLoop resumes canonical closeout when a transient provider error follow
       },
     });
     assert.equal(getTask("M001", "S01", "T01")?.status, "in_progress");
+    await waitForMicrotasks(() => pi.calls.length === 1, "unit dispatch");
 
     autoSession.reset();
     autoSession.active = true;
@@ -3081,6 +3082,7 @@ test("autoLoop refreshes its milestone lease while an execute-task call is pendi
       () => readLatestTaskAttempt({ milestoneId: "M001", sliceId: "S01", taskId: "T01" })?.state === "running",
       "canonical Task Attempt claim",
     );
+    await waitForMicrotasks(() => pi.calls.length === 1, "unit dispatch");
 
     const expiredAt = "1970-01-01T00:00:00.000Z";
     _getAdapter()!.prepare(
