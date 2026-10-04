@@ -93,7 +93,9 @@ function runMilestoneOperation(
   executeDomainOperation({
     operationType: `milestone.${command}`,
     idempotencyKey: invocation?.idempotencyKey ?? `command/${command}/${milestoneId}/${fence.revision}`,
-    expectedRevision: invocation?.expectedRevision ?? fence.revision,
+    // The caller's revision is a precondition of the first send only. A retry
+    // can carry a newer revision, so a replay uses the recorded one.
+    expectedRevision: fence.replay ? fence.revision : invocation?.expectedRevision ?? fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: invocation?.actorType ?? "operator",
     ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),

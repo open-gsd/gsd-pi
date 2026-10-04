@@ -51,6 +51,18 @@ test("a park command sent twice with the same idempotency key gives one operatio
   }]);
 });
 
+test("a retry that sends the revision it read after the first send replays the first result", async () => {
+  const expectedRevision = getProjectAuthorityVersion().revision;
+
+  const first = await park({ expectedRevision });
+  const second = await park({ expectedRevision: first.revision });
+
+  assert.equal(first.ok, true, first.message);
+  assert.deepEqual(second, first, "the second send returns the result of the first");
+  assert.equal(getMilestone("M001")?.status, "parked");
+  assert.deepEqual(operations("milestone.park").map((row) => row["expected_revision"]), [expectedRevision]);
+});
+
 test("a command with a stale expected revision is refused and changes nothing", async () => {
   const revision = getProjectAuthorityVersion().revision;
 
