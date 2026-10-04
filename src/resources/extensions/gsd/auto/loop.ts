@@ -146,7 +146,7 @@ import {
   recordFailureAndSelectRecovery,
 } from "../task-recovery-domain-operation.js";
 import { readTerminalTaskRecoveryAbort } from "../artifact-verification.js";
-import { IS_DISPATCH_OWNER_DEAD, RECLAIM_DEAD_DISPATCH_OWNER } from "./unit-run.js";
+import { IS_DISPATCH_OWNER_DEAD, IS_RUN_DISPATCH_OWNER_GONE, RECLAIM_DEAD_DISPATCH_OWNER } from "./unit-run.js";
 
 /**
  * Path of the `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker
@@ -1008,7 +1008,7 @@ export async function autoLoop(
           markDispatchRunning,
           logClaimRejected: logDispatchClaimRejected,
           logClaimFailed: logDispatchClaimFailed,
-          isDispatchOwnerDead: IS_DISPATCH_OWNER_DEAD,
+          isDispatchOwnerDead: IS_RUN_DISPATCH_OWNER_GONE,
           reclaimDeadDispatchOwner: RECLAIM_DEAD_DISPATCH_OWNER,
         });
         if (claim.kind !== "opened") {

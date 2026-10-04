@@ -133,7 +133,7 @@ Rules:
 - **Unit id.** `<name>/<timestamp>/<stepId>`: the run id and the step id. The claim guard is the partial unique index on `unit_id`, so two runs of one workflow do not block each other.
 - **Scope.** `milestone_id` on the row is the run id. A run is not a milestone and `milestone_leases` references `milestones`, so a step claim has no lease and `milestone_lease_token` is `0` (`recordRunDispatchClaim`).
 - **Second session.** A second session that resumes the run gets the active step again, fails the claim, and stops with a notice that names the worker. It does not call the agent.
-- **Dead worker.** When the worker that holds the claim is dead (its process is not alive on this host), the next session cancels that row and claims the step with the next `attempt_n`.
+- **Dead or stopped worker.** When the worker that holds the claim is dead (its process is not alive on this host) or its `workers` row is not `active` (it stopped or crashed), the next session cancels that row and claims the step with the next `attempt_n`. A session that stops while its step runs leaves the row `running`, and the next session can be in the same process.
 - **Settle.** A verified step settles the row `completed` before the step row is marked complete. A unit break, a unit retry, a verification retry and a verification pause settle it `failed` with the reason.
 
 Not changed:

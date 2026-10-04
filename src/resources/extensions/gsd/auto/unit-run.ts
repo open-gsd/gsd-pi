@@ -8,7 +8,7 @@ import {
   markActiveForWorkerCanceled,
   markCanceled,
 } from "../db/unit-dispatches.js";
-import { isDeadLocalAutoWorker, markWorkerCrashed } from "../db/auto-workers.js";
+import { getAutoWorker, isDeadLocalAutoWorker, markWorkerCrashed } from "../db/auto-workers.js";
 import { forceReleaseLeasesForWorker } from "../db/milestone-leases.js";
 import { debugLog } from "../debug-logger.js";
 import { MILESTONE_ID_RE } from "../milestone-ids.js";
@@ -109,6 +109,19 @@ export const UNIT_RUN_CLAIM_FAIL_LOG: OpenDispatchClaimDeps["logClaimFailed"] = 
 
 export const IS_DISPATCH_OWNER_DEAD: NonNullable<OpenDispatchClaimDeps["isDispatchOwnerDead"]> =
   isDeadLocalAutoWorker;
+
+/**
+ * The takeover test of a run claim (a custom workflow step). No milestone
+ * lease fences that claim, so a holder that is marked stopping or crashed
+ * also gives it up: a session that stops while its step runs cannot settle
+ * the row, and its process stays alive.
+ */
+export const IS_RUN_DISPATCH_OWNER_GONE: NonNullable<OpenDispatchClaimDeps["isDispatchOwnerDead"]> =
+  (workerId, projectRootRealpath) => {
+    const worker = getAutoWorker(workerId);
+    return (worker !== null && worker.status !== "active")
+      || isDeadLocalAutoWorker(workerId, projectRootRealpath);
+  };
 
 export const RECLAIM_DEAD_DISPATCH_OWNER: NonNullable<OpenDispatchClaimDeps["reclaimDeadDispatchOwner"]> =
   (workerId) => {

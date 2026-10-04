@@ -25,7 +25,7 @@ import type { SessionLockStatus } from "../session-lock.js";
 import { writeGraph, readGraph, type WorkflowGraph, type GraphStep } from "../graph.ts";
 import { SourceObservationStore } from "../source-observations.js";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.js";
-import { markWorkerStopping, registerAutoWorker } from "../db/auto-workers.ts";
+import { getAutoWorker, markWorkerStopping, registerAutoWorker } from "../db/auto-workers.ts";
 import { getDispatchById, getLatestForUnit, recordRunDispatchClaim } from "../db/unit-dispatches.ts";
 import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
 import {
@@ -695,6 +695,44 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
 
       await resolveNextAgentEnd();
       await next.loop;
+      assert.equal(getDispatchById(takenOver!.id)?.status, "completed");
+      assert.deepEqual(listRuns(base)[0]?.steps, { total: 1, completed: 1, pending: 0, active: 0 });
+    });
+
+    it("a new session in the same process takes over the step of a session that stopped while it ran", async (t) => {
+      const { base, unitId, startSession } = makeClaimedRun(t);
+
+      const first = startSession();
+      await waitForUnit();
+      const stranded = getLatestForUnit(unitId);
+      assert.equal(stranded?.status, "running");
+      const stoppedWorker: string = first.s.workerId;
+
+      // The order of stopAuto: it marks the worker stopping and closes the
+      // database before it unblocks the unit, so the loop cannot settle the claim.
+      markWorkerStopping(stoppedWorker);
+      first.s.workerId = null;
+      first.s.active = false;
+      closeDatabase();
+      resolveAgentEnd({ messages: [] });
+      _resetPendingResolve();
+      await first.loop;
+
+      openDatabase(join(base, ".gsd", "gsd.db"));
+      assert.equal(getDispatchById(stranded!.id)?.status, "running", "the stop left the claim open");
+      assert.equal(getAutoWorker(stoppedWorker)?.pid, process.pid, "the holder has the PID of this process");
+
+      const next = startSession();
+      await waitForUnit();
+      assert.equal(getDispatchById(stranded!.id)?.status, "canceled");
+      const takenOver = getLatestForUnit(unitId);
+      assert.equal(takenOver?.worker_id, next.s.workerId);
+      assert.equal(takenOver?.status, "running");
+      assert.equal(takenOver?.attempt_n, 2);
+
+      await resolveNextAgentEnd();
+      await next.loop;
+      assert.equal(next.pi.calls.length, 1, "the new session runs the step");
       assert.equal(getDispatchById(takenOver!.id)?.status, "completed");
       assert.deepEqual(listRuns(base)[0]?.steps, { total: 1, completed: 1, pending: 0, active: 0 });
     });

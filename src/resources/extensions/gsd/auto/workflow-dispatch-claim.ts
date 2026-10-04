@@ -159,8 +159,9 @@ export function openDispatchClaim(
  * milestone, so the claim has no milestone lease: `deps.recordDispatchClaim`
  * must be the run claim (recordRunDispatchClaim), which ignores the token.
  *
- * Returns "skip" when another live worker runs the step. The claim of a dead
- * worker is canceled first, so the step is taken over.
+ * Returns "skip" when another active worker runs the step. The claim of a
+ * worker that `deps.isDispatchOwnerDead` reports (dead, stopped or crashed) is
+ * canceled first, so the step is taken over.
  */
 export function openRunDispatchClaim(
   s: AutoSession,
