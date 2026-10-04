@@ -36,7 +36,10 @@ import {
   hasWorkflowToolBridgeConfiguration,
   readProjectProgressViaBridge,
   readCapturesViaBridge,
+  readProjectQueryViaBridge,
+  readRoadmapViaBridge,
   readKnowledgeViaBridge,
+  runDoctorViaBridge,
   registerWorkflowTools,
   validateProjectDir,
   warmWorkflowToolBridges,
@@ -274,6 +277,12 @@ function normalizeQuery(query: string | undefined): QueryCategory {
   return 'all';
 }
 
+/**
+ * The `gsd_query` answer. With the GSD runtime available the fields come from
+ * the workflow database; the .gsd/ files are read only when the database is
+ * missing or cannot be opened, and the result is then labelled a projection
+ * fallback.
+ */
 async function readProjectState(projectDir: string, query: string | undefined): Promise<Record<string, unknown>> {
   const gsdDir = join(resolve(projectDir), '.gsd');
   const category = normalizeQuery(query);
@@ -283,6 +292,12 @@ async function readProjectState(projectDir: string, query: string | undefined): 
     projectDir: resolve(projectDir),
     query: category,
   };
+
+  if (hasWorkflowToolBridgeConfiguration()) {
+    const fromDb = await readProjectQueryViaBridge(projectDir, QUERY_FIELDS[category]);
+    if (fromDb !== null) return { ...result, ...fromDb };
+  }
+  result.readMetadata = { source: 'projection', authority: 'projection-fallback' };
 
   if (wanted.has('state')) {
     try {
@@ -1309,16 +1324,16 @@ export async function createMcpServer(
   );
 
   // -----------------------------------------------------------------------
-  // gsd_query — read project state from filesystem (no session needed).
+  // gsd_query — read project state (no session needed).
   //
-  // `query` is optional: when omitted the tool returns all fields (STATE.md,
-  // PROJECT.md, requirements, milestone listing). Accepted narrow values:
+  // `query` is optional: when omitted the tool returns all fields (state,
+  // project, requirements, milestone listing). Accepted narrow values:
   // "state" / "status", "project", "requirements", "milestones", "all".
   // Unknown values fall back to "all" for forward-compatibility.
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_query',
-    'Query GSD project state from the filesystem. By default returns STATE.md, PROJECT.md, requirements, and milestone listing. Pass `query` to narrow the response (accepted: "state"/"status", "project", "requirements", "milestones", "all"). Does not require an active session.',
+    'Query GSD project state. By default returns the state, project and requirements documents and the milestone listing with status, plus readMetadata provenance. Pass `query` to narrow the response (accepted: "state"/"status", "project", "requirements", "milestones", "all"). Does not require an active session — reads the workflow database (the workflow authority) when the GSD runtime is available, .gsd/ projections otherwise.',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       query: z
@@ -1426,7 +1441,7 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_roadmap',
-    'Get the full project roadmap structure: milestones with their slices, tasks, status, risk, and dependencies. Optionally filter to a single milestone. No session required.',
+    'Get the full project roadmap structure: milestones with their slices, tasks, status, risk, and dependencies, plus readMetadata provenance. Optionally filter to a single milestone. No session required — reads the workflow database (the workflow authority) when the GSD runtime is available, .gsd/ projections otherwise.',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       milestoneId: z.string().optional().describe('Filter to a specific milestone (e.g. "M001")'),
@@ -1434,7 +1449,12 @@ export async function createMcpServer(
     async (args: Record<string, unknown>) => {
       const { projectDir, milestoneId } = args as { projectDir: string; milestoneId?: string };
       try {
-        return jsonContent(readRoadmap(validateProjectDir(projectDir), milestoneId));
+        const dir = validateProjectDir(projectDir);
+        if (hasWorkflowToolBridgeConfiguration()) {
+          const fromDb = await readRoadmapViaBridge(dir, milestoneId);
+          if (fromDb !== null) return jsonContent(fromDb);
+        }
+        return jsonContent(readRoadmap(dir, milestoneId));
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }
@@ -1462,11 +1482,11 @@ export async function createMcpServer(
   );
 
   // -----------------------------------------------------------------------
-  // gsd_doctor — lightweight structural health check
+  // gsd_doctor — lightweight health check
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_doctor',
-    'Run a lightweight structural health check on the .gsd/ directory. Checks for missing files, status inconsistencies, and orphaned state. No session required.',
+    'Run a lightweight health check on the project hierarchy: status inconsistencies and missing projection files, plus readMetadata provenance. No session required — checks the workflow database (the workflow authority) when the GSD runtime is available, the .gsd/ directory structure otherwise.',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       scope: z.string().optional().describe('Limit checks to a specific milestone (e.g. "M001")'),
@@ -1474,7 +1494,12 @@ export async function createMcpServer(
     async (args: Record<string, unknown>) => {
       const { projectDir, scope } = args as { projectDir: string; scope?: string };
       try {
-        return jsonContent(runDoctorLite(validateProjectDir(projectDir), scope));
+        const dir = validateProjectDir(projectDir);
+        if (hasWorkflowToolBridgeConfiguration()) {
+          const fromDb = await runDoctorViaBridge(dir, scope);
+          if (fromDb !== null) return jsonContent(fromDb);
+        }
+        return jsonContent(runDoctorLite(dir, scope));
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }

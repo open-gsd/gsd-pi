@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { existsSync, readFileSync } from 'node:fs';
+import type { ProjectProgressReadMetadata } from '@opengsd/contracts';
 import {
   resolveGsdRoot,
   resolveRootFile,
@@ -33,7 +34,13 @@ export interface DoctorResult {
   ok: boolean;
   issues: DoctorIssue[];
   counts: { error: number; warning: number; info: number };
+  readMetadata?: ProjectProgressReadMetadata;
 }
+
+const PROJECTION_READ_METADATA: ProjectProgressReadMetadata = {
+  source: 'projection',
+  authority: 'projection-fallback',
+};
 
 // ---------------------------------------------------------------------------
 // Check implementations
@@ -210,6 +217,7 @@ export function runDoctorLite(projectDir: string, scope?: string): DoctorResult 
         message: 'No .gsd/ directory found — project not initialized',
       }],
       counts: { error: 0, warning: 0, info: 1 },
+      readMetadata: PROJECTION_READ_METADATA,
     };
   }
 
@@ -236,5 +244,5 @@ export function runDoctorLite(projectDir: string, scope?: string): DoctorResult 
     info: issues.filter((i) => i.severity === 'info').length,
   };
 
-  return { ok: counts.error === 0, issues, counts };
+  return { ok: counts.error === 0, issues, counts, readMetadata: PROJECTION_READ_METADATA };
 }

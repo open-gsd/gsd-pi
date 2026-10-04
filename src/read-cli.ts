@@ -123,6 +123,25 @@ async function loadDbSnapshotReader(
   return (projectDir: string) => mod.readProjectSnapshotFromDb(projectDir)
 }
 
+/** DB-backed roadmap reader — jiti-loaded in production, injected in tests. */
+export type DbRoadmapReader = (projectDir: string, milestoneId?: string) => unknown
+
+async function loadDbRoadmapReader(): Promise<DbRoadmapReader> {
+  let mod: any
+  try {
+    mod = await jiti.import(gsdExtensionPath('state/external-reads-from-db.ts'), {})
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    throw new Error(
+      `selected GSD extensions do not support DB-backed roadmap reads; synchronize the extension bundle (${detail})`,
+    )
+  }
+  if (typeof mod.readRoadmapFromDb !== 'function') {
+    throw new Error('selected GSD extensions do not support DB-backed roadmap reads; synchronize the extension bundle')
+  }
+  return mod.readRoadmapFromDb
+}
+
 /**
  * DB-backed project snapshot (issue #2102), or null when there is no DB file.
  * Unlike progress, snapshot has no projection fallback: a null result means
@@ -249,6 +268,7 @@ export async function runReadCli(
   dbProgressModuleImporter?: DbProgressModuleImporter,
   dbSnapshotReader?: DbSnapshotReader,
   dbSnapshotModuleImporter?: DbSnapshotModuleImporter,
+  dbRoadmapReader?: DbRoadmapReader,
 ): Promise<number> {
   const opts = parseReadArgs(argv)
   if (!opts) {
@@ -331,9 +351,24 @@ export async function runReadCli(
       data = snapshot
       break
     }
-    case 'roadmap':
-      data = readRoadmap(projectDir, opts.milestone)
+    case 'roadmap': {
+      // ADR-046: the same rule as progress. The projection reader is the
+      // labelled fallback for a missing or unopenable DB only.
+      let fromDb: unknown | null = null
+      try {
+        if (existsSync(dbPath)) {
+          const read = dbRoadmapReader ?? await loadDbRoadmapReader()
+          fromDb = await read(projectDir, opts.milestone)
+        }
+      } catch (err) {
+        process.stderr.write(
+          `[gsd] DB-backed roadmap read failed: ${err instanceof Error ? err.message : String(err)}\n`,
+        )
+        return 1
+      }
+      data = fromDb ?? readRoadmap(projectDir, opts.milestone)
       break
+    }
     case 'memory': {
       const term = opts.query?.trim() || ''
       if (term.length < 2) {

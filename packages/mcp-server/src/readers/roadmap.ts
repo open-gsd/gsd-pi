@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { readFileSync, existsSync } from 'node:fs';
+import type { ProjectProgressReadMetadata } from '@opengsd/contracts';
 import {
   resolveGsdRoot,
   findMilestoneIds,
@@ -41,6 +42,7 @@ export interface MilestoneInfo {
 
 export interface RoadmapResult {
   milestones: MilestoneInfo[];
+  readMetadata?: ProjectProgressReadMetadata;
 }
 
 // ---------------------------------------------------------------------------
@@ -297,5 +299,5 @@ export function readRoadmap(projectDir: string, filterMilestoneId?: string): Roa
     milestones.push({ id: mid, title, status: milestoneStatus, vision, slices });
   }
 
-  return { milestones };
+  return { milestones, readMetadata: { source: 'projection', authority: 'projection-fallback' } };
 }

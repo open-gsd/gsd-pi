@@ -46,6 +46,9 @@ interface GsdMcpBridge {
   upsertMilestonePlanning: (...args: any[]) => any;
   invalidateStateCache: (...args: any[]) => any;
   readProgressFromDb: (...args: any[]) => any;
+  readRoadmapFromDb: (projectDir: string, milestoneId?: string) => unknown;
+  readProjectQueryFromDb: (projectDir: string, fields: readonly string[]) => unknown;
+  runDoctorFromDb: (projectDir: string, scope?: string) => unknown;
   readKnowledgeMarkdown: (projectDir: string) => string;
   loadAllCaptures: (projectDir: string) => DatabaseCapture[];
   loadEffectiveGSDPreferences: (...args: any[]) => any;
@@ -1373,16 +1376,20 @@ async function runSerializedWorkflowDbOperation<T>(
 }
 
 /**
- * DB-authoritative progress payload for the `gsd_progress` tool
- * (ADR-046). Runs inside the workflow serialization queue with the bridge's
- * project-scoped DB open, so back-to-back calls for different projects
- * cannot serve one project's state for another.
+ * DB-authoritative payload for a session-less read tool (ADR-046). Runs inside
+ * the workflow serialization queue with the bridge's project-scoped DB open,
+ * so back-to-back calls for different projects cannot serve one project's
+ * state for another.
  *
  * Returns null when the project database is missing or cannot be opened, so
- * the caller falls back to the projection reader, matching `gsd read progress`.
- * Schema-version errors and failures after a successful open remain loud.
+ * the caller falls back to the labelled projection reader, matching
+ * `gsd read progress`. Schema-version errors and failures after a successful
+ * open remain loud.
  */
-export async function readProjectProgressViaBridge(projectDir: string): Promise<unknown | null> {
+async function readDbViaBridge<T>(
+  projectDir: string,
+  read: (bridge: GsdMcpBridge) => T | Promise<T>,
+): Promise<T | null> {
   return runSerializedWorkflowOperation(async () => {
     const bridge = await importBridgeModule();
     const opened = bridge.openExistingWorkflowDatabase(projectDir);
@@ -1390,8 +1397,34 @@ export async function readProjectProgressViaBridge(projectDir: string): Promise<
       if (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound") throw opened.error;
       return null;
     }
-    return bridge.readProgressFromDb(projectDir);
+    return read(bridge);
   });
+}
+
+/** Progress payload from the project database (gsd_progress). */
+export async function readProjectProgressViaBridge(projectDir: string): Promise<unknown | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.readProgressFromDb(projectDir));
+}
+
+/** Roadmap hierarchy from the project database (gsd_roadmap). */
+export async function readRoadmapViaBridge(projectDir: string, milestoneId?: string): Promise<unknown | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.readRoadmapFromDb(projectDir, milestoneId));
+}
+
+/** The requested gsd_query fields from the project database. */
+export async function readProjectQueryViaBridge(
+  projectDir: string,
+  fields: readonly string[],
+): Promise<Record<string, unknown> | null> {
+  return readDbViaBridge(
+    projectDir,
+    (bridge) => bridge.readProjectQueryFromDb(projectDir, fields) as Promise<Record<string, unknown> | null>,
+  );
+}
+
+/** Hierarchy health from the project database (gsd_doctor). */
+export async function runDoctorViaBridge(projectDir: string, scope?: string): Promise<unknown | null> {
+  return readDbViaBridge(projectDir, (bridge) => bridge.runDoctorFromDb(projectDir, scope));
 }
 
 /**
@@ -1400,15 +1433,7 @@ export async function readProjectProgressViaBridge(projectDir: string): Promise<
  * display-only file read; once the database opens it is authoritative.
  */
 export async function readKnowledgeViaBridge(projectDir: string): Promise<string | null> {
-  return runSerializedWorkflowOperation(async () => {
-    const bridge = await importBridgeModule();
-    const opened = bridge.openExistingWorkflowDatabase(projectDir);
-    if (!opened.ok) {
-      if (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound") throw opened.error;
-      return null;
-    }
-    return bridge.readKnowledgeMarkdown(projectDir);
-  });
+  return readDbViaBridge(projectDir, (bridge) => bridge.readKnowledgeMarkdown(projectDir));
 }
 
 /**

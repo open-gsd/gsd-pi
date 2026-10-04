@@ -6,8 +6,8 @@
 // assertions are enforced now.
 //
 //   Gate                       Expected-fail checks and the package that makes them pass
-//   G1 files deleted           MCP read tools P30
-//   G2 files poisoned          prompt P23, no projection reads P23, MCP read tools P30
+//   G1 files deleted           none
+//   G2 files poisoned          prompt P23, no projection reads P23
 //   G3 canonical wins          P23
 //   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save task SUMMARY P12
 //   G5 render failure          handler writes no projection P12
