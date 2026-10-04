@@ -11,7 +11,7 @@ Captures 允许你在自动模式执行过程中随手记录想法，而不必�
 /gsd capture "the auth flow should support OAuth, not just JWT"
 ```
 
-这些 capture 会追加到 `.gsd/CAPTURES.md`，并在 tasks 之间自动参与 triage。
+这些 capture 会存入 GSD 数据库，并在 tasks 之间自动参与 triage。`.gsd/CAPTURES.md` 由数据库渲染生成；对它的手动修改不会被读取。
 
 ## 工作原理
 
@@ -21,7 +21,7 @@ Captures 允许你在自动模式执行过程中随手记录想法，而不必�
 capture → triage → confirm → resolve → resume
 ```
 
-1. **Capture**：`/gsd capture "thought"` 会带着时间戳和唯一 ID 追加到 `.gsd/CAPTURES.md`
+1. **Capture**：`/gsd capture "thought"` 会带着时间戳和唯一 ID 写入 GSD 数据库，并渲染 `.gsd/CAPTURES.md`
 2. **Triage**：在 tasks 之间的自然衔接点（`handleAgentEnd` 中），GSD 会检测待处理 capture 并进行分类
 3. **Confirm**：向用户展示建议的处理方式，由用户确认或调整
 4. **Resolve**：应用该处理方案（插入 task、触发重规划、延期等）
@@ -72,7 +72,9 @@ Capture 上下文会自动注入到：
 
 ## Worktree 感知
 
-Captures 总是写回**原始项目根目录**下的 `.gsd/CAPTURES.md`，而不是 worktree 的本地副本。这样从 steering 终端记录的内容，也能被运行在 worktree 里的自动模式会话看到。
+Captures 是项目数据库中的行，项目根目录和所有 worktree 共用这个数据库。这样从 steering 终端记录的内容，也能被运行在 worktree 里的自动模式会话看到。渲染结果始终写到**原始项目根目录**下的 `.gsd/CAPTURES.md`。
+
+数据库中没有的 `CAPTURES.md` 段落（由旧版本写入、手动添加或由队友提交）不会被读取。`/gsd doctor` 会报告它，`/gsd doctor --fix` 会导入它。
 
 ## 命令
 
