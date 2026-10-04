@@ -1136,19 +1136,21 @@ async function saveDiscussionQuestionRound(
     return;
   }
   const { getArtifact } = await import("../gsd-db.js");
-  const { saveArtifactToDb } = await import("../db-writer.js");
+  const { saveArtifactToDbByScope } = await import("../db-writer.js");
+  const { createWorkspace, scopeMilestone } = await import("../workspace.js");
+  const scope = scopeMilestone(createWorkspace(basePath), milestoneId);
   const timestamp = new Date().toISOString();
   const exchange = formatQuestionExchange(questions, details?.response?.answers);
 
   const appendRound = async (artifactType: string, build: (existing: string | null) => string): Promise<void> => {
     const path = relMilestoneFile(basePath, milestoneId, artifactType).replace(/^\.gsd\//, "");
     const file = resolveMilestoneFile(basePath, milestoneId, artifactType);
-    await saveArtifactToDb({
+    await saveArtifactToDbByScope(scope, {
       path,
       artifact_type: artifactType,
       content: build(getArtifact(path)?.full_content ?? (file ? await loadFile(file) : null)),
       milestone_id: milestoneId,
-    }, basePath);
+    });
   };
 
   await appendRound("DISCUSSION", (existing) =>
