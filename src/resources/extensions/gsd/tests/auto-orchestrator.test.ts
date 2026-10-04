@@ -1407,7 +1407,7 @@ test("advance() settles a pending flat-phase migration before the projection hol
   let pendingAtHold: boolean | undefined;
   const restoreProjectionObservation = _setPreserveProjectionChangesFnForTests(async () => {
     pendingAtHold = needsFlatPhaseMigration(f.base);
-    return { preserved: [], refreshedPassthrough: [], held: [] };
+    return { preserved: [], refreshedPassthrough: [], held: [], errors: [] };
   });
   t.after(restoreProjectionObservation);
 
