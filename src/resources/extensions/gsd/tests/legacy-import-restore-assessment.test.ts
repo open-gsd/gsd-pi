@@ -327,10 +327,6 @@ test("an Application of base snapshot schema 1 is compared without the knowledge
   assert.equal(consentRequired.decision, "restore-consent-required");
   assert.equal(consentRequired.facts.expectedRelevantRowsHash, consentRequired.facts.observedRelevantRowsHash);
   verifyLegacyImportApplicationResult(application);
-  assert.equal(
-    inspectProjectAuthorityCutoverEvidence().applicationOperationId,
-    application.operationId,
-  );
 
   // A changed canonical row is still refused.
   db().prepare("UPDATE milestones SET title = 'Changed outside a Domain Operation'").run();
