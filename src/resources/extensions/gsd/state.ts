@@ -50,8 +50,8 @@ import { readMilestone, readMilestones } from './db/lifecycle-read.js';
  * auto-mode to stall or falsely declare completion.
  *
  * However, a milestone is NOT a ghost if:
- * - It has a DB row with a meaningful status (queued, active, etc.) — the DB
- *   knows about it even if content files haven't been created yet.
+ * - It has a DB row. The one exception is a queued row with no saved CONTEXT
+ *   or CONTEXT-DRAFT row and no slice rows (see below); files do not decide.
  * - It has a worktree directory — a worktree proves the milestone was
  *   legitimately created and is expected to be populated.
  *
