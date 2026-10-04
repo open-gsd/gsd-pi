@@ -55,7 +55,8 @@ import { regenerateIfMissing } from "./workflow-projections.js";
 import { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 import { normalizeWorktreePathForCompare } from "./worktree-root.js";
-import { isDbAvailable, getTask, getSlice, getMilestone, getMilestoneSlices, _getAdapter, getVerificationEvidence, hasRoadmapAssessmentSince } from "./gsd-db.js";
+import { isDbAvailable, getTask, getSlice, getMilestone, getMilestoneSlices, _getAdapter, getVerificationEvidence, hasRoadmapAssessmentSince, getReplanHistory } from "./gsd-db.js";
+import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
 import { getWorkflowDatabasePath, refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -208,130 +209,26 @@ export function resolveCloseoutGitAction(
   return uokFlags.gitops ? uokFlags.gitopsTurnAction : null;
 }
 
-function agentEndMessagesIncludeToolCall(messages: unknown[] | undefined, toolName: string): boolean {
-  if (!Array.isArray(messages)) return false;
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    const content = (message as { content?: unknown }).content;
-    if (!Array.isArray(content)) continue;
-    for (const part of content) {
-      if (!part || typeof part !== "object") continue;
-      const typed = part as { type?: unknown; name?: unknown };
-      if (typed.type === "toolCall" && typed.name === toolName) return true;
-    }
-  }
-  return false;
-}
-
-function agentEndMessagesIncludeSuccessfulToolResult(messages: unknown[] | undefined, toolName: string): boolean {
-  if (!Array.isArray(messages)) return false;
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    const typed = message as { role?: unknown; toolName?: unknown; isError?: unknown };
-    if (typed.role === "toolResult" && typed.toolName === toolName && typed.isError !== true) return true;
-  }
-  return false;
-}
-
 function hasIncompleteMilestoneSlice(milestoneId: string): boolean {
   if (!isDbAvailable()) return false;
   return getMilestoneSlices(milestoneId).some((slice) => !isInactiveStatus(slice.status));
 }
 
 /**
- * Structural tool match inside one activity JSONL entry (#2223). Only real
- * toolCall parts and toolResult messages count — the unit's own prompt is
- * persisted as a custom_message entry that names every tool, so text content
- * must never match.
+ * A complete-slice unit that reopened a Task or replanned the Slice gave the
+ * Slice back to execution. The evidence is rows only: the Slice is open and
+ * has an open Task, or a replan row was recorded during this unit. No activity
+ * log, transcript or REPLAN file is read.
  */
-function activityEntryMentionsTool(rawEntry: unknown, toolName: string): boolean {
-  const entry = rawEntry as { type?: unknown; message?: unknown } | null;
-  if (!entry || entry.type !== "message" || !entry.message) return false;
-  const message = entry.message as { role?: unknown; content?: unknown; toolName?: unknown };
-  if (message.role === "assistant" && Array.isArray(message.content)) {
-    for (const part of message.content) {
-      const typed = part as { type?: unknown; name?: unknown } | null;
-      if (typed && typed.type === "toolCall" && typed.name === toolName) return true;
-    }
-  }
-  return message.role === "toolResult" && message.toolName === toolName;
-}
-
-function unitActivityMentionsTool(basePath: string, unitType: string, unitId: string, toolName: string): boolean {
-  const safeUnitId = unitId.replace(/\//g, "-");
-  const activityDir = join(basePath, ".gsd", "activity");
-  if (!existsSync(activityDir)) return false;
-
-  try {
-    for (const entry of readdirSync(activityDir, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      if (!entry.name.endsWith(`${unitType}-${safeUnitId}.jsonl`)) continue;
-      const content = readFileSync(join(activityDir, entry.name), "utf-8");
-      for (const line of content.split("\n")) {
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        if (activityEntryMentionsTool(parsed, toolName)) return true;
-      }
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-
-function completeSliceReopenReplanHandoffDetected(
-  s: AutoSession,
-  agentEndMessages: unknown[] | undefined,
-): boolean {
-  if (s.currentUnit?.type !== "complete-slice") return false;
-  const unitType = s.currentUnit.type;
-  const unitId = s.currentUnit.id;
-  return (
-    agentEndMessagesIncludeSuccessfulToolResult(agentEndMessages, "gsd_task_reopen") ||
-    agentEndMessagesIncludeToolCall(agentEndMessages, "gsd_task_reopen") ||
-    unitActivityMentionsTool(s.basePath, unitType, unitId, "gsd_task_reopen") ||
-    unitActivityMentionsTool(s.canonicalProjectRoot, unitType, unitId, "gsd_task_reopen")
-  );
-}
-
-function completeSliceReplanSignalDetected(
-  s: AutoSession,
-  agentEndMessages: unknown[] | undefined,
-): boolean {
-  if (s.currentUnit?.type !== "complete-slice") return false;
-  return (
-    agentEndMessagesIncludeSuccessfulToolResult(agentEndMessages, "gsd_replan_slice") ||
-    agentEndMessagesIncludeToolCall(agentEndMessages, "gsd_replan_slice") ||
-    unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_replan_slice") ||
-    unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_replan_slice")
-  );
-}
-
-function completeSliceValidReplanOutcomeDetected(
-  s: AutoSession,
-  agentEndMessages: unknown[] | undefined,
-): boolean {
-  if (s.currentUnit?.type !== "complete-slice") return false;
+function completeSliceHandedBackToExecution(s: AutoSession): boolean {
+  if (s.currentUnit?.type !== "complete-slice" || !isDbAvailable()) return false;
   const { milestone: mid, slice: sid } = parseUnitId(s.currentUnit.id);
   if (!mid || !sid) return false;
-
-  if (!completeSliceReplanSignalDetected(s, agentEndMessages)) return false;
-
-  const replanPath = resolveSliceFile(s.basePath, mid, sid, "REPLAN");
-  const canonicalReplanPath = resolveSliceFile(s.canonicalProjectRoot, mid, sid, "REPLAN");
-  const hasReplanArtifact = (
-    Boolean(replanPath && existsSync(replanPath)) ||
-    Boolean(canonicalReplanPath && existsSync(canonicalReplanPath))
-  );
-  if (!hasReplanArtifact) return false;
-
-  if (!isDbAvailable()) return true;
-  const slice = getSlice(mid, sid);
-  return Boolean(slice && !isClosedStatus(slice.status));
+  const slice = readMilestoneSlices(mid).find((candidate) => candidate.id === sid);
+  if (!slice || slice.done) return false;
+  if (readSliceTasks(mid, sid).some((task) => !task.done)) return true;
+  const startedAt = s.currentUnit.startedAt;
+  return getReplanHistory(mid, sid).some((row) => Date.parse(String(row["created_at"] ?? "")) >= startedAt);
 }
 
 function formatPreExecutionCheckDetail(check: PreExecutionCheckJSON): string {
@@ -972,7 +869,7 @@ import {
   setAutoOutcomeWidget,
   type AutoOutcomeSurfaceSnapshot,
 } from "./auto-dashboard.js";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 import { _resetHasChangesCache } from "./native-git-bridge.js";
 import { autoCommitCurrentBranch } from "./worktree.js";
@@ -2459,10 +2356,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         );
         await pauseAuto(ctx, pi);
         return "dispatched";
-      } else if (
-        !triggerArtifactVerified &&
-        completeSliceReopenReplanHandoffDetected(s, opts?.agentEndMessages)
-      ) {
+      } else if (!triggerArtifactVerified && completeSliceHandedBackToExecution(s)) {
         const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
         s.pendingVerificationRetry = null;
         s.verificationRetryCount.delete(retryKey);
@@ -2477,29 +2371,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           "warning",
         );
         return "continue";
-      } else if (
-        !triggerArtifactVerified &&
-        completeSliceValidReplanOutcomeDetected(s, opts?.agentEndMessages)
-      ) {
-        const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
-        s.pendingVerificationRetry = null;
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
-        debugLog("postUnit", {
-          phase: "artifact-verify-complete-slice-replan-outcome",
-          unitType: s.currentUnit.type,
-          unitId: s.currentUnit.id,
-        });
-        ctx.ui.notify(
-          `complete-slice ${s.currentUnit.id} produced a valid replan outcome; continuing orchestration instead of retrying closeout.`,
-          "warning",
-        );
-        return "continue";
-      } else if (
-        !triggerArtifactVerified &&
-        !isDbAvailable() &&
-        !completeSliceReplanSignalDetected(s, opts?.agentEndMessages)
-      ) {
+      } else if (!triggerArtifactVerified && !isDbAvailable()) {
         debugLog("postUnit", { phase: "artifact-verify-db-unavailable", unitType: s.currentUnit.type, unitId: s.currentUnit.id });
         const dbSkipDiag = diagnoseExpectedArtifact(s.currentUnit.type, s.currentUnit.id, verificationBasePath);
         ctx.ui.notify(
