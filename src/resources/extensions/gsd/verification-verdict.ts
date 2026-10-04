@@ -68,7 +68,6 @@ export function unresolvedCommandToken(stderr: string | undefined): string | nul
 }
 
 export function decideVerificationVerdict(
-  unitType: string,
   result: VerificationGateResult,
   options?: DecideVerificationVerdictOptions,
 ): VerificationVerdict {
@@ -123,20 +122,9 @@ export function decideVerificationVerdict(
     };
   }
 
-  if (unitType === "execute-task" && result.discoverySource === "task-plan-prose" && result.checks.length === 0) {
-    return {
-      passed: true,
-      reason: "passed",
-      retryable: false,
-      failureContext: "",
-    };
-  }
-
-  if (
-    unitType === "execute-task" &&
-    (result.discoverySource === "none" || result.discoverySource === "task-plan-unsafe") &&
-    result.checks.length === 0
-  ) {
+  // A host verdict needs a host-run check. A result with no check proves
+  // nothing, so it is never a pass (ADR-046), whatever the discovery source.
+  if (result.checks.length === 0) {
     return {
       passed: false,
       reason: "no-host-checks",

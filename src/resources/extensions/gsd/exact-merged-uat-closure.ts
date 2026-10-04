@@ -7,7 +7,8 @@ import { join } from "node:path";
 
 import { getDb } from "./db/engine.js";
 import type { TaskTechnicalVerdictSnapshot } from "./task-verification-domain-operation.js";
-import { readUatExecEvidenceMetadata } from "./uat-run.js";
+import { execRunSucceeded } from "./db/writers/exec-runs.js";
+import { readExecRunOfRef } from "./uat-run.js";
 
 export interface ExactMergedUatClosureInput {
   basePath: string;
@@ -173,18 +174,15 @@ function requireUatExecEvidence(
   input: ExactMergedUatClosureInput,
   row: VerificationEvidenceRow,
 ): string {
-  const metadata = readUatExecEvidenceMetadata(input.basePath, row.durable_output_ref);
-  if (!metadata || metadata.metadata?.kind !== "uat_exec" ||
-      metadata.metadata.milestoneId !== input.task.milestoneId ||
-      metadata.metadata.sliceId !== input.task.sliceId ||
-      metadata.exit_code !== 0 || metadata.signal !== null ||
-      metadata.timed_out !== false || metadata.aborted === true) {
+  // The host exec_runs row is the record of the run, not `.gsd/exec/*.meta.json`.
+  const run = readExecRunOfRef(row.durable_output_ref);
+  if (!run || run.kind !== "uat_exec" ||
+      run.milestone_id !== input.task.milestoneId ||
+      run.slice_id !== input.task.sliceId ||
+      !execRunSucceeded(run)) {
     throw new Error("Verified Task publication requires successful typed gsd_uat_exec evidence");
   }
-  if (typeof metadata.id !== "string" || !metadata.id.trim()) {
-    throw new Error("Verified Task publication requires identified gsd_uat_exec evidence");
-  }
-  return metadata.id;
+  return run.id;
 }
 
 function requireCanonicalUatReceipt(

@@ -20,7 +20,8 @@ import {
   type VerificationContext,
 } from "../auto-verification.ts";
 import { AutoSession } from "../auto/session.ts";
-import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, _getAdapter } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, insertVerificationEvidence, _getAdapter } from "../gsd-db.ts";
+import { recordExecRun } from "../db/writers/exec-runs.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { _clearGsdRootCache } from "../paths.ts";
 import { initMetrics, resetMetrics } from "../metrics.ts";
@@ -33,6 +34,7 @@ import {
 import {
   claimTaskAttempt,
   readLatestTaskAttempt,
+  readTaskLifecycleStatus,
   settleTaskAttempt,
 } from "../task-execution-domain-operation.ts";
 import {
@@ -235,7 +237,8 @@ function createBasicTask(verify = "echo pass"): void {
   });
 }
 
-function createCanonicalSucceededTaskAttempt(): string {
+/** `whileRunning` runs between the claim and the settle, as the executor does. */
+function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}): string {
   const adapter = _getAdapter();
   assert.ok(adapter);
   adapter.exec(`
@@ -302,6 +305,7 @@ function createCanonicalSucceededTaskAttempt(): string {
     milestoneLeaseToken: 7,
     coordinationDispatchId: dispatch.id,
   });
+  whileRunning();
   settleTaskAttempt({
     invocation: internalExecutionInvocation("fixture/verification-task-settle"),
     attemptId: claimed.attemptId,
@@ -1338,39 +1342,100 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(evidence.maxRetries, 2);
   });
 
-  test("completed browser-facing execute-task with no host-owned verification continues toward browser UAT", async () => {
-    createTaskWithoutVerify("complete");
+  /** Run host verification on the real authority and return what the database holds after it. */
+  async function verifyCanonicalTask(whileRunning?: () => void) {
+    const attemptId = createCanonicalSucceededTaskAttempt(whileRunning);
+    const s = makeMockSession(tempDir, { type: "execute-task", id: "M001/S01/T01" });
+    const result = await runPostUnitVerification(
+      { s, ctx: makeMockCtx(), pi: makeMockPi() } satisfies VerificationContext,
+      mock.fn(async () => {}),
+    );
+    const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+    return {
+      result,
+      verdict: readTaskTechnicalVerdict(attemptId)?.verdict,
+      nextStage: readLatestTaskAttempt(task)?.nextStage,
+      lifecycleStatus: readTaskLifecycleStatus(task),
+    };
+  }
+
+  const PROSE_VERIFY = "The settings page shows the saved theme after a reload";
+
+  function stageClaimedEvidence(command: string): void {
+    insertVerificationEvidence({
+      taskId: "T01", sliceId: "S01", milestoneId: "M001",
+      command, exitCode: 0, verdict: "pass", durationMs: 5,
+    });
+  }
+
+  function recordHostRun(id: string, command: string, exitCode = 0): void {
+    recordExecRun({
+      kind: "exec", id, runtime: "bash", command, cwd: tempDir,
+      exit_code: exitCode, signal: null, timedOut: false, aborted: false,
+      started_at: new Date().toISOString(), duration_ms: 12, output_hash: "sha256:test",
+    });
+  }
+
+  test("a task with a prose Verify and no command gets an inconclusive verdict and is not published", async () => {
+    createBasicTask(PROSE_VERIFY);
+
+    const outcome = await verifyCanonicalTask();
+
+    assert.equal(outcome.result, "retry");
+    assert.equal(outcome.verdict, "inconclusive");
+    // The Task did not leave the route stage, so slice completion has no passing proof for it.
+    assert.equal(outcome.nextStage, "route");
+    assert.notEqual(outcome.lifecycleStatus, "completed");
+  });
+
+  test("a browser-facing task with no host check gets an inconclusive verdict, not a pass", async () => {
+    createTaskWithoutVerify();
     writeFileSync(join(tempDir, "index.html"), "<!doctype html><button>Import</button>", "utf-8");
 
-    const ctx = makeMockCtx();
-    const pi = makeMockPi();
-    const pauseAutoMock = mock.fn(async () => {});
-    const s = makeMockSession(tempDir, { type: "execute-task", id: "M001/S01/T01" });
+    const outcome = await verifyCanonicalTask();
 
-    const result = await runPostUnitVerification(makeVerificationContext(s, ctx, pi), pauseAutoMock);
+    assert.equal(outcome.result, "retry");
+    assert.equal(outcome.verdict, "inconclusive");
+    assert.equal(outcome.nextStage, "route");
+  });
 
-    assert.equal(result, "continue");
-    assert.equal(pauseAutoMock.mock.callCount(), 0);
-    assert.equal(s.pendingVerificationRetry, null);
+  test("agent-claimed evidence with no host run of the Attempt does not pass a prose Verify", async () => {
+    createBasicTask(PROSE_VERIFY);
+    stageClaimedEvidence("node check-theme.js");
 
-    const notifyMessages = ctx.ui.notify.mock.calls.map((c: { arguments: unknown[] }) =>
-      String(c.arguments[0])
-    );
-    assert.ok(
-      notifyMessages.some(
-        (m: string) =>
-          m.includes("canonical executor Result passed") &&
-          m.includes("slice UAT") &&
-          m.includes("automated")
-      ),
-      "completed web tasks without task-level commands should explain browser UAT handoff",
-    );
+    const outcome = await verifyCanonicalTask();
 
-    const evidencePath = join(tempDir, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-VERIFY.json");
-    const evidence = JSON.parse(readFileSync(evidencePath, "utf-8"));
-    assert.equal(evidence.passed, false);
-    assert.equal(evidence.discoverySource, "none");
-    assert.ok(!("retryAttempt" in evidence), "browser-UAT handoff evidence must not request a task retry");
+    assert.equal(outcome.result, "retry");
+    assert.equal(outcome.verdict, "inconclusive");
+  });
+
+  test("a host run recorded before the Attempt does not back agent-claimed evidence", async () => {
+    createBasicTask(PROSE_VERIFY);
+    stageClaimedEvidence("node check-theme.js");
+    recordHostRun("run-before-attempt", "node check-theme.js");
+
+    const outcome = await verifyCanonicalTask();
+
+    assert.equal(outcome.verdict, "inconclusive");
+  });
+
+  test("a failed host run does not back agent-claimed evidence", async () => {
+    createBasicTask(PROSE_VERIFY);
+    stageClaimedEvidence("node check-theme.js");
+
+    const outcome = await verifyCanonicalTask(() => recordHostRun("run-failed", "node check-theme.js", 1));
+
+    assert.equal(outcome.verdict, "inconclusive");
+  });
+
+  test("agent-claimed evidence backed by a host run of the Attempt passes a prose Verify", async () => {
+    createBasicTask(PROSE_VERIFY);
+    stageClaimedEvidence("node check-theme.js");
+
+    const outcome = await verifyCanonicalTask(() => recordHostRun("run-in-attempt", "node check-theme.js"));
+
+    assert.equal(outcome.result, "continue");
+    assert.equal(outcome.verdict, "pass");
   });
 
   test("auto-discovered package.json verification failure retries instead of continuing", async () => {

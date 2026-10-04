@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, assertVerifyIsShellCheckable, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, looksLikePosixAuthoredCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, assertVerifyIsShellCheckable, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, looksLikePosixAuthoredCommand, shellForCommand, normalizeCommandIdentity, hostRecordedTaskEvidence } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -662,7 +662,62 @@ describe("verification-gate: execution", () => {
 
     assert.equal(result.passed, true);
     assert.equal(result.discoverySource, "task-plan-prose");
+    // The host-recorded runs are the checks; the unrelated preference command did not run.
+    assert.deepEqual(result.checks.map((check) => [check.command, check.exitCode]), [
+      ["gsd_exec node: artifact check", 0],
+      ["gsd_exec node: consolidated artifact verification", 0],
+    ]);
+  });
+
+  test("a prose Verify with no host-recorded evidence yields a result with no check", () => {
+    const result = runVerificationGate({
+      cwd: tmp,
+      taskPlanVerify: "Planning artifacts exist and contain all required sections",
+    });
+
+    assert.equal(result.discoverySource, "task-plan-prose");
     assert.deepEqual(result.checks, []);
+  });
+
+  describe("hostRecordedTaskEvidence", () => {
+    const claim = (command: string, verdict = "pass") => ({ command, exitCode: 0, verdict, durationMs: 1 });
+    const run = (id: string, command: string, succeeded = true) => ({ id, command, succeeded, durationMs: 40 });
+
+    test("a claim with no host run of this Attempt is not evidence", () => {
+      assert.deepEqual(hostRecordedTaskEvidence([claim("npm test")], []), []);
+    });
+
+    test("a claim is replaced by the host record of the same script", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("npm  test")], [run("run-1", "npm test")]),
+        [{ command: "npm test", exitCode: 0, verdict: "pass", durationMs: 40 }],
+      );
+    });
+
+    test("a claim can name its run by the run id", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("gsd_exec[run-1] artifact check")], [run("run-1", "node check.js")]),
+        [{ command: "node check.js", exitCode: 0, verdict: "pass", durationMs: 40 }],
+      );
+    });
+
+    test("the latest host run of a script decides: a later failure voids the claim", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("npm test")], [run("run-1", "npm test"), run("run-2", "npm test", false)]),
+        [],
+      );
+    });
+
+    test("one claimed command without a host run voids the whole set", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("npm test"), claim("npm run lint")], [run("run-1", "npm test")]),
+        [],
+      );
+    });
+
+    test("a failing claim is not evidence even when the host run succeeded", () => {
+      assert.deepEqual(hostRecordedTaskEvidence([claim("npm test", "fail")], [run("run-1", "npm test")]), []);
+    });
   });
 
   test("verificationChildEnvironment preserves Windows Path casing when prepending venv (#2086)", () => {

@@ -26,6 +26,7 @@ import {
   createUnitDispatchRetrySchema,
   hasUnitDispatchRetrySchema,
 } from "./db-unit-dispatch-retry-schema.js";
+import { createExecRunSchema, hasExecRunSchema } from "./db-exec-run-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -63,6 +64,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "unit-dispatch-retries",
     isPresent: hasUnitDispatchRetrySchema,
     create: createUnitDispatchRetrySchema,
+  },
+  {
+    id: "exec-runs",
+    isPresent: hasExecRunSchema,
+    create: createExecRunSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

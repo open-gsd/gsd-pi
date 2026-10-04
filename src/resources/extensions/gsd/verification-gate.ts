@@ -21,6 +21,7 @@ import { join, basename, delimiter, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import type { AuditWarning, RuntimeError, VerificationCheck, VerificationResult } from "./types.js";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
+import { redactSecrets } from "./redact-secrets.js";
 import { rewriteCommandWithRtk } from "../shared/rtk.js";
 import { getPathValue, prependPathEntry, resolvePathCandidates } from "../shared/rtk-shared.js";
 import { normalizePythonCommand, resolveVenvInterpreter, venvBinDirectory, formatPythonInvocation } from "./python-resolver.js";
@@ -69,7 +70,10 @@ function readBoundedCommandOutput(path: string): string {
 
 // ─── Command Discovery ──────────────────────────────────────────────────────
 
-/** Structured evidence staged by `gsd_task_complete` for the current Task. */
+/**
+ * Evidence for the current Task. `gsd_task_complete` stages the agent's claim;
+ * the gate takes only the host-recorded form (see hostRecordedTaskEvidence).
+ */
 export interface TaskVerificationEvidence {
   command: string;
   exitCode: number;
@@ -80,7 +84,7 @@ export interface TaskVerificationEvidence {
 export interface DiscoverCommandsOptions {
   preferenceCommands?: string[];
   taskPlanVerify?: string;
-  /** Structured task-specific evidence supplied at completion (#1591). */
+  /** Host-recorded task-specific evidence (#1591); never the agent's bare claim. */
   taskEvidence?: TaskVerificationEvidence[];
   cwd: string;
 }
@@ -140,6 +144,41 @@ export function hasQualifyingTaskEvidence(
     latestByCommand.set(normalizedCommand, record);
   }
   return [...latestByCommand.values()].every(recordQualifies);
+}
+
+/** One gsd_exec run the host recorded in the Attempt under verification, oldest first. */
+export interface HostExecRun {
+  id: string;
+  command: string;
+  /** Exit 0 and no signal, timeout or abort. */
+  succeeded: boolean;
+  durationMs: number;
+}
+
+/**
+ * The agent's claimed evidence, replaced by the host's own record of it. The
+ * claim counts only when it qualifies and the host ran every claimed command
+ * through gsd_exec in this Attempt with success. A claimed command names its
+ * run by the run id, or by the exact script (then the latest run of that
+ * script counts). One claimed command without such a run voids the whole set:
+ * the result is empty.
+ */
+export function hostRecordedTaskEvidence(
+  claimed: TaskVerificationEvidence[],
+  attemptRuns: readonly HostExecRun[],
+): TaskVerificationEvidence[] {
+  if (!hasQualifyingTaskEvidence(claimed)) return [];
+  const latestRun = new Map<string, HostExecRun>();
+  for (const run of attemptRuns) latestRun.set(normalizeCommandIdentity(run.command), run);
+  const recorded = new Map<string, TaskVerificationEvidence>();
+  for (const record of claimed) {
+    // The host stores a command with secrets redacted, so compare in that form.
+    const run = attemptRuns.find((candidate) => record.command.includes(candidate.id))
+      ?? latestRun.get(normalizeCommandIdentity(redactSecrets(record.command)));
+    if (!run?.succeeded) return [];
+    recorded.set(run.id, { command: run.command, exitCode: 0, verdict: "pass", durationMs: run.durationMs });
+  }
+  return [...recorded.values()];
 }
 
 /**
@@ -1246,9 +1285,21 @@ export function runVerificationGate(options: RunVerificationGateOptions): Verifi
   });
 
   if (commands.length === 0) {
+    // A prose Verify is proven by the host-recorded runs of the claimed
+    // commands. They are the checks of this result; with none, the result has
+    // no check and the verdict policy does not pass it.
+    const recorded = source === "task-plan-prose" && hasQualifyingTaskEvidence(options.taskEvidence)
+      ? options.taskEvidence ?? []
+      : [];
     return {
       passed: true,
-      checks: [],
+      checks: recorded.map((record) => ({
+        command: record.command,
+        exitCode: record.exitCode,
+        stdout: "",
+        stderr: "",
+        durationMs: record.durationMs ?? 0,
+      })),
       discoverySource: source,
       timestamp,
     };

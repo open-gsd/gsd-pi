@@ -121,8 +121,10 @@ describe("verification-gate: GSD tool-name verify (issue #1628)", () => {
     }));
     assert.equal(result.passed, true);
     assert.equal(result.discoverySource, "task-plan-prose");
-    assert.deepStrictEqual(result.checks, []);
-    const verdict = decideVerificationVerdict("execute-task", result);
+    assert.deepStrictEqual(result.checks, [
+      { command: "gsd_exec_search limit 1 query D023", exitCode: 0, stdout: "", stderr: "", durationMs: 19 },
+    ]);
+    const verdict = decideVerificationVerdict(result);
     assert.equal(verdict.passed, true);
     assert.equal(verdict.reason, "passed");
   });

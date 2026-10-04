@@ -876,6 +876,42 @@ updated_at   TEXT NOT NULL
 PRIMARY KEY (milestone_id, slice_id)
 ```
 
+- Deleted by `slice.reopen` and `milestone.reopen`, so a redone slice gets a new budget.
+
+##### `exec_runs`
+
+One row for each `gsd_exec` / `gsd_uat_exec` command the host ran. Evidence
+checks read this row; `.gsd/exec/<id>.*` holds only the output text.
+
+```
+id           TEXT PRIMARY KEY   ← the run id the tool returns
+kind         TEXT NOT NULL      ← 'exec' | 'uat_exec'
+runtime      TEXT NOT NULL
+command      TEXT NOT NULL      ← the script, secrets redacted
+cwd          TEXT NOT NULL
+exit_code    INTEGER
+signal       TEXT
+timed_out    INTEGER NOT NULL
+aborted      INTEGER NOT NULL
+started_at   TEXT NOT NULL
+duration_ms  INTEGER NOT NULL
+output_hash  TEXT NOT NULL      ← sha256 of the stored stdout and stderr
+milestone_id TEXT               ← uat_exec only
+slice_id     TEXT               ← uat_exec only
+check_id     TEXT               ← uat_exec only
+attempt_ref  TEXT               ← the Attempt the run belongs to, or NULL
+```
+
+- `attempt_ref` of an `exec` run is the id of the one Task Attempt that was not
+  settled when the command ended. It is NULL with no such Attempt, or with more
+  than one (parallel workers); a NULL run backs no claimed evidence.
+- `attempt_ref` of a `uat_exec` run is `uat:<M>:<S>:attempt-<N>`, the run-uat
+  attempt not saved yet. `gsd_uat_result_save` accepts a `gsd_uat_exec` ref only
+  from its own slice and its own attempt. Reopen sets it to NULL.
+- Host verification accepts the agent's claimed task evidence only when each
+  claimed command names a run of the Attempt under verification that ended with
+  exit 0.
+
 ---
 
 #### `milestone_integration_branches` (non-versioned)

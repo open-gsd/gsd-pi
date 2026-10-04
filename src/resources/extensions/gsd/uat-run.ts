@@ -1,8 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Owns the durable UAT run lifecycle behind gsd_uat_result_save.
 
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, normalize, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, isAbsolute, join, normalize, resolve } from "node:path";
 
 import {
   hasUatBrowserToolSurface,
@@ -24,6 +24,7 @@ import {
   RUN_UAT_WORKFLOW_TOOL_NAMES,
 } from "./tool-presentation-plan.js";
 import { getLatestUatAttempt } from "./db/queries.js";
+import { execRunSucceeded, readExecRun, uatAttemptRef, type ExecRunRow } from "./db/writers/exec-runs.js";
 import { saveFile } from "./files.js";
 import { relSliceFile, resolveGsdPathContract } from "./paths.js";
 import { buildManualValidationGuidance, resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -49,21 +50,6 @@ export interface UatEvidenceRef {
   unitType?: string;
   tool?: string;
   executionId?: string;
-}
-
-export interface UatExecEvidenceMetadata {
-  id?: unknown;
-  exit_code?: unknown;
-  signal?: unknown;
-  timed_out?: unknown;
-  aborted?: unknown;
-  metadata?: {
-    kind?: unknown;
-    milestoneId?: unknown;
-    sliceId?: unknown;
-    checkId?: unknown;
-    intent?: unknown;
-  };
 }
 
 export interface UatCheckResultInput {
@@ -204,10 +190,6 @@ function pathStartsWithin(parent: string, target: string): boolean {
   return normalizedTarget === normalizedParent || normalizedTarget.startsWith(`${normalizedParent}/`);
 }
 
-function pushUnique(paths: string[], candidate: string): void {
-  if (!paths.includes(candidate)) paths.push(candidate);
-}
-
 function quoteList(values: readonly string[]): string {
   return values.map((value) => `"${value}"`).join(", ");
 }
@@ -239,55 +221,26 @@ function relativeRefStartsWithin(root: string, ref: string): boolean {
   return normalizedRef === normalizedRoot || normalizedRef.startsWith(`${normalizedRoot}/`);
 }
 
-function execMetaPathCandidates(basePath: string, ref: string): string[] {
-  const trimmed = ref.trim();
-  const candidates: string[] = [];
-  const execDirs = approvedEvidenceRoots(basePath).map((root) => join(root, "exec"));
-  const normalizedRef = trimmed.replace(/\\/g, "/");
-  const pathLike = normalizedRef.endsWith(".meta.json") || normalizedRef.includes("/.gsd/exec/");
+/** The exec_runs row an exec evidence ref names: a run id, or a path to one of the files of the run. */
+export function readExecRunOfRef(ref: string): ExecRunRow | null {
+  const id = basename(ref.trim().replace(/\\/g, "/")).replace(/\.(?:meta\.json|stdout|stderr)$/, "");
+  return readExecRun(id);
+}
 
-  if (pathLike) {
-    const rawPath = isAbsolute(trimmed) ? resolve(trimmed) : resolve(basePath, trimmed);
-    pushUnique(candidates, rawPath);
-
-    const relativeExecMarker = ".gsd/exec/";
-    const markerIndex = normalizedRef.indexOf(relativeExecMarker);
-    if (markerIndex >= 0) {
-      const execRelative = normalizedRef.slice(markerIndex + relativeExecMarker.length);
-      for (const execDir of execDirs) {
-        pushUnique(candidates, join(execDir, execRelative));
-      }
+/** Every place a relative evidence path can be: the work root, and the .gsd and browser artifact roots. */
+function evidenceFileExists(basePath: string, ref: string): boolean {
+  if (isAbsolute(ref)) return existsSync(ref);
+  const normalizedRef = normalizeEvidenceRef(ref);
+  const candidates = [resolve(basePath, ref)];
+  if (normalizedRef.startsWith(".gsd/")) {
+    for (const root of approvedEvidenceRoots(basePath)) candidates.push(join(root, normalizedRef.slice(".gsd/".length)));
+  }
+  if (normalizedRef.startsWith(".artifacts/browser/")) {
+    for (const root of approvedBrowserArtifactRoots(basePath)) {
+      candidates.push(join(root, normalizedRef.slice(".artifacts/browser/".length)));
     }
-
-    return candidates.filter((candidate) =>
-      execDirs.some((execDir) => pathStartsWithin(execDir, candidate))
-    );
   }
-
-  for (const execDir of execDirs) {
-    pushUnique(candidates, join(execDir, `${trimmed}.meta.json`));
-  }
-  return candidates;
-}
-
-function resolveExecMetaPath(basePath: string, ref: string): string | null {
-  for (const candidate of execMetaPathCandidates(basePath, ref)) {
-    if (existsSync(candidate)) return candidate;
-  }
-  return null;
-}
-
-export function readUatExecEvidenceMetadata(
-  basePath: string,
-  ref: string,
-): UatExecEvidenceMetadata | null {
-  const path = resolveExecMetaPath(basePath, ref);
-  if (!path) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf-8")) as UatExecEvidenceMetadata;
-  } catch {
-    return null;
-  }
+  return candidates.some((candidate) => existsSync(candidate));
 }
 
 function evidencePathIsApproved(basePath: string, ref: string): boolean {
@@ -310,44 +263,75 @@ function browserArtifactPathIsApproved(basePath: string, ref: string): boolean {
   return approvedBrowserArtifactRoots(basePath).some((root) => pathStartsWithin(root, resolvedRef));
 }
 
-function validateEvidenceRef(basePath: string, evidence: UatEvidenceRef): string | null {
+/**
+ * Exec evidence is the exec_runs row the host stored when the command ran. A
+ * gsd_uat_exec ref must name a run of this slice and of this run-uat attempt,
+ * so a run of another slice or of an earlier attempt proves nothing here.
+ */
+function validateExecEvidenceRef(
+  params: UatResultSaveParams,
+  runId: string,
+  check: UatCheckResultInput,
+  evidence: UatEvidenceRef,
+): string | null {
+  const run = readExecRunOfRef(evidence.ref);
+  if (!run) {
+    return `${evidence.kind} evidence ref "${evidence.ref}" names no host-recorded run; run the check with gsd_uat_exec and cite the id it returns`;
+  }
+  if (evidence.kind === "gsd_uat_exec") {
+    if (run.kind !== "uat_exec") return `evidence id "${evidence.ref}" is not typed as uat_exec`;
+    if (run.milestone_id !== params.milestoneId || run.slice_id !== params.sliceId) {
+      return `gsd_uat_exec evidence id "${evidence.ref}" was recorded for ${run.milestone_id}/${run.slice_id}, not for ${params.milestoneId}/${params.sliceId}`;
+    }
+    if (run.attempt_ref !== runId) {
+      return `gsd_uat_exec evidence id "${evidence.ref}" was recorded in ${run.attempt_ref}, not in this run (${runId}); re-run the check`;
+    }
+  }
+  if (check.result === "PASS" && !execRunSucceeded(run)) {
+    return (
+      `PASS cites ${evidence.kind} evidence id "${evidence.ref}" whose execution ` +
+      `recorded exit_code=${String(run.exit_code)}, signal=${String(run.signal)}, ` +
+      `timed_out=${String(run.timed_out === 1)}, aborted=${String(run.aborted === 1)}; ` +
+      "re-run the check or fix the result"
+    );
+  }
+  return null;
+}
+
+function validateEvidenceRef(
+  basePath: string,
+  params: UatResultSaveParams,
+  runId: string,
+  check: UatCheckResultInput,
+  evidence: UatEvidenceRef,
+): string | null {
   if (!isUatEvidenceKind(evidence.kind)) {
     return `evidence.kind must be one of: ${quoteList(UAT_EVIDENCE_KINDS)}`;
   }
   if (!isNonEmptyString(evidence.ref)) return "evidence.ref is required";
   if (evidence.kind === "gsd_uat_exec" || evidence.kind === "gsd_exec") {
-    const path = resolveExecMetaPath(basePath, evidence.ref.trim());
-    if (!path) {
-      return `${evidence.kind} evidence ref "${evidence.ref}" must resolve to an existing .meta.json file under .gsd/exec/`;
-    }
-    if (evidence.kind === "gsd_uat_exec") {
-      try {
-        const meta = JSON.parse(readFileSync(path, "utf-8")) as { metadata?: { kind?: unknown } };
-        if (meta.metadata?.kind !== "uat_exec") return `evidence id "${evidence.ref}" is not typed as uat_exec`;
-      } catch {
-        return `invalid gsd_exec metadata JSON for evidence id "${evidence.ref}"`;
-      }
-    }
-    return null;
+    return validateExecEvidenceRef(params, runId, check, evidence);
   }
   if (evidence.kind === "url") {
     return isHttpUrlRef(evidence.ref)
       ? null
       : `url evidence ref must be an http:// or https:// URL; got "${evidence.ref}"`;
   }
-  if (evidence.kind === "screenshot" || evidence.kind === "log") {
-    return evidencePathIsApproved(basePath, evidence.ref)
-      ? null
+  if (evidence.kind === "browser" && isHttpUrlRef(evidence.ref)) return null;
+  const approved = evidence.kind === "browser"
+    ? browserArtifactPathIsApproved(basePath, evidence.ref)
+    : evidencePathIsApproved(basePath, evidence.ref);
+  if (!approved) {
+    return evidence.kind === "browser"
+      ? `browser evidence ref must be an http:// or https:// URL, or a path under ${approvedRootsText(APPROVED_BROWSER_EVIDENCE_REF_ROOTS)}; got "${evidence.ref}"`
       : `${evidence.kind} evidence ref must be a path under approved evidence locations (${approvedRootsText()}); got "${evidence.ref}"`;
   }
-  if (evidence.kind === "browser") {
-    if (isHttpUrlRef(evidence.ref) || browserArtifactPathIsApproved(basePath, evidence.ref)) return null;
-    return `browser evidence ref must be an http:// or https:// URL, or a path under ${approvedRootsText(APPROVED_BROWSER_EVIDENCE_REF_ROOTS)}; got "${evidence.ref}"`;
-  }
-  return null;
+  return evidenceFileExists(basePath, evidence.ref)
+    ? null
+    : `${evidence.kind} evidence ref "${evidence.ref}" names a file that does not exist`;
 }
 
-function validateUatChecks(basePath: string, params: UatResultSaveParams): string | null {
+function validateUatChecks(basePath: string, params: UatResultSaveParams, runId: string): string | null {
   for (const check of params.checks) {
     if (!isNonEmptyString(check.id)) return "every check must have a non-empty id";
     if (!isNonEmptyString(check.description)) return `check ${check.id} must have a description`;
@@ -362,22 +346,8 @@ function validateUatChecks(basePath: string, params: UatResultSaveParams): strin
         return `check ${check.id} is ${check.result} but has no objective evidence`;
       }
       for (const evidence of check.evidence) {
-        const error = validateEvidenceRef(basePath, evidence);
+        const error = validateEvidenceRef(basePath, params, runId, check, evidence);
         if (error) return `check ${check.id}: ${error}`;
-        if (check.result === "PASS" && evidence.kind === "gsd_uat_exec") {
-          const meta = readUatExecEvidenceMetadata(basePath, evidence.ref.trim());
-          if (
-            meta &&
-            (meta.exit_code !== 0 || meta.signal !== null || meta.timed_out !== false || meta.aborted === true)
-          ) {
-            return (
-              `check ${check.id}: PASS cites gsd_uat_exec evidence id "${evidence.ref}" whose execution ` +
-              `recorded exit_code=${String(meta.exit_code)}, signal=${String(meta.signal)}, ` +
-              `timed_out=${String(meta.timed_out)}, aborted=${String(meta.aborted)}; ` +
-              "re-run the check or fix the result"
-            );
-          }
-        }
       }
     } else if (!isNonEmptyString(check.notes)) {
       return `check ${check.id} is NEEDS-HUMAN but has no manual instruction or reason`;
@@ -555,7 +525,11 @@ export function prepareUatRun(basePath: string, rawParams: UatResultSaveParams):
 
   params = mergeCanonicalPresentation(params);
 
-  const checkError = validateUatChecks(basePath, params);
+  const attempt = resolveUatAttempt(params);
+  if (typeof attempt !== "number") return { ok: false, error: attempt };
+  const runId = uatAttemptRef(params.milestoneId, params.sliceId, attempt);
+
+  const checkError = validateUatChecks(basePath, params, runId);
   if (checkError) return { ok: false, error: { code: "invalid_evidence", message: checkError } };
 
   const freshEvidenceError = validateFreshUatOwnedEvidence(params);
@@ -566,14 +540,10 @@ export function prepareUatRun(basePath: string, rawParams: UatResultSaveParams):
   const modeError = validateUatModePolicy(params);
   if (modeError) return { ok: false, error: { code: "uat_mode_mismatch", message: modeError } };
 
-  const attempt = resolveUatAttempt(params);
-  if (typeof attempt !== "number") return { ok: false, error: attempt };
-
   const gateVerdict = params.verdict === "PASS" ? "pass" : "flag";
   const gateOutcome = params.verdict === "PASS" ? "pass" : "fail";
   const rationale = params.notes ?? `UAT ${params.verdict} for ${params.sliceId}.`;
   const evaluatedAt = new Date().toISOString();
-  const runId = `uat:${params.milestoneId}:${params.sliceId}:attempt-${attempt}`;
   const worktreeRoot = resolveCanonicalMilestoneRoot(basePath, params.milestoneId);
   const hasHuman = params.checks.some((check) => check.result === "NEEDS-HUMAN");
   const manualGuidance = hasHuman

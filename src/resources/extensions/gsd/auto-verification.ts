@@ -41,6 +41,7 @@ import {
   captureRuntimeErrors,
   runDependencyAudit,
   hasQualifyingTaskEvidence,
+  hostRecordedTaskEvidence,
 } from "./verification-gate.js";
 import type { VerificationTarget, TaskVerificationEvidence } from "./verification-gate.js";
 import { writeVerificationJSON, type PostExecutionCheckJSON, type EvidenceJSON } from "./verification-evidence.js";
@@ -60,7 +61,7 @@ import { getSlice } from "./gsd-db.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { formatPostUnitStatusCard } from "./auto-status-message.js";
-import { detectWebApp } from "./web-app-uat.js";
+import { execRunSucceeded, listExecRunsOfAttempt } from "./db/writers/exec-runs.js";
 import {
   isTaskAttemptAwaitingVerification,
   readLatestTaskAttempt,
@@ -577,7 +578,7 @@ async function runValidateMilestonePostCheck(
         mid,
       );
       await pauseAuto(ctx, pi, {
-        message: `Milestone ${mid} is waiting for a genuine subjective UAT decision.`,
+        message: `Milestone ${mid} is waiting for a genuine subjective UAT decision. Answer it with /gsd uat-answer.`,
         category: "unknown",
       });
       return "pause";
@@ -882,7 +883,8 @@ export async function runPostUnitVerification(
     let taskPlanVerify: string | undefined;
     let taskRow: TaskRow | null = null;
     let sliceRow: SliceRow | null = null;
-    // Structured evidence staged by gsd_task_complete for this Task (#1591).
+    // Evidence staged by gsd_task_complete for this Task (#1591), in the form
+    // the host recorded: the agent's claim alone proves nothing.
     let taskEvidence: TaskVerificationEvidence[] = [];
     if (mid && sid && tid) {
       // The Task verify command and its staged evidence exist only in the DB.
@@ -891,7 +893,15 @@ export async function runPostUnitVerification(
       taskRow = getTask(mid, sid, tid);
       sliceRow = getSlice(mid, sid);
       taskPlanVerify = taskRow?.verify;
-      taskEvidence = getTaskVerificationEvidence(mid, sid, tid);
+      taskEvidence = hostRecordedTaskEvidence(
+        getTaskVerificationEvidence(mid, sid, tid),
+        listExecRunsOfAttempt(latestAttempt.attemptId).map((run) => ({
+          id: run.id,
+          command: run.command,
+          succeeded: execRunSucceeded(run),
+          durationMs: run.duration_ms,
+        })),
+      );
     }
 
     const verificationTargets = resolveVerificationTargets(s.basePath, prefs, taskRow, sliceRow);
@@ -1011,7 +1021,7 @@ export async function runPostUnitVerification(
       }
     }
 
-    const verdict = decideVerificationVerdict(s.currentUnit.type, result, {
+    const verdict = decideVerificationVerdict(result, {
       hasQualifyingEvidence: hasQualifyingTaskEvidence(taskEvidence),
     });
     // #2209: a command-not-found check is a platform fault, not a requirement
@@ -1114,11 +1124,6 @@ export async function runPostUnitVerification(
 
     // Write verification evidence JSON
     const attempt = s.verificationRetryCount.get(retryKey) ?? 0;
-    const browserUatContinuation =
-      verdict.reason === "no-host-checks" &&
-      detectWebApp(s.basePath) &&
-      !result.runtimeErrors?.some((error) => error.blocking) &&
-      isTaskAttemptAwaitingVerification(latestAttempt);
     // ── Post-execution checks (run after main verification passes for execute-task units) ──
     let postExecChecks: PostExecutionCheckJSON[] | undefined;
     let postExecBlockingFailure = false;
@@ -1300,9 +1305,11 @@ export async function runPostUnitVerification(
     const hostTechnicalPassed =
       !sourceError &&
       !postExecInfrastructureError &&
-      (result.passed || browserUatContinuation);
+      result.passed;
+    // No host-run check is not a failed check: the host has no verdict.
+    const noHostChecks = verdict.reason === "no-host-checks";
     const hostTechnicalVerdict: RecordTaskTechnicalVerdictInput["verdict"] =
-      unrunnablePause || sourceError || postExecInfrastructureError
+      unrunnablePause || sourceError || postExecInfrastructureError || noHostChecks
         ? "inconclusive"
         : hostTechnicalPassed
           ? "pass"
@@ -1316,9 +1323,7 @@ export async function runPostUnitVerification(
       } else if (postExecInfrastructureError) {
         rationale = postExecFailureSummary ?? postExecInfrastructureError;
       } else if (hostTechnicalPassed) {
-        rationale = browserUatContinuation
-          ? "Canonical executor Result succeeded; browser-facing behavior continues to automated slice UAT."
-          : "All host-owned technical verification checks passed.";
+        rationale = "All host-owned technical verification checks passed.";
       }
       if (!unrunnablePause) {
         canonicalVerdictWriteStarted = true;
@@ -1350,7 +1355,9 @@ export async function runPostUnitVerification(
                   : rationale,
               expected: "exit 0 / pass",
               evidenceRef: `db://host-verification/${latestAttempt.attemptId} (verdict ${recordedVerdict.verdictId})`,
-              nextAction: hostTechnicalVerdict === "inconclusive"
+              nextAction: noHostChecks
+                ? undefined
+                : hostTechnicalVerdict === "inconclusive"
                 ? "To become conclusive, restore a stable source snapshot and matching evidence, then resume."
                 : failingCheck?.failureClass === "timeout"
                   ? "Raise verification_timeout_ms if this command is expected to run longer."
@@ -1379,7 +1386,6 @@ export async function runPostUnitVerification(
             const includeRetryMetadata =
               !result.passed &&
               !unrunnablePause &&
-              !browserUatContinuation &&
               autoFixEnabled &&
               nextAttempt <= maxRetries;
             writeVerificationJSON(
@@ -1448,12 +1454,6 @@ export async function runPostUnitVerification(
       s.verificationRetryCount.delete(retryKey);
       s.verificationRetryFailureHashes.delete(retryKey);
       s.pendingVerificationRetry = null;
-      if (browserUatContinuation) {
-        ctx.ui.notify(
-          "No task-level command was available; the canonical executor Result passed and browser-facing behavior will continue to automated slice UAT.",
-          "warning",
-        );
-      }
       return "continue";
     } else if (durableRecovery === "abort") {
       s.verificationRetryCount.delete(retryKey);

@@ -47,6 +47,7 @@ import {
   executeUatResultSave,
 } from "../tools/workflow-tool-executors.ts";
 import { internalExecutionInvocation, type ExecutionInvocation } from "../execution-invocation.ts";
+import { recordExecRun } from "../db/writers/exec-runs.ts";
 import { internalPlanningInvocation } from "../planning-invocation.ts";
 import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
 import {
@@ -220,6 +221,38 @@ function seedSlice(milestoneId: string, sliceId: string, status: string): void {
   db.prepare(
     "INSERT OR REPLACE INTO slices (milestone_id, id, title, status, created_at) VALUES (?, ?, ?, ?, ?)",
   ).run(milestoneId, sliceId, `Slice ${sliceId}`, status, new Date().toISOString());
+}
+
+/** Record a gsd_exec / gsd_uat_exec run as the host does when the command ends. */
+function recordUatExecEvidence(run: {
+  id: string;
+  exit_code?: number | null;
+  signal?: string | null;
+  timed_out?: boolean;
+  aborted?: boolean;
+  metadata: { kind: string; milestoneId?: string; sliceId?: string; checkId?: string };
+}): void {
+  recordExecRun({
+    ...(run.metadata.kind === "uat_exec"
+      ? {
+        kind: "uat_exec",
+        milestoneId: run.metadata.milestoneId ?? "",
+        sliceId: run.metadata.sliceId ?? "",
+        checkId: run.metadata.checkId ?? "",
+      }
+      : { kind: "exec" }),
+    id: run.id,
+    runtime: "bash",
+    command: "node check.js",
+    cwd: process.cwd(),
+    exit_code: run.exit_code ?? 0,
+    signal: run.signal ?? null,
+    timedOut: run.timed_out ?? false,
+    aborted: run.aborted ?? false,
+    started_at: new Date().toISOString(),
+    duration_ms: 1,
+    output_hash: "sha256:test",
+  });
 }
 
 function seedCompletedTaskAuthority(input: {
@@ -1993,7 +2026,6 @@ test("executePlanSlice omits the zero-task warning for metadata-only replans ove
 test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone worktree", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const browserTimelineDir = join(base, ".artifacts", "browser", "session");
   const evidenceId = "worktree-uat-evidence";
   const browserTimelinePath = join(browserTimelineDir, "s02-uat-browser-timeline.json");
@@ -2001,27 +2033,22 @@ test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone 
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S02", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
     mkdirSync(browserTimelineDir, { recursive: true });
     writeFileSync(browserTimelinePath, JSON.stringify({ summary: "browser timeline evidence" }), "utf-8");
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S02",
-          checkId: "UAT-01",
-          intent: "uat-runtime-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S02",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2103,7 +2130,6 @@ test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone 
 test("executeUatResultSave rejects a PASS verdict citing failed gsd_uat_exec evidence and leaves the UAT gate unwritten", async (t) => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-failed-exec-evidence";
   t.after(() => {
     closeDatabase();
@@ -2112,25 +2138,20 @@ test("executeUatResultSave rejects a PASS verdict citing failed gsd_uat_exec evi
   openTestDb(base);
   seedMilestone("M001", "Milestone One");
   seedSlice("M001", "S08", "complete");
-  mkdirSync(worktreeExecDir, { recursive: true });
-  writeFileSync(
-    join(worktreeExecDir, `${evidenceId}.meta.json`),
-    JSON.stringify({
-      id: evidenceId,
-      exit_code: 1,
-      signal: null,
-      timed_out: false,
-      aborted: false,
-      metadata: {
-        kind: "uat_exec",
-        milestoneId: "M001",
-        sliceId: "S08",
-        checkId: "UAT-01",
-        intent: "uat-runtime-check",
-      },
-    }),
-    "utf-8",
-  );
+  mkdirSync(worktree, { recursive: true });
+  recordUatExecEvidence({
+    id: evidenceId,
+    exit_code: 1,
+    signal: null,
+    timed_out: false,
+    aborted: false,
+    metadata: {
+      kind: "uat_exec",
+      milestoneId: "M001",
+      sliceId: "S08",
+      checkId: "UAT-01",
+    },
+  });
 
   const selectUatGate = _getAdapter()!.prepare(
     "SELECT verdict FROM quality_gates WHERE milestone_id = ? AND slice_id = ? AND gate_id = ?",
@@ -2193,28 +2214,22 @@ test("executeUatResultSave rejects a PASS verdict citing failed gsd_uat_exec evi
 test("executeUatResultSave leaves UAT pending after a harness-aborted turn", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "harness-aborted-uat-evidence";
   const startedAt = Date.now();
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S04", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S04",
-          checkId: "UAT-01",
-          intent: "uat-runtime-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S04",
+        checkId: "UAT-01",
+      },
+    });
     _getAdapter()!.prepare(
       `INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2291,31 +2306,25 @@ test("executeUatResultSave leaves UAT pending after a harness-aborted turn", asy
 test("executeUatResultSave supplies canonical presentation and normalizes verdict casing", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-lowercase-verdict";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S03", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S03",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S03",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2352,31 +2361,25 @@ test("executeUatResultSave supplies canonical presentation and normalizes verdic
 test("executeUatResultSave supplies direct browser tools for browser-executable UAT", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-direct-browser-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S06", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S06",
-          checkId: "UAT-01",
-          intent: "uat-browser-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S06",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2417,31 +2420,25 @@ test("executeUatResultSave supplies direct browser tools for browser-executable 
 test("executeUatResultSave merges canonical plan ID and read-only tools when presentation lacks plan ID", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-no-plan-id-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S05", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S05",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S05",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2493,32 +2490,26 @@ test("executeUatResultSave merges canonical plan ID and read-only tools when pre
 test("executeUatResultSave surfaces the worktree validation path and notification for NEEDS-HUMAN checks", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-human-validation-evidence";
   try {
     openTestDb(base);
     initNotificationStore(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S07", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S07",
-          checkId: "UAT-01",
-          intent: "uat-runtime-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S07",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2580,31 +2571,25 @@ test("executeUatResultSave surfaces the worktree validation path and notificatio
 test("executeUatResultSave omits manual-validation guidance when no human checks remain", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-no-human-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S08", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S08",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S08",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2641,21 +2626,16 @@ test("executeUatResultSave omits manual-validation guidance when no human checks
 test("executeUatResultSave rejects saved UAT without fresh UAT-owned evidence", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "generic-exec-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S04", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        metadata: { kind: "exec" },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      metadata: { kind: "exec" },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2717,30 +2697,24 @@ test("executeUatResultSave rejects artifact-driven PASS with human follow-up che
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
   const evidenceId = "uat-artifact-nonautomatable";
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S01", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S01",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",

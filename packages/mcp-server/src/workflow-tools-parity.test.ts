@@ -31,6 +31,7 @@ import {
   _getAdapter,
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { _setDomainOperationFaultForTest } from "../../../src/resources/extensions/gsd/db/domain-operation.ts";
+import { recordExecRun } from "../../../src/resources/extensions/gsd/db/writers/exec-runs.ts";
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
 import { importFileCaptures, loadAllCaptures, type CaptureEntry } from "../../../src/resources/extensions/gsd/captures.ts";
 import { registerMemoryTools } from "../../../src/resources/extensions/gsd/bootstrap/memory-tools.ts";
@@ -465,6 +466,27 @@ const SUMMARY_SAVE_ARGS = {
   artifact_type: "SUMMARY",
   content: "# Summary\n\nparity matrix artifact",
 };
+
+/** The host record of a gsd_uat_exec run of M001/S01, bound to the run-uat attempt not saved yet. */
+function recordUatRun(base: string, id: string): void {
+  recordExecRun({
+    kind: "uat_exec",
+    milestoneId: "M001",
+    sliceId: "S01",
+    checkId: "UAT-01",
+    id,
+    runtime: "bash",
+    command: "node check.js",
+    cwd: base,
+    exit_code: 0,
+    signal: null,
+    timedOut: false,
+    aborted: false,
+    started_at: new Date().toISOString(),
+    duration_ms: 1,
+    output_hash: "sha256:test",
+  });
+}
 
 const UAT_RESULT_SAVE_ARGS = {
   milestoneId: "M001",
@@ -1042,17 +1064,7 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
     tool: "gsd_uat_result_save",
     args: UAT_RESULT_SAVE_ARGS,
     passesWith: null,
-    seed: (base) => {
-      mkdirSync(join(base, ".gsd", "exec"), { recursive: true });
-      writeFileSync(join(base, ".gsd", "exec", "operation-only-uat.meta.json"), JSON.stringify({
-        id: "operation-only-uat",
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: { kind: "uat_exec", milestoneId: "M001", sliceId: "S01", checkId: "UAT-01", intent: "uat-artifact-check" },
-      }));
-    },
+    seed: (base) => recordUatRun(base, "operation-only-uat"),
   },
   {
     tool: "gsd_requirement_save",
@@ -1314,7 +1326,13 @@ describe("gsd_uat_result_save commits its rows in one Domain Operation", () => {
     assert.deepEqual(uatRows(), { artifacts: 1, assessments: 1, verdicts: 1, gateRuns: 1 }, "the replay writes no row");
 
     rmSync(attemptFile(base, 1));
-    const next = await runNativeDbTool(base, uatCase.tool, { ...uatCase.args, attempt: "auto" }, "uat-next");
+    // A new attempt is a new run: it cites evidence the host recorded after attempt 1.
+    recordUatRun(base, "operation-only-uat-2");
+    const next = await runNativeDbTool(base, uatCase.tool, {
+      ...uatCase.args,
+      checks: [{ ...UAT_RESULT_SAVE_ARGS.checks[0], evidence: [{ kind: "gsd_uat_exec", ref: "operation-only-uat-2" }] }],
+      attempt: "auto",
+    }, "uat-next");
     assert.equal(executorDetails(next).attempt, 2, "attempt files on disk do not set the attempt number");
     assert.ok(existsSync(attemptFile(base, 2)));
   });

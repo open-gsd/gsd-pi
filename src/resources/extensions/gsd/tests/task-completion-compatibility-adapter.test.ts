@@ -45,6 +45,7 @@ import {
 } from "../task-recovery-domain-operation.js";
 import { resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.js";
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.js";
+import { recordExecRun } from "../db/writers/exec-runs.js";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.js";
 import {
   adoptOrTransitionLifecycle,
@@ -255,22 +256,23 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     CAPSTONE_HASH,
     "",
   ].join("\n");
-  const execDir = join(basePath, ".gsd", "exec");
-  mkdirSync(execDir, { recursive: true });
-  writeFileSync(join(execDir, `${evidenceId}.meta.json`), JSON.stringify({
+  recordExecRun({
+    kind: "uat_exec",
+    milestoneId: TASK.milestoneId,
+    sliceId: TASK.sliceId,
+    checkId: "exact-merge-capstone",
     id: evidenceId,
+    runtime: "bash",
+    command: "node capstone.js",
+    cwd: basePath,
     exit_code: 0,
     signal: null,
-    timed_out: false,
+    timedOut: false,
     aborted: false,
-    metadata: {
-      kind: "uat_exec",
-      milestoneId: TASK.milestoneId,
-      sliceId: TASK.sliceId,
-      checkId: "exact-merge-capstone",
-      intent: "uat-runtime-check",
-    },
-  }));
+    started_at: "2026-07-12T00:02:00.000Z",
+    duration_ms: 1,
+    output_hash: "sha256:test",
+  });
   db().prepare(`
     INSERT INTO assessments (
       path, milestone_id, slice_id, status, scope, full_content, created_at

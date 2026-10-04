@@ -1,6 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: Executor for the gsd_exec MCP tool.
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
 import {
   EXEC_DEFAULTS,
   runExecSandbox,
@@ -13,6 +16,9 @@ import {
   type GSDPreferences,
 } from "../preferences-types.js";
 import { bashReferencesProjectRootOutsideWorktree } from "../worktree-shell-guard.js";
+import { openExistingWorkflowDatabase } from "../db-workspace.js";
+import { recordExecRun } from "../db/writers/exec-runs.js";
+import { redactSecrets } from "../redact-secrets.js";
 import { contextModeDisabledResult, type ToolExecutionResult } from "./context-mode-tool-result.js";
 
 export interface ExecToolParams {
@@ -222,9 +228,47 @@ function isToolExecutionResult(value: unknown): value is ToolExecutionResult {
   return typeof value === "object" && value !== null && Array.isArray((value as { content?: unknown }).content);
 }
 
+/** The UAT check a gsd_uat_exec run belongs to. */
+interface UatExecBinding {
+  milestoneId: string;
+  sliceId: string;
+  checkId: string;
+}
+
+/**
+ * Store the run as an exec_runs row. Evidence checks read that row, so a run
+ * outside a GSD project (no workflow database) is not evidence of anything.
+ */
+function recordRun(
+  baseDir: string,
+  result: ExecSandboxResult,
+  script: string,
+  startedAt: Date,
+  uat: UatExecBinding | undefined,
+): void {
+  if (!openExistingWorkflowDatabase(baseDir).ok) return;
+  const hash = createHash("sha256");
+  for (const path of [result.stdout_path, result.stderr_path]) hash.update(readFileSync(path));
+  recordExecRun({
+    id: result.id,
+    runtime: result.runtime,
+    command: redactSecrets(script),
+    cwd: baseDir,
+    exit_code: result.exit_code,
+    signal: result.signal,
+    timedOut: result.timed_out,
+    aborted: result.aborted === true,
+    started_at: startedAt.toISOString(),
+    duration_ms: result.duration_ms,
+    output_hash: `sha256:${hash.digest("hex")}`,
+    ...(uat ? { kind: "uat_exec", ...uat } : { kind: "exec" }),
+  });
+}
+
 export async function executeGsdExec(
   params: ExecToolParams,
   deps: ExecToolDeps,
+  uat?: UatExecBinding,
 ): Promise<ToolExecutionResult> {
   if (!isEnabled(deps.preferences)) return contextModeDisabledResult("gsd_exec");
 
@@ -250,6 +294,7 @@ export async function executeGsdExec(
   const run = deps.run ?? runExecSandbox;
 
   try {
+    const startedAt = (deps.now ?? (() => new Date()))();
     const result = await run(
       {
         runtime,
@@ -260,6 +305,7 @@ export async function executeGsdExec(
       },
       opts,
     );
+    recordRun(deps.baseDir, result, script, startedAt, uat);
     return formatResult(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
@@ -313,6 +359,7 @@ export async function executeUatExec(
       },
     },
     deps,
+    { milestoneId, sliceId, checkId },
   );
   const details = result.details ?? {};
   return {
