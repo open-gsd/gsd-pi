@@ -614,6 +614,27 @@ export async function finalizeMilestoneGitHubSync(basePath: string, mid: string)
   }
 }
 
+/**
+ * Close a milestone on GitHub from a record carried outside the mapping file,
+ * and store the result in the mapping under `basePath`. Returns true when the
+ * milestone is closed on GitHub.
+ */
+export function closeMilestoneFromRecord(
+  basePath: string,
+  repo: string,
+  mid: string,
+  numbers: { issueNumber: number; ghMilestoneNumber: number },
+): boolean {
+  if (!ghIsAvailable() || !ghHasRateLimit(basePath)) return false;
+  const mapping = loadSyncMapping(basePath) ?? createEmptyMapping(repo);
+  if (!getMilestoneRecord(mapping, mid)) {
+    setMilestoneRecord(mapping, mid, { ...numbers, lastSyncedAt: new Date().toISOString(), state: "open" });
+  }
+  closeMilestoneOnGitHub(basePath, mapping, mid);
+  saveSyncMapping(basePath, mapping);
+  return getMilestoneRecord(mapping, mid)?.state === "closed";
+}
+
 async function syncMilestoneComplete(
   basePath: string,
   mapping: SyncMapping,

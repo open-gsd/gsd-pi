@@ -49,11 +49,11 @@ import { buildMilestoneMergeMessage } from "./auto-worktree-merge-message.js";
 import { assertMilestoneWorktreeCleanBeforeTeardown } from "./auto-worktree-merge-pre-teardown.js";
 import { createPreMergeStash } from "./auto-worktree-merge-stash.js";
 import {
+  completeSettledCloseout,
   readSettledMilestoneMerge,
   settleMilestoneMerge,
   type SettledMilestoneMerge,
 } from "./milestone-closeout-effects.js";
-import { settleCloseout } from "./closeout-domain-operation.js";
 import {
   cleanupConflictState,
   removeMergeStateFiles,
@@ -503,7 +503,7 @@ function finishSettledMilestoneMerge(request: {
   const previousCwd = process.cwd();
   process.chdir(projectRoot);
   try {
-    settleCloseout(milestoneId);
+    completeSettledCloseout(projectRoot, milestoneId);
     const prefs = loadEffectiveGSDPreferences()?.preferences?.git ?? {};
     const { pushed } = publishMilestone({
       basePath: projectRoot,

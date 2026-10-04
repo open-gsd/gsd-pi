@@ -391,15 +391,20 @@ async function milestoneInWorktree(options: { autoPush?: boolean; githubSync?: b
         join(base, ".gsd", "PREFERENCES.md"),
         "---\nversion: 1\ngithub:\n  enabled: true\n  repo: owner/repo\n---\n",
       );
-      const mapping = createEmptyMapping("owner/repo");
-      setMilestoneRecord(mapping, "M001", {
-        issueNumber: 10,
-        ghMilestoneNumber: 3,
-        lastSyncedAt: "2025-01-01T00:00:00Z",
-        state: "open",
-      });
-      writeFileSync(join(base, ".gsd", "github-sync.json"), JSON.stringify(mapping));
     }
+  }
+
+  if (options.githubSync) {
+    // `.gsd` is a real directory in the worktree, so the mapping the run
+    // wrote there is not in the project root.
+    const mapping = createEmptyMapping("owner/repo");
+    setMilestoneRecord(mapping, "M001", {
+      issueNumber: 10,
+      ghMilestoneNumber: 3,
+      lastSyncedAt: "2025-01-01T00:00:00Z",
+      state: "open",
+    });
+    writeFileSync(join(worktree, ".gsd", "github-sync.json"), JSON.stringify(mapping));
   }
 
   assert.equal(openDatabase(join(repo, ".gsd", "gsd.db")), true);
@@ -492,7 +497,12 @@ function countGitHubCloses(): { calls: number } {
   return closes;
 }
 
-test("a merge conflict after prepare leaves the GitHub milestone open", async () => {
+function githubCloseReceipt() {
+  return readMilestoneCloseoutPlan("M001")?.effects
+    .find((effect) => effect.effectKind === "github-milestone-close")?.receipt ?? null;
+}
+
+test("a merge conflict leaves the GitHub milestone open and the later merge closes it once", async () => {
   const { repo, worktree } = await milestoneInWorktree({ githubSync: true });
   const closes = countGitHubCloses();
   commitOnMain(repo, "conflicting change on main\n");
@@ -500,26 +510,55 @@ test("a merge conflict after prepare leaves the GitHub milestone open", async ()
   // The post-unit step of complete-milestone runs before the merge.
   await runMilestoneCloseoutGitHub(worktree, "M001");
   assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), MergeConflictError);
-  await runMilestoneCloseoutGitHub(worktree, "M001");
 
   assert.equal(getMilestone("M001")?.status, "active");
   assert.equal(closes.calls, 0);
+  assert.equal(githubCloseReceipt(), null);
   assert.equal(loadSyncMapping(worktree)?.milestones.M001?.state, "open");
-});
 
-test("the GitHub milestone closes after the merge settled the Milestone", async () => {
-  const { repo, worktree } = await milestoneInWorktree({ githubSync: true });
-  const closes = countGitHubCloses();
-
-  await runMilestoneCloseoutGitHub(worktree, "M001");
-  assert.equal(closes.calls, 0);
-
+  // The user resolves the conflict by hand; the next run finishes the merge.
+  git(["merge", "--no-ff", "-X", "theirs", "-m", "manual merge", "milestone/M001"], repo);
   mergeMilestoneToMain(repo, "M001", ROADMAP);
-  await runMilestoneCloseoutGitHub(repo, "M001");
 
   assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(closes.calls, 2, "one issue close and one milestone close");
+  assert.equal(githubCloseReceipt()?.outcome, "performed");
+
+  await runMilestoneCloseoutGitHub(repo, "M001");
   assert.equal(closes.calls, 2);
+});
+
+test("the GitHub close finds the milestone when the mapping was only in the removed worktree", async () => {
+  const { repo, worktree } = await milestoneInWorktree({ githubSync: true });
+  const closes = countGitHubCloses();
+  assert.equal(loadSyncMapping(repo), null);
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(existsSync(worktree), false);
+  assert.equal(closes.calls, 2, "one issue close and one milestone close");
+  assert.equal(githubCloseReceipt()?.externalRef, "owner/repo#10");
   assert.equal(loadSyncMapping(repo)?.milestones.M001?.state, "closed");
+});
+
+test("a GitHub close that fails keeps no receipt and the resumed closeout closes it once", async () => {
+  const { repo, worktree } = await milestoneInWorktree({ githubSync: true });
+  const closes = countGitHubCloses();
+  _setGhAvailableForTest(false);
+  _setPreTeardownSafetyDepsForTests({
+    existsSync: () => { throw new Error("process stopped before cleanup"); },
+  });
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /process stopped before cleanup/);
+  _resetPreTeardownSafetyDepsForTests();
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(githubCloseReceipt(), null);
+
+  _setGhAvailableForTest(true);
+  process.chdir(worktree);
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(closes.calls, 2);
+  assert.equal(githubCloseReceipt()?.outcome, "performed");
 });
 
 test("a recognized squash merge finishes cleanup when the integration branch has files of its own", async () => {

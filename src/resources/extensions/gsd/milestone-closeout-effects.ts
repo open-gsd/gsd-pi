@@ -1,5 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: Host effects of a Milestone Closeout Plan: the merge and the push, and their Settlement Receipts.
+// File Purpose: Host effects of a Milestone Closeout Plan: the merge, the GitHub close and the push, and their Settlement Receipts.
 
 import { execFileSync } from "node:child_process";
 
@@ -17,9 +17,33 @@ import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
 import { isDbAvailable } from "./gsd-db.js";
 import { nativeBranchExists } from "./native-git-bridge.js";
 import { getIsolationMode, loadEffectiveGSDPreferences } from "./preferences.js";
+import { logWarning } from "./workflow-logger.js";
+import { getMilestoneRecord, loadSyncMapping } from "../github-sync/mapping.js";
+import { closeMilestoneFromRecord } from "../github-sync/sync.js";
 
 export const MILESTONE_MERGE_EFFECT = "milestone-merge";
+export const GITHUB_MILESTONE_CLOSE_EFFECT = "github-milestone-close";
 export const INTEGRATION_PUSH_EFFECT = "integration-push";
+
+/**
+ * The GitHub close of a synced Milestone. The effect carries the GitHub
+ * numbers, so the close does not need the mapping file of a removed worktree.
+ */
+function githubMilestoneCloseEffect(basePath: string, milestoneId: string): CloseoutEffectInput[] {
+  if (!loadEffectiveGSDPreferences(basePath)?.preferences?.github?.enabled) return [];
+  const mapping = loadSyncMapping(basePath);
+  const record = mapping ? getMilestoneRecord(mapping, milestoneId) : null;
+  if (!mapping || !record || record.state === "closed") return [];
+  return [{
+    effectKind: GITHUB_MILESTONE_CLOSE_EFFECT,
+    required: false,
+    spec: {
+      repo: mapping.repo,
+      issueNumber: record.issueNumber,
+      ghMilestoneNumber: record.ghMilestoneNumber,
+    },
+  }];
+}
 
 /**
  * The host effects a Milestone needs before it may complete. A Milestone whose
@@ -33,6 +57,7 @@ export function milestoneCloseoutEffects(basePath: string, milestoneId: string):
   const git = loadEffectiveGSDPreferences(basePath)?.preferences?.git ?? {};
   return [
     { effectKind: MILESTONE_MERGE_EFFECT, required: true, spec: { milestoneBranch } },
+    ...githubMilestoneCloseEffect(basePath, milestoneId),
     ...(git.auto_push === true && git.auto_pr !== true
       ? [{ effectKind: INTEGRATION_PUSH_EFFECT, required: false }]
       : []),
@@ -114,7 +139,55 @@ export function settleMilestoneMerge(request: {
       codeFilesChanged: request.codeFilesChanged,
     },
   });
-  settleCloseout(request.milestoneId);
+  completeSettledCloseout(request.projectRoot, request.milestoneId);
+}
+
+/** True when the Closeout Plan owns the GitHub close of the Milestone. */
+export function closeoutPlanClosesGitHubMilestone(milestoneId: string): boolean {
+  return isDbAvailable() && Boolean(
+    readMilestoneCloseoutPlan(milestoneId)?.effects
+      .some((effect) => effect.effectKind === GITHUB_MILESTONE_CLOSE_EFFECT),
+  );
+}
+
+/**
+ * Close the Milestone on GitHub once it is completed. The receipt makes the
+ * close run once; a failed close keeps no receipt and never fails the closeout.
+ */
+function settleGitHubMilestoneClose(projectRoot: string, milestoneId: string): void {
+  const plan = readMilestoneCloseoutPlan(milestoneId);
+  const effect = plan?.effects.find((candidate) => candidate.effectKind === GITHUB_MILESTONE_CLOSE_EFFECT);
+  if (plan?.lifecycleStatus !== "completed" || !effect || effect.receipt) return;
+  try {
+    const repo = String(effect.spec["repo"]);
+    const issueNumber = Number(effect.spec["issueNumber"]);
+    const ghMilestoneNumber = Number(effect.spec["ghMilestoneNumber"]);
+    if (!closeMilestoneFromRecord(projectRoot, repo, milestoneId, { issueNumber, ghMilestoneNumber })) {
+      logWarning("worktree", `GitHub milestone for ${milestoneId} was not closed; it stays open on ${repo}.`);
+      return;
+    }
+    recordSettlementReceipt({
+      milestoneId,
+      effectKind: GITHUB_MILESTONE_CLOSE_EFFECT,
+      outcome: "performed",
+      externalRef: `${repo}#${issueNumber}`,
+      proof: { repo, issueNumber, ghMilestoneNumber },
+    });
+  } catch (err) {
+    logWarning(
+      "worktree",
+      `GitHub milestone close for ${milestoneId} failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Complete the Milestone when its required effects have receipts, then run the
+ * follow-on effects that wait for completion. No-op without a Closeout Plan.
+ */
+export function completeSettledCloseout(projectRoot: string, milestoneId: string): void {
+  settleCloseout(milestoneId);
+  settleGitHubMilestoneClose(projectRoot, milestoneId);
 }
 
 function pendingIntegrationPushes(integrationBranch: string): Array<{ milestoneId: string; commitSha: string }> {

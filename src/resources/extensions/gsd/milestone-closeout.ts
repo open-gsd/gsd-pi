@@ -26,6 +26,7 @@ import {
   readMilestoneLifecycleStatus,
 } from "./db/milestone-closeout-readiness.js";
 import { runSafely } from "./auto-utils.js";
+import { closeoutPlanClosesGitHubMilestone } from "./milestone-closeout-effects.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 import { uatSignoffBlockerGuidance } from "./guidance.js";
 import { logWarning } from "./workflow-logger.js";
@@ -172,8 +173,10 @@ export async function isMilestoneCloseoutSettled(mid: string, basePath: string):
 /** Non-blocking GitHub milestone close after local closeout has settled. */
 export async function runMilestoneCloseoutGitHub(basePath: string, mid: string): Promise<void> {
   // A prepared Closeout Plan is not completion: the Milestone closes on GitHub
-  // only after the settle transaction completed it in the database.
+  // only after the settle transaction completed it in the database. A plan
+  // that carries the GitHub close runs it at settlement.
   if (isDbAvailable() && !isClosedStatus(getMilestone(mid)?.status ?? "")) return;
+  if (closeoutPlanClosesGitHubMilestone(mid)) return;
   await runSafely("postUnit", "github-sync", async () => {
     const { finalizeMilestoneGitHubSync } = await import("../github-sync/sync.js");
     await finalizeMilestoneGitHubSync(basePath, mid);
