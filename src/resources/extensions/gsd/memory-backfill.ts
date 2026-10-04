@@ -126,7 +126,9 @@ export function backfillDecisionsToMemories(): number {
           typeof currentSf["superseded_by"] === "string" || currentSf["superseded_by"] === null
             ? (currentSf["superseded_by"] as string | null | undefined)
             : null;
-        if (memorySuperseded !== row.superseded_by) {
+        // The legacy table gets no new writes, so a supersede that only the
+        // memory holds was recorded by gsd_decision_save and must stay.
+        if (row.superseded_by !== null && memorySuperseded !== row.superseded_by) {
           const merged = {
             ...currentSf,
             superseded_by: row.superseded_by,

@@ -629,6 +629,42 @@ describe("ADR-008 parity: shared workflow write tools native vs MCP", () => {
       cleanup(mcpBase);
     }
   });
+
+  const SUPERSEDING_DECISION_ARGS = { ...DECISION_SAVE_ARGS, choice: "Replace the first choice", supersedes: "D001" };
+  const decisionSupersededBy = () => Object.fromEntries(_getAdapter()!.prepare(`
+    SELECT json_extract(structured_fields, '$.sourceDecisionId') AS id,
+           json_extract(structured_fields, '$.superseded_by') AS superseded_by
+    FROM memories
+    WHERE json_extract(structured_fields, '$.sourceDecisionId') IS NOT NULL
+  `).all().map((row) => [row["id"], row["superseded_by"]]));
+
+  it("native gsd_decision_save supersedes the active decision", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    await runNativeDbTool(base, "gsd_decision_save", DECISION_SAVE_ARGS, "supersede-first");
+    await runNativeDbTool(base, "gsd_decision_save", SUPERSEDING_DECISION_ARGS, "supersede-second");
+    assert.deepEqual(decisionSupersededBy(), { D001: "D002", D002: null });
+  });
+
+  it("MCP gsd_decision_save supersedes the active decision", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    closeDatabase();
+    const server = makeMockServer();
+    registerWorkflowTools(server as Parameters<typeof registerWorkflowTools>[0]);
+    const tool = server.tools.find((entry) => entry.name === "gsd_decision_save");
+    assert.ok(tool);
+    await tool.handler(
+      { projectDir: base, ...DECISION_SAVE_ARGS },
+      { _meta: { "io.opengsd/idempotency-key": "supersede-first" } },
+    );
+    await tool.handler(
+      { projectDir: base, ...SUPERSEDING_DECISION_ARGS },
+      { _meta: { "io.opengsd/idempotency-key": "supersede-second" } },
+    );
+    assert.deepEqual(decisionSupersededBy(), { D001: "D002", D002: null });
+  });
 });
 
 const SLICE_LIFECYCLE_CASES = [

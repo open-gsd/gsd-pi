@@ -558,6 +558,40 @@ export interface SaveDecisionFields {
   made_by?: import('./types.js').DecisionMadeBy;
   /** ADR-011 Phase 2: origin of the decision — "discussion" (default), "planning", "escalation". */
   source?: string;
+  /** ID of the active decision that this decision replaces (e.g. "D003"). */
+  supersedes?: string;
+}
+
+/**
+ * Mark the decision `oldId` as replaced by `newId`. Only an active decision
+ * can be replaced, so every chain keeps exactly one active head.
+ */
+function supersedeActiveDecision(
+  db: typeof import('./gsd-db.js'),
+  oldId: string,
+  newId: string,
+): void {
+  const row = db._getAdapter()?.prepare(
+    `SELECT id, structured_fields FROM memories
+     WHERE category = 'architecture'
+       AND json_valid(structured_fields)
+       AND json_extract(structured_fields, '$.sourceDecisionId') = :id
+     ORDER BY seq DESC LIMIT 1`,
+  ).get({ ':id': oldId });
+  const fields = row ? JSON.parse(row['structured_fields'] as string) as Record<string, unknown> : null;
+  if (!row || !fields || fields['deleted'] === true) {
+    throw new Error(`Cannot supersede ${oldId}: no such decision.`);
+  }
+  if (fields['superseded_by']) {
+    throw new Error(
+      `Cannot supersede ${oldId}: it is already superseded by ${String(fields['superseded_by'])}. Supersede the active decision instead.`,
+    );
+  }
+  db.updateMemoryStructuredFieldsRow(
+    String(row['id']),
+    { ...fields, superseded_by: newId },
+    new Date().toISOString(),
+  );
 }
 
 type NormalizedSaveDecisionFields = Omit<
@@ -631,6 +665,9 @@ export async function saveDecisionToDb(
       projectionKeys: ['decisions'],
       mutate: () => {
         const decisionId = nextDecisionIdAcrossSurfaces(adapter);
+        if (normalized.supersedes) {
+          supersedeActiveDecision(db, normalized.supersedes, decisionId);
+        }
         if (!persistDecisionToMemory(decisionId, normalized)) {
           throw new Error(`Unable to persist decision ${decisionId}`);
         }

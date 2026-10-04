@@ -2461,6 +2461,7 @@ const decisionSaveParams = {
   revisable: z.string().optional().describe("Whether this can be revisited"),
   when_context: z.string().optional().describe("When/context for the decision"),
   made_by: z.enum(["human", "agent", "collaborative"]).optional().describe("Who made the decision"),
+  supersedes: z.string().optional().describe("ID of the active decision that this decision replaces (e.g. D003). The old decision is marked superseded."),
 };
 const decisionSaveSchema = z.object(decisionSaveParams);
 

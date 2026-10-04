@@ -282,6 +282,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					revisable: params.revisable,
 					when_context: params.when_context,
 					made_by: params.made_by,
+					supersedes: params.supersedes,
 				},
 				basePath,
 				piPlanningInvocation("gsd_decision_save", toolCallId),
@@ -316,7 +317,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_decision_save when recording an architectural, pattern, library, or observability decision.",
 			"Decision IDs are auto-assigned (D001, D002, ...) — never guess or provide an ID.",
-			"All fields except revisable, when_context, and made_by are required.",
+			"All fields except revisable, when_context, made_by, and supersedes are required.",
+			"To reverse or replace an earlier decision, set supersedes to its ID. Only an active decision can be superseded.",
 			"The tool writes to the DB and regenerates .gsd/DECISIONS.md automatically.",
 			"Set made_by to 'human' when the user explicitly directed the decision, 'agent' when the LLM chose autonomously (default), or 'collaborative' when it was discussed and agreed together.",
 		],
@@ -342,6 +344,12 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				StringEnum(["human", "agent", "collaborative"], {
 					description:
 						"Who made this decision: 'human' (user directed), 'agent' (LLM decided autonomously), or 'collaborative' (discussed and agreed). Default: 'agent'",
+				}),
+			),
+			supersedes: Type.Optional(
+				Type.String({
+					description:
+						"ID of the active decision that this decision replaces (e.g. 'D003'). The old decision is marked superseded.",
 				}),
 			),
 		}),
