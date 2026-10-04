@@ -129,6 +129,11 @@ export function claimReservedId(): string | undefined {
   return undefined;
 }
 
+/** Release one reservation, for a caller that registers the ID itself. */
+export function releaseMilestoneId(id: string): void {
+  reservedMilestoneIds.delete(id);
+}
+
 /** Return a snapshot of all currently reserved IDs (for merging into the "existing" list). */
 export function getReservedMilestoneIds(): ReadonlySet<string> {
   return reservedMilestoneIds;

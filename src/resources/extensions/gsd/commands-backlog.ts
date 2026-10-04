@@ -17,7 +17,7 @@ import {
 } from "./backlog.js";
 import { invalidateAllCaches } from "./cache.js";
 import { nextMilestoneIdReserved } from "./milestone-id-reservation.js";
-import { claimReservedId, findMilestoneIds } from "./milestone-ids.js";
+import { findMilestoneIds, releaseMilestoneId } from "./milestone-ids.js";
 import { registerMilestones } from "./milestone-registration.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { renderStateProjection } from "./workflow-projections.js";
@@ -79,12 +79,12 @@ async function handlePromote(
 
   // Register a queued milestone for the item (one milestone.register Domain
   // Operation), then record the promotion with the milestone id.
-  let milestoneId = claimReservedId();
-  if (!milestoneId) {
-    const uniqueEnabled = !!loadEffectiveGSDPreferences(basePath)?.preferences?.unique_milestone_ids;
-    nextMilestoneIdReserved(findMilestoneIds(basePath), uniqueEnabled, basePath);
-    milestoneId = claimReservedId()!;
-  }
+  // The id is a new one: an id that another flow reserved (a new-milestone
+  // discussion that showed it to the user) is not taken. This command
+  // registers the id at once, so it does not stay reserved.
+  const uniqueEnabled = !!loadEffectiveGSDPreferences(basePath)?.preferences?.unique_milestone_ids;
+  const milestoneId = nextMilestoneIdReserved(findMilestoneIds(basePath), uniqueEnabled, basePath);
+  releaseMilestoneId(milestoneId);
   registerMilestones([{ id: milestoneId, title: item.title }], "backlog-promote");
   promoteBacklogItem(basePath, itemId, milestoneId);
   invalidateAllCaches();

@@ -9,6 +9,7 @@ import { handleBacklog } from "../commands-backlog.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { _getAdapter, closeDatabase, getAllMilestones, isDbAvailable } from "../gsd-db.ts";
+import { clearReservedMilestoneIds, getReservedMilestoneIds, reserveMilestoneId } from "../milestone-ids.ts";
 import { invalidateStateCache } from "../state.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -136,6 +137,22 @@ test("backlog promote creates a queued milestone and works with BACKLOG.md delet
 
   assert.match((await runBacklog("promote 999.1")).join("\n"), /already promoted/);
   assert.equal(getAllMilestones().length, 1, "a second promote registers no second milestone");
+});
+
+test("backlog promote allocates its own milestone id and leaves another flow's reservation", async (t) => {
+  const base = makeTmpBase();
+  enterBacklogDir(t, base);
+  t.after(() => cleanup(base));
+  t.after(clearReservedMilestoneIds);
+  await runBacklog("add OAuth support");
+  // A new-milestone discussion in this process showed M001 to the user and has not registered it yet.
+  reserveMilestoneId("M001");
+
+  const notifications = await runBacklog("promote 999.1");
+
+  assert.deepEqual(getAllMilestones().map((milestone) => milestone.id), ["M002"]);
+  assert.match(notifications.join("\n"), /queued as milestone M002/);
+  assert.deepEqual([...getReservedMilestoneIds()], ["M001"], "the discussion keeps its id and the promoted id is not left reserved");
 });
 
 test("ticking a BACKLOG.md checkbox by hand does not promote the item", async (t) => {
