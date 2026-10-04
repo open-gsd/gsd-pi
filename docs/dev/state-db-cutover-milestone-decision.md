@@ -343,15 +343,15 @@ D012 is a decision. It is not the cutover:
   directly and apply the status vocabulary themselves. The Milestone readiness
   class in `state/derive/from-db.ts` (queued shell, needs discussion) uses the
   status label of the interface, because the lifecycle vocabulary has no word
-  for queued. On 2026-10-04, 48 production files of the GSD extension other
+  for queued. On 2026-10-04, 47 production files of the GSD extension other
   than `db/lifecycle-read.ts` import `status-guards.ts`; each one is a
   candidate. The ones with a closed-status check on the closeout, recovery and
   post-unit paths are `auto/orchestrator.ts`, `auto/closeout.ts`,
   `milestone-closeout.ts`, `closeout-consistency-gate.ts`, `auto-recovery.ts`,
   `auto-post-unit.ts`, `auto-verification.ts`, `unit-runtime.ts`,
   `artifact-verification.ts`, `pre-execution-checks.ts`,
-  `unmerged-milestone-guard.ts`, `worktree-lifecycle.ts`,
-  `milestone-actions.ts` and `state-contract.ts`.
+  `unmerged-milestone-guard.ts`, `milestone-actions.ts` and
+  `state-contract.ts`.
 - Step 2 is done in the read interface (2026-10-04). The project Authority
   Epoch chooses the read source, in one function (`cutoverHasRun`) and per
   Project, never per item:
