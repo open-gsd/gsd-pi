@@ -748,9 +748,10 @@ the ADR-047 liveness feature, the ADR-048
 [`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned),
 [`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) and
 [`unit_dispatch_retries`](#unit_dispatch_retries-non-versioned) features,
-the runtime-control feature and the
+the runtime-control feature, the
 [`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
-feature below;
+feature and the
+[custom workflow run](#custom-workflow-run-tables-non-versioned) feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
 required objects trigger guarded startup maintenance without changing
@@ -940,6 +941,61 @@ updated_at         TEXT NOT NULL
 - This is a git coordination row, written outside Domain Operations.
 - The row is the merge target. `<MID>-META.json` is a rendered copy; it is read
   only when the milestone has no row or no database is open.
+
+---
+
+#### Custom workflow run tables (non-versioned)
+
+A `yaml-step` custom workflow run, its steps and the verification evidence of
+each step.
+
+```
+custom_workflow_runs
+  run_id           TEXT PRIMARY KEY     ← '<name>/<timestamp>', the run directory under .gsd/workflow-runs
+  name             TEXT NOT NULL
+  definition_json  TEXT NOT NULL        ← the definition frozen at run creation
+  params_json      TEXT
+  created_at       TEXT NOT NULL
+  operation_id     TEXT NOT NULL
+  FOREIGN KEY operation_id → workflow_operations(operation_id)
+
+custom_workflow_steps
+  run_id           TEXT NOT NULL
+  step_id          TEXT NOT NULL
+  position         INTEGER NOT NULL
+  title            TEXT NOT NULL
+  status           TEXT NOT NULL        ← 'pending' | 'active' | 'complete' | 'expanded'
+  prompt           TEXT NOT NULL
+  depends_on_json  TEXT NOT NULL
+  parent_step_id   TEXT
+  started_at       TEXT
+  finished_at      TEXT
+  verify_retries   INTEGER NOT NULL DEFAULT 0 CHECK (verify_retries >= 0)
+  PRIMARY KEY (run_id, step_id)
+  FOREIGN KEY run_id → custom_workflow_runs(run_id)
+
+custom_workflow_step_verifications
+  id                INTEGER PRIMARY KEY AUTOINCREMENT
+  run_id            TEXT NOT NULL
+  step_id           TEXT NOT NULL
+  verdict           TEXT NOT NULL       ← 'pass' | 'fail' | 'inconclusive'
+  evidence_json     TEXT NOT NULL
+  waiver_rationale  TEXT
+  recorded_at       TEXT NOT NULL
+  operation_id      TEXT NOT NULL
+  FOREIGN KEY (run_id, step_id) → custom_workflow_steps(run_id, step_id)
+  FOREIGN KEY operation_id → workflow_operations(operation_id)
+```
+
+- DDL owner: `db-custom-workflow-schema.ts`. Reader: `db/custom-workflow-runs.ts`. Writer: `db/writers/custom-workflow-runs.ts`.
+- These are workflow-state rows: every write is a `custom_workflow.*` Domain
+  Operation (`run.create`, `run.import`, `step.activate`, `step.expand`,
+  `step.complete`, `step.verify`, `step.retry`).
+- `GRAPH.yaml`, `DEFINITION.yaml` and `PARAMS.json` in the run directory are
+  renders of these rows, written by the Projection Worker
+  (`custom-workflow-run` projection kind).
+- Authority, approval and import rules: see
+  [ADR-046](dev/ADR-046-database-authoritative-workflow-lifecycle.md).
 
 ---
 
