@@ -2052,9 +2052,13 @@ authority_epoch    INTEGER NOT NULL
 - Effect specs must be nonempty JSON objects and their hashes must use lowercase
   `sha256:` format. `db/writers/closeout.ts` owns canonicalization and the
   hash; `milestone-closeout-effects.ts` is the host adapter.
-- Effect kinds in production: `milestone-merge` (required),
-  `github-milestone-close` and `integration-push` (not required; they never
-  gate completion). The `required` flag is stored in the effect spec.
+- Effect kinds in production, in ordinal order: `milestone-merge` (required),
+  then `integration-push` and `github-milestone-close` (not required; they
+  never gate completion). The `required` flag is stored in the effect spec.
+- The host runs an effect only when every effect before it has a receipt. An
+  effect that is not run stays pending and the next closeout pass tries it
+  again. Thus a failed GitHub close cannot block the push receipt, and the
+  GitHub close waits for the push.
 
 #### `workflow_settlement_receipts`
 

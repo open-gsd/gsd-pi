@@ -217,7 +217,7 @@ function pushIntegrationBranch(
   });
   if (result.pushed) {
     try {
-      settleIntegrationPush({ remote, integrationBranch: branch });
+      settleIntegrationPush({ projectRoot: basePath, remote, integrationBranch: branch });
     } catch (err) {
       // The push effect keeps no receipt, so the next closeout pushes again.
       logWarning("worktree", `push receipt was not recorded: ${err instanceof Error ? err.message : String(err)}`);

@@ -48,7 +48,9 @@ function githubMilestoneCloseEffect(basePath: string, milestoneId: string): Clos
 /**
  * The host effects a Milestone needs before it may complete. A Milestone whose
  * work sits on its own branch needs the merge; a Milestone that ran on the
- * integration branch needs none.
+ * integration branch needs none. The list is in dependency order: receipts
+ * must follow it, so the push comes before the GitHub close that can fail
+ * without the push.
  */
 export function milestoneCloseoutEffects(basePath: string, milestoneId: string): CloseoutEffectInput[] {
   const milestoneBranch = autoWorktreeBranch(milestoneId);
@@ -57,10 +59,10 @@ export function milestoneCloseoutEffects(basePath: string, milestoneId: string):
   const git = loadEffectiveGSDPreferences(basePath)?.preferences?.git ?? {};
   return [
     { effectKind: MILESTONE_MERGE_EFFECT, required: true, spec: { milestoneBranch } },
-    ...githubMilestoneCloseEffect(basePath, milestoneId),
     ...(git.auto_push === true && git.auto_pr !== true
       ? [{ effectKind: INTEGRATION_PUSH_EFFECT, required: false }]
       : []),
+    ...githubMilestoneCloseEffect(basePath, milestoneId),
   ];
 }
 
@@ -151,13 +153,15 @@ export function closeoutPlanClosesGitHubMilestone(milestoneId: string): boolean 
 }
 
 /**
- * Close the Milestone on GitHub once it is completed. The receipt makes the
- * close run once; a failed close keeps no receipt and never fails the closeout.
+ * Close the Milestone on GitHub once it is completed and every effect ahead of
+ * the close has a receipt. The receipt makes the close run once; a failed
+ * close keeps no receipt and never fails the closeout.
  */
 function settleGitHubMilestoneClose(projectRoot: string, milestoneId: string): void {
   const plan = readMilestoneCloseoutPlan(milestoneId);
   const effect = plan?.effects.find((candidate) => candidate.effectKind === GITHUB_MILESTONE_CLOSE_EFFECT);
   if (plan?.lifecycleStatus !== "completed" || !effect || effect.receipt) return;
+  if (plan.effects.some((earlier) => earlier.ordinal < effect.ordinal && !earlier.receipt)) return;
   try {
     const repo = String(effect.spec["repo"]);
     const issueNumber = Number(effect.spec["issueNumber"]);
@@ -209,9 +213,13 @@ export function hasPendingIntegrationPush(integrationBranch: string): boolean {
  * Record a successful push of the integration branch. One push carries every
  * merge commit below it, so it settles the push effect of each Milestone
  * already merged to that branch — this is how a failed push is retried by the
- * next closeout.
+ * next closeout. The GitHub close that waited for the push runs after it.
  */
-export function settleIntegrationPush(request: { remote: string; integrationBranch: string }): void {
+export function settleIntegrationPush(request: {
+  projectRoot: string;
+  remote: string;
+  integrationBranch: string;
+}): void {
   for (const pending of pendingIntegrationPushes(request.integrationBranch)) {
     recordSettlementReceipt({
       milestoneId: pending.milestoneId,
@@ -224,5 +232,6 @@ export function settleIntegrationPush(request: { remote: string; integrationBran
         commitSha: pending.commitSha,
       },
     });
+    settleGitHubMilestoneClose(request.projectRoot, pending.milestoneId);
   }
 }

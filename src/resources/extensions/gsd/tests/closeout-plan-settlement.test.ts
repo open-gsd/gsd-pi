@@ -383,13 +383,13 @@ async function milestoneInWorktree(options: { autoPush?: boolean; githubSync?: b
 
   for (const base of [repo, worktree]) {
     mkdirSync(join(base, ".gsd"), { recursive: true });
-    if (options.autoPush) {
-      writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\ngit:\n  auto_push: true\n---\n");
-    }
-    if (options.githubSync) {
+    if (options.autoPush || options.githubSync) {
       writeFileSync(
         join(base, ".gsd", "PREFERENCES.md"),
-        "---\nversion: 1\ngithub:\n  enabled: true\n  repo: owner/repo\n---\n",
+        "---\nversion: 1\n" +
+          (options.autoPush ? "git:\n  auto_push: true\n" : "") +
+          (options.githubSync ? "github:\n  enabled: true\n  repo: owner/repo\n" : "") +
+          "---\n",
       );
     }
   }
@@ -558,6 +558,61 @@ test("a GitHub close that fails keeps no receipt and the resumed closeout closes
   mergeMilestoneToMain(repo, "M001", ROADMAP);
 
   assert.equal(closes.calls, 2);
+  assert.equal(githubCloseReceipt()?.outcome, "performed");
+});
+
+test("a GitHub close that fails keeps the push receipt and the next pass retries only the close", async () => {
+  const { repo, worktree, remote } = await milestoneInWorktree({ autoPush: true, githubSync: true });
+  const closes = countGitHubCloses();
+  const effects = () => readMilestoneCloseoutPlan("M001")!.effects
+    .map((effect) => [effect.effectKind, effect.receipt?.settlementReceiptId ?? null]);
+  _setGhAvailableForTest(false);
+  _setPreTeardownSafetyDepsForTests({
+    existsSync: () => { throw new Error("process stopped before cleanup"); },
+  });
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /process stopped before cleanup/);
+  _resetPreTeardownSafetyDepsForTests();
+
+  const [merge, push, close] = effects();
+  assert.deepEqual([merge[0], push[0], close[0]], ["milestone-merge", "integration-push", "github-milestone-close"]);
+  assert.equal(git(["rev-parse", "main"], remote), git(["rev-parse", "main"], repo));
+  assert.ok(push[1], "the push receipt is recorded while the GitHub close is pending");
+  assert.equal(close[1], null);
+  assert.equal(closes.calls, 0);
+
+  _setGhAvailableForTest(true);
+  process.chdir(worktree);
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(closes.calls, 2, "one issue close and one milestone close");
+  assert.equal(githubCloseReceipt()?.outcome, "performed");
+  assert.deepEqual(effects().slice(0, 2), [merge, push], "the merge and the push are not settled again");
+});
+
+test("the GitHub close waits for the push receipt and runs when a later push settles it", async () => {
+  const { repo, remote } = await milestoneInWorktree({ autoPush: true, githubSync: true });
+  const closes = countGitHubCloses();
+  git(["remote", "set-url", "origin", join(remote, "missing")], repo);
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(closes.calls, 0);
+  assert.equal(githubCloseReceipt(), null);
+
+  git(["remote", "set-url", "origin", remote], repo);
+  publishMilestone({
+    basePath: repo,
+    milestoneId: "M002",
+    milestoneTitle: "Dependent",
+    integrationBranch: "main",
+    milestoneBranch: "milestone/M002",
+    sliceSummaries: [],
+    nothingToCommit: true,
+    prefs: { autoPush: true, autoPr: false },
+  });
+
+  assert.equal(closes.calls, 2, "one issue close and one milestone close");
   assert.equal(githubCloseReceipt()?.outcome, "performed");
 });
 
