@@ -10,7 +10,9 @@ import { checkRuntimeHealth } from "../doctor-runtime-checks.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
   closeDatabase,
+  insertAssessment,
   insertMilestone,
+  insertSlice,
   openDatabase,
   setMilestoneQueueOrder,
 } from "../gsd-db.ts";
@@ -78,6 +80,25 @@ test("doctor fix resets run-uat counters at the dispatch cap", async (t) => {
   mkdirSync(join(dir, ".gsd"), { recursive: true });
   openDatabase(join(dir, ".gsd", "gsd.db"));
   for (let attempt = 1; attempt <= 3; attempt++) incrementUatRetryAttempts("M002", "S01");
+  // An ASSESSMENT.md verdict with no assessment row is not a verdict.
+  mkdirSync(join(dir, ".gsd", "milestones", "M002", "slices", "S01"), { recursive: true });
+  writeFileSync(
+    join(dir, ".gsd", "milestones", "M002", "slices", "S01", "S01-ASSESSMENT.md"),
+    "---\nverdict: PASS\n---\n",
+    "utf-8",
+  );
+  // A run-uat assessment row is a verdict: the slice is not reported.
+  for (let attempt = 1; attempt <= 3; attempt++) incrementUatRetryAttempts("M002", "S02");
+  insertMilestone({ id: "M002", title: "Milestone", status: "active" });
+  insertSlice({ id: "S02", milestoneId: "M002", title: "Slice with a verdict" });
+  insertAssessment({
+    path: "milestones/M002/slices/S02/S02-ASSESSMENT.md",
+    milestoneId: "M002",
+    sliceId: "S02",
+    status: "pass",
+    scope: "run-uat",
+    fullContent: "verdict: PASS",
+  });
   // A counter file from an older build is not a counter: it is never reported.
   mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true });
   writeFileSync(

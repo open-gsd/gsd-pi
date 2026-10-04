@@ -16,7 +16,7 @@ import { ensureGitignore, isGsdGitignored } from "./gitignore.js";
 import { readAllSessionStatuses, isSessionStale, removeSessionStatus } from "./session-status-io.js";
 import { isCurrentGsdStateIntactForMigratingCleanup, recoverFailedMigration } from "./migrate-external.js";
 import { findMilestoneIds } from "./milestone-ids.js";
-import { getAllMilestones, isDbAvailable } from "./gsd-db.js";
+import { getAllMilestones, getSliceRunUatAssessment, isDbAvailable } from "./gsd-db.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { removeLegacyProjectionTreeSync, removeProjectionTreeSync } from "./atomic-write.js";
 import {
@@ -34,16 +34,6 @@ import { deleteRuntimeKv, getRuntimeKv } from "./db/runtime-kv.js";
 import { deleteUatRetryCounter, listUatRetryCounters, readHookStateJson } from "./db/writers/runtime-control.js";
 
 const MAX_UAT_ATTEMPTS = 3;
-
-function hasAssessmentVerdict(basePath: string, mid: string, sid: string): boolean {
-  const assessmentPath = join(gsdRoot(basePath), "milestones", mid, "slices", sid, `${sid}-ASSESSMENT.md`);
-  if (!existsSync(assessmentPath)) return false;
-  try {
-    return /^\s*verdict\s*:\s*(PASS|FAIL|PARTIAL)\b/im.test(readFileSync(assessmentPath, "utf-8"));
-  } catch {
-    return false;
-  }
-}
 
 export async function checkRuntimeHealth(
   basePath: string,
@@ -382,7 +372,8 @@ export async function checkRuntimeHealth(
       const mid = counter.milestone_id;
       const sid = counter.slice_id;
       const count = counter.attempts;
-      if (count < MAX_UAT_ATTEMPTS || hasAssessmentVerdict(basePath, mid, sid)) continue;
+      // The run-uat verdict is the assessment row; ASSESSMENT.md is not read.
+      if (count < MAX_UAT_ATTEMPTS || getSliceRunUatAssessment(mid, sid)?.status) continue;
 
       issues.push({
         severity: "warning",
