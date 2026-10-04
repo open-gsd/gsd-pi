@@ -171,9 +171,9 @@ plan-slice  (per slice, sequential)
 
 | Prompt | Purpose | Key Tools Called |
 |--------|---------|-----------------|
-| `discuss.md` | Interactive milestone discussion. Layered Q&A: Scope → Architecture → Error States → Quality Bar. | `ask_user_questions`, `gsd_summary_save(CONTEXT)` |
+| `discuss.md` | Interactive milestone discussion. Layered Q&A: Scope → Architecture → Error States → Quality Bar. | `ask_user_questions`, `gsd_summary_save(CONTEXT)`, `gsd_milestone_set_dependencies` |
 | `guided-discuss-milestone.md` | Same as discuss.md but interview-driven, with draft saves. | `ask_user_questions`, `gsd_summary_save(CONTEXT)` |
-| `discuss-headless.md` | Create milestone CONTEXT from spec with no user interaction. | `gsd_plan_milestone`, `gsd_decision_save` |
+| `discuss-headless.md` | Create milestone CONTEXT from spec with no user interaction. | `gsd_plan_milestone`, `gsd_decision_save`, `gsd_milestone_set_dependencies` |
 | `research-milestone.md` | Strategic research before planning. Narrates findings. | `gsd_summary_save(RESEARCH)` |
 | `plan-milestone.md` | Decompose milestone into slices. Plans first slice inline if single-slice. | `gsd_plan_milestone`, `gsd_plan_slice`, `gsd_plan_task`, `gsd_decision_save` |
 | `parallel-research-slices.md` | Spawn one scout subagent per slice simultaneously. Retries once on failure. | `subagent` × N |
@@ -249,18 +249,18 @@ complete-milestone
 | `replan-slice.md` | Replan after a blocker discovered mid-slice. Preserves completed Tasks; every updated Task declares execution-compatible `requiredWorkflowTools`. | `gsd_replan_slice` |
 | `replan-task.md` | Replace one pending Task plan for a durable recovery action. Declares execution-compatible `requiredWorkflowTools` before a replacement Attempt can be claimed. | `gsd_replan_task` |
 | `rethink.md` | Reorder, park, unpark, skip, or discard milestones, and change dependencies. | `gsd_skip_slice`, `gsd_milestone_reorder`, `gsd_milestone_park`, `gsd_milestone_unpark`, `gsd_milestone_discard`, `gsd_milestone_set_dependencies`; `QUEUE-ORDER.json` and `PARKED.md` are rendered from the DB |
-| `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. | git merge (main tree CWD) |
+| `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. Managed `.gsd` projections are not hand-merged; they are rendered again with `/gsd rebuild markdown`. | git merge (main tree CWD) |
 | `reassess-roadmap.md` | *(see Completion Flow above)* | — |
-| `rewrite-docs.md` | Apply active steer overrides (database rows, rendered to OVERRIDES.md) across all planning docs. | — |
+| `rewrite-docs.md` | Apply active steer overrides (database rows, rendered to OVERRIDES.md) across all plans. Planning files are not edited; they are rendered from the DB. | `gsd_plan_task`, `gsd_plan_slice`, `gsd_decision_save`, `gsd_requirement_update`, `gsd_summary_save(PROJECT)` |
 | `review-migration.md` | Audit `.planning → .gsd` migration correctness. | `deriveState` |
-| `doctor-heal.md` | Repair broken GSD artifacts (summaries, UAT, CONTEXT). | — |
+| `doctor-heal.md` | Repair broken GSD artifacts (summaries, UAT, CONTEXT) in the DB; rendered files are not edited. | `gsd_summary_save`, `gsd_uat_result_save`, `gsd_milestone_status` |
 | `scan.md` | Codebase scan → STACK.md, INTEGRATIONS.md, ARCHITECTURE.md. No tool calls. | writes `{{outputDir}}` |
 | `forensics.md` | Debug GSD engine failures. Map failures to source files. | reads activity logs, journal, metrics |
 | `debug-diagnose.md` | Root-cause analysis for reported bugs. | `capture_thought`, `memory_query` |
 | `debug-session-manager.md` | Manage debug session with checkpoint protocol. Structured return headers. | — |
 | `add-tests.md` | Generate tests for completed slices. | skill activation |
 | `triage-captures.md` | Classify user thoughts captured with `capture_thought`. | `ask_user_questions`, updates `CAPTURES.md` |
-| `queue.md` | Add future milestones to queue. | `gsd_milestone_generate_id`, `gsd_summary_save(CONTEXT)`; `QUEUE.md` is rendered from the DB |
+| `queue.md` | Add future milestones to queue. | `gsd_milestone_generate_id`, `gsd_summary_save(CONTEXT)`, `gsd_milestone_set_dependencies`; `QUEUE.md` is rendered from the DB |
 
 ### 5h. Workflow Execution (one-off workflows, not milestone-driven)
 

@@ -85,11 +85,11 @@ Each row = one prompt file. Columns show which DB tables it touches and how.
 
 | Prompt | DB Reads | DB Writes | Disk Artifact Written |
 |--------|----------|-----------|----------------------|
-| `discuss` / `guided-discuss-milestone` | milestones, artifacts | artifacts (CONTEXT) | M##-CONTEXT.md |
+| `discuss` / `guided-discuss-milestone` | milestones, artifacts | artifacts (CONTEXT), milestones.depends_on via `gsd_milestone_set_dependencies` | M##-CONTEXT.md |
 | `discuss-headless` | milestones, artifacts | milestones, slices, decisions, artifacts | M##-CONTEXT.md, DECISIONS.md |
 | `research-milestone` | milestones, artifacts | artifacts (RESEARCH) | M##-RESEARCH.md |
 | `plan-milestone` | project_authority, workflow_operations, workflow_item_lifecycles, milestones, slices | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, milestones (UPDATE planning), slices (INSERT), optional single-slice metadata via `gsd_plan_slice`, optional single-slice tasks via `gsd_plan_task`, decisions | ROADMAP.md; NN-MM-PLAN.md with embedded tasks for single-slice fast path |
-| `queue` | milestones | milestones (INSERT queued), artifacts (CONTEXT) | PROJECT.md, QUEUE.md |
+| `queue` | milestones | milestones (INSERT queued), artifacts (CONTEXT), milestones.depends_on via `gsd_milestone_set_dependencies` | PROJECT.md, QUEUE.md |
 
 ### Slice Planning Phase
 
@@ -137,7 +137,7 @@ The task-bearing planning payloads use camel-case `requiredWorkflowTools` on `gs
 | `replan-slice` | project_authority, workflow_operations, workflow_item_lifecycles, slices, tasks | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, slices, tasks (including execution-compatible `required_workflow_tools`), replan_history, quality_gates; removed pending tasks become `skipped` / `cancelled` | NN-MM-PLAN.md, NN-MM-REPLAN.md |
 | `replan-task` | project_authority, workflow_operations, workflow_item_lifecycles, slices, tasks, current recovery evidence | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_item_lifecycles, one pending task planning row (including execution-compatible `required_workflow_tools`), replan_history | re-renders the task/slice PLAN projection before replacement execution |
 | `rethink` | milestones, slices, artifacts | Slice cancellation through `gsd_skip_slice`; milestone park, unpark, discard, reorder and dependency changes through the `gsd_milestone_*` tools, one Domain Operation each | QUEUE-ORDER.json and PARKED.md, rendered from the DB |
-| `rewrite-docs` | decisions, requirements, artifacts | decisions, requirements, artifacts | DECISIONS.md, REQUIREMENTS.md, slice plans with embedded task planning |
+| `rewrite-docs` | decisions, requirements, artifacts | decisions, requirements, artifacts (PROJECT), slices and incomplete tasks via `gsd_plan_slice` / `gsd_plan_task` | DECISIONS.md, REQUIREMENTS.md, slice plans with embedded task planning |
 | `doctor-heal` | slices, tasks, artifacts | artifacts (repair CONTEXT/SUMMARY/UAT) | repairs existing artifacts |
 | `review-migration` | milestones, slices, tasks, artifacts, decisions, requirements | — (read-only audit) | — |
 | `scan` | — | — | STACK.md, INTEGRATIONS.md, ARCHITECTURE.md |
