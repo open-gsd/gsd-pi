@@ -124,8 +124,10 @@ alias tables in tools, commands, or orchestration modules.
 
 ### S07 and later boundaries
 
-- Slice completion proves each completed Task's tested source revision, but it
-  does not yet record one integrated Slice source snapshot. Automated UAT runs
+- Slice completion proves each completed Task's tested source revision and
+  stores one hash over those revisions (`testedSourceSetHash`) in the
+  `slice.completed` event, but it does not yet record one integrated Slice
+  source snapshot. Automated UAT runs
   after completion, and its structured result/source identity is not part of
   the `slice.completed` receipt.
 - S07 compares exact legacy responses with normalized canonical state across
