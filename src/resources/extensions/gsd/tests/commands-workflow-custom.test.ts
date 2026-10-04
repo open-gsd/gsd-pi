@@ -18,6 +18,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { getGsdArgumentCompletions, TOP_LEVEL_SUBCOMMANDS } from "../commands/catalog.ts";
+import { closeDatabase, isDbAvailable } from "../gsd-db.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -31,6 +32,8 @@ function makeTmpBase(): string {
 }
 
 afterEach(() => {
+  // The run and resume subcommands open the database of the project.
+  if (isDbAvailable()) closeDatabase();
   // Restore cwd if changed during tests
   if (savedCwd && process.cwd() !== savedCwd) {
     process.chdir(savedCwd);
@@ -275,6 +278,18 @@ describe("workflow command handler", () => {
     assert.ok(
       notifications.some((n) => n.level === "warning"),
       "should show warning when no custom workflow to resume",
+    );
+  });
+
+  it("'/gsd workflow resume <run>' for an unknown run shows an error", async () => {
+    const base = makeTmpBase();
+    mkdirSync(join(base, ".gsd"));
+    process.chdir(base);
+    const { handled, notifications } = await callHandler("workflow resume no-such-workflow/2026-01-01T00-00-00");
+    assert.ok(handled, "should be handled");
+    assert.ok(
+      notifications.some((n) => n.level === "error" && n.message.includes("no such run")),
+      "should show the unknown-run error",
     );
   });
 

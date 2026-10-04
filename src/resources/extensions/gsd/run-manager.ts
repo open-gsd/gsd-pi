@@ -1,23 +1,32 @@
 /**
- * run-manager.ts — Create and list isolated workflow run directories.
+ * run-manager.ts — Create and list isolated workflow runs.
  *
- * Each run lives under `.gsd/workflow-runs/<name>/<timestamp>/` and contains:
- * - DEFINITION.yaml — frozen snapshot of the workflow definition at run-creation time
- * - GRAPH.yaml — initialized step graph with all steps pending
+ * A run is database rows (db/custom-workflow-runs.ts): the run with its frozen
+ * definition and one row per step. Each run also has a directory
+ * `.gsd/workflow-runs/<name>/<timestamp>/` with renders of those rows:
+ * - DEFINITION.yaml — the definition frozen at run-creation time
+ * - GRAPH.yaml — the step graph
  * - PARAMS.json — (optional) parameter overrides used for this run
+ * The step artifacts that the agent writes live in the same directory.
  *
- * Observability:
- * - All run state is on disk in human-readable YAML/JSON — inspectable with cat/less.
- * - `listRuns()` returns structured metadata including step counts and overall status.
- * - Timestamp directory names are filesystem-safe (ISO with hyphens replacing colons).
- * - Errors include the full path context for diagnosis.
+ * A run directory with no run row was written before runs were database rows.
+ * It is listed from its GRAPH.yaml, and `importRunDirectory` maps it to rows.
  */
 
-import { mkdirSync, writeFileSync, existsSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { stringify } from "yaml";
+import {
+  customWorkflowRunId,
+  getCustomWorkflowRun,
+  listCustomWorkflowRuns,
+  readCustomWorkflowGraph,
+} from "./db/custom-workflow-runs.js";
+import { insertCustomWorkflowRun } from "./db/writers/custom-workflow-runs.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { readFrozenDefinition, renderRunDirectory } from "./definition-io.js";
 import { loadDefinition, loadDefinitionFromFile, substituteParams } from "./definition-loader.js";
-import { initializeGraph, writeGraph, readGraph } from "./graph.js";
+import { initializeGraph, readGraph } from "./graph.js";
+import { isDbAvailable } from "./gsd-db.js";
 import { resolvePlugin } from "./workflow-plugins.js";
 import type { WorkflowDefinition } from "./definition-loader.js";
 import type { WorkflowGraph } from "./graph.js";
@@ -31,7 +40,7 @@ export interface RunMetadata {
   timestamp: string;
   /** Full path to the run directory. */
   runDir: string;
-  /** Step counts derived from GRAPH.yaml. */
+  /** Step counts of the run. */
   steps: { total: number; completed: number; pending: number; active: number };
   /** Overall status derived from step states. */
   status: "pending" | "running" | "complete";
@@ -66,99 +75,118 @@ function deriveStatus(graph: WorkflowGraph): "pending" | "running" | "complete" 
   return "pending";
 }
 
-// ─── Public API ──────────────────────────────────────────────────────────
+/** List the sub-directories of a directory. */
+function subDirectories(dir: string): string[] {
+  return readdirSync(dir).filter((entry) => statSync(join(dir, entry)).isDirectory());
+}
 
-/**
- * Create a run directory from an explicit definition file path.
- * Preferred over `createRun` when the caller has already resolved the file
- * (e.g. via the plugin resolver).
- */
-export function createRunFromDefinition(
+/** Create the run rows of a substituted definition and render its run directory. */
+function createRunRows(
   basePath: string,
   defName: string,
-  definitionFile: string,
+  rawDef: WorkflowDefinition,
   overrides?: Record<string, string>,
 ): string {
-  const rawDef = loadDefinitionFromFile(definitionFile);
-  const def: WorkflowDefinition = overrides
-    ? substituteParams(rawDef, overrides)
-    : substituteParams(rawDef);
-
+  if (!isDbAvailable()) throw new Error("A workflow run requires the GSD database");
+  const def = overrides ? substituteParams(rawDef, overrides) : substituteParams(rawDef);
   const timestamp = makeTimestamp();
+  const runId = `${defName}/${timestamp}`;
+  insertCustomWorkflowRun({
+    fence: readDomainOperationFence(),
+    operationType: "run.create",
+    runId,
+    definition: def,
+    params: overrides && Object.keys(overrides).length > 0 ? overrides : null,
+    graph: initializeGraph(def),
+  });
   const runDir = join(basePath, ".gsd", RUNS_DIR, defName, timestamp);
-  mkdirSync(runDir, { recursive: true });
-
-  writeFileSync(join(runDir, "DEFINITION.yaml"), stringify(def), "utf-8");
-
-  const graph = initializeGraph(def);
-  writeGraph(runDir, graph);
-
-  if (overrides && Object.keys(overrides).length > 0) {
-    writeFileSync(
-      join(runDir, "PARAMS.json"),
-      JSON.stringify(overrides, null, 2),
-      "utf-8",
-    );
-  }
-
+  renderRunDirectory(runDir, getCustomWorkflowRun(runId)!);
   return runDir;
 }
 
+// ─── Public API ──────────────────────────────────────────────────────────
+
 /**
- * Create a new isolated run directory for a workflow definition.
+ * Load the definition that a run of `defName` starts from.
  *
  * Resolution order:
  *   1. Plugin resolver (project → global → bundled), YAML format only.
  *   2. Legacy `.gsd/workflow-defs/<defName>.yaml`.
  *
- * Creates `<basePath>/.gsd/workflow-runs/<defName>/<timestamp>/` containing
- * DEFINITION.yaml (frozen), GRAPH.yaml (initialized), and optional PARAMS.json.
- *
  * @throws Error if no matching definition is found anywhere.
+ */
+export function loadRunDefinition(basePath: string, defName: string): WorkflowDefinition {
+  // Try the unified plugin resolver first — honors project/global overrides.
+  const plugin = resolvePlugin(basePath, defName);
+  if (plugin && plugin.format === "yaml") return loadDefinitionFromFile(plugin.path);
+
+  // Fall back to legacy `.gsd/workflow-defs/<defName>.yaml`.
+  return loadDefinition(join(basePath, ".gsd", DEFS_DIR), defName);
+}
+
+/**
+ * Create a new isolated run of a workflow definition (see `loadRunDefinition`).
+ *
+ * Writes the run rows and renders `<basePath>/.gsd/workflow-runs/<defName>/<timestamp>/`.
+ *
+ * @returns the run directory
+ * @throws Error if no matching definition is found anywhere, or no database is open.
  */
 export function createRun(
   basePath: string,
   defName: string,
   overrides?: Record<string, string>,
 ): string {
-  // Try the unified plugin resolver first — honors project/global overrides.
-  const plugin = resolvePlugin(basePath, defName);
-  if (plugin && plugin.format === "yaml") {
-    return createRunFromDefinition(basePath, defName, plugin.path, overrides);
+  return createRunRows(basePath, defName, loadRunDefinition(basePath, defName), overrides);
+}
+
+/**
+ * Map a run directory that has no run row to database rows: the frozen
+ * DEFINITION.yaml, the GRAPH.yaml step statuses and PARAMS.json. An unknown
+ * step status fails loud.
+ */
+export function importRunDirectory(runDir: string): void {
+  const fence = readDomainOperationFence();
+  const graph = readGraph(runDir);
+  const unknown = graph.steps.find((step) => !["pending", "active", "complete", "expanded"].includes(step.status));
+  if (unknown) {
+    throw new Error(`Cannot import ${runDir}: step "${unknown.id}" has unknown status "${unknown.status}"`);
   }
+  const paramsPath = join(runDir, "PARAMS.json");
+  insertCustomWorkflowRun({
+    fence,
+    operationType: "run.import",
+    runId: customWorkflowRunId(runDir),
+    definition: readFrozenDefinition(runDir),
+    params: existsSync(paramsPath) ? JSON.parse(readFileSync(paramsPath, "utf-8")) as Record<string, string> : null,
+    graph,
+  });
+}
 
-  // Fall back to legacy `.gsd/workflow-defs/<defName>.yaml`.
-  const defsDir = join(basePath, ".gsd", DEFS_DIR);
-  const rawDef = loadDefinition(defsDir, defName);
-  const def: WorkflowDefinition = overrides
-    ? substituteParams(rawDef, overrides)
-    : substituteParams(rawDef);
-
-  const timestamp = makeTimestamp();
-  const runDir = join(basePath, ".gsd", RUNS_DIR, defName, timestamp);
-  mkdirSync(runDir, { recursive: true });
-
-  writeFileSync(join(runDir, "DEFINITION.yaml"), stringify(def), "utf-8");
-
-  const graph = initializeGraph(def);
-  writeGraph(runDir, graph);
-
-  if (overrides && Object.keys(overrides).length > 0) {
-    writeFileSync(
-      join(runDir, "PARAMS.json"),
-      JSON.stringify(overrides, null, 2),
-      "utf-8",
-    );
+/**
+ * The run directory of a run to resume. `runId` is "<name>/<timestamp>". A run
+ * directory with no run row is imported first.
+ *
+ * @throws Error when no such run exists.
+ */
+export function openRunForResume(basePath: string, runId: string): string {
+  const segments = runId.split("/");
+  if (segments.length !== 2 || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+    throw new Error("name the run as <name>/<timestamp> (see /gsd workflow list)");
   }
-
+  const runDir = join(basePath, ".gsd", RUNS_DIR, runId);
+  if (!getCustomWorkflowRun(runId)) {
+    if (!existsSync(join(runDir, "GRAPH.yaml"))) throw new Error("no such run (see /gsd workflow list)");
+    importRunDirectory(runDir);
+  }
   return runDir;
 }
 
 /**
  * List existing workflow runs with metadata.
  *
- * Scans `<basePath>/.gsd/workflow-runs/` for run directories. Each run's
- * GRAPH.yaml is read to derive step counts and overall status.
+ * Step counts and status come from the run rows. A run directory with no run
+ * row (written before runs were database rows) is listed from its GRAPH.yaml.
  *
  * @param basePath — project root directory
  * @param defName — optional filter: only list runs for this definition name
@@ -166,49 +194,40 @@ export function createRun(
  */
 export function listRuns(basePath: string, defName?: string): RunMetadata[] {
   const runsRoot = join(basePath, ".gsd", RUNS_DIR);
-  if (!existsSync(runsRoot)) return [];
+  const graphs = new Map<string, WorkflowGraph>();
+  for (const run of listCustomWorkflowRuns()) graphs.set(run.runId, readCustomWorkflowGraph(run));
 
-  const results: RunMetadata[] = [];
-
-  // Get workflow name directories
-  const nameDirs = defName ? [defName] : readdirSync(runsRoot).filter((entry) => {
-    const full = join(runsRoot, entry);
-    return statSync(full).isDirectory();
-  });
-
-  for (const name of nameDirs) {
-    const nameDir = join(runsRoot, name);
-    if (!existsSync(nameDir)) continue;
-
-    const timestamps = readdirSync(nameDir).filter((entry) => {
-      const full = join(nameDir, entry);
-      return statSync(full).isDirectory();
-    });
-
-    // Sort newest-first (ISO strings sort lexicographically)
-    timestamps.sort().reverse();
-
-    for (const ts of timestamps) {
-      const runDir = join(nameDir, ts);
-      try {
-        const graph = readGraph(runDir);
-        const total = graph.steps.length;
-        const completed = graph.steps.filter((s) => s.status === "complete").length;
-        const pending = graph.steps.filter((s) => s.status === "pending").length;
-        const active = graph.steps.filter((s) => s.status === "active").length;
-
-        results.push({
-          name,
-          timestamp: ts,
-          runDir,
-          steps: { total, completed, pending, active },
-          status: deriveStatus(graph),
-        });
-      } catch {
-        // Skip runs with invalid/missing GRAPH.yaml
+  if (existsSync(runsRoot)) {
+    for (const name of subDirectories(runsRoot)) {
+      for (const timestamp of subDirectories(join(runsRoot, name))) {
+        const runId = `${name}/${timestamp}`;
+        if (graphs.has(runId)) continue;
+        try {
+          graphs.set(runId, readGraph(join(runsRoot, name, timestamp)));
+        } catch {
+          // Skip runs with invalid/missing GRAPH.yaml
+        }
       }
     }
   }
 
-  return results;
+  return [...graphs]
+    .map(([runId, graph]): RunMetadata => {
+      const [name, timestamp] = runId.split("/") as [string, string];
+      return {
+        name,
+        timestamp,
+        runDir: join(runsRoot, name, timestamp),
+        steps: {
+          total: graph.steps.length,
+          completed: graph.steps.filter((s) => s.status === "complete").length,
+          pending: graph.steps.filter((s) => s.status === "pending").length,
+          active: graph.steps.filter((s) => s.status === "active").length,
+        },
+        status: deriveStatus(graph),
+      };
+    })
+    .filter((run) => defName === undefined || run.name === defName)
+    // Newest-first within each definition (ISO strings sort lexicographically)
+    .sort((a, b) => a.name.localeCompare(b.name) || b.timestamp.localeCompare(a.timestamp));
 }

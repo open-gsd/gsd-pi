@@ -2,7 +2,7 @@
  * custom-execution-policy.ts — ExecutionPolicy for custom workflows.
  *
  * Delegates verification to the step-level verification module which reads
- * the frozen DEFINITION.yaml and dispatches to the appropriate policy handler.
+ * the frozen definition of the run and dispatches to the appropriate policy handler.
  *
  * Observability:
  * - verify() returns the outcome from runCustomVerification() — four policies
@@ -52,7 +52,7 @@ export class CustomExecutionPolicy implements ExecutionPolicy {
    * Verify step output by dispatching to the step's configured verification policy.
    *
    * Extracts the step ID from unitId (format: "<workflowName>/<stepId>")
-   * and calls runCustomVerification() which reads the frozen DEFINITION.yaml
+   * and calls runCustomVerification() which reads the frozen definition
    * to determine which policy to apply.
    */
   async verify(

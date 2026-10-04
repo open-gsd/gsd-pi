@@ -71,11 +71,11 @@ const GUARD_SANCTIONED_EXITS: Record<string, string> = {
   "dispatch-claim-skip":
     "The unit dispatch claim was refused twice for the same reason. Inspect concurrent workers with `/gsd status`, repair the ledger with `/gsd doctor fix`, then re-run `/gsd auto`.",
   "custom-engine-dispatch-stop":
-    "The custom engine refused to produce a dispatch. Fix its GRAPH.yaml, confirm the derived phase with `/gsd status`, then re-run `/gsd auto`.",
+    "The custom engine refused to produce a dispatch; the stop reason names the step. GRAPH.yaml is a render and edits to it are not read. Check the run with `/gsd workflow list`, then resume it with `/gsd workflow resume <name>/<timestamp>` when the cause is gone, or start a new run with `/gsd workflow run <name>`.",
   "custom-engine-dispatch-skip":
-    "The custom engine skipped dispatch twice from the same state. Fix its GRAPH.yaml, confirm the derived phase with `/gsd status`, then re-run `/gsd auto`.",
+    "The custom engine skipped dispatch twice from the same state. GRAPH.yaml is a render and edits to it are not read. Check the run with `/gsd workflow list`, then resume it with `/gsd workflow resume <name>/<timestamp>` or start a new run with `/gsd workflow run <name>`.",
   "custom-engine-dispatch-mismatch":
-    "The custom engine returned a dispatch the loop cannot run. Fix its GRAPH.yaml, then re-run `/gsd auto`; `/gsd forensics` carries the mismatch detail.",
+    "The custom engine returned a dispatch the loop cannot run. GRAPH.yaml is a render and edits to it are not read. Start a new run with `/gsd workflow run <name>`; `/gsd forensics` carries the mismatch detail.",
   "custom-engine-task-replan":
     "The replanned task artifact never became durable. Re-project it with `/gsd rebuild markdown`, confirm with `/gsd status`, then re-run `/gsd auto`.",
   "custom-engine-task-verify":

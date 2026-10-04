@@ -13,7 +13,7 @@ import { discardMilestone, isParked, parkMilestone, unparkMilestone } from "../.
 import { setPlanningDepth } from "../../planning-depth.js";
 import { normalizeDiscussTarget } from "../../milestone-ids.js";
 import { currentDirectoryRoot, projectRoot } from "../context.js";
-import { createRun, listRuns } from "../../run-manager.js";
+import { createRun, listRuns, loadRunDefinition, openRunForResume } from "../../run-manager.js";
 import {
   setActiveEngineId,
   setActiveRunDir,
@@ -122,8 +122,9 @@ function requireNotAutoActive(commandName: string, ctx: ExtensionCommandContext)
   return true;
 }
 
-// Park, unpark and discard run Domain Operations, so a cold session must open
-// the database first (#3385: commands can arrive before anything opened it).
+// Park, unpark, discard and the custom workflow run commands run Domain
+// Operations, so a cold session must open the database first (#3385: commands
+// can arrive before anything opened it).
 async function blockWithoutDb(commandName: string, basePath: string, ctx: ExtensionCommandContext): Promise<boolean> {
   const { ensureDbOpen } = await import("../../bootstrap/dynamic-tools.js");
   if (await ensureDbOpen(basePath)) return false;
@@ -147,6 +148,7 @@ const WORKFLOW_USAGE = [
   "  new               — Create a new workflow definition (via skill)",
   "  run <name> [k=v]  — Explicit YAML run (creates a new run dir)",
   "  list [name]       — List workflow runs (optionally filtered by name)",
+  "  resume <name>/<timestamp> — Resume a workflow run (also after a crash)",
   "  info <name>       — Show plugin details (source, mode, phases)",
   "  install <source>  — Install a plugin from a URL / gist: / gh:",
   "  uninstall <name>  — Remove an installed plugin",
@@ -236,12 +238,12 @@ export function parseWorkflowOverridesOnly(args: string): Record<string, string>
 /**
  * Dispatch a resolved plugin according to its declared mode.
  */
-function dispatchPluginByMode(
+async function dispatchPluginByMode(
   plugin: WorkflowPlugin,
   args: string,
   ctx: ExtensionCommandContext,
   pi: ExtensionAPI,
-): void {
+): Promise<void> {
   switch (plugin.meta.mode) {
     case "oneshot": {
       dispatchOneshot(plugin, pi, args.trim());
@@ -253,6 +255,7 @@ function dispatchPluginByMode(
       const overrides = parseWorkflowOverridesOnly(args);
       try {
         const base = projectRoot();
+        if (await blockWithoutDb(`/gsd workflow ${plugin.name}`, base, ctx)) return;
         const runDir = createRun(base, plugin.name, Object.keys(overrides).length > 0 ? overrides : undefined);
         setActiveEngineId("custom");
         setActiveRunDir(runDir);
@@ -325,6 +328,9 @@ async function handleCustomWorkflow(
     const { defName, overrides } = parseWorkflowRunArgs(rest);
     try {
       const base = projectRoot();
+      // An unknown definition name fails here, before the database is opened.
+      loadRunDefinition(base, defName);
+      if (await blockWithoutDb("/gsd workflow run", base, ctx)) return true;
       const runDir = createRun(base, defName, Object.keys(overrides).length > 0 ? overrides : undefined);
       setActiveEngineId("custom");
       setActiveRunDir(runDir);
@@ -532,6 +538,26 @@ async function handleCustomWorkflow(
     return true;
   }
 
+  // ── resume <name>/<timestamp> — resume a run from its database rows ──
+  if (head === "resume" && rest) {
+    if (requireNotAutoActive("/gsd workflow resume", ctx)) return true;
+    try {
+      const base = projectRoot();
+      if (await blockWithoutDb("/gsd workflow resume", base, ctx)) return true;
+      const runDir = openRunForResume(base, rest);
+      setActiveEngineId("custom");
+      setActiveRunDir(runDir);
+      ctx.ui.notify(`Resuming workflow run: ${rest}`, "info");
+      startAutoDetached(ctx, pi, base, false);
+    } catch (err) {
+      setActiveEngineId(null);
+      setActiveRunDir(null);
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`Failed to resume workflow run "${rest}": ${msg}`, "error");
+    }
+    return true;
+  }
+
   // ── resume ──
   if (head === "resume" && !rest) {
     const engineId = getActiveEngineId();
@@ -550,7 +576,7 @@ async function handleCustomWorkflow(
     const base = projectRoot();
     const plugin = resolvePlugin(base, head);
     if (plugin) {
-      dispatchPluginByMode(plugin, rest, ctx, pi);
+      await dispatchPluginByMode(plugin, rest, ctx, pi);
       return true;
     }
   }

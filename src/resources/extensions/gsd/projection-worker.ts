@@ -14,8 +14,10 @@ import {
   regenerateRequirementsMarkdown,
   regenerateRootArtifactsMarkdown,
 } from "./db-writer.js";
+import { listCustomWorkflowRuns } from "./db/custom-workflow-runs.js";
 import { milestoneLeaseTtlSeconds } from "./db/milestone-leases.js";
 import { getRuntimeKv, setRuntimeKv } from "./db/runtime-kv.js";
+import { CUSTOM_WORKFLOW_RUN_PROJECTION_KIND } from "./db/writers/custom-workflow-runs.js";
 import {
   claimProjectionWork,
   expiredProjectionClaim,
@@ -27,6 +29,7 @@ import {
   settleRenderedProjectionWork,
   type ProjectionWorkClaim,
 } from "./db/writers/projection-work-delivery.js";
+import { renderRunDirectory } from "./definition-io.js";
 import { getAllMilestones, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
 import { knowledgeMdPath } from "./knowledge-parser.js";
 import { renderKnowledgeProjection } from "./knowledge-projection.js";
@@ -180,6 +183,16 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
   if (MILESTONE_KINDS.has(kind)) return hierarchyTarget(segments.slice(1, 2));
   if (STATE_KINDS.has(kind)) return { target: "state", render: renderStateFile };
   if (kind === "queue-order") return { target: "queue-order", render: renderQueueOrderFile };
+  if (kind === CUSTOM_WORKFLOW_RUN_PROJECTION_KIND) {
+    return {
+      target: key,
+      render: async (root) => {
+        // The key holds the run id in lowercase.
+        const run = listCustomWorkflowRuns().find((row) => row.runId.toLowerCase() === segments.slice(1).join("/"));
+        if (run) renderRunDirectory(join(root, ".gsd", "workflow-runs", run.runId), run);
+      },
+    };
+  }
   if (kind !== MARKDOWN_PROJECTION_KIND) return null;
   if (segments[0] === "legacy-import") return { target: "all", render: renderAllFromDb };
   if (key.startsWith(MILESTONE_REBUILD_KEY_PREFIX)) {

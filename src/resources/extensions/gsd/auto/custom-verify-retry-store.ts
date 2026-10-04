@@ -1,10 +1,19 @@
 // Project/App: gsd-pi
-// File Purpose: Persistence adapter for custom workflow verification retry counts.
+// File Purpose: Persistence adapter for verification retry counts. A step of a
+// custom workflow run with database rows keeps its count on the step row. Every
+// other unit keeps it in custom-verify-retries.json.
 
 import { readFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteSync } from "../atomic-write.js";
+import {
+  customWorkflowRunId,
+  getCustomWorkflowRun,
+  getCustomWorkflowStepVerifyRetries,
+} from "../db/custom-workflow-runs.js";
+import { setCustomWorkflowStepVerifyRetries } from "../db/writers/custom-workflow-runs.js";
 import { gsdRoot } from "../paths.js";
+import { parseUnitId } from "../unit-id.js";
 import type { AutoSession } from "./session.js";
 
 type RetrySession = Pick<AutoSession, "activeRunDir" | "basePath" | "verificationRetryCount"> & {
@@ -87,4 +96,53 @@ export function saveCustomVerifyRetryCounts(
       deps.logFailure(err);
     }
   }
+}
+
+/** The step row of a unit, or null when the session runs no custom workflow run that has rows. */
+function stepRowOf(
+  s: Pick<AutoSession, "activeRunDir">,
+  unitId: string,
+): { runId: string; stepId: string } | null {
+  if (!s.activeRunDir) return null;
+  const runId = customWorkflowRunId(s.activeRunDir);
+  if (!getCustomWorkflowRun(runId)) return null;
+  const { milestone, slice, task } = parseUnitId(unitId);
+  return { runId, stepId: task ?? slice ?? milestone };
+}
+
+/**
+ * Load the retry count of a custom workflow step from its step row, so a
+ * restart continues the count. Returns null when the unit has no step row.
+ */
+export function hydrateCustomStepVerifyRetryCount(
+  s: Pick<AutoSession, "activeRunDir" | "verificationRetryCount">,
+  unitType: string,
+  unitId: string,
+): Map<string, number> | null {
+  const step = stepRowOf(s, unitId);
+  if (!step) return null;
+  s.verificationRetryCount.set(
+    `${unitType}/${unitId}`,
+    getCustomWorkflowStepVerifyRetries(step.runId, step.stepId),
+  );
+  return s.verificationRetryCount;
+}
+
+/**
+ * Store the retry count of a custom workflow step on its step row. A unit with
+ * no count stores 0. Returns false when the unit has no step row.
+ */
+export function saveCustomStepVerifyRetryCount(
+  s: Pick<AutoSession, "activeRunDir" | "verificationRetryCount">,
+  unitType: string,
+  unitId: string,
+): boolean {
+  const step = stepRowOf(s, unitId);
+  if (!step) return false;
+  setCustomWorkflowStepVerifyRetries(
+    step.runId,
+    step.stepId,
+    s.verificationRetryCount.get(`${unitType}/${unitId}`) ?? 0,
+  );
+  return true;
 }

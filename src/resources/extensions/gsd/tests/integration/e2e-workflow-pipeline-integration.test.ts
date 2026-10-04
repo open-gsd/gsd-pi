@@ -36,8 +36,9 @@ import { stringify, parse } from "yaml";
 
 import { CustomWorkflowEngine } from "../../custom-workflow-engine.ts";
 import { CustomExecutionPolicy } from "../../custom-execution-policy.ts";
+import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../../gsd-db.ts";
 import { createRun, listRuns } from "../../run-manager.ts";
-import { readGraph, writeGraph } from "../../graph.ts";
+import { readGraph } from "../../graph.ts";
 import { validateDefinition } from "../../definition-loader.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -51,6 +52,7 @@ function makeTmpDir(): string {
 }
 
 afterEach(() => {
+  if (isDbAvailable()) closeDatabase();
   for (const d of tmpDirs) {
     try { rmSync(d, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* Windows EPERM */ }
   }
@@ -63,8 +65,12 @@ async function dispatch(engine: CustomWorkflowEngine) {
   return { state, result: engine.resolveDispatch(state, { basePath: "/unused" }) };
 }
 
-/** Drive deriveState → reconcile for a given unitId. */
-async function reconcile(engine: CustomWorkflowEngine, unitId: string) {
+/**
+ * Drive verify → deriveState → reconcile for a given unitId. The engine
+ * completes a step only from its stored verification result.
+ */
+async function reconcile(engine: CustomWorkflowEngine, policy: CustomExecutionPolicy, unitId: string) {
+  assert.equal(await policy.verify("custom-step", unitId, { basePath: "/unused" }), "continue");
   const state = await engine.deriveState("/unused");
   return engine.reconcile(state, {
     unitType: "custom-step",
@@ -83,7 +89,7 @@ async function reconcile(engine: CustomWorkflowEngine, unitId: string) {
  *
  * Note: The scan step prompt uses a literal string instead of {{item}} in the
  * definition YAML because substituteParams() checks for unresolved {{key}}
- * placeholders. After createRun, we patch GRAPH.yaml to add the {{item}}
+ * placeholders. After createRun, we patch the scan step row to add the {{item}}
  * placeholder so iterate expansion produces item-specific prompts.
  */
 const E2E_DEFINITION_YAML = `
@@ -140,8 +146,8 @@ steps:
 
 /**
  * Create a temp project directory with the e2e-pipeline definition YAML,
- * call createRun with param overrides, and patch GRAPH.yaml so the scan
- * step's prompt contains {{item}} for iterate expansion.
+ * call createRun with param overrides, and patch the scan step row so its
+ * prompt contains {{item}} for iterate expansion.
  */
 function setupProject(overrides?: Record<string, string>): {
   basePath: string;
@@ -151,18 +157,16 @@ function setupProject(overrides?: Record<string, string>): {
   const defsDir = join(basePath, ".gsd", "workflow-defs");
   mkdirSync(defsDir, { recursive: true });
   writeFileSync(join(defsDir, "e2e-pipeline.yaml"), E2E_DEFINITION_YAML, "utf-8");
+  openDatabase(join(basePath, ".gsd", "gsd.db"));
 
   const runDir = createRun(basePath, "e2e-pipeline", overrides);
 
-  // Patch GRAPH.yaml: replace the scan step's placeholder with {{item}}
+  // Patch the scan step row: replace the placeholder with {{item}}
   // so iterate expansion produces item-specific prompts. This works around
   // substituteParams() rejecting unresolved {{item}} in the definition.
-  const graph = readGraph(runDir);
-  const scanStep = graph.steps.find((s) => s.id === "scan");
-  if (scanStep) {
-    scanStep.prompt = "Scan item: {{item}}";
-    writeGraph(runDir, graph);
-  }
+  _getAdapter()!.prepare(
+    "UPDATE custom_workflow_steps SET prompt = 'Scan item: {{item}}' WHERE step_id = 'scan'",
+  ).run();
 
   return { basePath, runDir };
 }
@@ -238,7 +242,7 @@ describe("e2e-workflow-pipeline", () => {
     );
 
     // Reconcile gather
-    await reconcile(engine, "e2e-pipeline/gather");
+    await reconcile(engine, policy, "e2e-pipeline/gather");
 
     // Verify gather: content-heuristic (minSize: 10) should pass
     const gatherVerify = await policy.verify("custom-step", "e2e-pipeline/gather", {
@@ -310,7 +314,7 @@ describe("e2e-workflow-pipeline", () => {
     writeFileSync(join(runDir, "output/scan-result.txt"), "scan output data", "utf-8");
 
     // Complete scan--001, dispatch scan--002
-    await reconcile(engine, "e2e-pipeline/scan--001");
+    await reconcile(engine, policy, "e2e-pipeline/scan--001");
 
     // Verify analyze is still blocked (not all scan instances complete)
     const { result: r3a } = await dispatch(engine);
@@ -325,7 +329,7 @@ describe("e2e-workflow-pipeline", () => {
     assert.ok(d3a.step.prompt.includes("performance-review"));
 
     // Complete scan--002, dispatch scan--003
-    await reconcile(engine, "e2e-pipeline/scan--002");
+    await reconcile(engine, policy, "e2e-pipeline/scan--002");
     const { result: r3b } = await dispatch(engine);
     const d3b = await r3b;
     assert.equal(d3b.action, "dispatch");
@@ -334,7 +338,7 @@ describe("e2e-workflow-pipeline", () => {
     assert.ok(d3b.step.prompt.includes("code-quality"));
 
     // Complete scan--003 — now analyze should be unblocked
-    await reconcile(engine, "e2e-pipeline/scan--003");
+    await reconcile(engine, policy, "e2e-pipeline/scan--003");
 
     // Dashboard after all scan instances: 4 complete (gather + 3 instances)
     state = await engine.deriveState("/unused");
@@ -368,7 +372,7 @@ describe("e2e-workflow-pipeline", () => {
       "utf-8",
     );
 
-    await reconcile(engine, "e2e-pipeline/analyze");
+    await reconcile(engine, policy, "e2e-pipeline/analyze");
 
     // Verify analyze: content-heuristic (minSize: 5) should pass
     const analyzeVerify = await policy.verify("custom-step", "e2e-pipeline/analyze", {
@@ -413,7 +417,7 @@ describe("e2e-workflow-pipeline", () => {
       "utf-8",
     );
 
-    await reconcile(engine, "e2e-pipeline/report");
+    await reconcile(engine, policy, "e2e-pipeline/report");
 
     // ── 6. Completion ─────────────────────────────────────────────────
     state = await engine.deriveState("/unused");

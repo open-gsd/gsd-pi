@@ -332,7 +332,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "uninstall", desc: "Remove an installed plugin" },
     { cmd: "validate", desc: "Validate a workflow definition YAML" },
     { cmd: "pause", desc: "Pause custom workflow auto-mode" },
-    { cmd: "resume", desc: "Resume paused custom workflow auto-mode" },
+    { cmd: "resume", desc: "Resume paused custom workflow auto-mode, or a run by <name>/<timestamp>" },
   ],
   codebase: [
     { cmd: "generate", desc: "Generate or regenerate CODEBASE.md" },

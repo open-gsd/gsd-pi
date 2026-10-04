@@ -31,6 +31,10 @@ import {
   ensureVerificationEvidenceDedupIndex,
   hasVerificationEvidenceDedupIndex,
 } from "./db-verification-evidence-schema.js";
+import {
+  createCustomWorkflowSchema,
+  hasCustomWorkflowSchema,
+} from "./db-custom-workflow-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -78,6 +82,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "verification-evidence-attempt",
     isPresent: hasVerificationEvidenceDedupIndex,
     create: ensureVerificationEvidenceDedupIndex,
+  },
+  {
+    id: "custom-workflow-runs",
+    isPresent: hasCustomWorkflowSchema,
+    create: createCustomWorkflowSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

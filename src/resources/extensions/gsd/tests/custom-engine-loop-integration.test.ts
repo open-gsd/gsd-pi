@@ -19,7 +19,13 @@ import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import type { SessionLockStatus } from "../session-lock.js";
 import { writeGraph, readGraph, type WorkflowGraph, type GraphStep } from "../graph.ts";
 import { SourceObservationStore } from "../source-observations.js";
-import { closeDatabase, openDatabase } from "../gsd-db.js";
+import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.js";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import {
+  customWorkflowRunId,
+  getLatestCustomWorkflowStepVerification,
+} from "../db/custom-workflow-runs.ts";
+import { createRun, listRuns } from "../run-manager.ts";
 import { recordNonAdvancingOutcome } from "../auto-liveness-backstop.js";
 import { stringify } from "yaml";
 
@@ -488,6 +494,121 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       !deps.callLog.includes("resolveDispatch"),
       "Custom engine path should skip resolveDispatch (dev path not taken)",
     );
+  });
+
+  it("runs a database-backed run through autoLoop and ignores a hand-edited GRAPH.yaml", async () => {
+    _resetPendingResolve();
+
+    const base = realpathSync(makeTmpDir());
+    mkdirSync(join(base, ".gsd", "workflow-defs"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "workflow-defs", "db-run.yaml"), [
+      "version: 1",
+      "name: db-run",
+      "steps:",
+      "  - id: step-a",
+      "    name: A",
+      "    prompt: Do step-a",
+      "    requires: []",
+      "    produces: []",
+      "  - id: step-b",
+      "    name: B",
+      "    prompt: Do step-b",
+      "    requires: [step-a]",
+      "    produces: []",
+    ].join("\n"), "utf-8");
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const runDir = createRun(base, "db-run");
+    // The step rows are the state: a hand edit that marks every step complete is not read.
+    const edited = readGraph(runDir);
+    writeGraph(runDir, { ...edited, steps: edited.steps.map((step) => ({ ...step, status: "complete" as const })) });
+
+    const ctx = makeMockCtx();
+    const pi = makeMockPi();
+    const s = makeLoopSession({
+      activeEngineId: "custom",
+      activeRunDir: runDir,
+      basePath: base,
+      workerId: registerAutoWorker({ projectRootRealpath: base }),
+    });
+    const deps = makeMockDeps({
+      stopAuto: async (_ctx, _pi, reason) => {
+        deps.callLog.push(`stopAuto:${reason ?? "no-reason"}`);
+        s.active = false;
+      },
+    });
+
+    const loopPromise = autoLoop(ctx, pi, s, deps);
+    await resolveNextAgentEnd();
+    await resolveNextAgentEnd();
+    await loopPromise;
+
+    assert.equal(pi.calls.length, 2, "each step is dispatched once");
+    assert.ok(deps.callLog.includes("stopAuto:Workflow complete"), deps.callLog.join("\n"));
+    assert.deepEqual(listRuns(base)[0]?.steps, { total: 2, completed: 2, pending: 0, active: 0 });
+    assert.deepEqual(readGraph(runDir).steps.map((step) => step.status), ["complete", "complete"]);
+    // The loop claimed each step for the worker of the session.
+    const claims = _getAdapter()!.prepare(
+      `SELECT json_extract(payload_json, '$.claimedBy') AS worker FROM workflow_domain_events
+       WHERE event_type = 'custom_workflow.step.activate' ORDER BY project_revision`,
+    ).all().map((row) => row["worker"]);
+    assert.deepEqual(claims, [s.workerId, s.workerId]);
+    // Each step advanced on a stored verification result, here a waiver: no verify policy.
+    for (const stepId of ["step-a", "step-b"]) {
+      const verification = getLatestCustomWorkflowStepVerification(customWorkflowRunId(runDir), stepId);
+      assert.equal(verification?.verdict, "inconclusive", stepId);
+      assert.equal(verification?.waiverRationale, "The step has no verify policy.", stepId);
+    }
+  });
+
+  it("a verification retry of a database-backed run writes no retry file", async () => {
+    _resetPendingResolve();
+
+    const base = realpathSync(makeTmpDir());
+    mkdirSync(join(base, ".gsd", "workflow-defs"), { recursive: true });
+    // The check fails on its first run and passes on its second.
+    writeFileSync(join(base, ".gsd", "workflow-defs", "retry-run.yaml"), [
+      "version: 1",
+      "name: retry-run",
+      "steps:",
+      "  - id: step-a",
+      "    name: A",
+      "    prompt: Do step-a",
+      "    requires: []",
+      "    produces: []",
+      "    verify:",
+      "      policy: shell-command",
+      "      command: test -f marker || (touch marker && false)",
+    ].join("\n"), "utf-8");
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const runDir = createRun(base, "retry-run");
+
+    const ctx = makeMockCtx();
+    const pi = makeMockPi();
+    const s = makeLoopSession({
+      activeEngineId: "custom",
+      activeRunDir: runDir,
+      basePath: base,
+      workerId: registerAutoWorker({ projectRootRealpath: base }),
+    });
+    const deps = makeMockDeps({
+      stopAuto: async (_ctx, _pi, reason) => {
+        deps.callLog.push(`stopAuto:${reason ?? "no-reason"}`);
+        s.active = false;
+      },
+    });
+
+    const loopPromise = autoLoop(ctx, pi, s, deps);
+    await resolveNextAgentEnd();
+    await resolveNextAgentEnd();
+    await loopPromise;
+
+    const verdicts = _getAdapter()!.prepare(
+      "SELECT verdict FROM custom_workflow_step_verifications ORDER BY id",
+    ).all().map((row) => row["verdict"]);
+    assert.deepEqual(verdicts, ["fail", "pass"]);
+    assert.equal(pi.calls.length, 2, "the step is dispatched again after the failed check");
+    assert.deepEqual(listRuns(base)[0]?.steps, { total: 1, completed: 1, pending: 0, active: 0 });
+    assert.equal(existsSync(join(runDir, "runtime")), false, "the retry count is on the step row");
   });
 
   it("step mode stops after one custom workflow step", async () => {
