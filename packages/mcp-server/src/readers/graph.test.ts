@@ -171,6 +171,43 @@ describe('buildGraph', () => {
     );
   });
 
+  it('adds slice, task and learning nodes for a project in the flat-phase layout', async (t) => {
+    const flatProject = tmpProject();
+    t.after(() => rmSync(flatProject, { recursive: true, force: true }));
+    const phaseDir = '.gsd/phases/01-foundation';
+    writeFixture(flatProject, `${phaseDir}/01-ROADMAP.md`, '# M001: Foundation\n');
+    writeFixture(flatProject, `${phaseDir}/01-01-PLAN.md`, [
+      '# S01: Set up tooling',
+      '',
+      '<tasks>',
+      '- [X] **T01**: Add the build script _(1h)_',
+      '- [ ] **T02**: Add the lint step',
+      '</tasks>',
+    ].join('\n'));
+    writeFixture(flatProject, `${phaseDir}/01-LEARNINGS.md`, [
+      '## Lessons',
+      '',
+      '- Pin the toolchain version.',
+    ].join('\n'));
+
+    const graph = await buildGraph(flatProject);
+
+    const slice = graph.nodes.find((n) => n.id === 'slice:M001:S01');
+    assert.equal(slice?.label, 'S01: Set up tooling');
+    assert.equal(slice?.sourceFile, 'phases/01-foundation/01-01-PLAN.md');
+    assert.deepEqual(
+      graph.nodes.filter((n) => n.type === 'task').map((n) => [n.id, n.label]),
+      [
+        ['task:M001:S01:T01', 'T01: Add the build script'],
+        ['task:M001:S01:T02', 'T02: Add the lint step'],
+      ],
+    );
+    assert.ok(
+      graph.nodes.some((n) => n.type === 'lesson' && n.label.includes('Pin the toolchain version')),
+      'the flat-phase LEARNINGS file is read',
+    );
+  });
+
   it('produces a non-empty set of edges for a project with artifacts', async () => {
     // Previous `edgeCount >= 0` was a pure tautology. For a project
     // with STATE/KNOWLEDGE/LEARNINGS/milestone artifacts, the graph

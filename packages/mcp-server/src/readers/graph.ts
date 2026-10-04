@@ -13,14 +13,14 @@
  */
 
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from 'node:fs';
-import { basename, join, resolve } from 'node:path';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import {
   resolveGsdRoot,
   findMilestoneIds,
   resolveMilestoneDir,
   resolveMilestoneFile,
   findSliceIds,
-  resolveSliceDir,
+  resolveSliceFile,
 } from './paths.js';
 
 // ---------------------------------------------------------------------------
@@ -321,17 +321,15 @@ function parseSingleSlice(
   nodes: GraphNode[],
   edges: GraphEdge[],
 ): void {
-  const sDir = resolveSliceDir(gsdRoot, milestoneId, sliceId);
-  if (!sDir) return;
-
   const sliceNodeId = `slice:${milestoneId}:${sliceId}`;
 
-  // Try to read the slice plan
-  const planPath = join(sDir, `${sliceId}-PLAN.md`);
+  // Try to read the slice plan. The shared resolver finds it in both layouts:
+  // slices/<id>/<id>-PLAN.md and the flat-phase NN-MM-PLAN.md.
+  const planPath = resolveSliceFile(gsdRoot, milestoneId, sliceId, 'PLAN');
   let sliceTitle = `${milestoneId}/${sliceId}`;
   let planContent: string | null = null;
 
-  if (existsSync(planPath)) {
+  if (planPath) {
     try {
       planContent = readFileSync(planPath, 'utf-8');
       const titleMatch = planContent.match(/^#\s+[A-Z]\d+:\s+(.+)/m);
@@ -346,7 +344,7 @@ function parseSingleSlice(
     label: sliceTitle,
     type: 'slice',
     confidence: 'EXTRACTED',
-    sourceFile: planContent ? `milestones/${milestoneId}/slices/${sliceId}/${sliceId}-PLAN.md` : undefined,
+    sourceFile: planContent ? relative(gsdRoot, planPath!).split(sep).join('/') : undefined,
   });
 
   // Edge: milestone contains slice
@@ -372,11 +370,13 @@ function parseTasksFromPlan(
   edges: GraphEdge[],
 ): void {
   // Match lines like: - [ ] **T01: Title** — description
-  const taskPattern = /[-*]\s+\[[ x]\]\s+\*\*(T\d+):\s*([^*]+)\*\*/g;
+  // and the flat-phase form: - [x] **T01**: Title _(2h)_
+  const taskPattern = /[-*]\s+\[[ xX]\]\s+\*\*(T\d+)(?::\s*([^*]+)\*\*|\*\*:\s*(.+))/g;
   let match: RegExpExecArray | null;
 
   while ((match = taskPattern.exec(content)) !== null) {
-    const [, taskId, taskTitle] = match;
+    const taskId = match[1];
+    const taskTitle = match[2] ?? match[3].replace(/\s*_\([^)]*\)_\s*$/, '');
     const taskNodeId = `task:${milestoneId}:${sliceId}:${taskId}`;
 
     nodes.push({
@@ -423,11 +423,9 @@ function parseSingleLearningsFile(
   nodes: GraphNode[],
   edges: GraphEdge[],
 ): void {
-  const mDir = resolveMilestoneDir(gsdRoot, milestoneId);
-  if (!mDir) return;
-
-  const learningsPath = join(mDir, `${milestoneId}-LEARNINGS.md`);
-  if (!existsSync(learningsPath)) return;
+  // The shared resolver also finds the flat-phase NN-LEARNINGS.md.
+  const learningsPath = resolveMilestoneFile(gsdRoot, milestoneId, 'LEARNINGS');
+  if (!learningsPath) return;
 
   let content: string;
   try {
@@ -440,7 +438,7 @@ function parseSingleLearningsFile(
   const withoutFrontmatter = content.replace(/^---[\s\S]*?---\n?/, '');
 
   const milestoneNodeId = `milestone:${milestoneId}`;
-  const sourceFile = `milestones/${milestoneId}/${milestoneId}-LEARNINGS.md`;
+  const sourceFile = relative(gsdRoot, learningsPath).split(sep).join('/');
 
   // Parse each section: [sectionName, nodeType, idPrefix]
   const sections: Array<[string, NodeType, string]> = [
