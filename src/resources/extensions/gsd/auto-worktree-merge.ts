@@ -481,6 +481,19 @@ function finishSettledMilestoneMerge(request: {
         `The branch is preserved; merge the new commits manually or re-run milestone validation.`,
     );
   }
+  // A reset of the integration branch can drop the merge commit GSD made. The
+  // branch is then the only place the work lives, so it must stay.
+  if (
+    !settledMerge.recognized &&
+    nativeBranchExists(projectRoot, milestoneBranch) &&
+    !nativeIsAncestor(projectRoot, settledMerge.commitSha, settledMerge.integrationBranch)
+  ) {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `The recorded merge ${settledMerge.commitSha} of milestone branch ${milestoneBranch} is not on ` +
+        `${settledMerge.integrationBranch}. The branch is preserved; merge it manually.`,
+    );
+  }
   // A recognized merge means GSD did not merge the branch itself. Remove the
   // branch only while its work is still on the integration branch.
   if (

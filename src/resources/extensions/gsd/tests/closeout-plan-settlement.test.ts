@@ -711,6 +711,25 @@ test("a leftover branch of a squash-merged Milestone is not reported as unmerged
   assert.ok(blocker?.files.includes("late.txt"));
 });
 
+test("a merge commit dropped from the integration branch is reported as unmerged and the branch is kept", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  mergeAndStopBeforeCleanup(repo);
+  const branchTip = git(["rev-parse", "milestone/M001"], repo);
+  // The receipt still names the merge commit, but main no longer has it.
+  git(["reset", "--hard", "HEAD~1"], repo);
+  assert.equal(git(["show", "main:feature.txt"], repo), "base");
+
+  const [blocker] = await findUnmergedCompletedMilestones(repo);
+  assert.equal(blocker?.milestoneId, "M001");
+  assert.deepEqual(blocker?.files, ["feature.txt"]);
+
+  process.chdir(worktree);
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /is not on main/);
+
+  assert.equal(git(["rev-parse", "milestone/M001"], repo), branchTip);
+  assert.equal(existsSync(worktree), true);
+});
+
 test("a failed push leaves the push effect without a receipt and the next closeout pushes again", async () => {
   const { repo, remote } = await milestoneInWorktree({ autoPush: true });
   const pushEffect = () => readMilestoneCloseoutPlan("M001")!.effects

@@ -15,7 +15,7 @@ import {
 import { readUnsettledEffectsBehind } from "./db/writers/closeout.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
 import { isDbAvailable } from "./gsd-db.js";
-import { nativeBranchExists } from "./native-git-bridge.js";
+import { nativeBranchExists, nativeIsAncestor } from "./native-git-bridge.js";
 import { getIsolationMode, loadEffectiveGSDPreferences } from "./preferences.js";
 import { logWarning } from "./workflow-logger.js";
 import { getMilestoneRecord, loadSyncMapping } from "../github-sync/mapping.js";
@@ -102,13 +102,17 @@ export function readSettledMilestoneMerge(milestoneId: string): SettledMilestone
 
 /**
  * True when GSD merged the whole milestone branch: the merge has a Settlement
- * Receipt and the branch still points at the merged commit. A squash merge
- * leaves no git ancestry, so the receipt is the only durable record of that
- * merge. A recognized receipt is not enough: GSD did not make that merge.
+ * Receipt, the branch still points at the merged commit and the merge commit
+ * is still on the integration branch. A squash merge leaves no git ancestry,
+ * so the receipt is the only durable record of that merge. A recognized
+ * receipt is not enough: GSD did not make that merge.
  */
 export function isMilestoneBranchSettled(projectRoot: string, milestoneId: string, milestoneBranch: string): boolean {
   const settled = readSettledMilestoneMerge(milestoneId);
   if (!settled || settled.recognized) return false;
+  // A reset of the integration branch can drop the merge commit; then the
+  // branch is the only place the work lives.
+  if (!nativeIsAncestor(projectRoot, settled.commitSha, settled.integrationBranch)) return false;
   try {
     return revParse(projectRoot, milestoneBranch) === settled.milestoneBranchSha;
   } catch {
