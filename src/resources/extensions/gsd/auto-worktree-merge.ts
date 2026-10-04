@@ -51,6 +51,7 @@ import { createPreMergeStash } from "./auto-worktree-merge-stash.js";
 import {
   completeSettledCloseout,
   readSettledMilestoneMerge,
+  recognizeMilestoneMergeAgain,
   settleMilestoneMerge,
   type SettledMilestoneMerge,
 } from "./milestone-closeout-effects.js";
@@ -470,7 +471,8 @@ function finishSettledMilestoneMerge(request: {
   roadmapContent: string;
   settledMerge: SettledMilestoneMerge;
 }): { commitMessage: string; pushed: boolean; prCreated: boolean; codeFilesChanged: boolean } {
-  const { projectRoot, worktreeCwd, milestoneId, milestoneBranch, settledMerge } = request;
+  const { projectRoot, worktreeCwd, milestoneId, milestoneBranch } = request;
+  let { settledMerge } = request;
   if (
     nativeBranchExists(projectRoot, milestoneBranch) &&
     nativeCommitCountBetween(projectRoot, settledMerge.milestoneBranchSha, milestoneBranch) > 0
@@ -482,17 +484,27 @@ function finishSettledMilestoneMerge(request: {
     );
   }
   // A reset of the integration branch can drop the merge commit GSD made. The
-  // branch is then the only place the work lives, so it must stay.
+  // branch is then the only place the work lives, so it must stay until its
+  // work is on the integration branch again.
   if (
     !settledMerge.recognized &&
     nativeBranchExists(projectRoot, milestoneBranch) &&
     !nativeIsAncestor(projectRoot, settledMerge.commitSha, settledMerge.integrationBranch)
   ) {
-    throw new GSDError(
-      GSD_GIT_ERROR,
-      `The recorded merge ${settledMerge.commitSha} of milestone branch ${milestoneBranch} is not on ` +
-        `${settledMerge.integrationBranch}. The branch is preserved; merge it manually.`,
-    );
+    if (milestoneCodeNotOn(projectRoot, settledMerge.integrationBranch, milestoneBranch).length > 0) {
+      throw new GSDError(
+        GSD_GIT_ERROR,
+        `The recorded merge ${settledMerge.commitSha} of milestone branch ${milestoneBranch} is not on ` +
+          `${settledMerge.integrationBranch}. The branch is preserved. Merge ${milestoneBranch} into ` +
+          `${settledMerge.integrationBranch} by hand, then run \`/gsd dispatch complete-milestone ${milestoneId}\`.`,
+      );
+    }
+    settledMerge = recognizeMilestoneMergeAgain({
+      projectRoot,
+      milestoneId,
+      milestoneBranch,
+      settled: settledMerge,
+    });
   }
   // A recognized merge means GSD did not merge the branch itself. Remove the
   // branch only while its work is still on the integration branch.

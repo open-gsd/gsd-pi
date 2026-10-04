@@ -724,10 +724,39 @@ test("a merge commit dropped from the integration branch is reported as unmerged
   assert.deepEqual(blocker?.files, ["feature.txt"]);
 
   process.chdir(worktree);
-  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /is not on main/);
+  assert.throws(
+    () => mergeMilestoneToMain(repo, "M001", ROADMAP),
+    /is not on main.*Merge milestone\/M001 into main by hand, then run `\/gsd dispatch complete-milestone M001`/,
+  );
 
   assert.equal(git(["rev-parse", "milestone/M001"], repo), branchTip);
   assert.equal(existsSync(worktree), true);
+});
+
+test("after a dropped merge commit, a merge by hand lets the closeout finish and keeps the old receipt", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  mergeAndStopBeforeCleanup(repo);
+  const droppedMerge = git(["rev-parse", "main"], repo);
+  const receiptRefs = () => _getAdapter()!
+    .prepare("SELECT external_ref FROM workflow_settlement_receipts ORDER BY project_revision")
+    .all().map((row) => row["external_ref"]);
+  assert.deepEqual(receiptRefs(), [droppedMerge]);
+  git(["reset", "--hard", "HEAD~1"], repo);
+  git(["merge", "--squash", "milestone/M001"], repo);
+  git(["commit", "-m", "feat: milestone work by hand"], repo);
+  const manualMerge = git(["rev-parse", "main"], repo);
+
+  process.chdir(worktree);
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.deepEqual(receiptRefs(), [droppedMerge, manualMerge]);
+  assert.equal(mergeEffectReceipt()?.outcome, "recognized");
+  assert.equal(mergeEffectReceipt()?.externalRef, manualMerge);
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
+  assert.equal(git(["rev-parse", "main"], repo), manualMerge);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(["branch", "--list", "milestone/M001"], repo), "");
+  assert.deepEqual(await findUnmergedCompletedMilestones(repo), []);
 });
 
 test("a failed push leaves the push effect without a receipt and the next closeout pushes again", async () => {

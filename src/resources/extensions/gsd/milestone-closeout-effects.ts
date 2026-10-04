@@ -10,6 +10,7 @@ import {
   readMilestoneCloseoutPlan,
   recordSettlementReceipt,
   settleCloseout,
+  supersedeCloseoutPlan,
   type CloseoutEffectInput,
 } from "./closeout-domain-operation.js";
 import { readUnsettledEffectsBehind } from "./db/writers/closeout.js";
@@ -119,6 +120,36 @@ export function isMilestoneBranchSettled(projectRoot: string, milestoneId: strin
     // The branch cannot be read; let the caller inspect git.
     return false;
   }
+}
+
+/**
+ * The recorded merge commit left the integration branch and the milestone
+ * work is on that branch again (merged by hand). Supersede the Closeout Plan
+ * and record the merge as recognized at the integration branch tip. The old
+ * receipt stays under the superseded plan.
+ */
+export function recognizeMilestoneMergeAgain(request: {
+  projectRoot: string;
+  milestoneId: string;
+  milestoneBranch: string;
+  settled: SettledMilestoneMerge;
+}): SettledMilestoneMerge {
+  const { projectRoot, milestoneId, settled } = request;
+  supersedeCloseoutPlan(milestoneId);
+  const commitSha = revParse(projectRoot, settled.integrationBranch);
+  recordSettlementReceipt({
+    milestoneId,
+    effectKind: MILESTONE_MERGE_EFFECT,
+    outcome: "recognized",
+    externalRef: commitSha,
+    proof: {
+      commitSha,
+      integrationBranch: settled.integrationBranch,
+      milestoneBranchSha: revParse(projectRoot, request.milestoneBranch),
+      codeFilesChanged: settled.codeFilesChanged,
+    },
+  });
+  return readSettledMilestoneMerge(milestoneId)!;
 }
 
 /** True while the current Closeout Plan still waits for a required host effect. */

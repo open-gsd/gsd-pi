@@ -292,6 +292,68 @@ function preparedCloseoutPayload(plan: CloseoutPlan): PreparedCloseoutPayload {
 }
 
 /**
+ * Replace the current Closeout Plan with a copy that has no Settlement
+ * Receipts, for a recorded effect that no longer holds and must settle again.
+ * The old plan and its receipts stay as history.
+ */
+export function supersedeCloseoutPlan(milestoneId: string): CloseoutPlan {
+  const plan = readMilestoneCloseoutPlan(milestoneId);
+  if (!plan) throw new Error(`Milestone ${milestoneId} has no Closeout Plan to supersede`);
+  const prepared = preparedCloseoutPayload(plan);
+  const audit = {
+    actorName: prepared.audit.actorName ?? null,
+    triggerReason: prepared.audit.triggerReason ?? null,
+  };
+  const effects: CloseoutEffectInput[] = plan.effects.map((effect) => ({
+    effectKind: effect.effectKind,
+    required: effect.required,
+    spec: effect.spec,
+  }));
+  executeDomainOperation(
+    operationRequest(
+      CLOSEOUT_PREPARE_OPERATION,
+      internalExecutionInvocation(`internal:closeout.supersede:${plan.closeoutPlanId}`),
+      {
+        milestoneId,
+        sourceRevision: prepared.sourceRevision,
+        closeout: prepared.closeout as unknown as DomainJsonValue,
+        audit,
+        effects: effects as unknown as DomainJsonValue,
+      },
+    ),
+    (context) => {
+      const closeoutPlanId = insertCloseoutPlan(context, {
+        milestoneId,
+        lifecycleId: plan.lifecycleId,
+        attemptId: plan.attemptId,
+        testedSourceSetHash: closeoutHash(prepared.sourceRevision),
+        readinessBasisHash: plan.readinessBasisHash,
+        effects,
+        preparedAt: new Date().toISOString(),
+      });
+      return {
+        events: [{
+          eventType: "milestone.closeout.prepared",
+          entityType: "milestone",
+          entityId: milestoneId,
+          payload: {
+            closeoutPlanId,
+            milestoneLifecycleId: plan.lifecycleId,
+            sourceRevision: prepared.sourceRevision,
+            closeout: prepared.closeout as unknown as DomainJsonValue,
+            audit,
+            effectKinds: effects.map((effect) => effect.effectKind),
+          },
+          destinations: ["projection"],
+        }],
+        projections: lifecycleProjection(milestoneId),
+      };
+    },
+  );
+  return readMilestoneCloseoutPlan(milestoneId)!;
+}
+
+/**
  * Complete the Milestone once every required effect of its Closeout Plan has a
  * Settlement Receipt. Returns null when there is no open plan to settle; a
  * required effect without a receipt makes `milestone.complete` throw.
