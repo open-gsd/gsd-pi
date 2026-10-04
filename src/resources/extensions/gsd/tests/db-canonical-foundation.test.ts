@@ -62,6 +62,7 @@ function rewindToV30(dbPath: string): void {
       DROP TABLE IF EXISTS workflow_domain_events;
       DROP TABLE IF EXISTS workflow_operations;
       DROP TABLE IF EXISTS project_authority;
+      DROP TRIGGER IF EXISTS trg_milestones_lifecycle_coverage;
       DELETE FROM schema_version;
       INSERT INTO schema_version (version, applied_at) VALUES (30, '2026-07-12T00:00:00.000Z');
       INSERT OR IGNORE INTO milestones (id, title, status, created_at)

@@ -133,7 +133,8 @@ function task(
  * Legacy rows and lifecycle rows that disagree in both directions:
  * M001 is legacy active and canonical completed. M002 is legacy complete and
  * canonical ready, and so are its Slice S01 and Task T01. S02 and T02 are
- * legacy pending and canonical completed.
+ * legacy pending and canonical completed. M005 is legacy complete and
+ * canonical pending.
  */
 function seedDisagreement(): string {
   const base = makeProject();
@@ -141,7 +142,7 @@ function seedDisagreement(): string {
   insertMilestone({ id: "M002", title: "Canonical open", status: "complete", depends_on: ["M001"] });
   insertMilestone({ id: "M003", title: "Canonical cancelled", status: "active" });
   insertMilestone({ id: "M004", title: "Canonical paused", status: "active" });
-  insertMilestone({ id: "M005", title: "No lifecycle", status: "complete" });
+  insertMilestone({ id: "M005", title: "Canonical pending", status: "complete" });
   insertSlice({ id: "S01", milestoneId: "M002", title: "Canonical open", status: "complete", depends: ["S02"], sequence: 1 });
   insertSlice({ id: "S02", milestoneId: "M002", title: "Canonical completed", status: "pending", depends: [], sequence: 2 });
   insertTask({ id: "T01", sliceId: "S01", milestoneId: "M002", title: "Canonical open", status: "complete" });
@@ -151,6 +152,7 @@ function seedDisagreement(): string {
     milestone("M002", "ready"),
     milestone("M003", "cancelled"),
     milestone("M004", "paused"),
+    milestone("M005", "pending"),
     slice("M002", "S01", "ready"),
     slice("M002", "S02", "completed"),
     task("M002", "S01", "T01", "ready"),
@@ -188,7 +190,6 @@ test("the Authority Epoch switches the read interface from the legacy rows to th
       ["M002", "active", false, false, false, false],
       ["M003", "skipped", false, true, false, true],
       ["M004", "parked", false, false, true, false],
-      // No lifecycle row: the legacy status does not answer for this one item.
       ["M005", "pending", false, false, false, false],
     ],
     slices: [["S01", "pending", false, false], ["S02", "complete", true, true]],
@@ -369,7 +370,7 @@ test("after the Cutover progress and the project snapshot give the same counts f
   const counts = readProgressCounts();
   assert.deepEqual(counts, {
     // M003 is cancelled and is in no count. M001 is done, M004 is parked,
-    // M002 is active and M005 has no lifecycle row.
+    // M002 is active and M005 is pending.
     milestones: { total: 4, done: 1, active: 1, pending: 1, parked: 1 },
     slices: { total: 2, done: 1, active: 0, pending: 1 },
     tasks: { total: 2, done: 1, pending: 1 },

@@ -108,6 +108,7 @@ function createV30Backup(): string {
   assert.ok(db);
   db.exec("PRAGMA foreign_keys = OFF");
   for (const table of POST_V30_TABLES) db.exec(`DROP TABLE IF EXISTS ${table}`);
+  db.exec("DROP TRIGGER IF EXISTS trg_milestones_lifecycle_coverage");
   db.exec(`
     DELETE FROM schema_version;
     INSERT INTO schema_version (version, applied_at)

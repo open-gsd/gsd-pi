@@ -43,6 +43,7 @@ import {
   updateTaskStatus,
 } from "../gsd-db.ts";
 import { getLegacyTelemetry, resetLegacyTelemetry } from "../legacy-telemetry.ts";
+import { applyLifecycleBackfill } from "../lifecycle-backfill-domain-operation.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
 import { analyzeParallelEligibility } from "../parallel-eligibility.ts";
 import { resolveMilestoneFile } from "../paths.ts";
@@ -398,7 +399,8 @@ describe("G6: evidence before unlock", () => {
 
 describe("G7: Authority Epoch fence", () => {
   test("a writer with an old epoch is refused", async () => {
-    await openFixture();
+    // The epoch can advance only when every hierarchy row has a lifecycle row.
+    applyLifecycleBackfill(await openFixture());
     const stale = readDomainOperationFence();
     db().prepare("UPDATE project_authority SET authority_epoch = authority_epoch + 1").run();
     const tablesBefore = snapshotWorkflowTables();

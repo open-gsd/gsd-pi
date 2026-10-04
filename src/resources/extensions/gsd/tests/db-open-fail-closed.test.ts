@@ -17,6 +17,7 @@ import { ensureWorkflowDbAtPath, ensureWorkflowDbForBase, openWorkflowDatabase, 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.ts";
 import { backupDatabaseBeforeMigration } from "../db-migration-backup.ts";
 import { recordSchemaVersion } from "../db-schema-metadata.ts";
+import { applyLifecycleBackfill } from "../lifecycle-backfill-domain-operation.ts";
 import { SCHEMA_VERSION } from "../db/engine.ts";
 import { moveStateDirectory } from "../repo-identity.ts";
 import { openSqliteReadOnly } from "../sqlite-readonly.ts";
@@ -109,6 +110,13 @@ function makeRestoreFixture(withSlices = false): { base: string; dbPath: string;
   seedSlice("M100");
   closeDatabase();
   return { base, dbPath, backupPath, backupSha: sha256File(backupPath) };
+}
+
+/** Adopt every hierarchy row: the Authority Epoch cannot advance over a row with no lifecycle row. */
+function adoptHierarchy(base: string): void {
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  applyLifecycleBackfill(base);
+  closeDatabase();
 }
 
 function consentArgs(fixture: { backupPath: string; backupSha: string }): string {
@@ -291,6 +299,7 @@ test("(4) restore shows the erased Domain Operation range and refuses a higher A
     new RegExp(`Erases 3 later Domain Operations: project revisions ${backupRevision + 1}\\.\\.${backupRevision + 3}`),
   );
 
+  adoptHierarchy(fixture.base);
   rawExec(fixture.dbPath, "UPDATE project_authority SET authority_epoch = authority_epoch + 1 WHERE singleton = 1");
   const before = sha256File(fixture.dbPath);
   const refused = makeCtx();
@@ -308,6 +317,7 @@ test("(4) restore shows the erased Domain Operation range and refuses a higher A
 
 test("(4b) a healthy database locked by another process is refused, not replaced as corrupt", async () => {
   const fixture = makeRestoreFixture();
+  adoptHierarchy(fixture.base);
   rawExec(
     fixture.dbPath,
     `UPDATE project_authority SET authority_epoch = authority_epoch + 1 WHERE singleton = 1;

@@ -102,6 +102,7 @@ import {
 } from "../db-canonical-foundation-schema.js";
 import { createConversationFoundationSchemaV33 } from "../db-conversation-foundation-schema.js";
 import { rebuildWorkflowItemLifecyclesForBlockerAccepted } from "../db-blocker-accepted-closeout-schema.js";
+import { ensureLifecycleCoverageFence, hasLifecycleCoverageFence } from "../db-lifecycle-coverage-schema.js";
 import { createLifecycleFoundationSchemaV32 } from "../db-lifecycle-foundation-schema.js";
 import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "../db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "../db-recovery-evidence-foundation-schema.js";
@@ -225,6 +226,7 @@ function assessStartupRepair(db: DbAdapter): StartupRepairAssessment {
   const required = schemaMetadata === undefined
     || getCurrentSchemaVersion(db) !== SCHEMA_VERSION
     || !hasCanonicalOutboxInvariantsV31(db)
+    || !hasLifecycleCoverageFence(db)
     || !hasVerificationEvidenceDedupIndex(db)
     || !hasRuntimeKvSchemaV25(db)
     || !hasRequiredSchemaObjects(db)
@@ -453,6 +455,7 @@ function initSchema(
 
   migrateSchema(db, dbPath, startupTransactionOpen, migrationBackupPrepared);
   ensureCanonicalOutboxInvariantsV31(db);
+  ensureLifecycleCoverageFence(db);
   rebuildMemoriesFtsSchemaOnce(db, {
     force: forceMemoriesFtsRebuild,
     onRebuildFailed: (message) => logWarning("db", message),

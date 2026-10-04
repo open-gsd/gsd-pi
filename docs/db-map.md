@@ -1076,6 +1076,15 @@ last_authority_epoch  INTEGER NOT NULL
   provenance must advance; deletes are rejected as durable-history loss.
 - Indexes: `idx_workflow_lifecycle_milestone`,
   `idx_workflow_lifecycle_slice`, and `idx_workflow_lifecycle_task`.
+- Lifecycle coverage fence (non-versioned, `db-lifecycle-coverage-schema.ts`,
+  created on every open that does not find it). When `authority_epoch` is
+  above 0, every `milestones`, `slices` and `tasks` row has a lifecycle row:
+  `trg_milestones_lifecycle_coverage`, `trg_slices_lifecycle_coverage` and
+  `trg_tasks_lifecycle_coverage` refuse an inserted hierarchy row when no
+  Domain Operation is open, and `trg_project_authority_lifecycle_coverage`
+  refuses the `project_authority` update of a Domain Operation, and of the
+  cutover itself, while a hierarchy row has no lifecycle row. Epoch 0 is not
+  fenced.
 
 #### `workflow_execution_attempts`
 
