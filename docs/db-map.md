@@ -738,7 +738,8 @@ result_json  TEXT
 `db-required-schema.ts` is the registration and completeness authority for
 non-versioned schema features required on every database open. It registers
 the ADR-047 liveness feature, the ADR-048
-[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) feature and
+[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) and
+[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) features and
 the runtime-control feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
@@ -761,6 +762,29 @@ FOREIGN KEY dispatch_id → unit_dispatches(id)
 
 - DDL owner: `db-unit-dispatch-budget-schema.ts`. Access: `db/unit-dispatch-budgets.ts`.
 - Count and release rules: see the 2026-10-03 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `unit_dispatch_sidecars` (non-versioned)
+
+```
+id                   INTEGER PRIMARY KEY AUTOINCREMENT
+trigger_dispatch_id  INTEGER            ← the dispatch whose close-out queued the row; NULL when there is none
+scope                TEXT NOT NULL      ← the worker: '<milestone lock of a parallel worker>/<slice lock>'
+kind                 TEXT NOT NULL      ← 'hook' | 'triage' | 'quick-task'
+unit_type            TEXT NOT NULL
+unit_id              TEXT NOT NULL
+prompt               TEXT NOT NULL
+model                TEXT
+capture_id           TEXT               ← quick tasks only
+status               TEXT NOT NULL      ← 'held' | 'queued' | 'done' | 'canceled'
+queued_at            TEXT NOT NULL
+settled_at           TEXT
+FOREIGN KEY trigger_dispatch_id → unit_dispatches(id)
+```
+
+- DDL owner: `db-unit-dispatch-sidecar-schema.ts`. Reader: `db/unit-dispatch-sidecars.ts`. Writer: `db/writers/unit-dispatch-sidecars.ts`.
+- Scope, status and kill rules: see the 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
 
 ---
 

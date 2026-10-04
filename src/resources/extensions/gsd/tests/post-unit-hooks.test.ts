@@ -27,7 +27,7 @@ import { invalidateAllCaches } from "../cache.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { readHookStateJson, writeHookStateJson } from "../db/writers/runtime-control.ts";
 import { hookStateScope } from "../rule-registry.ts";
-import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.ts";
+import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
 import { enqueueSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
@@ -262,9 +262,8 @@ test('Restore reconciliation re-enqueues the lost hook dispatch (#1246)', () => 
 
     // Reconciliation re-enqueues the missing dispatch so the hook actually runs.
     openDatabase(join(base, ".gsd", "gsd.db"));
-    const scope = sidecarQueueScope("M002");
-    reconcileRestoredHookDispatch(base, scope);
-    const sidecarQueue = listQueuedSidecarItems(scope);
+    reconcileRestoredHookDispatch(base);
+    const sidecarQueue = listQueuedSidecarItems();
     assert.equal(sidecarQueue.length, 1, "lost hook dispatch is re-enqueued");
     assert.equal(sidecarQueue[0].kind, "hook");
     assert.equal(sidecarQueue[0].unitType, "hook/plan-review");
@@ -297,14 +296,11 @@ test('Restore reconciliation is a no-op when the dispatch is already queued (#12
     restoreHookState(base);
 
     openDatabase(join(base, ".gsd", "gsd.db"));
-    const scope = sidecarQueueScope("M002");
-    enqueueSidecarItem(
-      scope,
-      { kind: "hook", unitType: "hook/plan-review", unitId: "M002/S01", prompt: "already here" },
+    enqueueSidecarItem({ kind: "hook", unitType: "hook/plan-review", unitId: "M002/S01", prompt: "already here" },
       null,
     );
-    reconcileRestoredHookDispatch(base, scope);
-    const sidecarQueue = listQueuedSidecarItems(scope);
+    reconcileRestoredHookDispatch(base);
+    const sidecarQueue = listQueuedSidecarItems();
     assert.equal(sidecarQueue.length, 1, "does not duplicate an existing hook dispatch");
     assert.equal(sidecarQueue[0].prompt, "already here");
   } finally {
@@ -320,9 +316,8 @@ test('Restore reconciliation is a no-op with no active hook (#1246)', () => {
   const base = createFixtureBase();
   try {
     openDatabase(join(base, ".gsd", "gsd.db"));
-    const scope = sidecarQueueScope("M002");
-    reconcileRestoredHookDispatch(base, scope);
-    assert.equal(listQueuedSidecarItems(scope).length, 0, "nothing enqueued when no active hook");
+    reconcileRestoredHookDispatch(base);
+    assert.equal(listQueuedSidecarItems().length, 0, "nothing enqueued when no active hook");
   } finally {
     closeDatabase();
     resetHookState();

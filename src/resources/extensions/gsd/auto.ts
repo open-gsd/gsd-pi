@@ -132,7 +132,6 @@ import {
   reconcileRestoredGateBlock,
   clearPersistedHookState,
 } from "./post-unit-hooks.js";
-import { sidecarQueueScope } from "./db/unit-dispatch-sidecars.js";
 import { cancelOpenSidecarItems } from "./db/writers/unit-dispatch-sidecars.js";
 import { runGSDDoctor, rebuildState } from "./doctor.js";
 import {
@@ -2015,7 +2014,7 @@ export async function stopAuto(
       // A stop drops the follow-on work that did not run yet. Only a killed
       // process leaves it queued for the next start.
       try {
-        cancelOpenSidecarItems(sidecarQueueScope(s.currentMilestoneId));
+        cancelOpenSidecarItems();
       } catch (err) {
         logWarning("engine", `sidecar queue cancel on stop failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
       }
@@ -3129,10 +3128,10 @@ export async function startAuto(
     // A restored activeHook may have no queued dispatch (a pause closed its
     // row); re-enqueue it so the hook runs instead of blocking the next
     // unrelated unit's close-out (#1246).
-    reconcileRestoredHookDispatch(s.basePath, sidecarQueueScope(s.currentMilestoneId));
+    reconcileRestoredHookDispatch(s.basePath);
     // A restored gate block has no dispatch either; re-enqueue the blocked
     // hook so a failed blocking gate cannot be bypassed by resuming (#2194).
-    reconcileRestoredGateBlock(s.basePath, sidecarQueueScope(s.currentMilestoneId));
+    reconcileRestoredGateBlock(s.basePath);
     // Re-sync managed resources on resume so long-lived auto sessions pick up
     // bundled extension updates before resume-time verification/state logic runs.
     // GSD_PKG_ROOT is set by loader.ts and points to the gsd-pi package root.

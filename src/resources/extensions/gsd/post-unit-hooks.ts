@@ -92,16 +92,12 @@ export function restoreHookState(basePath: string): void {
 
 /** Shared tail of the resume reconciles: enqueue a hook dispatch unless an
  *  equivalent item is already queued. */
-function enqueueHookDispatch(
-  dispatch: HookDispatchResult,
-  queueScope: string,
-): void {
-  const alreadyQueued = listQueuedSidecarItems(queueScope).some(
+function enqueueHookDispatch(dispatch: HookDispatchResult): void {
+  const alreadyQueued = listQueuedSidecarItems().some(
     item => item.kind === "hook" && item.unitType === dispatch.unitType,
   );
   if (alreadyQueued) return;
   enqueueSidecarItem(
-    queueScope,
     {
       kind: "hook",
       unitType: dispatch.unitType,
@@ -126,13 +122,10 @@ function enqueueHookDispatch(
  * invariant that a persisted `activeHook` always has a live dispatch (#1246).
  * After a kill the row is still queued and nothing is added.
  */
-export function reconcileRestoredHookDispatch(
-  basePath: string,
-  queueScope: string,
-): void {
+export function reconcileRestoredHookDispatch(basePath: string): void {
   const dispatch = getOrCreateRegistry().getPendingHookDispatch(basePath);
   if (!dispatch) return;
-  enqueueHookDispatch(dispatch, queueScope);
+  enqueueHookDispatch(dispatch);
 }
 
 /**
@@ -145,13 +138,10 @@ export function reconcileRestoredHookDispatch(
  * selected; the registry re-arms it as in-flight so its completion is
  * re-assessed against the gate artifact.
  */
-export function reconcileRestoredGateBlock(
-  basePath: string,
-  queueScope: string,
-): void {
+export function reconcileRestoredGateBlock(basePath: string): void {
   const dispatch = getOrCreateRegistry().reconcileRestoredGateBlock(basePath);
   if (!dispatch) return;
-  enqueueHookDispatch(dispatch, queueScope);
+  enqueueHookDispatch(dispatch);
 }
 
 export function clearPersistedHookState(basePath: string): void {

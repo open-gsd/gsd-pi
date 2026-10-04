@@ -37,7 +37,7 @@ import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";
 import type { SessionLockStatus } from "../session-lock.js";
 import { _getAdapter, openDatabase, closeDatabase, getTask, insertMilestone, insertSlice, insertTask } from "../gsd-db.js";
 import { getOpenWedge } from "../auto-liveness-backstop.js";
-import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.js";
+import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.js";
 import { enqueueSidecarItem } from "../db/writers/unit-dispatch-sidecars.js";
 import { isBlockedStopReason, stopNoticeKind } from "../stop-notice.js";
 import { mapStatusToExitCode } from "../../../../headless-events.ts";
@@ -3238,7 +3238,7 @@ test("autoLoop dequeues sidecar item before session-lock break (first iteration,
   const pi = makeMockPi();
   const s = makeLoopSession();
   openLoopDatabase(t, s);
-  enqueueSidecarItem(sidecarQueueScope("M001"), {
+  enqueueSidecarItem({
     kind: "hook" as const,
     unitType: "hook/review",
     unitId: "M001/S01/T01/review",
@@ -3264,7 +3264,7 @@ test("autoLoop dequeues sidecar item before session-lock break (first iteration,
   await autoLoop(ctx, pi, s, deps);
 
   assert.equal(
-    listQueuedSidecarItems(sidecarQueueScope("M001")).length,
+    listQueuedSidecarItems().length,
     0,
     "sidecar item must be popped on lock-loss iteration (pre-#5308 ordering)",
   );
@@ -3313,7 +3313,7 @@ test("autoLoop dequeues sidecar item before session-lock break (mid-session, #53
     // with a non-empty queue and an invalid lock.
     postUnitPostVerification: async () => {
       deps.callLog.push("postUnitPostVerification");
-      enqueueSidecarItem(sidecarQueueScope("M001"), {
+      enqueueSidecarItem({
         kind: "hook" as const,
         unitType: "run-uat",
         unitId: "M001/S01/T01/review",
@@ -3331,7 +3331,7 @@ test("autoLoop dequeues sidecar item before session-lock break (mid-session, #53
 
   assert.ok(lockCheckCount >= 2, "lock validator must run on iteration 2");
   assert.equal(
-    listQueuedSidecarItems(sidecarQueueScope("M001")).length,
+    listQueuedSidecarItems().length,
     0,
     "queued sidecar item must be popped on the lock-loss iteration",
   );
@@ -5338,7 +5338,7 @@ test("autoLoop drains sidecar queue after postUnitPostVerification enqueues item
   const postVerActions: Array<() => void> = [
     () => {
       // First call (main unit): enqueue a sidecar item
-      enqueueSidecarItem(sidecarQueueScope("M001"), {
+      enqueueSidecarItem({
         kind: "hook" as const,
         unitType: "run-uat",
         unitId: "M001/S01/T01/review",
@@ -5395,8 +5395,7 @@ test("autoLoop runs a hook row left queued by a killed process and closes it whe
   // A new session: the process that queued the hook is gone.
   const s = makeLoopSession();
   openLoopDatabase(t, s);
-  const scope = sidecarQueueScope("M001");
-  enqueueSidecarItem(scope, {
+  enqueueSidecarItem({
     kind: "hook" as const,
     unitType: "hook/review",
     unitId: "M001/S01/T01",
@@ -5418,7 +5417,7 @@ test("autoLoop runs a hook row left queued by a killed process and closes it whe
   }
   assert.equal(_hasPendingResolveForTest(), true, "the hook unit should be awaiting agent_end");
   // Read now, assert after the loop ends: a failed assert must not leave the loop running.
-  const queuedWhileRunning = listQueuedSidecarItems(scope).length;
+  const queuedWhileRunning = listQueuedSidecarItems().length;
   resolveAgentEnd(makeEvent());
   await loopPromise;
 
@@ -5429,7 +5428,7 @@ test("autoLoop runs a hook row left queued by a killed process and closes it whe
   );
   assert.deepEqual(finishedUnits, ["hook/review:M001/S01/T01"], "the hook ran before any unit was selected");
   assert.ok(!deps.callLog.includes("resolveDispatch"), "no other unit was dispatched");
-  assert.equal(listQueuedSidecarItems(scope).length, 0, "the row is closed after the iteration");
+  assert.equal(listQueuedSidecarItems().length, 0, "the row is closed after the iteration");
 });
 
 test("autoLoop exits when no active milestone found", async (t) => {

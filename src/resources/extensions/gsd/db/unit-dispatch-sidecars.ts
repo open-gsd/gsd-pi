@@ -11,9 +11,7 @@
 //   canceled the user stopped auto-mode before the item ran
 // A killed process leaves the row held or queued, so the next start runs it.
 //
-// Scope keeps one worker from running the queue of another: queued rows belong
-// to one milestone, and to one slice for a slice-parallel worker. Held rows
-// belong to the worker (see quickTaskHoldScope).
+// Scope keeps one worker from running the queue of another (see sidecarQueueScope).
 //
 // This module reads the queue. db/writers/unit-dispatch-sidecars.ts writes it.
 
@@ -39,20 +37,17 @@ export interface SidecarRow {
   capture_id: string | null;
 }
 
-export function sidecarQueueScope(milestoneId: string | null): string {
-  return `${milestoneId ?? ""}/${process.env.GSD_SLICE_LOCK ?? ""}`;
-}
-
 /**
- * The scope of held quick tasks. They belong to the worker, not to the
- * milestone it runs, so a session that moves to the next milestone takes them
- * along. A parallel worker never leaves the milestone of its lock, and it
- * shares the database with the other workers, so its scope keeps the milestone.
+ * The scope of every row this worker writes and reads. Rows belong to the
+ * worker, not to the milestone it runs, so a session that moves to the next
+ * milestone (or restarts on it) still runs the rows queued under the last one.
+ * A parallel worker never leaves the milestone of its lock, and it shares the
+ * database with the other workers, so its scope keeps the milestone, and the
+ * slice for a slice-parallel worker.
  */
-export function quickTaskHoldScope(): string {
-  return sidecarQueueScope(
-    process.env.GSD_PARALLEL_WORKER ? process.env.GSD_MILESTONE_LOCK ?? null : null,
-  );
+export function sidecarQueueScope(): string {
+  const milestoneLock = process.env.GSD_PARALLEL_WORKER ? process.env.GSD_MILESTONE_LOCK ?? "" : "";
+  return `${milestoneLock}/${process.env.GSD_SLICE_LOCK ?? ""}`;
 }
 
 export function sidecarItemFromRow(row: SidecarRow): QueuedSidecarItem {
@@ -73,17 +68,17 @@ export function hasHeldQuickTask(): boolean {
     `SELECT 1 AS present FROM unit_dispatch_sidecars
      WHERE scope = :scope AND status = 'held'
      LIMIT 1`,
-  ).get({ ":scope": quickTaskHoldScope() }) != null;
+  ).get({ ":scope": sidecarQueueScope() }) != null;
 }
 
 /** The items the auto loop must run, oldest first. */
-export function listQueuedSidecarItems(scope: string): QueuedSidecarItem[] {
+export function listQueuedSidecarItems(): QueuedSidecarItem[] {
   if (!isDbAvailable()) return [];
   const rows = _getAdapter()!.prepare(
     `SELECT id, kind, unit_type, unit_id, prompt, model, capture_id
      FROM unit_dispatch_sidecars
      WHERE scope = :scope AND status = 'queued'
      ORDER BY id`,
-  ).all({ ":scope": scope }) as unknown as SidecarRow[];
+  ).all({ ":scope": sidecarQueueScope() }) as unknown as SidecarRow[];
   return rows.map(sidecarItemFromRow);
 }

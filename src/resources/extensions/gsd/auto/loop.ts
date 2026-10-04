@@ -98,7 +98,7 @@ import { createWorkflowPhaseReporter } from "./workflow-phase-reporter.js";
 import { createWorkflowTurnReporter } from "./workflow-turn-reporter.js";
 import { validateWorkflowSessionLock } from "./workflow-session-lock.js";
 import { dequeueSidecarItem } from "./workflow-sidecar-queue.js";
-import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.js";
+import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.js";
 import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.js";
 import { maintainWorkerHeartbeat, runWithWorkerHeartbeat } from "./workflow-worker-heartbeat.js";
 import { gsdRoot } from "../paths.js";
@@ -829,7 +829,7 @@ export async function autoLoop(
       // even when the session lock invalidates this iteration. Inverting this
       // order silently drops queued items on lock-loss. Refs #5308.
       const sidecarItem = await dequeueSidecarItem({
-        queue: listQueuedSidecarItems(sidecarQueueScope(s.currentMilestoneId)),
+        queue: listQueuedSidecarItems(),
         executionGraphEnabled: uokFlags.executionGraph,
         scheduleQueue: scheduleSidecarQueue,
         warnSchedulingFailure: message => logWarning("dispatch", `sidecar queue scheduling failed: ${message}`),

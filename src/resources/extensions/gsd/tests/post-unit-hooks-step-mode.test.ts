@@ -40,7 +40,7 @@ import {
   openDatabase,
 } from "../gsd-db.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
-import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.ts";
+import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
 import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
 import {
   adoptOrTransitionLifecycle,
@@ -48,11 +48,8 @@ import {
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.ts";
 
-// The harness sessions have no milestone, so every test uses this queue scope.
-const QUEUE_SCOPE = sidecarQueueScope(null);
-
 function queuedItems() {
-  return listQueuedSidecarItems(QUEUE_SCOPE);
+  return listQueuedSidecarItems();
 }
 
 /** Stand-in for the auto loop: it runs each queued item and closes its row. */
@@ -353,8 +350,8 @@ test("failed gate block persists and resume re-dispatches the blocked hook befor
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredHookDispatch(base, QUEUE_SCOPE);
-    reconcileRestoredGateBlock(base, QUEUE_SCOPE);
+    reconcileRestoredHookDispatch(base);
+    reconcileRestoredGateBlock(base);
 
     assert.equal(queuedItems().length, 1, "the blocked hook is re-dispatched on resume");
     assert.equal(queuedItems()[0].kind, "hook");
@@ -419,8 +416,8 @@ test("resume with an already-passing gate artifact holds no dispatch and clears 
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredHookDispatch(base, QUEUE_SCOPE);
-    reconcileRestoredGateBlock(base, QUEUE_SCOPE);
+    reconcileRestoredHookDispatch(base);
+    reconcileRestoredGateBlock(base);
 
     assert.equal(queuedItems().length, 0, "passing artifact clears the block without a rerun");
     assert.equal(getActiveHook(), null);
@@ -541,8 +538,8 @@ test("resume after gate A blocks still runs queued gate B once A passes", async 
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredHookDispatch(base, QUEUE_SCOPE);
-    reconcileRestoredGateBlock(base, QUEUE_SCOPE);
+    reconcileRestoredHookDispatch(base);
+    reconcileRestoredGateBlock(base);
     assert.equal(queuedItems().length, 1);
     assert.equal(queuedItems()[0].unitType, "hook/gate-a");
     drainQueue();
@@ -611,7 +608,7 @@ test("resume re-arms an execute-task gate with completion identity and schedules
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredGateBlock(base, QUEUE_SCOPE);
+    reconcileRestoredGateBlock(base);
     assert.equal(queuedItems().length, 1);
     assert.equal(queuedItems()[0].unitType, "hook/review-gate");
     const rearmed = getActiveHook();
@@ -684,14 +681,14 @@ test("resume holds selection when a resolved gate has a blocked sibling", async 
   resumed.basePath = base;
   resumed.active = true;
   resumed.stepMode = true;
-  reconcileRestoredGateBlock(base, QUEUE_SCOPE);
+  reconcileRestoredGateBlock(base);
   const { pctx, pauseAuto } = createPctx(base, resumed);
   assert.equal(resumed.currentUnit, null);
   assert.equal(await handlePendingHookOutcome(pctx), "stopped");
   assert.equal(pauseAuto.mock.callCount(), 1);
   resetHookState();
   restoreHookState(base);
-  reconcileRestoredGateBlock(base, QUEUE_SCOPE);
+  reconcileRestoredGateBlock(base);
   assert.equal(queuedItems()[0]?.unitType, "hook/gate-b");
 });
 
@@ -726,8 +723,9 @@ for (const queuedSibling of [false, true]) {
       writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "FIRST.md"), "---\nverdict: pass\n---\n");
       resetHookState();
       restoreHookState(base);
-      // A scope no test reads: this dispatch is not part of the assertion.
-      reconcileRestoredGateBlock(base, sidecarQueueScope("discarded"));
+      // This dispatch is not part of the assertion.
+      reconcileRestoredGateBlock(base);
+      drainQueue();
     } else {
       assert.equal(checkPostUnitHooks("execute-task", "M001/S01/T01", base), null);
     }
@@ -739,7 +737,7 @@ for (const queuedSibling of [false, true]) {
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredGateBlock(base, QUEUE_SCOPE);
+    reconcileRestoredGateBlock(base);
     assert.equal(queuedItems().length, 1);
     assert.equal(queuedItems()[0].unitType, "hook/review-gate");
     const rearmed = getActiveHook();

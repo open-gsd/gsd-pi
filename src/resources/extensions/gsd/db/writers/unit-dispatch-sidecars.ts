@@ -5,7 +5,7 @@
 import { _getAdapter, isDbAvailable, transaction } from "../engine.js";
 import type { SidecarItem } from "../../auto/session.js";
 import {
-  quickTaskHoldScope,
+  sidecarQueueScope,
   sidecarItemFromRow,
   type QueuedSidecarItem,
   type SidecarRow,
@@ -13,7 +13,6 @@ import {
 } from "../unit-dispatch-sidecars.js";
 
 function insertSidecar(
-  scope: string,
   item: SidecarItem,
   trigger: SidecarTriggerUnit | null,
   status: "held" | "queued",
@@ -38,7 +37,7 @@ function insertSidecar(
          (:trigger_dispatch_id, :scope, :kind, :unit_type, :unit_id, :prompt, :model, :capture_id, :status, :queued_at)`,
     ).run({
       ":trigger_dispatch_id": triggerRow?.id ?? null,
-      ":scope": scope,
+      ":scope": sidecarQueueScope(),
       ":kind": item.kind,
       ":unit_type": item.unitType,
       ":unit_id": item.unitId,
@@ -54,11 +53,10 @@ function insertSidecar(
 
 /** Queue an item for the auto loop. `trigger` is the unit whose close-out queued it. */
 export function enqueueSidecarItem(
-  scope: string,
   item: SidecarItem,
   trigger: SidecarTriggerUnit | null,
 ): number {
-  return insertSidecar(scope, item, trigger, "queued");
+  return insertSidecar(item, trigger, "queued");
 }
 
 /**
@@ -77,14 +75,15 @@ export function holdQuickTask(
      WHERE capture_id = :capture_id AND status IN ('held', 'queued')
      LIMIT 1`,
   ).get({ ":capture_id": item.captureId });
-  if (open == null) insertSidecar(quickTaskHoldScope(), item, trigger, "held");
+  if (open == null) insertSidecar(item, trigger, "held");
 }
 
 /**
- * Move the oldest held quick task of this worker to the queue of `queueScope`.
- * Returns it, or null when none waits.
+ * Move the oldest held quick task of this worker to its queue. The unit id
+ * takes the milestone the session runs now, not the one that held the task.
+ * Returns the task, or null when none waits.
  */
-export function promoteHeldQuickTask(queueScope: string): QueuedSidecarItem | null {
+export function promoteHeldQuickTask(milestoneId: string | null): QueuedSidecarItem | null {
   if (!isDbAvailable()) return null;
   return transaction(() => {
     const db = _getAdapter()!;
@@ -94,11 +93,12 @@ export function promoteHeldQuickTask(queueScope: string): QueuedSidecarItem | nu
        WHERE scope = :scope AND status = 'held'
        ORDER BY id
        LIMIT 1`,
-    ).get({ ":scope": quickTaskHoldScope() }) as SidecarRow | undefined;
+    ).get({ ":scope": sidecarQueueScope() }) as SidecarRow | undefined;
     if (!row) return null;
+    row.unit_id = `${milestoneId}/${row.capture_id}`;
     db.prepare(
-      `UPDATE unit_dispatch_sidecars SET status = 'queued', scope = :scope WHERE id = :id`,
-    ).run({ ":id": row.id, ":scope": queueScope });
+      `UPDATE unit_dispatch_sidecars SET status = 'queued', unit_id = :unit_id WHERE id = :id`,
+    ).run({ ":id": row.id, ":unit_id": row.unit_id });
     return sidecarItemFromRow(row);
   });
 }
@@ -116,20 +116,18 @@ export function settleSidecarItem(id: number): void {
 }
 
 /**
- * A user stop drops the work that did not run yet: the queue of `queueScope`
- * and the quick tasks this worker holds.
+ * A user stop drops the work of this worker that did not run yet: its queue
+ * and the quick tasks it holds.
  */
-export function cancelOpenSidecarItems(queueScope: string): void {
+export function cancelOpenSidecarItems(): void {
   if (!isDbAvailable()) return;
   transaction(() => {
     _getAdapter()!.prepare(
       `UPDATE unit_dispatch_sidecars
        SET status = 'canceled', settled_at = :settled_at
-       WHERE (scope = :queue_scope AND status = 'queued')
-          OR (scope = :hold_scope AND status = 'held')`,
+       WHERE scope = :scope AND status IN ('held', 'queued')`,
     ).run({
-      ":queue_scope": queueScope,
-      ":hold_scope": quickTaskHoldScope(),
+      ":scope": sidecarQueueScope(),
       ":settled_at": new Date().toISOString(),
     });
   });

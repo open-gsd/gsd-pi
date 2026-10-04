@@ -79,7 +79,7 @@ import {
   runMilestoneCloseoutGitHub,
 } from "./milestone-closeout.js";
 import type { AutoSession, SidecarItem } from "./auto/session.js";
-import { hasHeldQuickTask, sidecarQueueScope } from "./db/unit-dispatch-sidecars.js";
+import { hasHeldQuickTask } from "./db/unit-dispatch-sidecars.js";
 import {
   enqueueSidecarItem,
   holdQuickTask,
@@ -858,7 +858,7 @@ function enqueueSidecar(
   debugExtra: Record<string, unknown>,
   notification?: string,
 ): "continue" {
-  enqueueSidecarItem(sidecarQueueScope(s.currentMilestoneId), entry, s.currentUnit);
+  enqueueSidecarItem(entry, s.currentUnit);
   debugLog("postUnitPostVerification", {
     phase: "sidecar-enqueue",
     kind: entry.kind,
@@ -3308,7 +3308,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   // ── Quick-task dispatch ──
   if (_shouldDispatchQuickTaskForTest(s, hasHeldQuickTask)) {
     try {
-      const { markCaptureExecuted } = await import("./captures.js");
+      const { loadAllCaptures, markCaptureExecuted } = await import("./captures.js");
 
       if (s.currentUnit) {
         await closeoutUnit(ctx, s.basePath, s.currentUnit.type, s.currentUnit.id, s.currentUnit.startedAt);
@@ -3316,16 +3316,18 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
 
       // The held row becomes the queued work before the capture is marked
       // executed, so a kill between the two steps cannot lose the task.
-      const quickTask = promoteHeldQuickTask(sidecarQueueScope(s.currentMilestoneId));
+      const quickTask = promoteHeldQuickTask(s.currentMilestoneId);
       if (quickTask) {
-        if (quickTask.captureId) markCaptureExecuted(s.basePath, quickTask.captureId);
+        const captureId = quickTask.captureId!;
+        const captureText = loadAllCaptures(s.basePath).find((capture) => capture.id === captureId)?.text ?? "";
+        markCaptureExecuted(s.basePath, captureId);
         debugLog("postUnitPostVerification", {
           phase: "sidecar-enqueue",
           kind: quickTask.kind,
           unitId: quickTask.unitId,
           captureId: quickTask.captureId,
         });
-        ctx.ui.notify(`Executing quick-task: ${quickTask.captureId ?? quickTask.unitId}`, "info");
+        ctx.ui.notify(`Executing quick-task: ${captureId} — "${captureText}"`, "info");
         return "continue";
       }
     } catch (e) {

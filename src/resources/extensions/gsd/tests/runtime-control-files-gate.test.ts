@@ -45,6 +45,7 @@ import {
   restoreHookState,
 } from "../post-unit-hooks.ts";
 import { hookStateScope } from "../rule-registry.ts";
+import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
 import { executeSaveGateResult } from "../tools/workflow-tool-executors.ts";
 import {
   clearUnitRuntimeRecord,
@@ -295,9 +296,8 @@ test("a hook-state.json from an older build with no hook state row restores noth
   assert.equal(isGateBlockPending(), false, "the file creates no gate block");
   assert.equal(isRetryPending(), false, "the file creates no retry");
   assert.equal(peekRetryTrigger(), null);
-  const sidecarQueue: Array<{ unitType: string }> = [];
-  reconcileRestoredGateBlock(base, sidecarQueue as any);
-  assert.deepEqual(sidecarQueue, [], "no gate hook is re-armed");
+  reconcileRestoredGateBlock(base);
+  assert.deepEqual(listQueuedSidecarItems(), [], "no gate hook is re-armed");
   // The first hook cycle is not counted as already spent.
   persistHookState(base);
   assert.deepEqual(JSON.parse(readHookStateJson(hookStateScope(base))!).cycleCounts, {});

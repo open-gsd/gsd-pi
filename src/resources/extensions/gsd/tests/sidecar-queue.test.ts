@@ -22,7 +22,6 @@ import { recordDispatchClaim } from "../db/unit-dispatches.ts";
 import {
   hasHeldQuickTask,
   listQueuedSidecarItems,
-  sidecarQueueScope,
 } from "../db/unit-dispatch-sidecars.ts";
 import {
   cancelOpenSidecarItems,
@@ -159,12 +158,11 @@ test("a post-unit hook queued at close-out survives a process kill and is queued
 
   // The process dies before the loop runs the hook.
   restartProcess(base);
-  const scope = sidecarQueueScope("M001");
   restoreHookState(base);
-  reconcileRestoredHookDispatch(base, scope);
-  reconcileRestoredGateBlock(base, scope);
+  reconcileRestoredHookDispatch(base);
+  reconcileRestoredGateBlock(base);
 
-  const queued = listQueuedSidecarItems(scope);
+  const queued = listQueuedSidecarItems();
   assert.equal(queued.length, 1, "the restart finds the hook and does not queue it twice");
   assert.equal(queued[0].kind, "hook");
   assert.equal(queued[0].unitType, "hook/slice-plan-review");
@@ -175,70 +173,102 @@ test("a post-unit hook queued at close-out survives a process kill and is queued
 
 test("a queued item stays queued until the iteration that ran it ends", (t) => {
   const base = makeProject(t);
-  const scope = sidecarQueueScope("M001");
-  const id = enqueueSidecarItem(
-    scope,
-    { kind: "triage", unitType: "triage-captures", unitId: "M001/S01/triage", prompt: "Triage", model: "provider/model" },
+  const id = enqueueSidecarItem({ kind: "triage", unitType: "triage-captures", unitId: "M001/S01/triage", prompt: "Triage", model: "provider/model" },
     null,
   );
 
   // A kill while the item runs: the row was read but not settled.
   restartProcess(base);
-  assert.deepEqual(listQueuedSidecarItems(scope), [
+  assert.deepEqual(listQueuedSidecarItems(), [
     { id, kind: "triage", unitType: "triage-captures", unitId: "M001/S01/triage", prompt: "Triage", model: "provider/model" },
   ]);
 
   settleSidecarItem(id);
-  assert.deepEqual(listQueuedSidecarItems(scope), []);
+  assert.deepEqual(listQueuedSidecarItems(), []);
 });
 
 test("items run oldest first", (t) => {
   makeProject(t);
-  const scope = sidecarQueueScope("M001");
-  enqueueSidecarItem(scope, { kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
-  enqueueSidecarItem(scope, { kind: "triage", unitType: "triage-captures", unitId: "M001/S01/triage", prompt: "b" }, null);
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
+  enqueueSidecarItem({ kind: "triage", unitType: "triage-captures", unitId: "M001/S01/triage", prompt: "b" }, null);
 
-  assert.deepEqual(listQueuedSidecarItems(scope).map((item) => item.unitType), ["hook/a", "triage-captures"]);
+  assert.deepEqual(listQueuedSidecarItems().map((item) => item.unitType), ["hook/a", "triage-captures"]);
 });
 
-test("a worker does not see the queue of another milestone or another slice lock", (t) => {
+test("a row queued at the end of a milestone runs after a kill, when the restart is on the next milestone", async (t) => {
+  const base = makeProject(t);
+  process.chdir(base);
+  _clearGsdRootCache();
+  resetHookState();
+  const captureId = appendCapture(base, "Fix the typo in the README.");
+  markCaptureResolved(base, captureId, "quick-task", "run as a quick task", "small fix");
+  holdQuickTask(quickTask(captureId), null);
+
+  // The last unit of M001 closes out: the quick task is queued and its capture is marked executed.
+  const pctx = makePostUnitContext(base, "research-slice", "M001/S01");
+  assert.equal(await postUnitPostVerification(pctx), "continue");
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
+  assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
+
+  // The process dies. The next start is on M002 and its first close-out queues new work.
+  restartProcess(base);
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/b", unitId: "M002/S01", prompt: "b" }, null);
+
+  assert.deepEqual(
+    listQueuedSidecarItems().map((item) => item.unitId),
+    [`M001/${captureId}`, "M001/S01", "M002/S01"],
+    "the rows of the finished milestone run before the work of the next one",
+  );
+});
+
+test("a parallel worker does not see the queue of another milestone lock or another slice lock", (t) => {
   makeProject(t);
-  enqueueSidecarItem(sidecarQueueScope("M001"), { kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
-
-  assert.equal(listQueuedSidecarItems(sidecarQueueScope("M002")).length, 0);
-
-  const previousSliceLock = process.env.GSD_SLICE_LOCK;
+  const previous = {
+    GSD_PARALLEL_WORKER: process.env.GSD_PARALLEL_WORKER,
+    GSD_MILESTONE_LOCK: process.env.GSD_MILESTONE_LOCK,
+    GSD_SLICE_LOCK: process.env.GSD_SLICE_LOCK,
+  };
   t.after(() => {
-    if (previousSliceLock === undefined) delete process.env.GSD_SLICE_LOCK;
-    else process.env.GSD_SLICE_LOCK = previousSliceLock;
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   });
-  process.env.GSD_SLICE_LOCK = "S02";
-  assert.equal(listQueuedSidecarItems(sidecarQueueScope("M001")).length, 0);
+  process.env.GSD_PARALLEL_WORKER = "1";
+  process.env.GSD_MILESTONE_LOCK = "M001";
   delete process.env.GSD_SLICE_LOCK;
-  assert.equal(listQueuedSidecarItems(sidecarQueueScope("M001")).length, 1);
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
+
+  process.env.GSD_MILESTONE_LOCK = "M002";
+  assert.equal(listQueuedSidecarItems().length, 0);
+
+  process.env.GSD_MILESTONE_LOCK = "M001";
+  process.env.GSD_SLICE_LOCK = "S02";
+  assert.equal(listQueuedSidecarItems().length, 0);
+  delete process.env.GSD_SLICE_LOCK;
+  assert.equal(listQueuedSidecarItems().length, 1);
 });
 
 test("held quick tasks survive a restart and move to the queue one at a time", (t) => {
   const base = makeProject(t);
-  const scope = sidecarQueueScope("M001");
   holdQuickTask(quickTask("CAP-1"), null);
   holdQuickTask(quickTask("CAP-2"), null);
   // A second triage run reports the same capture again.
   holdQuickTask(quickTask("CAP-1"), null);
 
-  assert.deepEqual(listQueuedSidecarItems(scope), [], "a held quick task is not ready work");
+  assert.deepEqual(listQueuedSidecarItems(), [], "a held quick task is not ready work");
 
   restartProcess(base);
   assert.equal(hasHeldQuickTask(), true);
 
-  const first = promoteHeldQuickTask(scope);
+  const first = promoteHeldQuickTask("M001");
   assert.equal(first?.captureId, "CAP-1");
-  assert.deepEqual(listQueuedSidecarItems(scope).map((item) => item.captureId), ["CAP-1"]);
+  assert.deepEqual(listQueuedSidecarItems().map((item) => item.captureId), ["CAP-1"]);
   settleSidecarItem(first!.id);
 
-  assert.equal(promoteHeldQuickTask(scope)?.captureId, "CAP-2");
+  assert.equal(promoteHeldQuickTask("M001")?.captureId, "CAP-2");
   assert.equal(hasHeldQuickTask(), false, "CAP-1 was held once");
-  assert.equal(promoteHeldQuickTask(scope), null);
+  assert.equal(promoteHeldQuickTask("M001"), null);
 });
 
 test("unit close-out moves one held quick task to the queue and marks its capture executed", async (t) => {
@@ -248,16 +278,21 @@ test("unit close-out moves one held quick task to the queue and marks its captur
   resetHookState();
   const captureId = appendCapture(base, "Fix the typo in the README.");
   markCaptureResolved(base, captureId, "quick-task", "run as a quick task", "small fix");
-  const scope = sidecarQueueScope("M001");
   holdQuickTask(quickTask(captureId), null);
 
   // A new process finishes the next unit: the held task is found in the database.
   restartProcess(base);
   const pctx = makePostUnitContext(base, "research-slice", "M001/S01");
+  const messages: string[] = [];
+  pctx.ctx.ui.notify = (message: string) => { messages.push(message); };
 
   assert.equal(await postUnitPostVerification(pctx), "continue");
 
-  assert.deepEqual(listQueuedSidecarItems(scope).map((item) => item.captureId), [captureId]);
+  assert.ok(
+    messages.includes(`Executing quick-task: ${captureId} — "Fix the typo in the README."`),
+    `the message shows the capture text: ${JSON.stringify(messages)}`,
+  );
+  assert.deepEqual(listQueuedSidecarItems().map((item) => item.captureId), [captureId]);
   assert.equal(hasHeldQuickTask(), false);
   assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
 });
@@ -276,18 +311,17 @@ test("a session that moves to the next milestone still runs the quick tasks it h
   });
 
   // The session adopts M002 before a unit close-out takes the held tasks.
-  const scope = sidecarQueueScope("M002");
   for (const captureId of captureIds) {
     const pctx = makePostUnitContext(base, "research-slice", "M002/S01");
     pctx.s.currentMilestoneId = "M002";
 
     assert.equal(await postUnitPostVerification(pctx), "continue");
 
-    const queued = listQueuedSidecarItems(scope);
+    const queued = listQueuedSidecarItems();
     assert.deepEqual(
-      queued.map((item) => item.captureId),
-      [captureId],
-      "the auto loop of the M002 session finds the task in its queue",
+      queued.map((item) => item.unitId),
+      [`M002/${captureId}`],
+      "the task runs as a unit of the milestone the session runs now",
     );
     assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
     settleSidecarItem(queued[0].id);
@@ -313,26 +347,41 @@ test("a parallel worker does not take the quick tasks another worker holds", (t)
 
   process.env.GSD_MILESTONE_LOCK = "M002";
   assert.equal(hasHeldQuickTask(), false);
-  assert.equal(promoteHeldQuickTask(sidecarQueueScope("M002")), null);
-  cancelOpenSidecarItems(sidecarQueueScope("M002"));
+  assert.equal(promoteHeldQuickTask("M002"), null);
+  cancelOpenSidecarItems();
 
   process.env.GSD_MILESTONE_LOCK = "M001";
-  assert.equal(promoteHeldQuickTask(sidecarQueueScope("M001"))?.captureId, "CAP-1");
+  assert.equal(promoteHeldQuickTask("M001")?.captureId, "CAP-1");
 });
 
 test("a user stop drops its queued items and its held quick tasks only", (t) => {
   makeProject(t);
-  const scope = sidecarQueueScope("M001");
-  const otherScope = sidecarQueueScope("M002");
-  enqueueSidecarItem(scope, { kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
+  const previous = {
+    GSD_PARALLEL_WORKER: process.env.GSD_PARALLEL_WORKER,
+    GSD_MILESTONE_LOCK: process.env.GSD_MILESTONE_LOCK,
+  };
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  process.env.GSD_PARALLEL_WORKER = "1";
+  process.env.GSD_MILESTONE_LOCK = "M002";
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/b", unitId: "M002/S01", prompt: "b" }, null);
+
+  process.env.GSD_MILESTONE_LOCK = "M001";
+  // Rows of two milestones: the stop takes every row of this worker.
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/c", unitId: "M003/S01", prompt: "c" }, null);
   holdQuickTask(quickTask("CAP-1"), null);
-  enqueueSidecarItem(otherScope, { kind: "hook", unitType: "hook/b", unitId: "M002/S01", prompt: "b" }, null);
 
-  cancelOpenSidecarItems(scope);
+  cancelOpenSidecarItems();
 
-  assert.deepEqual(listQueuedSidecarItems(scope), []);
+  assert.deepEqual(listQueuedSidecarItems(), []);
   assert.equal(hasHeldQuickTask(), false);
-  assert.equal(listQueuedSidecarItems(otherScope).length, 1);
+  process.env.GSD_MILESTONE_LOCK = "M002";
+  assert.equal(listQueuedSidecarItems().length, 1, "the queue of the other worker stays");
 });
 
 test("stopAuto drops the queue so the next start does not run old follow-on work", async (t) => {
@@ -340,8 +389,7 @@ test("stopAuto drops the queue so the next start does not run old follow-on work
   holdQuickTask(quickTask("CAP-1"), null);
 
   // The session moved from M001 to M002 after triage held the quick task.
-  const scope = sidecarQueueScope("M002");
-  enqueueSidecarItem(scope, { kind: "hook", unitType: "hook/a", unitId: "M002/S01", prompt: "a" }, null);
+  enqueueSidecarItem({ kind: "hook", unitType: "hook/a", unitId: "M002/S01", prompt: "a" }, null);
 
   autoSession.reset();
   t.after(() => autoSession.reset());
@@ -362,6 +410,6 @@ test("stopAuto drops the queue so the next start does not run old follow-on work
 
   // stopAuto closes the database; the next start opens it again.
   openDatabase(join(base, ".gsd", "gsd.db"));
-  assert.deepEqual(listQueuedSidecarItems(scope), []);
+  assert.deepEqual(listQueuedSidecarItems(), []);
   assert.equal(hasHeldQuickTask(), false);
 });
