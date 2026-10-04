@@ -2182,9 +2182,10 @@ means canonical state is committed and readable projections remain queued for
 repair; an exact retry reports `duplicate` without creating another operation.
 A historical retry reports both `duplicate` and `superseded` and cannot repair
 or present itself as the current lifecycle result.
-Legacy active-Slice selection still recognizes `skipped` directly. The S07
-canonical read cutover must require the current active Waiver when it replaces
-that compatibility adapter.
+While the Authority Epoch of the Project is 0, active-Slice selection still
+recognizes legacy `skipped` directly. After the Cutover the read interface
+`db/lifecycle-read.ts` requires the current active Waiver; see
+[`dev/state-db-cutover-milestone-decision.md`](dev/state-db-cutover-milestone-decision.md).
 
 The three Milestone lifecycle mutations use one source- and evidence-bound
 operation ledger across Pi, workflow MCP names and aliases, auto, and recovery

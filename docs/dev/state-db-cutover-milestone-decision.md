@@ -332,10 +332,11 @@ D012 is a decision. It is not the cutover:
   Project, never per item:
   - Epoch 0: the interface answers from legacy rows, as in step 1.
   - Epoch above 0 (the Cutover has run): the interface answers from the
-    canonical lifecycle rows. A Milestone is done when its lifecycle is
-    `completed`, parked when it is `paused`, and discarded when it is
-    `cancelled`. A Slice or Task needs no further work when its lifecycle is
-    `completed` or `cancelled`. A hierarchy row with no lifecycle row is
+    canonical lifecycle rows. An item is complete when its lifecycle is
+    `completed` or `blocker-accepted`. A Milestone is done when it is
+    complete, parked when its lifecycle is `paused`, and discarded when it is
+    `cancelled`. A Slice or Task needs no further work when it is complete or
+    its lifecycle is `cancelled`. A hierarchy row with no lifecycle row is
     pending; its legacy status does not answer for it.
   - After the Cutover a cancelled Slice releases the Slices that depend on it
     only when it has an active cancellation Waiver. The legacy `skipped` and
