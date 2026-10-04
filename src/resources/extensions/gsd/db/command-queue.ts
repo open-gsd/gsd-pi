@@ -29,14 +29,17 @@ export function takeNextCommand(
 ): { command: string; enqueuedAt: string } | null {
   const db = getDbOrNull();
   if (!db) return null;
+  const pending = db.prepare(
+    `SELECT id, command, enqueued_at FROM command_queue
+     WHERE target_worker = :target AND claimed_at IS NULL AND completed_at IS NULL
+     ORDER BY id ASC LIMIT 1`,
+  );
+  // A poll with nothing pending is a plain read: it takes no write lock.
+  if (!pending.get({ ":target": target })) return null;
   // BEGIN IMMEDIATE: a read-then-write claim must hold the write lock before
   // the read, or two takers can both read the same pending row.
   return immediateTransaction(() => {
-    const row = db.prepare(
-      `SELECT id, command, enqueued_at FROM command_queue
-       WHERE target_worker = :target AND claimed_at IS NULL AND completed_at IS NULL
-       ORDER BY id ASC LIMIT 1`,
-    ).get({ ":target": target });
+    const row = pending.get({ ":target": target });
     if (!row) return null;
     const now = new Date().toISOString();
     db.prepare(

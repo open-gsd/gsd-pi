@@ -7,7 +7,8 @@
  * partial reads.
  *
  * A pause/resume/stop/rebase signal is a command_queue row in the project
- * database, targeted at the worker's milestone. There is no signal file.
+ * database, targeted at the worker's milestone. A legacy signal file from an
+ * external orchestrator is input only: the worker turns it into a row.
  * Stale detection combines PID liveness checks with heartbeat timeouts.
  */
 
@@ -21,6 +22,8 @@ import { join } from "node:path";
 import { gsdRoot } from "./paths.js";
 import { loadJsonFileOrNull, writeJsonFileAtomic } from "./json-persistence.js";
 import { dropPendingCommands, enqueueCommand, takeNextCommand } from "./db/command-queue.js";
+import { getDbOrNull } from "./gsd-db.js";
+import { isSqliteBusyError } from "./sqlite-errors.js";
 import { logWarning } from "./workflow-logger.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
@@ -49,6 +52,8 @@ export interface SignalMessage {
 
 const PARALLEL_DIR = "parallel";
 const STATUS_SUFFIX = ".status.json";
+const LEGACY_SIGNAL_SUFFIX = ".signal.json";
+const SIGNALS: readonly string[] = ["pause", "resume", "stop", "rebase"];
 const DEFAULT_STALE_TIMEOUT_MS = 30_000;
 // How long a paused worker waits for the coordinator to lift the pause before
 // it degrades to in-process serialization (#1273). Kept below the stale
@@ -138,11 +143,39 @@ export function sendSignal(milestoneId: string, signal: SessionSignal): void {
   enqueueCommand(milestoneId, signal);
 }
 
-/** Take the oldest pending signal for a milestone. Each signal is delivered one time. Returns null if none is pending. */
-export function consumeSignal(milestoneId: string): SignalMessage | null {
-  const taken = takeNextCommand(milestoneId, `pid-${process.pid}`);
-  if (!taken) return null;
-  return { signal: taken.command as SessionSignal, sentAt: Date.parse(taken.enqueuedAt), from: "coordinator" };
+function isLegacySignal(data: unknown): data is { signal: SessionSignal } {
+  return data !== null && typeof data === "object" && SIGNALS.includes((data as { signal?: unknown }).signal as string);
+}
+
+/**
+ * Deprecated input bridge: an external orchestrator wrote a signal file. Queue
+ * its command as a row and remove the file. The file is never read as a command.
+ */
+function queueLegacySignalFile(basePath: string, milestoneId: string): void {
+  const p = join(parallelDir(basePath), `${milestoneId}${LEGACY_SIGNAL_SUFFIX}`);
+  const msg = loadJsonFileOrNull(p, isLegacySignal);
+  if (!msg) return;
+  sendSignal(milestoneId, msg.signal);
+  try { unlinkSync(p); } catch { /* non-fatal */ }
+  logWarning("parallel", `${p}: the signal-file protocol is deprecated; "${msg.signal}" was queued as a command_queue row`);
+}
+
+/**
+ * Take the oldest pending signal for a milestone. Each signal is delivered one
+ * time. Returns null if none is pending, and also when the database is busy:
+ * the signal stays pending for the next poll. With `basePath`, a legacy signal
+ * file of the milestone is queued first.
+ */
+export function consumeSignal(milestoneId: string, basePath?: string): SignalMessage | null {
+  try {
+    if (basePath && getDbOrNull()) queueLegacySignalFile(basePath, milestoneId);
+    const taken = takeNextCommand(milestoneId, `pid-${process.pid}`);
+    if (!taken) return null;
+    return { signal: taken.command as SessionSignal, sentAt: Date.parse(taken.enqueuedAt), from: "coordinator" };
+  } catch (e) {
+    if (isSqliteBusyError(e)) return null;
+    throw e;
+  }
 }
 
 /**
@@ -158,14 +191,14 @@ export function consumeSignal(milestoneId: string): SignalMessage | null {
  */
 export async function awaitWorkerResume(
   milestoneId: string,
-  opts: { timeoutMs?: number; pollMs?: number } = {},
+  opts: { timeoutMs?: number; pollMs?: number; basePath?: string } = {},
 ): Promise<"resume" | "stop" | "timeout"> {
   const timeoutMs = opts.timeoutMs ?? DEFAULT_RESUME_WAIT_MS;
   const pollMs = opts.pollMs ?? DEFAULT_RESUME_POLL_MS;
   const deadline = Date.now() + timeoutMs;
 
   for (;;) {
-    const msg = consumeSignal(milestoneId);
+    const msg = consumeSignal(milestoneId, opts.basePath);
     if (msg?.signal === "resume") return "resume";
     if (msg?.signal === "stop") return "stop";
     if (Date.now() >= deadline) return "timeout";

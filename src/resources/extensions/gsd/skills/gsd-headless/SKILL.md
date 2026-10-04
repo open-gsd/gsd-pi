@@ -147,7 +147,7 @@ kill -TERM "$M001_PID"
 
 **Status file fields:** `milestoneId`, `pid`, `state` (running/paused/stopped/error), `currentUnit`, `completedUnits`, `cost`, `lastHeartbeat`, `startedAt`, `worktreePath`.
 
-**Worker commands:** `pause`, `resume` and `stop` are `command_queue` rows in the project database. The coordinator writes them (`/gsd parallel pause|resume|stop`). There is no signal file: a file in `.gsd/parallel/` is not a command. An external orchestrator stops a worker with `SIGTERM`.
+**Worker commands:** `pause`, `resume` and `stop` are `command_queue` rows in the project database. The coordinator writes them (`/gsd parallel pause|resume|stop`). An external orchestrator stops a worker with `SIGTERM`. A signal file `.gsd/parallel/<milestoneId>.signal.json` is still accepted for compatibility and is deprecated: the worker turns it into a `command_queue` row and removes the file.
 
 **Liveness detection:** PID alive check (`kill -0 $pid`) + heartbeat freshness (30s timeout). Stale sessions are auto-cleaned.
 

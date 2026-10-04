@@ -167,7 +167,7 @@ parallel:
 
 ## 信号生命周期
 
-Coordinator 通过项目数据库中的 `command_queue` 行和 workers 通信。每一行都定向到 worker 的 milestone。不存在信号文件：
+Coordinator 通过项目数据库中的 `command_queue` 行和 workers 通信。每一行都定向到 worker 的 milestone。外部编排器写入的信号文件（`.gsd/parallel/<MID>.signal.json`）仍为兼容而接受，但已弃用：worker 会把它转换为 `command_queue` 行并删除该文件：
 
 ```
 Coordinator                    Worker

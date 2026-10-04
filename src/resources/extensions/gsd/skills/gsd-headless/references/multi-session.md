@@ -52,7 +52,9 @@ Written atomically (`.tmp` + rename) by each worker at `.gsd/parallel/<milestone
 
 `pause`, `resume` and `stop` are `command_queue` rows in the project database, targeted at the worker's milestone. The coordinator writes them (`/gsd parallel pause|resume|stop`) and the worker takes the oldest pending row between units.
 
-There is no signal file. A file written to `.gsd/parallel/<milestoneId>.signal.json` is not read and has no effect. An external orchestrator stops a worker with `SIGTERM`.
+An external orchestrator stops a worker with `SIGTERM`.
+
+**Deprecated:** a signal file `.gsd/parallel/<milestoneId>.signal.json` with `{"signal":"pause"}` (or `resume`, `stop`) is still accepted for compatibility. Between units, the worker writes its command as a `command_queue` row, removes the file, and logs a deprecation warning. The file is input only; the worker acts on the row.
 
 ## Spawning Workers
 

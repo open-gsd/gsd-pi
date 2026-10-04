@@ -736,7 +736,7 @@ result_json  TEXT
 ```
 
 - Index: `idx_command_queue_pending` (target_worker, claimed_at)
-- `db/command-queue.ts` writes and takes the rows. The parallel coordinator queues `pause`, `resume` and `stop` with `target_worker` set to the milestone ID of the worker (`session-status-io.ts` `sendSignal`). The worker takes the oldest pending row at each unit boundary (`consumeSignal`); the take sets `claimed_at`, `claimed_by` and `completed_at` in one write. When a parallel session ends, its pending rows are completed so that they do not reach the next worker of the milestone.
+- `db/command-queue.ts` writes and takes the rows. The parallel coordinator queues `pause`, `resume` and `stop` with `target_worker` set to the milestone ID of the worker (`session-status-io.ts` `sendSignal`). The worker takes the oldest pending row at each unit boundary (`consumeSignal`); a poll with no pending row is a plain read, and the take sets `claimed_at`, `claimed_by` and `completed_at` in one write. When a parallel session ends, its pending rows are completed so that they do not reach the next worker of the milestone. A deprecated `.gsd/parallel/<MID>.signal.json` file is input only: the worker queues its command as a row and removes the file.
 
 ---
 

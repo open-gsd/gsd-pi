@@ -172,7 +172,7 @@ parallel:
 
 ## Command Lifecycle
 
-The coordinator communicates with workers through `command_queue` rows in the project database. Each row is targeted at the worker's milestone. There is no signal file:
+The coordinator communicates with workers through `command_queue` rows in the project database. Each row is targeted at the worker's milestone. A signal file (`.gsd/parallel/<MID>.signal.json`) from an external orchestrator is still accepted for compatibility and is deprecated: the worker turns it into a `command_queue` row and removes the file:
 
 ```text
 Coordinator                    Worker
