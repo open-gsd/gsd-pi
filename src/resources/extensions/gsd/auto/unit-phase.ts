@@ -30,7 +30,7 @@ import { markWorkerStopping } from "../db/auto-workers.js";
 import { releaseMilestoneLease } from "../db/milestone-leases.js";
 import type { MinimalModelRegistry } from "../context-budget.js";
 import { parseUnitId } from "../unit-id.js";
-import { createCheckpoint, cleanupCheckpoint, rollbackToCheckpoint } from "../safety/git-checkpoint.js";
+import { createCheckpoint, cleanupCheckpoint, rollbackToCheckpointAndRebuild } from "../safety/git-checkpoint.js";
 import { resolveSafetyHarnessConfig } from "../safety/safety-harness.js";
 import { getUnitWorkflowDispatchReadinessErrorForModel } from "../tool-contract.js";
 import { prepareWorkflowMcpForProject } from "../workflow-mcp-auto-prep.js";
@@ -1025,7 +1025,7 @@ export async function runUnitPhase(
   // ── Safety harness: checkpoint cleanup or rollback ──
   if (s.checkpointSha) {
     if (unitResult.status === "error" && safetyConfig.auto_rollback) {
-      const rolled = rollbackToCheckpoint(s.basePath, unitId, s.checkpointSha);
+      const rolled = await rollbackToCheckpointAndRebuild(s.basePath, unitId, s.checkpointSha);
       if (rolled) {
         ctx.ui.notify(`Rolled back to pre-unit checkpoint for ${unitId}`, "info");
         debugLog("runUnitPhase", { phase: "checkpoint-rollback", unitId });

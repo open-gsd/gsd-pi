@@ -3,11 +3,19 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
-import { createCheckpoint, rollbackToCheckpoint, cleanupCheckpoint } from "../safety/git-checkpoint.js";
+import {
+  createCheckpoint,
+  rollbackToCheckpoint,
+  rollbackToCheckpointAndRebuild,
+  cleanupCheckpoint,
+} from "../safety/git-checkpoint.js";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.js";
+import { renderRoadmapFromDb } from "../markdown-renderer.js";
+import { invalidateStateCache } from "../state.js";
 
 function git(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" }).trim();
@@ -57,6 +65,42 @@ describe("git-checkpoint rollback", () => {
 
     const headAfter = git(["rev-parse", "HEAD"], repo);
     assert.equal(headAfter, sha, "HEAD should match checkpoint SHA after rollback");
+  });
+
+  it("renders tracked projections again from the database after a rollback", async (t) => {
+    const repo = createTempRepo();
+    t.after(() => {
+      closeDatabase();
+      invalidateStateCache();
+      rmSync(repo, { recursive: true, force: true });
+    });
+    // Team mode: the projections are tracked; the database is not.
+    writeFileSync(join(repo, ".gitignore"), ".gsd/gsd.db*\n");
+    mkdirSync(join(repo, ".gsd"));
+    openDatabase(join(repo, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Test", status: "active", planning: { vision: "Rollback keeps the database." } });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "pending", risk: "low", depends: [] });
+    const rendered = await renderRoadmapFromDb(repo, "M001");
+    assert.ok("roadmapPath" in rendered);
+    git(["add", "."], repo);
+    git(["commit", "-m", "checkpoint state"], repo);
+    const sha = createCheckpoint(repo, "unit-render");
+    assert.ok(sha);
+
+    // The failed unit committed a slice to the database and its render to git.
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Added by the unit", status: "pending", risk: "low", depends: [] });
+    await renderRoadmapFromDb(repo, "M001");
+    git(["add", "."], repo);
+    git(["commit", "-m", "unit work"], repo);
+
+    assert.equal(await rollbackToCheckpointAndRebuild(repo, "unit-render", sha), true);
+
+    assert.equal(git(["rev-parse", "HEAD"], repo), sha, "the branch is rolled back");
+    assert.match(
+      readFileSync(rendered.roadmapPath, "utf-8"),
+      /S02: Added by the unit/,
+      "the roadmap shows the database content, not the reverted file",
+    );
   });
 
   it("returns false on detached HEAD", (t) => {
