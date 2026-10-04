@@ -152,6 +152,7 @@ export const UNIT_REGISTRY = {
         "gsd_plan_milestone",
         "gsd_milestone_generate_id",
         "gsd_milestone_set_dependencies",
+        "gsd_checkpoint_save",
       ],
       requiredWorkflowTools: [
         "ask_user_questions",
@@ -343,6 +344,7 @@ export const UNIT_REGISTRY = {
         "gsd_resume",
         "gsd_capture_thought",
         "gsd_decision_save",
+        "gsd_checkpoint_save",
       ],
       requiredWorkflowTools: [
         "gsd_task_complete",
@@ -375,6 +377,7 @@ export const UNIT_REGISTRY = {
         "gsd_resume",
         "gsd_capture_thought",
         "gsd_decision_save",
+        "gsd_checkpoint_save",
       ],
       requiredWorkflowTools: [
         "gsd_task_complete",

@@ -124,7 +124,7 @@ type ProjectionSaveTool = { name: RegExp; tool: string };
  * Managed projection kinds that have a save tool, keyed by file name: first
  * the kinds the renderers write at the .gsd root, then the kinds they write
  * below .gsd/milestones and .gsd/phases.
- * A managed file with no entry here (LEARNINGS, SECRETS, CONTINUE, ...) has no
+ * A managed file with no entry here (LEARNINGS, SECRETS, ...) has no
  * save tool yet, so it stays writable: a refusal must name a real tool.
  */
 const ROOT_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
@@ -150,6 +150,7 @@ const HIERARCHY_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /-RESEARCH\.md$/i, tool: 'gsd_summary_save with artifact_type "RESEARCH"' },
   { name: /-UI-SPEC\.md$/i, tool: 'gsd_summary_save with artifact_type "UI-SPEC"' },
   { name: /-PARKED\.md$/i, tool: "gsd_milestone_park or gsd_milestone_unpark" },
+  { name: /(^|-)CONTINUE\.md$/i, tool: "gsd_checkpoint_save" },
 ];
 
 /** The save tool for a managed projection path, or null when the path is not one. */

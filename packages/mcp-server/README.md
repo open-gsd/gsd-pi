@@ -92,6 +92,7 @@ The workflow MCP surface includes:
 - `gsd_replan_slice`
 - `gsd_replan_task`
 - `gsd_rework_brief_save`
+- `gsd_checkpoint_save`
 - `gsd_slice_complete`
 - `gsd_skip_slice`
 - `gsd_complete_milestone`
@@ -148,6 +149,8 @@ Planning and replanning never physically delete adopted work. Tasks removed by `
 `gsd_rework_brief_save` persists structured rework findings for a task. `projectDir` is optional; required parameters are `milestoneId`, `sliceId`, `taskId`, and a non-empty `findings` array. Each finding requires `findingId`, `severity` (`blocking` or `advisory`), `description`, `requiredFix`, and `verificationCommands`; optional fields are `status`, `evidence`, and `decisionRef`.
 
 Blocking findings saved by `gsd_rework_brief_save` gate `gsd_task_complete`. To complete the task, the `gsd_task_complete` call must include a `reworkResolution` entry for each pending blocking `findingId` with `status: "resolved"` and non-empty `evidence`. Deferred findings must use `status: "deferred-with-override"` with non-empty `evidence` and a `decisionRef`.
+
+`gsd_checkpoint_save` saves a Work Checkpoint row for a milestone, slice or task. `projectDir` is optional; required parameters are `milestoneId`, `kind` (`pause` or `handoff`), `confirmedContext`, and `nextAction`; optional fields are `sliceId`, `taskId`, `unresolved`, and `evidence`. The row is the resume state: the next session reads it from the database. `CONTINUE.md` is rendered from the row and is never read back.
 
 For canonical auto-mode task execution, `gsd_task_complete` stages the executor result for the running Attempt instead of publishing task completion immediately. A successful call returns `details.attemptId`, `details.resultId`, `details.summaryPath`, and `details.nextStage`; `nextStage: "verify"` means the host must still run technical verification before completion is published, while `nextStage: "route"` means the executor reported a blocker or failed result that should be routed for recovery. After host verification records a passing Technical Verdict for the same source revision, auto mode publishes the task completion and refreshes the summary and plan projections. MCP clients should call this tool only for the active task Attempt they are executing; calls without a running or replay-matched canonical Attempt fail instead of falling back to legacy completion.
 

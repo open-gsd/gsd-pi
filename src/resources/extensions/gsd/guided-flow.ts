@@ -42,7 +42,7 @@ import { resolveExpectedArtifactPath } from "./auto.js";
 import { gsdHome } from "./gsd-home.js";
 import {
   gsdRoot, milestonesDir, legacyMilestonesDir, resolveMilestoneFile,
-  resolveSliceFile, resolveSlicePath, resolveGsdRootFile, relGsdRootFile,
+  resolveSliceFile, resolveGsdRootFile, relGsdRootFile,
   relMilestoneFile, relSliceFile, relSlicePath,
 } from "./paths.js";
 import { join } from "node:path";
@@ -111,10 +111,12 @@ import {
   deletePendingAutoStart,
   getDiscussionMilestoneId,
   hasPendingAutoStart,
+  restorePendingAutoStart,
   setPendingAutoStart,
 } from "./pending-auto-start.js";
 import { clearGuidedUnitContext, setGuidedUnitContext } from "./guided-unit-context.js";
 import { checkAutoStartAfterDiscuss, scheduleAutoStartAfterIdle } from "./discussion-handoff.js";
+import { buildResumeSection, readWorkCheckpoint } from "./work-checkpoint.js";
 import { resolveSubagentRoleForProvider } from "./subagent-role-resolver.js";
 export {
   maybeHandleEmptyIntentTurn,
@@ -2130,6 +2132,17 @@ export async function showSmartEntry(
   // Rebuild STATE.md from derived state before any dispatch (#3475).
   await renderStateProjection(basePath);
 
+  // A discuss handoff row saved by an earlier process of this conversation has
+  // no live handles. Bind it to this command, and finish the handoff when the
+  // discussion already saved its rows.
+  if (
+    restorePendingAutoStart(basePath, ctx, pi) &&
+    !isAgentTurnInFlight(ctx) &&
+    checkAutoStartAfterDiscuss(basePath)
+  ) {
+    return;
+  }
+
   // ── Deep planning mode kickoff ────────────────────────────────────────
   // When `planning_depth: deep` is set (e.g. via `/gsd new-project --deep`)
   // and any project-level stage gate is still pending, keep the user-question
@@ -2160,7 +2173,7 @@ export async function showSmartEntry(
     // and fires another dispatchWorkflow, resetting the conversation mid-interview.
     if (hasPendingAutoStart(basePath)) {
       // #3274: If /clear interrupted the discussion, the pending entry is stale.
-      // Detect staleness: no manifest, no saved milestone CONTEXT/CONTEXT-DRAFT row,
+      // Detect staleness: no saved milestone CONTEXT/CONTEXT-DRAFT row,
       // the entry is older than 30s (avoids race between .set() and LLM writing the
       // first artifact), AND no agent turn is in flight. A dispatched discuss turn
       // can think for well over 30s before its first question round writes any
@@ -2169,7 +2182,6 @@ export async function showSmartEntry(
       // replays the final "context written" message after the real one.
       const entry = _getPendingAutoStart(basePath)!;
       const ageMs = Date.now() - (entry.createdAt || 0);
-      const manifestExists = existsSync(join(gsdRoot(basePath), "DISCUSSION-MANIFEST.json"));
       const milestoneHasContext = hasSavedArtifact(entry.milestoneId, null, "CONTEXT");
       const milestoneHasDraft = hasSavedArtifact(entry.milestoneId, null, "CONTEXT-DRAFT");
       const milestoneRow = isDbAvailable() ? getMilestone(entry.milestoneId) : null;
@@ -2180,7 +2192,6 @@ export async function showSmartEntry(
         // Clear stale in-memory guard and continue through normal active-milestone routing.
         deletePendingAutoStart(basePath);
       } else if (
-        !manifestExists &&
         !milestoneHasContext &&
         !milestoneHasDraft &&
         ageMs > 30_000 &&
@@ -2768,10 +2779,8 @@ export async function showSmartEntry(
     const taskId = state.activeTask.id;
     const taskTitle = state.activeTask.title;
 
-    const continueFile = resolveSliceFile(basePath, milestoneId, sliceId, "CONTINUE");
-    const sDir = resolveSlicePath(basePath, milestoneId, sliceId);
-    const hasInterrupted = !!(continueFile && await loadFile(continueFile)) ||
-      !!(sDir && await loadFile(join(sDir, "continue.md")));
+    // A saved Work Checkpoint row of the task selects the resume path.
+    const hasInterrupted = readWorkCheckpoint({ milestoneId, sliceId, taskId }) !== null;
 
     const choice = await showNextAction(ctx, {
       title: `GSD — ${milestoneId} / ${sliceId}: ${sliceTitle}`,
@@ -2827,6 +2836,8 @@ export async function showSmartEntry(
         await dispatchWorkflow(pi, loadPrompt("guided-resume-task", {
           milestoneId,
           sliceId,
+          taskId,
+          resumeState: buildResumeSection(milestoneId, sliceId, taskId),
           skillActivation: buildSkillActivationBlock({
             base: basePath,
             milestoneId,

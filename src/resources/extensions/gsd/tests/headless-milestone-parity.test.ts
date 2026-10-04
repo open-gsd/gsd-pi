@@ -106,7 +106,7 @@ describe("headless milestone bootstrap — parity with interactive flow", () => 
       "PROJECT artifact",
       "REQUIREMENTS artifact",
       "`gsd_plan_milestone`",
-      "`.gsd/DISCUSSION-MANIFEST.json`",
+      "`gsd_checkpoint_save`",
     ]) {
       const escaped = artifact.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       assert.ok(
@@ -115,8 +115,8 @@ describe("headless milestone bootstrap — parity with interactive flow", () => 
       );
     }
     assert.ok(
-      /gates_completed === total/.test(multiSection),
-      "multi-milestone pre-condition must still enforce gates_completed === total",
+      /Do NOT write `\.gsd\/DISCUSSION-MANIFEST\.json`/.test(multiSection),
+      "multi-milestone gate tracking must not ask for the manifest file",
     );
     assert.ok(/Next steps:/.test(multiSection), "multi-milestone handoff must include next steps");
     assert.ok(/\/gsd auto/.test(multiSection), "multi-milestone handoff must mention /gsd auto");

@@ -12,7 +12,7 @@ import { readForensicsMarker } from "../forensics.js";
 import { resolveAllSkillReferences, renderPreferencesForSystemPrompt, loadEffectiveGSDPreferences } from "../preferences.js";
 import { renderRuntimeContractForSystemPrompt } from "../runtime-contract.js";
 import { resolveModelWithFallbacksForUnit } from "../preferences-models.js";
-import { gsdRoot, resolveGsdRootFile, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
+import { gsdRoot, resolveGsdRootFile, resolveSliceFile, resolveTaskFile, resolveTaskFiles, resolveTasksDir, relSliceFile, relSlicePath, relTaskFile } from "../paths.js";
 import { extractIntroAndRules } from "../knowledge-parser.js";
 import { knowledgeUnavailableBlock, readKnowledgeMarkdown, readUnimportedPatternsAndLessons } from "../knowledge-projection.js";
 import { isDbAvailable } from "../gsd-db.js";
@@ -21,7 +21,8 @@ import { resolveRepositoryProjectRoot } from "../repository-registry.js";
 import { getActiveAutoWorktreeContext } from "../auto-worktree-session-registry.js";
 import { getActiveWorktreeName, getWorktreeOriginalCwd } from "../worktree-session-state.js";
 import { deriveState } from "../state.js";
-import { formatOverridesSection, formatShortcut, loadFile, parseContinue, parseSummary } from "../files.js";
+import { formatOverridesSection, formatShortcut, loadFile, parseSummary } from "../files.js";
+import { buildResumeSection } from "../work-checkpoint.js";
 import { loadActiveOverrides } from "../overrides.js";
 import { toPosixPath } from "../../shared/mod.js";
 import { autoEnableCmuxPreferences } from "../commands-cmux.js";
@@ -71,7 +72,7 @@ export const BUNDLED_SKILL_TRIGGERS: Array<{ trigger: string; skill: string }> =
   { trigger: "Create a Model Context Protocol (MCP) server — tool design, error handling, Inspector testing, evals", skill: "create-mcp-server" },
   { trigger: "Write documentation, proposals, specs, RFCs, or READMEs for a fresh reader", skill: "write-docs" },
   { trigger: "Post-mortem a failed GSD auto-mode run using .gsd/activity, .gsd/journal, and .gsd/metrics.json", skill: "forensics" },
-  { trigger: "Prepare a clean cross-session handoff — continue.md + summary updates (pause/resume work)", skill: "handoff" },
+  { trigger: "Prepare a clean cross-session handoff — Work Checkpoint + summary updates (pause/resume work)", skill: "handoff" },
   { trigger: "Security review with STRIDE threat modeling and exploit-scenario reporting", skill: "security-review" },
   { trigger: "HTTP/REST/GraphQL API design — verbs, status codes, pagination, errors, idempotency, versioning", skill: "api-design" },
   { trigger: "Dependency upgrades — risk-batched, verified between batches, one major per commit", skill: "dependency-upgrade" },
@@ -822,7 +823,7 @@ async function buildTaskExecutionContextInjection(
   const slicePlanContent = slicePlanPath ? await loadFile(slicePlanPath) : null;
   const slicePlanExcerpt = extractSliceExecutionExcerpt(slicePlanContent, slicePlanRelPath);
   const priorTaskLines = await buildCarryForwardLines(basePath, milestoneId, sliceId, taskId);
-  const resumeSection = await buildResumeSection(basePath, milestoneId, sliceId);
+  const resumeSection = buildResumeSection(milestoneId, sliceId, taskId);
   const activeOverrides = loadActiveOverrides(basePath);
   const overridesSection = formatOverridesSection(activeOverrides);
 
@@ -882,37 +883,6 @@ async function buildCarryForwardLines(
     if (diagnostics) parts.push(`diagnostics: ${oneLine(diagnostics)}`);
     return `- \`${relPath}\` — ${parts.join(" | ")}`;
   }));
-}
-
-async function buildResumeSection(basePath: string, milestoneId: string, sliceId: string): Promise<string> {
-  const continueFile = resolveSliceFile(basePath, milestoneId, sliceId, "CONTINUE");
-  const legacyDir = resolveSlicePath(basePath, milestoneId, sliceId);
-  const legacyPath = legacyDir ? join(legacyDir, "continue.md") : null;
-  const continueContent = continueFile ? await loadFile(continueFile) : null;
-  const legacyContent = !continueContent && legacyPath ? await loadFile(legacyPath) : null;
-  const resolvedContent = continueContent ?? legacyContent;
-  const resolvedRelPath = continueContent
-    ? relSliceFile(basePath, milestoneId, sliceId, "CONTINUE")
-    : (legacyPath ? `${relSlicePath(basePath, milestoneId, sliceId)}/continue.md` : null);
-
-  if (!resolvedContent || !resolvedRelPath) {
-    return ["## Resume State", "- No continue file present. Start from the top of the task plan."].join("\n");
-  }
-
-  const cont = parseContinue(resolvedContent);
-  const lines = [
-    "## Resume State",
-    `Source: \`${resolvedRelPath}\``,
-    `- Status: ${cont.frontmatter.status || "in_progress"}`,
-  ];
-  if (cont.frontmatter.step && cont.frontmatter.totalSteps) {
-    lines.push(`- Progress: step ${cont.frontmatter.step} of ${cont.frontmatter.totalSteps}`);
-  }
-  if (cont.completedWork) lines.push(`- Completed: ${oneLine(cont.completedWork)}`);
-  if (cont.remainingWork) lines.push(`- Remaining: ${oneLine(cont.remainingWork)}`);
-  if (cont.decisions) lines.push(`- Decisions: ${oneLine(cont.decisions)}`);
-  if (cont.nextAction) lines.push(`- Next action: ${oneLine(cont.nextAction)}`);
-  return lines.join("\n");
 }
 
 function extractSliceExecutionExcerpt(content: string | null, relPath: string): string {

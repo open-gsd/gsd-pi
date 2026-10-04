@@ -196,7 +196,7 @@ guided-resume-task  (if task was interrupted)
 |--------|---------|-----------------|
 | `execute-task.md` | Execute a single task. Inlines full context stack. | `memory_query`, `gsd_task_complete` |
 | `reactive-execute.md` | Dispatch all ready tasks in parallel subagents. When batch tasks are still not closed and have no Attempt Result after retries, records a recovery block and writes a diagnostic slice blocker; task lifecycle still follows DB Attempt/recovery authority, not summary-file presence. | `subagent` × N |
-| `guided-resume-task.md` | Resume interrupted task. Reads `{{sliceId}}-CONTINUE.md` for continuation context. | `gsd_task_complete` |
+| `guided-resume-task.md` | Resume interrupted task. The saved Work Checkpoint row of the task is inlined as `{{resumeState}}`. | `gsd_task_complete`, `gsd_checkpoint_save` |
 | `quick-task.md` | Lightweight task outside milestone structure. No DB tools. | writes `{{summaryPath}}` directly |
 
 ### 5e. Quality Gates
@@ -348,7 +348,7 @@ gsd.db (derived GSDState)
 
 ```
 execute-task  ──[interrupted]──► guided-resume-task
-                                    reads {{sliceId}}-CONTINUE.md
+                                    gets the Work Checkpoint row as {{resumeState}}
 
 execute-task  ──[blocker]──────► replan-slice
                                     rewrites incomplete tasks only

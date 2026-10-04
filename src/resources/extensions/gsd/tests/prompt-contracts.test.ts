@@ -402,11 +402,11 @@ test("queue prompt requires waiting for user response between rounds", () => {
   assert.doesNotMatch(prompt, /treat that as permission to continue/i);
 });
 
-test("guided-resume-task prompt preserves recovery state until work is superseded", () => {
+test("guided-resume-task prompt takes recovery state from the Work Checkpoint and saves a new one on a second stop", () => {
   const prompt = readPrompt("guided-resume-task");
-  assert.match(prompt, /Do \*\*not\*\* delete the continue file immediately/i);
-  assert.match(prompt, /successfully completed or you have written a newer summary\/continue artifact/i);
-  assert.doesNotMatch(prompt, /Delete the continue file after reading it/i);
+  assert.match(prompt, /\{\{resumeState\}\}/);
+  assert.match(prompt, /save a new one with `gsd_checkpoint_save`/i);
+  assert.match(prompt, /Do not write a `CONTINUE\.md` or `continue\.md` file/i);
 });
 
 // ─── Prompt migration: execute-task → gsd_complete_task ───────────────

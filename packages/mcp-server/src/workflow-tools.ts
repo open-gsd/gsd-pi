@@ -222,6 +222,20 @@ type WorkflowToolExecutors = {
     basePath: string,
     invocation: PlanningInvocation,
   ) => Promise<unknown>;
+  executeCheckpointSave: (
+    params: {
+      milestoneId: string;
+      sliceId?: string;
+      taskId?: string;
+      kind: "pause" | "handoff";
+      confirmedContext: string;
+      unresolved?: string;
+      evidence?: string;
+      nextAction: string;
+    },
+    basePath: string,
+    invocation: PlanningInvocation,
+  ) => Promise<unknown>;
   executeSliceComplete: (
     params: {
       sliceId: string;
@@ -817,6 +831,7 @@ function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors
     "executeReplanSlice",
     "executeReplanTask",
     "executeReworkBriefSave",
+    "executeCheckpointSave",
     "executeSliceComplete",
     "executeCompleteMilestone",
     "executeValidateMilestone",
@@ -1771,6 +1786,19 @@ async function handleReworkBriefSave(
   );
 }
 
+async function handleCheckpointSave(
+  projectDir: string,
+  args: z.infer<typeof checkpointSaveSchema>,
+  invocation: PlanningInvocation,
+): Promise<unknown> {
+  await enforceWorkflowWriteGate("gsd_checkpoint_save", projectDir, args.milestoneId);
+  const { executeCheckpointSave } = await getWorkflowToolExecutors();
+  const { projectDir: _projectDir, ...params } = args;
+  return adaptExecutorResult(
+    await runSerializedWorkflowOperation(() => executeCheckpointSave(params, projectDir, invocation)),
+  );
+}
+
 async function handleCompleteMilestone(
   projectDir: string,
   args: z.infer<typeof completeMilestoneSchema>,
@@ -2392,6 +2420,19 @@ const reworkBriefSaveParams = {
   findings: z.array(reworkFindingSchema).min(1).describe("Structured rework findings for this task"),
 };
 const reworkBriefSaveSchema = z.object(reworkBriefSaveParams);
+
+const checkpointSaveParams = {
+  projectDir: projectDirParam,
+  milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M001)"),
+  sliceId: z.string().optional().describe("Slice ID (e.g. S01); omit for a milestone checkpoint"),
+  taskId: z.string().optional().describe("Task ID (e.g. T01); pass it when a task is in progress"),
+  kind: z.enum(["pause", "handoff"]).describe("pause: work stops and the same work resumes; handoff: another session or a later phase picks the work up"),
+  confirmedContext: nonEmptyString("confirmedContext").describe("What is done and confirmed, with evidence"),
+  unresolved: z.string().optional().describe("Remaining work, open questions, and what not to do"),
+  evidence: z.string().optional().describe("Commands, files and results that support the confirmed context"),
+  nextAction: nonEmptyString("nextAction").describe("The one concrete action the next session takes first"),
+};
+const checkpointSaveSchema = z.object(checkpointSaveParams);
 
 const sliceCompleteParams = {
   projectDir: projectDirParam,
@@ -3438,6 +3479,20 @@ export function registerWorkflowTools(
         parsed.projectDir,
         parsed,
         mcpPlanningInvocation("gsd_rework_brief_save", extra),
+      );
+    },
+  );
+
+  server.tool(
+    "gsd_checkpoint_save",
+    "Save a Work Checkpoint row (pause or handoff) for a milestone, slice or task. The row is the resume state; CONTINUE.md is rendered from it.",
+    checkpointSaveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const parsed = parseWorkflowArgs(checkpointSaveSchema, args);
+      return handleCheckpointSave(
+        parsed.projectDir,
+        parsed,
+        mcpPlanningInvocation("gsd_checkpoint_save", extra),
       );
     },
   );

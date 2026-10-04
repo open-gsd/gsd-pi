@@ -12,7 +12,6 @@ import { milestoneIdSort, findMilestoneIds } from './milestone-ids.js';
 import type {
   TaskPlanFile, TaskPlanFrontmatter,
   Summary, SummaryFrontmatter, SummaryRequires, FileModified,
-  Continue, ContinueFrontmatter, ContinueStatus,
   RequirementCounts,
   TaskIO,
   SecretsManifest, SecretsManifestEntry, SecretsManifestEntryStatus,
@@ -378,106 +377,6 @@ function _parseSummaryImpl(content: string): Summary {
   const knownLimitations = extractSection(body, 'Known Limitations') ?? '';
 
   return { frontmatter, title, oneLiner, whatHappened, deviations, filesModified, followUps, knownLimitations };
-}
-
-// ─── Continue Parser ───────────────────────────────────────────────────────
-
-export function parseContinue(content: string): Continue {
-  return cachedParse(content, 'continue', _parseContinueImpl);
-}
-
-function _parseContinueImpl(content: string): Continue {
-  const [fmLines, body] = splitFrontmatter(content);
-
-  const fm = fmLines ? parseFrontmatterMap(fmLines) : {};
-  const frontmatter: ContinueFrontmatter = {
-    milestone: (fm.milestone as string) || '',
-    slice: (fm.slice as string) || '',
-    task: (fm.task as string) || '',
-    step: typeof fm.step === 'string' ? parseInt(fm.step) : (fm.step as number) || 0,
-    totalSteps: typeof fm.total_steps === 'string' ? parseInt(fm.total_steps) : (fm.total_steps as number) ||
-      (typeof fm.totalSteps === 'string' ? parseInt(fm.totalSteps) : (fm.totalSteps as number) || 0),
-    status: ((fm.status as string) || 'in_progress') as ContinueStatus,
-    savedAt: (fm.saved_at as string) || (fm.savedAt as string) || '',
-  };
-
-  const completedWork = extractSection(body, 'Completed Work') || '';
-  const remainingWork = extractSection(body, 'Remaining Work') || '';
-  const decisions = extractSection(body, 'Decisions Made') || '';
-  const context = extractSection(body, 'Context') || '';
-  const nextAction = extractSection(body, 'Next Action') || '';
-
-  return { frontmatter, completedWork, remainingWork, decisions, context, nextAction };
-}
-
-// ─── Continue Formatter ────────────────────────────────────────────────────
-
-function formatFrontmatter(data: Record<string, unknown>): string {
-  const lines: string[] = ['---'];
-
-  for (const [key, value] of Object.entries(data)) {
-    if (value === undefined || value === null) continue;
-
-    if (Array.isArray(value)) {
-      if (value.length === 0) {
-        lines.push(`${key}: []`);
-      } else if (typeof value[0] === 'object' && value[0] !== null) {
-        lines.push(`${key}:`);
-        for (const obj of value) {
-          const entries = Object.entries(obj as Record<string, unknown>);
-          if (entries.length > 0) {
-            lines.push(`  - ${entries[0][0]}: ${entries[0][1]}`);
-            for (let i = 1; i < entries.length; i++) {
-              lines.push(`    ${entries[i][0]}: ${entries[i][1]}`);
-            }
-          }
-        }
-      } else {
-        lines.push(`${key}:`);
-        for (const item of value) {
-          lines.push(`  - ${item}`);
-        }
-      }
-    } else {
-      lines.push(`${key}: ${value}`);
-    }
-  }
-
-  lines.push('---');
-  return lines.join('\n');
-}
-
-export function formatContinue(cont: Continue): string {
-  const fm = cont.frontmatter;
-  const fmData: Record<string, unknown> = {
-    milestone: fm.milestone,
-    slice: fm.slice,
-    task: fm.task,
-    step: fm.step,
-    total_steps: fm.totalSteps,
-    status: fm.status,
-    saved_at: fm.savedAt,
-  };
-
-  const lines: string[] = [];
-  lines.push(formatFrontmatter(fmData));
-  lines.push('');
-  lines.push('## Completed Work');
-  lines.push(cont.completedWork);
-  lines.push('');
-  lines.push('## Remaining Work');
-  lines.push(cont.remainingWork);
-  lines.push('');
-  lines.push('## Decisions Made');
-  lines.push(cont.decisions);
-  lines.push('');
-  lines.push('## Context');
-  lines.push(cont.context);
-  lines.push('');
-  lines.push('## Next Action');
-  lines.push(cont.nextAction);
-
-  return lines.join('\n');
 }
 
 // ─── File I/O ──────────────────────────────────────────────────────────────

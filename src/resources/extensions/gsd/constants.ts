@@ -53,6 +53,8 @@ export const DISCUSS_TOOLS_ALLOWLIST: readonly string[] = [
   // Requirement updates
   "gsd_requirement_save",
   "gsd_requirement_update",
+  // Readiness decision of a queued milestone (multi-milestone flow)
+  "gsd_checkpoint_save",
   // Status read (workflow protocol)
   "gsd_project_snapshot",
 ];

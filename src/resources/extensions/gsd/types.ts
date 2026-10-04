@@ -29,7 +29,6 @@ export type Phase =
   | "complete"
   | "paused"
   | "blocked";
-export type ContinueStatus = "in_progress" | "interrupted" | "compacted";
 
 // ─── Roadmap (Milestone-level) ─────────────────────────────────────────────
 
@@ -169,27 +168,6 @@ export interface Summary {
   filesModified: FileModified[];
   followUps: string;
   knownLimitations: string;
-}
-
-// ─── Continue-Here ─────────────────────────────────────────────────────────
-
-export interface ContinueFrontmatter {
-  milestone: string;
-  slice: string;
-  task: string;
-  step: number;
-  totalSteps: number;
-  status: ContinueStatus;
-  savedAt: string;
-}
-
-export interface Continue {
-  frontmatter: ContinueFrontmatter;
-  completedWork: string;
-  remainingWork: string;
-  decisions: string;
-  context: string;
-  nextAction: string;
 }
 
 // ─── Secrets Manifest ──────────────────────────────────────────────────────

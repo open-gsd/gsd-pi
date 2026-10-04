@@ -1156,6 +1156,17 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
     passesWith: null,
   },
   {
+    tool: "gsd_checkpoint_save",
+    args: {
+      milestoneId: "M001",
+      sliceId: "S02",
+      kind: "handoff",
+      confirmedContext: "Parity checkpoint context",
+      nextAction: "Run the parity suite",
+    },
+    passesWith: null,
+  },
+  {
     tool: "gsd_capture_thought",
     piTool: "capture_thought",
     args: { category: "pattern", content: "Route every record write through one Domain Operation." },

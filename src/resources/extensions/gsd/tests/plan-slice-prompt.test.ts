@@ -210,10 +210,13 @@ test("guided resume prompt substitutes skillActivation", () => {
   const result = loadPrompt("guided-resume-task", {
     milestoneId: "M001",
     sliceId: "S01",
+    taskId: "T01",
+    resumeState: "## Resume State\n- Next action: Run the suite.",
     skillActivation: "Load debugging skill first.",
   });
 
   assert.ok(result.includes("Load debugging skill first."));
+  assert.ok(result.includes("- Next action: Run the suite."));
   assert.ok(!result.includes("{{skillActivation}}"));
 });
 

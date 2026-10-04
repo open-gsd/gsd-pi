@@ -24,14 +24,10 @@ test("a PROJECT.md file that lists a milestone with no directory does not warn a
   });
   const gsdDir = join(base, ".gsd");
   mkdirSync(join(gsdDir, "milestones", "M001"), { recursive: true });
-  // The file names M002, which has no directory, no CONTEXT and no manifest gate.
+  // The file names M002, which has no directory, no CONTEXT and no database row.
   writeFileSync(
     join(gsdDir, "PROJECT.md"),
     ["# Project", "", "| M001 | First milestone | active |", "| M002 | Second milestone | queued |", ""].join("\n"),
-  );
-  writeFileSync(
-    join(gsdDir, "DISCUSSION-MANIFEST.json"),
-    JSON.stringify({ primary: "M001", milestones: { M001: { gate: "discussed", context: "full" } }, total: 1, gates_completed: 1 }),
   );
   openDatabase(":memory:");
   saveContextArtifact("M001");

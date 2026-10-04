@@ -9,7 +9,8 @@
  * utility.
  */
 
-import { loadFile, parseContinue, parseSummary, formatOverridesSection, parseTaskPlanFile } from "./files.js";
+import { loadFile, parseSummary, formatOverridesSection, parseTaskPlanFile } from "./files.js";
+import { buildResumeSection } from "./work-checkpoint.js";
 import { loadActiveOverrides } from "./overrides.js";
 import type { Override } from "./files.js";
 import { extractVerdict } from "./verdict-parser.js";
@@ -1434,37 +1435,6 @@ function oneLine(text: string): string {
 
 // ─── Section Builders ──────────────────────────────────────────────────────
 
-export function buildResumeSection(
-  continueContent: string | null,
-  legacyContinueContent: string | null,
-  continueRelPath: string,
-  legacyContinueRelPath: string | null,
-): string {
-  const resolvedContent = continueContent ?? legacyContinueContent;
-  const resolvedRelPath = continueContent ? continueRelPath : legacyContinueRelPath;
-
-  if (!resolvedContent || !resolvedRelPath) {
-    return ["## Resume State", "- No continue file present. Start from the top of the task plan."].join("\n");
-  }
-
-  const cont = parseContinue(resolvedContent);
-  const lines = [
-    "## Resume State",
-    `Source: \`${resolvedRelPath}\``,
-    `- Status: ${cont.frontmatter.status || "in_progress"}`,
-  ];
-
-  if (cont.frontmatter.step && cont.frontmatter.totalSteps) {
-    lines.push(`- Progress: step ${cont.frontmatter.step} of ${cont.frontmatter.totalSteps}`);
-  }
-  if (cont.completedWork) lines.push(`- Completed: ${oneLine(cont.completedWork)}`);
-  if (cont.remainingWork) lines.push(`- Remaining: ${oneLine(cont.remainingWork)}`);
-  if (cont.decisions) lines.push(`- Decisions: ${oneLine(cont.decisions)}`);
-  if (cont.nextAction) lines.push(`- Next action: ${oneLine(cont.nextAction)}`);
-
-  return lines.join("\n");
-}
-
 export async function buildCarryForwardSection(priorSummaryPaths: string[], base: string): Promise<string> {
   if (priorSummaryPaths.length === 0) {
     return ["## Carry-Forward Context", "- No prior task summaries in this slice."].join("\n");
@@ -2881,19 +2851,8 @@ export async function buildExecuteTaskPrompt(
   const slicePlanContext = extractSliceExecutionExcerpt(slicePlanContent, relSliceFile(base, mid, sid, "PLAN"));
   trackPromptContext(contextTelemetry, "slice-plan", slicePlanContext ? "excerpt" : "skipped", slicePlanContext, slicePlanContext ? undefined : "missing");
 
-  // Check for continue file (new naming or legacy)
-  const continueFile = resolveSliceFile(base, mid, sid, "CONTINUE");
-  const legacyContinueDir = resolveSlicePath(base, mid, sid);
-  const legacyContinuePath = legacyContinueDir ? join(legacyContinueDir, "continue.md") : null;
-  const continueContent = continueFile ? await loadFile(continueFile) : null;
-  const legacyContinueContent = !continueContent && legacyContinuePath ? await loadFile(legacyContinuePath) : null;
-  const continueRelPath = relSliceFile(base, mid, sid, "CONTINUE");
-  const resumeSection = buildResumeSection(
-    continueContent,
-    legacyContinueContent,
-    continueRelPath,
-    legacyContinuePath ? `${relSlicePath(base, mid, sid)}/continue.md` : null,
-  );
+  // The head Work Checkpoint row of the task is the resume state.
+  const resumeSection = buildResumeSection(mid, sid, tid);
   trackPromptContext(contextTelemetry, "resume-section", resumeSection.trim() ? "inline" : "skipped", resumeSection, resumeSection.trim() ? undefined : "missing");
 
   // For minimal inline level, only carry forward the most recent prior summary

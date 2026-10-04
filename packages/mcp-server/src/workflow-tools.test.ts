@@ -1890,6 +1890,7 @@ export const executePlanSlice = noop;
 export const executeReplanSlice = noop;
 export const executeReplanTask = noop;
 export const executeReworkBriefSave = noop;
+export const executeCheckpointSave = noop;
 export const executeSliceComplete = (params, projectDir, invocation) =>
   captureSliceLifecycle("complete", params, projectDir, invocation);
 export const executeCompleteMilestone = (params, projectDir, invocation) =>
@@ -2396,6 +2397,7 @@ export const executePlanSlice = noop;
 export const executeReplanSlice = noop;
 export const executeReplanTask = noop;
 export const executeReworkBriefSave = noop;
+export const executeCheckpointSave = noop;
 export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = ["SUMMARY", "UAT", "CONTEXT", "PLAN"];
 export const resolveMilestoneStatusObservationTokenState = () => "malformed";
 export const executeMilestoneStatus = noop;

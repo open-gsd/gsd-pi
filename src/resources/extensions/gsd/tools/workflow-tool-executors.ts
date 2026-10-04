@@ -110,6 +110,7 @@ import type { ReplanTaskParams } from "./replan-task.js";
 import { handleReplanTask } from "./replan-task.js";
 import type { ReworkBriefSaveParams } from "./rework-brief.js";
 import { handleReworkBriefSave } from "./rework-brief.js";
+import { saveWorkCheckpoint, type SaveWorkCheckpointParams } from "../work-checkpoint.js";
 import type { ReopenMilestoneParams } from "./reopen-milestone.js";
 import { handleReopenMilestone } from "./reopen-milestone.js";
 import type { ReopenSliceParams } from "./reopen-slice.js";
@@ -133,7 +134,7 @@ import { renderStateProjection } from "../workflow-projections.js";
 import { loadEffectiveGSDPreferences } from "../preferences.js";
 import { parseProject } from "../schemas/parsers.js";
 import { autoSession, getAutoRuntimeSnapshot, isAutoActive } from "../auto-runtime-state.js";
-import { renderPlanCheckboxes, renderPlanFromDb, writeTaskSummaryProjection } from "../markdown-renderer.js";
+import { renderPlanCheckboxes, renderPlanFromDb, renderWorkCheckpoint, writeTaskSummaryProjection } from "../markdown-renderer.js";
 import { readUnitHarnessAbort, type UnitHarnessAbortRecord } from "../unit-runtime.js";
 import {
   prepareUatRun,
@@ -2678,6 +2679,53 @@ export async function executeReplanTask(
     return {
       content: [{ type: "text", text: `Error replanning task: ${msg}` }],
       details: { operation: "replan_task", error: msg },
+      isError: true,
+    };
+  }
+}
+
+/**
+ * Save a Work Checkpoint row for a milestone, slice or task, then render its
+ * CONTINUE file. The row is the resume state; a failed render is retried by
+ * the Projection Work that the operation enqueued.
+ */
+export async function executeCheckpointSave(
+  params: SaveWorkCheckpointParams,
+  basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
+): Promise<ToolExecutionResult> {
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) {
+    return {
+      content: [{ type: "text", text: "Error: GSD database is not available. Cannot save the checkpoint." }],
+      details: { operation: "checkpoint_save", error: "db_unavailable" },
+      isError: true,
+    };
+  }
+  try {
+    const saved = saveWorkCheckpoint(params, invocation);
+    const entity = [saved.milestoneId, saved.sliceId, saved.taskId].filter(Boolean).join("/");
+    let stale = false;
+    try {
+      await renderWorkCheckpoint(basePath, saved.milestoneId, saved.sliceId ?? undefined);
+    } catch (err) {
+      stale = true;
+      logWarning("tool", `gsd_checkpoint_save render failed: ${(err as Error).message}`);
+    }
+    return {
+      content: [{
+        type: "text",
+        text: `Saved ${params.kind} checkpoint ${saved.sequence} for ${entity}.` +
+          (stale ? " CONTINUE.md is not rendered yet; the database row is the resume state." : ""),
+      }],
+      details: { operation: "checkpoint_save", ...saved, ...(stale ? { stale: true } : {}) },
+    };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `checkpoint_save tool failed: ${msg}`, { tool: "gsd_checkpoint_save", error: String(err) });
+    return {
+      content: [{ type: "text", text: `Error saving checkpoint: ${msg}` }],
+      details: { operation: "checkpoint_save", error: msg },
       isError: true,
     };
   }
