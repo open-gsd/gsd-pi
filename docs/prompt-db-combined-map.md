@@ -155,11 +155,12 @@ The dispatch loop reads DB state to determine which prompt to issue next. This i
 ```
 DB State                                           → Prompt Dispatched
 ───────────────────────────────────────────────────────────────────────
-PREFERENCES.md missing                             → guided-workflow-preferences
+no project.setup.recorded event for 'workflow-preferences'
+  (and PROJECT + REQUIREMENTS not both saved)      → workflow preferences defaults (in-process)
 
-artifacts WHERE artifact_type='PROJECT' missing    → guided-discuss-project
+no valid PROJECT artifact row                      → guided-discuss-project
 
-requirements table empty                           → guided-discuss-requirements
+no valid REQUIREMENTS artifact row                 → guided-discuss-requirements
 
 newest project.setup.recorded event for 'research-decision'
   absent or decision='skip'                        → no project research (default)

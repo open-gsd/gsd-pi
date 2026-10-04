@@ -109,7 +109,7 @@ planning_depth: deep
 | `light` | Default. Uses the normal milestone discussion flow. |
 | `deep` | Runs workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, a research decision, and optional project research before milestone planning. |
 
-Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in `.gsd/runtime/research-decision.json`; choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
+Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in the database; ask for research during the project or requirements discussion, and no recorded decision means `skip`. Choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
 
 ### `planning_subagents`
 

@@ -436,9 +436,9 @@ projection-delivery contracts are owned by the
 
 ## 10. Dispatch Rule Priority Order
 
-`auto-dispatch.ts` evaluates 28 rules top-to-bottom, first match wins. Source of
+`auto-dispatch.ts` evaluates 29 rules top-to-bottom, first match wins. Source of
 truth is the `DISPATCH_RULES` array in `auto-dispatch.ts`; the canary test
-`tests/dispatch-rule-coverage.test.ts` pins the count at 29.
+`tests/dispatch-rule-coverage.test.ts` pins the count.
 
 ```
 Priority  Rule                                          Fires When
@@ -451,10 +451,10 @@ Priority  Rule                                          Fires When
  6        uat-verdict-gate (non-PASS continues)         UAT non-PASS — continue for remediation; final milestone closure still requires PASS sign-off
  7        reassess-roadmap (post-completion)            slice closed, roadmap needs update
  8        needs-discussion → discuss-milestone          milestone explicitly flagged for discussion
- 9        deep: workflow-preferences                    deep mode + PREFERENCES.md missing
-10        deep: discuss-project                         deep mode + PROJECT artifact missing
-11        deep: discuss-requirements                    deep mode + REQUIREMENTS missing
-12        deep: research-project                        deep mode + research approved, files missing
+ 9        deep: workflow-preferences                    deep mode + workflow preferences fact not recorded (in-process, no unit)
+10        deep: discuss-project                         deep mode + no valid PROJECT artifact row
+11        deep: discuss-requirements                    deep mode + no valid REQUIREMENTS artifact row
+12        deep: research-project                        deep mode + recorded decision is `research`, files missing
 13        pre-planning (no context) → discuss-milestone active milestone, CONTEXT missing
 14        pre-planning (no research) → research-mile…   CONTEXT done, RESEARCH missing
 15        pre-planning (has research) → plan-milestone  CONTEXT + RESEARCH done, ROADMAP missing
@@ -465,12 +465,13 @@ Priority  Rule                                          Fires When
 20        planning → plan-slice                         slice CONTEXT done, PLAN missing
 21        evaluating-gates → gate-evaluate              gates pending evaluation
 22        replanning-slice → replan-slice               slice in 'replanning' phase
-23        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no reactive blocker
-24        executing → execute-task (recover plan)       task plan missing — recover via plan-slice
-25        executing → execute-task                      1–2 tasks ready (sequential mode)
-26        validating-milestone → validate-milestone     all slices closed, not yet validated
-27        completing-milestone → complete-milestone     validated, not yet completed
-28        complete → stop                               nothing left to do
+23        executing → replan-task recovery              pending Task recovery action for the active task
+24        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no reactive blocker
+25        executing → execute-task (recover plan)       task plan missing — recover via plan-slice
+26        executing → execute-task                      1–2 tasks ready (sequential mode)
+27        validating-milestone → validate-milestone     all slices closed, not yet validated
+28        completing-milestone → complete-milestone     validated, not yet completed
+29        complete → stop                               nothing left to do
 ```
 
 ---

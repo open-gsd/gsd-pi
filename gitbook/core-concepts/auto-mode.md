@@ -72,10 +72,10 @@ Workflow Preferences -> Project Context -> Requirements -> Research Decision -> 
 | `.gsd/PREFERENCES.md` | `--deep` / `workflow-preferences` | Holds `planning_depth: deep` and captured workflow settings |
 | `.gsd/PROJECT.md` | `discuss-project` | Project vision, users, anti-goals, constraints, milestone sequence |
 | `.gsd/REQUIREMENTS.md` | `discuss-requirements` | Capability contract with Active, Validated, Deferred, and Out of Scope requirements |
-| `.gsd/runtime/research-decision.json` | `research-decision` | Records whether to run project research or skip it |
+| (database only) | `discuss-project` or `discuss-requirements` | Records `research` when you ask for project research; no recorded decision means `skip` |
 | `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, `PITFALLS.md` | `research-project` | Optional four-way project research when the decision is `research` |
 
-The research-decision unit only records the choice. If the decision is `research`, the next gate fans out four project research passes. Those outputs inform planning and requirement review; they do not silently create binding requirements.
+If the decision is `research`, the next gate fans out four project research passes. Those outputs inform planning and requirement review; they do not silently create binding requirements.
 
 ## Controlling Auto Mode
 
