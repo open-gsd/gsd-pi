@@ -449,19 +449,23 @@ describe("workflow MCP tools", () => {
       "gsd_milestone_reopen",
       "gsd_reopen_milestone",
       "gsd_prepare_milestone_subjective_uat",
-      "gsd_answer_milestone_subjective_uat",
     ]) {
       const tool = server.tools.find((candidate) => candidate.name === name);
       assert.ok(tool, `${name} must be registered`);
       assert.ok(!("idempotencyKey" in tool.params), `${name} identity must remain private`);
       assert.ok(!("actorId" in tool.params), `${name} actor identity must remain private`);
     }
-    const answer = server.tools.find((candidate) =>
-      candidate.name === "gsd_answer_milestone_subjective_uat"
+  });
+
+  it("registers no tool that answers a subjective UAT question for the user", () => {
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+
+    assert.deepEqual(
+      server.tools.filter((candidate) => /answer/.test(candidate.name)).map((candidate) => candidate.name),
+      [],
+      "Human Acceptance comes only from the host command /gsd uat-answer",
     );
-    assert.ok(answer);
-    assert.ok("selectedOptionId" in answer.params);
-    assert.ok("verbatimResponse" in answer.params);
   });
 
   it("routes task recovery resume to the worktree owning the action", async () => {

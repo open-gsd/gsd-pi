@@ -164,6 +164,11 @@ export async function handleOpsCommand(trimmed: string, ctx: ExtensionCommandCon
     await handleDbRestoreBackup(ctx, projectRoot(), trimmed.replace(/^db restore-backup\s*/, "").trim());
     return true;
   }
+  if (trimmed === "uat-answer" || trimmed.startsWith("uat-answer ")) {
+    const { handleUatAnswer } = await import("../../commands-uat-answer.js");
+    await handleUatAnswer(trimmed.replace(/^uat-answer\s*/, "").trim(), ctx, projectRoot());
+    return true;
+  }
   if (trimmed === "task settle" || trimmed.startsWith("task settle ")) {
     const { handleTaskSettle } = await import("../../commands-task-settle.js");
     await handleTaskSettle(trimmed.replace(/^task settle\s*/, "").trim(), ctx, projectRoot());

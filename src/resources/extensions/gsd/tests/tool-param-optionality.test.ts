@@ -177,15 +177,13 @@ test("gsd_validate_milestone — evidence schema descriptions state their invari
   assert.match(revision, /re-produce the evidence/i);
 });
 
-test("milestone subjective UAT tools keep user identity out of model arguments", () => {
-  const prepare = getTool("gsd_prepare_milestone_subjective_uat");
-  const answer = getTool("gsd_answer_milestone_subjective_uat");
-  assert.ok(prepare, "subjective UAT preparation must be registered");
-  assert.ok(answer, "subjective UAT answer callback must be registered");
-  assert.equal(answer.parameters.properties.actorId, undefined);
-  assert.equal(answer.parameters.properties.actorType, undefined);
-  assert.ok(answer.parameters.properties.selectedOptionId);
-  assert.ok(answer.parameters.properties.verbatimResponse);
+test("the model can prepare a subjective UAT question but has no tool to answer it", () => {
+  assert.ok(getTool("gsd_prepare_milestone_subjective_uat"), "subjective UAT preparation must be registered");
+  assert.equal(
+    getTool("gsd_answer_milestone_subjective_uat"),
+    undefined,
+    "Human Acceptance comes only from the host command /gsd uat-answer",
+  );
 });
 
 // ─── gsd_slice_complete: enrichment arrays must be optional ──────────────────

@@ -137,14 +137,6 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		auditEvent: "workflow.milestone.subjective_uat.prepare",
 	},
 	{
-		canonicalName: "gsd_answer_milestone_subjective_uat",
-		aliases: [],
-		schemaId: "workflow.milestone.subjective_uat.answer",
-		executorId: "executeAnswerMilestoneSubjectiveUat",
-		writePolicy: "write",
-		auditEvent: "workflow.milestone.subjective_uat.answer",
-	},
-	{
 		canonicalName: "gsd_reassess_roadmap",
 		aliases: ["gsd_roadmap_reassess"],
 		schemaId: "workflow.roadmap.reassess",

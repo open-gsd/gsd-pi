@@ -39,6 +39,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "triage", desc: "Manually trigger triage of pending captures" },
   { cmd: "dispatch", desc: "Dispatch a specific phase directly" },
   { cmd: "verdict", desc: "Override an unadopted compatibility milestone validation verdict" },
+  { cmd: "uat-answer", desc: "Answer an open subjective UAT question (accept or reject); only you can record it" },
   { cmd: "history", desc: "View execution history" },
   { cmd: "undo", desc: "Revert last completed unit" },
   { cmd: "undo-task", desc: "Reset a specific task's completion state (DB + markdown)" },

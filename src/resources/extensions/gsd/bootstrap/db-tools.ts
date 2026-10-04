@@ -2067,7 +2067,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet: "Prepare a genuine subjective Milestone UAT decision",
 		promptGuidelines: [
 			"Use only when acceptance genuinely requires human judgment and cannot be decided by executable evidence.",
-			"After preparation, present the returned options to the user; do not fabricate or infer their answer.",
+			"After preparation, present the question to the user and stop. Only the user can answer, with /gsd uat-answer; you have no tool that records the answer.",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ minLength: 1 }),
@@ -2111,65 +2111,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					"gsd_prepare_milestone_subjective_uat",
 					toolCallId,
 				),
-			);
-		},
-	});
-
-	registerWorkflowTool(pi, {
-		name: "gsd_answer_milestone_subjective_uat",
-		label: "Answer Milestone Subjective UAT",
-		description:
-			"Record a user-selected answer to a prepared subjective Milestone UAT question using the authenticated Pi session identity.",
-		promptSnippet: "Record the user's actual subjective Milestone UAT answer",
-		promptGuidelines: [
-			"Call only after the user explicitly chooses one of the prepared options.",
-			"Pass the user's response verbatim; actor identity is derived from the active session and is not a tool argument.",
-		],
-		parameters: Type.Object({
-			criterionId: Type.String({ minLength: 1 }),
-			questionId: Type.String({ minLength: 1 }),
-			interactionId: Type.String({ minLength: 1 }),
-			selectedOptionId: Type.String({ minLength: 1 }),
-			verbatimResponse: Type.String({ minLength: 1 }),
-			rationale: Type.String({ minLength: 1 }),
-			testedSourceRevision: Type.String({ minLength: 1 }),
-		}),
-		execute: async (
-			toolCallId: string,
-			params: any,
-			_signal: AbortSignal | undefined,
-			_onUpdate: unknown,
-			_ctx: any,
-		) => {
-			const actorId = _ctx?.sessionManager?.getSessionId?.();
-			if (typeof actorId !== "string" || !actorId.trim()) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Error answering subjective UAT: authenticated Pi session identity is unavailable",
-						},
-					],
-					details: {
-						operation: "answer_milestone_subjective_uat",
-						error: "user_identity_unavailable",
-					},
-					isError: true,
-				};
-			}
-			const { executeAnswerMilestoneSubjectiveUat } =
-				await loadWorkflowExecutors();
-			return executeAnswerMilestoneSubjectiveUat(
-				params,
-				resolveWorkflowToolBasePath(_ctx, params),
-				{
-					...piExecutionInvocation(
-						"gsd_answer_milestone_subjective_uat",
-						toolCallId,
-					),
-					actorType: "user",
-					actorId: actorId.trim(),
-				},
 			);
 		},
 	});

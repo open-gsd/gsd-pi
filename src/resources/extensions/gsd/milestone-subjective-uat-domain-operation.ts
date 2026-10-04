@@ -86,6 +86,66 @@ export function hasPendingMilestoneSubjectiveUat(milestoneId: string): boolean {
   return row !== undefined;
 }
 
+export interface OpenMilestoneSubjectiveUat {
+  milestoneId: string;
+  criterionId: string;
+  questionId: string;
+  interactionId: string;
+  focusedPrompt: string;
+  recommendation: string;
+  testedSourceRevision: string;
+  accepted: { optionId: string; label: string };
+  rejected: { optionId: string; label: string };
+}
+
+/**
+ * Every prepared subjective UAT question that waits for a person: the binding
+ * the answer Domain Operation needs, read for the host answer command.
+ */
+export function listOpenMilestoneSubjectiveUat(): OpenMilestoneSubjectiveUat[] {
+  const rows = getDb().prepare(`
+    SELECT lifecycle.milestone_id,
+           json_extract(event.payload_json, '$.criterionId') AS criterion_id,
+           question.question_id, interaction.interaction_id,
+           interaction.focused_prompt, interaction.recommendation_text,
+           json_extract(event.payload_json, '$.testedSourceRevision') AS tested_source_revision,
+           accepted.option_id AS accepted_option_id, accepted.label AS accepted_label,
+           rejected.option_id AS rejected_option_id, rejected.label AS rejected_label
+    FROM workflow_domain_events event
+    JOIN workflow_open_questions question
+      ON question.question_id = json_extract(event.payload_json, '$.questionId')
+     AND question.project_id = event.project_id
+    JOIN workflow_interactions interaction
+      ON interaction.interaction_id = json_extract(event.payload_json, '$.interactionId')
+     AND interaction.question_id = question.question_id
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = question.lifecycle_id
+     AND lifecycle.project_id = question.project_id
+    JOIN workflow_interaction_options accepted
+      ON accepted.interaction_id = interaction.interaction_id
+     AND accepted.option_id = json_extract(event.payload_json, '$.acceptedOptionId')
+    JOIN workflow_interaction_options rejected
+      ON rejected.interaction_id = interaction.interaction_id
+     AND rejected.option_id = json_extract(event.payload_json, '$.rejectedOptionId')
+    WHERE event.event_type = 'milestone.subjective-uat.prepared'
+      AND question.question_status = 'open'
+      AND interaction.interaction_kind = 'subjective-uat'
+      AND interaction.presentation_state = 'presented'
+    ORDER BY lifecycle.milestone_id, question.question_id
+  `).all() as Array<Record<string, unknown>>;
+  return rows.map((row) => ({
+    milestoneId: String(row["milestone_id"]),
+    criterionId: String(row["criterion_id"]),
+    questionId: String(row["question_id"]),
+    interactionId: String(row["interaction_id"]),
+    focusedPrompt: String(row["focused_prompt"]),
+    recommendation: String(row["recommendation_text"]),
+    testedSourceRevision: String(row["tested_source_revision"]),
+    accepted: { optionId: String(row["accepted_option_id"]), label: String(row["accepted_label"]) },
+    rejected: { optionId: String(row["rejected_option_id"]), label: String(row["rejected_label"]) },
+  }));
+}
+
 function requireNonBlank(value: string, field: string): string {
   const normalized = value.trim();
   if (normalized.length === 0) throw new Error(`${field} must not be blank`);

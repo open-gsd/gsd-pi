@@ -121,9 +121,7 @@ import { handleReassessRoadmap } from "./reassess-roadmap.js";
 import type { ValidateMilestoneOptions, ValidateMilestoneParams } from "./validate-milestone.js";
 import { handleValidateMilestone } from "./validate-milestone.js";
 import {
-  answerMilestoneSubjectiveUat,
   prepareMilestoneSubjectiveUat,
-  type AnswerMilestoneSubjectiveUatInput,
   type PrepareMilestoneSubjectiveUatInput,
 } from "../milestone-subjective-uat-domain-operation.js";
 import { logError, logWarning } from "../workflow-logger.js";
@@ -1012,10 +1010,6 @@ export type ReopenMilestoneExecutorParams = ReopenMilestoneParams;
 export type ValidateMilestoneExecutorParams = ValidateMilestoneParams;
 export type PrepareMilestoneSubjectiveUatExecutorParams = Omit<
   PrepareMilestoneSubjectiveUatInput,
-  "invocation"
->;
-export type AnswerMilestoneSubjectiveUatExecutorParams = Omit<
-  AnswerMilestoneSubjectiveUatInput,
   "invocation"
 >;
 export type ReassessRoadmapExecutorParams = ReassessRoadmapParams;
@@ -2093,26 +2087,20 @@ export async function executePrepareMilestoneSubjectiveUat(
   }
   try {
     const result = prepareMilestoneSubjectiveUat({ ...params, invocation });
-    // The answer tool binds on these exact values, and the text channel is the
-    // only surface the model sees — render the full binding verbatim (#2296).
     const optionLines = result.options
-      .map((option) =>
-        `  optionId: ${option.optionId} | disposition: ${option.disposition}` +
-        `${option.recommended ? " | recommended" : ""} | label: "${option.label}"`
-      )
+      .map((option) => `  ${option.disposition}${option.recommended ? " (recommended)" : ""}: "${option.label}"`)
       .join("\n");
     return {
       content: [{
         type: "text",
         text: [
           `Prepared subjective UAT for ${result.milestoneId}: ${params.focusedPrompt}`,
-          "Answer binding for gsd_answer_milestone_subjective_uat:",
-          `  criterionId: ${result.criterionId}`,
           `  questionId: ${result.questionId}`,
-          `  interactionId: ${result.interactionId}`,
-          `  testedSourceRevision: ${result.testedSourceRevision}`,
-          "Options (verbatimResponse must equal the label text exactly — the double quotes below are delimiters, not part of the value):",
+          "Options:",
           optionLines,
+          // Human Acceptance has no model tool: only the person can record it.
+          "Present this question and the options to the user, then stop. The user records the answer with " +
+            '/gsd uat-answer <accept|reject> --rationale "why". You cannot record it.',
         ].join("\n"),
       }],
       details: {
@@ -2125,40 +2113,6 @@ export async function executePrepareMilestoneSubjectiveUat(
     return {
       content: [{ type: "text", text: `Error preparing subjective UAT: ${message}` }],
       details: { operation: "prepare_milestone_subjective_uat", error: message },
-      isError: true,
-    };
-  }
-}
-
-export async function executeAnswerMilestoneSubjectiveUat(
-  params: AnswerMilestoneSubjectiveUatExecutorParams,
-  basePath: string,
-  invocation: ExecutionInvocation,
-): Promise<ToolExecutionResult> {
-  if (!await ensureDbOpen(basePath)) {
-    return {
-      content: [{ type: "text", text: "Error: GSD database is not available. Cannot answer subjective UAT." }],
-      details: { operation: "answer_milestone_subjective_uat", error: "db_unavailable" },
-      isError: true,
-    };
-  }
-  try {
-    const result = answerMilestoneSubjectiveUat({ ...params, invocation });
-    return {
-      content: [{
-        type: "text",
-        text: `Recorded the authenticated subjective UAT response as ${result.disposition}.`,
-      }],
-      details: {
-        operation: "answer_milestone_subjective_uat",
-        ...result,
-      },
-    };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return {
-      content: [{ type: "text", text: `Error answering subjective UAT: ${message}` }],
-      details: { operation: "answer_milestone_subjective_uat", error: message },
       isError: true,
     };
   }

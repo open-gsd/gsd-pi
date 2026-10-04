@@ -1,5 +1,6 @@
 // Project/App: gsd-pi
-// File Purpose: The prepare subjective-UAT tool text must carry the full answer binding (issue #2296).
+// File Purpose: The prepare subjective-UAT tool hands the question to the user, and only the
+// host command /gsd uat-answer records Human Acceptance (ADR-046).
 
 import assert from "node:assert/strict";
 import { mkdirSync, rmSync } from "node:fs";
@@ -19,14 +20,10 @@ import {
   insertMilestone,
   openDatabase,
 } from "../gsd-db.ts";
-import {
-  executeAnswerMilestoneSubjectiveUat,
-  executePrepareMilestoneSubjectiveUat,
-} from "../tools/workflow-tool-executors.ts";
-import {
-  internalExecutionInvocation,
-  type ExecutionInvocation,
-} from "../execution-invocation.ts";
+import { executePrepareMilestoneSubjectiveUat } from "../tools/workflow-tool-executors.ts";
+import { internalExecutionInvocation } from "../execution-invocation.ts";
+import { handleUatAnswer } from "../commands-uat-answer.ts";
+import { WORKFLOW_TOOL_CONTRACTS } from "@opengsd/contracts";
 import { normalizeRealPath } from "../paths.ts";
 
 let basePath: string | undefined;
@@ -93,19 +90,16 @@ function setup(): string {
   return basePath;
 }
 
-function parseBindingFromText(text: string) {
-  const criterionId = /criterionId: (\S+)/.exec(text)?.[1];
-  const questionId = /questionId: (\S+)/.exec(text)?.[1];
-  const interactionId = /interactionId: (\S+)/.exec(text)?.[1];
-  const testedSourceRevision = /testedSourceRevision: (.+)/.exec(text)?.[1]?.trim();
-  const options = text.split("\n")
-    .filter((line) => line.includes("optionId:"))
-    .map((line) => ({
-      optionId: /optionId: (\S+)/.exec(line)![1]!,
-      disposition: /disposition: (\w+)/.exec(line)![1]!,
-      label: /label: "(.*)"/.exec(line)![1]!,
-    }));
-  return { criterionId, questionId, interactionId, testedSourceRevision, options };
+/** Run the host command as a person does, and return what it told them. */
+async function uatAnswer(base: string, args: string): Promise<string[]> {
+  const messages: string[] = [];
+  const ctx = { ui: { notify: (message: string) => { messages.push(message); } } };
+  await handleUatAnswer(args, ctx as unknown as Parameters<typeof handleUatAnswer>[1], base);
+  return messages;
+}
+
+function humanAcceptances(): Array<Record<string, unknown>> {
+  return db().prepare("SELECT disposition, actor_id, rationale FROM workflow_human_acceptances").all();
 }
 
 afterEach(() => {
@@ -114,7 +108,15 @@ afterEach(() => {
   basePath = undefined;
 });
 
-test("prepare subjective UAT renders the full answer binding into the tool text", async () => {
+test("no workflow tool contract records Human Acceptance", () => {
+  assert.deepEqual(
+    WORKFLOW_TOOL_CONTRACTS.filter((contract) => /answer/.test(contract.canonicalName)).map((contract) => contract.canonicalName),
+    [],
+    "no workflow tool contract may answer a question for the user",
+  );
+});
+
+test("prepare subjective UAT hands the question to the user and gives the model no answer binding", async () => {
   const base = setup();
   const result = await executePrepareMilestoneSubjectiveUat(
     prepareExecutorInput(),
@@ -124,122 +126,64 @@ test("prepare subjective UAT renders the full answer binding into the tool text"
   assert.notEqual(result.isError, true);
 
   const text = textOf(result);
-  const details = result.details as {
-    criterionId: string;
-    questionId: string;
-    interactionId: string;
-    testedSourceRevision: string;
-    options: Array<{ optionId: string; label: string }>;
-  };
-
   assert.ok(
     text.startsWith("Prepared subjective UAT for M001: Does the guided flow feel natural and clear?"),
   );
-  assert.ok(text.includes(details.criterionId), "text must include criterionId");
-  assert.ok(text.includes(details.questionId), "text must include questionId");
-  assert.ok(text.includes(details.interactionId), "text must include interactionId");
-  assert.ok(text.includes(details.testedSourceRevision), "text must include testedSourceRevision");
-  assert.equal(details.options.length, 2);
-  for (const option of details.options) {
-    assert.ok(text.includes(option.optionId), `text must include optionId ${option.optionId}`);
-    assert.ok(
-      text.includes(`"${option.label}"`),
-      `label must be rendered verbatim inside delimiters: ${option.label}`,
-    );
-  }
+  assert.match(text, /\/gsd uat-answer <accept\|reject>/);
+  assert.match(text, /You cannot record it/);
+  assert.deepEqual(humanAcceptances(), [], "preparing a question records no acceptance");
 });
 
-test("a valid subjective UAT answer can be constructed from the prepare text alone", async () => {
+test("/gsd uat-answer accept records Human Acceptance for the prepared question", async () => {
   const base = setup();
-  const prepared = await executePrepareMilestoneSubjectiveUat(
+  await executePrepareMilestoneSubjectiveUat(
     prepareExecutorInput(),
     base,
-    internalExecutionInvocation("test/uat-text/prepare/roundtrip"),
+    internalExecutionInvocation("test/uat-text/prepare/accept"),
   );
-  assert.notEqual(prepared.isError, true);
 
-  // Parse the binding out of the TEXT channel only — no peeking at details.
-  const binding = parseBindingFromText(textOf(prepared));
-  assert.ok(binding.criterionId, "text must yield criterionId");
-  assert.ok(binding.questionId, "text must yield questionId");
-  assert.ok(binding.interactionId, "text must yield interactionId");
-  assert.ok(binding.testedSourceRevision, "text must yield testedSourceRevision");
-  assert.equal(binding.options.length, 2, "text must yield both options");
-  const accepted = binding.options.find((option) => option.disposition === "accepted");
-  assert.ok(accepted, "text must identify which option accepts");
+  const listed = await uatAnswer(base, "");
+  assert.match(listed.join("\n"), /Does the guided flow feel natural and clear\?/);
+  assert.deepEqual(humanAcceptances(), [], "listing the open questions records nothing");
 
-  const answerInvocation: ExecutionInvocation = {
-    idempotencyKey: "test/uat-text/answer/roundtrip",
-    sourceTransport: "internal",
-    actorType: "user",
-    actorId: "test-user",
-  };
-  const answered = await executeAnswerMilestoneSubjectiveUat({
-    criterionId: binding.criterionId!,
-    questionId: binding.questionId!,
-    interactionId: binding.interactionId!,
-    selectedOptionId: accepted.optionId,
-    verbatimResponse: accepted.label,
-    rationale: "The user explicitly accepted the guided experience.",
-    testedSourceRevision: binding.testedSourceRevision!,
-  }, base, answerInvocation);
-  assert.notEqual(answered.isError, true, `answer must be accepted from text alone: ${textOf(answered)}`);
-  assert.match(textOf(answered), /accepted/);
+  const messages = await uatAnswer(base, 'accept --rationale "The guided flow is clear to me."');
 
-  assert.deepEqual(db().prepare(`
-    SELECT question_status FROM workflow_open_questions
-    WHERE question_id = :question_id
-  `).get({ ":question_id": binding.questionId }), { question_status: "answered" });
-  assert.equal(Number(db().prepare(
-    "SELECT COUNT(*) AS count FROM workflow_human_acceptances",
-  ).get()?.["count"]), 1, "the answer must record the human acceptance so validate can pass");
+  assert.match(messages.join("\n"), /Recorded your subjective UAT answer for M001 as accepted/);
+  assert.deepEqual(humanAcceptances(), [{
+    disposition: "accepted",
+    actor_id: "gsd-cli-operator",
+    rationale: "The guided flow is clear to me.",
+  }]);
+  assert.deepEqual(
+    db().prepare("SELECT question_status FROM workflow_open_questions").all(),
+    [{ question_status: "answered" }],
+  );
 });
 
-test("a rejected subjective UAT answer can be constructed from the prepare text alone", async () => {
+test("/gsd uat-answer reject records a rejected Human Acceptance", async () => {
   const base = setup();
-  const prepared = await executePrepareMilestoneSubjectiveUat(
+  await executePrepareMilestoneSubjectiveUat(
     prepareExecutorInput(),
     base,
-    internalExecutionInvocation("test/uat-text/prepare/reject-roundtrip"),
+    internalExecutionInvocation("test/uat-text/prepare/reject"),
   );
-  assert.notEqual(prepared.isError, true);
 
-  // Parse the binding out of the TEXT channel only — no peeking at details.
-  const binding = parseBindingFromText(textOf(prepared));
-  assert.ok(binding.criterionId, "text must yield criterionId");
-  assert.ok(binding.questionId, "text must yield questionId");
-  assert.ok(binding.interactionId, "text must yield interactionId");
-  assert.ok(binding.testedSourceRevision, "text must yield testedSourceRevision");
-  const rejected = binding.options.find((option) => option.disposition === "rejected");
-  assert.ok(rejected, "text must identify which option rejects");
+  await uatAnswer(base, 'reject --rationale "The second step is confusing."');
 
-  const answerInvocation: ExecutionInvocation = {
-    idempotencyKey: "test/uat-text/answer/reject-roundtrip",
-    sourceTransport: "internal",
-    actorType: "user",
-    actorId: "test-user",
-  };
-  const answered = await executeAnswerMilestoneSubjectiveUat({
-    criterionId: binding.criterionId!,
-    questionId: binding.questionId!,
-    interactionId: binding.interactionId!,
-    selectedOptionId: rejected.optionId,
-    verbatimResponse: rejected.label,
-    rationale: "The user rejected the experience pending another revision.",
-    testedSourceRevision: binding.testedSourceRevision!,
-  }, base, answerInvocation);
-  assert.notEqual(answered.isError, true, `answer must be accepted from text alone: ${textOf(answered)}`);
-  assert.match(textOf(answered), /rejected/);
-  assert.equal(answered.details.disposition, "rejected");
+  assert.deepEqual(humanAcceptances().map((row) => row["disposition"]), ["rejected"]);
+});
 
-  assert.deepEqual(db().prepare(`
-    SELECT disposition FROM workflow_human_acceptances
-    WHERE criterion_id = :criterion_id
-  `).get({ ":criterion_id": binding.criterionId }), { disposition: "rejected" });
-  assert.deepEqual(db().prepare(`
-    SELECT question_status FROM workflow_open_questions
-    WHERE question_id = :question_id
-  `).get({ ":question_id": binding.questionId }), { question_status: "answered" });
+test("/gsd uat-answer records nothing without a rationale or without an open question", async () => {
+  const base = setup();
+  assert.match((await uatAnswer(base, 'accept --rationale "ok"')).join("\n"), /no subjective UAT question is waiting/);
+
+  await executePrepareMilestoneSubjectiveUat(
+    prepareExecutorInput(),
+    base,
+    internalExecutionInvocation("test/uat-text/prepare/no-rationale"),
+  );
+  assert.match((await uatAnswer(base, "accept")).join("\n"), /--rationale is required/);
+  assert.deepEqual(humanAcceptances(), []);
 });
 
 test("prepare subjective UAT error paths keep their existing text", async () => {
