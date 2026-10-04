@@ -3,7 +3,13 @@
 // snapshot reads, and a key-drift guard against pi's ExtensionAPI surface.
 
 import { strict as assert } from "node:assert";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
+
+import { deleteProjections } from "../resources/extensions/gsd/tests/db-authority-gate.ts";
+import { createWorkflowAuthorityFixture } from "../resources/extensions/gsd/tests/workflow-authority-fixture.ts";
 
 import {
   _resetSnapshot,
@@ -172,6 +178,31 @@ test("updateSnapshot(null) resets both snapshot fields", () => {
   updateSnapshot(null);
   assert.equal(getSnapshotPhase(), null);
   assert.equal(getSnapshotActiveUnit(), null);
+});
+
+test("getProjectSnapshot returns the database state when the projection files are deleted", async (t) => {
+  // Fixture rows: M001 active; S01 complete; S02 pending.
+  const fixture = await createWorkflowAuthorityFixture();
+  t.after(() => fixture.cleanup());
+  deleteProjections(fixture.root);
+  const api = createGSDExtensionAPI(buildPiStub().pi, []);
+
+  const snapshot = await api.getProjectSnapshot(fixture.root);
+
+  assert.equal(snapshot?.current.activeMilestone?.id, "M001");
+  assert.deepEqual(snapshot?.milestones.items.map((m) => [m.id, m.status]), [["M001", "active"]]);
+  assert.deepEqual(
+    { total: snapshot?.progress.slices.total, done: snapshot?.progress.slices.done },
+    { total: 2, done: 1 },
+  );
+});
+
+test("getProjectSnapshot returns null for a project with no database", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-ecosystem-snapshot-"));
+  t.after(() => rmSync(base, { recursive: true, force: true }));
+  const api = createGSDExtensionAPI(buildPiStub().pi, []);
+
+  assert.equal(await api.getProjectSnapshot(base), null);
 });
 
 test("wrapper key-drift guard: every ExtensionAPI method is delegated", () => {
