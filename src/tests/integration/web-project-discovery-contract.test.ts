@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { discoverProjects } from "../../web/project-discovery-service.ts";
 import { detectMonorepo } from "../../web/bridge-service.ts";
-import { closeDatabase, insertMilestone, openDatabase, setMilestoneQueueOrder } from "../../resources/extensions/gsd/gsd-db.ts";
+import { closeDatabase, insertArtifact, insertMilestone, openDatabase, setMilestoneQueueOrder } from "../../resources/extensions/gsd/gsd-db.ts";
 import { renderStateContent } from "../../resources/extensions/gsd/workflow-projections.ts";
 
 // ---------------------------------------------------------------------------
@@ -354,7 +354,7 @@ describe("project-discovery — database progress", () => {
 
     const [project] = discoverProjects(root, true);
     assert.deepStrictEqual(project.progress, {
-      // The first milestone that is not closed, discarded or parked.
+      // The first milestone that is not closed, discarded or parked. M005 is a queued shell.
       activeMilestone: "M004: Payments platform",
       // Slice and phase are not read for a project that is not open.
       activeSlice: null,
@@ -374,14 +374,95 @@ describe("project-discovery — database progress", () => {
     const gsdDir = join(root, "app", ".gsd");
     mkdirSync(gsdDir, { recursive: true });
     assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
-    insertMilestone({ id: "M001", title: "Not queued" });
-    insertMilestone({ id: "M002", title: "Queued second" });
-    insertMilestone({ id: "M003", title: "Queued first" });
+    insertMilestone({ id: "M001", title: "Not queued", status: "active" });
+    insertMilestone({ id: "M002", title: "Queued second", status: "active" });
+    insertMilestone({ id: "M003", title: "Queued first", status: "active" });
     setMilestoneQueueOrder(["M003", "M002"]);
     closeDatabase();
 
     const [project] = discoverProjects(root, true);
     assert.equal(project.progress?.activeMilestone, "M003: Queued first");
+  });
+
+  test("a milestone with an unmet dependency is not the active milestone", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-db-"));
+    t.after(() => {
+      closeDatabase();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const gsdDir = join(root, "app", ".gsd");
+    mkdirSync(gsdDir, { recursive: true });
+    assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "Waits for M002", status: "queued", depends_on: ["M002"] });
+    insertMilestone({ id: "M002", title: "Foundation", status: "active" });
+    closeDatabase();
+
+    const [project] = discoverProjects(root, true);
+    assert.equal(project.progress?.activeMilestone, "M002: Foundation");
+    assert.equal(project.progress?.milestonesTotal, 2);
+  });
+
+  test("a queued shell is active only when the PROJECT artifact lists it", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-db-"));
+    t.after(() => {
+      closeDatabase();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const gsdDir = join(root, "app", ".gsd");
+    mkdirSync(gsdDir, { recursive: true });
+    assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "Phantom id" });
+    insertMilestone({ id: "M002", title: "First stage" });
+    closeDatabase();
+
+    assert.equal(discoverProjects(root, true)[0].progress?.activeMilestone, null, "no shell is in the roadmap");
+
+    assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+    insertArtifact({
+      path: "PROJECT.md",
+      artifact_type: "PROJECT",
+      milestone_id: null,
+      slice_id: null,
+      task_id: null,
+      full_content: "# Project\n\n## Milestone Sequence\n\n- [ ] M002: First stage — The first real stage\n",
+    });
+    closeDatabase();
+
+    assert.equal(discoverProjects(root, true)[0].progress?.activeMilestone, "M002: First stage");
+  });
+
+  test("the read leaves no new file in a project that is not open", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-db-"));
+    t.after(() => {
+      closeDatabase();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const gsdDir = join(root, "app", ".gsd");
+    mkdirSync(gsdDir, { recursive: true });
+    const dbPath = join(gsdDir, "gsd.db");
+    const readLeavesNoFile = (label: string): void => {
+      const filesBefore = readdirSync(gsdDir).sort();
+      const [project] = discoverProjects(root, true);
+      assert.equal(project.progress?.activeMilestone, "M001: Payments platform", label);
+      assert.deepStrictEqual(readdirSync(gsdDir).sort(), filesBefore, `${label}: the read leaves no new file`);
+    };
+
+    // The engine puts the database in WAL mode. A plain read-only open of a
+    // WAL-mode database that has no `-wal` file creates `-shm` and `-wal` files.
+    assert.equal(openDatabase(dbPath), true);
+    insertMilestone({ id: "M001", title: "Payments platform", status: "active" });
+    closeDatabase();
+    readLeavesNoFile("as the session left it");
+
+    // The last connection of a project folds the WAL into the database and removes it.
+    const last = new DatabaseSync(dbPath);
+    assert.equal(last.prepare("PRAGMA journal_mode").get()?.journal_mode, "wal");
+    last.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    last.close();
+    assert.ok(!readdirSync(gsdDir).some((name) => /-(wal|shm)$/.test(name)), "the database has no WAL files");
+    const before = readFileSync(dbPath);
+    readLeavesNoFile("with no WAL file");
+    assert.deepStrictEqual(readFileSync(dbPath), before, "the database file is unchanged");
   });
 
   test("reads an old-schema database without migrating it", (t) => {

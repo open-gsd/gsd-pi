@@ -10,7 +10,7 @@ import { getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
 import { registerMilestones } from "./milestone-registration.js";
 import { getMilestoneScopedArtifacts } from "./db/queries.js";
 import {
-  assessMilestoneHandoffReadiness,
+  classifyMilestoneReadiness,
   formatAcceptedDiscussHandoffMessage,
 } from "./milestone-readiness.js";
 import { clearPathCache, gsdRoot, resolveGsdRootFile, resolveMilestoneFile } from "./paths.js";
@@ -276,9 +276,10 @@ export function checkAutoStartAfterDiscuss(lookupBasePath?: string): boolean {
   cleanupAcceptedHandoffArtifacts(entry);
   deletePendingAutoStart(basePath);
 
-  const readiness = assessMilestoneHandoffReadiness({
-    milestoneId,
+  const readiness = classifyMilestoneReadiness({
+    status: getMilestone(milestoneId)?.status,
     hasContext: hasDbContext,
+    sliceCount: getMilestoneSlices(milestoneId).length,
   });
   ctx.ui.notify(
     formatAcceptedDiscussHandoffMessage(milestoneId, readiness),

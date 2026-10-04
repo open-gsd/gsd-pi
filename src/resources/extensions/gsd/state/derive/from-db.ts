@@ -32,8 +32,8 @@ import {
   type TaskRead,
 } from '../../db/lifecycle-read.js';
 import {
-  classifyMilestoneReadiness,
   readinessNeedsDiscussion,
+  selectActiveMilestone,
 } from '../../milestone-readiness.js';
 import {
   needsAttentionBlockerGuidance as formatNeedsAttentionBlocker,
@@ -165,113 +165,55 @@ async function buildRegistryAndFindActive(
   completeMilestoneIds: Set<string>,
   parkedMilestoneIds: Set<string>
 ) {
-  const registry: MilestoneRegistryEntry[] = [];
-  let activeMilestone: ActiveRef | null = null;
-  let activeMilestoneSlices: SliceRead[] = [];
-  let activeMilestoneFound = false;
-  let activeMilestoneHasDraft = false;
-  let firstPromotableQueuedShell: { id: string; title: string; deps: string[]; hasDraftContext: boolean } | null = null;
-
-  const projectSequenceIds = loadProjectSequenceIds();
-
   const activeMilestoneIds = milestones
     .filter((m) => !parkedMilestoneIds.has(m.id))
     .map((m) => m.id);
   const slicesByMilestone = readSlicesByMilestoneIds(activeMilestoneIds);
 
+  // DB-authoritative completeness (#4179): only trust completeMilestoneIds,
+  // which is itself derived from DB status. SUMMARY-file presence alone must
+  // not imply completion.
+  const candidates = milestones.map((m) => {
+    const parked = parkedMilestoneIds.has(m.id);
+    const done = completeMilestoneIds.has(m.id);
+    const artifacts = parked || done ? [] : getMilestoneScopedArtifacts(m.id);
+    return {
+      id: m.id,
+      status: m.status,
+      dependsOn: m.depends_on,
+      done,
+      parked,
+      sliceCount: slicesByMilestone.get(m.id)?.length ?? 0,
+      hasContext: artifacts.some((a) => a.artifact_type === "CONTEXT"),
+      hasDraftContext: artifacts.some((a) => a.artifact_type === "CONTEXT-DRAFT"),
+    };
+  });
+  const selected = selectActiveMilestone(candidates, loadProjectSequenceIds());
+  const activeId = selected?.milestone.id;
+
+  const registry: MilestoneRegistryEntry[] = [];
+  let activeMilestone: ActiveRef | null = null;
   for (const m of milestones) {
+    const title = stripMilestonePrefix(m.title) || m.id;
     if (parkedMilestoneIds.has(m.id)) {
-      registry.push({ id: m.id, title: stripMilestonePrefix(m.title) || m.id, status: 'parked' });
+      registry.push({ id: m.id, title, status: 'parked' });
       continue;
     }
-
-    const slices = slicesByMilestone.get(m.id) ?? [];
-
-    // DB-authoritative completeness (#4179): only trust completeMilestoneIds,
-    // which is itself derived from DB status. SUMMARY-file presence alone must
-    // not imply completion.
     if (completeMilestoneIds.has(m.id)) {
-      const title = stripMilestonePrefix(m.title) || m.id;
       registry.push({ id: m.id, title, status: 'complete' });
       continue;
     }
-
-    const allSlicesDone = slices.length > 0 && slices.every(s => s.done);
-
-    const title = stripMilestonePrefix(m.title) || m.id;
-    const artifacts = getMilestoneScopedArtifacts(m.id);
-    const hasContext = artifacts.some((a) => a.artifact_type === "CONTEXT");
-    const hasDraftContext = !hasContext && artifacts.some((a) => a.artifact_type === "CONTEXT-DRAFT");
-    const readiness = classifyMilestoneReadiness({
-      status: m.status,
-      hasContext,
-      hasDraftContext,
-      sliceCount: slices.length,
-    });
-
-    if (!activeMilestoneFound) {
-      const deps = m.depends_on;
-      const depsUnmet = deps.some(dep => !completeMilestoneIds.has(dep));
-
-      if (depsUnmet) {
-        registry.push({ id: m.id, title, status: 'pending', dependsOn: deps });
-        continue;
-      }
-
-      if (readiness.kind === 'queued-shell') {
-        // Only a *promotable* queued-shell may become active in the fallback
-        // below: one that carries draft context (discuss-milestone was started)
-        // or is listed in the PROJECT artifact roadmap sequence (a real, not-yet-
-        // planned stage). A content-less shell that is neither is a phantom left
-        // by gsd_milestone_generate_id that was never planned; promoting it
-        // strands the user on an empty milestone (#1524), so we record it only
-        // as 'pending' and never promote it. Storing just the first promotable
-        // shell also means an earlier phantom can't mask a later resumable one.
-        const promotable = readiness.hasDraftContext || projectSequenceIds.has(m.id);
-        if (promotable && !firstPromotableQueuedShell) {
-          firstPromotableQueuedShell = { id: m.id, title, deps, hasDraftContext: readiness.hasDraftContext };
-        }
-        registry.push({ id: m.id, title, status: 'pending', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
-        continue;
-      }
-
-      if (allSlicesDone) {
-        activeMilestone = { id: m.id, title };
-        activeMilestoneSlices = slices;
-        activeMilestoneFound = true;
-        registry.push({ id: m.id, title, status: 'active', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
-        continue;
-      }
-
-      if (readinessNeedsDiscussion(readiness)) activeMilestoneHasDraft = true;
-
-      activeMilestone = { id: m.id, title };
-      activeMilestoneSlices = slices;
-      activeMilestoneFound = true;
-      registry.push({ id: m.id, title, status: 'active', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
-    } else {
-      const deps = m.depends_on;
-      registry.push({ id: m.id, title, status: 'pending', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
-    }
+    const deps = m.depends_on;
+    const active = m.id === activeId;
+    if (active) activeMilestone = { id: m.id, title };
+    registry.push({ id: m.id, title, status: active ? 'active' : 'pending', ...(deps.length > 0 ? { dependsOn: deps } : {}) });
   }
 
-  // Promote the first promotable queued-shell as a fallback when no other
-  // milestone became active. "Promotable" (tracked above) means it either
-  // carries draft context or is part of the PROJECT artifact roadmap sequence.
-  // Content-less phantom rows never reach here, so state falls through to
-  // handleNoActiveMilestone and the doctor can flag them as orphans (#1524).
-  // A draft-bearing shell resumes discussion (needs-discussion); an in-sequence
-  // shell with no draft goes to pre-planning, so only carry the draft flag
-  // when the shell actually has draft context.
-  if (!activeMilestoneFound && firstPromotableQueuedShell) {
-    const shell = firstPromotableQueuedShell;
-    activeMilestone = { id: shell.id, title: shell.title };
-    activeMilestoneSlices = [];
-    activeMilestoneFound = true;
-    if (shell.hasDraftContext) activeMilestoneHasDraft = true;
-    const entry = registry.find(e => e.id === shell.id);
-    if (entry) entry.status = 'active';
-  }
+  const activeMilestoneSlices: SliceRead[] = (activeId ? slicesByMilestone.get(activeId) : undefined) ?? [];
+  const allSlicesDone = activeMilestoneSlices.length > 0 && activeMilestoneSlices.every(s => s.done);
+  // A draft-bearing milestone resumes discussion (needs-discussion); a promoted
+  // in-sequence shell with no draft goes to pre-planning.
+  const activeMilestoneHasDraft = selected !== null && !allSlicesDone && readinessNeedsDiscussion(selected.readiness);
 
   return { registry, activeMilestone, activeMilestoneSlices, activeMilestoneHasDraft };
 }

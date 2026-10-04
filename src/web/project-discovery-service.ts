@@ -1,8 +1,11 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import type { ProjectDetectionKind, ProjectDetectionSignals } from "./bridge-service.ts";
 import { detectMonorepo, detectProjectKind } from "./bridge-service.ts";
+import { selectActiveMilestone } from "../resources/extensions/gsd/milestone-readiness.ts";
+import { parseMilestoneSequence, splitH2Sections } from "../resources/extensions/gsd/schemas/project-sequence.ts";
 import { isClosedStatus, isDiscardedMilestoneStatus } from "../resources/extensions/gsd/status-guards.ts";
 import { stripIdPrefix } from "../resources/extensions/gsd/strip-id-prefix.ts";
 
@@ -29,10 +32,17 @@ export interface ProjectMetadata {
 const EXCLUDED_DIRS = new Set(["node_modules", ".git"]);
 
 /**
- * Read milestone counts and the first open milestone from a project's
+ * Read milestone counts and the active milestone from a project's
  * `.gsd/gsd.db`. The picker lists projects that the user did not open, so the
- * connection is read-only: no migration, no checkout-binding check, and a
- * missing file is not created. Slice and phase need the full state derivation,
+ * read does not change the project: no migration, no checkout-binding check,
+ * and no new file. A database with no `-wal` file was closed cleanly, and it
+ * is opened immutable, because a plain read-only open of a WAL-mode database
+ * creates `-shm` and `-wal` files. A `-wal` file means that a session has the
+ * project open, so a plain read-only open adds nothing and reads the content
+ * of that session.
+ *
+ * The active milestone comes from `selectActiveMilestone`, the same rule that
+ * state derivation applies. Slice and phase need the full state derivation,
  * so they stay `null` here.
  *
  * Returns `null` when the database cannot be read.
@@ -41,36 +51,74 @@ function readDatabaseProgress(projectPath: string): ProjectProgressInfo | null {
   let db: DatabaseSync | undefined;
   try {
     const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
-    db = new DatabaseSync(join(projectPath, ".gsd", "gsd.db"), { readOnly: true });
+    const dbPath = join(projectPath, ".gsd", "gsd.db");
+    const location = pathToFileURL(dbPath);
+    if (!existsSync(`${dbPath}-wal`)) location.searchParams.set("immutable", "1");
+    const connection = db = new DatabaseSync(location, { readOnly: true });
+
+    // The picker reads databases of every schema version. A query that names an
+    // absent table or column throws, so each read names only what is there.
+    const columnsOf = (table: string): Set<string> =>
+      new Set(connection.prepare(`PRAGMA table_info(${table})`).all().map((column) => String(column.name)));
+    const milestoneColumns = columnsOf("milestones");
+    const hasSequence = milestoneColumns.has("sequence");
+    const hasDependsOn = milestoneColumns.has("depends_on");
+    const hasArtifacts = columnsOf("artifacts").size > 0;
+
     // Workflow order: queued milestones (sequence > 0) first, then sequence, then id.
-    // The sort is here and not in SQL because `sequence` is absent before schema V23,
-    // and a query that names an absent column throws.
-    const sequenceOf = (row: Record<string, unknown>): number => Number(row.sequence ?? 0);
-    const rows = db.prepare("SELECT * FROM milestones").all().sort((a, b) => {
-      const sa = sequenceOf(a);
-      const sb = sequenceOf(b);
-      return Number(sa <= 0) - Number(sb <= 0) || sa - sb || (String(a.id) < String(b.id) ? -1 : 1);
-    });
+    const rows = connection.prepare(
+      `SELECT id, title, status${hasDependsOn ? ", depends_on" : ""} FROM milestones ORDER BY ${
+        hasSequence ? "CASE WHEN sequence > 0 THEN 0 ELSE 1 END, sequence, " : ""
+      }id`,
+    ).all();
 
-    let activeMilestone: string | null = null;
-    let milestonesCompleted = 0;
-    let milestonesTotal = 0;
-
-    for (const row of rows) {
-      const status = String(row.status);
-      // A discarded milestone is a tombstone: it is not counted and not listed.
-      if (isDiscardedMilestoneStatus(status)) continue;
-      milestonesTotal++;
-      if (isClosedStatus(status)) {
-        milestonesCompleted++;
-      } else if (activeMilestone === null && status !== "parked") {
-        const id = String(row.id);
-        const title = stripIdPrefix(String(row.title ?? ""), id);
-        activeMilestone = title ? `${id}: ${title}` : id;
+    const sliceCounts = new Map<string, number>();
+    if (columnsOf("slices").size > 0) {
+      for (const row of connection.prepare("SELECT milestone_id, COUNT(*) AS count FROM slices GROUP BY milestone_id").all()) {
+        sliceCounts.set(String(row.milestone_id), Number(row.count));
       }
     }
+    const contextIds = new Set<string>();
+    const draftContextIds = new Set<string>();
+    let projectSequenceIds = new Set<string>();
+    if (hasArtifacts) {
+      for (const row of connection.prepare(
+        "SELECT milestone_id, artifact_type FROM artifacts WHERE milestone_id IS NOT NULL AND slice_id IS NULL AND task_id IS NULL AND artifact_type IN ('CONTEXT', 'CONTEXT-DRAFT')",
+      ).all()) {
+        (row.artifact_type === "CONTEXT" ? contextIds : draftContextIds).add(String(row.milestone_id));
+      }
+      const project = connection.prepare("SELECT full_content FROM artifacts WHERE path = 'PROJECT.md'").get();
+      const { sections } = splitH2Sections(String(project?.full_content ?? ""));
+      projectSequenceIds = new Set(parseMilestoneSequence(sections).map((m) => m.id));
+    }
 
-    return { activeMilestone, activeSlice: null, phase: null, milestonesCompleted, milestonesTotal };
+    // A discarded milestone is a tombstone: it is not counted and not listed.
+    const milestones = rows
+      .filter((row) => !isDiscardedMilestoneStatus(String(row.status)))
+      .map((row) => {
+        const id = String(row.id);
+        const status = String(row.status);
+        return {
+          id,
+          title: stripIdPrefix(String(row.title ?? ""), id),
+          status,
+          dependsOn: JSON.parse(String(row.depends_on ?? "") || "[]") as string[],
+          done: isClosedStatus(status),
+          parked: status === "parked",
+          sliceCount: sliceCounts.get(id) ?? 0,
+          hasContext: contextIds.has(id),
+          hasDraftContext: draftContextIds.has(id),
+        };
+      });
+
+    const active = selectActiveMilestone(milestones, projectSequenceIds)?.milestone;
+    return {
+      activeMilestone: active ? (active.title ? `${active.id}: ${active.title}` : active.id) : null,
+      activeSlice: null,
+      phase: null,
+      milestonesCompleted: milestones.filter((m) => m.done).length,
+      milestonesTotal: milestones.length,
+    };
   } catch {
     // No database, no SQLite provider, or no milestones table (before schema V5).
     return null;
