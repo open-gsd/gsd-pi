@@ -117,6 +117,8 @@ export type DoctorIssueCode =
   | "override_file_block_unimported"
   // CAPTURES.md section that the database does not hold
   | "capture_file_entry_unimported"
+  // BACKLOG.md item that the database does not hold
+  | "backlog_file_item_unimported"
   // event-log.jsonl milestone reopen or completion that the database does not hold
   | "legacy_milestone_event_unimported"
   | "escalation_legacy_response_unapplied"

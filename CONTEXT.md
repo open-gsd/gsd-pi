@@ -181,6 +181,14 @@ What shipped:
   database capture holds is not read. The render keeps it, doctor reports it as
   a warning, and `/gsd doctor --fix` imports it with a `capture.import` Domain
   Operation.
+- Backlog items (`/gsd backlog`) are `backlog.*` events of Domain Operations.
+  `/gsd backlog promote` registers a queued milestone (`milestone.register`)
+  and records its id on the item. BACKLOG.md is rendered from the events, but
+  is not a pure projection: the render sets each database item's header line
+  and keeps every other line of the file (notes under an item, free text). A
+  ticked checkbox in the file promotes nothing. An item line that no database
+  item holds is not listed and cannot be promoted; doctor reports it and
+  `/gsd doctor --fix` imports it with a `backlog.import` Domain Operation.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).

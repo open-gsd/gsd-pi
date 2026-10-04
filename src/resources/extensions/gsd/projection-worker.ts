@@ -5,6 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 
+import { renderBacklogProjection } from "./backlog.js";
 import { renderCapturesProjection } from "./captures.js";
 import { collectRenderedProjectionFiles, noteRenderedProjectionFile } from "./compat/compat-marker.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -198,6 +199,7 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
   if (key === "knowledge") return { target: "knowledge", render: renderKnowledgeFile };
   if (key === "overrides") return { target: "overrides", render: async (root) => renderOverridesProjection(root) };
   if (key === "captures") return { target: "captures", render: async (root) => renderCapturesProjection(root) };
+  if (key === "backlog") return { target: "backlog", render: async (root) => renderBacklogProjection(root) };
   if (segments[0] !== "planning") return null;
   if (key === "planning/requirements") {
     return {
@@ -488,7 +490,7 @@ export interface ProjectionPreservationResult extends ProjectionObservationResul
   errors: string[];
 }
 
-/** Render every projection file from the database: the hierarchy, the root files, KNOWLEDGE.md, STATE.md, OVERRIDES.md and CAPTURES.md. */
+/** Render every projection file from the database: the hierarchy, the root files, KNOWLEDGE.md, STATE.md, OVERRIDES.md, CAPTURES.md and BACKLOG.md. */
 async function renderEveryProjection(basePath: string): Promise<RenderAllResult> {
   const rendered = await renderAllFromDb(basePath);
   try {
@@ -508,6 +510,11 @@ async function renderEveryProjection(basePath: string): Promise<RenderAllResult>
     renderCapturesProjection(basePath);
   } catch (err) {
     rendered.errors.push(`captures: ${(err as Error).message}`);
+  }
+  try {
+    renderBacklogProjection(basePath);
+  } catch (err) {
+    rendered.errors.push(`backlog: ${(err as Error).message}`);
   }
   return rendered;
 }

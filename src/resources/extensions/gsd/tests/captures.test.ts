@@ -166,7 +166,7 @@ test("captures: doctor reports un-imported CAPTURES.md sections and imports them
   assert.deepEqual(issues.map((issue) => [issue.severity, issue.fixable]), [
     ["warning", true], ["warning", true], ["warning", true],
   ]);
-  assert.match(issues[0]!.message, /CAP-legacy01 \("stop the run", resolved\)/);
+  assert.match(issues[0]!.message, /CAPTURES\.md capture CAP-legacy01 \("stop the run", resolved\) is not in the database/);
 
   // A repair run the operator did not ask for imports nothing.
   issues = await captureIssues(tmp, { repair: true });
@@ -177,7 +177,7 @@ test("captures: doctor reports un-imported CAPTURES.md sections and imports them
   issues = await captureIssues(tmp, { repair: true, importFileOverrides: true }, fixes);
   assert.deepEqual(issues, []);
   assert.equal(operations("capture.import"), 1);
-  assert.match(fixes.join("\n"), /imported 3 capture\(s\) from CAPTURES\.md: CAP-legacy01, CAP-legacy02, CAP-legacy03/);
+  assert.match(fixes.join("\n"), /imported 3 row\(s\) from CAPTURES\.md: CAP-legacy01, CAP-legacy02, CAP-legacy03/);
 
   const [stop, silenced, done] = loadAllCaptures(tmp);
   assert.deepEqual(

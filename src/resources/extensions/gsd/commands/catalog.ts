@@ -363,7 +363,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
   ],
   backlog: [
     { cmd: "add", desc: "Add item to backlog" },
-    { cmd: "promote", desc: "Promote backlog item to active slice" },
+    { cmd: "promote", desc: "Promote backlog item to a queued milestone" },
     { cmd: "remove", desc: "Remove backlog item" },
   ],
   "pr-branch": [
