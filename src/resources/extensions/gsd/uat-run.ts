@@ -23,10 +23,12 @@ import {
   RUN_UAT_TOOL_PRESENTATION_PLAN_ID,
   RUN_UAT_WORKFLOW_TOOL_NAMES,
 } from "./tool-presentation-plan.js";
-import { getLatestUatAttempt } from "./db/queries.js";
+import { getLatestUatAttempt, isSavedUatRun } from "./db/queries.js";
 import { execRunSucceeded, readExecRun, uatAttemptRef, type ExecRunRow } from "./db/writers/exec-runs.js";
 import { saveFile } from "./files.js";
 import { relSliceFile, resolveGsdPathContract } from "./paths.js";
+import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { readSourceRevisionForRecord } from "./verification-source-integrity.js";
 import { buildManualValidationGuidance, resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 
 export const UAT_EVIDENCE_KINDS = [
@@ -98,6 +100,8 @@ export interface PreparedUatRun {
   manualGuidance: string | null;
   worktreeRoot: string;
   browserToolsPresented: boolean;
+  /** Project source revision when the result was prepared; null when it cannot be read. */
+  sourceRevision: string | null;
 }
 
 export interface UatRunValidationError {
@@ -537,6 +541,19 @@ export function prepareUatRun(basePath: string, rawParams: UatResultSaveParams):
   if (typeof attempt !== "number") return { ok: false, error: attempt };
   const runId = uatAttemptRef(params.milestoneId, params.sliceId, attempt);
 
+  if (isNonEmptyString(params.previousAttemptId) &&
+      !isSavedUatRun(params.milestoneId, params.sliceId, params.previousAttemptId)) {
+    return {
+      ok: false,
+      error: {
+        code: "invalid_previous_attempt",
+        message:
+          `previousAttemptId "${params.previousAttemptId}" is not a saved run-uat run of ` +
+          `${params.milestoneId}/${params.sliceId}; omit it or use the runId of the earlier result`,
+      },
+    };
+  }
+
   const checkError = validateUatChecks(basePath, params, runId);
   if (checkError) return { ok: false, error: { code: "invalid_evidence", message: checkError } };
 
@@ -584,6 +601,7 @@ export function prepareUatRun(basePath: string, rawParams: UatResultSaveParams):
       manualGuidance,
       worktreeRoot,
       browserToolsPresented,
+      sourceRevision: readSourceRevisionForRecord(basePath, loadEffectiveGSDPreferences(basePath)?.preferences),
     },
   };
 }
@@ -605,6 +623,7 @@ export function renderUatAttemptRecord(run: PreparedUatRun): string {
     gateVerdict: run.gateVerdict,
     evaluatedAt: run.evaluatedAt,
     worktreeRoot: run.worktreeRoot,
+    sourceRevision: run.sourceRevision,
     browserToolsPresented: run.browserToolsPresented,
     modePolicy: UAT_MODE_POLICIES[run.params.uatType],
     checks: run.params.checks,

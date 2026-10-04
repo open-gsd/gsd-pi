@@ -950,6 +950,21 @@ export function getLatestUatAttempt(milestoneId: string, sliceId: string): numbe
   return Number(row?.["attempt"] ?? 0);
 }
 
+/** True when `runId` is a saved run-uat run of the slice. */
+export function isSavedUatRun(milestoneId: string, sliceId: string, runId: string): boolean {
+  const row = getDbOrNull()?.prepare(`
+    SELECT 1 AS present
+    FROM gate_runs
+    WHERE gate_id = 'UAT'
+      AND gate_type = 'uat'
+      AND unit_type = 'run-uat'
+      AND milestone_id = :milestone_id
+      AND slice_id = :slice_id
+      AND turn_id = :run_id
+  `).get({ ":milestone_id": milestoneId, ":slice_id": sliceId, ":run_id": runId });
+  return row !== undefined;
+}
+
 export function getMilestoneSlices(milestoneId: string): SliceRow[] {
   if (!getDbOrNull()!) return [];
   const rows = getDbOrNull()!.prepare("SELECT * FROM slices WHERE milestone_id = :mid ORDER BY sequence, id").all({ ":mid": milestoneId });

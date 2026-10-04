@@ -25,12 +25,16 @@ export interface ExecRunRow {
   slice_id: string | null;
   check_id: string | null;
   attempt_ref: string | null;
+  source_revision: string | null;
 }
 
 export type ExecRunInput =
   & Pick<ExecRunRow, "id" | "runtime" | "command" | "cwd" | "exit_code" | "signal" | "started_at" | "duration_ms" | "output_hash">
   & { timedOut: boolean; aborted: boolean }
-  & ({ kind: "exec" } | { kind: "uat_exec"; milestoneId: string; sliceId: string; checkId: string });
+  & (
+    | { kind: "exec" }
+    | { kind: "uat_exec"; milestoneId: string; sliceId: string; checkId: string; sourceRevision?: string | null }
+  );
 
 /** Identity of one run-uat attempt. It is also the run id of the saved UAT result. */
 export function uatAttemptRef(milestoneId: string, sliceId: string, attempt: number): string {
@@ -112,6 +116,7 @@ export function recordExecRun(input: ExecRunInput): ExecRunRow {
       slice_id: uat?.sliceId ?? null,
       check_id: uat?.checkId ?? null,
       attempt_ref: currentAttemptRef(input),
+      source_revision: uat?.sourceRevision ?? null,
     };
     const columns = Object.keys(row);
     getDb().prepare(

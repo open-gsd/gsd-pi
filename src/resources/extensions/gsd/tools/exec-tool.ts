@@ -18,7 +18,9 @@ import {
 import { bashReferencesProjectRootOutsideWorktree } from "../worktree-shell-guard.js";
 import { openExistingWorkflowDatabase } from "../db-workspace.js";
 import { recordExecRun } from "../db/writers/exec-runs.js";
+import { loadEffectiveGSDPreferences } from "../preferences.js";
 import { redactSecrets } from "../redact-secrets.js";
+import { readSourceRevisionForRecord } from "../verification-source-integrity.js";
 import { contextModeDisabledResult, type ToolExecutionResult } from "./context-mode-tool-result.js";
 
 export interface ExecToolParams {
@@ -281,7 +283,14 @@ function storeRun(
     started_at: startedAt.toISOString(),
     duration_ms: result.duration_ms,
     output_hash: `sha256:${hash.digest("hex")}`,
-    ...(uat ? { kind: "uat_exec", ...uat } : { kind: "exec" }),
+    // Only a UAT run stores the source revision: reading it hashes every source file.
+    ...(uat
+      ? {
+          kind: "uat_exec",
+          ...uat,
+          sourceRevision: readSourceRevisionForRecord(baseDir, loadEffectiveGSDPreferences(baseDir)?.preferences),
+        }
+      : { kind: "exec" }),
   });
 }
 

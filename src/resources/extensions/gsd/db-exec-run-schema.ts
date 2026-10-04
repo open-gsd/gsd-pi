@@ -3,11 +3,10 @@
 // gsd_exec / gsd_uat_exec command.
 
 import type { DbAdapter } from "./db-adapter.js";
+import { columnExists, ensureColumn } from "./db-schema-metadata.js";
 
 export function hasExecRunSchema(db: DbAdapter): boolean {
-  return db.prepare(
-    "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'exec_runs'",
-  ).get() !== undefined;
+  return columnExists(db, "exec_runs", "source_revision");
 }
 
 /**
@@ -15,6 +14,9 @@ export function hasExecRunSchema(db: DbAdapter): boolean {
  * how it ended, which Attempt it ran in), so the host writes it outside Domain
  * Operations, like gate_runs. `.gsd/exec/<id>.*` holds the output text and a
  * metadata copy for gsd_exec_search; that copy is not evidence.
+ * `source_revision` is the project source revision when a gsd_uat_exec run
+ * was recorded. It is NULL for a gsd_exec run and when the source cannot be
+ * read.
  * Idempotent.
  */
 export function createExecRunSchema(db: DbAdapter): void {
@@ -35,8 +37,10 @@ export function createExecRunSchema(db: DbAdapter): void {
       milestone_id TEXT,
       slice_id TEXT,
       check_id TEXT,
-      attempt_ref TEXT
+      attempt_ref TEXT,
+      source_revision TEXT
     );
     CREATE INDEX IF NOT EXISTS idx_exec_runs_attempt ON exec_runs(attempt_ref);
   `);
+  ensureColumn(db, "exec_runs", "source_revision", "ALTER TABLE exec_runs ADD COLUMN source_revision TEXT");
 }

@@ -2280,6 +2280,8 @@ type UatResultSaved = {
   attemptRecord: string;
   runId: string;
   worktreeRoot: string;
+  /** Project source revision the result was saved for; null when it cannot be read. */
+  sourceRevision: string | null;
   browserToolsPresented: boolean;
   recommendedNextUnit: string | null;
   manualValidationPath?: string;
@@ -2351,6 +2353,7 @@ export async function executeUatResultSave(
       attemptRecord: renderUatAttemptRecord(run),
       runId: run.runId,
       worktreeRoot: run.worktreeRoot,
+      sourceRevision: run.sourceRevision,
       browserToolsPresented: run.browserToolsPresented,
       recommendedNextUnit: run.params.verdict === "PASS" ? null : "reactive-execute",
       ...(run.hasHuman
