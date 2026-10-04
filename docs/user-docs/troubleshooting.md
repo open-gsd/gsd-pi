@@ -390,7 +390,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 
 **Symptoms:** Auto mode or `/gsd doctor` reports that a milestone recorded an integration branch that no longer exists in git.
 
-**What it means:** The milestone's `.gsd/milestones/<MID>/<MID>-META.json` still points at the branch that was active when the milestone started, but that branch has since been renamed or deleted.
+**What it means:** The integration branch recorded for the milestone in the GSD database (`<MID>-META.json` is a copy of that record) still points at the branch that was active when the milestone started, but that branch has since been renamed or deleted.
 
 **Current behavior:**
 

@@ -140,7 +140,7 @@ rm -rf "$(dirname .gsd)/.gsd.lock"
 
 **症状：** 自动模式或 `/gsd doctor` 报告某个 milestone 记录的 integration branch 已经不在 git 中。
 
-**这意味着什么：** 该 milestone 的 `.gsd/milestones/<MID>/<MID>-META.json` 里仍然记录着启动时的 branch，但该 branch 之后被重命名或删除了。
+**这意味着什么：** GSD 数据库中为该 milestone 记录的 integration branch（`<MID>-META.json` 只是这条记录的副本）仍然是启动时的 branch，但该 branch 之后被重命名或删除了。
 
 **当前行为：**
 

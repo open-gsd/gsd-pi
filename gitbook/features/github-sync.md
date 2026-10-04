@@ -33,7 +33,7 @@ GSD can auto-sync milestones, slices, and tasks to GitHub Issues, PRs, and Miles
 - Tasks → GitHub Issue checklists
 - Completed slices → squash-merged PRs into the milestone branch (when `slice_prs` is enabled)
 
-Sync mapping is persisted in `.gsd/.github-sync.json`. The sync is rate-limit aware — it skips when the GitHub API rate limit is low.
+Sync mapping is persisted in `.gsd/github-sync.json`. The sync is rate-limit aware — it skips when the GitHub API rate limit is low.
 
 ## Configuration
 

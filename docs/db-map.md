@@ -739,8 +739,10 @@ result_json  TEXT
 non-versioned schema features required on every database open. It registers
 the ADR-047 liveness feature, the ADR-048
 [`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) and
-[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) features and
-the runtime-control feature below;
+[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) features,
+the runtime-control feature and the
+[`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
+feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
 required objects trigger guarded startup maintenance without changing
@@ -856,6 +858,23 @@ attempts     INTEGER NOT NULL
 updated_at   TEXT NOT NULL
 PRIMARY KEY (milestone_id, slice_id)
 ```
+
+---
+
+#### `milestone_integration_branches` (non-versioned)
+
+The branch a milestone merges back to. One row per milestone.
+
+```
+milestone_id       TEXT PRIMARY KEY
+integration_branch TEXT NOT NULL      ← not blank
+updated_at         TEXT NOT NULL
+```
+
+- DDL owner: `db-integration-branch-schema.ts`. Reader and writer: `db/writers/milestone-integration-branch.ts`.
+- This is a git coordination row, written outside Domain Operations.
+- The row is the merge target. `<MID>-META.json` is a rendered copy; it is read
+  only when the milestone has no row or no database is open.
 
 ---
 
@@ -1998,9 +2017,13 @@ authority_epoch             INTEGER NOT NULL
 - Supersession preserves project/lifecycle and may retain the Attempt or name a
   later Attempt in the same lifecycle. There is no mutable plan status.
 - Tested-source and readiness-basis hashes must use lowercase `sha256:` format;
-  the deferred closeout writer owns canonical input construction and hash
-  verification.
+  `db/writers/closeout.ts` builds the canonical input and the hash.
 - Index: `idx_workflow_closeout_plan_head`.
+- Production use: `prepareCloseout` in `closeout-domain-operation.ts` stores a
+  plan and its effects in one `milestone.closeout.prepare` operation, only for
+  a Milestone whose work is on a milestone branch. `milestone.complete` fails
+  while a required effect of the current plan has no receipt. Tasks and Slices
+  have no plan.
 
 #### `workflow_closeout_effects`
 
@@ -2027,8 +2050,11 @@ authority_epoch    INTEGER NOT NULL
   tuple of its plan. Effects cannot be added after the plan is superseded or
   after receipt settlement begins. A plan may have zero host effects.
 - Effect specs must be nonempty JSON objects and their hashes must use lowercase
-  `sha256:` format. S06 and the host adapter own canonicalization, hash
-  verification, and idempotent execution.
+  `sha256:` format. `db/writers/closeout.ts` owns canonicalization and the
+  hash; `milestone-closeout-effects.ts` is the host adapter.
+- Effect kinds in production: `milestone-merge` (required),
+  `github-milestone-close` and `integration-push` (not required; they never
+  gate completion). The `required` flag is stored in the effect spec.
 
 #### `workflow_settlement_receipts`
 
@@ -2055,8 +2081,9 @@ authority_epoch       INTEGER NOT NULL
   plan. Current plan plus complete receipt coverage is the settlement state;
   V35 adds no settlement aggregate.
 - Receipt proofs must be nonempty JSON objects and their hashes must use
-  lowercase `sha256:` format. The deferred settlement writer owns canonical
-  proof construction and verification before insertion.
+  lowercase `sha256:` format. `db/writers/closeout.ts` builds the canonical
+  proof and hash; each receipt is one `milestone.closeout.settle_effect`
+  operation.
 - Index: `idx_workflow_settlement_receipt_scope`.
 
 V35 enforces local shape, provenance, lineage, immutability, delivery fencing,
@@ -2092,6 +2119,7 @@ milestones ──► assessments (milestone_id)
 milestones ──► milestone_leases (milestone_id) ◄── workers
 milestones ──► unit_dispatches (milestone_id) ◄── workers
 milestones ──► milestone_commit_attributions (milestone_id)
+milestones ──► milestone_integration_branches (milestone_id, no FK)
 
 memories ──► memories_fts (FTS5 virtual, via triggers)
 memories ──► memory_embeddings (memory_id)
@@ -2228,7 +2256,7 @@ execution evidence remain authoritative.
 | `gsd_task_complete` | project_authority, workflow operations/lifecycles, current Attempt/Result/verdict/evidence, tasks, slices, rework briefs/findings | project_authority, workflow operations/events/outbox/Projection Work, Attempt Result/checkpoints, Technical Verdict evidence/publication, tasks, verification evidence, rework findings | S##-T##-SUMMARY.md; toggles checkbox in NN-MM-PLAN.md after commit; reads legacy T##-SUMMARY.md |
 | `gsd_slice_complete` | project_authority, workflow operations/lifecycles, Tasks and their Attempts/Results/verdict evidence, milestones, slices, quality_gates | project_authority, workflow operations/events/outbox/Projection Work, Milestone/Slice lifecycles, milestones, slices, quality_gates, gate_runs | S##-SUMMARY.md, S##-UAT.md; toggles checkpoint in ROADMAP.md after commit |
 | `gsd_uat_result_save` | project_authority, workflow_operations, slices, artifacts, gate_runs (the highest UAT `attempt` of the Slice gives the next attempt number) | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, artifacts, assessments, quality_gates, gate_runs (one `uat-result.save` operation) | S##-ASSESSMENT.md; UAT attempt JSON, both written after commit. A replay writes the attempt JSON again from the stored result |
-| `gsd_complete_milestone` | project_authority, workflow operations/lifecycles, current validation Attempt/Result/verdict/evidence, Waivers, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, Milestone lifecycle, milestones | M##-SUMMARY.md projection after commit |
+| `gsd_complete_milestone` | project_authority, workflow operations/lifecycles, current validation Attempt/Result/verdict/evidence, Waivers, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, Milestone lifecycle, milestones. For a Milestone with a milestone branch and a succeeded validation Attempt, the tool writes workflow_closeout_plans and workflow_closeout_effects and leaves the Milestone open; the host writes workflow_settlement_receipts and completes the Milestone after the merge | M##-SUMMARY.md projection after commit |
 | `gsd_validate_milestone` | project_authority, Milestone lifecycle, planned verification classes, current criteria/verdict/evidence, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, validation Attempts/Results, acceptance criteria, Technical Verdicts/evidence, assessments, quality_gates, gate_runs | VALIDATION.md projection after commit |
 | `gsd_prepare_milestone_subjective_uat` | project_authority, Milestone lifecycle, current acceptance criteria, open questions, interactions, and validation events | project_authority, workflow operations/events/outbox/Projection Work, acceptance criteria, open questions, interactions, and interaction options | — |
 | `gsd_answer_milestone_subjective_uat` | project_authority, Milestone lifecycle, current subjective criterion, open question, interaction/options, validation events, and Human Acceptance | project_authority, workflow operations/events/outbox/Projection Work, Answers, Human Acceptance, and open-question/interactions status | — |
