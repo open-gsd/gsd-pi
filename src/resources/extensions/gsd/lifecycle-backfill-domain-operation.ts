@@ -527,7 +527,9 @@ function adoptItem(
  * exists without its lifecycle row. A row that was in the database before the
  * merge keeps its adoption state. `merge` returns the payload of the
  * `legacy.merged` event. Refuses, and writes nothing, when an inserted row
- * has a raw status that is not in the one legacy map.
+ * has a raw status that is not in the one legacy map, or when its adoption
+ * would change its legacy status: reopen a legacy completion that has no
+ * evidence, or cancel open work under a completed or cancelled parent.
  */
 export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJsonValue): void {
   const fence = readDomainOperationFence();
@@ -552,6 +554,19 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
       );
     }
     const inserted = preview.items.filter((item) => !before.has(`${item.itemKind} ${rowLabel(item)}`));
+    // The same owner rule as the cutover on open: a status change needs the
+    // preview of /gsd db adopt, so the merge never makes one.
+    const statusChanges = inserted.filter((item) => item.projectedLegacyStatus !== null);
+    if (statusChanges.length > 0) {
+      throw new LifecycleBackfillRefusedError(
+        `lifecycle backfill refused: adoption would change the legacy status of ${statusChanges.length} merged row(s): ${
+          statusChanges.map((item) =>
+            `${item.itemKind} ${rowLabel(item)} ${JSON.stringify(item.rawStatus)} -> ` +
+            `${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
+          ).join(", ")
+        }. Nothing was merged. A status change needs the /gsd db adopt preview`,
+      );
+    }
     const report: AdoptionReport = { waivers: 0, findings: [], cancelledUnderCompletedParent: [] };
     return {
       events: [

@@ -2224,7 +2224,9 @@ execution evidence remain authoritative. The merge runs in one
 row that the merge inserts gets its lifecycle row in that operation, by the
 rules of the lifecycle backfill. A row that main already held keeps its
 adoption state. An inserted row with an unknown raw status refuses the whole
-merge as a canonical divergence, so the worktree is kept.
+merge as a canonical divergence, so the worktree is kept. So does an inserted
+row whose adoption would change its legacy status: a legacy completion with no
+evidence, or open work under a completed or cancelled parent.
 
 ---
 

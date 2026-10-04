@@ -323,6 +323,40 @@ test("worktree reconcile keeps a row with an unknown status in the worktree data
   );
 });
 
+test("worktree reconcile keeps rows in the worktree database when adoption would change their status", (t) => {
+  const mainDb = openFixture(t);
+  const worktreeDb = join(tempDir("gsd-reconcile-status-change-worktree-"), "gsd.db");
+
+  closeDatabase();
+  assert.equal(copyWorktreeDb(mainDb, worktreeDb), true);
+  assert.equal(openDatabase(worktreeDb), true);
+  // A completion with no summary and no verification in the database.
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Worktree task", status: "complete" });
+  // Open work under a cancelled parent.
+  insertSlice({ milestoneId: "M001", id: "S02", title: "Skipped slice", status: "skipped", sequence: 2 });
+  insertTask({ milestoneId: "M001", sliceId: "S02", id: "T01", title: "Open task", status: "pending" });
+  closeDatabase();
+
+  assert.equal(openDatabase(mainDb), true);
+  const before = hierarchyIdentitySnapshot();
+  const revision = projectRevision();
+  assert.throws(
+    () => reconcileWorktreeDb(mainDb, worktreeDb),
+    (error: Error) => {
+      assert.match(error.message, /canonical worktree divergence/);
+      assert.match(error.message, /task M001\/S01\/T02 "complete" -> "pending" \(legacy-complete-unproven\)/);
+      assert.match(error.message, /task M001\/S02\/T01 "pending" -> "skipped" \(cancelled-with-parent\)/);
+      assert.match(error.message, /\/gsd db adopt/);
+      return true;
+    },
+  );
+  assert.deepEqual(hierarchyIdentitySnapshot(), before, "a refused adoption must roll back the whole merge");
+  assert.equal(projectRevision(), revision);
+  assert.equal(Number(db().prepare("SELECT count(*) AS n FROM tasks").get()?.["n"]), 1, "no worktree task is merged");
+  assert.equal(Number(db().prepare("SELECT count(*) AS n FROM slices").get()?.["n"]), 1, "no worktree slice is merged");
+  assert.equal(Number(db().prepare("SELECT count(*) AS n FROM workflow_item_lifecycles").get()?.["n"]), 0);
+});
+
 test("worktree reconcile fails closed when canonical authority advanced in the worktree", (t) => {
   const mainDb = openFixture(t);
   adoptHierarchy();
