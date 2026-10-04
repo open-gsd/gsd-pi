@@ -35,6 +35,7 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
+	WorkflowCommandResult,
 } from "./rpc-types.js";
 
 // Re-export types for consumers
@@ -74,6 +75,22 @@ export async function invokeProjectSnapshotRead(
 	} catch (e) {
 		const message = e instanceof Error ? e.message : String(e);
 		return { id, type: "response", command: "get_project_snapshot", success: false, error: message };
+	}
+}
+
+/** Run a typed workflow command through the extension handler, with the session CWD. */
+export async function invokeWorkflowCommand(
+	handler: (input: unknown) => Promise<unknown>,
+	command: Extract<RpcCommand, { type: "workflow_command" }>,
+	cwd: string,
+): Promise<RpcResponse> {
+	const { id, name, args, idempotencyKey, expectedRevision } = command;
+	try {
+		const data = await handler({ cwd, name, args, idempotencyKey, expectedRevision });
+		return { id, type: "response", command: "workflow_command", success: true, data: data as WorkflowCommandResult };
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		return { id, type: "response", command: "workflow_command", success: false, error: message };
 	}
 }
 
@@ -651,6 +668,17 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					return error(id, "get_project_snapshot", "Project snapshot is unavailable");
 				}
 				return await invokeProjectSnapshotRead(handler, id, session.sessionManager.getCwd());
+			}
+
+			case "workflow_command": {
+				if (!extensionsReady) {
+					return error(id, "workflow_command", "Extensions are still loading");
+				}
+				const handler = session.extensionRunner?.getRuntimeReadHandler("workflow_command");
+				if (!handler) {
+					return error(id, "workflow_command", "Workflow commands are unavailable");
+				}
+				return await invokeWorkflowCommand(handler, command, session.sessionManager.getCwd());
 			}
 
 			// =================================================================

@@ -450,6 +450,17 @@ export class RpcClient {
 	}
 
 	/**
+	 * Run a typed workflow mutation. Sending the same `idempotencyKey` again
+	 * returns the first result and changes nothing.
+	 */
+	async workflowCommand(
+		command: import("@opengsd/contracts").WorkflowCommandRequest & import("@opengsd/contracts").WorkflowCommandIdentity,
+	): Promise<import("@opengsd/contracts").WorkflowCommandResult> {
+		const response = await this.send({ type: "workflow_command", ...command });
+		return this.getData(response);
+	}
+
+	/**
 	 * Export session to HTML.
 	 */
 	async exportHtml(outputPath?: string): Promise<{ path: string }> {

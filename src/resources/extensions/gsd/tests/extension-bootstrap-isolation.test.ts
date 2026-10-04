@@ -115,7 +115,7 @@ describe("extension bootstrap isolation (#4168, #4172)", () => {
     );
   });
 
-  test("registers host-only project progress and snapshot runtime reads", async () => {
+  test("registers the host-only project progress and snapshot reads and the typed workflow command", async () => {
     const runtimeReads = new Map<string, (input: unknown) => unknown>();
     const { pi } = makePi({
       registerRuntimeRead: (name: string, handler: (input: unknown) => unknown) => {
@@ -125,10 +125,14 @@ describe("extension bootstrap isolation (#4168, #4172)", () => {
 
     await registerExtension(pi as any);
 
-    assert.deepEqual([...runtimeReads.keys()].sort(), ["project_progress", "project_snapshot"]);
+    assert.deepEqual([...runtimeReads.keys()].sort(), ["project_progress", "project_snapshot", "workflow_command"]);
     await assert.rejects(
       async () => runtimeReads.get("project_snapshot")?.({}),
       /Project snapshot requires a session CWD/,
+    );
+    await assert.rejects(
+      async () => runtimeReads.get("workflow_command")?.({}),
+      /Workflow command requires a session CWD/,
     );
   });
 });

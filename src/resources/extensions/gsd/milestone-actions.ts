@@ -93,7 +93,7 @@ function runMilestoneOperation(
   executeDomainOperation({
     operationType: `milestone.${command}`,
     idempotencyKey: invocation?.idempotencyKey ?? `command/${command}/${milestoneId}/${fence.revision}`,
-    expectedRevision: fence.revision,
+    expectedRevision: invocation?.expectedRevision ?? fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: invocation?.actorType ?? "operator",
     ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),

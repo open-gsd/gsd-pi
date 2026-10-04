@@ -14,6 +14,7 @@ export const RPC_COMMAND_TYPES = [
 	"get_state",
 	"get_project_progress",
 	"get_project_snapshot",
+	"workflow_command",
 	"set_model",
 	"cycle_model",
 	"get_available_models",
@@ -184,6 +185,36 @@ export interface ProjectSnapshot {
 	capturedAt: string;
 }
 
+/**
+ * A workflow mutation that a host sends as a typed command, not as
+ * slash-command text. It runs the same executor as the workflow tool of the
+ * same name.
+ */
+export type WorkflowCommandRequest =
+	| { name: "milestone_park"; args: { milestoneId: string; reason: string } }
+	| { name: "milestone_unpark"; args: { milestoneId: string } };
+
+export interface WorkflowCommandIdentity {
+	/**
+	 * Identifies one user action. A command that is sent again with the same key
+	 * returns the result of the first send and changes nothing.
+	 */
+	idempotencyKey: string;
+	/**
+	 * The project revision that the host last read (`ProjectSnapshot.authority.revision`).
+	 * When it is set, the command is refused if the project changed since then.
+	 */
+	expectedRevision?: number;
+}
+
+export interface WorkflowCommandResult {
+	/** False when the command was refused. `message` gives the reason. */
+	ok: boolean;
+	message: string;
+	/** The project revision after the command. */
+	revision: number;
+}
+
 export interface CompactionResult<T = unknown> {
 	summary: string;
 	firstKeptEntryId: string;
@@ -202,6 +233,7 @@ export type RpcCommand =
 	| { id?: string; type: "get_state" }
 	| { id?: string; type: "get_project_progress" }
 	| { id?: string; type: "get_project_snapshot" }
+	| ({ id?: string; type: "workflow_command" } & WorkflowCommandRequest & WorkflowCommandIdentity)
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
@@ -267,6 +299,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
 	| { id?: string; type: "response"; command: "get_project_progress"; success: true; data: ProjectProgress | null }
 	| { id?: string; type: "response"; command: "get_project_snapshot"; success: true; data: ProjectSnapshot | null }
+	| { id?: string; type: "response"; command: "workflow_command"; success: true; data: WorkflowCommandResult }
 	| { id?: string; type: "response"; command: "set_model"; success: true; data: ModelInfo }
 	| {
 			id?: string;
