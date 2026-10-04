@@ -2135,4 +2135,38 @@ describe('gsd-recover', async () => {
     assert.match(notes.at(-1)?.message ?? '', /does not differ from an active database row: P001/u);
     assert.equal(_getAdapter()!.prepare('SELECT COUNT(*) AS count FROM workflow_import_applications').get()?.['count'], 0);
   });
+
+  test('recover refuses a knowledge row choice when it loads a retained Import Application', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const pattern = captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+    assert.equal(updateMemoryContent(pattern.memoryId, 'Retry with jitter'), true);
+    const databaseText = () => _getAdapter()!
+      .prepare('SELECT content FROM memories WHERE id = :id')
+      .get({ ':id': pattern.memoryId })?.['content'];
+
+    // The operator approves the plain conflict Preview first: the database row is kept.
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(approval);
+    const applied = makeCtx();
+    await handleRecover(applied.ctx, base, approval);
+    assert.equal(applied.notes.at(-1)?.kind, 'success', applied.notes.at(-1)?.message);
+
+    for (const args of [
+      '--choice=P001.use-file',
+      `--application=${String(_getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!['operation_id'])} --choice=P001.use-file`,
+    ]) {
+      const { ctx, notes } = makeCtx();
+      await handleRecover(ctx, base, args);
+      assert.equal(notes.at(-1)?.kind, 'error', notes.at(-1)?.message);
+      assert.match(notes.at(-1)?.message ?? '', /row choice for P001 was not applied/u);
+      assert.equal(databaseText(), 'Retry with jitter');
+    }
+  });
 });

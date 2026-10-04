@@ -368,6 +368,42 @@ test("headless recover writes a conflicting KNOWLEDGE.md row over its database r
   );
 });
 
+test("headless recover refuses a knowledge row choice when it loads a retained Import Application", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-headless-recover-"));
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  assert.equal(await ensureDbOpen(base), true);
+  const pattern = captureKnowledgeEntry(base, "pattern", "Retry with backoff", "project");
+  assert.equal(updateMemoryContent(pattern.memoryId, "Retry with jitter"), true);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  // The caller approves the plain conflict Preview first: the database row is kept.
+  assert.equal((await handleHeadlessRecover(base)).exitCode, 1);
+  const plainHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(plainHash, stderr.join(""));
+  assert.equal((await handleHeadlessRecover(base, [`--preview=${plainHash}`])).exitCode, 0, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, ["--choice=P001.use-file"]);
+  assert.equal(result.exitCode, 1, stderr.join(""));
+  assert.match(stderr.join(""), /row choice for P001 was not applied/u);
+  assert.doesNotMatch(stderr.join(""), /gsd-recover: recovered/u);
+  assert.equal(await ensureDbOpen(base), true);
+  assert.equal(
+    _getAdapter()!.prepare("SELECT content FROM memories WHERE id = :id").get({ ":id": pattern.memoryId })?.["content"],
+    "Retry with jitter",
+  );
+});
+
 test("headless recover uses the entrypoint-neutral retained-backup Import Application path", async (t) => {
   const base = makeCorpusFixture();
   const previousWrite = process.stderr.write;

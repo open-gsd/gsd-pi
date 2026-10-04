@@ -262,7 +262,16 @@ export async function handleRecover(
     const retained = applicationId
       ? modules.loadVerifiedRecoverApplication(applicationId)
       : modules.loadRetainedVerifiedRecoverApplication()
+    const knowledgeFileRows = modules.parseLegacyImportKnowledgeFileRowChoices(args.join(' '))
     if (retained) {
+      if (knowledgeFileRows.length > 0) {
+        // A loaded Application is already applied: the choice would write nothing.
+        throw new Error(
+          `the KNOWLEDGE.md row choice for ${knowledgeFileRows.join(', ')} was not applied: `
+            + `Import Application ${retained.receipt.operationId} is loaded, and a row choice needs a new Preview; `
+            + 'no database changes made',
+        )
+      }
       application = retained
     } else {
       // Reviewed --choice tokens resolve 'requires-user' diagnoses and seal a
@@ -270,10 +279,7 @@ export async function handleRecover(
       // choice makes the Preview write that KNOWLEDGE.md row over its
       // differing database row.
       const previewChoices = modules.parseLegacyImportPreviewChoices(args.join(' '))
-      let prepared = await modules.prepareVerifiedRecoverApplication(
-        basePath,
-        modules.parseLegacyImportKnowledgeFileRowChoices(args.join(' ')),
-      )
+      let prepared = await modules.prepareVerifiedRecoverApplication(basePath, knowledgeFileRows)
       if (previewChoices.length > 0) {
         prepared = modules.resolvePreparedVerifiedRecoverApplication(prepared, previewChoices)
       }
