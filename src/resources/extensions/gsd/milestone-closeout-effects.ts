@@ -100,6 +100,23 @@ export function readSettledMilestoneMerge(milestoneId: string): SettledMilestone
   };
 }
 
+/**
+ * True when GSD merged the whole milestone branch: the merge has a Settlement
+ * Receipt and the branch still points at the merged commit. A squash merge
+ * leaves no git ancestry, so the receipt is the only durable record of that
+ * merge. A recognized receipt is not enough: GSD did not make that merge.
+ */
+export function isMilestoneBranchSettled(projectRoot: string, milestoneId: string, milestoneBranch: string): boolean {
+  const settled = readSettledMilestoneMerge(milestoneId);
+  if (!settled || settled.recognized) return false;
+  try {
+    return revParse(projectRoot, milestoneBranch) === settled.milestoneBranchSha;
+  } catch {
+    // The branch cannot be read; let the caller inspect git.
+    return false;
+  }
+}
+
 /** True while the current Closeout Plan still waits for a required host effect. */
 export function hasPendingCloseoutEffect(milestoneId: string): boolean {
   if (!isDbAvailable()) return false;

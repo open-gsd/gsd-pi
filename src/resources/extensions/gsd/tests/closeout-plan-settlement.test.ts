@@ -56,6 +56,7 @@ import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
 import { closeUnit } from "../unit-closeout.ts";
+import { findUnmergedCompletedMilestones } from "../unmerged-milestone-guard.ts";
 import { _resetServiceCache } from "../worktree.ts";
 import { mergeMilestoneStandalone } from "../worktree-lifecycle.ts";
 import { worktreePath } from "../worktree-manager.ts";
@@ -680,6 +681,36 @@ test("a run that stops after the merge commit finishes from the receipt without 
   assert.equal(git(["branch", "--list", "milestone/M001"], repo), "");
 });
 
+/** The merge commits and settles, then the process stops before the worktree and branch are removed. */
+function mergeAndStopBeforeCleanup(repo: string): void {
+  _setPreTeardownSafetyDepsForTests({
+    existsSync: () => { throw new Error("process stopped before cleanup"); },
+  });
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /process stopped before cleanup/);
+  _resetPreTeardownSafetyDepsForTests();
+  process.chdir(repo);
+}
+
+test("a leftover branch of a squash-merged Milestone is not reported as unmerged once main moves on", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  mergeAndStopBeforeCleanup(repo);
+  // Git has no record of the squash merge: after this commit the branch
+  // differs from main and is not its ancestor.
+  commitOnMain(repo, "later change on main\n");
+  assert.notEqual(git(["diff", "--name-only", "main", "milestone/M001"], repo), "");
+
+  assert.deepEqual(await findUnmergedCompletedMilestones(repo), []);
+
+  // The receipt covers the branch only up to the merged commit.
+  writeFileSync(join(worktree, "late.txt"), "work after the merge\n");
+  git(["add", "late.txt"], worktree);
+  git(["commit", "-m", "feat: work after the merge"], worktree);
+
+  const [blocker] = await findUnmergedCompletedMilestones(repo);
+  assert.equal(blocker?.milestoneId, "M001");
+  assert.ok(blocker?.files.includes("late.txt"));
+});
+
 test("a failed push leaves the push effect without a receipt and the next closeout pushes again", async () => {
   const { repo, remote } = await milestoneInWorktree({ autoPush: true });
   const pushEffect = () => readMilestoneCloseoutPlan("M001")!.effects
@@ -811,6 +842,62 @@ test("a plan that waits for a branch merged and deleted by hand is superseded an
   assert.equal(getMilestone("M001")?.status, "complete");
   assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
   assert.equal(git(["show", "main:feature.txt"], repo), "milestone work");
+});
+
+// The fixture sets no isolation preference, so the mode is `none`: the plan
+// has a merge effect only because the tool ran inside the worktree.
+
+test("with isolation none, a call from the project root keeps the merge of the live worktree required", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  process.chdir(repo);
+
+  const result = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-root"));
+
+  assert.ok(!("error" in result), `closeout failed: ${"error" in result ? result.error : ""}`);
+  assert.deepEqual(result.pendingCloseoutEffects, ["milestone-merge"]);
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(git(["show", "main:feature.txt"], repo), "base");
+
+  process.chdir(worktree);
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(git(["show", "main:feature.txt"], repo), "milestone work");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
+});
+
+test("with isolation none and the worktree removed, the root completes only on a validation of its own source", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  process.chdir(repo);
+  git(["worktree", "remove", "--force", worktree], repo);
+  const branchTip = git(["rev-parse", "milestone/M001"], repo);
+  const mainHead = git(["rev-parse", "main"], repo);
+
+  // The validation covers the source of the milestone branch, not of the root.
+  const stale = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-root-stale"));
+  assert.ok("error" in stale && /canonical validation is not current/.test(stale.error), JSON.stringify(stale));
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+
+  const validated = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: "| S01 | delivered |",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+    verdictRationale: "The source at the project root passes.",
+  }, repo, { invocation: invocation("fixture/validate-root"), skipBrowserEvidenceGate: true });
+  assert.ok(!("error" in validated), `validation failed: ${"error" in validated ? validated.error : ""}`);
+  const completed = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-root"));
+
+  assert.ok(!("error" in completed), `completion failed: ${"error" in completed ? completed.error : ""}`);
+  assert.equal(completed.pendingCloseoutEffects, undefined);
+  assert.deepEqual(readMilestoneCloseoutPlan("M001")?.effects, []);
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
+  assert.equal(git(["rev-parse", "milestone/M001"], repo), branchTip);
+  assert.equal(git(["rev-parse", "main"], repo), mainHead);
 });
 
 test("after a conflict resolved by hand, a new validation lets the tool complete the Milestone", async () => {

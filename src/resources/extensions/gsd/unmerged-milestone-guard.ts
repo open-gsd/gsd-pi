@@ -13,6 +13,7 @@ import { autoWorktreeBranch } from "./auto-worktree-branch-lifecycle.js";
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 import { getAllMilestones } from "./gsd-db.js";
 import { resolveMilestoneIntegrationBranch, VALID_BRANCH_NAME } from "./git-service.js";
+import { isMilestoneBranchSettled } from "./milestone-closeout-effects.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { isClosedStatus } from "./status-guards.js";
 
@@ -176,6 +177,10 @@ export async function findUnmergedCompletedMilestones(base: string): Promise<Unm
 
     const branch = autoWorktreeBranch(milestone.id);
     if (!nativeBranchExists(base, branch)) continue;
+    // The merge Settlement Receipt is the database fact that the branch is
+    // merged. Git cannot show a squash merge once the integration branch
+    // moves on, so the diff below would report merged work as unmerged.
+    if (isMilestoneBranchSettled(base, milestone.id, branch)) continue;
 
     const integrationBranch = resolveIntegrationBranch(base, milestone.id);
     if (!integrationBranch || integrationBranch === branch) continue;

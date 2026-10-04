@@ -287,8 +287,11 @@ export async function handleCompleteMilestone(
         ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
       };
       const lifecycleStatus = readMilestoneLifecycleStatus(params.milestoneId);
+      // The effects come from the tree this closeout proves. A call from the
+      // project root still closes out the live milestone worktree, so its
+      // merge stays required.
       const effects = lifecycleStatus === "ready" || lifecycleStatus === "in_progress"
-        ? milestoneCloseoutEffects(basePath, params.milestoneId)
+        ? milestoneCloseoutEffects(artifactBasePath, params.milestoneId)
         : [];
       // A Closeout Plan must cite a succeeded Attempt. A Milestone closed out
       // on a validation Waiver has none, so it completes here as before.
