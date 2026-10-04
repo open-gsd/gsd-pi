@@ -121,7 +121,7 @@ describe("gate-state canonicalization (#4950)", () => {
       full_content: THREAT_SURFACE_PLAN,
     });
 
-    const result = closeQualityGatesFromEvidence("M001", { storedSectionEvidence: true });
+    const result = closeQualityGatesFromEvidence("M001");
 
     assert.deepEqual(result.unresolved, []);
     assert.deepEqual(result.repaired, [{ gateId: "Q3", sliceId: "S01", verdict: "pass" }]);
@@ -134,7 +134,7 @@ describe("gate-state canonicalization (#4950)", () => {
     mkdirSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
     writeFileSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"), THREAT_SURFACE_PLAN);
 
-    const result = closeQualityGatesFromEvidence("M001", { storedSectionEvidence: true });
+    const result = closeQualityGatesFromEvidence("M001");
 
     assert.deepEqual(result.repaired, []);
     assert.equal(getPendingGates("M001", "S01").length, 1);
@@ -144,7 +144,6 @@ describe("gate-state canonicalization (#4950)", () => {
     insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", scope: "slice" });
 
     const result = closeQualityGatesFromEvidence("M001", {
-      storedSectionEvidence: true,
       milestoneValidationPassed: true,
     });
 
@@ -156,7 +155,7 @@ describe("gate-state canonicalization (#4950)", () => {
   test("closeQualityGatesFromEvidence leaves pending gate unresolved without evidence", () => {
     insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
 
-    const result = closeQualityGatesFromEvidence("M001", { storedSectionEvidence: true });
+    const result = closeQualityGatesFromEvidence("M001");
 
     assert.deepEqual(result.repaired, []);
     assert.equal(result.unresolved.length, 1);

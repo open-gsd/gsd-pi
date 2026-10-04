@@ -19,11 +19,13 @@ import { resolveExpectedArtifactPath } from "../auto-artifact-paths.ts";
 import { DISPATCH_RULES, type DispatchAction, type DispatchContext } from "../auto-dispatch.ts";
 import { evaluateGuardedCompleteMilestoneDispatch } from "../milestone-closeout.ts";
 import { closeQualityGatesFromEvidence } from "../quality-gate-closure.ts";
+import { checkCloseoutConsistencyGate } from "../closeout-consistency-gate.ts";
 import { _selfHealRuntimeRecordsForTest } from "../guided-flow.ts";
 import { readUnitRuntimeRecord, writeUnitRuntimeRecord } from "../unit-runtime.ts";
 import {
   _getAdapter,
   closeDatabase,
+  getGateResults,
   getPendingGates,
   hasUnitRecoveryBlock,
   insertArtifact,
@@ -390,7 +392,7 @@ describe("a heading in a projection file closes no quality gate", () => {
     seedPendingGate();
     writeFile(join(sliceDir(), `${SID}-PLAN.md`), [`# ${SID}: Slice`, "", "## Threat Surface", "", "- Reviewed, none."]);
 
-    const result = closeQualityGatesFromEvidence(MID, { storedSectionEvidence: true });
+    const result = closeQualityGatesFromEvidence(MID);
 
     assert.deepEqual(result.repaired, []);
     assert.deepEqual(getPendingGates(MID, SID).map((gate) => gate.gate_id), ["Q3"]);
@@ -407,10 +409,39 @@ describe("a heading in a projection file closes no quality gate", () => {
       full_content: [`# ${SID}: Slice`, "", "## Threat Surface", "", "- Reviewed, none."].join("\n"),
     });
 
-    const result = closeQualityGatesFromEvidence(MID, { storedSectionEvidence: true });
+    const result = closeQualityGatesFromEvidence(MID);
 
     assert.deepEqual(result.repaired.map((repair) => repair.gateId), ["Q3"]);
     assert.deepEqual(getPendingGates(MID, SID), []);
+  });
+
+  test("the closeout gate reads the PLAN row section with no project root", () => {
+    closeDatabase();
+    openDatabase(":memory:");
+    insertMilestone({ id: MID, title: "Evidence", status: "active" });
+    seedPendingGate();
+    insertArtifact({
+      path: `milestones/${MID}/slices/${SID}/${SID}-PLAN.md`,
+      artifact_type: "PLAN",
+      milestone_id: MID,
+      slice_id: SID,
+      task_id: null,
+      full_content: [`# ${SID}: Slice`, "", "## Threat Surface", "", "- Reviewed, none."].join("\n"),
+    });
+    insertAssessment({
+      path: `milestones/${MID}/${MID}-VALIDATION.md`,
+      milestoneId: MID,
+      status: "pass",
+      scope: "milestone-validation",
+      fullContent: "---\nverdict: pass\n---\n",
+    });
+    updateMilestoneStatus(MID, "complete", new Date().toISOString());
+
+    const result = checkCloseoutConsistencyGate(MID);
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(getPendingGates(MID, SID), []);
+    assert.equal(getGateResults(MID, SID).find((gate) => gate.gate_id === "Q3")?.verdict, "pass");
   });
 });
 

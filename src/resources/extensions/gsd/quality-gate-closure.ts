@@ -16,8 +16,6 @@ import {
 import type { GateId, GateRow, GateVerdict } from "./types.js";
 
 export interface QualityGateClosureOptions {
-  /** Close a pending gate from its section in the stored plan or summary content. */
-  storedSectionEvidence?: boolean;
   milestoneValidationPassed?: boolean;
   milestoneValidationAuthorization?: {
     kind: "validated" | "waived";
@@ -109,8 +107,6 @@ function closureEvidence(row: GateRow, options: QualityGateClosureOptions): Gate
       findings: "",
     };
   }
-
-  if (!options.storedSectionEvidence) return null;
 
   const section = firstSection(storedEvidenceContent(row), row.gate_id);
   if (section) {

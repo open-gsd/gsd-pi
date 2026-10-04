@@ -412,12 +412,7 @@ export function checkCloseoutConsistencyGate(
   if (validationRequired) {
     gateClosureOptions = canonicalAuthorization?.authorized
       ? { milestoneValidationAuthorization: canonicalAuthorization }
-      : {
-          // Unchanged condition: evidence closure runs only for a project
-          // with a resolvable root. The evidence itself is read from the DB.
-          storedSectionEvidence: Boolean(options.artifactBasePath ?? artifactBasePathFromDb()),
-          milestoneValidationPassed: validation?.status === "pass",
-        };
+      : { milestoneValidationPassed: validation?.status === "pass" };
   }
   const plannedGateClosure = gateClosureOptions
     ? inspectQualityGatesFromEvidence(milestoneId, gateClosureOptions)
