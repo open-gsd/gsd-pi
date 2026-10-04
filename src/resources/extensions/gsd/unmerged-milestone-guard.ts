@@ -11,11 +11,10 @@ import {
 } from "./native-git-bridge.js";
 import { autoWorktreeBranch } from "./auto-worktree-branch-lifecycle.js";
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
-import { getAllMilestones } from "./gsd-db.js";
+import { readMilestones } from "./db/lifecycle-read.js";
 import { resolveMilestoneIntegrationBranch, VALID_BRANCH_NAME } from "./git-service.js";
 import { milestoneBranchMergeState } from "./milestone-closeout-effects.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
-import { isClosedStatus } from "./status-guards.js";
 
 export interface UnmergedMilestoneDirtyEntry {
   path: string;
@@ -172,8 +171,8 @@ export async function findUnmergedCompletedMilestones(base: string): Promise<Unm
   const blockers: UnmergedMilestoneBlocker[] = [];
   let dirtyByPath: UnmergedMilestoneDirtySnapshot | null = null;
 
-  for (const milestone of getAllMilestones()) {
-    if (!isClosedStatus(milestone.status)) continue;
+  for (const milestone of readMilestones()) {
+    if (!milestone.closed) continue;
 
     const branch = autoWorktreeBranch(milestone.id);
     if (!nativeBranchExists(base, branch)) continue;

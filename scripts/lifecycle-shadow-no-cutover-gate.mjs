@@ -31,8 +31,11 @@ const READ_INTERFACE_ENTRIES = [
   "readMilestones",
   "readMilestone",
   "readMilestoneSlices",
+  "readClosedSliceIds",
+  "readSlice",
   "readSlicesByMilestoneIds",
   "readSliceTasks",
+  "readTask",
   "readMilestoneStatus",
   "readProgressCounts",
   "toMilestoneRead",
@@ -75,6 +78,9 @@ const DECISION_IMPORT_POLICY = Object.freeze({
       "./db/lifecycle-read.js#readMilestones",
       "./db/lifecycle-read.js#readMilestone",
       "./db/lifecycle-read.js#readMilestoneSlices",
+      // The UAT hold (ADR-046 gate G6). It reads the Slice through the read
+      // interface and the run-uat verdict row.
+      "./uat-dispatch.js#sliceAwaitsUatVerdict",
     ]),
   },
   resolver: {

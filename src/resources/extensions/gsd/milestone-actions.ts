@@ -15,10 +15,10 @@ import { renderStateProjection } from "./workflow-projections.js";
 import { loadQueueOrder, renderQueueOrder } from "./queue-order.js";
 import {
   executeDomainOperation,
-  getMilestone,
   isDbAvailable,
   projectCanonicalStatusToLegacy,
 } from "./gsd-db.js";
+import { readMilestone } from "./db/lifecycle-read.js";
 import { getDb } from "./db/engine.js";
 import type { DomainOperationContext } from "./db/domain-operation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
@@ -169,11 +169,11 @@ export async function parkMilestone(
 ): Promise<boolean> {
   if (!options.fromAutoLoop) assertNotAutoActive("park milestone");
   assertDbAvailable("parkMilestone", milestoneId);
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   // Do not park a closed milestone — it would corrupt depends_on satisfaction.
   if (
     !isReplay(options.invocation) &&
-    (!milestone || milestone.status === "parked" || isClosedStatus(milestone.status))
+    (!milestone || milestone.parked || milestone.closed)
   ) return false;
 
   try {
@@ -208,7 +208,7 @@ export async function unparkMilestone(
 ): Promise<boolean> {
   assertNotAutoActive("unpark milestone");
   assertDbAvailable("unparkMilestone", milestoneId);
-  if (!isReplay(invocation) && getMilestone(milestoneId)?.status !== "parked") return false;
+  if (!isReplay(invocation) && !readMilestone(milestoneId)?.parked) return false;
 
   try {
     runMilestoneOperation("unpark", milestoneId, { parked: false }, (context) =>
@@ -316,9 +316,9 @@ export async function discardMilestone(
 ): Promise<boolean> {
   assertNotAutoActive("discard milestone");
   assertDbAvailable("discardMilestone", milestoneId);
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   if (!milestone) return false;
-  if (!isReplay(options.invocation) && isClosedStatus(milestone.status)) {
+  if (!isReplay(options.invocation) && milestone.closed) {
     throw new Error(`${milestoneId} is already closed (${milestone.status}) and cannot be discarded`);
   }
 
@@ -355,7 +355,7 @@ export async function discardMilestone(
 
 /** Whether the database records the milestone as parked. */
 export function isParked(milestoneId: string): boolean {
-  return isDbAvailable() && getMilestone(milestoneId)?.status === "parked";
+  return isDbAvailable() && readMilestone(milestoneId)?.parked === true;
 }
 
 /** The reason recorded by the park Domain Operation, or null. */

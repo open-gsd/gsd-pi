@@ -67,12 +67,24 @@ export function readMilestoneSlices(milestoneId) {
   return getMilestoneSlices(milestoneId).map((row) => toSliceRead(row, items));
 }
 
+export function readClosedSliceIds(milestoneId) {
+  return readMilestoneSlices(milestoneId).filter((slice) => slice.done).map((slice) => slice.id);
+}
+
+export function readSlice(milestoneId, sliceId) {
+  return readMilestoneSlices(milestoneId).find((slice) => slice.id === sliceId) ?? null;
+}
+
 export function readSlicesByMilestoneIds(milestoneIds) {
   return new Map([...getSlicesByMilestoneIds(milestoneIds)].map(([id, rows]) => [id, rows.map((row) => toSliceRead(row, null))]));
 }
 
 export function readSliceTasks(milestoneId, sliceId) {
   return getSliceTasks(milestoneId, sliceId).map((row) => ({ ...row, done: isClosedStatus(row.status) }));
+}
+
+export function readTask(milestoneId, sliceId, taskId) {
+  return readSliceTasks(milestoneId, sliceId).find((task) => task.id === taskId) ?? null;
 }
 
 export function readMilestoneStatus(milestoneId) {

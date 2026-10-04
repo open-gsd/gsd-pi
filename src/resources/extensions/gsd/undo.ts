@@ -13,9 +13,9 @@ import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import { gsdRoot, resolveTasksDir, resolveTaskFile, buildTaskFileName } from "./paths.js";
 import { sendDesktopNotification } from "./notifications.js";
-import { getDb, getTask, getSlice, getSliceTasks, getMilestone, isDbAvailable } from "./gsd-db.js";
+import { getDb, getTask, getSlice, getSliceTasks, isDbAvailable } from "./gsd-db.js";
+import { readMilestone, readSlice, readTask } from "./db/lifecycle-read.js";
 import { openExistingWorkflowDatabase } from "./db-workspace.js";
-import { isClosedStatus } from "./status-guards.js";
 import { renderPlanCheckboxes } from "./markdown-renderer.js";
 import { renderStateProjection } from "./workflow-projections.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
@@ -298,9 +298,9 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
   const results: string[] = [`Undone: ${label}`];
 
   if (UNDO_TASK_UNIT_TYPES.has(unit.unitType) && sid && tid) {
-    const task = getTask(mid, sid, tid);
+    const task = readTask(mid, sid, tid);
     if (!task) return { success: false, message: `Cannot undo ${label}: task not found in database.` };
-    if (!isClosedStatus(task.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    if (!task.done) return { success: false, message: `Nothing to undo — ${label} is already open.` };
     let summaryDeleted: boolean;
     try {
       summaryDeleted = await reopenTaskAndRefresh(basePath, mid, sid, tid);
@@ -310,9 +310,9 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
     results.push(`  - Reopened task ${mid}/${sid}/${tid} in the database`);
     if (summaryDeleted) results.push("  - Deleted task summary file");
   } else if (unit.unitType === "complete-slice" && sid) {
-    const slice = getSlice(mid, sid);
+    const slice = readSlice(mid, sid);
     if (!slice) return { success: false, message: `Cannot undo ${label}: slice not found in database.` };
-    if (!isClosedStatus(slice.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    if (!slice.closed) return { success: false, message: `Nothing to undo — ${label} is already open.` };
     const terminal = lifecycleLastOperation("slice", mid, sid) ?? slice.completed_at ?? `legacy:${slice.status}`;
     const result = await executeSliceReopen(
       { milestoneId: mid, sliceId: sid, reason: UNDO_UNIT_REOPEN_REASON },
@@ -324,9 +324,9 @@ export async function undoLastCompletedUnit(basePath: string): Promise<UndoUnitR
     }
     results.push(`  - Reopened slice ${mid}/${sid} in the database`);
   } else if (unit.unitType === "complete-milestone") {
-    const milestone = getMilestone(mid);
+    const milestone = readMilestone(mid);
     if (!milestone) return { success: false, message: `Cannot undo ${label}: milestone not found in database.` };
-    if (!isClosedStatus(milestone.status)) return { success: false, message: `Nothing to undo — ${label} is already open.` };
+    if (!milestone.closed) return { success: false, message: `Nothing to undo — ${label} is already open.` };
     const terminal = lifecycleLastOperation("milestone", mid, null) ?? milestone.completed_at ?? `legacy:${milestone.status}`;
     // Undo reverses only the complete-milestone Unit: slices, tasks and their
     // summaries stay complete.

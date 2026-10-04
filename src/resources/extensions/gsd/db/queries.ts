@@ -7,7 +7,6 @@
 import { createHash } from "node:crypto";
 
 import { getDbOrNull, readTransaction } from "./engine.js";
-import { isClosedStatus } from "../status-guards.js";
 import { getGateIdsForTurn, type OwnerTurn } from "../gate-registry.js";
 import type { Decision, Requirement, GateRow, GateScope } from "../types.js";
 import {
@@ -1225,17 +1224,6 @@ export function getProgressHierarchyDetails(): ProgressHierarchyDetails {
     milestonesTruncated: milestones.length > maxMilestones,
     tasksTruncated,
   };
-}
-
-/**
- * Ids of slices closed per the canonical status vocabulary (ADR-017), in
- * milestone order, for the "which slices produced closeout artifacts?"
- * decision-path read. A deferred slice is not closed: it never ran.
- */
-export function getClosedSliceIds(milestoneId: string): string[] {
-  return getMilestoneSlices(milestoneId)
-    .filter((s) => isClosedStatus(s.status))
-    .map((s) => s.id);
 }
 
 export function getArtifact(path: string): ArtifactRow | null {

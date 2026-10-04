@@ -13,7 +13,6 @@ import {
   getMilestone,
   getMilestoneLifecycleShadowSnapshot,
   getSlice,
-  getTask,
   getUnresolvedBlockingReworkFindingsForTask,
   insertAssessment,
   insertAuditEvent,
@@ -50,7 +49,7 @@ import {
   registerMilestoneRows,
   type MilestoneRegistration,
 } from "../milestone-registration.js";
-import { readMilestoneStatus } from "../db/lifecycle-read.js";
+import { readMilestoneStatus, readTask } from "../db/lifecycle-read.js";
 import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
 import { isClosedStatus } from "../status-guards.js";
@@ -1065,8 +1064,7 @@ export async function executeTaskComplete(
         // error-trace anomalies for a task that actually completed, so when the
         // task is already closed in current DB state, unwind the duplicate as an
         // idempotent success pointing at the existing summary instead (#1569).
-        const existingTask = getTask(params.milestoneId, params.sliceId, params.taskId);
-        if (existingTask && isClosedStatus(existingTask.status)) {
+        if (readTask(params.milestoneId, params.sliceId, params.taskId)?.done) {
           const summaryPath = resolveTaskSummaryPath(
             basePath,
             params.milestoneId,

@@ -43,6 +43,7 @@ import {
   getTask,
   isDbAvailable,
 } from "./gsd-db.js";
+import { readMilestoneSlices } from "./db/lifecycle-read.js";
 import {
   GATE_REGISTRY,
   assertGateCoverage,
@@ -76,7 +77,7 @@ import { findMilestoneIds } from "./milestone-ids.js";
 import { buildRunUatPresentationForType, RUN_UAT_TOOL_PRESENTATION_PLAN_ID } from "./tool-presentation-plan.js";
 import { classifyUatContentForRun } from "./uat-policy.js";
 import { checkNeedsRunUat as resolveNeedsRunUat, type UatDispatchCandidate } from "./uat-dispatch.js";
-import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
+import { isClosedStatus } from "./status-guards.js";
 import { STOPWORDS, deriveSliceScope } from "./slice-scope.js";
 import { buildWebAppUatGuidanceBlock } from "./web-app-uat.js";
 import {
@@ -1643,10 +1644,10 @@ export async function checkNeedsReassessment(
   if (!isDbAvailable()) return null;
 
   try {
-    const slices = getMilestoneSlices(mid);
+    const slices = readMilestoneSlices(mid);
     if (slices.length > 0) {
       const completedSliceIds = slices.filter(s => isCompletedSliceStatus(s.status)).map(s => s.id);
-      const hasIncomplete = slices.some(s => !isInactiveStatus(s.status));
+      const hasIncomplete = slices.some(s => !s.done);
       if (completedSliceIds.length === 0 || !hasIncomplete) return null;
       const lastCompleted = completedSliceIds[completedSliceIds.length - 1];
       // reassess-roadmap persists its verdict as a roadmap-scoped assessments
@@ -1669,7 +1670,7 @@ export async function loadRoadmapCompletedSliceCandidates(
   // DB read authority — completed slices come from DB rows, not roadmap checkboxes.
   void base;
   if (!isDbAvailable()) return [];
-  return getMilestoneSlices(mid)
+  return readMilestoneSlices(mid)
     .filter((slice) => isCompletedSliceStatus(slice.status))
     .map((slice) => ({ sliceId: slice.id }))
     .reverse();

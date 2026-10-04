@@ -9,12 +9,10 @@ import { existsSync } from "node:fs";
 
 import {
   getMilestone,
-  getClosedSliceIds,
   getLatestAssessmentByScope,
-  getMilestoneSlices,
   isDbAvailable,
 } from "./gsd-db.js";
-import { isClosedStatus } from "./status-guards.js";
+import { readClosedSliceIds, readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { resolveExpectedArtifactPath } from "./auto-artifact-paths.js";
 import {
   handleCompleteMilestone,
@@ -61,7 +59,7 @@ export async function isCompletedMilestoneTerminal(
 ): Promise<boolean> {
   if (!isDbAvailable()) return false;
 
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   if (!milestone) return false;
 
   const lifecycleStatus = readMilestoneLifecycleStatus(milestoneId);
@@ -77,14 +75,14 @@ export async function isCompletedMilestoneTerminal(
       sourceRevision: source.sourceRevision,
     }).authorized) return false;
   } else {
-    if (isClosedStatus(milestone.status)) return true;
+    if (milestone.closed) return true;
     const validation = getLatestAssessmentByScope(milestoneId, "milestone-validation");
     if (validation?.status !== "pass") return false;
   }
 
-  const slices = getMilestoneSlices(milestoneId);
+  const slices = readMilestoneSlices(milestoneId);
   if (slices.length === 0) return false;
-  return slices.every((slice) => isClosedStatus(slice.status));
+  return slices.every((slice) => slice.closed);
 }
 
 /** Write a missing milestone SUMMARY projection when canonical DB closeout already settled. */
@@ -149,8 +147,7 @@ export async function isMilestoneCloseoutSettled(mid: string, basePath: string):
   const deadline = Date.now() + COMPLETE_MILESTONE_DB_SETTLE_MS;
   while (Date.now() < deadline) {
     if (isDbAvailable()) {
-      const milestone = getMilestone(mid);
-      if (milestone && isClosedStatus(milestone.status)) {
+      if (readMilestone(mid)?.closed) {
         const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, mid);
         const closeoutProof = proveMilestoneCloseout(mid, {
           refreshFromDisk: true,
@@ -175,7 +172,7 @@ export async function runMilestoneCloseoutGitHub(basePath: string, mid: string):
   // A prepared Closeout Plan is not completion: the Milestone closes on GitHub
   // only after the settle transaction completed it in the database. A plan
   // that carries the GitHub close runs it at settlement.
-  if (isDbAvailable() && !isClosedStatus(getMilestone(mid)?.status ?? "")) return;
+  if (isDbAvailable() && !readMilestone(mid)?.closed) return;
   if (closeoutPlanClosesGitHubMilestone(mid)) return;
   await runSafely("postUnit", "github-sync", async () => {
     const { finalizeMilestoneGitHubSync } = await import("../github-sync/sync.js");
@@ -203,8 +200,7 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
   const adoptedMilestone = isDbAvailable() && isMilestoneLifecycleAdopted(mid);
 
   if (isDbAvailable()) {
-    const milestone = getMilestone(mid);
-    if (milestone && isClosedStatus(milestone.status)) {
+    if (readMilestone(mid)?.closed) {
       const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, mid);
       const summaryPath = resolveExpectedArtifactPath("complete-milestone", mid, artifactBasePath);
       const summaryMissing = !summaryPath || !existsSync(summaryPath);
@@ -250,7 +246,7 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
         level: "warning",
       };
     }
-    for (const sliceId of getClosedSliceIds(mid)) {
+    for (const sliceId of readClosedSliceIds(mid)) {
       const result = readUatGateVerdict(mid, sliceId);
       if (!result) {
         return {

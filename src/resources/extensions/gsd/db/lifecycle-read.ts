@@ -2,12 +2,13 @@
 // File Purpose: The read interface for status, phase, dispatch-eligibility
 // and dependency decisions (ADR-046). deriveState, the dispatch guard,
 // resolveDispatch, the already-closed dispatch check, the queue commands, the
-// auto start and stop completion checks, the status response, progress and
-// the project snapshot ask their status questions here.
+// auto start and stop completion checks, the closeout, recovery, post-unit and
+// verification checks, the status response, progress and the project snapshot
+// ask their status questions here.
 // The project Authority Epoch chooses the read source, in `cutoverHasRun`
 // only: canonical lifecycle rows and Waivers after the Cutover, legacy status
 // rows (D005) before it. The choice is per Project, never per item.
-// Other decision sites still read legacy rows directly and apply the status
+// Some decision sites still read legacy rows directly and apply the status
 // vocabulary themselves; docs/dev/state-db-cutover-milestone-decision.md
 // (D012) lists them.
 
@@ -57,6 +58,11 @@ export interface MilestoneRead extends MilestoneRow {
 export interface SliceRead extends SliceRow {
   /** Needs no further work: closed, or deferred by a decision. */
   readonly done: boolean;
+  /**
+   * Closed: complete or cancelled. Before the Cutover a deferred Slice is not
+   * closed (the legacy rule). After the Cutover this is `done`.
+   */
+  readonly closed: boolean;
   /**
    * Releases the Slices that depend on it. Before the Cutover this is `done`.
    * After the Cutover a cancelled Slice releases them only with an active
@@ -217,11 +223,12 @@ function toSliceRead(row: SliceRow, items: LifecycleItems | null): SliceRead {
       ...row,
       status: statusLabel("slice", item),
       done: complete || cancelled,
+      closed: complete || cancelled,
       satisfiesDependents: complete || (cancelled && item?.waived === true),
     };
   }
   const done = isInactiveStatus(row.status);
-  return { ...row, done, satisfiesDependents: done };
+  return { ...row, done, closed: isClosedStatus(row.status), satisfiesDependents: done };
 }
 
 /** Every Milestone in workflow order (sequence, then id). Includes discarded tombstones. */
@@ -242,6 +249,15 @@ export function readMilestoneSlices(milestoneId: string): SliceRead[] {
   return getMilestoneSlices(milestoneId).map((row) => toSliceRead(row, items));
 }
 
+/** The ids of the closed Slices of one Milestone, in workflow order. */
+export function readClosedSliceIds(milestoneId: string): string[] {
+  return readMilestoneSlices(milestoneId).filter((slice) => slice.closed).map((slice) => slice.id);
+}
+
+export function readSlice(milestoneId: string, sliceId: string): SliceRead | null {
+  return readMilestoneSlices(milestoneId).find((slice) => slice.id === sliceId) ?? null;
+}
+
 /** `readMilestoneSlices` for many Milestones in one query. A Milestone with no Slice has no entry. */
 export function readSlicesByMilestoneIds(milestoneIds: readonly string[]): Map<string, SliceRead[]> {
   const items = cutoverHasRun() ? readLifecycleItems("slice") : null;
@@ -259,6 +275,10 @@ export function readSliceTasks(milestoneId: string, sliceId: string): TaskRead[]
     const item = items.get(`${milestoneId}/${sliceId}/${row.id}`);
     return { ...row, status: statusLabel("task", item), done: isComplete(item) || isCancelled(item) };
   });
+}
+
+export function readTask(milestoneId: string, sliceId: string, taskId: string): TaskRead | null {
+  return readSliceTasks(milestoneId, sliceId).find((task) => task.id === taskId) ?? null;
 }
 
 export interface MilestoneStatusRead {

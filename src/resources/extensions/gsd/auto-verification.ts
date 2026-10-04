@@ -21,8 +21,6 @@ import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.j
 import { hasPendingMilestoneSubjectiveUat } from "./milestone-subjective-uat-domain-operation.js";
 import { parseUnitId } from "./unit-id.js";
 import {
-  getMilestoneSlices,
-  getSliceTasks,
   getTask,
   getTaskVerificationEvidence,
   hasRoadmapAssessmentSince,
@@ -32,7 +30,7 @@ import type { TaskRow } from "./db-task-slice-rows.js";
 import { formatEscalationForDisplay, readTaskEscalation } from "./escalation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import type { GSDPreferences } from "./preferences-types.js";
-import { isInactiveStatus } from "./status-guards.js";
+import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import {
   runVerificationGate,
   runVerificationGateForTargets,
@@ -712,9 +710,9 @@ async function countIncompleteSlices(_basePath: string, milestoneId: string): Pr
   // DB-authoritative (ADR-017): no markdown fallback. DB unavailable or no
   // rows means "unknown" — do not pause.
   if (!isDbAvailable()) return 1;
-  const slices = getMilestoneSlices(milestoneId);
+  const slices = readMilestoneSlices(milestoneId);
   if (slices.length === 0) return 1;
-  return slices.filter((slice) => !isInactiveStatus(slice.status)).length;
+  return slices.filter((slice) => !slice.done).length;
 }
 
 type BlockerDiscoveredAttempt = VerificationAttemptSnapshot & {
@@ -1134,7 +1132,7 @@ export async function runPostUnitVerification(
           // Reuse the already-loaded task row for post-execution checks.
           if (taskRow && taskRow.key_files && taskRow.key_files.length > 0) {
             // Get all tasks in the slice
-            const allTasks = getSliceTasks(mid, sid);
+            const allTasks = readSliceTasks(mid, sid);
             // Filter to prior completed tasks (status = 'complete' or 'done', before current task)
             const priorTasks = allTasks.filter(
               (t: TaskRow) =>

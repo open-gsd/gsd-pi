@@ -30,7 +30,6 @@ import {
   insertTask,
   getTask,
   getSliceTasks,
-  getClosedSliceIds,
   getSliceTaskCounts,
   checkpointDatabase,
   refreshOpenDatabaseFromDisk,
@@ -46,6 +45,7 @@ import {
   deleteDecisionById,
   upsertSlicePlanning,
 } from '../gsd-db.ts';
+import { readClosedSliceIds } from '../db/lifecycle-read.ts';
 import { MigrationBackupError } from '../db-migration-backup.ts';
 import { _resetLogs, peekLogs, setStderrLoggingEnabled } from '../workflow-logger.ts';
 
@@ -1079,7 +1079,7 @@ describe('gsd-db', () => {
     closeDatabase();
   });
 
-  test('gsd-db: getClosedSliceIds filters to closed ids', () => {
+  test('gsd-db: readClosedSliceIds filters to closed ids', () => {
     openDatabase(':memory:');
     insertMilestone({ id: 'M001', status: 'active' });
     insertSlice({ milestoneId: 'M001', id: 'S01', title: 'Complete', status: 'complete', depends: [], sequence: 1 });
@@ -1089,8 +1089,8 @@ describe('gsd-db', () => {
     insertSlice({ milestoneId: 'M001', id: 'S05', title: 'Active', status: 'active', depends: [], sequence: 5 });
     insertSlice({ milestoneId: 'M001', id: 'S06', title: 'Pending', status: 'pending', depends: ['S05'], sequence: 6 });
 
-    assert.deepStrictEqual(getClosedSliceIds('M001'), ['S01', 'S02', 'S03', 'S04']);
-    assert.deepStrictEqual(getClosedSliceIds('M999'), [], 'unknown milestone yields no closed ids');
+    assert.deepStrictEqual(readClosedSliceIds('M001'), ['S01', 'S02', 'S03', 'S04']);
+    assert.deepStrictEqual(readClosedSliceIds('M999'), [], 'unknown milestone yields no closed ids');
 
     closeDatabase();
   });

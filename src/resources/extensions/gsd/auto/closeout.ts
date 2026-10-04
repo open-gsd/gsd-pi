@@ -12,9 +12,9 @@ import type { PostflightResult, PreflightResult } from "../clean-root-preflight.
 import { MergeConflictError } from "../git-service.js";
 import { findUnmergedCompletedMilestones } from "../unmerged-milestone-guard.js";
 import { getIsolationMode } from "../preferences.js";
-import { isDbAvailable, getMilestone } from "../gsd-db.js";
+import { isDbAvailable } from "../gsd-db.js";
+import { readMilestone } from "../db/lifecycle-read.js";
 import { refreshWorkflowDatabaseFromDisk } from "../db-workspace.js";
-import { isClosedStatus } from "../status-guards.js";
 import { gsdRoot } from "../paths.js";
 import { atomicWriteSync } from "../atomic-write.js";
 import { logWarning, logError } from "../workflow-logger.js";
@@ -247,7 +247,7 @@ export async function shouldSkipTerminalMilestoneCloseout(
     }
   }
   const milestoneAlreadyClosedOut = isDbAvailable()
-    && isClosedStatus(getMilestone(closeoutMilestoneId)?.status ?? "")
+    && readMilestone(closeoutMilestoneId)?.closed === true
     && !closeoutMergePending;
   if (milestoneAlreadyClosedOut) {
     return { skip: true, milestoneId: closeoutMilestoneId };

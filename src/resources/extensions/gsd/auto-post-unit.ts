@@ -55,8 +55,8 @@ import { regenerateIfMissing } from "./workflow-projections.js";
 import { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 import { normalizeWorktreePathForCompare } from "./worktree-root.js";
-import { isDbAvailable, getTask, getSlice, getMilestone, getMilestoneSlices, _getAdapter, getVerificationEvidence, hasRoadmapAssessmentSince, getReplanHistory } from "./gsd-db.js";
-import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
+import { isDbAvailable, getTask, getSlice, getMilestone, _getAdapter, getVerificationEvidence, hasRoadmapAssessmentSince, getReplanHistory } from "./gsd-db.js";
+import { readMilestoneSlices, readSlice, readSliceTasks, readTask } from "./db/lifecycle-read.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
 import { getWorkflowDatabasePath, refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -100,14 +100,12 @@ import { validateContent } from "./safety/content-validator.js";
 import { resolveSafetyHarnessConfig } from "./safety/safety-harness.js";
 import { resolveExpectedArtifactPath as resolveArtifactForContent } from "./auto-artifact-paths.js";
 import { getIsolationMode, loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.js";
-import { getSliceTasks } from "./gsd-db.js";
 import { runPreExecutionChecks, type PreExecutionResult } from "./pre-execution-checks.js";
 import { writePreExecutionEvidence, type PreExecutionCheckJSON } from "./verification-evidence.js";
 import { ensureCodebaseMapFresh } from "./codebase-generator.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { UokGateRunner } from "./uok/gate-runner.js";
 import { writeTurnGitTransaction } from "./uok/gitops.js";
-import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { detectAbandonMilestone } from "./abandon-detect.js";
 import { getPendingGate } from "./bootstrap/write-gate.js";
 import { isDeterministicPolicyError, isToolInvocationError, isToolUnavailableError } from "./auto-tool-tracking.js";
@@ -216,7 +214,7 @@ export function resolveCloseoutGitAction(
 
 function hasIncompleteMilestoneSlice(milestoneId: string): boolean {
   if (!isDbAvailable()) return false;
-  return getMilestoneSlices(milestoneId).some((slice) => !isInactiveStatus(slice.status));
+  return readMilestoneSlices(milestoneId).some((slice) => !slice.done);
 }
 
 /**
@@ -816,7 +814,7 @@ function runExecuteTaskFileChangeSafety(
 
   try {
     const sliceTaskRows = isDbAvailable()
-      ? getSliceTasks(sMid, sSid).filter((t) => isClosedStatus(t.status) || t.id === sTid)
+      ? readSliceTasks(sMid, sSid).filter((t) => t.done || t.id === sTid)
       : [];
 
     if (sliceTaskRows.length > 0) {
@@ -916,7 +914,7 @@ export function detectRogueFileWrites(
     const summaryPath = resolveTaskArtifactPath(basePath, mid, sid, tid, "SUMMARY");
     if (!summaryPath || !existsSync(summaryPath)) return [];
 
-    const dbRow = getTask(mid, sid, tid);
+    const dbRow = readTask(mid, sid, tid);
     if (!dbRow || dbRow.status !== "complete") {
       rogues.push({ path: summaryPath, unitType, unitId });
     }
@@ -926,7 +924,7 @@ export function detectRogueFileWrites(
     const summaryPath = resolveSliceFile(basePath, mid, sid, "SUMMARY");
     if (!summaryPath || !existsSync(summaryPath)) return [];
 
-    const dbRow = getSlice(mid, sid);
+    const dbRow = readSlice(mid, sid);
     if (!dbRow || dbRow.status !== "complete") {
       rogues.push({ path: summaryPath, unitType, unitId });
     }
@@ -1245,8 +1243,7 @@ async function repairCompleteSliceRoadmapProjection(
   const { milestone: mid, slice: sid } = parseUnitId(unitId);
   if (!mid || !sid) return false;
 
-  const slice = getSlice(mid, sid);
-  if (!slice || !isClosedStatus(slice.status)) return false;
+  if (!readSlice(mid, sid)?.closed) return false;
 
   const artifactBase = resolveCanonicalMilestoneRoot(basePath, mid);
 
@@ -2826,7 +2823,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         }
 
         // Get tasks for this slice from DB
-        const tasks = getSliceTasks(mid, sid);
+        const tasks = readSliceTasks(mid, sid);
         if (tasks.length === 0) {
           debugLog("postUnitPostVerification", {
             phase: "pre-execution-checks",

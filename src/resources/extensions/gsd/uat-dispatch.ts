@@ -6,6 +6,7 @@ import {
   getSliceRunUatAssessment,
   getSliceScopedArtifacts,
 } from "./gsd-db.js";
+import { readMilestoneSlices, readSlice } from "./db/lifecycle-read.js";
 import { loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.js";
 import {
   classifyUatContentForRun,
@@ -43,7 +44,7 @@ export function readSliceUatSpec(milestoneId: string, sliceId: string): string {
  * the run-uat rule comes before the rule of every unit the guard holds.
  */
 export function sliceAwaitsUatVerdict(basePath: string, milestoneId: string, sliceId: string): boolean {
-  if (getSlice(milestoneId, sliceId)?.status !== "complete") return false;
+  if (readSlice(milestoneId, sliceId)?.status !== "complete") return false;
   const uatContent = readSliceUatSpec(milestoneId, sliceId);
   if (!uatContent || getSliceRunUatAssessment(milestoneId, sliceId)?.status) return false;
   return shouldDispatchUatForContent(uatContent, loadEffectiveGSDPreferences(basePath)?.preferences);
@@ -123,10 +124,10 @@ async function resolveCandidateRunUatDispatch(
 async function getDbCompletedSliceCandidates(
   milestoneId: string,
 ): Promise<UatDispatchCandidate[] | null> {
-  const { isDbAvailable, getMilestoneSlices } = await import("./gsd-db.js");
+  const { isDbAvailable } = await import("./gsd-db.js");
   if (!isDbAvailable()) return null;
 
-  const slices = getMilestoneSlices(milestoneId);
+  const slices = readMilestoneSlices(milestoneId);
   // No DB slice rows for this milestone: the DB has no authoritative view, so
   // return null to let the caller defer to the roadmap fallback.
   if (slices.length === 0) return null;

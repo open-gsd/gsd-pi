@@ -22,7 +22,6 @@ import { getUatBrowserToolSupportError, type UatType } from "./uat-policy.js";
 import {
   isDbAvailable,
   getMilestoneSlices,
-  getClosedSliceIds,
   getPendingGatesForTurn,
   markPendingGatesOmittedForTurn,
   insertAssessment,
@@ -31,7 +30,7 @@ import {
   hasSavedArtifact,
   hasUnitRecoveryBlock,
 } from "./gsd-db.js";
-import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
+import { readClosedSliceIds, readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { readTaskLifecycleStatus } from "./task-execution-domain-operation.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
@@ -974,7 +973,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // Only pause if the slice has no saved CONTEXT row yet (discussion not done).
       if (hasSavedArtifact(mid, state.activeSlice.id, "CONTEXT")) return null; // discussion already done, proceed
 
-      const closedSliceIds = getClosedSliceIds(mid);
+      const closedSliceIds = readClosedSliceIds(mid);
       const justClosedSliceId = closedSliceIds[closedSliceIds.length - 1];
       let priorVerdictWarning = "";
       if (justClosedSliceId) {
