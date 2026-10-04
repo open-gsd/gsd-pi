@@ -1794,7 +1794,8 @@ export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): vo
 /**
  * `gsd db adopt` — preview, and with `--apply` run, the lifecycle.backfill
  * Domain Operation that adopts every milestone, slice and task row with no
- * lifecycle row. `--apply` first writes a verified backup beside the database
+ * lifecycle row, and stores the evidence marker of each imported completion.
+ * `--apply` first writes a verified backup beside the database
  * so `/gsd db restore-backup` can roll the change back.
  */
 export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: string, args = ""): Promise<void> {
@@ -1822,10 +1823,13 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
       );
       return;
     }
-    if (preview.items.length === 0 && preview.waiverRepairs.length === 0) {
+    if (
+      preview.items.length === 0 && preview.waiverRepairs.length === 0 &&
+      preview.unmarkedImportCompletions.length === 0
+    ) {
       ctx.ui.notify(
         "gsd db adopt: every milestone, slice and task already has a lifecycle row, " +
-          "and every adopted cancellation has a Waiver.",
+          "every adopted cancellation has a Waiver, and every imported completion has its evidence marker.",
         "info",
       );
       return;
@@ -1835,6 +1839,9 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
     if (preview.waiverRepairs.length > 0) {
       byRule.set("adopted-cancelled-without-waiver", preview.waiverRepairs.length);
     }
+    if (preview.unmarkedImportCompletions.length > 0) {
+      byRule.set("import-adopted-completion", preview.unmarkedImportCompletions.length);
+    }
     const summary = [...byRule].map(([rule, count]) => `  ${rule}: ${count}`).join("\n") +
       (preview.openUnderCompletedParent.length > 0
         ? `\nOpen work under a completed parent, adopted as cancelled:\n${
@@ -1843,8 +1850,10 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
         : "");
     if (!/(^|\s)--apply(\s|$)/.test(args)) {
       ctx.ui.notify(
-        `gsd db adopt: ${preview.items.length} row(s) would be adopted and ` +
-          `${preview.waiverRepairs.length} adopted cancellation(s) would get a Waiver:\n${summary}\n` +
+        `gsd db adopt: ${preview.items.length} row(s) would be adopted, ` +
+          `${preview.waiverRepairs.length} adopted cancellation(s) would get a Waiver and ` +
+          `${preview.unmarkedImportCompletions.length} imported completion(s) would get the ` +
+          `unverified-legacy evidence marker:\n${summary}\n` +
           "Run /gsd db adopt --apply to adopt them in one operation (a verified backup is written first).",
         "info",
       );
@@ -1858,7 +1867,7 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
     const result = applyLifecycleBackfill(basePath);
     ctx.ui.notify(
       `gsd db adopt: adopted ${result.adopted} row(s) in operation ${result.operationId} ` +
-        `(${result.waivers} legacy-attested Waiver(s)).\n${summary}` +
+        `(${result.waivers} legacy-attested Waiver(s), ${result.evidenceMarkers} unverified-legacy evidence marker(s)).\n${summary}` +
         (result.findings.length > 0 ? `\nCompletion without evidence:\n  ${result.findings.join("\n  ")}` : "") +
         "\nA verified backup was written beside the database; /gsd db restore-backup lists it.",
       "info",

@@ -61,7 +61,10 @@ function backfillAndCutOver(basePath: string): void {
   }
   requireCoordinationIdle();
   backupDatabaseBeforeMigration(getDb(), getDbPath(), SCHEMA_VERSION, { existsSync, copyFileSync, logWarning });
-  if (preview.items.length > 0 || preview.waiverRepairs.length > 0) {
+  if (
+    preview.items.length > 0 || preview.waiverRepairs.length > 0 ||
+    preview.unmarkedImportCompletions.length > 0
+  ) {
     const { findings } = applyLifecycleBackfill(basePath);
     if (findings.length > 0) {
       logWarning("db", `Lifecycle backfill adopted ${findings.length} row(s) with a finding:\n  ${findings.join("\n  ")}`);
