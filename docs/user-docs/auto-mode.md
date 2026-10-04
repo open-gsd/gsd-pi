@@ -270,6 +270,13 @@ closeout, a UAT-scoped non-passing verdict is also redispatched so closeout can
 recover with fresh UAT evidence; roadmap and backfill assessments do not
 suppress that UAT run.
 
+A completed slice whose UAT must run does not release the slices that depend on
+it until a run-uat verdict is saved. Until then GSD dispatches `run-uat` for
+that slice and refuses to dispatch work for a dependent slice ("dependency
+slice ... has no UAT verdict"). A slice whose UAT is not dispatched
+(artifact-driven UAT with `uat_dispatch` off) releases its dependents when it
+completes.
+
 Artifact verification retries are capped at 3 attempts. If the result is still missing after those retries, GSD pauses auto mode with the "Artifact verification failed..." error instead of relying on loop detection or an unbounded dispatch counter.
 
 A unit that records no result is never treated as complete. When timeout recovery exhausts its attempts, or a tool rejects the unit with a deterministic policy error that a retry cannot fix, GSD pauses auto mode for every unit type. It records a manual-attention recovery block in the database (a task keeps its Attempt and recovery records instead) and writes a `-RECOVERY-BLOCKER.md` diagnostic sidecar next to the expected artifact. The sidecar never has the name of the unit's artifact, so it cannot pass for the result. The one exception is the aggregate parallel slice-research unit after timeout recovery: GSD records the block and falls back to per-slice research.

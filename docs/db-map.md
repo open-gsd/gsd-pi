@@ -909,6 +909,7 @@ milestone_id TEXT               ← uat_exec only
 slice_id     TEXT               ← uat_exec only
 check_id     TEXT               ← uat_exec only
 attempt_ref  TEXT               ← the Attempt the run belongs to, or NULL
+source_revision TEXT            ← uat_exec only: project source revision when the run was recorded
 ```
 
 - Index: `idx_exec_runs_attempt` on `(attempt_ref)`
@@ -924,6 +925,11 @@ attempt_ref  TEXT               ← the Attempt the run belongs to, or NULL
 - Host verification accepts the agent's claimed task evidence only when each
   claimed command names a run of the Attempt under verification that ended with
   exit 0.
+- `source_revision` is the verification source revision of the project when a
+  `uat_exec` run was recorded. It is NULL for an `exec` run (reading it hashes
+  every source file) and when the source cannot be read, for example outside a
+  git repository. `gsd_uat_result_save` stores the revision it was saved for in
+  its operation result and in the `attempt-N.json` record.
 
 ---
 
@@ -1844,6 +1850,14 @@ authority_epoch          INTEGER NOT NULL
   `sha256:` value with 64 hexadecimal digits, and `environment_json` must be a
   non-empty JSON object. Command/tool, working directory, source revision, and
   durable output reference must all be non-empty.
+- A host Task verdict (`attempt.verify`) is refused when its
+  `durable_output_ref` does not resolve. A `db://<kind>/<attemptId>` reference
+  must name the Attempt under verification; it resolves to this evidence row.
+  Any other reference must be the id of an `exec_runs` row.
+- The evidence row of a host verification run stores the record of each host
+  check in `environment_json.checks`: command, exit code, duration, verdict and
+  the bounded stdout/stderr of a failed check. `T##-VERIFY.json` is a copy of
+  that record for people; no code reads it.
 - Index: `idx_workflow_evidence_verdict` (verdict_id, evidence_id)
 
 #### `workflow_human_acceptances`
