@@ -1078,8 +1078,8 @@ export function removeWorktree(
   // The computed path may differ when .gsd/ is (or was) a symlink to an
   // external state directory — git resolves symlinks at worktree creation
   // time, so its registered path points to the resolved external location.
-  // If syncStateToProjectRoot later creates a real .gsd/ directory that
-  // shadows the symlink, the computed path diverges from git's record.
+  // If a real .gsd/ directory later shadows the symlink, the computed path
+  // diverges from git's record.
   let gitReportedPath: string | null = null;
   try {
     const entries = nativeWorktreeList(basePath);

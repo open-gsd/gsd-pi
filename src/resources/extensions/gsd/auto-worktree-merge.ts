@@ -281,7 +281,7 @@ export function mergeMilestoneToMain(
 
   if (!mergeResult.success) {
     // Dirty working tree — the merge was rejected before it started (e.g.
-    // untracked .gsd/ files left by syncStateToProjectRoot).  Preserve the
+    // untracked .gsd/ files at the project root).  Preserve the
     // milestone branch so commits are not lost.
     if (mergeResult.conflicts.includes("__dirty_working_tree__")) {
       // Defensively clean merge state — the native path may leave MERGE_HEAD

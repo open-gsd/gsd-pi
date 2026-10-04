@@ -2242,8 +2242,10 @@ active milestone and its slices and includes a deliberately approximate,
 stale-tolerant next-command hint. It is a local runtime projection, not a restore
 or worktree-merge input.
 
-`reconcileWorktreeDb` merges hidden-worktree legacy correctness rows back into the main
-DB, including hierarchy, requirements, artifacts, memories, replan history,
+`reconcileWorktreeDb` runs only from the explicit `/worktree import-db` command;
+no merge, teardown, or projection path calls it. Its `preview` option returns
+the row counts and conflicts and changes no row. It merges the legacy
+correctness rows of a worktree-local `gsd.db` into the main DB, including hierarchy, requirements, artifacts, memories, replan history,
 assessments, quality gates, slice dependencies, verification evidence, gate
 runs, and milestone commit attributions. Runtime-only/audit substrates such as
 `runtime_kv`, `turn_git_transactions`, `audit_events`, and `audit_turn_index`

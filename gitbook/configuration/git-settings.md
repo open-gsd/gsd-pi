@@ -184,7 +184,7 @@ Inside an active GSD TUI session, use `/gsd worktree` (or `/gsd wt`) for worktre
 
 `list` shows each worktree's branch, path, diff stats, commit count, and whether it is clean, unmerged, or has uncommitted changes. `merge` brings a worktree back into the detected main branch and removes it afterward; if the worktree has dirty files, GSD tries to auto-commit them before merging. `clean` removes only merged or empty worktrees and keeps anything with pending changes. `remove` refuses to discard unmerged or uncommitted work unless you pass `--force`.
 
-Before merge or automatic teardown, GSD reconciles legacy worktree rows without replacing hierarchy identities. If the worktree contains canonical operations or lifecycle state missing from or newer than the project database, merge/cleanup stops and preserves the worktree for recovery. A newer project lifecycle head also protects its status, completion summaries, verification results, and blocker/escalation evidence from older worktree state.
+Worktrees share the project database. For a worktree that holds a `gsd.db` of its own, see the [Git Strategy guide](../../docs/user-docs/git-strategy.md#automatic-auto-mode).
 
 When forced removal finds uncommitted work, GSD treats the worktree contents as recoverable data instead of deleting them. It moves the checkout to `.gsd/quarantine/worktrees/<name>-<timestamp>/`, writes `.gsd-quarantine.json` with the original path, branch, and `git status --porcelain` output, removes the quarantined `.git` pointer, and keeps the milestone branch. Inspect, copy, or merge any salvageable files from the quarantine before deleting it. If quarantine cannot be created, GSD leaves the original worktree in place.
 
