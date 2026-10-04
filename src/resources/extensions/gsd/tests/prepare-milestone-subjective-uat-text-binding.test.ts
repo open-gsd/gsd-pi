@@ -90,11 +90,27 @@ function setup(): string {
   return basePath;
 }
 
-/** Run the host command as a person does, and return what it told them. */
-async function uatAnswer(base: string, args: string): Promise<string[]> {
+/**
+ * Run the host command and return what it told the caller. "terminal" is the
+ * terminal UI with a person at the keyboard. "rpc" has a UI context, but its
+ * stdin and stdout are pipes. "headless" is the session `gsd headless` starts.
+ */
+async function uatAnswer(
+  base: string,
+  args: string,
+  session: "terminal" | "rpc" | "headless" = "terminal",
+): Promise<string[]> {
   const messages: string[] = [];
-  const ctx = { ui: { notify: (message: string) => { messages.push(message); } } };
-  await handleUatAnswer(args, ctx as unknown as Parameters<typeof handleUatAnswer>[1], base);
+  const ctx = { hasUI: true, ui: { notify: (message: string) => { messages.push(message); } } };
+  const previousHeadless = process.env.GSD_HEADLESS;
+  if (session === "headless") process.env.GSD_HEADLESS = "1";
+  else delete process.env.GSD_HEADLESS;
+  try {
+    await handleUatAnswer(args, ctx as unknown as Parameters<typeof handleUatAnswer>[1], base, session === "terminal");
+  } finally {
+    if (previousHeadless === undefined) delete process.env.GSD_HEADLESS;
+    else process.env.GSD_HEADLESS = previousHeadless;
+  }
   return messages;
 }
 
@@ -183,6 +199,44 @@ test("/gsd uat-answer records nothing without a rationale or without an open que
     internalExecutionInvocation("test/uat-text/prepare/no-rationale"),
   );
   assert.match((await uatAnswer(base, "accept")).join("\n"), /--rationale is required/);
+  assert.deepEqual(humanAcceptances(), []);
+});
+
+test("/gsd uat-answer sent through an RPC session records no Human Acceptance", async () => {
+  const base = setup();
+  await executePrepareMilestoneSubjectiveUat(
+    prepareExecutorInput(),
+    base,
+    internalExecutionInvocation("test/uat-text/prepare/rpc"),
+  );
+
+  const messages = await uatAnswer(base, 'accept --rationale "ok"', "rpc");
+
+  assert.match(messages.join("\n"), /recorded only from the GSD terminal UI/);
+  assert.deepEqual(humanAcceptances(), []);
+  assert.deepEqual(
+    db().prepare("SELECT question_status FROM workflow_open_questions").all(),
+    [{ question_status: "open" }],
+    "the question stays open for the person",
+  );
+  assert.match(
+    (await uatAnswer(base, "", "rpc")).join("\n"),
+    /Does the guided flow feel natural and clear\?/,
+    "an RPC session can still list the open questions",
+  );
+});
+
+test("/gsd uat-answer sent through gsd headless records no Human Acceptance", async () => {
+  const base = setup();
+  await executePrepareMilestoneSubjectiveUat(
+    prepareExecutorInput(),
+    base,
+    internalExecutionInvocation("test/uat-text/prepare/headless"),
+  );
+
+  const messages = await uatAnswer(base, 'accept --rationale "ok"', "headless");
+
+  assert.match(messages.join("\n"), /recorded only from the GSD terminal UI/);
   assert.deepEqual(humanAcceptances(), []);
 });
 

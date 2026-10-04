@@ -1,12 +1,14 @@
 // Project/App: gsd-pi
 // File Purpose: /gsd uat-answer — the host-owned path that records Human
 // Acceptance for a prepared subjective Milestone UAT question. The model has
-// no tool for this: only a person who types the command can answer.
+// no tool for this: only a person who types the command in the terminal UI
+// can answer.
 
 import { randomUUID } from "node:crypto";
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
+import { isInteractiveCommandContext } from "./command-feedback.js";
 import {
   answerMilestoneSubjectiveUat,
   listOpenMilestoneSubjectiveUat,
@@ -56,10 +58,22 @@ export async function handleUatAnswer(
   args: string,
   ctx: ExtensionCommandContext,
   basePath: string,
+  atTerminal: boolean = Boolean(process.stdin.isTTY && process.stdout.isTTY),
 ): Promise<void> {
   const parsed = parseArgs(args);
   if (!parsed) {
     ctx.ui.notify(USAGE, "warning");
+    return;
+  }
+  // An RPC or headless session (gsd_execute, gsd headless) takes its commands
+  // from a program over a pipe, and a model can be that program. Only the
+  // terminal UI has a person at the keyboard.
+  if (parsed.disposition && !(atTerminal && isInteractiveCommandContext(ctx))) {
+    ctx.ui.notify(
+      "gsd uat-answer: Human Acceptance is recorded only from the GSD terminal UI. " +
+        "Start gsd in a terminal and type /gsd uat-answer there.",
+      "error",
+    );
     return;
   }
   if (!await ensureDbOpen(basePath)) {

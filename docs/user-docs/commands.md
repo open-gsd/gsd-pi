@@ -27,7 +27,7 @@
 | `/gsd debug --diagnose` | Inspect malformed artifacts and session health (`--diagnose [<slug> \| <issue text>]`) |
 | `/gsd dispatch` | Dispatch a specific phase directly (research, plan, execute, complete, validate, reassess, uat, replan) |
 | `/gsd verdict <pass\|needs-attention\|needs-remediation>` | Override an unadopted compatibility milestone's recorded validation verdict with an explicit rationale; adopted milestones must rerun canonical validation with current evidence |
-| `/gsd uat-answer <accept\|reject> --rationale "..."` | Answer an open subjective UAT question. Only this command records Human Acceptance; the agent has no tool for it. Run it with no arguments to list the open questions; add `--question <id>` when more than one is open |
+| `/gsd uat-answer <accept\|reject> --rationale "..."` | Answer an open subjective UAT question. Only this command records Human Acceptance; the agent has no tool for it. It records an answer only when you type it in the terminal UI: an RPC or headless session (`gsd headless`, the MCP `gsd_execute` tool, the web UI) can list the open questions but cannot answer. Run it with no arguments to list the open questions; add `--question <id>` when more than one is open |
 | `/gsd history` | View execution history (supports `--cost`, `--phase`, `--model` filters) |
 | `/gsd usage` | Show current LLM context-window usage and session token totals |
 | `/gsd session-report` | Show session cost, tokens, and work summary (`--json`, `--save`) |
