@@ -79,15 +79,19 @@ closeout from one consistent project-database snapshot. Missing or unreadable
 authority fails explicitly; runtime does not fall back to files or cached
 prose.
 
-Read-only progress integrations are a display-only compatibility boundary:
-`gsd read progress` and packaged MCP `gsd_progress` may serve the `STATE.md`
-projection only when the project database is missing or cannot be opened, or
+Read-only integrations are a display-only compatibility boundary:
+`gsd read progress`, `gsd read roadmap` and packaged MCP `gsd_progress`,
+`gsd_query`, `gsd_roadmap` and `gsd_doctor` may serve the `.gsd/` projections
+only when the project database is missing or cannot be opened, or
 when the standalone MCP package has no GSD runtime bridge. Once the database
 opens, it remains authoritative and any later read failure is reported instead
 of falling back. The web project picker lists projects that the user did not
 open, so it reads each project database read-only with no migration, and it
-shows the `STATE.md` projection only when that read fails. This exception
-cannot drive lifecycle state.
+shows the `STATE.md` projection only when that read fails. The web workspace
+index, project kind and inspect reads follow the same rule and, like the CLI
+and MCP reads, label a fallback result `readMetadata: { source: "projection",
+authority: "projection-fallback" }`. This exception cannot drive lifecycle
+state.
 
 Only Domain Operations in the Single Writer layer mutate workflow state. A
 Domain Operation validates revision, dependencies, lifecycle, lease/fencing,

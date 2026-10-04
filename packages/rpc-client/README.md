@@ -106,6 +106,7 @@ for optional abort-origin metadata and its handling.
 | `bash(command)`                  | Execute a bash command            |
 | `newSession(parent?)`            | Start a new session               |
 | `sendUIResponse(id, response)`   | Respond to extension UI requests  |
+| `workflowCommand(command)`       | Run a typed workflow mutation     |
 
 ## Type Exports
 
