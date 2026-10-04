@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import { bootstrapAutoSession } from "../auto-start.ts";
 import { AutoSession } from "../auto/session.ts";
@@ -24,6 +24,7 @@ import {
 import { GitServiceImpl } from "../git-service.ts";
 import { showSmartEntry } from "../guided-flow.ts";
 import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
+import { renderTaskSummary } from "../markdown-renderer.ts";
 import { describeHeldProjectionChanges, preserveProjectionChangesBeforeDispatch } from "../projection-worker.ts";
 import { ensureGsdSymlink } from "../repo-identity.ts";
 import { reconcileBeforeSpawn } from "../state-reconciliation/spawn-gate.ts";
@@ -364,6 +365,44 @@ test("a pulled projection change raises one 'changed outside GSD' state and no d
   assert.equal(quarantined.length, 1);
   assert.match(readFileSync(quarantined[0]!, "utf-8"), /Teammate edit/);
   assert.deepEqual((await preserveProjectionChangesBeforeDispatch(base)).held, []);
+});
+
+test("a held projection change also holds a hand edit of another projection: nothing is moved or rendered", async () => {
+  const { base, summaryPath, ctx } = await trackedProjectAfterPull();
+  // T02 is completed after the pull, so git does not track its summary.
+  insertTask({
+    id: "T02",
+    sliceId: "S01",
+    milestoneId: "M001",
+    title: "Second task",
+    status: "complete",
+    oneLiner: "Second task complete",
+    narrative: "Canonical narrative.",
+    verificationResult: "passed",
+    fullSummaryMd: "# T02 Summary\n\nCanonical second summary.\n",
+  });
+  assert.equal(await renderTaskSummary(base, "M001", "S01", "T02"), true);
+  const handEditPath = join(dirname(summaryPath), "T02-SUMMARY.md");
+  writeFileSync(handEditPath, "# T02 Summary\n\nHand edit.\n");
+
+  // The state persists: a later pass must not find the held file rendered over.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const observed = await preserveProjectionChangesBeforeDispatch(base);
+    assert.deepEqual(observed.held, [summaryPath]);
+    assert.deepEqual(observed.preserved, []);
+    assert.match(readFileSync(summaryPath, "utf-8"), /Teammate edit/);
+    assert.match(readFileSync(handEditPath, "utf-8"), /Hand edit/);
+    assert.equal(existsSync(join(base, ".gsd", "quarantine")), false);
+  }
+
+  // Discard choice: both files go back to the database render and each change is kept once.
+  await handleRebuild(ctx, base, "markdown");
+  assert.match(readFileSync(summaryPath, "utf-8"), /Canonical summary/);
+  assert.match(readFileSync(handEditPath, "utf-8"), /Canonical second summary/);
+  assert.deepEqual(
+    listFiles(join(base, ".gsd", "quarantine")).map((path) => readFileSync(path, "utf-8")).sort(),
+    ["# T01 Summary\n\nTeammate edit.\n", "# T02 Summary\n\nHand edit.\n"],
+  );
 });
 
 test("guided entry does not self-heal over a pulled projection change: it keeps the change and stops", async () => {

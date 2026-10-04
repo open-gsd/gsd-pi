@@ -527,7 +527,8 @@ export async function preserveProjectionChanges(
  * Before dispatch: preserve changed projection bytes and render the database
  * content again, but hold a changed git-tracked projection (team mode) in
  * place. A non-empty `held` means the caller must stop: see
- * describeHeldProjectionChanges. Nothing else in the result may stop dispatch.
+ * describeHeldProjectionChanges. In that pass no file is moved or rendered, so
+ * the held file is not overwritten. Nothing else in the result may stop dispatch.
  */
 export function preserveProjectionChangesBeforeDispatch(
   basePath: string,
