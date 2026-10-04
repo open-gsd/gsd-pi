@@ -3,6 +3,9 @@
 // .gsd/journal, hook-state.json and auto.lock between units must not change the
 // retry budget, the harness-abort tool block, a hook unit outcome or a pending
 // gate block. A file or journal line written by hand must not create one.
+// One exception: hook-state.json is imported once, while its scope has no
+// hook_state row, so an update from a build that kept hook state in the file
+// does not drop a pending gate block.
 
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -21,19 +24,37 @@ import {
   insertSlice,
   openDatabase,
 } from "../gsd-db.ts";
+import { getDatabaseReplacementPaths } from "../database-replacement-paths.ts";
+import {
+  deleteUatRetryCounter,
+  getUatRetryAttempts,
+  incrementUatRetryAttempts,
+  readHookStateJson,
+  writeHookStateJson,
+} from "../db/writers/runtime-control.ts";
 import { emitJournalEvent } from "../journal.ts";
 import {
   checkPostUnitHooks,
   consumeGateBlock,
   consumeHookFailure,
   isGateBlockPending,
+  isRetryPending,
+  peekRetryTrigger,
   persistHookState,
+  reconcileRestoredGateBlock,
   resetHookState,
   resolveHookArtifactPath,
   restoreHookState,
 } from "../post-unit-hooks.ts";
+import { hookStateScope } from "../rule-registry.ts";
 import { executeSaveGateResult } from "../tools/workflow-tool-executors.ts";
-import { recordUnitEnd, recordUnitHarnessAbort, writeUnitRuntimeRecord } from "../unit-runtime.ts";
+import {
+  clearUnitRuntimeRecord,
+  readUnitRuntimeRecord,
+  recordUnitEnd,
+  recordUnitHarnessAbort,
+  writeUnitRuntimeRecord,
+} from "../unit-runtime.ts";
 import { _selfHealRuntimeRecordsForTest } from "../guided-flow.ts";
 
 function makeProject(t: TestContext, preferences = ""): string {
@@ -252,4 +273,75 @@ test("G1: a pending gate block is unchanged after hook-state.json is deleted", (
   const block = consumeGateBlock();
   assert.equal(block?.hookName, "security-review");
   assert.equal(block?.triggerUnitId, unitId);
+});
+
+test("upgrade: hook-state.json from an older build is imported once and re-arms the gate", (t) => {
+  const base = makeProject(t, BLOCKING_GATE);
+  const unitId = "M001/S01";
+  const legacyPath = join(base, ".gsd", "hook-state.json");
+  // What a build without the hook_state table left after a pause on a failed
+  // gate with a task rework still owed.
+  const legacy = JSON.stringify({
+    cycleCounts: { "security-review/plan-slice/M001/S01": 1 },
+    redispatchedGateKeys: [],
+    activeHook: null,
+    hookQueue: [],
+    retryPending: true,
+    retryTrigger: { unitType: "plan-slice", unitId },
+    gateBlockPending: { hookName: "security-review", triggerUnitType: "plan-slice", triggerUnitId: unitId },
+    gateBlockQueue: [],
+    savedAt: new Date().toISOString(),
+  });
+  writeFileSync(legacyPath, legacy, "utf-8");
+  assert.equal(readHookStateJson(hookStateScope(base)), null, "no hook state row before the first restore");
+
+  restoreHookState(base);
+
+  assert.equal(readHookStateJson(hookStateScope(base)), legacy, "the file is stored as the hook state row");
+  assert.deepEqual(peekRetryTrigger(), { unitType: "plan-slice", unitId }, "the pending retry is kept");
+  assert.equal(isGateBlockPending(), true, "the pending gate block is kept");
+  // Auto-start re-arms the blocked gate from the restored block (#2194).
+  const sidecarQueue: Array<{ unitType: string }> = [];
+  reconcileRestoredGateBlock(base, sidecarQueue as any);
+  assert.deepEqual(sidecarQueue.map((item) => item.unitType), ["hook/security-review"]);
+
+  // The import is one-time: with a row present, an edited file clears nothing.
+  writeFileSync(legacyPath, JSON.stringify({ cycleCounts: {}, retryPending: false, gateBlockPending: null }), "utf-8");
+  resetHookState();
+  restoreHookState(base);
+  assert.equal(isGateBlockPending(), true, "the row, not the file, decides the gate block");
+  assert.equal(isRetryPending(), true, "the row, not the file, decides the retry");
+});
+
+test("the database replacement fence rejects every runtime-control write", (t) => {
+  const base = makeProject(t);
+  const unitId = "M001/S01/T01";
+  const scope = hookStateScope(base);
+  writeUnitRuntimeRecord(base, "execute-task", unitId, 1, { phase: "dispatched" });
+  assert.equal(incrementUatRetryAttempts("M001", "S01"), 1);
+  writeHookStateJson(scope, JSON.stringify({
+    cycleCounts: {},
+    retryPending: true,
+    retryTrigger: { unitType: "execute-task", unitId },
+  }));
+  restoreHookState(base);
+  assert.equal(isRetryPending(), true);
+  const storedBefore = readHookStateJson(scope);
+
+  // An import or restore is replacing the database: a write accepted now is lost.
+  const replacement = getDatabaseReplacementPaths(join(base, ".gsd", "gsd.db"));
+  mkdirSync(replacement.recoveryDirectory);
+  writeFileSync(replacement.activeIntentPath, "{}");
+  try {
+    const fenced = /Database writes are fenced while replacement intent exists/;
+    assert.throws(() => persistHookState(base), fenced, "a pending retry must not be reported as persisted");
+    assert.throws(() => clearUnitRuntimeRecord(base, "execute-task", unitId), fenced);
+    assert.throws(() => deleteUatRetryCounter("M001", "S01"), fenced);
+  } finally {
+    rmSync(replacement.recoveryDirectory, { recursive: true, force: true });
+  }
+
+  assert.equal(readHookStateJson(scope), storedBefore, "the fenced hook state write stored nothing");
+  assert.equal(readUnitRuntimeRecord(base, "execute-task", unitId)?.phase, "dispatched", "the fenced delete kept the unit row");
+  assert.equal(getUatRetryAttempts("M001", "S01"), 1, "the fenced delete kept the retry counter");
 });

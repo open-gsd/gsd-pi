@@ -610,21 +610,6 @@ test('State persistence: restore reads the database row, not hook-state.json', (
   }
 });
 
-test('State persistence: a hook-state.json file alone restores nothing', (t) => {
-  const base = createFixtureBase();
-  t.after(() => rmSync(base, { recursive: true, force: true }));
-  resetHookState();
-  writeFileSync(join(base, ".gsd", "hook-state.json"), JSON.stringify({
-    cycleCounts: { "review/execute-task/M001/S01/T01": 3 },
-    savedAt: new Date().toISOString(),
-  }), "utf-8");
-
-  restoreHookState(base);
-  persistHookState(base);
-
-  assert.deepStrictEqual(storedHookState(base).cycleCounts, {}, "the file did not add cycle counts");
-});
-
 test('State persistence: clear', () => {
   const base = createFixtureBase();
   try {

@@ -1211,10 +1211,28 @@ export class RuleRegistry {
     }
   }
 
+  /**
+   * One-time upgrade import. A build without the hook_state table kept this
+   * state in hook-state.json only. While the scope has no row, that file is the
+   * last persisted state, so it becomes the row. Without the import an update
+   * drops a pending gate block, pending retry or active hook, and the next unit
+   * is dispatched past a failed gate (#2194). After the row exists the file is
+   * not read again.
+   */
+  private _importLegacyHookState(basePath: string): string | null {
+    const filePath = this._hookStatePath(basePath);
+    if (!existsSync(filePath)) return null;
+    const raw = readFileSync(filePath, "utf-8");
+    JSON.parse(raw); // A corrupt file throws here and is not stored.
+    writeHookStateJson(hookStateScope(basePath), raw);
+    logWarning("registry", `imported hook state from ${filePath}: the database had no hook state for this project`);
+    return raw;
+  }
+
   /** Restore hook state from the database after a crash/restart. */
   restoreState(basePath: string): void {
     try {
-      const raw = readHookStateJson(hookStateScope(basePath));
+      const raw = readHookStateJson(hookStateScope(basePath)) ?? this._importLegacyHookState(basePath);
       if (raw === null) return;
       const state: PersistedHookState = JSON.parse(raw);
       if (state.cycleCounts && typeof state.cycleCounts === "object") {

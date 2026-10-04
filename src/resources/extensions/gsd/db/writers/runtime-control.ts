@@ -4,8 +4,9 @@
 //
 // These are coordination rows (see db-runtime-control-schema.ts). Every reader
 // returns "no row" when no database is open; every writer needs an open one.
+// Every write runs in a transaction so the database replacement fence applies.
 
-import { _getAdapter, getDb, immediateTransaction, isDbAvailable } from "../engine.js";
+import { _getAdapter, getDb, immediateTransaction, isDbAvailable, transaction } from "../engine.js";
 
 export interface UnitRuntimeRow {
   unit_type: string;
@@ -94,9 +95,11 @@ export function updateUnitRuntimeRow(
 
 export function deleteUnitRuntimeRow(unitType: string, unitId: string): void {
   if (!isDbAvailable()) return;
-  getDb().prepare(
-    `DELETE FROM unit_runtime_records WHERE unit_type = :unit_type AND unit_id = :unit_id`,
-  ).run({ ":unit_type": unitType, ":unit_id": unitId });
+  transaction(() => {
+    getDb().prepare(
+      `DELETE FROM unit_runtime_records WHERE unit_type = :unit_type AND unit_id = :unit_id`,
+    ).run({ ":unit_type": unitType, ":unit_id": unitId });
+  });
 }
 
 export function readHookStateJson(scope: string): string | null {
@@ -108,13 +111,15 @@ export function readHookStateJson(scope: string): string | null {
 }
 
 export function writeHookStateJson(scope: string, stateJson: string): void {
-  getDb().prepare(
-    `INSERT INTO hook_state (scope, state_json, updated_at)
-     VALUES (:scope, :state_json, :updated_at)
-     ON CONFLICT (scope) DO UPDATE SET
-       state_json = excluded.state_json,
-       updated_at = excluded.updated_at`,
-  ).run({ ":scope": scope, ":state_json": stateJson, ":updated_at": new Date().toISOString() });
+  transaction(() => {
+    getDb().prepare(
+      `INSERT INTO hook_state (scope, state_json, updated_at)
+       VALUES (:scope, :state_json, :updated_at)
+       ON CONFLICT (scope) DO UPDATE SET
+         state_json = excluded.state_json,
+         updated_at = excluded.updated_at`,
+    ).run({ ":scope": scope, ":state_json": stateJson, ":updated_at": new Date().toISOString() });
+  });
 }
 
 export interface UatRetryCounterRow {
@@ -155,7 +160,9 @@ export function listUatRetryCounters(): UatRetryCounterRow[] {
 
 export function deleteUatRetryCounter(milestoneId: string, sliceId: string): void {
   if (!isDbAvailable()) return;
-  getDb().prepare(
-    `DELETE FROM uat_retry_counters WHERE milestone_id = :milestone_id AND slice_id = :slice_id`,
-  ).run({ ":milestone_id": milestoneId, ":slice_id": sliceId });
+  transaction(() => {
+    getDb().prepare(
+      `DELETE FROM uat_retry_counters WHERE milestone_id = :milestone_id AND slice_id = :slice_id`,
+    ).run({ ":milestone_id": milestoneId, ":slice_id": sliceId });
+  });
 }
