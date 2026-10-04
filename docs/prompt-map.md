@@ -99,7 +99,7 @@ session-start KNOWLEDGE projection path and then calls
 database. The helper inlines only the Rules section of the project knowledge,
 read from the database; projected patterns and lessons are supplied through
 the memories layer. A Pattern or Lesson that exists only in the file has no
-memories row, so the helper inlines it too until the KNOWLEDGE import exists.
+memories row, so the helper inlines it too until `/gsd recover` imports it.
 
 Budget enforcement: `context-budget.ts` computes `preambleBudgetChars`, `summaryBudgetChars`, `verificationBudgetChars` from the model's context window. Sections are truncated at markdown section boundaries, not mid-sentence.
 

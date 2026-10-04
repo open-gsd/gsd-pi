@@ -12,7 +12,7 @@
 // memories rows with a `sourceKnowledgeId` (K/P/L###). A KNOWLEDGE.md row
 // whose id has no such row exists only in the file: it is not imported into
 // the database, and the scanner reports it as a gap. Session start never
-// imports it.
+// imports it; `/gsd recover` imports it through an Import Preview.
 
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { parseKnowledgeRows, readKnowledgeMd } from "./knowledge-parser.js";
@@ -207,7 +207,8 @@ export function scanConsolidationGaps(basePath: string): ConsolidationGapReport 
   const summary =
     parts.length === 0
       ? "Memory consolidation: all decisions and KNOWLEDGE.md rows are in memories."
-      : `Memory consolidation: ${parts.join(" and ")} not yet in memories table. Run /doctor for details.`;
+      : `Memory consolidation: ${parts.join(" and ")} not yet in memories table. Run /doctor for details.`
+        + (knowledgeReport.unmigrated > 0 ? " Run /gsd recover to import KNOWLEDGE.md rows." : "");
 
   return { decisions: decisionsReport, knowledge: knowledgeReport, totalGaps, summary };
 }

@@ -11,7 +11,14 @@ import {
 } from "./legacy-import-preview-interpretation.js";
 import { parseLegacyImportJson, type LegacyImportJsonDocument } from "./legacy-import-preview-json.js";
 import { hashLegacyImportBytes } from "./legacy-import-preview.js";
-import { parseKnowledgeRows } from "./knowledge-parser.js";
+import {
+  KNOWLEDGE_CELL_FIELDS,
+  KNOWLEDGE_DEFAULT_INTRO,
+  KNOWLEDGE_SECTIONS,
+  parseKnowledgeRows,
+  splitPipeRow,
+} from "./knowledge-parser.js";
+import { legacyImportKnowledgeCell } from "./legacy-import-preview-classifier-targets.js";
 
 interface KnowledgeGraphNode {
   id: string;
@@ -60,9 +67,15 @@ function stringTokenSpan(
   return { start: token.start_byte + 1, end: token.end_byte - 1 };
 }
 
-function preserveKnowledgeMarkdown(
+/**
+ * Map each Rule, Pattern and Lesson row of KNOWLEDGE.md to a `knowledge`
+ * target, and report every other part of the file as not imported. The file
+ * itself stays a preserved projection: the render keeps what is not imported.
+ */
+function interpretKnowledgeMarkdown(
   file: LegacyImportDecodedSourceFile,
   candidates: LegacyImportPendingCandidate[],
+  diagnoses: LegacyImportPendingDiagnosis[],
 ): void {
   file.parserId = "gsd-knowledge-graph";
   file.kind = "markdown";
@@ -77,6 +90,84 @@ function preserveKnowledgeMarkdown(
     file.bytes.length,
     "preserve",
   );
+
+  const defaultIntro = new Set(KNOWLEDGE_DEFAULT_INTRO.split("\n"));
+  const mappedIds = new Set<string>();
+  let section: (typeof KNOWLEDGE_SECTIONS)[number] | undefined;
+  let content: { start: number; end: number } | undefined;
+  const flushContent = (): void => {
+    if (content === undefined) return;
+    addLegacyImportDiagnosis(
+      diagnoses,
+      file,
+      "knowledge-content-not-imported",
+      "info",
+      "KNOWLEDGE.md content that is not a Rule, Pattern or Lesson row is not imported into the database; it stays in the file.",
+      "preserved",
+      content.start,
+      content.end,
+    );
+    content = undefined;
+  };
+  const rowNotImported = (line: { start: number; end: number }, reason: string): void => {
+    flushContent();
+    addLegacyImportDiagnosis(
+      diagnoses,
+      file,
+      "knowledge-row-not-imported",
+      "warning",
+      `A KNOWLEDGE.md table row is not imported into the database: ${reason}.`,
+      "preserved",
+      line.start,
+      line.end,
+    );
+  };
+
+  let beforeFirstHeading = true;
+  for (const line of file.lines) {
+    const trimmed = line.text.trim();
+    if (trimmed.startsWith("## ")) {
+      flushContent();
+      beforeFirstHeading = false;
+      section = KNOWLEDGE_SECTIONS.find((candidate) => candidate.heading === trimmed);
+      if (section === undefined) content = { start: line.start, end: line.end };
+      continue;
+    }
+    if (trimmed.length === 0) continue;
+    if (beforeFirstHeading && defaultIntro.has(trimmed)) continue;
+    if (section !== undefined) {
+      if (/^\|\s*(#|-+)\s*\|/u.test(trimmed)) continue;
+      if (/^\|\s*MEM\d+\s*\|/u.test(trimmed)) {
+        rowNotImported(line, "its id is a memory id, so it is kept only while that memory row exists");
+        continue;
+      }
+      const id = new RegExp(`^\\|\\s*(${section.idPrefix}\\d+)\\s*\\|`, "u").exec(trimmed)?.[1];
+      if (id !== undefined) {
+        const cells = splitPipeRow(trimmed).slice(1).map(legacyImportKnowledgeCell);
+        if (cells.length !== KNOWLEDGE_CELL_FIELDS[section.table].cells.length) {
+          rowNotImported(line, "its cell count does not match its table");
+        } else if (mappedIds.has(id)) {
+          rowNotImported(line, "an earlier row has the same id");
+        } else {
+          flushContent();
+          mappedIds.add(id);
+          addLegacyImportCandidate(
+            candidates,
+            file,
+            { kind: "knowledge", key: id },
+            { source_knowledge_id: id, table: section.table, cells },
+            "knowledge-row-mapped",
+            line.start,
+            line.end,
+          );
+        }
+        continue;
+      }
+    }
+    content = { start: content?.start ?? line.start, end: line.end };
+  }
+  flushContent();
+  if (mappedIds.size > 0) file.outcome = "mapped";
 }
 
 function preserveNestedLearnings(
@@ -244,7 +335,7 @@ export function contributeLegacyKnowledgeProjection(
     const path = file.entry.logical_path;
     if (file.encoding !== "utf-8") continue;
     if (path === ".gsd/KNOWLEDGE.md") {
-      preserveKnowledgeMarkdown(file, candidates);
+      interpretKnowledgeMarkdown(file, candidates, diagnoses);
       continue;
     }
     const nestedPath = /^\.gsd\/milestones\/[^/]+\/((M\d+)(?:-[A-Za-z0-9-]+)?-LEARNINGS)\.md$/u.exec(path);

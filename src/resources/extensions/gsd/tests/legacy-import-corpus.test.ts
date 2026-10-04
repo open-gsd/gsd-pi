@@ -487,15 +487,15 @@ test("legacy corpus manifest seals exact structure and aggregate accounting", ()
   assert.deepEqual(manifest.totals, {
     cases: 26,
     sources: 185,
-    changes: 205,
-    diagnoses: 101,
-    resolutions: 101,
-    create: 103,
+    changes: 209,
+    diagnoses: 102,
+    resolutions: 102,
+    create: 107,
     update: 3,
     delete: 1,
     preserve: 98,
-    mapped: 73,
-    preserved: 73,
+    mapped: 75,
+    preserved: 71,
     unparsed: 31,
     ignored_with_reason: 8,
     requires_user: 39,
@@ -2132,13 +2132,16 @@ test("legacy corpus supplemental preserves evidence without replay or filesystem
   ]);
 
   assert.deepEqual(sourceRows("knowledge-graph"), [
-    [".gsd/KNOWLEDGE.md", "gsd-knowledge-graph", "preserved"],
+    [".gsd/KNOWLEDGE.md", "gsd-knowledge-graph", "mapped"],
     [".gsd/graphs/.last-build-snapshot.json", "gsd-knowledge-graph", "unparsed"],
     [".gsd/graphs/graph.json", "gsd-knowledge-graph", "preserved"],
     [".gsd/milestones/M001/M001-LEARNINGS.md", "gsd-knowledge-graph", "preserved"],
     [".gsd/phases/02-legacy/02-LEARNINGS.md", "gsd-knowledge-graph", "ignored-with-reason"],
   ]);
   assert.deepEqual(changeRows("knowledge-graph"), [
+    ["change-create-knowledge-k001", "create", "knowledge", "K001", null, "knowledge-row-mapped"],
+    ["change-create-knowledge-l001", "create", "knowledge", "L001", null, "knowledge-row-mapped"],
+    ["change-create-knowledge-p001", "create", "knowledge", "P001", null, "knowledge-row-mapped"],
     ["change-knowledge-derived-graph", "preserve", "legacy-knowledge-graph-snapshot", ".gsd/graphs/graph.json", null, "derived-graph-preserved-without-rebuild"],
     ["change-knowledge-nested-learnings", "preserve", "legacy-knowledge-source", "M001-LEARNINGS", null, "nested-learnings-preserved"],
     ["change-knowledge-root", "preserve", "legacy-knowledge-source", ".gsd/KNOWLEDGE.md", null, "knowledge-markdown-preserved"],
@@ -2198,7 +2201,7 @@ test("legacy corpus supplemental preserves evidence without replay or filesystem
   assert.deepEqual(caseNames.map((caseName) => semanticHash(caseName)), [
     "sha256:7a8577e612620e2fd48d3d5f6b7b78a0c4fcc057f43481e32eb32668212c7ae5",
     "sha256:4c5e58c6769ba8a0df6164d991afc5d8d36b4c0d29e32fc7b07f9c385288ab66",
-    "sha256:618e2fffe915053eb829179e87af1081517f1d2bfb4c8ce36d8f910f1a323565",
+    "sha256:596401b83bab17ce28d5cc0d1d2036637bc79782cd23485319fa839c2758384e",
     "sha256:3955cc04bb609320fbc33beaec578a8fe2ae2bf333aa1b8116fe3d2fb7ebb2a7",
   ]);
   assert.deepEqual(
@@ -2225,8 +2228,8 @@ test("legacy corpus supplemental preserves evidence without replay or filesystem
         "sha256:5dc7bd17d903e37b156b6f4926d2a07bf735aff550ec2734330f35000ada3ba6",
       ],
       [
-        "sha256:a7f5713ba6aff3f6aa8ee258d0743a1a3e58a6100235d55bb88e2de41da9c737",
-        "sha256:b598ab41be378fbb1915df3bb03a99509cb3bc318f4cc452d47b6b034a6f7836",
+        "sha256:b8343676d97bb42fb4a9f63fc899d18742aada54ae9be48f29dc71c0bb757085",
+        "sha256:073a8cbba41efbeab696b32b094d0e75e4957de8f0c4daae7b204bc4610ee076",
         "sha256:bb489fd7b29f5a93ded05daaab99408de0774c7ad26971a8d91199aac8c1b621",
         "sha256:c4dd8e9335bdf8a11826b62bb9c7eca7b5bb74be966cf77af716b52890952f2b",
       ],
@@ -2238,8 +2241,13 @@ test("legacy corpus supplemental preserves evidence without replay or filesystem
       ],
     ],
   );
-  assert.ok(cases.every((corpusCase) => corpusCase.oracle.changes.every((change) => change.action === "preserve")));
-  assert.ok(cases.every((corpusCase) => corpusCase.oracle.sources.every((source) => source.outcome !== "mapped")));
+  // Supplemental evidence is preserved. KNOWLEDGE.md rows are the one mapping.
+  assert.ok(cases.every((corpusCase) => corpusCase.oracle.changes.every((change) => (
+    change.action === "preserve" || (change.action === "create" && change.target.kind === "knowledge")
+  ))));
+  assert.ok(cases.every((corpusCase) => corpusCase.oracle.sources.every((source) => (
+    source.outcome !== "mapped" || source.path === ".gsd/KNOWLEDGE.md"
+  ))));
   assert.ok(oracle("jsonl-history").changes.every(
     (change) => (change.normalized as Record<string, unknown>).replay_policy === "evidence-only",
   ));
@@ -2741,7 +2749,7 @@ test("legacy corpus capstone classifies database targets and changes without app
   assert.deepEqual(sourceRows("composite-capstone"), [
     [".gsd-worktrees/M008/git-marker.txt", "gsd-worktree-topology", "preserved"],
     [".gsd/DECISIONS.md", "gsd-decisions-table", "mapped"],
-    [".gsd/KNOWLEDGE.md", "gsd-knowledge-graph", "preserved"],
+    [".gsd/KNOWLEDGE.md", "gsd-knowledge-graph", "mapped"],
     [".gsd/REQUIREMENTS.md", "gsd-requirements-sections", "mapped"],
     [".gsd/event-log.jsonl", "gsd-workflow-events", "preserved"],
     [".gsd/gsd.db", "gsd-sqlite-target", "unparsed"],
@@ -2756,6 +2764,7 @@ test("legacy corpus capstone classifies database targets and changes without app
   assert.deepEqual(changeRows("composite-capstone"), [
     ["change-create-assessment-m702-s01-run-uat", "create", "assessment", "M702/S01/run-uat", null, "structured-run-uat"],
     ["change-create-decision-d701", "create", "decision", "D701", null, "scope-first-decision-row"],
+    ["change-create-knowledge-k701", "create", "knowledge", "K701", null, "knowledge-row-mapped"],
     ["change-create-milestone-m701", "create", "milestone", "M701", null, "capstone-clean-planning-milestone"],
     ["change-create-milestone-m702", "create", "milestone", "M702", null, "hybrid-non-overlap"],
     ["change-create-milestone-status-m702", "create", "milestone-status", "M702", null, "manifest-milestone-status"],
@@ -2770,17 +2779,19 @@ test("legacy corpus capstone classifies database targets and changes without app
   assert.deepEqual(diagnosisRows("composite-capstone"), [
     ["diagnosis-hybrid-m007-conflicting-content", "hybrid-conflicting-content", "blocker", "capstone-hybrid-m007-nested"],
     ["diagnosis-hybrid-m007-duplicate-logical-milestone", "duplicate-logical-milestone", "blocker", "capstone-hybrid-m007-flat"],
+    ["diagnosis-knowledge-content-not-imported-1", "knowledge-content-not-imported", "info", "capstone-knowledge"],
     ["diagnosis-unsupported-database-schema", "unsupported-database-schema", "blocker", "capstone-database-v44"],
   ]);
   assert.deepEqual(oracle("composite-capstone").resolutions, [
     { diagnosis_id: "diagnosis-hybrid-m007-conflicting-content", disposition: "requires-user" },
     { diagnosis_id: "diagnosis-hybrid-m007-duplicate-logical-milestone", disposition: "requires-user" },
+    { diagnosis_id: "diagnosis-knowledge-content-not-imported-1", disposition: "preserved" },
     { diagnosis_id: "diagnosis-unsupported-database-schema", disposition: "unsupported" },
   ]);
   assert.deepEqual(oracle("composite-capstone").counts, {
-    create: 7, update: 0, delete: 0, preserve: 5, unparsed: 3, unresolved: 3,
+    create: 8, update: 0, delete: 0, preserve: 5, unparsed: 3, unresolved: 3,
   });
-  assert.equal(semanticHash("composite-capstone"), "sha256:e53f6d211deb783bc92d82da7f63c1c12d8336692e0d781d6c9595d0360756a2");
+  assert.equal(semanticHash("composite-capstone"), "sha256:2e6c7a558e74cd486095e09916b372d31c052e018a50878cbdfdb5c6bb44895c");
   assert.ok(!oracle("composite-capstone").changes.some((change) => change.target.key.includes("M007")));
   assert.ok(oracle("composite-capstone").changes
     .filter((change) => change.target.kind.startsWith("legacy-"))
@@ -2847,10 +2858,10 @@ test("legacy corpus capstone classifies database targets and changes without app
         "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
       ],
       [
-        "sha256:f46a7c5e2ae452d5d440aa5d1476fe152420de8961d71b1714cd656f04ff6f93",
-        "sha256:51ae819b23ff90aa05d0075b2229e9f7853c0dfeabdefdbce93c3cbbe551c421",
-        "sha256:8ac690a6a27840de4ae7fa6434d7dd7600ba33c148ca87ba9948f5ca8f443852",
-        "sha256:9246e708c1c434600f9db15eb8573504cdfa4b21b42effbfcf48857ea55359ad",
+        "sha256:be640f15687502bb6cf6348f5a0b8c8f2bda92b71a0f18cd6b3285410e432242",
+        "sha256:069210b367d09b99efa05273f8f04fee38dd2d2b25611eb560fedd70a289f353",
+        "sha256:66a890082358d06b19c2e38d7c6e74281fff8bccb09a14c3e34022344690b4e6",
+        "sha256:20cdef594bba162267de1b477ca019296c0f03c4531f4f5514b39bbb0c830922",
       ],
     ],
   );

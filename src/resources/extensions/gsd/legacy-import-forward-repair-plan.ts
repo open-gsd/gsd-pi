@@ -830,6 +830,11 @@ function compileTarget(
   if (instruction.action === "adopt-lifecycle") {
     return lifecycleTarget(instruction, instructionIndex, input, compiledTargets);
   }
+  if (instruction.action === "create-knowledge-memory" || instruction.action === "update-knowledge-memory") {
+    // Forward Repair does not change knowledge rows. The row came from
+    // KNOWLEDGE.md, which still holds it, and `/gsd memory forget` removes it.
+    return target(instruction, instructionIndex, "preserve", "KNOWLEDGE_MEMORY_RETAINED");
+  }
   if (instruction.action === "seed-quality-gate") {
     // The seeded Q8 row is companion authority for a created slice. Revert
     // retains created hierarchy rows as cancelled lifecycle tombstones (see

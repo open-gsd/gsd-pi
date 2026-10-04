@@ -7,14 +7,15 @@
 // The `#` cell is `structured_fields.sourceKnowledgeId` (K/P/L###) when set,
 // else the memory id. Captures assign a knowledge id (knowledge-capture.ts).
 //
-// Import bridge (until the explicit KNOWLEDGE import lands): a K/P/L row in
-// the existing file whose id has no memories row at all is not imported yet.
-// It is kept in the render so the render does not erase it. Once a row with
-// that id exists in the database, the database row wins. Content the render
-// does not model (the intro, non-table lines in the three sections, and any
-// other `## ` section) is kept verbatim the same way, so a render never drops
-// file content that the database does not hold. The file is never imported
-// into the database implicitly.
+// Import bridge: a K/P/L row in the existing file whose id has no memories
+// row at all is not imported yet. It is kept in the render so the render does
+// not erase it. `/gsd recover` imports such rows through an Import Preview
+// (legacy-import-preview-knowledge.ts); once a row with that id exists in the
+// database, the database row wins. Content the import does not model (the
+// intro, non-table lines in the three sections, and any other `## ` section)
+// is kept verbatim the same way, so a render never drops file content that
+// the database does not hold. The file is never imported into the database
+// implicitly.
 //
 // Readers (prompt inlines, visualizer, MCP gsd_knowledge, web) use
 // readKnowledgeMarkdown / readKnowledgeEntries, which build the same content
@@ -30,19 +31,15 @@ import { writeProjectionFileSync } from "./compat/compat-marker.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { gsdRoot } from "./paths.js";
 import {
+  KNOWLEDGE_DEFAULT_INTRO,
   KNOWLEDGE_SECTIONS,
+  KNOWLEDGE_TABLE_BY_CATEGORY,
   knowledgeMdPath,
+  knowledgeMemoryCells,
   parseKnowledgeRows,
   readKnowledgeMd,
   type KnowledgeTable,
 } from "./knowledge-parser.js";
-
-const DEFAULT_INTRO = [
-  "# Project Knowledge",
-  "",
-  "Append-only register of project-specific rules, patterns, and lessons learned.",
-  "Agents read this before every unit. Add entries when you discover something worth remembering.",
-].join("\n");
 
 const TABLES: Record<KnowledgeTable, { heading: string; header: string; separator: string }> = {
   rules: {
@@ -62,12 +59,6 @@ const TABLES: Record<KnowledgeTable, { heading: string; header: string; separato
   },
 };
 
-const TABLE_BY_CATEGORY: Record<string, KnowledgeTable> = {
-  rule: "rules",
-  pattern: "patterns",
-  gotcha: "lessons",
-};
-
 interface RenderRow {
   id: string;
   /** All cells including the leading `#` cell, unescaped. */
@@ -82,16 +73,6 @@ export interface KnowledgeProjectionResult {
 function text(sf: Record<string, unknown>, key: string): string {
   const value = sf[key];
   return typeof value === "string" ? value : "";
-}
-
-function memoryCells(table: KnowledgeTable, id: string, content: string, scope: string, sf: Record<string, unknown>): string[] {
-  if (table === "rules") {
-    return [id, text(sf, "scopeText") || scope, text(sf, "rule") || content, text(sf, "why") || "—", text(sf, "added") || "—"];
-  }
-  if (table === "patterns") {
-    return [id, text(sf, "pattern") || content, text(sf, "where") || "—", text(sf, "notes") || "—"];
-  }
-  return [id, text(sf, "whatHappened") || content, text(sf, "rootCause") || "—", text(sf, "fix") || "—", text(sf, "scopeText") || scope];
 }
 
 /**
@@ -128,10 +109,10 @@ function readDbKnowledge(): { rows: Record<KnowledgeTable, RenderRow[]>; knownId
     const knowledgeId = text(sf, "sourceKnowledgeId");
     if (knowledgeId) knownIds.add(knowledgeId);
 
-    const table = TABLE_BY_CATEGORY[row.category];
+    const table = KNOWLEDGE_TABLE_BY_CATEGORY[row.category];
     if (!table || row.superseded_by) continue;
     const id = knowledgeId || row.id;
-    rows[table].push({ id, cells: memoryCells(table, id, row.content, row.scope || "project", sf) });
+    rows[table].push({ id, cells: knowledgeMemoryCells(table, id, row.content, row.scope || "project", sf) });
   }
   return { rows, knownIds };
 }
@@ -152,8 +133,8 @@ interface FileProse {
 /**
  * Import bridge for file content the render does not model: the intro, the
  * non-table lines under Rules, Patterns and Lessons Learned, and any other
- * `## ` section. The render keeps them verbatim until the KNOWLEDGE import
- * can carry them, so a render never drops them.
+ * `## ` section. The KNOWLEDGE import does not carry them, so the render keeps
+ * them verbatim and never drops them.
  */
 function fileProse(existing: string): FileProse {
   const lines = existing.split("\n");
@@ -189,8 +170,8 @@ function fileProse(existing: string): FileProse {
 }
 
 /**
- * The rows to show for each table: active database rows plus, until the
- * KNOWLEDGE import exists, file rows whose id the database has never held.
+ * The rows to show for each table: active database rows plus the file rows
+ * that are not imported yet (the database has never held their id).
  * Knowledge ids (K/P/L###) first, then rows that only have a memory id.
  * Throws when the database is not available.
  */
@@ -216,7 +197,7 @@ function buildKnowledgeMarkdown(existing: string): { content: string; empty: boo
     const tableNotes = notes[table].length > 0 ? ["", ...notes[table]] : [];
     return [heading, "", header, separator, ...tableRows, ...tableNotes].join("\n");
   });
-  const content = [intro || DEFAULT_INTRO, ...sections, ...otherSections].join("\n\n") + "\n";
+  const content = [intro || KNOWLEDGE_DEFAULT_INTRO, ...sections, ...otherSections].join("\n\n") + "\n";
   const empty = !intro
     && otherSections.length === 0
     && KNOWLEDGE_SECTIONS.every(({ table }) => rows[table].length === 0 && notes[table].length === 0);
@@ -245,7 +226,7 @@ export function readLocalKnowledgeIndex(basePath: string): { contents: Array<{ c
   for (const row of parseKnowledgeRows(readKnowledgeMd(basePath))) {
     if (ids.has(row.id)) continue;
     ids.add(row.id);
-    const category = Object.keys(TABLE_BY_CATEGORY).find((key) => TABLE_BY_CATEGORY[key] === row.table)!;
+    const category = Object.keys(KNOWLEDGE_TABLE_BY_CATEGORY).find((key) => KNOWLEDGE_TABLE_BY_CATEGORY[key] === row.table)!;
     contents.push({ category, content: row.cells[row.table === "rules" ? 2 : 1] ?? "" });
   }
   return { contents, ids };
@@ -277,9 +258,9 @@ export function readKnowledgeEntries(basePath: string): Record<KnowledgeTable, s
 /**
  * The Patterns and Lessons Learned rows that exist only in the file: no
  * memories row holds their id, so the MEMORY block cannot show them. Returned
- * as their table sections for the system prompt, until the explicit KNOWLEDGE
- * import exists. Returns "" when there are none. Throws when the database is
- * not available.
+ * as their table sections for the system prompt, until `/gsd recover` imports
+ * them. Returns "" when there are none. Throws when the database is not
+ * available.
  */
 export function readUnimportedPatternsAndLessons(basePath: string): string {
   const { knownIds } = readDbKnowledge();

@@ -49,8 +49,8 @@ const DEVIATIONS = {
   },
   "composite-capstone": {
     reason: "multi-target-completeness",
-    counts: [5, 0, 0, 5, 3, 5],
-    semantic_hash: "sha256:3989cd22a325b8c776c62a47965d13e03b968eefc3c71aaf5af3f7c1246ce5a8",
+    counts: [6, 0, 0, 5, 3, 5],
+    semantic_hash: "sha256:522dcd88992a7c2b64423d3578b665732d7522bd384ffbdd7e93c55d374d3e88",
   },
   "db-target-matrix": {
     reason: "multi-target-ambiguity",
@@ -253,6 +253,7 @@ test("public legacy Preview returns deterministic read-only artifacts for every 
   ]);
   assert.deepEqual(actionKeys(results.get("composite-capstone")!), [
     "create:assessment:M702/S01/run-uat",
+    "create:knowledge:K701",
     "create:milestone-status:M702",
     "create:milestone:M702",
     "create:requirement:R701",

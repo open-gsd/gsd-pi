@@ -6,10 +6,10 @@
   "base_project_revision": 27,
   "base_authority_epoch": 3,
   "base_database_schema_version": 51,
-  "source_set_hash": "sha256:f46a7c5e2ae452d5d440aa5d1476fe152420de8961d71b1714cd656f04ff6f93",
-  "change_set_hash": "sha256:51ae819b23ff90aa05d0075b2229e9f7853c0dfeabdefdbce93c3cbbe551c421",
+  "source_set_hash": "sha256:be640f15687502bb6cf6348f5a0b8c8f2bda92b71a0f18cd6b3285410e432242",
+  "change_set_hash": "sha256:069210b367d09b99efa05273f8f04fee38dd2d2b25611eb560fedd70a289f353",
   "counts": {
-    "create": 7,
+    "create": 8,
     "update": 0,
     "delete": 0,
     "preserve": 5,
@@ -48,7 +48,7 @@
       "parser_id": "gsd-knowledge-graph",
       "parser_version": "1",
       "encoding": "utf-8",
-      "outcome": "preserved"
+      "outcome": "mapped"
     },
     {
       "source_id": "capstone-requirements",
@@ -224,6 +224,40 @@
         "parser_version": "1"
       },
       "reason_code": "scope-first-decision-row"
+    },
+    {
+      "change_id": "change-create-knowledge-k701",
+      "action": "create",
+      "target": {
+        "kind": "knowledge",
+        "key": "K701"
+      },
+      "raw": {
+        "source_id": "capstone-knowledge",
+        "locator": {
+          "start_byte": 99,
+          "end_byte": 197,
+          "line": 7
+        },
+        "value": "| K701 | import | Preserve derived evidence | Classification must not rebuild projections | M702 |",
+        "sha256": "sha256:20b5ee66b7bd51a6abbb9e4b54e1c93b26e71b96d570ac913f100dc8171157b1"
+      },
+      "normalized": {
+        "source_knowledge_id": "K701",
+        "table": "rules",
+        "cells": [
+          "import",
+          "Preserve derived evidence",
+          "Classification must not rebuild projections",
+          "M702"
+        ]
+      },
+      "provenance": {
+        "source_id": "capstone-knowledge",
+        "parser_id": "gsd-knowledge-graph",
+        "parser_version": "1"
+      },
+      "reason_code": "knowledge-row-mapped"
     },
     {
       "change_id": "change-create-milestone-m701",
@@ -549,6 +583,19 @@
       "message": "A second hierarchy layout claims M007; both sources remain evidence until the user chooses the route."
     },
     {
+      "diagnosis_id": "diagnosis-knowledge-content-not-imported-1",
+      "code": "knowledge-content-not-imported",
+      "severity": "info",
+      "source_id": "capstone-knowledge",
+      "locator": {
+        "start_byte": 31,
+        "end_byte": 66,
+        "line": 5
+      },
+      "raw_value": "| ID | Scope | Rule | Why | Added |",
+      "message": "KNOWLEDGE.md content that is not a Rule, Pattern or Lesson row is not imported into the database; it stays in the file."
+    },
+    {
       "diagnosis_id": "diagnosis-unsupported-database-schema",
       "code": "unsupported-database-schema",
       "severity": "blocker",
@@ -572,6 +619,10 @@
     {
       "diagnosis_id": "diagnosis-hybrid-m007-duplicate-logical-milestone",
       "disposition": "requires-user"
+    },
+    {
+      "diagnosis_id": "diagnosis-knowledge-content-not-imported-1",
+      "disposition": "preserved"
     },
     {
       "diagnosis_id": "diagnosis-unsupported-database-schema",

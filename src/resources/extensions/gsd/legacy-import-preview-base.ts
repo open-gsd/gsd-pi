@@ -21,6 +21,7 @@ export const LEGACY_IMPORT_BASE_ROW_SETS = [
   "assessments",
   "decisions",
   "decision_memories",
+  "knowledge_memories",
   "item_lifecycles",
 ] as const;
 
@@ -36,6 +37,7 @@ export const LEGACY_IMPORT_BASE_IDENTITY_COLUMNS: Record<LegacyImportBaseRowSet,
   assessments: ["path"],
   decisions: ["id"],
   decision_memories: ["source_decision_id"],
+  knowledge_memories: ["source_knowledge_id"],
   item_lifecycles: ["project_id", "item_kind", "milestone_id", "slice_id", "task_id"],
 };
 
@@ -85,6 +87,29 @@ const ROW_SET_QUERIES: Record<LegacyImportBaseRowSet, string> = {
     FROM memories
     WHERE category = 'architecture'
       AND instr(structured_fields, '"sourceDecisionId"') > 0`,
+  // One row per KNOWLEDGE.md id (K/P/L###). A capture supersedes the prior
+  // row that held the id, so an id can have many memories rows: the active
+  // row is the authority, else the newest superseded row.
+  knowledge_memories: `SELECT source_knowledge_id, category, content, scope, structured_fields
+    FROM (
+      SELECT source_knowledge_id, category, content, scope, structured_fields,
+        ROW_NUMBER() OVER (
+          PARTITION BY source_knowledge_id
+          ORDER BY superseded_by IS NOT NULL, seq DESC
+        ) AS authority_rank
+      FROM (
+        SELECT
+          CASE WHEN json_valid(structured_fields)
+            THEN json_extract(structured_fields, '$.sourceKnowledgeId')
+            ELSE NULL
+          END AS source_knowledge_id,
+          category, content, scope, structured_fields, superseded_by, seq
+        FROM memories
+        WHERE instr(structured_fields, '"sourceKnowledgeId"') > 0
+      )
+      WHERE typeof(source_knowledge_id) = 'text' AND trim(source_knowledge_id) <> ''
+    )
+    WHERE authority_rank = 1`,
   item_lifecycles: `SELECT
     project_id, item_kind, milestone_id, slice_id, task_id, lifecycle_status,
     state_version, last_operation_id

@@ -836,6 +836,41 @@ test("an imported decision already removed from a base without it is already rep
   assert.equal(plan.targets[0]?.reasonCode, "DECISION_ALREADY_RESTORED");
 });
 
+test("Forward Repair keeps an imported knowledge row and plans no mutation for it", () => {
+  const identity = hashLegacyImportValue({ id: "K001" });
+  const applicationPlan = {
+    planSchemaVersion: 2,
+    previewId: identity,
+    previewHash: identity,
+    baseProjectRevision: 0,
+    baseAuthorityEpoch: 0,
+    instructions: [{
+      action: "create-knowledge-memory",
+      targetKind: "knowledge",
+      targetKey: "K001",
+      knowledgeId: "K001",
+      values: { table: "rules", cells: '["project","Imported rule","—","manual"]' },
+      changeIds: [identity],
+    }],
+  } as unknown as LegacyImportApplicationPlan;
+  const plan = compileLegacyImportForwardRepairPlan({
+    applicationOperationId: "application-op",
+    applicationIdentityHash: identity,
+    applicationRelevantRowsHash: identity,
+    previewId: identity,
+    previewHash: identity,
+    backupId: identity,
+    applicationPlan,
+    backupBase: baseSnapshot(0, []),
+    currentBase: baseSnapshot(2, []),
+  });
+
+  assert.equal(plan.unresolvedCount, 0);
+  assert.equal(plan.mutationCount, 0);
+  assert.equal(plan.targets[0]?.disposition, "preserve");
+  assert.equal(plan.targets[0]?.reasonCode, "KNOWLEDGE_MEMORY_RETAINED");
+});
+
 test("the retain goal keeps intact Application rows instead of reverting them", () => {
   const identity = hashLegacyImportValue({ id: "R001" });
   const applicationPlan = {

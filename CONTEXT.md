@@ -108,8 +108,10 @@ What shipped:
   stamp. STATE.md, DECISIONS.md, and `.planning/` carry no stamp. KNOWLEDGE.md
   is rendered from `memories` rows, but is not a pure projection yet: file rows
   with no database row, and file content the render does not model, are kept in
-  the render until the KNOWLEDGE import exists. Session start never imports the
-  file into the database. Knowledge readers read the database, not the file.
+  the render. Session start never imports the file into the database.
+  `/gsd recover` imports the file's Rule, Pattern and Lesson rows through an
+  Import Preview, which also lists the content it does not import. Knowledge
+  readers read the database, not the file.
 - Steer overrides (`/gsd steer`) are `override.*` events of Domain Operations.
   OVERRIDES.md is a one-way render of them: dispatch, prompts and artifact
   verification read only the database. A file block that no database override

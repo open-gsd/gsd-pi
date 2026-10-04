@@ -54,6 +54,51 @@ export const KNOWLEDGE_SECTIONS: ReadonlyArray<{
   { table: "lessons", heading: "## Lessons Learned", idPrefix: "L" },
 ];
 
+/** The intro a render writes when the file has none. */
+export const KNOWLEDGE_DEFAULT_INTRO = [
+  "# Project Knowledge",
+  "",
+  "Append-only register of project-specific rules, patterns, and lessons learned.",
+  "Agents read this before every unit. Add entries when you discover something worth remembering.",
+].join("\n");
+
+/** The KNOWLEDGE.md table of each knowledge memory category. */
+export const KNOWLEDGE_TABLE_BY_CATEGORY: Record<string, KnowledgeTable> = {
+  rule: "rules",
+  pattern: "patterns",
+  gotcha: "lessons",
+};
+
+/**
+ * The `structured_fields` key of each cell after the `#` cell, per table.
+ * `content` names the cell that also holds the memory content.
+ */
+export const KNOWLEDGE_CELL_FIELDS: Record<KnowledgeTable, { content: string; cells: readonly string[] }> = {
+  rules: { content: "rule", cells: ["scopeText", "rule", "why", "added"] },
+  patterns: { content: "pattern", cells: ["pattern", "where", "notes"] },
+  lessons: { content: "whatHappened", cells: ["whatHappened", "rootCause", "fix", "scopeText"] },
+};
+
+/**
+ * The cells KNOWLEDGE.md shows for one memories row, `#` cell first. An empty
+ * content cell falls back to the memory content, an empty scope cell to the
+ * memory scope, and any other empty cell to "—".
+ */
+export function knowledgeMemoryCells(
+  table: KnowledgeTable,
+  id: string,
+  content: string,
+  scope: string,
+  structuredFields: Record<string, unknown>,
+): string[] {
+  const fields = KNOWLEDGE_CELL_FIELDS[table];
+  return [id, ...fields.cells.map((field) => {
+    const value = structuredFields[field];
+    if (typeof value === "string" && value) return value;
+    return field === fields.content ? content : field === "scopeText" ? scope : "—";
+  })];
+}
+
 /** Read `.gsd/KNOWLEDGE.md` content if present. Returns "" when absent or unreadable. */
 export function readKnowledgeMd(basePath: string): string {
   const path = resolveGsdRootFile(basePath, "KNOWLEDGE");

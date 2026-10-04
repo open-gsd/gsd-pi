@@ -717,8 +717,9 @@ function prepareVerifiedRecoverEvidence(basePath: string): PreparedVerifiedRecov
         logical_path: ".gsd/milestones",
         presence: "optional" as const,
       },
-      // Root registries and narrative. DECISIONS.md and REQUIREMENTS.md map to
-      // rows; the Preview lists the others as preserved and not imported.
+      // Root registries and narrative. DECISIONS.md, REQUIREMENTS.md and the
+      // KNOWLEDGE.md Rule, Pattern and Lesson rows map to rows; the Preview
+      // lists the others as preserved and not imported.
       ...RECOVER_ROOT_FILES.map((stem) => ({
         id: `project-root-${stem.toLowerCase()}`,
         kind: "project" as const,

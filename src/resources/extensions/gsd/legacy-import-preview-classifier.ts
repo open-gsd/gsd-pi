@@ -28,6 +28,7 @@ import {
   LEGACY_IMPORT_COMPLETE_TARGET_KINDS,
   LEGACY_IMPORT_JSON_COLUMNS,
   LEGACY_IMPORT_TARGET_ADAPTERS,
+  legacyImportKnowledgeRow,
   legacyImportTargetIdentity,
   type LegacyImportTargetAdapter,
 } from "./legacy-import-preview-classifier-targets.js";
@@ -368,7 +369,9 @@ function buildBaseRows(base: LegacyImportBaseSnapshot): Map<string, JsonRecord> 
     if (rows.has(key)) {
       fail("LEGACY_IMPORT_CLASSIFICATION_BASE_INCONSISTENT", "legacy import base row identity is duplicated");
     }
-    const value = { ...row.value };
+    const value = row.row_set === "knowledge_memories"
+      ? legacyImportKnowledgeRow(row.value)
+      : { ...row.value };
     rows.set(key, value);
     if (row.row_set === "decisions") decisionRows.set(String(value.id), value);
   }

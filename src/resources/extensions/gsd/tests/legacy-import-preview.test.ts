@@ -77,6 +77,7 @@ const EXPECTED_BASE_ROW_SETS = [
   "assessments",
   "decisions",
   "decision_memories",
+  "knowledge_memories",
   "item_lifecycles",
 ] as const;
 const EXPECTED_BASE_ROW_KEYS: Record<(typeof EXPECTED_BASE_ROW_SETS)[number], readonly string[]> = {
@@ -112,6 +113,7 @@ const EXPECTED_BASE_ROW_KEYS: Record<(typeof EXPECTED_BASE_ROW_SETS)[number], re
     "made_by", "source", "superseded_by",
   ],
   decision_memories: ["source_decision_id", "structured_fields"],
+  knowledge_memories: ["source_knowledge_id", "category", "content", "scope", "structured_fields"],
   item_lifecycles: [
     "project_id", "item_kind", "milestone_id", "slice_id", "task_id",
     "lifecycle_status", "state_version", "last_operation_id",
@@ -535,6 +537,7 @@ function sourceFixture(overrides: Partial<LegacyImportBaseSnapshotSource> = {}) 
     }]],
     ["decisions", [{ id: "D001", decision: "Decision" }]],
     ["decision_memories", [{ source_decision_id: "D002", structured_fields: '{"sourceDecisionId":"D002"}' }]],
+    ["knowledge_memories", [{ source_knowledge_id: "K001", structured_fields: '{"sourceKnowledgeId":"K001"}' }]],
     ["item_lifecycles", [{
       project_id: "project-1",
       item_kind: "milestone",
@@ -769,6 +772,16 @@ describe("legacy preview base snapshot", () => {
           'memory-1', 'architecture', 'Decision memory', 'created', 'updated',
           '{ "choice": "Memory choice", "sourceDecisionId": "D002" }'
         );
+        INSERT INTO memories (
+          id, category, content, created_at, updated_at, structured_fields
+        ) VALUES (
+          'memory-2', 'rule', 'Newer rule', 'created', 'updated', '{"sourceKnowledgeId":"K001"}'
+        );
+        INSERT INTO memories (
+          id, category, content, created_at, updated_at, superseded_by, structured_fields
+        ) VALUES (
+          'memory-3', 'rule', 'Older rule', 'created', 'updated', 'memory-2', '{"sourceKnowledgeId":"K001"}'
+        );
       `);
       const projectId = String(db.prepare(
         "SELECT project_id FROM project_authority WHERE singleton = 1",
@@ -812,6 +825,9 @@ describe("legacy preview base snapshot", () => {
       assert.equal(rows.get("assessments")?.["scope"], "roadmap");
       assert.equal(rows.get("decisions")?.["decision"], "Decision");
       assert.equal(rows.get("decision_memories")?.["source_decision_id"], "D002");
+      // One row per knowledge id: the active memories row, not the superseded one.
+      assert.equal(rows.get("knowledge_memories")?.["source_knowledge_id"], "K001");
+      assert.equal(rows.get("knowledge_memories")?.["content"], "Newer rule");
       assert.equal(rows.get("item_lifecycles")?.["lifecycle_status"], "pending");
 
       db.exec(`
@@ -1076,6 +1092,7 @@ describe("legacy preview task classification", () => {
         "conflicting-legacy-import-completeness",
         "duplicate-logical-milestone",
         "hybrid-conflicting-content",
+        "knowledge-content-not-imported",
         "unsupported-database-schema",
       ],
     );
@@ -1083,6 +1100,7 @@ describe("legacy preview task classification", () => {
       result.changes.map((change) => [change.action, change.target.kind, change.target.key]).sort(),
       [
         ["create", "assessment", "M702/S01/run-uat"],
+        ["create", "knowledge", "K701"],
         ["create", "milestone", "M702"],
         ["create", "milestone-status", "M702"],
         ["create", "requirement", "R701"],
@@ -1095,7 +1113,7 @@ describe("legacy preview task classification", () => {
       ].sort(),
     );
     assert.deepEqual(result.counts, {
-      create: 5, update: 0, delete: 0, preserve: 5, unparsed: 3, unresolved: 5,
+      create: 6, update: 0, delete: 0, preserve: 5, unparsed: 3, unresolved: 5,
     });
     assert.equal(result.changes.some((change) => change.target.key.includes("M007")), false);
     assert.equal(result.changes.some((change) => change.target.key === "M701"), false);

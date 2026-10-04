@@ -10,6 +10,7 @@ import {
   type LegacyImportBaseRow,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
+import { legacyImportKnowledgeRow } from "./legacy-import-preview-classifier-targets.js";
 import { canonicalLegacyImportJson, hashLegacyImportValue } from "./legacy-import-preview.js";
 import type { LegacyImportValue } from "./legacy-import-contract.js";
 
@@ -102,6 +103,14 @@ function instructionMatches(
       ":slice_id": instruction.sliceId,
     });
     return Boolean(row);
+  }
+  if (instruction.action === "create-knowledge-memory" || instruction.action === "update-knowledge-memory") {
+    const row = snapshot.rows.find((candidate) => candidate.row_set === "knowledge_memories"
+      && candidate.value["source_knowledge_id"] === instruction.knowledgeId);
+    return row !== undefined && valuesMatch(legacyImportKnowledgeRow(row.value), {
+      table: instruction.values["table"],
+      cells: JSON.parse(String(instruction.values["cells"])),
+    });
   }
   if (instruction.action !== "create-decision-memory"
     && instruction.action !== "update-decision-memory"

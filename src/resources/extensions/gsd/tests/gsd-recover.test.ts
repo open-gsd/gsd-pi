@@ -28,6 +28,8 @@ import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
 import { generateDecisionsMd, generateRequirementsMd, saveDecisionToDb, saveRequirementToDb } from '../db-writer.ts';
 import { getAllDecisionsFromMemories } from '../context-store.ts';
+import { captureKnowledgeEntry } from '../knowledge-capture.ts';
+import { renderKnowledgeProjection } from '../knowledge-projection.ts';
 import { captureCurrentLegacyImportBaseSnapshot } from '../legacy-import-preview-base.ts';
 import { createLegacyImportPreview } from '../legacy-import-preview.ts';
 import { fingerprintLegacyImportCorpusTree } from './helpers/legacy-import-corpus.ts';
@@ -1537,5 +1539,195 @@ describe('gsd-recover', async () => {
       closeDatabase();
       cleanup(base);
     }
+  });
+
+  test('recover imports every KNOWLEDGE.md Rule, Pattern and Lesson row and reports the content it does not import', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'KNOWLEDGE.md', [
+      '# Project Knowledge',
+      '',
+      'Team note: ask before adding a rule.',
+      '',
+      '## Rules',
+      '',
+      '| # | Scope | Rule | Why | Added |',
+      '|---|-------|------|-----|-------|',
+      '| K001 | project | Use a \\| b | — | manual |',
+      '| K002 | project | Too few cells |',
+      '',
+      'Rules are reviewed each quarter.',
+      '',
+      '## Patterns',
+      '',
+      '| # | Pattern | Where | Notes |',
+      '|---|---------|-------|-------|',
+      '| P001 | Retry with backoff | src/net | — |',
+      '| MEM007 | Extracted pattern | — | — |',
+      '',
+      '## Lessons Learned',
+      '',
+      '| # | What Happened | Root Cause | Fix | Scope |',
+      '|---|--------------|------------|-----|-------|',
+      '| L001 | Cache went stale | No invalidation | Add a version key | M001 |',
+      '',
+      '## Glossary',
+      '',
+      'Projection: a file rendered from the database.',
+      '',
+    ].join('\n'));
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const preview = first.notes.at(-1)?.message ?? '';
+
+    // Every K/P/L row is a mapping. Every other part of the file is a diagnosis.
+    for (const id of ['K001', 'P001', 'L001']) {
+      assert.ok(preview.includes(`create knowledge:${id} (knowledge-row-mapped)`), id);
+    }
+    assert.doesNotMatch(preview, /knowledge:(K002|MEM007)/);
+    const diagnoses = preview
+      .slice(preview.indexOf('Diagnoses:'), preview.indexOf('Resolutions:'))
+      .split('\n')
+      .slice(1)
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { code: string; raw_value: string })
+      .filter((diagnosis) => diagnosis.code.startsWith('knowledge-'))
+      .map((diagnosis) => [diagnosis.code, diagnosis.raw_value]);
+    assert.deepEqual(diagnoses.sort(), [
+      ['knowledge-content-not-imported', '## Glossary\n\nProjection: a file rendered from the database.'],
+      ['knowledge-content-not-imported', 'Rules are reviewed each quarter.'],
+      ['knowledge-content-not-imported', 'Team note: ask before adding a rule.'],
+      ['knowledge-row-not-imported', '| K002 | project | Too few cells |'],
+      ['knowledge-row-not-imported', '| MEM007 | Extracted pattern | — | — |'],
+    ]);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+    assert.ok(approval, 'no knowledge diagnosis blocks the Preview');
+
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+
+    const imported = _getAdapter()!
+      .prepare('SELECT category, content, scope, superseded_by, structured_fields FROM memories ORDER BY category')
+      .all()
+      .map((row) => ({ ...row, structured_fields: JSON.parse(String(row['structured_fields'])) }));
+    assert.deepEqual(imported, [
+      {
+        category: 'gotcha',
+        content: 'Cache went stale',
+        scope: 'M001',
+        superseded_by: null,
+        structured_fields: {
+          sourceKnowledgeTable: 'lessons',
+          whatHappened: 'Cache went stale',
+          rootCause: 'No invalidation',
+          fix: 'Add a version key',
+          scopeText: 'M001',
+          sourceKnowledgeId: 'L001',
+        },
+      },
+      {
+        category: 'pattern',
+        content: 'Retry with backoff',
+        scope: 'project',
+        superseded_by: null,
+        structured_fields: {
+          sourceKnowledgeTable: 'patterns',
+          pattern: 'Retry with backoff',
+          where: 'src/net',
+          notes: '',
+          sourceKnowledgeId: 'P001',
+        },
+      },
+      {
+        category: 'rule',
+        content: 'Use a | b',
+        scope: 'project',
+        superseded_by: null,
+        structured_fields: {
+          sourceKnowledgeTable: 'rules',
+          scopeText: 'project',
+          rule: 'Use a | b',
+          why: '',
+          added: 'manual',
+          sourceKnowledgeId: 'K001',
+        },
+      },
+    ]);
+
+    // The import is exact: the same file gives no further knowledge change.
+    assert.deepEqual(
+      recoverPreview(base).preview.changes.filter((change) => change.target.kind === 'knowledge'),
+      [],
+    );
+    // Content that was reported as not imported is still in the file after a render.
+    const rendered = renderKnowledgeProjection(base).content;
+    for (const kept of [
+      'Team note: ask before adding a rule.',
+      '| K001 | project | Use a \\| b | — | manual |',
+      '| K002 | project | Too few cells |',
+      'Rules are reviewed each quarter.',
+      '## Glossary',
+      'Projection: a file rendered from the database.',
+    ]) {
+      assert.ok(rendered.includes(kept), kept);
+    }
+  });
+
+  test('recover changes no knowledge row for a rendered KNOWLEDGE.md and imports a hand-edited row as an update', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    // The real capture path writes the rows and renders KNOWLEDGE.md.
+    captureKnowledgeEntry(base, 'rule', 'Line one\nline two | piped', 'project');
+    captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+    const lesson = captureKnowledgeEntry(base, 'lesson', 'Cache went stale', 'M001');
+    const knowledgeChanges = () => recoverPreview(base).preview.changes
+      .filter((change) => change.target.kind === 'knowledge')
+      .map((change) => `${change.action} ${change.target.key}`);
+    assert.deepEqual(knowledgeChanges(), [], 'a rendered file is in sync with the database');
+
+    // A forgotten row that a stale file still shows is not created again.
+    const knowledgePath = join(base, '.gsd', 'KNOWLEDGE.md');
+    const beforeForget = readFileSync(knowledgePath, 'utf-8');
+    _getAdapter()!.prepare("UPDATE memories SET superseded_by = 'CAP_EXCEEDED' WHERE id = :id")
+      .run({ ':id': lesson.memoryId });
+    renderKnowledgeProjection(base);
+    assert.ok(!readFileSync(knowledgePath, 'utf-8').includes('L001'));
+    writeFileSync(knowledgePath, beforeForget);
+    assert.deepEqual(knowledgeChanges(), [], 'a forgotten row stays forgotten');
+
+    writeFileSync(knowledgePath, beforeForget.replace('Retry with backoff', 'Retry with jitter'));
+    assert.deepEqual(knowledgeChanges(), ['update P001']);
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(approval, first.notes.at(-1)?.message);
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+
+    const patterns = _getAdapter()!
+      .prepare("SELECT content, superseded_by, structured_fields FROM memories WHERE category = 'pattern'")
+      .all();
+    assert.equal(patterns.length, 1, 'the update changes the row and adds none');
+    assert.equal(patterns[0]!['content'], 'Retry with jitter');
+    assert.equal(patterns[0]!['superseded_by'], null);
+    assert.equal(JSON.parse(String(patterns[0]!['structured_fields'])).pattern, 'Retry with jitter');
+    assert.equal(
+      _getAdapter()!.prepare('SELECT superseded_by FROM memories WHERE id = :id').get({ ':id': lesson.memoryId })?.['superseded_by'],
+      'CAP_EXCEEDED',
+    );
+    assert.deepEqual(knowledgeChanges(), []);
   });
 });

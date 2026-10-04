@@ -18,6 +18,7 @@ import {
 import {
   LEGACY_IMPORT_APPLICATION_PLAN_SCHEMA_VERSION,
   type LegacyImportApplicationDecisionInstruction,
+  type LegacyImportApplicationKnowledgeInstruction,
   type LegacyImportApplicationPlan,
   type LegacyImportApplicationPlanInstruction,
   type LegacyImportApplicationRowInstruction,
@@ -32,6 +33,11 @@ import {
   type LegacyImportPreviewArtifact,
 } from "../../legacy-import-preview.js";
 import { synthesizeDecisionMemoryContent } from "../../memory-backfill.js";
+import {
+  KNOWLEDGE_CELL_FIELDS,
+  KNOWLEDGE_TABLE_BY_CATEGORY,
+  type KnowledgeTable,
+} from "../../knowledge-parser.js";
 
 type SqlValue = null | number | string;
 type SqlRecord = Readonly<Record<string, SqlValue>>;
@@ -188,6 +194,39 @@ function preflightDecision(instruction: LegacyImportApplicationDecisionInstructi
   }
 }
 
+const KNOWLEDGE_VALUE_FIELDS = new Set(["table", "cells"]);
+
+/** The table and cells of a knowledge instruction, or a failure when they are not exact. */
+function knowledgeValues(
+  instruction: LegacyImportApplicationKnowledgeInstruction,
+): { table: KnowledgeTable; cells: string[] } {
+  const table = instruction.values["table"];
+  const fields = typeof table === "string" && Object.hasOwn(KNOWLEDGE_CELL_FIELDS, table)
+    ? KNOWLEDGE_CELL_FIELDS[table as KnowledgeTable]
+    : undefined;
+  let cells: unknown;
+  try { cells = JSON.parse(String(instruction.values["cells"])); } catch {
+    fail("legacy import knowledge cells are invalid JSON");
+  }
+  if (
+    fields === undefined
+    || !Array.isArray(cells)
+    || cells.length !== fields.cells.length
+    || cells.some((cell) => typeof cell !== "string")
+  ) fail("legacy import knowledge row does not match its table");
+  return { table: table as KnowledgeTable, cells: cells as string[] };
+}
+
+function preflightKnowledge(instruction: LegacyImportApplicationKnowledgeInstruction): void {
+  if (
+    instruction.targetKind !== "knowledge"
+    || instruction.knowledgeId !== instruction.targetKey
+    || !/^[KPL]\d+$/u.test(instruction.knowledgeId)
+  ) fail("legacy import knowledge identity is inconsistent");
+  preflightSqlRecord(instruction.values, KNOWLEDGE_VALUE_FIELDS, "legacy import knowledge values");
+  knowledgeValues(instruction);
+}
+
 function preflight(plan: LegacyImportApplicationPlan): LegacyImportApplicationPlan {
   if (!isStrictLegacyImportData(plan)) fail("legacy import Application plan must be strict data");
   let snapshot: LegacyImportApplicationPlan;
@@ -208,6 +247,11 @@ function preflight(plan: LegacyImportApplicationPlan): LegacyImportApplicationPl
       || instruction.action === "delete-decision-memory"
     ) {
       preflightDecision(instruction);
+    } else if (
+      instruction.action === "create-knowledge-memory"
+      || instruction.action === "update-knowledge-memory"
+    ) {
+      preflightKnowledge(instruction);
     } else if (instruction.action === "adopt-lifecycle") {
       if (instruction.lifecycleAction !== "create" && instruction.lifecycleAction !== "update") {
         fail("legacy import lifecycle action is unsupported");
@@ -777,6 +821,81 @@ function applyDecision(
   return resultFor(instruction, 1, affected);
 }
 
+/**
+ * Write one KNOWLEDGE.md row as a memories row with its knowledge id. A
+ * create requires that no memories row holds the id. An update changes the
+ * row the Preview base compared: the active row, else the newest superseded
+ * row. Cells that the render shows as "—" are stored empty, as a capture does.
+ */
+function applyKnowledge(
+  context: Readonly<DomainOperationContext>,
+  occurredAt: string,
+  instruction: LegacyImportApplicationKnowledgeInstruction,
+): LegacyImportApplicationInstructionResult {
+  const { table, cells } = knowledgeValues(instruction);
+  const fields = KNOWLEDGE_CELL_FIELDS[table];
+  const category = Object.keys(KNOWLEDGE_TABLE_BY_CATEGORY)
+    .find((key) => KNOWLEDGE_TABLE_BY_CATEGORY[key] === table)!;
+  const structured: Record<string, unknown> = {};
+  fields.cells.forEach((field, index) => {
+    const cell = cells[index]!;
+    structured[field] = cell === "—" && field !== fields.content && field !== "scopeText" ? "" : cell;
+  });
+  const content = String(structured[fields.content]);
+  const scope = String(structured["scopeText"] ?? "") || "project";
+  const existing = getDb().prepare(`SELECT id, structured_fields FROM memories
+    WHERE json_valid(structured_fields)
+      AND json_extract(structured_fields, '$.sourceKnowledgeId') = :knowledge_id
+    ORDER BY superseded_by IS NOT NULL, seq DESC
+    LIMIT 1`).get({ ":knowledge_id": instruction.knowledgeId }) as DbRow | undefined;
+  let affected: number;
+  if (instruction.action === "create-knowledge-memory") {
+    if (existing) fail("legacy import knowledge row already exists");
+    const memoryId = `legacy-import-${hashLegacyImportValue({
+      operationId: context.operationId,
+      knowledgeId: instruction.knowledgeId,
+    }).slice(7, 31)}`;
+    affected = changes(getDb().prepare(`INSERT INTO memories (
+        id, category, content, confidence, source_unit_type, source_unit_id,
+        created_at, updated_at, superseded_by, hit_count, scope, tags, structured_fields
+      ) VALUES (
+        :id, :category, :content, 0.85, NULL, NULL,
+        :created_at, :updated_at, NULL, 0, :scope, '[]', :structured_fields
+      )`).run({
+      ":id": memoryId,
+      ":category": category,
+      ":content": content,
+      ":created_at": occurredAt,
+      ":updated_at": occurredAt,
+      ":scope": scope,
+      ":structured_fields": JSON.stringify({
+        sourceKnowledgeTable: table,
+        ...structured,
+        sourceKnowledgeId: instruction.knowledgeId,
+      }),
+    }));
+  } else {
+    if (!existing) fail("legacy import knowledge row is missing");
+    affected = changes(getDb().prepare(`UPDATE memories
+      SET category = :category, content = :content, scope = :scope,
+        structured_fields = :structured_fields, updated_at = :updated_at
+      WHERE id = :memory_id`).run({
+      ":category": category,
+      ":content": content,
+      ":scope": scope,
+      ":structured_fields": JSON.stringify({
+        ...JSON.parse(String(existing["structured_fields"])) as Record<string, unknown>,
+        sourceKnowledgeTable: table,
+        ...structured,
+      }),
+      ":updated_at": occurredAt,
+      ":memory_id": existing["id"],
+    }));
+  }
+  if (affected !== 1) fail("legacy import knowledge memory mutation must affect exactly one row");
+  return resultFor(instruction, 1, affected);
+}
+
 function adoptLifecycle(
   context: Readonly<DomainOperationContext>,
   occurredAt: string,
@@ -884,6 +1003,11 @@ export function applyLegacyImportApplicationPlan(
       || instruction.action === "delete-decision-memory"
     ) {
       instructionResults.push(applyDecision(context, occurredAt, instruction));
+    } else if (
+      instruction.action === "create-knowledge-memory"
+      || instruction.action === "update-knowledge-memory"
+    ) {
+      instructionResults.push(applyKnowledge(context, occurredAt, instruction));
     } else {
       instructionResults.push(resultFor(instruction, 0, 0));
     }

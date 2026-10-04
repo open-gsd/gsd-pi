@@ -40,7 +40,7 @@ type SqlRecord = Readonly<Record<string, SqlValue>>;
 
 export interface LegacyImportApplicationRowInstruction {
   readonly action: "create" | "update" | "delete";
-  readonly targetKind: Exclude<CanonicalTargetKind, "decision">;
+  readonly targetKind: Exclude<CanonicalTargetKind, "decision" | "knowledge">;
   readonly targetKey: string;
   readonly rowSet: LegacyImportBaseRowSet;
   readonly identity: SqlRecord;
@@ -56,6 +56,16 @@ export interface LegacyImportApplicationDecisionInstruction {
   readonly targetKind: "decision";
   readonly targetKey: string;
   readonly decisionId: string;
+  readonly values: SqlRecord;
+  readonly changeIds: readonly string[];
+}
+
+/** One KNOWLEDGE.md row written as a memories row: `values` holds `table` and `cells`. */
+export interface LegacyImportApplicationKnowledgeInstruction {
+  readonly action: "create-knowledge-memory" | "update-knowledge-memory";
+  readonly targetKind: "knowledge";
+  readonly targetKey: string;
+  readonly knowledgeId: string;
   readonly values: SqlRecord;
   readonly changeIds: readonly string[];
 }
@@ -121,6 +131,7 @@ export interface LegacyImportApplicationPreserveInstruction {
 export type LegacyImportApplicationPlanInstruction =
   | LegacyImportApplicationRowInstruction
   | LegacyImportApplicationDecisionInstruction
+  | LegacyImportApplicationKnowledgeInstruction
   | LegacyImportApplicationSliceDependenciesInstruction
   | LegacyImportApplicationDeleteSliceDependenciesInstruction
   | LegacyImportApplicationLifecycleInstruction
@@ -638,7 +649,10 @@ function normalizedDecisionFields(
 
 function rowInstruction(
   row: MutableRowClaim,
-): LegacyImportApplicationRowInstruction | LegacyImportApplicationDecisionInstruction {
+):
+  | LegacyImportApplicationRowInstruction
+  | LegacyImportApplicationDecisionInstruction
+  | LegacyImportApplicationKnowledgeInstruction {
   const values = row.action === "create"
     ? { ...row.identity, ...row.values }
     : row.action === "delete" ? {} : row.values;
@@ -655,9 +669,22 @@ function rowInstruction(
       changeIds,
     };
   }
+  if (row.targetKind === "knowledge") {
+    if (row.action === "delete") {
+      fail("LEGACY_IMPORT_APPLICATION_MAPPING_UNSUPPORTED", "legacy import cannot delete a knowledge row");
+    }
+    return {
+      action: `${row.action}-knowledge-memory`,
+      targetKind: "knowledge",
+      targetKey: row.targetKey,
+      knowledgeId: row.targetKey,
+      values: row.values,
+      changeIds,
+    };
+  }
   return {
     action: row.action,
-    targetKind: row.targetKind as Exclude<CanonicalTargetKind, "decision">,
+    targetKind: row.targetKind as Exclude<CanonicalTargetKind, "decision" | "knowledge">,
     targetKey: row.targetKey,
     rowSet: row.rowSet,
     identity: row.identity,

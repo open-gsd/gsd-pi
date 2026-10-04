@@ -1,7 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: Explicit canonical target adapters for legacy Preview classification.
 
+import type { LegacyImportValue } from "./legacy-import-contract.js";
 import type { LegacyImportBaseRowSet } from "./legacy-import-preview-base.js";
+import { KNOWLEDGE_TABLE_BY_CATEGORY, knowledgeMemoryCells } from "./knowledge-parser.js";
 
 export interface LegacyImportTargetAdapter {
   rowSet: LegacyImportBaseRowSet;
@@ -96,6 +98,15 @@ export const LEGACY_IMPORT_TARGET_ADAPTERS = {
     metadata: new Set(["seq"]),
     aliases: {},
   },
+  // One KNOWLEDGE.md row (K/P/L###). `cells` are the cells after the `#`
+  // cell, as the KNOWLEDGE.md render shows them.
+  knowledge: {
+    rowSet: "knowledge_memories",
+    identity: { kind: "scalar", fields: ["source_knowledge_id"] },
+    fields: new Set(["source_knowledge_id", "table", "cells"]),
+    metadata: new Set(),
+    aliases: {},
+  },
 } as const satisfies Readonly<Partial<Record<string, LegacyImportTargetAdapter>>>;
 
 export interface LegacyImportTargetIdentity {
@@ -158,6 +169,7 @@ export const LEGACY_IMPORT_JSON_COLUMNS = new Set([
   "tasks.inputs",
   "tasks.expected_output",
   "tasks.target_repositories",
+  "knowledge_memories.cells",
 ]);
 
 export const LEGACY_IMPORT_BOOLEAN_COLUMNS = new Set([
@@ -176,3 +188,31 @@ export const LEGACY_IMPORT_COMPLETE_TARGET_KINDS: Partial<Record<LegacyImportBas
   assessments: "assessment",
   decisions: "decision",
 };
+
+/** One cell as it reads back from a rendered KNOWLEDGE.md table row. */
+export function legacyImportKnowledgeCell(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The comparable form of one `knowledge_memories` base row: the table and
+ * cells that the KNOWLEDGE.md render shows for that memories row. A category
+ * with no KNOWLEDGE.md table gives a null table and no cells.
+ */
+export function legacyImportKnowledgeRow(
+  value: Readonly<Record<string, LegacyImportValue>>,
+): Record<string, LegacyImportValue> {
+  const id = String(value["source_knowledge_id"]);
+  const table = KNOWLEDGE_TABLE_BY_CATEGORY[String(value["category"])];
+  // The base query returns only a JSON object that holds a text sourceKnowledgeId.
+  const fields = JSON.parse(String(value["structured_fields"])) as Record<string, unknown>;
+  return {
+    source_knowledge_id: id,
+    table: table ?? null,
+    cells: table === undefined
+      ? []
+      : knowledgeMemoryCells(table, id, String(value["content"] ?? ""), String(value["scope"] || "project"), fields)
+        .slice(1)
+        .map(legacyImportKnowledgeCell),
+  };
+}
