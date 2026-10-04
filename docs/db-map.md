@@ -736,12 +736,30 @@ result_json  TEXT
 #### ADR-047 liveness ledger (non-versioned)
 
 `db-required-schema.ts` is the registration and completeness authority for
-non-versioned schema features required on every database open. It currently
-registers the ADR-047 liveness feature; `db-liveness-backstop-schema.ts` owns
-that feature's table and open-wedge-index DDL. Startup repair and `/gsd doctor`
-query the same registry, so missing required objects trigger guarded startup
-maintenance without changing `schema_version`, `application_id`, or
-`user_version`; doctor records a detected repair.
+non-versioned schema features required on every database open. It registers
+the ADR-047 liveness feature and the ADR-048
+[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) feature;
+`db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
+DDL. Startup repair and `/gsd doctor` query the same registry, so missing
+required objects trigger guarded startup maintenance without changing
+`schema_version`, `application_id`, or `user_version`; doctor records a
+detected repair of the liveness feature.
+
+---
+
+#### `unit_dispatch_budgets` (non-versioned)
+
+```
+dispatch_id  INTEGER NOT NULL
+kind         TEXT NOT NULL      ← 'zero-tool' | 'tool-unavailable' | 'pre-exec'
+used         INTEGER NOT NULL CHECK (used >= 0)
+updated_at   TEXT NOT NULL
+PRIMARY KEY (dispatch_id, kind)
+FOREIGN KEY dispatch_id → unit_dispatches(id)
+```
+
+- DDL owner: `db-unit-dispatch-budget-schema.ts`. Access: `db/unit-dispatch-budgets.ts`.
+- Count and release rules: see the 2026-10-03 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
 
 ---
 
