@@ -444,10 +444,7 @@ test("after the Cutover progress and the project snapshot give the same counts f
 });
 
 test("after the Cutover the already-closed dispatch check, the open-slice list and the reactive task graph follow the lifecycle rows", async () => {
-  const base = seedDisagreement();
-  const sliceDirectory = join(base, ".gsd", "milestones", "M002", "slices", "S01");
-  mkdirSync(join(sliceDirectory, "tasks"), { recursive: true });
-  writeFileSync(join(sliceDirectory, "S01-PLAN.md"), "# S01\n");
+  seedDisagreement();
   cutOver();
 
   // T01 and S01 are legacy complete and canonical ready.
@@ -466,7 +463,7 @@ test("after the Cutover the already-closed dispatch check, the open-slice list a
   assert.deepEqual(findOpenSlices("M002"), ["S01"]);
 
   assert.deepEqual(
-    (await loadSliceTaskIO(base, "M002", "S01")).map((entry) => [entry.id, entry.done]),
+    loadSliceTaskIO("M002", "S01").map((entry) => [entry.id, entry.done]),
     [["T01", false], ["T02", true]],
   );
 });

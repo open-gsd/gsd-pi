@@ -468,7 +468,7 @@ Priority  Rule                                          Fires When
 21        evaluating-gates → gate-evaluate              gates pending evaluation
 22        replanning-slice → replan-slice               slice in 'replanning' phase
 23        executing → replan-task recovery              pending Task recovery action for the active task
-24        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block
+24        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block, no selected task with a lifecycle row
 25        executing → execute-task (render plan)        slice PLAN file missing — render it from the DB, then fall through
 26        executing → execute-task                      1–2 tasks ready (sequential mode)
 27        validating-milestone → validate-milestone     all slices closed, not yet validated

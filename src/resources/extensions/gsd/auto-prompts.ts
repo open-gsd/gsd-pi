@@ -4162,7 +4162,7 @@ export async function buildReactiveExecutePrompt(
   const { loadSliceTaskIO, deriveTaskGraph, graphMetrics } = await import("./reactive-graph.js");
 
   // Build graph for context
-  const taskIO = await loadSliceTaskIO(base, mid, sid);
+  const taskIO = loadSliceTaskIO(mid, sid);
   const graph = deriveTaskGraph(taskIO);
   const metrics = graphMetrics(graph);
 

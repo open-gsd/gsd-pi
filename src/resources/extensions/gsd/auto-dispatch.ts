@@ -32,6 +32,7 @@ import {
   hasUnitRecoveryBlock,
 } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
+import { readTaskLifecycleStatus } from "./task-execution-domain-operation.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
@@ -1318,7 +1319,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
 
         const taskIO = _reactiveGraphDeriveFn
           ? await _reactiveGraphDeriveFn(basePath, mid, sid)
-          : await loadSliceTaskIO(basePath, mid, sid);
+          : loadSliceTaskIO(mid, sid);
         if (taskIO.length < 2) return null; // single task, no point
 
         const graph = deriveTaskGraph(taskIO);
@@ -1348,6 +1349,13 @@ export const DISPATCH_RULES: DispatchRule[] = [
               new Set(),
             );
         if (selected.length <= 1) return null;
+
+        // A batch subagent holds no Attempt, and only the running Attempt of
+        // the host completes a Task that has a lifecycle row. Those Tasks run
+        // one at a time through execute-task.
+        if (selected.some((taskId) => readTaskLifecycleStatus({ milestoneId: mid, sliceId: sid, taskId }) !== null)) {
+          return null;
+        }
 
         // Log graph metrics for observability
         const metrics = graphMetrics(graph);

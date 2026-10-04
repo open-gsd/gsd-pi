@@ -188,6 +188,7 @@ S##-CONTEXT present AND
 slices WHERE is_sketch = 1                         → refine-slice
 
 tasks WHERE status='pending' AND count ≥ 3 AND no recorded reactive recovery block
+  AND no selected task has a lifecycle row (IO read from tasks.inputs / expected_output / files)
                                                        → reactive-execute (parallel)
 
 tasks WHERE status='pending' AND count < 3         → execute-task (sequential)

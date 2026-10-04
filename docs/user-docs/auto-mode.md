@@ -532,7 +532,9 @@ When enabled, auto-mode automatically selects cheaper models for simple units (s
 
 ## Reactive Task Execution
 
-Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the IO annotations in task plans. When at least three ready tasks can be considered safely, tasks that do not conflict (no shared file reads/writes) are dispatched in parallel via subagents, while dependent tasks wait for their predecessors to complete.
+Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the planned inputs and expected output of each task. GSD reads them from the task rows in the database, not from PLAN files. When at least three ready tasks can be considered safely, tasks that do not conflict (no shared file reads/writes) are dispatched in parallel via subagents, while dependent tasks wait for their predecessors to complete.
+
+A task that has a lifecycle row is not put in a parallel batch. Every task that `gsd_plan_slice` plans has one. Only the running Attempt of the host can complete such a task, and a batch subagent has no Attempt, so these tasks run one at a time through the sequential executor.
 
 ```yaml
 reactive_execution:
