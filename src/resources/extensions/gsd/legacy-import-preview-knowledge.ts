@@ -93,20 +93,26 @@ function interpretKnowledgeMarkdown(
   const defaultIntro = new Set(KNOWLEDGE_DEFAULT_INTRO.split("\n"));
   const mappedIds = new Set<string>();
   let section: (typeof KNOWLEDGE_SECTIONS)[number] | undefined;
-  let content: { start: number; end: number } | undefined;
+  let run: { memoryRows: boolean; start: number; end: number } | undefined;
   const flushContent = (): void => {
-    if (content === undefined) return;
+    if (run === undefined) return;
     addLegacyImportDiagnosis(
       diagnoses,
       file,
-      "knowledge-content-not-imported",
+      run.memoryRows ? "knowledge-memory-row-not-imported" : "knowledge-content-not-imported",
       "info",
-      "KNOWLEDGE.md content that is not a Rule, Pattern or Lesson row is not imported into the database; it stays in the file.",
+      run.memoryRows
+        ? "KNOWLEDGE.md rows with a memory id are renders of database memories and are not imported; the next render writes a row for each such memory that is active."
+        : "KNOWLEDGE.md content that is not a Rule, Pattern or Lesson row is not imported into the database; it stays in the file.",
       "preserved",
-      content.start,
-      content.end,
+      run.start,
+      run.end,
     );
-    content = undefined;
+    run = undefined;
+  };
+  const extendRun = (memoryRows: boolean, line: { start: number; end: number }): void => {
+    if (run?.memoryRows !== memoryRows) flushContent();
+    run = { memoryRows, start: run?.start ?? line.start, end: line.end };
   };
   const rowNotImported = (line: { start: number; end: number }, reason: string): void => {
     flushContent();
@@ -129,7 +135,7 @@ function interpretKnowledgeMarkdown(
       flushContent();
       beforeFirstHeading = false;
       section = KNOWLEDGE_SECTIONS.find((candidate) => candidate.heading === trimmed);
-      if (section === undefined) content = { start: line.start, end: line.end };
+      if (section === undefined) extendRun(false, line);
       continue;
     }
     if (trimmed.length === 0) continue;
@@ -137,7 +143,7 @@ function interpretKnowledgeMarkdown(
     if (section !== undefined) {
       if (/^\|\s*(#|-+)\s*\|/u.test(trimmed)) continue;
       if (/^\|\s*MEM\d+\s*\|/u.test(trimmed)) {
-        rowNotImported(line, "its id is a memory id, so it is kept only while that memory row exists");
+        extendRun(true, line);
         continue;
       }
       const id = new RegExp(`^\\|\\s*(${section.idPrefix}\\d+)\\s*\\|`, "u").exec(trimmed)?.[1];
@@ -164,7 +170,7 @@ function interpretKnowledgeMarkdown(
         continue;
       }
     }
-    content = { start: content?.start ?? line.start, end: line.end };
+    extendRun(false, line);
   }
   flushContent();
   if (mappedIds.size > 0) file.outcome = "mapped";
