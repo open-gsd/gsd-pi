@@ -12,7 +12,7 @@
 import { join } from "node:path";
 
 import type { CompleteSliceParams } from "../types.js";
-import { getDb } from "../gsd-db.js";
+import { getDb, getSlice } from "../gsd-db.js";
 import { clearPathCache, relSliceFile } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
 import { checkOwnership, sliceUnitKey } from "../unit-ownership.js";
@@ -32,7 +32,6 @@ import {
   type SliceCompletionCloseout,
 } from "../slice-lifecycle-domain-operation.js";
 import { repairMilestoneLifecycleShadowsForward } from "../lifecycle-shadow-repair-domain-operation.js";
-import { setSliceCompletionSummaryProjectionIfCurrent } from "../db/writers/slice-lifecycle.js";
 
 export interface CompleteSliceResult {
   sliceId: string;
@@ -386,6 +385,13 @@ export async function handleCompleteSlice(
       slice: { milestoneId: params.milestoneId, sliceId: params.sliceId },
       closeout,
       audit: { actorName: params.actorName, triggerReason: params.triggerReason },
+      carriers: (completedAt) => {
+        const completed: CompleteSliceParams = { ...closeout, milestoneId: params.milestoneId, sliceId: params.sliceId };
+        return {
+          summaryMd: renderSliceSummaryMarkdown(completed, completedAt),
+          uatMd: renderUatMarkdown(completed, completedAt),
+        };
+      },
     });
   } catch (error) {
     if (!(error instanceof SliceLifecycleValidationError)) throw error;
@@ -414,10 +420,11 @@ export async function handleCompleteSlice(
     milestoneId: params.milestoneId,
     sliceId: params.sliceId,
   };
-  const summaryMd = renderSliceSummaryMarkdown(effectiveParams, completion.completedAt);
-
-  // Resolve and write summary to disk
-  const uatMd = renderUatMarkdown(effectiveParams, completion.completedAt);
+  // The files follow the carriers on the Slice row, which the operation wrote:
+  // a replay must not put back a UAT that gsd_summary_save corrected later.
+  const carriers = getSlice(params.milestoneId, params.sliceId);
+  const summaryMd = carriers?.full_summary_md || renderSliceSummaryMarkdown(effectiveParams, completion.completedAt);
+  const uatMd = carriers?.full_uat_md || renderUatMarkdown(effectiveParams, completion.completedAt);
   let projectionStale = false;
   let superseded = false;
   const slice = { milestoneId: params.milestoneId, sliceId: params.sliceId };
@@ -426,13 +433,7 @@ export async function handleCompleteSlice(
   }
 
   try {
-    if (!setSliceCompletionSummaryProjectionIfCurrent({
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      operationId: completion.operationId,
-      summaryMd,
-      uatMd,
-    })) {
+    if (!isCurrent()) {
       superseded = true;
       projectionStale = true;
     } else {

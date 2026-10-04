@@ -1247,39 +1247,24 @@ export function reopenSliceHierarchy(
 }
 
 /**
- * Persist the rendered SUMMARY/UAT Markdown projections onto the compatibility
- * Slice row, fenced to the still-current completion operation. Returns false
- * (writing nothing) when the Slice lifecycle head has moved off this operation,
- * so callers can treat the projection as superseded rather than rebuild stale
- * completion output.
+ * Store the rendered SUMMARY/UAT Markdown on the compatibility Slice row.
+ * Runs inside the slice.complete operation, so the carriers commit with the
+ * completion and a replay does not write them again.
  */
-export function setSliceCompletionSummaryProjectionIfCurrent(input: {
+export function setSliceCompletionCarriers(input: {
   milestoneId: string;
   sliceId: string;
-  operationId: string;
   summaryMd: string;
   uatMd: string;
-}): boolean {
-  const updated = getDb().prepare(`
+}): void {
+  getDb().prepare(`
     UPDATE slices
     SET full_summary_md = :summary_md, full_uat_md = :uat_md
-    WHERE milestone_id = :milestone_id
-      AND id = :slice_id
-      AND EXISTS (
-        SELECT 1 FROM workflow_item_lifecycles lifecycle
-        WHERE lifecycle.item_kind = 'slice'
-          AND lifecycle.milestone_id = :milestone_id
-          AND lifecycle.slice_id = :slice_id
-          AND lifecycle.task_id IS NULL
-          AND lifecycle.lifecycle_status = 'completed'
-          AND lifecycle.last_operation_id = :operation_id
-      )
+    WHERE milestone_id = :milestone_id AND id = :slice_id
   `).run({
     ":milestone_id": input.milestoneId,
     ":slice_id": input.sliceId,
-    ":operation_id": input.operationId,
     ":summary_md": input.summaryMd,
     ":uat_md": input.uatMd,
   });
-  return Number((updated as { changes?: number }).changes ?? 0) === 1;
 }

@@ -1168,6 +1168,43 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
   }
 });
 
+describe("slice SUMMARY and UAT carriers commit inside the operation that writes them", () => {
+  const carriers = () => ({ ..._getAdapter()!.prepare(
+    "SELECT full_summary_md AS summary, full_uat_md AS uat FROM slices WHERE milestone_id = 'M001' AND id = 'S02'",
+  ).get() }) as { summary: string; uat: string };
+
+  it("a replay of gsd_slice_complete keeps a later UAT correction", async () => {
+    await withOperationOnlyFixture("pi", async (_call, base) => {
+      const complete = () => runNativeDbTool(base, "gsd_slice_complete", SLICE_LIFECYCLE_CASES[0].args, "carrier-complete");
+      const fence = fenceWorkflowWrites();
+      const first = await complete();
+      fence.restore();
+      assert.ok(!(first as { isError?: boolean }).isError, "the completion succeeds");
+      assert.ok(!fence.violations.includes("slices"), "the carriers are written inside slice.complete");
+      const completed = carriers();
+      assert.match(completed.summary, /Persistent lifecycle parity is complete/);
+
+      const correction = "# UAT\n\nCorrected after completion.\n";
+      const saved = await runNativeDbTool(base, "gsd_summary_save", {
+        milestone_id: "M001",
+        slice_id: "S02",
+        artifact_type: "UAT",
+        content: correction,
+      }, "carrier-correction");
+      assert.ok(!(saved as { isError?: boolean }).isError, "the correction is saved");
+
+      await complete();
+
+      assert.deepEqual(carriers(), { summary: completed.summary, uat: correction });
+      assert.equal(
+        readFileSync(join(base, ".gsd", String(executorDetails(saved).path)), "utf-8"),
+        correction,
+        "the UAT file follows the carrier",
+      );
+    });
+  });
+});
+
 describe("gsd_uat_result_save commits its rows in one Domain Operation", () => {
   const uatCase = OPERATION_ONLY_CASES.find((entry) => entry.tool === "gsd_uat_result_save")!;
   const count = (sql: string) => Number(_getAdapter()!.prepare(sql).get()?.count);

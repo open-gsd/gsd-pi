@@ -15,6 +15,7 @@ import {
   completeSliceHierarchy,
   grantSliceCancellationWaiver,
   reopenSliceHierarchy,
+  setSliceCompletionCarriers,
   SliceLifecycleValidationError,
   type SliceCancellationHierarchyResult,
   type SliceCancellationInterruption,
@@ -404,6 +405,8 @@ export function completeSlice(input: {
   slice: SliceLifecycleIdentity;
   closeout: SliceCompletionCloseout;
   audit?: SliceLifecycleAudit;
+  /** Renders the SUMMARY and UAT carriers of the Slice row for the completion time. */
+  carriers?: (completedAt: string) => { summaryMd: string; uatMd: string };
 }): SliceCompletionReceipt {
   const slice = {
     milestoneId: requireText(input.slice.milestoneId, "milestoneId"),
@@ -418,6 +421,7 @@ export function completeSlice(input: {
       ...slice,
       operationalReadiness: input.closeout.operationalReadiness,
     });
+    if (input.carriers) setSliceCompletionCarriers({ ...slice, ...input.carriers(result.completedAt) });
     return {
       events: [{
         eventType: "slice.completed",
