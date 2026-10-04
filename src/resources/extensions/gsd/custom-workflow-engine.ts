@@ -46,7 +46,7 @@ import {
 } from "./db/custom-workflow-runs.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
 import {
-  insertCustomWorkflowStepVerification,
+  approveCustomWorkflowStep,
   saveCustomWorkflowSteps,
 } from "./db/writers/custom-workflow-runs.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
@@ -74,6 +74,10 @@ function formatBlockedWorkflowReason(graph: WorkflowGraph): string {
   return blockedSteps.length > 0
     ? `Workflow blocked: no pending steps are ready. Blocked steps: ${blockedSteps.join("; ")}`
     : "Workflow blocked: no pending steps are ready.";
+}
+
+function allStepsDone(graph: WorkflowGraph): boolean {
+  return graph.steps.every((step) => step.status === "complete" || step.status === "expanded");
 }
 
 /** The step id of a custom-step unit id "<name>/<timestamp>/<stepId>". */
@@ -129,9 +133,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
    */
   async deriveState(_basePath: string): Promise<EngineState> {
     const graph = readCustomWorkflowGraph(this.openRun());
-    const allDone = graph.steps.every(
-      (s) => s.status === "complete" || s.status === "expanded",
-    );
+    const allDone = allStepsDone(graph);
     const phase = allDone ? "complete" : "running";
 
     return {
@@ -169,10 +171,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     let next = getNextPendingStep(graph);
 
     if (!next) {
-      const allDone = graph.steps.every(
-        (step) => step.status === "complete" || step.status === "expanded",
-      );
-      if (!allDone) {
+      if (!allStepsDone(graph)) {
         return {
           action: {
             action: "stop",
@@ -301,10 +300,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     state: EngineState,
     completedStep: CompletedStep,
   ): Promise<ReconcileResult> {
-    return this.completeStep(stepIdOfUnit(completedStep.unitId));
-  }
-
-  private async completeStep(stepId: string): Promise<ReconcileResult> {
+    const stepId = stepIdOfUnit(completedStep.unitId);
     const run = this.openRun();
     const fence = readDomainOperationFence();
     const verification = getLatestCustomWorkflowStepVerification(this.runId, stepId);
@@ -323,24 +319,19 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     });
     renderRunDirectory(this.runDir, run);
 
-    const allDone = updatedGraph.steps.every(
-      (s) => s.status === "complete" || s.status === "expanded",
-    );
-
-    return {
-      outcome: allDone ? "milestone-complete" : "continue",
-    };
+    return { outcome: allStepsDone(updatedGraph) ? "milestone-complete" : "continue" };
   }
 
   /**
    * Record the approval of the operator for a step that waits for a decision
-   * (`/gsd workflow approve`), then complete the step. A step waits for a
+   * (`/gsd workflow approve`) and complete the step, in one Domain Operation. A step waits for a
    * decision when its newest verification result is inconclusive and has no
    * waiver. A failed check is not approved: the step runs again on resume.
    *
    * @throws Error when the step does not wait for a decision.
    */
   async approveStep(stepId: string): Promise<ReconcileResult> {
+    const run = this.openRun();
     const fence = readDomainOperationFence();
     const pending = getLatestCustomWorkflowStepVerification(this.runId, stepId);
     if (pending?.verdict !== "inconclusive" || pending.waiverRationale !== null) {
@@ -348,16 +339,16 @@ export class CustomWorkflowEngine implements WorkflowEngine {
         `Workflow step "${stepId}" does not wait for approval: its verification result is ${pending?.verdict ?? "missing"}`,
       );
     }
-    insertCustomWorkflowStepVerification({
+    const graph = markStepComplete(readCustomWorkflowGraph(run), stepId);
+    approveCustomWorkflowStep({
       fence,
       runId: this.runId,
       stepId,
-      verdict: "pass",
       evidence: { ...pending.evidence, approvedBy: "operator" } as { [key: string]: DomainJsonValue },
-      waiverRationale: null,
-      actorType: "user",
+      graph,
     });
-    return this.completeStep(stepId);
+    renderRunDirectory(this.runDir, run);
+    return { outcome: allStepsDone(graph) ? "milestone-complete" : "continue" };
   }
 
   /**

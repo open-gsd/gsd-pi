@@ -236,6 +236,16 @@ describe("custom workflow runs in the database", () => {
       waiverRationale: null,
     });
     assert.deepEqual(statuses(readGraph(runDir)), { scan: "complete", judge: "complete" });
+    // The decision and the completion are one operation of the operator: a
+    // process that dies cannot leave an approved step active.
+    const approvals = _getAdapter()!.prepare(
+      `SELECT event.event_type, operation.actor_type
+       FROM workflow_domain_events event
+       JOIN workflow_operations operation ON operation.operation_id = event.operation_id
+       WHERE event.event_type IN ('custom_workflow.step.approve', 'custom_workflow.step.complete')
+         AND json_extract(event.payload_json, '$.stepId') = 'judge'`,
+    ).all().map((row) => ({ ...row }));
+    assert.deepEqual(approvals, [{ event_type: "custom_workflow.step.approve", actor_type: "user" }]);
     // A decided step does not wait for a second decision.
     await assert.rejects(engine.approveStep("judge"), /verification result is pass/);
   });

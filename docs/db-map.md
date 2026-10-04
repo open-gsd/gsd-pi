@@ -1071,7 +1071,7 @@ custom_workflow_step_verifications
 - DDL owner: `db-custom-workflow-schema.ts`. Reader: `db/custom-workflow-runs.ts`. Writer: `db/writers/custom-workflow-runs.ts`.
 - These are workflow-state rows: every write is a `custom_workflow.*` Domain
   Operation (`run.create`, `run.import`, `step.activate`, `step.expand`,
-  `step.complete`, `step.verify`, `step.retry`).
+  `step.complete`, `step.verify`, `step.approve`, `step.retry`).
 - A step that auto-mode runs also has a `unit_dispatches` row: `unit_type`
   `custom-step`, `unit_id` `<run_id>/<step_id>`, `milestone_id` the run id and
   `milestone_lease_token` 0 (a run has no milestone lease).

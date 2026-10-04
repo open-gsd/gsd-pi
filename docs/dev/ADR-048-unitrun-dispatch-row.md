@@ -136,7 +136,11 @@ Rules:
 - **Dead worker.** When the worker that holds the claim is dead (its process is not alive on this host), the next session cancels that row and claims the step with the next `attempt_n`.
 - **Settle.** A verified step settles the row `completed` before the step row is marked complete. A unit break, a unit retry, a verification retry and a verification pause settle it `failed` with the reason.
 
-Not changed: the custom loop path is still a separate branch of the auto loop. It shares guards, the unit phase and the dispatch ledger with the standard path. `/gsd workflow approve` completes a step with no dispatch row, because no unit runs.
+Not changed:
+
+- The custom loop path is still a separate branch of the auto loop. It shares guards, the unit phase and the dispatch ledger with the standard path.
+- `/gsd workflow approve` completes a step with no dispatch row, because no unit runs. It does not check for a live claim of the step.
+- A step has no expected artifact in the unit registry and no Tool Contract in the unit manifest, so the artifact check and the Worktree Safety check of the standard path do not run for it. The verification policy of the step is its check, and its result is the evidence row that completion requires (ADR-046). A run has no worktree: a step runs in the project root.
 
 ## Rejected alternatives
 

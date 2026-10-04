@@ -119,7 +119,8 @@ rationale on that row; it is not a `workflow_waivers` row, because a step has
 no lifecycle row. A step with a `human-review` or `prompt-verify` policy
 records `inconclusive` with no waiver and pauses the run;
 `/gsd workflow approve <name>/<timestamp> <step>` records the decision of the
-operator as a `pass` row written by a `user` actor and completes the step. A
+operator as a `pass` row written by a `user` actor and completes the step, in
+one `custom_workflow.step.approve` operation. A
 step that auto-mode runs is claimed as a `unit_dispatches` row (ADR-048), so a
 second session cannot run it. A step is not a Task: it has no Attempt. The run
 revision fence of the Domain Operation is the write safety of the step rows:
@@ -134,6 +135,12 @@ nothing. This import is not an Import Preview. The pause row (`auto_pauses`) is 
 not run identity: a command that names a run starts that run and drops the
 record. A markdown-phase template run still keeps its phase state in
 an agent-edited `STATE.json`.
+
+The semantic shadow comparison does not cover custom runs. The `custom` mode
+entries of the M003/S07 cutover dossier compare the status of hierarchy items
+while a custom run is active; they are not evidence about run or step state.
+A custom run has no legacy status to compare with: its rows are the only
+authority and the run directory files are renders.
 
 ### Markdown and other files are one-way projections
 

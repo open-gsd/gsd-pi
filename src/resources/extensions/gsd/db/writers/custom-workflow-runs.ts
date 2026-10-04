@@ -130,36 +130,57 @@ export function saveCustomWorkflowSteps(input: {
   });
 }
 
-/**
- * Record one verification result of a step as an evidence row. `actorType` is
- * "user" when the operator decided the result (/gsd workflow approve).
- */
-export function insertCustomWorkflowStepVerification(input: {
-  fence: DomainOperationFence;
+interface StepVerificationRow {
   runId: string;
   stepId: string;
   verdict: "pass" | "fail" | "inconclusive";
   evidence: { [key: string]: DomainJsonValue };
   waiverRationale: string | null;
-  actorType?: "system" | "user";
+}
+
+function insertVerificationRow(row: StepVerificationRow, operationId: string): void {
+  getDb().prepare(
+    `INSERT INTO custom_workflow_step_verifications
+       (run_id, step_id, verdict, evidence_json, waiver_rationale, recorded_at, operation_id)
+     VALUES
+       (:run_id, :step_id, :verdict, :evidence_json, :waiver_rationale, :recorded_at, :operation_id)`,
+  ).run({
+    ":run_id": row.runId,
+    ":step_id": row.stepId,
+    ":verdict": row.verdict,
+    ":evidence_json": JSON.stringify(row.evidence),
+    ":waiver_rationale": row.waiverRationale,
+    ":recorded_at": new Date().toISOString(),
+    ":operation_id": operationId,
+  });
+}
+
+/** Record one verification result of a step as an evidence row. */
+export function insertCustomWorkflowStepVerification(input: StepVerificationRow & {
+  fence: DomainOperationFence;
 }): void {
   const payload = { stepId: input.stepId, verdict: input.verdict, waived: input.waiverRationale !== null };
   runOperation(input.fence, "step.verify", input.runId, payload, (context) => {
-    getDb().prepare(
-      `INSERT INTO custom_workflow_step_verifications
-         (run_id, step_id, verdict, evidence_json, waiver_rationale, recorded_at, operation_id)
-       VALUES
-         (:run_id, :step_id, :verdict, :evidence_json, :waiver_rationale, :recorded_at, :operation_id)`,
-    ).run({
-      ":run_id": input.runId,
-      ":step_id": input.stepId,
-      ":verdict": input.verdict,
-      ":evidence_json": JSON.stringify(input.evidence),
-      ":waiver_rationale": input.waiverRationale,
-      ":recorded_at": new Date().toISOString(),
-      ":operation_id": context.operationId,
-    });
-  }, input.actorType);
+    insertVerificationRow(input, context.operationId);
+  });
+}
+
+/**
+ * Record the approval of the operator (/gsd workflow approve) as a `pass`
+ * evidence row and store the graph with the step complete, in one operation:
+ * a process that dies cannot leave an approved step active.
+ */
+export function approveCustomWorkflowStep(input: {
+  fence: DomainOperationFence;
+  runId: string;
+  stepId: string;
+  evidence: { [key: string]: DomainJsonValue };
+  graph: WorkflowGraph;
+}): void {
+  runOperation(input.fence, "step.approve", input.runId, { stepId: input.stepId }, (context) => {
+    insertVerificationRow({ ...input, verdict: "pass", waiverRationale: null }, context.operationId);
+    upsertSteps(input.runId, input.graph);
+  }, "user");
 }
 
 /** Set the verification retries a step has used. */
