@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { saveRequirementToDb } from "../db-writer.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { renderAllFromDb } from "../markdown-renderer.ts";
 import {
   describePreservedProjectionChanges,
   preserveProjectionChangesBeforeDispatch,
@@ -87,6 +88,8 @@ test("G2: poisoned projections before dispatch are rendered again and never stop
     assert.deepEqual(quarantineCopies(base, rel), [poisoned[path]], `${rel} has one quarantine copy`);
     assert.equal(notice.split(`.gsd/${rel} -> `).length, 2, `${rel} is in the user notice once`);
   }
+  assert.doesNotMatch(notice, /recover|Import Preview/, "the notice names no promote route");
+  assert.match(notice, /workflow tools/);
   assert.equal(after[statePath], control[statePath], "STATE.md is back to the database render");
 });
 
@@ -110,6 +113,35 @@ test("drift repair renders again a task summary that is older than the database"
   assert.deepEqual(drift.repaired.map((record) => record.kind), ["stale-render"]);
   assert.match(readFileSync(summaryPath, "utf-8"), /Newer database content\./);
   assert.equal(existsSync(join(base, ".gsd", "quarantine")), false, "the file had no outside change to keep");
+  assert.deepEqual(await repairProjectionDrift(base), { repaired: [], errors: [] });
+});
+
+test("drift repair runs one full render for all files that have no narrower renderer", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  seedPrerequisiteCompletionEvidence();
+  assert.deepEqual((await rebuildMarkdownProjectionsFromDb(base)).errors, []);
+
+  _getAdapter()!.exec(`
+    UPDATE tasks SET full_summary_md = '# T01 summary\n\nNewer task content.\n'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01';
+    UPDATE slices SET full_summary_md = '# S01 summary\n\nNewer slice content.\n'
+    WHERE milestone_id = 'M001' AND id = 'S01';
+  `);
+  invalidateStateCache();
+
+  let fullRenders = 0;
+  const drift = await repairProjectionDrift(base, (path) => {
+    fullRenders++;
+    return renderAllFromDb(path);
+  });
+
+  assert.deepEqual(drift.errors, []);
+  assert.deepEqual(drift.repaired.map((record) => record.kind), ["stale-render", "stale-render"]);
+  assert.equal(fullRenders, 1);
+  const rendered = Object.values(liveProjections(base)).join("\n");
+  assert.match(rendered, /Newer task content\./);
+  assert.match(rendered, /Newer slice content\./);
   assert.deepEqual(await repairProjectionDrift(base), { repaired: [], errors: [] });
 });
 

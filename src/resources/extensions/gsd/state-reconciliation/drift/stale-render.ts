@@ -13,6 +13,7 @@ import {
   renderRoadmapFromDb,
   renderSliceSummary,
   renderTaskSummary,
+  type RenderAllResult,
 } from "../../markdown-renderer.js";
 import {
   getMilestone,
@@ -127,6 +128,7 @@ function retryDbForStaleRenderRepair(basePath: string): boolean {
 export async function repairStaleRender(
   record: StaleRenderDrift,
   basePath: string,
+  renderAll: (basePath: string) => Promise<RenderAllResult> = renderAllFromDb,
 ): Promise<void> {
   if (!ensureDbForStaleRenderRepair(basePath)) {
     throw new Error(`stale-render drift: database unavailable for repair (${basePath})`);
@@ -312,7 +314,7 @@ export async function repairStaleRender(
 
   // Any other file that differs from the database (for example a milestone or
   // slice artifact) has no narrower renderer: render every projection again.
-  const rendered = await renderAllFromDb(basePath);
+  const rendered = await renderAll(basePath);
   if (rendered.errors.length > 0) throw new Error(rendered.errors.join("; "));
 }
 

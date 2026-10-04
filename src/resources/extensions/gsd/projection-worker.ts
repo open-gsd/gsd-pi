@@ -545,7 +545,7 @@ export function describePreservedProjectionChanges(
   const rel = (path: string) => relative(root, normalizeRealPath(path)).split(sep).join("/");
   return [
     `Projection files changed outside GSD: ${preserved.length}. The database is authoritative, so GSD rendered them again.`,
-    "The changed bytes are kept. To keep a change, review its copy and run `/gsd recover` to import it through Import Preview.",
+    "Each changed file was moved to the quarantine path shown below. To make a change real, apply it with the workflow tools (plan, replan, requirement, or decision tools).",
     ...preserved.map((evidence) => `  ${rel(evidence.sourcePath)} -> ${rel(evidence.quarantinePath)}`),
   ].join("\n");
 }
@@ -562,9 +562,15 @@ export interface ProjectionDriftRepairResult {
  * database: slice plans, task and slice summaries, UAT files, and roadmaps.
  * This is the only place that detects projection drift. It never throws for a
  * file or render fault, so projection state cannot block database-backed work.
+ * Drift that has no narrower renderer shares one full render per pass.
  */
-export async function repairProjectionDrift(basePath: string): Promise<ProjectionDriftRepairResult> {
+export async function repairProjectionDrift(
+  basePath: string,
+  renderAll: (basePath: string) => Promise<RenderAllResult> = renderAllFromDb,
+): Promise<ProjectionDriftRepairResult> {
   const result: ProjectionDriftRepairResult = { repaired: [], errors: [] };
+  let fullRender: Promise<RenderAllResult> | undefined;
+  const renderAllOnce = (path: string) => (fullRender ??= renderAll(path));
   const detect = <T extends DriftRecord>(kind: T["kind"], find: (basePath: string) => T[]): T[] => {
     try {
       return find(basePath);
@@ -593,7 +599,7 @@ export async function repairProjectionDrift(basePath: string): Promise<Projectio
     ...detect("roadmap-missing", detectRoadmapMissingDrift),
     ...detect("roadmap-divergence", detectRoadmapDivergenceDrift),
   ];
-  await repair(staleRenders, repairStaleRender);
+  await repair(staleRenders, (record, path) => repairStaleRender(record, path, renderAllOnce));
   await repair(roadmaps, repairRoadmapDrift);
   return result;
 }
