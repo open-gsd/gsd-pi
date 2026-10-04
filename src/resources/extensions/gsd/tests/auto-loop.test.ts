@@ -282,7 +282,6 @@ async function autoLoop(
   pi: any,
   s: any,
   deps: LoopDeps,
-  options?: Parameters<typeof rawAutoLoop>[4],
 ): Promise<void> {
   // Loop-mechanics fixtures intentionally do not open the workflow database or
   // register a worker. Bypass only that unrelated coordination boundary; tests
@@ -293,7 +292,7 @@ async function autoLoop(
   if (!s.orchestration) {
     s.orchestration = createLoopTestOrchestration(ctx, pi, s, deps);
   }
-  await rawAutoLoop(ctx, pi, s, deps, options);
+  await rawAutoLoop(ctx, pi, s, deps);
 }
 
 /**

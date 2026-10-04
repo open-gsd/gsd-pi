@@ -285,7 +285,7 @@ import {
   type BootstrapDeps,
 } from "./auto-start.js";
 import { initHealthWidget } from "./health-widget.js";
-import { runLegacyAutoLoop, runUokKernelLoop } from "./auto/loop.js";
+import { autoLoop } from "./auto/loop.js";
 import { autoResumeEnterFailureStop } from "./auto/phase-helpers.js";
 import { resolveAgentEnd, resolveAgentEndCancelled, _resetPendingResolve, isSessionSwitchInFlight } from "./auto/resolve.js";
 import type { LoopDeps, PauseAutoOptions, PauseAutoUnitIdentity, StopAutoOptions } from "./auto/loop-deps.js";
@@ -3205,8 +3205,8 @@ export async function startAuto(
         pi,
         s,
         deps: loopDeps,
-        runKernelLoop: runUokKernelLoop,
-        runLegacyLoop: runLegacyAutoLoop,
+        runKernelLoop: autoLoop,
+        runLegacyLoop: autoLoop,
       });
     } finally {
       await cleanupAfterLoopExit(ctx);
@@ -3298,8 +3298,8 @@ export async function startAuto(
       pi,
       s,
       deps: loopDeps,
-      runKernelLoop: runUokKernelLoop,
-      runLegacyLoop: runLegacyAutoLoop,
+      runKernelLoop: autoLoop,
+      runLegacyLoop: autoLoop,
     });
   } finally {
     await cleanupAfterLoopExit(ctx);

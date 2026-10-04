@@ -203,16 +203,6 @@ export interface ModelPolicyBlockedDecision {
   failureClass: "manual-attention";
 }
 
-export type DispatchNodeKind =
-  | "unit"
-  | "hook"
-  | "subagent"
-  | "team-worker"
-  | "verification"
-  | "reprocess";
-
-export type DispatchSidecarKind = "hook" | "triage" | "quick-task" | string;
-
 export interface DispatchLedgerErrorInput {
   error: unknown;
 }
@@ -565,34 +555,6 @@ export function decideModelPolicyBlocked(input: ModelPolicyBlockedInput): ModelP
     turnStatus: "paused",
     failureClass: "manual-attention",
   };
-}
-
-export function decideDispatchNodeKind(
-  unitType: string,
-  sidecarKind?: DispatchSidecarKind,
-): DispatchNodeKind {
-  if (sidecarKind === "hook") return "hook";
-  if (sidecarKind === "triage") return "verification";
-  if (sidecarKind === "quick-task") return "team-worker";
-
-  if (unitType.startsWith("hook/")) return "hook";
-  if (unitType === "reactive-execute") return "subagent";
-  if (
-    unitType === "gate-evaluate"
-    || unitType === "validate-milestone"
-    || unitType === "run-uat"
-    || unitType === "complete-slice"
-  ) {
-    return "verification";
-  }
-  if (
-    unitType === "replan-slice"
-    || unitType === "replan-task"
-    || unitType === "reassess-roadmap"
-  ) {
-    return "reprocess";
-  }
-  return "unit";
 }
 
 export function formatDispatchExceptionSummary(input: DispatchLedgerErrorInput): string {

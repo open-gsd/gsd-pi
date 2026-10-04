@@ -84,6 +84,13 @@ export type PhaseResult<T = void> =
   | { action: "retry"; reason: string; data?: T }
   | { action: "next"; data: T }
 
+/** The result of running one unit through the unit phase. */
+export type UnitPhaseResult = PhaseResult<{
+  unitStartedAt?: number;
+  requestDispatchedAt?: number;
+  retryAfterMs?: number;
+}>;
+
 export interface IterationContext {
   ctx: ExtensionContext;
   pi: ExtensionAPI;

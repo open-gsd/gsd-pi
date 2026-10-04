@@ -8,7 +8,6 @@ import {
   decideCooldownRecovery,
   decideCustomEngineRecovery,
   decideCustomEngineVerifyRetry,
-  decideDispatchNodeKind,
   decideDispatchClaim,
   decideEngineDispatch,
   decideEngineReconcile,
@@ -689,25 +688,6 @@ test("decideModelPolicyBlocked returns pause notification and journal payload", 
       failureClass: "manual-attention",
     },
   );
-});
-
-test("decideDispatchNodeKind maps sidecar kinds before unit types", () => {
-  assert.equal(decideDispatchNodeKind("execute-task", "hook"), "hook");
-  assert.equal(decideDispatchNodeKind("execute-task", "triage"), "verification");
-  assert.equal(decideDispatchNodeKind("execute-task", "quick-task"), "team-worker");
-});
-
-test("decideDispatchNodeKind maps workflow unit types to scheduler node kinds", () => {
-  assert.equal(decideDispatchNodeKind("hook/pre-dispatch"), "hook");
-  assert.equal(decideDispatchNodeKind("reactive-execute"), "subagent");
-  assert.equal(decideDispatchNodeKind("gate-evaluate"), "verification");
-  assert.equal(decideDispatchNodeKind("validate-milestone"), "verification");
-  assert.equal(decideDispatchNodeKind("run-uat"), "verification");
-  assert.equal(decideDispatchNodeKind("complete-slice"), "verification");
-  assert.equal(decideDispatchNodeKind("replan-slice"), "reprocess");
-  assert.equal(decideDispatchNodeKind("replan-task"), "reprocess");
-  assert.equal(decideDispatchNodeKind("reassess-roadmap"), "reprocess");
-  assert.equal(decideDispatchNodeKind("execute-task"), "unit");
 });
 
 test("formatDispatchExceptionSummary preserves error and non-error messages", () => {

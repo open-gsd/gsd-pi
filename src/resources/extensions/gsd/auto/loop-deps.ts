@@ -8,7 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
-import type { ErrorContext, IterationData } from "./types.js";
+import type { ErrorContext, IterationData, UnitPhaseResult } from "./types.js";
 import type { GSDPreferences } from "../preferences.js";
 import type { GSDState } from "../types.js";
 import type { SessionLockStatus } from "../session-lock.js";
@@ -38,7 +38,6 @@ import type {
   VerifiedTaskPublicationDeps,
   VerifiedTaskPublicationInput,
 } from "./task-execution-cutover.js";
-import type { UnitPhaseResult } from "./workflow-unit-dispatch.js";
 import type { MemoryPressureSnapshot } from "./workflow-memory-pressure.js";
 import type {
   DispatchClaimOutcome,

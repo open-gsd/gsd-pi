@@ -24,7 +24,7 @@ import type { PublishVerifiedTaskCompletionInput } from "../task-completion-comp
 import { internalExecutionInvocation } from "../execution-invocation.js";
 import type { TaskTechnicalVerdictSnapshot } from "../task-verification-domain-operation.js";
 import { describeHostVerificationRationale } from "../verification-verdict.js";
-import type { UnitPhaseResult } from "./workflow-unit-dispatch.js";
+import type { UnitPhaseResult } from "./types.js";
 
 export interface TaskExecutionCutoverInput {
   unitType: string;

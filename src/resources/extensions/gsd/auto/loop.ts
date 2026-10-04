@@ -25,6 +25,7 @@ import {
   type LoopState,
   type IterationContext,
   type IterationData,
+  type UnitPhaseResult,
 } from "./types.js";
 import { _clearCurrentResolve } from "./resolve.js";
 import { runGuards } from "./phases.js";
@@ -33,6 +34,7 @@ import { handlePendingHookOutcome, resolveVerificationFailureMarkerPath } from "
 import {
   resetSessionTimeoutState,
   restoreTaskHostVerificationContext,
+  runUnitPhase,
 } from "./unit-phase.js";
 import { debugLog } from "../debug-logger.js";
 import { markBlockedStopReason } from "../stop-notice.js";
@@ -103,11 +105,6 @@ import {
   shouldCheckMemoryPressure,
 } from "./workflow-memory-pressure.js";
 import { buildSidecarIterationData } from "./workflow-sidecar-iteration.js";
-import {
-  createExecutionGraphUnitDispatchDeps,
-  runUnitPhaseViaContract,
-  type DispatchContract,
-} from "./workflow-unit-dispatch.js";
 import { handleCustomEngineDispatchOutcome } from "./workflow-custom-engine-dispatch-outcome.js";
 import { buildCustomEngineIterationData } from "./workflow-custom-engine-iteration.js";
 import { handleCustomEngineVerifyRetry } from "./workflow-custom-engine-retry.js";
@@ -350,10 +347,6 @@ function logCustomVerifyRetrySaveFailure(err: unknown): void {
 const MEMORY_CHECK_INTERVAL = 5; // check every 5 iterations
 const MAX_CUSTOM_ENGINE_VERIFY_RETRIES = 3;
 
-interface AutoLoopOptions {
-  dispatchContract?: DispatchContract;
-}
-
 type CrashErrorType = "infrastructure" | "cooldown-exhausted" | "iteration-exhausted";
 
 function persistCrashNote(
@@ -483,7 +476,6 @@ export async function autoLoop(
   pi: ExtensionAPI,
   s: AutoSession,
   deps: LoopDeps,
-  options?: AutoLoopOptions,
 ): Promise<void> {
   debugLog("autoLoop", { phase: "enter" });
   resetSessionTimeoutState();
@@ -503,8 +495,6 @@ export async function autoLoop(
     }
   }
   let iteration = 0;
-  const dispatchContract = options?.dispatchContract ?? "legacy-direct";
-  const unitDispatchDeps = createExecutionGraphUnitDispatchDeps();
   // Load persisted verification retry state so the exhausted-unit guard fires on restart (#651)
   hydrateCustomVerifyRetryCounts(s, { logFailure: logCustomVerifyRetryLoadFailure });
   const loopState: LoopState = {
@@ -1045,7 +1035,7 @@ export async function autoLoop(
           customDispatchId = claim.dispatchId;
           dispatchId = customDispatchId;
         }
-        let unitPhaseResult: Awaited<ReturnType<typeof runUnitPhaseViaContract>>;
+        let unitPhaseResult: UnitPhaseResult;
         try {
           s.unitExecutionInFlight = true;
           ownsUnitExecution = true;
@@ -1066,14 +1056,7 @@ export async function autoLoop(
                   customDispatchSettled = true;
                 },
               },
-              () => runUnitPhaseViaContract(
-                dispatchContract,
-                ic,
-                customIterData,
-                loopState,
-                undefined,
-                unitDispatchDeps,
-              ),
+              () => runUnitPhase(ic, customIterData, loopState),
               TASK_EXECUTION_CUTOVER_DEPS,
             ),
           );
@@ -1945,7 +1928,7 @@ export async function autoLoop(
       dispatchId = dispatchDecision.dispatchId;
       }
 
-      let unitPhaseResult: Awaited<ReturnType<typeof runUnitPhaseViaContract>>;
+      let unitPhaseResult: UnitPhaseResult;
       try {
         s.unitExecutionInFlight = true;
         ownsUnitExecution = true;
@@ -1966,14 +1949,7 @@ export async function autoLoop(
                 dispatchSettled = true;
               },
             },
-            () => runUnitPhaseViaContract(
-              dispatchContract,
-              ic,
-              unitIterData,
-              loopState,
-              sidecarItem,
-              unitDispatchDeps,
-            ),
+            () => runUnitPhase(ic, unitIterData, loopState, sidecarItem),
             TASK_EXECUTION_CUTOVER_DEPS,
           ),
         );
@@ -2401,22 +2377,4 @@ export async function autoLoop(
 
   _clearCurrentResolve();
   debugLog("autoLoop", { phase: "exit", totalIterations: iteration });
-}
-
-export async function runUokKernelLoop(
-  ctx: ExtensionContext,
-  pi: ExtensionAPI,
-  s: AutoSession,
-  deps: LoopDeps,
-): Promise<void> {
-  return autoLoop(ctx, pi, s, deps, { dispatchContract: "uok-scheduler" });
-}
-
-export async function runLegacyAutoLoop(
-  ctx: ExtensionContext,
-  pi: ExtensionAPI,
-  s: AutoSession,
-  deps: LoopDeps,
-): Promise<void> {
-  return autoLoop(ctx, pi, s, deps, { dispatchContract: "legacy-direct" });
 }
