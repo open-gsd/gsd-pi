@@ -16,6 +16,8 @@ import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { verifyExpectedArtifact } from "../artifact-verification.ts";
+import { postUnitPostVerification } from "../auto-post-unit.ts";
+import { AutoSession } from "../auto/session.ts";
 import {
   appendCapture,
   loadAllCaptures,
@@ -28,6 +30,8 @@ import {
   resolveCapturesPath,
   parseTriageOutput,
 } from "../captures.ts";
+import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
+import { holdQuickTask } from "../db/writers/unit-dispatch-sidecars.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { _getAdapter, closeDatabase, insertMilestone, isDbAvailable, openDatabase } from "../gsd-db.ts";
@@ -262,6 +266,41 @@ test("captures: a quick-task that does nothing is not recorded as executed", asy
   );
   assert.notEqual(again.isError, true);
   assert.equal(operations("capture.execute"), 1, "a retry of the call writes no second operation");
+});
+
+test("captures: dispatching a quick-task does not mark its capture executed", async (t) => {
+  const tmp = makeTempDir("cap-dispatch");
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const id = appendCapture(tmp, "fix the typo in the footer");
+  markCaptureResolved(tmp, id, "quick-task", "fix inline", "small", "M001");
+  const s = new AutoSession();
+  s.active = true;
+  s.basePath = tmp;
+  s.originalBasePath = tmp;
+  s.currentMilestoneId = "M001";
+  s.currentUnit = { type: "triage-captures", id: "M001/S01/triage", startedAt: Date.now() };
+  holdQuickTask(
+    { kind: "quick-task", unitType: "quick-task", unitId: `M001/${id}`, prompt: "fix it", captureId: id },
+    null,
+  );
+
+  await postUnitPostVerification({
+    s,
+    ctx: { ui: { notify: () => {} } } as any,
+    pi: {} as any,
+    buildSnapshotOpts: () => ({}) as any,
+    lockBase: () => tmp,
+    stopAuto: async () => {},
+    pauseAuto: async () => {},
+    updateProgressWidget: () => {},
+  });
+
+  assert.deepEqual(
+    listQueuedSidecarItems().map((item) => [item.kind, item.unitId, item.captureId]),
+    [["quick-task", `M001/${id}`, id]],
+  );
+  assert.equal(loadAllCaptures(tmp)[0]!.executed, undefined, "only gsd_capture_complete records the outcome");
+  assert.equal(verifyExpectedArtifact("quick-task", `M001/${id}`, tmp), false);
 });
 
 // ─── appendCapture ────────────────────────────────────────────────────────────
