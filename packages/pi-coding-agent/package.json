@@ -54,7 +54,7 @@
     "sql.js": "^1.14.1",
     "strip-ansi": "^7.1.0",
     "typebox": "1.1.38",
-    "undici": "7.28.0",
+    "undici": "7.29.1",
     "yaml": "2.9.0"
   },
   "devDependencies": {
