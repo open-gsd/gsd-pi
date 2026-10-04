@@ -362,8 +362,17 @@ test("each kind that production code enqueues is rendered and settled", async ()
     ["task-execution", "execution/m001/s01/t01"],
     ["lifecycle-shadow-repair", "lifecycle-shadow-repair/m001/s02"],
     ["markdown", "planning/requirements"],
+    ["markdown", "planning/root-artifacts"],
     ["markdown", "knowledge"],
   ];
+  insertArtifact({
+    path: "PROJECT.md",
+    artifact_type: "PROJECT",
+    milestone_id: null,
+    slice_id: null,
+    task_id: null,
+    full_content: "# Project\n\nStored in the artifacts row.\n",
+  });
   for (const [kind, key] of rows) seed(kind, key);
 
   const drained = await drainProjectionWork(base);
@@ -378,6 +387,11 @@ test("each kind that production code enqueues is rendered and settled", async ()
   assert.match(readFileSync(queuePath, "utf-8"), /M001/, "the state kinds render QUEUE.md");
   assert.match(readFileSync(rootRoadmapPath, "utf-8"), /M001/, "the state kinds render the root ROADMAP.md");
   assert.match(readFileSync(requirementsPath, "utf-8"), /SQLite is authoritative/);
+  assert.match(
+    readFileSync(join(base, ".gsd", "PROJECT.md"), "utf-8"),
+    /Stored in the artifacts row/,
+    "the root-artifacts key renders PROJECT.md",
+  );
   assert.match(readFileSync(join(base, ".gsd", "KNOWLEDGE.md"), "utf-8"), /## Rules/, "the knowledge key renders KNOWLEDGE.md");
   assert.ok(existsSync(queueOrderPath), "the queue-order kind renders QUEUE-ORDER.json");
   const roadmap = resolveMilestoneFile(base, "M001", "ROADMAP");

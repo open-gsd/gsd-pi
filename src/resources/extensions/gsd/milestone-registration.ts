@@ -6,6 +6,8 @@ import { adoptOrTransitionLifecycle, readDomainOperationFence } from "./db/write
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import {
   executeDomainOperation,
+  type DomainOperationContext,
+  type DomainOperationMutation,
   getMilestone,
   insertMilestone,
   upsertMilestonePlanning,
@@ -23,48 +25,29 @@ function isRegistered(milestone: MilestoneRegistration): boolean {
   return row !== null && !(milestone.retitle && milestone.title && row.title !== milestone.title);
 }
 
+/** True when no milestone of the list needs a new row or a retitle. */
+export function milestonesRegistered(milestones: ReadonlyArray<MilestoneRegistration>): boolean {
+  return milestones.every(isRegistered);
+}
+
 /**
- * Register milestones in one milestone.register Domain Operation: insert a
+ * Write the milestone rows inside the Domain Operation of the caller: insert a
  * `queued` row for each id that has none, and apply the requested retitles.
- * Returns the ids of the rows this call created.
- *
- * A caller without a call identity (a command or a hook) writes nothing when
- * every row is already as requested. A tool call passes its invocation: the
- * operation always runs and is the receipt of the call, so a retry replays it
- * (see `readMilestoneRegistration`).
+ * Adds the id of each new row to `created`. Returns the events and the
+ * Projection Work that the operation must commit.
  *
  * A new row gets its lifecycle row in the same operation, as `ready`: the
  * status that planning and the lifecycle backfill give an open milestone, and
  * the one that park (`ready` to `paused`) can leave. A row that existed before
  * this operation is adopted by planning, park, discard or the backfill.
  */
-export function registerMilestones(
+export function registerMilestoneRows(
+  context: DomainOperationContext,
   milestones: ReadonlyArray<MilestoneRegistration>,
   source: string,
-  invocation?: ExecutionInvocation,
-): string[] {
-  if (!invocation && milestones.every(isRegistered)) return [];
-  const fence = readDomainOperationFence(invocation?.idempotencyKey);
-  const created: string[] = [];
-  executeDomainOperation({
-    operationType: "milestone.register",
-    idempotencyKey: invocation?.idempotencyKey ?? `command/register/${fence.revision}`,
-    expectedRevision: fence.revision,
-    expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: invocation?.actorType ?? "operator",
-    ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),
-    sourceTransport: invocation?.sourceTransport ?? "internal",
-    ...(invocation?.traceId ? { traceId: invocation.traceId } : {}),
-    ...(invocation?.turnId ? { turnId: invocation.turnId } : {}),
-    payload: {
-      source,
-      milestones: milestones.map((milestone) => ({
-        id: milestone.id,
-        title: milestone.title ?? "",
-        retitle: milestone.retitle === true,
-      })),
-    },
-  }, (context) => ({
+  created: string[] = [],
+): DomainOperationMutation {
+  return {
     events: milestones.map((milestone) => {
       const title = milestone.title ?? "";
       const existing = getMilestone(milestone.id);
@@ -92,7 +75,45 @@ export function registerMilestones(
       projectionKind: "milestone-status",
       rendererVersion: "1",
     }],
-  }));
+  };
+}
+
+/**
+ * Register milestones in one milestone.register Domain Operation. Returns the
+ * ids of the rows this call created.
+ *
+ * A caller without a call identity (a command or a hook) writes nothing when
+ * every row is already as requested. A tool call passes its invocation: the
+ * operation always runs and is the receipt of the call, so a retry replays it
+ * (see `readMilestoneRegistration`).
+ */
+export function registerMilestones(
+  milestones: ReadonlyArray<MilestoneRegistration>,
+  source: string,
+  invocation?: ExecutionInvocation,
+): string[] {
+  if (!invocation && milestonesRegistered(milestones)) return [];
+  const fence = readDomainOperationFence(invocation?.idempotencyKey);
+  const created: string[] = [];
+  executeDomainOperation({
+    operationType: "milestone.register",
+    idempotencyKey: invocation?.idempotencyKey ?? `command/register/${fence.revision}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: invocation?.actorType ?? "operator",
+    ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),
+    sourceTransport: invocation?.sourceTransport ?? "internal",
+    ...(invocation?.traceId ? { traceId: invocation.traceId } : {}),
+    ...(invocation?.turnId ? { turnId: invocation.turnId } : {}),
+    payload: {
+      source,
+      milestones: milestones.map((milestone) => ({
+        id: milestone.id,
+        title: milestone.title ?? "",
+        retitle: milestone.retitle === true,
+      })),
+    },
+  }, (context) => registerMilestoneRows(context, milestones, source, created));
   return created;
 }
 

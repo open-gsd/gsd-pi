@@ -8,8 +8,10 @@ import {
   applyReworkResolutions,
   getActiveRequirements,
   getAllMilestones,
+  getArtifact,
   getMilestone,
   getMilestoneLifecycleShadowSnapshot,
+  getSlice,
   getTask,
   getUnresolvedBlockingReworkFindingsForTask,
   insertAssessment,
@@ -41,12 +43,17 @@ export {
 export { executeResearchDecisionSave } from "./research-decision.js";
 import { emitLifecycleShadowObservation } from "../uok/audit.js";
 import { extractMilestoneSeq } from "../milestone-ids.js";
-import { registerMilestones } from "../milestone-registration.js";
+import {
+  milestonesRegistered,
+  registerMilestoneRows,
+  type MilestoneRegistration,
+} from "../milestone-registration.js";
 import { readMilestoneStatus } from "../db/lifecycle-read.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
 import { isClosedStatus } from "../status-guards.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
-import { generateRequirementsMd, saveArtifactToDb } from "../db-writer.js";
+import { generateRequirementsMd, saveArtifactToDb, saveArtifactToDbByScope } from "../db-writer.js";
+import { createWorkspace, scopeMilestone } from "../workspace.js";
 import { clearPathCache, normalizeRealPath, relMilestoneFile, relSliceFile, relSlicePath, resolveGsdPathContract, resolveMilestoneFile, resolveSliceFile } from "../paths.js";
 import { saveFile, clearParseCache } from "../files.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
@@ -91,6 +98,7 @@ import { noteSessionRead } from "../db/domain-operation.js";
 export { runInToolSession } from "../db/domain-operation.js";
 import { internalPlanningInvocation, type PlanningInvocation } from "../planning-invocation.js";
 import { executeRecordDomainOperation } from "../record-domain-operation.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import type { PlanSliceParams } from "./plan-slice.js";
 import { handlePlanSlice } from "./plan-slice.js";
 import type { ReplanSliceParams } from "./replan-slice.js";
@@ -129,6 +137,7 @@ import { readUnitHarnessAbort, type UnitHarnessAbortRecord } from "../unit-runti
 import {
   prepareUatRun,
   saveUatAttemptArtifact,
+  uatAttemptArtifactPath,
   type UatResultSaveParams,
 } from "../uat-run.js";
 import { appendNotification } from "../notification-store.js";
@@ -358,7 +367,8 @@ function projectMilestoneSequenceRepairNeeded(content: string): boolean {
   });
 }
 
-function registerProjectMilestoneSequence(content: string): string[] {
+/** The milestone rows that the Milestone Sequence of a PROJECT document asks for. */
+function projectMilestoneRegistrations(content: string): MilestoneRegistration[] {
   // Reconcile parsed IDs against existing DB milestones before inserting (#807).
   // Under unique_milestone_ids the planner mints suffixed IDs (e.g. "M001-b1nole"),
   // while PROJECT.md's template uses bare sequence IDs (e.g. "M001"). Inserting the
@@ -369,7 +379,7 @@ function registerProjectMilestoneSequence(content: string): string[] {
   // milestone per sequence number, so map each parsed line onto the existing row
   // that shares its sequence number instead of minting a duplicate bare-ID row.
   const existingBySeq = existingMilestonesBySequence();
-  const milestones = parseProject(content).milestones.map((milestone) => {
+  return parseProject(content).milestones.map((milestone) => {
     const canonical = existingBySeq.get(extractMilestoneSeq(milestone.id));
     // An adopted row, or a row that owns the sequence number under another id,
     // gets only its human title refreshed: a checked box never completes a
@@ -378,9 +388,6 @@ function registerProjectMilestoneSequence(content: string): string[] {
       (adoptedMilestoneProjectionDone(canonical.id) !== null || canonical.id !== milestone.id);
     return { id: canonical?.id ?? milestone.id, title: milestone.title, retitle };
   });
-  // One milestone.register Domain Operation writes the new rows and the titles.
-  registerMilestones(milestones, "project-sequence");
-  return milestones.map((milestone) => milestone.id);
 }
 
 /** Minimal shape of a DB milestone row needed to re-render the sequence section. */
@@ -532,9 +539,16 @@ async function mirrorArtifactToActiveWorktreeProjection(
   }
 }
 
+/**
+ * Save an artifact. The artifacts row, the slice UAT carrier (UAT) and the
+ * milestone rows of the Milestone Sequence (PROJECT) commit in one
+ * artifact.save Domain Operation; a replay of the invocation writes no row.
+ * A task SUMMARY is the exception: its row is stored by the projection write.
+ */
 export async function executeSummarySave(
   params: SummarySaveParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) {
@@ -728,43 +742,42 @@ export async function executeSummarySave(
       }
     }
 
+    const registrationFailure = (err: unknown): ToolExecutionResult => {
+      const msg = err instanceof Error ? err.message : String(err);
+      logError("tool", `gsd_summary_save: PROJECT milestone registration failed before persistence: ${msg}`, {
+        tool: "gsd_summary_save",
+        error: String(err),
+        stack: err instanceof Error ? err.stack ?? "" : "",
+      });
+      return {
+        content: [{
+          type: "text",
+          text:
+            `Error: PROJECT.md was not saved because milestone registration failed: ${msg}. ` +
+            `The registration operation was rolled back; resolve the underlying error and re-call gsd_summary_save(PROJECT).`,
+        }],
+        details: {
+          operation: "save_summary",
+          path: relativePath,
+          artifact_type: params.artifact_type,
+          error: "milestone_registration_threw",
+          registration_error: msg,
+        },
+        isError: true,
+      };
+    };
+    let registrations: MilestoneRegistration[] = [];
     if (params.artifact_type === "PROJECT") {
       try {
         if (projectRegistrationContent !== null) {
-          registeredMilestones = registerProjectMilestoneSequence(projectRegistrationContent);
+          registrations = projectMilestoneRegistrations(projectRegistrationContent);
+          registeredMilestones = registrations.map((milestone) => milestone.id);
         }
         if (registeredMilestones.length === 0) {
           throw new Error("PROJECT.md parsed zero milestone lines after preflight");
         }
-        invalidateStateCache();
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        logError("tool", `gsd_summary_save: PROJECT milestone registration failed before persistence: ${msg}`, {
-          tool: "gsd_summary_save",
-          error: String(err),
-          stack: err instanceof Error ? err.stack ?? "" : "",
-        });
-        return {
-          content: [{
-            type: "text",
-            text:
-              `Error: PROJECT.md was not saved because milestone registration failed: ${msg}. ` +
-              `The registration operation was rolled back; resolve the underlying error and re-call gsd_summary_save(PROJECT).`,
-          }],
-          details: {
-            operation: "save_summary",
-            path: relativePath,
-            artifact_type: params.artifact_type,
-            error: "milestone_registration_threw",
-            registration_error: msg,
-          },
-          isError: true,
-        };
-      }
-      // Rebuild after registration: a line for a milestone that had no row
-      // before this save must stay in the sequence.
-      if (milestoneSequenceSelfHealed) {
-        contentToSave = rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRows());
+        return registrationFailure(err);
       }
     }
 
@@ -782,30 +795,75 @@ export async function executeSummarySave(
       relativePath = projection.artifactPath;
       projectedContent = projection.content;
     } else {
-      if (params.artifact_type === "UAT") {
-        // UAT must land in the slice's UAT carrier (full_uat_md), never the
-        // summary carrier: after slice completion the UAT projection re-renders
-        // from this column, so post-completion corrections survive flushes.
-        const updated = setSliceUatMd(params.milestone_id!, params.slice_id!, contentToSave);
-        if (!updated) {
-          return {
-            content: [{ type: "text", text: `Error: no slice "${params.slice_id}" found in milestone "${params.milestone_id}". UAT saves require an existing slice row.` }],
-            details: { operation: "save_summary", error: "slice_not_found" },
-            isError: true,
-          };
-        }
+      if (params.artifact_type === "UAT" && !getSlice(params.milestone_id!, params.slice_id!)) {
+        return {
+          content: [{ type: "text", text: `Error: no slice "${params.slice_id}" found in milestone "${params.milestone_id}". UAT saves require an existing slice row.` }],
+          details: { operation: "save_summary", error: "slice_not_found" },
+          isError: true,
+        };
       }
-      await saveArtifactToDb(
-        {
-          path: relativePath,
-          artifact_type: params.artifact_type,
-          content: contentToSave,
-          milestone_id: isRootArtifact ? undefined : params.milestone_id,
-          slice_id: isRootArtifact ? undefined : params.slice_id,
-          task_id: isRootArtifact ? undefined : params.task_id,
-        },
-        basePath,
-      );
+      const scopeIds = isRootArtifact ? [] : [params.milestone_id, params.slice_id, params.task_id].filter(Boolean);
+      const projectionKey = params.artifact_type === "REQUIREMENTS"
+        ? "planning/requirements"
+        : isRootArtifact
+        ? "planning/root-artifacts"
+        : `planning/${scopeIds.join("/")}`.toLowerCase();
+      let registrationError: unknown;
+      try {
+        await saveArtifactToDb(
+          {
+            path: relativePath,
+            artifact_type: params.artifact_type,
+            content: contentToSave,
+            milestone_id: isRootArtifact ? undefined : params.milestone_id,
+            slice_id: isRootArtifact ? undefined : params.slice_id,
+            task_id: isRootArtifact ? undefined : params.task_id,
+          },
+          basePath,
+          (insertRow) => {
+            executeRecordDomainOperation({
+              operationType: "artifact.save",
+              invocation,
+              payload: params,
+              eventType: "artifact.saved",
+              entityType: "artifact",
+              projectionKeys: [projectionKey],
+              mutate: (context) => {
+                // UAT must land in the slice's UAT carrier (full_uat_md), never the
+                // summary carrier: after slice completion the UAT projection re-renders
+                // from this column, so post-completion corrections survive flushes.
+                if (params.artifact_type === "UAT") {
+                  setSliceUatMd(params.milestone_id!, params.slice_id!, contentToSave);
+                }
+                let milestoneRows: ReturnType<typeof registerMilestoneRows> | undefined;
+                if (!milestonesRegistered(registrations)) {
+                  try {
+                    milestoneRows = registerMilestoneRows(context, registrations, "project-sequence");
+                  } catch (err) {
+                    registrationError = err;
+                    throw err;
+                  }
+                }
+                // Rebuild after registration: a line for a milestone that had no row
+                // before this save must stay in the sequence.
+                insertRow(milestoneSequenceSelfHealed
+                  ? rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRows())
+                  : undefined);
+                return {
+                  entityId: relativePath,
+                  result: { path: relativePath, artifactType: params.artifact_type },
+                  ...(milestoneRows ? { also: milestoneRows } : {}),
+                };
+              },
+            });
+          },
+        );
+      } catch (err) {
+        if (registrationError) return registrationFailure(registrationError);
+        throw err;
+      }
+      // The stored row: the operation can rebuild the sequence, and a replay writes no row.
+      projectedContent = getArtifact(relativePath)?.full_content ?? contentToSave;
     }
     const worktreeCopyStale = await mirrorArtifactToActiveWorktreeProjection(basePath, relativePath, projectedContent);
 
@@ -2239,9 +2297,38 @@ function errorResult(operation: string, message: string, error: string): ToolExe
   };
 }
 
+/** The result of one saved UAT run. A replay of the call returns it from the operation. */
+type UatResultSaved = {
+  text: string;
+  milestoneId: string;
+  sliceId: string;
+  verdict: string;
+  gateVerdict: string;
+  attempt: number;
+  attemptPath: string;
+  runId: string;
+  worktreeRoot: string;
+  browserToolsPresented: boolean;
+  recommendedNextUnit: string | null;
+  manualValidationPath?: string;
+};
+
+function uatResultSaved({ text, ...details }: UatResultSaved): ToolExecutionResult {
+  return {
+    content: [{ type: "text", text }],
+    details: { operation: "save_uat_result", ...details },
+  };
+}
+
+/**
+ * Save a UAT run. The ASSESSMENT artifact row, the assessment row, the
+ * aggregate UAT gate verdict and its gate_runs row commit in one
+ * uat-result.save Domain Operation; the files are written after it.
+ */
 export async function executeUatResultSave(
   params: UatResultSaveParams,
   basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ToolExecutionResult> {
   const unitGuard = blockIfWrongAutoUnit("run-uat", "save_uat_result");
   if (unitGuard) return unitGuard;
@@ -2252,64 +2339,112 @@ export async function executeUatResultSave(
   const dbAvailable = await ensureDbOpen(basePath);
   if (!dbAvailable) return errorResult("save_uat_result", "GSD database is not available.", "db_unavailable");
 
-  const prepared = prepareUatRun(basePath, params);
-  if (!prepared.ok) {
-    return errorResult("save_uat_result", prepared.error.message, prepared.error.code);
-  }
-  const { run } = prepared;
+  const operation = {
+    operationType: "uat-result.save",
+    invocation,
+    payload: params,
+    eventType: "uat-result.saved",
+    entityType: "slice",
+    projectionKeys: [`planning/${params.milestoneId}/${params.sliceId}`.toLowerCase()],
+  };
 
   try {
-    const summary = await executeSummarySave(
+    // A replay returns the stored result. The attempt number of a run comes
+    // from state, so preparing the run again would describe another attempt.
+    if (readDomainOperationFence(invocation.idempotencyKey).replay) {
+      return uatResultSaved(executeRecordDomainOperation<UatResultSaved>({
+        ...operation,
+        mutate: () => {
+          throw new Error("the stored UAT result of this call was not found");
+        },
+      }));
+    }
+
+    const prepared = prepareUatRun(basePath, params);
+    if (!prepared.ok) {
+      return errorResult("save_uat_result", prepared.error.message, prepared.error.code);
+    }
+    const { run } = prepared;
+    const savedText = `UAT result saved for ${run.params.milestoneId}/${run.params.sliceId}: ${run.params.verdict}`;
+    const saved: UatResultSaved = {
+      text: run.manualGuidance ? `${savedText}\n\nManual validation needed:\n${run.manualGuidance}` : savedText,
+      milestoneId: run.params.milestoneId,
+      sliceId: run.params.sliceId,
+      verdict: run.params.verdict,
+      gateVerdict: run.gateVerdict,
+      attempt: run.attempt,
+      attemptPath: uatAttemptArtifactPath(run),
+      runId: run.runId,
+      worktreeRoot: run.worktreeRoot,
+      browserToolsPresented: run.browserToolsPresented,
+      recommendedNextUnit: run.params.verdict === "PASS" ? null : "reactive-execute",
+      ...(run.hasHuman
+        ? { manualValidationPath: run.worktreeRoot }
+        : {}),
+    };
+    const assessmentPath = relSliceFile(basePath, run.params.milestoneId, run.params.sliceId, "ASSESSMENT");
+    const artifactPath = assessmentPath.replace(/^\.gsd\//, "");
+
+    await saveArtifactToDbByScope(
+      scopeMilestone(createWorkspace(basePath), run.params.milestoneId),
       {
-        milestone_id: run.params.milestoneId,
-        slice_id: run.params.sliceId,
+        path: artifactPath,
         artifact_type: "ASSESSMENT",
         content: run.assessment,
+        milestone_id: run.params.milestoneId,
+        slice_id: run.params.sliceId,
       },
-      basePath,
+      (insertRow) => {
+        executeRecordDomainOperation({
+          ...operation,
+          mutate: () => {
+            insertRow();
+            insertAssessment({
+              path: assessmentPath,
+              milestoneId: run.params.milestoneId,
+              sliceId: run.params.sliceId,
+              taskId: null,
+              status: run.params.verdict.toLowerCase(),
+              scope: "run-uat",
+              fullContent: run.assessment,
+            });
+            upsertQualityGate({
+              milestoneId: run.params.milestoneId,
+              sliceId: run.params.sliceId,
+              gateId: "UAT",
+              scope: "slice",
+              taskId: "",
+              status: "complete",
+              verdict: run.gateVerdict,
+              rationale: run.rationale,
+              findings: run.assessment,
+              evaluatedAt: run.evaluatedAt,
+            });
+            insertGateRun({
+              traceId: `uat:${run.params.milestoneId}:${run.params.sliceId}`,
+              turnId: run.runId,
+              gateId: "UAT",
+              gateType: "uat",
+              unitType: "run-uat",
+              unitId: `run-uat:${run.params.milestoneId}/${run.params.sliceId}`,
+              milestoneId: run.params.milestoneId,
+              sliceId: run.params.sliceId,
+              outcome: run.gateOutcome,
+              failureClass: run.params.verdict === "PASS" ? "none" : "verification",
+              rationale: run.rationale,
+              findings: run.assessment,
+              attempt: run.attempt,
+              maxAttempts: run.attempt,
+              retryable: run.params.verdict !== "PASS",
+              evaluatedAt: run.evaluatedAt,
+            });
+            return { entityId: `${run.params.milestoneId}/${run.params.sliceId}`, result: saved };
+          },
+        });
+      },
     );
-    if (summary.isError) return summary;
-    const assessmentPath = relSliceFile(basePath, run.params.milestoneId, run.params.sliceId, "ASSESSMENT");
-    insertAssessment({
-      path: assessmentPath,
-      milestoneId: run.params.milestoneId,
-      sliceId: run.params.sliceId,
-      taskId: null,
-      status: run.params.verdict.toLowerCase(),
-      scope: "run-uat",
-      fullContent: run.assessment,
-    });
-    const attemptPath = await saveUatAttemptArtifact(basePath, run);
-    upsertQualityGate({
-      milestoneId: run.params.milestoneId,
-      sliceId: run.params.sliceId,
-      gateId: "UAT",
-      scope: "slice",
-      taskId: "",
-      status: "complete",
-      verdict: run.gateVerdict,
-      rationale: run.rationale,
-      findings: run.assessment,
-      evaluatedAt: run.evaluatedAt,
-    });
-    insertGateRun({
-      traceId: `uat:${run.params.milestoneId}:${run.params.sliceId}`,
-      turnId: run.runId,
-      gateId: "UAT",
-      gateType: "uat",
-      unitType: "run-uat",
-      unitId: `run-uat:${run.params.milestoneId}/${run.params.sliceId}`,
-      milestoneId: run.params.milestoneId,
-      sliceId: run.params.sliceId,
-      outcome: run.gateOutcome,
-      failureClass: run.params.verdict === "PASS" ? "none" : "verification",
-      rationale: run.rationale,
-      findings: run.assessment,
-      attempt: run.attempt,
-      maxAttempts: run.attempt,
-      retryable: run.params.verdict !== "PASS",
-      evaluatedAt: run.evaluatedAt,
-    });
+    await mirrorArtifactToActiveWorktreeProjection(basePath, artifactPath, run.assessment);
+    await saveUatAttemptArtifact(basePath, run);
     await renderStateProjection(basePath);
     if (run.hasHuman) {
       appendNotification(
@@ -2319,29 +2454,7 @@ export async function executeUatResultSave(
         { kind: "uat-needs-human", scope: `${run.params.milestoneId}/${run.params.sliceId}` },
       );
     }
-    const savedText = `UAT result saved for ${run.params.milestoneId}/${run.params.sliceId}: ${run.params.verdict}`;
-    return {
-      content: [{
-        type: "text",
-        text: run.manualGuidance ? `${savedText}\n\nManual validation needed:\n${run.manualGuidance}` : savedText,
-      }],
-      details: {
-        operation: "save_uat_result",
-        milestoneId: run.params.milestoneId,
-        sliceId: run.params.sliceId,
-        verdict: run.params.verdict,
-        gateVerdict: run.gateVerdict,
-        attempt: run.attempt,
-        attemptPath,
-        runId: run.runId,
-        worktreeRoot: run.worktreeRoot,
-        browserToolsPresented: run.browserToolsPresented,
-        recommendedNextUnit: run.params.verdict === "PASS" ? null : "reactive-execute",
-        ...(run.hasHuman
-          ? { manualValidationPath: run.worktreeRoot }
-          : {}),
-      },
-    };
+    return uatResultSaved(saved);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logError("tool", `gsd_uat_result_save failed: ${msg}`, { tool: "gsd_uat_result_save", error: String(err) });

@@ -1,7 +1,12 @@
 // Project/App: gsd-pi
 // File Purpose: Shared atomic Domain Operation seam for non-hierarchy workflow record writes.
 
-import { executeDomainOperation, type DomainJsonValue } from "./db/domain-operation.js";
+import {
+  executeDomainOperation,
+  type DomainJsonValue,
+  type DomainOperationContext,
+  type DomainOperationMutation,
+} from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import { planningOperationPayload } from "./planning-domain-operation.js";
@@ -16,8 +21,12 @@ export interface RecordDomainOperationInput<T extends { [key: string]: DomainJso
   entityType: string;
   /** Projection Work keys to enqueue. Each key needs a renderer in projection-worker.ts. */
   projectionKeys: string[];
-  /** Write the rows. Return the entity id and the result that a replay must return. */
-  mutate(): { entityId: string; result: T };
+  /**
+   * Write the rows. Return the entity id and the result that a replay must
+   * return. `also` carries the events and Projection Work of other rows that
+   * the same operation writes.
+   */
+  mutate(context: DomainOperationContext): { entityId: string; result: T; also?: DomainOperationMutation };
 }
 
 /**
@@ -41,8 +50,8 @@ export function executeRecordDomainOperation<T extends { [key: string]: DomainJs
     ...(invocation.traceId ? { traceId: invocation.traceId } : {}),
     ...(invocation.turnId ? { turnId: invocation.turnId } : {}),
     payload: planningOperationPayload(input.payload),
-  }, () => {
-    const { entityId, result } = input.mutate();
+  }, (context) => {
+    const { entityId, result, also } = input.mutate(context);
     committed = result;
     return {
       events: [{
@@ -51,12 +60,12 @@ export function executeRecordDomainOperation<T extends { [key: string]: DomainJs
         entityId,
         payload: result,
         destinations: ["projection"],
-      }],
-      projections: input.projectionKeys.map((projectionKey) => ({
+      }, ...(also?.events ?? [])],
+      projections: [...input.projectionKeys.map((projectionKey) => ({
         projectionKey,
         projectionKind: "markdown",
         rendererVersion: "1",
-      })),
+      })), ...(also?.projections ?? [])],
     };
   });
   if (committed) return committed;

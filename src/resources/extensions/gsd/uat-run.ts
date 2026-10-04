@@ -621,9 +621,14 @@ export function prepareUatRun(basePath: string, rawParams: UatResultSaveParams):
   };
 }
 
+/** Path of the attempt record of a run, relative to the project `.gsd` directory. */
+export function uatAttemptArtifactPath(run: PreparedUatRun): string {
+  return `uat/${run.params.milestoneId}/${run.params.sliceId}/attempt-${run.attempt}.json`;
+}
+
 export async function saveUatAttemptArtifact(basePath: string, run: PreparedUatRun): Promise<string> {
   const contract = resolveGsdPathContract(basePath);
-  const relativePath = `uat/${run.params.milestoneId}/${run.params.sliceId}/attempt-${run.attempt}.json`;
+  const relativePath = uatAttemptArtifactPath(run);
   const payload = {
     runId: run.runId,
     attempt: run.attempt,

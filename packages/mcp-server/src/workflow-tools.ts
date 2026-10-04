@@ -382,7 +382,8 @@ type WorkflowToolExecutors = {
       attempt?: string;
       previousAttemptId?: string;
     },
-    basePath?: string,
+    basePath: string,
+    invocation: ExecutionInvocation,
   ) => Promise<unknown>;
   executeSummarySave: (
     params: {
@@ -392,7 +393,8 @@ type WorkflowToolExecutors = {
       artifact_type: string;
       content: string;
     },
-    basePath?: string,
+    basePath: string,
+    invocation: PlanningInvocation,
   ) => Promise<unknown>;
   executeTaskComplete: (
     params: {
@@ -3581,13 +3583,14 @@ export function registerWorkflowTools(
     "gsd_uat_result_save",
     "Save structured UAT checks, evidence, verdict, and tool-presentation proof. Writes ASSESSMENT, attempt history, and aggregate UAT gate.",
     uatResultSaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(uatResultSaveSchema, args);
       const { projectDir, ...params } = parsed;
+      const invocation = mcpWorkflowExecutionInvocation("gsd_uat_result_save", extra);
       await enforceWorkflowWriteGate("gsd_uat_result_save", projectDir, params.milestoneId);
       const { executeUatResultSave } = await getWorkflowToolExecutors();
       return adaptExecutorResult(
-        await runSerializedWorkflowOperation(() => executeUatResultSave(params, projectDir)),
+        await runSerializedWorkflowOperation(() => executeUatResultSave(params, projectDir, invocation)),
       );
     },
   );
@@ -3596,9 +3599,10 @@ export function registerWorkflowTools(
     "gsd_summary_save",
     "Save a GSD summary/research/context/assessment artifact to the database and disk. Omit milestone_id only for root-level PROJECT/PROJECT-DRAFT/REQUIREMENTS/REQUIREMENTS-DRAFT artifacts.",
     summarySaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       const parsed = parseWorkflowArgs(summarySaveSchema, args);
       const { projectDir, milestone_id, slice_id, task_id, artifact_type, content } = parsed;
+      const invocation = mcpPlanningInvocation("gsd_summary_save", extra);
       await enforceWorkflowWriteGate("gsd_summary_save", projectDir, milestone_id ?? null);
       const executors = await getWorkflowToolExecutors();
       const supportedArtifactTypes = getSupportedSummaryArtifactTypes(executors);
@@ -3609,7 +3613,11 @@ export function registerWorkflowTools(
       }
       return adaptExecutorResult(
         await runSerializedWorkflowOperation(() =>
-          executors.executeSummarySave({ milestone_id, slice_id, task_id, artifact_type, content }, projectDir),
+          executors.executeSummarySave(
+            { milestone_id, slice_id, task_id, artifact_type, content },
+            projectDir,
+            invocation,
+          ),
         ),
       );
     },
@@ -3619,10 +3627,11 @@ export function registerWorkflowTools(
     "gsd_save_summary",
     "Alias for gsd_summary_save. Save a GSD summary/research/context/assessment artifact to the database and disk.",
     summarySaveParams,
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
       logAliasUsage("gsd_save_summary", "gsd_summary_save");
       const parsed = parseWorkflowArgs(summarySaveSchema, args);
       const { projectDir, milestone_id, slice_id, task_id, artifact_type, content } = parsed;
+      const invocation = mcpPlanningInvocation("gsd_summary_save", extra);
       await enforceWorkflowWriteGate("gsd_summary_save", projectDir, milestone_id ?? null);
       const executors = await getWorkflowToolExecutors();
       const supportedArtifactTypes = getSupportedSummaryArtifactTypes(executors);
@@ -3633,7 +3642,11 @@ export function registerWorkflowTools(
       }
       return adaptExecutorResult(
         await runSerializedWorkflowOperation(() =>
-          executors.executeSummarySave({ milestone_id, slice_id, task_id, artifact_type, content }, projectDir),
+          executors.executeSummarySave(
+            { milestone_id, slice_id, task_id, artifact_type, content },
+            projectDir,
+            invocation,
+          ),
         ),
       );
     },

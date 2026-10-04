@@ -10,7 +10,7 @@
 //                              MCP read tools P30
 //   G2 files poisoned          prompt P23, no projection reads P23, MCP read tools P30
 //   G3 canonical wins          P23
-//   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save P15
+//   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save task SUMMARY P12
 //   G5 render failure          handler writes no projection P12
 //   G6 evidence before unlock  slice P24, milestone P27
 //   G7 epoch fence             direct UPDATE outside an operation P34

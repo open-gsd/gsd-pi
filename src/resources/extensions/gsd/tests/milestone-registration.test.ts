@@ -1,5 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: New milestone rows are written only by the milestone.register Domain Operation; id generation is one executor for every transport.
+// File Purpose: New milestone rows are written only inside a Domain Operation (milestone.register, or the artifact.save of a PROJECT save); id generation is one executor for every transport.
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
@@ -8,11 +8,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { markApprovalGateVerified, clearDiscussionFlowState } from "../bootstrap/write-gate.ts";
+import { _setDomainOperationFaultForTest } from "../db/domain-operation.ts";
 import { piExecutionInvocation } from "../execution-invocation.ts";
 import {
   _getAdapter,
   closeDatabase,
   getAllMilestones,
+  getArtifact,
   getMilestone,
   insertMilestone,
   openDatabase,
@@ -22,6 +24,7 @@ import { discardMilestone, parkMilestone, unparkMilestone } from "../milestone-a
 import { clearReservedMilestoneIds, reserveMilestoneId } from "../milestone-ids.ts";
 import { registerMilestones } from "../milestone-registration.ts";
 import { clearPathCache } from "../paths.ts";
+import { piPlanningInvocation } from "../planning-invocation.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { executeMilestoneGenerateId, executeSummarySave } from "../tools/workflow-tool-executors.ts";
 import { fenceWorkflowWrites } from "./db-authority-gate.ts";
@@ -180,7 +183,7 @@ describe("milestone registration", () => {
     assert.equal(getMilestone("M002")?.status, "skipped");
   });
 
-  test("gsd_summary_save(PROJECT) registers the sequence in one milestone.register operation and a second save adds none", async (t) => {
+  test("gsd_summary_save(PROJECT) writes the sequence rows and the artifact row in one artifact.save operation", async (t) => {
     writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
     markApprovalGateVerified("depth_verification_project_confirm", base);
     t.after(() => clearDiscussionFlowState(base));
@@ -197,19 +200,65 @@ describe("milestone registration", () => {
       "",
     ].join("\n");
 
-    const first = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
+    const invocation = piPlanningInvocation("gsd_summary_save", "project-call");
+    const revisionBefore = revision();
+    const fence = fenceWorkflowWrites();
+
+    const first = await executeSummarySave({ artifact_type: "PROJECT", content }, base, invocation);
+    const revisionAfterFirst = revision();
+    const replay = await executeSummarySave({ artifact_type: "PROJECT", content }, base, invocation);
+    fence.restore();
 
     assert.ok(!first.isError, first.content[0]!.text);
-    assert.equal(registerOperations(), 1);
+    assert.deepEqual(fence.violations, [], "the milestone rows and the artifact row are written inside the Domain Operation");
+    assert.equal(revisionAfterFirst, revisionBefore + 1, "the save is one operation");
+    assert.deepEqual(
+      { ..._getAdapter()!.prepare("SELECT operation_type, idempotency_key FROM workflow_operations").get() },
+      { operation_type: "artifact.save", idempotency_key: "pi:gsd_summary_save:project-call" },
+    );
     assert.deepEqual(registeredEvents(), [
       { id: "M001", source: "project-sequence", created: 1 },
       { id: "M002", source: "project-sequence", created: 1 },
     ]);
     assert.equal(getMilestone("M002")?.status, "queued", "a checked box registers an open milestone");
+    assert.deepEqual(
+      milestoneLifecycle("M002"),
+      { status: "ready", version: 0, writer: "artifact.save" },
+      "the new milestone is adopted in the same operation",
+    );
+    assert.equal(getArtifact("PROJECT.md")?.full_content, content);
+    assert.equal(revision(), revisionAfterFirst, "the replay commits no operation");
+    assert.deepEqual(replay.content, first.content, "the replay returns the result of the first call");
 
     const second = await executeSummarySave({ artifact_type: "PROJECT", content }, base);
     assert.ok(!second.isError, second.content[0]!.text);
-    assert.equal(registerOperations(), 1, "an unchanged sequence registers nothing");
+    assert.equal(registeredEvents().length, 2, "an unchanged sequence registers nothing");
+    assert.equal(registerOperations(), 0, "a PROJECT save commits no separate milestone.register operation");
+  });
+
+  test("a PROJECT save whose milestone row write fails saves no artifact row", async (t) => {
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+    markApprovalGateVerified("depth_verification_project_confirm", base);
+    t.after(() => clearDiscussionFlowState(base));
+    const originalCwd = process.cwd();
+    process.chdir(base);
+    t.after(() => process.chdir(originalCwd));
+    const first = "# Project\n\n## Milestone Sequence\n\n- [ ] M001: Foo — bar\n";
+    assert.ok(!(await executeSummarySave({ artifact_type: "PROJECT", content: first }, base)).isError);
+    const revisionBefore = revision();
+    _setDomainOperationFaultForTest("after-mutation", "artifact.save");
+    t.after(() => _setDomainOperationFaultForTest(null));
+
+    const result = await executeSummarySave({
+      artifact_type: "PROJECT",
+      content: `${first}- [ ] M002: Baz — qux\n`,
+    }, base);
+
+    assert.equal(result.isError, true);
+    assert.equal(getMilestone("M002"), null, "the milestone row is rolled back with the artifact row");
+    assert.equal(getArtifact("PROJECT.md")?.full_content, first);
+    assert.equal(readFileSync(join(base, ".gsd", "PROJECT.md"), "utf-8"), first, "the file keeps the stored content");
+    assert.equal(revision(), revisionBefore);
   });
 
   test("a PROJECT save that repairs a checked box keeps a new milestone line, and the new milestone becomes active", async (t) => {
