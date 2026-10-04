@@ -107,10 +107,19 @@ Cutover refuses an older copy of the database file; a new process does not
 (ADR-046, step 5). A project that was cut over before those triggers existed
 can hold a row with no lifecycle row: its next open adopts the row with
 `lifecycle.backfill`, with or without the environment variable, and logs each
-legacy status that it changes. No production writer creates a hierarchy row
-with no lifecycle row: a Forward Repair adopts each row that it puts back, in
-its own Domain Operation, and the legacy Task completion writer creates no
-row. The automatic Cutover becomes the default after the test fixtures that
+legacy status that it changes. After the Cutover no production writer creates
+a hierarchy row with no lifecycle row: a Forward Repair adopts each row that
+it puts back, in its own Domain Operation, and an unknown legacy status
+refuses the repair; the legacy Task completion writer creates no row. At
+Authority Epoch 0 that is not true for two writers. A Forward Repair and a
+worktree database merge adopt a row only when the adoption keeps its legacy
+status. A row whose adoption would change its legacy status, or whose status
+is unknown, is written with no lifecycle row. The next automatic Cutover then
+stops with nothing changed and names the row: `/gsd db adopt` is the route for
+a status change, and a fix of the status is the route for an unknown status
+(see below). Authority Epoch 0 is the usual state for a Forward Repair, because
+the automatic Cutover waits while the operation head is an Import Application.
+The automatic Cutover becomes the default after the test fixtures that
 insert a hierarchy row with no lifecycle row into a cut-over database are
 migrated, and the end-to-end suites pass with the flag on. This section owns
 the contract of the automatic Cutover; other documents point here. The rest of

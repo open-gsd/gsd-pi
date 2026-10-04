@@ -241,6 +241,33 @@ test("after the cutover a Forward Repair refuses to put back a row with an unkno
   assert.equal(getTask("M001", "S01", "T02"), null);
 });
 
+function taskLifecycle(id: string): unknown {
+  return db().prepare(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = :id
+  `).get({ ":id": id });
+}
+
+test("before the cutover a Forward Repair leaves a row unadopted when adoption would change its status or the status is unknown", () => {
+  openAdoptedProject();
+
+  forwardRepairRecreate([
+    recreatedTask("T02", "pending"),
+    // A legacy completion with no evidence: the backfill would make it open work again.
+    recreatedTask("T03", "complete"),
+    recreatedTask("T04", "mystery"),
+  ]);
+
+  assert.equal(authority().authority_epoch, 0);
+  assert.deepEqual(taskLifecycle("T02"), { lifecycle_status: "ready" });
+  assert.equal(getTask("M001", "S01", "T03")?.status, "complete");
+  assert.equal(taskLifecycle("T03"), undefined);
+  assert.equal(getTask("M001", "S01", "T04")?.status, "mystery");
+  assert.equal(taskLifecycle("T04"), undefined);
+  // The Authority Epoch cannot advance over the rows the repair left unadopted.
+  assert.throws(advanceAuthorityEpoch, UNCOVERED);
+});
+
 test("the Authority Epoch cannot advance while a hierarchy row has no lifecycle row", () => {
   openAdoptedProject();
   // Epoch 0 is not fenced: a legacy writer may still insert an unadopted row.
