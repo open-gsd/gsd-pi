@@ -722,20 +722,24 @@ function ambiguityFor(
 }
 
 /**
- * The loss report for a KNOWLEDGE.md row whose id was forgotten in the
- * database. Readers and the render do not show a forgotten row, so the
- * Preview plans no change for it and says that the file row is lost.
+ * The loss report for a KNOWLEDGE.md row that the database row with its id
+ * wins over. The database content is never lost to file text, so the Preview
+ * plans no change for the row and says that the file row is lost: a forgotten
+ * id stays forgotten, and an active row with other content is kept.
  */
-function forgottenKnowledgeRow(
+function knowledgeRowLoss(
   candidate: LegacyImportInterpretationCandidate,
+  forgotten: boolean,
 ): { diagnosis: LegacyImportPreviewDiagnosis; resolution: LegacyImportPreviewResolution } {
   const diagnosisValue = {
-    code: "knowledge-row-not-imported",
+    code: forgotten ? "knowledge-row-not-imported" : "knowledge-row-conflict",
     severity: "warning" as const,
     source_id: candidate.raw.source_id,
     locator: candidate.raw.locator,
     raw_value: candidate.raw.value,
-    message: "A KNOWLEDGE.md table row is not imported into the database: the database row with its id was forgotten, so the next render removes the row from the file.",
+    message: forgotten
+      ? "A KNOWLEDGE.md table row is not imported into the database: the database row with its id was forgotten, so the next render removes the row from the file."
+      : "A KNOWLEDGE.md table row is not imported into the database: the database row with its id has different content. The database row is kept, so the next render replaces the row in the file.",
   };
   const diagnosis = { diagnosis_id: hashLegacyImportValue(diagnosisValue), ...diagnosisValue };
   return { diagnosis, resolution: { diagnosis_id: diagnosis.diagnosis_id, disposition: "preserved" } };
@@ -1188,13 +1192,17 @@ export function classifyLegacyImportChanges(
       continue;
     }
     const key = rowAddress(address.rowSet, address.identity);
-    if (forgottenKnowledge.has(key)) {
-      const loss = forgottenKnowledgeRow(candidate);
+    const current = rows.get(key);
+    if (
+      address.rowSet === "knowledge_memories"
+      && current !== undefined
+      && (forgottenKnowledge.has(key) || !valuesMatch(address.rowSet, current, patch))
+    ) {
+      const loss = knowledgeRowLoss(candidate, forgottenKnowledge.has(key));
       diagnoses.push(loss.diagnosis);
       resolutions.push(loss.resolution);
       continue;
     }
-    const current = rows.get(key);
     const complete = completeSetsByRowSet.get(address.rowSet)?.[0];
     const completeMember = complete?.member_keys.includes(address.memberKey) === true;
     if (current === undefined) {

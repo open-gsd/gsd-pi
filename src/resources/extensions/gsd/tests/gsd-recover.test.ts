@@ -1740,7 +1740,7 @@ describe('gsd-recover', async () => {
     }
   });
 
-  test('recover changes no knowledge row for a rendered KNOWLEDGE.md and imports a hand-edited row as an update', async (t) => {
+  test('recover changes no knowledge row for a rendered KNOWLEDGE.md, a forgotten row or a hand-edited row', async (t) => {
     const base = createFixtureBase();
     t.after(() => {
       closeDatabase();
@@ -1768,7 +1768,7 @@ describe('gsd-recover', async () => {
     assert.deepEqual(knowledgeChanges(), [], 'a forgotten row stays forgotten');
 
     writeFileSync(knowledgePath, beforeForget.replace('Retry with backoff', 'Retry with jitter'));
-    assert.deepEqual(knowledgeChanges(), ['update P001']);
+    assert.deepEqual(knowledgeChanges(), [], 'a file row does not change its database row');
 
     const first = makeCtx();
     await handleRecover(first.ctx, base);
@@ -1781,10 +1781,10 @@ describe('gsd-recover', async () => {
     const patterns = _getAdapter()!
       .prepare("SELECT content, superseded_by, structured_fields FROM memories WHERE category = 'pattern'")
       .all();
-    assert.equal(patterns.length, 1, 'the update changes the row and adds none');
-    assert.equal(patterns[0]!['content'], 'Retry with jitter');
+    assert.equal(patterns.length, 1, 'the import adds no row');
+    assert.equal(patterns[0]!['content'], 'Retry with backoff');
     assert.equal(patterns[0]!['superseded_by'], null);
-    assert.equal(JSON.parse(String(patterns[0]!['structured_fields'])).pattern, 'Retry with jitter');
+    assert.equal(JSON.parse(String(patterns[0]!['structured_fields'])).pattern, 'Retry with backoff');
     assert.equal(
       _getAdapter()!.prepare('SELECT superseded_by FROM memories WHERE id = :id').get({ ':id': lesson.memoryId })?.['superseded_by'],
       'CAP_EXCEEDED',
@@ -1849,7 +1849,7 @@ describe('gsd-recover', async () => {
     });
   }
 
-  test('Forward Repair restores the pre-import text of a knowledge row that the import updated', async (t) => {
+  test('recover reports a KNOWLEDGE.md row that differs from its database row as a conflict and keeps the database row', async (t) => {
     const base = createFixtureBase();
     t.after(() => {
       closeDatabase();
@@ -1859,46 +1859,40 @@ describe('gsd-recover', async () => {
     const pattern = captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
     // A memory UPDATE changes the database row. KNOWLEDGE.md keeps the old text.
     assert.equal(updateMemoryContent(pattern.memoryId, 'Retry with jitter'), true);
-    const patternRow = () => {
-      const row = _getAdapter()!
-        .prepare('SELECT content, structured_fields FROM memories WHERE id = :id')
-        .get({ ':id': pattern.memoryId })!;
-      return { content: row['content'], pattern: JSON.parse(String(row['structured_fields'])).pattern };
-    };
-    const beforeImport = _getAdapter()!
-      .prepare('SELECT category, content, scope, structured_fields FROM memories WHERE id = :id')
-      .get({ ':id': pattern.memoryId });
+    const patternRow = () => ({
+      ..._getAdapter()!
+        .prepare('SELECT category, content, scope, superseded_by, structured_fields FROM memories WHERE id = :id')
+        .get({ ':id': pattern.memoryId }),
+    });
+    const beforeImport = patternRow();
 
     const first = makeCtx();
     await handleRecover(first.ctx, base);
     const preview = first.notes.at(-1)?.message ?? '';
-    assert.ok(preview.includes('update knowledge:P001'), preview);
+    assert.doesNotMatch(preview, /knowledge:P001/, 'the Preview plans no change for the row');
+    const reported = preview
+      .slice(preview.indexOf('Diagnoses:'), preview.indexOf('Resolutions:'))
+      .split('\n')
+      .slice(1)
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line) as { code: string; severity: string; raw_value: string; message: string })
+      .filter((diagnosis) => diagnosis.code.startsWith('knowledge-row-'));
+    assert.deepEqual(
+      reported.map((diagnosis) => [diagnosis.code, diagnosis.severity, diagnosis.raw_value]),
+      [['knowledge-row-conflict', 'warning', '| P001 | Retry with backoff | — | — |']],
+    );
+    assert.match(reported[0]!.message, /database row is kept.*next render replaces/u);
     const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
-    assert.ok(approval, preview);
+    assert.ok(approval, 'the conflict report does not block the Preview');
+
     const second = makeCtx();
     await handleRecover(second.ctx, base, approval);
     assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
-    assert.deepEqual(
-      patternRow(),
-      { content: 'Retry with backoff', pattern: 'Retry with backoff' },
-      'the import wrote the stale file text over the database text',
-    );
-
-    // Later accepted work closes the restore window, so the undo is a Forward Repair.
-    captureKnowledgeEntry(base, 'rule', 'Later rule', 'project');
-    const application = _getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!;
-    const third = makeCtx();
-    await handleRecover(third.ctx, base, `--application=${String(application['operation_id'])} --forward-repair`);
-    assert.match(third.notes.at(-1)?.message ?? '', /Forward Repair: committed/);
-
-    assert.deepEqual(patternRow(), { content: 'Retry with jitter', pattern: 'Retry with jitter' });
-    assert.deepEqual(
-      _getAdapter()!
-        .prepare('SELECT category, content, scope, structured_fields FROM memories WHERE id = :id')
-        .get({ ':id': pattern.memoryId }),
-      beforeImport,
-      'the row is the pre-import row again',
-    );
-    assert.ok(renderKnowledgeProjection(base).content.includes('| P001 | Retry with jitter |'));
+    assert.deepEqual(patternRow(), beforeImport, 'the import does not write the file text over the database row');
+    assert.equal(beforeImport['content'], 'Retry with jitter');
+    // The report is true: the next render replaces the row in the file.
+    const rendered = renderKnowledgeProjection(base).content;
+    assert.ok(rendered.includes('| P001 | Retry with jitter |'));
+    assert.ok(!rendered.includes('Retry with backoff'));
   });
 });
