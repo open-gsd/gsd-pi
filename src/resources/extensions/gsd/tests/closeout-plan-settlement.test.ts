@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
+import { verifyExpectedArtifact } from "../auto-recovery.ts";
 import { mergeMilestoneToMain } from "../auto-worktree-merge.ts";
 import {
   _resetPreTeardownSafetyDepsForTests,
@@ -417,6 +418,9 @@ test("the Milestone stays open after gsd_complete_milestone and completes when t
   const { repo, worktree } = await milestoneInWorktree();
   assert.equal(getMilestone("M001")?.status, "active");
   assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+  // The prepared plan is the result of the complete-milestone unit, so the
+  // auto loop goes on to the merge instead of dispatching the unit again.
+  assert.equal(verifyExpectedArtifact("complete-milestone", "M001", worktree), true);
 
   mergeMilestoneToMain(repo, "M001", ROADMAP);
 
