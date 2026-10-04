@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,7 +14,7 @@ import {
 } from "../auto/closeout.js";
 import type { IterationContext } from "../auto/types.js";
 import { MergeConflictError } from "../git-service.js";
-import { closeDatabase, insertDecision, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.js";
+import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.js";
 import { renderAllFromDb } from "../markdown-renderer.js";
 import { resolveMilestoneFile } from "../paths.js";
 import type {
@@ -541,8 +541,10 @@ test("already-merged milestone skips guarded merge to terminate duplicate closeo
 });
 
 
-test("postflight-restored projection edits survive successful merge rebuild", async () => {
+test("a projection edit restored by the postflight stash pop is not authority: the merge rebuild renders the database", async () => {
   await withProjectionBackedProject(async (basePath, roadmapPath) => {
+    insertFreshDbSlice();
+
     const { ic } = buildIc({
       preflightResult: STASH_PUSHED,
       mergeBehavior: "succeed",
@@ -558,71 +560,16 @@ test("postflight-restored projection edits survive successful merge rebuild", as
     const result = await _runMilestoneMergeWithStashRestore(ic, "M002");
 
     assert.equal(result, null);
-    assert.equal(
-      readFileSync(roadmapPath, "utf8"),
-      "# local projection edit restored from stash\n",
-      "projection rebuild must not overwrite user edits restored by postflight stash pop",
-    );
-  });
-});
-
-test("untracked markdown under a new generated .gsd projection directory suppresses successful merge rebuild", async () => {
-  await withProjectionBackedProject(async (basePath, roadmapPath) => {
-    insertFreshDbSlice();
-
-    const { ic } = buildIc({
-      preflightResult: STASH_PUSHED,
-      mergeBehavior: "succeed",
-      postflightResult: POP_OK,
-    });
-    (ic.s as { basePath: string; originalBasePath: string }).basePath = basePath;
-    (ic.s as { basePath: string; originalBasePath: string }).originalBasePath = basePath;
-    (ic.deps as unknown as { postflightPopStash: () => PostflightResult }).postflightPopStash = () => {
-      const restoredDir = join(basePath, ".gsd", "milestones", "M002", "slices", "S99");
-      mkdirSync(restoredDir, { recursive: true });
-      writeFileSync(join(restoredDir, "S99-SUMMARY.md"), "# restored local markdown\n", "utf8");
-      return POP_OK;
-    };
-
-    const result = await _runMilestoneMergeWithStashRestore(ic, "M002");
-
-    assert.equal(result, null);
-    assert.doesNotMatch(
-      readFileSync(roadmapPath, "utf8"),
-      /Fresh DB Slice/,
-      "untracked markdown projections inside generated .gsd directories must suppress rebuild",
-    );
-  });
-});
-
-test("ignored untracked markdown under .gsd suppresses successful merge rebuild", async () => {
-  await withProjectionBackedProject(async (basePath, roadmapPath) => {
-    writeFileSync(join(basePath, ".gitignore"), ".gsd\n", "utf8");
-    git(basePath, ["add", ".gitignore"]);
-    git(basePath, ["commit", "-m", "ignore gsd projections"], "ignore");
-    insertFreshDbSlice();
-
-    const { ic } = buildIc({
-      preflightResult: STASH_PUSHED,
-      mergeBehavior: "succeed",
-      postflightResult: POP_OK,
-    });
-    (ic.s as { basePath: string; originalBasePath: string }).basePath = basePath;
-    (ic.s as { basePath: string; originalBasePath: string }).originalBasePath = basePath;
-    (ic.deps as unknown as { postflightPopStash: () => PostflightResult }).postflightPopStash = () => {
-      const restoredDir = join(basePath, ".gsd", "milestones", "M002", "ignored-restored-projections");
-      mkdirSync(restoredDir, { recursive: true });
-      writeFileSync(join(restoredDir, "S99-SUMMARY.md"), "# ignored restored local markdown\n", "utf8");
-      return POP_OK;
-    };
-
-    const result = await _runMilestoneMergeWithStashRestore(ic, "M002");
-
-    assert.equal(result, null);
-    assert.doesNotMatch(
-      readFileSync(roadmapPath, "utf8"),
-      /Fresh DB Slice/,
-      "ignored .gsd markdown projections restored by postflight must suppress rebuild",
+    const roadmap = readFileSync(roadmapPath, "utf8");
+    assert.match(roadmap, /Fresh DB Slice/, "the roadmap is rendered from the database after the merge");
+    assert.doesNotMatch(roadmap, /local projection edit restored from stash/);
+    const quarantined = readdirSync(join(basePath, ".gsd", "quarantine"), { recursive: true, encoding: "utf8" })
+      .map((entry) => join(basePath, ".gsd", "quarantine", entry))
+      .filter((path) => statSync(path).isFile())
+      .map((path) => readFileSync(path, "utf8"));
+    assert.ok(
+      quarantined.includes("# local projection edit restored from stash\n"),
+      "the restored edit is kept under .gsd/quarantine",
     );
   });
 });
@@ -659,44 +606,6 @@ test("preexisting ignored markdown under .gsd does not suppress successful merge
   });
 });
 
-test("failed pre-merge ignored snapshot still suppresses rebuild over restored ignored markdown", async () => {
-  await withProjectionBackedProject(async (basePath, roadmapPath) => {
-    insertFreshDbSlice();
-
-    const { ic } = buildIc({
-      preflightResult: STASH_PUSHED,
-      mergeBehavior: "succeed",
-      postflightResult: POP_OK,
-    });
-    (ic.s as { basePath: string; originalBasePath: string }).basePath = basePath;
-    (ic.s as { basePath: string; originalBasePath: string }).originalBasePath = basePath;
-    (ic.deps as unknown as { postflightPopStash: () => PostflightResult }).postflightPopStash = () => {
-      // Git only becomes available AFTER the pre-merge ignored-markdown
-      // snapshot was attempted, so `before` is null. Postflight then restores
-      // ignored `.gsd` markdown that plain `git status` cannot see. With no
-      // baseline to diff against, the guard must fail closed and refuse to
-      // rebuild over the restored edit.
-      git(basePath, ["init"], "ignore");
-      git(basePath, ["config", "user.email", "test@example.invalid"]);
-      git(basePath, ["config", "user.name", "Test"]);
-      writeFileSync(join(basePath, ".gitignore"), ".gsd\n", "utf8");
-      git(basePath, ["add", ".gitignore"]);
-      git(basePath, ["commit", "-m", "ignore gsd projections"], "ignore");
-      writeFileSync(roadmapPath, "# ignored projection edit restored from stash\n", "utf8");
-      return POP_OK;
-    };
-
-    const result = await _runMilestoneMergeWithStashRestore(ic, "M002");
-
-    assert.equal(result, null);
-    assert.equal(
-      readFileSync(roadmapPath, "utf8"),
-      "# ignored projection edit restored from stash\n",
-      "a null pre-merge ignored snapshot must fail closed and preserve restored ignored .gsd markdown",
-    );
-  }, { gitInit: false });
-});
-
 test("non-projection .gsd markdown does not suppress successful merge rebuild", async () => {
   await withProjectionBackedProject(async (basePath, roadmapPath) => {
     insertFreshDbSlice();
@@ -722,82 +631,6 @@ test("non-projection .gsd markdown does not suppress successful merge rebuild", 
       readFileSync(roadmapPath, "utf8"),
       /Fresh DB Slice/,
       "non-generated .gsd markdown must not block the required projection rebuild",
-    );
-  });
-});
-
-test("three-digit flat-phase projection restored by postflight suppresses successful merge rebuild", async () => {
-  await withProjectionBackedProject(async (basePath, roadmapPath) => {
-    insertFreshDbSlice();
-
-    const { ic } = buildIc({
-      preflightResult: STASH_PUSHED,
-      mergeBehavior: "succeed",
-      postflightResult: POP_OK,
-    });
-    (ic.s as { basePath: string; originalBasePath: string }).basePath = basePath;
-    (ic.s as { basePath: string; originalBasePath: string }).originalBasePath = basePath;
-    (ic.deps as unknown as { postflightPopStash: () => PostflightResult }).postflightPopStash = () => {
-      const restoredDir = join(basePath, ".gsd", "phases", "999-db-backed-planning");
-      mkdirSync(restoredDir, { recursive: true });
-      writeFileSync(join(restoredDir, "999-ROADMAP.md"), "# restored 3-digit projection\n", "utf8");
-      return POP_OK;
-    };
-
-    const result = await _runMilestoneMergeWithStashRestore(ic, "M002");
-
-    assert.equal(result, null);
-    assert.doesNotMatch(
-      readFileSync(roadmapPath, "utf8"),
-      /Fresh DB Slice/,
-      "three-digit flat-phase projections restored by postflight must suppress rebuild",
-    );
-  });
-});
-
-test("root DECISIONS projection restored by postflight suppresses successful merge rebuild", async () => {
-  await withProjectionBackedProject(async (basePath, roadmapPath) => {
-    insertFreshDbSlice();
-    insertDecision({
-      id: "D001",
-      when_context: "closeout",
-      scope: "global",
-      decision: "Regenerate decisions from DB",
-      choice: "Use database projection",
-      rationale: "Exercise root decision projection rebuild",
-      revisable: "Yes",
-      made_by: "agent",
-      superseded_by: null,
-    });
-
-    const { ic } = buildIc({
-      preflightResult: STASH_PUSHED,
-      mergeBehavior: "succeed",
-      postflightResult: POP_OK,
-    });
-    (ic.s as { basePath: string; originalBasePath: string }).basePath = basePath;
-    (ic.s as { basePath: string; originalBasePath: string }).originalBasePath = basePath;
-    (ic.deps as unknown as { postflightPopStash: () => PostflightResult }).postflightPopStash = () => {
-      writeFileSync(
-        join(basePath, ".gsd", "DECISIONS.md"),
-        "# local decisions edit restored from stash\n",
-        "utf8",
-      );
-      return POP_OK;
-    };
-
-    const result = await _runMilestoneMergeWithStashRestore(ic, "M002");
-
-    assert.equal(result, null);
-    assert.doesNotMatch(
-      readFileSync(roadmapPath, "utf8"),
-      /Fresh DB Slice/,
-      "root generated DECISIONS.md restored by postflight must suppress rebuild",
-    );
-    assert.equal(
-      readFileSync(join(basePath, ".gsd", "DECISIONS.md"), "utf8"),
-      "# local decisions edit restored from stash\n",
-      "rebuild must not overwrite restored root DECISIONS.md edits",
     );
   });
 });
@@ -841,10 +674,8 @@ test("guarded merge stash restore and rebuild target the same canonical project 
       postflightResult: POP_OK,
     });
     // originalBasePath empty + basePath diverging from canonicalProjectRoot is
-    // the exact condition where the guard (snapshot / dirty check / rebuild)
-    // could run against a different tree than the postflight stash restore.
-    // The postflight restore must land on the same canonical root the guard
-    // inspects and the rebuild writes, otherwise restored edits are missed.
+    // the exact condition where the rebuild could run against a different
+    // tree than the postflight stash restore. Both must use the canonical root.
     (ic.s as unknown as {
       basePath: string;
       originalBasePath: string;
@@ -865,45 +696,12 @@ test("guarded merge stash restore and rebuild target the same canonical project 
     assert.equal(
       postflightProjectRoot,
       realRoot,
-      "postflight stash restore must run at the canonical project root the guard and rebuild use",
+      "postflight stash restore must run at the canonical project root the rebuild uses",
     );
-    assert.equal(
-      readFileSync(roadmapPath, "utf8"),
-      "# projection edit restored from stash\n",
-      "restored projection edits on the canonical root must suppress the rebuild",
-    );
-  });
-});
-
-test("git-quoted special-character .gsd markdown paths still suppress rebuild", async () => {
-  await withProjectionBackedProject(async (basePath, roadmapPath) => {
-    insertFreshDbSlice();
-
-    const { ic } = buildIc({
-      preflightResult: STASH_PUSHED,
-      mergeBehavior: "succeed",
-      postflightResult: POP_OK,
-    });
-    (ic.s as { basePath: string; originalBasePath: string }).basePath = basePath;
-    (ic.s as { basePath: string; originalBasePath: string }).originalBasePath = basePath;
-    (ic.deps as unknown as { postflightPopStash: () => PostflightResult }).postflightPopStash = () => {
-      const restoredDir = join(basePath, ".gsd", "milestones", "M002", "restoréd");
-      mkdirSync(restoredDir, { recursive: true });
-      // A non-ASCII generated projection path that `git status --porcelain`
-      // C-quotes without -z; a naive line.endsWith(".md") check would miss the
-      // quoted path. NUL-delimited (-z) parsing sees the raw path and still
-      // detects it as generated projection dirt.
-      writeFileSync(join(restoredDir, "S99-SUMMARY.md"), "# restored local markdown\n", "utf8");
-      return POP_OK;
-    };
-
-    const result = await _runMilestoneMergeWithStashRestore(ic, "M002");
-
-    assert.equal(result, null);
-    assert.doesNotMatch(
+    assert.match(
       readFileSync(roadmapPath, "utf8"),
       /Fresh DB Slice/,
-      "special-character generated .gsd markdown restored by postflight must suppress the rebuild",
+      "the rebuild must render the canonical project root that the stash restore used",
     );
   });
 });

@@ -3,10 +3,8 @@
 
 import { importExtensionModule, type ExtensionAPI, type ExtensionContext } from "@gsd/pi-coding-agent";
 
-import { execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import { join, basename } from "node:path";
-import { existsSync, cpSync, readFileSync } from "node:fs";
+import { existsSync, cpSync } from "node:fs";
 import type { AutoSession } from "./session.js";
 import type { LoopDeps } from "./loop-deps.js";
 import type { GSDState } from "../types.js";
@@ -18,7 +16,7 @@ import { getIsolationMode } from "../preferences.js";
 import { isDbAvailable, getMilestone } from "../gsd-db.js";
 import { refreshWorkflowDatabaseFromDisk } from "../db-workspace.js";
 import { isClosedStatus } from "../status-guards.js";
-import { gsdRoot, PLANNING_ARTIFACT_SUFFIXES } from "../paths.js";
+import { gsdRoot } from "../paths.js";
 import { atomicWriteSync } from "../atomic-write.js";
 import { logWarning, logError } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
@@ -102,13 +100,10 @@ export async function _runMilestoneMergeWithStashRestore(
 
   // Resolve the project root once, before the merge can flip session path
   // pointers (worktree teardown mutates s.basePath / s.scope). The guarded
-  // merge's preflight/postflight stash restore, the pre-merge ignored-markdown
-  // snapshot, the dirty-projection check, and the rebuild must all target this
-  // same tree; otherwise `.gsd` markdown restored on one tree can be silently
-  // overwritten by a rebuild on another. canonicalProjectRoot is the
-  // authoritative `.gsd`/DB writer path (see AutoSession.canonicalProjectRoot).
+  // merge's preflight/postflight stash restore and the rebuild must target
+  // this same tree. canonicalProjectRoot is the authoritative `.gsd`/DB
+  // writer path (see AutoSession.canonicalProjectRoot).
   const projectRoot = s.originalBasePath || s.canonicalProjectRoot || s.basePath;
-  const ignoredProjectionSnapshot = snapshotIgnoredGsdMarkdownProjections(projectRoot);
   const mergeResult = deps.lifecycle.exitMilestone(
     milestoneId,
     {
@@ -123,12 +118,12 @@ export async function _runMilestoneMergeWithStashRestore(
   );
 
   if (mergeResult.ok) {
-    await markMilestoneMergedAndRebuild(s, projectRoot, ignoredProjectionSnapshot);
+    await markMilestoneMergedAndRebuild(s, projectRoot);
     return null;
   }
 
   if (mergeResult.reason === "postflight-stash-restore-failed") {
-    await markMilestoneMergedAndRebuild(s, projectRoot, ignoredProjectionSnapshot);
+    await markMilestoneMergedAndRebuild(s, projectRoot);
   }
 
   if (mergeResult.reason === "preflight-dirty-overlap" || mergeResult.reason === "preflight-unmerged-conflicts") {
@@ -190,22 +185,17 @@ export async function _runMilestoneMergeWithStashRestore(
   return null;
 }
 
-type GsdMarkdownSnapshot = Map<string, string>;
-
+/**
+ * After a milestone merge, always render the project-root projections from
+ * the database. A `.gsd` file that the merge or the stash restore brought in
+ * is not authority: the rebuild keeps its changed bytes under
+ * .gsd/quarantine/ and renders the database content.
+ */
 async function markMilestoneMergedAndRebuild(
   s: AutoSession,
   rebuildBasePath: string,
-  ignoredProjectionSnapshot: GsdMarkdownSnapshot | null,
 ): Promise<void> {
   s.milestoneMergedInPhases = true;
-  if (hasDirtyGsdMarkdownProjections(rebuildBasePath, ignoredProjectionSnapshot)) {
-    logWarning(
-      "engine",
-      "skipping markdown projection rebuild after milestone merge because restored .gsd edits are dirty",
-    );
-    return;
-  }
-
   try {
     const { rebuildMarkdownProjectionsFromDb } = await import("../commands-maintenance.js");
     await rebuildMarkdownProjectionsFromDb(rebuildBasePath);
@@ -215,90 +205,6 @@ async function markMilestoneMergedAndRebuild(
       `markdown projection rebuild after milestone merge failed: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
-}
-
-function hasDirtyGsdMarkdownProjections(
-  basePath: string,
-  ignoredProjectionSnapshot: GsdMarkdownSnapshot | null,
-): boolean {
-  try {
-    const output = execFileSync(
-      "git",
-      ["status", "--porcelain", "-z", "--untracked-files=all", "--", ".gsd"],
-      { cwd: basePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    const entries = output.split("\0").filter(Boolean);
-    for (let i = 0; i < entries.length; i++) {
-      const entry = entries[i];
-      if (entry.length <= 3) continue;
-      const status = entry.slice(0, 2);
-      const path = entry.slice(3);
-      if (isGeneratedGsdMarkdownProjection(path)) return true;
-      if ((status === "R " || status === "C ") && i + 1 < entries.length) {
-        const dest = entries[++i];
-        if (isGeneratedGsdMarkdownProjection(dest)) return true;
-      }
-    }
-  } catch (err) {
-    void err;
-    // Fall through to ignored-file snapshot comparison below.
-  }
-  return ignoredGsdMarkdownProjectionSnapshotChanged(basePath, ignoredProjectionSnapshot);
-}
-
-function isGeneratedGsdMarkdownProjection(path: string): boolean {
-  const normalized = path.replace(/\\/g, "/");
-  if (normalized === ".gsd/DECISIONS.md") return true;
-  if (!normalized.startsWith(".gsd/milestones/") && !normalized.startsWith(".gsd/phases/")) {
-    return false;
-  }
-  return isGeneratedPlanningArtifactFileName(basename(normalized));
-}
-
-function isGeneratedPlanningArtifactFileName(fileName: string): boolean {
-  if (!fileName.endsWith(".md")) return false;
-  const stem = fileName.slice(0, -".md".length).toUpperCase();
-  for (const suffix of PLANNING_ARTIFACT_SUFFIXES) {
-    if (!stem.endsWith(`-${suffix}`)) continue;
-    const idPrefix = stem.slice(0, -suffix.length - 1);
-    return /^(?:[MST]\d+|\d{2,})(?:-[A-Z0-9]+)*$/.test(idPrefix);
-  }
-  return false;
-}
-
-function snapshotIgnoredGsdMarkdownProjections(basePath: string): GsdMarkdownSnapshot | null {
-  try {
-    const output = execFileSync(
-      "git",
-      ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", ".gsd"],
-      { cwd: basePath, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-    const snapshot: GsdMarkdownSnapshot = new Map();
-    for (const path of output.split("\0")) {
-      if (!isGeneratedGsdMarkdownProjection(path)) continue;
-      snapshot.set(path, hashFile(join(basePath, path)));
-    }
-    return snapshot;
-  } catch {
-    return null;
-  }
-}
-
-function hashFile(path: string): string {
-  return createHash("sha256").update(readFileSync(path)).digest("hex");
-}
-
-function ignoredGsdMarkdownProjectionSnapshotChanged(
-  basePath: string,
-  before: GsdMarkdownSnapshot | null,
-): boolean {
-  if (!before) return true;
-  const after = snapshotIgnoredGsdMarkdownProjections(basePath);
-  if (!after || after.size !== before.size) return true;
-  for (const [path, hash] of before) {
-    if (after.get(path) !== hash) return true;
-  }
-  return false;
 }
 
 export async function _runMilestoneMergeOnceWithStashRestore(

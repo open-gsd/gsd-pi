@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
-import { gsdRoot } from "./paths.js";
+import { gsdProjectionRoot, gsdRoot, resolveMilestonePath } from "./paths.js";
 import {
   getRecordedIntegrationBranch,
   recordIntegrationBranch,
@@ -890,19 +890,26 @@ export class GitServiceImpl {
     // must only commit files belonging to its own milestone. Exclude all other
     // milestone directories from staging to prevent cross-milestone pollution
     // (e.g., an M033 worker fabricating M032 artifacts in the same commit).
+    // The directories are read from the tree that this commit stages (the
+    // worktree's `.gsd` in a worktree), in both the legacy `milestones/`
+    // layout and the flat `phases/` layout.
     const milestoneLock = process.env.GSD_MILESTONE_LOCK;
     if (milestoneLock) {
-      const msDir = join(gsdRoot(this.basePath), "milestones");
-      if (existsSync(msDir)) {
+      const projectionRoot = gsdProjectionRoot(this.basePath);
+      const ownDir = resolveMilestonePath(this.basePath, milestoneLock);
+      for (const layout of ["milestones", "phases"] as const) {
+        const layoutDir = join(projectionRoot, layout);
+        if (!existsSync(layoutDir)) continue;
         try {
-          const entries = readdirSync(msDir, { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.isDirectory() && entry.name !== milestoneLock) {
-              allExclusions.push(`.gsd/milestones/${entry.name}/`);
-            }
+          for (const entry of readdirSync(layoutDir, { withFileTypes: true })) {
+            if (!entry.isDirectory()) continue;
+            const own = layout === "milestones"
+              ? entry.name === milestoneLock
+              : join(layoutDir, entry.name) === ownDir;
+            if (!own) allExclusions.push(`.gsd/${layout}/${entry.name}/`);
           }
         } catch {
-          // Best-effort — if we can't read the milestones dir, proceed without scoping
+          // Best-effort — if we can't read the layout dir, proceed without scoping
         }
       }
     }

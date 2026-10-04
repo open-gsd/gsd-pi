@@ -11,12 +11,13 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _resolveStopAutoMilestoneId, _selectStopAutoWorktreeExit, stopAuto } from "../auto.ts";
 import { autoSession } from "../auto-runtime-state.ts";
-import { closeDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { resolveMilestoneFile } from "../paths.ts";
 import { WorktreeLifecycle } from "../worktree-lifecycle.ts";
 
 test("#5576: stopAuto should check milestone completion status before choosing exit strategy", () => {
@@ -133,4 +134,45 @@ test("stopAuto preserves the branch instead of merging when the DB is unavailabl
   );
 
   assert.deepEqual(exits, [{ milestoneId: "M001", merge: false }], "no DB must preserve, never merge");
+});
+
+test("stopAuto renders the project-root projections from the database after it merges a complete milestone", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-stop-merge-rebuild-"));
+  const previousCwd = process.cwd();
+  const roadmapPath = join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md");
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  // The merge brings in a tracked projection file whose content is not the database content.
+  t.mock.method(WorktreeLifecycle.prototype, "exitMilestone", () => {
+    writeFileSync(roadmapPath, "# M001\n\n## Slices\n- [ ] **S01: Merged file slice**\n", "utf-8");
+    return { ok: true };
+  });
+  t.mock.method(WorktreeLifecycle.prototype, "restoreToProjectRoot", () => {});
+  t.after(() => {
+    autoSession.reset();
+    closeDatabase();
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Stop merge", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Database slice", status: "complete", risk: "low", depends: [], demo: "demo", sequence: 1 });
+
+  autoSession.reset();
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.originalBasePath = base;
+  autoSession.currentMilestoneId = "M001";
+
+  await stopAuto(
+    { hasUI: false, ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {}, setHeader: () => {} } } as any,
+    undefined,
+    "test stop",
+  );
+
+  const rendered = resolveMilestoneFile(base, "M001", "ROADMAP");
+  assert.ok(rendered, "the stop merge renders the root ROADMAP");
+  const roadmap = readFileSync(rendered, "utf-8");
+  assert.match(roadmap, /Database slice/, "the root ROADMAP is the database render after the stop merge");
+  assert.doesNotMatch(roadmap, /Merged file slice/);
 });

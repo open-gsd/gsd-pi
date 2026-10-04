@@ -1956,6 +1956,16 @@ export async function stopAuto(
             notifyCtx,
           );
           if (!r.ok && r.cause instanceof Error) throw r.cause;
+          if (r.ok) {
+            // A merged `.gsd` file is not authority: render the project-root
+            // projections from the database after the merge.
+            try {
+              const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
+              await rebuildMarkdownProjectionsFromDb(s.originalBasePath || s.basePath);
+            } catch (err) {
+              logWarning("engine", `markdown projection rebuild after stop merge failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+            }
+          }
         } else if (exitAction === "preserve") {
           // Milestone still in progress — preserve branch for later resumption
           const r = lifecycle.exitMilestone(

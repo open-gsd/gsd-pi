@@ -636,6 +636,17 @@ async function handleMerge(
 
     try {
       mergeWorktreeToMain(basePath, name, commitMessage, undefined, mainBranch);
+      // A merged `.gsd` file is not authority: render the project-root
+      // projections from the database after the merge.
+      try {
+        const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
+        await rebuildMarkdownProjectionsFromDb(basePath);
+      } catch (err) {
+        ctx.ui.notify(
+          `Projections were not rendered after the merge: ${err instanceof Error ? err.message : String(err)}. Run /gsd rebuild markdown.`,
+          "warning",
+        );
+      }
       ctx.ui.notify(
         [
           `${CLR.ok("✓")} Merged ${CLR.name(name)} → ${CLR.branch(mainBranch)} ${CLR.muted("(deterministic squash)")}`,
@@ -743,7 +754,7 @@ async function handleImportDb(
       ctx.ui.notify("Import cancelled. No database changes made.", "info");
       return;
     }
-    const { rebuildMarkdownProjectionsFromDb } = await import("./projection-worker.js");
+    const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
     const rebuilt = await rebuildMarkdownProjectionsFromDb(basePath);
     ctx.ui.notify(
       [

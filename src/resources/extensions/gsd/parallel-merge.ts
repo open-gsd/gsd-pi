@@ -7,7 +7,7 @@
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { openWorkflowDatabaseIsolated } from "./db-workspace.js";
 import { resolveGsdPathContract } from "./paths.js";
 import { worktreePathFor, worktreesDirs } from "./worktree-placement.js";
 import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
@@ -21,7 +21,6 @@ import { removeSessionStatus } from "./session-status-io.js";
 import type { WorkerInfo } from "./parallel-orchestrator.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning } from "./workflow-logger.js";
-import { renderStateProjection } from "./workflow-projections.js";
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -40,7 +39,7 @@ export type MergeOrder = "sequential" | "by-completion";
 
 /**
  * Check whether a milestone is complete by querying the canonical project DB.
- * Uses a subprocess to avoid disrupting the global DB singleton.
+ * Uses an isolated connection, so the global DB handle is not displaced.
  * Returns true when milestones.status = 'complete' in project gsd.db.
  */
 export function isMilestoneCompleteInProjectDb(basePath: string, mid: string): boolean {
@@ -48,16 +47,16 @@ export function isMilestoneCompleteInProjectDb(basePath: string, mid: string): b
   const dbPath = resolveGsdPathContract(workRoot, basePath).projectDb;
   if (!existsSync(dbPath)) return false;
 
+  const db = openWorkflowDatabaseIsolated(dbPath);
+  if (!db) return false;
   try {
-    const result = spawnSync(
-      "sqlite3",
-      [dbPath, `SELECT status FROM milestones WHERE id='${mid}' LIMIT 1`],
-      { timeout: 3000, encoding: "utf-8" },
-    );
-    return (result.stdout || "").trim() === "complete";
+    const row = db.prepare("SELECT status FROM milestones WHERE id = :mid").get({ ":mid": mid });
+    return row?.["status"] === "complete";
   } catch (e) {
-    logWarning("parallel", `spawnSync milestone completion check failed for ${mid}: ${(e as Error).message}`);
+    logWarning("parallel", `milestone completion check failed for ${mid}: ${(e as Error).message}`);
     return false;
+  } finally {
+    db.close();
   }
 }
 
@@ -215,7 +214,14 @@ export async function mergeCompletedMilestone(
 
   // Clean up parallel session status — only on a real merge.
   removeSessionStatus(basePath, milestoneId);
-  await renderStateProjection(basePath);
+  // A merged `.gsd` file is not authority: render the project-root
+  // projections (STATE.md included) from the database after the merge.
+  try {
+    const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
+    await rebuildMarkdownProjectionsFromDb(basePath);
+  } catch (err) {
+    logWarning("parallel", `${milestoneId}: markdown projection rebuild after merge failed: ${getErrorMessage(err)}`);
+  }
 
   return {
     milestoneId,

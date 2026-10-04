@@ -20,6 +20,7 @@ import {
   writeFileSync,
   rmSync,
   existsSync,
+  readFileSync,
   realpathSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -485,6 +486,12 @@ test("mergeCompletedMilestone — clean merge, session status cleaned up", async
     // Verify milestone branch deleted
     const branches = run("git branch", repo);
     assert.ok(!branches.includes("milestone/M010"), "milestone branch should be deleted");
+
+    // The merged ROADMAP file is not authority: after the merge the
+    // project-root projection is the database render.
+    const roadmap = readFileSync(join(repo, ".gsd", "milestones", "M010", "M010-ROADMAP.md"), "utf-8");
+    assert.match(roadmap, /Test Slice/, "the root ROADMAP shows the database slice title");
+    assert.doesNotMatch(roadmap, /JWT module/, "the merged file content does not win over the database");
   } finally {
     process.chdir(savedCwd);
     cleanup(repo);
