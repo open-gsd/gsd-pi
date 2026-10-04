@@ -1249,11 +1249,6 @@ async function repairCompleteSliceRoadmapProjection(
   if (!slice || !isClosedStatus(slice.status)) return false;
 
   const artifactBase = resolveCanonicalMilestoneRoot(basePath, mid);
-  const summaryPath = resolveExpectedArtifactPath(unitType, unitId, artifactBase);
-  const uatPath = resolveSliceFile(artifactBase, mid, sid, "UAT");
-  if (!summaryPath || !existsSync(summaryPath) || !uatPath || !existsSync(uatPath)) {
-    return false;
-  }
 
   // Stale-render detection (ADR-017): the DB already says the slice is closed;
   // this only checks whether the rendered ROADMAP projection reflects it, to
@@ -1275,6 +1270,7 @@ async function repairCompleteSliceRoadmapProjection(
   await renderRoadmapFromDb(artifactBase, mid);
   return true;
 }
+export const _repairCompleteSliceRoadmapProjectionForTest = repairCompleteSliceRoadmapProjection;
 
 export async function autoCommitUnit(
   basePath: string,
