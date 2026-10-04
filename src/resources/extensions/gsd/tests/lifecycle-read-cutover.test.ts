@@ -284,6 +284,32 @@ test("after the Cutover resolveDispatch stops on a canonically completed milesto
   assert.equal(open.unitType, "discuss-milestone");
 });
 
+test("after the Cutover the rule complete → stop dispatches the closeout of a canonically open milestone", async () => {
+  const base = seedDisagreement();
+  cutOver();
+
+  // M002 is legacy complete and canonical ready: the legacy row says closed.
+  const result = await resolveDispatch({
+    basePath: base,
+    mid: "M002",
+    midTitle: "M002",
+    prefs: undefined,
+    state: {
+      activeMilestone: { id: "M002", title: "M002" },
+      activeSlice: null,
+      activeTask: null,
+      phase: "complete",
+      recentDecisions: [],
+      blockers: [],
+      nextAction: "",
+      registry: [{ id: "M002", title: "M002", status: "active" }],
+    },
+  });
+
+  assert.equal(result.action, "dispatch");
+  assert.equal(result.unitType, "complete-milestone");
+});
+
 test("after the Cutover parallel eligibility follows the lifecycle status of the dependency", async () => {
   const base = makeProject();
   insertMilestone({ id: "M001", title: "Canonical open", status: "complete" });
