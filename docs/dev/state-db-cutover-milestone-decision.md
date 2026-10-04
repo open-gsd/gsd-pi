@@ -335,7 +335,10 @@ D012 is a decision. It is not the cutover:
   Milestone universe from the registry of `deriveState`, which reads the
   database. It does not scan the milestone directories. A directory with no
   Milestone row is not listed; before, it was listed as ineligible. A
-  Milestone row with no directory is a candidate.
+  Milestone row with no directory is a candidate, with one exception: a queued
+  row that was never planned (no saved CONTEXT or CONTEXT-DRAFT, no Slices) is
+  listed as ineligible with the reason "no planning data". `isGhostMilestone`
+  answers this from rows.
 - Other decision sites do not use the interface. They read legacy rows
   directly and apply the status vocabulary themselves. The Milestone readiness
   class in `state/derive/from-db.ts` (queued shell, needs discussion) uses the

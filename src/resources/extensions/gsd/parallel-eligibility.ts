@@ -5,7 +5,7 @@
  * dependency satisfaction and file overlap across slice plans.
  */
 
-import { deriveState } from "./state.js";
+import { deriveState, isGhostMilestone } from "./state.js";
 import { resolveMilestoneFile, resolveSliceFile } from "./paths.js";
 import { isDbAvailable, getMilestoneSlices, getTasksBySliceIds } from "./gsd-db.js";
 import { openExistingWorkflowDatabase } from "./db-workspace.js";
@@ -119,6 +119,18 @@ export async function analyzeParallelEligibility(
     const mid = entry.id;
     const title = entry.title;
     const status = entry.status;
+
+    // Rule 0: a queued row that was never planned (no saved context, no
+    // slices) is ineligible — a worker for it has nothing to run (#2501)
+    if (isGhostMilestone(basePath, mid)) {
+      ineligible.push({
+        milestoneId: mid,
+        title,
+        eligible: false,
+        reason: "Milestone has no planning data — cannot determine eligibility.",
+      });
+      continue;
+    }
 
     // Rule 1: skip complete and parked milestones
     if (status === "complete" || status === "parked") {

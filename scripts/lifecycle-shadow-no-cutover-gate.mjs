@@ -56,6 +56,7 @@ const DECISION_IMPORT_POLICY = Object.freeze({
     required: new Set(["./state.js#deriveState"]),
     approved: new Set([
       "./state.js#deriveState",
+      "./state.js#isGhostMilestone",
       "./gsd-db.js#isDbAvailable",
       "./gsd-db.js#getMilestoneSlices",
       "./gsd-db.js#getTasksBySliceIds",

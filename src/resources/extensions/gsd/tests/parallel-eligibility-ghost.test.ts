@@ -2,6 +2,7 @@
  * Tests for parallel eligibility edge cases:
  * - Ghost milestones (a directory with no milestone row) are not milestones:
  *   the universe is the database (#2501 Bug 2)
+ * - A queued row that was never planned is ineligible
  * - Milestones with failed worktree merge (SUMMARY only in worktree, DB still
  *   "active") must NOT appear eligible (#2501 Bug 1 context)
  */
@@ -22,6 +23,7 @@ import {
   insertTask,
   updateMilestoneStatus,
 } from "../gsd-db.ts";
+import { registerMilestones } from "../milestone-registration.ts";
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
 
@@ -81,6 +83,23 @@ describe("parallel-eligibility: ghost milestone ineligibility (#2501)", () => {
 
     assert.deepEqual(result.eligible.map(e => e.milestoneId), ["M001"]);
     assert.deepEqual(result.ineligible.map(e => e.milestoneId), []);
+  });
+
+  test("a queued row that was never planned is ineligible: no worker starts for an empty milestone", async () => {
+    insertMilestone({ id: "M001", title: "M001: Real Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First Slice", status: "active", risk: "low", depends: [] });
+
+    // M003 is the row gsd_milestone_generate_id leaves: queued, no saved
+    // context, no slices, no directory.
+    registerMilestones([{ id: "M003" }], "generate-id");
+
+    invalidateStateCache();
+    const result = await analyzeParallelEligibility(base);
+
+    assert.deepEqual(result.eligible.map(e => e.milestoneId), ["M001"]);
+    assert.deepEqual(result.ineligible.map(e => [e.milestoneId, e.reason]), [
+      ["M003", "Milestone has no planning data — cannot determine eligibility."],
+    ]);
   });
 
   test("milestone with DB status active and no SUMMARY on disk is not eligible when it has no slices", async () => {
