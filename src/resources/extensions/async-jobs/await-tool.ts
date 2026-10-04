@@ -163,12 +163,22 @@ export function createAwaitTool(getManager: () => AsyncJobManager): ToolDefiniti
  * acknowledged on a single line instead of having their full output reprinted;
  * not-yet-delivered jobs (the within-turn case, where suppressFollowUp won the
  * race) are rendered in full as before.
+ *
+ * Exception: a delivered job whose follow-up copy was TRUNCATED by the
+ * extension entry (2000-char cap, flagged via `deliveredTruncated`) has not
+ * actually been shown in full — the follow-up itself tells the agent to "use
+ * await_job for full output". Such a job is rendered in full here, once, and
+ * the flag is then cleared so subsequent awaits acknowledge it tersely (the
+ * full text is now in context).
  */
 function renderCompleted(jobs: Job[]): string {
 	if (jobs.length === 0) return "No completed jobs.";
 
-	const fresh = jobs.filter((j) => !j.delivered);
-	const alreadyDelivered = jobs.filter((j) => j.delivered);
+	const fresh = jobs.filter((j) => !j.delivered || j.deliveredTruncated);
+	const alreadyDelivered = jobs.filter((j) => j.delivered && !j.deliveredTruncated);
+	// The full text is being served inline now, so later awaits must not reprint
+	// it — clear the truncation flag up front, before formatting.
+	for (const j of fresh) j.deliveredTruncated = false;
 
 	const sections: string[] = [];
 	if (fresh.length > 0) sections.push(formatResults(fresh));

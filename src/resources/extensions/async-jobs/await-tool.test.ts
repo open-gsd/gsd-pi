@@ -337,3 +337,51 @@ test("unawaited jobs still get follow-up delivery (#2248)", async () => {
 
 	manager.shutdown();
 });
+
+test("await_job serves full output once when the delivered follow-up was truncated", async () => {
+	// Regression for the truncation dead-end: the completion follow-up caps its
+	// copy at 2000 chars and tells the agent to "use await_job for full output",
+	// but await_job used to acknowledge any delivered job tersely ("nothing new
+	// to report"), making the full output unreachable. A delivered-but-truncated
+	// job must be rendered in full once, then acknowledged tersely again.
+	const followUps: string[] = [];
+	const manager = new AsyncJobManager({
+		onJobComplete: (job) => {
+			if (!job.awaited) followUps.push(job.id);
+		},
+	});
+	const tool = createAwaitTool(() => manager);
+
+	const longOutput = `TRUNCATED_JOB_FULL_OUTPUT_${"x".repeat(5000)}`;
+	const jobId = manager.register("bash", "truncated-delivery-job", async () => longOutput);
+	const job = manager.getJob(jobId)!;
+	await job.promise;
+
+	// Real macrotask gap so the setTimeout(0) delivery fires and the job is
+	// `delivered` before await_job runs (mirrors the no-duplicate-in-context test).
+	await new Promise((r) => setTimeout(r, 100));
+	assert.equal(followUps.length, 1, "follow-up should have been delivered before the later-turn await_job");
+
+	// Simulate the extension entry's bookkeeping: the follow-up copy shown to the
+	// agent was capped at 2000 chars with the "use await_job" pointer appended.
+	job.deliveredTruncated = true;
+
+	const first = await tool.execute("tc_trunc1", { jobs: [jobId] }, noopSignal, () => {}, undefined as never);
+	const firstText = getTextFromResult(first);
+	assert.ok(
+		firstText.includes(longOutput),
+		`await_job must serve the full output when the delivered follow-up was truncated, got:\n${firstText}`,
+	);
+	assert.doesNotMatch(firstText, /nothing new to report/);
+
+	// The full output is now in context, so a subsequent await must not reprint it.
+	const second = await tool.execute("tc_trunc2", { jobs: [jobId] }, noopSignal, () => {}, undefined as never);
+	const secondText = getTextFromResult(second);
+	assert.ok(
+		!secondText.includes(longOutput),
+		`second await_job must acknowledge tersely, not reprint the full output again, got:\n${secondText}`,
+	);
+	assert.match(secondText, /already finished and its result was shown above/);
+
+	manager.shutdown();
+});
