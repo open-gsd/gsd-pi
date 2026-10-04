@@ -815,9 +815,8 @@ updated_at TEXT NOT NULL
 ```
 
 - Diagnostic copy: `.gsd/hook-state.json`.
-- Upgrade import: while a scope has no row, restore stores `.gsd/hook-state.json`
-  as the row once, so an update keeps a pending gate block, pending retry or
-  active hook. After the row exists the file is not read.
+- The file is never read. A `.gsd/hook-state.json` with no row (left by an older
+  build) is reported by doctor as `legacy_hook_state_file`; `doctor --fix` removes it.
 
 ##### `uat_retry_counters`
 

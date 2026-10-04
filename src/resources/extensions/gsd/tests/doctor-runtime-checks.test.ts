@@ -281,6 +281,44 @@ test("doctor fix preserves a pending gate block in the hook state (#2194)", asyn
   assert.deepEqual(cleared.cycleCounts, {});
 });
 
+test("doctor reports a hook-state.json with no hook state row and fix removes it", async (t) => {
+  const dir = createGitProject();
+  t.after(() => {
+    closeDatabase();
+    invalidateAllCaches();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  openDatabase(join(dir, ".gsd", "gsd.db"));
+  const filePath = join(dir, ".gsd", "hook-state.json");
+  const legacyIssues = async (fix: boolean, fixesApplied: string[] = []): Promise<DoctorIssue[]> => {
+    const issues: DoctorIssue[] = [];
+    await checkRuntimeHealth(dir, issues, fixesApplied, (code) => fix && code === "legacy_hook_state_file");
+    return issues.filter((candidate) => candidate.code === "legacy_hook_state_file");
+  };
+  writeFileSync(filePath, JSON.stringify({ cycleCounts: { "review/plan-slice/M001/S01": 1 } }), "utf-8");
+
+  const [issue] = await legacyIssues(false);
+  assert.equal(issue?.severity, "info");
+  assert.equal(issue?.file, ".gsd/hook-state.json");
+  assert.equal(issue?.fixable, true);
+  assert.ok(existsSync(filePath), "a report without fix keeps the file");
+
+  const fixesApplied: string[] = [];
+  await legacyIssues(true, fixesApplied);
+  assert.equal(existsSync(filePath), false, "fix removes the file");
+  assert.deepEqual(fixesApplied.filter((fix) => fix.includes("hook-state.json")), ["removed legacy hook-state.json"]);
+  assert.equal(readHookStateJson(hookStateScope(dir)), null, "fix creates no hook state row");
+  assert.deepEqual(await legacyIssues(false), []);
+
+  // With a row, the file is the diagnostic copy of that row: not reported, not removed.
+  writeHookStateJson(hookStateScope(dir), JSON.stringify({ cycleCounts: {} }));
+  writeFileSync(filePath, JSON.stringify({ cycleCounts: {} }), "utf-8");
+  assert.deepEqual(await legacyIssues(true), []);
+  assert.ok(existsSync(filePath));
+});
+
 test("doctor lists stale control-publication intents without opening the projection lock (#2154)", async (t) => {
   const dir = createGitProject();
   t.after(() => rmSync(dir, { recursive: true, force: true }));

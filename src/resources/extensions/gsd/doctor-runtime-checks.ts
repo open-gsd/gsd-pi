@@ -354,6 +354,22 @@ export async function checkRuntimeHealth(
           }
         }
       }
+    } else if (existsSync(join(root, "hook-state.json"))) {
+      // No row: the file is from a build that kept hook state in the file. It is never read.
+      issues.push({
+        severity: "info",
+        code: "legacy_hook_state_file",
+        scope: "project",
+        unitId: "project",
+        message: "hook-state.json is left from an older build; hook state is read from the database only",
+        file: ".gsd/hook-state.json",
+        fixable: true,
+      });
+
+      if (shouldFix("legacy_hook_state_file")) {
+        rmSync(join(root, "hook-state.json"), { force: true });
+        fixesApplied.push("removed legacy hook-state.json");
+      }
     }
   } catch {
     // Non-fatal — hook state check failed

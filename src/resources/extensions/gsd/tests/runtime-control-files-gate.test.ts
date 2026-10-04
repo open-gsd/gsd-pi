@@ -3,9 +3,6 @@
 // .gsd/journal, hook-state.json and auto.lock between units must not change the
 // retry budget, the harness-abort tool block, a hook unit outcome or a pending
 // gate block. A file or journal line written by hand must not create one.
-// One exception: hook-state.json is imported once, while its scope has no
-// hook_state row, so an update from a build that kept hook state in the file
-// does not drop a pending gate block.
 
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -275,13 +272,10 @@ test("G1: a pending gate block is unchanged after hook-state.json is deleted", (
   assert.equal(block?.triggerUnitId, unitId);
 });
 
-test("upgrade: hook-state.json from an older build is imported once and re-arms the gate", (t) => {
+test("a hook-state.json from an older build with no hook state row restores nothing", (t) => {
   const base = makeProject(t, BLOCKING_GATE);
   const unitId = "M001/S01";
-  const legacyPath = join(base, ".gsd", "hook-state.json");
-  // What a build without the hook_state table left after a pause on a failed
-  // gate with a task rework still owed.
-  const legacy = JSON.stringify({
+  writeFileSync(join(base, ".gsd", "hook-state.json"), JSON.stringify({
     cycleCounts: { "security-review/plan-slice/M001/S01": 1 },
     redispatchedGateKeys: [],
     activeHook: null,
@@ -291,26 +285,20 @@ test("upgrade: hook-state.json from an older build is imported once and re-arms 
     gateBlockPending: { hookName: "security-review", triggerUnitType: "plan-slice", triggerUnitId: unitId },
     gateBlockQueue: [],
     savedAt: new Date().toISOString(),
-  });
-  writeFileSync(legacyPath, legacy, "utf-8");
-  assert.equal(readHookStateJson(hookStateScope(base)), null, "no hook state row before the first restore");
+  }), "utf-8");
 
   restoreHookState(base);
 
-  assert.equal(readHookStateJson(hookStateScope(base)), legacy, "the file is stored as the hook state row");
-  assert.deepEqual(peekRetryTrigger(), { unitType: "plan-slice", unitId }, "the pending retry is kept");
-  assert.equal(isGateBlockPending(), true, "the pending gate block is kept");
-  // Auto-start re-arms the blocked gate from the restored block (#2194).
+  assert.equal(readHookStateJson(hookStateScope(base)), null, "the file is not stored as the hook state row");
+  assert.equal(isGateBlockPending(), false, "the file creates no gate block");
+  assert.equal(isRetryPending(), false, "the file creates no retry");
+  assert.equal(peekRetryTrigger(), null);
   const sidecarQueue: Array<{ unitType: string }> = [];
   reconcileRestoredGateBlock(base, sidecarQueue as any);
-  assert.deepEqual(sidecarQueue.map((item) => item.unitType), ["hook/security-review"]);
-
-  // The import is one-time: with a row present, an edited file clears nothing.
-  writeFileSync(legacyPath, JSON.stringify({ cycleCounts: {}, retryPending: false, gateBlockPending: null }), "utf-8");
-  resetHookState();
-  restoreHookState(base);
-  assert.equal(isGateBlockPending(), true, "the row, not the file, decides the gate block");
-  assert.equal(isRetryPending(), true, "the row, not the file, decides the retry");
+  assert.deepEqual(sidecarQueue, [], "no gate hook is re-armed");
+  // The first hook cycle is not counted as already spent.
+  persistHookState(base);
+  assert.deepEqual(JSON.parse(readHookStateJson(hookStateScope(base))!).cycleCounts, {});
 });
 
 test("the database replacement fence rejects every runtime-control write", (t) => {

@@ -23,6 +23,7 @@ export type DoctorIssueCode =
   | "stale_paused_session"
   | "stale_parallel_session"
   | "stale_hook_state"
+  | "legacy_hook_state_file"
   | "uat_retry_exhausted"
   | "activity_log_bloat"
   | "state_file_stale"
