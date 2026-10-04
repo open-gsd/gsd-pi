@@ -23,7 +23,8 @@ export const LIFECYCLE_SHADOW_SOURCE_FILES = Object.freeze({
 const SOURCE_FILES = LIFECYCLE_SHADOW_SOURCE_FILES;
 
 // The read interface answers every decision reader. Until the read cutover it
-// must answer from these legacy readers only.
+// must answer from these legacy readers only. The gate follows direct calls
+// only, so the row mappers that are passed to `.map()` are listed as entries.
 const READ_INTERFACE_ENTRIES = [
   "readMilestones",
   "readMilestone",
@@ -32,6 +33,8 @@ const READ_INTERFACE_ENTRIES = [
   "readSliceTasks",
   "readMilestoneStatus",
   "readProgressCounts",
+  "toMilestoneRead",
+  "toSliceRead",
 ];
 const READ_INTERFACE_LEGACY_READERS = [
   "./queries.js#getAllMilestones",
