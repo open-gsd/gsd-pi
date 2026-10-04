@@ -30,11 +30,13 @@ import {
   resolveCapturesPath,
   parseTriageOutput,
 } from "../captures.ts";
+import { addBacklogItem } from "../backlog.ts";
 import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
 import { holdQuickTask } from "../db/writers/unit-dispatch-sidecars.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { _getAdapter, closeDatabase, insertMilestone, isDbAvailable, openDatabase } from "../gsd-db.ts";
+import { rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
 import { invalidateStateCache } from "../state.ts";
 import { executeCaptureComplete, executeCaptureResolve } from "../tools/capture-tools.ts";
 import { piExecutionInvocation } from "../execution-invocation.ts";
@@ -159,6 +161,96 @@ test("captures: a CAPTURES.md section the database does not hold is not read, an
   assert.ok(rendered.includes(`### ${id}`));
   assert.match(rendered, /### CAP-legacy01\n\*\*Text:\*\* stop the run/, "the render keeps the section for doctor");
   assert.equal(operations("capture.import"), 0);
+});
+
+test("captures: the render keeps every CAPTURES.md byte the database does not own", (t) => {
+  const tmp = makeTempDir("cap-keep");
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const path = join(tmp, ".gsd", "CAPTURES.md");
+  const id = appendCapture(tmp, "first thought");
+  // What older releases, their spike and sketch prompts, and users wrote into the file.
+  const legacySection = [
+    "### CAP-legacy09",
+    "**Text:** a long thought",
+    "that continues on a second line",
+    "**Captured:** 2026-03-13T09:00:00.000Z",
+    "**Status:** pending",
+    "**Priority:** high",
+  ];
+  const spikeLine = "Spike 001: see .gsd/spikes/001/README.md";
+  const handNote = "hand note under the capture";
+  const sketchLine = "Sketch 002: see .gsd/sketches/002/README.md";
+  writeFileSync(path, readFileSync(path, "utf-8")
+    .replace("**Status:** pending\n", `**Status:** pending\n${handNote}\n`)
+    .replace(`### ${id}`, [spikeLine, "", ...legacySection, "", `### ${id}`].join("\n"))
+    + `${sketchLine}\n`);
+
+  const id2 = appendCapture(tmp, "second thought");
+  markCaptureResolved(tmp, id, "note", "acknowledged", "informational");
+
+  const [first, second] = loadAllCaptures(tmp);
+  assert.equal(readFileSync(path, "utf-8"), [
+    "# Captures",
+    "",
+    "Rendered from the GSD database; edits to the captures below are not read.",
+    "",
+    spikeLine,
+    "",
+    ...legacySection,
+    "",
+    `### ${id}`,
+    "**Text:** first thought",
+    `**Captured:** ${first!.timestamp}`,
+    "**Status:** resolved",
+    "**Classification:** note",
+    "**Resolution:** acknowledged",
+    "**Rationale:** informational",
+    `**Resolved:** ${first!.resolvedAt}`,
+    handNote,
+    sketchLine,
+    "",
+    `### ${id2}`,
+    "**Text:** second thought",
+    `**Captured:** ${second!.timestamp}`,
+    "**Status:** pending",
+    "",
+  ].join("\n"));
+});
+
+test("captures: a value with a line break is one field line, so a second render does not repeat it", (t) => {
+  const tmp = makeTempDir("cap-multiline");
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const path = join(tmp, ".gsd", "CAPTURES.md");
+
+  appendCapture(tmp, "line one\nline two");
+  const rendered = readFileSync(path, "utf-8");
+  appendCapture(tmp, "another thought");
+
+  assert.match(rendered, /^\*\*Text:\*\* line one line two$/m);
+  assert.ok(readFileSync(path, "utf-8").startsWith(rendered), "the first section is not changed by the second render");
+  assert.equal(loadAllCaptures(tmp)[0]!.text, "line one\nline two", "the database keeps the text as given");
+});
+
+test("captures: a full projection rebuild writes CAPTURES.md and BACKLOG.md again", async (t) => {
+  const tmp = makeTempDir("cap-rebuild");
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const capturesPath = join(tmp, ".gsd", "CAPTURES.md");
+  const backlogPath = join(tmp, ".gsd", "BACKLOG.md");
+  appendCapture(tmp, "keep me");
+  addBacklogItem(tmp, "OAuth support");
+  const captures = readFileSync(capturesPath, "utf-8");
+  const backlog = readFileSync(backlogPath, "utf-8");
+  // The first rebuild settles the Projection Work rows of the two operations,
+  // so the second one writes the files only through the full render.
+  assert.deepEqual((await rebuildMarkdownProjectionsFromDb(tmp)).errors, []);
+  rmSync(capturesPath);
+  rmSync(backlogPath);
+
+  const rebuild = await rebuildMarkdownProjectionsFromDb(tmp);
+
+  assert.deepEqual(rebuild.errors, []);
+  assert.equal(readFileSync(capturesPath, "utf-8"), captures);
+  assert.equal(readFileSync(backlogPath, "utf-8"), backlog);
 });
 
 test("captures: doctor reports un-imported CAPTURES.md sections and imports them only on the operator's --fix", async (t) => {

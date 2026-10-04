@@ -293,30 +293,53 @@ export function importFileCaptures(basePath: string, captures: readonly CaptureE
     }));
 }
 
-/** Write CAPTURES.md from the database. A file section that is not imported yet is kept, so that doctor can import it. */
+const FIELD_LINE_RE = /^\*\*(?:Text|Captured|Status|Classification|Resolution|Rationale|Resolved|Milestone|Executed):\*\*/;
+
+/** One field line. The file holds one line per field, so a line break in a value is written as a space. */
+function fieldLine(key: string, value: string): string {
+  return `**${key}:** ${value.replace(/\s*\n\s*/g, " ")}`;
+}
+
+/**
+ * Write CAPTURES.md from the database: the field lines under each database
+ * capture's `### <id>` heading are set, and a new capture is appended. Every
+ * other line of the file is kept as it is: free text, a note under a capture,
+ * and a section that is not imported yet (doctor imports it).
+ */
 export function renderCapturesProjection(basePath: string): void {
   const rows = loadAllCaptures(basePath);
   if (rows.length === 0) return;
-  const content = [
-    "# Captures",
-    "",
-    "Rendered from the GSD database; edits to the captures below are not read.",
-    "",
-    ...[...rows, ...unimportedFileCaptures(basePath)].flatMap((capture) => [
-      `### ${capture.id}`,
-      `**Text:** ${capture.text}`,
-      `**Captured:** ${capture.timestamp}`,
-      `**Status:** ${capture.status}`,
-      ...(capture.classification ? [`**Classification:** ${capture.classification}`] : []),
-      ...(capture.resolution ? [`**Resolution:** ${capture.resolution}`] : []),
-      ...(capture.rationale ? [`**Rationale:** ${capture.rationale}`] : []),
-      ...(capture.resolvedAt ? [`**Resolved:** ${capture.resolvedAt}`] : []),
-      ...(capture.resolvedInMilestone ? [`**Milestone:** ${capture.resolvedInMilestone}`] : []),
-      ...(capture.executedAt ? [`**Executed:** ${capture.executedAt}`] : []),
-      "",
-    ]),
-  ].join("\n");
   const path = resolveCapturesPath(basePath);
+  const lines = existsSync(path)
+    ? readFileSync(path, "utf-8").split("\n")
+    : ["# Captures", "", "Rendered from the GSD database; edits to the captures below are not read.", "", ""];
+  for (const capture of rows) {
+    const fields = [
+      fieldLine("Text", capture.text),
+      fieldLine("Captured", capture.timestamp),
+      fieldLine("Status", capture.status),
+      ...(capture.classification ? [fieldLine("Classification", capture.classification)] : []),
+      ...(capture.resolution ? [fieldLine("Resolution", capture.resolution)] : []),
+      ...(capture.rationale ? [fieldLine("Rationale", capture.rationale)] : []),
+      ...(capture.resolvedAt ? [fieldLine("Resolved", capture.resolvedAt)] : []),
+      ...(capture.resolvedInMilestone ? [fieldLine("Milestone", capture.resolvedInMilestone)] : []),
+      ...(capture.executedAt ? [fieldLine("Executed", capture.executedAt)] : []),
+    ];
+    const header = lines.findIndex((line) => line.startsWith("### ") && line.slice(4).trim() === capture.id);
+    if (header === -1) {
+      // Append at the end of the file, with one blank line before the heading
+      if (lines[lines.length - 1] === "") lines.pop();
+      if (lines.length > 0 && lines[lines.length - 1] !== "") lines.push("");
+      lines.push(`### ${capture.id}`, ...fields, "");
+      continue;
+    }
+    // The section ends at the next heading. Only its field lines are replaced.
+    let end = header + 1;
+    while (end < lines.length && !lines[end].startsWith("### ")) end++;
+    const kept = lines.slice(header + 1, end).filter((line) => !FIELD_LINE_RE.test(line));
+    lines.splice(header + 1, end - header - 1, ...fields, ...kept);
+  }
+  const content = lines.join("\n");
   atomicWriteSync(path, content, "utf-8");
   // Not registered in the compat marker: a worktree base path writes this
   // project-root file, and its own marker cannot hold a key outside its .gsd.
