@@ -1,5 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: Gate for the schema fence that refuses a hierarchy row without a lifecycle row after the Authority Epoch cutover.
+// File Purpose: Gate for the schema fence of the hierarchy tables after the Authority Epoch cutover: no row without a lifecycle row, no status change outside a Domain Operation.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -26,6 +26,8 @@ import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 
 const OUTSIDE_OPERATION = /a hierarchy row needs a lifecycle row from the same Domain Operation/;
 const UNCOVERED = /a hierarchy row has no lifecycle row/;
+const STATUS_OUTSIDE_OPERATION = /the status of a hierarchy row changes only in a Domain Operation/;
+const HIERARCHY_TABLES = ["milestones", "slices", "tasks"];
 
 const tempDirs = new Set<string>();
 
@@ -158,6 +160,49 @@ test("after the cutover a write to a hierarchy row that exists is not fenced", (
   assert.equal(insertMilestone({ id: "M001", title: "Ignored" }), false);
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Retitled", status: "pending" });
   assert.equal(getTask("M001", "S01", "T01")?.title, "Retitled");
+});
+
+function hierarchyStatuses(): unknown {
+  return [getMilestone("M001")?.status, getSlice("M001", "S01")?.status, getTask("M001", "S01", "T01")?.status];
+}
+
+test("after the cutover a status change of a hierarchy row outside a Domain Operation is refused", () => {
+  openAdoptedProject();
+  advanceAuthorityEpoch();
+
+  for (const table of HIERARCHY_TABLES) {
+    assert.throws(() => db().prepare(`UPDATE ${table} SET status = 'complete'`).run(), STATUS_OUTSIDE_OPERATION);
+  }
+  assert.deepEqual(hierarchyStatuses(), ["active", "pending", "pending"]);
+});
+
+test("after the cutover a Domain Operation still changes the status of a hierarchy row", () => {
+  openAdoptedProject();
+  advanceAuthorityEpoch();
+
+  operate(() => {
+    for (const table of HIERARCHY_TABLES) db().prepare(`UPDATE ${table} SET status = 'in_progress'`).run();
+  });
+
+  assert.deepEqual(hierarchyStatuses(), ["in_progress", "in_progress", "in_progress"]);
+});
+
+test("before the cutover a status change outside a Domain Operation is not fenced", () => {
+  openAdoptedProject();
+
+  for (const table of HIERARCHY_TABLES) db().prepare(`UPDATE ${table} SET status = 'complete'`).run();
+
+  assert.deepEqual(hierarchyStatuses(), ["complete", "complete", "complete"]);
+});
+
+test("after the cutover the status of a row with no lifecycle row can be fixed for the backfill", () => {
+  openAdoptedProject();
+  advanceAuthorityEpoch();
+  insertTaskAsEarlierBuild("T02", "wip-custom");
+
+  db().prepare("UPDATE tasks SET status = 'pending' WHERE id = 'T02'").run();
+
+  assert.equal(getTask("M001", "S01", "T02")?.status, "pending");
 });
 
 test("the Authority Epoch cannot advance while a hierarchy row has no lifecycle row", () => {

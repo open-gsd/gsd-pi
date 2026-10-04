@@ -12,7 +12,7 @@
 //   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save task SUMMARY P12
 //   G5 render failure          handler writes no projection P12
 //   G6 evidence before unlock  slice P24, milestone P27
-//   G7 epoch fence             direct UPDATE outside an operation P34
+//   G7 epoch fence             none
 //   G8 legacy counters         P36
 //
 // Legs in other files:
@@ -421,10 +421,15 @@ describe("G7: Authority Epoch fence", () => {
   });
 
   test("a direct UPDATE on tasks outside a Domain Operation aborts", async () => {
-    await openFixture();
+    applyLifecycleBackfill(await openFixture());
+    db().prepare("UPDATE project_authority SET authority_epoch = authority_epoch + 1").run();
+    const tablesBefore = snapshotWorkflowTables();
 
-    expectedFail("P34", () => assert.throws(() =>
-      db().prepare("UPDATE tasks SET status = 'complete' WHERE slice_id = 'S02'").run()));
+    assert.throws(
+      () => db().prepare("UPDATE tasks SET status = 'complete' WHERE slice_id = 'S02'").run(),
+      /the status of a hierarchy row changes only in a Domain Operation/,
+    );
+    assert.deepEqual(snapshotWorkflowTables(), tablesBefore, "the refused write leaves no row change");
   });
 });
 

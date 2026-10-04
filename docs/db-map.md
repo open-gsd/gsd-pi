@@ -1120,7 +1120,12 @@ last_authority_epoch  INTEGER NOT NULL
   Domain Operation is open, and `trg_project_authority_lifecycle_coverage`
   refuses the `project_authority` update of a Domain Operation, and of the
   cutover itself, while a hierarchy row has no lifecycle row. The Domain
-  Operation error names each such row and `/gsd db adopt`. Epoch 0 is not
+  Operation error names each such row and `/gsd db adopt`.
+  `trg_milestones_status_authority`, `trg_slices_status_authority` and
+  `trg_tasks_status_authority` refuse a change of the legacy `status` of a
+  hierarchy row that has a lifecycle row when no Domain Operation is open.
+  Other columns are not fenced, and a row with no lifecycle row is not fenced,
+  so its status can be fixed for the backfill. Epoch 0 is not
   fenced. A database that is already above epoch 0 and holds such a row (a
   canary cutover by an earlier build) is repaired when it opens: the open
   writes a verified backup, runs `lifecycle.backfill` for those rows and logs
