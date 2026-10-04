@@ -34,7 +34,14 @@ import { logWarning, logError } from "../workflow-logger.js";
 import {
   isMilestoneLifecycleAdopted,
   readMilestoneCloseoutAuthorization,
+  readMilestoneLifecycleStatus,
 } from "../db/milestone-closeout-readiness.js";
+import { readCloseoutAttemptId } from "../db/writers/closeout.js";
+import {
+  pendingRequiredCloseoutEffects,
+  prepareCloseout,
+} from "../closeout-domain-operation.js";
+import { milestoneCloseoutEffects } from "../milestone-closeout-effects.js";
 import { closeQualityGatesFromEvidence } from "../quality-gate-closure.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import {
@@ -86,6 +93,11 @@ export interface CompleteMilestoneParams {
 export interface CompleteMilestoneResult {
   milestoneId: string;
   summaryPath: string;
+  /**
+   * Set when the Closeout Plan is stored and the Milestone is still open: it
+   * completes when the host settles these effects (the milestone merge).
+   */
+  pendingCloseoutEffects?: string[];
   stale?: boolean;
   alreadyComplete?: boolean;
   operationId?: string;
@@ -191,6 +203,11 @@ function completionCloseout(params: CompleteMilestoneParams): MilestoneCompletio
   };
 }
 
+function milestoneSummaryPath(artifactBasePath: string, milestoneId: string): string {
+  return resolveMilestoneFile(artifactBasePath, milestoneId, "SUMMARY") ??
+    targetMilestoneFile(artifactBasePath, milestoneId, "SUMMARY", getMilestone(milestoneId)?.title);
+}
+
 export async function handleCompleteMilestone(
   params: CompleteMilestoneParams,
   basePath: string,
@@ -262,15 +279,41 @@ export async function handleCompleteMilestone(
           milestoneValidationAuthorization: authorization,
         });
       }
+      const audit = {
+        ...(params.actorName ? { actorName: params.actorName } : {}),
+        ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
+      };
+      const lifecycleStatus = readMilestoneLifecycleStatus(params.milestoneId);
+      const effects = lifecycleStatus === "ready" || lifecycleStatus === "in_progress"
+        ? milestoneCloseoutEffects(basePath, params.milestoneId)
+        : [];
+      // A Closeout Plan must cite a succeeded Attempt. A Milestone closed out
+      // on a validation Waiver has none, so it completes here as before.
+      if (effects.length > 0 && readCloseoutAttemptId(params.milestoneId)) {
+        const plan = prepareCloseout({
+          invocation: { ...invocation, idempotencyKey: `${invocation.idempotencyKey}/closeout.prepare` },
+          milestoneId: params.milestoneId,
+          sourceRevision: currentSourceRevision!,
+          closeout: completionCloseout(params),
+          audit,
+          effects,
+        });
+        const pending = pendingRequiredCloseoutEffects(plan);
+        if (pending.length > 0) {
+          invalidateStateCache();
+          return {
+            milestoneId: params.milestoneId,
+            summaryPath: milestoneSummaryPath(artifactBasePath, params.milestoneId),
+            pendingCloseoutEffects: pending.map((effect) => effect.effectKind),
+          };
+        }
+      }
       canonicalReceipt = completeMilestone({
         invocation,
         milestoneId: params.milestoneId,
         sourceRevision: currentSourceRevision!,
         closeout: completionCloseout(params),
-        audit: {
-          ...(params.actorName ? { actorName: params.actorName } : {}),
-          ...(params.triggerReason ? { triggerReason: params.triggerReason } : {}),
-        },
+        audit,
       });
       completedAt = canonicalReceipt.completedAt;
       alreadyComplete = canonicalReceipt.status === "replayed";
@@ -342,14 +385,7 @@ export async function handleCompleteMilestone(
     canonicalReceipt?.closeout ?? completionCloseout(params),
   );
 
-  const summaryPath =
-    resolveMilestoneFile(artifactBasePath, params.milestoneId, "SUMMARY") ??
-    targetMilestoneFile(
-      artifactBasePath,
-      params.milestoneId,
-      "SUMMARY",
-      getMilestone(params.milestoneId)?.title,
-    );
+  const summaryPath = milestoneSummaryPath(artifactBasePath, params.milestoneId);
 
   const isCurrent = canonicalReceipt
     ? () => isCurrentMilestoneCompletionOperation(canonicalReceipt.operationId, params.milestoneId)

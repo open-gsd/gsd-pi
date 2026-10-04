@@ -1,0 +1,495 @@
+// Project/App: gsd-pi
+// File Purpose: Behavior contract for the Milestone Closeout Plan and its Settlement Receipts.
+
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, test } from "node:test";
+
+import { mergeMilestoneToMain } from "../auto-worktree-merge.ts";
+import {
+  _resetPreTeardownSafetyDepsForTests,
+  _setPreTeardownSafetyDepsForTests,
+} from "../auto-worktree-merge-pre-teardown.ts";
+import {
+  pendingRequiredCloseoutEffects,
+  prepareCloseout,
+  readMilestoneCloseoutPlan,
+  recordSettlementReceipt,
+  settleCloseout,
+} from "../closeout-domain-operation.ts";
+import type { DomainOperationContext } from "../db/domain-operation.ts";
+import { readMilestoneLifecycleStatus } from "../db/milestone-closeout-readiness.ts";
+import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import type { ExecutionInvocation } from "../execution-invocation.ts";
+import { clearParseCache } from "../files.ts";
+import {
+  _getAdapter,
+  closeDatabase,
+  executeDomainOperation,
+  getMilestone,
+  insertMilestone,
+  insertSlice,
+  insertTask,
+  openDatabase,
+  readDomainOperationFence,
+} from "../gsd-db.ts";
+import {
+  completeMilestone,
+  reopenMilestone,
+} from "../milestone-lifecycle-domain-operation.ts";
+import { MergeConflictError } from "../git-service.ts";
+import { _clearGsdRootCache, clearPathCache } from "../paths.ts";
+import { publishMilestone } from "../publication.ts";
+import { deriveState, invalidateStateCache } from "../state.ts";
+import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
+import { handleValidateMilestone } from "../tools/validate-milestone.ts";
+import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
+import { _resetServiceCache } from "../worktree.ts";
+import { worktreePath } from "../worktree-manager.ts";
+
+const tempDirs = new Set<string>();
+
+const MERGE_EFFECT = { effectKind: "milestone-merge", required: true };
+const PUSH_EFFECT = { effectKind: "integration-push", required: false };
+
+const closeout = {
+  title: "Closeout Plan",
+  oneLiner: "Closed out one Milestone through a plan and receipts.",
+  narrative: "The Milestone was prepared, its host effects settled, then it completed.",
+  successCriteriaResults: "Passed.",
+  definitionOfDoneResults: "Passed.",
+  requirementOutcomes: "Covered.",
+  keyDecisions: [],
+  keyFiles: [],
+  lessonsLearned: [],
+  followUps: "None.",
+  deviations: "None.",
+};
+
+function invocation(idempotencyKey: string): ExecutionInvocation {
+  return { idempotencyKey, sourceTransport: "pi-tool", actorType: "agent" };
+}
+
+function git(args: string[], cwd: string): string {
+  return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" }).trim();
+}
+
+function atFence(idempotencyKey: string, write: (context: Readonly<DomainOperationContext>) => void): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.closeout.fixture",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { idempotencyKey },
+  }, (context) => {
+    write(context);
+    return {
+      events: [{
+        eventType: "test.closeout.fixture",
+        entityType: "milestone",
+        entityId: "M001",
+        payload: { idempotencyKey },
+        destinations: ["test"],
+      }],
+      projections: [{ projectionKey: `test/${idempotencyKey}`, projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+}
+
+function sourceRevision(basePath: string): string {
+  const source = captureVerificationSourceSnapshot([{ id: "project", cwd: basePath }]);
+  if (!source.ok) assert.fail(source.error);
+  return source.snapshot.aggregateRevision;
+}
+
+/** An adopted, validated Milestone M001 whose only Slice and Task are complete. */
+async function validatedMilestone(): Promise<{ basePath: string; sourceRevision: string }> {
+  const basePath = realpathSync(mkdtempSync(join(tmpdir(), "gsd-closeout-plan-")));
+  tempDirs.add(basePath);
+  mkdirSync(join(basePath, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(basePath, ".gitignore"), ".gsd/\n");
+  writeFileSync(join(basePath, "source.ts"), "export const source = 1;\n");
+  git(["init", "-b", "main"], basePath);
+  git(["config", "user.email", "test@example.com"], basePath);
+  git(["config", "user.name", "Test"], basePath);
+  git(["add", "."], basePath);
+  git(["commit", "-m", "fixture"], basePath);
+
+  assert.equal(openDatabase(join(basePath, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M001", title: "Closeout Plan", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", status: "complete" });
+  atFence("fixture/adopt", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed",
+    });
+  });
+  const validated = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: "| S01 | delivered |",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+    verdictRationale: "All current database evidence passes.",
+  }, basePath, { invocation: invocation("fixture/validate"), skipBrowserEvidenceGate: true });
+  assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
+  return { basePath, sourceRevision: sourceRevision(basePath) };
+}
+
+function prepare(revision: string, key: string, effects = [MERGE_EFFECT, PUSH_EFFECT]) {
+  return prepareCloseout({
+    invocation: invocation(key),
+    milestoneId: "M001",
+    sourceRevision: revision,
+    closeout,
+    effects,
+  });
+}
+
+function count(table: string): number {
+  return Number(_getAdapter()!.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()?.["n"]);
+}
+
+const savedCwd = process.cwd();
+const savedHome = process.env.HOME;
+const savedGsdHome = process.env.GSD_HOME;
+
+afterEach(() => {
+  _resetPreTeardownSafetyDepsForTests();
+  process.chdir(savedCwd);
+  if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
+  if (savedGsdHome === undefined) delete process.env.GSD_HOME; else process.env.GSD_HOME = savedGsdHome;
+  _clearGsdRootCache();
+  _resetServiceCache();
+  invalidateStateCache();
+  clearPathCache();
+  clearParseCache();
+  closeDatabase();
+  for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
+  tempDirs.clear();
+});
+
+test("prepareCloseout stores the plan and its effects while the Milestone stays open", async () => {
+  const fixture = await validatedMilestone();
+
+  const plan = prepare(fixture.sourceRevision, "closeout/prepare");
+
+  assert.deepEqual(plan.effects.map((effect) => [effect.effectKind, effect.required, effect.receipt]), [
+    ["milestone-merge", true, null],
+    ["integration-push", false, null],
+  ]);
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+  assert.equal(getMilestone("M001")?.status, "active");
+});
+
+test("milestone.complete is refused until the required effect has a Settlement Receipt", async () => {
+  const fixture = await validatedMilestone();
+  prepare(fixture.sourceRevision, "closeout/prepare");
+
+  assert.throws(
+    () => completeMilestone({
+      invocation: invocation("closeout/complete-early"),
+      milestoneId: "M001",
+      sourceRevision: fixture.sourceRevision,
+      closeout,
+    }),
+    /closeout effect milestone-merge has no Settlement Receipt/,
+  );
+  assert.throws(() => settleCloseout("M001"), /closeout effect milestone-merge has no Settlement Receipt/);
+  assert.equal(getMilestone("M001")?.status, "active");
+
+  recordSettlementReceipt({
+    milestoneId: "M001",
+    effectKind: "milestone-merge",
+    outcome: "performed",
+    externalRef: "abc123",
+    proof: { commitSha: "abc123" },
+  });
+  const completion = settleCloseout("M001");
+
+  assert.equal(completion?.canonicalStatus, "completed");
+  assert.equal(completion?.closeout.title, "Closeout Plan");
+  assert.equal(getMilestone("M001")?.status, "complete");
+  // The push effect is not required: it stays open for the next closeout to retry.
+  const pushEffect = readMilestoneCloseoutPlan("M001")!.effects[1]!;
+  assert.equal(pushEffect.receipt, null);
+});
+
+test("a Settlement Receipt is recorded once and survives a repeated prepare", async () => {
+  const fixture = await validatedMilestone();
+  const plan = prepare(fixture.sourceRevision, "closeout/prepare");
+  const receipt = recordSettlementReceipt({
+    milestoneId: "M001",
+    effectKind: "milestone-merge",
+    outcome: "performed",
+    externalRef: "abc123",
+    proof: { commitSha: "abc123" },
+  });
+
+  const again = recordSettlementReceipt({
+    milestoneId: "M001",
+    effectKind: "milestone-merge",
+    outcome: "performed",
+    externalRef: "def456",
+    proof: { commitSha: "def456" },
+  });
+  const prepared = prepare(fixture.sourceRevision, "closeout/prepare-retry");
+
+  assert.equal(again.settlementReceiptId, receipt.settlementReceiptId);
+  assert.equal(again.externalRef, "abc123");
+  assert.equal(prepared.closeoutPlanId, plan.closeoutPlanId);
+  assert.deepEqual(pendingRequiredCloseoutEffects(prepared), []);
+  assert.equal(count("workflow_closeout_plans"), 1);
+  assert.equal(count("workflow_settlement_receipts"), 1);
+});
+
+test("a later effect cannot settle before the required effect ahead of it", async () => {
+  const fixture = await validatedMilestone();
+  prepare(fixture.sourceRevision, "closeout/prepare");
+
+  assert.throws(
+    () => recordSettlementReceipt({
+      milestoneId: "M001",
+      effectKind: "integration-push",
+      outcome: "performed",
+      externalRef: "origin/main",
+      proof: { remote: "origin" },
+    }),
+    /settlement receipt requires current plan and prior ordinal receipts/,
+  );
+  assert.equal(count("workflow_settlement_receipts"), 0);
+});
+
+test("prepareCloseout refuses a Milestone whose validation does not cover the current source", async () => {
+  const fixture = await validatedMilestone();
+  writeFileSync(join(fixture.basePath, "source.ts"), "export const source = 2;\n");
+
+  assert.throws(
+    () => prepare(sourceRevision(fixture.basePath), "closeout/prepare-drifted"),
+    /canonical validation is not current/,
+  );
+  assert.equal(count("workflow_closeout_plans"), 0);
+});
+
+test("receipts of a plan prepared before a reopen do not settle the reopened Milestone", async () => {
+  const fixture = await validatedMilestone();
+  prepare(fixture.sourceRevision, "closeout/prepare");
+  recordSettlementReceipt({
+    milestoneId: "M001",
+    effectKind: "milestone-merge",
+    outcome: "performed",
+    externalRef: "abc123",
+    proof: { commitSha: "abc123" },
+  });
+  settleCloseout("M001");
+
+  reopenMilestone({
+    invocation: invocation("closeout/reopen"),
+    milestoneId: "M001",
+    reason: "More work is needed.",
+  });
+
+  assert.equal(readMilestoneCloseoutPlan("M001"), null);
+});
+
+// ─── Host effects: merge, push, completion order ─────────────────────────────
+
+const completionParams = {
+  milestoneId: "M001",
+  title: "Closeout Plan",
+  oneLiner: "Closed out one Milestone through a plan and receipts.",
+  narrative: "The Milestone was prepared, its host effects settled, then it completed.",
+  verificationPassed: true,
+};
+
+function mergeEffectReceipt() {
+  return readMilestoneCloseoutPlan("M001")?.effects
+    .find((effect) => effect.effectKind === "milestone-merge")?.receipt ?? null;
+}
+
+/**
+ * M001 runs in its own worktree on `milestone/M001` and is validated there.
+ * M002 depends on M001. `autoPush` adds a remote the push can be pointed at.
+ */
+async function milestoneInWorktree(options: { autoPush?: boolean } = {}): Promise<{
+  repo: string;
+  worktree: string;
+  remote: string;
+}> {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-closeout-merge-")));
+  tempDirs.add(root);
+  process.env.HOME = join(root, "home");
+  process.env.GSD_HOME = join(root, "home", ".gsd");
+  mkdirSync(process.env.GSD_HOME, { recursive: true });
+  _clearGsdRootCache();
+  _resetServiceCache();
+
+  const repo = join(root, "repo");
+  const remote = join(root, "origin.git");
+  mkdirSync(repo);
+  git(["init", "-b", "main"], repo);
+  git(["config", "user.email", "test@example.com"], repo);
+  git(["config", "user.name", "Test"], repo);
+  writeFileSync(join(repo, ".gitignore"), ".gsd/\n.gsd-worktrees/\n");
+  writeFileSync(join(repo, "feature.txt"), "base\n");
+  git(["add", "."], repo);
+  git(["commit", "-m", "init"], repo);
+  git(["init", "--bare", remote], root);
+  git(["remote", "add", "origin", remote], repo);
+  git(["push", "origin", "main"], repo);
+
+  const worktree = worktreePath(repo, "M001");
+  git(["worktree", "add", "-b", "milestone/M001", worktree], repo);
+  writeFileSync(join(worktree, "feature.txt"), "milestone work\n");
+  git(["commit", "-am", "feat: milestone work"], worktree);
+
+  for (const base of [repo, worktree]) {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    if (options.autoPush) {
+      writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\ngit:\n  auto_push: true\n---\n");
+    }
+  }
+
+  assert.equal(openDatabase(join(repo, ".gsd", "gsd.db")), true);
+  insertMilestone({ id: "M001", title: "Closeout Plan", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", status: "complete" });
+  insertMilestone({ id: "M002", title: "Dependent", status: "queued", depends_on: ["M001"] });
+  atFence("fixture/adopt", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed",
+    });
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed",
+    });
+  });
+  const validated = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: "| S01 | delivered |",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+    verdictRationale: "All current database evidence passes.",
+  }, worktree, { invocation: invocation("fixture/validate"), skipBrowserEvidenceGate: true });
+  assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
+
+  process.chdir(worktree);
+  const prepared = await handleCompleteMilestone(completionParams, worktree, invocation("tool/complete"));
+  assert.ok(!("error" in prepared), `closeout fixture failed: ${"error" in prepared ? prepared.error : ""}`);
+  assert.deepEqual(prepared.pendingCloseoutEffects, ["milestone-merge"]);
+  return { repo, worktree, remote };
+}
+
+function commitOnMain(repo: string, content: string): void {
+  writeFileSync(join(repo, "feature.txt"), content);
+  git(["commit", "-am", "chore: change on main"], repo);
+}
+
+const ROADMAP = "# M001: Closeout Plan\n- [x] **S01: Done**\n";
+
+test("the Milestone stays open after gsd_complete_milestone and completes when the merge settles", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(git(["show", "main:feature.txt"], repo), "milestone work");
+  const receipt = mergeEffectReceipt();
+  assert.equal(receipt?.outcome, "performed");
+  assert.equal(receipt?.externalRef, git(["rev-parse", "main"], repo));
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
+  assert.equal(existsSync(worktree), false);
+});
+
+test("a merge conflict leaves the Milestone open and its dependent locked", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  commitOnMain(repo, "conflicting change on main\n");
+
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), MergeConflictError);
+
+  assert.equal(mergeEffectReceipt(), null);
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+  assert.equal(existsSync(worktree), true);
+  invalidateStateCache();
+  const state = await deriveState(repo);
+  assert.equal(state.activeMilestone?.id, "M001");
+  assert.notEqual(state.registry.find((entry) => entry.id === "M002")?.status, "active");
+});
+
+test("a run that stops after the merge commit finishes from the receipt without a second merge", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  _setPreTeardownSafetyDepsForTests({
+    existsSync: () => { throw new Error("process stopped before cleanup"); },
+  });
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /process stopped before cleanup/);
+  _resetPreTeardownSafetyDepsForTests();
+  const mergeCommit = git(["rev-parse", "main"], repo);
+  assert.equal(mergeEffectReceipt()?.externalRef, mergeCommit);
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(existsSync(worktree), true);
+
+  // Main moves on. A second squash merge of the same branch would now conflict.
+  commitOnMain(repo, "later change on main\n");
+  const mainHead = git(["rev-parse", "main"], repo);
+  process.chdir(worktree);
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(git(["rev-parse", "main"], repo), mainHead);
+  assert.equal(git(["show", "main:feature.txt"], repo), "later change on main");
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(["branch", "--list", "milestone/M001"], repo), "");
+});
+
+test("a failed push leaves the push effect without a receipt and the next closeout pushes again", async () => {
+  const { repo, remote } = await milestoneInWorktree({ autoPush: true });
+  const pushEffect = () => readMilestoneCloseoutPlan("M001")!.effects
+    .find((effect) => effect.effectKind === "integration-push")!;
+  git(["remote", "set-url", "origin", join(remote, "missing")], repo);
+
+  const merged = mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(merged.pushed, false);
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(pushEffect().receipt, null);
+
+  git(["remote", "set-url", "origin", remote], repo);
+  const retried = publishMilestone({
+    basePath: repo,
+    milestoneId: "M002",
+    milestoneTitle: "Dependent",
+    integrationBranch: "main",
+    milestoneBranch: "milestone/M002",
+    sliceSummaries: [],
+    nothingToCommit: true,
+    prefs: { autoPush: true, autoPr: false },
+  });
+
+  assert.equal(retried.pushed, true);
+  assert.equal(git(["rev-parse", "main"], remote), git(["rev-parse", "main"], repo));
+  assert.equal(pushEffect().receipt?.externalRef, "origin/main");
+});

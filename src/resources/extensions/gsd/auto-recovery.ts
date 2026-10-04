@@ -21,7 +21,6 @@ import {
   insertGateRun,
   getMilestone,
   immediateTransaction,
-  updateMilestoneStatus,
   getCompletedMilestoneTaskFileHints,
   getMilestoneCommitAttributionShas,
   recordMilestoneCommitAttribution,
@@ -68,10 +67,6 @@ import {
   readTerminalTaskRecoveryAbort,
   resolveArtifactVerificationBase,
 } from "./artifact-verification.js";
-import {
-  proveMilestoneCloseout,
-  type CloseoutProofFailureReason,
-} from "./milestone-closeout-proof.js";
 import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
 import { compareLifecycleShadow } from "./db/lifecycle-shadow-comparison.js";
 import { readCurrentMilestoneCompletionReceipt } from "./milestone-lifecycle-domain-operation.js";
@@ -89,24 +84,6 @@ export {
   resolveArtifactVerificationBase,
 } from "./artifact-verification.js";
 
-/**
- * Optional override for the detached GitHub milestone finalize invoked after DB
- * closeout in refreshRecoveryDbForArtifact. Production leaves this null so the
- * real finalizeMilestoneGitHubSync runs; tests inject a throwing function to
- * deterministically exercise the best-effort catch (auto-recovery.ts:232),
- * which otherwise needs a real GitHub remote + network failure.
- * @internal
- */
-let _githubFinalizeFn: ((basePath: string, mid: string) => void | Promise<void>) | null = null;
-
-export function _setGithubFinalizeFnForTests(
-  fn: ((basePath: string, mid: string) => void | Promise<void>) | null,
-): () => void {
-  const previous = _githubFinalizeFn;
-  _githubFinalizeFn = fn;
-  return () => { _githubFinalizeFn = previous; };
-}
-
 // ─── Recovery DB refresh ──────────────────────────────────────────────────────
 
 /**
@@ -119,19 +96,6 @@ export function _setGithubFinalizeFnForTests(
 export type ArtifactRecoveryDbRefreshResult =
   | { ok: true; advanced?: boolean; reason?: string; message?: string }
   | { ok: false; fatal: boolean; message: string; reason: string };
-
-function closeoutProofRecoveryReason(reason: CloseoutProofFailureReason): string {
-  switch (reason) {
-    case "slice-missing":
-      return "complete-milestone-slices-missing";
-    case "summary-artifact-missing":
-      return "complete-milestone-summary-missing";
-    case "summary-artifact-failed":
-      return "complete-milestone-summary-failed";
-    default:
-      return `complete-milestone-${reason}`;
-  }
-}
 
 function adoptedMilestoneRecoveryResult(
   milestoneId: string,
@@ -312,63 +276,14 @@ export function refreshRecoveryDbForArtifact(
     });
     if (observedResult) return observedResult;
 
-    const artifactBasePath = resolveArtifactVerificationBase(unitId, basePath);
-    const closeoutProof = proveMilestoneCloseout(mid, {
-      allowOpenMilestone: true,
-      summaryArtifactBasePath: artifactBasePath,
-      implementationEvidence: {
-        basePath,
-        requirement: "present",
-      },
-    });
-    if (!closeoutProof.ok) {
-      if (closeoutProof.reason === "implementation-evidence-missing") {
-        return {
-          ok: false,
-          fatal: true,
-          reason: "complete-milestone-implementation-missing",
-          message: `Stuck recovery found complete-milestone ${unitId} artifacts, but implementation evidence is not present.`,
-        };
-      }
-      return {
-        ok: false,
-        fatal: true,
-        reason: closeoutProofRecoveryReason(closeoutProof.reason),
-        message: `Stuck recovery found complete-milestone ${unitId} artifacts, but ${closeoutProof.message}`,
-      };
-    }
-
-    const concurrentResult = immediateTransaction<ArtifactRecoveryDbRefreshResult | null>(() => {
-      const currentMilestone = getMilestone(mid);
-      if (!currentMilestone) {
-        return {
-          ok: false,
-          fatal: true,
-          reason: "complete-milestone-artifact-db-missing",
-          message: `Stuck recovery found complete-milestone ${unitId} artifacts, but the DB milestone disappeared before compatibility closeout.`,
-        };
-      }
-      if (isMilestoneLifecycleAdopted(mid)) {
-        return adoptedMilestoneRecoveryResult(mid, currentMilestone.status);
-      }
-      if (isClosedStatus(currentMilestone.status)) return { ok: true };
-      updateMilestoneStatus(mid, "complete", new Date().toISOString());
-      return null;
-    });
-    if (concurrentResult) return concurrentResult;
-    // Detached GitHub sync — best-effort. Test seam: when
-    // _githubFinalizeFn is injected, route through it so the catch
-    // (:232) is deterministically reachable (otherwise it needs a real
-    // GitHub remote + network failure). Production leaves it null. The
-    // seam is wrapped so a synchronous throw becomes a rejected promise,
-    // matching the real import-then-call deferred semantics.
-    const finalizePromise = _githubFinalizeFn
-      ? new Promise<void>((resolve) => { resolve(_githubFinalizeFn!(basePath, mid)); })
-      : import("../github-sync/sync.js").then(({ finalizeMilestoneGitHubSync }) => finalizeMilestoneGitHubSync(basePath, mid));
-    void finalizePromise.catch((err) => {
-      logWarning("recovery", `GitHub milestone finalize failed after DB closeout: ${getErrorMessage(err)}`);
-    });
-    return { ok: true };
+    // An open Milestone is never completed from artifacts. Completion is the
+    // milestone.complete Domain Operation, with its own proof and receipts.
+    return {
+      ok: false,
+      fatal: true,
+      reason: "complete-milestone-canonical-command-required",
+      message: `Stuck recovery cannot complete Milestone ${mid} from artifacts; dispatch the normal completion command.`,
+    };
   }
 
   return { ok: true };

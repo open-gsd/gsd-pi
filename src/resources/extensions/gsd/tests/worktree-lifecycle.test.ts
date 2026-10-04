@@ -18,7 +18,7 @@ import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import { queryJournal } from "../journal.js";
 import { AutoSession } from "../auto/session.js";
 import { openDatabase, closeDatabase, getMilestone, insertMilestone, _getAdapter } from "../gsd-db.js";
-import { peekLogs, setStderrLoggingEnabled, _resetLogs } from "../workflow-logger.js";
+import { setStderrLoggingEnabled, _resetLogs } from "../workflow-logger.js";
 import { registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease } from "../db/milestone-leases.js";
 
@@ -689,12 +689,6 @@ test("exitMilestone merge does not create a 'complete' row for a milestone with 
 
   assert.deepEqual(result, { ok: true, merged: true, codeFilesChanged: true });
   assert.equal(getMilestone("M001"), null);
-  assert.ok(
-    peekLogs().some(
-      (e) => e.severity === "error" && e.message.includes("M001 but it has no DB row; not creating one"),
-    ),
-    `expected no-DB-row error log, got: ${JSON.stringify(peekLogs())}`,
-  );
 });
 
 // ─── Queries (issue #5587) ────────────────────────────────────────────────────

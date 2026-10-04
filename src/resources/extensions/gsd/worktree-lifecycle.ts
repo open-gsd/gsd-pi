@@ -25,7 +25,7 @@ import type { PreflightResult, PostflightResult } from "./clean-root-preflight.j
 
 import type { AutoSession } from "./auto/session.js";
 import { debugLog } from "./debug-logger.js";
-import { logError, logWarning } from "./workflow-logger.js";
+import { logWarning } from "./workflow-logger.js";
 import { emitJournalEvent } from "./journal.js";
 import { emitWorktreeCreated, emitWorktreeMerged } from "./worktree-telemetry.js";
 import {
@@ -52,8 +52,6 @@ import { loadEffectiveGSDPreferences, getIsolationMode } from "./preferences.js"
 import { isolationDegradedFallbackGuidance, worktreeCreationFailedGuidance } from "./guidance.js";
 import { invalidateAllCaches } from "./cache.js";
 import { resolveMilestoneFile } from "./paths.js";
-import { getMilestone, isDbAvailable, updateMilestoneStatus } from "./gsd-db.js";
-import { isClosedStatus } from "./status-guards.js";
 import type { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 // ADR-016 phase 2 / C1 (#5624): file-system + git-CLI leaf primitives
@@ -87,6 +85,10 @@ import { inspectUncommittedWorktreeState, isStaleWorktreeRegistrationError } fro
 import { resolveRoadmapForMilestoneMerge } from "./milestone-merge-roadmap.js";
 import type { MilestoneMergeTransactionRunner } from "./milestone-merge-transaction.js";
 import {
+  hasPendingCloseoutEffect,
+  settleMilestoneMerge,
+} from "./milestone-closeout-effects.js";
+import {
   pushIntegrationBranchIfAhead,
   type PushIfAheadResult,
 } from "./publication.js";
@@ -96,31 +98,6 @@ const MERGE_FAILURE_DEDUPE_MS = 60_000;
 
 export function resetRecentWorktreeMergeFailuresForTest(): void {
   recentWorktreeMergeFailures.clear();
-}
-
-// The git merge has already run, so a DB gap is logged as an error, never
-// papered over by inventing a 'complete' row (ADR-046).
-function markMilestoneClosedAfterMerge(milestoneId: string, completedAt: string): void {
-  if (!isDbAvailable()) {
-    logError("worktree", `Merged ${milestoneId} but cannot mark it complete: workflow DB is unavailable`);
-    return;
-  }
-  try {
-    const existing = getMilestone(milestoneId);
-    if (!existing) {
-      logError("worktree", `Merged ${milestoneId} but it has no DB row; not creating one`);
-      return;
-    }
-    if (!isClosedStatus(existing.status)) {
-      updateMilestoneStatus(milestoneId, "complete", completedAt);
-      invalidateAllCaches();
-    }
-  } catch (err) {
-    logWarning(
-      "worktree",
-      `Merged ${milestoneId} but failed to mark milestone complete in DB: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────
@@ -1412,6 +1389,27 @@ function pushIfAheadAtCloseout(
 }
 
 /**
+ * The merge is skipped because the work already sits on the current branch.
+ * A Closeout Plan that waits for the merge effect would never settle, so
+ * recognize the effect and complete the Milestone. No-op without a plan.
+ */
+function recognizeSkippedMilestoneMerge(
+  deps: WorktreeLifecycleDeps,
+  basePath: string,
+  milestoneId: string,
+): void {
+  if (!hasPendingCloseoutEffect(milestoneId)) return;
+  settleMilestoneMerge({
+    projectRoot: basePath,
+    milestoneId,
+    milestoneBranch: lifecycleAutoWorktreeBranch(deps, milestoneId),
+    integrationBranch: currentLifecycleBranch(deps, basePath),
+    recognized: true,
+    codeFilesChanged: true,
+  });
+}
+
+/**
  * Session-less merge entry (ADR-016 phase 2 / A1, issue #5618).
  *
  * Runs the worktree-mode or branch-mode merge body without touching session
@@ -1467,6 +1465,7 @@ export function mergeMilestoneStandalone(
       `Skipping worktree merge for ${milestoneId} — isolation was degraded (worktree creation failed earlier). Work is on the current branch.`,
       "info",
     );
+    recognizeSkippedMilestoneMerge(deps, originalBasePath || worktreeBasePath, milestoneId);
     return {
       merged: false,
       mode: "skipped",
@@ -1519,6 +1518,7 @@ export function mergeMilestoneStandalone(
     // current branch, so skipping the merge also skipped publication and
     // auto_push silently never pushed. Honor it here when the branch is ahead
     // of its upstream; push failure is non-fatal to the closeout.
+    recognizeSkippedMilestoneMerge(deps, originalBasePath || worktreeBasePath, milestoneId);
     const publication = pushIfAheadAtCloseout(deps, originalBasePath, milestoneId);
     return {
       merged: false,
@@ -1934,8 +1934,6 @@ export class WorktreeLifecycle {
 
     // #4764 — record merge completion. Only reaches here when an actual
     // merge ran; failure paths throw out before this point.
-    const mergeCompletedAt = new Date().toISOString();
-    markMilestoneClosedAfterMerge(milestoneId, mergeCompletedAt);
     try {
       emitWorktreeMerged(
         this.s.originalBasePath || this.s.basePath,

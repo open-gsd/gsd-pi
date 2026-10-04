@@ -33,6 +33,7 @@ import {
   type MilestoneCloseoutAuthorization,
   type MilestoneCloseoutBlocker,
 } from "./db/milestone-closeout-readiness.js";
+import { isMilestoneCloseoutPrepared } from "./db/writers/closeout.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   captureMilestoneVerificationSourceRevision,
@@ -270,7 +271,13 @@ export function checkCloseoutConsistencyGate(
       `Closeout consistency blocked for ${milestoneId}: milestone is missing from canonical DB.`,
     );
   }
-  if (!isClosedStatus(milestone.status) && !options.allowOpenMilestone) {
+  // An open Milestone with a Closeout Plan is prepared: its completion
+  // requirements are proven and it completes when the host settles the plan.
+  if (
+    !isClosedStatus(milestone.status) &&
+    !options.allowOpenMilestone &&
+    !isMilestoneCloseoutPrepared(milestoneId)
+  ) {
     return blocked(
       "milestone-open",
       `Closeout consistency blocked for ${milestoneId}: canonical DB milestone status is "${milestone.status}".`,

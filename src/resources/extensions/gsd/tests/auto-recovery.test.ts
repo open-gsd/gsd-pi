@@ -26,16 +26,6 @@ import { clearParseCache } from "../files.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { writeIntegrationBranch } from "../git-service.ts";
-import { loadSyncMapping } from "../../github-sync/mapping.ts";
-import {
-  _resetConfigCache,
-  _setGhCloseOverridesForTest,
-} from "../../github-sync/sync.ts";
-import {
-  _resetGhCache,
-  _setGhAvailableForTest,
-  _setGhRateLimitOkForTest,
-} from "../../github-sync/cli.ts";
 
 const tmpDirs: string[] = [];
 
@@ -621,7 +611,7 @@ test("refreshRecoveryDbForArtifact refuses execute-task recovery after a termina
   assert.ok(result.message.includes(`/gsd recover ${route.recoveryActionId}`));
 });
 
-test("refreshRecoveryDbForArtifact closes complete-milestone DB row when artifacts exist but DB is stale (#5568)", async () => {
+test("refreshRecoveryDbForArtifact never completes an open milestone from complete-looking artifacts", () => {
   const base = mkdtempSync(join(tmpdir(), "auto-recovery-complete-ms-"));
   mkdirSync(join(base, ".gsd"), { recursive: true });
   openDatabase(join(base, ".gsd", "gsd.db"));
@@ -635,26 +625,11 @@ test("refreshRecoveryDbForArtifact closes complete-milestone DB row when artifac
     risk: "low",
     depends: [],
   });
-  insertSlice({
-    milestoneId: "M001",
-    id: "S02",
-    title: "Done Slice",
-    status: "complete",
-    risk: "low",
-    depends: [],
-  });
   insertTask({
     milestoneId: "M001",
     sliceId: "S01",
     id: "T01",
     title: "Done Task",
-    status: "complete",
-  });
-  insertTask({
-    milestoneId: "M001",
-    sliceId: "S02",
-    id: "T02",
-    title: "Done Task 2",
     status: "complete",
   });
   insertAssessment({
@@ -671,57 +646,19 @@ test("refreshRecoveryDbForArtifact closes complete-milestone DB row when artifac
   runGit(base, ["init", "-b", "main"]);
   runGit(base, ["config", "user.email", "test@example.com"]);
   runGit(base, ["config", "user.name", "Test User"]);
-  runGit(base, ["checkout", "-b", "milestone/M001"]);
   writeFileSync(join(base, "feature.ts"), "export const shipped = true;\n");
   runGit(base, ["add", "feature.ts"]);
   runGit(base, ["commit", "-m", "feat: implementation evidence"]);
-  writeFileSync(join(base, ".gsd", "integration-branch"), "main\n");
-  writeFileSync(
-    join(base, ".gsd", "PREFERENCES.md"),
-    ["---", "version: 1", "github:", "  enabled: true", "  repo: owner/repo", "---"].join("\n"),
-    "utf-8",
-  );
-  writeFileSync(
-    join(base, ".gsd", "github-sync.json"),
-    JSON.stringify({
-      version: 1,
-      repo: "owner/repo",
-      milestones: {
-        M001: {
-          issueNumber: 42,
-          ghMilestoneNumber: 7,
-          lastSyncedAt: "2025-01-01T00:00:00Z",
-          state: "open",
-        },
-      },
-      slices: {},
-      tasks: {},
-    }, null, 2),
-    "utf-8",
-  );
-
-  _resetGhCache();
-  _resetConfigCache();
-  _setGhAvailableForTest(true);
-  _setGhRateLimitOkForTest(true);
-  _setGhCloseOverridesForTest({
-    closeIssue: () => ({ ok: true }),
-    closeMilestone: () => ({ ok: true }),
-  });
 
   const result = refreshRecoveryDbForArtifact("complete-milestone", "M001", base);
 
-  assert.deepEqual(result, { ok: true });
-  assert.equal(getMilestone("M001")?.status, "complete");
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const mapping = loadSyncMapping(base);
-  assert.equal(mapping?.milestones.M001?.state, "closed");
-
-  _setGhCloseOverridesForTest(null);
-  _setGhAvailableForTest(null);
-  _setGhRateLimitOkForTest(null);
-  _resetGhCache();
-  _resetConfigCache();
+  assert.deepEqual(result, {
+    ok: false,
+    fatal: true,
+    reason: "complete-milestone-canonical-command-required",
+    message: "Stuck recovery cannot complete Milestone M001 from artifacts; dispatch the normal completion command.",
+  });
+  assert.equal(getMilestone("M001")?.status, "active");
 });
 
 test("adopted Milestone recovery cannot promote complete-looking artifacts into authority", () => {
@@ -863,55 +800,6 @@ test("adopted Milestone recovery rejects a current projection-shaped but incompl
   assert.deepEqual(milestoneLifecycleHead(), lifecycleBefore);
   assert.equal(getMilestone("M001")?.status, legacyBefore.status);
   assert.equal(getMilestone("M001")?.completed_at, legacyBefore.completed_at);
-});
-
-test("refreshRecoveryDbForArtifact fails closed for complete-milestone without implementation evidence", () => {
-  const base = mkdtempSync(join(tmpdir(), "auto-recovery-complete-ms-no-impl-"));
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  tmpDirs.push(base);
-  insertMilestone({ id: "M001", title: "Stale completion", status: "active" });
-  insertSlice({
-    milestoneId: "M001",
-    id: "S01",
-    title: "Done Slice",
-    status: "complete",
-    risk: "low",
-    depends: [],
-  });
-  insertTask({
-    milestoneId: "M001",
-    sliceId: "S01",
-    id: "T01",
-    title: "Done Task",
-    status: "complete",
-  });
-  insertAssessment({
-    path: ".gsd/milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "---\nverdict: pass\n---\n",
-  });
-  const milestoneDir = join(base, ".gsd", "milestones", "M001");
-  mkdirSync(milestoneDir, { recursive: true });
-  writeFileSync(join(milestoneDir, "M001-SUMMARY.md"), "# Milestone Summary\n");
-  writeFileSync(join(milestoneDir, "M001-VALIDATION.md"), "---\nverdict: pass\n---\n");
-  runGit(base, ["init", "-b", "main"]);
-  runGit(base, ["config", "user.email", "test@example.com"]);
-  runGit(base, ["config", "user.name", "Test User"]);
-  runGit(base, ["add", ".gsd"]);
-  runGit(base, ["commit", "-m", "chore: gsd artifacts only"]);
-
-  const result = refreshRecoveryDbForArtifact("complete-milestone", "M001", base);
-
-  assert.deepEqual(result, {
-    ok: false,
-    fatal: true,
-    reason: "complete-milestone-implementation-missing",
-    message: "Stuck recovery found complete-milestone M001 artifacts, but implementation evidence is not present.",
-  });
-  assert.equal(getMilestone("M001")?.status, "active");
 });
 
 // ─── diagnoseExpectedArtifact ─────────────────────────────────────────────

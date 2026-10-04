@@ -18,6 +18,7 @@ import {
   createDraftPullRequestFromEvidence,
 } from "./pull-request-process.js";
 import { emitJournalEvent } from "./journal.js";
+import { hasPendingIntegrationPush, settleIntegrationPush } from "./milestone-closeout-effects.js";
 import { logWarning } from "./workflow-logger.js";
 
 export interface PublicationPrefs {
@@ -44,6 +45,8 @@ export interface PublicationRequest {
 
 export interface PublicationResult {
   pushed: boolean;
+  /** Set when a push was attempted and failed. Absent when no push ran. */
+  pushError?: string;
   prCreated: boolean;
   prUrl?: string;
 }
@@ -68,24 +71,17 @@ export function gitRemoteExists(basePath: string, remote: string): boolean {
  */
 export function publishMilestone(request: PublicationRequest): PublicationResult {
   const result: PublicationResult = { pushed: false, prCreated: false };
-  if (request.nothingToCommit) return result;
+  // A push that failed at an earlier closeout is retried even when this
+  // merge committed nothing.
+  if (request.nothingToCommit && !hasPendingIntegrationPush(request.integrationBranch)) return result;
 
   const { basePath, prefs } = request;
   const remote = prefs.remote ?? "origin";
 
   if (prefs.autoPush && !prefs.autoPr && gitRemoteExists(basePath, remote)) {
-    try {
-      execFileSync("git", ["push", remote, request.integrationBranch], {
-        cwd: basePath,
-        stdio: ["ignore", "pipe", "pipe"],
-        encoding: "utf-8",
-      });
-      result.pushed = true;
-    } catch (err) {
-      // Push failure is non-fatal
-      logWarning("worktree", `git push failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    Object.assign(result, pushIntegrationBranch(basePath, remote, request.integrationBranch, request.milestoneId));
   }
+  if (request.nothingToCommit) return result;
 
   // #2302: PR creation is not gated on pushed/auto-push.
   if (prefs.autoPr && gitRemoteExists(basePath, remote)) {
@@ -178,6 +174,22 @@ export function pushIntegrationBranchIfAhead(
   if (!gitRemoteExists(basePath, remote)) return result;
   if (!isAheadOfUpstream(basePath)) return result;
 
+  return pushIntegrationBranch(basePath, remote, branch, request.milestoneId);
+}
+
+/**
+ * Push the integration branch and record the outcome: a `milestone-pushed`
+ * journal event, and on success the Settlement Receipt of every merged
+ * Milestone still waiting for this push. A failed push leaves those effects
+ * without a receipt, so the next closeout pushes again.
+ */
+function pushIntegrationBranch(
+  basePath: string,
+  remote: string,
+  branch: string,
+  milestoneId: string | undefined,
+): PushIfAheadResult {
+  const result: PushIfAheadResult = { pushed: false };
   try {
     execFileSync("git", ["push", remote, branch], {
       cwd: basePath,
@@ -196,12 +208,20 @@ export function pushIntegrationBranchIfAhead(
     seq: 0,
     eventType: "milestone-pushed",
     data: {
-      milestoneId: request.milestoneId,
+      milestoneId,
       branch,
       remote,
       pushed: result.pushed,
       error: result.pushError,
     },
   });
+  if (result.pushed) {
+    try {
+      settleIntegrationPush({ remote, integrationBranch: branch });
+    } catch (err) {
+      // The push effect keeps no receipt, so the next closeout pushes again.
+      logWarning("worktree", `push receipt was not recorded: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
   return result;
 }

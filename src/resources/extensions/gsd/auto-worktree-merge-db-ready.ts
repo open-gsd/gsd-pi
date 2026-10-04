@@ -13,6 +13,7 @@ import {
   openWorkflowDatabasePath,
 } from "./db-workspace.js";
 import { readMilestoneMergeObservation } from "./db/milestone-closeout-readiness.js";
+import { isMilestoneCloseoutPrepared } from "./db/writers/closeout.js";
 import { GSDError, GSD_GIT_ERROR } from "./errors.js";
 import {
   isDbAvailable,
@@ -37,6 +38,7 @@ interface MergeDbReadyDeps {
   formatCloseoutProofBlock: typeof formatCloseoutProofBlock;
   getWorkflowDatabasePath: typeof getWorkflowDatabasePath;
   isDbAvailable: typeof isDbAvailable;
+  isMilestoneCloseoutPrepared: typeof isMilestoneCloseoutPrepared;
   logError: typeof logError;
   openWorkflowDatabasePath: typeof openWorkflowDatabasePath;
   proveMilestoneCloseout: typeof proveMilestoneCloseout;
@@ -51,6 +53,7 @@ const defaultDeps: MergeDbReadyDeps = {
   formatCloseoutProofBlock,
   getWorkflowDatabasePath,
   isDbAvailable,
+  isMilestoneCloseoutPrepared,
   logError,
   openWorkflowDatabasePath,
   proveMilestoneCloseout,
@@ -110,9 +113,17 @@ function assertCloseoutProof(milestoneId: string): void {
   }
 }
 
-function assertAdoptedMilestoneCompleted(milestoneId: string): void {
+/**
+ * An adopted Milestone merges while it is still open, from its Closeout Plan:
+ * the merge is a host effect that settles before completion (ADR-046). A
+ * Milestone completed without a plan may still merge.
+ */
+function assertAdoptedMilestoneCloseoutReady(milestoneId: string): void {
   const observation = deps.readMilestoneMergeObservation(milestoneId);
   if (observation.kind === "unadopted" || observation.kind === "completed") {
+    return;
+  }
+  if (observation.kind === "not-completed" && deps.isMilestoneCloseoutPrepared(milestoneId)) {
     return;
   }
   if (observation.kind === "unavailable") {
@@ -124,7 +135,7 @@ function assertAdoptedMilestoneCompleted(milestoneId: string): void {
   }
   const detail = observation.kind === "mismatch"
     ? "canonical and legacy status mismatch"
-    : "canonical lifecycle is not completed";
+    : "canonical lifecycle is not completed and has no Closeout Plan";
   throw new GSDError(
     GSD_GIT_ERROR,
     `Milestone ${milestoneId} merge blocked: ${detail} ` +
@@ -137,6 +148,6 @@ export function assertMilestoneDbReadyForMerge(
   request: MilestoneDbReadyRequest,
 ): void {
   reconcileWorktreeDatabase(request);
-  assertAdoptedMilestoneCompleted(request.milestoneId);
+  assertAdoptedMilestoneCloseoutReady(request.milestoneId);
   assertCloseoutProof(request.milestoneId);
 }

@@ -1971,6 +1971,20 @@ export async function executeCompleteMilestone(
       isError: true,
       };
     }
+    if (result.pendingCloseoutEffects) {
+      return {
+        content: [{
+          type: "text",
+          text: `Milestone ${result.milestoneId} closeout is prepared. The milestone completes when the system has merged ` +
+            `the milestone branch (pending: ${result.pendingCloseoutEffects.join(", ")}). Do not merge it yourself.`,
+        }],
+        details: {
+          operation: "complete_milestone",
+          milestoneId: result.milestoneId,
+          pendingCloseoutEffects: result.pendingCloseoutEffects,
+        },
+      };
+    }
     const historical = result.superseded || result.current === false;
     const message = historical
       ? `Milestone completion receipt for ${result.milestoneId} has been superseded; current state was not changed.`

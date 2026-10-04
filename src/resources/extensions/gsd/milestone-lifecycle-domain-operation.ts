@@ -10,6 +10,10 @@ import {
 import { getDb } from "./db/engine.js";
 import { MILESTONE_LIFECYCLE_PROJECTION_KIND } from "./projection-identity.js";
 import { readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
+import {
+  pendingRequiredCloseoutEffects,
+  readMilestoneCloseoutPlan,
+} from "./db/writers/closeout.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import type { LifecycleShadowRecord } from "./db/writers/lifecycle-commands.js";
 import {
@@ -521,6 +525,15 @@ export function completeMilestone(input: {
       if (unresolvedGate) {
         throw new MilestoneLifecycleValidationError(
           `Milestone ${milestoneId} quality gate ${unresolvedGate.gate_id} is still pending for ${unresolvedGate.slice_id}`,
+        );
+      }
+      // The Milestone is marked complete only after every required host effect
+      // of its Closeout Plan has a Settlement Receipt (ADR-046).
+      const closeoutPlan = readMilestoneCloseoutPlan(milestoneId);
+      const unsettledEffect = closeoutPlan && pendingRequiredCloseoutEffects(closeoutPlan)[0];
+      if (unsettledEffect) {
+        throw new MilestoneLifecycleValidationError(
+          `Milestone ${milestoneId} closeout effect ${unsettledEffect.effectKind} has no Settlement Receipt`,
         );
       }
       const result = completeMilestoneHierarchy(context, { milestoneId, sourceRevision });
