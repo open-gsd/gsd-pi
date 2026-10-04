@@ -9,7 +9,7 @@ import {
   clearPendingAutoStart,
   setPendingAutoStart,
 } from "../guided-flow.ts";
-import { _getAdapter, closeDatabase, getMilestone } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, getMilestone, openDatabase } from "../gsd-db.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import {
   getPendingGate,
@@ -425,6 +425,88 @@ test("an answered question round is captured into the database under an external
     assert.match(content, /What are you picturing for M004\?/, `${type} row keeps the first round`);
     assert.match(content, /What is out of scope\?/, `${type} row holds the second round`);
     assert.equal(readFileSync(path, "utf-8"), content, `${type} file is rendered again from the row`);
+  }
+});
+
+test("the first captured round keeps a draft and a discussion log that have no database row", async (t) => {
+  const dir = makeTempDir("question-adopt");
+  const originalCwd = process.cwd();
+  process.chdir(dir);
+  resetWriteGateState(dir);
+  clearPendingAutoStart(dir);
+
+  t.after(() => {
+    try {
+      resetWriteGateState(dir);
+      clearPendingAutoStart(dir);
+      closeDatabase();
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The triage defer seed and a discussion started before the rows existed
+  // both leave files with no artifact row in an existing project database.
+  const milestoneDir = join(dir, ".gsd", "milestones", "M005");
+  const draftPath = join(milestoneDir, "M005-CONTEXT-DRAFT.md");
+  const discussionPath = join(milestoneDir, "M005-DISCUSSION.md");
+  mkdirSync(milestoneDir, { recursive: true });
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
+  writeFileSync(draftPath, "# M005: Deferred Work\n\n## Deferred Captures\n\n- **CAP-1:** export the report as CSV\n");
+  writeFileSync(discussionPath, "# M005 Discussion Log\n\n## Exchange — earlier\n\nWhich format comes first?\n\n---\n\n");
+
+  const handlers = new Map<string, Array<(event: any, ctx?: any) => Promise<void> | void>>();
+  const pi = {
+    on(event: string, handler: (event: any, ctx?: any) => Promise<void> | void) {
+      handlers.set(event, [...(handlers.get(event) ?? []), handler]);
+    },
+  } as any;
+  const ctx = { cwd: dir, ui: { notify: () => undefined } } as any;
+
+  registerHooks(pi, []);
+  setPendingAutoStart(dir, {
+    basePath: dir,
+    milestoneId: "M005",
+    ctx,
+    pi: { sendMessage: () => undefined } as any,
+  });
+
+  for (const handler of handlers.get("tool_execution_end") ?? []) {
+    await handler({
+      toolCallId: "call-1",
+      toolName: "ask_user_questions",
+      isError: false,
+      result: {
+        content: [{ type: "text", text: "answered" }],
+        details: {
+          questions: [{
+            id: "scope",
+            header: "Scope",
+            question: "What is out of scope?",
+            options: [
+              { label: "Sync (Recommended)", description: "No sync in this milestone." },
+              { label: "Nothing", description: "Everything is in scope." },
+            ],
+          }],
+          cancelled: false,
+          response: { answers: { scope: { selected: "Sync (Recommended)" } } },
+        },
+      },
+    }, ctx);
+  }
+
+  const seeds = [
+    ["CONTEXT-DRAFT", draftPath, /export the report as CSV/],
+    ["DISCUSSION", discussionPath, /Which format comes first\?/],
+  ] as const;
+  for (const [type, path, seed] of seeds) {
+    const content = _getAdapter()?.prepare(
+      "SELECT full_content FROM artifacts WHERE milestone_id = 'M005' AND artifact_type = :type",
+    ).get({ ":type": type })?.["full_content"] as string | undefined;
+    assert.match(content ?? "", seed, `${type} row keeps the text that was only on disk`);
+    assert.match(content ?? "", /What is out of scope\?/, `${type} row holds the new round`);
+    assert.equal(readFileSync(path, "utf-8"), content, `${type} file is a render of the row`);
   }
 });
 

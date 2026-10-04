@@ -12,7 +12,7 @@ import { ALWAYS_PRESERVED_SHIM_TOOL_NAMES } from "@gsd/pi-ai";
 import type { GSDEcosystemBeforeAgentStartHandler } from "../ecosystem/gsd-extension-api.js";
 import { updateSnapshot } from "../ecosystem/gsd-extension-api.js";
 
-import { canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
+import { canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
 import { applyAskUserQuestionsGateResult, clearDiscussionFlowState, currentWriteGateSnapshot, formatPendingAskUserQuestionsGateMessage, formatTimedOutAskUserQuestionsGateMessage, hostWriteGateAdapter, isApprovalGateVerifiedInSnapshot, isDepthConfirmationAnswer, isMilestoneDepthVerifiedInSnapshot, isQueuePhaseActive, resetWriteGateState, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, shouldBlockWorktreeBash, shouldBlockWorktreeWrite, isGateQuestionId, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId, type WriteGateSnapshot } from "./write-gate.js";
 import { canonicalToolName } from "../engine-hook-contract.js";
 import { resolveManifest } from "../unit-context-manifest.js";
@@ -1118,7 +1118,9 @@ async function ensureMilestoneShell(basePath: string, milestoneId: string): Prom
 /**
  * Append one answered question round to the milestone's DISCUSSION log and
  * CONTEXT-DRAFT. Both are database artifact rows: the next round is built from
- * the row, and the files are rendered from it.
+ * the row, and the files are rendered from it. A file with no row (a triage
+ * seed, or a discussion started before the rows existed) is adopted into the
+ * row by the first round.
  */
 async function saveDiscussionQuestionRound(
   basePath: string,
@@ -1139,10 +1141,11 @@ async function saveDiscussionQuestionRound(
 
   const appendRound = async (artifactType: string, build: (existing: string | null) => string): Promise<void> => {
     const path = relMilestoneFile(basePath, milestoneId, artifactType).replace(/^\.gsd\//, "");
+    const file = resolveMilestoneFile(basePath, milestoneId, artifactType);
     await saveArtifactToDb({
       path,
       artifact_type: artifactType,
-      content: build(getArtifact(path)?.full_content ?? null),
+      content: build(getArtifact(path)?.full_content ?? (file ? await loadFile(file) : null)),
       milestone_id: milestoneId,
     }, basePath);
   };
