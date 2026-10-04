@@ -1,16 +1,18 @@
 // Project/App: gsd-pi
 // File Purpose: Resolve whether a completed slice needs run-uat dispatch.
 
-import { loadFile } from "./files.js";
-import { getAssessment } from "./gsd-db.js";
+import {
+  getSlice,
+  getSliceRunUatAssessment,
+  getSliceScopedArtifacts,
+} from "./gsd-db.js";
 import type { GSDPreferences } from "./preferences.js";
-import { relSliceFile, resolveSliceFile } from "./paths.js";
 import {
   classifyUatContentForRun,
   shouldDispatchUatForContent,
   type UatType,
 } from "./uat-policy.js";
-import { extractVerdict, hasVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
+import { isAcceptableUatVerdict } from "./verdict-parser.js";
 import { logWarning } from "./workflow-logger.js";
 
 export interface UatDispatchCandidate {
@@ -22,37 +24,14 @@ export interface RunUatDispatchOptions {
   retryNonPass?: boolean;
 }
 
-async function loadSliceFileContent(
-  base: string,
-  milestoneId: string,
-  sliceId: string,
-  kind: "UAT" | "ASSESSMENT" | "SUMMARY",
-): Promise<string> {
-  const filePath = resolveSliceFile(base, milestoneId, sliceId, kind);
-  return filePath ? ((await loadFile(filePath)) ?? "") : "";
-}
-
-async function resolveRunUatEffectiveType(
-  base: string,
-  milestoneId: string,
-  sliceId: string,
-  uatContent: string,
-): Promise<UatType> {
-  let summaryContent = "";
-  try {
-    summaryContent = await loadSliceFileContent(
-      base,
-      milestoneId,
-      sliceId,
-      "SUMMARY",
-    );
-  } catch (err) {
-    logWarning(
-      "prompt",
-      `resolveRunUatEffectiveType SUMMARY load failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  return classifyUatContentForRun(uatContent, summaryContent).effectiveType;
+/**
+ * UAT spec of a slice, from the database: the slice UAT column, else a saved
+ * UAT artifact row. The rendered UAT file is a projection and is not read.
+ */
+export function readSliceUatSpec(milestoneId: string, sliceId: string): string {
+  return getSlice(milestoneId, sliceId)?.full_uat_md
+    || getSliceScopedArtifacts(milestoneId, sliceId).find((row) => row.artifact_type === "UAT")?.full_content
+    || "";
 }
 
 /**
@@ -99,44 +78,23 @@ async function uatRetryPredatesAcceptedValidation(
 }
 
 async function resolveCandidateRunUatDispatch(
-  base: string,
   milestoneId: string,
   candidate: UatDispatchCandidate,
   prefs: GSDPreferences | undefined,
   options: RunUatDispatchOptions,
 ): Promise<RunUatDispatch | null> {
-  const uatContent = await loadSliceFileContent(
-    base,
-    milestoneId,
-    candidate.sliceId,
-    "UAT",
-  );
+  const uatContent = readSliceUatSpec(milestoneId, candidate.sliceId);
   if (!uatContent) return null;
 
-  const assessmentContent = await loadSliceFileContent(
-    base,
-    milestoneId,
-    candidate.sliceId,
-    "ASSESSMENT",
-  );
-  const assessmentScope = String(
-    getAssessment(relSliceFile(base, milestoneId, candidate.sliceId, "ASSESSMENT"))?.scope ?? "",
-  ).trim().toLowerCase();
-  const isUatAssessment = assessmentScope !== "roadmap" && assessmentScope !== "backfill";
-  const verdictContent = isUatAssessment && assessmentContent && hasVerdict(assessmentContent)
-    ? assessmentContent
-    : hasVerdict(uatContent)
-      ? uatContent
-      : null;
-  const uatType = await resolveRunUatEffectiveType(
-    base,
-    milestoneId,
-    candidate.sliceId,
+  const uatType = classifyUatContentForRun(
     uatContent,
-  );
-  if (verdictContent) {
-    const verdict = extractVerdict(verdictContent);
-    if (!options.retryNonPass || !verdict || isAcceptableUatVerdict(verdict, uatType)) return null;
+    getSlice(milestoneId, candidate.sliceId)?.full_summary_md ?? "",
+  ).effectiveType;
+  // The saved run-uat row is the only UAT verdict. A verdict line in a
+  // rendered UAT or ASSESSMENT file decides nothing.
+  const verdict = getSliceRunUatAssessment(milestoneId, candidate.sliceId)?.status;
+  if (verdict) {
+    if (!options.retryNonPass || isAcceptableUatVerdict(verdict, uatType)) return null;
     if (await uatRetryPredatesAcceptedValidation(milestoneId, candidate.sliceId)) return null;
   }
   if (!shouldDispatchUatForContent(uatContent, prefs)) return null;
@@ -169,7 +127,7 @@ async function getDbCompletedSliceCandidates(
 }
 
 export async function findRunUatDispatchFromCandidates(
-  base: string,
+  _base: string,
   milestoneId: string,
   candidates: readonly UatDispatchCandidate[],
   prefs: GSDPreferences | undefined,
@@ -177,7 +135,6 @@ export async function findRunUatDispatchFromCandidates(
 ): Promise<RunUatDispatch | null> {
   for (const candidate of candidates) {
     const dispatch = await resolveCandidateRunUatDispatch(
-      base,
       milestoneId,
       candidate,
       prefs,
@@ -201,9 +158,9 @@ export async function findRunUatDispatchFromCandidates(
  * Skips when:
  * - No completed slices exist in DB or the caller-provided fallback candidates
  * - uat_dispatch is not enabled and the UAT spec does not require runtime/browser evidence
- * - No UAT file exists for the slice
- * - A UAT result already exists in the UAT or UAT-scoped ASSESSMENT file,
- *   unless milestone closeout requested a retry of a non-acceptable verdict
+ * - The slice has no UAT spec in the database
+ * - A run-uat verdict row already exists, unless milestone closeout requested
+ *   a retry of a non-acceptable verdict
  */
 export async function checkNeedsRunUat(
   base: string,

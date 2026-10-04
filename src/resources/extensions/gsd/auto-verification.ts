@@ -14,7 +14,7 @@
  */
 
 import type { ExtensionContext, ExtensionAPI } from "@gsd/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { gsdProjectionRoot, legacyMilestonesDir, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "./paths.js";
 import { resolveMilestoneValidationVerdict } from "./milestone-validation-verdict.js";
 import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
@@ -25,6 +25,7 @@ import {
   getSliceTasks,
   getTask,
   getTaskVerificationEvidence,
+  hasRoadmapAssessmentSince,
   isDbAvailable,
 } from "./gsd-db.js";
 import type { TaskRow } from "./db-task-slice-rows.js";
@@ -483,57 +484,6 @@ function hasExplicitVerificationTargets(task: TaskRow | null, slice: SliceRow | 
   return Boolean(task?.target_repositories?.length || slice?.target_repositories?.length);
 }
 
-function messagesMentionTool(messages: unknown[] | null | undefined, toolName: string): boolean {
-  if (!Array.isArray(messages)) return false;
-  try {
-    return JSON.stringify(messages).includes(toolName);
-  } catch {
-    return false;
-  }
-}
-
-function unitActivityMentionsTool(basePath: string, unitType: string, unitId: string, toolName: string): boolean {
-  const safeUnitId = unitId.replace(/\//g, "-");
-  const activityDir = join(basePath, ".gsd", "activity");
-  if (!existsSync(activityDir)) return false;
-
-  try {
-    for (const entry of readdirSync(activityDir, { withFileTypes: true })) {
-      if (!entry.isFile()) continue;
-      if (!entry.name.endsWith(`${unitType}-${safeUnitId}.jsonl`)) continue;
-      if (readFileSync(join(activityDir, entry.name), "utf-8").includes(toolName)) return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-
-function hasRoadmapReassessmentArtifact(basePath: string, milestoneId: string): boolean {
-  const slicesDir = join(basePath, ".gsd", "milestones", milestoneId, "slices");
-  if (!existsSync(slicesDir)) return false;
-
-  try {
-    for (const entry of readdirSync(slicesDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      if (existsSync(join(slicesDir, entry.name, `${entry.name}-ASSESSMENT.md`))) return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
-}
-
-function hasReassessmentEvidence(s: AutoSession, milestoneId: string): boolean {
-  if (!s.currentUnit) return false;
-  const toolName = "gsd_reassess_roadmap";
-  const roots = [...new Set([s.basePath, s.canonicalProjectRoot].filter(Boolean))];
-  return messagesMentionTool(s.lastUnitAgentEndMessages, toolName)
-    || roots.some((root) => unitActivityMentionsTool(root, s.currentUnit!.type, s.currentUnit!.id, toolName))
-    || roots.some((root) => hasRoadmapReassessmentArtifact(root, milestoneId));
-}
-
-
 /**
  * Post-unit guard for `validate-milestone` units (#4094).
  *
@@ -608,12 +558,12 @@ async function runValidateMilestonePostCheck(
     return "retry";
   };
 
+  // The unit reassessed the roadmap instead and left open slices: validation
+  // no longer applies. The evidence is the roadmap assessment row recorded
+  // during this unit; no activity log or ASSESSMENT file is read.
   const reassessmentInvalidatedValidation = async (): Promise<boolean> => {
-    if (!hasReassessmentEvidence(s, mid)) return false;
-    const incompleteSliceCount = await countIncompleteSlices(s.canonicalProjectRoot, mid);
-    const hasAssessmentArtifact = [s.basePath, s.canonicalProjectRoot]
-      .some((root) => hasRoadmapReassessmentArtifact(root, mid));
-    return incompleteSliceCount > 0 || hasAssessmentArtifact;
+    if (!hasRoadmapAssessmentSince(mid, s.currentUnit!.startedAt)) return false;
+    return await countIncompleteSlices(s.canonicalProjectRoot, mid) > 0;
   };
 
   const verdict = await resolveMilestoneValidationVerdict(s.basePath, mid);

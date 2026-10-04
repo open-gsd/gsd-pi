@@ -35,7 +35,7 @@ import type { AutoAdvanceResult, AutoOrchestrationModule, AutoStatus, UnitRef } 
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";
 import type { SessionLockStatus } from "../session-lock.js";
-import { _getAdapter, openDatabase, closeDatabase, getTask, insertMilestone, insertSlice, insertTask } from "../gsd-db.js";
+import { _getAdapter, openDatabase, closeDatabase, getTask, insertArtifact, insertMilestone, insertSlice, insertTask } from "../gsd-db.js";
 import { getOpenWedge } from "../auto-liveness-backstop.js";
 import { isBlockedStopReason, stopNoticeKind } from "../stop-notice.js";
 import { mapStatusToExitCode } from "../../../../headless-events.ts";
@@ -7133,9 +7133,15 @@ async function runClaimedResearchSliceWithUsedZeroToolRetry(
   assert.equal(claim.ok, true);
   spendUnitBudget(new Map<string, number>(), RESEARCH_SLICE_ZERO_TOOL);
   if (turn.researchSaved) {
-    const sliceDir = join(s.basePath, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(sliceDir, { recursive: true });
-    writeFileSync(join(sliceDir, "S01-RESEARCH.md"), "# Research\n");
+    // The saved RESEARCH row is the unit's result (no RESEARCH file is written).
+    insertArtifact({
+      path: "milestones/M001/slices/S01/S01-RESEARCH.md",
+      artifact_type: "RESEARCH",
+      milestone_id: "M001",
+      slice_id: "S01",
+      task_id: null,
+      full_content: "# Research\n",
+    });
   }
 
   const mockLedger = {

@@ -205,8 +205,8 @@ describe("Test 5 — postUnitPreVerification short-circuits on deterministic err
   // This integration test calls postUnitPreVerification with a deterministic error
   // in lastToolInvocationError and asserts that:
   //   1. pendingVerificationRetry is NOT set (no retry dispatched)
-  //   2. the blocker placeholder is written to disk
-  //   3. the function returns "continue" (not "retry" or "dispatched")
+  //   2. the blocker diagnostic is a sidecar, never the unit's projection file
+  //   3. auto-mode pauses: the unit recorded no result and must not be passed
 
   let base = "";
   beforeEach(() => {
@@ -219,7 +219,7 @@ describe("Test 5 — postUnitPreVerification short-circuits on deterministic err
     // is best-effort only so as not to mask assertion failures.
   });
 
-  test("returns 'continue' and writes placeholder for context_write_blocked — no pendingVerificationRetry set", async () => {
+  test("pauses and writes a blocker sidecar for context_write_blocked — no pendingVerificationRetry set", async () => {
     const { postUnitPreVerification } = await import("../auto-post-unit.ts");
 
     const s = new AutoSession();
@@ -249,19 +249,25 @@ describe("Test 5 — postUnitPreVerification short-circuits on deterministic err
 
     const result = await postUnitPreVerification(pctx, { skipSettleDelay: true });
 
-    // Core assertion: deterministic error short-circuits — returns "continue",
-    // no retry, and the placeholder is written so the pipeline can advance.
-    assert.strictEqual(result, "continue", "must return 'continue', not 'retry' or 'dispatched'");
+    // Core assertion: deterministic error short-circuits — no retry, and
+    // auto-mode pauses because the unit recorded no result.
+    assert.strictEqual(result, "dispatched", "must pause, not 'retry' or 'continue'");
+    assert.strictEqual(pauseCalled, true, "a unit with no recorded result must pause auto-mode");
     assert.strictEqual(s.pendingVerificationRetry, null, "pendingVerificationRetry must NOT be set");
     assert.strictEqual(s.verificationRetryCount.has("discuss-milestone:M001"), false, "deterministic short-circuit clears stale retry count");
     assert.strictEqual(s.lastToolInvocationError, null, "lastToolInvocationError cleared after handling");
-    assert.strictEqual(pauseCalled, false, "pauseAuto must NOT be called for deterministic errors");
 
-    // The blocker placeholder must exist on disk so the pipeline can advance.
-    const placeholderPath = join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md");
+    // The blocker diagnostic is a sidecar. It must not be written as CONTEXT.md,
+    // where it would pass for the discussion result.
+    const milestoneDir = join(base, ".gsd", "milestones", "M001");
     assert.ok(
-      existsSync(placeholderPath),
-      `blocker placeholder must be written at ${placeholderPath}`,
+      existsSync(join(milestoneDir, "M001-CONTEXT-RECOVERY-BLOCKER.md")),
+      "blocker diagnostic must be written as a sidecar",
+    );
+    assert.equal(
+      existsSync(join(milestoneDir, "M001-CONTEXT.md")),
+      false,
+      "the blocker must not occupy the CONTEXT projection",
     );
   });
 

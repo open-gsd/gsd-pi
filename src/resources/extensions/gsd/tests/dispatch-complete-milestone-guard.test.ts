@@ -327,29 +327,14 @@ describe("complete phase dispatch guard (#5683)", () => {
 
 describe("complete milestone context recovery guard (#5831)", () => {
   let base = "";
-  const executionEntryRule = DISPATCH_RULES.find(
-    (candidate) => candidate.name === "execution-entry phase (no context) → discuss-milestone",
-  );
   const prePlanningRule = DISPATCH_RULES.find(
     (candidate) => candidate.name === "pre-planning (no context) → discuss-milestone",
   );
-  assert.ok(executionEntryRule, "execution-entry missing-context rule should exist");
   assert.ok(prePlanningRule, "pre-planning missing-context rule should exist");
 
   afterEach(() => {
     if (base) rmSync(base, { recursive: true, force: true });
     base = "";
-  });
-
-  test("does not discuss a complete execution-entry milestone with no CONTEXT file", async () => {
-    base = makeBase();
-    const ctx = buildDispatchCtx(base);
-    ctx.state.registry = [{ id: "M001", title: "Milestone One", status: "complete" }];
-    ctx.state.phase = "completing-milestone";
-
-    const result = await executionEntryRule.match(ctx);
-
-    assert.equal(result, null);
   });
 
   test("does not discuss a complete pre-planning milestone with no CONTEXT file", async () => {

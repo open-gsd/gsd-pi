@@ -87,7 +87,6 @@ export {
   verifyExpectedArtifact,
   diagnoseWorktreeIntegrityFailure,
   resolveArtifactVerificationBase,
-  _setRoadmapParserFnForTests,
 } from "./artifact-verification.js";
 
 /**
@@ -441,6 +440,7 @@ export function writeReactiveExecuteBlocker(
 
   clearPathCache();
   clearParseCache();
+  recordUnitRecoveryBlock("reactive-execute", unitId, reason, blockerPath);
 
   return {
     blockerPath,
@@ -451,10 +451,51 @@ export function writeReactiveExecuteBlocker(
 }
 
 /**
- * Write a placeholder artifact so recovery can surface a stuck unit.
- * Task and slice-plan completion projections use diagnostic sidecars
- * instead of canonical artifact paths.
+ * Record the terminal outcome of a unit whose recovery ended without a result:
+ * one manual-attention gate run. Dispatch and verification read this row
+ * (hasUnitRecoveryBlock, getPlanMilestoneRecoveryBlock); the blocker file is a
+ * diagnostic only.
+ */
+function recordUnitRecoveryBlock(
+  unitType: string,
+  unitId: string,
+  reason: string,
+  blockerArtifactPath: string,
+): void {
+  if (!isDbAvailable()) return;
+  const { milestone: mid, slice: sid } = parseUnitId(unitId);
+  const recordedAt = new Date().toISOString();
+  try {
+    insertGateRun({
+      traceId: `auto-recovery:${mid || unitId}`,
+      turnId: `${unitType}:${unitId}:${recordedAt}`,
+      gateId: `${unitType}-recovery`,
+      gateType: "policy",
+      unitType,
+      unitId,
+      ...(mid ? { milestoneId: mid } : {}),
+      ...(sid ? { sliceId: sid } : {}),
+      outcome: "manual-attention",
+      failureClass: "manual-attention",
+      rationale: reason,
+      findings: `Diagnostic artifact: ${blockerArtifactPath}`,
+      attempt: 1,
+      maxAttempts: 1,
+      retryable: false,
+      evaluatedAt: recordedAt,
+    });
+    invalidateStateCache();
+  } catch (e) {
+    logWarning("recovery", `recovery blocker persistence failed for ${unitType} ${unitId}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
 
+/**
+ * Record a stuck unit: a manual-attention gate run in the database and a
+ * diagnostic sidecar file. The sidecar never has the name of the unit's
+ * projection file, so no file can pass for the unit's result and the unit
+ * stays incomplete.
+ *
  * Returns the relative path written, or null if the path couldn't be resolved.
  */
 export function writeBlockerPlaceholder(
@@ -466,19 +507,15 @@ export function writeBlockerPlaceholder(
   const artifactBase = resolveArtifactVerificationBase(unitId, base);
   const canonicalArtifactPath = resolveExpectedArtifactPath(unitType, unitId, artifactBase);
   if (!canonicalArtifactPath) return null;
-  const blockerArtifactPath = unitType === "execute-task" || unitType === "complete-milestone"
-    ? canonicalArtifactPath.replace(/-SUMMARY\.md$/u, "-RECOVERY-BLOCKER.md")
-    : unitType === "plan-slice"
-      ? canonicalArtifactPath.replace(/-PLAN\.md$/u, "-RECOVERY-BLOCKER.md")
-      : unitType === "validate-milestone"
-        ? canonicalArtifactPath.replace(/-VALIDATION\.md$/u, "-RECOVERY-BLOCKER.md")
-        : canonicalArtifactPath;
-  // DB-backed Task, slice-plan, milestone-validation, and milestone-summary
-  // blockers must never occupy their canonical projections.
-  if (
-    (unitType === "execute-task" || unitType === "plan-slice" || unitType === "validate-milestone" || unitType === "complete-milestone") &&
-    blockerArtifactPath === canonicalArtifactPath
-  ) return null;
+  // Sentinel paths (PARALLEL-BLOCKER, PROJECT-RESEARCH-BLOCKER) are already
+  // sidecars. Every other path is a projection and gets a sidecar name.
+  const blockerArtifactPath = canonicalArtifactPath.endsWith("-BLOCKER.md")
+    ? canonicalArtifactPath
+    : canonicalArtifactPath.replace(
+      SHORT_SIDECAR_UNIT_TYPES.has(unitType) ? /-(?:SUMMARY|PLAN|VALIDATION)\.md$/u : /\.md$/u,
+      "-RECOVERY-BLOCKER.md",
+    );
+  if (!blockerArtifactPath.endsWith("-BLOCKER.md")) return null;
   const dir = dirname(blockerArtifactPath);
   if (!existsSync(dir)) createProjectionDirectorySync(dir);
   const recoveryLine = unitType === "research-project"
@@ -489,64 +526,29 @@ export function writeBlockerPlaceholder(
         ? "This diagnostic does not complete slice planning; auto-mode must remain paused until a valid plan is persisted."
         : unitType === "validate-milestone" || unitType === "complete-milestone"
           ? "This diagnostic is not a canonical result; no validation verdict or milestone completion was recorded."
-          : "This placeholder was written by auto-mode so the pipeline can advance.";
+          : "This diagnostic is not the unit's result; the unit stays incomplete until its save tool records one.";
   const content = [
     `# BLOCKER — auto-mode recovery failed`,
     ``,
-    `Unit \`${unitType}\` for \`${unitId}\` failed to produce this artifact after idle recovery exhausted all retries.`,
+    `Unit \`${unitType}\` for \`${unitId}\` failed to record its result after recovery exhausted all retries.`,
     ``,
     `**Reason**: ${reason}`,
     ``,
     recoveryLine,
-    `Review and replace this file before relying on downstream artifacts.`,
   ].join("\n");
   atomicWriteSync(blockerArtifactPath, content, "utf-8");
 
-  // #4414: Clear caches so subsequent dispatch guards (e.g.
-  // resolveMilestoneFile) see the placeholder file. Without this, the
-  // cached directory listing is stale and the dispatch rule re-fires,
-  // producing an infinite loop despite the placeholder being on disk.
-  // Matches the pattern used in verifyExpectedArtifact above.
   clearPathCache();
   clearParseCache();
 
   // A failed milestone plan must stop durably without fabricating a completed
   // slice. The recovery gate remains authoritative while the milestone has no
   // real slices; a later successful plan supersedes it by creating those rows.
-  if (isDbAvailable()) {
-    const { milestone: mid } = parseUnitId(unitId);
-    if (unitType === "plan-milestone" && mid) {
-      const recordedAt = new Date().toISOString();
-      try {
-        insertGateRun({
-          traceId: `auto-recovery:${mid}`,
-          turnId: `plan-milestone:${mid}:${recordedAt}`,
-          gateId: "plan-milestone-recovery",
-          gateType: "policy",
-          unitType,
-          unitId,
-          milestoneId: mid,
-          outcome: "manual-attention",
-          failureClass: "manual-attention",
-          rationale: reason,
-          findings: `Diagnostic artifact: ${blockerArtifactPath}`,
-          attempt: 1,
-          maxAttempts: 1,
-          retryable: false,
-          evaluatedAt: recordedAt,
-        });
-        invalidateStateCache();
-      } catch (e) {
-        logWarning("recovery", `planning blocker persistence failed for plan-milestone recovery: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
+  // A Task outcome is already held by its Attempt, Result and Recovery rows.
+  if (unitType !== "execute-task") {
+    recordUnitRecoveryBlock(unitType, unitId, reason, blockerArtifactPath);
   }
 
-  // Sidecar diagnostics report the file actually written; placeholders that
-  // occupy their canonical path keep the expected-artifact description.
-  if (blockerArtifactPath === canonicalArtifactPath) {
-    return diagnoseExpectedArtifact(unitType, unitId, base);
-  }
   const writtenRel = relative(base, blockerArtifactPath);
   // Milestone resolvers realpath-anchor their results, so when base sits
   // behind a symlink (e.g. /tmp) re-anchor the relative path to the real base.
@@ -554,6 +556,14 @@ export function writeBlockerPlaceholder(
     ? relative(normalizeRealPath(base), blockerArtifactPath)
     : writtenRel;
 }
+
+/** Unit types whose sidecar replaces the projection suffix (`T01-RECOVERY-BLOCKER.md`). */
+const SHORT_SIDECAR_UNIT_TYPES: ReadonlySet<string> = new Set([
+  "execute-task",
+  "complete-milestone",
+  "plan-slice",
+  "validate-milestone",
+]);
 
 // ─── Merge State Reconciliation ───────────────────────────────────────────────
 // Body relocated to state-reconciliation/drift/merge-state.ts (ADR-017 #5701).

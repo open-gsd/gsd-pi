@@ -112,18 +112,26 @@ test('resolveExpectedArtifactPath: unknown unit type → null', () => {
 
 // ═══ writeBlockerPlaceholder ═════════════════════════════════════════════════
 
-test('writeBlockerPlaceholder: writes file for research-slice', () => {
+test('writeBlockerPlaceholder: writes a sidecar for research-slice, not the RESEARCH file', () => {
   const base = createFixtureBase();
   try {
+    seedSlice(base, "pending");
     const result = writeBlockerPlaceholder("research-slice", "M001/S01", base, "idle recovery exhausted 2 attempts");
     assert.ok(result !== null, "should return relative path");
-    const absPath = resolveExpectedArtifactPath("research-slice", "M001/S01", base)!;
-    assert.ok(existsSync(absPath), "file should exist on disk");
-    const content = readFileSync(absPath, "utf-8");
+    const researchPath = resolveExpectedArtifactPath("research-slice", "M001/S01", base)!;
+    assert.equal(existsSync(researchPath), false, "the RESEARCH projection must not be written");
+    const blockerPath = researchPath.replace(/\.md$/, "-RECOVERY-BLOCKER.md");
+    assert.ok(existsSync(blockerPath), "the sidecar should exist on disk");
+    const content = readFileSync(blockerPath, "utf-8");
     assert.ok(content.includes("BLOCKER"), "should contain BLOCKER heading");
     assert.ok(content.includes("idle recovery exhausted 2 attempts"), "should contain the reason");
     assert.ok(content.includes("research-slice"), "should mention the unit type");
     assert.ok(content.includes("M001/S01"), "should mention the unit ID");
+    assert.equal(
+      verifyExpectedArtifact("research-slice", "M001/S01", base),
+      false,
+      "a blocker is not the unit's result",
+    );
   } finally {
     cleanup(base);
   }
@@ -144,14 +152,16 @@ test('writeBlockerPlaceholder: creates directory if missing', () => {
   }
 });
 
-test('writeBlockerPlaceholder: writes file for research-milestone', () => {
+test('writeBlockerPlaceholder: writes a sidecar for research-milestone, not the RESEARCH file', () => {
   const base = createFixtureBase();
   try {
     const result = writeBlockerPlaceholder("research-milestone", "M001", base, "hard timeout");
     assert.ok(result !== null, "should return relative path");
-    const absPath = resolveExpectedArtifactPath("research-milestone", "M001", base)!;
-    assert.ok(existsSync(absPath), "file should exist on disk");
-    const content = readFileSync(absPath, "utf-8");
+    const researchPath = resolveExpectedArtifactPath("research-milestone", "M001", base)!;
+    assert.equal(existsSync(researchPath), false, "the RESEARCH projection must not be written");
+    const blockerPath = researchPath.replace(/\.md$/, "-RECOVERY-BLOCKER.md");
+    assert.ok(existsSync(blockerPath), "the sidecar should exist on disk");
+    const content = readFileSync(blockerPath, "utf-8");
     assert.ok(content.includes("BLOCKER"), "should contain BLOCKER heading");
     assert.ok(content.includes("hard timeout"), "should contain the reason");
   } finally {
@@ -234,8 +244,9 @@ test('writeBlockerPlaceholder: unknown type → null', () => {
 // Regression for #indefinite-hang: complete-slice must verify the slice is
 // actually complete or the idempotency skip loops forever after a crash that
 // wrote SUMMARY+UAT but never closed the slice. Completion is DB-authoritative
-// (ADR-017), so the check reads the slice row; the ROADMAP text below is a
-// projection kept in the fixtures to prove it is NOT what decides the outcome.
+// (ADR-046), so the check reads the slice row only; the ROADMAP, SUMMARY and
+// UAT files below are projections kept in the fixtures to prove they do NOT
+// decide the outcome.
 
 const ROADMAP_INCOMPLETE = `# M001: Test Milestone
 
@@ -283,16 +294,14 @@ test('verifyExpectedArtifact: complete-slice — SUMMARY + UAT present but the s
   }
 });
 
-test('verifyExpectedArtifact: complete-slice — SUMMARY present but UAT missing returns false', () => {
+test('verifyExpectedArtifact: complete-slice — a complete slice row verifies with SUMMARY and UAT files missing', () => {
   const base = createFixtureBase();
   try {
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    writeFileSync(join(sliceDir, "S01-SUMMARY.md"), "# Summary\n", "utf-8");
-    // no UAT file
-    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), ROADMAP_COMPLETE, "utf-8");
+    // no SUMMARY file, no UAT file: the slice row is the completion.
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), ROADMAP_INCOMPLETE, "utf-8");
     seedSlice(base, "complete");
     const result = verifyExpectedArtifact("complete-slice", "M001/S01", base);
-    assert.ok(result === false, "missing UAT should return false");
+    assert.ok(result === true, "a missing projection file must not block a completed slice");
   } finally {
     cleanup(base);
   }

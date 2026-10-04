@@ -418,9 +418,9 @@ function makeExecutingFixture(): string {
 
 function missingTaskPlanRuleMatch(basePath: string, preview: boolean) {
   const rule = DISPATCH_RULES.find((candidate) =>
-    candidate.name === "executing → execute-task (recover missing task plan → plan-slice)"
+    candidate.name === "executing → execute-task (render missing plan projection)"
   );
-  assert.ok(rule, "missing-task-plan recovery rule must exist");
+  assert.ok(rule, "missing-plan projection rule must exist");
   return rule.match({
     basePath,
     mid: "M001",

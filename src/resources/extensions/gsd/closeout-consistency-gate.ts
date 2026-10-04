@@ -25,7 +25,7 @@ import {
   type QualityGateClosureOptions,
 } from "./quality-gate-closure.js";
 import { insertMilestoneValidationGates } from "./milestone-validation-gates.js";
-import { relMilestoneFile, resolveSliceFile } from "./paths.js";
+import { relMilestoneFile } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
 import {
   isMilestoneLifecycleAdopted,
@@ -176,18 +176,14 @@ function artifactBasePathFromDb(): string | undefined {
     : resolveRepositoryProjectRoot(process.cwd());
 }
 
-function allSlicesHaveCloseoutSummaryEvidence(milestoneId: string, artifactBasePath: string): boolean {
+/** Every slice and every task of the milestone is closed in the DB. No SUMMARY file is read. */
+function allSlicesAndTasksClosed(milestoneId: string): boolean {
   const slices = getMilestoneSlices(milestoneId);
   if (slices.length === 0) return false;
 
-  return slices.every((slice) => {
-    if (!isClosedStatus(slice.status)) return false;
-    for (const task of getSliceTasks(milestoneId, slice.id)) {
-      if (!isClosedStatus(task.status)) return false;
-    }
-    const summaryPath = resolveSliceFile(artifactBasePath, milestoneId, slice.id, "SUMMARY");
-    return Boolean(summaryPath && existsSync(summaryPath));
-  });
+  return slices.every((slice) =>
+    isClosedStatus(slice.status) &&
+    getSliceTasks(milestoneId, slice.id).every((task) => isClosedStatus(task.status)));
 }
 
 function renderCloseoutPassThroughValidation(milestoneId: string): string {
@@ -201,7 +197,7 @@ function renderCloseoutPassThroughValidation(milestoneId: string): string {
     "",
     "# Milestone Validation (skipped)",
     "",
-    `Milestone validation was recorded during closeout for ${milestoneId} because all slices already had SUMMARY evidence and no milestone-validation assessment was present.`,
+    `Milestone validation was recorded during closeout for ${milestoneId} because all slices and tasks were closed in the database and no milestone-validation assessment was present.`,
     "",
   ].join("\n");
 }
@@ -216,7 +212,7 @@ function recordCloseoutPassThroughValidationIfReady(
   const existing = getLatestAssessmentByScope(milestoneId, "milestone-validation");
   if (existing?.status === "pass") return true;
   if (existing) return false;
-  if (!allSlicesHaveCloseoutSummaryEvidence(milestoneId, basePath)) return false;
+  if (!allSlicesAndTasksClosed(milestoneId)) return false;
 
   const validationPath = join(basePath, relMilestoneFile(basePath, milestoneId, "VALIDATION"));
   const content = renderCloseoutPassThroughValidation(milestoneId);
@@ -296,10 +292,10 @@ export function checkCloseoutConsistencyGate(
     if (options.readOnly) {
       // Preview: the pass-through recorder writes a VALIDATION projection and
       // assessment/gate rows. It only records when no assessment exists and
-      // every closed slice has SUMMARY evidence — mirror those read-only
+      // every slice and task is closed in the DB — mirror those read-only
       // preconditions and evaluate the rest of the gate as if recorded,
       // without writing (#2230).
-      if (!validation && artifactBasePath && allSlicesHaveCloseoutSummaryEvidence(milestoneId, artifactBasePath)) {
+      if (!validation && artifactBasePath && allSlicesAndTasksClosed(milestoneId)) {
         validation = { status: "pass" } as NonNullable<typeof validation>;
       }
     } else if (recordCloseoutPassThroughValidationIfReady(milestoneId, artifactBasePath)) {
@@ -417,7 +413,9 @@ export function checkCloseoutConsistencyGate(
     gateClosureOptions = canonicalAuthorization?.authorized
       ? { milestoneValidationAuthorization: canonicalAuthorization }
       : {
-          artifactBasePath: options.artifactBasePath ?? artifactBasePathFromDb(),
+          // Unchanged condition: evidence closure runs only for a project
+          // with a resolvable root. The evidence itself is read from the DB.
+          storedSectionEvidence: Boolean(options.artifactBasePath ?? artifactBasePathFromDb()),
           milestoneValidationPassed: validation?.status === "pass",
         };
   }

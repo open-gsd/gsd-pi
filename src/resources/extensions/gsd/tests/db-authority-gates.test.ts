@@ -6,8 +6,7 @@
 // assertions are enforced now.
 //
 //   Gate                       Expected-fail checks and the package that makes them pass
-//   G1 files deleted           dispatch decision P24, prompt P23, artifact verification P24,
-//                              MCP read tools P30
+//   G1 files deleted           MCP read tools P30
 //   G2 files poisoned          prompt P23, no projection reads P23, MCP read tools P30
 //   G3 canonical wins          P23
 //   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save task SUMMARY P12
@@ -146,9 +145,10 @@ describe("G1: files-deleted run", () => {
     const deleted = await decide(base);
 
     assert.deepEqual(deleted.state, control.state, "derived state comes from DB rows");
-    expectedFail("P24", () => assert.deepEqual(deleted.dispatch, control.dispatch));
-    expectedFail("P23", () => assert.equal(deleted.prompt, control.prompt));
-    expectedFail("P24", () => assert.deepEqual(deleted.artifacts, control.artifacts));
+    assert.deepEqual(deleted.dispatch, control.dispatch, "the dispatch decision comes from DB rows");
+    // Dispatch renders the missing slice PLAN from DB rows before it builds the prompt.
+    assert.equal(deleted.prompt, control.prompt, "the prompt is the same after the projections are deleted");
+    assert.deepEqual(deleted.artifacts, control.artifacts, "unit verification comes from DB rows");
   });
 });
 

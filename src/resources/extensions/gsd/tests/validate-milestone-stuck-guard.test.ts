@@ -541,37 +541,79 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
     assert.equal(s.pendingVerificationRetry!.attempt, 1);
   });
 
-  test("continues when same-turn roadmap reassessment invalidated the validation artifact", async () => {
+  /** The row that gsd_reassess_roadmap records. */
+  function recordRoadmapReassessment(createdAt?: string): void {
+    insertAssessment({
+      path: ".gsd/milestones/M001/M001-ROADMAP-ASSESSMENT.md",
+      milestoneId: "M001",
+      sliceId: "S01",
+      status: "roadmap-changed",
+      scope: "roadmap",
+      fullContent: "Added a remediation slice.",
+      ...(createdAt ? { createdAt } : {}),
+    });
+  }
+
+  test("continues when a roadmap reassessment recorded in this unit left open slices", async () => {
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Remediation", status: "queued" });
-
-    const path = join(tempDir, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
-    writeFileSync(path, "", "utf-8");
-    invalidateAllCaches();
 
     const ctx = makeMockCtx();
     const pi = makeMockPi();
     const pauseAutoMock = mock.fn(async () => {});
     const s = makeMockSession(tempDir, "validate-milestone", "M001");
-    s.lastUnitAgentEndMessages = [
-      {
-        role: "assistant",
-        content: [
-          { type: "toolCall", name: "gsd_reassess_roadmap" },
-        ],
-      },
-      {
-        role: "toolResult",
-        toolName: "gsd_reassess_roadmap",
-        isError: false,
-      },
-    ];
+    recordRoadmapReassessment();
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
     assert.equal(result, "continue");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(s.pendingVerificationRetry, null);
+  });
+
+  test("retries when the reassessment is only named in messages, an activity log or an ASSESSMENT file", async () => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Remediation", status: "queued" });
+
+    const sliceDir = join(tempDir, ".gsd", "milestones", "M001", "slices", "S01");
+    mkdirSync(sliceDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-ASSESSMENT.md"), "# Assessment\n", "utf-8");
+    mkdirSync(join(tempDir, ".gsd", "activity"), { recursive: true });
+    writeFileSync(
+      join(tempDir, ".gsd", "activity", "001-validate-milestone-M001.jsonl"),
+      JSON.stringify({ type: "message", message: { role: "toolResult", toolName: "gsd_reassess_roadmap" } }) + "\n",
+      "utf-8",
+    );
+
+    const s = makeMockSession(tempDir, "validate-milestone", "M001");
+    s.lastUnitAgentEndMessages = [
+      { role: "assistant", content: [{ type: "toolCall", name: "gsd_reassess_roadmap" }] },
+      { role: "toolResult", toolName: "gsd_reassess_roadmap", isError: false },
+    ];
+
+    const result = await runPostUnitVerification(
+      { s, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext,
+      mock.fn(async () => {}),
+    );
+
+    assert.equal(result, "retry", "with no roadmap assessment row the unit recorded no outcome");
+  });
+
+  test("retries when the only roadmap reassessment was recorded before this unit started", async () => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Remediation", status: "queued" });
+    recordRoadmapReassessment("2020-01-01T00:00:00.000Z");
+
+    const s = makeMockSession(tempDir, "validate-milestone", "M001");
+
+    const result = await runPostUnitVerification(
+      { s, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext,
+      mock.fn(async () => {}),
+    );
+
+    assert.equal(result, "retry");
   });
 });

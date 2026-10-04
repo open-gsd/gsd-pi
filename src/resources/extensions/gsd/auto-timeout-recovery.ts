@@ -256,9 +256,9 @@ export async function recoverTimedOutUnit(
         ]
       : isEscalation
         ? [
-            `**FINAL ${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — last chance before skip.**`,
+            `**FINAL ${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — last chance before auto-mode pauses.**`,
             `You are still executing ${unitType} ${unitId}.`,
-            `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts} — next failure skips this unit.`,
+            `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts} — next failure pauses auto-mode on this unit.`,
             `Expected durable output: ${expected}.`,
             "You MUST save the durable output NOW, even if incomplete.",
             "Save whatever you have — partial research, preliminary findings, best-effort analysis.",
@@ -320,35 +320,37 @@ export async function recoverTimedOutUnit(
     return "paused";
   }
 
-  // Retries exhausted — surface a blocker instead of silently stalling.
-  // Milestone planning pauses fail-closed; legacy units retain their existing
-  // placeholder-and-advance behavior.
+  // Retries exhausted. The unit recorded no result, so it is not complete:
+  // record the outcome in the database, write a diagnostic sidecar and pause
+  // for repair. A blocker file never stands in for the unit's result. Only the
+  // aggregate parallel-research unit advances, because dispatch reads its
+  // recorded block and falls back to per-slice research.
   const placeholder = writeBlockerPlaceholder(
     unitType, unitId, basePath,
-    `${reason} recovery exhausted ${maxRecoveryAttempts} attempts without producing the artifact.`,
+    `${reason} recovery exhausted ${maxRecoveryAttempts} attempts without recording a result.`,
   );
 
   if (placeholder) {
-    const planningBlocked = unitType === "plan-milestone";
+    const fallsBack = unitType === "research-slice" && unitId.endsWith("/parallel-research");
     writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnitStartedAt, {
-      phase: planningBlocked ? "paused" : "skipped",
+      phase: fallsBack ? "skipped" : "paused",
       recoveryAttempts: recoveryAttempts + 1,
       lastRecoveryReason: reason,
     });
-    if (planningBlocked) {
+    if (fallsBack) {
+      ctx.ui.notify(
+        `${unitType} ${unitId} skipped after ${maxRecoveryAttempts} recovery attempts. Diagnostic written to ${placeholder}. Falling back to per-slice research. (attempt ${attemptNumber})`,
+        "warning",
+      );
+    } else {
       ctx.ui.notify(
         `${unitType} ${unitId} blocked after ${maxRecoveryAttempts} recovery attempts. Diagnostic written to ${placeholder}; no milestone work was marked complete. Pausing for repair. (attempt ${attemptNumber})`,
         "error",
       );
-    } else {
-      ctx.ui.notify(
-        `${unitType} ${unitId} skipped after ${maxRecoveryAttempts} recovery attempts. Blocker placeholder written to ${placeholder}. Advancing pipeline. (attempt ${attemptNumber})`,
-        "warning",
-      );
     }
     unitRecoveryCount.delete(recoveryKey);
     bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
-    return planningBlocked ? "paused" : "recovered";
+    return fallsBack ? "recovered" : "paused";
   }
 
   // Fallback: couldn't resolve artifact path — pause as before.

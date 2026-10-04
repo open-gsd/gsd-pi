@@ -454,7 +454,7 @@ describe("filesystem race conditions", () => {
     assert.ok(state.phase, "should produce valid phase after slice dir deletion");
   });
 
-  test("task PLAN file deleted between dispatch and execution → recovery dispatch", async () => {
+  test("task PLAN file deleted between dispatch and execution → execute-task still dispatched", async () => {
     base = createMinimalFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
@@ -490,17 +490,14 @@ describe("filesystem race conditions", () => {
     };
 
     const result = await resolveDispatch(ctx);
-    // The "executing → execute-task (recover missing task plan)" rule should
-    // detect missing T01-PLAN.md and dispatch plan-slice instead of execute-task
-    if (result.action === "dispatch") {
-      assert.equal(
-        (result as any).unitType,
-        "plan-slice",
-        "missing task plan should trigger plan-slice recovery",
-      );
-    }
-    // It's also valid if the state changed due to cache invalidation
-    assert.ok(result.action, "should produce a valid dispatch action");
+    // The task row in the DB is the plan. A deleted T01-PLAN.md is a missing
+    // projection: it must not send the slice back to plan-slice.
+    assert.equal(result.action, "dispatch");
+    assert.equal(
+      (result as any).unitType,
+      "execute-task",
+      "a missing task plan file must not trigger plan-slice",
+    );
   });
 
   test("worktree directory disappearance: isGhostMilestone still works", () => {

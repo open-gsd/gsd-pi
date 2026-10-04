@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { _setAutoActiveForTest } from "../auto.ts";
 import { postUnitPreVerification } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
-import { closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertArtifact, insertMilestone, openDatabase } from "../gsd-db.ts";
 import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
@@ -97,7 +97,14 @@ describe("tool-unavailable budget on the dispatch row", () => {
     // Two turns lost the race with MCP startup. The third turn saved the research.
     spendUnitBudget(new Map(), BUDGET);
     spendUnitBudget(new Map(), BUDGET);
-    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-RESEARCH.md"), "# Research\n");
+    insertArtifact({
+      path: "milestones/M001/M001-RESEARCH.md",
+      artifact_type: "RESEARCH",
+      milestone_id: "M001",
+      slice_id: null,
+      task_id: null,
+      full_content: "# Research\n",
+    });
 
     const { result, pauseCalled } = await runPreVerification(base, null);
 

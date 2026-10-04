@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, realpathSync, rmSync, utimesSync, writeFileSync
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { resolveExpectedArtifactPath, resolveSliceResearchLocation, resolveExistingSliceResearchPath } from "../auto-artifact-paths.ts";
+import { resolveExpectedArtifactPath, resolveSliceResearchLocation } from "../auto-artifact-paths.ts";
 import { clearPathCache, _clearGsdRootCache, isLegacyMilestonesLayout, milestonesDir } from "../paths.ts";
 
 test("worktree artifact resolution falls back to project .gsd artifacts", () => {
@@ -556,28 +556,6 @@ test("resolveSliceResearchLocation returns null pair when no RESEARCH file exist
   }
 });
 
-test("resolveExistingSliceResearchPath returns null when no RESEARCH file exists", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-research-null-")));
-  try {
-    const milestoneDir = join(root, ".gsd", "milestones", "M001");
-    mkdirSync(join(milestoneDir, "slices", "S01"), { recursive: true });
-    writeFileSync(join(milestoneDir, "M001-CONTEXT.md"), "# context\n");
-
-    _clearGsdRootCache();
-    clearPathCache();
-
-    assert.strictEqual(
-      resolveExistingSliceResearchPath(root, "M001", "S01"),
-      null,
-      "must return null when RESEARCH file is absent",
-    );
-  } finally {
-    _clearGsdRootCache();
-    clearPathCache();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
 test("resolveSliceResearchLocation finds existing RESEARCH in legacy layout", () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-research-legacy-")));
   try {
@@ -595,29 +573,6 @@ test("resolveSliceResearchLocation finds existing RESEARCH in legacy layout", ()
     assert.ok(result.absolutePath !== null, "absolutePath must be non-null when RESEARCH exists");
     assert.ok(result.relativePath !== null, "relativePath must be non-null when RESEARCH exists");
     assert.equal(result.absolutePath, researchFile, "absolutePath must point to the RESEARCH file");
-  } finally {
-    _clearGsdRootCache();
-    clearPathCache();
-    rmSync(root, { recursive: true, force: true });
-  }
-});
-
-test("resolveExistingSliceResearchPath returns absolute path when RESEARCH exists (legacy layout)", () => {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "gsd-research-existing-")));
-  try {
-    const milestoneDir = join(root, ".gsd", "milestones", "M001");
-    const sliceDir = join(milestoneDir, "slices", "S01");
-    mkdirSync(sliceDir, { recursive: true });
-    writeFileSync(join(milestoneDir, "M001-CONTEXT.md"), "# context\n");
-    const researchFile = join(sliceDir, "S01-RESEARCH.md");
-    writeFileSync(researchFile, "# research\n");
-
-    _clearGsdRootCache();
-    clearPathCache();
-
-    const result = resolveExistingSliceResearchPath(root, "M001", "S01");
-    assert.ok(result !== null, "must return non-null when RESEARCH exists");
-    assert.equal(result, researchFile, "must return the absolute path to the RESEARCH file");
   } finally {
     _clearGsdRootCache();
     clearPathCache();

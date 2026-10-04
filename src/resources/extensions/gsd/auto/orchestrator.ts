@@ -1036,10 +1036,7 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
         const stateSnapshot = await deriveState(this.getLiveDispatchBasePath());
         // Dispatch selection can update session bookkeeping. Re-evaluate with a
         // shadow so acknowledging a wedge remains a read-only operation.
-        const shadowSession = {
-          ...this.s,
-          missingTaskPlanRetryCount: new Map(this.s.missingTaskPlanRetryCount),
-        } as AutoSession;
+        const shadowSession = { ...this.s } as AutoSession;
         const decision = await decideOrchestratorDispatch(
           this.ctx,
           this.pi,

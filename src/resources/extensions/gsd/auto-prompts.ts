@@ -1628,12 +1628,13 @@ function isCompletedSliceStatus(status: string): boolean {
  * Skips reassessment when:
  * - No roadmap exists yet
  * - No slices are completed
- * - The last completed slice already has an assessment file or a roadmap
- *   assessment row
+ * - The last completed slice already has a roadmap assessment row
  * - All slices are complete (milestone done — no point reassessing)
+ *
+ * Database rows decide. No ASSESSMENT or SUMMARY file is read.
  */
 export async function checkNeedsReassessment(
-  base: string, mid: string, state: GSDState,
+  _base: string, mid: string, state: GSDState,
 ): Promise<{ sliceId: string } | null> {
   // DB read authority — post-cutover there is no markdown fallback. With no DB
   // there is no slice state to reason about, so returning null (never dispatch
@@ -1648,15 +1649,9 @@ export async function checkNeedsReassessment(
       const hasIncomplete = slices.some(s => !isInactiveStatus(s.status));
       if (completedSliceIds.length === 0 || !hasIncomplete) return null;
       const lastCompleted = completedSliceIds[completedSliceIds.length - 1];
-      const assessmentFile = resolveSliceFile(base, mid, lastCompleted, "ASSESSMENT");
-      const hasAssessment = !!(assessmentFile && await loadFile(assessmentFile));
       // reassess-roadmap persists its verdict as a roadmap-scoped assessments
       // row and never renders a slice ASSESSMENT.md (#2344).
-      const hasRoadmapAssessment = !!getRoadmapAssessmentForSlice(mid, lastCompleted);
-      if (hasAssessment || hasRoadmapAssessment) return null;
-      const summaryFile = resolveSliceFile(base, mid, lastCompleted, "SUMMARY");
-      const hasSummary = !!(summaryFile && await loadFile(summaryFile));
-      if (!hasSummary) return null;
+      if (getRoadmapAssessmentForSlice(mid, lastCompleted)) return null;
       return { sliceId: lastCompleted };
     }
   } catch (err) {

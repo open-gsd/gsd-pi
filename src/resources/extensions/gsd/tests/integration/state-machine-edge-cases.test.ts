@@ -774,7 +774,7 @@ describe("dispatch failure modes", () => {
       activeTask: { id: "T01", title: "Task" },
     });
 
-    // The "executing → execute-task (recover missing task plan)" rule checks activeSlice
+    // The "executing → execute-task (render missing plan projection)" rule checks activeSlice
     // and returns missingSliceStop when null
     const result = await resolveDispatch(ctx);
     assert.equal(result.action, "stop", "null activeSlice in executing should stop");
@@ -1039,10 +1039,18 @@ describe("completion and verification failures", () => {
 
   test("needs-remediation VALIDATION blocks milestone completion dispatch", async () => {
     base = createFullFixture();
-    const mDir = join(base, ".gsd", "milestones", "M001");
-    writeFileSync(
-      join(mDir, "M001-VALIDATION.md"),
-      [
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Active", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "complete" });
+    // The milestone-validation row is the verdict; no VALIDATION.md is written.
+    insertAssessment({
+      path: "milestones/M001/M001-VALIDATION.md",
+      milestoneId: "M001",
+      status: "needs-remediation",
+      scope: "milestone-validation",
+      fullContent: [
         "---",
         "verdict: needs-remediation",
         "remediation_round: 1",
@@ -1052,12 +1060,7 @@ describe("completion and verification failures", () => {
         "",
         "Needs remediation work.",
       ].join("\n"),
-    );
-
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Active", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "complete" });
-    insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "complete" });
+    });
 
     const ctx = buildDispatchCtx(base, "M001", {
       phase: "completing-milestone",
@@ -1073,15 +1076,13 @@ describe("completion and verification failures", () => {
     );
   });
 
-  test("missing slice SUMMARY blocks milestone validation dispatch", async () => {
+  test("open slices block milestone validation dispatch", async () => {
     base = createFullFixture();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Active", status: "active" });
-    // Use "pending" status — closed slices (complete/done/skipped) are
-    // excluded from SUMMARY checks per #3620.
+    // Open slice rows block validation. Slice SUMMARY files are not read.
     insertSlice({ id: "S01", milestoneId: "M001", title: "First", status: "pending" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Second", status: "pending" });
-    // No S01-SUMMARY.md or S02-SUMMARY.md on disk
 
     const ctx = buildDispatchCtx(base, "M001", {
       phase: "validating-milestone",
@@ -1090,10 +1091,10 @@ describe("completion and verification failures", () => {
     });
 
     const result = await resolveDispatch(ctx);
-    assert.equal(result.action, "stop", "missing SUMMARY files should block validation");
+    assert.equal(result.action, "stop", "open slices should block validation");
     assert.ok(
-      (result as any).reason?.includes("missing SUMMARY"),
-      "stop reason should mention missing SUMMARY",
+      (result as any).reason?.includes("S01, S02 are not closed"),
+      "stop reason should name the open slices",
     );
   });
 

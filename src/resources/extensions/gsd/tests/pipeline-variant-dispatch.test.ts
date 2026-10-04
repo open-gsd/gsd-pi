@@ -91,6 +91,13 @@ function seedMilestone(base: string, mid: string, opts: SeedOpts): void {
   });
 }
 
+/** Close every seeded slice in the DB, as a milestone in validation has them. */
+function closeAllSlices(): void {
+  const adapter = _getAdapter();
+  assert.ok(adapter, "test database should be open");
+  adapter.prepare("UPDATE slices SET status = 'complete' WHERE milestone_id = 'M001'").run();
+}
+
 function findRule(name: string) {
   const rule = DISPATCH_RULES.find(r => r.name === name);
   assert.ok(rule, `rule "${name}" must exist`);
@@ -214,21 +221,9 @@ test("#4781 phase 2: validate-milestone rule writes pass-through VALIDATION for 
   t.after(() => cleanup(base));
 
   seedMilestone(base, "M001", TRIVIAL_INPUT);
-  // findMissingSummaries checks slice SUMMARY files — write empty ones so
-  // the safety guard doesn't stop first.
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md"), "# S01\n");
-  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S02", "S02-SUMMARY.md"), "# S02\n");
-  // Write a roadmap so findMissingSummaries can enumerate slice IDs.
-  writeFileSync(
-    join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
-    [
-      "# M001",
-      "## Slices",
-      "- [x] **S01: First** `risk:low` `depends:[]`",
-      "- [x] **S02: Second** `risk:low` `depends:[]`",
-    ].join("\n"),
-  );
+  // The open-slice guard reads the DB: both slices are closed there. No
+  // SUMMARY or ROADMAP file is written.
+  closeAllSlices();
 
   const ctx = makeCtx({ base, mid: "M001", phase: "validating-milestone" });
   const result = await findRule(VALIDATE_RULE).match(ctx);
@@ -252,9 +247,7 @@ test("validate-milestone skip writes to project root when active worktree lacks 
   t.after(() => cleanup(base));
 
   seedMilestone(base, "M001", TRIVIAL_INPUT);
-  const adapter = _getAdapter();
-  assert.ok(adapter, "test database should be open");
-  adapter.prepare("UPDATE slices SET status = 'complete' WHERE milestone_id = 'M001'").run();
+  closeAllSlices();
 
   const { writeFileSync, readFileSync } = await import("node:fs");
   writeFileSync(
@@ -352,18 +345,7 @@ test("#4781 phase 2: validate-milestone rule dispatches normally for standard va
   t.after(() => cleanup(base));
 
   seedMilestone(base, "M001", STANDARD_INPUT);
-  const { writeFileSync } = await import("node:fs");
-  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md"), "# S01\n");
-  writeFileSync(join(base, ".gsd", "milestones", "M001", "slices", "S02", "S02-SUMMARY.md"), "# S02\n");
-  writeFileSync(
-    join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
-    [
-      "# M001",
-      "## Slices",
-      "- [x] **S01: First** `risk:low` `depends:[]`",
-      "- [x] **S02: Second** `risk:low` `depends:[]`",
-    ].join("\n"),
-  );
+  closeAllSlices();
 
   const ctx = makeCtx({ base, mid: "M001", phase: "validating-milestone" });
   const result = await findRule(VALIDATE_RULE).match(ctx);

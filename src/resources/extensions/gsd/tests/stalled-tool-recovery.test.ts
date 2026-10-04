@@ -15,7 +15,7 @@
  * (the fix) and verifies it does not crash.
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { verifyExpectedArtifact } from "../auto-recovery.ts";
@@ -245,6 +245,47 @@ test("plan-milestone timeout recovery persists a blocker and pauses", async (t) 
   assert.ok(
     ctx.notifications.some((entry: { message: string }) => entry.message.includes("no milestone work was marked complete")),
     "timeout recovery should explain why planning paused",
+  );
+});
+
+test("research-slice timeout recovery pauses and leaves the unit incomplete", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-timeout-research-slice-blocked-"));
+  const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+  mkdirSync(sliceDir, { recursive: true });
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending" });
+  const ctx = makeRecordingCtx();
+  const pi = makeRecordingPi();
+  const recoveryContext: RecoveryContext = {
+    basePath: base,
+    verbose: false,
+    currentUnitStartedAt: Date.now(),
+    unitRecoveryCount: new Map(),
+  };
+
+  assert.equal(await recoverTimedOutUnit(ctx, pi, "research-slice", "M001/S01", "idle", recoveryContext), "recovered");
+  assert.equal(await recoverTimedOutUnit(ctx, pi, "research-slice", "M001/S01", "idle", recoveryContext), "recovered");
+  assert.equal(
+    await recoverTimedOutUnit(ctx, pi, "research-slice", "M001/S01", "idle", recoveryContext),
+    "paused",
+    "an exhausted research unit must pause, not advance past a blocker file",
+  );
+
+  assert.equal(
+    existsSync(join(sliceDir, "S01-RESEARCH.md")),
+    false,
+    "the blocker must not be written as the RESEARCH projection",
+  );
+  assert.equal(
+    verifyExpectedArtifact("research-slice", "M001/S01", base),
+    false,
+    "a timed-out research unit is not complete",
   );
 });
 

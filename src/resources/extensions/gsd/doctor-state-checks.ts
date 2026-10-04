@@ -164,9 +164,8 @@ export async function checkGsdStateHealth(
 
     // #2510: a recorded plan-milestone-recovery gate means milestone planning
     // failed fail-closed and auto-mode is gated on a real plan being persisted.
-    // Surface it as its own issue independent of ROADMAP presence — the
-    // recovery blocker diagnostic itself occupies ROADMAP.md, so the missing-
-    // roadmap branch below would never see this state. Eligibility mirrors
+    // Surface it as its own issue independent of ROADMAP presence: the missing-
+    // roadmap branch below does not describe a blocked plan. Eligibility mirrors
     // derive: the gate only blocks while the milestone has zero slices (a
     // persisted plan supersedes it), and only for live milestones.
     if (

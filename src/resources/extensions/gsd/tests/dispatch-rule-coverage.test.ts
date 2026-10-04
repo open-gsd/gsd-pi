@@ -16,6 +16,7 @@ import { DISPATCH_RULES } from "../auto-dispatch.ts";
 import type { DispatchContext, DispatchAction } from "../auto-dispatch.ts";
 import type { GSDState } from "../types.ts";
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
+import { closeDatabase, insertArtifact, insertMilestone, openDatabase } from "../gsd-db.ts";
 
 // ─── State helpers ────────────────────────────────────────────────────────
 
@@ -41,6 +42,32 @@ function makeCtx(basePath: string, state: GSDState, mid = "M001"): DispatchConte
     state,
     prefs: undefined,
   };
+}
+
+// ─── Database scaffold helpers ────────────────────────────────────────────
+
+/**
+ * Open an in-memory DB with milestone `mid` and the given saved artifact rows.
+ * Dispatch reads these rows; a CONTEXT or RESEARCH file decides nothing.
+ */
+function seedMilestoneArtifacts(
+  t: { after: (fn: () => void) => void },
+  mid: string,
+  artifactTypes: string[],
+): void {
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  insertMilestone({ id: mid, title: "Test Milestone", status: "active" });
+  for (const type of artifactTypes) {
+    insertArtifact({
+      path: `milestones/${mid}/${mid}-${type}.md`,
+      artifact_type: type,
+      milestone_id: mid,
+      slice_id: null,
+      task_id: null,
+      full_content: `# ${type}\n`,
+    });
+  }
 }
 
 // ─── Disk scaffold helpers ────────────────────────────────────────────────
@@ -147,14 +174,12 @@ test("dispatch-rule-coverage: pre-planning, no CONTEXT → discuss-milestone", a
   );
 });
 
-test("dispatch-rule-coverage: pre-planning worktree sees project-root CONTEXT", async (t) => {
+test("dispatch-rule-coverage: pre-planning from a worktree base sees the saved CONTEXT row", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-wt-context-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  seedMilestoneArtifacts(t, "M001", ["CONTEXT"]);
 
-  const projectPhaseDir = join(tmp, ".gsd", "phases", "01-foundation");
-  mkdirSync(projectPhaseDir, { recursive: true });
-  writeFileSync(join(projectPhaseDir, "01-CONTEXT.md"), "# Context\n");
-
+  // The worktree has no CONTEXT file at all: the saved row is the discussion.
   const worktree = join(tmp, ".gsd", "worktrees", "M001");
   mkdirSync(join(worktree, ".gsd", "milestones", "M001"), { recursive: true });
   writeFileSync(
@@ -168,39 +193,31 @@ test("dispatch-rule-coverage: pre-planning worktree sees project-root CONTEXT", 
   assert.ok(rule, "pre-planning missing-context rule should exist");
 
   const result = await rule.match(makeCtx(worktree, makeState({ phase: "pre-planning" })));
-  assert.equal(result, null, "project-root CONTEXT must prevent a second discuss-milestone dispatch");
+  assert.equal(result, null, "the saved CONTEXT row must prevent a second discuss-milestone dispatch");
 });
 
-test("dispatch-rule-coverage: pre-planning worktree sees worktree-only CONTEXT", async (t) => {
-  // Mirror image of the project-root test: discuss-milestone mirrors CONTEXT into
-  // the worktree's own .gsd, and it may not yet exist at the project root (the
-  // worktree→root sync deliberately does not flow markdown projections back).
-  // A project-root-only check would miss it and re-fire discuss-milestone.
+test("dispatch-rule-coverage: pre-planning with only a CONTEXT file dispatches discuss-milestone", async (t) => {
+  // A CONTEXT file with no saved row (in the worktree or at the project root)
+  // is not a finished discussion.
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-wt-only-context-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
-
-  // No CONTEXT at the project root — only the milestone dir exists there.
-  mkdirSync(join(tmp, ".gsd", "phases"), { recursive: true });
-
-  const worktree = join(tmp, ".gsd", "worktrees", "M001");
-  const worktreePhaseDir = join(worktree, ".gsd", "phases", "01-foundation");
-  mkdirSync(worktreePhaseDir, { recursive: true });
-  writeFileSync(join(worktreePhaseDir, "01-CONTEXT.md"), "# WT Context\n");
+  seedMilestoneArtifacts(t, "M001", []);
+  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
 
   const rule = DISPATCH_RULES.find(
     (candidate) => candidate.name === "pre-planning (no context) → discuss-milestone",
   );
   assert.ok(rule, "pre-planning missing-context rule should exist");
 
-  const result = await rule.match(makeCtx(worktree, makeState({ phase: "pre-planning" })));
-  assert.equal(result, null, "worktree-only CONTEXT must prevent a second discuss-milestone dispatch");
+  const result = await rule.match(makeCtx(tmp, makeState({ phase: "pre-planning" })));
+  assert.equal(result?.action === "dispatch" ? result.unitType : null, "discuss-milestone");
 });
 
 test("dispatch-rule-coverage: pre-planning, has CONTEXT, no RESEARCH → research-milestone", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-res-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
-  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
+  seedMilestoneArtifacts(t, "M001", ["CONTEXT"]);
 
   const ctx = makeCtx(tmp, makeState({ phase: "pre-planning" }));
   const match = await findFirstMatch(ctx);
@@ -219,8 +236,7 @@ test("dispatch-rule-coverage: pre-planning, has CONTEXT + RESEARCH → plan-mile
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-plan-m-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
-  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
-  writeMilestoneFile(tmp, "M001", "RESEARCH", "# Research\n");
+  seedMilestoneArtifacts(t, "M001", ["CONTEXT", "RESEARCH"]);
 
   const ctx = makeCtx(tmp, makeState({ phase: "pre-planning" }));
   const match = await findFirstMatch(ctx);
@@ -430,10 +446,6 @@ test("dispatch-rule-coverage: summarizing → complete-slice", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-sum-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
-  // Rule "execution-entry phase (no context)" fires for summarizing if CONTEXT
-  // is missing — write it so the summarizing rule wins.
-  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
-
   const ctx = makeCtx(
     tmp,
     makeState({
@@ -482,7 +494,7 @@ test("dispatch-rule-coverage: rule registry has the expected size", () => {
   // intentionally.
   assert.equal(
     DISPATCH_RULES.length,
-    29,
+    28,
     `DISPATCH_RULES length changed (got ${DISPATCH_RULES.length}). ` +
       "If you added a rule, add a state stub to dispatch-rule-coverage.test.ts " +
       "and update this expected count.",

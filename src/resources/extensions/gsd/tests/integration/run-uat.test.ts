@@ -14,10 +14,14 @@ import { buildRunUatPrompt, checkNeedsRunUat } from '../../auto-prompts.ts';
 import { buildRunUatResultPresentation, RUN_UAT_TOOL_PRESENTATION_PLAN_ID } from '../../tool-presentation-plan.ts';
 import {
   closeDatabase,
+  getSlice,
+  insertAssessment,
   insertMilestone,
   insertSlice,
   isDbAvailable,
   openDatabase,
+  setSliceSummaryMd,
+  setSliceUatMd,
 } from '../../gsd-db.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -86,6 +90,28 @@ function seedSliceRows(
       depends: slice.depends ?? [],
       sequence: i + 1,
     });
+  });
+}
+
+/** Store the UAT spec in the slice row, where gsd_slice_complete and gsd_summary_save put it. */
+function storeSliceUat(mid: string, sid: string, content: string): void {
+  setSliceUatMd(mid, sid, content);
+}
+
+/** Store the slice summary in the slice row. The stored UAT spec is kept. */
+function storeSliceSummary(mid: string, sid: string, content: string): void {
+  setSliceSummaryMd(mid, sid, content, getSlice(mid, sid)?.full_uat_md ?? '');
+}
+
+/** Record a run-uat verdict row, as gsd_uat_result_save does. */
+function recordUatVerdict(mid: string, sid: string, status: string): void {
+  insertAssessment({
+    path: `.gsd/milestones/${mid}/slices/${sid}/${sid}-ASSESSMENT.md`,
+    milestoneId: mid,
+    sliceId: sid,
+    status,
+    scope: 'run-uat',
+    fullContent: `verdict: ${status.toUpperCase()}`,
   });
 }
 
@@ -445,7 +471,7 @@ test('(m) non-artifact UAT skip', async () => {
         { id: 'S02', title: 'Next slice', status: 'pending', depends: ['S01'] },
       ]);
 
-      writeSliceFile(base, 'M001', 'S01', 'UAT', makeUatContent('human-experience'));
+      storeSliceUat('M001', 'S01', makeUatContent('human-experience'));
 
       const state = {
         activeMilestone: { id: 'M001', title: 'Test roadmap' },
@@ -561,8 +587,8 @@ test('(n) stale replay guard', async () => {
         { id: 'S02', title: 'Next slice', status: 'pending', depends: ['S01'] },
       ]);
 
-      writeSliceFile(base, 'M001', 'S01', 'UAT', makeUatContent('artifact-driven'));
-      writeSliceFile(base, 'M001', 'S01', 'UAT', '---\nverdict: FAIL\n---\n');
+      storeSliceUat('M001', 'S01', makeUatContent('artifact-driven'));
+      recordUatVerdict('M001', 'S01', 'fail');
 
       const state = {
         activeMilestone: { id: 'M001', title: 'Test roadmap' },
@@ -579,17 +605,17 @@ test('(n) stale replay guard', async () => {
       assert.deepStrictEqual(
         result,
         null,
-        'existing UAT with FAIL verdict does not re-dispatch; verdict gate owns blocking',
+        'a recorded FAIL verdict does not re-dispatch; verdict gate owns blocking',
       );
     } finally {
       cleanup(base);
     }
 });
 
-test('(q) verdict in ASSESSMENT file skips UAT dispatch (file-based path)', async () => {
-    // Regression test for #2644: run-uat writes the verdict to
-    // S{sid}-ASSESSMENT.md through the structured UAT save path,
-    // but checkNeedsRunUat only checked S{sid}-UAT.md — causing a stuck loop.
+test('(q) recorded run-uat verdict row skips UAT dispatch', async () => {
+    // Regression test for #2644: run-uat records its verdict through the
+    // structured UAT save path. checkNeedsRunUat must read that recorded
+    // verdict, or the unit is dispatched again in a stuck loop.
     const base = createFixtureBase();
     try {
       const roadmapDir = join(base, '.gsd', 'milestones', 'M001');
@@ -613,10 +639,10 @@ test('(q) verdict in ASSESSMENT file skips UAT dispatch (file-based path)', asyn
         { id: 'S02', title: 'Next slice', status: 'pending', depends: ['S01'] },
       ]);
 
-      // UAT spec file WITHOUT a verdict (the spec never gets one)
-      writeSliceFile(base, 'M001', 'S01', 'UAT', makeUatContent('artifact-driven'));
-      // ASSESSMENT file WITH a verdict (where run-uat actually writes it)
-      writeSliceFile(base, 'M001', 'S01', 'ASSESSMENT', '---\nverdict: PASS\n---\n# UAT Assessment\n');
+      // UAT spec WITHOUT a verdict (the spec never gets one)
+      storeSliceUat('M001', 'S01', makeUatContent('artifact-driven'));
+      // The run-uat verdict row that gsd_uat_result_save records. No ASSESSMENT file.
+      recordUatVerdict('M001', 'S01', 'pass');
 
       const state = {
         activeMilestone: { id: 'M001', title: 'Test roadmap' },
@@ -633,16 +659,16 @@ test('(q) verdict in ASSESSMENT file skips UAT dispatch (file-based path)', asyn
       assert.deepStrictEqual(
         result,
         null,
-        'verdict in ASSESSMENT file should prevent re-dispatch of run-uat',
+        'the recorded verdict should prevent re-dispatch of run-uat',
       );
     } finally {
       cleanup(base);
     }
 });
 
-test('(r) no ASSESSMENT file still dispatches UAT (no false skip)', async () => {
-    // Guard: when there is no ASSESSMENT file at all, UAT should still dispatch
-    // normally. The ASSESSMENT check must not cause a false-negative skip.
+test('(r) no recorded verdict still dispatches UAT (no false skip)', async () => {
+    // Guard: when there is no run-uat verdict row, UAT should still dispatch
+    // normally. The verdict check must not cause a false-negative skip.
     const base = createFixtureBase();
     try {
       const roadmapDir = join(base, '.gsd', 'milestones', 'M001');
@@ -666,8 +692,8 @@ test('(r) no ASSESSMENT file still dispatches UAT (no false skip)', async () => 
         { id: 'S02', title: 'Next slice', status: 'pending', depends: ['S01'] },
       ]);
 
-      // UAT spec file WITHOUT a verdict, and NO ASSESSMENT file
-      writeSliceFile(base, 'M001', 'S01', 'UAT', makeUatContent('artifact-driven'));
+      // UAT spec WITHOUT a verdict, and NO run-uat verdict row
+      storeSliceUat('M001', 'S01', makeUatContent('artifact-driven'));
 
       const state = {
         activeMilestone: { id: 'M001', title: 'Test roadmap' },
@@ -684,16 +710,16 @@ test('(r) no ASSESSMENT file still dispatches UAT (no false skip)', async () => 
       assert.deepStrictEqual(
         result,
         { sliceId: 'S01', uatType: 'artifact-driven' },
-        'without ASSESSMENT file, UAT still dispatches normally',
+        'without a recorded verdict, UAT still dispatches normally',
       );
     } finally {
       cleanup(base);
     }
 });
 
-test('(s) ASSESSMENT without verdict does not skip UAT dispatch', async () => {
-    // Guard: an ASSESSMENT file that exists but has no verdict line should
-    // NOT suppress UAT dispatch — only a file with an actual verdict should.
+test('(s) an ASSESSMENT file with a PASS verdict and no recorded row does not skip UAT dispatch', async () => {
+    // Guard: an ASSESSMENT file is a projection. Even with a PASS verdict line
+    // it must NOT suppress UAT dispatch — only the recorded run-uat row does.
     const base = createFixtureBase();
     try {
       const roadmapDir = join(base, '.gsd', 'milestones', 'M001');
@@ -718,9 +744,9 @@ test('(s) ASSESSMENT without verdict does not skip UAT dispatch', async () => {
       ]);
 
       // UAT spec WITHOUT verdict
-      writeSliceFile(base, 'M001', 'S01', 'UAT', makeUatContent('artifact-driven'));
-      // ASSESSMENT file WITHOUT verdict (partial/incomplete assessment)
-      writeSliceFile(base, 'M001', 'S01', 'ASSESSMENT', '# UAT Assessment\n\nStill running checks...\n');
+      storeSliceUat('M001', 'S01', makeUatContent('artifact-driven'));
+      // ASSESSMENT file with a hand-written PASS verdict and no recorded row
+      writeSliceFile(base, 'M001', 'S01', 'ASSESSMENT', '---\nverdict: PASS\n---\n# UAT Assessment\n');
 
       const state = {
         activeMilestone: { id: 'M001', title: 'Test roadmap' },
@@ -737,7 +763,7 @@ test('(s) ASSESSMENT without verdict does not skip UAT dispatch', async () => {
       assert.deepStrictEqual(
         result,
         { sliceId: 'S01', uatType: 'artifact-driven' },
-        'ASSESSMENT without verdict should not suppress UAT dispatch',
+        'a verdict in the ASSESSMENT file should not suppress UAT dispatch',
       );
     } finally {
       cleanup(base);
@@ -763,7 +789,7 @@ test('(t) browser-observable UAT dispatches for final slice even when uat_dispat
         ].join('\n'),
       );
       seedSliceRows('M001', [{ id: 'S01', title: 'Only slice', status: 'complete' }]);
-      writeSliceFile(base, 'M001', 'S01', 'UAT', makeBrowserObservableUatContent());
+      storeSliceUat('M001', 'S01', makeBrowserObservableUatContent());
 
       const state = {
         activeMilestone: { id: 'M001', title: 'Test roadmap' },
@@ -919,12 +945,7 @@ test('(x) checkNeedsRunUat returns runtime-executable when slice SUMMARY names a
         ].join('\n'),
       );
       seedSliceRows('M007', [{ id: 'S01', title: 'Only slice', status: 'complete' }]);
-      writeSliceFile(
-        base,
-        'M007',
-        'S01',
-        'UAT',
-        [
+      storeSliceUat('M007', 'S01', [
           '# S01 UAT',
           '',
           '## UAT Type',
@@ -934,12 +955,7 @@ test('(x) checkNeedsRunUat returns runtime-executable when slice SUMMARY names a
           '- Start the dev/local verification server with `npm run test:server`.',
         ].join('\n'),
       );
-      writeSliceFile(
-        base,
-        'M007',
-        'S01',
-        'SUMMARY',
-        [
+      storeSliceSummary('M007', 'S01', [
           '# S01 Summary',
           '',
           'Verification: `npm run test:uat` passed with clean browser diagnostics.',
@@ -990,13 +1006,8 @@ test('(x2) checkNeedsRunUat leaves true browser-executable UAT unpromoted when n
         ].join('\n'),
       );
       seedSliceRows('M008', [{ id: 'S01', title: 'Only slice', status: 'complete' }]);
-      writeSliceFile(base, 'M008', 'S01', 'UAT', makeBrowserObservableUatContent('browser-executable'));
-      writeSliceFile(
-        base,
-        'M008',
-        'S01',
-        'SUMMARY',
-        [
+      storeSliceUat('M008', 'S01', makeBrowserObservableUatContent('browser-executable'));
+      storeSliceSummary('M008', 'S01', [
           '# S01 Summary',
           '',
           'Verification: clicked through the UI and confirmed the search box filters todos.',

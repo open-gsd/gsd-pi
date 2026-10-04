@@ -10,7 +10,7 @@ import {
   resolveTasksDir,
 } from "./paths.js";
 import { deriveState } from "./state.js";
-import { extractVerdict } from "./verdict-parser.js";
+import { readMilestoneValidationVerdict } from "./milestone-validation-verdict.js";
 import { milestoneIdSort, findMilestoneIds } from "./guided-flow.js";
 import type { RiskLevel } from "./types.js";
 import { getSliceBranchName, detectWorktreeName } from "./worktree.js";
@@ -180,18 +180,11 @@ export async function indexWorkspace(basePath: string, opts: IndexWorkspaceOptio
     }
   }
 
-  // Populate validationVerdict from VALIDATION files (#2807)
+  // Populate validationVerdict from the milestone-validation row (#2807).
+  // VALIDATION.md is a projection and is not read.
   for (const milestone of milestones) {
-    const validationPath = resolveMilestoneFile(basePath, milestone.id, "VALIDATION");
-    if (validationPath) {
-      const validationContent = await loadFile(validationPath);
-      if (validationContent) {
-        const verdict = extractVerdict(validationContent);
-        if (verdict === "pass" || verdict === "needs-attention" || verdict === "needs-remediation") {
-          milestone.validationVerdict = verdict;
-        }
-      }
-    }
+    const verdict = readMilestoneValidationVerdict(milestone.id);
+    if (verdict) milestone.validationVerdict = verdict;
   }
 
   const scopes: WorkspaceScopeTarget[] = [{ scope: "project", label: "project", kind: "project" }];

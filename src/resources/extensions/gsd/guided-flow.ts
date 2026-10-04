@@ -44,7 +44,7 @@ import { gsdHome } from "./gsd-home.js";
 import {
   gsdRoot, milestonesDir, legacyMilestonesDir, resolveMilestoneFile,
   resolveSliceFile, resolveSlicePath, resolveGsdRootFile, relGsdRootFile,
-  relMilestoneFile, relSliceFile, relSlicePath, clearPathCache,
+  relMilestoneFile, relSliceFile, relSlicePath,
 } from "./paths.js";
 import { join } from "node:path";
 import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
@@ -104,7 +104,6 @@ import {
   formatPriorContextBrief,
 } from "./preparation.js";
 import { verifyExpectedArtifact } from "./auto-recovery.js";
-import { countPlanMilestoneRoadmapSlices } from "./artifact-verification.js";
 import { createWorkspace, scopeMilestone, type MilestoneScope } from "./workspace.js";
 import { clearPendingGate, extractDepthVerificationMilestoneId, getPendingGate } from "./bootstrap/write-gate.js";
 import {
@@ -218,53 +217,15 @@ export const _scheduleAutoStartAfterIdleForTest = scheduleAutoStartAfterIdle;
 
 /**
  * Scope-based overload of verifyExpectedArtifact.
- * Uses scope.workspace.projectRoot as the authoritative base path, making
- * the check immune to cwd-drift and worktree-path divergence.
+ * Uses scope.workspace.projectRoot as the base path. The unit result is read
+ * from the database, so cwd drift and worktree paths do not change it.
  */
 export function verifyExpectedArtifactForScope(
   scope: MilestoneScope,
   unitType: string,
   unitId: string,
 ): boolean {
-  if (
-    unitId === scope.milestoneId &&
-    (unitType === "discuss-milestone" || unitType === "plan-milestone")
-  ) {
-    // Layout-aware scope paths use resolveMilestoneFile; clear stale dir listings
-    // primed before discuss/plan wrote CONTEXT.md or ROADMAP.md (see checkAutoStartAfterDiscuss).
-    clearPathCache();
-  }
-  if (
-    unitId === scope.milestoneId &&
-    unitType === "discuss-milestone"
-  ) {
-    const path = resolveExpectedArtifactPathForScope(scope, unitType, unitId);
-    return path ? existsSync(path) : false;
-  }
-  if (unitId === scope.milestoneId && unitType === "plan-milestone") {
-    const path = resolveExpectedArtifactPathForScope(scope, unitType, unitId);
-    return verifyScopedPlanMilestoneArtifact(path, unitType, unitId);
-  }
   return verifyExpectedArtifact(unitType, unitId, scope.workspace.projectRoot);
-}
-
-function verifyScopedPlanMilestoneArtifact(
-  path: string | null,
-  unitType: string,
-  unitId: string,
-): boolean {
-  if (!path || !existsSync(path)) return false;
-  try {
-    const roadmapContent = readFileSync(path, "utf-8");
-    if (countPlanMilestoneRoadmapSlices(roadmapContent) === 0) {
-      logWarning("recovery", `verify-fail ${unitType} ${unitId}: roadmap has zero slices at ${path}`);
-      return false;
-    }
-    return true;
-  } catch (err) {
-    logWarning("recovery", `plan-milestone roadmap verification failed: ${err instanceof Error ? err.message : String(err)}`);
-    return false;
-  }
 }
 
 /**
@@ -1221,20 +1182,10 @@ export async function showHeadlessMilestoneCreation(
 
 type DiscussNormSlice = { id: string; done: boolean; title: string };
 
-/** Prefer DB slice rows; fall back to ROADMAP parsing when the DB is empty (#2892). */
-async function loadDiscussNormSlices(basePath: string, mid: string): Promise<DiscussNormSlice[]> {
-  let normSlices: DiscussNormSlice[] = [];
-  if (isDbAvailable()) {
-    normSlices = getMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete", title: s.title }));
-  }
-  if (normSlices.length === 0) {
-    const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
-    const roadmapContent = roadmapFile ? await loadFile(roadmapFile) : null;
-    if (roadmapContent) {
-      normSlices = parseRoadmapSlices(roadmapContent).map(s => ({ id: s.id, done: s.done, title: s.title }));
-    }
-  }
-  return normSlices;
+/** Slices of the milestone from the DB. The ROADMAP projection is never parsed for them. */
+async function loadDiscussNormSlices(_basePath: string, mid: string): Promise<DiscussNormSlice[]> {
+  if (!isDbAvailable()) return [];
+  return getMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete", title: s.title }));
 }
 
 export const _loadDiscussNormSlicesForTest = loadDiscussNormSlices;
@@ -1813,12 +1764,9 @@ function selfHealRuntimeRecords(basePath: string, ctx: ExtensionContext): { clea
       // on resume. Clearing it would let a failed hook count as already run.
       // The record is replaced when the hook is dispatched again.
       if (unitType.startsWith("hook/")) continue;
-      // Clear records whose expected artifact already exists (completed but not cleaned up)
-      // TODO(C-future): selfHealRuntimeRecords iterates across all unit types (not just milestone
-      // units), so it cannot be converted to resolveExpectedArtifactPathForScope without
-      // first establishing a per-record scope.  Migrate once unit runtime records carry scope info.
-      const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
-      if (artifactPath && existsSync(artifactPath)) {
+      // Clear records of units that recorded their result in the database
+      // (completed but not cleaned up). A file on disk is not that evidence.
+      if (verifyExpectedArtifact(unitType, unitId, basePath)) {
         clearUnitRuntimeRecord(basePath, unitType, unitId);
         cleared++;
         continue;

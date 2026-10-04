@@ -16,7 +16,7 @@ import type { GSDState, TaskIO } from "./types.js";
 import type { GSDPreferences } from "./preferences.js";
 import { renderLanguageDirectiveForPrompt } from "./preferences.js";
 import type { MinimalModelRegistry } from "./context-budget.js";
-import { loadFile, extractUatType } from "./files.js";
+import { extractUatType } from "./files.js";
 import { getRewriteCount, loadActiveOverrides, recordRewriteAttempt, resolveAllOverrides } from "./overrides.js";
 import { getUatBrowserToolSupportError, type UatType } from "./uat-policy.js";
 import {
@@ -28,33 +28,27 @@ import {
   getMilestone,
   insertAssessment,
   transaction,
-  getAssessment,
   getSliceRunUatAssessment,
+  hasSavedArtifact,
+  hasUnitRecoveryBlock,
 } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
-import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
+import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
 import {
-  resolveMilestoneFile,
   resolveMilestonePath,
   resolveSliceFile,
   resolveSlicePath,
-  resolveTaskFile,
-  relTaskFile,
   relSliceFile,
   relMilestoneFile,
   buildMilestoneFileName,
-  buildTaskFileName,
-  gsdProjectionRoot,
 } from "./paths.js";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { writeProjectionFileSync } from "./compat/compat-marker.js";
 import { logWarning, logError } from "./workflow-logger.js";
-import { dirname, join, sep } from "node:path";
-import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
-import { isFlatPhaseMigrationInFlight } from "./flat-phase-migration.js";
+import { dirname, join } from "node:path";
 import { composeToolAffordanceReminder } from "./unit-context-composer.js";
 import {
   buildDiscussMilestonePrompt,
@@ -83,12 +77,11 @@ import {
 } from "./auto-prompts.js";
 import { readPendingTaskRecoveryContext } from "./task-recovery-domain-operation.js";
 import { readTerminalTaskRecoveryAbort } from "./artifact-verification.js";
-import { checkNeedsRunUat } from "./uat-dispatch.js";
+import { checkNeedsRunUat, readSliceUatSpec } from "./uat-dispatch.js";
 import { normalizeModelFieldConfig, resolveModelWithFallbacksForUnit, resolveThinkingLevelForUnit } from "./preferences-models.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { selectReactiveDispatchBatch } from "./uok/execution-graph.js";
 import { getMilestonePipelineVariant } from "./milestone-scope-classifier.js";
-import { EXECUTION_ENTRY_PHASES, hasFinalizedMilestoneContext } from "./uok/plan-v2.js";
 import { isAutoActive } from "./auto.js";
 // Host adapter explicitly: auto-dispatch runs in the extension host, and the
 // ambient write-gate exports env-sniff the adapter per call (they are reserved
@@ -112,7 +105,6 @@ import { annotateBackgroundable } from "./delegation-policy.js";
 import { invalidateAllCaches } from "./cache.js";
 import { insertMilestoneValidationGates } from "./milestone-validation-gates.js";
 import { nativeHasChanges, nativeIsRepo, _resetHasChangesCache } from "./native-git-bridge.js";
-import { debugLog, isDebugEnabled } from "./debug-logger.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import {
@@ -128,7 +120,6 @@ import { detectWorktreeName } from "./worktree.js";
 import { probeGitConflictState } from "./git-conflict-state.js";
 import { runTurnGitAction } from "./git-service.js";
 import { parseUnitId } from "./unit-id.js";
-import { resolveExpectedArtifactPath, resolveExistingSliceResearchPath } from "./auto-artifact-paths.js";
 import {
   formatCloseoutProofBlock,
   proveMilestoneCloseout,
@@ -185,15 +176,6 @@ export interface DispatchContext {
    * side effect (DB writes, file writes, counters, markers).
    */
   preview?: boolean;
-}
-
-function resolveExistingExpectedArtifact(
-  unitType: string,
-  unitId: string,
-  basePath: string,
-): string | null {
-  const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
-  return artifactPath && existsSync(artifactPath) ? artifactPath : null;
 }
 
 type ReassessmentChecker = typeof checkNeedsReassessment;
@@ -306,68 +288,21 @@ export type DeepStageGate =
   | { status: "pending"; stage: DeepProjectStage; reason: string }
   | { status: "blocked"; stage: DeepProjectStage; reason: string };
 
-export async function readUatGateVerdict(
-  basePath: string,
+/**
+ * UAT sign-off of a slice: the `run-uat` assessment row that
+ * `gsd_uat_result_save` writes. A verdict line in a rendered ASSESSMENT or UAT
+ * file is not a sign-off, and roadmap or backfill rows have another scope.
+ */
+export function readUatGateVerdict(
   mid: string,
   sliceId: string,
-): Promise<{ verdict: string; uatType: UatType | undefined } | null> {
-  const uatFile = resolveSliceFile(basePath, mid, sliceId, "UAT");
-  const assessmentFile = resolveSliceFile(basePath, mid, sliceId, "ASSESSMENT");
-
-  const uatContent = uatFile ? await loadFile(uatFile) : null;
-  const uatType = uatContent ? extractUatType(uatContent) : undefined;
-
-  const assessmentContent = assessmentFile ? await loadFile(assessmentFile) : null;
-  if (assessmentContent) {
-    // `reassess-roadmap` writes roadmap-scoped assessments to the same
-    // S##-ASSESSMENT artifact path; those verdicts must not be treated as UAT.
-    const assessmentRow = getAssessment(relSliceFile(basePath, mid, sliceId, "ASSESSMENT"));
-    const assessmentScope = typeof assessmentRow?.["scope"] === "string"
-      ? String(assessmentRow["scope"]).trim().toLowerCase()
-      : "";
-    if (assessmentScope === "roadmap") {
-      return null;
-    }
-
-    // Backfilled assessments (#1258) are placeholders that older versions created
-    // during milestone validation for completed slices that never produced a real
-    // UAT ASSESSMENT (e.g. artifact-driven UAT that was never dispatched). Their fabricated
-    // verdict must not be treated as a genuine UAT sign-off — otherwise "never
-    // checked" is silently read as "passed". Skip the placeholder and fall
-    // through to the authoritative run-uat DB row (which stays null unless a
-    // real UAT was actually recorded).
-    if (assessmentScope !== BACKFILL_ASSESSMENT_SCOPE) {
-      const assessmentVerdict = extractVerdict(assessmentContent);
-      if (assessmentVerdict) {
-        return {
-          verdict: assessmentVerdict,
-          uatType: uatType ?? extractUatType(assessmentContent),
-        };
-      }
-    }
-  }
-
-  if (uatContent) {
-    const legacyUatVerdict = extractVerdict(uatContent);
-    if (legacyUatVerdict) {
-      return { verdict: legacyUatVerdict, uatType };
-    }
-  }
-
-  // ADR-017 DB fallback: when the ASSESSMENT markdown is missing or orphaned
-  // from its canonical path (e.g. after a milestone artifact-layout migration
-  // moves slice artifacts from `phases/…` to `milestones/…`), consult the
-  // authoritative assessments table by (mid, slice) identity instead of path.
-  // `gsd_uat_result_save` always writes this row, so it is the source of truth.
+): { verdict: string; uatType: UatType | undefined } | null {
   const runUatAssessment = getSliceRunUatAssessment(mid, sliceId);
-  if (runUatAssessment?.status) {
-    return {
-      verdict: runUatAssessment.status,
-      uatType: uatType ?? extractUatType(runUatAssessment.fullContent),
-    };
-  }
-
-  return null;
+  if (!runUatAssessment?.status) return null;
+  return {
+    verdict: runUatAssessment.status,
+    uatType: extractUatType(readSliceUatSpec(mid, sliceId)) ?? extractUatType(runUatAssessment.fullContent),
+  };
 }
 
 /**
@@ -435,21 +370,6 @@ function missingSliceStop(mid: string, phase: string): DispatchAction {
     reason: `${mid}: phase "${phase}" has no active slice — run /gsd doctor.`,
     level: "error",
   };
-}
-
-/**
- * True when the slice's tasks live inside the slice plan file itself —
- * flat-phase phases/ layout with task checkboxes, or a renderPlanFromDb
- * `<tasks>` block — rather than as per-task PLAN files under tasks/.
- */
-function slicePlanHasEmbeddedTasks(basePath: string, mid: string, sid: string): boolean {
-  const slicePlanPath = resolveSliceFile(basePath, mid, sid, "PLAN");
-  if (!slicePlanPath || !existsSync(slicePlanPath)) return false;
-  const content = readFileSync(slicePlanPath, "utf-8");
-  const phasesRoot = join(gsdProjectionRoot(basePath), "phases");
-  const isPhasesSlicePlan = slicePlanPath.startsWith(`${phasesRoot}${sep}`);
-  const hasTaskCheckboxes = /^-\s+\[[ xX]\]\s+\*\*[\w.]+/m.test(content);
-  return content.includes("<tasks>") || (isPhasesSlicePlan && hasTaskCheckboxes);
 }
 
 function isRegistryMilestoneComplete(state: GSDState, mid: string): boolean {
@@ -538,40 +458,17 @@ function withEffectiveDispatchMilestone(ctx: DispatchContext, effectiveMid: stri
   return { ...ctx, mid: effectiveMid, state };
 }
 
-function hasMilestonePassedDiscuss(basePath: string, mid: string): boolean {
-  if (!isDbAvailable()) return false;
-  const slices = getMilestoneSlices(mid);
-  for (const slice of slices) {
-    const planPath = resolveSliceFile(basePath, mid, slice.id, "PLAN");
-    if (planPath && existsSync(planPath)) return true;
-  }
-  return hasImplementationArtifacts(basePath, mid) === "present";
-}
-
 /**
- * Check for milestone slices missing SUMMARY files.
- * Returns array of missing slice IDs, or empty array if all present or DB unavailable.
- *
- * Excludes skipped slices (intentionally summary-less) and legacy-complete
- * slices whose DB status is authoritative even without on-disk SUMMARY (#3620).
+ * Ids of the milestone slices that are still open in the database. Empty when
+ * every slice is closed, skipped or deferred, or when the DB is unavailable.
+ * A slice SUMMARY file is a projection: it is not read here.
  */
-export function findMissingSummaries(basePath: string, mid: string): string[] {
+export function findOpenSlices(mid: string): string[] {
   if (!isDbAvailable()) return [];
-  const slices = getMilestoneSlices(mid);
-  // Skipped and deferred slices never produce SUMMARYs; legacy-complete slices may lack them
-  return slices
+  return getMilestoneSlices(mid)
     .filter(s => !isInactiveStatus(s.status))
-    .filter(s => {
-      const summaryPath = resolveSliceFile(basePath, mid, s.id, "SUMMARY");
-      return !summaryPath || !existsSync(summaryPath);
-    })
     .map(s => s.id);
 }
-
-// Scope marker of assessment rows that older versions fabricated during
-// milestone validation (#1258). No code writes this scope any more; the reader
-// keeps it so a legacy placeholder is never read as a genuine `run-uat` sign-off.
-const BACKFILL_ASSESSMENT_SCOPE = "backfill";
 
 function recordAdoptedMilestoneValidationWaiver(
   basePath: string,
@@ -722,66 +619,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
     },
   },
   {
-    // #4671 — Recovery path for execution-entry phases with missing CONTEXT.md.
-    //
-    // Once `deriveStateFromDb` returns an execution-entry phase (executing /
-    // summarizing / validating-milestone / completing-milestone), the
-    // pre-planning guard at `pre-planning (no context) → discuss-milestone`
-    // no longer fires. The plan-v2 gate correctly detects the missing context
-    // but can only block — it cannot redispatch. Without this rule the
-    // milestone is stuck until `/gsd doctor heal` repairs it (and heal
-    // historically missed this check too).
-    //
-    // Fire BEFORE the execution-entry phase rules so we redispatch to
-    // `discuss-milestone` instead of hitting the plan-v2 gate.
-    name: "execution-entry phase (no context) → discuss-milestone",
-    match: async ({ state, mid, midTitle, basePath, session, prefs, structuredQuestionsAvailable, preview }) => {
-      if (!EXECUTION_ENTRY_PHASES.has(state.phase)) return null;
-      if (!MILESTONE_ID_RE.test(mid)) return null;
-      if (isRegistryMilestoneComplete(state, mid)) return null;
-      // Resolve discuss/context artifacts against the active session worktree,
-      // mirroring the executing rules below. For a suffixed-worktree milestone
-      // the CONTEXT and slice plans live under the worktree, not the project
-      // root; checking the raw project-root basePath misreads the milestone as
-      // "never discussed" and re-dispatches discuss-milestone after task
-      // closeout instead of continuing execution (#1317).
-      const artifactBasePath = resolveArtifactBasePath(basePath, mid, session);
-      // The layout migration moves .gsd/milestones/ aside before rendering
-      // .gsd/phases/, so mid-flight the slice plans exist in neither layout.
-      // A dispatch landing in that window reads "never discussed" and re-plans a
-      // milestone that is already fully planned in the DB, discarding the plan.
-      // Startup dispatch races the migration on every run, so decline to decide
-      // while the layout is converting; the next iteration sees a settled tree.
-      // Scoped to a migration actually in flight — a settled legacy project must
-      // still reach this rule (#4671).
-      if (isFlatPhaseMigrationInFlight(artifactBasePath)) return null;
-      if (hasMilestonePassedDiscuss(artifactBasePath, mid)) return null;
-      // Align with the plan-v2 gate's lookup semantics: whitespace-only counts
-      // as missing, and an auto worktree may fall back to GSD_PROJECT_ROOT.
-      if (hasFinalizedMilestoneContext(artifactBasePath, mid)) return null;
-      // H6 fix (#4973): non-deep auto-mode has no human to answer the
-      // depth-verification question, so pre-marking avoids a write-gate
-      // deadlock. Deep planning is still user-driven even inside auto-mode,
-      // so it must wait for explicit approval instead of taking this bypass.
-      if (shouldBypassMilestoneDepthGateInAuto(prefs)) {
-        if (!preview) hostWriteGateAdapter.markDepthVerified(mid, basePath);
-      }
-      return {
-        action: "dispatch",
-        unitType: "discuss-milestone",
-        unitId: mid,
-        prompt: await buildDiscussMilestonePrompt(
-          mid,
-          midTitle,
-          basePath,
-          structuredQuestionsAvailable,
-          { headless: !!process.env.GSD_HEADLESS },
-        ),
-        pauseAfterDispatch: !process.env.GSD_HEADLESS,
-      };
-    },
-  },
-  {
     name: "summarizing → complete-slice",
     match: async ({ state, mid, midTitle, basePath }) => {
       if (state.phase !== "summarizing") return null;
@@ -875,8 +712,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
       }
       // Preview must not burn a retry attempt; the dispatch decision is shared.
       if (!preview) incrementUatRetryAttempts(mid, sliceId);
-      const uatFile = resolveSliceFile(basePath, mid, sliceId, "UAT")!;
-      const uatContent = await loadFile(uatFile);
       return {
         action: "dispatch",
         unitType: "run-uat",
@@ -885,7 +720,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           mid,
           sliceId,
           relSliceFile(basePath, mid, sliceId, "UAT"),
-          uatContent ?? "",
+          readSliceUatSpec(mid, sliceId),
           basePath,
         ),
         pauseAfterDispatch: !process.env.GSD_HEADLESS && uatType !== "artifact-driven" && uatType !== "browser-executable" && uatType !== "runtime-executable",
@@ -894,7 +729,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "uat-verdict-gate (non-PASS observed; closeout enforces)",
-    match: async ({ mid, basePath, prefs }) => {
+    match: async ({ mid, prefs }) => {
       // Only applies when UAT dispatch is enabled
       if (!prefs?.uat_dispatch) return null;
 
@@ -902,7 +737,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // ROADMAP projection is never parsed for gate decisions.
       if (!isDbAvailable()) return null;
       for (const sliceId of getClosedSliceIds(mid)) {
-        const result = await readUatGateVerdict(basePath, mid, sliceId);
+        const result = readUatGateVerdict(mid, sliceId);
         if (!result) continue;
         const { verdict, uatType } = result;
 
@@ -1060,15 +895,11 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "pre-planning (no context) → discuss-milestone",
-    match: async ({ state, mid, midTitle, basePath, prefs, session, structuredQuestionsAvailable, preview }) => {
+    match: async ({ state, mid, midTitle, basePath, prefs, structuredQuestionsAvailable, preview }) => {
       if (state.phase !== "pre-planning") return null;
       if (isRegistryMilestoneComplete(state, mid)) return null;
-      const contextBasePath = resolveWorktreeProjectRoot(basePath, session?.originalBasePath);
-      const contextFile =
-        resolveMilestoneFile(basePath, mid, "CONTEXT") ??
-        (contextBasePath !== basePath ? resolveMilestoneFile(contextBasePath, mid, "CONTEXT") : null);
-      const hasContext = !!(contextFile && (await loadFile(contextFile)));
-      if (hasContext) return null; // fall through to next rule
+      // The saved CONTEXT row is the discussion result; the file is not read.
+      if (hasSavedArtifact(mid, null, "CONTEXT")) return null; // fall through to next rule
       if (prefs?.planning_depth === "deep") return null;
       // H6 fix (#4973): keep the non-deep auto-mode bypass, but do not
       // pre-verify deep planning's user-facing milestone approval gate.
@@ -1096,8 +927,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (state.phase !== "pre-planning") return null;
       // Phase skip: skip research when preference or profile says so
       if (prefs?.phases?.skip_research) return null;
-      const researchFile = resolveMilestoneFile(basePath, mid, "RESEARCH");
-      if (researchFile) return null; // has research, fall through
+      if (hasSavedArtifact(mid, null, "RESEARCH")) return null; // has research, fall through
       return {
         action: "dispatch",
         unitType: "research-milestone",
@@ -1128,23 +958,18 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "planning (require_slice_discussion) → pause for discussion",
-    match: async ({ state, mid, basePath, prefs }) => {
+    match: async ({ state, mid, prefs }) => {
       if (state.phase !== "planning") return null;
       if (!prefs?.phases?.require_slice_discussion) return null;
       if (!state.activeSlice) return null;
-      // Only pause if the slice has no context file yet (discussion not done).
-      // resolveSliceFile returns null when the file does not exist on disk,
-      // but cachedReaddir could return a stale hit — verify with existsSync
-      // so the guard is defence-in-depth and the contract is explicit at the
-      // call site.
-      const sliceContextFile = resolveSliceFile(basePath, mid, state.activeSlice.id, "CONTEXT");
-      if (sliceContextFile && existsSync(sliceContextFile)) return null; // discussion already done, proceed
+      // Only pause if the slice has no saved CONTEXT row yet (discussion not done).
+      if (hasSavedArtifact(mid, state.activeSlice.id, "CONTEXT")) return null; // discussion already done, proceed
 
       const closedSliceIds = getClosedSliceIds(mid);
       const justClosedSliceId = closedSliceIds[closedSliceIds.length - 1];
       let priorVerdictWarning = "";
       if (justClosedSliceId) {
-        const prior = await readUatGateVerdict(basePath, mid, justClosedSliceId);
+        const prior = readUatGateVerdict(mid, justClosedSliceId);
         if (prior && !isAcceptableUatVerdict(prior.verdict, prior.uatType)) {
           priorVerdictWarning =
             ` Note: the slice just closed (${justClosedSliceId}) recorded a non-PASS UAT verdict (${prior.verdict.toUpperCase()}); review before continuing.`;
@@ -1177,20 +1002,18 @@ export const DISPATCH_RULES: DispatchRule[] = [
       const dbSlices = readMilestoneSlices(mid);
       if (dbSlices.length === 0) return null;
 
-      // Find slices that need research (no RESEARCH file, dependencies done).
-      // Milestone research informs slice research; it does not satisfy the
-      // per-slice RESEARCH artifact contract.
+      // Find slices that need research (no saved RESEARCH row, dependencies
+      // done in the DB). Milestone research informs slice research; it does
+      // not satisfy the per-slice RESEARCH contract.
       const researchReadySlices: Array<{ id: string; title: string }> = [];
+      const doneSliceIds = new Set(dbSlices.filter((slice) => slice.done).map((slice) => slice.id));
 
       for (const slice of dbSlices) {
         if (slice.done) continue;
         // Skip if already has research
-        if (resolveExistingSliceResearchPath(basePath, mid, slice.id)) continue;
-        // Skip if dependencies aren't done (check for SUMMARY files)
-        const depsComplete = slice.depends.every((depId) =>
-          !!resolveExistingExpectedArtifact("complete-slice", `${mid}/${depId}`, basePath),
-        );
-        if (!depsComplete) continue;
+        if (hasSavedArtifact(mid, slice.id, "RESEARCH")) continue;
+        // Skip if dependencies aren't done
+        if (!slice.depends.every((depId) => doneSliceIds.has(depId))) continue;
 
         researchReadySlices.push({ id: slice.id, title: slice.title });
       }
@@ -1198,13 +1021,10 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // Only dispatch parallel if 2+ slices are ready
       if (researchReadySlices.length < 2) return null;
 
-      // #4414: If a previous parallel-research attempt escalated to a blocker
-      // placeholder, skip this rule and fall through to per-slice research
+      // #4414: If a previous parallel-research attempt ended in a recorded
+      // recovery block, skip this rule and fall through to per-slice research
       // (or other rules) rather than re-dispatching the same failing unit.
-      const parallelBlocker =
-        resolveExistingExpectedArtifact("research-slice", `${mid}/parallel-research`, basePath) ??
-        resolveMilestoneFile(basePath, mid, "PARALLEL-BLOCKER");
-      if (parallelBlocker) return null;
+      if (hasUnitRecoveryBlock("research-slice", `${mid}/parallel-research`)) return null;
 
       return {
         action: "dispatch",
@@ -1234,7 +1054,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
       const sTitle = state.activeSlice!.title;
-      if (resolveExistingSliceResearchPath(basePath, mid, sid)) return null; // has research, fall through
+      if (hasSavedArtifact(mid, sid, "RESEARCH")) return null; // has research, fall through
       return {
         action: "dispatch",
         unitType: "research-slice",
@@ -1444,7 +1264,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
 
       const sid = state.activeSlice.id;
       const sTitle = state.activeSlice.title;
-      if (resolveSliceFile(basePath, mid, sid, "REACTIVE-BLOCKER")) return null;
+      if (hasUnitRecoveryBlock("reactive-execute", `${mid}/${sid}`)) return null;
       const maxParallel = reactiveConfig?.max_parallel ?? 2;
       // `subagent_model` accepts the phase-bucket object form (#1229); honor the
       // full primary→fallbacks chain in the dispatch prompt (the reactive
@@ -1549,163 +1369,34 @@ export const DISPATCH_RULES: DispatchRule[] = [
     },
   },
   {
-    name: "executing → execute-task (recover missing task plan → plan-slice)",
-    match: async ({ state, mid, midTitle, basePath, session, sessionContextWindow, modelRegistry, sessionProvider, preview }) => {
+    // The active task comes from the database, so the plan exists there. A
+    // missing PLAN file is projection work: render it from the DB so the
+    // execute-task prompt can inline it, then fall through. A missing file
+    // never stops dispatch and never sends the slice back to planning.
+    name: "executing → execute-task (render missing plan projection)",
+    match: async ({ state, mid, basePath, session, preview }) => {
       if (state.phase !== "executing" || !state.activeTask) return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
-      const sid = state.activeSlice!.id;
-      const sTitle = state.activeSlice!.title;
-      const tid = state.activeTask.id;
-      const unitId = `${mid}/${sid}`;
+      const sid = state.activeSlice.id;
       const artifactBasePath = resolveArtifactBasePath(basePath, mid, session);
-
-      // Guard: if the slice plan exists but the individual task plan files are
-      // missing, the planner created S##-PLAN.md with task entries but never
-      // wrote the tasks/ directory files. Dispatch plan-slice to regenerate
-      // them rather than hard-stopping — fixes the infinite-loop described in
-      // issue #909. Flat-phase layout embeds tasks in the slice plan file, so
-      // skip recovery when tasks are embedded (<tasks> block or task checkboxes in phases/ plan).
-      const taskPlanPath = resolveTaskFile(artifactBasePath, mid, sid, tid, "PLAN");
-      // tasksEmbeddedInSlicePlan is true when tasks live inside the slice plan
-      // (flat-phase phases/ layout with task checkboxes or renderPlanFromDb <tasks> block).
-      const tasksEmbeddedInSlicePlan = slicePlanHasEmbeddedTasks(artifactBasePath, mid, sid);
-      const projectionTaskPlanPath = join(
-        gsdProjectionRoot(artifactBasePath),
-        "milestones",
-        mid,
-        "slices",
-        sid,
-        "tasks",
-        buildTaskFileName(tid, "PLAN"),
-      );
-      if (
-        (!taskPlanPath || !existsSync(taskPlanPath)) &&
-        !existsSync(projectionTaskPlanPath) &&
-        !tasksEmbeddedInSlicePlan
-      ) {
-        // #1640: a fresh worktree created after an incomplete-milestone
-        // teardown starts with no .gsd markdown (the tree is gitignored), even
-        // though the authoritative DB rows for the active slice survive. The
-        // DB is the single source of truth and the PLAN projection is always
-        // re-renderable from it, so heal the gap here instead of stopping
-        // (#1520) or burning plan-slice retries (#909). renderPlanFromDb
-        // resolves the existing descriptor dir via resolveMilestonePath /
-        // targetSliceFile, so the heal lands beside the phase's other
-        // artifacts rather than at a hardcoded canonical path.
-        let planRenderError: string | null = null;
-        if (!resolveSliceFile(artifactBasePath, mid, sid, "PLAN")) {
-          if (preview) {
-            // Preview: the re-render is a PLAN projection write. Mirror the
-            // failure-free outcome read-only: renderPlanFromDb writes only
-            // after the slice and its active tasks resolve from the DB, and
-            // its rendered plan always carries a <tasks> block — so a real
-            // turn would restore the PLAN, see embedded tasks, and fall
-            // through to the normal execute-task rule (#2230). Otherwise the
-            // render would throw and reach the same replan decision below.
-            const { getSlice, getSliceTasks } = await import("./gsd-db.js");
-            if (
-              isDbAvailable() &&
-              getSlice(mid, sid) &&
-              getSliceTasks(mid, sid).some((task) => task.status !== "skipped")
-            ) {
-              session?.missingTaskPlanRetryCount?.delete(unitId);
-              return null;
-            }
-          } else {
-            try {
-              const { renderPlanFromDb } = await import("./markdown-renderer.js");
-              const rendered = await renderPlanFromDb(artifactBasePath, mid, sid);
-              process.stderr.write(
-                `gsd-projection-heal: re-rendered missing slice PLAN for ${unitId} from the DB at ${rendered.planPath}\n`,
-              );
-            } catch (err) {
-              // A Windows sharing violation is transient contention, not a DB
-              // projection gap. Preserve it as a typed throw so Recovery
-              // Classification routes through the loop's existing retry budget.
-              throwIfTransientProjectionLockError(err);
-              // Fail loud below: a DB that genuinely lacks the slice rows is a
-              // real error, and the stop diagnosis reports it verbatim.
-              planRenderError = err instanceof Error ? err.message : String(err);
-              logWarning(
-                "dispatch",
-                `slice PLAN re-render from DB failed for ${unitId}: ${planRenderError}`,
-              );
-            }
-            if (slicePlanHasEmbeddedTasks(artifactBasePath, mid, sid)) {
-              session?.missingTaskPlanRetryCount?.delete(unitId);
-              // PLAN restored — fall through to the normal execute-task rule.
-              return null;
-            }
-          }
-        }
-        // #1520: if the slice plan with embedded tasks exists at the original
-        // project root but not in the active worktree, the root→worktree state
-        // projection is broken or stale. Re-planning the slice cannot repair a
-        // projection gap — it would burn both retries and then misreport the
-        // failure as "missing task plans". Stop immediately with an accurate
-        // diagnosis instead. When the root plan is also absent or carries no
-        // embedded tasks, the #909 replan recovery below still applies.
-        const originalRoot = session?.originalBasePath;
-        if (
-          originalRoot &&
-          originalRoot !== artifactBasePath &&
-          slicePlanHasEmbeddedTasks(originalRoot, mid, sid)
-        ) {
-          session?.missingTaskPlanRetryCount?.delete(unitId);
-          return {
-            action: "stop",
-            reason: `${unitId}: the slice plan with embedded tasks exists at the project root but is missing from the active worktree, and re-rendering it from the workflow database failed${planRenderError ? ` (${planRenderError})` : ""} — re-planning cannot fix a projection gap. Run /gsd rebuild markdown to restore projections from the authoritative DB, then run /gsd auto to resume.`,
-            level: "error",
-          };
-        }
-        const MAX_MISSING_TASK_PLAN_RETRIES = 2;
-        const retryCount = session?.missingTaskPlanRetryCount?.get(unitId) ?? 0;
-        if (retryCount >= MAX_MISSING_TASK_PLAN_RETRIES) {
-          session?.missingTaskPlanRetryCount?.delete(unitId);
-          return {
-            action: "stop",
-            reason: `Missing task-plan recovery failed ${retryCount} times for ${unitId} - manual intervention required. Task plan ${tid} is still missing after regenerating the slice plan. Fix the task-plan files manually, then run /gsd auto to resume.`,
-            level: "error",
-          };
-        }
-        session?.missingTaskPlanRetryCount?.set(unitId, retryCount + 1);
-        if (isDebugEnabled()) {
-          const expectedTaskPlanPath = join(artifactBasePath, relTaskFile(artifactBasePath, mid, sid, tid, "PLAN"));
-          const originalProjectRoot = session?.originalBasePath || basePath;
-          const activeMilestoneWorktreePath = session?.basePath || basePath;
-          const expectedTaskPlanExists = existsSync(expectedTaskPlanPath);
-          debugLog("dispatch-missing-task-plan-recovery", {
-            selectedDispatchRule: "executing → execute-task (recover missing task plan → plan-slice)",
-            basePathUsedForArtifactChecks: artifactBasePath,
-            milestoneRoot: artifactBasePath,
-            originalProjectRoot,
-            activeMilestoneWorktreePath,
-            hasRootWorktreeMismatch: originalProjectRoot !== activeMilestoneWorktreePath,
-            expectedTaskPlanPath,
-            projectionTaskPlanPath,
-            expectedTaskPlanExists,
-            // Retained for compatibility with existing diagnostic parsers.
-            artifactExists: expectedTaskPlanExists,
-            projectionArtifactExists: existsSync(projectionTaskPlanPath),
-          });
-        }
-        return {
-          action: "dispatch",
-          unitType: "plan-slice",
-          unitId,
-          prompt: await buildPlanSlicePrompt(
-            mid,
-            midTitle,
-            sid,
-            sTitle,
-            basePath,
-            undefined,
-            { sessionContextWindow, modelRegistry, sessionProvider },
-          ),
-        };
+      // Preview must not write the projection; the decision is the same.
+      if (preview || resolveSliceFile(artifactBasePath, mid, sid, "PLAN")) return null;
+      try {
+        const { renderPlanFromDb } = await import("./markdown-renderer.js");
+        const rendered = await renderPlanFromDb(artifactBasePath, mid, sid);
+        process.stderr.write(
+          `gsd-projection-heal: re-rendered missing slice PLAN for ${mid}/${sid} from the DB at ${rendered.planPath}\n`,
+        );
+      } catch (err) {
+        // A Windows sharing violation is transient contention, not a DB
+        // projection gap. Preserve it as a typed throw so Recovery
+        // Classification routes through the loop's existing retry budget.
+        throwIfTransientProjectionLockError(err);
+        logWarning(
+          "dispatch",
+          `slice PLAN re-render from DB failed for ${mid}/${sid}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
-
-      session?.missingTaskPlanRetryCount?.delete(unitId);
       return null;
     },
   },
@@ -1772,14 +1463,14 @@ export const DISPATCH_RULES: DispatchRule[] = [
 
       const adoptedMilestone = isMilestoneLifecycleAdopted(mid);
 
-      // Legacy validation still consumes SUMMARY projections. Adopted validation
-      // reads canonical evidence and cannot be blocked by a missing projection.
+      // Adopted validation reads canonical evidence. Legacy validation needs
+      // every slice closed in the DB; a missing SUMMARY file does not block it.
       if (!adoptedMilestone) {
-        const missingSlices = findMissingSummaries(basePath, mid);
-        if (missingSlices.length > 0) {
+        const openSlices = findOpenSlices(mid);
+        if (openSlices.length > 0) {
           return {
             action: "stop",
-            reason: `Cannot validate milestone ${mid}: slices ${missingSlices.join(", ")} are missing SUMMARY files. These slices may have been skipped.`,
+            reason: `Cannot validate milestone ${mid}: slices ${openSlices.join(", ")} are not closed in the database.`,
             level: "error",
           };
         }
@@ -1820,15 +1511,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
         }
         const artifactBasePath = resolveArtifactBasePath(basePath, mid, session);
         const projectRoot = resolveWorktreeProjectRoot(basePath, session?.originalBasePath);
-        const mDir = resolveMilestonePath(artifactBasePath, mid) ??
-          (projectRoot !== artifactBasePath ? resolveMilestonePath(projectRoot, mid) : null);
-        if (!mDir) {
-          return {
-            action: "stop",
-            reason: `Cannot skip milestone validation for ${mid}: milestone artifacts are missing under ${artifactBasePath}. Run /gsd doctor before resuming auto-mode.`,
-            level: "warning",
-          };
-        }
         // Use relMilestoneFile for the layout-aware filename:
         //   legacy   → milestones/M001/M001-VALIDATION.md
         //   flat-phase → phases/01-slug/01-VALIDATION.md

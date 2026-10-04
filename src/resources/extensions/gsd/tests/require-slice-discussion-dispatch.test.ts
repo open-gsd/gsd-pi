@@ -4,7 +4,7 @@
  *   1. state.phase === "planning"
  *   2. require_slice_discussion is enabled in preferences
  *   3. state.activeSlice is non-null
- *   4. the slice has no CONTEXT file on disk
+ *   4. the slice has no saved CONTEXT artifact row in the database
  *
  * Exercises the dispatch rule from DISPATCH_RULES directly with a
  * DispatchContext built against a real temp directory — no source-string
@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { DISPATCH_RULES, type DispatchContext } from "../auto-dispatch.ts";
 import {
   closeDatabase,
+  insertArtifact,
   insertAssessment,
   insertMilestone,
   insertSlice,
@@ -189,23 +190,51 @@ describe("require_slice_discussion dispatch rule (#3454)", () => {
     }
   });
 
-  // ─── Context-file present: should not pause ───────────────────────────
+  // ─── Saved CONTEXT row present: should not pause ──────────────────────
 
-  test("falls through (null) when CONTEXT file already exists on disk", async () => {
+  test("falls through (null) when the slice has a saved CONTEXT row", async () => {
     const basePath = makeBasePath("ctx-present");
     try {
-      // Seed the CONTEXT file that /gsd discuss would have written.
-      const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
-      writeFileSync(join(sliceDir, "S01-CONTEXT.md"), "# Discussion notes\n", "utf-8");
+      openDatabase(":memory:");
+      insertMilestone({ id: "M001", title: "Test milestone" });
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Test slice", status: "pending", sequence: 1 });
+      // The row that gsd_summary_save commits for the slice discussion.
+      insertArtifact({
+        path: "milestones/M001/slices/S01/S01-CONTEXT.md",
+        artifact_type: "CONTEXT",
+        milestone_id: "M001",
+        slice_id: "S01",
+        task_id: null,
+        full_content: "# Discussion notes\n",
+      });
 
       const prefs = { phases: { require_slice_discussion: true } } as unknown as GSDPreferences;
       const action = await findRule().match(buildCtx(basePath, prefs));
       assert.strictEqual(
         action,
         null,
-        "once the slice has a CONTEXT file, the rule must fall through so planning proceeds",
+        "once the slice has a saved CONTEXT row, the rule must fall through so planning proceeds",
       );
     } finally {
+      closeDatabase();
+      rmSync(basePath, { recursive: true, force: true });
+    }
+  });
+
+  test("still pauses when only a CONTEXT file exists on disk", async () => {
+    const basePath = makeBasePath("ctx-file-only");
+    try {
+      openDatabase(":memory:");
+      insertMilestone({ id: "M001", title: "Test milestone" });
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Test slice", status: "pending", sequence: 1 });
+      const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
+      writeFileSync(join(sliceDir, "S01-CONTEXT.md"), "# Discussion notes\n", "utf-8");
+
+      const prefs = { phases: { require_slice_discussion: true } } as unknown as GSDPreferences;
+      const action = await findRule().match(buildCtx(basePath, prefs));
+      assert.strictEqual(action?.action, "stop", "a CONTEXT file with no saved row is not a finished discussion");
+    } finally {
+      closeDatabase();
       rmSync(basePath, { recursive: true, force: true });
     }
   });

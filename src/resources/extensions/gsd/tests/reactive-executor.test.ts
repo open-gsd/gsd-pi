@@ -21,11 +21,14 @@ import {
 
 /**
  * Open a DB under `repo` and seed M001/S01 with the given task rows.
- * `loadSliceTaskIO` takes its task list (ids, titles, done) from the DB
- * (ADR-017) and reads only the per-task PLAN files for IO signatures, so the
- * graph fixtures below need real rows even though they are testing dispatch.
+ * `loadSliceTaskIO` reads everything from the task rows (ADR-046): ids, titles,
+ * done status, and the planned inputs and expected output. No PLAN file is
+ * written by these fixtures.
  */
-function seedSliceTasks(repo: string, tasks: Array<{ id: string; title: string; status?: string }>): void {
+function seedSliceTasks(
+  repo: string,
+  tasks: Array<{ id: string; title: string; status?: string; inputs?: string[]; outputs?: string[] }>,
+): void {
   mkdirSync(join(repo, ".gsd"), { recursive: true });
   openDatabase(join(repo, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Milestone", status: "active" });
@@ -38,6 +41,7 @@ function seedSliceTasks(repo: string, tasks: Array<{ id: string; title: string; 
       title: task.title,
       status: task.status ?? "pending",
       sequence: index,
+      planning: { inputs: task.inputs ?? [], expectedOutput: task.outputs ?? [] },
     });
   });
 }
@@ -130,97 +134,25 @@ test("reactive commit context key files include planned output, files, and key_f
 // ─── Dispatch Rule Matching Logic ─────────────────────────────────────────
 
 test("reactive dispatch requires enabled config and multiple ready tasks", async () => {
-  // Build a minimal filesystem with a slice plan and task plans
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-dispatch-"));
   try {
-    const gsd = join(repo, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(join(gsd, "tasks"), { recursive: true });
+    // Three tasks with non-overlapping IO (all independent)
     seedSliceTasks(repo, [
-      { id: "T01", title: "First" },
-      { id: "T02", title: "Second" },
-      { id: "T03", title: "Third" },
+      { id: "T01", title: "First", inputs: ["src/config.json"], outputs: ["src/types.ts"] },
+      { id: "T02", title: "Second", inputs: ["src/schema.json"], outputs: ["src/models.ts"] },
+      { id: "T03", title: "Third", inputs: ["src/api.json"], outputs: ["src/service.ts"] },
     ]);
 
-    // Slice plan with 3 tasks
-    writeFileSync(
-      join(gsd, "S01-PLAN.md"),
-      [
-        "# S01: Test Slice",
-        "",
-        "**Goal:** Test reactive execution",
-        "**Demo:** All three tasks run in parallel",
-        "",
-        "## Tasks",
-        "",
-        "- [ ] **T01: First** `est:15m`",
-        "  Create initial types",
-        "- [ ] **T02: Second** `est:15m`",
-        "  Create models",
-        "- [ ] **T03: Third** `est:15m`",
-        "  Create service layer",
-        "",
-      ].join("\n"),
-    );
-
-    // Task plans with non-overlapping IO (all independent)
-    writeFileSync(
-      join(gsd, "tasks", "T01-PLAN.md"),
-      [
-        "# T01: First",
-        "",
-        "## Description",
-        "Create types.",
-        "",
-        "## Inputs",
-        "",
-        "- `src/config.json` — Config schema",
-        "",
-        "## Expected Output",
-        "",
-        "- `src/types.ts` — Type definitions",
-      ].join("\n"),
-    );
-
-    writeFileSync(
-      join(gsd, "tasks", "T02-PLAN.md"),
-      [
-        "# T02: Second",
-        "",
-        "## Description",
-        "Create models.",
-        "",
-        "## Inputs",
-        "",
-        "- `src/schema.json` — Schema file",
-        "",
-        "## Expected Output",
-        "",
-        "- `src/models.ts` — Model definitions",
-      ].join("\n"),
-    );
-
-    writeFileSync(
-      join(gsd, "tasks", "T03-PLAN.md"),
-      [
-        "# T03: Third",
-        "",
-        "## Description",
-        "Create service.",
-        "",
-        "## Inputs",
-        "",
-        "- `src/api.json` — API spec",
-        "",
-        "## Expected Output",
-        "",
-        "- `src/service.ts` — Service layer",
-      ].join("\n"),
-    );
-
     // Load IO and build graph
-    const basePath = repo;
-    const taskIO = await loadSliceTaskIO(basePath, "M001", "S01");
+    const taskIO = await loadSliceTaskIO(repo, "M001", "S01");
     assert.equal(taskIO.length, 3);
+    assert.deepEqual(taskIO[0], {
+      id: "T01",
+      title: "First",
+      inputFiles: ["src/config.json"],
+      outputFiles: ["src/types.ts"],
+      done: false,
+    });
 
     const graph = deriveTaskGraph(taskIO);
     assert.equal(isGraphAmbiguous(graph), false, "Graph should not be ambiguous");
@@ -239,44 +171,41 @@ test("reactive dispatch requires enabled config and multiple ready tasks", async
   }
 });
 
-test("reactive dispatch falls through when slice has REACTIVE-BLOCKER", async () => {
+test("task IO comes from the task rows, not from task PLAN files", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-io-rows-"));
+  try {
+    const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+    mkdirSync(tasksDir, { recursive: true });
+    seedSliceTasks(repo, [
+      { id: "T01", title: "First", inputs: ["src/config.json"], outputs: ["src/a.ts"] },
+      { id: "T02", title: "Second", inputs: ["src/a.ts"], outputs: ["src/b.ts"] },
+    ]);
+    // A PLAN file that contradicts the rows: it makes T02 independent of T01.
+    writeFileSync(
+      join(tasksDir, "T02-PLAN.md"),
+      "# T02: Second\n\n## Inputs\n\n- `src/other.json`\n\n## Expected Output\n\n- `src/z.ts`\n",
+    );
+
+    const graph = deriveTaskGraph(await loadSliceTaskIO(repo, "M001", "S01"));
+
+    assert.deepEqual(getReadyTasks(graph, new Set(), new Set()), ["T01"], "T02 depends on T01 per the rows");
+  } finally {
+    closeDatabase();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test("reactive dispatch falls through when the slice has a recorded reactive recovery block", async () => {
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-blocker-dispatch-"));
   try {
-    const sliceDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01");
-    const tasksDir = join(sliceDir, "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    writeFileSync(
-      join(sliceDir, "S01-PLAN.md"),
-      [
-        "# S01: Test Slice",
-        "",
-        "## Tasks",
-        "",
-        "- [ ] **T01: First**",
-        "- [ ] **T02: Second**",
-        "- [ ] **T03: Third**",
-        "",
-      ].join("\n"),
-    );
-    for (const tid of ["T01", "T02", "T03"]) {
-      writeFileSync(
-        join(tasksDir, `${tid}-PLAN.md`),
-        [
-          `# ${tid}`,
-          "",
-          "## Inputs",
-          "",
-          `- \`src/${tid}.input\``,
-          "",
-          "## Expected Output",
-          "",
-          `- \`src/${tid}.output\``,
-        ].join("\n"),
-      );
-    }
-    writeFileSync(join(sliceDir, "S01-REACTIVE-BLOCKER.md"), "# BLOCKER\n");
-
-    const action = await resolveDispatch({
+    mkdirSync(join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
+    seedSliceTasks(repo, ["T01", "T02", "T03"].map((tid) => ({
+      id: tid,
+      title: tid,
+      inputs: [`src/${tid}.input`],
+      outputs: [`src/${tid}.output`],
+    })));
+    const dispatch = () => resolveDispatch({
       basePath: repo,
       mid: "M001",
       midTitle: "Milestone",
@@ -291,12 +220,28 @@ test("reactive dispatch falls through when slice has REACTIVE-BLOCKER", async ()
       prefs: { reactive_execution: { enabled: true, max_parallel: 3 } } as any,
     });
 
-    assert.notEqual(
-      action.action === "dispatch" ? action.unitType : null,
+    const before = await dispatch();
+    assert.equal(
+      before.action === "dispatch" ? before.unitType : null,
       "reactive-execute",
-      "reactive blocker should prevent another reactive batch dispatch",
+      "three independent ready tasks dispatch as a reactive batch",
+    );
+
+    // A REACTIVE-BLOCKER file with no recorded row decides nothing.
+    writeFileSync(join(repo, ".gsd", "milestones", "M001", "slices", "S01", "S01-REACTIVE-BLOCKER.md"), "# BLOCKER\n");
+    const withFileOnly = await dispatch();
+    assert.equal(withFileOnly.action === "dispatch" ? withFileOnly.unitType : null, "reactive-execute");
+
+    const { writeReactiveExecuteBlocker } = await import("../auto-recovery.ts");
+    assert.ok(writeReactiveExecuteBlocker("M001/S01/reactive+T01,T02,T03", repo, "verification retries exhausted"));
+    const after = await dispatch();
+    assert.notEqual(
+      after.action === "dispatch" ? after.unitType : null,
+      "reactive-execute",
+      "the recorded recovery block should prevent another reactive batch dispatch",
     );
   } finally {
+    closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });
@@ -304,38 +249,11 @@ test("reactive dispatch falls through when slice has REACTIVE-BLOCKER", async ()
 test("reactive dispatch falls back when graph is ambiguous (task without IO)", async () => {
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-ambiguous-"));
   try {
-    const gsd = join(repo, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(join(gsd, "tasks"), { recursive: true });
+    // T01 has IO, T02 has none → ambiguous
     seedSliceTasks(repo, [
-      { id: "T01", title: "A" },
+      { id: "T01", title: "A", inputs: ["src/a.ts"], outputs: ["src/b.ts"] },
       { id: "T02", title: "B" },
     ]);
-
-    writeFileSync(
-      join(gsd, "S01-PLAN.md"),
-      [
-        "# S01: Test",
-        "",
-        "**Goal:** Test",
-        "**Demo:** Test",
-        "",
-        "## Tasks",
-        "",
-        "- [ ] **T01: A** `est:15m`",
-        "- [ ] **T02: B** `est:15m`",
-        "",
-      ].join("\n"),
-    );
-
-    // T01 has IO, T02 has NO IO sections → ambiguous
-    writeFileSync(
-      join(gsd, "tasks", "T01-PLAN.md"),
-      "# T01: A\n\n## Inputs\n\n- `src/a.ts`\n\n## Expected Output\n\n- `src/b.ts`\n",
-    );
-    writeFileSync(
-      join(gsd, "tasks", "T02-PLAN.md"),
-      "# T02: B\n\n## Description\n\nNo IO sections.\n",
-    );
 
     const taskIO = await loadSliceTaskIO(repo, "M001", "S01");
     const graph = deriveTaskGraph(taskIO);
@@ -349,37 +267,10 @@ test("reactive dispatch falls back when graph is ambiguous (task without IO)", a
 test("single ready task falls through to sequential", async () => {
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-single-"));
   try {
-    const gsd = join(repo, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(join(gsd, "tasks"), { recursive: true });
     seedSliceTasks(repo, [
-      { id: "T01", title: "First" },
-      { id: "T02", title: "Second" },
+      { id: "T01", title: "First", inputs: ["src/config.json"], outputs: ["src/a.ts"] },
+      { id: "T02", title: "Second", inputs: ["src/a.ts"], outputs: ["src/b.ts"] },
     ]);
-
-    writeFileSync(
-      join(gsd, "S01-PLAN.md"),
-      [
-        "# S01: Linear",
-        "",
-        "**Goal:** Linear chain",
-        "**Demo:** Sequential",
-        "",
-        "## Tasks",
-        "",
-        "- [ ] **T01: First** `est:15m`",
-        "- [ ] **T02: Second** `est:15m`",
-        "",
-      ].join("\n"),
-    );
-
-    writeFileSync(
-      join(gsd, "tasks", "T01-PLAN.md"),
-      "# T01: First\n\n## Inputs\n\n- `src/config.json`\n\n## Expected Output\n\n- `src/a.ts`\n",
-    );
-    writeFileSync(
-      join(gsd, "tasks", "T02-PLAN.md"),
-      "# T02: Second\n\n## Inputs\n\n- `src/a.ts`\n\n## Expected Output\n\n- `src/b.ts`\n",
-    );
 
     const taskIO = await loadSliceTaskIO(repo, "M001", "S01");
     const graph = deriveTaskGraph(taskIO);
@@ -398,44 +289,11 @@ test("single ready task falls through to sequential", async () => {
 test("completed tasks are not re-dispatched on next iteration", async () => {
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-reentry-"));
   try {
-    const gsd = join(repo, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(join(gsd, "tasks"), { recursive: true });
-    mkdirSync(join(repo, ".gsd", "runtime"), { recursive: true });
     seedSliceTasks(repo, [
-      { id: "T01", title: "Done", status: "complete" },
-      { id: "T02", title: "Pending" },
-      { id: "T03", title: "Also Pending" },
+      { id: "T01", title: "Done", status: "complete", inputs: ["src/config.json"], outputs: ["src/a.ts"] },
+      { id: "T02", title: "Pending", inputs: ["src/a.ts"], outputs: ["src/b.ts"] },
+      { id: "T03", title: "Also Pending", inputs: ["src/a.ts"], outputs: ["src/c.ts"] },
     ]);
-
-    writeFileSync(
-      join(gsd, "S01-PLAN.md"),
-      [
-        "# S01: Reentry Test",
-        "",
-        "**Goal:** Test re-entry",
-        "**Demo:** Correct resumption",
-        "",
-        "## Tasks",
-        "",
-        "- [x] **T01: Done** `est:15m`",
-        "- [ ] **T02: Pending** `est:15m`",
-        "- [ ] **T03: Also Pending** `est:15m`",
-        "",
-      ].join("\n"),
-    );
-
-    writeFileSync(
-      join(gsd, "tasks", "T01-PLAN.md"),
-      "# T01: Done\n\n## Inputs\n\n- `src/config.json`\n\n## Expected Output\n\n- `src/a.ts`\n",
-    );
-    writeFileSync(
-      join(gsd, "tasks", "T02-PLAN.md"),
-      "# T02: Pending\n\n## Inputs\n\n- `src/a.ts`\n\n## Expected Output\n\n- `src/b.ts`\n",
-    );
-    writeFileSync(
-      join(gsd, "tasks", "T03-PLAN.md"),
-      "# T03: Also Pending\n\n## Inputs\n\n- `src/a.ts`\n\n## Expected Output\n\n- `src/c.ts`\n",
-    );
 
     const taskIO = await loadSliceTaskIO(repo, "M001", "S01");
     const graph = deriveTaskGraph(taskIO);
@@ -459,72 +317,75 @@ test("completed tasks are not re-dispatched on next iteration", async () => {
 
 // ─── Batch Verification ───────────────────────────────────────────────────
 
-test("verifyExpectedArtifact: reactive-execute passes when all dispatched summaries exist", async () => {
+test("verifyExpectedArtifact: reactive-execute passes when every dispatched task is closed in the DB", async () => {
   const { verifyExpectedArtifact } = await import("../auto-recovery.ts");
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-verify-pass-"));
   try {
-    const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    openDatabase(join(repo, ".gsd", "gsd.db"));
-    writeFileSync(join(tasksDir, "T02-SUMMARY.md"), "---\nid: T02\n---\n# T02: Done\n");
-    writeFileSync(join(tasksDir, "T03-SUMMARY.md"), "---\nid: T03\n---\n# T03: Done\n");
+    seedSliceTasks(repo, [
+      { id: "T02", title: "Second", status: "complete" },
+      { id: "T03", title: "Third", status: "complete" },
+    ]);
 
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive+T02,T03", repo);
-    assert.equal(result, true, "Should pass when all dispatched task summaries exist");
+    assert.equal(result, true, "Should pass when all dispatched tasks are closed, with no SUMMARY file");
   } finally {
     closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("verifyExpectedArtifact: reactive-execute fails when a dispatched summary is missing", async () => {
+test("verifyExpectedArtifact: reactive-execute fails when a dispatched task is still open", async () => {
   const { verifyExpectedArtifact } = await import("../auto-recovery.ts");
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-verify-fail-"));
   try {
     const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
     mkdirSync(tasksDir, { recursive: true });
-    openDatabase(join(repo, ".gsd", "gsd.db"));
-    // Only T02 has a summary, T03 does not
-    writeFileSync(join(tasksDir, "T02-SUMMARY.md"), "---\nid: T02\n---\n# T02: Done\n");
+    seedSliceTasks(repo, [
+      { id: "T02", title: "Second", status: "complete" },
+      { id: "T03", title: "Third" },
+    ]);
+    // A SUMMARY file for the open task does not close it.
+    writeFileSync(join(tasksDir, "T03-SUMMARY.md"), "---\nid: T03\n---\n# T03: Done\n");
 
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive+T02,T03", repo);
-    assert.equal(result, false, "Should fail when dispatched task T03 summary is missing");
+    assert.equal(result, false, "Should fail when dispatched task T03 is open in the DB");
   } finally {
     closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("verifyExpectedArtifact: reactive-execute fails even with pre-existing summaries from other tasks", async () => {
+test("verifyExpectedArtifact: reactive-execute fails even when other tasks of the slice are closed", async () => {
   const { verifyExpectedArtifact } = await import("../auto-recovery.ts");
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-verify-preexisting-"));
   try {
-    const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    openDatabase(join(repo, ".gsd", "gsd.db"));
-    // T01 summary exists from before, but T02 and T03 were dispatched
-    writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01: Prior\n");
+    // T01 was closed before; T02 and T03 were dispatched and are still open
+    seedSliceTasks(repo, [
+      { id: "T01", title: "Prior", status: "complete" },
+      { id: "T02", title: "Second" },
+      { id: "T03", title: "Third" },
+    ]);
 
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive+T02,T03", repo);
-    assert.equal(result, false, "Pre-existing T01 summary should not satisfy T02,T03 batch");
+    assert.equal(result, false, "A closed T01 should not satisfy the T02,T03 batch");
   } finally {
     closeDatabase();
     rmSync(repo, { recursive: true, force: true });
   }
 });
 
-test("verifyExpectedArtifact: reactive-execute legacy format (no batch IDs) falls back", async () => {
+test("verifyExpectedArtifact: reactive-execute with no batch IDs fails closed", async () => {
   const { verifyExpectedArtifact } = await import("../auto-recovery.ts");
   const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-verify-legacy-"));
   try {
     const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
     mkdirSync(tasksDir, { recursive: true });
-    openDatabase(join(repo, ".gsd", "gsd.db"));
+    seedSliceTasks(repo, [{ id: "T01", title: "First", status: "complete" }]);
     writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01\n");
 
-    // Legacy format without +batch suffix
+    // A unit id without the +batch suffix names no task to check.
     const result = verifyExpectedArtifact("reactive-execute", "M001/S01/reactive", repo);
-    assert.equal(result, true, "Legacy format should fall back to any-summary check");
+    assert.equal(result, false, "A batch with no task ids cannot be verified from any SUMMARY file");
   } finally {
     closeDatabase();
     rmSync(repo, { recursive: true, force: true });

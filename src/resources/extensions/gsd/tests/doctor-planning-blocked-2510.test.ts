@@ -131,7 +131,7 @@ test("#2510: a recorded plan-milestone-recovery gate surfaces planning_blocked w
   );
 });
 
-test("#2510: the real recovery path (blocker artifact occupies ROADMAP.md) surfaces planning_blocked", async (t) => {
+test("#2510: the real recovery path (blocker sidecar, no ROADMAP.md) surfaces planning_blocked", async (t) => {
   const base = makeBase("gsd-2510-writer-");
   t.after(() => cleanup(base));
 
@@ -143,7 +143,7 @@ test("#2510: the real recovery path (blocker artifact occupies ROADMAP.md) surfa
   writeFileSync(join(milestoneDir, "M001-CONTEXT.md"), "# Context\n", "utf-8");
 
   // The real deterministic-failure recovery write: the blocker diagnostic is
-  // written INTO ROADMAP.md and the gate row is recorded.
+  // written to a sidecar beside ROADMAP.md and the gate row is recorded.
   const blockerPath = writeBlockerPlaceholder(
     "plan-milestone",
     "M001",
@@ -151,19 +151,24 @@ test("#2510: the real recovery path (blocker artifact occupies ROADMAP.md) surfa
     "Deterministic policy rejection for plan-milestone M001: HARD BLOCK — gsd_exec is not permitted.",
   );
   assert.ok(blockerPath, "the placeholder write must succeed with a resolvable milestone dir");
-  assert.match(blockerPath, /M001-ROADMAP\.md/, "plan-milestone blockers occupy the canonical ROADMAP projection");
+  assert.match(blockerPath, /M001-ROADMAP-RECOVERY-BLOCKER\.md$/, "plan-milestone blockers are written to a sidecar");
+  assert.equal(
+    existsSync(join(milestoneDir, "M001-ROADMAP.md")),
+    false,
+    "the blocker must not occupy the ROADMAP projection",
+  );
 
-  // Doctor must see through the blocker content to the planning gate.
+  // Doctor must report the planning gate, not a missing roadmap.
   const issues: DoctorIssue[] = [];
   await checkGsdStateHealth(base, issues, [], { fix: false, shouldFix: () => false });
   assert.equal(
     issues.filter((i) => i.code === "missing_roadmap").length,
     0,
-    "ROADMAP.md exists (blocker content), so missing_roadmap cannot describe this state",
+    "planning is blocked, so missing_roadmap does not describe this state",
   );
   assert.ok(
     issues.some((i) => i.code === "planning_blocked"),
-    "the recovery gate must surface even though ROADMAP.md exists",
+    "the recovery gate must surface from the gate row",
   );
 });
 
@@ -275,7 +280,7 @@ test("#2510: post-unit reports honestly when the planning blocker cannot be pers
   t.after(() => cleanup(base));
 
   // No milestone dir anywhere: resolveExpectedArtifactPath returns null, so
-  // neither the ROADMAP.md blocker diagnostic nor the recovery gate row can
+  // neither the blocker diagnostic sidecar nor the recovery gate row can
   // be written. The notification must not claim a blocker was recorded.
   const s = planMilestoneSession(base);
   const notifications: string[] = [];
@@ -296,7 +301,7 @@ test("#2510: post-unit reports honestly when the planning blocker cannot be pers
     `expected the honest persistence-failure notification, got: ${JSON.stringify(notifications)}`,
   );
   assert.equal(
-    notifications.some((m) => /recorded planning blocker/.test(m)),
+    notifications.some((m) => /recorded blocker/.test(m)),
     false,
     "must not claim a blocker was recorded when the write returned null",
   );
@@ -327,7 +332,7 @@ test("#2510: post-unit records the planning blocker when persistence succeeds", 
 
   assert.equal(result, "dispatched", "the deterministic branch must pause auto-mode");
   assert.ok(
-    notifications.some((m) => /recorded planning blocker and paused/.test(m)),
+    notifications.some((m) => /recorded blocker and paused/.test(m)),
     `expected the blocker-recorded notification, got: ${JSON.stringify(notifications)}`,
   );
   // The gate row makes the block durable: derive gates re-dispatch on it.
@@ -336,9 +341,14 @@ test("#2510: post-unit records the planning blocker when persistence succeeds", 
     "the plan-milestone-recovery gate row must exist after the branch",
   );
   assert.equal(
-    existsSync(join(milestoneDir, "M001-ROADMAP.md")),
+    existsSync(join(milestoneDir, "M001-ROADMAP-RECOVERY-BLOCKER.md")),
     true,
-    "the blocker diagnostic occupies the ROADMAP projection",
+    "the blocker diagnostic is written to a sidecar",
+  );
+  assert.equal(
+    existsSync(join(milestoneDir, "M001-ROADMAP.md")),
+    false,
+    "the blocker diagnostic must not occupy the ROADMAP projection",
   );
   assert.equal(s.lastToolInvocationError, null, "the invocation error is consumed by the branch");
 });

@@ -7,8 +7,6 @@
 
 import { existsSync } from "node:fs";
 
-import { loadFile } from "./files.js";
-import { resolveMilestoneFile } from "./paths.js";
 import {
   getMilestone,
   getClosedSliceIds,
@@ -28,7 +26,7 @@ import {
   readMilestoneLifecycleStatus,
 } from "./db/milestone-closeout-readiness.js";
 import { runSafely } from "./auto-utils.js";
-import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
+import { isAcceptableUatVerdict } from "./verdict-parser.js";
 import { uatSignoffBlockerGuidance } from "./guidance.js";
 import { logWarning } from "./workflow-logger.js";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
@@ -41,7 +39,7 @@ import { captureMilestoneVerificationSourceRevision } from "./verification-sourc
 import type { DispatchAction, DispatchContext } from "./auto-dispatch.js";
 import {
   commitPendingMilestoneCloseoutChanges,
-  findMissingSummaries,
+  findOpenSlices,
   isVerificationNotApplicable,
   readUatGateVerdict,
 } from "./auto-dispatch.js";
@@ -143,7 +141,7 @@ export async function repairMissingMilestoneSummaryProjection(
 }
 
 /**
- * True when the milestone is closed in the DB and the completion summary artifact exists.
+ * True when the milestone is closed in the DB and the closeout proof holds.
  * Polls briefly so post-unit verification can observe the tool's DB write.
  */
 export async function isMilestoneCloseoutSettled(mid: string, basePath: string): Promise<boolean> {
@@ -155,7 +153,7 @@ export async function isMilestoneCloseoutSettled(mid: string, basePath: string):
         const artifactBasePath = resolveCanonicalMilestoneRoot(basePath, mid);
         const closeoutProof = proveMilestoneCloseout(mid, {
           refreshFromDisk: true,
-          summaryArtifactBasePath: artifactBasePath,
+          artifactBasePath,
           implementationEvidence: {
             basePath,
             requirement: "not-absent",
@@ -206,23 +204,19 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
       const summaryMissing = !summaryPath || !existsSync(summaryPath);
       if (summaryMissing) {
         // Preview must not persist dispatch effects (#2230): report the skip
-        // a successful repair produces without writing the projection.
-        // Failure-path divergence (accepted): when the repair would fail, the
-        // real turn dispatches complete-milestone to retry while preview
-        // still reports skip — a preview cannot write the repair.
+        // without writing the projection.
         if (ctx.preview) return { action: "skip" };
+        // The closed DB row is the completion. A missing SUMMARY is projection
+        // work: a failed repair is logged and never re-dispatches the unit.
         const repair = await repairMissingMilestoneSummaryProjection(basePath, mid);
         if (!repair.ok) {
           logWarning(
             "dispatch",
-            `Milestone ${mid} is closed in DB but SUMMARY repair failed: ${repair.error}. Dispatching complete-milestone to retry.`,
+            `Milestone ${mid} is closed in DB but SUMMARY repair failed: ${repair.error}.`,
           );
-        } else {
-          return { action: "skip" };
         }
-      } else {
-        return { action: "skip" };
       }
+      return { action: "skip" };
     }
   }
 
@@ -251,7 +245,7 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
       };
     }
     for (const sliceId of getClosedSliceIds(mid)) {
-      const result = await readUatGateVerdict(basePath, mid, sliceId);
+      const result = readUatGateVerdict(mid, sliceId);
       if (!result) {
         return {
           action: "stop",
@@ -292,26 +286,23 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
     }
   }
 
-  const validationFile = adoptedMilestone ? null : resolveMilestoneFile(basePath, mid, "VALIDATION");
-  if (validationFile) {
-    const validationContent = await loadFile(validationFile);
-    if (validationContent) {
-      const verdict = extractVerdict(validationContent);
-      if (verdict !== "pass") {
-        return {
-          action: "stop",
-          reason: `Cannot complete milestone ${mid}: VALIDATION verdict is "${verdict}". Address the findings and re-run validation. Only an unadopted compatibility milestone can use \`/gsd verdict pass --rationale "..."\` to override.`,
-          level: "warning",
-        };
-      }
-    }
-  }
-
-  const missingSlices = adoptedMilestone ? [] : findMissingSummaries(basePath, mid);
-  if (missingSlices.length > 0) {
+  // The milestone-validation row is the verdict; VALIDATION.md is not read.
+  const validationVerdict = adoptedMilestone
+    ? undefined
+    : getLatestAssessmentByScope(mid, "milestone-validation")?.["status"];
+  if (typeof validationVerdict === "string" && validationVerdict !== "pass") {
     return {
       action: "stop",
-      reason: `Cannot complete milestone ${mid}: slices ${missingSlices.join(", ")} are missing SUMMARY files. Run /gsd doctor to diagnose.`,
+      reason: `Cannot complete milestone ${mid}: VALIDATION verdict is "${validationVerdict}". Address the findings and re-run validation. Only an unadopted compatibility milestone can use \`/gsd verdict pass --rationale "..."\` to override.`,
+      level: "warning",
+    };
+  }
+
+  const openSlices = adoptedMilestone ? [] : findOpenSlices(mid);
+  if (openSlices.length > 0) {
+    return {
+      action: "stop",
+      reason: `Cannot complete milestone ${mid}: slices ${openSlices.join(", ")} are not closed in the database. Run /gsd doctor to diagnose.`,
       level: "error",
     };
   }
@@ -329,9 +320,9 @@ export async function evaluateGuardedCompleteMilestoneDispatch(
       const milestone = getMilestone(mid);
       if (milestone?.verification_operational &&
           !isVerificationNotApplicable(milestone.verification_operational)) {
-        const validationPath = resolveMilestoneFile(basePath, mid, "VALIDATION");
-        if (validationPath) {
-          const validationContent = await loadFile(validationPath);
+        // The validation text is the stored assessment row, not VALIDATION.md.
+        const validationContent = getLatestAssessmentByScope(mid, "milestone-validation")?.["full_content"];
+        if (typeof validationContent === "string") {
           if (validationContent) {
             const skippedByMarker = /^skip_validation:\s*true$/im.test(validationContent);
             const skippedByPreference = /skip(?:ped)?[\s\-]+(?:by|per|due to)\s+(?:preference|budget|profile)/i.test(validationContent);

@@ -1,7 +1,7 @@
 /**
  * Behavioural tests for /gsd discuss routing fixes:
  *   - pre-planning milestones route to milestone-level discuss
- *   - targeted slice path uses ROADMAP fallback when DB has no slices (#2892)
+ *   - the discussable slices come from the DB slice rows, never from ROADMAP.md
  *   - discuss target IDs are canonicalized (case normalization)
  */
 
@@ -17,7 +17,7 @@ import {
 } from "../guided-flow.ts";
 import { normalizeDiscussTarget } from "../milestone-ids.ts";
 import { _parseDiscussArgsForTest } from "../commands/handlers/workflow.ts";
-import { openDatabase, closeDatabase, isDbAvailable, insertMilestone } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, isDbAvailable, insertMilestone, insertSlice } from "../gsd-db.ts";
 import { invalidateStateCache } from "../state.ts";
 import { clearGuidedUnitContext, getGuidedUnitContext } from "../guided-unit-context.ts";
 
@@ -84,6 +84,7 @@ async function runDiscussTargetFixture(
   target: string,
   milestones: Array<{ id: string; title?: string; status?: string }>,
   writeArtifacts?: (base: string) => void,
+  seedRows?: () => void,
 ) {
   const base = mkdtempSync(join(tmpdir(), "gsd-discuss-target-"));
   const notifications: Array<{ message: string; level?: string }> = [];
@@ -96,6 +97,7 @@ async function runDiscussTargetFixture(
     for (const milestone of milestones) {
       insertMilestone(milestone);
     }
+    seedRows?.();
 
     await showDiscuss(
       makeDiscussCtx(notifications) as any,
@@ -205,6 +207,7 @@ describe("showDiscuss targeted milestone guardrails (#1320)", () => {
           "utf-8",
         );
       },
+      () => insertSlice({ id: "S01", milestoneId: "M006-abc123", title: "Unique slice", status: "pending" }),
     );
 
     assert.equal(result.notifications.length, 0);
@@ -213,8 +216,8 @@ describe("showDiscuss targeted milestone guardrails (#1320)", () => {
   });
 });
 
-describe("loadDiscussNormSlices roadmap fallback (#2892)", () => {
-  test("falls back to ROADMAP when DB has no slice rows", async () => {
+describe("loadDiscussNormSlices reads the DB slice rows only", () => {
+  test("a ROADMAP file with slices lists nothing when the DB has no slice rows", async () => {
     const base = mkdtempSync(join(tmpdir(), "gsd-discuss-slices-"));
     try {
       mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
@@ -230,6 +233,9 @@ describe("loadDiscussNormSlices roadmap fallback (#2892)", () => {
 `;
       writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), roadmap, "utf-8");
 
+      assert.deepEqual(await _loadDiscussNormSlicesForTest(base, "M001"), []);
+
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Core setup", status: "pending" });
       const slices = await _loadDiscussNormSlicesForTest(base, "M001");
       assert.equal(slices.length, 1);
       assert.equal(slices[0]?.id, "S01");
@@ -268,8 +274,8 @@ describe("showDiscuss pre-planning routing", () => {
   });
 });
 
-describe("showDiscuss targeted slice roadmap fallback", () => {
-  test("/gsd discuss M001/S01 resolves slice from ROADMAP when DB is empty", async () => {
+describe("showDiscuss targeted slice", () => {
+  test("/gsd discuss M001/S01 resolves the slice from its DB row", async () => {
     const base = mkdtempSync(join(tmpdir(), "gsd-discuss-target-slice-"));
     const notifications: Array<{ message: string; level?: string }> = [];
     const harness = makeDiscussPi();
@@ -278,6 +284,7 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       const dbPath = join(base, ".gsd", "gsd.db");
       assert.equal(openDatabase(dbPath), true);
       insertMilestone({ id: "M001", title: "Target slice milestone", status: "active" });
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Auth module", status: "pending" });
 
       const roadmap = `# M001 Roadmap
 
@@ -295,7 +302,7 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       );
 
       const notFound = notifications.find((n) => /not found in discussable slices/i.test(n.message));
-      assert.equal(notFound, undefined, "targeted slice must resolve from ROADMAP fallback");
+      assert.equal(notFound, undefined, "targeted slice must resolve from its DB row");
       assert.equal(harness.sent.length, 1, "targeted slice must dispatch discuss-slice");
       assert.match(String(harness.sent[0]?.content), /S01|Auth module|guided-discuss-slice/i);
     } finally {
@@ -315,6 +322,7 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       const dbPath = join(base, ".gsd", "gsd.db");
       assert.equal(openDatabase(dbPath), true);
       insertMilestone({ id: "M001", title: "Target slice milestone", status: "active" });
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Auth module", status: "pending" });
 
       const rootRoadmap = `# M001 Roadmap
 

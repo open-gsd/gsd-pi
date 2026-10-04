@@ -19,13 +19,14 @@ import {
   insertSlice,
   isDbAvailable,
   openDatabase,
+  setSliceUatMd,
 } from "../gsd-db.ts";
 
 /**
- * Seed the slice rows the run-uat dispatch gate reads. Post-cutover the gate
- * derives completed-slice candidates from DB rows only (`getMilestoneSlices`),
- * so the ROADMAP checkboxes this fixture writes are projection context; these
- * rows are the dispatch input.
+ * Seed the slice rows the run-uat dispatch gate reads. The gate derives
+ * completed-slice candidates and the UAT spec from DB rows only, so the
+ * ROADMAP checkboxes this fixture writes are projection context; these rows
+ * are the dispatch input. No UAT file is written.
  */
 function seedSliceRows(): void {
   openDatabase(":memory:");
@@ -40,6 +41,7 @@ function seedSliceRows(): void {
     depends: [],
     sequence: 1,
   });
+  setSliceUatMd("M001", "S01", "# UAT\n\nRun the checks. No verdict has been recorded yet.\n");
   insertSlice({
     milestoneId: "M001",
     id: "S02",
@@ -67,11 +69,6 @@ function makeUatProject(): string {
       "- [ ] **S02: Remaining slice** `risk:low`",
       "  Demo: pending.",
     ].join("\n"),
-    "utf-8",
-  );
-  writeFileSync(
-    join(milestone, "slices", "S01", "S01-UAT.md"),
-    "# UAT\n\nRun the checks. No verdict has been written yet.\n",
     "utf-8",
   );
   return base;

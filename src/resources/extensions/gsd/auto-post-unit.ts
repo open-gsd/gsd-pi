@@ -55,7 +55,7 @@ import { regenerateIfMissing } from "./workflow-projections.js";
 import { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 import { normalizeWorktreePathForCompare } from "./worktree-root.js";
-import { isDbAvailable, getTask, getSlice, getMilestone, getMilestoneSlices, _getAdapter, getVerificationEvidence } from "./gsd-db.js";
+import { isDbAvailable, getTask, getSlice, getMilestone, getMilestoneSlices, _getAdapter, getVerificationEvidence, hasRoadmapAssessmentSince } from "./gsd-db.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { reopenTask } from "./task-lifecycle-domain-operation.js";
 import { getWorkflowDatabasePath, refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -227,33 +227,9 @@ function agentEndMessagesIncludeSuccessfulToolResult(messages: unknown[] | undef
   return false;
 }
 
-function agentEndMessagesMentionTool(messages: unknown[] | undefined, toolName: string): boolean {
-  if (!Array.isArray(messages)) return false;
-  try {
-    return JSON.stringify(messages).includes(toolName);
-  } catch {
-    return false;
-  }
-}
-
 function hasIncompleteMilestoneSlice(milestoneId: string): boolean {
   if (!isDbAvailable()) return false;
   return getMilestoneSlices(milestoneId).some((slice) => !isInactiveStatus(slice.status));
-}
-
-function hasRoadmapReassessmentArtifact(basePath: string, milestoneId: string): boolean {
-  const slicesDir = join(basePath, ".gsd", "milestones", milestoneId, "slices");
-  if (!existsSync(slicesDir)) return false;
-
-  try {
-    for (const entry of readdirSync(slicesDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      if (existsSync(join(slicesDir, entry.name, `${entry.name}-ASSESSMENT.md`))) return true;
-    }
-  } catch {
-    return false;
-  }
-  return false;
 }
 
 /**
@@ -2247,29 +2223,17 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         }
       }
 
-      if (
-        !triggerArtifactVerified &&
-        s.currentUnit.type === "validate-milestone" &&
-        (
-          agentEndMessagesIncludeSuccessfulToolResult(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesIncludeToolCall(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesMentionTool(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          hasRoadmapReassessmentArtifact(s.basePath, parseUnitId(s.currentUnit.id).milestone) ||
-          hasRoadmapReassessmentArtifact(s.canonicalProjectRoot, parseUnitId(s.currentUnit.id).milestone)
-        )
-      ) {
+      // A validate-milestone unit that reassessed the roadmap instead (and so
+      // left open slices) produced a valid outcome: validation no longer
+      // applies. The evidence is the roadmap assessment row recorded during
+      // this unit; no activity log or ASSESSMENT file is read.
+      if (!triggerArtifactVerified && s.currentUnit.type === "validate-milestone") {
         const { milestone: mid } = parseUnitId(s.currentUnit.id);
-        if (mid && (
-          agentEndMessagesIncludeSuccessfulToolResult(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesMentionTool(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          hasIncompleteMilestoneSlice(mid) ||
-          hasRoadmapReassessmentArtifact(s.basePath, mid) ||
-          hasRoadmapReassessmentArtifact(s.canonicalProjectRoot, mid)
-        )) {
+        if (
+          mid &&
+          hasRoadmapAssessmentSince(mid, s.currentUnit.startedAt) &&
+          hasIncompleteMilestoneSlice(mid)
+        ) {
           triggerArtifactVerified = true;
           invalidateAllCaches();
           debugLog("postUnit", {
@@ -2300,40 +2264,6 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           }
         } catch (e) {
           debugLog("postUnit", { phase: "regenerate-projection", error: String(e) });
-        }
-      }
-
-      if (
-        !triggerArtifactVerified &&
-        s.currentUnit.type === "validate-milestone" &&
-        (
-          agentEndMessagesIncludeSuccessfulToolResult(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesIncludeToolCall(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesMentionTool(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          hasRoadmapReassessmentArtifact(s.basePath, parseUnitId(s.currentUnit.id).milestone) ||
-          hasRoadmapReassessmentArtifact(s.canonicalProjectRoot, parseUnitId(s.currentUnit.id).milestone)
-        )
-      ) {
-        const { milestone: mid } = parseUnitId(s.currentUnit.id);
-        if (mid && (
-          agentEndMessagesIncludeSuccessfulToolResult(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          agentEndMessagesMentionTool(opts?.agentEndMessages, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.basePath, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          unitActivityMentionsTool(s.canonicalProjectRoot, s.currentUnit.type, s.currentUnit.id, "gsd_reassess_roadmap") ||
-          hasIncompleteMilestoneSlice(mid) ||
-          hasRoadmapReassessmentArtifact(s.basePath, mid) ||
-          hasRoadmapReassessmentArtifact(s.canonicalProjectRoot, mid)
-        )) {
-          triggerArtifactVerified = true;
-          invalidateAllCaches();
-          debugLog("postUnit", {
-            phase: "validate-milestone-reassessment-invalidated-validation",
-            unitType: s.currentUnit.type,
-            unitId: s.currentUnit.id,
-            milestoneId: mid,
-          });
         }
       }
 
@@ -2474,30 +2404,26 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         return "dispatched";
       } else if (!triggerArtifactVerified && s.lastToolInvocationError && isDeterministicPolicyError(s.lastToolInvocationError)) {
         const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
-        const planningBlocked = s.currentUnit.type === "plan-milestone";
         debugLog("postUnit", { phase: "deterministic-policy-error-placeholder", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: s.lastToolInvocationError });
-        const reason = `Deterministic policy rejection for ${s.currentUnit.type} "${s.currentUnit.id}": ${s.lastToolInvocationError}. Retrying cannot resolve this gate — ${planningBlocked ? "recording a fail-closed planning blocker" : "writing blocker placeholder to advance pipeline"}.`;
+        const reason = `Deterministic policy rejection for ${s.currentUnit.type} "${s.currentUnit.id}": ${s.lastToolInvocationError}. Retrying cannot resolve this gate — recording a fail-closed blocker.`;
         s.lastToolInvocationError = null;
         s.pendingVerificationRetry = null;
         s.verificationRetryCount.delete(retryKey);
         s.verificationRetryFailureHashes.delete(retryKey);
         // #2510: the write can return null (artifact path unresolvable) — in that
-        // case neither the diagnostic sidecar nor the plan-milestone-recovery
-        // gate row exists, so the UI must not claim a blocker was recorded.
+        // case neither the diagnostic sidecar nor the recovery gate row exists,
+        // so the UI must not claim a blocker was recorded.
         const blockerPath = writeBlockerPlaceholder(s.currentUnit.type, s.currentUnit.id, s.basePath, reason);
         ctx.ui.notify(
-          planningBlocked
-            ? blockerPath
-              ? `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, recorded planning blocker and paused (no work marked complete)`
-              : `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, paused, but the planning blocker could not be persisted (no recovery gate was recorded; the next iteration re-dispatches planning)`
-            : `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, wrote blocker placeholder (no retries)`,
-          planningBlocked ? "error" : "warning",
+          blockerPath
+            ? `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, recorded blocker and paused (no work marked complete)`
+            : `${s.currentUnit.type} ${s.currentUnit.id} — deterministic policy rejection, paused, but the blocker could not be persisted (no recovery gate was recorded; the next iteration re-dispatches the unit)`,
+          "error",
         );
-        if (planningBlocked) {
-          await pauseAuto(ctx, pi);
-          return "dispatched";
-        }
-        // Fall through to "continue" — do NOT enter the retry or db-unavailable paths.
+        // The unit recorded no result, so it is not complete. Pause for every
+        // unit type: a blocker file never lets the pipeline advance.
+        await pauseAuto(ctx, pi);
+        return "dispatched";
       } else if (!triggerArtifactVerified && diagnoseWorktreeIntegrityFailure(verificationBasePath)) {
         const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
         const worktreeFailure = diagnoseWorktreeIntegrityFailure(verificationBasePath)!;

@@ -913,6 +913,27 @@ export function getPlanMilestoneRecoveryBlock(milestoneId: string): PlanMileston
   };
 }
 
+/**
+ * True when recovery of this unit type ended in a recorded manual-attention
+ * outcome for the unit id, or for any unit id below it (a reactive batch id
+ * sits below its slice). The row is written with the diagnostic blocker file;
+ * dispatch reads the row and never the file.
+ */
+export function hasUnitRecoveryBlock(unitType: string, unitId: string): boolean {
+  const db = getDbOrNull();
+  if (!db) return false;
+  const row = db.prepare(`
+    SELECT outcome
+    FROM gate_runs
+    WHERE gate_id = :gate_id
+      AND unit_type = :unit_type
+      AND (unit_id = :unit_id OR substr(unit_id, 1, length(:unit_id) + 1) = :unit_id || '/')
+    ORDER BY id DESC
+    LIMIT 1
+  `).get({ ":gate_id": `${unitType}-recovery`, ":unit_type": unitType, ":unit_id": unitId });
+  return row?.["outcome"] === "manual-attention";
+}
+
 /** Highest attempt number of the saved UAT runs of a slice. 0 when the slice has none. */
 export function getLatestUatAttempt(milestoneId: string, sliceId: string): number {
   const db = getDbOrNull();
@@ -1235,6 +1256,18 @@ export function getSliceScopedArtifacts(milestoneId: string, sliceId: string): A
   return rows.map(rowToArtifact);
 }
 
+/**
+ * True when the milestone (sliceId null) or the slice has a saved artifact row
+ * of this type with content. This is the evidence that a discuss or research
+ * unit saved its result; the rendered file is a projection and is not read.
+ */
+export function hasSavedArtifact(milestoneId: string, sliceId: string | null, artifactType: string): boolean {
+  const rows = sliceId
+    ? getSliceScopedArtifacts(milestoneId, sliceId)
+    : getMilestoneScopedArtifacts(milestoneId);
+  return rows.some((row) => row.artifact_type === artifactType && row.full_content.trim() !== "");
+}
+
 /** Fast slice status check — avoids deserializing JSON depends/planning fields. */
 export function getSliceStatusSummary(milestoneId: string): IdStatusSummary[] {
   if (!getDbOrNull()!) return [];
@@ -1376,6 +1409,16 @@ export function getLatestAssessmentByScope(
       LIMIT 1`,
   ).get({ ":mid": milestoneId, ":scope": scope });
   return row ?? null;
+}
+
+/**
+ * True when a roadmap reassessment of this milestone was recorded at or after
+ * `sinceMs`. This row is the evidence that a unit ran `gsd_reassess_roadmap`;
+ * activity logs and ASSESSMENT files are not read.
+ */
+export function hasRoadmapAssessmentSince(milestoneId: string, sinceMs: number): boolean {
+  const recordedAt = Date.parse(String(getLatestAssessmentByScope(milestoneId, "roadmap")?.["created_at"] ?? ""));
+  return Number.isFinite(recordedAt) && recordedAt >= sinceMs;
 }
 
 /**

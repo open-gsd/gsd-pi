@@ -7,10 +7,12 @@
 // or drop them must surface. The existing artifact-verification tests assert
 // only the boolean return value; this file pins the log output for each
 // important gate:
-//   - plan-milestone roadmap has zero slices      (auto-recovery.ts:511)
-//   - run-uat assessment missing a verdict        (auto-recovery.ts:502)
-//   - validate-milestone validation not terminal  (auto-recovery.ts:494)
-//   - generic verify-fail: artifact file missing  (auto-recovery.ts:487)
+//   - plan-milestone: the milestone has no slice rows
+//   - run-uat: no run-uat verdict row
+//   - complete-slice: the slice row is not complete
+//   - plan-slice: the slice has no task rows
+// Each case also writes the unit's projection file, well formed: the file
+// must not change the result (ADR-046).
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +20,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { verifyExpectedArtifact, _setRoadmapParserFnForTests } from "../auto-recovery.ts";
+import { verifyExpectedArtifact } from "../auto-recovery.ts";
 import { closeDatabase, openDatabase, insertMilestone, insertSlice, _getAdapter } from "../gsd-db.ts";
 import {
   drainLogs,
@@ -79,60 +81,69 @@ function findRecovery(logs: readonly LogEntry[]): LogEntry | undefined {
   return logs.find((e) => e.component === "recovery");
 }
 
-test("plan-milestone verify-fail logs a recovery warning naming the zero-slice roadmap", () => {
+test("plan-milestone verify-fail logs a recovery warning naming the missing slice rows", () => {
   const base = createFixtureBase();
   try {
+    insertMilestone({ id: "M001", title: "Stub", status: "active" });
     const dir = milestoneDir(base, "M001");
-    writeFileSync(join(dir, "M001-ROADMAP.md"), "# M001: Stub\n\n## Slices\n\n_TBD_\n", "utf-8");
+    // A roadmap file that lists a slice does not stand in for the slice rows.
+    writeFileSync(
+      join(dir, "M001-ROADMAP.md"),
+      ["# M001: Stub", "", "## Slices", "", "- [ ] **S01: First slice** `risk:low` `depends:[]`", ""].join("\n"),
+      "utf-8",
+    );
 
     const { result, logs } = verifyAndCaptureLogs("plan-milestone", "M001", base);
 
-    assert.equal(result, false, "zero-slice roadmap must fail verification");
+    assert.equal(result, false, "a milestone with no slice rows must fail verification");
     const recovery = findRecovery(logs);
     assert.ok(recovery, "a recovery warning must be logged");
     assert.equal(recovery!.severity, "warn");
-    assert.match(recovery!.message, /verify-fail plan-milestone M001: roadmap has zero slices/u);
+    assert.match(recovery!.message, /verify-fail plan-milestone M001: the milestone has no slice rows/u);
   } finally {
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-test("run-uat verify-fail logs a recovery warning when the assessment has no verdict", () => {
+test("run-uat verify-fail logs a recovery warning when no run-uat verdict row exists", () => {
   const base = createFixtureBase();
   try {
+    insertMilestone({ id: "M001", title: "Roadmap", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "First", status: "complete", risk: "low", depends: [] });
     const dir = sliceDir(base, "M001", "S01");
-    // No `verdict:` frontmatter → hasVerdict() returns false → warning fires.
-    writeFileSync(join(dir, "S01-ASSESSMENT.md"), "# UAT\n\nNo verdict yet.\n", "utf-8");
+    // A PASS verdict in the file is not a recorded verdict.
+    writeFileSync(join(dir, "S01-ASSESSMENT.md"), "---\nverdict: PASS\n---\n\n# UAT\n", "utf-8");
 
     const { result, logs } = verifyAndCaptureLogs("run-uat", "M001/S01", base);
 
-    assert.equal(result, false, "verdict-less assessment must fail verification");
+    assert.equal(result, false, "an assessment file with no run-uat row must fail verification");
     const recovery = findRecovery(logs);
     assert.ok(recovery, "a recovery entry must be logged");
     assert.equal(recovery!.severity, "warn");
-    assert.match(recovery!.message, /verify-fail run-uat M001\/S01: assessment missing verdict/u);
+    assert.match(recovery!.message, /verify-fail run-uat M001\/S01: no run-uat verdict row/u);
   } finally {
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-test("verify-fail logs a recovery warning when an expected artifact file is absent", () => {
+test("complete-slice verify-fail logs a recovery warning naming the slice row status", () => {
   const base = createFixtureBase();
   try {
-    // complete-slice resolves a SUMMARY path under the milestone dir, but we
-    // never write the file → existsSync is false → the generic verify-fail path
-    // logs and returns false.
-    sliceDir(base, "M001", "S01");
+    insertMilestone({ id: "M001", title: "Roadmap", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "First", status: "active", risk: "low", depends: [] });
+    const dir = sliceDir(base, "M001", "S01");
+    writeFileSync(join(dir, "S01-SUMMARY.md"), "# S01 done\n", "utf-8");
+    writeFileSync(join(dir, "S01-UAT.md"), "# UAT\n", "utf-8");
 
     const { result, logs } = verifyAndCaptureLogs("complete-slice", "M001/S01", base);
 
-    assert.equal(result, false, "missing artifact must fail verification");
+    assert.equal(result, false, "SUMMARY and UAT files must not verify an open slice");
     const recovery = findRecovery(logs);
     assert.ok(recovery, "a recovery warning must be logged");
     assert.equal(recovery!.severity, "warn");
-    assert.match(recovery!.message, /verify-fail complete-slice M001\/S01: existsSync false/u);
+    assert.match(recovery!.message, /verify-fail complete-slice M001\/S01: the slice row is "active"/u);
   } finally {
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
@@ -142,16 +153,12 @@ test("verify-fail logs a recovery warning when an expected artifact file is abse
 test("a passing verification produces no recovery warnings", () => {
   const base = createFixtureBase();
   try {
-    const dir = milestoneDir(base, "M001");
-    writeFileSync(
-      join(dir, "M001-ROADMAP.md"),
-      ["# M001: Real roadmap", "", "## Slices", "", "- [ ] **S01: First slice** `risk:low` `depends:[]`", ""].join("\n"),
-      "utf-8",
-    );
+    insertMilestone({ id: "M001", title: "Real roadmap", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "First slice", status: "pending", risk: "low", depends: [] });
 
     const { result, logs } = verifyAndCaptureLogs("plan-milestone", "M001", base);
 
-    assert.equal(result, true, "a real roadmap must pass verification");
+    assert.equal(result, true, "a milestone with slice rows must pass verification");
     assert.equal(
       findRecovery(logs),
       undefined,
@@ -163,79 +170,29 @@ test("a passing verification produces no recovery warnings", () => {
   }
 });
 
-// ─── plan-slice verification gates (legacy path, no DB) ────────────────────
-// These run the filesystem fallback when isDbAvailable() is false. Each verify-
-// fail branch logs a recovery warning naming the exact missing artifact, so a
+// ─── plan-slice verification gate ──────────────────────────────────────────
+// The verify-fail branch logs a recovery warning naming the missing rows, so a
 // regression that drops the reason would hide why a slice refused to advance.
 
-test("plan-slice verify-fail logs a recovery warning when the plan has no task entries", () => {
+test("plan-slice verify-fail logs a recovery warning when the slice has no task rows", () => {
   const base = createFixtureBase("gsd-recovery-logs-plan-");
   try {
+    insertMilestone({ id: "M001", title: "Roadmap", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "First", status: "pending", risk: "low", depends: [] });
     const dir = sliceDir(base, "M001", "S01");
-    // A PLAN with neither a `- [ ] **T0x:**` checkbox nor a `## T0x --` heading.
-    writeFileSync(join(dir, "S01-PLAN.md"), "# S01: Stub\n\n## Tasks\n\n_TBD_\n", "utf-8");
-
-    const { result, logs } = verifyAndCaptureLogs("plan-slice", "M001/S01", base);
-
-    assert.equal(result, false, "a task-less plan must fail verification");
-    const recovery = findRecovery(logs);
-    assert.ok(recovery, "a recovery warning must be logged");
-    assert.match(
-      recovery!.message,
-      /verify-fail plan-slice M001\/S01: plan has no task checkbox\/heading/u,
-    );
-  } finally {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("plan-slice verify-fail logs a recovery warning when the tasks dir is missing", () => {
-  const base = createFixtureBase("gsd-recovery-logs-tasksdir-");
-  try {
-    const dir = sliceDir(base, "M001", "S01");
-    // Valid checkbox task, but we deliberately do NOT create the tasks/ dir.
-    writeFileSync(
-      join(dir, "S01-PLAN.md"),
-      "# S01: Has task\n\n## Tasks\n\n- [ ] **T01: A** `est:15m`\n",
-      "utf-8",
-    );
-
-    const { result, logs } = verifyAndCaptureLogs("plan-slice", "M001/S01", base);
-
-    assert.equal(result, false, "a plan without its tasks dir must fail verification");
-    const recovery = findRecovery(logs);
-    assert.ok(recovery, "a recovery warning must be logged");
-    assert.match(
-      recovery!.message,
-      /verify-fail plan-slice M001\/S01: tasks dir missing/u,
-    );
-  } finally {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("plan-slice verify-fail logs a recovery warning when an individual task artifact is missing", () => {
-  const base = createFixtureBase("gsd-recovery-logs-taskplan-");
-  try {
-    const dir = sliceDir(base, "M001", "S01");
-    writeFileSync(
-      join(dir, "S01-PLAN.md"),
-      "# S01: Has task\n\n## Tasks\n\n- [ ] **T01: A** `est:15m`\n",
-      "utf-8",
-    );
-    // Create the tasks dir but NOT any T01 task artifact inside it.
+    // A PLAN file with a task entry and its task plan do not stand in for task rows.
+    writeFileSync(join(dir, "S01-PLAN.md"), "# S01: Has task\n\n## Tasks\n\n- [ ] **T01: A** `est:15m`\n", "utf-8");
     mkdirSync(join(dir, "tasks"), { recursive: true });
+    writeFileSync(join(dir, "tasks", "T01-PLAN.md"), "# T01: A\n", "utf-8");
 
     const { result, logs } = verifyAndCaptureLogs("plan-slice", "M001/S01", base);
 
-    assert.equal(result, false, "a missing task artifact must fail verification");
+    assert.equal(result, false, "a slice with no task rows must fail verification");
     const recovery = findRecovery(logs);
     assert.ok(recovery, "a recovery warning must be logged");
     assert.match(
       recovery!.message,
-      /verify-fail plan-slice M001\/S01: task artifact missing for T01/u,
+      /verify-fail plan-slice M001\/S01: the slice has no task rows/u,
     );
   } finally {
     closeDatabase();
@@ -245,54 +202,27 @@ test("plan-slice verify-fail logs a recovery warning when an individual task art
 
 // ─── parallel-research sentinel verification gates ─────────────────────────
 // The "{mid}/parallel-research" sentinel fans research across multiple slices.
-// verifyExpectedArtifact checks every research-ready slice has a RESEARCH file;
-// each failure logs a recovery warning naming the exact gap.
-
-test("parallel-research verify-fail logs a recovery warning when the roadmap is missing", () => {
-  const base = createFixtureBase("gsd-recovery-logs-prr-");
-  try {
-    // No roadmap file present → resolveExpectedArtifactPath("plan-milestone")
-    // returns null/missing → :445 warning.
-    const { result, logs } = verifyAndCaptureLogs("research-slice", "M001/parallel-research", base);
-
-    assert.equal(result, false, "missing roadmap must fail parallel-research verification");
-    const recovery = findRecovery(logs);
-    assert.ok(recovery, "a recovery warning must be logged");
-    assert.match(
-      recovery!.message,
-      /verify-fail research-slice M001\/parallel-research: roadmap missing/u,
-    );
-  } finally {
-    closeDatabase();
-    rmSync(base, { recursive: true, force: true });
-  }
-});
+// verifyExpectedArtifact checks every research-ready slice has a saved RESEARCH
+// row; a failure logs a recovery warning naming the exact gap.
 
 test("parallel-research verify-fail logs a recovery warning when a research-ready slice lacks RESEARCH", () => {
   const base = createFixtureBase("gsd-recovery-logs-prrs-");
   try {
-    const dir = milestoneDir(base, "M001");
-    // The roadmap projection must exist so verification passes the
-    // roadmap-missing guard; slice state itself comes from the DB (ADR-017).
-    writeFileSync(
-      join(dir, "M001-ROADMAP.md"),
-      ["# M001: Roadmap", "", "## Slices", "", "- [ ] **S01: First** `risk:low` `depends:[]`", ""].join("\n"),
-      "utf-8",
-    );
     // One not-done slice (S01) and no milestone-level RESEARCH: S01 is
-    // research-ready (no deps, not done) and has no RESEARCH file.
-    openDatabase(join(base, ".gsd", "gsd.db"));
+    // research-ready (no deps, not done) and has no saved RESEARCH row. A
+    // RESEARCH file on disk does not change that.
     insertMilestone({ id: "M001", title: "Roadmap", status: "active" });
     insertSlice({ milestoneId: "M001", id: "S01", title: "First", status: "pending", risk: "low", depends: [] });
+    writeFileSync(join(sliceDir(base, "M001", "S01"), "S01-RESEARCH.md"), "# research\n", "utf-8");
 
     const { result, logs } = verifyAndCaptureLogs("research-slice", "M001/parallel-research", base);
 
-    assert.equal(result, false, "a research-ready slice without RESEARCH must fail verification");
+    assert.equal(result, false, "a research-ready slice without saved RESEARCH must fail verification");
     const recovery = findRecovery(logs);
     assert.ok(recovery, "a recovery warning must be logged");
     assert.match(
       recovery!.message,
-      /verify-fail research-slice M001\/parallel-research: slice S01 missing RESEARCH/u,
+      /verify-fail research-slice M001\/parallel-research: slice S01 has no saved RESEARCH/u,
     );
   } finally {
     closeDatabase();
@@ -340,32 +270,25 @@ test("gate-evaluate verify logs a recovery warning when the pending-gates DB que
 });
 
 // ─── fail-closed verification witnesses ────────────────────────────────────
-// plan-milestone parses the artifact's own content (does it declare slices?),
-// so its parse-failure catch survives the DB cutover; parseProjectionRoadmap is
-// internally defensive against every malformed input, so that catch is
-// unreachable without the _setRoadmapParserFnForTests seam.
-// complete-slice and parallel-research instead read slice state from the DB.
-// With no DB they must fail CLOSED — never silently return true — and say why.
+// Unit results are read from the DB. With no DB, or when the read throws, the
+// check must fail CLOSED — never silently return true — and say why.
 
-test("plan-milestone verify logs a recovery warning when the roadmap parser throws (auto-recovery.ts:515)", () => {
-  const base = createFixtureBase("gsd-recovery-logs-parse-");
-  const restore = _setRoadmapParserFnForTests(() => {
-    throw new Error("forced roadmap parse failure");
-  });
+test("discuss-milestone verify fails closed and logs a recovery warning when the DB read throws", () => {
+  const base = createFixtureBase("gsd-recovery-logs-read-");
   try {
+    insertMilestone({ id: "M001", title: "Roadmap", status: "active" });
     const dir = milestoneDir(base, "M001");
-    // A real ROADMAP file must exist so verification reaches the parser.
-    writeFileSync(join(dir, "M001-ROADMAP.md"), "# M001: x\n\n## Slices\n\n- [ ] **S01: A**\n", "utf-8");
+    writeFileSync(join(dir, "M001-CONTEXT.md"), "# Context\n\nDecisions.\n", "utf-8");
+    // The saved-artifact read throws: the CONTEXT file must not rescue it.
+    _getAdapter()!.exec("DROP TABLE artifacts");
 
-    const { result, logs } = verifyAndCaptureLogs("plan-milestone", "M001", base);
+    const { result, logs } = verifyAndCaptureLogs("discuss-milestone", "M001", base);
 
-    assert.equal(result, false, "a parser failure must fail plan-milestone verification");
+    assert.equal(result, false, "a failed DB read must fail verification");
     const recovery = findRecovery(logs);
     assert.ok(recovery, "a recovery warning must be logged");
-    assert.match(recovery!.message, /plan-milestone roadmap verification failed/u);
-    assert.match(recovery!.message, /forced roadmap parse failure/u);
+    assert.match(recovery!.message, /verify-fail discuss-milestone M001: DB read failed/u);
   } finally {
-    restore();
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }

@@ -12,6 +12,8 @@ import {
   openDatabase,
   closeDatabase,
   insertMilestone,
+  insertSlice,
+  insertTask,
   _getAdapter,
 } from "../gsd-db.ts";
 import { registerAutoWorker } from "../db/auto-workers.ts";
@@ -268,24 +270,12 @@ test("direct /gsd auto source only resumes paused-session metadata for recoverab
 test("direct /gsd auto skips paused-session replay when recovered unit already completed", async () => {
   const base = makeTmpBase();
   try {
-    // Slice-scoped artifact verification needs an open DB (ADR-046).
+    // The paused plan-slice unit recorded its result: the slice has a task
+    // row (ADR-046). No PLAN file is written.
     openFixtureDb(base);
-    writeRoadmap(base, false);
-    const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    const tasksDir = join(sliceDir, "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    writeFileSync(
-      join(sliceDir, "S01-PLAN.md"),
-      [
-        "# S01: Test Slice",
-        "",
-        "## Tasks",
-        "",
-        "- [ ] **T01: First task** `est:1h`",
-      ].join("\n"),
-      "utf-8",
-    );
-    writeFileSync(join(tasksDir, "T01-PLAN.md"), "# T01 Plan\n\nDo the thing.\n", "utf-8");
+    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "pending" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First task", status: "pending" });
 
     const state = {
       pausedSessionFile: join(base, ".gsd", "activity", "paused-session.jsonl"),

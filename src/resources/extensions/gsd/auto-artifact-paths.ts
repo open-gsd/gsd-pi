@@ -340,8 +340,8 @@ export interface SliceResearchLocation {
 
 /**
  * Resolve slice RESEARCH with worktree projection first, then canonical
- * project-root path. Shared by dispatch rules, execute-task prompts, and
- * artifact verification.
+ * project-root path, for prompts that inline the rendered file. Dispatch and
+ * verification read the saved RESEARCH artifact row, not this file.
  */
 export function resolveSliceResearchLocation(
   basePath: string,
@@ -365,13 +365,4 @@ export function resolveSliceResearchLocation(
   }
 
   return { absolutePath: null, relativePath: null };
-}
-
-/** Returns the absolute RESEARCH path when it exists, otherwise null. */
-export function resolveExistingSliceResearchPath(
-  basePath: string,
-  mid: string,
-  sid: string,
-): string | null {
-  return resolveSliceResearchLocation(basePath, mid, sid).absolutePath;
 }
