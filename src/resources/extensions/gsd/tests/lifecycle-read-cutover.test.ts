@@ -4,12 +4,15 @@
 // dependencies follow the canonical lifecycle rows when legacy rows disagree.
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import { resolveDispatch } from "../auto-dispatch.ts";
+import { getAlreadyClosedDispatchReason } from "../auto/dispatch.ts";
+import { findOpenSlices, resolveDispatch } from "../auto-dispatch.ts";
+import { auditOrphanedMilestoneBranches, findUnmergedCompletedMilestone } from "../auto-start.ts";
 import {
   _executeAuthorityCutoverDomainOperation,
   executeDomainOperation,
@@ -17,6 +20,7 @@ import {
   type DomainOperationMutation,
 } from "../db/domain-operation.ts";
 import {
+  readMilestone,
   readMilestoneSlices,
   readMilestones,
   readProgressCounts,
@@ -30,8 +34,11 @@ import {
 import { getPriorSliceCompletionBlocker } from "../dispatch-guard.ts";
 import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { analyzeParallelEligibility } from "../parallel-eligibility.ts";
+import { reorderMilestones, setMilestoneDependencies } from "../queue-order.ts";
+import { loadSliceTaskIO } from "../reactive-graph.ts";
 import { cancelSlice } from "../slice-lifecycle-domain-operation.ts";
-import { deriveState, invalidateStateCache } from "../state.ts";
+import { getEligibleSlicesFromRows } from "../slice-parallel-eligibility.ts";
+import { deriveState, invalidateStateCache, isGhostMilestone } from "../state.ts";
 import { readProgressFromDb } from "../state/progress-from-db.ts";
 import { readProjectSnapshotFromDb } from "../state/project-snapshot.ts";
 import { executeMilestoneStatus } from "../tools/workflow-tool-executors.ts";
@@ -279,11 +286,6 @@ test("after the Cutover resolveDispatch stops on a canonically completed milesto
 
 test("after the Cutover parallel eligibility follows the lifecycle status of the dependency", async () => {
   const base = makeProject();
-  for (const id of ["M001", "M002", "M003", "M004"]) {
-    const directory = join(base, ".gsd", "milestones", id);
-    mkdirSync(directory, { recursive: true });
-    writeFileSync(join(directory, "CONTEXT.md"), `# ${id}\n`);
-  }
   insertMilestone({ id: "M001", title: "Canonical open", status: "complete" });
   insertMilestone({ id: "M002", title: "Blocked dependent", status: "active", depends_on: ["M001"] });
   insertMilestone({ id: "M003", title: "Canonical completed", status: "active" });
@@ -388,4 +390,105 @@ test("after the Cutover progress and the project snapshot give the same counts f
     snapshot.milestones.items.map((m) => [m.id, m.status]),
     [["M001", "complete"], ["M002", "active"], ["M003", "skipped"], ["M004", "parked"], ["M005", "pending"]],
   );
+});
+
+test("after the Cutover the already-closed dispatch check, the open-slice list and the reactive task graph follow the lifecycle rows", async () => {
+  const base = seedDisagreement();
+  const sliceDirectory = join(base, ".gsd", "milestones", "M002", "slices", "S01");
+  mkdirSync(join(sliceDirectory, "tasks"), { recursive: true });
+  writeFileSync(join(sliceDirectory, "S01-PLAN.md"), "# S01\n");
+  cutOver();
+
+  // T01 and S01 are legacy complete and canonical ready.
+  assert.equal(getAlreadyClosedDispatchReason("execute-task", "M002/S01/T01"), null);
+  assert.equal(getAlreadyClosedDispatchReason("complete-slice", "M002/S01"), null);
+  // T02 and S02 are legacy pending and canonical completed.
+  assert.equal(
+    getAlreadyClosedDispatchReason("execute-task", "M002/S01/T02"),
+    "execute-task M002/S01/T02 is already complete",
+  );
+  assert.equal(
+    getAlreadyClosedDispatchReason("complete-slice", "M002/S02"),
+    "complete-slice M002/S02 is already complete",
+  );
+
+  assert.deepEqual(findOpenSlices("M002"), ["S01"]);
+
+  assert.deepEqual(
+    (await loadSliceTaskIO(base, "M002", "S01")).map((entry) => [entry.id, entry.done]),
+    [["T01", false], ["T02", true]],
+  );
+});
+
+test("slice-parallel eligibility releases a dependent of a cancelled slice only with a Waiver after the Cutover", () => {
+  seedCancelledDependencies();
+  const eligible = () => getEligibleSlicesFromRows(readMilestoneSlices("M001")).map((entry) => entry.id);
+
+  assert.deepEqual(eligible(), ["S02", "S04"], "before the Cutover the legacy skipped status releases S02");
+
+  cutOver();
+
+  assert.deepEqual(eligible(), ["S04"], "S02 waits on the cancelled S01; S03 has a Waiver");
+});
+
+test("after the Cutover the queue commands take closed, parked and discarded from the lifecycle rows", () => {
+  const base = seedDisagreement();
+  cutOver();
+
+  // M001 is legacy active and canonical completed.
+  assert.throws(() => reorderMilestones(base, ["M001"]), /milestone M001 is closed/);
+  assert.throws(() => setMilestoneDependencies("M001", []), /milestone M001 is closed \(complete\)/);
+  // M003 is legacy active and canonical cancelled.
+  assert.throws(
+    () => setMilestoneDependencies("M002", ["M003"]),
+    /depends_on milestone M003 was discarded/,
+  );
+
+  // M002 is legacy complete and canonical ready: it is open and has a place in the queue.
+  setMilestoneDependencies("M002", ["M004"]);
+  assert.deepEqual(readMilestone("M002")?.depends_on, ["M004"]);
+  // M004 is canonical paused: it is outside the queue and M002 does not wait on its position.
+  assert.deepEqual(reorderMilestones(base, ["M002"]).order, ["M002", "M005"]);
+});
+
+test("after the Cutover a queued row whose lifecycle is completed is not a ghost milestone", () => {
+  const base = makeProject();
+  insertMilestone({ id: "M001", title: "Canonical completed", status: "queued" });
+  seedLifecycles("ghost", [milestone("M001", "completed")]);
+
+  assert.equal(isGhostMilestone(base, "M001"), true, "before the Cutover a queued row with no files is a ghost");
+
+  cutOver();
+
+  assert.equal(isGhostMilestone(base, "M001"), false);
+});
+
+test("after the Cutover the milestone branch audit takes completion from the lifecycle rows", () => {
+  const base = seedDisagreement();
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: base, stdio: ["ignore", "pipe", "pipe"] });
+  git("init");
+  git("config", "user.email", "test@test.com");
+  git("config", "user.name", "Test");
+  writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+  git("add", ".gitignore");
+  git("commit", "-m", "init");
+  git("branch", "-M", "main");
+  // M001 (legacy active, canonical completed): a branch that is merged in main.
+  git("branch", "milestone/M001");
+  // M002 (legacy complete, canonical ready): a branch with work that main does not have.
+  git("checkout", "-b", "milestone/M002");
+  writeFileSync(join(base, "feature.txt"), "work\n");
+  git("add", "feature.txt");
+  git("commit", "-m", "work on M002");
+  git("checkout", "main");
+  cutOver();
+
+  assert.equal(findUnmergedCompletedMilestone(base, "worktree"), null, "M002 is not complete");
+
+  const audit = auditOrphanedMilestoneBranches(base, "branch");
+  assert.deepEqual(
+    audit.actions.map((action) => [action.kind, action.milestoneId]),
+    [["complete-merged-branch", "M001"], ["in-progress-stranded-work", "M002"]],
+  );
+  assert.equal(git("branch", "--list", "milestone/M001").toString().trim(), "");
 });

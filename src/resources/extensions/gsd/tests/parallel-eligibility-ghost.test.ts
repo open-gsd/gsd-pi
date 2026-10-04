@@ -1,6 +1,7 @@
 /**
  * Tests for parallel eligibility edge cases:
- * - Ghost milestones (no registry entry) must NOT appear eligible (#2501 Bug 2)
+ * - Ghost milestones (a directory with no milestone row) are not milestones:
+ *   the universe is the database (#2501 Bug 2)
  * - Milestones with failed worktree merge (SUMMARY only in worktree, DB still
  *   "active") must NOT appear eligible (#2501 Bug 1 context)
  */
@@ -65,42 +66,21 @@ describe("parallel-eligibility: ghost milestone ineligibility (#2501)", () => {
     invalidateStateCache();
   });
 
-  test("ghost milestone (directory only, no planning files) is ineligible", async () => {
-    // Set up a real milestone M001 with proper planning data in DB
-    writeMilestoneFile(base, "M001", "M001-CONTEXT.md", "# M001: Real Milestone\n\nA real milestone.");
-    writeMilestoneFile(base, "M001", "M001-ROADMAP.md", "# M001: Real Milestone\n\n## Slices\n\n- [ ] **S01: First Slice** `risk:low` `depends:[]`\n  > Do something.\n");
-    writeMilestoneFile(base, "M001", "slices/S01/S01-PLAN.md", "# S01: First Slice\n\n**Goal:** Do it.\n**Demo:** Done.\n\n## Tasks\n\n- [ ] **T01: Task One** `est:10m`\n  Do the thing.\n");
+  test("the milestone universe is the database: a directory with no row is not listed, a row with no directory is a candidate", async () => {
+    // M001 has rows in the DB and no directory on disk.
     insertMilestone({ id: "M001", title: "M001: Real Milestone", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "First Slice", status: "active", risk: "low", depends: [] });
     insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task One", status: "pending" });
 
-    // Create ghost milestone M017 — directory with only slices/, no CONTEXT/ROADMAP/SUMMARY
+    // M017 is a ghost: a directory on disk with no milestone row (#2501).
     makeMilestoneDir(base, "M017");
     mkdirSync(join(base, ".gsd", "milestones", "M017", "slices"), { recursive: true });
 
     invalidateStateCache();
     const result = await analyzeParallelEligibility(base);
 
-    // M017 should NOT be in the eligible list
-    const ghostEligible = result.eligible.find(e => e.milestoneId === "M017");
-    assert.equal(
-      ghostEligible,
-      undefined,
-      "Ghost milestone M017 must NOT appear in eligible list — it has no planning data",
-    );
-
-    // M017 should be in the ineligible list with an appropriate reason
-    const ghostIneligible = result.ineligible.find(e => e.milestoneId === "M017");
-    assert.ok(
-      ghostIneligible,
-      "Ghost milestone M017 must appear in ineligible list",
-    );
-    assert.equal(ghostIneligible!.eligible, false);
-    assert.match(
-      ghostIneligible!.reason,
-      /no planning data|unknown|no registry/i,
-      "Reason should indicate the milestone has no planning data or is unknown",
-    );
+    assert.deepEqual(result.eligible.map(e => e.milestoneId), ["M001"]);
+    assert.deepEqual(result.ineligible.map(e => e.milestoneId), []);
   });
 
   test("milestone with DB status active and no SUMMARY on disk is not eligible when it has no slices", async () => {

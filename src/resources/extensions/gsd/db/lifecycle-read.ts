@@ -1,8 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: The read interface for status, phase, dispatch-eligibility
-// and dependency decisions (ADR-046). deriveState, the dispatch guard, the
-// milestone guard of resolveDispatch, the status response, progress and the
-// project snapshot ask their status questions here.
+// and dependency decisions (ADR-046). deriveState, the dispatch guard,
+// resolveDispatch, the already-closed dispatch check, the queue commands, the
+// auto start and stop completion checks, the status response, progress and
+// the project snapshot ask their status questions here.
 // The project Authority Epoch chooses the read source, in `cutoverHasRun`
 // only: canonical lifecycle rows and Waivers after the Cutover, legacy status
 // rows (D005) before it. The choice is per Project, never per item.

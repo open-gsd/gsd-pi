@@ -25,7 +25,6 @@ import {
   getClosedSliceIds,
   getPendingGatesForTurn,
   markPendingGatesOmittedForTurn,
-  getMilestone,
   insertAssessment,
   transaction,
   getSliceRunUatAssessment,
@@ -34,7 +33,6 @@ import {
 } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
-import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
 import {
@@ -465,8 +463,8 @@ function withEffectiveDispatchMilestone(ctx: DispatchContext, effectiveMid: stri
  */
 export function findOpenSlices(mid: string): string[] {
   if (!isDbAvailable()) return [];
-  return getMilestoneSlices(mid)
-    .filter(s => !isInactiveStatus(s.status))
+  return readMilestoneSlices(mid)
+    .filter(s => !s.done)
     .map(s => s.id);
 }
 
@@ -1571,8 +1569,8 @@ export const DISPATCH_RULES: DispatchRule[] = [
     match: async ({ state, mid, midTitle, basePath }) => {
       if (state.phase !== "complete") return null;
       if (mid && isDbAvailable()) {
-        const milestone = getMilestone(mid);
-        if (milestone && !isClosedStatus(milestone.status)) {
+        const milestone = readMilestone(mid);
+        if (milestone && !milestone.closed) {
           return {
             action: "dispatch",
             unitType: "complete-milestone",

@@ -206,7 +206,6 @@ import { recoverFailedMigration } from "./migrate-external.js";
 import { initRegistry, convertDispatchRules } from "./rule-registry.js";
 import { emitJournalEvent as _emitJournalEvent, type JournalEntry } from "./journal.js";
 import { recordTaskVerificationPause } from "./task-settle.js";
-import { isClosedStatus } from "./status-guards.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import {
   type AutoDashboardData,
@@ -230,10 +229,10 @@ import {
 import {
   isDbAvailable,
   getMilestone,
-  getMilestoneSlices,
   getSlice,
   getTask,
 } from "./gsd-db.js";
+import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import {
   checkpointWorkflowDatabase,
   closeWorkflowDatabase,
@@ -1932,8 +1931,7 @@ export async function stopAuto(
         let milestoneComplete = false;
         try {
           if (isDbAvailable()) {
-            const dbRow = getMilestone(stopMilestoneId);
-            milestoneComplete = dbRow?.status === "complete";
+            milestoneComplete = readMilestone(stopMilestoneId)?.done === true;
           } else {
             logWarning("engine", `stopAuto: DB unavailable, preserving ${stopMilestoneId} branch instead of merging`, { file: "auto.ts" });
           }
@@ -2001,8 +1999,8 @@ export async function stopAuto(
     let totalSlices: number | null = null;
     if (preserveCompletionSurface && options.completionWidget && completionMilestoneId && isDbAvailable()) {
       try {
-        const slices = getMilestoneSlices(completionMilestoneId);
-        completedSlices = slices.filter(slice => isClosedStatus(slice.status)).length;
+        const slices = readMilestoneSlices(completionMilestoneId);
+        completedSlices = slices.filter(slice => slice.done).length;
         totalSlices = slices.length;
       } catch (err) {
         logWarning("dashboard", `completion slice stats lookup failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -2878,16 +2876,16 @@ export async function startAuto(
           const mDir = resolveMilestonePath(base, meta.milestoneId);
           let summaryIsTerminal = false;
           let dbAvailable = isDbAvailable();
-          let milestoneRow = dbAvailable ? getMilestone(meta.milestoneId) : null;
+          let milestoneRow = dbAvailable ? readMilestone(meta.milestoneId) : null;
           if (!milestoneRow) {
             const opened = await ensureDbOpen(base);
             dbAvailable = opened || isDbAvailable();
             if (dbAvailable) {
-              milestoneRow = getMilestone(meta.milestoneId);
+              milestoneRow = readMilestone(meta.milestoneId);
             }
           }
           if (dbAvailable) {
-            summaryIsTerminal = !!milestoneRow && isClosedStatus(milestoneRow.status);
+            summaryIsTerminal = milestoneRow?.closed === true;
           } else {
             ctx.ui.notify(
               `Cannot check paused milestone ${meta.milestoneId}: workflow DB is unavailable.`,

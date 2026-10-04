@@ -78,10 +78,9 @@ import { snapshotSkills } from "./skill-discovery.js";
 import {
   isDbAvailable,
   probeDbWritable,
-  getMilestone,
-  getAllMilestones,
   hasSavedArtifact,
 } from "./gsd-db.js";
+import { readMilestone, readMilestones, type MilestoneRead } from "./db/lifecycle-read.js";
 import {
   closeAllWorkflowDatabases,
   getWorkflowDatabaseStatus,
@@ -89,7 +88,6 @@ import {
   openWorkflowDatabase,
   resolveProjectRootDbPath,
 } from "./db-workspace.js";
-import { isClosedStatus } from "./status-guards.js";
 import { auditOrphanedPreflightStashes } from "./orphan-stash-audit.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
 
@@ -471,7 +469,7 @@ export function auditOrphanedMilestoneBranches(
 
   for (const branch of milestoneBranches) {
     const milestoneId = branch.replace(/^milestone\//, "");
-    const milestone = getMilestone(milestoneId);
+    const milestone = readMilestone(milestoneId);
 
     if (!milestone) continue;
 
@@ -485,10 +483,10 @@ export function auditOrphanedMilestoneBranches(
     // we never delete or touch; we just surface a warning so the user knows
     // where to look.
     //
-    // Gate on isClosedStatus so we only warn about genuinely open milestones.
-    // Parked/other closed statuses go through the legacy complete/unmerged
+    // Gate on the closed answer so we only warn about genuinely open
+    // milestones. Other closed milestones go through the complete/unmerged
     // path below where appropriate.
-    if (!isClosedStatus(milestone.status)) {
+    if (!milestone.closed) {
       let commitsAhead = 0;
       try {
         commitsAhead = nativeCommitCountBetween(basePath, mainBranch, branch);
@@ -557,10 +555,9 @@ export function auditOrphanedMilestoneBranches(
       continue;
     }
 
-    // Only the "complete" status participates in the merged/unmerged cleanup
-    // paths below — other closed statuses (parked, etc.) are intentionally
-    // left alone.
-    if (milestone.status !== "complete") continue;
+    // Only a done milestone participates in the merged/unmerged cleanup
+    // paths below — a discarded milestone is intentionally left alone.
+    if (!milestone.done) continue;
 
     if (isMerged) {
       // Branch is merged — safe to delete branch and clean up worktree dir
@@ -665,15 +662,15 @@ export function auditOrphanedMilestoneBranches(
   const seenMilestoneIds = new Set(
     milestoneBranches.map((branch) => branch.replace(/^milestone\//, "")),
   );
-  let completedMilestones: readonly { id: string; status: string }[] = [];
+  let completedMilestones: readonly MilestoneRead[] = [];
   try {
-    completedMilestones = getAllMilestones();
+    completedMilestones = readMilestones();
   } catch {
     // DB read failure — skip the second pass; the first pass is still useful.
     completedMilestones = [];
   }
   for (const m of completedMilestones) {
-    if (!isClosedStatus(m.status)) {
+    if (!m.closed) {
       if (seenMilestoneIds.has(m.id)) continue;
       const worktreeEvidence = detectWorktreeEvidence(basePath, m.id, hasChanges);
       if (!worktreeEvidence.dirty) continue;
@@ -709,7 +706,7 @@ export function auditOrphanedMilestoneBranches(
       continue;
     }
 
-    if (m.status !== "complete") continue;
+    if (!m.done) continue;
     if (seenMilestoneIds.has(m.id)) continue; // already processed in the branch loop
     if (!milestoneBranchListAvailable) {
       try {
@@ -859,7 +856,7 @@ export function findUnmergedCompletedMilestone(
     milestoneBranches,
     mergedBranches,
     // DB status is the only completion authority; no DB or no row is not complete.
-    (milestoneId) => isDbAvailable() && getMilestone(milestoneId)?.status === "complete",
+    (milestoneId) => isDbAvailable() && readMilestone(milestoneId)?.done === true,
     (branch) => nativeCommitCountBetween(basePath, mainBranch, branch),
   );
 }
@@ -1218,8 +1215,7 @@ export async function bootstrapAutoSession(
       gsdRoot(base),
       (mid) => {
         if (!isDbAvailable()) return false;
-        const row = getMilestone(mid);
-        return !!row && isClosedStatus(row.status);
+        return readMilestone(mid)?.closed === true;
       },
     );
 
@@ -1268,8 +1264,7 @@ export async function bootstrapAutoSession(
     try {
       if (isDbAvailable()) {
         const stashAudit = auditOrphanedPreflightStashes(base, (milestoneId) => {
-          const row = getMilestone(milestoneId);
-          return !!row && isClosedStatus(row.status);
+          return readMilestone(milestoneId)?.closed === true;
         });
         for (const entry of stashAudit.applied) {
           ctx.ui.notify(
@@ -1949,8 +1944,8 @@ export async function bootstrapAutoSession(
           // Skip completed/parked milestones — a leftover CONTEXT-DRAFT
           // on a finished milestone is harmless residue, not an actionable warning.
           if (isDbAvailable()) {
-            const ms = getMilestone(id);
-            if (ms?.status === "complete" || ms?.status === "parked") continue;
+            const ms = readMilestone(id);
+            if (ms?.done || ms?.parked) continue;
           }
           // The draft row stays after the final CONTEXT is saved, so it counts only without one.
           if (!hasSavedArtifact(id, null, "CONTEXT") && hasSavedArtifact(id, null, "CONTEXT-DRAFT"))

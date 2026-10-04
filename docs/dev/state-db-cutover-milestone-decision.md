@@ -311,24 +311,44 @@ D012 is a decision. It is not the cutover:
   satisfy a dependent, and the Milestone counts of progress and of the project
   snapshot leave it out of `total` and `done`. All other answers are the same
   as the legacy reads.
-- Other decision sites do not use the interface. They read legacy rows
-  directly and apply the status vocabulary themselves. The known sites on the
-  dispatch and dependency paths are:
-  - `auto-dispatch.ts`: the rule "complete → stop", `findMissingSummaries`,
-    and the skipped-task check of the missing-PLAN preview.
-  - `auto/dispatch.ts`: `getAlreadyClosedDispatchReason`.
-  - `slice-parallel-eligibility.ts`: `getEligibleSlicesFromRows`.
-  - `queue-order.ts`: the dependency graph, the dependency warnings, and the
-    closed check of `set-dependencies`.
+- Since 2026-10-04 these dispatch and dependency sites also ask the read
+  interface. Before that date they read legacy rows directly:
+  - `auto-dispatch.ts`: the rule "complete → stop" and `findOpenSlices`.
+  - `auto/dispatch.ts`: `getAlreadyClosedDispatchReason`. It now also stops a
+    `complete-slice` unit for a deferred Slice, because the interface answers
+    that a deferred Slice needs no further work.
+  - `slice-parallel-eligibility.ts`: `getEligibleSlicesFromRows`. It takes the
+    Slices of the interface and no longer reads a status.
+  - `queue-order.ts`: the dependency graph, the dependency warnings, the
+    rendered queue order, and the closed and discarded checks of
+    `set-dependencies`.
   - `reactive-graph.ts`: the done flag of each Task.
-  - `auto-start.ts` and `auto.ts`: the closed-status checks.
+  - `auto-start.ts`: the milestone branch audit, the lookup of a completed
+    Milestone with an unmerged branch, the stale runtime unit cleanup, the
+    preflight-stash audit and the queue pre-flight. A Milestone is complete
+    there when the interface answers `done`. Before, only the raw status
+    `complete` counted; the legacy aliases `done` and `closed` now count too.
+  - `auto.ts`: the merge decision of `stopAuto`, the Slice count of the
+    completion widget, and the terminal check of a paused session.
   - `state.ts`: `isGhostMilestone`.
-  - `state/derive/from-db.ts`: the Milestone readiness class, which uses the
-    raw status.
-
-  This list is not complete. On 2026-10-03, 55 production files of the GSD
-  extension other than `db/lifecycle-read.ts` import `status-guards.ts`; each
-  one is a candidate.
+- Since 2026-10-04 parallel eligibility (`parallel-eligibility.ts`) takes the
+  Milestone universe from the registry of `deriveState`, which reads the
+  database. It does not scan the milestone directories. A directory with no
+  Milestone row is not listed; before, it was listed as ineligible. A
+  Milestone row with no directory is a candidate.
+- Other decision sites do not use the interface. They read legacy rows
+  directly and apply the status vocabulary themselves. The Milestone readiness
+  class in `state/derive/from-db.ts` (queued shell, needs discussion) uses the
+  status label of the interface, because the lifecycle vocabulary has no word
+  for queued. On 2026-10-04, 48 production files of the GSD extension other
+  than `db/lifecycle-read.ts` import `status-guards.ts`; each one is a
+  candidate. The ones with a closed-status check on the closeout, recovery and
+  post-unit paths are `auto/orchestrator.ts`, `auto/closeout.ts`,
+  `milestone-closeout.ts`, `closeout-consistency-gate.ts`, `auto-recovery.ts`,
+  `auto-post-unit.ts`, `auto-verification.ts`, `unit-runtime.ts`,
+  `artifact-verification.ts`, `pre-execution-checks.ts`,
+  `unmerged-milestone-guard.ts`, `worktree-lifecycle.ts`,
+  `milestone-actions.ts` and `state-contract.ts`.
 - Step 2 is done in the read interface (2026-10-04). The project Authority
   Epoch chooses the read source, in one function (`cutoverHasRun`) and per
   Project, never per item:
@@ -359,17 +379,17 @@ D012 is a decision. It is not the cutover:
   does not read the Authority Epoch, reads it in more than one function, does
   not query canonical lifecycle rows, or loses a legacy reader. The gate has
   five behavior witnesses for a cut-over Project in
-  `tests/lifecycle-read-cutover.test.ts`.
+  `tests/lifecycle-read-cutover.test.ts`. The same file has the behavior tests
+  for the sites that were routed on 2026-10-04.
 - The legacy readers and the adopted/unadopted branches are not deleted. That
   is later work.
-- The decision sites in the list above still read legacy rows directly. On a
-  cut-over Project authority is split for them: `deriveState`, the dispatch
-  guard, the status response, progress and the snapshot follow canonical rows,
-  and those sites follow legacy rows. The two agree while Domain Operations
-  keep the legacy row aligned with the lifecycle row. They differ for a
-  cancelled Slice with no Waiver, and when the rows disagree. These sites must
-  read through the interface before a production command advances the
-  Authority Epoch.
+- The decision sites that do not use the interface still read legacy rows
+  directly. On a cut-over Project authority is split for them: the callers of
+  the interface follow canonical rows, and those sites follow legacy rows. The
+  two agree while Domain Operations keep the legacy row aligned with the
+  lifecycle row. They differ for a cancelled Slice with no Waiver, and when
+  the rows disagree. These sites must read through the interface before a
+  production command advances the Authority Epoch.
 - The interface does not check that every hierarchy row has a lifecycle row.
   The cutover command must check that before it advances the Authority Epoch.
 

@@ -1,9 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: Auto-loop dispatch guards for already-closed units.
 
-import { isDbAvailable, getTask, getSlice } from "../gsd-db.js";
+import { isDbAvailable } from "../gsd-db.js";
+import { readMilestoneSlices, readSliceTasks } from "../db/lifecycle-read.js";
 import { refreshWorkflowDatabaseFromDisk } from "../db-workspace.js";
-import { isClosedStatus } from "../status-guards.js";
 import { parseUnitId } from "../unit-id.js";
 import type { PendingVerificationRetry } from "./session.js";
 
@@ -12,14 +12,14 @@ export function getAlreadyClosedDispatchReason(unitType: string, unitId: string)
   refreshWorkflowDatabaseFromDisk();
   const { milestone, slice, task } = parseUnitId(unitId);
   if (unitType === "execute-task" && milestone && slice && task) {
-    const row = getTask(milestone, slice, task);
-    return row && isClosedStatus(row.status)
+    const row = readSliceTasks(milestone, slice).find((entry) => entry.id === task);
+    return row?.done
       ? `execute-task ${unitId} is already ${row.status}`
       : null;
   }
   if (unitType === "complete-slice" && milestone && slice) {
-    const row = getSlice(milestone, slice);
-    return row && isClosedStatus(row.status)
+    const row = readMilestoneSlices(milestone).find((entry) => entry.id === slice);
+    return row?.done
       ? `complete-slice ${unitId} is already ${row.status}`
       : null;
   }
