@@ -14,9 +14,10 @@ import {
   type LegacyImportTarget,
   type LegacyImportValue,
 } from "./legacy-import-contract.js";
-import type {
-  LegacyImportBaseRowSet,
-  LegacyImportBaseSnapshot,
+import {
+  isLegacyImportBaseSnapshotSchemaVersion,
+  type LegacyImportBaseRowSet,
+  type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
 import type {
   LegacyImportCompleteRowSet,
@@ -235,7 +236,7 @@ function normalizeStoredValue(rowSet: LegacyImportBaseRowSet, field: string, val
 
 function validateBase(base: LegacyImportBaseSnapshot): void {
   if (
-    base.snapshot_schema_version !== 1
+    !isLegacyImportBaseSnapshotSchemaVersion(base.snapshot_schema_version)
     || base.database_schema_version !== LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION
     || hashLegacyImportValue(base.rows) !== base.relevant_rows_hash
   ) {

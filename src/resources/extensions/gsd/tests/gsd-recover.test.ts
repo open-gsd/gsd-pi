@@ -31,7 +31,11 @@ import { getAllDecisionsFromMemories } from '../context-store.ts';
 import { captureKnowledgeEntry } from '../knowledge-capture.ts';
 import { renderKnowledgeProjection } from '../knowledge-projection.ts';
 import { supersedeMemory, updateMemoryContent } from '../memory-store.ts';
-import { captureCurrentLegacyImportBaseSnapshot } from '../legacy-import-preview-base.ts';
+import {
+  _setLegacyImportBaseSnapshotSchemaVersionForTest,
+  captureCurrentLegacyImportBaseSnapshot,
+  legacyImportBaseSnapshotAtVersion,
+} from '../legacy-import-preview-base.ts';
 import { createLegacyImportPreview } from '../legacy-import-preview.ts';
 import { fingerprintLegacyImportCorpusTree } from './helpers/legacy-import-corpus.ts';
 import { executeDomainOperation } from '../db/domain-operation.ts';
@@ -993,6 +997,125 @@ describe('gsd-recover', async () => {
       closeDatabase();
       cleanup(base);
     }
+  });
+
+  // An Import Application that an earlier build made holds base snapshot
+  // schema 1: its Preview, backup and result hash do not count knowledge rows.
+  async function applyRecoverWithBaseSnapshotSchema1(base: string): Promise<string> {
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    captureKnowledgeEntry(base, 'rule', 'Use tabs', 'project');
+    // The earlier build did not import KNOWLEDGE.md rows.
+    rmSync(join(base, '.gsd', 'KNOWLEDGE.md'));
+    _setLegacyImportBaseSnapshotSchemaVersionForTest(1);
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, previewApproval(base));
+    _setLegacyImportBaseSnapshotSchemaVersionForTest();
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    assert.ok(
+      captureCurrentLegacyImportBaseSnapshot().rows.some((row) => row.row_set === 'knowledge_memories'),
+      'this build counts a knowledge row that schema 1 did not count',
+    );
+    return String(_getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!['operation_id']);
+  }
+
+  test('recover restores an Import Application of base snapshot schema 1 when nothing changed after it', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      _setLegacyImportBaseSnapshotSchemaVersionForTest();
+      closeDatabase();
+      cleanup(base);
+    });
+    installCorpusCase(base, 'gsd-nested');
+    const operationId = await applyRecoverWithBaseSnapshotSchema1(base);
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--application=${operationId}`);
+    const instruction = /--application=\S+ --restore --consent=proceed:destructive-database-restore:sha256:[0-9a-f]{64}/u
+      .exec(notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(instruction, notes.at(-1)?.message);
+    await handleRecover(ctx, base, instruction);
+
+    assert.equal(notes.at(-1)?.kind, 'success', notes.at(-1)?.message);
+    const db = _getAdapter()!;
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM workflow_import_applications').get()?.count, 0);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM workflow_import_restores').get()?.count, 1);
+    assert.equal(getMilestone('M001'), null, 'restore returns to the verified pre-import database');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM memories').get()?.count, 1, 'the backup holds the knowledge row');
+
+    await handleRecover(ctx, base, instruction);
+    assert.match(notes.at(-1)?.message ?? '', /replayed/i);
+  });
+
+  test('recover resumes a published restore of an Import Application of base snapshot schema 1 after restart', async (t) => {
+    const base = realpathSync(createFixtureBase());
+    t.after(() => {
+      _setLegacyImportBaseSnapshotSchemaVersionForTest();
+      closeDatabase();
+      cleanup(base);
+    });
+    installCorpusCase(base, 'gsd-nested');
+    const application = loadVerifiedRecoverApplication(await applyRecoverWithBaseSnapshotSchema1(base));
+    const identity = {
+      applicationIdentityHash: application.receipt.applicationIdentityHash,
+      backup: application.backup,
+    };
+    const consent = {
+      consentSchemaVersion: LEGACY_IMPORT_RESTORE_ASSESSMENT_CONSENT_SCHEMA_VERSION,
+      decision: 'proceed' as const,
+      destructiveDatabaseRestore: true as const,
+      evidenceHash: assessLegacyImportRestore(identity).evidenceHash,
+    };
+    const assessment = assessLegacyImportRestore({ ...identity, consent });
+    assert.equal(assessment.decision, 'restore-eligible');
+    persistVerifiedRecoverRestoreApproval(application, assessment, consent);
+
+    assert.throws(() => _restoreLegacyImportLiveForTest({
+      invocation: {
+        idempotencyKey: `legacy-import/recover-restore/${application.receipt.applicationIdentityHash}`,
+        sourceTransport: 'internal',
+        actorType: 'system',
+        actorId: 'gsd-recover',
+      },
+      ...identity,
+      assessment,
+      consent,
+    }, {
+      boundary(point) {
+        if (point === 'before-receipt-commit') throw new Error('simulated restart before receipt commit');
+      },
+    }), /published restore requires exact retry convergence/);
+
+    closeDatabase();
+    assert.equal(openDatabase(join(base, '.gsd', 'gsd.db')), true);
+    const retained = loadVerifiedRecoverApplication(application.receipt.operationId);
+    const resumed = executeLegacyImportRecoveryAction(retained, 'restore', [], consent);
+    assert.equal(resumed.status, 'restored');
+    assert.equal(_getAdapter()!.prepare('SELECT COUNT(*) AS count FROM workflow_import_restores').get()?.count, 1);
+  });
+
+  test('recover Forward Repairs an Import Application of base snapshot schema 1', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      _setLegacyImportBaseSnapshotSchemaVersionForTest();
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    const operationId = await applyRecoverWithBaseSnapshotSchema1(base);
+    assert.ok(getMilestone('M001'));
+    // Later accepted work closes the restore window, so the undo is a Forward Repair.
+    captureKnowledgeEntry(base, 'rule', 'Later rule', 'project');
+    const current = captureCurrentLegacyImportBaseSnapshot();
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, `--application=${operationId} --forward-repair`);
+    assert.match(notes.at(-1)?.message ?? '', /Forward Repair: committed/);
+    // The plan compares the rows that schema 1 counts, on each side.
+    const plan = JSON.parse(String(
+      _getAdapter()!.prepare('SELECT plan_json FROM workflow_import_forward_repairs').get()!['plan_json'],
+    ));
+    assert.equal(plan.currentRelevantRowsHash, legacyImportBaseSnapshotAtVersion(current, 1).relevant_rows_hash);
+    assert.notEqual(plan.currentRelevantRowsHash, current.relevant_rows_hash);
   });
 
   test('retained manifest resumes a published restore after restart', async () => {

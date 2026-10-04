@@ -54,6 +54,7 @@ import {
 import {
   createLegacyImportPreview,
   hashLegacyImportValue,
+  legacyImportBaseSnapshotForPreview,
   revalidateLegacyImportPreview,
   resolveLegacyImportPreview,
   type LegacyImportPreviewArtifact,
@@ -994,10 +995,13 @@ function verifiedRecoverResult(
   receipt: LegacyImportApplicationReceipt,
   preview: LegacyImportPreviewArtifact,
   backup: LegacyImportVerifiedBackup,
-  capturedBase = inspectSqliteReadOnlySnapshot(backup.backup_ref, (database) => captureLegacyImportBaseSnapshot({
-    readTransaction: (operation) => operation(),
-    source: createLegacyImportBaseSnapshotSource(database),
-  })),
+  capturedBase = legacyImportBaseSnapshotForPreview(
+    preview,
+    inspectSqliteReadOnlySnapshot(backup.backup_ref, (database) => captureLegacyImportBaseSnapshot({
+      readTransaction: (operation) => operation(),
+      source: createLegacyImportBaseSnapshotSource(database),
+    })),
+  ),
 ): VerifiedRecoverApplicationResult {
   verifyLegacyImportBackupArtifact({ backup, preview, base: capturedBase });
   const database = _getAdapter();
@@ -1058,10 +1062,13 @@ export function loadVerifiedRecoverApplication(operationId: string): VerifiedRec
       retained.backup,
     );
   }
-  const base = inspectSqliteReadOnlySnapshot(application.backupRef, (backupDatabase) => captureLegacyImportBaseSnapshot({
-    readTransaction: (operation) => operation(),
-    source: createLegacyImportBaseSnapshotSource(backupDatabase),
-  }));
+  const base = legacyImportBaseSnapshotForPreview(
+    application.preview,
+    inspectSqliteReadOnlySnapshot(application.backupRef, (backupDatabase) => captureLegacyImportBaseSnapshot({
+      readTransaction: (operation) => operation(),
+      source: createLegacyImportBaseSnapshotSource(backupDatabase),
+    })),
+  );
   const backup = sealLegacyImportVerifiedBackup({
     preview: application.preview,
     base,

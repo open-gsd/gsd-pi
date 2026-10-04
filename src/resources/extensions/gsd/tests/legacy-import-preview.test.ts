@@ -21,6 +21,8 @@ import {
   LegacyImportBaseSnapshotError,
   captureLegacyImportBaseSnapshot,
   captureCurrentLegacyImportBaseSnapshot,
+  legacyImportBaseSnapshotAtVersion,
+  legacyImportBaseSnapshotForRetainedHash,
   type LegacyImportBaseSnapshot,
   type LegacyImportBaseSnapshotSource,
 } from "../legacy-import-preview-base.ts";
@@ -46,6 +48,7 @@ import {
   createLegacyImportPreview,
   hashLegacyImportValue,
   isValidLegacyImportPreviewArtifact,
+  legacyImportBaseSnapshotForPreview,
   LegacyImportPreviewError,
   resolveLegacyImportPreview,
   revalidateLegacyImportPreview,
@@ -432,8 +435,8 @@ describe("legacy preview identity", () => {
     assert.throws(() => sealLegacyImportPreview(blankImporter), /importer_version must not be blank/);
 
     const wrongSnapshotSchema = sealInput();
-    wrongSnapshotSchema.base = { ...wrongSnapshotSchema.base, snapshot_schema_version: 2 as 1 };
-    assert.throws(() => sealLegacyImportPreview(wrongSnapshotSchema), /snapshot schema 1/);
+    wrongSnapshotSchema.base = { ...wrongSnapshotSchema.base, snapshot_schema_version: 3 as 1 };
+    assert.throws(() => sealLegacyImportPreview(wrongSnapshotSchema), /snapshot schema 1 or 2/);
   });
 
   test("legacy preview identity full-envelope hash catches non-identity evidence drift", () => {
@@ -619,6 +622,32 @@ describe("legacy preview base snapshot", () => {
     assert.notEqual(hashLegacyImportValue(changedRows), snapshot.relevant_rows_hash);
     assert.equal(Object.isFrozen(snapshot), true);
     assert.equal(Object.isFrozen(snapshot.rows), true);
+  });
+
+  test("legacy preview base snapshot gives the rows and hash of schema 1 for evidence that an earlier build retained", () => {
+    const snapshot = captureLegacyImportBaseSnapshot(sourceFixture());
+    assert.equal(snapshot.snapshot_schema_version, 2);
+    assert.equal(legacyImportBaseSnapshotAtVersion(snapshot, 2), snapshot);
+
+    const earlier = legacyImportBaseSnapshotAtVersion(snapshot, 1);
+    assert.equal(earlier.snapshot_schema_version, 1);
+    assert.equal(earlier.rows.length, snapshot.rows.length - 1);
+    assert.deepEqual(earlier.rows, snapshot.rows.filter((row) => row.row_set !== "knowledge_memories"));
+    assert.equal(earlier.relevant_rows_hash, hashLegacyImportValue(earlier.rows));
+    assert.notEqual(earlier.relevant_rows_hash, snapshot.relevant_rows_hash);
+    assert.deepEqual(earlier.authority, snapshot.authority);
+    assert.equal(Object.isFrozen(earlier), true);
+
+    // Evidence without a snapshot schema version: its rows hash selects the version.
+    assert.equal(legacyImportBaseSnapshotForRetainedHash(snapshot, snapshot.relevant_rows_hash), snapshot);
+    assert.deepEqual(legacyImportBaseSnapshotForRetainedHash(snapshot, earlier.relevant_rows_hash), earlier);
+    assert.equal(legacyImportBaseSnapshotForRetainedHash(snapshot, hashLegacyImportValue("other rows")), snapshot);
+
+    // A sealed Preview: its identity selects the version.
+    const sealOn = (base: LegacyImportBaseSnapshot) => sealLegacyImportPreview({ ...sealInput(), base });
+    assert.deepEqual(legacyImportBaseSnapshotForPreview(sealOn(earlier), snapshot), earlier);
+    assert.equal(legacyImportBaseSnapshotForPreview(sealOn(snapshot), snapshot), snapshot);
+    assert.notEqual(sealOn(earlier).preview.preview_id, sealOn(snapshot).preview.preview_id);
   });
 
   test("legacy preview base snapshot is stable when a reader returns rows in another order", () => {

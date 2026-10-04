@@ -27,6 +27,8 @@ import {
 } from "./legacy-import-contract.js";
 import {
   captureCurrentLegacyImportBaseSnapshot,
+  isLegacyImportBaseSnapshotSchemaVersion,
+  legacyImportBaseSnapshotAtVersion,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
 import { classifyLegacyImportChanges } from "./legacy-import-preview-classifier.js";
@@ -216,8 +218,8 @@ function validateSealInput(input: LegacyImportPreviewSealInput): void {
   requireHash(input.source_set_hash, "source_set_hash");
   requireHash(input.change_set_hash, "change_set_hash");
   requireHash(input.base.relevant_rows_hash, "base.relevant_rows_hash");
-  if (input.base.snapshot_schema_version !== 1) {
-    throw new Error("legacy import base snapshot schema 1 is required");
+  if (!isLegacyImportBaseSnapshotSchemaVersion(input.base.snapshot_schema_version)) {
+    throw new Error("legacy import base snapshot schema 1 or 2 is required");
   }
   if (input.base.database_schema_version !== LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION) {
     throw new Error(`legacy import database schema ${LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION} is required`);
@@ -280,6 +282,44 @@ export function isStrictLegacyImportData(
   }
 }
 
+function previewIdentity(
+  preview: Pick<
+    LegacyImportPreviewSealInput,
+    "import_kind" | "importer_version" | "source_set_hash" | "change_set_hash"
+  >,
+  base: LegacyImportBaseSnapshot,
+): LegacyImportSha256 {
+  return hashLegacyImportValue({
+    preview_schema_version: LEGACY_IMPORT_PREVIEW_SCHEMA_VERSION,
+    import_kind: preview.import_kind,
+    importer_version: preview.importer_version,
+    project_id: base.authority.project_id,
+    project_root_realpath: base.authority.project_root_realpath,
+    base_project_revision: base.authority.revision,
+    base_authority_epoch: base.authority.authority_epoch,
+    base_database_schema_version: base.database_schema_version,
+    base_snapshot_schema_version: base.snapshot_schema_version,
+    relevant_rows_hash: base.relevant_rows_hash,
+    source_set_hash: preview.source_set_hash,
+    change_set_hash: preview.change_set_hash,
+  });
+}
+
+/**
+ * The base snapshot at the snapshot schema version that sealed `preview`. The
+ * Preview identity holds that version; the envelope does not. A Preview that
+ * an earlier build sealed is verified against the base as that build captured
+ * it. When no version gives the Preview identity, the result is `base`
+ * unchanged.
+ */
+export function legacyImportBaseSnapshotForPreview(
+  preview: LegacyImportPreviewArtifact,
+  base: LegacyImportBaseSnapshot,
+): LegacyImportBaseSnapshot {
+  const earlier = legacyImportBaseSnapshotAtVersion(base, 1);
+  return previewIdentity(preview.preview, earlier) === preview.preview.preview_id ? earlier : base;
+}
+
 /**
  * Derive a non-circular approval identity, then hash the complete exact v1
  * envelope. The base row hash catches relevant DB drift even if a broken
@@ -288,20 +328,7 @@ export function isStrictLegacyImportData(
 export function sealLegacyImportPreview(input: LegacyImportPreviewSealInput): LegacyImportPreviewArtifact {
   const sealedInput = structuredClone(input);
   validateSealInput(sealedInput);
-  const previewId = hashLegacyImportValue({
-    preview_schema_version: LEGACY_IMPORT_PREVIEW_SCHEMA_VERSION,
-    import_kind: sealedInput.import_kind,
-    importer_version: sealedInput.importer_version,
-    project_id: sealedInput.base.authority.project_id,
-    project_root_realpath: sealedInput.base.authority.project_root_realpath,
-    base_project_revision: sealedInput.base.authority.revision,
-    base_authority_epoch: sealedInput.base.authority.authority_epoch,
-    base_database_schema_version: sealedInput.base.database_schema_version,
-    base_snapshot_schema_version: sealedInput.base.snapshot_schema_version,
-    relevant_rows_hash: sealedInput.base.relevant_rows_hash,
-    source_set_hash: sealedInput.source_set_hash,
-    change_set_hash: sealedInput.change_set_hash,
-  });
+  const previewId = previewIdentity(sealedInput, sealedInput.base);
   const preview: LegacyImportPreviewEnvelope = {
     preview_schema_version: LEGACY_IMPORT_PREVIEW_SCHEMA_VERSION,
     preview_id: previewId,

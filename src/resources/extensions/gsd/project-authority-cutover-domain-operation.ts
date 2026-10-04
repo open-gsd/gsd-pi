@@ -30,7 +30,10 @@ import {
   LegacyImportApplicationEvidenceError,
   type LegacyImportApplicationEvidence,
 } from "./legacy-import-application-evidence.js";
-import { captureCurrentLegacyImportBaseSnapshot } from "./legacy-import-preview-base.js";
+import {
+  captureCurrentLegacyImportBaseSnapshot,
+  legacyImportBaseSnapshotForRetainedHash,
+} from "./legacy-import-preview-base.js";
 
 export const PROJECT_AUTHORITY_CONTRACT_VERSION = 1 as const;
 export const PROJECT_AUTHORITY_CUTOVER_EVIDENCE_SCHEMA_VERSION = 1 as const;
@@ -375,8 +378,12 @@ export function inspectProjectAuthorityCutoverEvidence(): ProjectAuthorityCutove
     }
     const current = loadCurrentApplication();
     const application = current.evidence;
-    if (captureCurrentLegacyImportBaseSnapshot().relevant_rows_hash
-      !== application.applicationRelevantRowsHash) {
+    // The Application does not hold its snapshot schema version, so the rows
+    // are hashed at the version that made the Application result hash.
+    if (legacyImportBaseSnapshotForRetainedHash(
+      captureCurrentLegacyImportBaseSnapshot(),
+      application.applicationRelevantRowsHash,
+    ).relevant_rows_hash !== application.applicationRelevantRowsHash) {
       fail(
         "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT",
         "current canonical rows no longer match the Import Application result",

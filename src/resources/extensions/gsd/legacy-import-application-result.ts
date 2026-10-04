@@ -7,6 +7,7 @@ import type { LegacyImportApplicationPlanInstruction } from "./legacy-import-app
 import {
   captureCurrentLegacyImportBaseSnapshot,
   LEGACY_IMPORT_BASE_IDENTITY_COLUMNS,
+  legacyImportBaseSnapshotForRetainedHash,
   type LegacyImportBaseRow,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
@@ -176,7 +177,12 @@ export function verifyLegacyImportApplicationTargets(
 export function verifyLegacyImportApplicationResult(
   application: LegacyImportApplicationEvidence,
 ): LegacyImportBaseSnapshot {
-  const snapshot = verifyLegacyImportApplicationTargets(application);
+  // The Application does not hold its snapshot schema version, so the rows are
+  // hashed at the version that made the Application result hash.
+  const snapshot = legacyImportBaseSnapshotForRetainedHash(
+    verifyLegacyImportApplicationTargets(application),
+    application.applicationRelevantRowsHash,
+  );
   if (snapshot.authority.revision !== application.resultingProjectRevision
     || snapshot.authority.authority_epoch !== application.resultingAuthorityEpoch
     || snapshot.relevant_rows_hash !== application.applicationRelevantRowsHash) {

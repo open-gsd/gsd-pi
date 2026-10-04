@@ -133,8 +133,22 @@ export interface LegacyImportBaseRow {
   value: Readonly<Record<string, LegacyImportValue>>;
 }
 
+/**
+ * The schema version of a base snapshot. Version 1 has no `knowledge_memories`
+ * rows. Evidence that an earlier build retained holds hashes of version 1 rows.
+ */
+export const LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION = 2 as const;
+
+export type LegacyImportBaseSnapshotSchemaVersion = 1 | typeof LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION;
+
+export function isLegacyImportBaseSnapshotSchemaVersion(
+  value: unknown,
+): value is LegacyImportBaseSnapshotSchemaVersion {
+  return value === 1 || value === LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION;
+}
+
 export interface LegacyImportBaseSnapshot {
-  snapshot_schema_version: 1;
+  snapshot_schema_version: LegacyImportBaseSnapshotSchemaVersion;
   database_schema_version: typeof LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION;
   authority: LegacyImportBaseAuthority;
   rows: readonly LegacyImportBaseRow[];
@@ -321,6 +335,48 @@ function freezeSnapshot(snapshot: LegacyImportBaseSnapshot): LegacyImportBaseSna
   return Object.freeze(snapshot);
 }
 
+/**
+ * The snapshot as an earlier snapshot schema version captured it. Retained
+ * evidence is compared at the version that made it, so a row set that a later
+ * version added does not read as a change.
+ */
+export function legacyImportBaseSnapshotAtVersion(
+  snapshot: LegacyImportBaseSnapshot,
+  version: LegacyImportBaseSnapshotSchemaVersion,
+): LegacyImportBaseSnapshot {
+  if (version >= snapshot.snapshot_schema_version) return snapshot;
+  const rows = snapshot.rows.filter((row) => row.row_set !== "knowledge_memories");
+  return freezeSnapshot({
+    ...snapshot,
+    snapshot_schema_version: version,
+    rows,
+    relevant_rows_hash: hashLegacyImportValue(rows),
+  });
+}
+
+/**
+ * The snapshot at the snapshot schema version whose rows hash is
+ * `retainedHash`, for retained evidence that does not hold its version. When
+ * no version gives that hash, the result is the snapshot unchanged.
+ */
+export function legacyImportBaseSnapshotForRetainedHash(
+  snapshot: LegacyImportBaseSnapshot,
+  retainedHash: string,
+): LegacyImportBaseSnapshot {
+  if (snapshot.relevant_rows_hash === retainedHash) return snapshot;
+  const earlier = legacyImportBaseSnapshotAtVersion(snapshot, 1);
+  return earlier.relevant_rows_hash === retainedHash ? earlier : snapshot;
+}
+
+let captureSchemaVersion: LegacyImportBaseSnapshotSchemaVersion = LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION;
+
+/** Test-only: capture as an earlier build did, to make evidence of that snapshot schema version. */
+export function _setLegacyImportBaseSnapshotSchemaVersionForTest(
+  version: LegacyImportBaseSnapshotSchemaVersion = LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION,
+): void {
+  captureSchemaVersion = version;
+}
+
 export function createLegacyImportBaseSnapshotSource(
   db: DbAdapter,
 ): LegacyImportBaseSnapshotSource {
@@ -352,13 +408,13 @@ export function captureLegacyImportBaseSnapshot(
     }
     const authority = authorityFrom(dependencies.source.readAuthorityRows());
     const rows = captureRows(dependencies.source);
-    return freezeSnapshot({
-      snapshot_schema_version: 1,
+    return legacyImportBaseSnapshotAtVersion(freezeSnapshot({
+      snapshot_schema_version: LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION,
       database_schema_version: LEGACY_IMPORT_BASE_DATABASE_SCHEMA_VERSION,
       authority,
       rows,
       relevant_rows_hash: hashLegacyImportValue(rows),
-    });
+    }), captureSchemaVersion);
   });
 }
 

@@ -24,9 +24,13 @@ import {
   type LegacyImportPreviewArtifact,
 } from "../legacy-import-preview.ts";
 import {
+  _setLegacyImportBaseSnapshotSchemaVersionForTest,
   captureCurrentLegacyImportBaseSnapshot,
+  legacyImportBaseSnapshotAtVersion,
   type LegacyImportBaseSnapshot,
 } from "../legacy-import-preview-base.ts";
+import { inspectLegacyImportApplicationEvidence } from "../legacy-import-application-evidence.ts";
+import { verifyLegacyImportApplicationResult } from "../legacy-import-application-result.ts";
 import {
   _setLegacyImportRestoreAssessmentBoundaryForTest,
   assessLegacyImportRestore,
@@ -78,7 +82,7 @@ function rows(sql: string): Array<Record<string, unknown>> {
   return db().prepare(sql).all();
 }
 
-function prepareCase(apply = true, inProjectGsd = false): PreparedCase {
+function prepareCase(apply = true, inProjectGsd = false, knowledgeRow = false): PreparedCase {
   sequence += 1;
   const workspace = mkdtempSync(join(tmpdir(), "gsd-restore-assessment-"));
   tempDirectories.add(workspace);
@@ -95,6 +99,16 @@ function prepareCase(apply = true, inProjectGsd = false): PreparedCase {
   });
   mkdirSync(backupDirectory);
   assert.equal(openDatabase(databasePath), true);
+  if (knowledgeRow) {
+    db().prepare(`INSERT INTO memories (
+        id, category, content, confidence, created_at, updated_at, scope, tags, structured_fields
+      ) VALUES (
+        'knowledge-k001', 'rule', 'Use tabs', 0.85, '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z', 'project', '[]', :structured_fields
+      )`).run({
+      ":structured_fields": JSON.stringify({ sourceKnowledgeTable: "rules", rule: "Use tabs", sourceKnowledgeId: "K001" }),
+    });
+  }
   const roots = createLegacyImportCorpusSourceRoots(source);
   const previewInput = { roots };
   const base = captureCurrentLegacyImportBaseSnapshot();
@@ -256,6 +270,7 @@ function assertDeepFrozen(value: unknown, seen = new Set<object>()): void {
 }
 
 afterEach(() => {
+  _setLegacyImportBaseSnapshotSchemaVersionForTest();
   _setLegacyImportRestoreAssessmentBoundaryForTest(null);
   closeDatabase();
   for (const directory of tempDirectories) rmSync(directory, { recursive: true, force: true });
@@ -286,6 +301,41 @@ test("uncommitted Application needs only transaction rollback", () => {
   assert.equal(result.reasonCode, "APPLICATION_NOT_COMMITTED");
   assert.equal(result.recommendation.recommendedOptionId, "let-transaction-rollback");
   assert.equal(result.recommendation.question, null);
+});
+
+test("an Application of base snapshot schema 1 is compared without the knowledge rows that schema 2 added", () => {
+  // An earlier build made the Preview, the backup and the Application.
+  _setLegacyImportBaseSnapshotSchemaVersionForTest(1);
+  const prepared = prepareCase(true, false, true);
+  _setLegacyImportBaseSnapshotSchemaVersionForTest();
+  const current = captureCurrentLegacyImportBaseSnapshot();
+  assert.equal(current.snapshot_schema_version, 2);
+  assert.equal(prepared.base.snapshot_schema_version, 1);
+  assert.ok(current.rows.some((entry) => entry.row_set === "knowledge_memories"));
+  const application = inspectLegacyImportApplicationEvidence(
+    String(row("SELECT operation_id FROM workflow_import_applications").operation_id),
+  );
+  assert.notEqual(current.relevant_rows_hash, application.applicationRelevantRowsHash);
+  assert.equal(
+    legacyImportBaseSnapshotAtVersion(current, 1).relevant_rows_hash,
+    application.applicationRelevantRowsHash,
+  );
+
+  // Nothing changed after the Application: restore is offered, not refused.
+  const consentRequired = assessLegacyImportRestore(assessmentInput(prepared));
+  assert.equal(consentRequired.decision, "restore-consent-required");
+  assert.equal(consentRequired.facts.expectedRelevantRowsHash, consentRequired.facts.observedRelevantRowsHash);
+  verifyLegacyImportApplicationResult(application);
+  assert.equal(
+    inspectProjectAuthorityCutoverEvidence().applicationOperationId,
+    application.operationId,
+  );
+
+  // A changed canonical row is still refused.
+  db().prepare("UPDATE milestones SET title = 'Changed outside a Domain Operation'").run();
+  const changed = assessLegacyImportRestore(assessmentInput(prepared));
+  assert.equal(changed.decision, "refused");
+  assert.equal(changed.reasonCode, "APPLICATION_STATE_CHANGED");
 });
 
 test("exact head recommends restore, requires bound Consent, and remains read-only", () => {
