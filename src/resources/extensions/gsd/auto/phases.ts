@@ -119,19 +119,13 @@ export async function runGuards(
   // Budget ceiling guard
   const budgetCeiling = prefs?.budget_ceiling;
   if (budgetCeiling !== undefined && budgetCeiling > 0) {
-    const currentLedger = deps.getLedger() as { units: unknown } | null;
-    // In parallel worker mode, only count cost from the current auto-mode session
-    // to avoid hitting the ceiling due to historical project-wide spend (#2184).
-    let costUnits = currentLedger?.units;
-    if (process.env.GSD_PARALLEL_WORKER && s.autoStartTime && Array.isArray(costUnits)) {
-      const sessionStartISO = new Date(s.autoStartTime).toISOString();
-      costUnits = costUnits.filter(
-        (u: { startedAt?: string }) => u.startedAt != null && u.startedAt >= sessionStartISO,
-      );
-    }
-    const totalCost = costUnits
-      ? deps.getProjectTotals(costUnits).cost
-      : 0;
+    // The spend is the sum of the unit_metrics rows of the database, not the
+    // metrics.json ledger. In parallel worker mode, only count cost from the
+    // current auto-mode session to avoid hitting the ceiling due to historical
+    // project-wide spend (#2184).
+    const totalCost = deps.getBudgetSpend(
+      process.env.GSD_PARALLEL_WORKER && s.autoStartTime ? s.autoStartTime : undefined,
+    );
     const budgetPct = totalCost / budgetCeiling;
     const budgetAlertLevel = deps.getBudgetAlertLevel(budgetPct);
     const newBudgetAlertLevel = deps.getNewBudgetAlertLevel(

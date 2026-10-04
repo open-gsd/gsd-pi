@@ -35,6 +35,10 @@ import {
   createCustomWorkflowSchema,
   hasCustomWorkflowSchema,
 } from "./db-custom-workflow-schema.js";
+import {
+  createUnitMetricsSchema,
+  hasUnitMetricsSchema,
+} from "./db-unit-metrics-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -87,6 +91,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "custom-workflow-runs",
     isPresent: hasCustomWorkflowSchema,
     create: createCustomWorkflowSchema,
+  },
+  {
+    id: "unit-metrics",
+    isPresent: hasUnitMetricsSchema,
+    create: createUnitMetricsSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

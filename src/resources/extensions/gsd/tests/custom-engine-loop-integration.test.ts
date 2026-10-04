@@ -241,7 +241,7 @@ function makeMockDeps(overrides?: Partial<LoopDeps>): LoopDeps & { callLog: stri
       message: "restored",
     }),
     getLedger: () => null,
-    getProjectTotals: () => ({ cost: 0 }),
+    getBudgetSpend: () => 0,
     formatCost: (c: number) => `$${c.toFixed(2)}`,
     getBudgetAlertLevel: () => 0,
     getNewBudgetAlertLevel: () => 0,
@@ -394,8 +394,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       loadEffectiveGSDPreferences: () => ({
         preferences: { budget_ceiling: 5, budget_enforcement: "pause" },
       } as any),
-      getLedger: () => ({ units: [{}] } as any),
-      getProjectTotals: () => ({ cost: 10 } as any),
+      getBudgetSpend: () => 10,
       getNewBudgetAlertLevel: () => 100,
       getBudgetAlertLevel: () => 100,
       getBudgetEnforcementAction: () => "pause",

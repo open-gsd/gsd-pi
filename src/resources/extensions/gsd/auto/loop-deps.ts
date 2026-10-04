@@ -226,7 +226,8 @@ export interface LoopDeps {
 
   // Budget/context/secrets
   getLedger: () => unknown;
-  getProjectTotals: (units: unknown) => { cost: number };
+  /** Total unit cost in USD from the database. With `sinceMs`, only units started at or after it. */
+  getBudgetSpend: (sinceMs?: number) => number;
   formatCost: (cost: number) => string;
   getBudgetAlertLevel: (pct: number) => number;
   getNewBudgetAlertLevel: (lastLevel: number, pct: number) => number;

@@ -13,7 +13,7 @@ import { fallbackCandidate, fallbackEntryThinking, fallbackModelId, type GSDMode
 import type { ComplexityTier } from "./complexity-classifier.js";
 import { classifyUnitComplexity, extractTaskMetadata, tierLabel } from "./complexity-classifier.js";
 import { resolveModelForComplexity, escalateTier, getEligibleModels, loadCapabilityOverrides, adjustToolSet, filterToolsForProvider } from "./model-router.js";
-import { getLedger, getProjectTotals } from "./metrics.js";
+import { readUnitSpend } from "./db/unit-metrics.js";
 import { unitPhaseLabel } from "./auto-dashboard.js";
 import { getSessionModelOverride } from "./session-model-override.js";
 import { logWarning } from "./workflow-logger.js";
@@ -773,9 +773,7 @@ export async function selectAndApplyModel(
       if (routingConfig.budget_pressure !== false) {
         const budgetCeiling = prefs?.budget_ceiling;
         if (budgetCeiling !== undefined && budgetCeiling > 0) {
-          const currentLedger = getLedger();
-          const totalCost = currentLedger ? getProjectTotals(currentLedger.units).cost : 0;
-          budgetPct = totalCost / budgetCeiling;
+          budgetPct = readUnitSpend() / budgetCeiling;
         }
       }
 

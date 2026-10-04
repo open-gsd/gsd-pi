@@ -161,6 +161,7 @@ import {
   formatCost,
   formatTokenCount,
 } from "./metrics.js";
+import { readUnitSpend } from "./db/unit-metrics.js";
 import { setLogBasePath, logWarning, logError } from "./workflow-logger.js";
 import { preflightCleanRoot, postflightPopStash } from "./clean-root-preflight.js";
 import { isAbsolute, join } from "node:path";
@@ -2604,7 +2605,7 @@ function buildLoopDeps(pi: ExtensionAPI, ctx: ExtensionContext): LoopDeps {
 
     // Budget/context/secrets
     getLedger,
-    getProjectTotals,
+    getBudgetSpend: readUnitSpend,
     formatCost,
     getBudgetAlertLevel,
     getNewBudgetAlertLevel,

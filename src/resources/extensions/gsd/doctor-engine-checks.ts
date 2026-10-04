@@ -40,6 +40,8 @@ import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-wo
 import { importFileOverrides, unimportedFileOverrides, type FileOverride } from "./overrides.js";
 import { importFileCaptures, unimportedFileCaptures } from "./captures.js";
 import { importFileBacklogItems, unimportedFileBacklogItems } from "./backlog.js";
+import { formatCost, unimportedLedgerUnits } from "./metrics.js";
+import { recordUnitMetricsRows } from "./db/unit-metrics.js";
 import { convertResolvedLegacyEscalation, readConvertibleLegacyEscalation } from "./escalation.js";
 import { isUnplannedMilestone, milestoneRenderArtifactPaths } from "./markdown-renderer.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
@@ -1349,6 +1351,18 @@ export async function checkEngineHealth(
       rows: backlogItems.map((item) => ({ id: item.id, label: `item ${item.id} ("${item.title}")` })),
       unread: "is not listed and cannot be promoted",
       importRows: () => importFileBacklogItems(basePath, backlogItems),
+    });
+    const ledgerUnits = unimportedLedgerUnits(basePath);
+    const ledgerCost = ledgerUnits.reduce((sum, unit) => sum + unit.cost, 0);
+    checkUnimportedFileRows(issues, fixesApplied, importFileRows, {
+      file: "metrics.json",
+      code: "metrics_ledger_units_unimported",
+      rows: ledgerUnits.length === 0 ? [] : [{
+        id: `${ledgerUnits.length} unit run(s)`,
+        label: `ledger of ${ledgerUnits.length} unit run(s) (${formatCost(ledgerCost)})`,
+      }],
+      unread: "is not counted by the budget ceiling",
+      importRows: () => recordUnitMetricsRows(ledgerUnits),
     });
     checkUnappliedLegacyEscalations(basePath, issues, fixesApplied, options?.repair === true);
   }

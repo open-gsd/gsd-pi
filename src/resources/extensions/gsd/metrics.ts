@@ -26,6 +26,8 @@ import { isUnifiedAuditEnabled } from "./uok/audit-toggle.js";
 import type { MilestoneScope } from "./workspace.js";
 import { logWarning } from "./workflow-logger.js";
 import { atomicWriteSync } from "./atomic-write.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { listUnitMetrics, recordUnitMetricsRows } from "./db/unit-metrics.js";
 
 // Re-export from shared — import directly from format-utils to avoid pulling
 // in the full barrel (mod.js → ui.js → @gsd/pi-tui) which breaks when loaded
@@ -264,6 +266,7 @@ export function snapshotUnitMetrics(
   } else {
     ledger.units.push(unit);
   }
+  recordUnitInDatabase(unit);
   saveLedger(basePath, ledger);
 
   if (isUnifiedAuditEnabled(basePath)) {
@@ -457,6 +460,7 @@ export function snapshotUnitMetricsByScope(
   } else {
     scopedLedger.units.push(unit);
   }
+  recordUnitInDatabase(unit);
   saveLedger(base, scopedLedger);
 
   if (isUnifiedAuditEnabled(base)) {
@@ -481,6 +485,34 @@ export function snapshotUnitMetricsByScope(
   }
 
   return unit;
+}
+
+// ─── Database rows ────────────────────────────────────────────────────────────
+
+/**
+ * Store the unit in the unit_metrics table, where the budget ceiling reads
+ * the spend. metrics.json stays the telemetry file of the dashboards.
+ */
+function recordUnitInDatabase(unit: UnitMetrics): void {
+  if (!isDbAvailable()) return;
+  try {
+    recordUnitMetricsRows([unit]);
+  } catch (err) {
+    logWarning("db", `unit metrics row not stored for ${unit.type} ${unit.id}; the budget ceiling does not count its cost: ${(err as Error).message}`);
+  }
+}
+
+/**
+ * The units of .gsd/metrics.json that the database does not hold (written by
+ * an older release). The budget ceiling does not count them: doctor reports
+ * them and `doctor --fix` imports them.
+ */
+export function unimportedLedgerUnits(base: string): UnitMetrics[] {
+  const units = loadLedgerFromDisk(base)?.units ?? [];
+  if (units.length === 0) return [];
+  const key = (u: UnitMetrics) => `${u.type}\0${u.id}\0${u.startedAt}`;
+  const stored = new Set(listUnitMetrics().map(key));
+  return deduplicateUnits(units).filter((unit) => !stored.has(key(unit)));
 }
 
 // ─── Aggregation helpers ──────────────────────────────────────────────────────

@@ -1740,7 +1740,7 @@ function makeMockDeps(
       message: "restored",
     }),
     getLedger: () => null,
-    getProjectTotals: () => ({ cost: 0 }),
+    getBudgetSpend: () => 0,
     formatCost: (c: number) => `$${c.toFixed(2)}`,
     getBudgetAlertLevel: () => 0,
     getNewBudgetAlertLevel: () => 0,
