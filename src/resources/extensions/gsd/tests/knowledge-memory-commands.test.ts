@@ -4,7 +4,8 @@
 //   1. the memory cap and decay never remove or weaken a Rule; Patterns and
 //      Lessons are subject to both
 //   2. `/gsd memory forget`, `cap` and `import` render KNOWLEDGE.md at once
-//   3. the unit-closeout refresh is enqueued for the Projection Worker
+//   3. the unit-closeout refresh is enqueued for the Projection Worker, also
+//      after the memory extraction of the unit
 //   4. `/gsd memory export` + `import` keeps the knowledge id of a row, adds
 //      nothing on a re-import, and never takes the id of a local row
 
@@ -20,7 +21,7 @@ import { handleMemory } from "../commands-memory.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 import { captureKnowledgeEntry } from "../knowledge-capture.ts";
-import { enqueueKnowledgeRefresh } from "../memory-extractor.ts";
+import { _resetExtractionState, enqueueKnowledgeRefresh, extractMemoriesFromUnit } from "../memory-extractor.ts";
 import { createMemory, decayStaleMemories, enforceMemoryCap } from "../memory-store.ts";
 import { drainProjectionWork } from "../projection-worker.ts";
 import { _resetLogs, peekLogs } from "../workflow-logger.ts";
@@ -142,6 +143,25 @@ test("the closeout refresh goes through the Projection Worker, not a direct writ
   await drainProjectionWork(base);
   assert.doesNotMatch(knowledgeMd(base), /Pattern stays/, "the worker renders the capped Pattern out of the file");
   assert.match(knowledgeMd(base), /\| K001 \| project \| Rule stays \|/);
+});
+
+test("memory extraction at unit closeout changes the KNOWLEDGE.md row through the Projection Worker", async (t) => {
+  const base = makeBase(t);
+  _resetExtractionState();
+  t.after(() => _resetExtractionState());
+  const pattern = captureKnowledgeEntry(base, "pattern", "Retry with backoff", "project");
+  await drainProjectionWork(base);
+  const activityFile = join(base, "activity.jsonl");
+  writeFileSync(activityFile, `${JSON.stringify({ role: "assistant", content: "The retry needs jitter. ".repeat(60) })}\n`, "utf-8");
+  // The extraction model answers with an UPDATE of the captured Pattern.
+  const llm = async () => JSON.stringify([{ action: "UPDATE", id: pattern.memoryId, content: "Retry with jitter" }]);
+
+  await extractMemoriesFromUnit(activityFile, "execute-task", "M001/S01/T01", llm);
+
+  assert.match(knowledgeMd(base), /\| P001 \| Retry with backoff \|/, "the closeout does not write the file itself");
+  await drainProjectionWork(base);
+  assert.match(knowledgeMd(base), /\| P001 \| Retry with jitter \|/, "the worker renders the extracted change");
+  assert.doesNotMatch(knowledgeMd(base), /Retry with backoff/);
 });
 
 test("a failed closeout enqueue logs that the memories are committed and the render is not enqueued", (t) => {
