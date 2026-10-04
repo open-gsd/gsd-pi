@@ -4,7 +4,7 @@ import { basename, dirname, join } from "node:path";
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import { removeLockDirectory } from "./session-lock.js";
 import { cleanNumberedGsdVariants } from "./repo-identity.js";
-import { milestonesDir, gsdRoot, milestoneDirExists } from "./paths.js";
+import { milestonesDir, gsdRoot } from "./paths.js";
 import { deriveState, invalidateStateCache, isGhostMilestone, isReusableGhostMilestone } from "./state.js";
 import { renderStateContent, renderStateProjection } from "./workflow-projections.js";
 import { saveFile } from "./files.js";
@@ -848,30 +848,21 @@ export async function checkRuntimeHealth(
     // Non-fatal — orphan milestone directory check failed
   }
 
-  // ── Orphan milestone DB rows (DB present, filesystem missing) ─────────
-  // A milestone row without a corresponding milestone directory can keep
-  // stale milestones "active" and trigger unwanted continuation behavior.
+  // ── Phantom milestone DB rows ─────────────────────────────────────────
+  // A queued row with no saved CONTEXT or CONTEXT-DRAFT row and no Slice rows
+  // is a reservation from gsd_milestone_generate_id that was never planned
+  // (#1524). The rows decide. A missing milestone directory is not evidence:
+  // the directory is a projection and the rebuild renders it again.
   try {
     if (isDbAvailable()) {
       for (const milestone of getAllMilestones()) {
-        // Every milestone status, including `queued`, is subject to the
-        // missing-directory orphan check below. This is a directory-PRESENCE
-        // check (milestoneDirExists), not a content-bearing one: the workflow
-        // prompts create the milestone directory early (often before any
-        // CONTEXT/ROADMAP is written), so a legitimate in-flight queued
-        // milestone with only a scaffold directory (e.g. an empty slices/)
-        // must not be flagged. resolveMilestonePath alone would return null for
-        // such a legacy scaffold dir and produce a false positive during normal
-        // planning. A `queued` phantom left by gsd_milestone_generate_id (no
-        // directory at all) is correctly reported as an orphan to clean up
-        // (#1524).
-        if (!milestoneDirExists(basePath, milestone.id)) {
+        if (isGhostMilestone(basePath, milestone.id)) {
           issues.push({
             severity: "warning",
             code: "orphan_milestone_db",
             scope: "milestone",
             unitId: milestone.id,
-            message: `Orphan milestone DB row: ${milestone.id} — DB row exists but milestone directory is missing from disk. This can cause stale milestone continuation.`,
+            message: `Orphan milestone DB row: ${milestone.id} — the row is queued and has no saved context and no slices. It was reserved and never planned. This can cause stale milestone continuation.`,
             file: `.gsd/gsd.db`,
             fixable: false,
           });
