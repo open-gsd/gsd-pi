@@ -261,26 +261,32 @@ Cancel the active session for a project directory when `sessionId` is unavailabl
 
 ### `gsd_query`
 
-Query GSD project state from the filesystem without an active session. Returns STATE.md, PROJECT.md, requirements, and milestone listing.
+Query GSD project state without an active session. Returns the state, project and requirements documents and the milestone listing.
+
+When the GSD runtime is available, the tool reads the workflow database: the documents are built from database rows and each milestone has its `title` and `status`. When the project has no openable database, the tool reads the `.gsd/` files and `readMetadata` says so. `gsd_roadmap` and `gsd_doctor` follow the same rule and also return `readMetadata`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `projectDir` | `string` | ✅ | Absolute path to the project directory |
-| `query` | `string` | ✅ | What to query (e.g. `"status"`, `"milestones"`) |
+| `query` | `string` | | Narrow the response: `"state"`/`"status"`, `"project"`, `"requirements"`, `"milestones"` or `"all"` (default) |
 
 **Returns:**
 
 ```json
 {
   "projectDir": "/path/to/project",
+  "query": "all",
   "state": "...",
   "project": "...",
   "requirements": "...",
   "milestones": [
-    { "id": "M001", "hasRoadmap": true, "hasSummary": false }
-  ]
+    { "id": "M001", "title": "Foundation", "status": "active", "hasRoadmap": true, "hasSummary": false }
+  ],
+  "readMetadata": { "source": "database", "authority": "db-authoritative" }
 }
 ```
+
+The projection fallback returns `readMetadata: { "source": "projection", "authority": "projection-fallback" }` and milestones without `title` and `status`.
 
 ### `gsd_resolve_blocker`
 
