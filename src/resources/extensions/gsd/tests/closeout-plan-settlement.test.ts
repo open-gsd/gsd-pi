@@ -37,10 +37,15 @@ import {
   readDomainOperationFence,
 } from "../gsd-db.ts";
 import {
+  MergeConflictError,
+  milestoneMetaPath,
+  readIntegrationBranch,
+  writeIntegrationBranch,
+} from "../git-service.ts";
+import {
   completeMilestone,
   reopenMilestone,
 } from "../milestone-lifecycle-domain-operation.ts";
-import { MergeConflictError } from "../git-service.ts";
 import { _clearGsdRootCache, clearPathCache } from "../paths.ts";
 import { publishMilestone } from "../publication.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
@@ -492,4 +497,18 @@ test("a failed push leaves the push effect without a receipt and the next closeo
   assert.equal(retried.pushed, true);
   assert.equal(git(["rev-parse", "main"], remote), git(["rev-parse", "main"], repo));
   assert.equal(pushEffect().receipt?.externalRef, "origin/main");
+});
+
+test("deleting META.json does not change the branch the Milestone merges to", async () => {
+  const { repo } = await milestoneInWorktree();
+  git(["checkout", "-b", "release"], repo);
+  writeIntegrationBranch(repo, "M001", "release");
+  assert.equal(existsSync(milestoneMetaPath(repo, "M001")), true);
+
+  rmSync(milestoneMetaPath(repo, "M001"));
+
+  assert.equal(readIntegrationBranch(repo, "M001"), "release");
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+  assert.equal(git(["show", "release:feature.txt"], repo), "milestone work");
+  assert.equal(git(["show", "main:feature.txt"], repo), "base");
 });

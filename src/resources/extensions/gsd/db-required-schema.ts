@@ -18,6 +18,10 @@ import {
   createUnitDispatchSidecarSchema,
   hasUnitDispatchSidecarSchema,
 } from "./db-unit-dispatch-sidecar-schema.js";
+import {
+  createIntegrationBranchSchema,
+  hasIntegrationBranchSchema,
+} from "./db-integration-branch-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -45,6 +49,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "unit-dispatch-sidecars",
     isPresent: hasUnitDispatchSidecarSchema,
     create: createUnitDispatchSidecarSchema,
+  },
+  {
+    id: "integration-branch",
+    isPresent: hasIntegrationBranchSchema,
+    create: createIntegrationBranchSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

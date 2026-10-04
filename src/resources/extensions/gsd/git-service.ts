@@ -15,6 +15,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 
 import type { Dirent } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { gsdRoot } from "./paths.js";
+import {
+  getRecordedIntegrationBranch,
+  recordIntegrationBranch,
+} from "./db/milestone-integration-branch.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { logWarning } from "./workflow-logger.js";
@@ -407,11 +411,26 @@ function legacyMilestoneMetaPath(basePath: string, milestoneId: string): string 
   return join(gsdRoot(basePath), "milestones", milestoneId, `${milestoneId}-META.json`);
 }
 
+function validIntegrationBranch(branch: unknown): string | null {
+  return typeof branch === "string" && branch.trim() !== "" && VALID_BRANCH_NAME.test(branch)
+    ? branch
+    : null;
+}
+
 /**
  * Read the integration branch recorded for a milestone.
- * Returns null if no metadata file exists or the branch isn't set.
+ *
+ * The database row is the authority; the META.json file is a rendered copy
+ * and is not read when the row exists. The file is read only for a milestone
+ * recorded before the row existed, or when no database is open.
  */
 export function readIntegrationBranch(basePath: string, milestoneId: string): string | null {
+  const recorded = getRecordedIntegrationBranch(milestoneId);
+  if (recorded) return validIntegrationBranch(recorded);
+  return readIntegrationBranchFile(basePath, milestoneId);
+}
+
+function readIntegrationBranchFile(basePath: string, milestoneId: string): string | null {
   try {
     let metaFile = milestoneMetaPath(basePath, milestoneId);
     if (!existsSync(metaFile)) {
@@ -420,11 +439,7 @@ export function readIntegrationBranch(basePath: string, milestoneId: string): st
       metaFile = legacy;
     }
     const data = JSON.parse(readFileSync(metaFile, "utf-8"));
-    const branch = data?.integrationBranch;
-    if (typeof branch === "string" && branch.trim() !== "" && VALID_BRANCH_NAME.test(branch)) {
-      return branch;
-    }
-    return null;
+    return validIntegrationBranch(data?.integrationBranch);
   } catch {
     return null;
   }
@@ -441,7 +456,8 @@ export { QUICK_BRANCH_RE, WORKFLOW_BRANCH_RE } from "./branch-patterns.js";
  * branch. Idempotent when the branch matches; updates the record when the
  * user starts from a different branch.
  *
- * The file is committed immediately so the metadata is persisted in git.
+ * The record is a database row. The META.json file is rendered from the same
+ * value for readers that have no database.
  */
 export function writeIntegrationBranch(
   basePath: string,
@@ -463,11 +479,14 @@ export function writeIntegrationBranch(
   if (WORKFLOW_BRANCH_RE.test(branch)) return;
   // Validate
   if (!VALID_BRANCH_NAME.test(branch)) return;
-  // Skip if already recorded with the same branch (idempotent across restarts).
-  // If recorded with a different branch, update it — the user started auto-mode
-  // from a new branch and expects slices to merge back there (#300).
-  const existingBranch = readIntegrationBranch(basePath, milestoneId);
-  if (existingBranch === branch) return;
+  // Record the branch in the database: that row is what the merge reads. If a
+  // different branch is recorded, update it — the user started auto-mode from
+  // a new branch and expects slices to merge back there (#300).
+  if (getRecordedIntegrationBranch(milestoneId) !== branch) {
+    recordIntegrationBranch(milestoneId, branch);
+  }
+  // Render the file copy. Skip when it already matches (idempotent across restarts).
+  if (readIntegrationBranchFile(basePath, milestoneId) === branch) return;
 
   const metaFile = milestoneMetaPath(basePath, milestoneId);
   // Ensure the flat .gsd/ root exists (never milestones/<MID>/ — that would
