@@ -6,8 +6,8 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import test from "node:test"
 
-import { appendCapture, loadAllCaptures } from "../resources/extensions/gsd/captures.ts"
-import { closeDatabase, openDatabase } from "../resources/extensions/gsd/gsd-db.ts"
+import { appendCapture, loadActionableCaptures, loadAllCaptures } from "../resources/extensions/gsd/captures.ts"
+import { closeDatabase, insertMilestone, openDatabase } from "../resources/extensions/gsd/gsd-db.ts"
 import { collectCapturesData, resolveCaptureAction } from "../web/captures-service.ts"
 
 function useRepoAsPackageRoot(t: { after: (fn: () => void) => void }): void {
@@ -68,6 +68,32 @@ test("collectCapturesData returns database rows when CAPTURES.md is edited, and 
     loadAllCaptures(base).map((entry) => [entry.id, entry.status, entry.classification, entry.resolution]),
     [[id, "resolved", "quick-task", "fix inline"]],
   )
+})
+
+test("resolveCaptureAction records the active milestone, so a later milestone does not run the capture", async (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-web-captures-stamp-")))
+  t.after(() => {
+    closeDatabase()
+    rmSync(base, { recursive: true, force: true })
+  })
+  useRepoAsPackageRoot(t)
+  mkdirSync(join(base, ".gsd"), { recursive: true })
+
+  openDatabase(join(base, ".gsd", "gsd.db"))
+  insertMilestone({ id: "M001", title: "First", status: "active" })
+  insertMilestone({ id: "M002", title: "Second", status: "queued" })
+  const id = appendCapture(base, "Fix the dialog width")
+  closeDatabase()
+
+  await resolveCaptureAction(
+    { captureId: id, classification: "quick-task", resolution: "fix inline", rationale: "small" },
+    base,
+  )
+
+  openDatabase(join(base, ".gsd", "gsd.db"))
+  assert.equal(loadAllCaptures(base).find((entry) => entry.id === id)?.resolvedInMilestone, "M001")
+  assert.deepEqual(loadActionableCaptures(base, "M001").map((entry) => entry.id), [id])
+  assert.deepEqual(loadActionableCaptures(base, "M002"), [])
 })
 
 test("collectCapturesData fails when the project database is missing, even with a CAPTURES.md", async (t) => {

@@ -14,6 +14,7 @@ import type { ExecutionInvocation } from "./execution-invocation.js";
 import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
 import { gsdRoot } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
+import { readActiveMilestoneId } from "./state.js";
 import { projectRootFromWorktreePath } from "./worktree-root.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -76,7 +77,7 @@ function runCaptureOperation(
   basePath: string,
   operationType: string,
   payload: DomainJsonValue,
-  events: CaptureEvent[],
+  buildEvents: () => CaptureEvent[],
   invocation?: ExecutionInvocation,
 ): void {
   if (!isDbAvailable()) throw new Error(`${operationType} requires the GSD database`);
@@ -93,7 +94,7 @@ function runCaptureOperation(
     ...(invocation?.turnId ? { turnId: invocation.turnId } : {}),
     payload,
   }, () => ({
-    events: events.map((event) => ({ ...event, entityType: "capture", destinations: ["projection"] })),
+    events: buildEvents().map((event) => ({ ...event, entityType: "capture", destinations: ["projection"] })),
     projections: [{ projectionKey: "captures", projectionKind: "markdown", rendererVersion: "1" }],
   }));
   try {
@@ -107,7 +108,7 @@ function runCaptureOperation(
 /** `/gsd capture`: record one pending capture in a capture.register Domain Operation. Returns its id. */
 export function appendCapture(basePath: string, text: string): string {
   const id = `CAP-${randomUUID().slice(0, 8)}`;
-  runCaptureOperation(basePath, "capture.register", { captureId: id, text }, [
+  runCaptureOperation(basePath, "capture.register", { captureId: id, text }, () => [
     { eventType: "capture.registered", entityId: id, payload: { text } },
   ]);
   return id;
@@ -119,7 +120,11 @@ function requireCapture(captureId: string): void {
   }
 }
 
-/** Classify one capture in a capture.resolve Domain Operation. An unknown id fails loud. */
+/**
+ * Classify one capture in a capture.resolve Domain Operation. An unknown id
+ * fails loud. With no `milestoneId`, the operation records the active
+ * Milestone that the database holds in the same transaction.
+ */
 export function markCaptureResolved(
   basePath: string,
   captureId: string,
@@ -131,9 +136,14 @@ export function markCaptureResolved(
 ): void {
   requireCapture(captureId);
   const payload = { captureId, classification, resolution, rationale, ...(milestoneId ? { milestoneId } : {}) };
-  runCaptureOperation(basePath, "capture.resolve", payload, [
-    { eventType: "capture.resolved", entityId: captureId, payload },
-  ], invocation);
+  runCaptureOperation(basePath, "capture.resolve", payload, () => {
+    const resolvedIn = milestoneId ?? readActiveMilestoneId();
+    return [{
+      eventType: "capture.resolved",
+      entityId: captureId,
+      payload: { ...payload, ...(resolvedIn ? { milestoneId: resolvedIn } : {}) },
+    }];
+  }, invocation);
 }
 
 /** Record that a capture's resolution was carried out, in a capture.execute Domain Operation. An unknown id fails loud. */
@@ -145,7 +155,7 @@ export function markCaptureExecuted(
 ): void {
   requireCapture(captureId);
   const payload = { captureId, ...detail };
-  runCaptureOperation(basePath, "capture.execute", payload, [
+  runCaptureOperation(basePath, "capture.execute", payload, () => [
     { eventType: "capture.executed", entityId: captureId, payload },
   ], invocation);
 }
@@ -268,7 +278,7 @@ export function unimportedFileCaptures(basePath: string): CaptureEntry[] {
 export function importFileCaptures(basePath: string, captures: readonly CaptureEntry[]): void {
   if (captures.length === 0) return;
   runCaptureOperation(basePath, "capture.import", { captureIds: captures.map((capture) => capture.id) },
-    captures.flatMap((capture) => {
+    () => captures.flatMap((capture) => {
       const events: CaptureEvent[] = [{
         eventType: "capture.registered",
         entityId: capture.id,
