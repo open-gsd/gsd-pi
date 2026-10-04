@@ -98,7 +98,7 @@ derivation. It was not a **Cutover** in the glossary sense.
 The **Cutover** runs by itself (owner decision 2026-10-04,
 `authority-cutover-on-open.ts`). For now it is an opt-in canary (ADR-046
 migration step 6): it runs only with the environment variable
-`GSD_AUTHORITY_CUTOVER=1` (or `true`). Without it, an open changes nothing and
+`GSD_AUTHORITY_CUTOVER=1`. Without it, an open changes nothing and
 no production path advances the Authority Epoch. Some writers can still create
 a hierarchy row with no lifecycle row; the automatic Cutover becomes the
 default after the writer-coverage gate passes: those writers are closed and a
@@ -122,7 +122,8 @@ the second replaces the database that it opens. After the Cutover,
 The automatic run does not change a legacy status. The backfill adopts a
 legacy completion as completed only with completion evidence (see
 `lifecycle-backfill-domain-operation.ts`); without evidence it makes the row
-open work again, and it cancels open work under a completed parent. When the
+open work again, and it cancels open work under a completed or cancelled
+parent. When the
 preview has such a row, the automatic run stops with nothing changed: the open
 logs the rows as an error and doctor reports `lifecycle_missing_shadow`. The
 route is the preview of `/gsd db adopt`, then `/gsd db adopt --apply`; the next

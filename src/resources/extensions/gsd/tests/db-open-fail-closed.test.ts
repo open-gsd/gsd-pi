@@ -84,8 +84,9 @@ function makeRestoreFixture(withSlices = false): { base: string; dbPath: string;
     if (withSlices) insertSlice({ id: "S01", milestoneId, title: `${milestoneId} slice`, status: "pending", risk: "low", depends: [] });
   };
   assert.equal(openWorkflowDatabase(base).ok, true);
-  // With GSD_AUTHORITY_CUTOVER=1 the first open of the existing database cuts
-  // the project over, so the backup and the live DB share one Authority Epoch.
+  // The second open matters only when GSD_AUTHORITY_CUTOVER=1 is set: it then
+  // cuts the project over, so the backup and the live DB share one Authority
+  // Epoch. With the flag unset it changes nothing.
   closeDatabase();
   assert.equal(openWorkflowDatabase(base).ok, true);
   const db = _getAdapter()!;

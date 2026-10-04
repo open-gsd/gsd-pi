@@ -201,8 +201,8 @@ test("without GSD_AUTHORITY_CUTOVER the open of an old project database changes 
   assert.deepEqual(before.authority, [{ revision: 0, authority_epoch: 0 }]);
   assert.deepEqual(before.lifecycles, []);
 
-  // Unset is the default. Any value other than 1 or true is also off.
-  for (const value of [undefined, "0"]) {
+  // Unset is the default. Any value other than 1 is also off.
+  for (const value of [undefined, "0", "true"]) {
     setAuthorityCutoverFlag(value);
     closeDatabase();
     assert.equal(openWorkflowDatabase(base).ok, true);
@@ -213,7 +213,7 @@ test("without GSD_AUTHORITY_CUTOVER the open of an old project database changes 
   }
 
   // The same database is cut over by the next open once the flag is on.
-  setAuthorityCutoverFlag("true");
+  setAuthorityCutoverFlag("1");
   closeDatabase();
   assert.equal(openWorkflowDatabase(base).ok, true);
   assert.deepEqual(rows("SELECT revision, authority_epoch FROM project_authority"), [{ revision: 2, authority_epoch: 1 }]);
@@ -320,6 +320,36 @@ test("open work under a completed parent stops the cutover and is not cancelled"
   assert.deepEqual(durableSnapshot(), before);
   assert.deepEqual(backupFiles(base), []);
   assert.match(logged("error").join("\n"), /slice M001\/S01: "pending" -> "skipped" \(cancelled-under-completed-parent\)/);
+});
+
+test("open work under a cancelled parent stops the cutover and is not cancelled", () => {
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "Old", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "skipped" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending" });
+  const before = durableSnapshot();
+  closeDatabase();
+
+  assert.equal(openWorkflowDatabase(base).ok, true, "the open itself still succeeds");
+
+  assert.deepEqual(durableSnapshot(), before);
+  assert.equal(getTask("M001", "S01", "T01")?.status, "pending");
+  assert.deepEqual(before.authority, [{ revision: 0, authority_epoch: 0 }]);
+  assert.deepEqual(before.lifecycles, []);
+  assert.deepEqual(backupFiles(base), []);
+  const errors = logged("error");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /Authority cutover stopped: the lifecycle backfill would change the status of 1 row\(s\)/);
+  assert.match(errors[0]!, /Nothing was changed/);
+  assert.match(errors[0]!, /\/gsd db adopt --apply/);
+  assert.match(errors[0]!, /task M001\/S01\/T01: "pending" -> "skipped" \(cancelled-with-parent\)/);
+
+  // The explicit backfill is the route; the next open cuts over.
+  applyLifecycleBackfill(base);
+  assert.equal(getTask("M001", "S01", "T01")?.status, "skipped");
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  assert.deepEqual(rows("SELECT revision, authority_epoch FROM project_authority"), [{ revision: 2, authority_epoch: 1 }]);
 });
 
 test("active coordination defers the backfill and the cutover to a later open", () => {

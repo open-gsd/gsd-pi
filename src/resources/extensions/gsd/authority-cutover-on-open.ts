@@ -44,9 +44,8 @@ function backfillAndCutOver(basePath: string): void {
     );
     return;
   }
-  // The automatic run never reopens completed work and never cancels open work.
-  const statusChanges = preview.items.filter((item) =>
-    item.rule === "legacy-complete-unproven" || item.rule === "cancelled-under-completed-parent");
+  // The automatic run never changes a legacy status.
+  const statusChanges = preview.items.filter((item) => item.projectedLegacyStatus !== null);
   if (statusChanges.length > 0) {
     logError(
       "db",
@@ -105,13 +104,14 @@ function authorityEpochAdvanced(): boolean {
  * is the standing Consent for the one-way cutover.
  *
  * For now this is an opt-in canary (ADR-046 migration step 6): it runs only
- * with GSD_AUTHORITY_CUTOVER=1 (or true).
+ * with GSD_AUTHORITY_CUTOVER=1.
  *
  * The run stops before the backup, with nothing changed, the rows logged as
  * an error and a doctor issue, when a row has a legacy status with no
- * lifecycle mapping, or when the backfill would reopen a legacy completion
- * that has no evidence or cancel open work under a completed parent. Those
- * status changes need the preview of `/gsd db adopt`.
+ * lifecycle mapping, or when the backfill would change a legacy status: reopen
+ * a legacy completion that has no evidence, or cancel open work under a
+ * completed or cancelled parent. Those status changes need the preview of
+ * `/gsd db adopt`.
  *
  * Active coordination and an open Import Application Restore Window defer
  * the run to a later open. A file lock beside the database lets one process
@@ -123,8 +123,7 @@ export function cutOverProjectAuthorityOnOpen(basePath: string): void {
   // Off by default: some writers can still create a hierarchy row without a
   // lifecycle row. The default becomes on after those writers are closed and
   // a database trigger refuses such a row after the cutover.
-  const flag = process.env.GSD_AUTHORITY_CUTOVER;
-  if (flag !== "1" && flag !== "true") return;
+  if (process.env.GSD_AUTHORITY_CUTOVER !== "1") return;
   try {
     if (readDomainOperationFence().authorityEpoch > 0) return;
     const databasePath = getDbPath();
