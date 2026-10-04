@@ -9,18 +9,21 @@
 //   (c) invocation with a corrupt backup fails verification and restores
 //       nothing.
 //   (d) list-style invocations show candidates and mutate nothing.
+//   (e) a backup taken before the Authority Epoch cutover is refused with
+//       valid consent and the refusal names Forward Repair.
+//   (f) a restore does not cut over the database that it replaces.
 
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { handleDbRestoreBackup } from "../commands-maintenance.ts";
-import { closeDatabase, _getAdapter } from "../gsd-db.ts";
+import { closeDatabase, openDatabase, _getAdapter } from "../gsd-db.ts";
 import { openWorkflowDatabase, resolveProjectRootDbPath } from "../db-workspace.ts";
 import { recordSchemaVersion } from "../db-schema-metadata.ts";
 import { SCHEMA_VERSION } from "../db/engine.ts";
@@ -53,20 +56,33 @@ interface RestoreFixture {
   backupSha: string;
 }
 
+function authorityEpochOf(dbPath: string): number {
+  return readOnly(dbPath, (db) =>
+    Number(db.prepare("SELECT authority_epoch FROM project_authority").get()?.["authority_epoch"]));
+}
+
 /**
  * Build a project DB holding sentinel row M999, rewind it to a v45 stamp, and
  * re-open so the real v45→v46 migration produces a verified gsd.db.backup-v45.
- * Then simulate the v46 cutover: M999 is erased and post-cutover row M100 is
- * accepted. The backup still holds M999; the live DB holds M100.
+ * - "cut-over-first": the project is cut over before the backup, so the backup
+ *   and the live DB are both at Authority Epoch 1.
+ * - "backup-first": the backup is taken at epoch 0 and that same open cuts the
+ *   project over.
+ * - "never-cut-over": the migrating open is an engine open, which does not cut
+ *   over, so the backup and the live DB are both at epoch 0.
  */
-function makeFixture(): RestoreFixture {
+function makeMigrationBackup(mode: "cut-over-first" | "backup-first" | "never-cut-over"): RestoreFixture {
   const base = mkdtempSync(join(tmpdir(), "gsd-backup-restore-"));
   tempDirs.add(base);
   mkdirSync(join(base, ".gsd"), { recursive: true });
   const dbPath = resolveProjectRootDbPath(base);
 
-  const first = openWorkflowDatabase(base);
-  assert.equal(first.ok, true);
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  if (mode === "cut-over-first") {
+    // The first open of the existing database cuts the project over.
+    closeDatabase();
+    assert.equal(openWorkflowDatabase(base).ok, true);
+  }
   const db = _getAdapter();
   assert.ok(db);
   db.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
@@ -77,17 +93,30 @@ function makeFixture(): RestoreFixture {
   db.exec("PRAGMA application_id = 0");
   closeDatabase();
 
-  const second = openWorkflowDatabase(base);
-  assert.equal(second.ok, true);
+  assert.equal(mode === "never-cut-over" ? openDatabase(dbPath) : openWorkflowDatabase(base).ok, true);
   const backupPath = `${dbPath}.backup-v45`;
   assert.equal(existsSync(backupPath), true, "migration should leave a verified backup-v45");
+  closeDatabase();
+  assert.equal(authorityEpochOf(backupPath), mode === "cut-over-first" ? 1 : 0);
+  assert.equal(authorityEpochOf(dbPath), mode === "never-cut-over" ? 0 : 1);
+  return { base, dbPath, backupPath, backupSha: sha256File(backupPath) };
+}
+
+/**
+ * A backup and a live DB in the same Authority Epoch. Then simulate later
+ * work: M999 is erased and row M100 is accepted. The backup still holds M999;
+ * the live DB holds M100.
+ */
+function makeFixture(): RestoreFixture {
+  const fixture = makeMigrationBackup("cut-over-first");
+  assert.equal(openWorkflowDatabase(fixture.base).ok, true);
   const live = _getAdapter();
   assert.ok(live);
   live.exec("DELETE FROM milestones");
   live.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
     .run("M100", "post-cutover", "active", "2026-01-02T00:00:00.000Z");
   closeDatabase();
-  return { base, dbPath, backupPath, backupSha: sha256File(backupPath) };
+  return fixture;
 }
 
 function readOnly<T>(dbPath: string, fn: (db: NonNullable<ReturnType<typeof _getAdapter>>) => T): T {
@@ -233,4 +262,48 @@ test("(d) list-style invocations show candidates and mutate nothing", async () =
   assert.equal(maxSchemaVersionOf(fixture.dbPath), SCHEMA_VERSION);
   assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
+});
+
+test("(e) a backup taken before the Authority Epoch cutover is refused with valid consent", async () => {
+  const fixture = makeMigrationBackup("backup-first");
+  const beforeSha = sha256File(fixture.dbPath);
+
+  const { ctx, notes } = makeCtx();
+  await handleDbRestoreBackup(
+    ctx,
+    fixture.base,
+    `--backup ${fixture.backupPath} --consent=proceed:destructive-database-restore:${fixture.backupSha}`,
+  );
+  closeDatabase();
+
+  const refusal = notes.find((note) => note.kind === "error");
+  assert.ok(refusal, `expected a refusal, got ${JSON.stringify(notes)}`);
+  assert.match(refusal.message, /Current Authority Epoch 1 is higher than the backup's epoch 0/);
+  assert.match(refusal.message, /Forward Repair/);
+  assert.ok(!notes.some((note) => note.kind === "success"));
+  assert.equal(sha256File(fixture.dbPath), beforeSha);
+  assert.equal(authorityEpochOf(fixture.dbPath), 1);
+  assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
+});
+
+test("(f) a restore does not cut over the database that it replaces", async () => {
+  const fixture = makeMigrationBackup("never-cut-over");
+
+  const { ctx, notes } = makeCtx();
+  await handleDbRestoreBackup(
+    ctx,
+    fixture.base,
+    `--backup ${fixture.backupPath} --consent=proceed:destructive-database-restore:${fixture.backupSha}`,
+  );
+  closeDatabase();
+
+  assert.ok(notes.some((note) => note.kind === "success"), `expected a success, got ${JSON.stringify(notes)}`);
+  // Only the restored database is cut over, by the open that follows the
+  // restore. A cutover of the replaced database would leave a second
+  // pre-cutover backup.
+  assert.equal(authorityEpochOf(fixture.dbPath), 1);
+  assert.deepEqual(
+    readdirSync(join(fixture.base, ".gsd")).filter((name) => name.includes(`.backup-v${SCHEMA_VERSION}`) && !/-(wal|shm)$/.test(name)),
+    [`gsd.db.backup-v${SCHEMA_VERSION}`],
+  );
 });

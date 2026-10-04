@@ -47,7 +47,7 @@ import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { isCanonicalStagedTaskSummaryProjection } from "./task-summary-projection-classification.js";
 import { isMilestoneLifecycleAdopted, readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
 import { isDeadLocalAutoWorker } from "./db/auto-workers.js";
-import { countUnadoptedHierarchyRows } from "./lifecycle-backfill-domain-operation.js";
+import { countUnadoptedHierarchyRows, previewLifecycleBackfill } from "./lifecycle-backfill-domain-operation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   captureMilestoneVerificationSourceRevision,
@@ -908,6 +908,23 @@ export async function checkEngineHealth(
             message:
               `${unadopted} milestone, slice or task row(s) have no canonical lifecycle row. ` +
               "Run /gsd db adopt to preview the one-time backfill, then /gsd db adopt --apply.",
+            file: ".gsd/gsd.db",
+            fixable: false,
+          });
+        }
+        // The automatic backfill and Authority Epoch cutover stop on these rows.
+        const unmappable = previewLifecycleBackfill().unknownStatuses;
+        if (unmappable.length > 0) {
+          issues.push({
+            severity: "error",
+            code: "lifecycle_unmappable_status",
+            scope: "project",
+            unitId: "project",
+            message:
+              `${unmappable.length} milestone, slice or task row(s) have a legacy status with no lifecycle mapping, ` +
+              "so the lifecycle backfill and the Authority Epoch cutover cannot run: " +
+              `${unmappable.map((entry) => `${entry.row}=${JSON.stringify(entry.rawStatus)}`).join(", ")}. ` +
+              "Fix each status, then reopen the project.",
             file: ".gsd/gsd.db",
             fixable: false,
           });

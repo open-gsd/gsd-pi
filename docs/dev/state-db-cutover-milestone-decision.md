@@ -287,9 +287,9 @@ decision research require before a lifecycle read-authority cutover.
 D012 is a decision. It is not the cutover:
 
 - Runtime behavior does not change with this record. Hierarchy reads still come
-  from legacy database rows while the Authority Epoch of the Project is 0. No
-  Project has advanced its Authority Epoch: `cutoverProjectAuthority` has no
-  production caller.
+  from legacy database rows while the Authority Epoch of the Project is 0. Since
+  2026-10-04 the first open of an existing project database advances its
+  Authority Epoch (`authority-cutover-on-open.ts`).
 - `gate:lifecycle-shadow-no-cutover` stays in `verify:pr`. Its checks for a
   Project at Authority Epoch 0 are unchanged. Step 2 inverted its
   read-interface check (see below). The work that removes the legacy reads

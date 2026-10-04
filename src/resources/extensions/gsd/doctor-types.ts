@@ -121,6 +121,7 @@ export type DoctorIssueCode =
   // Legacy/canonical lifecycle shadow drift (#2440)
   | "lifecycle_shadow_mismatch"
   | "lifecycle_missing_shadow"
+  | "lifecycle_unmappable_status"
   // Milestone filesystem/DB drift (#4996)
   | "orphan_milestone_dir"
   | "orphan_milestone_db"

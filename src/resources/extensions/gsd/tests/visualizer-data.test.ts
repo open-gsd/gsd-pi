@@ -12,6 +12,7 @@ import {
   type VisualizerMilestone,
 } from "../visualizer-data.ts";
 import { _getAdapter, closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import { createMemory } from "../memory-store.ts";
 import { generateHtmlReport } from "../export-html.ts";
 import { resetMetrics, type UnitMetrics } from "../metrics.ts";
@@ -136,6 +137,7 @@ test("loadVisualizerData scopes ETA rate to active milestone units", async () =>
     insertMilestone({ id: "M002", title: "Active", status: "active" });
     insertSlice({ milestoneId: "M002", id: "S01", title: "Done", status: "complete", sequence: 1 });
     insertSlice({ milestoneId: "M002", id: "S02", title: "Remaining", status: "pending", sequence: 2 });
+    addLegacyCompletionEvidence();
     closeDatabase();
 
     const units = [

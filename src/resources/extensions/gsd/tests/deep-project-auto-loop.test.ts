@@ -29,6 +29,7 @@ import {
   insertMilestone,
   openDatabase,
 } from "../gsd-db.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import type { GSDPreferences } from "../preferences.ts";
 import type { GSDState } from "../types.ts";
 
@@ -342,6 +343,7 @@ test("deep project setup: bootstrap continues queued M002 without milestone cont
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "First milestone", status: "complete" });
     insertMilestone({ id: "M002", title: "Second milestone", status: "queued" });
+    addLegacyCompletionEvidence();
     closeDatabase();
 
     const messages: unknown[] = [];

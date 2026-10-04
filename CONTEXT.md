@@ -90,12 +90,32 @@ completed.
 - **`tool-unavailable` (Recovery kind)**: the Recovery Classification failure kind for a tool call that raced the workflow MCP server's registration (`No such tool available` / a Tool Surface Readiness abort). Transient — action `retry` with bounded attempts and its own exit reason; distinct from `tool-schema`/`tool-contract`, which are deterministic stops. The system retries; the model must never improvise a fallback around a missing workflow tool.
 - **Workflow Bridge Warm-up**: the stdio MCP server's eager load + shape-check of the executor and write-gate bridges before connecting when workflow tools are enabled. A broken bridge fails the spawn with the actionable error (fail closed) instead of advertising tools that error on first call; a healthy spawn pre-pays the bridge import.
 
-## State layer (markdown fallback removed; Cutover not yet executed)
+## State layer (markdown fallback removed; Cutover runs on first open; read cutover not implemented)
 
 The 2026-08 state-DB milestone removed the markdown fallback for state
-derivation. It was not a **Cutover** in the glossary sense: no production
-command advances a Project's Authority Epoch (`cutoverProjectAuthority` has no
-production caller), and the ADR-046 program is not finished.
+derivation. It was not a **Cutover** in the glossary sense.
+
+The **Cutover** runs by itself (owner decision 2026-10-04,
+`authority-cutover-on-open.ts`). The first open of an existing project database
+whose Authority Epoch is 0 writes a verified backup, runs `lifecycle.backfill`,
+and advances the Authority Epoch with `cutoverProjectAuthority`. The
+precondition is a lifecycle row for every milestone, slice and task, and idle
+coordination. A row with an unknown legacy status stops the run with nothing
+changed: the open logs the rows as an error and doctor reports
+`lifecycle_unmappable_status`. Active coordination defers the run to a later
+open. A database that an open creates is cut over by its next open. An import
+open (`/gsd recover`, `/gsd migrate`) and `/gsd db restore-backup` do not run
+it: the first seals an Import Preview on the current revision and epoch, and
+the second replaces the database that it opens. After the Cutover,
+`/gsd db restore-backup` refuses a backup from the earlier epoch.
+
+The backfill adopts a legacy completion as completed only with completion
+evidence (see `lifecycle-backfill-domain-operation.ts`). A legacy completion
+without evidence becomes open work again; the open logs each such row as a
+warning.
+
+The Authority Epoch does not select a read path yet, and the ADR-046 program is
+not finished.
 
 What shipped:
 

@@ -26,8 +26,13 @@ test("startup database open treats merge JSONL as projection-only", async () => 
     await openProjectDbIfPresent(base);
 
     assert.deepEqual(getAllMilestones(), before);
-    // The only write is the first open binding the database to this checkout.
-    assert.equal(Number(_getAdapter()!.prepare("SELECT total_changes() AS count").get()?.["count"]), 1);
+    // The first open binds the database to this checkout, adopts its rows and
+    // advances the Authority Epoch. No other Domain Operation runs.
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision").all()
+        .map((row) => row["operation_type"]),
+      ["lifecycle.backfill", "authority.cutover"],
+    );
     assert.equal(_getAdapter()!.prepare("SELECT project_root_realpath FROM project_authority").get()?.["project_root_realpath"], realpathSync(base));
   } finally {
     if (isDbAvailable()) closeDatabase();

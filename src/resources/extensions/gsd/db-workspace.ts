@@ -65,6 +65,7 @@ import { formatLegacyImportPreviewChoice } from "./legacy-import-forward-repair-
 import { drillLegacyImportBackupRestore } from "./legacy-import-restore-drill.js";
 import { inspectSqliteReadOnlySnapshot } from "./sqlite-readonly.js";
 import { atomicWriteSync } from "./atomic-write.js";
+import { cutOverProjectAuthorityOnOpen } from "./authority-cutover-on-open.js";
 import { GSDError, GSD_STALE_STATE } from "./errors.js";
 import {
   assessLegacyImportRestore,
@@ -138,6 +139,12 @@ export interface OpenWorkflowDatabaseOptions {
    * to. The empty-database check does not run, so the caller must close the handle.
    */
   bindCheckout?: boolean;
+  /**
+   * Open without the automatic lifecycle backfill and Authority Epoch cutover.
+   * /gsd db restore-backup replaces the database it opens, so it must not
+   * change that database first.
+   */
+  skipAuthorityCutover?: boolean;
 }
 
 export type WorkflowDatabaseStatus = ReturnType<typeof getDbStatus>;
@@ -357,6 +364,12 @@ function openWorkflowDatabaseWithMode(
       return { ok: false, reason: "checkout-unbound", location, error: unbound };
     }
     setLogBasePath(location.projectRoot);
+    // A database this open created has no earlier rows to adopt; its next
+    // open cuts it over. An import open (/gsd recover, /gsd migrate) seals an
+    // Import Preview on the current revision and epoch, so it must not move them.
+    if (existed && !alreadyOpen && !options.createEmptyAuthority && !options.skipAuthorityCutover) {
+      cutOverProjectAuthorityOnOpen(basePath);
+    }
     return {
       ok: true,
       reason: existed ? "opened-existing" : "created-empty",

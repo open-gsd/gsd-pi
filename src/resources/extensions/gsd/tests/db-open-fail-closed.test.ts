@@ -84,6 +84,10 @@ function makeRestoreFixture(withSlices = false): { base: string; dbPath: string;
     if (withSlices) insertSlice({ id: "S01", milestoneId, title: `${milestoneId} slice`, status: "pending", risk: "low", depends: [] });
   };
   assert.equal(openWorkflowDatabase(base).ok, true);
+  // The first open of the existing database cuts the project over, so the
+  // backup and the live DB share one Authority Epoch.
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
   const db = _getAdapter()!;
   db.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
     .run("M999", "sentinel-milestone", "active", "2026-01-01T00:00:00.000Z");

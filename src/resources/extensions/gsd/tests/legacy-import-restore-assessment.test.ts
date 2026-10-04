@@ -386,7 +386,8 @@ test("an Import Application recorded before checkout binding stays restorable af
   assert.equal(prepared.backup.project_root_realpath, "", "the backup was taken while the database was unbound");
   closeDatabase();
   const projectRoot = dirname(dirname(prepared.databasePath));
-  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+  // The automatic cutover on open would close the Restore Window under test.
+  assert.equal(openWorkflowDatabase(projectRoot, { skipAuthorityCutover: true }).ok, true);
   assert.equal(row("SELECT project_root_realpath FROM project_authority").project_root_realpath, realpathSync(projectRoot));
   assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
 

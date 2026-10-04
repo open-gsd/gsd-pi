@@ -24,6 +24,7 @@ import {
   getSlice,
   getMilestone,
 } from "../gsd-db.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import {
   adoptOrTransitionLifecycle,
@@ -363,6 +364,7 @@ test("undoLastCompletedUnit opens the project DB itself, as web undo calls it", 
       unitType: "complete-slice", unitId: "M001/S01",
       milestoneId: "M001", sliceId: "S01", endedAt: "2026-07-13T01:00:00.000Z",
     });
+    addLegacyCompletionEvidence();
     closeDatabase();
     invalidateAllCaches();
 

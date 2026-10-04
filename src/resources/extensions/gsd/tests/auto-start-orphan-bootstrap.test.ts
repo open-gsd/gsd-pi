@@ -21,6 +21,7 @@ import {
   insertMilestone,
   openDatabase,
 } from "../gsd-db.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 
 function runGit(base: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -54,6 +55,7 @@ function makeRepoWithUnmergedCompletedMilestone(): string {
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M002", title: "Completed milestone", status: "complete" });
   insertMilestone({ id: "M003", title: "Next milestone", status: "active" });
+  addLegacyCompletionEvidence();
   closeDatabase();
 
   return base;
@@ -227,6 +229,7 @@ function makeRepoWithRecoveredCleanupAndStrandedMismatch(): string {
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Completed milestone", status: "complete" });
   insertMilestone({ id: "M002", title: "Stranded milestone", status: "active" });
+  addLegacyCompletionEvidence();
   closeDatabase();
 
   return base;

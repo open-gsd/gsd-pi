@@ -2053,7 +2053,9 @@ export async function handleDbRestoreBackup(
 
     // The engine opens only after consent. A database it cannot open is
     // replaced directly; the previous file is kept, never deleted.
-    const opened = current === null && existingIntent === null ? null : openWorkflowDatabase(basePath);
+    const opened = current === null && existingIntent === null
+      ? null
+      : openWorkflowDatabase(basePath, { skipAuthorityCutover: true });
     if (opened !== null && !opened.ok && (existingIntent !== null || opened.reason !== "schema-too-new")) {
       ctx.ui.notify(`gsd db restore-backup: cannot open the project database (${opened.reason}). Nothing was restored.`, "error");
       return;
