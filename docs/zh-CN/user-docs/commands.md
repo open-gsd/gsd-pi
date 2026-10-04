@@ -183,6 +183,7 @@
 | `/gsd workflow validate <name>` | 校验一个 workflow YAML definition |
 | `/gsd workflow pause` | 暂停自定义 workflow 的自动模式 |
 | `/gsd workflow resume` | 恢复已暂停的自定义 workflow 自动模式 |
+| `/gsd workflow resume <name>/<timestamp>` | 按 `/gsd workflow list` 显示的名称和时间戳恢复一次 YAML 运行（崩溃后同样适用） |
 
 ## 扩展
 

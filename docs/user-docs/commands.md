@@ -247,7 +247,7 @@ one of four execution modes:
 | Mode              | What it does                                                                              |
 |-------------------|-------------------------------------------------------------------------------------------|
 | `oneshot`         | Prompt-only, no state, no branch. For reviews, triage, changelog generation.              |
-| `yaml-step`       | Full engine with GRAPH.yaml, iterate, and shell-verify. For fan-out batch work.           |
+| `yaml-step`       | Full engine with step rows in the database, iterate, and shell-verify. For fan-out batch work. |
 | `markdown-phase`  | Multi-phase with STATE.json + phase-approval gates. For release, performance audit.       |
 | `auto-milestone`  | Hooks into the full `/gsd auto` pipeline. Reserved for `full-project`.                    |
 
@@ -275,6 +275,13 @@ backwards compatibility.
 | `/gsd workflow validate <name>` | Validate a YAML definition |
 | `/gsd workflow pause` | Pause custom workflow auto-mode |
 | `/gsd workflow resume` | Resume paused custom workflow auto-mode |
+| `/gsd workflow resume <name>/<timestamp>` | Resume a YAML run by the name and timestamp that `/gsd workflow list` shows, also after a crash |
+
+A YAML run is stored in the project database. `DEFINITION.yaml`, `GRAPH.yaml`
+and `PARAMS.json` in `.gsd/workflow-runs/<name>/<timestamp>/` are renders of
+it: GSD writes them again after each step and does not read your edits. A run
+directory from an older release has no database rows;
+`/gsd workflow resume <name>/<timestamp>` imports it first.
 
 ### Bundled plugins
 
