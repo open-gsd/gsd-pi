@@ -219,7 +219,10 @@ export interface ProjectSnapshot {
  */
 export type WorkflowCommandRequest =
 	| { name: "milestone_park"; args: { milestoneId: string; reason: string } }
-	| { name: "milestone_unpark"; args: { milestoneId: string } };
+	| { name: "milestone_unpark"; args: { milestoneId: string } }
+	| { name: "milestone_discard"; args: { milestoneId: string; reason: string } }
+	| { name: "milestone_reorder"; args: { order: string[] } }
+	| { name: "milestone_set_dependencies"; args: { milestoneId: string; dependsOn: string[] } };
 
 export interface WorkflowCommandIdentity {
 	/**

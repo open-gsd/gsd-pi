@@ -114,7 +114,9 @@ function queueOperationRequest(
   return {
     operationType,
     idempotencyKey: invocation?.idempotencyKey ?? `command/${commandKey}/${fence.revision}`,
-    expectedRevision: fence.revision,
+    // The caller's revision is a precondition of the first send only. A retry
+    // can carry a newer revision, so a replay uses the recorded one.
+    expectedRevision: fence.replay ? fence.revision : invocation?.expectedRevision ?? fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: invocation?.actorType ?? "operator",
     ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 
-import { _getAdapter, getMilestone, getProjectAuthorityVersion } from "../gsd-db.ts";
+import { _getAdapter, getAllMilestones, getMilestone, getProjectAuthorityVersion, insertMilestone } from "../gsd-db.ts";
 import { runWorkflowCommand } from "../workflow-command.ts";
 import { createWorkflowAuthorityFixture, type WorkflowAuthorityFixture } from "./workflow-authority-fixture.ts";
 
@@ -90,6 +90,102 @@ test("unpark is a separate command with its own key", async () => {
   assert.equal(operations("milestone.unpark").length, 1);
 });
 
+/** The queue order of the database: open milestones by sequence. */
+function queueOrder(): string[] {
+  return getAllMilestones()
+    .filter((milestone) => (milestone.sequence ?? 0) > 0)
+    .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
+    .map((milestone) => milestone.id);
+}
+
+function reorder(overrides: Record<string, unknown> = {}) {
+  return runWorkflowCommand({
+    cwd: fixture.root,
+    name: "milestone_reorder",
+    args: { order: ["M002", "M001"] },
+    idempotencyKey: "user-action-3",
+    ...overrides,
+  });
+}
+
+test("a reorder command sent twice with the same idempotency key gives one operation", async () => {
+  insertMilestone({ id: "M002", title: "Second", status: "queued" });
+  const expectedRevision = getProjectAuthorityVersion().revision;
+
+  const first = await reorder({ expectedRevision });
+  const second = await reorder({ expectedRevision: first.revision });
+
+  assert.equal(first.ok, true, first.message);
+  assert.deepEqual(second, first, "the second send returns the result of the first");
+  assert.deepEqual(queueOrder(), ["M002", "M001"]);
+  assert.deepEqual(operations("milestone.reorder").map((row) => ({ ...row })), [{
+    idempotency_key: "rpc:milestone_reorder:user-action-3",
+    source_transport: "internal",
+    actor_type: "operator",
+    expected_revision: expectedRevision,
+  }]);
+});
+
+test("reorder, set-dependencies and discard refuse a stale expected revision and change nothing", async () => {
+  insertMilestone({ id: "M002", title: "Second", status: "queued" });
+  const revision = getProjectAuthorityVersion().revision;
+  const orderBefore = queueOrder();
+  const stale = { cwd: fixture.root, idempotencyKey: "user-action-4", expectedRevision: revision - 1 };
+
+  const results = [
+    await runWorkflowCommand({ ...stale, name: "milestone_reorder", args: { order: ["M002", "M001"] } }),
+    await runWorkflowCommand({
+      ...stale,
+      name: "milestone_set_dependencies",
+      args: { milestoneId: "M002", dependsOn: ["M001"] },
+    }),
+    await runWorkflowCommand({
+      ...stale,
+      name: "milestone_discard",
+      args: { milestoneId: "M002", reason: "no longer needed" },
+    }),
+  ];
+
+  for (const result of results) {
+    assert.equal(result.ok, false);
+    assert.match(result.message, /stale project revision/);
+    assert.equal(result.revision, revision);
+  }
+  assert.deepEqual(queueOrder(), orderBefore);
+  assert.deepEqual(getMilestone("M002")?.depends_on, []);
+  assert.equal(getMilestone("M002")?.status, "queued");
+  for (const type of ["milestone.reorder", "milestone.set_dependencies", "milestone.discard"]) {
+    assert.deepEqual(operations(type), [], type);
+  }
+});
+
+test("set-dependencies and discard run through the typed command with the current revision", async () => {
+  insertMilestone({ id: "M002", title: "Second", status: "queued" });
+
+  const dependencies = await runWorkflowCommand({
+    cwd: fixture.root,
+    name: "milestone_set_dependencies",
+    args: { milestoneId: "M002", dependsOn: ["M001"] },
+    idempotencyKey: "user-action-5",
+    expectedRevision: getProjectAuthorityVersion().revision,
+  });
+  assert.equal(dependencies.ok, true, dependencies.message);
+  assert.deepEqual(getMilestone("M002")?.depends_on, ["M001"]);
+
+  const discard = await runWorkflowCommand({
+    cwd: fixture.root,
+    name: "milestone_discard",
+    args: { milestoneId: "M002", reason: "no longer needed" },
+    idempotencyKey: "user-action-6",
+    expectedRevision: dependencies.revision,
+  });
+  assert.equal(discard.ok, true, discard.message);
+  assert.equal(operations("milestone.set_dependencies").length, 1);
+  assert.deepEqual(operations("milestone.discard").map((row) => row["idempotency_key"]), [
+    "rpc:milestone_discard:user-action-6",
+  ]);
+});
+
 test("a command for a milestone that does not exist is refused with the reason", async () => {
   const result = await park({ args: { milestoneId: "M404", reason: "none" } });
 
@@ -103,5 +199,7 @@ test("a malformed command throws before any operation runs", async () => {
   await assert.rejects(park({ expectedRevision: "3" }), /expectedRevision must be an integer/);
   await assert.rejects(park({ args: { milestoneId: "M001" } }), /requires args\.reason/);
   await assert.rejects(park({ cwd: undefined }), /requires a session CWD/);
+  await assert.rejects(reorder({ args: { order: "M001" } }), /requires args\.order as a list/);
+  await assert.rejects(reorder({ args: { order: ["M001", 2] } }), /requires args\.order as a list/);
   assert.deepEqual(operations("milestone.park"), []);
 });

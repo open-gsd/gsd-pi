@@ -8,13 +8,27 @@ import type { WorkflowCommandResult } from "@opengsd/contracts";
 import { rpcExecutionInvocation, type ExecutionInvocation } from "./execution-invocation.js";
 import { getProjectAuthorityVersion } from "./gsd-db.js";
 import type { ToolExecutionResult } from "./tools/context-mode-tool-result.js";
-import { executeMilestonePark, executeMilestoneUnpark } from "./tools/milestone-hierarchy.js";
+import {
+  executeMilestoneDiscard,
+  executeMilestonePark,
+  executeMilestoneReorder,
+  executeMilestoneSetDependencies,
+  executeMilestoneUnpark,
+} from "./tools/milestone-hierarchy.js";
 
 type CommandArgs = Record<string, unknown>;
 
 function text(args: CommandArgs, key: string): string {
   const value = args[key];
   if (typeof value !== "string" || !value.trim()) throw new Error(`Workflow command requires args.${key}`);
+  return value;
+}
+
+function ids(args: CommandArgs, key: string): string[] {
+  const value = args[key];
+  if (!Array.isArray(value) || value.some((id) => typeof id !== "string" || !id.trim())) {
+    throw new Error(`Workflow command requires args.${key} as a list of milestone ids`);
+  }
   return value;
 }
 
@@ -26,6 +40,16 @@ const COMMANDS: Readonly<Record<
     executeMilestonePark({ milestoneId: text(args, "milestoneId"), reason: text(args, "reason") }, cwd, invocation),
   milestone_unpark: (args, cwd, invocation) =>
     executeMilestoneUnpark({ milestoneId: text(args, "milestoneId") }, cwd, invocation),
+  milestone_discard: (args, cwd, invocation) =>
+    executeMilestoneDiscard({ milestoneId: text(args, "milestoneId"), reason: text(args, "reason") }, cwd, invocation),
+  milestone_reorder: (args, cwd, invocation) =>
+    executeMilestoneReorder({ order: ids(args, "order") }, cwd, invocation),
+  milestone_set_dependencies: (args, cwd, invocation) =>
+    executeMilestoneSetDependencies(
+      { milestoneId: text(args, "milestoneId"), dependsOn: ids(args, "dependsOn") },
+      cwd,
+      invocation,
+    ),
 };
 
 /**
