@@ -310,25 +310,29 @@ Migration is additive and never runs two authorities.
 5. Increment the per-Project Authority Epoch at cutover. A migrated Project
    cannot downgrade to disk authority.
 
-   > **Note (2026-10-04):** owner decision: the cutover is automatic, and for
-   > now it is the opt-in canary of step 6. It runs only with the environment
-   > variable `GSD_AUTHORITY_CUTOVER=1`; without it an open changes nothing. It
-   > becomes the default after the writer-coverage gate passes: no writer
-   > creates a hierarchy row with no lifecycle row, and a database trigger
-   > refuses such a row after the cutover. With the flag on, the
-   > first open of an existing project database at Authority Epoch 0 writes a
+   > **Note (2026-10-04):** owner decision: the cutover is automatic. The first
+   > open of an existing project database at Authority Epoch 0 writes a
    > verified backup, runs `lifecycle.backfill`, and advances the epoch with
    > the `authority.cutover` Domain Operation. The precondition is a lifecycle
    > row for every milestone, slice and task, and idle coordination. It no
-   > longer requires an Import Application as the operation head. An unknown
-   > legacy status stops the run with nothing changed. The run also stops
-   > with nothing changed when the backfill would reopen a legacy completion
-   > that has no evidence or cancel open work under a completed or cancelled
-   > parent;
-   > `/gsd db adopt --apply` is the route for those rows. While the operation
-   > head is an Import Application, the run waits so that the Restore Window
-   > stays open. See
+   > longer requires an Import Application as the operation head. For now the
+   > run is the opt-in canary of step 6 (`GSD_AUTHORITY_CUTOVER=1`).
+   > `CONTEXT.md` (State layer) owns the rest of the contract: when the run
+   > stops or waits, and when it becomes the default. The code is
    > `src/resources/extensions/gsd/authority-cutover-on-open.ts`.
+
+   > **Note (2026-10-04, older copy of the database file):** a process that
+   > holds a receipt of a Domain Operation above Authority Epoch 0 refuses to
+   > open the same Project at a lower epoch. `/gsd db restore-backup` refuses a
+   > backup from a lower epoch. A new process that opens a file copy of a
+   > database from before the cutover is outside this guarantee: nothing
+   > outside the database file records the epoch. That copy holds no accepted
+   > work from after the cutover. When the automatic cutover is on, the open
+   > backs the copy up, backfills it and cuts it over again, so it does not
+   > stay on legacy authority. A record of the highest epoch beside the
+   > database file was considered and not built: it would refuse a file that
+   > the automatic cutover can bring forward, and it cannot see an older copy
+   > at the same epoch.
 6. Roll out through development corpus, opt-in canary, and stable release gates
    with restart, fault, import, restore, parity, projection, and performance
    evidence.

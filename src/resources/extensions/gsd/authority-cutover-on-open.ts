@@ -162,8 +162,8 @@ export function cutOverProjectAuthorityOnOpen(basePath: string): void {
   let cutOver = false;
   try {
     cutOver = readDomainOperationFence().authorityEpoch > 0;
-    // Off by default: some writers can still create a hierarchy row without a
-    // lifecycle row. The default becomes on after those writers are closed.
+    // Off by default. CONTEXT.md (State layer) states what is left before
+    // the default becomes on.
     if (!cutOver && process.env.GSD_AUTHORITY_CUTOVER !== "1") return;
     const databasePath = getDbPath();
     if (databasePath === null) return;

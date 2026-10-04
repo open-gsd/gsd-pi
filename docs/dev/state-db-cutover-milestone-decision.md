@@ -290,8 +290,8 @@ D012 is a decision. It is not the cutover:
   from legacy database rows while the Authority Epoch of the Project is 0. Since
   2026-10-04 the first open of an existing project database advances its
   Authority Epoch (`authority-cutover-on-open.ts`) when
-  `GSD_AUTHORITY_CUTOVER=1` is set. This is opt-in for now and becomes the
-  default after the writer-coverage gate passes.
+  `GSD_AUTHORITY_CUTOVER=1` is set. This is opt-in for now; `CONTEXT.md`
+  (State layer) states when it becomes the default.
 - `gate:lifecycle-shadow-no-cutover` stays in `verify:pr`. Its checks for a
   Project at Authority Epoch 0 are unchanged. Step 2 inverted its
   read-interface check (see below). The work that removes the legacy reads
