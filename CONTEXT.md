@@ -170,6 +170,17 @@ What shipped:
   not active. The render keeps it, doctor reports it as a warning, and
   `/gsd doctor --fix` imports it with an `override.import` Domain Operation. A
   block with an unknown scope is reported and is not imported.
+- Captures (`/gsd capture`) are `capture.*` events of Domain Operations.
+  CAPTURES.md is a one-way render of them: triage, the stop and backtrack
+  guard, the quick-task check, the web captures panel and MCP `gsd_captures`
+  read only the database. The triage agent records a classification with
+  `gsd_capture_resolve`. A quick-task capture is executed only when its agent
+  calls `gsd_capture_complete`; the host does not mark it before the unit runs.
+  A backtrack directive records its target on the `capture.executed` event; no
+  BACKTRACK-TRIGGER.md or REGRESSION.md file is written. A file section that no
+  database capture holds is not read. The render keeps it, doctor reports it as
+  a warning, and `/gsd doctor --fix` imports it with a `capture.import` Domain
+  Operation.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).

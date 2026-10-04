@@ -9,6 +9,7 @@ export { openExistingWorkflowDatabase } from "./db-workspace.js";
 export { readProgressFromDb, readProjectProgressFromDb } from "./state/progress-from-db.js";
 export { readProjectSnapshotFromDb } from "./state/project-snapshot.js";
 export { readKnowledgeMarkdown } from "./knowledge-projection.js";
+export { loadActionableCaptures, loadAllCaptures, markCaptureResolved } from "./captures.js";
 export {
   _getAdapter,
   checkpointDatabase,

@@ -18,6 +18,7 @@ import {
 } from "@opengsd/contracts";
 
 import { logAliasUsage } from "./alias-telemetry.js";
+import type { DatabaseCapture } from "./readers/captures.js";
 
 export type MilestoneStatusObservationTokenState = "active" | "inactive" | "unavailable";
 
@@ -46,6 +47,7 @@ interface GsdMcpBridge {
   invalidateStateCache: (...args: any[]) => any;
   readProgressFromDb: (...args: any[]) => any;
   readKnowledgeMarkdown: (projectDir: string) => string;
+  loadAllCaptures: (projectDir: string) => DatabaseCapture[];
   loadEffectiveGSDPreferences: (...args: any[]) => any;
   saveDecisionToDb: (...args: any[]) => any;
   saveRequirementToDb: (...args: any[]) => any;
@@ -525,6 +527,16 @@ type WorkflowToolExecutors = {
     basePath: string,
     invocation: ExecutionInvocation,
   ) => Promise<unknown>;
+  executeCaptureResolve: (
+    params: { captureId: string; classification: string; resolution: string; rationale: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
+  executeCaptureComplete: (
+    params: { captureId: string; outcome: string },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
 };
 
 type WorkflowWriteGateModule = {
@@ -835,6 +847,8 @@ function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors
     "executeMilestoneReorder",
     "executeMilestoneSetDependencies",
     "executeResearchDecisionSave",
+    "executeCaptureResolve",
+    "executeCaptureComplete",
   ];
 
   return Array.isArray(record.SUPPORTED_SUMMARY_ARTIFACT_TYPES) &&
@@ -1394,6 +1408,23 @@ export async function readKnowledgeViaBridge(projectDir: string): Promise<string
       return null;
     }
     return bridge.readKnowledgeMarkdown(projectDir);
+  });
+}
+
+/**
+ * Capture rows of the project database (gsd_captures). Returns null when the
+ * database cannot be opened, so the caller can use the display-only file
+ * read; once the database opens it is authoritative.
+ */
+export async function readCapturesViaBridge(projectDir: string): Promise<DatabaseCapture[] | null> {
+  return runSerializedWorkflowOperation(async () => {
+    const bridge = await importBridgeModule();
+    const opened = bridge.openExistingWorkflowDatabase(projectDir);
+    if (!opened.ok) {
+      if (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound") throw opened.error;
+      return null;
+    }
+    return bridge.loadAllCaptures(projectDir);
   });
 }
 
@@ -2661,6 +2692,22 @@ const researchDecisionSaveParams = {
 };
 const researchDecisionSaveSchema = z.object(researchDecisionSaveParams);
 
+const captureResolveParams = {
+  projectDir: projectDirParam,
+  captureId: nonEmptyString("captureId").describe("Capture ID (e.g. CAP-1a2b3c4d)"),
+  classification: z.enum(["quick-task", "inject", "defer", "replan", "note", "stop", "backtrack"]).describe("Confirmed classification"),
+  resolution: nonEmptyString("resolution").describe("What will happen (for backtrack, name the target milestone ID)"),
+  rationale: nonEmptyString("rationale").describe("Why this classification"),
+};
+const captureResolveSchema = z.object(captureResolveParams);
+
+const captureCompleteParams = {
+  projectDir: projectDirParam,
+  captureId: nonEmptyString("captureId").describe("Capture ID (e.g. CAP-1a2b3c4d)"),
+  outcome: nonEmptyString("outcome").describe("What was changed, or why no change was needed"),
+};
+const captureCompleteSchema = z.object(captureCompleteParams);
+
 const milestoneStatusParams = {
   projectDir: projectDirParam,
   milestoneId: z.string().describe("Milestone ID to query (e.g. M001)"),
@@ -3876,6 +3923,30 @@ export function registerWorkflowTools(
       const invocation = mcpWorkflowExecutionInvocation("gsd_research_decision_save", extra);
       return handleMilestoneHierarchyTool("gsd_research_decision_save", projectDir, null, (executors) =>
         executors.executeResearchDecisionSave(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_capture_resolve",
+    "Classify one user capture (triage) in one SQLite Domain Operation. The tool only records the classification; CAPTURES.md is rendered from the database.",
+    captureResolveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(captureResolveSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_capture_resolve", extra);
+      return handleMilestoneHierarchyTool("gsd_capture_resolve", projectDir, null, (executors) =>
+        executors.executeCaptureResolve(params, projectDir, invocation));
+    },
+  );
+
+  server.tool(
+    "gsd_capture_complete",
+    "Record the outcome of a quick-task capture in one SQLite Domain Operation. The capture counts as executed only after this call.",
+    captureCompleteParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const { projectDir, ...params } = parseWorkflowArgs(captureCompleteSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_capture_complete", extra);
+      return handleMilestoneHierarchyTool("gsd_capture_complete", projectDir, null, (executors) =>
+        executors.executeCaptureComplete(params, projectDir, invocation));
     },
   );
 

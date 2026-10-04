@@ -32,6 +32,7 @@ import {
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { _setDomainOperationFaultForTest } from "../../../src/resources/extensions/gsd/db/domain-operation.ts";
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
+import { importFileCaptures, loadAllCaptures, type CaptureEntry } from "../../../src/resources/extensions/gsd/captures.ts";
 import { registerMemoryTools } from "../../../src/resources/extensions/gsd/bootstrap/memory-tools.ts";
 import { registerQueryTools } from "../../../src/resources/extensions/gsd/bootstrap/query-tools.ts";
 import { parkMilestone } from "../../../src/resources/extensions/gsd/milestone-actions.ts";
@@ -1116,7 +1117,25 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
   { tool: "gsd_milestone_set_dependencies", args: { milestoneId: "M001", dependsOn: [] }, passesWith: null },
   { tool: "gsd_milestone_discard", args: { milestoneId: "M001", reason: "Parity discard" }, passesWith: null },
   { tool: "gsd_research_decision_save", args: { decision: "research" }, passesWith: null },
+  {
+    tool: "gsd_capture_resolve",
+    args: { captureId: "CAP-parity01", classification: "note", resolution: "acknowledged", rationale: "Parity triage" },
+    passesWith: null,
+    prepare: async (base) => seedCapture(base, { id: "CAP-parity01", status: "pending" }),
+  },
+  {
+    tool: "gsd_capture_complete",
+    args: { captureId: "CAP-parity02", outcome: "Parity quick task done" },
+    passesWith: null,
+    prepare: async (base) => seedCapture(base, { id: "CAP-parity02", status: "resolved", classification: "quick-task" }),
+  },
 ];
+
+/** Put one capture in the database, once per fixture. */
+function seedCapture(base: string, capture: Pick<CaptureEntry, "id" | "status" | "classification">): void {
+  if (loadAllCaptures(base).some((entry) => entry.id === capture.id)) return;
+  importFileCaptures(base, [{ ...capture, text: "Parity capture", timestamp: "2026-01-01T00:00:00.000Z" }]);
+}
 
 function operationCount(): number {
   return Number(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM workflow_operations").get()?.count);
@@ -1187,6 +1206,7 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
         const wroteProjections: string[] = [];
         for (const gateCase of OPERATION_ONLY_CASES) {
           gateCase.seed?.(base);
+          await gateCase.prepare?.(base);
           const before = snapshotProjections(base);
           const result = await call(gateCase);
           assert.ok(!(result as { isError?: boolean }).isError, `${gateCase.tool} must succeed`);

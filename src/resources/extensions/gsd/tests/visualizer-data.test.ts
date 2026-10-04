@@ -11,6 +11,7 @@ import {
   loadVisualizerData,
   type VisualizerMilestone,
 } from "../visualizer-data.ts";
+import { appendCapture } from "../captures.ts";
 import { _getAdapter, closeDatabase, insertArtifact, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import { createMemory } from "../memory-store.ts";
@@ -68,19 +69,8 @@ test("loadVisualizerData hydrates milestones, captures, stats, and health fields
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "M001: Visualizer", status: "active" });
     insertSlice({ milestoneId: "M001", id: "S01", title: "Build UI", status: "pending", sequence: 1 });
+    appendCapture(base, "Investigate visualizer state");
     closeDatabase();
-    writeFileSync(
-      join(base, ".gsd", "CAPTURES.md"),
-      [
-        "# Captures",
-        "",
-        "### CAP-visual",
-        "**Text:** Investigate visualizer state",
-        "**Captured:** 2026-01-01T00:00:00.000Z",
-        "**Status:** pending",
-        "",
-      ].join("\n"),
-    );
 
     const data = await loadVisualizerData(base);
 

@@ -219,7 +219,7 @@ export function verifyExpectedArtifact(
   if (unitType === "triage-captures") {
     const pending = loadPendingCaptures(base);
     if (pending.length === 0) return true;
-    logWarning("recovery", `verify-fail triage-captures ${unitId}: ${pending.length} pending capture(s) remain in CAPTURES.md`);
+    logWarning("recovery", `verify-fail triage-captures ${unitId}: ${pending.length} pending capture(s) remain in the database`);
     return false;
   }
 
@@ -227,7 +227,7 @@ export function verifyExpectedArtifact(
     const { slice: captureId } = parseUnitId(unitId);
     const capture = captureId ? loadAllCaptures(base).find((entry) => entry.id === captureId) : undefined;
     if (capture?.executed === true) return true;
-    logWarning("recovery", `verify-fail quick-task ${unitId}: capture ${captureId ?? "(missing capture id)"} not found or not marked executed`);
+    logWarning("recovery", `verify-fail quick-task ${unitId}: capture ${captureId ?? "(missing capture id)"} not found or not recorded as executed by gsd_capture_complete`);
     return false;
   }
 

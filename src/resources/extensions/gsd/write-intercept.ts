@@ -132,6 +132,7 @@ const ROOT_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /^REQUIREMENTS\.md$/i, tool: "gsd_requirement_save or gsd_requirement_update" },
   { name: /^DECISIONS\.md$/i, tool: "gsd_decision_save" },
   { name: /^KNOWLEDGE\.md$/i, tool: "capture_thought" },
+  { name: /^CAPTURES\.md$/i, tool: "/gsd capture (new capture), gsd_capture_resolve or gsd_capture_complete" },
   { name: /^QUEUE\.md$/i, tool: "gsd_milestone_reorder, gsd_milestone_park or gsd_milestone_discard" },
   { name: /^ROADMAP\.md$/i, tool: "gsd_plan_milestone or gsd_reassess_roadmap" },
 ];

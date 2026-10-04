@@ -72,7 +72,7 @@ import {
   persistHookState,
   resolveHookArtifactPath,
 } from "./post-unit-hooks.js";
-import { hasPendingCaptures, loadPendingCaptures, revertExecutorResolvedCaptures } from "./captures.js";
+import { hasPendingCaptures, loadPendingCaptures } from "./captures.js";
 import { debugLog } from "./debug-logger.js";
 import { runSafely } from "./auto-utils.js";
 import {
@@ -2765,27 +2765,6 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
     }
   }
 
-  // ── Capture protection: revert executor-silenced captures (#3487) ──
-  // Non-triage agents can write **Status:** resolved to CAPTURES.md, bypassing
-  // the triage pipeline. Revert those to pending before the triage check.
-  if (
-    s.currentUnit &&
-    s.currentUnit.type !== "triage-captures"
-  ) {
-    try {
-      const reverted = revertExecutorResolvedCaptures(s.basePath);
-      if (reverted > 0) {
-        debugLog("postUnit", { phase: "capture-protection", reverted });
-        ctx.ui.notify(
-          `Reverted ${reverted} capture${reverted === 1 ? "" : "s"} silenced by executor — re-queuing for triage.`,
-          "warning",
-        );
-      }
-    } catch (e) {
-      debugLog("postUnit", { phase: "capture-protection-error", error: String(e) });
-    }
-  }
-
   // ── Pre-execution checks (after plan-slice or ADR-011 refine-slice completes) ──
   // Both emit the same PLAN.md + task artifacts via gsd_plan_slice, so the
   // same structural validation applies to both.
@@ -3096,19 +3075,18 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   // ── Quick-task dispatch ──
   if (_shouldDispatchQuickTaskForTest(s, hasHeldQuickTask)) {
     try {
-      const { loadAllCaptures, markCaptureExecuted } = await import("./captures.js");
+      const { loadAllCaptures } = await import("./captures.js");
 
       if (s.currentUnit) {
         await closeoutUnit(ctx, s.basePath, s.currentUnit.type, s.currentUnit.id, s.currentUnit.startedAt);
       }
 
-      // The held row becomes the queued work before the capture is marked
-      // executed, so a kill between the two steps cannot lose the task.
+      // The capture is not marked executed here: the quick-task agent records
+      // its outcome with gsd_capture_complete, and that row is the evidence.
       const quickTask = promoteHeldQuickTask(s.currentMilestoneId);
       if (quickTask) {
         const captureId = quickTask.captureId!;
         const captureText = loadAllCaptures(s.basePath).find((capture) => capture.id === captureId)?.text ?? "";
-        markCaptureExecuted(s.basePath, captureId);
         debugLog("postUnitPostVerification", {
           phase: "sidecar-enqueue",
           kind: quickTask.kind,

@@ -38,6 +38,7 @@ import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from "./
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
 import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
 import { importFileOverrides, unimportedFileOverrides, type FileOverride } from "./overrides.js";
+import { importFileCaptures, unimportedFileCaptures } from "./captures.js";
 import { convertResolvedLegacyEscalation, readConvertibleLegacyEscalation } from "./escalation.js";
 import { isUnplannedMilestone, milestoneRenderArtifactPaths } from "./markdown-renderer.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";
@@ -735,7 +736,7 @@ export async function checkEngineHealth(
   options?: {
     repair?: boolean;
     repairDbLock?: boolean;
-    /** With `repair`: import OVERRIDES.md blocks and event-log.jsonl milestone events the database does not hold. Set only for a doctor run the operator asked for. */
+    /** With `repair`: import OVERRIDES.md blocks, CAPTURES.md sections and event-log.jsonl milestone events the database does not hold. Set only for a doctor run the operator asked for. */
     importFileOverrides?: boolean;
     lockRecovery?: {
       inspectHolders: typeof inspectWorkflowDbLockHolders;
@@ -1331,7 +1332,45 @@ export async function checkEngineHealth(
       fixesApplied,
       options?.repair === true && options.importFileOverrides === true,
     );
+    checkUnimportedCaptures(
+      basePath,
+      issues,
+      fixesApplied,
+      options?.repair === true && options.importFileOverrides === true,
+    );
     checkUnappliedLegacyEscalations(basePath, issues, fixesApplied, options?.repair === true);
+  }
+}
+
+/** CAPTURES.md sections the database does not hold are not read. Report each one; import them on request. */
+function checkUnimportedCaptures(
+  basePath: string,
+  issues: DoctorIssue[],
+  fixesApplied: string[],
+  doImport: boolean,
+): void {
+  const captures = unimportedFileCaptures(basePath);
+  if (captures.length === 0) return;
+  let importError = "";
+  if (doImport) {
+    try {
+      importFileCaptures(basePath, captures);
+      fixesApplied.push(`imported ${captures.length} capture(s) from CAPTURES.md: ${captures.map((capture) => capture.id).join(", ")}`);
+      return;
+    } catch (err) {
+      importError = ` The import failed: ${(err as Error).message}.`;
+    }
+  }
+  for (const capture of captures) {
+    issues.push({
+      severity: "warning",
+      code: "capture_file_entry_unimported",
+      scope: "project",
+      unitId: "project",
+      message: `CAPTURES.md capture ${capture.id} ("${capture.text}", ${capture.status}) is not in the database and is not read by triage or the stop guard. Run \`/gsd doctor --fix\` to import it.${importError}`,
+      file: ".gsd/CAPTURES.md",
+      fixable: true,
+    });
   }
 }
 

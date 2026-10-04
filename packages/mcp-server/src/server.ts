@@ -27,7 +27,7 @@ import type { RemoteToolResult } from './remote-questions.js';
 import { readProgress } from './readers/state.js';
 import { readRoadmap } from './readers/roadmap.js';
 import { readHistory } from './readers/metrics.js';
-import { readCaptures } from './readers/captures.js';
+import { capturesResultFromDatabase, readCaptures } from './readers/captures.js';
 import { knowledgeResultFromMarkdown, readKnowledge } from './readers/knowledge.js';
 import { buildGraph, writeGraph, writeSnapshot, graphStatus, graphQuery, graphDiff } from './readers/graph.js';
 import { resolveGsdRoot, findMilestoneIds, resolveMilestoneFile } from './readers/paths.js';
@@ -35,6 +35,7 @@ import { runDoctorLite } from './readers/doctor-lite.js';
 import {
   hasWorkflowToolBridgeConfiguration,
   readProjectProgressViaBridge,
+  readCapturesViaBridge,
   readKnowledgeViaBridge,
   registerWorkflowTools,
   validateProjectDir,
@@ -1485,7 +1486,7 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_captures',
-    'Get captured ideas and thoughts from CAPTURES.md with triage status. Filter by pending, actionable, or all. No session required.',
+    'Get captured ideas and thoughts with triage status. Filter by pending, actionable, or all. No session required — reads the workflow database when the GSD runtime is available, .gsd/CAPTURES.md otherwise (the result then carries readMetadata { source: projection, authority: projection-fallback }).',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       filter: z.enum(['all', 'pending', 'actionable']).optional().describe('Filter captures (default: "all")'),
@@ -1493,7 +1494,12 @@ export async function createMcpServer(
     async (args: Record<string, unknown>) => {
       const { projectDir, filter } = args as { projectDir: string; filter?: 'all' | 'pending' | 'actionable' };
       try {
-        return jsonContent(readCaptures(validateProjectDir(projectDir), filter ?? 'all'));
+        const dir = validateProjectDir(projectDir);
+        if (hasWorkflowToolBridgeConfiguration()) {
+          const fromDb = await readCapturesViaBridge(dir);
+          if (fromDb !== null) return jsonContent(capturesResultFromDatabase(fromDb, filter ?? 'all'));
+        }
+        return jsonContent(readCaptures(dir, filter ?? 'all'));
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }

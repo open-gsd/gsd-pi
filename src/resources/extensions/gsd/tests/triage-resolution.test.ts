@@ -2,12 +2,13 @@
  * Unit tests for GSD Triage Resolution — resolution execution and file overlap detection.
  */
 
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { appendCapture, markCaptureResolved, markCaptureExecuted, loadAllCaptures, loadActionableCaptures } from "../captures.ts";
+import { closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
 // Import only the functions that don't depend on @gsd/pi-coding-agent
 // (triage-ui.ts imports next-action-ui.ts which imports the unavailable package)
 import { executeInject, executeReplan, detectFileOverlap, loadDeferredCaptures, loadReplanCaptures, buildQuickTaskPrompt, executeTriageResolutions, ensureDeferMilestoneDir } from "../triage-resolution.ts";
@@ -18,8 +19,14 @@ function makeTempDir(prefix: string): string {
     `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
   mkdirSync(dir, { recursive: true });
+  // Captures are database rows; CAPTURES.md is their render.
+  assert.equal(openDatabase(":memory:"), true);
   return dir;
 }
+
+afterEach(() => {
+  if (isDbAvailable()) closeDatabase();
+});
 
 function setupPlanFile(tmp: string, mid: string, sid: string, content: string): string {
   const planDir = join(tmp, ".gsd", "milestones", mid, "slices", sid);

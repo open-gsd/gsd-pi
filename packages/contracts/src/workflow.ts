@@ -273,6 +273,22 @@ export const WORKFLOW_TOOL_CONTRACTS = [
 		auditEvent: "workflow.research_decision.save",
 	},
 	{
+		canonicalName: "gsd_capture_resolve",
+		aliases: [],
+		schemaId: "workflow.capture.resolve",
+		executorId: "executeCaptureResolve",
+		writePolicy: "write",
+		auditEvent: "workflow.capture.resolve",
+	},
+	{
+		canonicalName: "gsd_capture_complete",
+		aliases: [],
+		schemaId: "workflow.capture.complete",
+		executorId: "executeCaptureComplete",
+		writePolicy: "write",
+		auditEvent: "workflow.capture.complete",
+	},
+	{
 		canonicalName: "gsd_milestone_status",
 		aliases: [],
 		schemaId: "workflow.milestone.status",

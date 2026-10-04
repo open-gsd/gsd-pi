@@ -205,11 +205,11 @@ test("a row queued at the end of a milestone runs after a kill, when the restart
   markCaptureResolved(base, captureId, "quick-task", "run as a quick task", "small fix");
   holdQuickTask(quickTask(captureId), null);
 
-  // The last unit of M001 closes out: the quick task is queued and its capture is marked executed.
+  // The last unit of M001 closes out: the quick task is queued. Its capture is not executed yet.
   const pctx = makePostUnitContext(base, "research-slice", "M001/S01");
   assert.equal(await postUnitPostVerification(pctx), "continue");
   enqueueSidecarItem({ kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
-  assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
+  assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, undefined);
 
   // The process dies. The next start is on M002 and its first close-out queues new work.
   restartProcess(base);
@@ -272,7 +272,7 @@ test("held quick tasks survive a restart and move to the queue one at a time", (
   assert.equal(promoteHeldQuickTask("M001"), null);
 });
 
-test("unit close-out moves one held quick task to the queue and marks its capture executed", async (t) => {
+test("unit close-out moves one held quick task to the queue and does not mark its capture executed", async (t) => {
   const base = makeProject(t);
   process.chdir(base);
   _clearGsdRootCache();
@@ -295,7 +295,11 @@ test("unit close-out moves one held quick task to the queue and marks its captur
   );
   assert.deepEqual(listQueuedSidecarItems().map((item) => item.captureId), [captureId]);
   assert.equal(hasHeldQuickTask(), false);
-  assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
+  assert.equal(
+    loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed,
+    undefined,
+    "only gsd_capture_complete records the outcome",
+  );
 });
 
 test("a session that moves to the next milestone still runs the quick tasks it holds", async (t) => {
@@ -324,7 +328,7 @@ test("a session that moves to the next milestone still runs the quick tasks it h
       [`M002/${captureId}`],
       "the task runs as a unit of the milestone the session runs now",
     );
-    assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
+    assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, undefined);
     settleSidecarItem(queued[0].id);
   }
   assert.equal(hasHeldQuickTask(), false);

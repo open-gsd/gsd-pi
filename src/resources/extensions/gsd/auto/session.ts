@@ -84,7 +84,7 @@ export interface SidecarItem {
   prompt: string;
   /** Model override for hook units (e.g. "anthropic/claude-3-5-sonnet"). */
   model?: string;
-  /** Capture ID for quick-task items (already marked executed at enqueue time). */
+  /** Capture ID for quick-task items. */
   captureId?: string;
 }
 

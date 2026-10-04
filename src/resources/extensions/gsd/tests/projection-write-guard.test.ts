@@ -50,6 +50,7 @@ const PROJECTIONS: Array<[path: string, tool: RegExp]> = [
   [".gsd/REQUIREMENTS.md", /gsd_requirement_save/],
   [".gsd/DECISIONS.md", /gsd_decision_save/],
   [".gsd/KNOWLEDGE.md", /capture_thought/],
+  [".gsd/CAPTURES.md", /gsd_capture_resolve/],
   [".gsd/QUEUE.md", /gsd_milestone_reorder/],
   [".gsd/milestones/M001/slices/S01/S01-REPLAN.md", /gsd_replan_slice/],
   [".gsd/ROADMAP.md", /gsd_plan_milestone/],

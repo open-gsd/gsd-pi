@@ -153,10 +153,14 @@ test("/status reads the paused session from the DB, not paused-session.json", as
 
 // ─── /pause ──────────────────────────────────────────────────────────────────
 
-test("/pause writes a stop capture to CAPTURES.md", async (t) => {
+test("/pause records a stop capture in the database and renders CAPTURES.md", async (t) => {
   const dir = makeBasePath();
   const { sender, messages } = makeCapturingSender();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+  });
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
 
   await handleCommand("/pause", sender, dir);
 
@@ -182,11 +186,18 @@ test("/pause writes a stop capture to CAPTURES.md", async (t) => {
     content.includes("**Classification:** stop"),
     `Expected stop classification in CAPTURES.md, got:\n${content}`,
   );
+
+  // The directive is a database row: /resume clears it with the render deleted.
+  rmSync(capturesPath);
+  await handleCommand("/resume", sender, dir);
+  assert.match(messages[1], /Cleared 1 pause directive\(s\)/);
+  await handleCommand("/resume", sender, dir);
+  assert.match(messages[2], /No pending pause directives found/);
 });
 
 // ─── /resume ─────────────────────────────────────────────────────────────────
 
-test("/resume reports no pending directives when CAPTURES.md is empty", async (t) => {
+test("/resume reports no pending directives when there are no captures", async (t) => {
   const dir = makeBasePath();
   const { sender, messages } = makeCapturingSender();
   t.after(() => rmSync(dir, { recursive: true, force: true }));

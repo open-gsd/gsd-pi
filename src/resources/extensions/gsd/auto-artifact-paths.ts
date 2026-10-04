@@ -254,10 +254,10 @@ export function resolveExpectedArtifactPath(
       return resolveSliceArtifactPath(base, mid, sid!, "REPLAN");
     }
     case "triage-captures":
-      // Verified against CAPTURES.md state in verifyExpectedArtifact.
+      // Verified against the capture rows of the database in verifyExpectedArtifact.
       return null;
     case "quick-task":
-      // Verified against the capture's Executed field in CAPTURES.md.
+      // Verified against the capture's executed row in the database.
       return null;
     case "rewrite-docs":
       return null;
@@ -313,9 +313,9 @@ export function diagnoseExpectedArtifact(
     case "replan-slice":
       return `${relSliceFile(base, mid, sid!, "REPLAN")} + updated ${relSliceFile(base, mid, sid!, "PLAN")}`;
     case "triage-captures":
-      return ".gsd/CAPTURES.md with no pending captures";
+      return "No pending captures in the GSD database (each one classified through gsd_capture_resolve)";
     case "quick-task":
-      return `.gsd/CAPTURES.md capture ${sid ?? "<capture-id>"} marked executed`;
+      return `Capture ${sid ?? "<capture-id>"} recorded as executed in the GSD database through gsd_capture_complete`;
     case "rewrite-docs":
       return "Active overrides resolved in the GSD database + plan documents updated";
     case "reassess-roadmap":

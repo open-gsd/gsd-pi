@@ -142,7 +142,7 @@ The task-bearing planning payloads use camel-case `requiredWorkflowTools` on `gs
 | `scan` | — | — | STACK.md, INTEGRATIONS.md, ARCHITECTURE.md |
 | `debug-diagnose` | memories | memories (INSERT pattern/gotcha), memories (hit_count++) | — |
 | `forensics` | audit_events, gate_runs, turn_git_transactions | — (read-only) | — |
-| `triage-captures` | none (captures are file-only) | none (captures are file-only) | CAPTURES.md |
+| `triage-captures` | workflow_domain_events (`capture.*`) | workflow operations/events/Projection Work (one `capture.resolve` operation per `gsd_capture_resolve` call) | CAPTURES.md (render) |
 | `add-tests` | tasks, slices | — | test files (via code execution) |
 | `heal-skill` | — | — | skill-review-queue.md |
 

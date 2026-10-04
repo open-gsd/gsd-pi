@@ -1910,6 +1910,8 @@ export const executeMilestoneDiscard = noop;
 export const executeMilestoneReorder = noop;
 export const executeMilestoneSetDependencies = noop;
 export const executeResearchDecisionSave = noop;
+export const executeCaptureResolve = noop;
+export const executeCaptureComplete = noop;
 
 export const executeTaskReopen = async (params, projectDir, invocation) => {
   const capturePath = process.env.GSD_TEST_TASK_REOPEN_CAPTURE_PATH;
@@ -2402,6 +2404,8 @@ export const executeMilestoneDiscard = noop;
 export const executeMilestoneReorder = noop;
 export const executeMilestoneSetDependencies = noop;
 export const executeResearchDecisionSave = noop;
+export const executeCaptureResolve = noop;
+export const executeCaptureComplete = noop;
 `;
     writeFileSync(mockModulePath, mockSource, "utf-8");
     process.env.GSD_WORKFLOW_EXECUTORS_MODULE = mockModulePath;

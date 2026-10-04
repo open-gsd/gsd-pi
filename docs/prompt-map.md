@@ -257,7 +257,7 @@ complete-milestone
 | `debug-diagnose.md` | Root-cause analysis for reported bugs. | `capture_thought`, `memory_query` |
 | `debug-session-manager.md` | Manage debug session with checkpoint protocol. Structured return headers. | — |
 | `add-tests.md` | Generate tests for completed slices. | skill activation |
-| `triage-captures.md` | Classify user thoughts captured with `capture_thought`. | `ask_user_questions`, updates `CAPTURES.md` |
+| `triage-captures.md` | Classify user thoughts captured with `capture_thought`. | `ask_user_questions`, `gsd_capture_resolve` |
 | `queue.md` | Add future milestones to queue. | `gsd_milestone_generate_id`, `gsd_summary_save(CONTEXT)`, `gsd_milestone_set_dependencies`; `QUEUE.md` is rendered from the DB |
 
 ### 5h. Workflow Execution (one-off workflows, not milestone-driven)
@@ -398,7 +398,7 @@ reassess-roadmap             →  updates <NN>-ROADMAP.md (slice statuses)
 validate-milestone           →  validation verdict (DB)
 complete-milestone           →  .gsd/phases/<NN-slug>/<NN>-SUMMARY.md
 
-triage-captures              →  .gsd/CAPTURES.md (classification metadata)
+triage-captures              →  capture.resolved events (gsd_capture_resolve); .gsd/CAPTURES.md is the render
 queue                        →  .gsd/QUEUE.md, updates PROJECT.md
 scan                         →  {{outputDir}}/STACK.md, INTEGRATIONS.md, ARCHITECTURE.md
 rewrite-docs                 →  DECISIONS.md, task plans, REQUIREMENTS.md, PROJECT.md

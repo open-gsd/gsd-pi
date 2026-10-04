@@ -57,10 +57,13 @@ const EXPECTED_KNOWN_UNIT_TYPES = [
   "research-project",
 ];
 
-// The contract table carried two keys KNOWN_UNIT_TYPES never had (variants)
-// and lacked two it did have (sidecars without contracts).
+// The contract table carries two keys KNOWN_UNIT_TYPES never had (variants).
 const EXPECTED_CONTRACT_ONLY_TYPES = ["discuss-slice", "execute-task-simple"];
-const EXPECTED_CONTRACT_LESS_TYPES = ["triage-captures", "quick-task"];
+// The capture sidecars each have the one capture tool that records their outcome.
+const EXPECTED_SIDECAR_CONTRACTS: Record<string, string> = {
+  "triage-captures": "gsd_capture_resolve",
+  "quick-task": "gsd_capture_complete",
+};
 
 const EXPECTED_EXECUTE_TASK_SET = ["execute-task", "execute-task-simple", "reactive-execute"];
 const EXPECTED_SECTION_CLOSE_SET = [
@@ -141,18 +144,20 @@ test("KNOWN_UNIT_TYPES derives exactly the pre-registry list, in order", () => {
   assert.deepEqual([...KNOWN_UNIT_TYPES], EXPECTED_KNOWN_UNIT_TYPES);
 });
 
-test("UNIT_TOOL_CONTRACTS keeps the pre-registry key set, asymmetries included", () => {
+test("UNIT_TOOL_CONTRACTS has a contract for every unit type and variant", () => {
   const contractKeys = Object.keys(UNIT_TOOL_CONTRACTS);
   for (const variant of EXPECTED_CONTRACT_ONLY_TYPES) {
     assert.ok(contractKeys.includes(variant), `variant ${variant} must keep its contract`);
     assert.ok(!KNOWN_UNIT_TYPES.includes(variant as never), `${variant} must stay out of KNOWN_UNIT_TYPES`);
   }
-  for (const sidecar of EXPECTED_CONTRACT_LESS_TYPES) {
-    assert.ok(!contractKeys.includes(sidecar), `${sidecar} must stay contract-less`);
-    assert.equal(getUnitToolSurfaceContract(sidecar), undefined);
+  for (const [sidecar, tool] of Object.entries(EXPECTED_SIDECAR_CONTRACTS)) {
+    assert.deepEqual(getUnitToolSurfaceContract(sidecar), {
+      allowedGsdTools: [tool, "gsd_exec", "gsd_exec_search", "gsd_resume"],
+      requiredWorkflowTools: [tool],
+    });
   }
   const expectedKeys = [
-    ...EXPECTED_KNOWN_UNIT_TYPES.filter((t) => !EXPECTED_CONTRACT_LESS_TYPES.includes(t)),
+    ...EXPECTED_KNOWN_UNIT_TYPES,
     ...EXPECTED_CONTRACT_ONLY_TYPES,
   ].sort();
   assert.deepEqual([...contractKeys].sort(), expectedKeys);

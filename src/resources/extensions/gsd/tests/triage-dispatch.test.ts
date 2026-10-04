@@ -14,6 +14,7 @@ import {
   markCaptureExecuted,
   markCaptureResolved,
 } from "../captures.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { checkPostUnitHooks } from "../post-unit-hooks.ts";
 import {
   _shouldAttemptPlanRegenerationForTest,
@@ -101,6 +102,7 @@ test("quick-task dispatch guard requires a held quick task and avoids quick-task
 
 test("capture lifecycle exposes pending, replan, deferred, and executed states", () => {
   const base = makeProject();
+  openDatabase(":memory:");
   try {
     const pendingId = appendCapture(base, "Need a quick follow-up.");
     const replanId = appendCapture(base, "Plan needs a new task.");
@@ -117,6 +119,7 @@ test("capture lifecycle exposes pending, replan, deferred, and executed states",
     assert.equal(loadReplanCaptures(base).some((entry) => entry.id === replanId), true);
     assert.equal(loadDeferredCaptures(base).some((entry) => entry.id === deferId), true);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -133,4 +136,5 @@ test("quick-task prompt carries capture identity and completion instruction", ()
   assert.match(prompt, /CAP-quick/);
   assert.match(prompt, /Fix the CLI typo/);
   assert.match(prompt, /Quick task complete/);
+  assert.match(prompt, /`gsd_capture_complete` with `captureId: "CAP-quick"`/);
 });

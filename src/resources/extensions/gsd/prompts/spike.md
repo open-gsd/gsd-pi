@@ -46,7 +46,7 @@ Write `.gsd/spikes/{{spikeId}}/README.md` with:
 - Conclusions and recommendations for the real build
 - Any conventions discovered worth recording (stack, patterns)
 
-Append a one-line summary to `.gsd/CAPTURES.md` linking the README so the spike is discoverable.
+Give the developer a one-line summary that links the README, ready to save with `/gsd capture`, so the spike is discoverable. Do not edit `.gsd/CAPTURES.md`; it is rendered from the database.
 
 ### 8. Frontier mode (only when frontier flag is active)
 

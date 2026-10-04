@@ -112,6 +112,8 @@ The workflow MCP surface includes:
 - `gsd_milestone_reorder`
 - `gsd_milestone_set_dependencies`
 - `gsd_research_decision_save`
+- `gsd_capture_resolve`
+- `gsd_capture_complete`
 - `gsd_milestone_status`
 - `gsd_checkpoint_db`
 - `gsd_journal_query`

@@ -11,14 +11,17 @@ import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 function makeProject(t: { after: (fn: () => void) => void }): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-sidecar-artifact-"));
+  // Captures are database rows; the sidecar checks read only the database.
+  openDatabase(":memory:");
   t.after(() => {
+    closeDatabase();
     drainLogs();
     rmSync(base, { recursive: true, force: true });
   });
   return base;
 }
 
-test("triage-captures verification passes when CAPTURES.md is absent", (t) => {
+test("triage-captures verification passes when there are no captures", (t) => {
   const base = makeProject(t);
   drainLogs();
 
@@ -54,7 +57,7 @@ test("triage-captures verification fails while pending captures remain", (t) => 
   );
   const logs = drainLogs();
   assert.equal(logs.length, 1);
-  assert.match(logs[0].message, /1 pending capture\(s\) remain in CAPTURES\.md/);
+  assert.match(logs[0].message, /1 pending capture\(s\) remain in the database/);
 });
 
 test("quick-task verification passes when the capture is marked executed", (t) => {
@@ -83,10 +86,10 @@ test("quick-task verification fails when the capture is not marked executed", (t
   );
   const logs = drainLogs();
   assert.equal(logs.length, 1);
-  assert.match(logs[0].message, new RegExp(`capture ${captureId} not found or not marked executed`));
+  assert.match(logs[0].message, new RegExp(`capture ${captureId} not found or not recorded as executed by gsd_capture_complete`));
 });
 
-test("sidecar unit path resolver documents CAPTURES.md state verification", (t) => {
+test("sidecar units have no artifact path: they are verified against capture rows", (t) => {
   const base = makeProject(t);
 
   assert.equal(
@@ -101,8 +104,6 @@ test("sidecar unit path resolver documents CAPTURES.md state verification", (t) 
 
 test("unknown artifact contract warning distinguishes missing contracts from missing dirs", (t) => {
   const base = makeProject(t);
-  openDatabase(":memory:");
-  t.after(closeDatabase);
   drainLogs();
 
   assert.equal(

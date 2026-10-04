@@ -28,7 +28,7 @@ When the conversation reaches natural conclusions (or the developer signals read
 
 | Type | Destination (gsd-pi) | When to suggest |
 |------|----------------------|-----------------|
-| Capture | `.gsd/CAPTURES.md` (append) | Observations, context, decisions worth remembering |
+| Capture | `/gsd capture` | Observations, context, decisions worth remembering |
 | Backlog item | `/gsd backlog add` | Forward-looking ideas not ready for a milestone |
 | Knowledge | `/gsd knowledge lesson` | A lesson learned worth persisting |
 | Research | `/gsd dispatch research` | Open questions needing deeper investigation |

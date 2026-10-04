@@ -1085,6 +1085,85 @@ describe('createMcpServer tool registration', () => {
     assert.deepEqual(knowledge.readMetadata, { source: 'projection', authority: 'projection-fallback' });
   });
 
+  it('registered gsd_captures returns database rows when CAPTURES.md is stale', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-captures-handler-'));
+    const bridge = await importWorkflowBridgeFixture();
+    const captures = await import(
+      new URL('../../../src/resources/extensions/gsd/captures.js', import.meta.url).href
+    ) as { appendCapture(basePath: string, text: string): string };
+    t.after(() => {
+      bridge.closeDatabase();
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+    mkdirSync(join(projectDir, '.gsd'));
+    assert.equal(bridge.openDatabase(join(projectDir, '.gsd', 'gsd.db')), true);
+    const id = captures.appendCapture(projectDir, 'Database capture');
+    bridge.closeDatabase();
+    // A hand edit: the pending capture marked resolved, and a section the database does not hold.
+    writeFileSync(
+      join(projectDir, '.gsd', 'CAPTURES.md'),
+      [
+        '# Captures',
+        '',
+        `### ${id}`,
+        '**Text:** Database capture',
+        '**Captured:** 2026-01-01T00:00:00.000Z',
+        '**Status:** resolved',
+        '**Classification:** stop',
+        '',
+        '### CAP-byhand01',
+        '**Text:** File-only capture',
+        '**Captured:** 2026-01-01T00:00:00.000Z',
+        '**Status:** pending',
+        '',
+      ].join('\n'),
+    );
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const capturesTool = (server as any)._registeredTools?.gsd_captures;
+    assert.ok(capturesTool, 'gsd_captures should be registered');
+
+    const result = await capturesTool.handler({ projectDir });
+    const read = JSON.parse(result.content[0].text);
+    assert.deepEqual(read.counts, { total: 1, pending: 1, resolved: 0, actionable: 0 });
+    assert.deepEqual(
+      read.captures.map((capture: { id: string; status: string; classification: string | null }) =>
+        [capture.id, capture.status, capture.classification]),
+      [[id, 'pending', null]],
+    );
+    assert.equal(read.readMetadata, undefined, 'a database read is not labelled as a fallback');
+  });
+
+  it('registered gsd_captures labels the file read as a projection fallback when the database is unavailable', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-captures-fallback-'));
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    mkdirSync(join(projectDir, '.gsd'));
+    writeFileSync(
+      join(projectDir, '.gsd', 'CAPTURES.md'),
+      ['# Captures', '', '### CAP-0000aaaa', '**Text:** File capture', '**Captured:** 2026-01-01T00:00:00.000Z', '**Status:** pending', ''].join('\n'),
+    );
+
+    const previousExecutors = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const previousWriteGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    const previousBridgeDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+    t.after(() => {
+      restoreEnvironmentValue('GSD_WORKFLOW_EXECUTORS_MODULE', previousExecutors);
+      restoreEnvironmentValue('GSD_WORKFLOW_WRITE_GATE_MODULE', previousWriteGate);
+      restoreEnvironmentValue('GSD_WORKFLOW_BRIDGE_TEST_DISABLE', previousBridgeDisable);
+    });
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const capturesTool = (server as any)._registeredTools?.gsd_captures;
+    const result = await capturesTool.handler({ projectDir });
+    const read = JSON.parse(result.content[0].text);
+
+    assert.deepEqual(read.captures.map((capture: { id: string }) => capture.id), ['CAP-0000aaaa']);
+    assert.deepEqual(read.readMetadata, { source: 'projection', authority: 'projection-fallback' });
+  });
+
   // Flat-phase fixture mirroring the extension renderer's output:
   // .gsd/phases/NN-slug/NN-ROADMAP.md (no .gsd/milestones/ at all).
   function makeFlatPhaseProject(): string {

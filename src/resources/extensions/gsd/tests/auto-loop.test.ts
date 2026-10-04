@@ -1914,8 +1914,13 @@ test("stop-guard-error is adjudicated by the shared loop liveness boundary", asy
   const pi = makeMockPi();
   const s = makeLoopSession();
   openLoopDatabase(t, s);
-  mkdirSync(join(s.basePath, ".gsd", "CAPTURES.md"));
-  const deps = makeMockDeps({ adjudicateNonAdvancingOutcome: undefined });
+  // A stop directive whose pause fails: the guard must fail closed.
+  const captureId = appendCapture(s.basePath, "stop");
+  markCaptureResolved(s.basePath, captureId, "stop", "halt", "stop", "M001");
+  const deps = makeMockDeps({
+    adjudicateNonAdvancingOutcome: undefined,
+    pauseAuto: async () => { throw new Error("pause failed"); },
+  });
 
   await autoLoop(ctx, pi, s, deps);
   const first = getOpenWedge(realpathSync(s.basePath));

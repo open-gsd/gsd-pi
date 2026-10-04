@@ -46,7 +46,7 @@ Write `.gsd/sketches/{{sketchId}}/README.md` with:
 - Design decisions captured and their rationale
 - Recommendations for the real implementation
 
-Append a one-line summary to `.gsd/CAPTURES.md` linking the README.
+Give the developer a one-line summary that links the README, ready to save with `/gsd capture`. Do not edit `.gsd/CAPTURES.md`; it is rendered from the database.
 
 ### 8. Frontier mode (only when frontier flag is active)
 

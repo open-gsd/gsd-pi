@@ -2311,6 +2311,8 @@ error names the row and `/gsd db adopt`.
 | `gsd_research_decision_save` | project_authority, workflow operations | project_authority, workflow operations/events/Projection Work (one `project.setup.record` operation; the deep project setup gate reads the newest event) | STATE.md |
 | `gsd_save_gate_result` | project_authority, workflow_operations, quality_gates | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, quality_gates, gate_runs (one `gate-result.save` operation) | Slice plan (projection) |
 | `capture_thought` | project_authority, workflow_operations, memories | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, memories (one `knowledge.capture` operation for `rule`, `pattern` or `gotcha`; one `memory.capture` operation for other categories) | KNOWLEDGE.md, rendered after each `rule`, `pattern` or `gotcha` capture |
+| `gsd_capture_resolve` | project_authority, workflow_operations, workflow_domain_events (`capture.*`), milestones (active milestone) | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work (one `capture.resolve` operation) | CAPTURES.md, rendered after the operation |
+| `gsd_capture_complete` | project_authority, workflow_operations, workflow_domain_events (`capture.*`) | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work (one `capture.execute` operation; none when the capture is already executed) | CAPTURES.md, rendered after the operation |
 | `memory_query` | memories, memories_fts, memory_embeddings | memories (hit_count++) | — |
 
 Slice lifecycle writers own the taskless Q8 companion gate. Planning or

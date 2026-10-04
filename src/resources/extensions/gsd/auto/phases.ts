@@ -93,19 +93,13 @@ export async function runGuards(
       // Pause first — Ensures auto-mode stops even if later steps fail
       await deps.pauseAuto(ctx, pi);
 
-      // For backtrack captures, write the backtrack trigger after pausing
-      if (isBacktrack) {
-        try {
-          const { executeBacktrack } = await import("../triage-resolution.js");
-          executeBacktrack(s.basePath, mid, first);
-        } catch (e) {
-          debugLog("guards", { phase: "backtrack-execution-error", error: String(e) });
-        }
-      }
-
-      // Mark captures as executed only after successful pause/transition
+      // Mark captures as executed only after successful pause/transition.
+      // A backtrack capture records the milestone it leaves and its target.
+      const { resolveBacktrackTarget } = await import("../triage-resolution.js");
       for (const cap of stopCaptures) {
-        markCaptureExecuted(s.basePath, cap.id);
+        markCaptureExecuted(s.basePath, cap.id, cap.classification === "backtrack"
+          ? { backtrackFrom: mid, backtrackTarget: resolveBacktrackTarget(mid, cap) }
+          : {});
       }
 
       debugLog("autoLoop", { phase: "exit", reason: isBacktrack ? "user-backtrack" : "user-stop" });

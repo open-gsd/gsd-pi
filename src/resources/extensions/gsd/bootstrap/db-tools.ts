@@ -2845,7 +2845,9 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		| "executeMilestoneDiscard"
 		| "executeMilestoneReorder"
 		| "executeMilestoneSetDependencies"
-		| "executeResearchDecisionSave";
+		| "executeResearchDecisionSave"
+		| "executeCaptureResolve"
+		| "executeCaptureComplete";
 
 	const milestoneHierarchyExecute =
 		(toolName: string, executor: MilestoneHierarchyExecutor) =>
@@ -2993,6 +2995,44 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			"gsd_research_decision_save",
 			"executeResearchDecisionSave",
 		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_capture_resolve",
+		label: "Resolve Capture",
+		description:
+			"Classify one user capture (triage) in one SQLite Domain Operation. CAPTURES.md is rendered from the database.",
+		promptSnippet: "Classify a user capture during triage",
+		promptGuidelines: [
+			"Use gsd_capture_resolve once per capture after the classification is confirmed. Never edit .gsd/CAPTURES.md; the database is the only source of capture state.",
+			"The tool only records the classification. It does not carry out the resolution.",
+		],
+		parameters: Type.Object({
+			captureId: Type.String({ minLength: 1, description: "Capture ID (e.g. CAP-1a2b3c4d)" }),
+			classification: StringEnum(
+				["quick-task", "inject", "defer", "replan", "note", "stop", "backtrack"],
+				{ description: "Confirmed classification" },
+			),
+			resolution: Type.String({ minLength: 1, description: "What will happen (for backtrack, name the target milestone ID)" }),
+			rationale: Type.String({ minLength: 1, description: "Why this classification" }),
+		}),
+		execute: milestoneHierarchyExecute("gsd_capture_resolve", "executeCaptureResolve"),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_capture_complete",
+		label: "Complete Quick-Task Capture",
+		description:
+			"Record the outcome of a quick-task capture in one SQLite Domain Operation. The capture counts as executed only after this call.",
+		promptSnippet: "Record the outcome of a quick-task capture",
+		promptGuidelines: [
+			"Call gsd_capture_complete once when the quick task is done, or when the issue was already resolved and no change was needed.",
+		],
+		parameters: Type.Object({
+			captureId: Type.String({ minLength: 1, description: "Capture ID (e.g. CAP-1a2b3c4d)" }),
+			outcome: Type.String({ minLength: 1, description: "What was changed, or why no change was needed" }),
+		}),
+		execute: milestoneHierarchyExecute("gsd_capture_complete", "executeCaptureComplete"),
 	});
 
 	// ─── gsd_save_gate_result ──────────────────────────────────────────────
