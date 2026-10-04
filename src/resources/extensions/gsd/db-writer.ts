@@ -26,6 +26,7 @@ import { createMemory } from './memory-store.js';
 import { synthesizeDecisionMemoryContent } from './memory-backfill.js';
 import { executeRecordDomainOperation } from './record-domain-operation.js';
 import { internalPlanningInvocation, type PlanningInvocation } from './planning-invocation.js';
+import { loadWriteGateSnapshot, shouldBlockRootArtifactSaveInSnapshot } from './bootstrap/write-gate.js';
 
 // ─── Freeform Detection ───────────────────────────────────────────────────
 
@@ -346,6 +347,16 @@ export interface SaveRequirementFields {
 }
 
 /**
+ * A requirement write changes REQUIREMENTS.md, so it waits for a pending
+ * discussion gate. The check is here, in the writer both transports call, so
+ * the native tool and the workflow MCP tool enforce the same rule.
+ */
+function assertRequirementsWriteAllowed(basePath: string): void {
+  const guard = shouldBlockRootArtifactSaveInSnapshot(loadWriteGateSnapshot(basePath), 'REQUIREMENTS');
+  if (guard.block) throw new Error(guard.reason ?? 'requirements write blocked');
+}
+
+/**
  * Save a new requirement through the requirement.save Domain Operation and
  * regenerate REQUIREMENTS.md. The ID is allocated inside the operation, so a
  * replay with the same idempotency key returns the original ID and writes
@@ -358,6 +369,7 @@ export async function saveRequirementToDb(
   basePath: string,
   invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<{ id: string }> {
+  assertRequirementsWriteAllowed(basePath);
   try {
     const db = await import('./gsd-db.js');
 
@@ -767,6 +779,7 @@ export async function updateRequirementInDb(
   basePath: string,
   invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<void> {
+  assertRequirementsWriteAllowed(basePath);
   try {
     const db = await import('./gsd-db.js');
 
