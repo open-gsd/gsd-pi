@@ -2209,7 +2209,12 @@ and fails closed. Hierarchy merging uses identity-preserving UPSERTs and does
 not overwrite a status protected by a newer canonical lifecycle head. When the
 main lifecycle is newer, worktree planning fields may still merge, but main-side
 completion summaries, verification results, blocker/escalation facts, and other
-execution evidence remain authoritative.
+execution evidence remain authoritative. The merge runs in one
+`lifecycle.backfill` Domain Operation with one revision bump. Each hierarchy
+row that the merge inserts gets its lifecycle row in that operation, by the
+rules of the lifecycle backfill. A row that main already held keeps its
+adoption state. An inserted row with an unknown raw status refuses the whole
+merge as a canonical divergence, so the worktree is kept.
 
 ---
 

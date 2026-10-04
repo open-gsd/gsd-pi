@@ -257,6 +257,72 @@ test("worktree reconcile updates adopted hierarchy in place without deleting lif
   });
 });
 
+function lifecycleRows(): Array<Record<string, unknown>> {
+  return db().prepare(`
+    SELECT lifecycle.item_kind, lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id,
+           lifecycle.lifecycle_status, lifecycle.last_project_revision, operation.operation_type
+    FROM workflow_item_lifecycles lifecycle
+    JOIN workflow_operations operation ON operation.operation_id = lifecycle.last_operation_id
+    ORDER BY lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
+  `).all().map((row) => ({ ...row }));
+}
+
+function projectRevision(): number {
+  return Number(db().prepare("SELECT revision FROM project_authority WHERE singleton = 1").get()?.["revision"]);
+}
+
+test("worktree reconcile adopts every hierarchy row it inserts in one Domain Operation", (t) => {
+  const mainDb = openFixture(t);
+  const worktreeDb = join(tempDir("gsd-reconcile-adopt-worktree-"), "gsd.db");
+
+  closeDatabase();
+  assert.equal(copyWorktreeDb(mainDb, worktreeDb), true);
+  assert.equal(openDatabase(worktreeDb), true);
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Worktree task", status: "pending" });
+  insertSlice({ milestoneId: "M001", id: "S02", title: "Worktree slice", status: "pending", sequence: 2 });
+  insertMilestone({ id: "M002", title: "Worktree milestone", status: "queued" });
+  closeDatabase();
+
+  assert.equal(openDatabase(mainDb), true);
+  const revision = projectRevision();
+  reconcileWorktreeDb(mainDb, worktreeDb);
+
+  assert.equal(projectRevision(), revision + 1, "the merge is one Domain Operation with one revision bump");
+  // The rows that main held before the merge (M001, S01, T01) keep their adoption state.
+  const adopted = { last_project_revision: revision + 1, operation_type: "lifecycle.backfill" };
+  assert.deepEqual(lifecycleRows(), [
+    { item_kind: "task", milestone_id: "M001", slice_id: "S01", task_id: "T02", lifecycle_status: "ready", ...adopted },
+    { item_kind: "slice", milestone_id: "M001", slice_id: "S02", task_id: null, lifecycle_status: "pending", ...adopted },
+    { item_kind: "milestone", milestone_id: "M002", slice_id: null, task_id: null, lifecycle_status: "ready", ...adopted },
+  ]);
+});
+
+test("worktree reconcile keeps a row with an unknown status in the worktree database", (t) => {
+  const mainDb = openFixture(t);
+  const worktreeDb = join(tempDir("gsd-reconcile-unknown-worktree-"), "gsd.db");
+
+  closeDatabase();
+  assert.equal(copyWorktreeDb(mainDb, worktreeDb), true);
+  assert.equal(openDatabase(worktreeDb), true);
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Worktree task", status: "not-a-status" });
+  db().prepare("UPDATE milestones SET title = 'Must not merge' WHERE id = 'M001'").run();
+  closeDatabase();
+
+  assert.equal(openDatabase(mainDb), true);
+  const before = hierarchyIdentitySnapshot();
+  const revision = projectRevision();
+  assert.throws(
+    () => reconcileWorktreeDb(mainDb, worktreeDb),
+    /canonical worktree divergence.*unknown legacy statuses: task M001\/S01\/T02="not-a-status"/,
+  );
+  assert.deepEqual(hierarchyIdentitySnapshot(), before, "a refused adoption must roll back the whole merge");
+  assert.equal(projectRevision(), revision);
+  assert.equal(
+    db().prepare("SELECT 1 FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'").get(),
+    undefined,
+  );
+});
+
 test("worktree reconcile fails closed when canonical authority advanced in the worktree", (t) => {
   const mainDb = openFixture(t);
   adoptHierarchy();

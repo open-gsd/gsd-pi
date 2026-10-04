@@ -10,6 +10,10 @@ import { GSDError, GSD_STALE_STATE } from "../../errors.js";
 import { logError, logWarning } from "../../workflow-logger.js";
 import { getDbOrNull, openDatabase, transaction } from "../engine.js";
 import { TERMINAL_STATUS_SQL } from "../sql-constants.js";
+import {
+  LifecycleBackfillRefusedError,
+  mergeLegacyRowsWithAdoption,
+} from "../../lifecycle-backfill-domain-operation.js";
 
 export class CanonicalWorktreeDivergenceError extends GSDError {
   constructor(surfaces: readonly string[]) {
@@ -326,7 +330,9 @@ export function reconcileWorktreeDb(
            END`
         : "COALESCE(m.target_repositories, '[]')";
 
-      transaction(() => {
+      // One Domain Operation: the merge commits with a revision bump, and
+      // every hierarchy row it inserts gets its lifecycle row with it.
+      mergeLegacyRowsWithAdoption("worktree-reconcile", () => transaction(() => {
         // Join the target decisions so we can prefer an existing main.source
         // when the worktree predates v16 — otherwise a write-through reconcile
         // would clobber 'escalation'-sourced decisions with the literal default.
@@ -707,13 +713,16 @@ export function reconcileWorktreeDb(
           `).run());
         }
 
-      });
+        return { ...merged };
+      }));
       return { ...merged, conflicts };
     } finally {
       try { adapter.exec("DETACH DATABASE wt"); } catch (e) { logWarning("db", `detach worktree DB failed: ${(e as Error).message}`); }
     }
   } catch (err) {
     if (err instanceof CanonicalWorktreeDivergenceError) throw err;
+    // A merged row that cannot be adopted stays in the worktree database.
+    if (err instanceof LifecycleBackfillRefusedError) throw new CanonicalWorktreeDivergenceError([err.message]);
     logError("db", "worktree DB reconciliation failed", { error: (err as Error).message });
     return { ...zero, conflicts };
   }

@@ -396,9 +396,7 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
   const milestoneIds = [
     ...new Set([...preview.items, ...preview.waiverRepairs].map((item) => item.milestoneId)),
   ].sort();
-  let waivers = 0;
-  const findings: string[] = [];
-  const cancelledUnderCompletedParent: string[] = [];
+  const report: AdoptionReport = { waivers: 0, findings: [], cancelledUnderCompletedParent: [] };
   const operation = executeDomainOperation({
     operationType: LIFECYCLE_BACKFILL_OPERATION_TYPE,
     idempotencyKey: `command/lifecycle-backfill/${fence.revision}`,
@@ -408,63 +406,7 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
     sourceTransport: "internal",
     payload: { itemCount: preview.items.length, waiverRepairCount: preview.waiverRepairs.length },
   }, (context) => {
-    const events: DomainOperationEventInput[] = preview.items.map((item) => {
-      const identity = item.itemKind === "task"
-        ? { itemKind: "task" as const, milestoneId: item.milestoneId, sliceId: item.sliceId!, taskId: item.taskId! }
-        : item.itemKind === "slice"
-          ? { itemKind: "slice" as const, milestoneId: item.milestoneId, sliceId: item.sliceId! }
-          : { itemKind: "milestone" as const, milestoneId: item.milestoneId };
-      const lifecycle = adoptOrTransitionLifecycle(context, { ...identity, lifecycleStatus: item.lifecycleStatus });
-      if (item.projectedLegacyStatus !== null) projectLegacy(context, item, item.projectedLegacyStatus);
-      let waiverId: string | null = null;
-      if (item.lifecycleStatus === "cancelled") {
-        waiverId = grantLegacyAttestedCancellationWaiver(context, {
-          lifecycleId: lifecycle.lifecycleId,
-          itemKind: item.itemKind,
-          milestoneId: item.milestoneId,
-          sliceId: item.sliceId,
-          taskId: item.taskId,
-          rationale: `Legacy-attested cancellation adopted by lifecycle backfill ` +
-            `(raw status ${JSON.stringify(item.rawStatus)}, rule ${item.rule})`,
-          grantedByActorId: "lifecycle-backfill",
-        });
-        waivers++;
-      }
-      let finding: string | null = null;
-      if (item.rule === "legacy-complete-unproven") {
-        finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
-          `without completion evidence; adopted as ${item.lifecycleStatus}`;
-        findings.push(finding);
-      } else if (item.rule === "legacy-complete-under-completed-parent") {
-        finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
-          `without completion evidence under a completed parent; adopted as completed (unverified legacy)`;
-        findings.push(finding);
-      } else if (item.rule === "cancelled-under-completed-parent") {
-        finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
-          `under a completed parent; adopted as cancelled`;
-        cancelledUnderCompletedParent.push(finding);
-      }
-      const payload: { [key: string]: DomainJsonValue } = {
-        lifecycleId: lifecycle.lifecycleId,
-        rawStatus: item.rawStatus,
-        completedAt: item.completedAt,
-        lifecycleStatus: item.lifecycleStatus,
-        rule: item.rule,
-        evidence: item.rule === "legacy-complete-evidenced" || item.rule === "legacy-complete-under-completed-parent"
-          ? "unverified-legacy"
-          : null,
-        projectedLegacyStatus: item.projectedLegacyStatus,
-        waiverId,
-        finding,
-      };
-      return {
-        eventType: LIFECYCLE_BACKFILLED_EVENT_TYPE,
-        entityType: item.itemKind,
-        entityId: rowLabel(item),
-        payload,
-        destinations: ["db"],
-      };
-    });
+    const events: DomainOperationEventInput[] = preview.items.map((item) => adoptItem(context, item, report));
     for (const repair of preview.waiverRepairs) {
       const rule = "adopted-cancelled-without-waiver";
       const waiverId = grantLegacyAttestedCancellationWaiver(context, {
@@ -477,7 +419,7 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
           `(raw status ${JSON.stringify(repair.rawStatus)}, rule ${rule})`,
         grantedByActorId: "lifecycle-backfill",
       });
-      waivers++;
+      report.waivers++;
       events.push({
         eventType: LIFECYCLE_BACKFILLED_EVENT_TYPE,
         entityType: repair.itemKind,
@@ -508,10 +450,124 @@ export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResul
   return {
     operationId: operation.operationId,
     adopted: preview.items.length,
-    waivers,
-    findings,
-    cancelledUnderCompletedParent,
+    ...report,
   };
+}
+
+type AdoptionReport = Pick<LifecycleBackfillResult, "waivers" | "findings" | "cancelledUnderCompletedParent">;
+
+/** Adopt one classified item inside the Domain Operation of the caller. Returns its event. */
+function adoptItem(
+  context: Parameters<typeof adoptOrTransitionLifecycle>[0],
+  item: LifecycleBackfillItem,
+  report: AdoptionReport,
+): DomainOperationEventInput {
+    const identity = item.itemKind === "task"
+      ? { itemKind: "task" as const, milestoneId: item.milestoneId, sliceId: item.sliceId!, taskId: item.taskId! }
+      : item.itemKind === "slice"
+        ? { itemKind: "slice" as const, milestoneId: item.milestoneId, sliceId: item.sliceId! }
+        : { itemKind: "milestone" as const, milestoneId: item.milestoneId };
+    const lifecycle = adoptOrTransitionLifecycle(context, { ...identity, lifecycleStatus: item.lifecycleStatus });
+    if (item.projectedLegacyStatus !== null) projectLegacy(context, item, item.projectedLegacyStatus);
+    let waiverId: string | null = null;
+    if (item.lifecycleStatus === "cancelled") {
+      waiverId = grantLegacyAttestedCancellationWaiver(context, {
+        lifecycleId: lifecycle.lifecycleId,
+        itemKind: item.itemKind,
+        milestoneId: item.milestoneId,
+        sliceId: item.sliceId,
+        taskId: item.taskId,
+        rationale: `Legacy-attested cancellation adopted by lifecycle backfill ` +
+          `(raw status ${JSON.stringify(item.rawStatus)}, rule ${item.rule})`,
+        grantedByActorId: "lifecycle-backfill",
+      });
+      report.waivers++;
+    }
+    let finding: string | null = null;
+    if (item.rule === "legacy-complete-unproven") {
+      finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
+        `without completion evidence; adopted as ${item.lifecycleStatus}`;
+      report.findings.push(finding);
+    } else if (item.rule === "legacy-complete-under-completed-parent") {
+      finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
+        `without completion evidence under a completed parent; adopted as completed (unverified legacy)`;
+      report.findings.push(finding);
+    } else if (item.rule === "cancelled-under-completed-parent") {
+      finding = `${item.itemKind} ${rowLabel(item)} was legacy ${JSON.stringify(item.rawStatus)} ` +
+        `under a completed parent; adopted as cancelled`;
+      report.cancelledUnderCompletedParent.push(finding);
+    }
+    const payload: { [key: string]: DomainJsonValue } = {
+      lifecycleId: lifecycle.lifecycleId,
+      rawStatus: item.rawStatus,
+      completedAt: item.completedAt,
+      lifecycleStatus: item.lifecycleStatus,
+      rule: item.rule,
+      evidence: item.rule === "legacy-complete-evidenced" || item.rule === "legacy-complete-under-completed-parent"
+        ? "unverified-legacy"
+        : null,
+      projectedLegacyStatus: item.projectedLegacyStatus,
+      waiverId,
+      finding,
+    };
+    return {
+      eventType: LIFECYCLE_BACKFILLED_EVENT_TYPE,
+      entityType: item.itemKind,
+      entityId: rowLabel(item),
+      payload,
+      destinations: ["db"],
+    };
+}
+
+/**
+ * Run `merge`, which copies legacy rows from another database (a
+ * worktree-local gsd.db) into the open one, and adopt every hierarchy row it
+ * inserted, in one lifecycle.backfill Domain Operation. The merge and the
+ * adoption commit together with one revision bump, so a merged row never
+ * exists without its lifecycle row. A row that was in the database before the
+ * merge keeps its adoption state. `merge` returns the payload of the
+ * `legacy.merged` event. Refuses, and writes nothing, when an inserted row
+ * has a raw status that is not in the one legacy map.
+ */
+export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJsonValue): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: LIFECYCLE_BACKFILL_OPERATION_TYPE,
+    idempotencyKey: `${source}/lifecycle-backfill/${fence.revision}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "system",
+    sourceTransport: "internal",
+    payload: { source },
+  }, (context) => {
+    const before = new Set(loadHierarchy().map((row) => `${row.itemKind} ${rowLabel(row)}`));
+    const merged = merge();
+    const preview = previewLifecycleBackfill();
+    const unknown = preview.unknownStatuses.filter((entry) => !before.has(entry.row));
+    if (unknown.length > 0) {
+      throw new LifecycleBackfillRefusedError(
+        `lifecycle backfill refused: unknown legacy statuses: ${
+          unknown.map((entry) => `${entry.row}=${JSON.stringify(entry.rawStatus)}`).join(", ")
+        }`,
+      );
+    }
+    const inserted = preview.items.filter((item) => !before.has(`${item.itemKind} ${rowLabel(item)}`));
+    const report: AdoptionReport = { waivers: 0, findings: [], cancelledUnderCompletedParent: [] };
+    return {
+      events: [
+        { eventType: "legacy.merged", entityType: "project", entityId: source, payload: merged, destinations: ["db"] },
+        ...inserted.map((item) => adoptItem(context, item, report)),
+      ],
+      projections: [
+        { projectionKey: "state", projectionKind: "state", rendererVersion: "1" },
+        ...[...new Set(inserted.map((item) => item.milestoneId))].sort().map((milestoneId) => ({
+          projectionKey: `lifecycle/${milestoneId}`.toLowerCase(),
+          projectionKind: MILESTONE_LIFECYCLE_PROJECTION_KIND,
+          rendererVersion: "1",
+        })),
+      ],
+    };
+  });
 }
 
 /** Number of milestone, slice and task rows with no lifecycle row (doctor). */
