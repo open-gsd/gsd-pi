@@ -140,6 +140,62 @@ describe("UAT evidence is judged from exec_runs rows", () => {
     assert.match(result.error.message, /recorded in uat:M001:S01:attempt-1, not in this run \(uat:M001:S01:attempt-2\)/);
   });
 
+  test("a save cannot name an earlier attempt to make its old evidence count", async () => {
+    const firstAttemptRun = await uatExec("S01", "printf ok");
+    saveUatAttempt("S01", 1);
+
+    const result = prepareUatRun(base, {
+      ...uatResult("S01", [{ kind: "gsd_uat_exec", ref: firstAttemptRun }]),
+      attempt: "1",
+    });
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, "invalid_attempt");
+    assert.match(result.error.message, /attempt must be auto or 2/);
+  });
+
+  test("a save that names the next attempt gets the same run as auto", async () => {
+    saveUatAttempt("S01", 1);
+    const fresh = await uatExec("S01", "printf ok");
+
+    const result = prepareUatRun(base, { ...uatResult("S01", [{ kind: "gsd_uat_exec", ref: fresh }]), attempt: "2" });
+
+    if (!result.ok) assert.fail(result.error.message);
+    assert.equal(result.run.runId, "uat:M001:S01:attempt-2");
+  });
+
+  test("a gsd_uat_exec run of another slice is rejected when it is cited as gsd_exec", async () => {
+    const fresh = await uatExec("S01", "printf ok");
+    const otherSliceRun = await uatExec("S02", "printf ok");
+
+    const result = prepareUatRun(base, uatResult("S01", [
+      { kind: "gsd_uat_exec", ref: fresh },
+      { kind: "gsd_exec", ref: otherSliceRun },
+    ]));
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, "invalid_evidence");
+    assert.match(result.error.message, /recorded for M001\/S02, not for M001\/S01/);
+  });
+
+  test("a gsd_uat_exec run of an earlier attempt is rejected when it is cited as gsd_exec", async () => {
+    const firstAttemptRun = await uatExec("S01", "printf ok");
+    saveUatAttempt("S01", 1);
+    const fresh = await uatExec("S01", "printf ok");
+
+    const result = prepareUatRun(base, uatResult("S01", [
+      { kind: "gsd_uat_exec", ref: fresh },
+      { kind: "gsd_exec", ref: firstAttemptRun },
+    ]));
+
+    assert.equal(result.ok, false);
+    if (result.ok) return;
+    assert.equal(result.error.code, "invalid_evidence");
+    assert.match(result.error.message, /recorded in uat:M001:S01:attempt-1, not in this run \(uat:M001:S01:attempt-2\)/);
+  });
+
   test("an exec id the host never recorded is rejected, even with a meta.json file on disk", async () => {
     const id = await uatExec("S01", "printf ok");
     closeDatabase();

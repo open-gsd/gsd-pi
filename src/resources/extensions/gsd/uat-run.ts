@@ -265,8 +265,9 @@ function browserArtifactPathIsApproved(basePath: string, ref: string): boolean {
 
 /**
  * Exec evidence is the exec_runs row the host stored when the command ran. A
- * gsd_uat_exec ref must name a run of this slice and of this run-uat attempt,
- * so a run of another slice or of an earlier attempt proves nothing here.
+ * gsd_uat_exec run must be a run of this slice and of this run-uat attempt,
+ * so a run of another slice or of an earlier attempt proves nothing here. The
+ * stored row decides this, not the kind the model cites.
  */
 function validateExecEvidenceRef(
   params: UatResultSaveParams,
@@ -278,8 +279,10 @@ function validateExecEvidenceRef(
   if (!run) {
     return `${evidence.kind} evidence ref "${evidence.ref}" names no host-recorded run; run the check with gsd_uat_exec and cite the id it returns`;
   }
-  if (evidence.kind === "gsd_uat_exec") {
-    if (run.kind !== "uat_exec") return `evidence id "${evidence.ref}" is not typed as uat_exec`;
+  if (evidence.kind === "gsd_uat_exec" && run.kind !== "uat_exec") {
+    return `evidence id "${evidence.ref}" is not typed as uat_exec`;
+  }
+  if (run.kind === "uat_exec") {
     if (run.milestone_id !== params.milestoneId || run.slice_id !== params.sliceId) {
       return `gsd_uat_exec evidence id "${evidence.ref}" was recorded for ${run.milestone_id}/${run.slice_id}, not for ${params.milestoneId}/${params.sliceId}`;
     }
@@ -427,21 +430,20 @@ function validateCanonicalPresentation(params: UatResultSaveParams): string | nu
   return errors.length > 0 ? errors.join("; ") : null;
 }
 
+/**
+ * The attempt number of a save comes from the saved runs. A caller cannot
+ * choose it: a save under an earlier number would accept the evidence of that
+ * earlier attempt.
+ */
 function resolveUatAttempt(params: UatResultSaveParams): number | UatRunValidationError {
-  if (params.attempt === "auto" || params.attempt === undefined) {
-    return getLatestUatAttempt(params.milestoneId, params.sliceId) + 1;
-  }
-
-  const attempt = typeof params.attempt === "string"
-    ? Number.parseInt(params.attempt, 10)
-    : params.attempt;
-  if (!Number.isInteger(attempt) || attempt < 1) {
-    return {
-      code: "invalid_attempt",
-      message: "attempt must be a positive integer or auto",
-    };
-  }
-  return attempt;
+  const next = getLatestUatAttempt(params.milestoneId, params.sliceId) + 1;
+  if (params.attempt === "auto" || params.attempt === undefined || Number(params.attempt) === next) return next;
+  return {
+    code: "invalid_attempt",
+    message:
+      `attempt must be auto or ${next}, the next run-uat attempt of ${params.milestoneId}/${params.sliceId}; ` +
+      `got "${String(params.attempt)}"`,
+  };
 }
 
 function escapeMarkdownTableCell(value: unknown): string {
