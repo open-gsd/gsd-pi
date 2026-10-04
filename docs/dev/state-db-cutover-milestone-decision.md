@@ -373,6 +373,7 @@ D012 is a decision. It is not the cutover:
   - `milestone-actions.ts`: the parked and closed checks of park, unpark and
     discard, and `isParked`.
   - `closeout-wizard.ts`: the stranded Milestone check.
+  - `interrupted-session.ts`: the stale scoped pause check.
   - `undo.ts`: the "already open" check of `/gsd undo`.
   - `tools/workflow-tool-executors.ts`: the duplicate `gsd_task_complete`
     check.
