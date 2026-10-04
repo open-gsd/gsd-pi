@@ -11,13 +11,7 @@
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteSync } from "./atomic-write.js";
-import {
-  gsdRoot,
-  normalizeRealPath,
-  relTaskFile,
-  resolveTaskFile,
-} from "./paths.js";
-import { loadFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
+import { gsdRoot, normalizeRealPath } from "./paths.js";
 import { parseUnitId } from "./unit-id.js";
 import { getTask, isDbAvailable } from "./gsd-db.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
@@ -55,11 +49,7 @@ export function isInFlightRuntimePhase(phase: UnitRuntimePhase): boolean {
 }
 
 export interface ExecuteTaskRecoveryStatus {
-  summaryPath: string;
-  summaryExists: boolean;
   dbComplete: boolean;
-  mustHaveCount: number;
-  mustHavesMentionedInSummary: number;
 }
 
 export interface UnitHarnessAbortRecord {
@@ -383,19 +373,15 @@ export function listUnitRuntimeWorkRoots(unitType: string, unitId: string): stri
     .map((row) => row.work_root);
 }
 
-export async function inspectExecuteTaskDurability(
-  basePath: string,
-  unitId: string,
-): Promise<ExecuteTaskRecoveryStatus | null> {
+/**
+ * Durable state of one execute-task unit, read from the task row only. The
+ * task PLAN and SUMMARY files, the PLAN checkbox and the STATE.md next action
+ * are projections that can lag the row, so they are not read.
+ */
+export function inspectExecuteTaskDurability(unitId: string): ExecuteTaskRecoveryStatus | null {
   const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
   if (!mid || !sid || !tid) return null;
 
-  const summaryAbs = resolveTaskFile(basePath, mid, sid, tid, "SUMMARY");
-  const summaryPath = relTaskFile(basePath, mid, sid, tid, "SUMMARY");
-  const summaryExists = !!(summaryAbs && existsSync(summaryAbs));
-
-  // Task status comes from the database. The PLAN checkbox and the STATE.md
-  // next action are projections that can lag it, so they are not read.
   let dbComplete = false;
   if (isDbAvailable()) {
     refreshWorkflowDatabaseFromDisk();
@@ -403,40 +389,9 @@ export async function inspectExecuteTaskDurability(
     dbComplete = !!task && isClosedStatus(task.status);
   }
 
-  // Must-have coverage: load task plan and count mentions in summary
-  let mustHaveCount = 0;
-  let mustHavesMentionedInSummary = 0;
-
-  const taskPlanAbs = resolveTaskFile(basePath, mid, sid, tid, "PLAN");
-  if (taskPlanAbs) {
-    const taskPlanContent = await loadFile(taskPlanAbs);
-    if (taskPlanContent) {
-      const mustHaves = parseTaskPlanMustHaves(taskPlanContent);
-      mustHaveCount = mustHaves.length;
-      if (mustHaveCount > 0 && summaryExists && summaryAbs) {
-        const summaryContent = await loadFile(summaryAbs);
-        if (summaryContent) {
-          mustHavesMentionedInSummary = countMustHavesMentionedInSummary(mustHaves, summaryContent);
-        }
-      }
-    }
-  }
-
-  return {
-    summaryPath,
-    summaryExists,
-    dbComplete,
-    mustHaveCount,
-    mustHavesMentionedInSummary,
-  };
+  return { dbComplete };
 }
 
 export function formatExecuteTaskRecoveryStatus(status: ExecuteTaskRecoveryStatus): string {
-  if (status.dbComplete) return "DB task status is closed";
-  const missing = ["DB task status is not closed"];
-  if (!status.summaryExists) missing.push(`summary missing (${status.summaryPath})`);
-  if (status.mustHaveCount > 0 && status.mustHavesMentionedInSummary < status.mustHaveCount) {
-    missing.push(`must-have gap: ${status.mustHavesMentionedInSummary} of ${status.mustHaveCount} must-haves addressed in summary`);
-  }
-  return missing.join("; ");
+  return status.dbComplete ? "DB task status is closed" : "DB task status is not closed";
 }

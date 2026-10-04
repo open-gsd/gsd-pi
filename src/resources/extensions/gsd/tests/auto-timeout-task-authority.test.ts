@@ -229,10 +229,10 @@ test("timeout recovery record and steering follow the database when PLAN and STA
 
   for (const { recovery, steering } of [open, closed]) {
     assert.deepEqual(
-      Object.keys(recovery).sort(),
-      ["dbComplete", "mustHaveCount", "mustHavesMentionedInSummary", "summaryExists", "summaryPath"],
-      "the record carries no PLAN checkbox or STATE.md field",
+      Object.keys(recovery),
+      ["dbComplete"],
+      "the record carries no PLAN, SUMMARY or STATE.md field",
     );
-    assert.doesNotMatch(steering, /checkbox|next action|\[x\]/iu, "steering never points at projection text");
+    assert.doesNotMatch(steering, /checkbox|next action|\[x\]|summary missing|must-have/iu, "steering never points at projection text");
   }
 });

@@ -70,7 +70,7 @@ export async function recoverTimedOutUnit(
   }
 
   if (unitType === "execute-task") {
-    const status = await inspectExecuteTaskDurability(basePath, unitId);
+    const status = inspectExecuteTaskDurability(unitId);
     if (!status) return "paused";
 
     writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnitStartedAt, {
