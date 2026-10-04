@@ -250,6 +250,7 @@ function suppressWelcomeHeader(ctx: ExtensionContext): void {
  * are bounded — cleared on activation, session boundaries, and verification.
  */
 const deferredApprovalGates = new Map<string, string>();
+const askUserQuestionsInputByCallId = new Map<string, unknown>();
 const deferredDestructiveConfirmationPauses = new Set<string>();
 
 export const MINIMAL_GSD_TOOL_NAMES = [
@@ -1170,17 +1171,21 @@ async function saveDiscussionQuestionRound(
  * Called from tool_execution_end, so it also runs under external engines,
  * which never fire tool_result.
  */
-async function captureAnsweredQuestionRound(basePath: string, result: unknown): Promise<void> {
+async function captureAnsweredQuestionRound(basePath: string, inputQuestions: unknown, result: unknown): Promise<void> {
   const details = resolveAskUserQuestionsGateDetails({
     details: (result as { details?: unknown } | undefined)?.details,
     result,
   });
   if (!details?.response) return;
-  const questions = asQuestionArray(details.questions) as StructuredQuestion[];
+  const questions = asQuestionArray(Array.isArray(inputQuestions) ? inputQuestions : details.questions) as StructuredQuestion[];
   const outcome = evaluateAskUserQuestionsRound(questions, details);
   if (outcome === "cancelled" || outcome === "timeout" || outcome === "waiting") return;
   const milestoneId = await getDiscussionMilestoneIdFor(basePath);
   if (!milestoneId) return;
+  if (questions.length === 0) {
+    safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the result has answers but no questions`);
+    return;
+  }
   await saveDiscussionQuestionRound(basePath, milestoneId, questions, details);
 }
 
@@ -2210,6 +2215,7 @@ export function registerHooks(
     const basePath = contextBasePath(ctx);
     const toolName = canonicalToolName(event.toolName);
     if (toolName === "ask_user_questions") {
+      askUserQuestionsInputByCallId.set(event.toolCallId, (event.args as { questions?: unknown } | undefined)?.questions);
       const questionId = extractGateQuestionId(event.args);
       if (typeof questionId === "string") {
         // External engines (claude-code-cli) ingest the SDK turn's tool blocks
@@ -2250,9 +2256,11 @@ export function registerHooks(
   pi.on("tool_execution_end", async (event, ctx) => {
     const toolName = canonicalToolName(event.toolName);
     markToolEnd(event.toolCallId);
+    const inputQuestions = askUserQuestionsInputByCallId.get(event.toolCallId);
+    askUserQuestionsInputByCallId.delete(event.toolCallId);
     if (toolName === "ask_user_questions" && !event.isError) {
       // A failed capture must not skip the error classification below.
-      await captureAnsweredQuestionRound(contextBasePath(ctx), event.result).catch((err) =>
+      await captureAnsweredQuestionRound(contextBasePath(ctx), inputQuestions, event.result).catch((err) =>
         safetyLogWarning("guided", `question round capture failed: ${err instanceof Error ? err.message : String(err)}`));
     }
     // #2883/#4974: Capture deterministic invocation/policy errors

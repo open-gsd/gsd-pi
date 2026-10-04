@@ -337,11 +337,14 @@ test("an answered question round is captured into the database under an external
   // only tool_execution_start and tool_execution_end; the MCP structured
   // content arrives as the result details. tool_call and tool_result never fire.
   let callSeq = 0;
-  const externalRound = async (details: Record<string, unknown>): Promise<void> => {
+  const externalRound = async (
+    details: Record<string, unknown>,
+    args: Record<string, unknown> = { questions: details.questions },
+  ): Promise<void> => {
     const toolCallId = `call-${++callSeq}`;
     const toolName = "mcp__gsd-workflow__ask_user_questions";
     for (const handler of handlers.get("tool_execution_start") ?? []) {
-      await handler({ toolCallId, toolName, args: { questions: details.questions } }, ctx);
+      await handler({ toolCallId, toolName, args }, ctx);
     }
     for (const handler of handlers.get("tool_execution_end") ?? []) {
       await handler({
@@ -426,6 +429,33 @@ test("an answered question round is captured into the database under an external
     assert.match(content, /What is out of scope\?/, `${type} row holds the second round`);
     assert.equal(readFileSync(path, "utf-8"), content, `${type} file is rendered again from the row`);
   }
+
+  // The provider result shape (#1894) has answers and no questions field: the
+  // questions come from the tool call input.
+  const providerQuestions = [{
+    id: "storage",
+    header: "Storage",
+    question: "Where is the data stored?",
+    options: [
+      { label: "Local file (Recommended)", description: "One file on disk." },
+      { label: "Server", description: "A remote store." },
+    ],
+  }];
+  await externalRound(
+    { answers: { storage: { answers: ["Local file (Recommended)"] } } },
+    { questions: providerQuestions },
+  );
+  for (const type of ["CONTEXT-DRAFT", "DISCUSSION"]) {
+    const content = artifactContent(type) ?? "";
+    assert.match(content, /Where is the data stored\?/, `${type} row holds the question from the tool input`);
+    assert.match(content, /Local file \(Recommended\)/, `${type} row holds the provider-shape answer`);
+  }
+
+  // A result with answers and no questions anywhere is not written as an empty round.
+  const before = { draft: artifactContent("CONTEXT-DRAFT"), log: artifactContent("DISCUSSION") };
+  await externalRound({ answers: { storage: { answers: ["Server"] } } }, {});
+  assert.equal(artifactContent("CONTEXT-DRAFT"), before.draft, "a round with no questions does not change the draft");
+  assert.equal(artifactContent("DISCUSSION"), before.log, "a round with no questions does not change the log");
 });
 
 test("the first captured round keeps a draft and a discussion log that have no database row", async (t) => {
