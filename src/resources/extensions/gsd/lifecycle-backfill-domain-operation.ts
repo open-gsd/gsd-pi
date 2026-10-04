@@ -372,7 +372,8 @@ function projectLegacy(
  * as cancelled with no active Waiver gets its Waiver and one event too.
  * Refuses on a worktree-local database, on any unknown raw status, and when
  * there is nothing to adopt and no Waiver to grant. The first open of a
- * pre-cutover project database runs it (authority-cutover-on-open.ts);
+ * pre-cutover project database runs it when no row would be reopened or
+ * cancelled under a completed parent (authority-cutover-on-open.ts);
  * `/gsd db adopt` runs it by hand.
  */
 export function applyLifecycleBackfill(basePath: string): LifecycleBackfillResult {

@@ -386,14 +386,45 @@ test("an Import Application recorded before checkout binding stays restorable af
   assert.equal(prepared.backup.project_root_realpath, "", "the backup was taken while the database was unbound");
   closeDatabase();
   const projectRoot = dirname(dirname(prepared.databasePath));
-  // The automatic cutover on open would close the Restore Window under test.
-  assert.equal(openWorkflowDatabase(projectRoot, { skipAuthorityCutover: true }).ok, true);
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
   assert.equal(row("SELECT project_root_realpath FROM project_authority").project_root_realpath, realpathSync(projectRoot));
   assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
 
   // /gsd db bind moves the binding; the retained Application keeps its restore path.
   db().prepare("UPDATE project_authority SET project_root_realpath = '/moved/checkout'").run();
   assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
+});
+
+test("an open leaves the Restore Window open; the open after later accepted work cuts the project over", () => {
+  const prepared = prepareCase(true, true);
+  closeDatabase();
+  const projectRoot = dirname(dirname(prepared.databasePath));
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+  assert.deepEqual(row("SELECT revision, authority_epoch FROM project_authority"), { revision: 1, authority_epoch: 0 });
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
+
+  executeDomainOperation({
+    operationType: "milestone.describe",
+    idempotencyKey: "restore-assessment/later-work-before-open",
+    expectedRevision: 1,
+    expectedAuthorityEpoch: 0,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: { accepted: true },
+  }, () => ({
+    events: [{
+      eventType: "milestone.described",
+      entityType: "milestone",
+      entityId: "M001",
+      payload: { accepted: true },
+      destinations: ["projection"],
+    }],
+    projections: [{ projectionKey: "milestone/m001", projectionKind: "state", rendererVersion: "1" }],
+  }));
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+  assert.equal(row("SELECT authority_epoch FROM project_authority").authority_epoch, 1);
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).reasonCode, "AUTHORITY_CUTOVER_COMMITTED");
 });
 
 test("later canonical work permanently recommends Forward Repair before coordination", () => {

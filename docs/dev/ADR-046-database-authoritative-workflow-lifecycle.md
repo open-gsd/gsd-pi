@@ -315,7 +315,12 @@ Migration is additive and never runs two authorities.
    > the `authority.cutover` Domain Operation. The precondition is a lifecycle
    > row for every milestone, slice and task, and idle coordination. It no
    > longer requires an Import Application as the operation head. An unknown
-   > legacy status stops the run with nothing changed. See
+   > legacy status stops the run with nothing changed. The run also stops
+   > with nothing changed when the backfill would reopen a legacy completion
+   > that has no evidence or cancel open work under a completed parent;
+   > `/gsd db adopt --apply` is the route for those rows. While the operation
+   > head is an Import Application, the run waits so that the Restore Window
+   > stays open. See
    > `src/resources/extensions/gsd/authority-cutover-on-open.ts`.
 6. Roll out through development corpus, opt-in canary, and stable release gates
    with restart, fault, import, restore, parity, projection, and performance

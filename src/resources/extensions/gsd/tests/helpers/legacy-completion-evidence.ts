@@ -11,7 +11,7 @@ const COMPLETED_AT = "2026-01-01T00:00:00.000Z";
  * completed_at, a summary and a verification result; a Slice needs
  * completed_at and a summary; a Milestone needs completed_at and one Slice.
  * A fixture that means "this row is complete" calls this before it closes
- * the database; without it the open adopts the row as open work.
+ * the database; without it the open stops and does not cut the project over.
  */
 export function addLegacyCompletionEvidence(): void {
   const db = _getAdapter()!;

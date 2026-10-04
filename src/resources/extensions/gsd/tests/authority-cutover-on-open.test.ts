@@ -2,13 +2,17 @@
 // File Purpose: Behavior proof for the automatic lifecycle backfill and Authority Epoch cutover on project database open.
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { registerAutoWorker } from "../db/auto-workers.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
+import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import { openWorkflowDatabase } from "../db-workspace.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
@@ -21,11 +25,13 @@ import {
   insertSlice,
   insertTask,
 } from "../gsd-db.ts";
-import { countUnadoptedHierarchyRows } from "../lifecycle-backfill-domain-operation.ts";
+import { applyLifecycleBackfill, countUnadoptedHierarchyRows } from "../lifecycle-backfill-domain-operation.ts";
 import { normalizeRealPath } from "../paths.ts";
 import { openSqliteReadOnly } from "../sqlite-readonly.ts";
 import { _resetLogs, peekLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
 
+const CHILD_PATH = fileURLToPath(new URL("./authority-cutover-on-open-child.ts", import.meta.url));
+const RESOLVER_PATH = fileURLToPath(new URL("./resolve-ts.mjs", import.meta.url));
 const tempDirs = new Set<string>();
 let stderrWasEnabled = true;
 
@@ -71,6 +77,36 @@ function createProject(): string {
   return base;
 }
 
+interface ChildOpen {
+  ok: boolean;
+  logs: Array<{ severity: string; message: string }>;
+}
+
+/** A second process that has loaded the engine and opens the project when open() is called. */
+async function spawnOpener(base: string): Promise<{ open(): Promise<ChildOpen> }> {
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  const child = spawn(
+    process.execPath,
+    ["--import", RESOLVER_PATH, "--experimental-strip-types", CHILD_PATH, base],
+    { env, stdio: ["pipe", "pipe", "inherit"] },
+  );
+  let stdout = "";
+  child.stdout.on("data", (chunk) => { stdout += String(chunk); });
+  const closed = once(child, "close");
+  await Promise.race([
+    once(child.stdout, "data"),
+    closed.then(() => Promise.reject(new Error("the child exited before it was ready"))),
+  ]);
+  return {
+    open: async () => {
+      child.stdin.end("open");
+      await closed;
+      return JSON.parse(stdout.slice(stdout.indexOf("\n"))) as ChildOpen;
+    },
+  };
+}
+
 beforeEach(() => {
   stderrWasEnabled = setStderrLoggingEnabled(false);
   _resetLogs();
@@ -90,6 +126,10 @@ test("the first open of an old project database backs it up, adopts every row an
   insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
   insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "complete" });
   insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending" });
+  db().exec(`
+    UPDATE tasks SET completed_at = '2026-01-01T00:00:00.000Z', full_summary_md = 'Done.', verification_result = 'passed'
+    WHERE id = 'T01'
+  `);
   const before = durableSnapshot();
   assert.deepEqual(before.authority, [{ revision: 0, authority_epoch: 0 }], "the open that creates a database does not cut it over");
   assert.equal(countUnadoptedHierarchyRows(), 4);
@@ -104,9 +144,8 @@ test("the first open of an old project database backs it up, adopts every row an
   );
   assert.equal(rows("SELECT 1 FROM workflow_authority_cutovers").length, 1);
   assert.equal(countUnadoptedHierarchyRows(), 0);
-  // A legacy completion with no evidence is open work again, and the open says so.
-  assert.equal(getTask("M001", "S01", "T01")?.status, "pending");
-  assert.match(logged("warn").join("\n"), /task M001\/S01\/T01 was legacy "complete" without completion evidence/);
+  // A legacy completion with evidence stays completed.
+  assert.equal(getTask("M001", "S01", "T01")?.status, "complete");
   assert.deepEqual(logged("error"), []);
 
   // The verified backup holds the database as it was before the backfill.
@@ -184,6 +223,72 @@ test("a row with an unmappable status stops the cutover loudly and changes nothi
   assert.equal(countUnadoptedHierarchyRows(), 0);
 });
 
+test("a legacy completion with no evidence stops the cutover loudly and changes nothing", async () => {
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "Shipped", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "complete" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "complete" });
+  const before = durableSnapshot();
+  closeDatabase();
+
+  assert.equal(openWorkflowDatabase(base).ok, true, "the open itself still succeeds");
+
+  assert.deepEqual(durableSnapshot(), before, "shipped work is not reopened");
+  assert.deepEqual(before.authority, [{ revision: 0, authority_epoch: 0 }]);
+  assert.deepEqual(before.lifecycles, []);
+  assert.deepEqual(backupFiles(base), []);
+  const errors = logged("error");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /Authority cutover stopped: the lifecycle backfill would change the status of 3 row\(s\)/);
+  assert.match(errors[0]!, /Nothing was changed/);
+  assert.match(errors[0]!, /\/gsd db adopt --apply/);
+  assert.match(errors[0]!, /milestone M001: "complete" -> "active" \(legacy-complete-unproven\)/);
+  assert.match(errors[0]!, /task M001\/S01\/T01: "complete" -> "pending" \(legacy-complete-unproven\)/);
+
+  const issues: DoctorIssue[] = [];
+  await checkEngineHealth(base, issues, []);
+  const unadopted = issues.filter((issue) => issue.code === "lifecycle_missing_shadow");
+  assert.equal(unadopted.length, 1);
+  assert.match(unadopted[0]!.message, /3 milestone, slice or task row\(s\) have no canonical lifecycle row/);
+  assert.match(unadopted[0]!.message, /\/gsd db adopt --apply/);
+
+  // The explicit backfill is the route; the next open cuts over.
+  applyLifecycleBackfill(base);
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  assert.deepEqual(rows("SELECT revision, authority_epoch FROM project_authority"), [{ revision: 2, authority_epoch: 1 }]);
+});
+
+test("open work under a completed parent stops the cutover and is not cancelled", () => {
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "Old", status: "complete" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "pending" });
+  // Only the Milestone was adopted, as completed.
+  executeDomainOperation({
+    operationType: "test.partial-adoption",
+    idempotencyKey: "cutover-on-open/completed-parent",
+    expectedRevision: 0,
+    expectedAuthorityEpoch: 0,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "completed" });
+    return {
+      events: [{ eventType: "test.adopted", entityType: "milestone", entityId: "M001", payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: "test/completed-parent", projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
+  const before = durableSnapshot();
+  closeDatabase();
+
+  assert.equal(openWorkflowDatabase(base).ok, true);
+
+  assert.deepEqual(durableSnapshot(), before);
+  assert.deepEqual(backupFiles(base), []);
+  assert.match(logged("error").join("\n"), /slice M001\/S01: "pending" -> "skipped" \(cancelled-under-completed-parent\)/);
+});
+
 test("active coordination defers the backfill and the cutover to a later open", () => {
   const base = createProject();
   insertMilestone({ id: "M001", title: "Old", status: "active" });
@@ -197,4 +302,37 @@ test("active coordination defers the backfill and the cutover to a later open", 
   assert.deepEqual(backupFiles(base), []);
   assert.match(logged("warn").join("\n"), /Authority cutover deferred to a later open/);
   assert.deepEqual(logged("error"), []);
+});
+
+test("two processes that open an old project database at the same time cut it over exactly once", async () => {
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "Old", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
+  for (let task = 1; task <= 40; task++) {
+    insertTask({ id: `T${String(task).padStart(2, "0")}`, milestoneId: "M001", sliceId: "S01", status: "pending" });
+  }
+  closeDatabase();
+
+  const openers = await Promise.all([spawnOpener(base), spawnOpener(base)]);
+  const opens = await Promise.all(openers.map((opener) => opener.open()));
+
+  for (const opened of opens) {
+    assert.equal(opened.ok, true);
+    assert.deepEqual(opened.logs.filter((entry) => entry.severity === "error"), []);
+  }
+  // Read-only: an open by this process would run the cutover itself.
+  const database = openSqliteReadOnly(join(base, ".gsd", "gsd.db")).db;
+  const state = {
+    authority: database.prepare("SELECT revision, authority_epoch FROM project_authority").all(),
+    operations: database.prepare("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision").all()
+      .map((row) => row["operation_type"]),
+    cutovers: database.prepare("SELECT COUNT(*) AS count FROM workflow_authority_cutovers").get()?.["count"],
+  };
+  database.close();
+  assert.deepEqual(state, {
+    authority: [{ revision: 2, authority_epoch: 1 }],
+    operations: ["lifecycle.backfill", "authority.cutover"],
+    cutovers: 1,
+  });
+  assert.equal(backupFiles(base).length, 1);
 });

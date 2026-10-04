@@ -6,6 +6,7 @@ import { copyFileSync, existsSync } from "node:fs";
 import { backupDatabaseBeforeMigration } from "./db-migration-backup.js";
 import { getDb, getDbPath, SCHEMA_VERSION } from "./db/engine.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { withFileLockSync } from "./file-lock.js";
 import { applyLifecycleBackfill, previewLifecycleBackfill } from "./lifecycle-backfill-domain-operation.js";
 import {
   cutoverProjectAuthority,
@@ -17,59 +18,113 @@ import {
 } from "./project-authority-cutover-domain-operation.js";
 import { logError, logWarning } from "./workflow-logger.js";
 
+/** True while the operation head is an Import Application: its Restore Window is still open. */
+function importRestoreWindowIsOpen(fence: { projectId: string; revision: number }): boolean {
+  const head = getDb().prepare(`
+    SELECT operation_type FROM workflow_operations
+    WHERE project_id = :project_id AND resulting_revision = :revision
+  `).get({ ":project_id": fence.projectId, ":revision": fence.revision });
+  return head?.["operation_type"] === "import.apply";
+}
+
+function backfillAndCutOver(basePath: string): void {
+  const fence = readDomainOperationFence();
+  // Another process cut the project over before this one took the lock.
+  if (fence.authorityEpoch > 0) return;
+  // The backfill and the cutover would both close the Restore Window. The
+  // next accepted work closes it, and the open after that cuts over.
+  if (importRestoreWindowIsOpen(fence)) return;
+  const preview = previewLifecycleBackfill();
+  if (preview.unknownStatuses.length > 0) {
+    logError(
+      "db",
+      `Authority cutover stopped: ${preview.unknownStatuses.length} row(s) have a legacy status with no lifecycle mapping. ` +
+        "Nothing was changed. Fix each status, then reopen the project:\n" +
+        preview.unknownStatuses.map((entry) => `  ${entry.row}: ${JSON.stringify(entry.rawStatus)}`).join("\n"),
+    );
+    return;
+  }
+  // The automatic run never reopens completed work and never cancels open work.
+  const statusChanges = preview.items.filter((item) =>
+    item.rule === "legacy-complete-unproven" || item.rule === "cancelled-under-completed-parent");
+  if (statusChanges.length > 0) {
+    logError(
+      "db",
+      `Authority cutover stopped: the lifecycle backfill would change the status of ${statusChanges.length} row(s). ` +
+        "Nothing was changed. Run /gsd db adopt to preview the backfill, then /gsd db adopt --apply, then reopen the project:\n" +
+        statusChanges.map((item) =>
+          `  ${item.itemKind} ${[item.milestoneId, item.sliceId, item.taskId].filter(Boolean).join("/")}: ` +
+          `${JSON.stringify(item.rawStatus)} -> ${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
+        ).join("\n"),
+    );
+    return;
+  }
+  requireCoordinationIdle();
+  backupDatabaseBeforeMigration(getDb(), getDbPath(), SCHEMA_VERSION, { existsSync, copyFileSync, logWarning });
+  if (preview.items.length > 0 || preview.waiverRepairs.length > 0) {
+    const { findings } = applyLifecycleBackfill(basePath);
+    if (findings.length > 0) {
+      logWarning("db", `Lifecycle backfill adopted ${findings.length} row(s) with a finding:\n  ${findings.join("\n  ")}`);
+    }
+  }
+  const evidence = inspectProjectAuthorityCutoverEvidence();
+  cutoverProjectAuthority({
+    invocation: {
+      idempotencyKey: `open/authority-cutover/${fence.authorityEpoch}`,
+      sourceTransport: "internal",
+      actorType: "system",
+    },
+    expectedRevision: evidence.projectRevision,
+    // The epoch that was checked, not the one read now: the epoch advances
+    // once whatever a concurrent process does.
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    authorityContractVersion: PROJECT_AUTHORITY_CONTRACT_VERSION,
+    evidenceHash: evidence.evidenceHash,
+    consent: {
+      consentSchemaVersion: PROJECT_AUTHORITY_CUTOVER_CONSENT_SCHEMA_VERSION,
+      decision: "proceed",
+      irreversibleAuthorityCutover: true,
+      evidenceHash: evidence.evidenceHash,
+    },
+  });
+}
+
+function authorityEpochAdvanced(): boolean {
+  try {
+    return readDomainOperationFence().authorityEpoch > 0;
+  } catch {
+    // The failure that is being reported stands.
+    return false;
+  }
+}
+
 /**
  * Owner decision 2026-10-04: a project database whose Authority Epoch is
  * still 0 is backed up, backfilled (lifecycle.backfill) and cut over
  * (authority.cutover) when it opens. The user does nothing, so the decision
  * is the standing Consent for the one-way cutover.
  *
- * A row whose legacy status has no lifecycle mapping stops the run before the
- * backup: nothing changes, the rows are logged as an error, and doctor lists
- * them. Active coordination defers the run to a later open. No failure here
- * fails the open.
+ * The run stops before the backup, with nothing changed, the rows logged as
+ * an error and a doctor issue, when a row has a legacy status with no
+ * lifecycle mapping, or when the backfill would reopen a legacy completion
+ * that has no evidence or cancel open work under a completed parent. Those
+ * status changes need the preview of `/gsd db adopt`.
+ *
+ * Active coordination and an open Import Application Restore Window defer
+ * the run to a later open. A file lock beside the database lets one process
+ * run it at a time: without it, a process that opens the project during the
+ * run fails on the busy database and logs a false error. That process leaves
+ * the run to the lock holder. No failure here fails the open.
  */
 export function cutOverProjectAuthorityOnOpen(basePath: string): void {
   try {
     if (readDomainOperationFence().authorityEpoch > 0) return;
-    const preview = previewLifecycleBackfill();
-    if (preview.unknownStatuses.length > 0) {
-      logError(
-        "db",
-        `Authority cutover stopped: ${preview.unknownStatuses.length} row(s) have a legacy status with no lifecycle mapping. ` +
-          "Nothing was changed. Fix each status, then reopen the project:\n" +
-          preview.unknownStatuses.map((entry) => `  ${entry.row}: ${JSON.stringify(entry.rawStatus)}`).join("\n"),
-      );
-      return;
-    }
-    requireCoordinationIdle();
-    backupDatabaseBeforeMigration(getDb(), getDbPath(), SCHEMA_VERSION, { existsSync, copyFileSync, logWarning });
-    if (preview.items.length > 0 || preview.waiverRepairs.length > 0) {
-      const result = applyLifecycleBackfill(basePath);
-      // These rows were not adopted with the status the legacy row showed.
-      const reported = [...result.findings, ...result.cancelledUnderCompletedParent];
-      if (reported.length > 0) {
-        logWarning("db", `Lifecycle backfill adopted ${reported.length} row(s) with a changed status:\n  ${reported.join("\n  ")}`);
-      }
-    }
-    const evidence = inspectProjectAuthorityCutoverEvidence();
-    cutoverProjectAuthority({
-      invocation: {
-        idempotencyKey: `open/authority-cutover/${evidence.authorityEpoch}`,
-        sourceTransport: "internal",
-        actorType: "system",
-      },
-      expectedRevision: evidence.projectRevision,
-      expectedAuthorityEpoch: evidence.authorityEpoch,
-      authorityContractVersion: PROJECT_AUTHORITY_CONTRACT_VERSION,
-      evidenceHash: evidence.evidenceHash,
-      consent: {
-        consentSchemaVersion: PROJECT_AUTHORITY_CUTOVER_CONSENT_SCHEMA_VERSION,
-        decision: "proceed",
-        irreversibleAuthorityCutover: true,
-        evidenceHash: evidence.evidenceHash,
-      },
-    });
+    const databasePath = getDbPath();
+    if (databasePath === null) return;
+    withFileLockSync(databasePath, () => backfillAndCutOver(basePath), { retries: 0 });
   } catch (error) {
+    // Another process holds the lock, or finished the cutover while this one failed.
+    if ((error as { code?: unknown } | null)?.code === "ELOCKED" || authorityEpochAdvanced()) return;
     const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
     const message = (error instanceof Error ? error.message : String(error)) + cause;
     if (error instanceof ProjectAuthorityCutoverError && error.retryable) {

@@ -109,10 +109,23 @@ it: the first seals an Import Preview on the current revision and epoch, and
 the second replaces the database that it opens. After the Cutover,
 `/gsd db restore-backup` refuses a backup from the earlier epoch.
 
-The backfill adopts a legacy completion as completed only with completion
-evidence (see `lifecycle-backfill-domain-operation.ts`). A legacy completion
-without evidence becomes open work again; the open logs each such row as a
-warning.
+The automatic run does not change a legacy status. The backfill adopts a
+legacy completion as completed only with completion evidence (see
+`lifecycle-backfill-domain-operation.ts`); without evidence it makes the row
+open work again, and it cancels open work under a completed parent. When the
+preview has such a row, the automatic run stops with nothing changed: the open
+logs the rows as an error and doctor reports `lifecycle_missing_shadow`. The
+route is the preview of `/gsd db adopt`, then `/gsd db adopt --apply`; the next
+open advances the Authority Epoch.
+
+While the operation head is an Import Application, its Restore Window is open
+and the automatic run does nothing. The next accepted work closes the window,
+and the open after that runs the Cutover.
+
+A file lock beside the database (`gsd.db.lock`) lets one process run the
+Cutover at a time. A process that opens the project during the run leaves it
+to the lock holder. The cutover operation is bound to Authority Epoch 0, so
+the epoch advances once.
 
 The Authority Epoch does not select a read path yet, and the ADR-046 program is
 not finished.
