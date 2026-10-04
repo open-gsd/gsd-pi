@@ -69,6 +69,7 @@ import { initNotificationWidget } from "../notification-widget.js";
 import { notifyPreferenceDiagnostics } from "../preferences-diagnostics.js";
 import { resolveEffectivePlanningToolsPolicy } from "../planning-subagent-policy.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
+import { getPendingLlmMerge } from "../worktree-session-state.js";
 import { extractSubagentAgentClasses } from "./subagent-input.js";
 import {
   approvalGateIdForUnit,
@@ -1538,6 +1539,21 @@ export function registerHooks(
     const attributed = consumeAssistantRoutingEnd(event.message);
     if (attributed) {
       return { message: attributed };
+    }
+  });
+
+  // After an LLM-guided `/worktree merge` commits, render the project-root
+  // projections from the database. A merged `.gsd` file is not authority.
+  pi.on("agent_end", async (_event, ctx: ExtensionContext) => {
+    if (!getPendingLlmMerge()) return;
+    try {
+      const { renderProjectionsAfterLlmMerge } = await import("../worktree-command.js");
+      await renderProjectionsAfterLlmMerge();
+    } catch (err) {
+      ctx.ui.notify(
+        `Projections were not rendered after the merge: ${err instanceof Error ? err.message : String(err)}. Run /gsd rebuild markdown.`,
+        "warning",
+      );
     }
   });
 

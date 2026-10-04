@@ -15,6 +15,17 @@ export function clearWorktreeOriginalCwd(): void {
   originalCwd = null;
 }
 
+/** The project root and its HEAD at the start of an LLM-guided `/worktree merge` that has not committed yet. */
+let pendingLlmMerge: { basePath: string; head: string | null } | null = null;
+
+export function getPendingLlmMerge(): { basePath: string; head: string | null } | null {
+  return pendingLlmMerge;
+}
+
+export function setPendingLlmMerge(pending: { basePath: string; head: string | null } | null): void {
+  pendingLlmMerge = pending;
+}
+
 export function ensureWorktreeOriginalCwdFromPath(cwd: string = process.cwd()): string | null {
   if (originalCwd) return originalCwd;
   const root = projectRootFromWorktreePath(cwd);

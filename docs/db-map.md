@@ -736,7 +736,7 @@ result_json  TEXT
 ```
 
 - Index: `idx_command_queue_pending` (target_worker, claimed_at)
-- No code produces or claims rows in this table at present; the unused `db/command-queue.ts` module was deleted.
+- `db/command-queue.ts` writes and takes the rows. The parallel coordinator queues `pause`, `resume` and `stop` with `target_worker` set to the milestone ID of the worker (`session-status-io.ts` `sendSignal`). The worker takes the oldest pending row at each unit boundary (`consumeSignal`); the take sets `claimed_at`, `claimed_by` and `completed_at` in one write. When a parallel session ends, its pending rows are completed so that they do not reach the next worker of the milestone.
 
 ---
 
@@ -2375,7 +2375,10 @@ or worktree-merge input.
 
 `reconcileWorktreeDb` runs only from the explicit `/worktree import-db` command;
 no merge, teardown, or projection path calls it. Its `preview` option returns
-the row counts and conflicts and changes no row. It merges the legacy
+the row counts, the conflicts and every hierarchy status change (also the
+changes of the lifecycle adoption) and changes no row. Its `confirmed` option
+commits the merge only when the result equals that preview. The command takes a
+snapshot of the project database before the merge. It merges the legacy
 correctness rows of a worktree-local `gsd.db` into the main DB, including hierarchy, requirements, artifacts, memories, replan history,
 assessments, quality gates, slice dependencies, verification evidence, gate
 runs, and milestone commit attributions. Runtime-only/audit substrates such as

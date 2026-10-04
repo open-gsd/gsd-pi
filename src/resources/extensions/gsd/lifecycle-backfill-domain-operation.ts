@@ -540,8 +540,16 @@ function adoptItem(
  * comes back to the caller. An unknown raw status then refuses the merge, and
  * nothing is written: for an inserted row here, and for a row the database
  * already held at the commit (LifecycleCoverageRefusedError).
+ *
+ * `afterAdoption` runs inside the operation after its last row change and
+ * gets the legacy status changes of the adoption. A throw there rolls back the
+ * merge and the adoption.
  */
-export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJsonValue): string[] {
+export function mergeLegacyRowsWithAdoption(
+  source: string,
+  merge: () => DomainJsonValue,
+  afterAdoption?: (statusChanges: string[]) => void,
+): string[] {
   const fence = readDomainOperationFence();
   let statusChanges: string[] = [];
   executeDomainOperation({
@@ -557,6 +565,7 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
     const merged = merge();
     const adoption = adoptInsertedHierarchyRows(context, (row) => !before.has(row));
     statusChanges = adoption.statusChanges;
+    afterAdoption?.(statusChanges);
     return {
       events: [
         { eventType: "legacy.merged", entityType: "project", entityId: source, payload: merged, destinations: ["db"] },

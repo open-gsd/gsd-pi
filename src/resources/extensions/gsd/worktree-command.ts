@@ -33,13 +33,16 @@ import { inferCommitType } from "./git-service.js";
 import type { FileLineStat } from "./worktree-manager.js";
 import { existsSync, realpathSync, renameSync } from "node:fs";
 import { nativeMergeAbort } from "./native-git-bridge.js";
+import { readCommittedHeadSha } from "./safety/file-change-validator.js";
 import { _hasWorktreeLocalDb, worktreeLocalDbInstruction, worktreeOwnDbPath } from "./auto-worktree-cleanup.js";
 import type { ReconcileResult } from "./db/writers/reconcile.js";
 import {
   clearWorktreeOriginalCwd,
   ensureWorktreeOriginalCwdFromPath,
   getActiveWorktreeName,
+  getPendingLlmMerge,
   getWorktreeOriginalCwd,
+  setPendingLlmMerge,
   setWorktreeOriginalCwd,
 } from "./worktree-session-state.js";
 
@@ -48,27 +51,45 @@ export { getActiveWorktreeName, getWorktreeOriginalCwd } from "./worktree-sessio
 /**
  * `/worktree import-db`: the only path that merges a worktree-local gsd.db
  * into the project database. The preview changes no row. After the operator
- * confirms, the rows are merged and the file is renamed to `gsd.db.imported`,
- * so the worktree can merge. Throws when the preview or the merge fails.
+ * confirms, the project database is backed up and the rows are merged in one
+ * Domain Operation, only if the merge still equals the confirmed preview. The
+ * file is then renamed to `gsd.db.imported`, so the worktree can merge.
+ * Throws when the preview, the backup or the merge fails.
  */
 export async function importWorktreeLocalDb(
   mainDbPath: string,
   worktreeDbPath: string,
   confirm: (preview: ReconcileResult) => Promise<boolean>,
-): Promise<"absent" | "cancelled" | "imported"> {
+): Promise<"absent" | "cancelled" | { backupPath: string }> {
   if (!_hasWorktreeLocalDb(worktreeDbPath, mainDbPath)) return "absent";
-  const { reconcileWorktreeDb } = await import("./gsd-db.js");
+  const { reconcileWorktreeDb, snapshotDatabaseFile } = await import("./gsd-db.js");
   const preview = reconcileWorktreeDb(mainDbPath, worktreeDbPath, { preview: true });
   if (preview.error) throw new Error(`cannot read ${worktreeDbPath}: ${preview.error}`);
   if (!(await confirm(preview))) return "cancelled";
-  const applied = reconcileWorktreeDb(mainDbPath, worktreeDbPath);
+  const backupPath = `${mainDbPath}.before-worktree-import-${Date.now()}`;
+  snapshotDatabaseFile(mainDbPath, backupPath);
+  const applied = reconcileWorktreeDb(mainDbPath, worktreeDbPath, { confirmed: preview });
   if (applied.error) throw new Error(`import of ${worktreeDbPath} failed: ${applied.error}`);
   for (const suffix of ["", "-wal", "-shm"]) {
     if (existsSync(worktreeDbPath + suffix)) {
       renameSync(worktreeDbPath + suffix, `${worktreeDbPath}.imported${suffix}`);
     }
   }
-  return "imported";
+  return { backupPath };
+}
+
+/**
+ * Render the project-root projections from the database after an LLM-guided
+ * `/worktree merge` committed: a merged `.gsd` file is not authority. Runs at
+ * each agent end and does nothing until the merge moved HEAD.
+ */
+export async function renderProjectionsAfterLlmMerge(): Promise<void> {
+  const pending = getPendingLlmMerge();
+  if (!pending || readCommittedHeadSha(pending.basePath) === pending.head) return;
+  setPendingLlmMerge(null);
+  if (!existsSync(resolveGsdPathContract(pending.basePath).projectDb)) return;
+  const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
+  await rebuildMarkdownProjectionsFromDb(pending.basePath);
 }
 
 /**
@@ -699,7 +720,8 @@ async function handleMerge(
       codeDiff: codeDiff || "(no code changes)",
     });
 
-    // Dispatch to the LLM
+    // Dispatch to the LLM. The projections are rendered when its merge commit lands.
+    setPendingLlmMerge({ basePath, head: readCommittedHeadSha(basePath) });
     pi.sendMessage(
       {
         customType: "gsd-worktree-merge",
@@ -728,7 +750,7 @@ async function handleImportDb(
     const contract = resolveGsdPathContract(worktreePath(basePath, name), basePath);
     const wtDbPath = worktreeOwnDbPath(contract.workRoot);
     const outcome = wtDbPath === null ? "absent" : await importWorktreeLocalDb(contract.projectDb, wtDbPath, (preview) => {
-      const { conflicts, adoptionStatusChanges: _adoption, error: _error, ...counts } = preview;
+      const { conflicts, statusChanges, adoptionStatusChanges, error: _error, ...counts } = preview;
       const rows = Object.entries(counts).filter(([, count]) => count > 0);
       return showConfirm(ctx, {
         title: "Import worktree database",
@@ -737,6 +759,12 @@ async function handleImportDb(
           "",
           rows.length > 0 ? "  Rows that change in the project database:" : "  No project row changes.",
           ...rows.map(([table, count]) => `    ${table}: ${count}`),
+          ...(statusChanges.length > 0
+            ? ["", "  Status changes in the project database:", ...statusChanges.map((c) => `    ${c}`)]
+            : []),
+          ...(adoptionStatusChanges.length > 0
+            ? ["", "  Worktree statuses that the import changes to adopt the rows:", ...adoptionStatusChanges.map((c) => `    ${c}`)]
+            : []),
           ...(conflicts.length > 0
             ? ["", "  Changed on both sides (the worktree value replaces the project value):", ...conflicts.map((c) => `    ${c}`)]
             : []),
@@ -758,6 +786,7 @@ async function handleImportDb(
     ctx.ui.notify(
       [
         `${CLR.ok("✓")} Imported the database of worktree ${CLR.name(name)}. The file was kept as ${CLR.path(`${wtDbPath}.imported`)}.`,
+        `  The project database before the import was saved as ${CLR.path(outcome.backupPath)}.`,
         ...rebuilt.errors.map((error) => `  projection: ${error}`),
       ].join("\n"),
       rebuilt.errors.length > 0 ? "warning" : "info",
