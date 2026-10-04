@@ -44,10 +44,7 @@ import {
   resolveGsdRootFile,
   normalizeRealPath,
 } from "./paths.js";
-import {
-  existsSync,
-  mkdirSync,
-} from "node:fs";
+import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
@@ -61,7 +58,7 @@ import { hasVerdict } from "./verdict-parser.js";
 import { validateArtifact } from "./schemas/validate.js";
 import { getProjectResearchStatus } from "./project-research-policy.js";
 import { isGsdWorktreePath } from "./worktree-root.js";
-import { atomicWriteSync } from "./atomic-write.js";
+import { atomicWriteSync, createProjectionDirectorySync } from "./atomic-write.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
@@ -424,7 +421,7 @@ export function writeReactiveExecuteBlocker(
   const summaryMissing = batchIds.filter((tid) => !hasSummary(tid));
 
   const dir = dirname(blockerPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) createProjectionDirectorySync(dir);
   const content = [
     "# BLOCKER — reactive-execute batch recovery",
     "",
@@ -483,7 +480,7 @@ export function writeBlockerPlaceholder(
     blockerArtifactPath === canonicalArtifactPath
   ) return null;
   const dir = dirname(blockerArtifactPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) createProjectionDirectorySync(dir);
   const recoveryLine = unitType === "research-project"
     ? "This placeholder was written by auto-mode so the project research gate can stop fail-closed."
     : unitType === "plan-milestone"
