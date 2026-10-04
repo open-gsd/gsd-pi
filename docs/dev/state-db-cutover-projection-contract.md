@@ -204,7 +204,8 @@ reader that wants to compare content must strip it first
 
 `STATE.md`, root `ROADMAP.md` and `QUEUE.md` (rendered by
 `workflow-projections.ts`), `DECISIONS.md`, `REQUIREMENTS.md`, `PROJECT.md` and
-the root drafts (written by the db-writer), the milestone VALIDATION file
+the root drafts (written by the db-writer), `KNOWLEDGE.md`
+(`knowledge-projection.ts`), the milestone VALIDATION file
 (`renderMilestoneValidation`), and `.planning/` projections (planning-writer)
 do not go through `writeAndStore` and carry no stamp. A reader must therefore
 treat "no stamp" as normal, never as evidence of tampering or staleness.
