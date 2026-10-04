@@ -12,6 +12,7 @@ import {
   _getAdapter,
   insertMilestone,
   insertSlice,
+  insertTask,
 } from "../gsd-db.js";
 import { clearPathCache } from "../paths.js";
 import { clearParseCache } from "../files.js";
@@ -61,6 +62,7 @@ describe("complete-task projection failures preserve committed DB completion", (
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test task", status: "pending" });
 
     // Write a minimal slice plan so renderPlanCheckboxes doesn't error
     writeFileSync(
@@ -83,6 +85,7 @@ describe("complete-task projection failures preserve committed DB completion", (
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test task", status: "pending" });
 
     const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
     writeFileSync(
@@ -119,6 +122,7 @@ describe("complete-task projection failures preserve committed DB completion", (
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test task", status: "pending" });
 
     // Replace the tasks directory with a file so disk write fails (cross-platform)
     const tasksDir = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks");

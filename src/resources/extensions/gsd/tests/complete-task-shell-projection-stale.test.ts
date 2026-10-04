@@ -10,6 +10,7 @@ import {
   closeDatabase,
   insertMilestone,
   insertSlice,
+  insertTask,
   openDatabase,
   setTaskSummaryMd,
 } from "../gsd-db.js";
@@ -55,6 +56,7 @@ test("complete-task reports shell projection staleness and same-task repair clea
   openDatabase(join(basePath, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Milestone" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
 
   mkdirSync(roadmapPath);
   const completed = await handleCompleteTask(PARAMS, basePath);
@@ -97,6 +99,7 @@ test("complete-task repairs a missing SUMMARY with the stored summary, the bytes
   openDatabase(join(basePath, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Milestone" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
 
   const completed = await handleCompleteTask(PARAMS, basePath);
   assert.ok(!("error" in completed), `completion failed: ${"error" in completed ? completed.error : ""}`);

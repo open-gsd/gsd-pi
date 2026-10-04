@@ -16,6 +16,8 @@ import {
   insertAssessment,
   insertGateRow,
   insertMilestone,
+  insertSlice,
+  insertTask,
   setSliceSummaryMd,
   upsertRequirement,
   getAllMilestones,
@@ -144,6 +146,13 @@ function cleanup(base: string): void {
 
 function openTestDb(base: string): void {
   openDatabase(join(normalizeRealPath(base), ".gsd", "gsd.db"));
+}
+
+/** The legacy completion writer completes a Task row that exists. It creates none. */
+function seedLegacyTask(): void {
+  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Demo", status: "pending" });
 }
 
 async function inProjectDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
@@ -545,6 +554,7 @@ test("executeTaskComplete coerces string verificationEvidence entries", async ()
   const base = makeTmpBase();
   try {
     openTestDb(base);
+    seedLegacyTask();
     const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
@@ -585,6 +595,7 @@ test("executeTaskComplete derives missing verification from evidence", async () 
   const base = makeTmpBase();
   try {
     openTestDb(base);
+    seedLegacyTask();
     const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
@@ -619,6 +630,7 @@ test("executeTaskComplete treats a malformed duplicate for an already-complete t
   const base = makeTmpBase();
   try {
     openTestDb(base);
+    seedLegacyTask();
     const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
@@ -710,6 +722,7 @@ test("executeTaskComplete surfaces stale readable status and duplicate repair me
   });
 
   openTestDb(base);
+  seedLegacyTask();
   writeFileSync(join(base, ".gsd", "PREFERENCES.md"), [
     "---",
     "version: 1",
@@ -3528,14 +3541,17 @@ test("executeReplanSlice rewrites pending tasks and renders replan artifacts", a
         },
       ],
     }, base));
-    await inProjectDir(base, () => executeTaskComplete({
-      milestoneId: "M006",
+    // A blocker Task that a legacy completion closed. The replan adopts it.
+    insertTask({
+      id: "T06",
       sliceId: "S06",
-      taskId: "T06",
+      milestoneId: "M006",
+      title: "Blocker task",
+      status: "complete",
       oneLiner: "Completed blocker task",
       narrative: "The blocker was identified and documented.",
-      verification: "node --test",
-    }, base));
+      verificationResult: "node --test",
+    });
 
     const result = await inProjectDir(base, () => executeReplanSlice({
       milestoneId: "M006",

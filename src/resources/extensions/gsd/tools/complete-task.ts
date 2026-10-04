@@ -18,8 +18,6 @@ import type { CompleteTaskParams, EscalationArtifact } from "../types.js";
 import { isClosedStatus } from "../status-guards.js";
 import {
   transaction,
-  insertMilestone,
-  insertSlice,
   insertTask,
   insertVerificationEvidence,
   getMilestone,
@@ -391,7 +389,7 @@ function paramsToTaskRow(params: CompleteTaskParams, completedAt: string): TaskR
  * Handle the complete_task operation end-to-end.
  *
  * 1. Validate required fields
- * 2. Write DB in a transaction (milestone, slice, task, verification evidence)
+ * 2. Write DB in a transaction (task, verification evidence)
  * 3. Render SUMMARY.md to disk
  * 4. Toggle plan checkbox
  * 5. Store rendered markdown back in DB (for D004 recovery)
@@ -520,8 +518,6 @@ export async function handleCompleteTask(
 
   transaction(() => {
     // State machine preconditions (inside txn for atomicity).
-    // Milestone/slice not existing is OK — insertMilestone/insertSlice below will auto-create.
-    // Only block if they exist and are closed.
     const milestone = getMilestone(params.milestoneId);
     if (milestone && isClosedStatus(milestone.status)) {
       guardError = `cannot complete task in a closed milestone: ${params.milestoneId} (status: ${milestone.status})`;
@@ -535,15 +531,21 @@ export async function handleCompleteTask(
     }
 
     const existingTask = getTask(params.milestoneId, params.sliceId, params.taskId);
+    // This writer opens no Domain Operation, so it cannot give a new row its
+    // lifecycle row. Planning creates the Task row.
+    if (!existingTask) {
+      guardError = `task ${params.milestoneId}/${params.sliceId}/${params.taskId} does not exist — plan it with gsd_plan_slice or gsd_plan_task first`;
+      return;
+    }
     // If this task just produced the ROADMAP projection, preserve its verified
     // content instead of immediately regenerating it from stale DB rows (#1433).
     skipRoadmapProjectionAfterCompletion = taskReferencesMilestoneRoadmap(
       artifactBasePath,
       params.milestoneId,
       [
-        ...(existingTask?.expected_output ?? []),
-        ...(existingTask?.files ?? []),
-        ...(existingTask?.key_files ?? []),
+        ...existingTask.expected_output,
+        ...existingTask.files,
+        ...existingTask.key_files,
         ...normalizeListParam(params.keyFiles),
       ],
     );
@@ -561,7 +563,7 @@ export async function handleCompleteTask(
       return;
     }
 
-    if (existingTask && isClosedStatus(existingTask.status)) {
+    if (isClosedStatus(existingTask.status)) {
       // Stale-turn path: a timed-out turn that was superseded by recovery
       // can still reach this code when its LLM call eventually returns and
       // invokes gsd_complete_task. Returning an error would produce noisy
@@ -594,18 +596,14 @@ export async function handleCompleteTask(
     const taskRow = paramsToTaskRow(params, completedAt);
     summaryMd = renderSummaryContent(taskRow, params.sliceId, params.milestoneId, params.verificationEvidence ?? []);
 
-    insertMilestone({ id: params.milestoneId, title: params.milestoneId });
-    if (!slice) {
-      insertSlice({ id: params.sliceId, milestoneId: params.milestoneId, title: params.sliceId });
-    }
     insertTask({
       id: params.taskId,
       sliceId: params.sliceId,
       milestoneId: params.milestoneId,
       // A completion must not rewrite planning data (#2216): pass the stored
       // title through so the upsert cannot replace it with the executor's
-      // one-liner. Fall back to the one-liner only for a genuinely new row.
-      title: existingTask?.title ?? params.oneLiner,
+      // one-liner.
+      title: existingTask.title,
       status: "complete",
       oneLiner: params.oneLiner,
       narrative: params.narrative,

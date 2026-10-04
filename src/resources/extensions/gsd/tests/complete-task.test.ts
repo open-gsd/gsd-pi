@@ -13,6 +13,7 @@ import {
   updateTaskStatus,
   getTask,
   getSlice,
+  getMilestone,
   getSliceTasks,
   insertVerificationEvidence,
   insertGateRow,
@@ -318,6 +319,7 @@ console.log('\n=== complete-task: handler happy path ===');
   // Seed milestone + slice + both tasks so projection renders T01 ([x]) and T02 ([ ])
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice', risk: 'high', depends: ['S00'], demo: 'basic functionality works', sequence: 1 });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
   insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', status: 'pending', title: 'Second task' });
 
   const params = makeValidParams();
@@ -471,6 +473,8 @@ console.log('\n=== complete-task: flat-phase duplicate task IDs are slice-qualif
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'First Slice', sequence: 1 });
   insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Second Slice', sequence: 2 });
+  insertTask({ id: 'T03', sliceId: 'S01', milestoneId: 'M001', title: 'Shared task id', status: 'pending' });
+  insertTask({ id: 'T03', sliceId: 'S02', milestoneId: 'M001', title: 'Shared task id', status: 'pending' });
 
   const first = await handleCompleteTask({
     ...makeValidParams(),
@@ -526,6 +530,7 @@ console.log('\n=== complete-task: projection failure preserves DB completion ===
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   fs.unlinkSync(planPath);
   fs.mkdirSync(planPath, { recursive: true });
@@ -569,6 +574,7 @@ console.log('\n=== complete-task: handler leaves completed sibling summaries unt
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice', risk: 'high', depends: [], demo: 'basic functionality works', sequence: 1 });
   insertTask({ id: 'T00', sliceId: 'S01', milestoneId: 'M001', status: 'complete', title: 'Already complete task', oneLiner: 'Previously completed' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
   insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', status: 'pending', title: 'Second task' });
 
   const siblingSummaryPath = path.join(path.dirname(planPath), 'T00-SUMMARY.md');
@@ -799,6 +805,7 @@ console.log('\n=== complete-task: disabled soft escalation still completes ===')
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   const params = {
     ...makeValidParams(),
@@ -878,6 +885,7 @@ console.log('\n=== complete-task: handler idempotency ===');
   // Seed milestone + slice so state machine guards pass
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   const params = makeValidParams();
 
@@ -940,6 +948,7 @@ console.log('\n=== complete-task: handler with missing plan file ===');
   // Seed milestone + slice so state machine guards pass
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   const params = makeValidParams();
   const result = await handleCompleteTask(params, basePath);
@@ -970,6 +979,7 @@ console.log('\n=== complete-task: minimal params (no keyFiles, keyDecisions, ver
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   // Minimal params — only required fields, all optional enrichment fields omitted
   const minimalParams = {
@@ -1080,6 +1090,7 @@ console.log('\n=== complete-task: closes Q5/Q6/Q7 gates (pass vs omitted) ===');
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   // Seed the three task-scoped gates as pending for T01.
   insertGateRow({ milestoneId: 'M001', sliceId: 'S01', gateId: 'Q5', scope: 'task', taskId: 'T01' });
@@ -1360,25 +1371,27 @@ console.log('\n=== complete-task: legacy completion preserves the planned task t
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// complete-task: legacy completion of an unplanned task keeps the one-liner as title
+// complete-task: legacy completion of a Task with no row is refused
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-task: legacy completion of an unplanned task keeps the one-liner as title ===');
+console.log('\n=== complete-task: legacy completion of a Task with no row is refused ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
 
   const { basePath } = createTempProject();
-  insertMilestone({ id: 'M001', title: 'Test Milestone' });
-  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
 
   const result = await withWorkingDirectory(basePath, () => handleCompleteTask(makeValidParams(), basePath));
 
-  assertTrue(!('error' in result), 'completion of an unplanned task should still succeed');
-  const task = getTask('M001', 'S01', 'T01');
-  assertEq(task?.status, 'complete', 'unplanned task completion should insert a new row');
-  assertEq(task?.title, 'Added test functionality', 'a genuinely new row should take the one-liner as its title');
-  assertEq(task?.one_liner, 'Added test functionality', 'one_liner should match the one-liner');
+  assertTrue('error' in result, 'completion of a Task with no row should be refused');
+  if ('error' in result) {
+    assertMatch(result.error, /task M001\/S01\/T01 does not exist/, 'error should name the missing Task');
+  }
+  assertEq(getMilestone('M001'), null, 'the refused completion should insert no Milestone row');
+  assertEq(getSlice('M001', 'S01'), null, 'the refused completion should insert no Slice row');
+  assertEq(getTask('M001', 'S01', 'T01'), null, 'the refused completion should insert no Task row');
+  const evidence = _getAdapter()!.prepare('SELECT COUNT(*) AS count FROM verification_evidence').get();
+  assertEq(evidence?.['count'], 0, 'the refused completion should insert no verification evidence');
 
   cleanupDir(basePath);
   cleanup(dbPath);
