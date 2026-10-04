@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import { loadFile } from "./files.js";
 import { _getAdapter, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
 import { isInactiveStatus } from "./status-guards.js";
 import {
@@ -10,7 +9,7 @@ import {
   resolveWorkflowDatabaseLocation,
 } from "./db-workspace.js";
 import { hasRequiredSchemaFeature } from "./db-required-schema.js";
-import { resolveMilestoneFile, milestonesDir, legacyMilestonesDir, gsdRoot } from "./paths.js";
+import { milestonesDir, legacyMilestonesDir, gsdRoot } from "./paths.js";
 import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import { renderStateProjection } from "./workflow-projections.js";
@@ -134,13 +133,11 @@ export async function selectDoctorScope(basePath: string, requestedScope?: strin
   const legacyMilestonesPath = legacyMilestonesDir(basePath);
   if (!existsSync(milestonesPath) && !existsSync(legacyMilestonesPath)) return undefined;
 
+  // Slice rows decide: a milestone with no slice rows is not planned, and a
+  // rendered ROADMAP file is not read.
   for (const milestone of state.registry) {
-    const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
-    const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
-    if (!roadmapContent) continue;
     const dbSlices = getMilestoneSlices(milestone.id);
-    const allDone = dbSlices.length > 0 && dbSlices.every(s => isInactiveStatus(s.status));
-    if (!allDone) return milestone.id;
+    if (dbSlices.some(s => !isInactiveStatus(s.status))) return milestone.id;
   }
 
   return state.registry[0]?.id;
