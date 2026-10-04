@@ -20,7 +20,7 @@ import {
 import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
-import { getDispatchStage, recordDispatchClaim, setDispatchStage } from "../db/unit-dispatches.ts";
+import { getDispatchStage, markCompleted, recordDispatchClaim, setDispatchStage } from "../db/unit-dispatches.ts";
 import { openAutoPause } from "../db/writers/auto-pauses.ts";
 import {
   assessInterruptedSession,
@@ -51,16 +51,28 @@ function makeProject(t: TestContext): string {
   return base;
 }
 
-/** Claim the dispatch row of a unit, as advance() does before the unit runs. */
-function claimUnit(base: string, unitType: string, unitId: string): { workerId: string; leaseToken: number; dispatchId: number } {
-  const workerId = registerAutoWorker({ projectRootRealpath: base });
-  const lease = claimMilestoneLease(workerId, "M001");
-  if (!lease.ok) throw new Error("expected a milestone lease");
+/**
+ * Claim the dispatch row of a unit, as advance() does before the unit runs.
+ * With `held`, the worker that ran an earlier unit claims the row.
+ */
+function claimUnit(
+  base: string,
+  unitType: string,
+  unitId: string,
+  held?: { workerId: string; leaseToken: number },
+): { workerId: string; leaseToken: number; dispatchId: number } {
+  const workerId = held?.workerId ?? registerAutoWorker({ projectRootRealpath: base });
+  let leaseToken = held?.leaseToken;
+  if (leaseToken === undefined) {
+    const lease = claimMilestoneLease(workerId, "M001");
+    if (!lease.ok) throw new Error("expected a milestone lease");
+    leaseToken = lease.token;
+  }
   const [, sliceId = null, taskId = null] = unitId.split("/");
   const claim = recordDispatchClaim({
     traceId: "trace-pause-row",
     workerId,
-    milestoneLeaseToken: lease.token,
+    milestoneLeaseToken: leaseToken,
     milestoneId: "M001",
     sliceId,
     taskId,
@@ -68,7 +80,7 @@ function claimUnit(base: string, unitType: string, unitId: string): { workerId: 
     unitId,
   });
   if (!claim.ok) throw new Error(`expected a dispatch claim: ${claim.error}`);
-  return { workerId, leaseToken: lease.token, dispatchId: claim.dispatchId };
+  return { workerId, leaseToken, dispatchId: claim.dispatchId };
 }
 
 /** A session file of a unit that ran one tool call before it stopped. */
@@ -159,6 +171,61 @@ test("pauseAuto stores the pause as a row with the blocker kind and the link to 
   const stored = readPausedSessionMetadata(base);
   assert.equal(stored?.blockerKind, "user_limit");
   assert.equal(stored?.dispatchId, unit.dispatchId);
+});
+
+/** Pause the session of a worker, then resume with a session file that has a tool call. */
+async function pauseThenResume(
+  base: string,
+  worker: { workerId: string; leaseToken: number },
+  currentUnit: { type: string; id: string } | null,
+): Promise<{ dispatchId: unknown; skippedReplay: boolean; replayPrompt: string | null }> {
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.originalBasePath = base;
+  autoSession.currentMilestoneId = "M001";
+  autoSession.workerId = worker.workerId;
+  autoSession.milestoneLeaseToken = worker.leaseToken;
+  autoSession.currentUnit = currentUnit ? { ...currentUnit, startedAt: Date.now() } : null;
+  process.chdir(base);
+
+  await pauseAuto(undefined, undefined, "missing_access");
+
+  const state = {
+    pausedSessionFile: writeSessionFile(base),
+    pausedDispatchId: readPausedSessionMetadata(base)?.dispatchId ?? null,
+    pendingCrashRecovery: null as string | null,
+  };
+  const { skippedReplay } = _handlePausedSessionResumeRecoveryForTest(base, state);
+  return { dispatchId: openPauseRows()[0]["dispatch_id"], skippedReplay, replayPrompt: state.pendingCrashRecovery };
+}
+
+test("a pause after the claim and before the first unit starts has no dispatch link and no replay", async (t) => {
+  const base = makeProject(t);
+  // The loop claimed the row. The unit did not start, so the session file is
+  // not the file of this unit.
+  const claimed = claimUnit(base, "execute-task", "M001/S01/T01");
+
+  const result = await pauseThenResume(base, claimed, null);
+
+  assert.equal(result.dispatchId, null);
+  assert.equal(result.skippedReplay, true);
+  assert.equal(result.replayPrompt, null);
+});
+
+test("a pause after the claim and before the next unit starts links the previous unit and does not replay", async (t) => {
+  const base = makeProject(t);
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Next task", status: "pending" });
+  const previous = claimUnit(base, "execute-task", "M001/S01/T01");
+  markCompleted(previous.dispatchId);
+  const next = claimUnit(base, "execute-task", "M001/S01/T02", previous);
+
+  // The session file is still the file of T01: T02 did not start.
+  const result = await pauseThenResume(base, previous, { type: "execute-task", id: "M001/S01/T01" });
+
+  assert.notEqual(result.dispatchId, next.dispatchId, "the unit that did not start must not own the session file");
+  assert.equal(result.dispatchId, previous.dispatchId);
+  assert.equal(result.skippedReplay, true);
+  assert.equal(result.replayPrompt, null);
 });
 
 test("a new pause closes the open pause of the scope and keeps its row", (t) => {

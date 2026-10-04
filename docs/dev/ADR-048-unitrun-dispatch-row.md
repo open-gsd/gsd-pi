@@ -109,7 +109,7 @@ Rules for the pause row:
 
 - **Scope.** One row is open for each worker scope. The scope is the scope of the sidecar queue: the project root, or the milestone and slice lock of a parallel worker.
 - **Content.** The row holds the blocker kind, the session context a resume needs (milestone, worktree path, step mode, session file, engine, run directory, milestone lock, start time) and `dispatch_id`.
-- **Link.** `dispatch_id` is the claimed `unit_dispatches` row of the worker, or the newest row of the current unit when the loop settled it before the pause. It is `NULL` when no unit was active and when the unit ran with no dispatch row.
+- **Link.** `dispatch_id` is the claimed `unit_dispatches` row of the worker when that row is the row of the current unit, or the newest row of the current unit when the loop settled it before the pause. The loop claims a row before the unit starts its session. A pause between the claim and the start does not link the claimed row, because the session file belongs to an earlier unit. It is `NULL` when no unit was active and when the unit ran with no dispatch row.
 - **Close.** A resume, a discard (the milestone is gone, complete or superseded) and `/gsd doctor fix` close the row (`closed_at`). A new pause closes the row that is still open. A closed row stays in the table.
 - **Legacy.** Nothing writes the `paused_session` key. It is read when the scope has no open row, so a pause that an older build stored can still be resumed. Such a pause has no blocker kind and no dispatch link, so it gets no tool-call replay. The clear of a pause deletes the key.
 

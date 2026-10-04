@@ -2308,11 +2308,17 @@ export function _selectStopAutoWorktreeExit(args: {
  * The dispatch row of the unit that is active when auto-mode pauses: the
  * claimed row of this worker, or the newest row of the current unit when the
  * loop already settled it. Null when no unit with a dispatch row is active.
+ *
+ * The loop claims the row before the unit starts its session. Until the unit
+ * is the current unit, the session file belongs to an earlier unit, and a
+ * link to the claimed row makes resume replay that file as the new unit.
  */
 function activeUnitDispatchId(): number | null {
-  const claimed = s.workerId ? getActiveForWorker(s.workerId) : null;
-  if (claimed) return claimed.id;
   if (!s.currentUnit) return null;
+  const claimed = s.workerId ? getActiveForWorker(s.workerId) : null;
+  if (claimed?.unit_type === s.currentUnit.type && claimed.unit_id === s.currentUnit.id) {
+    return claimed.id;
+  }
   const latest = getLatestForUnit(s.currentUnit.id);
   return latest?.unit_type === s.currentUnit.type ? latest.id : null;
 }
