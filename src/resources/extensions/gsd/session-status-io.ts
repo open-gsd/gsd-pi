@@ -75,6 +75,10 @@ function statusPath(basePath: string, milestoneId: string): string {
   return join(parallelDir(basePath), `${milestoneId}${STATUS_SUFFIX}`);
 }
 
+function legacySignalPath(basePath: string, milestoneId: string): string {
+  return join(parallelDir(basePath), `${milestoneId}${LEGACY_SIGNAL_SUFFIX}`);
+}
+
 function ensureParallelDir(basePath: string): void {
   const dir = parallelDir(basePath);
   if (!existsSync(dir)) {
@@ -122,13 +126,15 @@ export function readAllSessionStatuses(basePath: string): SessionStatus[] {
 
 /**
  * Remove a milestone's session status file. The session is over, so a signal
- * its worker did not take is closed and does not reach the next worker.
+ * its worker did not take (a row or a legacy signal file) is closed and does
+ * not reach the next worker.
  */
 export function removeSessionStatus(basePath: string, milestoneId: string): void {
-  try {
-    const p = statusPath(basePath, milestoneId);
-    if (existsSync(p)) unlinkSync(p);
-  } catch { /* non-fatal */ }
+  for (const p of [statusPath(basePath, milestoneId), legacySignalPath(basePath, milestoneId)]) {
+    try {
+      if (existsSync(p)) unlinkSync(p);
+    } catch { /* non-fatal */ }
+  }
   try {
     dropPendingCommands(milestoneId);
   } catch (e) {
@@ -152,7 +158,7 @@ function isLegacySignal(data: unknown): data is { signal: SessionSignal } {
  * its command as a row and remove the file. The file is never read as a command.
  */
 function queueLegacySignalFile(basePath: string, milestoneId: string): void {
-  const p = join(parallelDir(basePath), `${milestoneId}${LEGACY_SIGNAL_SUFFIX}`);
+  const p = legacySignalPath(basePath, milestoneId);
   const msg = loadJsonFileOrNull(p, isLegacySignal);
   if (!msg) return;
   sendSignal(milestoneId, msg.signal);

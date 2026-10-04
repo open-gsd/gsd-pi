@@ -11,7 +11,7 @@ import { test, type TestContext } from "node:test";
 import { postUnitPreVerification, type PostUnitContext } from "../auto-post-unit.ts";
 import { takeNextCommand } from "../db/command-queue.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
-import { awaitWorkerResume, consumeSignal, removeSessionStatus, sendSignal } from "../session-status-io.ts";
+import { awaitWorkerResume, cleanupStaleSessions, consumeSignal, removeSessionStatus, sendSignal, writeSessionStatus } from "../session-status-io.ts";
 
 /** A project root with an open project database. The coordinator and the worker share it. */
 function makeProject(t: TestContext): string {
@@ -157,6 +157,30 @@ test("a signal that a worker did not take does not reach the next worker of the 
 
   assert.equal(consumeSignal("M001"), null);
   assert.equal(consumeSignal("M002")?.signal, "pause", "the signal of another milestone stays");
+});
+
+test("a signal file written after the worker stopped is removed at session end and the next worker gets no command", async (t) => {
+  const base = makeProject(t);
+  mkdirSync(join(base, ".gsd", "parallel"), { recursive: true });
+  writeSessionStatus(base, {
+    milestoneId: "M001", pid: 2 ** 30, state: "running", currentUnit: null, completedUnits: 0,
+    cost: 0, lastHeartbeat: Date.now(), startedAt: Date.now(), worktreePath: base,
+  });
+  writeFileSync(signalFile(base, "M001"), JSON.stringify({ signal: "stop" }));
+
+  assert.deepEqual(cleanupStaleSessions(base), ["M001"], "the session of the dead worker is over");
+  assert.equal(existsSync(signalFile(base, "M001")), false, "the file is removed");
+
+  // The next worker of the milestone reads its command at the unit boundary.
+  process.env.GSD_MILESTONE_LOCK = "M001";
+  let stops = 0;
+  await postUnitPreVerification({
+    s: { basePath: base },
+    stopAuto: async () => { stops += 1; },
+  } as unknown as PostUnitContext);
+
+  assert.equal(stops, 0, "the next worker does not stop");
+  assert.equal(_getAdapter()!.prepare("SELECT count(*) AS n FROM command_queue").get()?.["n"], 0);
 });
 
 test("sendSignal throws when no database is open, and consumeSignal reports no signal", () => {
