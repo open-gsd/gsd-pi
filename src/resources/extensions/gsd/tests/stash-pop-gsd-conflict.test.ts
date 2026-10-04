@@ -121,6 +121,36 @@ test("#2766: stash pop conflict on .gsd/ files is auto-resolved", () => {
   }
 });
 
+test("stash pop conflict on a .gsd file that the merge deleted keeps the file on disk", () => {
+  const repo = createTempRepo();
+  try {
+    writeFileSync(join(repo, ".gsd", "NOTES.md"), "notes: 1\n");
+    run("git add .", repo);
+    run('git commit -m "add notes"', repo);
+
+    const wtPath = createAutoWorktree(repo, "M302");
+    seedMergeReadyMilestone(repo, "M302");
+    writeFileSync(join(wtPath, "feature.ts"), "export const feature = true;\n");
+    run("git rm .gsd/NOTES.md", wtPath);
+    run("git add .", wtPath);
+    run('git commit -m "add feature and delete notes"', wtPath);
+
+    // Dirty .gsd/NOTES.md in the main repo: the stash pop finds it deleted in HEAD.
+    writeFileSync(join(repo, ".gsd", "NOTES.md"), "notes: 2-main-dirty\n");
+
+    mergeMilestoneToMain(repo, "M302", makeRoadmap("M302", "Deleted .gsd file", [{ id: "S01", title: "Feature" }]));
+
+    assert.ok(existsSync(join(repo, "feature.ts")), "milestone code merged to main");
+    assert.equal(readFileSync(join(repo, ".gsd", "NOTES.md"), "utf-8"), "notes: 2-main-dirty\n", "the file is not removed");
+    assert.equal(run("git diff --name-only --diff-filter=U", repo), "", "no unmerged entry remains");
+    let stashList = "";
+    try { stashList = run("git stash list", repo); } catch { /* empty stash */ }
+    assert.strictEqual(stashList, "", "stash is dropped");
+  } finally {
+    cleanupTempRepo(repo);
+  }
+});
+
 test("#2766: stash pop conflict on non-.gsd files preserves stash for manual resolution", () => {
   const repo = createTempRepo();
   try {
