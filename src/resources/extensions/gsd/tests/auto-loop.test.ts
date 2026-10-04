@@ -7064,7 +7064,17 @@ test("runUnitPhase pauses auto-mode when zero-tool-call retry is exhausted", asy
   assert.equal(deps.callLog.includes("pauseAuto"), true);
 });
 
-test("runUnitPhase continues the zero-tool budget of a claimed research unit after a restart", async (t) => {
+const RESEARCH_SLICE_ZERO_TOOL = { unitType: "research-slice", unitId: "M001/S01", kind: "zero-tool" } as const;
+
+/**
+ * Run one turn of a claimed research-slice unit whose dispatch row already
+ * holds one used zero-tool retry. The process that used it is gone, so the
+ * session is new and only the row holds the count.
+ */
+async function runClaimedResearchSliceWithUsedZeroToolRetry(
+  t: TestContext,
+  turn: { toolCalls: number; assistantText: string; researchSaved: boolean },
+) {
   _resetPendingResolve();
 
   const ctx = {
@@ -7089,7 +7099,7 @@ test("runUnitPhase continues the zero-tool budget of a claimed research unit aft
         {
           role: "assistant",
           content: [
-            { type: "text", text: "Error: I'll investigate the network error handling next." },
+            { type: "text", text: turn.assistantText },
           ],
         },
       ])));
@@ -7115,9 +7125,12 @@ test("runUnitPhase continues the zero-tool budget of a claimed research unit aft
     unitId: "M001/S01",
   });
   assert.equal(claim.ok, true);
-  // The process that died already used the one zero-tool retry. Its session
-  // memory is gone; only the dispatch row still holds the count.
-  spendUnitBudget(new Map<string, number>(), { unitType: "research-slice", unitId: "M001/S01", kind: "zero-tool" });
+  spendUnitBudget(new Map<string, number>(), RESEARCH_SLICE_ZERO_TOOL);
+  if (turn.researchSaved) {
+    const sliceDir = join(s.basePath, ".gsd", "milestones", "M001", "slices", "S01");
+    mkdirSync(sliceDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-RESEARCH.md"), "# Research\n");
+  }
 
   const mockLedger = {
     version: 1,
@@ -7130,7 +7143,7 @@ test("runUnitPhase continues the zero-tool budget of a claimed research unit aft
         type: "research-slice",
         id: "M001/S01",
         startedAt: s.currentUnit?.startedAt ?? Date.now(),
-        toolCalls: 0,
+        toolCalls: turn.toolCalls,
         assistantMessages: 1,
         tokens: { input: 100, output: 20, total: 120, cacheRead: 0, cacheWrite: 0 },
         cost: 0.01,
@@ -7168,9 +7181,36 @@ test("runUnitPhase continues the zero-tool budget of a claimed research unit aft
     { consecutiveFinalizeTimeouts: 0 },
   );
 
+  // Read the count as the next process does: from the database file.
+  closeDatabase();
+  openDatabase(join(s.basePath, ".gsd", "gsd.db"));
+  const zeroToolBudgetUsed = readUnitBudget(new Map<string, number>(), RESEARCH_SLICE_ZERO_TOOL);
+  return { result, deps, zeroToolBudgetUsed };
+}
+
+test("runUnitPhase continues the zero-tool budget of a claimed research unit after a restart", async (t) => {
+  const { result, deps, zeroToolBudgetUsed } = await runClaimedResearchSliceWithUsedZeroToolRetry(t, {
+    toolCalls: 0,
+    assistantText: "Error: I'll investigate the network error handling next.",
+    researchSaved: false,
+  });
+
   assert.equal(result.action, "break");
   assert.equal((result as any).reason, "zero-tool-calls-exhausted");
   assert.equal(deps.callLog.includes("pauseAuto"), true);
+  assert.equal(zeroToolBudgetUsed, 0, "the resume after this pause starts a new budget");
+});
+
+test("runUnitPhase gives a claimed research unit a full zero-tool budget again when its artifact verifies", async (t) => {
+  const { result, deps, zeroToolBudgetUsed } = await runClaimedResearchSliceWithUsedZeroToolRetry(t, {
+    toolCalls: 3,
+    assistantText: "Research saved.",
+    researchSaved: true,
+  });
+
+  assert.equal(result.action, "next");
+  assert.equal(deps.callLog.includes("pauseAuto"), false);
+  assert.equal(zeroToolBudgetUsed, 0, "the stored count must not outlive the verified turn");
 });
 
 test("autoLoop pauses user-driven deep question instead of flagging 0 tool calls", async () => {

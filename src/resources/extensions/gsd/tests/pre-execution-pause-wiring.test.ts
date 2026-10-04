@@ -34,6 +34,12 @@ let tempDir: string;
 let dbPath: string;
 let originalCwd: string;
 const PRE_EXEC_BUDGET = { unitType: "plan-slice", unitId: "M001/S01", kind: "pre-exec" } as const;
+const MISSING_TASK_INPUTS = [
+  "nonexistent-file-that-does-not-exist.ts",
+  "missing-second-file.ts",
+  "missing-third-file.ts",
+  "missing-fourth-file.ts",
+];
 
 function resetAllCaches(): void {
   invalidateAllCaches();
@@ -204,17 +210,31 @@ function createFailingTasks(): void {
       estimate: "1h",
       files: [],
       verify: "npm test",
-      inputs: [
-        "nonexistent-file-that-does-not-exist.ts",
-        "missing-second-file.ts",
-        "missing-third-file.ts",
-        "missing-fourth-file.ts",
-      ],
+      inputs: MISSING_TASK_INPUTS,
       expectedOutput: [],
       observabilityImpact: "",
     },
     sequence: 0,
   });
+}
+
+/**
+ * Claim the plan-slice unit, so its budgets are on a real dispatch row.
+ */
+function claimPlanSliceDispatch(traceId: string): void {
+  const workerId = registerAutoWorker({ projectRootRealpath: tempDir });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claim = recordDispatchClaim({
+    traceId,
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+  });
+  assert.equal(claim.ok, true);
 }
 
 /**
@@ -460,19 +480,7 @@ describe("Pre-execution checks → retry/pause wiring", () => {
 
   test("a restart continues the pre-execution repair budget of a claimed plan-slice unit", async () => {
     createFailingTasks();
-    const workerId = registerAutoWorker({ projectRootRealpath: tempDir });
-    const lease = claimMilestoneLease(workerId, "M001");
-    if (!lease.ok) throw new Error("expected test lease");
-    const claim = recordDispatchClaim({
-      traceId: "trace-pre-exec-restart",
-      workerId,
-      milestoneLeaseToken: lease.token,
-      milestoneId: "M001",
-      sliceId: "S01",
-      unitType: "plan-slice",
-      unitId: "M001/S01",
-    });
-    assert.equal(claim.ok, true);
+    claimPlanSliceDispatch("trace-pre-exec-restart");
 
     const beforeKill = makeMockSession(tempDir, { type: "plan-slice", id: "M001/S01" });
     const firstResult = await postUnitPostVerification(
@@ -492,6 +500,43 @@ describe("Pre-execution checks → retry/pause wiring", () => {
 
     assert.equal(result, "stopped", "the restarted process must not get a new retry budget");
     assert.equal(pauseAutoMock.mock.callCount(), 1);
+  });
+
+  test("a passed pre-execution check gives a claimed plan-slice unit a full repair budget again", async () => {
+    createFailingTasks();
+    claimPlanSliceDispatch("trace-pre-exec-release");
+    // Each call is a new process: a new session with no memory of the last one.
+    const runPlanSlice = () => postUnitPostVerification(
+      makePostUnitContext(
+        makeMockSession(tempDir, { type: "plan-slice", id: "M001/S01" }),
+        makeMockCtx(),
+        makeMockPi(),
+        mock.fn(async () => {}),
+      ),
+    );
+
+    assert.equal(await runPlanSlice(), "retry", "the first failure uses one planner retry");
+    assert.equal(readUnitBudget(new Map(), PRE_EXEC_BUDGET), 1);
+
+    // The planner repair worked: the files the task reads now exist.
+    for (const input of MISSING_TASK_INPUTS) writeFileSync(join(tempDir, input), "");
+    assert.equal(await runPlanSlice(), "continue", "the repaired plan passes the checks");
+
+    closeDatabase();
+    openDatabase(dbPath);
+    assert.equal(
+      readUnitBudget(new Map(), PRE_EXEC_BUDGET),
+      0,
+      "the pass is the only release of the stored count",
+    );
+
+    // A later, unrelated failure of the same slice.
+    rmSync(join(tempDir, MISSING_TASK_INPUTS[0]));
+    assert.equal(
+      await runPlanSlice(),
+      "retry",
+      "a later failure must get a planner retry, not pause on its first failure",
+    );
   });
 
   test("pauseAuto is NOT called when enhanced_verification_strict: false and pre-execution returns warn", async () => {
