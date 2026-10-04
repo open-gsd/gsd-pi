@@ -649,3 +649,17 @@ export function deleteUnitVerificationRetries(unitType: string, unitId: string):
     ).run({ ":unit_type": unitType, ":unit_id": unitId });
   });
 }
+
+/** Delete the stored git-commit repair retries of the unit. Every other retry stays. */
+export function deleteUnitCommitRepairRetries(unitType: string, unitId: string): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `DELETE FROM unit_dispatch_retries
+       WHERE dispatch_id IN (
+         SELECT id FROM unit_dispatches
+         WHERE unit_type = :unit_type AND unit_id = :unit_id
+       )
+       AND signature LIKE 'git-commit:%'`,
+    ).run({ ":unit_type": unitType, ":unit_id": unitId });
+  });
+}

@@ -3,11 +3,14 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { postUnitPreVerification, shouldDeferCloseoutGitAction, type PostUnitContext } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
+import { DISPATCH_RULES } from "../auto-dispatch.ts";
+import { invalidateAllCaches } from "../cache.ts";
+import { storeUnitRetry } from "../db/unit-dispatch-retries.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -35,6 +38,7 @@ import {
   readTaskTechnicalVerdict,
   recordTaskTechnicalVerdict,
 } from "../task-verification-domain-operation.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { cleanup, git, makeTempRepo } from "./test-utils.ts";
 
 function settleCanonicalTaskForHostVerification(basePath: string): void {
@@ -98,6 +102,95 @@ test("non execute-task units keep pre-verification closeout git action", () => {
   assert.equal(shouldDeferCloseoutGitAction("plan-slice"), false);
   assert.equal(shouldDeferCloseoutGitAction("complete-slice"), false);
 });
+
+for (const turnAction of ["status-only", "snapshot"] as const) {
+  test(`a ${turnAction} closeout of a planner keeps its stored pre-execution retry`, async (t) => {
+    const base = makeTempRepo("gsd-closeout-keeps-planner-retry-");
+    const originalCwd = process.cwd();
+    t.after(() => {
+      process.chdir(originalCwd);
+      closeDatabase();
+      invalidateAllCaches();
+      cleanup(base);
+    });
+    writeFileSync(join(base, ".gitignore"), ".gsd/\n");
+    git(base, "add", ".gitignore");
+    git(base, "commit", "-m", "chore: ignore gsd runtime");
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    writeFileSync(
+      join(base, ".gsd", "PREFERENCES.md"),
+      `---\nuok: ${JSON.stringify({ gitops: { enabled: true, turn_action: turnAction } })}\n---\n`,
+    );
+    // The closeout reads the preferences of the working directory.
+    process.chdir(base);
+    invalidateAllCaches();
+
+    openDatabase(":memory:");
+    insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active" });
+    const dispatch = claimTestDispatch(base, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      unitType: "plan-slice",
+      unitId: "M001/S01",
+    });
+    storeUnitRetry("plan-slice", {
+      unitId: "M001/S01",
+      failureContext: "task T01 reads a file that no task creates",
+      signature: "pre-execution:1",
+      attempt: 1,
+    });
+    // The planner runs again on a new dispatch row.
+    dispatch.claimNext();
+
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: Date.now() };
+    await postUnitPreVerification({
+      s,
+      ctx: { ui: { notify: () => {} } } as unknown as PostUnitContext["ctx"],
+      pi: {} as PostUnitContext["pi"],
+      buildSnapshotOpts: () => ({}),
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => {},
+      updateProgressWidget: () => {},
+    }, { skipSettleDelay: true, skipWorktreeSync: true });
+    assert.equal(s.lastGitActionStatus, "ok", `the ${turnAction} git action must have run`);
+
+    // The process is killed here, before the pre-execution check of the new
+    // plan. The task rows of the refused plan put the slice in "executing".
+    let selected: { rule: string; unitType: string | null } | null = null;
+    for (const rule of DISPATCH_RULES) {
+      const result = await rule.match({
+        basePath: base,
+        mid: "M001",
+        midTitle: "Milestone",
+        state: {
+          activeMilestone: { id: "M001", title: "Milestone" },
+          activeSlice: { id: "S01", title: "Slice" },
+          activeTask: { id: "T01", title: "Task" },
+          phase: "executing",
+          recentDecisions: [],
+          blockers: [],
+          nextAction: "",
+          registry: [],
+        },
+        prefs: undefined,
+      });
+      if (result) {
+        selected = { rule: rule.name, unitType: result.action === "dispatch" ? result.unitType : null };
+        break;
+      }
+    }
+    assert.deepEqual(
+      selected,
+      { rule: "stored retry → plan-slice / refine-slice", unitType: "plan-slice" },
+      "the plan is still refused, so a restart must send the slice back to the planner",
+    );
+  });
+}
 
 test("blocking evidence-xref routes recovery and clears evidence before pausing", async () => {
   const base = makeTempRepo("gsd-evidence-xref-commit-before-pause-");

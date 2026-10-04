@@ -1410,6 +1410,64 @@ test("a refused task commit survives a restart: the repair retry and its count a
   assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
 });
 
+test("a task commit that succeeds after a repair releases the stored repair retry", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: base, stdio: "ignore" });
+  const hookPath = join(base, ".git", "hooks", "pre-commit");
+  writeFileSync(hookPath, ["#!/bin/sh", "echo blocked by test hook >&2", "exit 1"].join("\n"));
+  chmodSync(hookPath, 0o755);
+  writeFileSync(join(base, "work.txt"), "changed\n");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+  const dispatch = claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  const closeOut = async () => {
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.originalBasePath = base;
+    s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+    await postUnitPostVerification({
+      s,
+      ctx: { ui: { notify() {} } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => {},
+      updateProgressWidget: () => {},
+    });
+    return s.lastGitActionStatus;
+  };
+
+  assert.equal(await closeOut(), "failed");
+  assert.match(readStoredUnitRetry("execute-task", "M001/S01/T01")?.signature ?? "", /^git-commit:/);
+
+  // The repair run removes the cause, and the commit of its close-out succeeds.
+  rmSync(hookPath);
+  dispatch.claimNext();
+  assert.equal(await closeOut(), "ok");
+  assert.equal(
+    readStoredUnitRetry("execute-task", "M001/S01/T01"),
+    null,
+    "a repair retry that stays stored makes the dispatch rules select the closed task again",
+  );
+  assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
+});
+
 test("verified task git closeout partial multi-repo commit pauses instead of redoing task", async () => {
   const root = join(tmpdir(), `gsd-deep-project-parent-commit-${randomUUID()}`);
   const initChildRepo = (dir: string) => {

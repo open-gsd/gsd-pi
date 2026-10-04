@@ -33,6 +33,7 @@
 import { _getAdapter, isDbAvailable } from "../gsd-db.js";
 import type { PendingVerificationRetry } from "../auto/session.js";
 import {
+  deleteUnitCommitRepairRetries,
   deleteUnitDispatchRetries,
   deleteUnitVerificationRetries,
   setDispatchRetry,
@@ -141,4 +142,12 @@ export function releaseUnitRetry(unitType: string, unitId: string): void {
  */
 export function releaseVerificationRetry(unitType: string, unitId: string): void {
   if (isDbAvailable()) deleteUnitVerificationRetries(unitType, unitId);
+}
+
+/**
+ * Release the stored git-commit repair retries of the unit: its commit
+ * succeeded. A retry that another check stored stays.
+ */
+export function releaseCommitRepairRetry(unitType: string, unitId: string): void {
+  if (isDbAvailable()) deleteUnitCommitRepairRetries(unitType, unitId);
 }

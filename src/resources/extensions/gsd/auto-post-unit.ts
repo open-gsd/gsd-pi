@@ -121,7 +121,7 @@ import {
   verificationBudget,
 } from "./auto/verification-retry-state.js";
 import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
-import { releaseUnitRetry } from "./db/unit-dispatch-retries.js";
+import { releaseCommitRepairRetry, releaseUnitRetry } from "./db/unit-dispatch-retries.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -1532,8 +1532,10 @@ async function runCloseoutGitAction(
       }
 
       s.lastGitActionStatus = "ok";
+      // Release only what the git action owns. This step runs before the
+      // checks of a planner, so a stored pre-execution retry must stay.
       resetUnitBudget(s.unclaimedUnitBudgets, { unitType: unit.type, unitId: unit.id, kind: "git-commit" });
-      releaseUnitRetry(unit.type, unit.id);
+      releaseCommitRepairRetry(unit.type, unit.id);
 
       if (turnAction === "commit" && gitResult.commitMessage) {
         ctx.ui.notify(formatPostUnitStatusCard("✓ Commit", gitResult.commitMessage.split("\n")[0]), "info");
