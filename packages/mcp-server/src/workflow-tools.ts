@@ -3305,7 +3305,7 @@ export function registerWorkflowTools(
         throw new Error(result.error);
       }
       return {
-        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})` }],
+        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? ". The readable plan update is pending repair." : ""}` }],
       };
     },
   );
@@ -3331,7 +3331,7 @@ export function registerWorkflowTools(
         throw new Error(result.error);
       }
       return {
-        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})` }],
+        content: [{ type: "text" as const, text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? ". The readable plan update is pending repair." : ""}` }],
       };
     },
   );

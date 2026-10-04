@@ -3112,6 +3112,58 @@ export const executeResearchDecisionSave = noop;
     }
   });
 
+  it("gsd_plan_task and gsd_task_plan report a failed plan render as pending repair, not as an error", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+    const tool = (name: string) => server.tools.find((entry) => entry.name === name)!;
+
+    await tool("gsd_plan_milestone").handler({
+      projectDir: base,
+      milestoneId: "M011",
+      title: "Stale task plan",
+      vision: "A failed render after the commit is reported, not raised.",
+      slices: [
+        {
+          sliceId: "S11",
+          title: "Stale task plan",
+          risk: "medium",
+          depends: [],
+          demo: "The task plan is committed when the slice PLAN cannot be written.",
+          goal: "Report the stale readable plan to the MCP caller.",
+          successCriteria: "The tool text names the pending repair.",
+          proofLevel: "integration",
+          integrationClosure: "The inline MCP handler returns the committed task plan.",
+          observabilityImpact: "The MCP caller sees that the readable plan is stale.",
+        },
+      ],
+    });
+    // A directory at the PLAN path makes every write of the slice PLAN fail.
+    mkdirSync(join(base, ".gsd", "phases", "11-stale-task-plan", "11-11-PLAN.md"));
+
+    for (const [name, taskId] of [["gsd_plan_task", "T11"], ["gsd_task_plan", "T12"]] as const) {
+      const result = await tool(name).handler({
+        projectDir: base,
+        milestoneId: "M011",
+        sliceId: "S11",
+        taskId,
+        title: `Task ${taskId}`,
+        description: "Plan a task while the slice PLAN cannot be written.",
+        estimate: "5m",
+        files: ["packages/mcp-server/src/workflow-tools.ts"],
+        verify: "node --test",
+        inputs: ["M011-ROADMAP.md"],
+        expectedOutput: ["packages/mcp-server/src/workflow-tools.ts"],
+        requiredWorkflowTools: [],
+      });
+      assert.equal(
+        (result as any).content[0].text,
+        `Planned task ${taskId} (S11/M011). The readable plan update is pending repair.`,
+      );
+    }
+  });
+
   it("gsd_replan_slice and gsd_slice_replan work end-to-end", async () => {
     const base = makeTmpBase();
     try {
