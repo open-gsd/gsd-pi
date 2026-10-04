@@ -102,23 +102,37 @@ export function readSettledMilestoneMerge(milestoneId: string): SettledMilestone
 }
 
 /**
- * True when GSD merged the whole milestone branch: the merge has a Settlement
- * Receipt, the branch still points at the merged commit and the merge commit
- * is still on the integration branch. A squash merge leaves no git ancestry,
- * so the receipt is the only durable record of that merge. A recognized
- * receipt is not enough: GSD did not make that merge.
+ * True when GSD made the merge but its commit is no longer on the integration
+ * branch (a reset or a rebase dropped it). The receipt then proves nothing:
+ * the milestone branch can be the only place the work lives.
  */
-export function isMilestoneBranchSettled(projectRoot: string, milestoneId: string, milestoneBranch: string): boolean {
+export function isSettledMergeDropped(projectRoot: string, settled: SettledMilestoneMerge): boolean {
+  return !settled.recognized && !nativeIsAncestor(projectRoot, settled.commitSha, settled.integrationBranch);
+}
+
+/**
+ * What the merge Settlement Receipt says about the milestone branch.
+ * `settled`: GSD merged the whole branch; the branch still points at the
+ * merged commit and the merge commit is still on the integration branch. A
+ * squash merge leaves no git ancestry, so the receipt is the only durable
+ * record of that merge. `dropped`: the recorded merge commit left the
+ * integration branch, so the merge must be finished again. `unrecorded`: the
+ * receipt does not decide (none, recognized, or the branch moved on); the
+ * caller inspects git.
+ */
+export function milestoneBranchMergeState(
+  projectRoot: string,
+  milestoneId: string,
+  milestoneBranch: string,
+): "settled" | "dropped" | "unrecorded" {
   const settled = readSettledMilestoneMerge(milestoneId);
-  if (!settled || settled.recognized) return false;
-  // A reset of the integration branch can drop the merge commit; then the
-  // branch is the only place the work lives.
-  if (!nativeIsAncestor(projectRoot, settled.commitSha, settled.integrationBranch)) return false;
+  if (!settled || settled.recognized) return "unrecorded";
+  if (isSettledMergeDropped(projectRoot, settled)) return "dropped";
   try {
-    return revParse(projectRoot, milestoneBranch) === settled.milestoneBranchSha;
+    return revParse(projectRoot, milestoneBranch) === settled.milestoneBranchSha ? "settled" : "unrecorded";
   } catch {
     // The branch cannot be read; let the caller inspect git.
-    return false;
+    return "unrecorded";
   }
 }
 

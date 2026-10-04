@@ -50,6 +50,7 @@ import { assertMilestoneWorktreeCleanBeforeTeardown } from "./auto-worktree-merg
 import { createPreMergeStash } from "./auto-worktree-merge-stash.js";
 import {
   completeSettledCloseout,
+  isSettledMergeDropped,
   readSettledMilestoneMerge,
   recognizeMilestoneMergeAgain,
   settleMilestoneMerge,
@@ -487,9 +488,8 @@ function finishSettledMilestoneMerge(request: {
   // branch is then the only place the work lives, so it must stay until its
   // work is on the integration branch again.
   if (
-    !settledMerge.recognized &&
     nativeBranchExists(projectRoot, milestoneBranch) &&
-    !nativeIsAncestor(projectRoot, settledMerge.commitSha, settledMerge.integrationBranch)
+    isSettledMergeDropped(projectRoot, settledMerge)
   ) {
     if (milestoneCodeNotOn(projectRoot, settledMerge.integrationBranch, milestoneBranch).length > 0) {
       throw new GSDError(

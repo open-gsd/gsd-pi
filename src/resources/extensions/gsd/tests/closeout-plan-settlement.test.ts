@@ -21,6 +21,8 @@ import {
   recordSettlementReceipt,
   settleCloseout,
 } from "../closeout-domain-operation.ts";
+import { withCommandCwd } from "../commands/context.ts";
+import { handleOpsCommand } from "../commands/handlers/ops.ts";
 import type { DomainOperationContext } from "../db/domain-operation.ts";
 import { readMilestoneLifecycleStatus } from "../db/milestone-closeout-readiness.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
@@ -746,9 +748,23 @@ test("after a dropped merge commit, a merge by hand lets the closeout finish and
   git(["commit", "-m", "feat: milestone work by hand"], repo);
   const manualMerge = git(["rev-parse", "main"], repo);
 
-  process.chdir(worktree);
-  mergeMilestoneToMain(repo, "M001", ROADMAP);
+  // The trees are equal, so git shows no unmerged file; the receipt alone
+  // says the closeout must run again.
+  const [blocker] = await findUnmergedCompletedMilestones(repo);
+  assert.equal(blocker?.milestoneId, "M001");
+  assert.deepEqual(blocker?.files, []);
 
+  const notifications: Array<{ message: string; level: string }> = [];
+  const ctx = {
+    hasUI: false,
+    ui: { notify: (message: string, level: string) => { notifications.push({ message, level }); } },
+  };
+  process.chdir(repo);
+  const handled = await withCommandCwd(repo, () =>
+    handleOpsCommand("dispatch complete-milestone M001", ctx as any, {} as any));
+
+  assert.equal(handled, true);
+  assert.deepEqual(notifications.filter((entry) => entry.level === "error"), []);
   assert.deepEqual(receiptRefs(), [droppedMerge, manualMerge]);
   assert.equal(mergeEffectReceipt()?.outcome, "recognized");
   assert.equal(mergeEffectReceipt()?.externalRef, manualMerge);
