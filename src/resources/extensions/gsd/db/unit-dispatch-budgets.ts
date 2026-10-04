@@ -10,7 +10,8 @@
 // no durable identity. Its count stays in the caller's `unclaimed` map and
 // lasts for the process only.
 
-import { _getAdapter, isDbAvailable, transaction } from "../gsd-db.js";
+import { _getAdapter, isDbAvailable } from "../gsd-db.js";
+import { setDispatchBudgetUsed } from "./unit-dispatches.js";
 
 export type UnitBudgetKind = "zero-tool" | "tool-unavailable" | "pre-exec";
 
@@ -42,20 +43,7 @@ function writeUnitBudget(unclaimed: Map<string, number>, ref: UnitBudgetRef, use
     else unclaimed.delete(unclaimedKey(ref));
     return;
   }
-  transaction(() => {
-    _getAdapter()!.prepare(
-      `INSERT INTO unit_dispatch_budgets (dispatch_id, kind, used, updated_at)
-       VALUES (:dispatch_id, :kind, :used, :updated_at)
-       ON CONFLICT (dispatch_id, kind) DO UPDATE SET
-         used = excluded.used,
-         updated_at = excluded.updated_at`,
-    ).run({
-      ":dispatch_id": dispatchId,
-      ":kind": ref.kind,
-      ":used": used,
-      ":updated_at": new Date().toISOString(),
-    });
-  });
+  setDispatchBudgetUsed(dispatchId, ref.kind, used);
 }
 
 /** How much of the budget the unit has used. 0 when it never spent any. */

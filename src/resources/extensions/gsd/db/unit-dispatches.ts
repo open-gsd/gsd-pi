@@ -554,3 +554,21 @@ export function getDispatchesByStatus(
     `SELECT * FROM unit_dispatches WHERE milestone_id = :mid AND status = :status ORDER BY id`,
   ).all({ ":mid": milestoneId, ":status": status }) as unknown as UnitDispatchRow[];
 }
+
+/** Store how much of one retry budget kind the dispatch row's unit has used. */
+export function setDispatchBudgetUsed(dispatchId: number, kind: string, used: number): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `INSERT INTO unit_dispatch_budgets (dispatch_id, kind, used, updated_at)
+       VALUES (:dispatch_id, :kind, :used, :updated_at)
+       ON CONFLICT (dispatch_id, kind) DO UPDATE SET
+         used = excluded.used,
+         updated_at = excluded.updated_at`,
+    ).run({
+      ":dispatch_id": dispatchId,
+      ":kind": kind,
+      ":used": used,
+      ":updated_at": new Date().toISOString(),
+    });
+  });
+}
