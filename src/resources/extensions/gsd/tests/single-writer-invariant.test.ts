@@ -46,6 +46,7 @@ const gsdDir = join(process.cwd(), "src/resources/extensions/gsd");
 // db/queries.ts is explicitly NOT allowed write SQL (asserted separately below).
 const TYPED_DB_WRITER_FILES = new Set([
   "db/auto-workers.ts",
+  "db/command-queue.ts",
   "db/domain-operation.ts",
   "db/milestone-leases.ts",
   "db/runtime-kv.ts",

@@ -1576,7 +1576,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
   // ── Parallel worker signal check ──
   const milestoneLock = process.env.GSD_MILESTONE_LOCK;
   if (milestoneLock) {
-    const signal = consumeSignal(s.basePath, milestoneLock);
+    const signal = consumeSignal(milestoneLock);
     if (signal) {
       if (signal.signal === "stop") {
         await stopAuto(ctx, pi);
@@ -1592,7 +1592,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         // Wait for the coordinator to resume (or stop) us instead. If no resumer
         // lifts the pause within the window, degrade to in-process serialization
         // and continue the dispatch loop rather than halting the run forever.
-        const resumeOutcome = await awaitWorkerResume(s.basePath, milestoneLock);
+        const resumeOutcome = await awaitWorkerResume(milestoneLock);
         if (resumeOutcome === "stop") {
           await stopAuto(ctx, pi);
           return "dispatched";
