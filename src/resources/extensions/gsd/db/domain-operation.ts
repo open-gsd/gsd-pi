@@ -1315,7 +1315,7 @@ export function executeImportDomainOperation(
 /**
  * Private epoch-advancing seam for the strict project-authority cutover
  * aggregate. Public callers must use cutoverProjectAuthority, which validates
- * current Application evidence, Consent, coordination, and the durable receipt.
+ * current lifecycle coverage evidence, Consent, coordination, and the durable receipt.
  */
 export function _executeAuthorityCutoverDomainOperation(
   request: AuthorityCutoverDomainOperationRequest,
