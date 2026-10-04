@@ -295,6 +295,13 @@ D012 is a decision. It is not the cutover:
   the gate.
 - The nine `deferredCutoverBlockers` in the dossier stay open. They are the
   Removal Gates listed below.
+- Step 1 of the read cutover is done: `db/lifecycle-read.ts` is the one read
+  interface for status, phase, dispatch-eligibility, and dependency decisions
+  (`deriveState`, the dispatch guard, `resolveDispatch`, the status response,
+  progress, and the project snapshot). It answers from legacy rows, and the
+  gate check `read-interface-legacy-authority` pins that. Step 2 changes only
+  that module to canonical lifecycle rows and inverts the gate. Step 2 must
+  wait until every hierarchy row has a lifecycle row.
 
 **Database record — pending.** The project database is the source of truth for
 decisions, and on 2026-10-02 it has no row for this decision: the last decision

@@ -131,7 +131,9 @@ authority. The owner confirmed it on 2026-10-02. Its project-database row is
 not written yet, so D012 is a provisional ID and that row is pending. The read cutover is not
 implemented: public status responses,
 dispatch, and dependency decisions still read legacy rows, and that surface is
-still pinned by `gate:lifecycle-shadow-no-cutover`. The decision, the
+still pinned by `gate:lifecycle-shadow-no-cutover`. Those decisions read through
+one interface, `db/lifecycle-read.ts`; the read cutover changes only that module.
+The decision, the
 Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
 are recorded in
 [`docs/dev/state-db-cutover-milestone-decision.md`](docs/dev/state-db-cutover-milestone-decision.md).
