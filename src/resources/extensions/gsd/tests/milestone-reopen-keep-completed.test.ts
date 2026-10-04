@@ -113,7 +113,11 @@ test("keepCompleted handler preserves task completed_at and SUMMARY files", asyn
   assert.equal(task.status, "complete");
   assert.equal(task.completed_at, COMPLETED_AT);
   assert.equal(existsSync(summaryPath), true, summaryPath);
-  assert.match(readFileSync(summaryPath, "utf8"), new RegExp(COMPLETED_AT));
+  // The SUMMARY projection is the stored summary; completed_at stays on the task row.
+  assert.ok(
+    readFileSync(summaryPath, "utf8").startsWith(SUMMARY_BODY),
+    "SUMMARY keeps the stored summary",
+  );
 });
 
 test("omitted keepCompleted still resets completed tasks and deletes SUMMARYs", async (t) => {
