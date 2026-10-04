@@ -184,6 +184,13 @@ test("set-dependencies and discard run through the typed command with the curren
   assert.deepEqual(operations("milestone.discard").map((row) => row["idempotency_key"]), [
     "rpc:milestone_discard:user-action-6",
   ]);
+  // The host command is an operator action, so the user grants the Waiver.
+  assert.deepEqual(_getAdapter()!.prepare(
+    "SELECT granted_by_actor_type, granted_by_actor_id FROM workflow_waivers WHERE scope = 'milestone:M002'",
+  ).all().map((row) => ({ ...row })), [{
+    granted_by_actor_type: "user",
+    granted_by_actor_id: "gsd-cli-operator",
+  }]);
 });
 
 test("a command for a milestone that does not exist is refused with the reason", async () => {

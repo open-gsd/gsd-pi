@@ -305,8 +305,9 @@ function cancelMilestoneHierarchy(
  * removed as projection cleanup. Returns false when the milestone is not in
  * the database. Throws when the milestone is complete or the write fails.
  *
- * The slash command records the Waiver as granted by the user. A tool call
- * comes from the agent, so its Waiver is granted by policy, like a slice skip.
+ * The operator grants the Waiver as the user, from the slash command or from a
+ * typed host command. A tool call comes from the agent, so its Waiver is
+ * granted by policy, like a slice skip.
  */
 export async function discardMilestone(
   basePath: string,
@@ -322,9 +323,9 @@ export async function discardMilestone(
   }
 
   const reason = options.reason ?? "Discarded by user";
-  const grantedBy = options.invocation
-    ? { grantedByActorType: "policy" as const, grantedByActorId: options.invocation.actorId ?? null }
-    : { grantedByActorType: "user" as const, grantedByActorId: "gsd-cli-operator" };
+  const grantedBy = !options.invocation || options.invocation.actorType === "operator"
+    ? { grantedByActorType: "user" as const, grantedByActorId: options.invocation?.actorId ?? "gsd-cli-operator" }
+    : { grantedByActorType: "policy" as const, grantedByActorId: options.invocation.actorId ?? null };
   runMilestoneOperation("discard", milestoneId, { reason }, (context) =>
     cancelMilestoneHierarchy(context, milestoneId, reason, grantedBy), options.invocation);
 
