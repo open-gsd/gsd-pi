@@ -314,7 +314,7 @@ export function reconcileWorktreeDb(
         for (const row of reqConf) conflicts.push(`requirement ${(row as Record<string, unknown>)["id"]}: modified in both`);
       }
 
-      const merged: Omit<ReconcileResult, "conflicts"> = {
+      const merged: Omit<ReconcileResult, "conflicts" | "adoptionStatusChanges"> = {
         decisions: 0,
         requirements: 0,
         artifacts: 0,
