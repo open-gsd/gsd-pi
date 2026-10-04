@@ -144,6 +144,11 @@ const STATUS_SECTION_MAP: Array<{ status: string; heading: string }> = [
   { status: 'out-of-scope', heading: 'Out of Scope' },
 ];
 
+/** Keep the later lines of a multi-line value inside its bullet. */
+function indentLaterLines(value: string): string {
+  return value.replace(/\n(?=[^\n])/g, '\n  ');
+}
+
 /**
  * Generate full REQUIREMENTS.md content from an array of Requirement objects.
  * Groups requirements by status into sections (## Active, ## Validated, etc.),
@@ -151,11 +156,6 @@ const STATUS_SECTION_MAP: Array<{ status: string; heading: string }> = [
  * status sections are emitted too because the deep-mode validator treats their
  * presence as part of the canonical contract.
  */
-/** Keep the later lines of a multi-line value inside its bullet. */
-function indentLaterLines(value: string): string {
-  return value.replace(/\n(?=[^\n])/g, '\n  ');
-}
-
 export function generateRequirementsMd(requirements: Requirement[]): string {
   const lines: string[] = [];
 
