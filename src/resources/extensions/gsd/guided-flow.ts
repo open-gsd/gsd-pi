@@ -27,7 +27,11 @@ import {
   buildPlanSlicePrompt,
   buildSkillActivationBlock,
   capPreamble,
+  inlineNarrativeOptional,
+  milestoneNarrative,
+  sliceNarrative,
 } from "./auto-prompts.js";
+import { readListedMilestoneIds } from "./db/lifecycle-read.js";
 import { deriveState, isGhostMilestone } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import { renderStateProjection } from "./workflow-projections.js";
@@ -42,7 +46,7 @@ import { listUnitRuntimeRecords, clearUnitRuntimeRecord, isInFlightRuntimePhase 
 import { resolveExpectedArtifactPath } from "./auto.js";
 import { gsdHome } from "./gsd-home.js";
 import {
-  gsdRoot, milestonesDir, legacyMilestonesDir, resolveMilestoneFile,
+  gsdRoot, milestonesDir, legacyMilestonesDir,
   resolveSliceFile, resolveGsdRootFile, relGsdRootFile,
   relMilestoneFile, relSliceFile, relSlicePath,
 } from "./paths.js";
@@ -1075,7 +1079,8 @@ async function dispatchNewMilestoneDiscuss(
 ): Promise<void> {
   setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: nextId, step: stepMode });
 
-  const isGreenfield = findMilestoneIds(basePath).length === 0;
+  // Greenfield: the database lists no Milestone. Directories are not counted.
+  const isGreenfield = readListedMilestoneIds().length === 0;
   if (isGreenfield) {
     const prompt = await prepareAndBuildDiscussPrompt(
       ctx,
@@ -1214,29 +1219,25 @@ export async function buildDiscussSlicePrompt(
 ): Promise<string> {
   const inlined: string[] = [];
 
-  // Roadmap — always included so the agent sees surrounding slices
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  const roadmapRel = relMilestoneFile(base, mid, "ROADMAP");
-  const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
-  if (roadmapContent) {
-    inlined.push(`### Milestone Roadmap\nSource: \`${roadmapRel}\`\n\n${roadmapContent.trim()}`);
+  // Narrative and slice rows come from the database; ensure it is open (#2560).
+  // A database that the caller already holds is kept: the open below resolves
+  // the working directory, which is not always the project of `base`.
+  if (!isDbAvailable()) {
+    const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
+    await ensureDbOpen();
   }
+
+  // Roadmap — always included so the agent sees surrounding slices
+  const roadmapInline = inlineNarrativeOptional(milestoneNarrative(base, mid, "ROADMAP"), "Milestone Roadmap");
+  if (roadmapInline) inlined.push(roadmapInline);
 
   // Milestone context — understanding the full milestone intent
-  const contextPath = resolveMilestoneFile(base, mid, "CONTEXT");
-  const contextRel = relMilestoneFile(base, mid, "CONTEXT");
-  const contextContent = contextPath ? await loadFile(contextPath) : null;
-  if (contextContent) {
-    inlined.push(`### Milestone Context\nSource: \`${contextRel}\`\n\n${contextContent.trim()}`);
-  }
+  const contextInline = inlineNarrativeOptional(milestoneNarrative(base, mid, "CONTEXT"), "Milestone Context");
+  if (contextInline) inlined.push(contextInline);
 
   // Milestone research — technical grounding
-  const researchPath = resolveMilestoneFile(base, mid, "RESEARCH");
-  const researchRel = relMilestoneFile(base, mid, "RESEARCH");
-  const researchContent = researchPath ? await loadFile(researchPath) : null;
-  if (researchContent) {
-    inlined.push(`### Milestone Research\nSource: \`${researchRel}\`\n\n${researchContent.trim()}`);
-  }
+  const researchInline = inlineNarrativeOptional(milestoneNarrative(base, mid, "RESEARCH"), "Milestone Research");
+  if (researchInline) inlined.push(researchInline);
 
   // Decisions — architectural context that constrains this slice
   const decisionsPath = resolveGsdRootFile(base, "DECISIONS");
@@ -1248,10 +1249,7 @@ export async function buildDiscussSlicePrompt(
   }
 
   // Completed slice summaries — what was already built that this slice builds on
-  // Ensure DB is open so getMilestoneSlices returns real data (#2560).
   {
-    const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
-    await ensureDbOpen();
     type NormSlice = { id: string; done: boolean };
     let normSlices: NormSlice[] = [];
     if (isDbAvailable()) {
@@ -1259,12 +1257,8 @@ export async function buildDiscussSlicePrompt(
     }
     for (const s of normSlices) {
       if (!s.done || s.id === sid) continue;
-      const summaryPath = resolveSliceFile(base, mid, s.id, "SUMMARY");
-      const summaryRel = relSliceFile(base, mid, s.id, "SUMMARY");
-      const summaryContent = summaryPath ? await loadFile(summaryPath) : null;
-      if (summaryContent) {
-        inlined.push(`### ${s.id} Summary (completed)\nSource: \`${summaryRel}\`\n\n${summaryContent.trim()}`);
-      }
+      const summaryInline = inlineNarrativeOptional(sliceNarrative(base, mid, s.id, "SUMMARY"), `${s.id} Summary (completed)`);
+      if (summaryInline) inlined.push(summaryInline);
     }
   }
 
@@ -1714,9 +1708,7 @@ async function dispatchDiscussForMilestone(
   milestoneTitle: string,
   opts: { fastPath?: boolean } = {},
 ): Promise<void> {
-  const draftFile = resolveMilestoneFile(basePath, mid, "CONTEXT-DRAFT");
-  const draftContent = draftFile ? await loadFile(draftFile) : null;
-  const hasSeed = !!(draftContent || opts.fastPath);
+  const hasSeed = hasSavedArtifact(mid, null, "CONTEXT-DRAFT") || !!opts.fastPath;
   const fastPathInstruction = hasSeed
     ? [
         "> **Fast path active — scope provided.**",
@@ -2220,7 +2212,10 @@ export async function showSmartEntry(
       }
     }
 
+    // The disk scan is an input of the id reservation and of the #456 check
+    // only. The database decides if this is the first Milestone.
     const milestoneIds = findMilestoneIds(basePath);
+    const isFirst = readListedMilestoneIds().length === 0;
 
     // Sanity check (#456): if findMilestoneIds returns [] but the milestones
     // directory has contents, something went wrong (permissions, stale worktree
@@ -2247,7 +2242,6 @@ export async function showSmartEntry(
 
     const uniqueMilestoneIds = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
     const nextId = nextMilestoneIdReserved(milestoneIds, uniqueMilestoneIds, basePath);
-    const isFirst = milestoneIds.length === 0;
 
     if (isFirst) {
       // First ever — skip wizard, just ask directly

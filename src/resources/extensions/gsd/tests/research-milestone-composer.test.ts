@@ -15,6 +15,7 @@ import {
   upsertMilestonePlanning,
   insertArtifact,
 } from "../gsd-db.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-research-ms-composer-"));
@@ -60,6 +61,7 @@ test("#4782 phase 3: buildResearchMilestonePrompt emits milestone-context then r
     "# M001 Context\n\nA research test milestone.\n",
   );
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildResearchMilestonePrompt("M001", "Research Test", base);
 
   // Context wrapper present
@@ -111,6 +113,7 @@ test("buildResearchMilestonePrompt keeps broad project docs on-demand", async (t
     full_content: "# Decisions\n\nResearch composer fixture decisions.\n",
   });
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildResearchMilestonePrompt("M001", "Research Test", base);
 
   const contextIdx = prompt.indexOf("### Milestone Context");
@@ -144,6 +147,7 @@ test("ADR-029: research-milestone inlines project classification + codebase snap
   writeFileSync(join(base, "index.html"), "<!doctype html><html><body><h1>hi</h1></body></html>\n");
   writeFileSync(join(base, "script.js"), "const x = 1;\nasync function go() { await x; }\n");
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildResearchMilestonePrompt("M001", "Research Test", base);
 
   // Project-size signal (same block plan-milestone gets).
@@ -164,6 +168,7 @@ test("ADR-029: codebase snapshot is suppressed when discuss_preparation is false
   writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\ndiscuss_preparation: false\n---\n");
   invalidateAllCaches();
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildResearchMilestonePrompt("M001", "Research Test", base);
 
   // Snapshot opt-out honored; classification (unconditional) still present.
@@ -181,6 +186,7 @@ test("ADR-029: prior partial RESEARCH is inlined as a resume block; absent other
 
   // No prior research yet → no resume block. (Match the rendered block heading,
   // not the bare phrase — step 8 of the template references the phrase by name.)
+  saveMilestoneFilesAsArtifacts(base);
   const before = await buildResearchMilestonePrompt("M001", "Research Test", base);
   assert.doesNotMatch(before, /### Resume — Prior Partial Research \(continue, do not redo\)/);
 
@@ -191,6 +197,7 @@ test("ADR-029: prior partial RESEARCH is inlined as a resume block; absent other
   );
   invalidateAllCaches();
 
+  saveMilestoneFilesAsArtifacts(base);
   const after = await buildResearchMilestonePrompt("M001", "Research Test", base);
   assert.match(after, /Resume — Prior Partial Research \(continue, do not redo\)/);
   assert.match(after, /Partial finding: the app is a static site/);

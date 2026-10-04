@@ -39,7 +39,6 @@ import {
 import { openAutoPause } from "./db/writers/auto-pauses.js";
 import type { AutoPauseBlockerKind } from "./recovery-policy.js";
 import { extractSection, getManifestStatus, splitFrontmatter, parseFrontmatterMap } from "./files.js";
-export { inlinePriorMilestoneSummary } from "./files.js";
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
 
 import {

@@ -1260,6 +1260,39 @@ export function getSliceScopedArtifacts(milestoneId: string, sliceId: string): A
 }
 
 /**
+ * The saved artifact row of this type, with content, for a Milestone (sliceId
+ * and taskId null), a Slice (taskId null) or a Task. The newest row answers
+ * when a scope has more than one. Null when there is none.
+ */
+export function getScopedArtifact(
+  milestoneId: string, sliceId: string | null, taskId: string | null, artifactType: string,
+): ArtifactRow | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare(
+    `SELECT * FROM artifacts
+      WHERE milestone_id = :mid AND slice_id IS :sid AND task_id IS :tid
+        AND artifact_type = :type AND TRIM(full_content) <> ''
+      ORDER BY imported_at DESC, path LIMIT 1`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId, ":type": artifactType });
+  return row ? rowToArtifact(row) : null;
+}
+
+/**
+ * The saved artifact rows of this type, with content, of the Tasks of one
+ * Slice: one row for each Task (the newest), in Task id order.
+ */
+export function getSliceTaskArtifacts(milestoneId: string, sliceId: string, artifactType: string): ArtifactRow[] {
+  if (!getDbOrNull()!) return [];
+  const rows = getDbOrNull()!.prepare(
+    `SELECT * FROM artifacts
+      WHERE milestone_id = :mid AND slice_id = :sid AND task_id IS NOT NULL
+        AND artifact_type = :type AND TRIM(full_content) <> ''
+      ORDER BY task_id, imported_at DESC, path`,
+  ).all({ ":mid": milestoneId, ":sid": sliceId, ":type": artifactType }).map(rowToArtifact);
+  return rows.filter((row, index) => index === 0 || rows[index - 1]!.task_id !== row.task_id);
+}
+
+/**
  * True when the milestone (sliceId null) or the slice has a saved artifact row
  * of this type with content. This is the evidence that a discuss or research
  * unit saved its result; the rendered file is a projection and is not read.

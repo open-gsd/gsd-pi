@@ -4,8 +4,9 @@
 // resolveDispatch, the already-closed dispatch check, the queue commands, the
 // auto start and stop completion checks, the closeout, recovery, post-unit and
 // verification checks, the preconditions of the planning and completion
-// commands, the status response, progress and the project snapshot ask their
-// status questions here.
+// commands, the status response, progress, the project snapshot and the
+// dashboards ask their status questions here. It also answers which
+// Milestones exist (`readListedMilestoneIds`).
 // The project Authority Epoch chooses the read source, in `cutoverHasRun`
 // only: canonical lifecycle rows and Waivers after the Cutover, legacy status
 // rows (D005) before it. The choice is per Project, never per item.
@@ -236,6 +237,15 @@ function toSliceRead(row: SliceRow, items: LifecycleItems | null): SliceRead {
 export function readMilestones(): MilestoneRead[] {
   const items = cutoverHasRun() ? readLifecycleItems("milestone") : null;
   return getAllMilestones().map((row) => toMilestoneRead(row, items));
+}
+
+/**
+ * The ids of the listed Milestones in workflow order. This is the Milestone
+ * universe for every reader that decides or reports: no milestone directory
+ * is scanned. A discarded Milestone is a tombstone and is not listed.
+ */
+export function readListedMilestoneIds(): string[] {
+  return readMilestones().filter((milestone) => !milestone.discarded).map((milestone) => milestone.id);
 }
 
 export function readMilestone(milestoneId: string): MilestoneRead | null {

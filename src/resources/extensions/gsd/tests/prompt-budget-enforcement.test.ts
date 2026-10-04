@@ -7,7 +7,7 @@
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -18,11 +18,13 @@ import { computeBudgets, truncateAtSectionBoundary } from "../context-budget.js"
 import { relSlicePath } from "../paths.js";
 import {
   closeDatabase,
+  insertArtifact,
   insertMilestone,
   insertSlice,
   isDbAvailable,
   openDatabase,
 } from "../gsd-db.js";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -100,6 +102,8 @@ function setupDependencyFixture(
   // Ensure target slice dir exists
   const targetSliceDir = join(msDir, "slices", sid);
   mkdirSync(targetSliceDir, { recursive: true });
+
+  saveMilestoneFilesAsArtifacts(base);
 }
 
 function setupFlatPhaseSlicePlan(base: string): void {
@@ -119,6 +123,16 @@ function setupFlatPhaseSlicePlan(base: string): void {
       "- Rendered prompt points at this slice plan.",
     ].join("\n"),
   );
+  // Prompt builders read the plan from its artifact row.
+  openDatabase(":memory:");
+  insertArtifact({
+    path: "phases/01-flat-phase/01-01-PLAN.md",
+    artifact_type: "PLAN",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: null,
+    full_content: readFileSync(join(phaseDir, "01-01-PLAN.md"), "utf-8"),
+  });
 }
 
 // ─── inlineDependencySummaries truncation ─────────────────────────────────────
@@ -708,6 +722,8 @@ describe("prompt-budget: reactive-execute builder", () => {
       ].join("\n");
       writeFileSync(join(taskDir, "T01-SUMMARY.md"), hugeSummary);
       writeFileSync(join(taskDir, "T02-SUMMARY.md"), hugeSummary);
+      openDatabase(":memory:");
+      saveMilestoneFilesAsArtifacts(base);
 
       const prompt = await buildReactiveExecutePrompt("M001", "Milestone", "S01", "Slice", ["T03"], base, undefined, {
         sessionContextWindow: 32_000,
@@ -789,6 +805,8 @@ describe("prompt-budget: execute-task inline cap (039)", () => {
         `### Step ${i}\n\n${"Implementation detail. ".repeat(90)}`
       ).join("\n\n");
       writeFileSync(join(taskDir, "T01-PLAN.md"), bigPlan);
+      openDatabase(":memory:");
+      saveMilestoneFilesAsArtifacts(base);
 
       const prompt = await buildExecuteTaskPrompt("M001", "S01", "Slice", "T01", "Task", base, {
         level: "standard",
@@ -856,6 +874,8 @@ describe("prompt-budget: discuss-slice inline cap (039)", () => {
         `### D${String(i).padStart(3, "0")}\n\n${"Decision rationale detail. ".repeat(60)}`
       ).join("\n\n");
       writeFileSync(join(base, ".gsd", "DECISIONS.md"), bigDecisions);
+      openDatabase(":memory:");
+      saveMilestoneFilesAsArtifacts(base);
 
       const prompt = await buildDiscussSlicePrompt("M001", "S01", "Current", base);
 

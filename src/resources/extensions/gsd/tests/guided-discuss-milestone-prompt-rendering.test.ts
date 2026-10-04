@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { VISION_ASK_VARIANTS } from "../vision-ask.ts";
 import { buildDiscussMilestonePrompt } from "../auto-prompts.ts";
+import { closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 test("guided milestone prompt renders compact interview and context guidance", async (t) => {
   const previousGsdHome = process.env.GSD_HOME;
@@ -66,6 +68,12 @@ test("guided milestone prompt builder preloads milestone planning context", asyn
     writeFileSync(join(currentDir, "M002-CONTEXT.md"), "# M002 Context\n\nCONTEXT-SIGNAL", "utf-8");
     writeFileSync(join(currentDir, "M002-RESEARCH.md"), "# M002 Research\n\nRESEARCH-SIGNAL", "utf-8");
     writeFileSync(join(futureDir, "M003-SUMMARY.md"), "# M003 Summary\n\nFUTURE-SUMMARY-SIGNAL", "utf-8");
+    // The Milestone order and the narrative come from database rows.
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Checkout", status: "complete" });
+    insertMilestone({ id: "M002", title: "Checkout Polish", status: "active" });
+    insertMilestone({ id: "M003", title: "Later", status: "complete" });
+    saveMilestoneFilesAsArtifacts(base);
 
     const prompt = await buildDiscussMilestonePrompt("M002", "Checkout Polish", base, "true");
 
@@ -83,6 +91,7 @@ test("guided milestone prompt builder preloads milestone planning context", asyn
     assert.doesNotMatch(prompt, /FUTURE-SUMMARY-SIGNAL/);
     assert.match(prompt, /### Output Template: Context/);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -118,8 +127,10 @@ test("guided milestone prompt builder caps prior draft seed before interpolation
     const currentDir = join(base, ".gsd", "milestones", "M001");
     mkdirSync(currentDir, { recursive: true });
 
+    openDatabase(join(base, ".gsd", "gsd.db"));
     const draftPath = join(currentDir, "M001-CONTEXT-DRAFT.md");
     writeFileSync(draftPath, "# Draft\n\nSMALL-DRAFT-SIGNAL", "utf-8");
+    saveMilestoneFilesAsArtifacts(base);
     const smallPrompt = await buildDiscussMilestonePrompt("M001", "Draft Resume", base, "true", {
       includeContextMode: false,
     });
@@ -129,6 +140,7 @@ test("guided milestone prompt builder caps prior draft seed before interpolation
       ["# Draft", "", "SMALL-DRAFT-SIGNAL", "", "A".repeat(200_000), "", "OVERSIZED-DRAFT-TAIL-SIGNAL"].join("\n"),
       "utf-8",
     );
+    saveMilestoneFilesAsArtifacts(base);
     const largePrompt = await buildDiscussMilestonePrompt("M001", "Draft Resume", base, "true", {
       includeContextMode: false,
     });
@@ -145,6 +157,7 @@ test("guided milestone prompt builder caps prior draft seed before interpolation
     );
     assert.ok(addedChars < 25_000, `large draft should add bounded seed chars, added ${addedChars}`);
   } finally {
+    closeDatabase();
     if (previousGsdHome === undefined) delete process.env.GSD_HOME;
     else process.env.GSD_HOME = previousGsdHome;
     rmSync(base, { recursive: true, force: true });

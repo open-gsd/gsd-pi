@@ -347,6 +347,15 @@ describe("showDiscuss targeted slice", () => {
         "utf-8",
       );
 
+      insertArtifact({
+        path: "milestones/M001/M001-ROADMAP.md",
+        artifact_type: "ROADMAP",
+        milestone_id: "M001",
+        slice_id: null,
+        task_id: null,
+        full_content: rootRoadmap.replace("ROOT-ROADMAP-CONTENT", "ROW-ROADMAP-CONTENT"),
+      });
+
       await showDiscuss(
         makeDiscussCtx(notifications) as any,
         harness.pi as any,
@@ -355,8 +364,11 @@ describe("showDiscuss targeted slice", () => {
       );
 
       assert.equal(harness.sent.length, 1, "targeted slice must dispatch discuss-slice");
+      // The roadmap text is the artifact row of the project database. Neither
+      // the worktree file nor the project-root file is read.
       const content = String(harness.sent[0]?.content);
-      assert.match(content, /WORKTREE-ROADMAP-CONTENT/);
+      assert.match(content, /ROW-ROADMAP-CONTENT/);
+      assert.doesNotMatch(content, /WORKTREE-ROADMAP-CONTENT/);
       assert.doesNotMatch(content, /ROOT-ROADMAP-CONTENT/);
       assert.equal(
         getGuidedUnitContext(worktreeBase)?.unitType,

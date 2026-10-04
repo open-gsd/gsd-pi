@@ -20,6 +20,7 @@ import {
   openDatabase,
   saveGateResult,
 } from "../gsd-db.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 // ─── Fixture helpers ──────────────────────────────────────────────────────
 
@@ -134,11 +135,9 @@ test("#4780 excerpt: emits compact block with frontmatter fields + section heads
   t.after(() => cleanup(base));
   invalidateAllCaches();
 
-  const absPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md");
   const relPath = ".gsd/milestones/M001/slices/S01/S01-SUMMARY.md";
-  writeSummary(base, "S01", makeFatSummary("S01"));
 
-  const out = await buildSliceSummaryExcerpt(absPath, relPath, "S01");
+  const out = await buildSliceSummaryExcerpt(makeFatSummary("S01"), relPath, "S01");
 
   // Compact header with source path for on-demand Read
   assert.match(out, /### S01 Summary \(excerpt\)/);
@@ -188,10 +187,7 @@ test("#4780 excerpt: blocker_discovered=true surfaces prominent marker", async (
     "## What Happened",
     "content",
   ].join("\n");
-  const absPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md");
-  writeSummary(base, "S01", content);
-
-  const out = await buildSliceSummaryExcerpt(absPath, "rel", "S01");
+  const out = await buildSliceSummaryExcerpt(content, "rel", "S01");
   assert.match(out, /Blockers:\*\* ⚠️ blocker recorded/);
 });
 
@@ -202,16 +198,13 @@ test("#4780 excerpt: fall back to full inline when frontmatter is unrecognizable
 
   // No frontmatter, no id — parser returns empty id, triggering fallback
   const garbage = "# S99\n\nJust a wall of text with no frontmatter at all.\n";
-  const absPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S99-SUMMARY.md");
-  writeFileSync(absPath, garbage);
-
-  const out = await buildSliceSummaryExcerpt(absPath, "rel/path.md", "S99");
+  const out = await buildSliceSummaryExcerpt(garbage, "rel/path.md", "S99");
   // Full content preserved (no excerpt wrapper), no data-loss
   assert.match(out, /Just a wall of text/);
   assert.match(out, /### S99 Summary/);
 });
 
-test("#4780 excerpt: missing file reports not-found fallback", async (t) => {
+test("#4780 excerpt: missing summary reports not-found fallback", async (t) => {
   const base = createBase();
   t.after(() => cleanup(base));
 
@@ -240,10 +233,7 @@ test("#4780 excerpt: section bodies are capped", async (t) => {
     "## Follow-ups",
     longFollowUps,
   ].join("\n");
-  const absPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md");
-  writeSummary(base, "S01", content);
-
-  const out = await buildSliceSummaryExcerpt(absPath, "rel/path.md", "S01");
+  const out = await buildSliceSummaryExcerpt(content, "rel/path.md", "S01");
 
   assert.match(out, /\(truncated — see full `rel\/path\.md`\)/);
   assert.ok(
@@ -266,6 +256,7 @@ test("#4780 closer prompt: uses excerpts + lists on-demand slice SUMMARY paths",
   writeFileSync(join(base, ".gsd", "PROJECT.md"), "# Project\n\nBroad product context should stay on-demand.");
   writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# Context\n\nMilestone context should stay on-demand.");
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildCompleteMilestonePrompt("M001", "Test Milestone", base);
 
   // Excerpt markers present for each slice
@@ -324,6 +315,7 @@ test("complete-milestone prompt caps repeated inlined context around 20k chars",
     "# Project Knowledge\n\n## Patterns\n\n### Test Milestone shared\n" + "Large scoped knowledge body. ".repeat(1200),
   );
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildCompleteMilestonePrompt("M001", "Test Milestone", base);
   const contextStart = prompt.indexOf("## Inlined Context (preloaded");
   const contextEnd = prompt.indexOf("## Steps", contextStart);
@@ -364,6 +356,7 @@ test("validate-milestone prompt uses slice excerpts and on-demand paths instead 
     ].join("\n"),
   );
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildValidateMilestonePrompt("M001", "Test Milestone", base);
 
   assert.match(prompt, /### S01 Summary \(excerpt\)/);
@@ -401,6 +394,7 @@ test("validate-milestone emits failure-aware reviewer instructions", async (t) =
   writeSummary(base, "S01", makeFatSummary("S01"));
   writeSummary(base, "S02", makeFatSummary("S02"));
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildValidateMilestonePrompt("M001", "Test Milestone", base);
 
   assert.match(prompt, /evaluate only the declared boundaries/i);
@@ -450,6 +444,7 @@ test("validate-milestone prompt inlines persisted slice-level Q3/Q4 gate flags",
   writeRoadmap(base, makeRoadmap());
   writeSummary(base, "S01", makeFatSummary("S01"));
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildValidateMilestonePrompt("M001", "Test Milestone", base);
 
   assert.match(prompt, /### Persisted Slice-Level Gate Flags \(from quality_gates\)/);
@@ -484,6 +479,7 @@ test("validate-milestone prompt inlines planned verification classes as canonica
   writeSummary(base, "S01", makeFatSummary("S01"));
   writeSummary(base, "S02", makeFatSummary("S02"));
 
+  saveMilestoneFilesAsArtifacts(base);
   const prompt = await buildValidateMilestonePrompt("M001", "Test Milestone", base);
 
   assert.match(prompt, /### Verification Classes \(from planning\)/);

@@ -32,7 +32,6 @@ import { ensureGsdSymlink, isInheritedRepo, validateProjectId } from "./repo-ide
 import { migrateToExternalState, recoverFailedMigration } from "./migrate-external.js";
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
 import { gsdRoot } from "./paths.js";
-import { findMilestoneIds } from "./milestone-ids.js";
 import { milestoneEntryBlockedGuidance } from "./guidance.js";
 import { invalidateAllCaches } from "./cache.js";
 import { writeLock, clearLock, readCrashLock, isLockProcessAlive } from "./crash-recovery.js";
@@ -80,7 +79,7 @@ import {
   probeDbWritable,
   hasSavedArtifact,
 } from "./gsd-db.js";
-import { readMilestone, readMilestones, type MilestoneRead } from "./db/lifecycle-read.js";
+import { readListedMilestoneIds, readMilestone, readMilestones, type MilestoneRead } from "./db/lifecycle-read.js";
 import {
   closeAllWorkflowDatabases,
   getWorkflowDatabaseStatus,
@@ -1936,7 +1935,7 @@ export async function bootstrapAutoSession(
 
     // Pre-flight: validate milestone queue
     try {
-      const milestoneIds = findMilestoneIds(base);
+      const milestoneIds = readListedMilestoneIds();
       if (milestoneIds.length > 1) {
         const issues: string[] = [];
         for (const id of milestoneIds) {

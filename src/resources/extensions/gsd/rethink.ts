@@ -13,7 +13,7 @@ import { existsSync } from "node:fs";
 import { isAutoActive } from "./auto.js";
 import { deriveState } from "./state.js";
 import { gsdRoot } from "./paths.js";
-import { findMilestoneIds } from "./milestone-ids.js";
+import { readListedMilestoneIds } from "./db/lifecycle-read.js";
 import { loadQueueOrder, validateQueueOrder } from "./queue-order.js";
 import { getParkedReason } from "./milestone-actions.js";
 import { getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
@@ -44,7 +44,7 @@ export async function handleRethink(
   ctx.ui.notify("Building project snapshot for rethink...", "info");
 
   const state = await deriveState(basePath);
-  const milestoneIds = findMilestoneIds(basePath);
+  const milestoneIds = readListedMilestoneIds();
 
   if (milestoneIds.length === 0) {
     ctx.ui.notify("No milestones exist yet. Nothing to rethink.", "warning");

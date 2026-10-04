@@ -6,8 +6,8 @@
 import { promises as fs } from 'node:fs';
 import { resolve } from 'node:path';
 import { atomicWriteAsync } from './atomic-write.js';
-import { resolveMilestoneFile, relMilestoneFile } from './paths.js';
-import { milestoneIdSort, findMilestoneIds } from './milestone-ids.js';
+import { resolveMilestoneFile } from './paths.js';
+import { milestoneIdSort } from './milestone-ids.js';
 
 import type {
   TaskPlanFile, TaskPlanFrontmatter,
@@ -579,25 +579,6 @@ export function parseContextDependsOn(content: string | null): string[] {
   const raw = fm['depends_on'];
   if (!Array.isArray(raw) || raw.length === 0) return [];
   return (raw as string[]).map(s => String(s).trim()).filter(Boolean);
-}
-
-/**
- * Inline the prior milestone's SUMMARY.md as context for the current milestone's planning prompt.
- * Returns null when: (1) `mid` is the first milestone, (2) prior milestone has no SUMMARY file.
- *
- * Uses the shared findMilestoneIds to scan the milestones directory.
- */
-export async function inlinePriorMilestoneSummary(mid: string, base: string): Promise<string | null> {
-  const sorted = findMilestoneIds(base);
-  if (sorted.length === 0) return null;
-  const idx = sorted.indexOf(mid);
-  if (idx <= 0) return null;
-  const prevMid = sorted[idx - 1];
-  const absPath = resolveMilestoneFile(base, prevMid, "SUMMARY");
-  const relPath = relMilestoneFile(base, prevMid, "SUMMARY");
-  const content = absPath ? await loadFile(absPath) : null;
-  if (!content) return null;
-  return `### Prior Milestone Summary\nSource: \`${relPath}\`\n\n${content.trim()}`;
 }
 
 // ─── Manifest Status ──────────────────────────────────────────────────────
