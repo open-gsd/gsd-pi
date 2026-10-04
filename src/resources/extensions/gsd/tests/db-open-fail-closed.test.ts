@@ -17,11 +17,12 @@ import { ensureWorkflowDbAtPath, ensureWorkflowDbForBase, openWorkflowDatabase, 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.ts";
 import { backupDatabaseBeforeMigration } from "../db-migration-backup.ts";
 import { recordSchemaVersion } from "../db-schema-metadata.ts";
-import { applyLifecycleBackfill } from "../lifecycle-backfill-domain-operation.ts";
 import { SCHEMA_VERSION } from "../db/engine.ts";
+import { registerMilestones } from "../milestone-registration.ts";
 import { moveStateDirectory } from "../repo-identity.ts";
 import { openSqliteReadOnly } from "../sqlite-readonly.ts";
 import { executeSummarySave } from "../tools/workflow-tool-executors.ts";
+import { insertPlannedSlice } from "./helpers/planned-slice.ts";
 
 const sqlite = createRequire(import.meta.url)("node:sqlite");
 const tempDirs = new Set<string>();
@@ -75,48 +76,53 @@ function makeCtx(): { ctx: any; notes: Array<{ message: string; kind: string }> 
   };
 }
 
-/**
- * A project whose live DB holds M100 and whose verified gsd.db.backup-v45
- * holds M999 (same construction as backup-restore-command.test.ts).
- */
-function makeRestoreFixture(withSlices = false): { base: string; dbPath: string; backupPath: string; backupSha: string } {
-  const { base, dbPath } = makeProject();
-  const seedSlice = (milestoneId: string): void => {
-    if (withSlices) insertSlice({ id: "S01", milestoneId, title: `${milestoneId} slice`, status: "pending", risk: "low", depends: [] });
-  };
-  assert.equal(openWorkflowDatabase(base).ok, true);
-  // The second open matters only when GSD_AUTHORITY_CUTOVER=1 is set: it then
-  // cuts the project over, so the backup and the live DB share one Authority
-  // Epoch. With the flag unset it changes nothing.
-  closeDatabase();
-  assert.equal(openWorkflowDatabase(base).ok, true);
+/** Stamp the open database as schema v45 and reopen it: the real migration from v45 writes a verified backup first. */
+function migrateFromV45(base: string): void {
   const db = _getAdapter()!;
-  db.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
-    .run("M999", "sentinel-milestone", "active", "2026-01-01T00:00:00.000Z");
-  seedSlice("M999");
   db.exec("DELETE FROM schema_version");
   recordSchemaVersion(db, 45);
   db.exec("PRAGMA user_version = 0");
   db.exec("PRAGMA application_id = 0");
   closeDatabase();
-
   assert.equal(openWorkflowDatabase(base).ok, true);
+}
+
+/**
+ * A project whose verified gsd.db.backup-v45 holds M999 and whose live DB
+ * also holds M100, both at Authority Epoch 1 (same construction as
+ * backup-restore-command.test.ts). M999 is a row of an older build, written
+ * before the open that cuts the project over. M100 is work accepted after it.
+ */
+function makeRestoreFixture(withSlices = false): { base: string; dbPath: string; backupPath: string; backupSha: string } {
+  const { base, dbPath } = makeProject();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  _getAdapter()!.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
+    .run("M999", "sentinel-milestone", "active", "2026-01-01T00:00:00.000Z");
+  if (withSlices) insertSlice({ id: "S01", milestoneId: "M999", title: "M999 slice", status: "pending", risk: "low", depends: [] });
+  // The first open of the existing database adopts its rows and cuts the project over.
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+
+  migrateFromV45(base);
   const backupPath = `${dbPath}.backup-v45`;
   assert.equal(existsSync(backupPath), true);
-  const live = _getAdapter()!;
-  live.exec("DELETE FROM slices; DELETE FROM milestones;");
-  live.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
-    .run("M100", "post-cutover", "active", "2026-01-02T00:00:00.000Z");
-  seedSlice("M100");
+  assert.deepEqual(registerMilestones([{ id: "M100", title: "post-cutover" }], "test"), ["M100"]);
+  if (withSlices) insertPlannedSlice("M100", "S01", "M100 slice");
   closeDatabase();
   return { base, dbPath, backupPath, backupSha: sha256File(backupPath) };
 }
 
-/** Adopt every hierarchy row: the Authority Epoch cannot advance over a row with no lifecycle row. */
-function adoptHierarchy(base: string): void {
-  assert.equal(openWorkflowDatabase(base).ok, true);
-  applyLifecycleBackfill(base);
+/**
+ * A second migration from v45 keeps the verified backup-v45 and writes the
+ * newer copy, which also holds M100, as gsd.db.backup-v45.latest.
+ */
+function makeLatestBackup(fixture: { base: string; backupPath: string }): { latestPath: string; latestSha: string } {
+  assert.equal(openWorkflowDatabase(fixture.base).ok, true);
+  migrateFromV45(fixture.base);
   closeDatabase();
+  const latestPath = `${fixture.backupPath}.latest`;
+  assert.deepEqual(milestoneIds(latestPath), ["M100", "M999"]);
+  return { latestPath, latestSha: sha256File(latestPath) };
 }
 
 function consentArgs(fixture: { backupPath: string; backupSha: string }): string {
@@ -288,6 +294,7 @@ test("(4) restore shows the erased Domain Operation range and refuses a higher A
   const fixture = makeRestoreFixture();
   const backupRevision = readOnly(fixture.backupPath, (db) =>
     Number(db.prepare("SELECT revision FROM project_authority WHERE singleton = 1").get()?.["revision"]));
+  // The registration of M100 is one later Domain Operation; three more follow.
   rawExec(fixture.dbPath, "UPDATE project_authority SET revision = revision + 3 WHERE singleton = 1");
 
   const preview = makeCtx();
@@ -296,10 +303,9 @@ test("(4) restore shows the erased Domain Operation range and refuses a higher A
   assert.ok(guidance, JSON.stringify(preview.notes));
   assert.match(
     guidance.message,
-    new RegExp(`Erases 3 later Domain Operations: project revisions ${backupRevision + 1}\\.\\.${backupRevision + 3}`),
+    new RegExp(`Erases 4 later Domain Operations: project revisions ${backupRevision + 1}\\.\\.${backupRevision + 4}`),
   );
 
-  adoptHierarchy(fixture.base);
   rawExec(fixture.dbPath, "UPDATE project_authority SET authority_epoch = authority_epoch + 1 WHERE singleton = 1");
   const before = sha256File(fixture.dbPath);
   const refused = makeCtx();
@@ -312,12 +318,11 @@ test("(4) restore shows the erased Domain Operation range and refuses a higher A
   assert.match(refusal.message, /\/gsd recover/);
   assert.ok(!refused.notes.some((note) => note.kind === "success"));
   assert.equal(sha256File(fixture.dbPath), before, "a refused restore must not touch the live database");
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
 });
 
 test("(4b) a healthy database locked by another process is refused, not replaced as corrupt", async () => {
   const fixture = makeRestoreFixture();
-  adoptHierarchy(fixture.base);
   rawExec(
     fixture.dbPath,
     `UPDATE project_authority SET authority_epoch = authority_epoch + 1 WHERE singleton = 1;
@@ -345,7 +350,7 @@ test("(4b) a healthy database locked by another process is refused, not replaced
     readdirSync(join(fixture.base, ".gsd")).filter((entry) => entry.startsWith("gsd.db.quarantine-")),
     [],
   );
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
 });
 
 test("(3c) restore refuses before claiming its intent when the WAL cannot be checkpointed", async () => {
@@ -408,15 +413,11 @@ test("(5) after a restore the projection tree equals a clean render of the resto
 
 test("(6) a .latest migration backup is listed as the newer copy and can be restored", async () => {
   const fixture = makeRestoreFixture();
-  const latestPath = `${fixture.backupPath}.latest`;
-  writeFileSync(latestPath, readFileSync(fixture.backupPath));
-  rawExec(
-    latestPath,
-    `INSERT INTO milestones (id, title, status, created_at) VALUES ('M555', 'newer', 'active', '2026-01-03T00:00:00.000Z');
-     PRAGMA wal_checkpoint(TRUNCATE);`,
-  );
-  for (const suffix of ["-wal", "-shm"]) rmSync(`${latestPath}${suffix}`, { force: true });
-  const latestSha = sha256File(latestPath);
+  const { latestPath, latestSha } = makeLatestBackup(fixture);
+  // Work accepted after the newer copy: the restore erases it.
+  assert.equal(openWorkflowDatabase(fixture.base).ok, true);
+  assert.deepEqual(registerMilestones([{ id: "M555", title: "after the newer copy" }], "test"), ["M555"]);
+  closeDatabase();
 
   const listing = makeCtx();
   await handleDbRestoreBackup(listing.ctx, fixture.base, "");
@@ -428,20 +429,12 @@ test("(6) a .latest migration backup is listed as the newer copy and can be rest
   await handleDbRestoreBackup(ctx, fixture.base, consentArgs({ backupPath: latestPath, backupSha: latestSha }));
   closeDatabase();
   assert.ok(notes.some((note) => note.kind === "success"), JSON.stringify(notes));
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M555", "M999"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
 });
 
 test("(6b) restoring backup-v45 beside an existing .latest keeps both earlier backups", async () => {
   const fixture = makeRestoreFixture();
-  const latestPath = `${fixture.backupPath}.latest`;
-  writeFileSync(latestPath, readFileSync(fixture.backupPath));
-  rawExec(
-    latestPath,
-    `INSERT INTO milestones (id, title, status, created_at) VALUES ('M555', 'newer', 'active', '2026-01-03T00:00:00.000Z');
-     PRAGMA wal_checkpoint(TRUNCATE);`,
-  );
-  for (const suffix of ["-wal", "-shm"]) rmSync(`${latestPath}${suffix}`, { force: true });
-  const latestSha = sha256File(latestPath);
+  const { latestPath, latestSha } = makeLatestBackup(fixture);
 
   const { ctx, notes } = makeCtx();
   await handleDbRestoreBackup(ctx, fixture.base, consentArgs(fixture));

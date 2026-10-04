@@ -289,9 +289,9 @@ D012 is a decision. It is not the cutover:
 - Runtime behavior does not change with this record. Hierarchy reads still come
   from legacy database rows while the Authority Epoch of the Project is 0. Since
   2026-10-04 the first open of an existing project database advances its
-  Authority Epoch (`authority-cutover-on-open.ts`) when
-  `GSD_AUTHORITY_CUTOVER=1` is set. This is opt-in for now; `CONTEXT.md`
-  (State layer) states when it becomes the default.
+  Authority Epoch (`authority-cutover-on-open.ts`). This is the default;
+  `GSD_AUTHORITY_CUTOVER=0` is the opt-out. `CONTEXT.md` (State layer) owns
+  that contract.
 - `gate:lifecycle-shadow-no-cutover` stays in `verify:pr`. Its checks for a
   Project at Authority Epoch 0 are unchanged. Step 2 inverted its
   read-interface check (see below). The work that removes the legacy reads
@@ -367,9 +367,9 @@ D012 is a decision. It is not the cutover:
   guard, the status response, progress and the snapshot follow canonical rows,
   and those sites follow legacy rows. The two agree while Domain Operations
   keep the legacy row aligned with the lifecycle row. They differ for a
-  cancelled Slice with no Waiver, and when the rows disagree. These sites must
-  read through the interface before a production command advances the
-  Authority Epoch.
+  cancelled Slice with no Waiver, and when the rows disagree. The automatic
+  Cutover is the default now, so a cut-over Project has this split until these
+  sites read through the interface.
 - The interface does not check that every hierarchy row has a lifecycle row.
   The cutover command must check that before it advances the Authority Epoch.
 

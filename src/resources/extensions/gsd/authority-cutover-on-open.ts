@@ -139,8 +139,8 @@ function authorityEpochAdvanced(): boolean {
  * (authority.cutover) when it opens. The user does nothing, so the decision
  * is the standing Consent for the one-way cutover.
  *
- * For now this is an opt-in canary (ADR-046 migration step 6): it runs only
- * with GSD_AUTHORITY_CUTOVER=1.
+ * This is the default. GSD_AUTHORITY_CUTOVER=0 turns it off; the opt-out is
+ * kept for one release.
  *
  * The run stops before the backup, with nothing changed, the rows logged as
  * an error and a doctor issue, when a row has a legacy status with no
@@ -155,16 +155,14 @@ function authorityEpochAdvanced(): boolean {
  * run fails on the busy database and logs a false error. That process leaves
  * the run to the lock holder. No failure here fails the open.
  *
- * A database that is already cut over needs no flag: the open adopts every
- * hierarchy row that has no lifecycle row (adoptRowsLeftAfterCutover).
+ * The opt-out does not apply to a database that is already cut over: the open
+ * adopts every hierarchy row that has no lifecycle row (adoptRowsLeftAfterCutover).
  */
 export function cutOverProjectAuthorityOnOpen(basePath: string): void {
   let cutOver = false;
   try {
     cutOver = readDomainOperationFence().authorityEpoch > 0;
-    // Off by default. CONTEXT.md (State layer) states what is left before
-    // the default becomes on.
-    if (!cutOver && process.env.GSD_AUTHORITY_CUTOVER !== "1") return;
+    if (!cutOver && process.env.GSD_AUTHORITY_CUTOVER === "0") return;
     const databasePath = getDbPath();
     if (databasePath === null) return;
     if (cutOver && listUncoveredHierarchyRows(getDb()).length === 0) return;

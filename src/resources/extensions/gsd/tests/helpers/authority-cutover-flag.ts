@@ -1,9 +1,9 @@
 // Project/App: gsd-pi
-// File Purpose: Test helper that sets the opt-in flag for the automatic Authority Epoch cutover on open and gives back its restore.
+// File Purpose: Test helper that sets the opt-out flag of the automatic Authority Epoch cutover on open and gives back its restore.
 
 /**
- * The automatic cutover on open runs only with GSD_AUTHORITY_CUTOVER=1.
- * A test that proves that path calls `t.after(setAuthorityCutoverFlag("1"))`.
+ * The automatic cutover on open runs unless GSD_AUTHORITY_CUTOVER=0.
+ * `undefined` unsets the variable, which is the default.
  */
 export function setAuthorityCutoverFlag(value: string | undefined): () => void {
   const before = process.env.GSD_AUTHORITY_CUTOVER;

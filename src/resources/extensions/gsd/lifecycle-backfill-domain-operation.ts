@@ -374,9 +374,8 @@ function projectLegacy(
  * legacy-attested Waiver per cancelled item. A lifecycle row already adopted
  * as cancelled with no active Waiver gets its Waiver and one event too.
  * Refuses on a worktree-local database, on any unknown raw status, and when
- * there is nothing to adopt and no Waiver to grant. With
- * GSD_AUTHORITY_CUTOVER=1, the first open of a pre-cutover project database
- * runs it when it would change no legacy status
+ * there is nothing to adopt and no Waiver to grant. The first open of a
+ * pre-cutover project database runs it when it would change no legacy status
  * (authority-cutover-on-open.ts), and an open of a cut-over database runs it
  * for the rows left with no lifecycle row; `/gsd db adopt --apply` runs it by
  * hand.

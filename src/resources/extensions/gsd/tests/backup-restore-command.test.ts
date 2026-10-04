@@ -27,8 +27,8 @@ import { closeDatabase, openDatabase, _getAdapter } from "../gsd-db.ts";
 import { openWorkflowDatabase, resolveProjectRootDbPath } from "../db-workspace.ts";
 import { recordSchemaVersion } from "../db-schema-metadata.ts";
 import { SCHEMA_VERSION } from "../db/engine.ts";
+import { registerMilestones } from "../milestone-registration.ts";
 import { openSqliteReadOnly } from "../sqlite-readonly.ts";
-import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 
 const tempDirs = new Set<string>();
 
@@ -65,11 +65,12 @@ function authorityEpochOf(dbPath: string): number {
 /**
  * Build a project DB holding sentinel row M999, rewind it to a v45 stamp, and
  * re-open so the real v45→v46 migration produces a verified gsd.db.backup-v45.
+ * M999 is a row of an older build: it has no lifecycle row, so it is written
+ * before the open that cuts the project over.
  * - "cut-over-first": the project is cut over before the backup, so the backup
- *   and the live DB are both at Authority Epoch 1. Without
- *   GSD_AUTHORITY_CUTOVER=1 no open cuts over and both stay at epoch 0.
+ *   and the live DB are both at Authority Epoch 1.
  * - "backup-first": the backup is taken at epoch 0 and that same open cuts the
- *   project over. It needs GSD_AUTHORITY_CUTOVER=1.
+ *   project over.
  * - "never-cut-over": the migrating open is an engine open, which does not cut
  *   over, so the backup and the live DB are both at epoch 0.
  */
@@ -80,15 +81,15 @@ function makeMigrationBackup(mode: "cut-over-first" | "backup-first" | "never-cu
   const dbPath = resolveProjectRootDbPath(base);
 
   assert.equal(openWorkflowDatabase(base).ok, true);
+  _getAdapter()!.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
+    .run("M999", "sentinel-milestone", "active", "2026-01-01T00:00:00.000Z");
   if (mode === "cut-over-first") {
-    // With the flag on, the first open of the existing database cuts the project over.
+    // The first open of the existing database adopts M999 and cuts the project over.
     closeDatabase();
     assert.equal(openWorkflowDatabase(base).ok, true);
   }
   const db = _getAdapter();
   assert.ok(db);
-  db.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
-    .run("M999", "sentinel-milestone", "active", "2026-01-01T00:00:00.000Z");
   db.exec("DELETE FROM schema_version");
   recordSchemaVersion(db, 45);
   db.exec("PRAGMA user_version = 0");
@@ -99,25 +100,20 @@ function makeMigrationBackup(mode: "cut-over-first" | "backup-first" | "never-cu
   const backupPath = `${dbPath}.backup-v45`;
   assert.equal(existsSync(backupPath), true, "migration should leave a verified backup-v45");
   closeDatabase();
-  const backupEpoch = authorityEpochOf(backupPath);
-  if (mode !== "cut-over-first") assert.equal(backupEpoch, 0);
-  assert.equal(authorityEpochOf(dbPath), mode === "backup-first" ? 1 : backupEpoch);
+  assert.equal(authorityEpochOf(backupPath), mode === "cut-over-first" ? 1 : 0);
+  assert.equal(authorityEpochOf(dbPath), mode === "never-cut-over" ? 0 : 1);
   return { base, dbPath, backupPath, backupSha: sha256File(backupPath) };
 }
 
 /**
- * A backup and a live DB in the same Authority Epoch. Then simulate later
- * work: M999 is erased and row M100 is accepted. The backup still holds M999;
- * the live DB holds M100.
+ * A backup and a live DB in the same Authority Epoch. Then later work is
+ * accepted: Milestone M100. The backup holds only M999; the live DB holds
+ * M100 too.
  */
 function makeFixture(): RestoreFixture {
   const fixture = makeMigrationBackup("cut-over-first");
   assert.equal(openWorkflowDatabase(fixture.base).ok, true);
-  const live = _getAdapter();
-  assert.ok(live);
-  live.exec("DELETE FROM milestones");
-  live.prepare("INSERT INTO milestones (id, title, status, created_at) VALUES (?, ?, ?, ?)")
-    .run("M100", "post-cutover", "active", "2026-01-02T00:00:00.000Z");
+  assert.deepEqual(registerMilestones([{ id: "M100", title: "post-cutover" }], "test"), ["M100"]);
   closeDatabase();
   return fixture;
 }
@@ -144,7 +140,7 @@ function maxSchemaVersionOf(dbPath: string): number {
 
 test("(a) restore with consent restores v45 contents and persists a receipt", async () => {
   const fixture = makeFixture();
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
   assert.equal(maxSchemaVersionOf(fixture.dbPath), SCHEMA_VERSION);
 
   const { ctx, notes } = makeCtx();
@@ -199,7 +195,7 @@ test("(b) restore without consent is refused with guidance; stale consent is ref
   assert.ok(!missing.notes.some((note) => note.kind === "success"));
   assert.equal(sha256File(fixture.dbPath), beforeSha);
   assert.equal(maxSchemaVersionOf(fixture.dbPath), SCHEMA_VERSION);
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
 
   const stale = makeCtx();
@@ -212,7 +208,7 @@ test("(b) restore without consent is refused with guidance; stale consent is ref
   const staleNote = stale.notes.find((note) => /stale consent/.test(note.message));
   assert.ok(staleNote, `expected stale-consent refusal, got ${JSON.stringify(stale.notes)}`);
   assert.equal(sha256File(fixture.dbPath), beforeSha);
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
 });
 
@@ -240,7 +236,7 @@ test("(c) a corrupt backup fails verification and restores nothing", async () =>
   assert.match(failure.message, /Nothing was restored/);
   assert.equal(sha256File(fixture.dbPath), beforeSha);
   assert.equal(maxSchemaVersionOf(fixture.dbPath), SCHEMA_VERSION);
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
 });
 
@@ -263,12 +259,11 @@ test("(d) list-style invocations show candidates and mutate nothing", async () =
   // byte-identical and still holds the post-cutover contents.
   assert.equal(sha256File(fixture.dbPath), beforeSha);
   assert.equal(maxSchemaVersionOf(fixture.dbPath), SCHEMA_VERSION);
-  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100"]);
+  assert.deepEqual(milestoneIds(fixture.dbPath), ["M100", "M999"]);
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
 });
 
-test("(e) a backup taken before the Authority Epoch cutover is refused with valid consent", async (t) => {
-  t.after(setAuthorityCutoverFlag("1"));
+test("(e) a backup taken before the Authority Epoch cutover is refused with valid consent", async () => {
   const fixture = makeMigrationBackup("backup-first");
   const beforeSha = sha256File(fixture.dbPath);
 
@@ -290,8 +285,7 @@ test("(e) a backup taken before the Authority Epoch cutover is refused with vali
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
 });
 
-test("(f) a restore does not cut over the database that it replaces", async (t) => {
-  t.after(setAuthorityCutoverFlag("1"));
+test("(f) a restore does not cut over the database that it replaces", async () => {
   const fixture = makeMigrationBackup("never-cut-over");
 
   const { ctx, notes } = makeCtx();

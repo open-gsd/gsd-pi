@@ -52,7 +52,6 @@ import {
   PROJECT_AUTHORITY_CONTRACT_VERSION,
   PROJECT_AUTHORITY_CUTOVER_CONSENT_SCHEMA_VERSION,
 } from "../project-authority-cutover-domain-operation.ts";
-import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 import { createLegacyImportCorpusSourceRoots } from "./helpers/legacy-import-corpus.ts";
 
 const CORPUS_ROOT = fileURLToPath(new URL("./__fixtures__/legacy-import-corpus/v1/", import.meta.url));
@@ -392,8 +391,7 @@ test("an Import Application recorded before checkout binding stays restorable af
   assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
 });
 
-test("an open leaves the Restore Window open; the open after later accepted work cuts the project over", (t) => {
-  t.after(setAuthorityCutoverFlag("1"));
+test("an open leaves the Restore Window open; the open after later accepted work cuts the project over", () => {
   const prepared = prepareCase(true, true);
   closeDatabase();
   const projectRoot = dirname(dirname(prepared.databasePath));

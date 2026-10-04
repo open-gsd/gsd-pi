@@ -111,7 +111,8 @@ async function spawnOpener(base: string): Promise<{ open(): Promise<ChildOpen> }
 }
 
 beforeEach(() => {
-  restoreCutoverFlag = setAuthorityCutoverFlag("1");
+  // Unset: the cutover on open is the default.
+  restoreCutoverFlag = setAuthorityCutoverFlag(undefined);
   stderrWasEnabled = setStderrLoggingEnabled(false);
   _resetLogs();
 });
@@ -193,7 +194,7 @@ test("the first open of an old project database backs it up, adopts every row an
   assert.deepEqual(backupFiles(base), backups);
 });
 
-test("without GSD_AUTHORITY_CUTOVER the open of an old project database changes nothing", () => {
+test("with GSD_AUTHORITY_CUTOVER=0 the open of an old project database changes nothing", () => {
   const base = createProject();
   insertMilestone({ id: "M001", title: "Old", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
@@ -202,19 +203,16 @@ test("without GSD_AUTHORITY_CUTOVER the open of an old project database changes 
   assert.deepEqual(before.authority, [{ revision: 0, authority_epoch: 0 }]);
   assert.deepEqual(before.lifecycles, []);
 
-  // Unset is the default. Any value other than 1 is also off.
-  for (const value of [undefined, "0", "true"]) {
-    setAuthorityCutoverFlag(value);
-    closeDatabase();
-    assert.equal(openWorkflowDatabase(base).ok, true);
+  setAuthorityCutoverFlag("0");
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
 
-    assert.deepEqual(durableSnapshot(), before);
-    assert.deepEqual(backupFiles(base), []);
-    assert.deepEqual(peekLogs(), []);
-  }
+  assert.deepEqual(durableSnapshot(), before);
+  assert.deepEqual(backupFiles(base), []);
+  assert.deepEqual(peekLogs(), []);
 
-  // The same database is cut over by the next open once the flag is on.
-  setAuthorityCutoverFlag("1");
+  // The same database is cut over by the next open without the opt-out.
+  setAuthorityCutoverFlag(undefined);
   closeDatabase();
   assert.equal(openWorkflowDatabase(base).ok, true);
   assert.deepEqual(rows("SELECT revision, authority_epoch FROM project_authority"), [{ revision: 2, authority_epoch: 1 }]);
@@ -372,8 +370,8 @@ function cutOverProjectOfEarlierBuild(insert: () => void): string {
   insert();
   closeDatabase();
   _resetLogs();
-  // The repair of a project that is already cut over does not need the flag.
-  setAuthorityCutoverFlag(undefined);
+  // The opt-out does not stop the repair of a project that is already cut over.
+  setAuthorityCutoverFlag("0");
   return base;
 }
 
