@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Pure legacy knowledge projection contributions from retained source bytes.
 
-import type { LegacyImportValue } from "./legacy-import-contract.js";
+import type { LegacyImportTarget, LegacyImportValue } from "./legacy-import-contract.js";
 import {
   addLegacyImportCandidate,
   addLegacyImportDiagnosis,
@@ -17,7 +17,10 @@ import {
   parseKnowledgeRows,
   splitPipeRow,
 } from "./knowledge-parser.js";
-import { legacyImportKnowledgeFileCells } from "./legacy-import-preview-classifier-targets.js";
+import {
+  LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND,
+  legacyImportKnowledgeFileCells,
+} from "./legacy-import-preview-classifier-targets.js";
 
 interface KnowledgeGraphNode {
   id: string;
@@ -93,28 +96,26 @@ function interpretKnowledgeMarkdown(
   const defaultIntro = new Set(KNOWLEDGE_DEFAULT_INTRO.split("\n"));
   const mappedIds = new Set<string>();
   let section: (typeof KNOWLEDGE_SECTIONS)[number] | undefined;
-  let run: { memoryRows: boolean; start: number; end: number } | undefined;
+  let content: { start: number; end: number } | undefined;
   const flushContent = (): void => {
-    if (run === undefined) return;
+    if (content === undefined) return;
     addLegacyImportDiagnosis(
       diagnoses,
       file,
-      run.memoryRows ? "knowledge-memory-row-not-imported" : "knowledge-content-not-imported",
+      "knowledge-content-not-imported",
       "info",
-      run.memoryRows
-        ? "KNOWLEDGE.md rows with a memory id are renders of database memories and are not imported; the next render writes a row for each such memory that is active."
-        : "KNOWLEDGE.md content that is not a Rule, Pattern or Lesson row is not imported into the database; it stays in the file.",
+      "KNOWLEDGE.md content that is not a Rule, Pattern or Lesson row is not imported into the database; it stays in the file.",
       "preserved",
-      run.start,
-      run.end,
+      content.start,
+      content.end,
     );
-    run = undefined;
+    content = undefined;
   };
-  const extendRun = (memoryRows: boolean, line: { start: number; end: number }): void => {
-    if (run?.memoryRows !== memoryRows) flushContent();
-    run = { memoryRows, start: run?.start ?? line.start, end: line.end };
-  };
-  const rowNotImported = (line: { start: number; end: number }, reason: string): void => {
+  const rowNotImported = (
+    line: { start: number; end: number },
+    reason: string,
+    target?: LegacyImportTarget,
+  ): void => {
     flushContent();
     addLegacyImportDiagnosis(
       diagnoses,
@@ -125,6 +126,7 @@ function interpretKnowledgeMarkdown(
       "preserved",
       line.start,
       line.end,
+      target,
     );
   };
 
@@ -135,15 +137,20 @@ function interpretKnowledgeMarkdown(
       flushContent();
       beforeFirstHeading = false;
       section = KNOWLEDGE_SECTIONS.find((candidate) => candidate.heading === trimmed);
-      if (section === undefined) extendRun(false, line);
+      if (section === undefined) content = { start: line.start, end: line.end };
       continue;
     }
     if (trimmed.length === 0) continue;
     if (beforeFirstHeading && defaultIntro.has(trimmed)) continue;
     if (section !== undefined) {
       if (/^\|\s*(#|-+)\s*\|/u.test(trimmed)) continue;
-      if (/^\|\s*MEM\d+\s*\|/u.test(trimmed)) {
-        extendRun(true, line);
+      const memoryId = /^\|\s*(MEM\d+)\s*\|/u.exec(trimmed)?.[1];
+      if (memoryId !== undefined) {
+        rowNotImported(
+          line,
+          "its id is a memory id, so the next render keeps it only when an active database memory has that id",
+          { kind: LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND, key: memoryId },
+        );
         continue;
       }
       const id = new RegExp(`^\\|\\s*(${section.idPrefix}\\d+)\\s*\\|`, "u").exec(trimmed)?.[1];
@@ -170,7 +177,7 @@ function interpretKnowledgeMarkdown(
         continue;
       }
     }
-    extendRun(false, line);
+    content = { start: content?.start ?? line.start, end: line.end };
   }
   flushContent();
   if (mappedIds.size > 0) file.outcome = "mapped";

@@ -1728,8 +1728,8 @@ describe('gsd-recover', async () => {
       ['knowledge-content-not-imported', '## Glossary\n\nProjection: a file rendered from the database.'],
       ['knowledge-content-not-imported', 'Rules are reviewed each quarter.'],
       ['knowledge-content-not-imported', 'Team note: ask before adding a rule.'],
-      ['knowledge-memory-row-not-imported', '| MEM007 | Extracted pattern | — | — |'],
       ['knowledge-row-not-imported', '| K002 | project | Too few cells |'],
+      ['knowledge-row-not-imported', '| MEM007 | Extracted pattern | — | — |'],
     ]);
     const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
     assert.ok(approval, 'no knowledge diagnosis blocks the Preview');
@@ -1972,19 +1972,25 @@ describe('gsd-recover', async () => {
     });
   }
 
-  test('recover gives no warning for the KNOWLEDGE.md rows that render database memories with a memory id', async (t) => {
+  test('recover gives an info report for a KNOWLEDGE.md memory-id row of an active database memory and a warning for one of no active memory', async (t) => {
     const base = createFixtureBase();
     t.after(() => {
       closeDatabase();
       cleanup(base);
     });
     openDatabase(join(base, '.gsd', 'gsd.db'));
-    const memoryIds = [
-      createMemory({ category: 'pattern', content: 'Extracted pattern one' }),
-      createMemory({ category: 'pattern', content: 'Extracted pattern two' }),
-    ];
-    const rendered = renderKnowledgeProjection(base).content;
-    for (const id of memoryIds) assert.ok(rendered.includes(`| ${id} | Extracted pattern`), rendered);
+    const active = createMemory({ category: 'pattern', content: 'Extracted pattern one' })!;
+    const forgotten = createMemory({ category: 'pattern', content: 'Extracted pattern two' })!;
+    const knowledgePath = join(base, '.gsd', 'KNOWLEDGE.md');
+    const beforeForget = renderKnowledgeProjection(base).content;
+    assert.equal(supersedeMemory(forgotten, 'CAP_EXCEEDED'), true);
+    // A stale file shows the forgotten memory row and a row of another checkout.
+    const stale = beforeForget.replace(
+      `| ${forgotten} | Extracted pattern two | — | — |`,
+      `| ${forgotten} | Extracted pattern two | — | — |\n| MEM999 | Pattern of another checkout | — | — |`,
+    );
+    assert.notEqual(stale, beforeForget);
+    writeFileSync(knowledgePath, stale);
 
     const first = makeCtx();
     await handleRecover(first.ctx, base);
@@ -1995,20 +2001,24 @@ describe('gsd-recover', async () => {
       .slice(1)
       .filter((line) => line.trim().length > 0)
       .map((line) => JSON.parse(line) as { code: string; severity: string; raw_value: string })
-      .filter((diagnosis) => diagnosis.code.startsWith('knowledge-'));
-    assert.deepEqual(
-      reported.map((diagnosis) => [diagnosis.code, diagnosis.severity]),
-      [['knowledge-memory-row-not-imported', 'info']],
-      'the memory rows give one info report and no warning',
-    );
-    for (const id of memoryIds) assert.ok(reported[0]!.raw_value.includes(`| ${id} |`));
+      .filter((diagnosis) => diagnosis.code.startsWith('knowledge-'))
+      .map((diagnosis) => [diagnosis.code, diagnosis.severity, diagnosis.raw_value]);
+    assert.deepEqual(reported.sort(), [
+      ['knowledge-memory-row-not-imported', 'info', `| ${active} | Extracted pattern one | — | — |`],
+      ['knowledge-row-not-imported', 'warning', '| MEM999 | Pattern of another checkout | — | — |'],
+      ['knowledge-row-not-imported', 'warning', `| ${forgotten} | Extracted pattern two | — | — |`],
+    ].sort());
     const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
-    assert.ok(approval, 'the report does not block the Preview');
+    assert.ok(approval, 'the reports do not block the Preview');
 
     const second = makeCtx();
     await handleRecover(second.ctx, base, approval);
     assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
-    assert.equal(renderKnowledgeProjection(base).content, rendered, 'the memory rows stay in the file');
+    // The reports are true: the next render keeps only the active memory row.
+    const rendered = renderKnowledgeProjection(base).content;
+    assert.ok(rendered.includes(`| ${active} | Extracted pattern one |`));
+    assert.ok(!rendered.includes(forgotten));
+    assert.ok(!rendered.includes('MEM999'));
   });
 
   test('recover reports a KNOWLEDGE.md row that differs from its database row as a conflict and keeps the database row', async (t) => {

@@ -28,6 +28,7 @@ import {
   LEGACY_IMPORT_BOOLEAN_COLUMNS,
   LEGACY_IMPORT_COMPLETE_TARGET_KINDS,
   LEGACY_IMPORT_JSON_COLUMNS,
+  LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND,
   LEGACY_IMPORT_TARGET_ADAPTERS,
   legacyImportKnowledgeRow,
   legacyImportTargetIdentity,
@@ -746,6 +747,48 @@ function knowledgeRowLoss(
   return { diagnosis, resolution: { diagnosis_id: diagnosis.diagnosis_id, disposition: "preserved" } };
 }
 
+/**
+ * The diagnoses and resolutions of the interpretation, with the report for a
+ * KNOWLEDGE.md memory-id row lowered to info when an active database memory
+ * has that id: the row is a render of the memory, so nothing is lost.
+ */
+function knowledgeMemoryRowReports(
+  base: LegacyImportBaseSnapshot,
+  interpretation: LegacyImportInterpretation,
+): { diagnoses: LegacyImportPreviewDiagnosis[]; resolutions: LegacyImportPreviewResolution[] } {
+  const activeMemoryIds = new Set(base.rows
+    .filter((row) => row.row_set === "knowledge_memory_ids")
+    .map((row) => row.value["id"]));
+  const rendered = new Map<string, string>();
+  for (const resolution of interpretation.resolutions) {
+    if (
+      resolution.target?.kind === LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND
+      && activeMemoryIds.has(resolution.target.key)
+    ) {
+      rendered.set(resolution.diagnosis_id, "");
+    }
+  }
+  const diagnoses = interpretation.diagnoses.map((diagnosis) => {
+    if (!rendered.has(diagnosis.diagnosis_id)) return diagnosis;
+    const diagnosisValue = {
+      code: "knowledge-memory-row-not-imported",
+      severity: "info" as const,
+      source_id: diagnosis.source_id,
+      locator: diagnosis.locator,
+      raw_value: diagnosis.raw_value,
+      message: "A KNOWLEDGE.md table row with a memory id is not imported into the database: an active database memory has that id, so the row is already in the database.",
+    };
+    const diagnosisId = hashLegacyImportValue(diagnosisValue);
+    rendered.set(diagnosis.diagnosis_id, diagnosisId);
+    return { diagnosis_id: diagnosisId, ...diagnosisValue };
+  });
+  const resolutions = interpretation.resolutions.map((resolution) => {
+    const diagnosisId = rendered.get(resolution.diagnosis_id);
+    return diagnosisId === undefined ? resolution : { ...resolution, diagnosis_id: diagnosisId };
+  });
+  return { diagnoses, resolutions };
+}
+
 function valuesMatch(rowSet: LegacyImportBaseRowSet, current: JsonRecord, patch: JsonRecord): boolean {
   return Object.entries(patch).every(([field, value]) => (
     canonicalLegacyImportJson(normalizeStoredValue(rowSet, field, current[field] ?? null))
@@ -1081,8 +1124,7 @@ export function classifyLegacyImportChanges(
     validateCompleteMemberCandidates(complete, prepared);
   }
 
-  const diagnoses = [...interpretation.diagnoses];
-  const resolutions = [...interpretation.resolutions];
+  const { diagnoses, resolutions } = knowledgeMemoryRowReports(base, interpretation);
   const excludedTargets = unresolvedTargets(resolutions);
   const excludedRows = new Set<string>();
 

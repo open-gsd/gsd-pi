@@ -114,6 +114,13 @@ export const LEGACY_IMPORT_TARGET_ADAPTERS = {
   },
 } as const satisfies Readonly<Partial<Record<string, LegacyImportTargetAdapter>>>;
 
+/**
+ * The target of the report for a KNOWLEDGE.md row with a memory id (MEM###).
+ * It is not an import target: the key is the memory id that the classifier
+ * looks for in the `knowledge_memory_ids` base rows.
+ */
+export const LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND = "knowledge-memory-row";
+
 export interface LegacyImportTargetIdentity {
   identity: Readonly<Record<string, string | null>>;
   fields: ReadonlySet<string>;
