@@ -44,7 +44,6 @@ export function createCustomWorkflowSchema(db: DbAdapter): void {
       parent_step_id TEXT,
       started_at TEXT,
       finished_at TEXT,
-      claimed_by TEXT,
       verify_retries INTEGER NOT NULL DEFAULT 0 CHECK (verify_retries >= 0),
       PRIMARY KEY (run_id, step_id),
       FOREIGN KEY (run_id) REFERENCES custom_workflow_runs(run_id)

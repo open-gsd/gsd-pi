@@ -10,7 +10,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { parse, stringify } from "yaml";
+import { stringify } from "yaml";
 import { noteRenderedProjectionFile } from "./compat/compat-marker.js";
 import {
   customWorkflowRunId,
@@ -21,15 +21,16 @@ import {
 import type { WorkflowDefinition } from "./definition-loader.js";
 import { writeGraph } from "./graph.js";
 
-/** The definition frozen when the run was created. */
+/**
+ * The definition frozen when the run was created.
+ *
+ * @throws Error when the run has no run row. DEFINITION.yaml is a render and is not read.
+ */
 export function readFrozenDefinition(runDir: string): WorkflowDefinition {
-  const run = getCustomWorkflowRun(customWorkflowRunId(runDir));
-  if (run) return run.definition;
-  // No run row: a run directory written before runs were database rows. It is
-  // read from DEFINITION.yaml for one release.
-  const defPath = join(runDir, "DEFINITION.yaml");
-  const raw = readFileSync(defPath, "utf-8");
-  return parse(raw, { schema: "core" }) as WorkflowDefinition;
+  const runId = customWorkflowRunId(runDir);
+  const run = getCustomWorkflowRun(runId);
+  if (!run) throw new Error(`Workflow run "${runId}" has no database rows (${runDir})`);
+  return run.definition;
 }
 
 /** Write DEFINITION.yaml, GRAPH.yaml and PARAMS.json of a run from its database rows. */

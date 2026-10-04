@@ -82,14 +82,6 @@ export function readCustomWorkflowGraph(run: CustomWorkflowRun): WorkflowGraph {
   };
 }
 
-/** The worker that claimed the step, or null when no worker holds it. */
-export function getCustomWorkflowStepClaim(runId: string, stepId: string): string | null {
-  const row = getDbOrNull()?.prepare(
-    "SELECT claimed_by FROM custom_workflow_steps WHERE run_id = :run_id AND step_id = :step_id",
-  ).get({ ":run_id": runId, ":step_id": stepId });
-  return typeof row?.["claimed_by"] === "string" ? row["claimed_by"] : null;
-}
-
 /** How many verification retries the step has used. */
 export function getCustomWorkflowStepVerifyRetries(runId: string, stepId: string): number {
   const row = getDbOrNull()?.prepare(

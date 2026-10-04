@@ -1,11 +1,12 @@
 /**
  * custom-workflow-engine.test.ts — Tests for CustomWorkflowEngine and CustomExecutionPolicy.
  *
- * Uses real temp directories with actual GRAPH.yaml files — no mocks.
+ * Uses real temp run directories and an in-memory database — no mocks. Each
+ * run directory is file-only; the engine imports it to rows on first use.
  * Tests the full engine lifecycle: deriveState → resolveDispatch → reconcile.
  */
 
-import { describe, it, afterEach } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +15,8 @@ import { parse } from "yaml";
 
 import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
 import { CustomExecutionPolicy } from "../custom-execution-policy.ts";
+import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { writeGraph, readGraph, type WorkflowGraph, type GraphStep } from "../graph.ts";
 import { stringify } from "yaml";
 
@@ -26,6 +29,14 @@ function makeTmpDir(): string {
   tmpDirs.push(dir);
   return dir;
 }
+
+before(() => {
+  assert.equal(openDatabase(":memory:"), true);
+});
+
+after(() => {
+  closeDatabase();
+});
 
 afterEach(() => {
   for (const d of tmpDirs) {
@@ -288,6 +299,7 @@ describe("CustomWorkflowEngine.reconcile", () => {
     ], "wf");
 
     const state = await engine.deriveState("/unused");
+    runCustomVerificationWithEvidence(runDir, "step-1");
     const result = await engine.reconcile(state, {
       unitType: "custom-step",
       unitId: "wf/step-1",
@@ -305,11 +317,12 @@ describe("CustomWorkflowEngine.reconcile", () => {
   });
 
   it("returns milestone-complete when all steps done", async () => {
-    const { engine } = setupEngine([
+    const { engine, runDir } = setupEngine([
       makeStep({ id: "only-step" }),
     ], "wf");
 
     const state = await engine.deriveState("/unused");
+    runCustomVerificationWithEvidence(runDir, "only-step");
     const result = await engine.reconcile(state, {
       unitType: "custom-step",
       unitId: "wf/only-step",
@@ -326,6 +339,7 @@ describe("CustomWorkflowEngine.reconcile", () => {
     ], "nested/workflow");
 
     const state = await engine.deriveState("/unused");
+    runCustomVerificationWithEvidence(runDir, "deep-step");
     const result = await engine.reconcile(state, {
       unitType: "custom-step",
       unitId: "nested/workflow/deep-step",
@@ -338,22 +352,23 @@ describe("CustomWorkflowEngine.reconcile", () => {
     assert.equal(graph.steps[0].status, "complete");
   });
 
-  it("re-reads GRAPH.yaml before reconcile so concurrent edits are preserved", async () => {
+  it("does not read a GRAPH.yaml edit made after the run was imported", async () => {
     const { engine, runDir } = setupEngine([
       makeStep({ id: "step-1" }),
       makeStep({ id: "step-2", dependsOn: ["step-1"] }),
     ], "wf");
 
-    const staleState = await engine.deriveState("/unused");
+    const state = await engine.deriveState("/unused");
 
-    // Simulate another process appending a new step after deriveState() ran.
+    // A hand edit that appends a step after the engine imported the run.
     writeGraph(runDir, makeGraph([
       makeStep({ id: "step-1" }),
       makeStep({ id: "step-2", dependsOn: ["step-1"] }),
       makeStep({ id: "step-3", dependsOn: ["step-2"] }),
     ], "wf"));
 
-    const result = await engine.reconcile(staleState, {
+    runCustomVerificationWithEvidence(runDir, "step-1");
+    const result = await engine.reconcile(state, {
       unitType: "custom-step",
       unitId: "wf/step-1",
       startedAt: Date.now() - 1000,
@@ -363,10 +378,9 @@ describe("CustomWorkflowEngine.reconcile", () => {
     assert.equal(result.outcome, "continue");
 
     const graph = readGraph(runDir);
-    assert.equal(graph.steps.length, 3, "reconcile should preserve the concurrent graph edit");
+    assert.equal(graph.steps.length, 2, "the render comes from the rows, not from the edited file");
     assert.equal(graph.steps[0].status, "complete");
     assert.equal(graph.steps[1].status, "pending");
-    assert.equal(graph.steps[2].status, "pending");
   });
 
   it("reconcile completes a step that was previously persisted as active", async () => {
@@ -380,6 +394,7 @@ describe("CustomWorkflowEngine.reconcile", () => {
     assert.equal(dispatch.action, "dispatch");
 
     const activeState = await engine.deriveState("/unused");
+    runCustomVerificationWithEvidence(runDir, "step-1");
     const result = await engine.reconcile(activeState, {
       unitType: "custom-step",
       unitId: "wf/step-1",
@@ -444,12 +459,9 @@ describe("CustomWorkflowEngine.getDisplayMetadata", () => {
 
 describe("CustomExecutionPolicy", () => {
   it("verify returns continue", async () => {
-    // verify() reads DEFINITION.yaml from runDir to find step's verify policy
-    const runDir = makeTmpDir();
-    writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({
-      version: 1, name: "wf", description: "test",
-      steps: [{ id: "step-1", name: "Step 1", prompt: "do it", produces: "step-1/output.md" }],
-    }));
+    // verify() reads the frozen definition of the run to find the step's verify policy
+    const { engine, runDir } = setupEngine([makeStep({ id: "step-1" })], "wf");
+    await engine.deriveState("/unused");
     const policy = new CustomExecutionPolicy(runDir);
     const result = await policy.verify("custom-step", "wf/step-1", { basePath: runDir });
     assert.equal(result, "continue");

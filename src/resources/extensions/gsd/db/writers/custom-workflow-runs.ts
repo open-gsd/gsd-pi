@@ -2,12 +2,14 @@
 // File Purpose: Single-writer layer for custom workflow runs (ADR-046). Owns the
 // write SQL of the custom_workflow_* tables; db/custom-workflow-runs.ts reads them.
 
+import { randomUUID } from "node:crypto";
+
 import {
   executeDomainOperation,
   type DomainJsonValue,
   type DomainOperationContext,
 } from "../domain-operation.js";
-import { getDb, transaction } from "../engine.js";
+import { getDb } from "../engine.js";
 import type { DomainOperationFence } from "./lifecycle-commands.js";
 import type { WorkflowDefinition } from "../../definition-loader.js";
 import type { WorkflowGraph } from "../../graph.js";
@@ -18,7 +20,9 @@ export const CUSTOM_WORKFLOW_RUN_PROJECTION_KIND = "custom-workflow-run";
 /**
  * Run one custom workflow Domain Operation. `fence` must be read before the
  * rows the caller decided on, so a change by another session fails the
- * operation with a revision conflict instead of being overwritten.
+ * operation with a revision conflict instead of being overwritten. Each call
+ * has its own idempotency key: a second caller that read the same revision
+ * gets that conflict, never a replay of the first caller's operation.
  */
 function runOperation(
   fence: DomainOperationFence,
@@ -30,7 +34,7 @@ function runOperation(
 ): void {
   executeDomainOperation({
     operationType: `custom_workflow.${operationType}`,
-    idempotencyKey: `custom_workflow.${operationType}/${runId}/${fence.revision}`,
+    idempotencyKey: `custom_workflow.${operationType}/${runId}/${randomUUID()}`,
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType,
@@ -113,26 +117,16 @@ export function insertCustomWorkflowRun(input: {
   });
 }
 
-/**
- * Store the step graph of a run after the transition of one step. `claimedBy`
- * is the worker that runs the step; a step that is not active has no claim.
- */
+/** Store the step graph of a run after the transition of one step. */
 export function saveCustomWorkflowSteps(input: {
   fence: DomainOperationFence;
-  operationType: "step.activate" | "step.claim" | "step.expand" | "step.complete";
+  operationType: "step.activate" | "step.expand" | "step.complete";
   runId: string;
   stepId: string;
   graph: WorkflowGraph;
-  claimedBy?: string | null;
 }): void {
-  const payload = { stepId: input.stepId, claimedBy: input.claimedBy ?? null };
-  runOperation(input.fence, input.operationType, input.runId, payload, () => {
+  runOperation(input.fence, input.operationType, input.runId, { stepId: input.stepId }, () => {
     upsertSteps(input.runId, input.graph);
-    getDb().prepare(
-      `UPDATE custom_workflow_steps
-       SET claimed_by = CASE WHEN status = 'active' THEN :claimed_by ELSE NULL END
-       WHERE run_id = :run_id AND step_id = :step_id`,
-    ).run({ ":run_id": input.runId, ":step_id": input.stepId, ":claimed_by": input.claimedBy ?? null });
   });
 }
 
@@ -168,11 +162,16 @@ export function insertCustomWorkflowStepVerification(input: {
   }, input.actorType);
 }
 
-/** Set the verification retries a step has used. A retry budget, like unit_dispatch_budgets. */
-export function setCustomWorkflowStepVerifyRetries(runId: string, stepId: string, used: number): void {
-  transaction(() => {
+/** Set the verification retries a step has used. */
+export function setCustomWorkflowStepVerifyRetries(input: {
+  fence: DomainOperationFence;
+  runId: string;
+  stepId: string;
+  used: number;
+}): void {
+  runOperation(input.fence, "step.retry", input.runId, { stepId: input.stepId, used: input.used }, () => {
     getDb().prepare(
       "UPDATE custom_workflow_steps SET verify_retries = :used WHERE run_id = :run_id AND step_id = :step_id",
-    ).run({ ":run_id": runId, ":step_id": stepId, ":used": used });
+    ).run({ ":run_id": input.runId, ":step_id": input.stepId, ":used": input.used });
   });
 }

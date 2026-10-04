@@ -15,15 +15,16 @@ import {
 import { handleCustomEngineVerifyRetry } from "../auto/workflow-custom-engine-retry.ts";
 import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
 import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
-import { markWorkerCrashed, registerAutoWorker } from "../db/auto-workers.ts";
 import {
   customWorkflowRunId,
   getCustomWorkflowRun,
-  getCustomWorkflowStepClaim,
   getLatestCustomWorkflowStepVerification,
+  readCustomWorkflowGraph,
 } from "../db/custom-workflow-runs.ts";
+import { saveCustomWorkflowSteps } from "../db/writers/custom-workflow-runs.ts";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
 import type { EngineDispatchAction } from "../engine-types.ts";
-import { readGraph, writeGraph, type WorkflowGraph } from "../graph.ts";
+import { markStepActive, readGraph, writeGraph, type WorkflowGraph } from "../graph.ts";
 import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import { projectionRendererFor } from "../projection-worker.ts";
 import { createRun, importRunDirectory, listRuns, openRunForResume } from "../run-manager.ts";
@@ -70,10 +71,6 @@ describe("custom workflow runs in the database", () => {
     rmSync(base, { recursive: true, force: true });
   });
 
-  function worker(): string {
-    return registerAutoWorker({ projectRootRealpath: base });
-  }
-
   async function dispatch(engine: CustomWorkflowEngine): Promise<EngineDispatchAction> {
     return engine.resolveDispatch(await engine.deriveState(base), { basePath: base });
   }
@@ -96,7 +93,7 @@ describe("custom workflow runs in the database", () => {
 
   test("an edited or deleted GRAPH.yaml does not change the next step and is rendered again", async () => {
     const runDir = createRun(base, "pipeline");
-    const engine = new CustomWorkflowEngine(runDir, worker());
+    const engine = new CustomWorkflowEngine(runDir);
     assert.equal(dispatchedUnit(await dispatch(engine)), "pipeline/draft");
     await complete(engine, runDir, "draft");
 
@@ -116,27 +113,27 @@ describe("custom workflow runs in the database", () => {
     assert.equal(listRuns(base)[0]?.steps.completed, 1);
   });
 
-  test("two sessions cannot run the same step", async () => {
+  test("a second caller that read the same revision gets a revision conflict, not a replay", () => {
     const runDir = createRun(base, "pipeline");
     const runId = customWorkflowRunId(runDir);
-    const first = worker();
-    const second = worker();
+    // Two sessions read the same revision and decide the same transition.
+    const fence = readDomainOperationFence();
+    const graph = markStepActive(readCustomWorkflowGraph(getCustomWorkflowRun(runId)!), "draft");
+    const activate = () => saveCustomWorkflowSteps({ fence, operationType: "step.activate", runId, stepId: "draft", graph });
 
-    assert.equal(dispatchedUnit(await dispatch(new CustomWorkflowEngine(runDir, first))), "pipeline/draft");
+    activate();
 
-    const refused = await dispatch(new CustomWorkflowEngine(runDir, second));
-    assert.equal(refused.action, "stop");
-    assert.match(refused.action === "stop" ? refused.reason : "", /"draft" is running in another session/);
-    assert.equal(getCustomWorkflowStepClaim(runId, "draft"), first);
-
-    // The session that ran the step may dispatch it again (a retry).
-    assert.equal(dispatchedUnit(await dispatch(new CustomWorkflowEngine(runDir, first))), "pipeline/draft");
+    assert.throws(activate, /revision/i);
+    const operations = _getAdapter()!.prepare(
+      "SELECT COUNT(*) AS n FROM workflow_operations WHERE operation_type = 'custom_workflow.step.activate'",
+    ).get() as { n: number };
+    assert.equal(operations.n, 1);
   });
 
   test("a step with no verify policy records an inconclusive result with a waiver", async () => {
     const runDir = createRun(base, "pipeline");
     const runId = customWorkflowRunId(runDir);
-    const engine = new CustomWorkflowEngine(runDir, worker());
+    const engine = new CustomWorkflowEngine(runDir);
     await dispatch(engine);
 
     const result = runCustomVerificationWithEvidence(runDir, "draft");
@@ -152,7 +149,7 @@ describe("custom workflow runs in the database", () => {
   test("a step completes only from a stored verification result that passed or was waived", async () => {
     const runDir = createRun(base, "pipeline");
     const runId = customWorkflowRunId(runDir);
-    const engine = new CustomWorkflowEngine(runDir, worker());
+    const engine = new CustomWorkflowEngine(runDir);
     await dispatch(engine);
     const draftDone = {
       unitType: "custom-step",
@@ -209,8 +206,7 @@ describe("custom workflow runs in the database", () => {
     ].join("\n"), "utf-8");
     const runDir = createRun(base, "audit");
     const runId = customWorkflowRunId(runDir);
-    const session = worker();
-    const engine = new CustomWorkflowEngine(runDir, session);
+    const engine = new CustomWorkflowEngine(runDir);
 
     // scan failed its check (scan.md is missing): a failed check is not approved.
     await dispatch(engine);
@@ -228,14 +224,10 @@ describe("custom workflow runs in the database", () => {
       finishedAt: 1,
     });
 
-    // judge waits for a decision, but the session that runs it is still live.
+    // judge waits for a decision: the operator can decide.
     await dispatch(engine);
     assert.equal(runCustomVerificationWithEvidence(runDir, "judge").outcome, "pause");
-    await assert.rejects(engine.approveStep("judge"), /"judge" is running in another session/);
     assert.equal(statuses(readGraph(runDir))["judge"], "active");
-
-    // The session paused: the operator can decide.
-    markWorkerCrashed(session);
     assert.deepEqual(await engine.approveStep("judge"), { outcome: "milestone-complete" });
     assert.deepEqual(getLatestCustomWorkflowStepVerification(runId, "judge"), {
       verdict: "pass",
@@ -250,21 +242,17 @@ describe("custom workflow runs in the database", () => {
   test("a run resumes by its id after a crash that wrote no pause", async () => {
     const runDir = createRun(base, "pipeline");
     const runId = customWorkflowRunId(runDir);
-    const crashed = worker();
-    const engine = new CustomWorkflowEngine(runDir, crashed);
+    const engine = new CustomWorkflowEngine(runDir);
     await dispatch(engine);
     await complete(engine, runDir, "draft");
     assert.equal(dispatchedUnit(await dispatch(engine)), "pipeline/review");
     // The process dies while review runs. Nothing is paused; only the rows remain.
-    markWorkerCrashed(crashed);
     rmSync(join(runDir, "GRAPH.yaml"));
 
-    const restarted = worker();
     const resumedDir = openRunForResume(base, runId);
 
     assert.equal(resumedDir, runDir);
-    assert.equal(dispatchedUnit(await dispatch(new CustomWorkflowEngine(resumedDir, restarted))), "pipeline/review");
-    assert.equal(getCustomWorkflowStepClaim(runId, "review"), restarted);
+    assert.equal(dispatchedUnit(await dispatch(new CustomWorkflowEngine(resumedDir))), "pipeline/review");
     assert.throws(() => openRunForResume(base, "pipeline/2000-01-01T00-00-00"), /no such run/);
     assert.throws(() => openRunForResume(base, "../pipeline"), /<name>\/<timestamp>/);
   });
@@ -301,12 +289,56 @@ describe("custom workflow runs in the database", () => {
     assert.equal(run?.createdAt, "2026-01-01T00:00:00.000Z");
     // The rows are the state now: the file is not read again.
     rmSync(join(runDir, "GRAPH.yaml"));
-    const engine = new CustomWorkflowEngine(runDir, worker());
+    const engine = new CustomWorkflowEngine(runDir);
     assert.equal(dispatchedUnit(await dispatch(engine)), "legacy/b");
     assert.deepEqual(statuses(readGraph(runDir)), { a: "complete", b: "active" });
   });
 
-  test("import refuses a run directory with an unknown step status", () => {
+  test("a file-only run is imported on first engine use and then advances by rows only", async () => {
+    const runId = "legacy/2026-02-02T00-00-00";
+    const runDir = join(base, ".gsd", "workflow-runs", runId);
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({
+      version: 1,
+      name: "legacy",
+      steps: [
+        { id: "a", name: "A", prompt: "Do a", requires: [], produces: [] },
+        { id: "b", name: "B", prompt: "Do b", requires: ["a"], produces: [] },
+      ],
+    }), "utf-8");
+    const fileGraph: WorkflowGraph = {
+      steps: [
+        { id: "a", title: "A", status: "pending", prompt: "Do a", dependsOn: [] },
+        { id: "b", title: "B", status: "pending", prompt: "Do b", dependsOn: ["a"] },
+      ],
+      metadata: { name: "legacy", createdAt: "2026-02-02T00:00:00.000Z" },
+    };
+    writeGraph(runDir, fileGraph);
+    assert.equal(listRuns(base, "legacy")[0]?.imported, false);
+
+    // No resume command: the engine is the first thing that touches the run.
+    const engine = new CustomWorkflowEngine(runDir);
+    assert.equal((await engine.deriveState(base)).isComplete, false);
+    assert.ok(getCustomWorkflowRun(runId), "the first engine use imported the run");
+    assert.equal(listRuns(base, "legacy")[0]?.imported, true);
+
+    // From here the files are renders: a deleted or edited file changes nothing.
+    rmSync(join(runDir, "DEFINITION.yaml"));
+    writeGraph(runDir, { ...fileGraph, steps: fileGraph.steps.map((step) => ({ ...step, status: "complete" as const })) });
+    assert.equal(dispatchedUnit(await dispatch(engine)), "legacy/a");
+    assert.equal(runCustomVerificationWithEvidence(runDir, "a").outcome, "continue");
+    await engine.reconcile(await engine.deriveState(base), {
+      unitType: "custom-step",
+      unitId: "legacy/a",
+      startedAt: 0,
+      finishedAt: 1,
+    });
+    assert.equal(dispatchedUnit(await dispatch(engine)), "legacy/b");
+    assert.deepEqual(statuses(readGraph(runDir)), { a: "complete", b: "active" });
+    assert.deepEqual(statuses(readCustomWorkflowGraph(getCustomWorkflowRun(runId)!)), { a: "complete", b: "active" });
+  });
+
+  test("import refuses a run directory with an unknown step status", async () => {
     const runDir = join(base, ".gsd", "workflow-runs", "legacy", "2026-01-01T00-00-00");
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({ version: 1, name: "legacy", steps: [] }), "utf-8");
@@ -320,12 +352,19 @@ describe("custom workflow runs in the database", () => {
     );
 
     assert.throws(() => importRunDirectory(runDir), /step "a" has unknown status "skipped"/);
+    // The engine imports first, so it fails the same way and changes nothing.
+    const before = readGraph(runDir);
+    await assert.rejects(
+      new CustomWorkflowEngine(runDir).deriveState(base),
+      /step "a" has unknown status "skipped"/,
+    );
     assert.equal(getCustomWorkflowRun("legacy/2026-01-01T00-00-00"), null);
+    assert.deepEqual(readGraph(runDir), before);
   });
 
   test("the verification retry count of a step survives a restart with no file", async () => {
     const runDir = createRun(base, "pipeline");
-    await dispatch(new CustomWorkflowEngine(runDir, worker()));
+    await dispatch(new CustomWorkflowEngine(runDir));
     const retry = (session: { activeRunDir: string; verificationRetryCount: Map<string, number> }) =>
       handleCustomEngineVerifyRetry({
         session,
@@ -335,14 +374,8 @@ describe("custom workflow runs in the database", () => {
         iteration: 1,
         maxRetries: 3,
         deps: {
-          hydrateRetryCounts: () => {
-            const counts = hydrateCustomStepVerifyRetryCount(session, "custom-step", "pipeline/draft");
-            assert.ok(counts, "the step of a run with rows has a step row");
-            return counts;
-          },
-          saveRetryCounts: () => {
-            assert.equal(saveCustomStepVerifyRetryCount(session, "custom-step", "pipeline/draft"), true);
-          },
+          hydrateRetryCounts: () => hydrateCustomStepVerifyRetryCount(session, "custom-step", "pipeline/draft"),
+          saveRetryCounts: () => saveCustomStepVerifyRetryCount(session, "custom-step", "pipeline/draft"),
           recover: async () => ({ outcome: "retry" }),
           logRetry: () => {},
           reportRetry: () => {},
@@ -358,11 +391,17 @@ describe("custom workflow runs in the database", () => {
     assert.deepEqual(await retry(afterRestart), { action: "retry", attempts: 3 });
     assert.equal((await retry(afterRestart)).action, "stop");
     assert.equal(existsSync(join(runDir, "runtime")), false);
+    // Each count that changed was written by a Domain Operation.
+    const retryWrites = _getAdapter()!.prepare(
+      `SELECT json_extract(payload_json, '$.used') AS used FROM workflow_domain_events
+       WHERE event_type = 'custom_workflow.step.retry' ORDER BY project_revision`,
+    ).all().map((row) => row["used"]);
+    assert.deepEqual(retryWrites, [1, 2, 3, 4]);
   });
 
   test("each step transition queues Projection Work that the worker can render", async () => {
     const runDir = createRun(base, "pipeline");
-    await dispatch(new CustomWorkflowEngine(runDir, worker()));
+    await dispatch(new CustomWorkflowEngine(runDir));
     const head = _getAdapter()!.prepare(
       `SELECT projection_kind, projection_key FROM workflow_projection_work
        ORDER BY source_project_revision DESC LIMIT 1`,

@@ -10,20 +10,22 @@
  * The step artifacts that the agent writes live in the same directory.
  *
  * A run directory with no run row was written before runs were database rows.
- * It is listed from its GRAPH.yaml, and `importRunDirectory` maps it to rows.
+ * It is listed as not imported, and `importRunDirectory` maps it to rows.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { parse } from "yaml";
 import {
   customWorkflowRunId,
   getCustomWorkflowRun,
   listCustomWorkflowRuns,
   readCustomWorkflowGraph,
+  type CustomWorkflowRun,
 } from "./db/custom-workflow-runs.js";
 import { insertCustomWorkflowRun } from "./db/writers/custom-workflow-runs.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
-import { readFrozenDefinition, renderRunDirectory } from "./definition-io.js";
+import { renderRunDirectory } from "./definition-io.js";
 import { loadDefinition, loadDefinitionFromFile, substituteParams } from "./definition-loader.js";
 import { initializeGraph, readGraph } from "./graph.js";
 import { isDbAvailable } from "./gsd-db.js";
@@ -44,6 +46,8 @@ export interface RunMetadata {
   steps: { total: number; completed: number; pending: number; active: number };
   /** Overall status derived from step states. */
   status: "pending" | "running" | "complete";
+  /** False for a run directory with no run row: its counts come from GRAPH.yaml. */
+  imported: boolean;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────
@@ -143,9 +147,11 @@ export function createRun(
 /**
  * Map a run directory that has no run row to database rows: the frozen
  * DEFINITION.yaml, the GRAPH.yaml step statuses and PARAMS.json. An unknown
- * step status fails loud.
+ * step status fails loud and writes nothing.
+ *
+ * @returns the run row
  */
-export function importRunDirectory(runDir: string): void {
+export function importRunDirectory(runDir: string): CustomWorkflowRun {
   const fence = readDomainOperationFence();
   const graph = readGraph(runDir);
   const unknown = graph.steps.find((step) => !["pending", "active", "complete", "expanded"].includes(step.status));
@@ -153,14 +159,16 @@ export function importRunDirectory(runDir: string): void {
     throw new Error(`Cannot import ${runDir}: step "${unknown.id}" has unknown status "${unknown.status}"`);
   }
   const paramsPath = join(runDir, "PARAMS.json");
+  const runId = customWorkflowRunId(runDir);
   insertCustomWorkflowRun({
     fence,
     operationType: "run.import",
-    runId: customWorkflowRunId(runDir),
-    definition: readFrozenDefinition(runDir),
+    runId,
+    definition: parse(readFileSync(join(runDir, "DEFINITION.yaml"), "utf-8"), { schema: "core" }) as WorkflowDefinition,
     params: existsSync(paramsPath) ? JSON.parse(readFileSync(paramsPath, "utf-8")) as Record<string, string> : null,
     graph,
   });
+  return getCustomWorkflowRun(runId)!;
 }
 
 /**
@@ -186,7 +194,8 @@ export function openRunForResume(basePath: string, runId: string): string {
  * List existing workflow runs with metadata.
  *
  * Step counts and status come from the run rows. A run directory with no run
- * row (written before runs were database rows) is listed from its GRAPH.yaml.
+ * row (written before runs were database rows) is listed from its GRAPH.yaml
+ * with `imported: false`; the engine imports it before it runs.
  *
  * @param basePath — project root directory
  * @param defName — optional filter: only list runs for this definition name
@@ -196,6 +205,7 @@ export function listRuns(basePath: string, defName?: string): RunMetadata[] {
   const runsRoot = join(basePath, ".gsd", RUNS_DIR);
   const graphs = new Map<string, WorkflowGraph>();
   for (const run of listCustomWorkflowRuns()) graphs.set(run.runId, readCustomWorkflowGraph(run));
+  const importedRunIds = new Set(graphs.keys());
 
   if (existsSync(runsRoot)) {
     for (const name of subDirectories(runsRoot)) {
@@ -225,6 +235,7 @@ export function listRuns(basePath: string, defName?: string): RunMetadata[] {
           active: graph.steps.filter((s) => s.status === "active").length,
         },
         status: deriveStatus(graph),
+        imported: importedRunIds.has(runId),
       };
     })
     .filter((run) => defName === undefined || run.name === defName)

@@ -84,7 +84,6 @@ import {
   hydrateCustomStepVerifyRetryCount,
   hydrateCustomVerifyRetryCounts,
   saveCustomStepVerifyRetryCount,
-  saveCustomVerifyRetryCounts,
 } from "./custom-verify-retry-store.js";
 import {
   settleDispatchFailed,
@@ -335,13 +334,6 @@ function leaseConflictNotice(
     unitType: iterData.unitType,
     unitId: iterData.unitId,
     reason,
-  });
-}
-
-function logCustomVerifyRetrySaveFailure(err: unknown): void {
-  debugLog("autoLoop", {
-    phase: "save-custom-verify-retries-failed",
-    error: err instanceof Error ? err.message : String(err),
   });
 }
 
@@ -893,7 +885,6 @@ export async function autoLoop(
         const { engine, policy } = resolveEngine({
           activeEngineId: s.activeEngineId,
           activeRunDir: s.activeRunDir,
-          workerId: s.workerId,
         });
 
         const engineState = await engine.deriveState(s.canonicalProjectRoot);
@@ -970,12 +961,9 @@ export async function autoLoop(
 
         let customDispatchId: number | null = null;
         let customDispatchSettled = false;
-        // A step of a run with database rows keeps its retry count on the step row.
-        const saveCustomEngineRetryCounts = (): void => {
-          if (!saveCustomStepVerifyRetryCount(s, customIterData.unitType, customIterData.unitId)) {
-            saveCustomVerifyRetryCounts(s, { logFailure: logCustomVerifyRetrySaveFailure });
-          }
-        };
+        // A custom workflow step keeps its retry count on the step row.
+        const saveCustomEngineRetryCounts = (): void =>
+          saveCustomStepVerifyRetryCount(s, customIterData.unitType, customIterData.unitId);
 
         // ── Progress widget (mirrors the dev path) ──
         deps.updateProgressWidget(ctx, iterData.unitType, iterData.unitId, iterData.state);
@@ -1310,8 +1298,7 @@ export async function autoLoop(
             maxRetries: MAX_CUSTOM_ENGINE_VERIFY_RETRIES,
             deps: {
               hydrateRetryCounts: () =>
-                hydrateCustomStepVerifyRetryCount(s, customIterData.unitType, customIterData.unitId)
-                ?? hydrateCustomVerifyRetryCounts(s, { logFailure: logCustomVerifyRetryLoadFailure }),
+                hydrateCustomStepVerifyRetryCount(s, customIterData.unitType, customIterData.unitId),
               saveRetryCounts: saveCustomEngineRetryCounts,
               recover: (unitType, unitId, options) => policy.recover(unitType, unitId, options),
               logRetry: details => debugLog("autoLoop", {

@@ -281,8 +281,8 @@ backwards compatibility.
 A YAML run is stored in the project database. `DEFINITION.yaml`, `GRAPH.yaml`
 and `PARAMS.json` in `.gsd/workflow-runs/<name>/<timestamp>/` are renders of
 it: GSD writes them again after each step and does not read your edits. A run
-directory from an older release has no database rows;
-`/gsd workflow resume <name>/<timestamp>` imports it first.
+directory from an older release has no database rows: `/gsd workflow list`
+shows it as not imported, and GSD imports it before it runs the next step.
 
 A step with a `human-review` or `prompt-verify` policy pauses the run after it
 runs. Review its output, approve it with

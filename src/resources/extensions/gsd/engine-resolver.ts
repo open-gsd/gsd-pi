@@ -30,7 +30,7 @@ export interface ResolvedEngine {
  * Note: `GSD_ENGINE_BYPASS=1` is checked in autoLoop before calling this function.
  */
 export function resolveEngine(
-  session: { activeEngineId: string | null; activeRunDir?: string | null; workerId?: string | null },
+  session: { activeEngineId: string | null; activeRunDir?: string | null },
 ): ResolvedEngine {
   const { activeEngineId, activeRunDir } = session;
 
@@ -51,7 +51,7 @@ export function resolveEngine(
   }
 
   return {
-    engine: new CustomWorkflowEngine(activeRunDir, session.workerId ?? null),
+    engine: new CustomWorkflowEngine(activeRunDir),
     policy: new CustomExecutionPolicy(activeRunDir),
   };
 }

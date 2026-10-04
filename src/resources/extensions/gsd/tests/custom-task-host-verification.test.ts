@@ -22,7 +22,9 @@ import {
 import { recordNonAdvancingOutcome } from "../auto-liveness-backstop.js";
 import { runCustomVerificationWithEvidence } from "../custom-verification.js";
 import { resolveTaskRecoveryResumeBasePath } from "../bootstrap/dynamic-tools.js";
+import { writeGraph } from "../graph.js";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.js";
+import { importRunDirectory } from "../run-manager.js";
 import { publishVerifiedTaskCompletion, stageTaskCompletion } from "../task-completion-compatibility-adapter.js";
 import { claimTaskAttempt, readLatestTaskAttempt } from "../task-execution-domain-operation.js";
 import { resumeTaskRecovery } from "../task-recovery-domain-operation.js";
@@ -30,6 +32,15 @@ import { readTaskTechnicalVerdict, recordTaskTechnicalVerdict } from "../task-ve
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.js";
 
 const tempDirs = new Set<string>();
+
+/** Verification reads the frozen definition from the run rows: import the run directory. */
+function importRun(basePath: string, name: string): void {
+  writeGraph(basePath, {
+    steps: [{ id: "step-1", title: "step-1", status: "active", prompt: "Do step-1", dependsOn: [] }],
+    metadata: { name, createdAt: "2026-07-12T00:00:00.000Z" },
+  });
+  importRunDirectory(basePath);
+}
 
 function db() {
   const adapter = _getAdapter();
@@ -435,6 +446,7 @@ test("#1674: post-policy failures include the selected recovery route", async ()
     "      pattern: '^ok'",
     "",
   ].join("\n"));
+  importRun(basePath, "post-policy-route");
   writeFileSync(join(basePath, "output.md"), "not-ok\n");
   let attemptId = firstAttemptId;
 
@@ -535,6 +547,7 @@ function writeHumanReviewDefinition(basePath: string): void {
     "      policy: human-review",
     "",
   ].join("\n"));
+  importRun(basePath, "host-verification");
 }
 
 test("#1674: a human-review resolution composes a different signature than the policy failure", async () => {

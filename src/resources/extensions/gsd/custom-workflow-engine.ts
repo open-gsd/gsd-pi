@@ -8,7 +8,7 @@
  * after it. GRAPH.yaml is never read for a run that has rows.
  *
  * A run directory with no run row was written before runs were database rows.
- * Its GRAPH.yaml is the step state for one release.
+ * The engine imports it to rows before its first read; a refused import throws.
  *
  * Observability:
  * - `resolveDispatch` returns unitType "custom-step" with unitId "<name>/<stepId>".
@@ -26,8 +26,6 @@ import type {
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
-  readGraph,
-  writeGraph,
   getNextPendingStep,
   markStepActive,
   markStepComplete,
@@ -37,13 +35,12 @@ import {
   type WorkflowGraph,
 } from "./graph.js";
 import { injectContext } from "./context-injector.js";
-import { isAutoWorkerLive } from "./db/auto-workers.js";
 import {
   customWorkflowRunId,
   getCustomWorkflowRun,
-  getCustomWorkflowStepClaim,
   getLatestCustomWorkflowStepVerification,
   readCustomWorkflowGraph,
+  type CustomWorkflowRun,
 } from "./db/custom-workflow-runs.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
 import {
@@ -53,8 +50,8 @@ import {
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import type { StepDefinition } from "./definition-loader.js";
 import { readFrozenDefinition, renderRunDirectory } from "./definition-io.js";
+import { importRunDirectory } from "./run-manager.js";
 import { parseUnitId } from "./unit-id.js";
-import { withFileLock } from "./file-lock.js";
 
 // Re-export for downstream consumers
 export { readFrozenDefinition } from "./definition-io.js";
@@ -87,7 +84,7 @@ function stepIdOfUnit(unitId: string): string {
  * The notice for a step that paused and waits for a decision of the operator
  * (a human-review or prompt-verify policy): its newest verification result is
  * inconclusive and has no waiver. Null when the step paused for another cause,
- * such as a failed check, or when the run has no rows.
+ * such as a failed check.
  */
 export function customStepApprovalNotice(runDir: string | null, unitId: string): string | null {
   if (!runDir) return null;
@@ -111,13 +108,15 @@ export class CustomWorkflowEngine implements WorkflowEngine {
   readonly engineId = "custom";
   private readonly runDir: string;
   private readonly runId: string;
-  private readonly workerId: string | null;
 
-  /** `workerId` is the auto worker of this session. A step it starts is claimed by it. */
-  constructor(runDir: string, workerId: string | null = null) {
+  constructor(runDir: string) {
     this.runDir = runDir;
     this.runId = customWorkflowRunId(runDir);
-    this.workerId = workerId;
+  }
+
+  /** The run row. A run directory with no run row is imported first. */
+  private openRun(): CustomWorkflowRun {
+    return getCustomWorkflowRun(this.runId) ?? importRunDirectory(this.runDir);
   }
 
   /**
@@ -127,8 +126,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
    * "running" otherwise (any pending or active steps remain).
    */
   async deriveState(_basePath: string): Promise<EngineState> {
-    const run = getCustomWorkflowRun(this.runId);
-    const graph = run ? readCustomWorkflowGraph(run) : readGraph(this.runDir);
+    const graph = readCustomWorkflowGraph(this.openRun());
     const allDone = graph.steps.every(
       (s) => s.status === "complete" || s.status === "expanded",
     );
@@ -258,10 +256,10 @@ export class CustomWorkflowEngine implements WorkflowEngine {
   /**
    * Resolve the next dispatch action from the step rows.
    *
-   * An active step is dispatched again (a retry, or a resume after a crash). A
-   * step that a live worker of another session runs is never dispatched: the
-   * result is a stop. Otherwise the first step whose dependencies are all
-   * satisfied becomes active and is claimed by this worker.
+   * An active step is dispatched again (a retry, or a resume after a crash).
+   * Otherwise the first step whose dependencies are all satisfied becomes
+   * active. When another session changed the project after this call read the
+   * rows, the step transition fails with a revision conflict.
    *
    * Returns a dispatch with unitType "custom-step" and unitId in
    * "<workflowName>/<stepId>" format.
@@ -270,65 +268,30 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     state: EngineState,
     _context: { basePath: string },
   ): Promise<EngineDispatchAction> {
-    const run = getCustomWorkflowRun(this.runId);
-    if (!run) return this.resolveDispatchFromGraphFile();
-
-    // Read the fence before the rows: a change by another session then fails
-    // the operation below with a revision conflict.
+    const run = this.openRun();
+    // Read the fence before the step rows: a change by another session then
+    // fails the operation below with a revision conflict.
     const fence = readDomainOperationFence();
     const graph = readCustomWorkflowGraph(run);
     const active = graph.steps.find((step) => step.status === "active");
     let action: EngineDispatchAction;
     if (active) {
-      const owner = getCustomWorkflowStepClaim(this.runId, active.id);
-      if (owner !== null && owner !== this.workerId && isAutoWorkerLive(owner)) {
-        return {
-          action: "stop",
-          reason: `Workflow step "${active.id}" is running in another session (worker ${owner}).`,
-          level: "error",
-        };
-      }
-      if (owner !== this.workerId) {
-        saveCustomWorkflowSteps({
-          fence,
-          operationType: "step.claim",
-          runId: this.runId,
-          stepId: active.id,
-          graph,
-          claimedBy: this.workerId,
-        });
-      }
       action = this.dispatchStep(graph, active);
     } else {
       const next = this.nextStep(graph);
-      if (next.transition) {
-        saveCustomWorkflowSteps({ fence, runId: this.runId, claimedBy: this.workerId, ...next.transition });
-      }
+      if (next.transition) saveCustomWorkflowSteps({ fence, runId: this.runId, ...next.transition });
       action = next.action;
     }
     renderRunDirectory(this.runDir, run);
     return action;
   }
 
-  /** resolveDispatch for a run directory with no run row: GRAPH.yaml is the step state. */
-  private async resolveDispatchFromGraphFile(): Promise<EngineDispatchAction> {
-    return await withFileLock(join(this.runDir, "GRAPH.yaml"), () => {
-      const graph = readGraph(this.runDir);
-      const active = graph.steps.find((step) => step.status === "active");
-      if (active) return this.dispatchStep(graph, active);
-
-      const next = this.nextStep(graph);
-      if (next.transition) writeGraph(this.runDir, next.transition.graph);
-      return next.action;
-    });
-  }
-
   /**
    * Reconcile state after a step completes.
    *
    * Extracts the stepId from the completedStep's unitId (last segment after `/`)
-   * and marks it complete. A step of a run with rows is completed only when its
-   * newest verification result is a pass or carries a waiver.
+   * and marks it complete. A step is completed only when its newest
+   * verification result is a pass or carries a waiver.
    *
    * Returns "milestone-complete" when all steps are now done, "continue" otherwise.
    */
@@ -340,34 +303,23 @@ export class CustomWorkflowEngine implements WorkflowEngine {
   }
 
   private async completeStep(stepId: string): Promise<ReconcileResult> {
-    const run = getCustomWorkflowRun(this.runId);
-    let updatedGraph: WorkflowGraph;
-    if (run) {
-      const fence = readDomainOperationFence();
-      const verification = getLatestCustomWorkflowStepVerification(this.runId, stepId);
-      if (!verification || (verification.verdict !== "pass" && verification.waiverRationale === null)) {
-        throw new Error(
-          `Workflow step "${stepId}" cannot complete: its verification result is ${verification?.verdict ?? "missing"}`,
-        );
-      }
-      updatedGraph = markStepComplete(readCustomWorkflowGraph(run), stepId);
-      saveCustomWorkflowSteps({
-        fence,
-        operationType: "step.complete",
-        runId: this.runId,
-        stepId,
-        graph: updatedGraph,
-      });
-      renderRunDirectory(this.runDir, run);
-    } else {
-      updatedGraph = await withFileLock(join(this.runDir, "GRAPH.yaml"), () => {
-        // Re-read the graph from disk so we do not overwrite concurrent
-        // workflow edits with a stale in-memory snapshot from deriveState().
-        const updated = markStepComplete(readGraph(this.runDir), stepId);
-        writeGraph(this.runDir, updated);
-        return updated;
-      });
+    const run = this.openRun();
+    const fence = readDomainOperationFence();
+    const verification = getLatestCustomWorkflowStepVerification(this.runId, stepId);
+    if (!verification || (verification.verdict !== "pass" && verification.waiverRationale === null)) {
+      throw new Error(
+        `Workflow step "${stepId}" cannot complete: its verification result is ${verification?.verdict ?? "missing"}`,
+      );
     }
+    const updatedGraph = markStepComplete(readCustomWorkflowGraph(run), stepId);
+    saveCustomWorkflowSteps({
+      fence,
+      operationType: "step.complete",
+      runId: this.runId,
+      stepId,
+      graph: updatedGraph,
+    });
+    renderRunDirectory(this.runDir, run);
 
     const allDone = updatedGraph.steps.every(
       (s) => s.status === "complete" || s.status === "expanded",
@@ -384,7 +336,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
    * decision when its newest verification result is inconclusive and has no
    * waiver. A failed check is not approved: the step runs again on resume.
    *
-   * @throws Error when the step does not wait for a decision, or a live session runs it.
+   * @throws Error when the step does not wait for a decision.
    */
   async approveStep(stepId: string): Promise<ReconcileResult> {
     const fence = readDomainOperationFence();
@@ -393,10 +345,6 @@ export class CustomWorkflowEngine implements WorkflowEngine {
       throw new Error(
         `Workflow step "${stepId}" does not wait for approval: its verification result is ${pending?.verdict ?? "missing"}`,
       );
-    }
-    const owner = getCustomWorkflowStepClaim(this.runId, stepId);
-    if (owner !== null && isAutoWorkerLive(owner)) {
-      throw new Error(`Workflow step "${stepId}" is running in another session (worker ${owner}).`);
     }
     insertCustomWorkflowStepVerification({
       fence,

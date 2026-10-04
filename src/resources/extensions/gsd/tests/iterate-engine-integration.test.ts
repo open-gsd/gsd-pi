@@ -11,7 +11,7 @@
  * and source artifact files — no mocks.
  */
 
-import { describe, it, afterEach } from "node:test";
+import { describe, it, before, after, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -19,6 +19,8 @@ import { tmpdir } from "node:os";
 import { stringify } from "yaml";
 
 import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
+import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import {
   writeGraph,
   readGraph,
@@ -36,6 +38,16 @@ function makeTmpDir(): string {
   tmpDirs.push(dir);
   return dir;
 }
+
+before(() => {
+  assert.equal(openDatabase(":memory:"), true);
+});
+
+after(() => {
+  closeDatabase();
+});
+
+const runDirs = new Map<CustomWorkflowEngine, string>();
 
 afterEach(() => {
   for (const d of tmpDirs) {
@@ -74,7 +86,9 @@ function makeTempRun(
     }
   }
 
-  return { runDir, engine: new CustomWorkflowEngine(runDir) };
+  const engine = new CustomWorkflowEngine(runDir);
+  runDirs.set(engine, runDir);
+  return { runDir, engine };
 }
 
 /** Shorthand to build a GraphStep. */
@@ -94,9 +108,10 @@ async function dispatch(engine: CustomWorkflowEngine) {
   return engine.resolveDispatch(state, { basePath: "/unused" });
 }
 
-/** Drive a full deriveState→reconcile cycle for a given unitId. */
+/** Drive a full deriveState→verify→reconcile cycle for a given unitId. */
 async function reconcile(engine: CustomWorkflowEngine, unitId: string) {
   const state = await engine.deriveState("/unused");
+  runCustomVerificationWithEvidence(runDirs.get(engine)!, unitId.slice(unitId.indexOf("/") + 1));
   return engine.reconcile(state, {
     unitType: "custom-step",
     unitId,

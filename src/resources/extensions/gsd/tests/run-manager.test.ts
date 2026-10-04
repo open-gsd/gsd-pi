@@ -239,5 +239,7 @@ describe("listRuns", () => {
     assert.equal(runs.length, 2);
     // First should be the newer one (the one we just created)
     assert.ok(runs[0].timestamp > runs[1].timestamp, "should be sorted newest-first");
+    // A run directory with no run row is listed, labelled as not imported.
+    assert.deepEqual(runs.map((run) => run.imported), [true, false]);
   });
 });

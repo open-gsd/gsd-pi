@@ -39,6 +39,17 @@ function makeTmpDir(): string {
   return dir;
 }
 
+/**
+ * A run directory from a release that kept runs in files, with an open
+ * database: the engine imports the directory to rows on its first use.
+ */
+function makeRunDir(): string {
+  const dir = makeTmpDir();
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
+  return dir;
+}
+
 async function resolveNextAgentEnd(timeoutMs = 3_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!_hasPendingResolveForTest()) {
@@ -366,7 +377,7 @@ async function runVerificationScenario(input: {
 describe("Custom engine loop integration", { concurrency: 1 }, () => {
   it("threads custom-engine runGuards ids and budget inputs through adjudication", async () => {
     _resetPendingResolve();
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([makeStep({ id: "guarded-step" })], "guarded-workflow");
     writeGraph(runDir, graph);
     writeDefinition(runDir, graph.steps, "guarded-workflow");
@@ -413,7 +424,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
     _resetPendingResolve();
 
     // Create a real run directory with 3 steps: a → b → c
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([
       makeStep({ id: "step-a" }),
       makeStep({ id: "step-b", dependsOn: ["step-a"] }),
@@ -546,12 +557,6 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
     assert.ok(deps.callLog.includes("stopAuto:Workflow complete"), deps.callLog.join("\n"));
     assert.deepEqual(listRuns(base)[0]?.steps, { total: 2, completed: 2, pending: 0, active: 0 });
     assert.deepEqual(readGraph(runDir).steps.map((step) => step.status), ["complete", "complete"]);
-    // The loop claimed each step for the worker of the session.
-    const claims = _getAdapter()!.prepare(
-      `SELECT json_extract(payload_json, '$.claimedBy') AS worker FROM workflow_domain_events
-       WHERE event_type = 'custom_workflow.step.activate' ORDER BY project_revision`,
-    ).all().map((row) => row["worker"]);
-    assert.deepEqual(claims, [s.workerId, s.workerId]);
     // Each step advanced on a stored verification result, here a waiver: no verify policy.
     for (const stepId of ["step-a", "step-b"]) {
       const verification = getLatestCustomWorkflowStepVerification(customWorkflowRunId(runDir), stepId);
@@ -706,7 +711,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
   it("step mode stops after one custom workflow step", async () => {
     _resetPendingResolve();
 
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([
       makeStep({ id: "step-a" }),
       makeStep({ id: "step-b", dependsOn: ["step-a"] }),
@@ -771,7 +776,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
     _resetPendingResolve();
 
     // Create a run directory where all steps are already complete
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([
       makeStep({ id: "step-a", status: "complete" }),
     ], "already-done");
@@ -807,7 +812,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
   it("finalizes custom-engine complete turns and clears current turn state", async () => {
     _resetPendingResolve();
 
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([
       makeStep({ id: "step-a", status: "complete" }),
     ], "already-done");
@@ -860,7 +865,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
   it("stops blocked custom workflows and clears current turn state", async () => {
     _resetPendingResolve();
 
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([
       makeStep({ id: "step-a", dependsOn: ["step-b"] }),
       makeStep({ id: "step-b", dependsOn: ["step-a"] }),
@@ -960,7 +965,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
     _resetPendingResolve();
 
     // Single-step workflow
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([makeStep({ id: "only" })], "single");
     writeGraph(runDir, graph);
     writeDefinition(runDir, graph.steps, "single");
@@ -1015,7 +1020,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
   it("respects dependency ordering — step-b waits for step-a", async () => {
     _resetPendingResolve();
 
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     // step-b depends on step-a, both pending
     const graph = makeGraph([
       makeStep({ id: "step-a" }),
@@ -1074,7 +1079,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
   it("stops custom workflow after repeated verification retries", async () => {
     _resetPendingResolve();
 
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([makeStep({ id: "retry-step" })], "retry-exhaustion");
     writeGraph(runDir, graph);
     writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({
@@ -1157,7 +1162,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
   it("persists custom verification retry budget across a session restart", async () => {
     _resetPendingResolve();
 
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([makeStep({ id: "retry-step" })], "retry-restart");
     writeGraph(runDir, graph);
     writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({
@@ -1660,7 +1665,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
 
     // Two-step workflow: a → b. We will complete step-a, then force a break
     // during step-b's runUnitPhase (by returning cancelled status + deactivating).
-    const runDir = makeTmpDir();
+    const runDir = makeRunDir();
     const graph = makeGraph([
       makeStep({ id: "step-a" }),
       makeStep({ id: "step-b", dependsOn: ["step-a"] }),

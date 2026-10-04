@@ -201,9 +201,12 @@ What shipped:
   an evidence row, and a step completes only from a row that passed or carries
   a waiver rationale. A `human-review` or `prompt-verify` step pauses the run
   until `/gsd workflow approve <name>/<timestamp> <step>` records the decision
-  of the operator as such a row. A run directory from an older release has no rows: it is
-  read from its files for one release, and
-  `/gsd workflow resume <name>/<timestamp>` imports it.
+  of the operator as such a row. The verification retry count of a step is on
+  its step row, written by a `custom_workflow.step.retry` Domain Operation. A
+  run directory from an older release has no rows: the engine imports it to
+  rows before its first read, and an import that is refused (an unknown step
+  status) fails loud and writes nothing. `/gsd workflow list` shows such a
+  directory as not imported.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).

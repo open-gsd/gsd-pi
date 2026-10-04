@@ -1,17 +1,17 @@
 // Project/App: gsd-pi
 // File Purpose: Persistence adapter for verification retry counts. A step of a
-// custom workflow run with database rows keeps its count on the step row. Every
-// other unit keeps it in custom-verify-retries.json.
+// custom workflow run keeps its count on the step row. The dev path keeps its
+// counts and exhausted units in custom-verify-retries.json.
 
 import { readFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteSync } from "../atomic-write.js";
 import {
   customWorkflowRunId,
-  getCustomWorkflowRun,
   getCustomWorkflowStepVerifyRetries,
 } from "../db/custom-workflow-runs.js";
 import { setCustomWorkflowStepVerifyRetries } from "../db/writers/custom-workflow-runs.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import { gsdRoot } from "../paths.js";
 import { parseUnitId } from "../unit-id.js";
 import type { AutoSession } from "./session.js";
@@ -98,29 +98,26 @@ export function saveCustomVerifyRetryCounts(
   }
 }
 
-/** The step row of a unit, or null when the session runs no custom workflow run that has rows. */
+/** The step row key of a custom workflow unit. */
 function stepRowOf(
   s: Pick<AutoSession, "activeRunDir">,
   unitId: string,
-): { runId: string; stepId: string } | null {
-  if (!s.activeRunDir) return null;
-  const runId = customWorkflowRunId(s.activeRunDir);
-  if (!getCustomWorkflowRun(runId)) return null;
+): { runId: string; stepId: string } {
+  if (!s.activeRunDir) throw new Error(`Custom workflow unit ${unitId} has no active run directory`);
   const { milestone, slice, task } = parseUnitId(unitId);
-  return { runId, stepId: task ?? slice ?? milestone };
+  return { runId: customWorkflowRunId(s.activeRunDir), stepId: task ?? slice ?? milestone };
 }
 
 /**
  * Load the retry count of a custom workflow step from its step row, so a
- * restart continues the count. Returns null when the unit has no step row.
+ * restart continues the count.
  */
 export function hydrateCustomStepVerifyRetryCount(
   s: Pick<AutoSession, "activeRunDir" | "verificationRetryCount">,
   unitType: string,
   unitId: string,
-): Map<string, number> | null {
+): Map<string, number> {
   const step = stepRowOf(s, unitId);
-  if (!step) return null;
   s.verificationRetryCount.set(
     `${unitType}/${unitId}`,
     getCustomWorkflowStepVerifyRetries(step.runId, step.stepId),
@@ -129,20 +126,18 @@ export function hydrateCustomStepVerifyRetryCount(
 }
 
 /**
- * Store the retry count of a custom workflow step on its step row. A unit with
- * no count stores 0. Returns false when the unit has no step row.
+ * Store the retry count of a custom workflow step on its step row with a
+ * Domain Operation. A unit with no count stores 0. A count that is already
+ * stored writes nothing.
  */
 export function saveCustomStepVerifyRetryCount(
   s: Pick<AutoSession, "activeRunDir" | "verificationRetryCount">,
   unitType: string,
   unitId: string,
-): boolean {
+): void {
   const step = stepRowOf(s, unitId);
-  if (!step) return false;
-  setCustomWorkflowStepVerifyRetries(
-    step.runId,
-    step.stepId,
-    s.verificationRetryCount.get(`${unitType}/${unitId}`) ?? 0,
-  );
-  return true;
+  const fence = readDomainOperationFence();
+  const used = s.verificationRetryCount.get(`${unitType}/${unitId}`) ?? 0;
+  if (getCustomWorkflowStepVerifyRetries(step.runId, step.stepId) === used) return;
+  setCustomWorkflowStepVerifyRetries({ fence, ...step, used });
 }

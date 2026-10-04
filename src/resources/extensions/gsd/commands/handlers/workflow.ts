@@ -367,7 +367,8 @@ async function handleCustomWorkflow(
     }
     const lines = runs.map((r) => {
       const stepInfo = `${r.steps.completed}/${r.steps.total} steps`;
-      return `• ${r.name} [${r.timestamp}] — ${r.status} (${stepInfo})`;
+      const notImported = r.imported ? "" : " — not imported";
+      return `• ${r.name} [${r.timestamp}] — ${r.status} (${stepInfo})${notImported}`;
     });
     ctx.ui.notify(lines.join("\n"), "info");
     return true;

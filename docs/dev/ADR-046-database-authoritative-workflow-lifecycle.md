@@ -119,12 +119,16 @@ no lifecycle row. A step with a `human-review` or `prompt-verify` policy
 records `inconclusive` with no waiver and pauses the run;
 `/gsd workflow approve <name>/<timestamp> <step>` records the decision of the
 operator as a `pass` row written by a `user` actor and completes the step. A
-step is claimed on its step row, not through
-`unit_dispatches`, because a dispatch claim needs a Milestone lease. A run
-directory with no run row (an older release) is read from its files for one
-release, and `/gsd workflow resume <name>/<timestamp>` imports it with a
-`custom_workflow.run.import` Domain Operation. This operator import is not an
-Import Preview. The paused-session record in `runtime_kv` is session state,
+step has no claim yet: the dispatch claim for custom steps (ADR-048) is a
+follow-up. Until then the run revision fence of the Domain Operation is the
+write safety: each call has its own idempotency key, so a second session that
+read the same revision gets a revision conflict and never a silent replay. The
+verification retry count of a step is on its step row, written by a
+`custom_workflow.step.retry` Domain Operation. The rows are the only
+authority: a run directory with no run row (an older release) is imported with
+a `custom_workflow.run.import` Domain Operation before the engine reads it,
+and an import that is refused (an unknown step status) fails loud and writes
+nothing. This import is not an Import Preview. The paused-session record in `runtime_kv` is session state,
 not run identity: a command that names a run starts that run and drops the
 record. A markdown-phase template run still keeps its phase state in
 an agent-edited `STATE.json`.

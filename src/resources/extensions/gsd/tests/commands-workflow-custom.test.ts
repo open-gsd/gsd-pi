@@ -384,7 +384,7 @@ describe("workflow command handler", () => {
     assert.equal(autoSession.activeRunDir, betaDir);
     assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), null);
     // The run that the session dispatches is beta. alpha did not start.
-    const engine = new CustomWorkflowEngine(autoSession.activeRunDir!, null);
+    const engine = new CustomWorkflowEngine(autoSession.activeRunDir!);
     const action = await engine.resolveDispatch(await engine.deriveState(base), { basePath: base });
     assert.equal(action.action === "dispatch" ? action.step.unitId : action.action, "beta/step-1");
     assert.equal(listRuns(base, "alpha")[0]?.status, "pending");

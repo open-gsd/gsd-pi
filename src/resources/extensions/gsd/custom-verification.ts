@@ -27,7 +27,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { spawnSync } from "node:child_process";
 import type { StepDefinition, VerifyPolicy } from "./definition-loader.js";
-import { customWorkflowRunId, getCustomWorkflowRun } from "./db/custom-workflow-runs.js";
+import { customWorkflowRunId } from "./db/custom-workflow-runs.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
 import { insertCustomWorkflowStepVerification } from "./db/writers/custom-workflow-runs.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
@@ -85,17 +85,14 @@ export function runCustomVerificationWithEvidence(
   stepId: string,
 ): CustomVerificationResult {
   const result = verifyStep(runDir, stepId);
-  const runId = customWorkflowRunId(runDir);
-  if (getCustomWorkflowRun(runId)) {
-    insertCustomWorkflowStepVerification({
-      fence: readDomainOperationFence(),
-      runId,
-      stepId,
-      verdict: result.verdict,
-      evidence: JSON.parse(result.inputPayload) as { [key: string]: DomainJsonValue },
-      waiverRationale: result.waiverRationale,
-    });
-  }
+  insertCustomWorkflowStepVerification({
+    fence: readDomainOperationFence(),
+    runId: customWorkflowRunId(runDir),
+    stepId,
+    verdict: result.verdict,
+    evidence: JSON.parse(result.inputPayload) as { [key: string]: DomainJsonValue },
+    waiverRationale: result.waiverRationale,
+  });
   return result;
 }
 
