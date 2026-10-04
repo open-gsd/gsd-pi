@@ -73,7 +73,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "init", desc: "Project init wizard — detect, configure, bootstrap .gsd/" },
   { cmd: "setup", desc: "Configuration hub: status + sub-routes (llm, model, search, remote, keys, prefs, onboarding)" },
   { cmd: "onboarding", desc: "Re-run the setup wizard  [--resume|--reset|--step <name>]" },
-  { cmd: "migrate", desc: "Migrate a v1 .planning directory to DB-backed .gsd with backup + audit" },
+  { cmd: "migrate", desc: "Preview a v1 .planning migration to DB-backed .gsd; apply it with --preview=<hash>" },
   { cmd: "remote", desc: "Control remote auto-mode" },
   { cmd: "steer", desc: "Hard-steer plan documents during execution" },
   { cmd: "inspect", desc: "Show SQLite DB diagnostics" },

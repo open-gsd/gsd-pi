@@ -104,7 +104,7 @@ After writing the file, GSD attempts to open it in a browser using the local pla
 | `/gsd skill-health --stale N` | Show skills unused for N+ days |
 | `/gsd hooks` | Show configured post-unit and pre-dispatch hooks |
 | `/gsd run-hook` | Manually trigger a specific hook |
-| `/gsd migrate` | Migrate a v1 `.planning` directory to `.gsd` format |
+| `/gsd migrate` | Preview the migration of a v1 `.planning` directory to `.gsd` format, then approve the exact hash shown with `/gsd migrate --preview=<sha256>` |
 | `/gsd recover` | Preview an explicit legacy markdown import, then approve the exact hash shown with `/gsd recover --preview=<sha256>` |
 | `/gsd recover <recoveryActionId>` | Resume one repaired Task recovery abort or remediation after supplying repair and verification evidence |
 | `/gsd rebuild markdown` | Preserve externally edited modeled projections under `.gsd/quarantine/projections/`, then rebuild from the canonical database without importing markdown |

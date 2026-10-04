@@ -10,7 +10,12 @@ If you have projects with `.planning` directories from Git Ship Done v1 (now con
 
 # Or specify a path
 /gsd migrate ~/projects/my-old-project
+
+# Apply the exact Preview that the first run printed
+/gsd migrate --preview=sha256:<hash> ~/projects/my-old-project
 ```
+
+The first run writes no projection, no backup and no database record. It prints the Import Preview with its hash and the command that applies it. A target with no `.gsd` gets the `.gsd` directory and an empty database, because the Preview is sealed against the database. The second run applies the migration only when the Preview still has the approved hash. When the source or the database changed, it applies nothing and prints the current Preview command. Neither run needs an interactive menu.
 
 ## What Gets Migrated
 
@@ -26,10 +31,10 @@ The migration tool:
 - Preserves completion state (`[x]` phases stay done, summaries carry over)
 - Consolidates research files into the new structure and archives the full legacy `.planning` source under `.gsd/migration/legacy/`
 - Records `.gsd/migration/MIGRATION.md` and `.gsd/migration/manifest.json` audit artifacts
-- Shows a preview before writing anything, including requirement status totals (validated, active, deferred, out of scope) and legacy-input counts (milestone phase dirs, decision files, seed files)
-- Optionally runs a read-only review of the output for quality assurance
+- Shows a preview before writing anything, including requirement status totals (validated, active, deferred, out of scope) and legacy-input counts (milestone phase dirs, decision files, seed files), followed by the exact Import Preview and its hash
+- In the interactive TUI, optionally runs a read-only review of the output for quality assurance
 
-If migration reports a Forward Repair overlap, review each target and rerun the exact `--forward-choice` command it prints. The evidence-bound flags preserve later canonical work unless you explicitly choose the displayed backup value.
+If migration reports a Forward Repair overlap, review each target and rerun the exact `--preview` and `--forward-choice` command it prints. The evidence-bound flags preserve later canonical work unless you explicitly choose the displayed backup value.
 
 ## Supported Formats
 

@@ -1197,13 +1197,23 @@ export function applyOrResumeVerifiedRecoverApplication(
     ?? applyVerifiedRecoverApplication(basePath, approvedPreviewHash);
 }
 
-export function applyVerifiedMigrationApplication(
+/**
+ * Seal the Import Preview of a generated migration projection against the open
+ * database and pass it to `use`. The Preview holds no path of the temporary
+ * copy, so the same sources on the same database revision give the same hash.
+ */
+function withMigrationImportPreview<T>(
   basePath: string,
   sourcePaths: readonly string[],
-  sourceGsdRoot: string = gsdRoot(basePath),
-  beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
-  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
-): VerifiedMigrationCounts {
+  sourceGsdRoot: string,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[],
+  use: (sealed: {
+    created: Pick<PreparedVerifiedRecoverApplication, "basePath" | "previewInput" | "preview">;
+    preview: LegacyImportPreviewArtifact;
+    logicalPaths: readonly string[];
+    expectedArtifacts: readonly VerifiedMigrationArtifactEvidence[];
+  }) => T,
+): T {
   const location = resolveWorkflowDatabaseLocation(basePath);
   if (sourcePaths.length === 0) throw new Error("gsd migrate requires generated source files");
   const generatedGsd = realpathSync(sourceGsdRoot);
@@ -1330,8 +1340,50 @@ export function applyVerifiedMigrationApplication(
           : []
       )),
     );
+    return use({ created, preview: resolved, logicalPaths, expectedArtifacts });
+  } finally {
+    rmSync(stagingRoot, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The Import Preview that `/gsd migrate` asks the operator to approve. It
+ * writes nothing: no backup, no Import Application.
+ */
+export function previewVerifiedMigrationApplication(
+  basePath: string,
+  sourcePaths: readonly string[],
+  sourceGsdRoot: string,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
+): { previewHash: string; authorizationText: string } {
+  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, ({ preview }) => ({
+    previewHash: preview.preview_hash,
+    authorizationText: recoverAuthorizationText(preview),
+  }));
+}
+
+/**
+ * Apply the Import Preview of a generated migration projection. When the
+ * caller gives the Preview hash that the operator approved, a Preview with
+ * another hash is refused before the backup and the Import Application.
+ */
+export function applyVerifiedMigrationApplication(
+  basePath: string,
+  sourcePaths: readonly string[],
+  sourceGsdRoot: string = gsdRoot(basePath),
+  beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
+  approvedPreviewHash?: string,
+): VerifiedMigrationCounts {
+  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, (sealed) => {
+    if (approvedPreviewHash !== undefined && sealed.preview.preview_hash !== approvedPreviewHash) {
+      throw new Error(
+        `gsd migrate Preview ${sealed.preview.preview_hash} is not the approved Preview ${approvedPreviewHash}; `
+        + "nothing was imported. Run /gsd migrate again to see the current Preview.",
+      );
+    }
     const evidence = prepareVerifiedImportEvidence(
-      { ...created, preview: resolved },
+      { ...sealed.created, preview: sealed.preview },
       "pre-migrate-import",
     );
     beforeApply?.({
@@ -1350,10 +1402,8 @@ export function applyVerifiedMigrationApplication(
       backup: evidence.backup,
     });
     const application = inspectLegacyImportApplicationEvidence(receipt.operationId);
-    return verifiedMigrationCounts(application, logicalPaths, expectedArtifacts);
-  } finally {
-    rmSync(stagingRoot, { recursive: true, force: true });
-  }
+    return verifiedMigrationCounts(application, sealed.logicalPaths, sealed.expectedArtifacts);
+  });
 }
 
 function verifiedMigrationCounts(
