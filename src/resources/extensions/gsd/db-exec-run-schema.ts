@@ -13,7 +13,8 @@ export function hasExecRunSchema(db: DbAdapter): boolean {
 /**
  * ADR-046: evidence must not live in files. A row is a host fact (what ran,
  * how it ended, which Attempt it ran in), so the host writes it outside Domain
- * Operations, like gate_runs. `.gsd/exec/<id>.*` holds only the output text.
+ * Operations, like gate_runs. `.gsd/exec/<id>.*` holds the output text and a
+ * metadata copy for gsd_exec_search; that copy is not evidence.
  * Idempotent.
  */
 export function createExecRunSchema(db: DbAdapter): void {

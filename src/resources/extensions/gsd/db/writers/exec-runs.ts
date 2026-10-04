@@ -37,17 +37,6 @@ export function uatAttemptRef(milestoneId: string, sliceId: string, attempt: num
   return `uat:${milestoneId}:${sliceId}:attempt-${attempt}`;
 }
 
-/**
- * The Attempt a run belongs to, read in the transaction that stores the run.
- * A UAT run belongs to the run-uat attempt that is not saved yet. Another run
- * belongs to the Task Attempt of its caller that is not settled. The caller is
- * known by the scope of its worker: `<MID>` for a Milestone, `<MID>-<SID>` for
- * a Slice. The scope is the worker lock (GSD_MILESTONE_LOCK, GSD_SLICE_LOCK);
- * without a lock it is the name of the worktree the run is in. So parallel
- * workers each bind their own runs.
- * With no such Attempt, or with more than one, the run is unbound and proves
- * nothing.
- */
 /** Name of the GSD worktree a path is in ("" outside one). */
 function worktreeNameOf(path: string): string {
   const normalized = path.replaceAll("\\", "/");
@@ -62,6 +51,17 @@ function callerScopeOf(cwd: string): string {
   return sliceLock ? `${milestoneLock}-${sliceLock}` : milestoneLock;
 }
 
+/**
+ * The Attempt a run belongs to, read in the transaction that stores the run.
+ * A UAT run belongs to the run-uat attempt that is not saved yet. Another run
+ * belongs to the Task Attempt of its caller that is not settled. The caller is
+ * known by the scope of its worker: `<MID>` for a Milestone, `<MID>-<SID>` for
+ * a Slice. The scope is the worker lock (GSD_MILESTONE_LOCK, GSD_SLICE_LOCK);
+ * without a lock it is the name of the worktree the run is in. So parallel
+ * workers each bind their own runs.
+ * With no such Attempt, or with more than one, the run is unbound and proves
+ * nothing.
+ */
 function currentAttemptRef(input: ExecRunInput): string | null {
   if (input.kind === "uat_exec") {
     const row = getDb().prepare(`

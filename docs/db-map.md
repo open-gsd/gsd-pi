@@ -887,7 +887,9 @@ PRIMARY KEY (milestone_id, slice_id)
 ##### `exec_runs`
 
 One row for each `gsd_exec` / `gsd_uat_exec` command the host ran. Evidence
-checks read this row; `.gsd/exec/<id>.*` holds only the output text.
+checks read this row. `.gsd/exec/<id>.*` holds the output text and a
+`.meta.json` copy of the run metadata for `gsd_exec_search` and the compaction
+snapshot; the `.meta.json` file is not evidence.
 
 ```
 id           TEXT PRIMARY KEY   ← the run id the tool returns
@@ -908,6 +910,7 @@ check_id     TEXT               ← uat_exec only
 attempt_ref  TEXT               ← the Attempt the run belongs to, or NULL
 ```
 
+- Index: `idx_exec_runs_attempt` on `(attempt_ref)`
 - `attempt_ref` of an `exec` run is the id of the one Task Attempt of the
   caller that was not settled when the command ended. The caller is known by
   its worker scope: `GSD_MILESTONE_LOCK` (with `GSD_SLICE_LOCK` for a Slice
