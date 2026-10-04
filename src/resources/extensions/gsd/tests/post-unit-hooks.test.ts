@@ -27,6 +27,11 @@ import { invalidateAllCaches } from "../cache.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { readHookStateJson, writeHookStateJson } from "../db/writers/runtime-control.ts";
 import { hookStateScope } from "../rule-registry.ts";
+import {
+  enqueueSidecarItem,
+  listQueuedSidecarItems,
+  sidecarQueueScope,
+} from "../db/unit-dispatch-sidecars.ts";
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
 
@@ -252,21 +257,24 @@ test('Restore reconciliation re-enqueues the lost hook dispatch (#1246)', () => 
     assert.equal(dispatch.unitType, "hook/plan-review");
     persistHookState(base);
 
-    // Pause/resume: activeHook restored, but the session-local sidecar queue is
-    // gone (never persisted).
+    // Pause/resume: activeHook restored, but the pause closed the queue row
+    // of the hook dispatch.
     resetHookState();
     restoreHookState(base);
     assert.ok(getActiveHook(), "activeHook restored from disk");
 
     // Reconciliation re-enqueues the missing dispatch so the hook actually runs.
-    const sidecarQueue: any[] = [];
-    reconcileRestoredHookDispatch(base, sidecarQueue);
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const scope = sidecarQueueScope("M002");
+    reconcileRestoredHookDispatch(base, scope);
+    const sidecarQueue = listQueuedSidecarItems(scope);
     assert.equal(sidecarQueue.length, 1, "lost hook dispatch is re-enqueued");
     assert.equal(sidecarQueue[0].kind, "hook");
     assert.equal(sidecarQueue[0].unitType, "hook/plan-review");
     assert.equal(sidecarQueue[0].unitId, "M002/S01");
     assert.match(sidecarQueue[0].prompt, /Review the plan for M002\/S01/);
   } finally {
+    closeDatabase();
     resetHookState();
     invalidateAllCaches();
     rmSync(base, { recursive: true, force: true });
@@ -291,13 +299,19 @@ test('Restore reconciliation is a no-op when the dispatch is already queued (#12
     resetHookState();
     restoreHookState(base);
 
-    const sidecarQueue: any[] = [
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const scope = sidecarQueueScope("M002");
+    enqueueSidecarItem(
+      scope,
       { kind: "hook", unitType: "hook/plan-review", unitId: "M002/S01", prompt: "already here" },
-    ];
-    reconcileRestoredHookDispatch(base, sidecarQueue);
+      null,
+    );
+    reconcileRestoredHookDispatch(base, scope);
+    const sidecarQueue = listQueuedSidecarItems(scope);
     assert.equal(sidecarQueue.length, 1, "does not duplicate an existing hook dispatch");
     assert.equal(sidecarQueue[0].prompt, "already here");
   } finally {
+    closeDatabase();
     resetHookState();
     invalidateAllCaches();
     rmSync(base, { recursive: true, force: true });
@@ -308,10 +322,12 @@ test('Restore reconciliation is a no-op with no active hook (#1246)', () => {
   resetHookState();
   const base = createFixtureBase();
   try {
-    const sidecarQueue: any[] = [];
-    reconcileRestoredHookDispatch(base, sidecarQueue);
-    assert.equal(sidecarQueue.length, 0, "nothing enqueued when no active hook");
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const scope = sidecarQueueScope("M002");
+    reconcileRestoredHookDispatch(base, scope);
+    assert.equal(listQueuedSidecarItems(scope).length, 0, "nothing enqueued when no active hook");
   } finally {
+    closeDatabase();
     resetHookState();
     invalidateAllCaches();
     rmSync(base, { recursive: true, force: true });

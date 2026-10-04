@@ -14,6 +14,10 @@ import {
   createRuntimeControlSchema,
   hasRuntimeControlSchema,
 } from "./db-runtime-control-schema.js";
+import {
+  createUnitDispatchSidecarSchema,
+  hasUnitDispatchSidecarSchema,
+} from "./db-unit-dispatch-sidecar-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -36,6 +40,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "runtime-control",
     isPresent: hasRuntimeControlSchema,
     create: createRuntimeControlSchema,
+  },
+  {
+    id: "unit-dispatch-sidecars",
+    isPresent: hasUnitDispatchSidecarSchema,
+    create: createUnitDispatchSidecarSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

@@ -130,8 +130,6 @@ function makeLoopSession(overrides?: Record<string, unknown>) {
     lastBudgetAlertLevel: 0,
     pendingVerificationRetry: null,
     pendingCrashRecovery: null,
-    pendingQuickTasks: [],
-    sidecarQueue: [],
     autoModeStartModel: null,
     unitDispatchCount: new Map<string, number>(),
     unitLifetimeDispatches: new Map<string, number>(),

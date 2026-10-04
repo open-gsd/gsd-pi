@@ -135,7 +135,7 @@ export function buildExecutionGraphSnapshot(
   };
 }
 
-export async function scheduleSidecarQueue(queue: SidecarItem[]): Promise<SidecarItem[]> {
+export async function scheduleSidecarQueue<T extends SidecarItem>(queue: T[]): Promise<T[]> {
   if (queue.length <= 1) return [...queue];
   const nodes = buildSidecarQueueNodes(queue);
   const scheduler = new ExecutionGraphScheduler();
@@ -150,7 +150,7 @@ export async function scheduleSidecarQueue(queue: SidecarItem[]): Promise<Sideca
   }
 
   await scheduler.run(nodes, { parallel: false });
-  return orderedIndexes.map((idx) => queue[idx]).filter((item): item is SidecarItem => !!item);
+  return orderedIndexes.map((idx) => queue[idx]).filter((item): item is T => !!item);
 }
 
 export class ExecutionGraphScheduler {

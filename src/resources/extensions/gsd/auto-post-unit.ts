@@ -79,6 +79,13 @@ import {
   runMilestoneCloseoutGitHub,
 } from "./milestone-closeout.js";
 import type { AutoSession, SidecarItem } from "./auto/session.js";
+import {
+  enqueueSidecarItem,
+  hasHeldQuickTask,
+  holdQuickTask,
+  promoteHeldQuickTask,
+  sidecarQueueScope,
+} from "./db/unit-dispatch-sidecars.js";
 import { getEvidence, clearEvidenceFromDisk, archiveEvidenceToBlocked, isExecutionToolName } from "./safety/evidence-collector.js";
 import { removeProjectionFileSync } from "./atomic-write.js";
 import {
@@ -852,7 +859,7 @@ function enqueueSidecar(
   debugExtra: Record<string, unknown>,
   notification?: string,
 ): "continue" {
-  s.sidecarQueue.push(entry);
+  enqueueSidecarItem(sidecarQueueScope(s.currentMilestoneId), entry, s.currentUnit);
   debugLog("postUnitPostVerification", {
     phase: "sidecar-enqueue",
     kind: entry.kind,
@@ -874,12 +881,13 @@ export function _shouldDispatchTriageForTest(
 }
 
 export function _shouldDispatchQuickTaskForTest(
-  state: Pick<AutoSession, "stepMode" | "currentUnit" | "pendingQuickTasks">,
+  state: Pick<AutoSession, "stepMode" | "currentUnit">,
+  hasHeldQuickTask: () => boolean,
 ): boolean {
   return !state.stepMode &&
-    state.pendingQuickTasks.length > 0 &&
     !!state.currentUnit &&
-    state.currentUnit.type !== "quick-task";
+    state.currentUnit.type !== "quick-task" &&
+    hasHeldQuickTask();
 }
 
 export function _hasExecutionToolCallsInSessionForTest(entries: readonly unknown[]): boolean {
@@ -1959,8 +1967,19 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           );
         }
         if (triageResult.quickTasks.length > 0) {
+          const { buildQuickTaskPrompt } = await import("./triage-resolution.js");
           for (const qt of triageResult.quickTasks) {
-            s.pendingQuickTasks.push(qt);
+            holdQuickTask(
+              sidecarQueueScope(s.currentMilestoneId),
+              {
+                kind: "quick-task",
+                unitType: "quick-task",
+                unitId: `${s.currentMilestoneId}/${qt.id}`,
+                prompt: buildQuickTaskPrompt(qt),
+                captureId: qt.id,
+              },
+              s.currentUnit,
+            );
           }
           ctx.ui.notify(
             `Triage: ${triageResult.quickTasks.length} quick-task${triageResult.quickTasks.length === 1 ? "" : "s"} queued for execution.`,
@@ -2812,8 +2831,8 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
  * Post-verification processing: DB dual-write, post-unit hooks, triage
  * capture dispatch, quick-task dispatch.
  *
- * Sidecar work (hooks, triage, quick-tasks) is enqueued on `s.sidecarQueue`
- * for the main loop to drain via `runUnit()`.
+ * Sidecar work (hooks, triage, quick-tasks) is enqueued as unit_dispatch_sidecars
+ * rows for the main loop to drain via `runUnit()`.
  *
  * Returns:
  * - "continue" — proceed to sidecar drain / normal dispatch
@@ -3289,26 +3308,29 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   }
 
   // ── Quick-task dispatch ──
-  if (_shouldDispatchQuickTaskForTest(s)) {
+  const quickTaskScope = sidecarQueueScope(s.currentMilestoneId);
+  if (_shouldDispatchQuickTaskForTest(s, () => hasHeldQuickTask(quickTaskScope))) {
     try {
-      const capture = s.pendingQuickTasks.shift()!;
-      const { buildQuickTaskPrompt } = await import("./triage-resolution.js");
       const { markCaptureExecuted } = await import("./captures.js");
-      const prompt = buildQuickTaskPrompt(capture);
 
       if (s.currentUnit) {
         await closeoutUnit(ctx, s.basePath, s.currentUnit.type, s.currentUnit.id, s.currentUnit.startedAt);
       }
 
-      markCaptureExecuted(s.basePath, capture.id);
-
-      const qtUnitId = `${s.currentMilestoneId}/${capture.id}`;
-      return enqueueSidecar(
-        s, ctx,
-        { kind: "quick-task", unitType: "quick-task", unitId: qtUnitId, prompt, captureId: capture.id },
-        { captureId: capture.id },
-        `Executing quick-task: ${capture.id} — "${capture.text}"`,
-      );
+      // The held row becomes the queued work before the capture is marked
+      // executed, so a kill between the two steps cannot lose the task.
+      const quickTask = promoteHeldQuickTask(quickTaskScope);
+      if (quickTask) {
+        if (quickTask.captureId) markCaptureExecuted(s.basePath, quickTask.captureId);
+        debugLog("postUnitPostVerification", {
+          phase: "sidecar-enqueue",
+          kind: quickTask.kind,
+          unitId: quickTask.unitId,
+          captureId: quickTask.captureId,
+        });
+        ctx.ui.notify(`Executing quick-task: ${quickTask.captureId ?? quickTask.unitId}`, "info");
+        return "continue";
+      }
     } catch (e) {
       debugLog("postUnit", { phase: "quick-task-dispatch", error: String(e) });
     }

@@ -21,7 +21,6 @@
 import type { Api, Model } from "@gsd/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import type { GitServiceImpl } from "../git-service.js";
-import type { CaptureEntry } from "../captures.js";
 import { SourceObservationStore, supportsSourceObservationsForUnit } from "../source-observations.js";
 import type { BudgetAlertLevel } from "../auto-budget.js";
 import type { AutoOrchestrationModule } from "./contracts.js";
@@ -76,6 +75,7 @@ export interface PendingOrchestrationDispatch {
  * A typed item enqueued by postUnitPostVerification for the main loop to
  * drain via the standard runUnit path. Replaces inline dispatch
  * (pi.sendMessage / s.cmdCtx.newSession()) for hooks, triage, and quick-tasks.
+ * The queue is the unit_dispatch_sidecars table (db/unit-dispatch-sidecars.ts).
  */
 export interface SidecarItem {
   kind: "hook" | "triage" | "quick-task";
@@ -211,9 +211,6 @@ export class AutoSession {
   pausedUnitId: string | null = null;
   resourceVersionOnStart: string | null = null;
 
-  // ── Sidecar queue ─────────────────────────────────────────────────────
-  sidecarQueue: SidecarItem[] = [];
-
   // ── Pre-exec gate failure context (#4551) ───────────────────────────
   /**
    * Persisted when a pre-execution gate fails on a plan-slice or refine-slice
@@ -275,7 +272,6 @@ export class AutoSession {
   autoStartTime = 0;
   lastPromptCharCount: number | undefined;
   lastBaselineCharCount: number | undefined;
-  pendingQuickTasks: CaptureEntry[] = [];
   /** Timestamp of the last LLM request dispatch (ms since epoch). Used for proactive rate limiting. */
   lastRequestTimestamp = 0;
 
@@ -431,9 +427,7 @@ export class AutoSession {
     this.autoStartTime = 0;
     this.lastPromptCharCount = undefined;
     this.lastBaselineCharCount = undefined;
-    this.pendingQuickTasks = [];
     this.lastRequestTimestamp = 0;
-    this.sidecarQueue = [];
     this.rewriteAttemptCount = 0;
     this.consecutiveCompleteBootstraps = 0;
     this.lastPreExecFailure = null;

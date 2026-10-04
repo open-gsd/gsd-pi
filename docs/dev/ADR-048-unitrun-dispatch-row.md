@@ -44,6 +44,21 @@ The work has four parts:
 
 Part 1 has started. `unit_dispatch_budgets (dispatch_id, kind, used)` holds one count for each budget kind. A retry opens a new dispatch row for the same unit, so the count of a unit is the value on its newest dispatch row that holds the kind, and a reset writes `0` on the newest row. The zero-tool, tool-unavailable and pre-execution repair budgets use it (`db/unit-dispatch-budgets.ts`). The three budgets have one release rule: a pass of the unit, or the pause at the cap, writes `0`, so a resume after a person fixed the cause starts a new budget. A unit that runs with no dispatch row (a custom-engine step) has no durable identity, so its count lasts for the process only.
 
+## Amendment 2026-10-04: the sidecar queue is rows linked to the dispatch row
+
+Owner decision 2026-10-03: the claimed `unit_dispatches` row is the kernel record of a non-task unit, and the follow-on work a unit queues (post-unit hooks, capture triage, quick tasks) is stored as rows linked to the dispatch that triggered it. `AutoSession.sidecarQueue` and `AutoSession.pendingQuickTasks` are deleted. The queue is the `unit_dispatch_sidecars` table (`db/unit-dispatch-sidecars.ts`).
+
+Rules:
+
+- **Link.** `trigger_dispatch_id` is the newest `unit_dispatches` row of the unit whose close-out queued the item. It is `NULL` when that unit ran with no dispatch row (a custom-engine step that is not an execute-task), and when a resume queues a restored hook again.
+- **Scope.** A row belongs to one milestone, and to one slice for a slice-parallel worker (`GSD_SLICE_LOCK`). A worker reads only the rows of its own scope, so two live workers do not run the queue of each other. A restarted worker has the same scope and takes the rows of the process that died.
+- **Status.** `held` is a quick task that waits (one quick task runs between two units). `queued` is ready work: the auto loop runs the oldest queued row before it selects a unit. `done` is set when the loop iteration that ran the row ends, with any result. `canceled` is set by `stopAuto`.
+- **Kill.** A killed process leaves the row `held` or `queued`. The next start runs it. A pause or a stop is not a kill: a pause in the middle of an item closes its row, and `stopAuto` cancels every open row of the scope, as the in-memory queue did.
+- **Hooks.** The `hook_state` row in the database still holds the active hook and the gate block. On start and resume the hook reconcile queues the restored hook only when no queued row for that hook exists, so a row that survived a kill is not queued twice.
+- **Quick tasks.** Triage stores each quick task as a `held` row. A capture that already has a `held` or `queued` row is not added again. The capture is marked executed after its row becomes `queued`, so a kill between the two steps cannot lose the task.
+
+Not changed: the auto loop still takes queued rows before `advance()`. Selecting them inside `advance()` is part of the Lifecycle Kernel work.
+
 ## Rejected alternatives
 
 - Freeze 1.15.x — leaves field users wedged.

@@ -75,36 +75,26 @@ test("triage dispatch guard excludes step mode, hook units, triage units, and qu
   );
 });
 
-test("quick-task dispatch guard requires queued captures and avoids quick-task recursion", () => {
-  const capture = {
-    id: "CAP-test",
-    text: "Fix typo",
-    timestamp: new Date().toISOString(),
-    status: "resolved" as const,
-    classification: "quick-task" as const,
-  };
+test("quick-task dispatch guard requires a held quick task and avoids quick-task recursion", () => {
   assert.equal(
     _shouldDispatchQuickTaskForTest({
       stepMode: false,
       currentUnit: { type: "execute-task", id: "M001/S01/T01", startedAt: 1 },
-      pendingQuickTasks: [capture],
-    } as any),
+    } as any, () => true),
     true,
   );
   assert.equal(
     _shouldDispatchQuickTaskForTest({
       stepMode: false,
       currentUnit: { type: "quick-task", id: "M001/CAP-test", startedAt: 1 },
-      pendingQuickTasks: [capture],
-    } as any),
+    } as any, () => true),
     false,
   );
   assert.equal(
     _shouldDispatchQuickTaskForTest({
       stepMode: false,
       currentUnit: { type: "execute-task", id: "M001/S01/T01", startedAt: 1 },
-      pendingQuickTasks: [],
-    } as any),
+    } as any, () => false),
     false,
   );
 });
