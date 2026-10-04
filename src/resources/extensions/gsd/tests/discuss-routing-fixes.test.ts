@@ -17,7 +17,7 @@ import {
 } from "../guided-flow.ts";
 import { normalizeDiscussTarget } from "../milestone-ids.ts";
 import { _parseDiscussArgsForTest } from "../commands/handlers/workflow.ts";
-import { openDatabase, closeDatabase, isDbAvailable, insertMilestone, insertSlice } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, isDbAvailable, insertArtifact, insertMilestone, insertSlice } from "../gsd-db.ts";
 import { invalidateStateCache } from "../state.ts";
 import { clearGuidedUnitContext, getGuidedUnitContext } from "../guided-unit-context.ts";
 
@@ -371,5 +371,39 @@ describe("showDiscuss targeted slice", () => {
       clearGuidedUnitContext();
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  test("/gsd discuss M001/S01 enters re-discuss mode from the saved CONTEXT row, never from a CONTEXT file", async () => {
+    const milestones = [{ id: "M001", title: "Target slice milestone", status: "active" }];
+    const seedSlice = () => insertSlice({ id: "S01", milestoneId: "M001", title: "Auth module", status: "pending" });
+
+    // The row is saved and no CONTEXT file exists.
+    const saved = await runDiscussTargetFixture("M001/S01", milestones, undefined, () => {
+      seedSlice();
+      insertArtifact({
+        path: "milestones/M001/slices/S01/S01-CONTEXT.md",
+        artifact_type: "CONTEXT",
+        milestone_id: "M001",
+        slice_id: "S01",
+        task_id: null,
+        full_content: "# S01 Context\n",
+      });
+    });
+    assert.equal(saved.sent.length, 1, "the slice with a saved CONTEXT row must dispatch discuss-slice");
+    assert.match(String(saved.sent[0]?.content), /## Re-discuss Mode/);
+
+    // A well-formed CONTEXT file exists and no row is saved.
+    const fileOnly = await runDiscussTargetFixture(
+      "M001/S01",
+      milestones,
+      (base) => {
+        const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+        mkdirSync(sliceDir, { recursive: true });
+        writeFileSync(join(sliceDir, "S01-CONTEXT.md"), "# S01 Context\n\nDecided on disk only.\n", "utf-8");
+      },
+      seedSlice,
+    );
+    assert.equal(fileOnly.sent.length, 1, "the slice with only a CONTEXT file must dispatch discuss-slice");
+    assert.doesNotMatch(String(fileOnly.sent[0]?.content), /## Re-discuss Mode/);
   });
 });
