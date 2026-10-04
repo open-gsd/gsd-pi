@@ -304,6 +304,10 @@ D012 is a decision. It is not the cutover:
   `artifact-verification.ts`, the status response, progress, and the project
   snapshot. The interface answers from legacy rows, and the gate check
   `read-interface-legacy-authority` pins that.
+- Step 1 changes one answer. A discarded Milestone is never done: it does not
+  satisfy a dependent, and the Milestone counts of progress and of the project
+  snapshot leave it out of `total` and `done`. All other answers are the same
+  as the legacy reads.
 - Other decision sites do not use the interface. They read legacy rows
   directly and apply the status vocabulary themselves. The known sites on the
   dispatch and dependency paths are:
