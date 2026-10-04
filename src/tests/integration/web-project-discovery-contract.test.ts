@@ -1,12 +1,14 @@
 import test, { after, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 
 import { discoverProjects } from "../../web/project-discovery-service.ts";
 import { detectMonorepo } from "../../web/bridge-service.ts";
+import { closeDatabase, insertMilestone, openDatabase } from "../../resources/extensions/gsd/gsd-db.ts";
 import { renderStateContent } from "../../resources/extensions/gsd/workflow-projections.ts";
 
 // ---------------------------------------------------------------------------
@@ -270,6 +272,18 @@ describe("project-discovery with monorepo root as devRoot", () => {
   });
 });
 
+/** A projection that names a milestone, slice, phase and tally the database does not hold. */
+const STALE_STATE_MD = renderStateContent({
+  activeMilestone: { id: "M001", title: "Legacy import" },
+  activeSlice: { id: "S09", title: "Stale slice" },
+  activeTask: null,
+  phase: "executing",
+  recentDecisions: [],
+  blockers: [],
+  nextAction: "Execute T01.",
+  registry: [{ id: "M001", title: "Legacy import", status: "active" }],
+});
+
 describe("project-discovery — STATE.md progress fallback", () => {
   test("reads every milestone row and empty refs that the STATE.md renderer writes", (t) => {
     const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-progress-"));
@@ -302,5 +316,81 @@ describe("project-discovery — STATE.md progress fallback", () => {
       milestonesCompleted: 1,
       milestonesTotal: 4,
     });
+    assert.deepStrictEqual(readdirSync(join(root, "app", ".gsd")), ["STATE.md"], "the read creates no database");
+  });
+
+  test("an unreadable database falls back to STATE.md", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-progress-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const gsdDir = join(root, "app", ".gsd");
+    mkdirSync(gsdDir, { recursive: true });
+    writeFileSync(join(gsdDir, "gsd.db"), "this is not a sqlite database");
+    writeFileSync(join(gsdDir, "STATE.md"), STALE_STATE_MD);
+
+    const [project] = discoverProjects(root, true);
+    assert.equal(project.progress?.activeMilestone, "M001: Legacy import");
+    assert.equal(project.progress?.phase, "executing");
+  });
+});
+
+describe("project-discovery — database progress", () => {
+  test("progress follows the database when STATE.md contradicts it", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-db-"));
+    t.after(() => {
+      closeDatabase();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const gsdDir = join(root, "app", ".gsd");
+    mkdirSync(gsdDir, { recursive: true });
+    writeFileSync(join(gsdDir, "STATE.md"), STALE_STATE_MD);
+    // Real-schema database, written and closed the way a GSD session leaves it.
+    assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "M001: Legacy import", status: "complete" });
+    insertMilestone({ id: "M002", title: "Abandoned idea", status: "cancelled" });
+    insertMilestone({ id: "M003", title: "Reporting", status: "parked" });
+    insertMilestone({ id: "M004", title: "M004: Payments platform", status: "active" });
+    insertMilestone({ id: "M005", title: "Dashboard" });
+    closeDatabase();
+
+    const [project] = discoverProjects(root, true);
+    assert.deepStrictEqual(project.progress, {
+      // The first milestone that is not closed, discarded or parked.
+      activeMilestone: "M004: Payments platform",
+      // Slice and phase are not read for a project that is not open.
+      activeSlice: null,
+      phase: null,
+      // The discarded M002 is not counted.
+      milestonesCompleted: 1,
+      milestonesTotal: 4,
+    });
+  });
+
+  test("reads an old-schema database without migrating it", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-db-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const gsdDir = join(root, "app", ".gsd");
+    mkdirSync(gsdDir, { recursive: true });
+    const dbPath = join(gsdDir, "gsd.db");
+    // The open path of a GSD session writes to this database and leaves a backup beside it.
+    const db = new DatabaseSync(dbPath);
+    db.exec(`
+      CREATE TABLE schema_version (version INTEGER NOT NULL);
+      INSERT INTO schema_version (version) VALUES (1);
+      CREATE TABLE milestones (id TEXT PRIMARY KEY, title TEXT, status TEXT, sequence INTEGER DEFAULT 0);
+      INSERT INTO milestones (id, title, status) VALUES ('M001', 'Core setup', 'done'), ('M002', '', 'pending');
+    `);
+    db.close();
+    const before = readFileSync(dbPath);
+
+    const [project] = discoverProjects(root, true);
+    assert.deepStrictEqual(project.progress, {
+      activeMilestone: "M002",
+      activeSlice: null,
+      phase: null,
+      milestonesCompleted: 1,
+      milestonesTotal: 2,
+    });
+    assert.deepStrictEqual(readFileSync(dbPath), before, "the database file is unchanged");
+    assert.deepStrictEqual(readdirSync(gsdDir), ["gsd.db"], "the read leaves no other file");
   });
 });
