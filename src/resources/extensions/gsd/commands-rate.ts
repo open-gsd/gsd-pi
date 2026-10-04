@@ -5,7 +5,7 @@
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { loadLedgerFromDisk } from "./metrics.js";
-import { recordFeedback, initRoutingHistory } from "./routing-history.js";
+import { clearRoutingHistory, recordFeedback, initRoutingHistory } from "./routing-history.js";
 import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 import type { ComplexityTier } from "./complexity-classifier.js";
 
@@ -18,12 +18,23 @@ export async function handleRate(
 ): Promise<void> {
   const rating = args.trim().toLowerCase();
 
+  if (rating === "reset") {
+    if (!(await ensureDbOpen(basePath))) {
+      ctx.ui.notify("Routing history not cleared: the project database could not be opened.", "error");
+      return;
+    }
+    clearRoutingHistory();
+    ctx.ui.notify("Routing history cleared. Adaptive routing starts again from no data.", "info");
+    return;
+  }
+
   if (!rating || !VALID_RATINGS.has(rating)) {
     ctx.ui.notify(
-      "Usage: /gsd rate <over|ok|under>\n" +
+      "Usage: /gsd rate <over|ok|under|reset>\n" +
       "  over  — model was overpowered for that task (encourage cheaper)\n" +
       "  ok    — model was appropriate\n" +
-      "  under — model was too weak (encourage stronger)",
+      "  under — model was too weak (encourage stronger)\n" +
+      "  reset — clear the routing history",
       "info",
     );
     return;

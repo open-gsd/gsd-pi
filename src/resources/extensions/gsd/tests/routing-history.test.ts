@@ -14,6 +14,7 @@ import {
   getRoutingHistory,
 } from "../routing-history.js";
 import { closeDatabase, openDatabase } from "../gsd-db.js";
+import { handleRate } from "../commands-rate.js";
 
 // ─── Test Setup ──────────────────────────────────────────────────────────────
 
@@ -214,63 +215,75 @@ test("clearRoutingHistory resets all data", () => {
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-test("routing history is a database row: it reloads with no file on disk", () => {
+test("routing history is a database row: it reloads with no file on disk", (t) => {
   const dir = makeTmpDir();
-  try {
-    initRoutingHistory();
-    recordOutcome("execute-task", "standard", true);
-    recordOutcome("execute-task", "standard", true);
-    resetRoutingHistory();
+  t.after(() => cleanup(dir));
 
-    assert.equal(existsSync(join(dir, ".gsd", "routing-history.json")), false, "no history file is written");
+  initRoutingHistory();
+  recordOutcome("execute-task", "standard", true);
+  recordOutcome("execute-task", "standard", true);
+  resetRoutingHistory();
 
-    initRoutingHistory();
-    const history = getRoutingHistory()!;
-    assert.equal(history.patterns["execute-task"].standard.success, 2);
-  } finally {
-    cleanup(dir);
-  }
+  assert.equal(existsSync(join(dir, ".gsd", "routing-history.json")), false, "no history file is written");
+
+  initRoutingHistory();
+  const history = getRoutingHistory()!;
+  assert.equal(history.patterns["execute-task"].standard.success, 2);
 });
 
-test("a routing-history.json written by hand does not change the model tier", () => {
+test("a routing-history.json written by hand does not change the model tier", (t) => {
   const dir = makeTmpDir();
-  try {
-    // The file claims that light always fails for execute-task.
-    writeFileSync(
-      join(dir, ".gsd", "routing-history.json"),
-      JSON.stringify({
-        version: 1,
-        patterns: {
-          "execute-task": {
-            light: { success: 0, fail: 10 },
-            standard: { success: 0, fail: 0 },
-            heavy: { success: 0, fail: 0 },
-          },
+  t.after(() => cleanup(dir));
+
+  // The file claims that light always fails for execute-task.
+  writeFileSync(
+    join(dir, ".gsd", "routing-history.json"),
+    JSON.stringify({
+      version: 1,
+      patterns: {
+        "execute-task": {
+          light: { success: 0, fail: 10 },
+          standard: { success: 0, fail: 0 },
+          heavy: { success: 0, fail: 0 },
         },
-        feedback: [],
-        updatedAt: new Date().toISOString(),
-      }),
-      "utf-8",
-    );
+      },
+      feedback: [],
+      updatedAt: new Date().toISOString(),
+    }),
+    "utf-8",
+  );
 
-    initRoutingHistory();
-    assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), null);
-    assert.deepEqual(getRoutingHistory()!.patterns, {});
-  } finally {
-    cleanup(dir);
-  }
+  initRoutingHistory();
+  assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), null);
+  assert.deepEqual(getRoutingHistory()!.patterns, {});
 });
 
-test("failures recorded in the database bump the tier in a later session", () => {
+test("failures recorded in the database bump the tier in a later session", (t) => {
   const dir = makeTmpDir();
-  try {
-    initRoutingHistory();
-    for (let i = 0; i < 3; i++) recordOutcome("execute-task", "light", false);
-    resetRoutingHistory();
+  t.after(() => cleanup(dir));
 
-    initRoutingHistory();
-    assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), "standard");
-  } finally {
-    cleanup(dir);
-  }
+  initRoutingHistory();
+  for (let i = 0; i < 3; i++) recordOutcome("execute-task", "light", false);
+  resetRoutingHistory();
+
+  initRoutingHistory();
+  assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), "standard");
+});
+
+test("/gsd rate reset clears the stored routing history", async (t) => {
+  const dir = makeTmpDir();
+  t.after(() => cleanup(dir));
+
+  initRoutingHistory();
+  for (let i = 0; i < 3; i++) recordOutcome("execute-task", "light", false);
+  resetRoutingHistory();
+
+  const notices: string[] = [];
+  await handleRate("reset", { ui: { notify: (message: string) => { notices.push(message); } } } as any, dir);
+  assert.match(notices[0] ?? "", /Routing history cleared/);
+  resetRoutingHistory();
+
+  initRoutingHistory();
+  assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), null);
+  assert.deepEqual(getRoutingHistory()!.patterns, {});
 });
