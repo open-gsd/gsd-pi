@@ -6,6 +6,7 @@
 import { readFileSync, mkdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { atomicWriteSync } from "../atomic-write.js";
+import { stepIdOfUnit } from "../custom-workflow-engine.js";
 import {
   customWorkflowRunId,
   getCustomWorkflowStepVerifyRetries,
@@ -13,7 +14,6 @@ import {
 import { setCustomWorkflowStepVerifyRetries } from "../db/writers/custom-workflow-runs.js";
 import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import { gsdRoot } from "../paths.js";
-import { parseUnitId } from "../unit-id.js";
 import type { AutoSession } from "./session.js";
 
 type RetrySession = Pick<AutoSession, "activeRunDir" | "basePath" | "verificationRetryCount"> & {
@@ -104,8 +104,7 @@ function stepRowOf(
   unitId: string,
 ): { runId: string; stepId: string } {
   if (!s.activeRunDir) throw new Error(`Custom workflow unit ${unitId} has no active run directory`);
-  const { milestone, slice, task } = parseUnitId(unitId);
-  return { runId: customWorkflowRunId(s.activeRunDir), stepId: task ?? slice ?? milestone };
+  return { runId: customWorkflowRunId(s.activeRunDir), stepId: stepIdOfUnit(unitId) };
 }
 
 /**

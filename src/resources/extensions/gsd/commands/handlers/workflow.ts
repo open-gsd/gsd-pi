@@ -360,6 +360,8 @@ async function handleCustomWorkflow(
   // ── list [name] — list YAML runs ──
   if (head === "list") {
     const base = projectRoot();
+    // The run rows decide which runs are imported. A project with no state directory has no runs.
+    if (existsSync(join(base, ".gsd")) && await blockWithoutDb("/gsd workflow list", base, ctx)) return true;
     const runs = listRuns(base, rest || undefined);
     if (runs.length === 0) {
       ctx.ui.notify("No workflow runs found.", "info");

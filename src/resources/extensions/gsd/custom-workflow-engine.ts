@@ -75,7 +75,7 @@ function formatBlockedWorkflowReason(graph: WorkflowGraph): string {
 }
 
 /** The step id of a custom-step unit id "<workflowName>/<stepId>". */
-function stepIdOfUnit(unitId: string): string {
+export function stepIdOfUnit(unitId: string): string {
   const { milestone, slice, task } = parseUnitId(unitId);
   return task ?? slice ?? milestone;
 }

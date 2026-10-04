@@ -408,6 +408,22 @@ describe("workflow command handler", () => {
     );
   });
 
+  it("'/gsd workflow list' in a cold session does not show a run that has rows as not imported", async () => {
+    const base = realpathSync(makeTmpBase());
+    writeDefinition(base, "alpha", SIMPLE_DEF.replace("test-workflow", "alpha"));
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    createRun(base, "alpha");
+    // A cold session: no command has opened the database yet.
+    closeDatabase();
+    process.chdir(base);
+
+    const { notifications } = await callHandler("workflow list");
+
+    const listing = notifications.map((n) => n.message).join("\n");
+    assert.match(listing, /alpha \[.+\] — pending \(0\/1 steps\)/);
+    assert.ok(!listing.includes("not imported"), listing);
+  });
+
   it("non-workflow commands are not intercepted by custom workflow routing", async () => {
     const { handleWorkflowCommand } = await import("../commands/handlers/workflow.ts");
     const ctx = createMockCtx();
