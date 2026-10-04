@@ -74,6 +74,7 @@ function db(): NonNullable<ReturnType<typeof _getAdapter>> {
 function prepareCase(
   seedExistingMilestone = false,
   corpusCase = "gsd-nested",
+  seed?: () => void,
 ): PreparedCase {
   sequence += 1;
   const workspace = mkdtempSync(join(tmpdir(), "gsd-forward-repair-"));
@@ -92,6 +93,7 @@ function prepareCase(
     db().prepare(`INSERT INTO milestones (id, title, status, created_at)
       VALUES ('M001', 'Original foundation', 'active', '2026-07-18T00:00:00.000Z')`).run();
   }
+  seed?.();
   const roots = createLegacyImportCorpusSourceRoots(source);
   const previewInput = { roots };
   const base = captureCurrentLegacyImportBaseSnapshot();
@@ -321,6 +323,55 @@ test("Forward Repair tombstones unchanged hierarchy introduced by the Import App
     FROM workflow_item_lifecycles WHERE milestone_id = 'M001'`).all(), [{ lifecycle_status: "cancelled" }]);
   assert.equal(db().prepare("SELECT COUNT(*) AS count FROM milestones WHERE id = 'M001'").get()?.["count"], 1);
   assert.equal(db().prepare("SELECT title FROM milestones WHERE id = 'M-LATER'").get()?.["title"], "Accepted later work");
+});
+
+test("Forward Repair keeps the status of an existing row that the Import Application adopted", () => {
+  // Rows of an older build: no lifecycle row. The source marks S01 and its
+  // Task complete, so the Application adopts both as completed.
+  const prepared = prepareCase(false, "gsd-nested", () => {
+    db().exec(`
+      INSERT INTO milestones (id, title, status) VALUES ('M001', 'Foundation', 'active');
+      INSERT INTO slices (milestone_id, id, title, status) VALUES ('M001', 'S01', 'Core setup', 'pending');
+      INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+        VALUES ('M001', 'S01', 'T01', 'Create the project skeleton', 'pending');
+    `);
+  });
+  commitLaterCanonicalRow(prepared);
+  const { input, plan } = prepareRepairInput(prepared, "adopted-existing-row");
+
+  assert.deepEqual(
+    plan.targets
+      .filter((entry) => entry.targetKey === "M001/S01" || entry.targetKey === "M001/S01/T01")
+      .filter((entry) => entry.targetKind !== "slice-dependencies")
+      .map((entry) => [entry.targetKind, entry.disposition, entry.reasonCode, entry.mutation]),
+    [
+      ["slice", "preserve", "STATUS_REQUIRED_BY_ADOPTED_LIFECYCLE", null],
+      ["task", "preserve", "STATUS_REQUIRED_BY_ADOPTED_LIFECYCLE", null],
+      ["slice-lifecycle", "preserve", "LIFECYCLE_REQUIRED_BY_PRESERVED_HIERARCHY", null],
+      ["task-lifecycle", "preserve", "LIFECYCLE_REQUIRED_BY_PRESERVED_HIERARCHY", null],
+    ],
+  );
+  assert.equal(applyLegacyImportForwardRepair(input).status, "committed");
+
+  // The legacy status and the lifecycle row still name the same state.
+  assert.deepEqual(db().prepare(`
+    SELECT 'slice' AS kind, item.status, lifecycle.lifecycle_status
+    FROM slices item
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = item.milestone_id
+        AND lifecycle.slice_id = item.id
+    WHERE item.milestone_id = 'M001' AND item.id = 'S01'
+    UNION ALL
+    SELECT 'task', item.status, lifecycle.lifecycle_status
+    FROM tasks item
+    JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'task' AND lifecycle.milestone_id = item.milestone_id
+        AND lifecycle.slice_id = item.slice_id AND lifecycle.task_id = item.id
+    WHERE item.milestone_id = 'M001' AND item.slice_id = 'S01' AND item.id = 'T01'
+  `).all(), [
+    { kind: "slice", status: "complete", lifecycle_status: "completed" },
+    { kind: "task", status: "complete", lifecycle_status: "completed" },
+  ]);
 });
 
 test("Forward Repair Domain Operation rolls back mutations without its exact receipt", () => {

@@ -366,8 +366,10 @@ D012 is a decision. It is not the cutover:
   cut-over Project authority is split for them: `deriveState`, the dispatch
   guard, the status response, progress and the snapshot follow canonical rows,
   and those sites follow legacy rows. The two agree while Domain Operations
-  keep the legacy row aligned with the lifecycle row. They differ for a
-  cancelled Slice with no Waiver, and when the rows disagree. The automatic
+  keep the legacy row aligned with the lifecycle row. An Import Application
+  keeps them aligned too: it does not change the status of a row to one that
+  disagrees with its lifecycle row (`CONTEXT.md`, State layer). They differ for
+  a cancelled Slice with no Waiver, and when the rows disagree. The automatic
   Cutover is the default now, so a cut-over Project has this split until these
   sites read through the interface.
 - The interface does not check that every hierarchy row has a lifecycle row.

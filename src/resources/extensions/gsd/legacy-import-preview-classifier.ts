@@ -847,6 +847,60 @@ function lifecycleMatches(
     && (shadow.kind === "match" || shadow.kind === "semantic_match_exact_delta");
 }
 
+/**
+ * An Import Application keeps the legacy status of an existing hierarchy row
+ * aligned with its lifecycle row. This reads a row candidate that changes the
+ * status of such a row. A row with no lifecycle row is adopted together with
+ * the status change (`adoption`). A row whose lifecycle row disagrees with the
+ * new status is not imported (`conflict`): the lifecycle row is the authority,
+ * and only a workflow Domain Operation moves it. A status that the lifecycle
+ * row agrees with gives neither.
+ */
+function existingRowStatusChange(
+  base: LegacyImportBaseSnapshot,
+  { candidate, address, patch }: PreparedCandidate,
+  current: JsonRecord,
+  rows: ReadonlyMap<string, JsonRecord>,
+): {
+  lifecycleRow: string;
+  adoption?: Omit<LegacyImportPreviewChange, "change_id">;
+  conflict?: ReturnType<typeof ambiguityFromEvidence>;
+} | undefined {
+  const itemKind = asHierarchyKind(candidate.target.kind);
+  const status = patch.status;
+  if (
+    itemKind === undefined
+    || typeof status !== "string"
+    || valuesMatch(address.rowSet, current, { status })
+    // The plan refuses an unknown status, so it gets no lifecycle claim here.
+    || (normalizeCanonicalLifecycleStatus(status) ?? normalizeLegacyLifecycleStatus(status)) === null
+  ) return undefined;
+  const statusCandidate = {
+    ...candidate,
+    target: { kind: `${itemKind}-status`, key: candidate.target.key },
+    normalized: status,
+  };
+  const lifecycleRow = rowAddress("item_lifecycles", targetAddress(base, statusCandidate).address.identity);
+  const lifecycle = rows.get(lifecycleRow);
+  if (lifecycle === undefined) {
+    return { lifecycleRow, adoption: makeChange("create", statusCandidate, "existing-row-status-change") };
+  }
+  const shadow = compareLifecycleShadow(
+    status,
+    typeof lifecycle.lifecycle_status === "string" ? lifecycle.lifecycle_status : null,
+  ).kind;
+  if (shadow === "match" || shadow === "semantic_match_exact_delta") return { lifecycleRow };
+  return {
+    lifecycleRow,
+    conflict: ambiguityFromEvidence(
+      [{ raw: candidate.raw, stableId: candidate.candidate_id }],
+      candidate.target,
+      "status-change-contradicts-lifecycle",
+      "The source gives this row a status that disagrees with its lifecycle row in the database. The import does not change the status of a row that has a lifecycle row; a workflow command changes it.",
+    ),
+  };
+}
+
 function makeChange(
   action: "create" | "update" | "preserve",
   candidate: LegacyImportInterpretationCandidate,
@@ -1228,6 +1282,11 @@ export function classifyLegacyImportChanges(
     resolutions.push(ambiguity.resolution);
   }
 
+  // The lifecycle rows that a candidate claims by itself. The source decides
+  // those, so the status rule of an existing row below leaves them alone.
+  const claimedLifecycles = new Set(prepared
+    .filter(({ address }) => address.rowSet === "item_lifecycles")
+    .map(({ address }) => rowAddress(address.rowSet, address.identity)));
   const pendingChanges: Array<Omit<LegacyImportPreviewChange, "change_id">> = [];
   const orderedCandidates = [...prepared].sort((left, right) => {
     const fieldOrder = Number(left.address.field !== undefined) - Number(right.address.field !== undefined);
@@ -1270,6 +1329,16 @@ export function classifyLegacyImportChanges(
       ));
       rows.set(key, { ...patch });
       continue;
+    }
+    const statusChange = existingRowStatusChange(base, preparedCandidate, current, rows);
+    if (statusChange !== undefined && !claimedLifecycles.has(statusChange.lifecycleRow)) {
+      if (statusChange.conflict !== undefined) {
+        diagnoses.push(statusChange.conflict.diagnosis);
+        resolutions.push(statusChange.conflict.resolution);
+        excludedRows.add(preparedAuthorityRow(preparedCandidate));
+        continue;
+      }
+      if (statusChange.adoption !== undefined) pendingChanges.push(statusChange.adoption);
     }
     const equal = address.rowSet === "item_lifecycles"
       ? lifecycleMatches(preparedCandidate, current, rows)

@@ -894,7 +894,15 @@ export function compileLegacyImportApplicationPlan(value: unknown): LegacyImport
         fail("LEGACY_IMPORT_APPLICATION_MAPPING_UNSUPPORTED", "legacy import lifecycle action is unsupported");
       }
       const identity = lifecycleIdentity(itemKind, change.target.key);
-      const lifecycleStatus = normalizedLifecycleStatus(change.normalized);
+      const claimedStatus = normalizedLifecycleStatus(change.normalized);
+      // The Preview adopts an existing row with no lifecycle row when the
+      // import changes its status. The row keeps the status that the source
+      // gives it, and open work adopts as "ready", as for a row that the
+      // import creates: only an Attempt makes "in_progress" true.
+      const lifecycleStatus = change.reason_code === "existing-row-status-change"
+        && (claimedStatus === "pending" || claimedStatus === "in_progress")
+        ? "ready"
+        : claimedStatus;
       const status = isRecord(change.normalized) ? change.normalized["status"] : change.normalized;
       const shadowTarget = { kind: itemKind, key: change.target.key, field: "status" };
       const shadowPrepared = preparedTarget(shadowTarget);

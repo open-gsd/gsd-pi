@@ -120,9 +120,22 @@ stops with nothing changed and names the row: `/gsd db adopt` is the route for
 a status change, and a fix of the status is the route for an unknown status
 (see below). Authority Epoch 0 is the usual state for a Forward Repair, because
 the automatic Cutover waits while the operation head is an Import Application.
-An Import Application adopts only the rows that it creates. A row with no
-lifecycle row whose status the import changes stays with no lifecycle row, and
-the next automatic Cutover adopts it or stops as above. This section owns
+An Import Application keeps the legacy status and the lifecycle row of a
+hierarchy row aligned, at each Authority Epoch. It adopts each row that it
+creates. It also adopts an existing row with no lifecycle row when it changes
+the status of that row: the lifecycle status is the status that the source
+gives, and open work (`pending`, `in_progress`) becomes `ready`, as for a row
+that the import creates. A completion that the source marks is adopted as
+completed with no completion evidence (unverified legacy); `lifecycle.backfill`
+does not do that. The import does not change the status of an existing row to a
+status that disagrees with the lifecycle row of that row. The Import Preview
+reports the row (`status-change-contradicts-lifecycle`), and the import applies
+nothing until the operator keeps the database row (`--choice`) or fixes the
+source. A workflow command is the route for that status change. An existing
+row with no lifecycle row whose status the import does not change stays so,
+and the next automatic Cutover adopts it or stops as above. A Forward Repair
+does not put back the status of an existing row that the Import Application
+adopted: the lifecycle row stays, so the status stays with it. This section owns
 the contract of the automatic Cutover; other documents point here. The rest of
 this section describes an open without the opt-out.
 

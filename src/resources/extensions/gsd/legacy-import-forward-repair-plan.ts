@@ -554,9 +554,25 @@ function rowTarget(
     }
     return target(instruction, instructionIndex, "later-modified", "UPDATED_ROW_DELETED_LATER");
   }
+  // An existing row that the Import Application adopted keeps the status that
+  // it was adopted with. Its lifecycle row is durable and stays (see
+  // lifecycleTarget), and the backup status would disagree with that row.
+  const hierarchy = hierarchyIdentity(instruction);
+  const adoptedByApplication = hierarchy !== null && input.applicationPlan.instructions.some((entry) => (
+    entry.action === "adopt-lifecycle"
+    && entry.lifecycleAction === "create"
+    && sameHierarchyIdentity(hierarchy, {
+      itemKind: entry.itemKind,
+      milestoneId: entry.milestoneId,
+      sliceId: entry.sliceId,
+      taskId: entry.taskId,
+    })
+  ));
+  const importedValues = Object.entries(instruction.values)
+    .filter(([field]) => !(adoptedByApplication && field === "status"));
   const restore: Record<string, SqlValue> = {};
   let revertedToBase = false;
-  for (const [field, importedValue] of Object.entries(instruction.values)) {
+  for (const [field, importedValue] of importedValues) {
     const currentValue = current[field];
     const baseValue = base[field];
     if (sameValue(currentValue, baseValue)) {
@@ -564,7 +580,8 @@ function rowTarget(
       continue;
     }
     if (!sameValue(currentValue, importedValue)) {
-      const restoreValues = Object.fromEntries(Object.keys(instruction.values)
+      const restoreValues = Object.fromEntries(importedValues
+        .map(([candidate]) => candidate)
         .filter((candidate) => !sameValue(current[candidate], base[candidate]))
         .map((candidate) => [candidate, base[candidate] as SqlValue]));
       return choiceForTarget(instruction, instructionIndex, choices, "UPDATED_FIELD_CHANGED_LATER", {
@@ -577,6 +594,9 @@ function rowTarget(
     restore[field] = baseValue as SqlValue;
   }
   if (Object.keys(restore).length === 0) {
+    if (adoptedByApplication && goal !== "retain" && !sameValue(current["status"], base["status"])) {
+      return target(instruction, instructionIndex, "preserve", "STATUS_REQUIRED_BY_ADOPTED_LIFECYCLE");
+    }
     // Retain mode: a meaningful Application update was undone by later work;
     // the later state is preserved.
     if (goal === "retain" && revertedToBase) {
