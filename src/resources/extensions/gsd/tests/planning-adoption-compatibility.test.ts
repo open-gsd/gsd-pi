@@ -30,6 +30,7 @@ import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 import { reconcileWorktreeDbBeforeManualMerge } from "../worktree-command.ts";
 import { worktreePath } from "../worktree-manager.ts";
 import { createWorkspace } from "../workspace.ts";
+import { _resetLogs, peekLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
 
 const tempDirs = new Set<string>();
 
@@ -533,4 +534,54 @@ test("auto-worktree teardown preserves canonical divergence when the database st
     process.chdir(originalCwd);
   }
   t.after(() => process.chdir(originalCwd));
+});
+
+test("auto-worktree teardown keeps the worktree when the coverage fence refuses the database merge", (t) => {
+  const originalCwd = process.cwd();
+  t.after(() => process.chdir(originalCwd));
+  const base = tempDir("gsd-teardown-coverage-refusal-");
+  const mainDb = join(base, ".gsd", "gsd.db");
+  const worktreeRoot = worktreePath(base, "M001");
+  const worktreeDb = join(worktreeRoot, ".gsd", "gsd.db");
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  mkdirSync(join(worktreeRoot, ".gsd"), { recursive: true });
+
+  assert.equal(openDatabase(mainDb), true);
+  seedLegacyHierarchy();
+  adoptHierarchy();
+  closeDatabase();
+  assert.equal(copyWorktreeDb(mainDb, worktreeDb), true);
+  assert.equal(openDatabase(worktreeDb), true);
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T03", title: "Only in the worktree", status: "pending" });
+  closeDatabase();
+  // A cut-over project that holds a row an earlier build left with an unknown status.
+  assert.equal(openDatabase(mainDb), true);
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Earlier build", status: "not-a-status" });
+  db().exec(`
+    DROP TRIGGER trg_project_authority_lifecycle_coverage;
+    UPDATE project_authority SET authority_epoch = authority_epoch + 1 WHERE singleton = 1;
+  `);
+  closeDatabase();
+
+  const stderrWasEnabled = setStderrLoggingEnabled(false);
+  _resetLogs();
+  try {
+    const workspace = createWorkspace(worktreeRoot);
+    setActiveWorkspace(workspace);
+    process.chdir(worktreeRoot);
+    teardownAutoWorktree(base, "M001");
+
+    assert.equal(existsSync(worktreeDb), true, "the worktree database holds the only copy of T03");
+    assert.equal(getActiveWorkspace(), workspace, "the workspace stays registered for recovery");
+    const errors = peekLogs().filter((entry) => entry.severity === "error").map((entry) => entry.message);
+    assert.equal(errors.length, 1);
+    assert.match(errors[0]!, /canonical worktree divergence/);
+    assert.match(errors[0]!, /a hierarchy row has no lifecycle row: task M001\/S01\/T02="not-a-status"/);
+    assert.match(errors[0]!, /\/gsd db adopt/);
+  } finally {
+    setActiveWorkspace(null);
+    process.chdir(originalCwd);
+    setStderrLoggingEnabled(stderrWasEnabled);
+    _resetLogs();
+  }
 });

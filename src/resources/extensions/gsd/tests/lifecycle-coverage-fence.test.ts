@@ -287,6 +287,55 @@ test("after the cutover a worktree database merge refuses an unknown status and 
   assert.deepEqual(taskState("S01", "T02"), { status: "pending", lifecycle: "ready" });
 });
 
+/** A hierarchy row that a build with no coverage fence left in the cut-over project. */
+function insertTaskAsEarlierBuild(id: string, status: string): void {
+  db().exec(`
+    DROP TRIGGER trg_tasks_lifecycle_coverage;
+    DROP TRIGGER trg_project_authority_lifecycle_coverage;
+  `);
+  insertTask({ milestoneId: "M001", sliceId: "S01", id, title: "Earlier build", status });
+}
+
+test("after the cutover a worktree database merge also adopts a row that main held with no lifecycle row", () => {
+  const mainDb = openAdoptedProject();
+  const worktreeDb = worktreeCopy(mainDb, () => {
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T03", title: "Worktree task", status: "pending" });
+  });
+  advanceAuthorityEpoch();
+  insertTaskAsEarlierBuild("T02", "pending");
+  closeDatabase();
+  assert.equal(openDatabase(mainDb), true);
+
+  reconcileWorktreeDb(mainDb, worktreeDb);
+
+  assert.deepEqual(taskState("S01", "T02"), { status: "pending", lifecycle: "ready" });
+  assert.deepEqual(taskState("S01", "T03"), { status: "pending", lifecycle: "ready" });
+});
+
+test("after the cutover a worktree database merge that the coverage fence refuses is a divergence, not a silent zero", () => {
+  const mainDb = openAdoptedProject();
+  const worktreeDb = worktreeCopy(mainDb, () => {
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T03", title: "Worktree task", status: "pending" });
+  });
+  advanceAuthorityEpoch();
+  insertTaskAsEarlierBuild("T02", "not-a-status");
+  closeDatabase();
+  assert.equal(openDatabase(mainDb), true);
+  const before = authority();
+
+  assert.throws(
+    () => reconcileWorktreeDb(mainDb, worktreeDb),
+    (error: Error) => {
+      assert.equal(error.name, "CanonicalWorktreeDivergenceError");
+      assert.match(error.message, /a hierarchy row has no lifecycle row: task M001\/S01\/T02="not-a-status"/);
+      assert.match(error.message, /\/gsd db adopt/);
+      return true;
+    },
+  );
+  assert.equal(getTask("M001", "S01", "T03"), null, "nothing is merged");
+  assert.deepEqual(authority(), before);
+});
+
 test("a refused Domain Operation names each hierarchy row that has no lifecycle row and the command that adopts it", () => {
   openAdoptedProject();
   advanceAuthorityEpoch();

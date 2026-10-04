@@ -2227,8 +2227,8 @@ completion summaries, verification results, blocker/escalation facts, and other
 execution evidence remain authoritative. The merge runs in one
 `lifecycle.backfill` Domain Operation with one revision bump. Each hierarchy
 row that the merge inserts gets its lifecycle row in that operation, by the
-rules of the lifecycle backfill. A row that main already held keeps its
-adoption state. At Authority Epoch 0 the merge never refuses for adoption: an
+rules of the lifecycle backfill. At Authority Epoch 0 a row that main already
+held keeps its adoption state, and the merge never refuses for adoption: an
 inserted row with an unknown raw status, or whose adoption would change its
 legacy status (a legacy completion with no evidence, or open work under a
 completed or cancelled parent), merges with no lifecycle row and waits for
@@ -2236,7 +2236,11 @@ completed or cancelled parent), merges with no lifecycle row and waits for
 logs them and returns them in `adoptionStatusChanges`. An inserted row with an
 unknown raw status then refuses the whole merge as a canonical divergence, so
 the worktree is kept; the error names each row and the `sqlite3` statement
-that gives it a known status in the worktree database.
+that gives it a known status in the worktree database. After the Cutover the
+same operation also adopts each row that main already held with no lifecycle
+row. If such a row has an unknown raw status, the coverage fence refuses the
+commit; that is a canonical divergence too, so the worktree is kept, and the
+error names the row and `/gsd db adopt`.
 
 ---
 

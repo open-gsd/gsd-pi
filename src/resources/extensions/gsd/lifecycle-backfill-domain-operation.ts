@@ -526,16 +526,18 @@ function adoptItem(
  * Run `merge`, which copies legacy rows from another database (a
  * worktree-local gsd.db) into the open one, and adopt the hierarchy rows it
  * inserted, in one lifecycle.backfill Domain Operation. The merge and the
- * adoption commit together with one revision bump. A row that was in the
- * database before the merge keeps its adoption state. `merge` returns the
+ * adoption commit together with one revision bump. `merge` returns the
  * payload of the `legacy.merged` event.
  *
- * At Authority Epoch 0 the merge never refuses: an inserted row whose
+ * At Authority Epoch 0 the merge never refuses, and a row that was in the
+ * database before the merge keeps its adoption state. An inserted row whose
  * adoption would change its legacy status, or whose raw status is not in the
  * one legacy map, stays unadopted for `/gsd db adopt`. After the Cutover every
- * inserted row is adopted with the rules of the backfill, also the rules that
- * change a legacy status, and each such change comes back to the caller. An
- * unknown raw status then refuses the merge, and nothing is written.
+ * row with no lifecycle row, inserted or not, is adopted with the rules of the
+ * backfill, also the rules that change a legacy status, and each such change
+ * comes back to the caller. An unknown raw status then refuses the merge, and
+ * nothing is written: for an inserted row here, and for a row the database
+ * already held at the commit (LifecycleCoverageRefusedError).
  */
 export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJsonValue): string[] {
   const fence = readDomainOperationFence();
@@ -562,10 +564,10 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
         unknown.map((entry) => entry.row),
       );
     }
-    const inserted = preview.items.filter((item) =>
-      !before.has(`${item.itemKind} ${rowLabel(item)}`) && (cutOver || item.projectedLegacyStatus === null)
+    const adopted = preview.items.filter((item) =>
+      cutOver || (!before.has(`${item.itemKind} ${rowLabel(item)}`) && item.projectedLegacyStatus === null)
     );
-    statusChanges = inserted.filter((item) => item.projectedLegacyStatus !== null).map((item) =>
+    statusChanges = adopted.filter((item) => item.projectedLegacyStatus !== null).map((item) =>
       `${item.itemKind} ${rowLabel(item)} ${JSON.stringify(item.rawStatus)} -> ` +
       `${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
     );
@@ -573,11 +575,11 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
     return {
       events: [
         { eventType: "legacy.merged", entityType: "project", entityId: source, payload: merged, destinations: ["db"] },
-        ...inserted.map((item) => adoptItem(context, item, report)),
+        ...adopted.map((item) => adoptItem(context, item, report)),
       ],
       projections: [
         { projectionKey: "state", projectionKind: "state", rendererVersion: "1" },
-        ...[...new Set(inserted.map((item) => item.milestoneId))].sort().map((milestoneId) => ({
+        ...[...new Set(adopted.map((item) => item.milestoneId))].sort().map((milestoneId) => ({
           projectionKey: `lifecycle/${milestoneId}`.toLowerCase(),
           projectionKind: MILESTONE_LIFECYCLE_PROJECTION_KIND,
           rendererVersion: "1",

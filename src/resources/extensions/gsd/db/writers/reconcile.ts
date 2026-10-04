@@ -10,6 +10,7 @@ import { GSDError, GSD_STALE_STATE } from "../../errors.js";
 import { logError, logWarning } from "../../workflow-logger.js";
 import { getDbOrNull, openDatabase, transaction } from "../engine.js";
 import { TERMINAL_STATUS_SQL } from "../sql-constants.js";
+import { LifecycleCoverageRefusedError } from "../../db-lifecycle-coverage-schema.js";
 import {
   LifecycleBackfillRefusedError,
   mergeLegacyRowsWithAdoption,
@@ -750,6 +751,9 @@ export function reconcileWorktreeDb(
             err.unknownRows.map((row) => `sqlite3 '${worktreeDbPath}' "${knownStatusSql(row)}"`).join("; ")
           }`,
       ]);
+    }
+    if (err instanceof LifecycleCoverageRefusedError) {
+      throw new CanonicalWorktreeDivergenceError([`${err.message} Nothing was merged`]);
     }
     logError("db", "worktree DB reconciliation failed", { error: (err as Error).message });
     return { ...zero, conflicts };

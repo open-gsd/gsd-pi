@@ -50,11 +50,16 @@ export function listUncoveredHierarchyRows(db: DbAdapter): string[] {
  */
 export function describeLifecycleCoverageRefusal(db: DbAdapter, error: unknown): unknown {
   if (!(error instanceof Error) || !error.message.includes(UNCOVERED_MESSAGE)) return error;
-  return new Error(
+  return new LifecycleCoverageRefusedError(
     `${UNCOVERED_MESSAGE}: ${listUncoveredHierarchyRows(db).join(", ")}. The Domain Operation was not committed. ` +
       "Run /gsd db adopt to preview the lifecycle backfill, then /gsd db adopt --apply.",
     { cause: error },
   );
+}
+
+/** The commit trigger refused a Domain Operation: a hierarchy row has no lifecycle row. */
+export class LifecycleCoverageRefusedError extends Error {
+  override readonly name = "LifecycleCoverageRefusedError";
 }
 
 function missingLifecycle(table: string, alias: string, identity: string): string {
