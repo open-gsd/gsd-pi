@@ -359,20 +359,33 @@ class GsdMcpClient:
             args["sessionId"] = session_id
         if project_dir:
             args["projectDir"] = project_dir
-        return self._call_tool("gsd_cancel", args, project_dir=project_dir)
+        # A cancel changes the project state, like execute: cached progress is stale.
+        # With only a session id the project is not known, so every entry is dropped.
+        try:
+            return self._call_tool("gsd_cancel", args, project_dir=project_dir)
+        finally:
+            self.invalidate_cache(project_dir)
 
     def cancel_by_project(self, project_dir: str) -> dict[str, Any]:
-        return self._call_tool(
-            "gsd_cancel_by_project",
-            {"projectDir": project_dir},
-            project_dir=project_dir,
-        )
+        try:
+            return self._call_tool(
+                "gsd_cancel_by_project",
+                {"projectDir": project_dir},
+                project_dir=project_dir,
+            )
+        finally:
+            self.invalidate_cache(project_dir)
 
     def resolve_blocker(self, session_id: str, response: str) -> dict[str, Any]:
-        return self._call_tool(
-            "gsd_resolve_blocker",
-            {"sessionId": session_id, "response": response},
-        )
+        # The session continues after the answer. Its project is not known here,
+        # so every cached progress entry is dropped.
+        try:
+            return self._call_tool(
+                "gsd_resolve_blocker",
+                {"sessionId": session_id, "response": response},
+            )
+        finally:
+            self.invalidate_cache()
 
     def memory_query(self, project_dir: str, query: str) -> dict[str, Any]:
         return self._call_tool(

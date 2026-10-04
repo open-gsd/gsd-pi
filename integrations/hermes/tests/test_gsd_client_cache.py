@@ -53,6 +53,41 @@ def test_invalidate_cache_only_removes_exact_project() -> None:
     assert calls["/tmp/app"] == 2
 
 
+def _progress_reads_after(action) -> int:
+    """Read progress, run `action(client)`, read progress again; return the reader call count."""
+    client = GsdMcpClient(GsdConfig(cache_ttl_seconds=60))
+    calls = {"n": 0}
+
+    def fake_read(project_dir: str) -> ProgressSnapshot:
+        calls["n"] += 1
+        return ProgressSnapshot(phase="execute", blockers=[], next_action="")
+
+    with patch.object(client, "_read_progress_cli", side_effect=fake_read):
+        with patch.object(client, "ensure_version"):
+            with patch.object(client, "_call_tool", return_value={}):
+                client.progress("/tmp/p")
+                action(client)
+                client.progress("/tmp/p")
+    return calls["n"]
+
+
+def test_resolve_blocker_drops_cached_progress() -> None:
+    assert _progress_reads_after(lambda c: c.resolve_blocker("session-1", "yes")) == 2
+
+
+def test_cancel_drops_cached_progress() -> None:
+    assert _progress_reads_after(lambda c: c.cancel(session_id="session-1")) == 2
+    assert _progress_reads_after(lambda c: c.cancel(project_dir="/tmp/p")) == 2
+
+
+def test_cancel_by_project_drops_cached_progress() -> None:
+    assert _progress_reads_after(lambda c: c.cancel_by_project("/tmp/p")) == 2
+
+
+def test_memory_query_keeps_cached_progress() -> None:
+    assert _progress_reads_after(lambda c: c.memory_query("/tmp/p", "auth")) == 1
+
+
 def test_progress_falls_back_to_mcp_when_cli_binary_is_missing() -> None:
     client = GsdMcpClient(GsdConfig())
 
