@@ -1238,6 +1238,31 @@ describe("gsd_uat_result_save commits its rows in one Domain Operation", () => {
     assert.ok(!existsSync(attemptFile(base, 2)), "the replay records no attempt 2");
   });
 
+  it("a replay writes the attempt file that the first call did not write, and the next attempt number comes from the database", async (t) => {
+    const base = await openUatFixture(t);
+    const blocker = join(base, ".gsd", "uat");
+    writeFileSync(blocker, "not a directory");
+
+    const first = await runNativeDbTool(base, uatCase.tool, uatCase.args, "uat-lost-file");
+    assert.equal((first as { isError?: boolean }).isError, true, "the attempt file write fails");
+    assert.deepEqual(uatRows(), { artifacts: 1, assessments: 1, verdicts: 1, gateRuns: 1 }, "the operation is committed");
+
+    rmSync(blocker);
+    const replay = await runNativeDbTool(base, uatCase.tool, uatCase.args, "uat-lost-file");
+    assert.equal(executorDetails(replay).attempt, 1);
+    assert.equal(
+      JSON.parse(readFileSync(join(base, ".gsd", String(executorDetails(replay).attemptPath)), "utf-8")).runId,
+      executorDetails(replay).runId,
+      "the returned attemptPath holds the record of the stored run",
+    );
+    assert.deepEqual(uatRows(), { artifacts: 1, assessments: 1, verdicts: 1, gateRuns: 1 }, "the replay writes no row");
+
+    rmSync(attemptFile(base, 1));
+    const next = await runNativeDbTool(base, uatCase.tool, { ...uatCase.args, attempt: "auto" }, "uat-next");
+    assert.equal(executorDetails(next).attempt, 2, "attempt files on disk do not set the attempt number");
+    assert.ok(existsSync(attemptFile(base, 2)));
+  });
+
   it("a failed operation saves no row and no attempt file", async (t) => {
     const base = await openUatFixture(t);
     _setDomainOperationFaultForTest("after-mutation", "uat-result.save");

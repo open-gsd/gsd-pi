@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Owns the durable UAT run lifecycle behind gsd_uat_result_save.
 
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { isAbsolute, join, normalize, resolve } from "node:path";
 
 import {
@@ -23,6 +23,7 @@ import {
   RUN_UAT_TOOL_PRESENTATION_PLAN_ID,
   RUN_UAT_WORKFLOW_TOOL_NAMES,
 } from "./tool-presentation-plan.js";
+import { getLatestUatAttempt } from "./db/queries.js";
 import { saveFile } from "./files.js";
 import { relSliceFile, resolveGsdPathContract } from "./paths.js";
 import { buildManualValidationGuidance, resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -456,21 +457,9 @@ function validateCanonicalPresentation(params: UatResultSaveParams): string | nu
   return errors.length > 0 ? errors.join("; ") : null;
 }
 
-function nextUatAttempt(basePath: string, milestoneId: string, sliceId: string): number {
-  const contract = resolveGsdPathContract(basePath);
-  const dir = join(contract.projectGsd, "uat", milestoneId, sliceId);
-  if (!existsSync(dir)) return 1;
-  let max = 0;
-  for (const entry of readdirSync(dir)) {
-    const match = /^attempt-(\d+)\.json$/.exec(entry);
-    if (match) max = Math.max(max, Number(match[1]));
-  }
-  return max + 1;
-}
-
-function resolveUatAttempt(basePath: string, params: UatResultSaveParams): number | UatRunValidationError {
+function resolveUatAttempt(params: UatResultSaveParams): number | UatRunValidationError {
   if (params.attempt === "auto" || params.attempt === undefined) {
-    return nextUatAttempt(basePath, params.milestoneId, params.sliceId);
+    return getLatestUatAttempt(params.milestoneId, params.sliceId) + 1;
   }
 
   const attempt = typeof params.attempt === "string"
@@ -577,7 +566,7 @@ export function prepareUatRun(basePath: string, rawParams: UatResultSaveParams):
   const modeError = validateUatModePolicy(params);
   if (modeError) return { ok: false, error: { code: "uat_mode_mismatch", message: modeError } };
 
-  const attempt = resolveUatAttempt(basePath, params);
+  const attempt = resolveUatAttempt(params);
   if (typeof attempt !== "number") return { ok: false, error: attempt };
 
   const gateVerdict = params.verdict === "PASS" ? "pass" : "flag";
@@ -626,9 +615,8 @@ export function uatAttemptArtifactPath(run: PreparedUatRun): string {
   return `uat/${run.params.milestoneId}/${run.params.sliceId}/attempt-${run.attempt}.json`;
 }
 
-export async function saveUatAttemptArtifact(basePath: string, run: PreparedUatRun): Promise<string> {
-  const contract = resolveGsdPathContract(basePath);
-  const relativePath = uatAttemptArtifactPath(run);
+/** Content of the attempt record file of a run. */
+export function renderUatAttemptRecord(run: PreparedUatRun): string {
   const payload = {
     runId: run.runId,
     attempt: run.attempt,
@@ -646,6 +634,10 @@ export async function saveUatAttemptArtifact(basePath: string, run: PreparedUatR
     notes: run.params.notes,
     previousAttemptId: run.params.previousAttemptId,
   };
-  await saveFile(join(contract.projectGsd, relativePath), `${JSON.stringify(payload, null, 2)}\n`);
-  return relativePath;
+  return `${JSON.stringify(payload, null, 2)}\n`;
+}
+
+/** Write the attempt record file. It is a render of the saved UAT result. */
+export async function saveUatAttemptArtifact(basePath: string, relativePath: string, record: string): Promise<void> {
+  await saveFile(join(resolveGsdPathContract(basePath).projectGsd, relativePath), record);
 }

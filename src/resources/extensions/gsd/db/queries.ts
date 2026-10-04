@@ -913,6 +913,22 @@ export function getPlanMilestoneRecoveryBlock(milestoneId: string): PlanMileston
   };
 }
 
+/** Highest attempt number of the saved UAT runs of a slice. 0 when the slice has none. */
+export function getLatestUatAttempt(milestoneId: string, sliceId: string): number {
+  const db = getDbOrNull();
+  if (!db) return 0;
+  const row = db.prepare(`
+    SELECT MAX(attempt) AS attempt
+    FROM gate_runs
+    WHERE gate_id = 'UAT'
+      AND gate_type = 'uat'
+      AND unit_type = 'run-uat'
+      AND milestone_id = :milestone_id
+      AND slice_id = :slice_id
+  `).get({ ":milestone_id": milestoneId, ":slice_id": sliceId });
+  return Number(row?.["attempt"] ?? 0);
+}
+
 export function getMilestoneSlices(milestoneId: string): SliceRow[] {
   if (!getDbOrNull()!) return [];
   const rows = getDbOrNull()!.prepare("SELECT * FROM slices WHERE milestone_id = :mid ORDER BY sequence, id").all({ ":mid": milestoneId });

@@ -136,6 +136,7 @@ import { renderPlanCheckboxes, renderPlanFromDb, writeTaskSummaryProjection } fr
 import { readUnitHarnessAbort, type UnitHarnessAbortRecord } from "../unit-runtime.js";
 import {
   prepareUatRun,
+  renderUatAttemptRecord,
   saveUatAttemptArtifact,
   uatAttemptArtifactPath,
   type UatResultSaveParams,
@@ -2306,6 +2307,8 @@ type UatResultSaved = {
   gateVerdict: string;
   attempt: number;
   attemptPath: string;
+  /** Content of the attempt record file. A replay writes the file from it. */
+  attemptRecord: string;
   runId: string;
   worktreeRoot: string;
   browserToolsPresented: boolean;
@@ -2313,7 +2316,7 @@ type UatResultSaved = {
   manualValidationPath?: string;
 };
 
-function uatResultSaved({ text, ...details }: UatResultSaved): ToolExecutionResult {
+function uatResultSaved({ text, attemptRecord: _attemptRecord, ...details }: UatResultSaved): ToolExecutionResult {
   return {
     content: [{ type: "text", text }],
     details: { operation: "save_uat_result", ...details },
@@ -2352,12 +2355,14 @@ export async function executeUatResultSave(
     // A replay returns the stored result. The attempt number of a run comes
     // from state, so preparing the run again would describe another attempt.
     if (readDomainOperationFence(invocation.idempotencyKey).replay) {
-      return uatResultSaved(executeRecordDomainOperation<UatResultSaved>({
+      const stored = executeRecordDomainOperation<UatResultSaved>({
         ...operation,
         mutate: () => {
           throw new Error("the stored UAT result of this call was not found");
         },
-      }));
+      });
+      await saveUatAttemptArtifact(basePath, stored.attemptPath, stored.attemptRecord);
+      return uatResultSaved(stored);
     }
 
     const prepared = prepareUatRun(basePath, params);
@@ -2374,6 +2379,7 @@ export async function executeUatResultSave(
       gateVerdict: run.gateVerdict,
       attempt: run.attempt,
       attemptPath: uatAttemptArtifactPath(run),
+      attemptRecord: renderUatAttemptRecord(run),
       runId: run.runId,
       worktreeRoot: run.worktreeRoot,
       browserToolsPresented: run.browserToolsPresented,
@@ -2444,7 +2450,7 @@ export async function executeUatResultSave(
       },
     );
     await mirrorArtifactToActiveWorktreeProjection(basePath, artifactPath, run.assessment);
-    await saveUatAttemptArtifact(basePath, run);
+    await saveUatAttemptArtifact(basePath, saved.attemptPath, saved.attemptRecord);
     await renderStateProjection(basePath);
     if (run.hasHuman) {
       appendNotification(
