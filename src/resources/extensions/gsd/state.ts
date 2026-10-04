@@ -38,6 +38,8 @@ export {
 import {
   isDbAvailable,
   getMilestone,
+  getMilestoneSlices,
+  hasSavedArtifact,
 } from './gsd-db.js';
 import { readMilestone, readMilestones } from './db/lifecycle-read.js';
 
@@ -58,16 +60,16 @@ import { readMilestone, readMilestones } from './db/lifecycle-read.js';
  */
 export function isGhostMilestone(basePath: string, mid: string): boolean {
   // If the milestone has a DB row, it's usually a known milestone — not a ghost.
-  // Exception: a "queued" row with no disk artifacts is a phantom from
-  // gsd_milestone_generate_id that was never planned (#3645).
+  // Exception: a "queued" row with no saved context and no slice rows is a
+  // phantom from gsd_milestone_generate_id that was never planned (#3645).
+  // The rows decide; a projection file on disk is not read.
   if (isDbAvailable()) {
     const dbRow = getMilestone(mid);
     if (dbRow) {
       if (dbRow.status === 'queued') {
-        const hasContent = resolveMilestoneFile(basePath, mid, "CONTEXT")
-          || resolveMilestoneFile(basePath, mid, "ROADMAP")
-          || resolveMilestoneFile(basePath, mid, "SUMMARY");
-        return !hasContent;
+        return !hasSavedArtifact(mid, null, "CONTEXT")
+          && !hasSavedArtifact(mid, null, "CONTEXT-DRAFT")
+          && getMilestoneSlices(mid).length === 0;
       }
       return false;
     }

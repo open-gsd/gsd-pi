@@ -4,10 +4,10 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { deriveState } from './state.js';
 import { parseSummary, loadFile } from './files.js';
-import { isDbAvailable, getMilestoneSlices, getSliceTasks } from './gsd-db.js';
+import { isDbAvailable, getMilestoneScopedArtifacts, getMilestoneSlices, getSliceTasks } from './gsd-db.js';
 import { openExistingWorkflowDatabase } from './db-workspace.js';
 import { findMilestoneIds } from './milestone-ids.js';
-import { resolveMilestoneFile, resolveSliceFile, resolveGsdRootFile, gsdRoot } from './paths.js';
+import { resolveSliceFile, resolveGsdRootFile, gsdRoot } from './paths.js';
 import {
   getLedger,
   getProjectTotals,
@@ -745,38 +745,28 @@ function buildVisualizerStats(
   };
 }
 
-function loadDiscussionState(
-  basePath: string,
-  milestones: VisualizerMilestone[],
-): VisualizerDiscussionState[] {
+function loadDiscussionState(milestones: VisualizerMilestone[]): VisualizerDiscussionState[] {
   const states: VisualizerDiscussionState[] = [];
 
   for (const ms of milestones) {
-    const contextPath = resolveMilestoneFile(basePath, ms.id, "CONTEXT");
-    const draftPath = resolveMilestoneFile(basePath, ms.id, "CONTEXT-DRAFT");
-    const state: DiscussionState = contextPath
+    // The saved artifact rows decide; the CONTEXT projections are not read.
+    const saved = getMilestoneScopedArtifacts(ms.id).filter(a => a.full_content.trim() !== "");
+    const context = saved.find(a => a.artifact_type === "CONTEXT");
+    // The draft row stays after the final CONTEXT is saved, so it counts only without one.
+    const draft = context ? undefined : saved.find(a => a.artifact_type === "CONTEXT-DRAFT");
+    const state: DiscussionState = context
       ? "discussed"
-      : draftPath
+      : draft
         ? "draft"
         : "undiscussed";
-
-    let lastUpdated: string | null = null;
-    const target = contextPath ?? draftPath;
-    if (target) {
-      try {
-        lastUpdated = new Date(statSync(target).mtimeMs).toISOString();
-      } catch {
-        lastUpdated = null;
-      }
-    }
 
     states.push({
       milestoneId: ms.id,
       title: ms.title,
       state,
-      hasContext: !!contextPath,
-      hasDraft: !!draftPath,
-      lastUpdated,
+      hasContext: !!context,
+      hasDraft: !!draft,
+      lastUpdated: (context ?? draft)?.imported_at ?? null,
     });
   }
 
@@ -891,7 +881,7 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
 
   const health = loadHealth(units, totals, basePath);
   const stats = buildVisualizerStats(milestones, changelog.entries);
-  const discussion = loadDiscussionState(basePath, milestones);
+  const discussion = loadDiscussionState(milestones);
 
   return {
     milestones,

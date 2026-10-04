@@ -5,18 +5,29 @@
  * invocations can distinguish an in-flight discussion from a stale one.
  */
 
-import { describe, test, afterEach } from "node:test";
+import { describe, test, afterEach, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
+import { invalidateAllCaches } from "../cache.ts";
+import {
+  _getAdapter,
+  closeDatabase,
+  insertArtifact,
+  insertMilestone,
+  insertSlice,
+  openDatabase,
+} from "../gsd-db.ts";
 import {
   _getPendingAutoStart,
   clearPendingAutoStart,
   setPendingAutoStart,
+  showSmartEntry,
 } from "../guided-flow.ts";
+import { cleanup, makeTempRepo } from "./test-utils.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -28,6 +39,46 @@ function pendingInput(basePath: string, milestoneId: string) {
     pi: { sendMessage: () => undefined } as any,
   };
 }
+
+/** A project whose only milestone is parked, so /gsd finds no active milestone. */
+function openParkedMilestoneProject(t: TestContext): string {
+  const base = realpathSync(makeTempRepo("gsd-pending-autostart-rows-"));
+  t.after(() => {
+    closeDatabase();
+    invalidateAllCaches();
+    cleanup(base);
+  });
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Parked milestone", status: "parked" });
+  invalidateAllCaches();
+  return base;
+}
+
+/** An interactive session where every menu is left unanswered. */
+function makeCtx(opts: { idle?: boolean } = {}) {
+  const notifications: string[] = [];
+  const ctx = {
+    hasUI: true,
+    isIdle: () => opts.idle ?? true,
+    hasPendingMessages: () => false,
+    ui: {
+      notify: (message: string) => notifications.push(message),
+      setStatus: () => {},
+      custom: async () => undefined,
+      select: async () => undefined,
+    },
+  } as any;
+  return { ctx, notifications };
+}
+
+const pi = {
+  sendMessage: () => {
+    throw new Error("/gsd must not dispatch a prompt in these tests");
+  },
+  getActiveTools: () => [],
+  setActiveTools: () => {},
+} as any;
 
 afterEach(() => {
   clearPendingAutoStart();
@@ -58,20 +109,56 @@ describe("clear stale pending auto-start (#3667)", () => {
     assert.equal(_getPendingAutoStart(base)?.createdAt, 123);
   });
 
-  test("guided-flow clears stale pending entry when discuss already completed", () => {
-    const source = readFileSync(join(__dirname, "..", "guided-flow.ts"), "utf-8");
-    assert.ok(
-      source.includes('const milestoneHasRoadmap = !!resolveMilestoneFile(basePath, entry.milestoneId, "ROADMAP");'),
-      "pending auto-start gate must check ROADMAP presence for completed discuss sessions",
+  test("a planned milestone clears the pending entry; a ROADMAP file with no slice rows does not", async (t) => {
+    const base = openParkedMilestoneProject(t);
+    writeFileSync(
+      join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
+      "# M001\n\n## Slices\n- [ ] **S01: First slice** `risk:low` `depends:[]`\n",
     );
-    assert.ok(
-      source.includes('milestoneRow.status !== "queued"'),
-      "pending auto-start gate must require non-queued DB milestone status before clearing",
-    );
-    assert.ok(
-      source.includes("if (discussPlanComplete)"),
-      "pending auto-start gate must clear stale map entries for completed discussions",
-    );
+    const { ctx, notifications } = makeCtx();
+    setPendingAutoStart(base, pendingInput(base, "M001"));
+
+    await showSmartEntry(ctx, pi, base);
+    assert.ok(_getPendingAutoStart(base), "the ROADMAP file does not prove the plan");
+    assert.match(notifications.join("\n"), /Discussion already in progress/);
+
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First slice" });
+    await showSmartEntry(ctx, pi, base);
+    assert.equal(_getPendingAutoStart(base), null, "slice rows prove the plan");
+  });
+
+  test("a saved draft keeps an old pending entry; a CONTEXT-DRAFT file with no row does not", async (t) => {
+    const base = openParkedMilestoneProject(t);
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-CONTEXT-DRAFT.md"), "# Draft\n");
+    const { ctx, notifications } = makeCtx();
+
+    insertArtifact({
+      path: "milestones/M001/M001-CONTEXT-DRAFT.md",
+      artifact_type: "CONTEXT-DRAFT",
+      milestone_id: "M001",
+      slice_id: null,
+      task_id: null,
+      full_content: "# Draft\n",
+    });
+    setPendingAutoStart(base, { ...pendingInput(base, "M001"), createdAt: 123 });
+    await showSmartEntry(ctx, pi, base);
+    assert.ok(_getPendingAutoStart(base), "a saved draft is an interview in progress");
+    assert.match(notifications.join("\n"), /Discussion already in progress/);
+
+    _getAdapter()!.prepare("DELETE FROM artifacts").run();
+    await showSmartEntry(ctx, pi, base);
+    assert.equal(_getPendingAutoStart(base), null, "the draft file alone leaves the entry stale");
+  });
+
+  test("a live agent turn keeps an old pending entry that has no saved rows", async (t) => {
+    const base = openParkedMilestoneProject(t);
+    const { ctx, notifications } = makeCtx({ idle: false });
+    setPendingAutoStart(base, { ...pendingInput(base, "M001"), createdAt: 123 });
+
+    await showSmartEntry(ctx, pi, base);
+
+    assert.ok(_getPendingAutoStart(base));
+    assert.match(notifications.join("\n"), /Discussion already in progress/);
   });
 
   test("guided-flow recovers a finished-but-unconsumed discussion instead of dead-ending", () => {
@@ -96,25 +183,4 @@ describe("clear stale pending auto-start (#3667)", () => {
     );
   });
 
-  test("guided-flow does not treat a live discuss turn as a stale pending entry", () => {
-    const source = readFileSync(join(__dirname, "..", "guided-flow.ts"), "utf-8");
-    assert.ok(
-      source.includes("!isAgentTurnInFlight(ctx)"),
-      "stale-entry deletion must be gated on no agent turn being in flight — a dispatched " +
-      "discuss turn can think for over 30s before writing its first artifact, and deleting " +
-      "its entry re-dispatches the workflow (duplicate interview + duplicate completion message)",
-    );
-    assert.ok(
-      source.includes('const milestoneHasDraft = !!resolveMilestoneFile(basePath, entry.milestoneId, "CONTEXT-DRAFT");'),
-      "stale-entry check must treat an existing CONTEXT-DRAFT as proof of an in-progress interview",
-    );
-    assert.ok(
-      source.includes("!milestoneHasDraft"),
-      "stale-entry deletion must require the CONTEXT-DRAFT to be absent",
-    );
-    assert.ok(
-      source.includes("ctx.hasPendingMessages"),
-      "in-flight detection must also cover dispatched-but-not-yet-started queued messages",
-    );
-  });
 });

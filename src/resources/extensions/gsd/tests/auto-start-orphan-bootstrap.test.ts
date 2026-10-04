@@ -16,6 +16,7 @@ import {
   validateSessionLock,
 } from "../session-lock.ts";
 import type { InterruptedSessionAssessment } from "../interrupted-session.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 import {
   closeDatabase,
   insertMilestone,
@@ -135,12 +136,6 @@ function makeRepoWithOnlySiblingStrandedAndLockedActive(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-locked-no-stranded-bootstrap-"));
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
   mkdirSync(join(base, ".gsd", "milestones", "M002"), { recursive: true });
-  // M002 has CONTEXT so bootstrap's pre-planning gate doesn't route to
-  // showSmartEntry and the test reaches the post-lock session-init path.
-  writeFileSync(
-    join(base, ".gsd", "milestones", "M002", "M002-CONTEXT.md"),
-    "# M002 context\n",
-  );
   writeFileSync(
     join(base, ".gsd", "PREFERENCES.md"),
     "---\ngit:\n  isolation: \"none\"\n---\n",
@@ -167,6 +162,10 @@ function makeRepoWithOnlySiblingStrandedAndLockedActive(): string {
   // row; getActiveMilestoneId honors the lock regardless of M001 order.
   insertMilestone({ id: "M001", title: "Sibling milestone", status: "pending" });
   insertMilestone({ id: "M002", title: "Locked milestone", status: "active" });
+  // M002 has a saved CONTEXT row (and no CONTEXT.md) so bootstrap's
+  // pre-planning gate doesn't route to showSmartEntry and the test reaches
+  // the post-lock session-init path.
+  saveContextArtifact("M002");
   closeDatabase();
 
   return base;

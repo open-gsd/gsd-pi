@@ -17,7 +17,7 @@ import type {
 } from "@gsd/pi-coding-agent";
 import { deriveState } from "./state.js";
 import { findWorktreeSegment, isGsdWorktreePath } from "./worktree-root.js";
-import { loadFile, getManifestStatus } from "./files.js";
+import { getManifestStatus } from "./files.js";
 import type { InterruptedSessionAssessment } from "./interrupted-session.js";
 import {
   loadEffectiveGSDPreferences,
@@ -31,7 +31,7 @@ import {
 import { ensureGsdSymlink, isInheritedRepo, validateProjectId } from "./repo-identity.js";
 import { migrateToExternalState, recoverFailedMigration } from "./migrate-external.js";
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
-import { gsdRoot, resolveMilestoneFile } from "./paths.js";
+import { gsdRoot } from "./paths.js";
 import { findMilestoneIds } from "./milestone-ids.js";
 import { milestoneEntryBlockedGuidance } from "./guidance.js";
 import { invalidateAllCaches } from "./cache.js";
@@ -80,6 +80,7 @@ import {
   probeDbWritable,
   getMilestone,
   getAllMilestones,
+  hasSavedArtifact,
 } from "./gsd-db.js";
 import {
   closeAllWorkflowDatabases,
@@ -1548,9 +1549,8 @@ export async function bootstrapAutoSession(
       // Active milestone exists but has no roadmap
       if (state.phase === "pre-planning") {
         const mid = state.activeMilestone!.id;
-        const contextFile = resolveMilestoneFile(base, mid, "CONTEXT");
-        const hasContext = !!(contextFile && (await loadFile(contextFile)));
-        if (!hasContext && effectivePrefs?.planning_depth !== "deep") {
+        // The saved CONTEXT row decides; the CONTEXT.md projection is not read.
+        if (!hasSavedArtifact(mid, null, "CONTEXT") && effectivePrefs?.planning_depth !== "deep") {
           const { showSmartEntry } = await import("./guided-flow.js");
           await showSmartEntry(ctx, pi, base, { step: requestedStepMode });
 
@@ -1946,14 +1946,14 @@ export async function bootstrapAutoSession(
       if (milestoneIds.length > 1) {
         const issues: string[] = [];
         for (const id of milestoneIds) {
-          // Skip completed/parked milestones — a leftover CONTEXT-DRAFT.md
+          // Skip completed/parked milestones — a leftover CONTEXT-DRAFT
           // on a finished milestone is harmless residue, not an actionable warning.
           if (isDbAvailable()) {
             const ms = getMilestone(id);
             if (ms?.status === "complete" || ms?.status === "parked") continue;
           }
-          const draft = resolveMilestoneFile(base, id, "CONTEXT-DRAFT");
-          if (draft)
+          // The draft row stays after the final CONTEXT is saved, so it counts only without one.
+          if (!hasSavedArtifact(id, null, "CONTEXT") && hasSavedArtifact(id, null, "CONTEXT-DRAFT"))
             issues.push(
               `${id}: has CONTEXT-DRAFT.md (will pause for discussion)`,
             );

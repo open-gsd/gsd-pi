@@ -11,7 +11,7 @@ import {
   loadVisualizerData,
   type VisualizerMilestone,
 } from "../visualizer-data.ts";
-import { _getAdapter, closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, insertArtifact, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import { createMemory } from "../memory-store.ts";
 import { generateHtmlReport } from "../export-html.ts";
@@ -268,6 +268,41 @@ test("loadVisualizerData reads knowledge from the database when KNOWLEDGE.md is 
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("loadVisualizerData reads the discussion state from saved artifact rows, not from CONTEXT files", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-visualizer-discussion-db-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  openDatabase(":memory:");
+  for (const id of ["M001", "M002", "M003"]) {
+    mkdirSync(join(base, ".gsd", "milestones", id), { recursive: true });
+    insertMilestone({ id, title: id, status: "queued" });
+  }
+  const save = (milestoneId: string, artifactType: string) => insertArtifact({
+    path: `milestones/${milestoneId}/${milestoneId}-${artifactType}.md`,
+    artifact_type: artifactType,
+    milestone_id: milestoneId,
+    slice_id: null,
+    task_id: null,
+    full_content: `# ${artifactType}\n`,
+  });
+  // The draft row of M001 stays after its final CONTEXT is saved; it no longer counts.
+  save("M001", "CONTEXT-DRAFT");
+  save("M001", "CONTEXT");
+  save("M002", "CONTEXT-DRAFT");
+  // M003 has CONTEXT files and no row.
+  writeFileSync(join(base, ".gsd", "milestones", "M003", "M003-CONTEXT.md"), "# Context\n");
+  writeFileSync(join(base, ".gsd", "milestones", "M003", "M003-CONTEXT-DRAFT.md"), "# Draft\n");
+
+  const data = await loadVisualizerData(base);
+
+  assert.deepEqual(
+    data.discussion.map((entry) => [entry.milestoneId, entry.state, entry.hasDraft, entry.lastUpdated !== null]),
+    [["M001", "discussed", false, true], ["M002", "draft", true, true], ["M003", "undiscussed", false, false]],
+  );
 });
 
 test("loadVisualizerData caps memory content for visualizer payloads", async () => {

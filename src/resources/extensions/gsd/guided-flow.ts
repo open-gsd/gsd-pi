@@ -16,8 +16,7 @@ import {
   isInteractiveCommandContext,
 } from "./command-feedback.js";
 import { loadFile } from "./files.js";
-import { isDbAvailable, getMilestone, getMilestoneSlices, insertMilestone } from "./gsd-db.js";
-import { parseRoadmapSlices } from "./roadmap-slices.js";
+import { isDbAvailable, getMilestone, getMilestoneSlices, hasSavedArtifact, insertMilestone } from "./gsd-db.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
 import {
   buildCompleteSlicePrompt,
@@ -357,13 +356,6 @@ function runPlanV2Gate(
 
 export const _needsPlanV2GateForTest = needsPlanV2Gate;
 export const _runPlanV2GateForTest = runPlanV2Gate;
-
-export function _roadmapHasParseableSlicesForTest(
-  roadmapContent: string | null | undefined,
-): boolean {
-  if (!roadmapContent) return false;
-  return parseRoadmapSlices(roadmapContent).length > 0;
-}
 
 // ─── Commit Instruction Helpers ──────────────────────────────────────────────
 
@@ -1369,10 +1361,9 @@ export async function showDiscuss(
         return;
       }
       const discussBasePath = resolveDiscussSliceBasePath(basePath, targetMilestone.id);
-      const contextFile = resolveSliceFile(discussBasePath, targetMilestone.id, sid, "CONTEXT");
       const sqAvail = getStructuredQuestionsAvailability(pi, ctx);
       const prompt = await buildDiscussSlicePrompt(targetMilestone.id, sid, chosen.title, discussBasePath, {
-        rediscuss: !!contextFile,
+        rediscuss: hasSavedArtifact(targetMilestone.id, sid, "CONTEXT"),
         structuredQuestionsAvailable: sqAvail,
       });
       await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-slice", { basePath: discussBasePath });
@@ -1490,10 +1481,8 @@ export async function showDiscuss(
     return;
   }
 
-  // Guard: no roadmap yet (unless DB has slices)
-  const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
-  const roadmapContent = roadmapFile ? await loadFile(roadmapFile) : null;
-  if (!roadmapContent && !isDbAvailable()) {
+  // Guard: slices come from the database only
+  if (!isDbAvailable()) {
     ctx.ui.notify("No roadmap yet for this milestone. Run /gsd to plan first.", "warning");
     return;
   }
@@ -1518,15 +1507,13 @@ export async function showDiscuss(
 
   // Loop: show picker, dispatch discuss, repeat until "not_yet"
   while (true) {
-    // Invalidate caches so we pick up CONTEXT files written by the just-completed discussion
     invalidateAllCaches();
     const discussBasePath = resolveDiscussSliceBasePath(basePath, mid);
 
-    // Build discussion-state map: which slices have CONTEXT files already?
+    // Build discussion-state map: which slices have a saved CONTEXT row already?
     const discussedMap = new Map<string, boolean>();
     for (const s of pendingSlices) {
-      const contextFile = resolveSliceFile(discussBasePath, mid, s.id, "CONTEXT");
-      discussedMap.set(s.id, !!contextFile);
+      discussedMap.set(s.id, hasSavedArtifact(mid, s.id, "CONTEXT"));
     }
 
     // If all pending slices are discussed, check for queued milestones before exiting (#3150)
@@ -1641,9 +1628,9 @@ async function showDiscussQueuedMilestone(
   pendingMilestones: Array<{ id: string; title: string; status: string }>,
 ): Promise<void> {
   const actions = pendingMilestones.map((m, i) => {
-    const hasContext = !!resolveMilestoneFile(basePath, m.id, "CONTEXT");
-    const hasDraft = !hasContext && !!resolveMilestoneFile(basePath, m.id, "CONTEXT-DRAFT");
-    const hasRoadmap = !!resolveMilestoneFile(basePath, m.id, "ROADMAP");
+    const hasContext = hasSavedArtifact(m.id, null, "CONTEXT");
+    const hasDraft = !hasContext && hasSavedArtifact(m.id, null, "CONTEXT-DRAFT");
+    const hasRoadmap = getMilestoneSlices(m.id).length > 0;
     const contextStatus = hasContext ? "context ✓" : hasDraft ? "draft context" : "no context yet";
     const roadmapStatus = hasRoadmap ? " · roadmap ✓" : "";
     return {
@@ -1669,7 +1656,9 @@ async function showDiscussQueuedMilestone(
   const chosen = pendingMilestones.find(m => m.id === choice);
   if (!chosen) return;
 
-  const hasDraft = !!resolveMilestoneFile(basePath, chosen.id, "CONTEXT-DRAFT");
+  // The draft row stays after the final CONTEXT is saved, so it counts only without one.
+  const hasDraft = !hasSavedArtifact(chosen.id, null, "CONTEXT") &&
+    hasSavedArtifact(chosen.id, null, "CONTEXT-DRAFT");
   let fastPath = hasDraft;
 
   if (!hasDraft) {
@@ -2165,7 +2154,7 @@ export async function showSmartEntry(
     // and fires another dispatchWorkflow, resetting the conversation mid-interview.
     if (hasPendingAutoStart(basePath)) {
       // #3274: If /clear interrupted the discussion, the pending entry is stale.
-      // Detect staleness: no manifest, no milestone CONTEXT/CONTEXT-DRAFT artifact,
+      // Detect staleness: no manifest, no saved milestone CONTEXT/CONTEXT-DRAFT row,
       // the entry is older than 30s (avoids race between .set() and LLM writing the
       // first artifact), AND no agent turn is in flight. A dispatched discuss turn
       // can think for well over 30s before its first question round writes any
@@ -2175,11 +2164,11 @@ export async function showSmartEntry(
       const entry = _getPendingAutoStart(basePath)!;
       const ageMs = Date.now() - (entry.createdAt || 0);
       const manifestExists = existsSync(join(gsdRoot(basePath), "DISCUSSION-MANIFEST.json"));
-      const milestoneHasContext = !!resolveMilestoneFile(basePath, entry.milestoneId, "CONTEXT");
-      const milestoneHasDraft = !!resolveMilestoneFile(basePath, entry.milestoneId, "CONTEXT-DRAFT");
-      const milestoneHasRoadmap = !!resolveMilestoneFile(basePath, entry.milestoneId, "ROADMAP");
+      const milestoneHasContext = hasSavedArtifact(entry.milestoneId, null, "CONTEXT");
+      const milestoneHasDraft = hasSavedArtifact(entry.milestoneId, null, "CONTEXT-DRAFT");
       const milestoneRow = isDbAvailable() ? getMilestone(entry.milestoneId) : null;
-      const discussPlanComplete = milestoneHasRoadmap && !!milestoneRow && milestoneRow.status !== "queued";
+      const discussPlanComplete = !!milestoneRow && milestoneRow.status !== "queued" &&
+        getMilestoneSlices(entry.milestoneId).length > 0;
       if (discussPlanComplete) {
         // The discuss flow already completed, but pending auto-start cleanup handshake did not run.
         // Clear stale in-memory guard and continue through normal active-milestone routing.
@@ -2485,24 +2474,12 @@ export async function showSmartEntry(
 
   // ── No active slice ──────────────────────────────────────────────────
   if (!state.activeSlice) {
-    const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-    const hasRoadmap = !!(roadmapFile && await loadFile(roadmapFile));
-
-    // A roadmap file with zero parseable slices (placeholder text) should be
-    // treated the same as no roadmap — offer "Create roadmap" instead of "Go auto"
-    // which would immediately get stuck in blocked state (#3441).
-    let roadmapHasSlices = false;
-    if (hasRoadmap) {
-      const roadmapContent = await loadFile(roadmapFile!);
-      if (roadmapContent) {
-        roadmapHasSlices = _roadmapHasParseableSlicesForTest(roadmapContent);
-      }
-    }
-
-    if (!hasRoadmap || !roadmapHasSlices) {
+    // The roadmap is the slice rows. A milestone with no slice row has no
+    // roadmap: offer "Create roadmap" instead of "Go auto", which would
+    // immediately get stuck in blocked state (#3441). A ROADMAP file is not read.
+    if (getMilestoneSlices(milestoneId).length === 0) {
       // No roadmap → discuss or plan
-      const contextFile = resolveMilestoneFile(basePath, milestoneId, "CONTEXT");
-      const hasContext = !!(contextFile && await loadFile(contextFile));
+      const hasContext = hasSavedArtifact(milestoneId, null, "CONTEXT");
 
       const actions = [
         ...buildCloseoutMenuActions(closeout),
@@ -2644,10 +2621,8 @@ export async function showSmartEntry(
 
   // ── Slice needs planning ─────────────────────────────────────────────
   if (state.phase === "planning") {
-    const contextFile = resolveSliceFile(basePath, milestoneId, sliceId, "CONTEXT");
-    const researchFile = resolveSliceFile(basePath, milestoneId, sliceId, "RESEARCH");
-    const hasContext = !!(contextFile && await loadFile(contextFile));
-    const hasResearch = !!(researchFile && await loadFile(researchFile));
+    const hasContext = hasSavedArtifact(milestoneId, sliceId, "CONTEXT");
+    const hasResearch = hasSavedArtifact(milestoneId, sliceId, "RESEARCH");
 
     const actions = [
       {
