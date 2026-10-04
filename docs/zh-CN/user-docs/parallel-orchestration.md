@@ -167,7 +167,7 @@ parallel:
 
 ## 信号生命周期
 
-Coordinator 通过信号和 workers 通信：
+Coordinator 通过项目数据库中的 `command_queue` 行和 workers 通信。每一行都定向到 worker 的 milestone。不存在信号文件：
 
 ```
 Coordinator                    Worker
@@ -255,7 +255,7 @@ Coordinator 会在 `refreshWorkerStatuses()` 中执行 stale detection，并自�
 | **`GSD_MILESTONE_LOCK`** | 每个 worker 在状态推导时只能看到自己的 milestone |
 | **`GSD_PARALLEL_WORKER`** | Worker 不能再嵌套启动新的并行会话 |
 | **预算上限** | 跨所有 workers 执行聚合成本限制 |
-| **信号式关闭** | 通过文件信号 + SIGTERM 优雅停止 |
+| **命令队列 + SIGTERM** | 通过数据库 `command_queue` 命令 + 进程信号优雅停止 / 暂停 / 恢复 |
 | **Doctor 集成** | 检测并清理孤儿会话 |
 | **冲突感知 merge** | 遇到代码冲突时停止；`.gsd/` 状态冲突自动解决 |
 
@@ -265,9 +265,7 @@ Coordinator 会在 `refreshWorkerStatuses()` 中执行 stale detection，并自�
 .gsd/
 ├── parallel/                    # Coordinator ↔ worker IPC
 │   ├── M002.status.json         # Worker heartbeat + progress
-│   ├── M002.signal.json         # Coordinator → worker signals
-│   ├── M003.status.json
-│   └── M003.signal.json
+│   └── M003.status.json
 ├── worktrees/                   # Git worktrees（每个 milestone 一个）
 │   ├── M002/                    # M002 的隔离 checkout
 │   │   ├── .gsd/                # M002 自己的状态文件

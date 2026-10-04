@@ -48,7 +48,7 @@ Each worker is a separate GSD process with complete isolation:
 | Metrics | Own `metrics.json` |
 | Crash recovery | Own `auto.lock` |
 
-Workers communicate with the coordinator through file-based IPC — heartbeat files and signal files in `.gsd/parallel/`.
+Workers communicate with the coordinator through heartbeat files in `.gsd/parallel/` and `command_queue` rows in the project database. There is no signal file.
 
 ## Eligibility
 
