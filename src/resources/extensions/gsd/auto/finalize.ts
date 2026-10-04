@@ -104,6 +104,7 @@ export async function runFinalize(
   loopState: LoopState,
   sidecarItem?: SidecarItem,
   publishVerifiedTask?: () => Promise<void>,
+  onExecuteWorkComplete?: () => void,
 ): Promise<PhaseResult> {
   const { ctx, pi, s, deps } = ic;
   const { pauseAfterUatDispatch } = iterData;
@@ -266,6 +267,8 @@ export async function runFinalize(
       }
     }
   }
+
+  onExecuteWorkComplete?.();
 
   if (pauseAfterUatDispatch) {
     const pauseMid = iterData.mid;

@@ -2066,7 +2066,6 @@ export async function autoLoop(
       // ── Phase 5: Finalize ───────────────────────────────────────────────
 
       let finalizeResult: Awaited<ReturnType<typeof runFinalize>>;
-      checkpointStage("verify");
       journalReporter.emit("post-unit-finalize-start", {
         iteration,
         unitType: iterData.unitType,
@@ -2087,7 +2086,7 @@ export async function autoLoop(
               turnId,
               basePath: s.basePath,
             }, VERIFIED_TASK_PUBLICATION_DEPS);
-          }),
+          }, () => checkpointStage("verify")),
         );
       } catch (err) {
         const error = formatDispatchExceptionSummary({ error: err });
@@ -2109,7 +2108,6 @@ export async function autoLoop(
           ));
         throw err;
       }
-      checkpointStage("route");
       phaseReporter.report("finalize", finalizeResult.action, {
         unitType: iterData.unitType,
         unitId: iterData.unitId,
@@ -2122,6 +2120,7 @@ export async function autoLoop(
           : finalizeResult.action === "continue"
             ? "retry"
             : "stopped";
+      if (finalizeStatus === "completed") checkpointStage("route");
       journalReporter.emit("post-unit-finalize-end", {
         iteration,
         unitType: iterData.unitType,
@@ -2208,7 +2207,7 @@ export async function autoLoop(
         continue;
       }
 
-      checkpointStage("closeout");
+      if (finalizeStatus === "completed") checkpointStage("closeout");
       await closeRun("completed", "iteration-complete");
       completeIteration();
       finishTurn("completed", "none", undefined, null);

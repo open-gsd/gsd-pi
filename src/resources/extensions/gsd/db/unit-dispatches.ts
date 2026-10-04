@@ -650,11 +650,12 @@ export function getDispatchStage(dispatchId: number): DispatchStage {
 
 /**
  * Whether the unit of the dispatch row may still have execution to continue:
- * the row is not completed and the unit did not leave the execute stage.
+ * the unit did not leave the execute stage. The row status does not decide
+ * this: the loop settles the row of a unit that paused in pre-verification
+ * with unfinished work, and that unit is still in the execute stage.
  */
 export function isDispatchExecutionOpen(dispatchId: number): boolean {
-  const row = getDispatchById(dispatchId);
-  return row !== null && row.status !== "completed" && getDispatchStage(dispatchId) === "execute";
+  return getDispatchById(dispatchId) !== null && getDispatchStage(dispatchId) === "execute";
 }
 
 /** Delete the stored retry decisions of every dispatch row of the unit. */

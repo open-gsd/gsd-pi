@@ -204,6 +204,9 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
       const closers = pausedScopes.map((scope) => {
         if (staleScopes.has(scope)) return `worker scope ${scope}: its milestone or slice is closed, run /gsd doctor fix`;
         if (scope === "/") return "project root: resume it with /gsd auto";
+        if (scope.split("/")[1]) {
+          return `worker scope ${scope}: it closes when the slice completes; after that, /gsd doctor fix or the next /gsd auto closes it`;
+        }
         return `worker scope ${scope}: resume its worker with /gsd parallel start`;
       });
       throw new MigrationBlockedError(

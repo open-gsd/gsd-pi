@@ -43,7 +43,7 @@ import { isBlockedStopReason, stopNoticeKind } from "../stop-notice.js";
 import { mapStatusToExitCode } from "../../../../headless-events.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease, getMilestoneLease, milestoneLeaseTtlSeconds } from "../db/milestone-leases.js";
-import { getDispatchStage, getLatestForUnit, recordDispatchClaim, markCanceled } from "../db/unit-dispatches.js";
+import { getDispatchStage, getLatestForUnit, isDispatchExecutionOpen, recordDispatchClaim, markCanceled } from "../db/unit-dispatches.js";
 import { setRuntimeKv, getRuntimeKv } from "../db/runtime-kv.js";
 import { SourceObservationStore } from "../source-observations.js";
 import { autoCommitCurrentBranch } from "../worktree.js";
@@ -8174,7 +8174,16 @@ test("#2385: the adjacent unit-retry guard still trips on unchanged payloads", a
   );
 });
 
-test("autoLoop stores the stage of the unit on its dispatch row", async (t) => {
+/**
+ * Run one unit through autoLoop with a claimed dispatch row. Returns the id of
+ * the row and the stage a restarted process reads when the process is killed
+ * in each phase.
+ */
+async function runUnitWithDispatchRow(
+  t: TestContext,
+  unit: { unitType: string; unitId: string },
+  overrides: Parameters<typeof makeMockDeps>[0] = {},
+): Promise<{ dispatchId: number; stageAt: Record<string, string> }> {
   _resetPendingResolve();
 
   const ctx = makeMockCtx();
@@ -8184,22 +8193,24 @@ test("autoLoop stores the stage of the unit on its dispatch row", async (t) => {
   openLoopDatabase(t, s);
   insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test Task", status: "pending" });
   const workerId = registerAutoWorker({ projectRootRealpath: s.basePath });
   const lease = claimMilestoneLease(workerId, "M001");
   if (!lease.ok) throw new Error("expected test lease");
+  const [, sliceId = null, taskId = null] = unit.unitId.split("/");
   const claim = recordDispatchClaim({
     traceId: "flow-stage-checkpoint",
     workerId,
     milestoneLeaseToken: lease.token,
     milestoneId: "M001",
-    sliceId: "S01",
-    unitType: "plan-slice",
-    unitId: "M001/S01",
+    sliceId,
+    taskId,
+    unitType: unit.unitType,
+    unitId: unit.unitId,
   });
   if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
   const dispatchId = claim.dispatchId;
 
-  // The stage a restarted process reads when the process is killed at this point.
   const stageAt: Record<string, string> = {};
   let advanceCalls = 0;
   s.orchestration = {
@@ -8212,12 +8223,12 @@ test("autoLoop stores the stage of the unit on its dispatch row", async (t) => {
       }
       return {
         kind: "advanced" as const,
-        unit: { unitType: "plan-slice", unitId: "M001/S01" },
+        unit,
         stateSnapshot: {
-          phase: "planning",
+          phase: taskId ? "executing" : "planning",
           activeMilestone: { id: "M001", title: "Test Milestone", status: "active" },
           activeSlice: { id: "S01", title: "Test Slice" },
-          activeTask: null,
+          activeTask: taskId ? { id: taskId, title: "Test Task" } : null,
           registry: [{ id: "M001", status: "active" }],
           blockers: [],
         } as any,
@@ -8238,13 +8249,49 @@ test("autoLoop stores the stage of the unit on its dispatch row", async (t) => {
       return { action: "next" as const, data: {} };
     },
     postUnitPreVerification: async () => {
-      stageAt.finalize = getDispatchStage(dispatchId);
+      stageAt.preVerification = getDispatchStage(dispatchId);
       return "continue" as const;
     },
+    runPostUnitVerification: async () => {
+      stageAt.verification = getDispatchStage(dispatchId);
+      return "continue" as const;
+    },
+    ...overrides,
   });
 
   await autoLoop(ctx, pi, s, deps);
 
-  assert.deepEqual(stageAt, { execute: "execute", finalize: "verify" });
+  return { dispatchId, stageAt };
+}
+
+test("autoLoop stores the stage of the unit on its dispatch row", async (t) => {
+  const { dispatchId, stageAt } = await runUnitWithDispatchRow(t, { unitType: "plan-slice", unitId: "M001/S01" });
+
+  assert.deepEqual(stageAt, { execute: "execute", preVerification: "execute", verification: "verify" });
   assert.equal(getDispatchStage(dispatchId), "closeout", "a completed iteration reached the closeout stage");
+});
+
+test("a pause in pre-verification for unfinished work leaves the unit in the execute stage", async (t) => {
+  // The per-unit cost cap: pre-verification pauses and the unit did not finish its work.
+  const { dispatchId } = await runUnitWithDispatchRow(t, { unitType: "execute-task", unitId: "M001/S01/T01" }, {
+    postUnitPreVerification: async (postUnitCtx) => {
+      await postUnitCtx.pauseAuto(postUnitCtx.ctx, postUnitCtx.pi, "user_limit");
+      return "dispatched" as const;
+    },
+  });
+
+  assert.equal(getDispatchStage(dispatchId), "execute");
+  assert.equal(isDispatchExecutionOpen(dispatchId), true, "the resume replays the tool calls of the unit");
+});
+
+test("a pause in verification after pre-verification passed leaves the unit in the verify stage", async (t) => {
+  const { dispatchId } = await runUnitWithDispatchRow(t, { unitType: "execute-task", unitId: "M001/S01/T01" }, {
+    runPostUnitVerification: async (vctx, pauseAuto) => {
+      await pauseAuto(vctx.ctx, vctx.pi, "machine_fixable");
+      return "pause" as const;
+    },
+  });
+
+  assert.equal(getDispatchStage(dispatchId), "verify");
+  assert.equal(isDispatchExecutionOpen(dispatchId), false, "the resume does not replay");
 });

@@ -218,6 +218,7 @@ test("a pause after the claim and before the next unit starts links the previous
   const base = makeProject(t);
   insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Next task", status: "pending" });
   const previous = claimUnit(base, "execute-task", "M001/S01/T01");
+  setDispatchStage(previous.dispatchId, "closeout");
   markCompleted(previous.dispatchId);
   const next = claimUnit(base, "execute-task", "M001/S01/T02", previous);
 
@@ -407,18 +408,22 @@ test("restart resumes the named run of a custom-engine pause from the pause row"
 });
 
 /** Open the pause of a parallel worker on a milestone, from a process that is not that worker. */
-function pauseParallelWorker(t: TestContext, milestoneId: string): void {
+function pauseParallelWorker(t: TestContext, milestoneId: string, sliceId?: string): void {
   const previousWorker = process.env.GSD_PARALLEL_WORKER;
   const previousLock = process.env.GSD_MILESTONE_LOCK;
+  const previousSliceLock = process.env.GSD_SLICE_LOCK;
   const restore = (): void => {
     if (previousWorker === undefined) delete process.env.GSD_PARALLEL_WORKER;
     else process.env.GSD_PARALLEL_WORKER = previousWorker;
     if (previousLock === undefined) delete process.env.GSD_MILESTONE_LOCK;
     else process.env.GSD_MILESTONE_LOCK = previousLock;
+    if (previousSliceLock === undefined) delete process.env.GSD_SLICE_LOCK;
+    else process.env.GSD_SLICE_LOCK = previousSliceLock;
   };
   t.after(restore);
   process.env.GSD_PARALLEL_WORKER = "1";
   process.env.GSD_MILESTONE_LOCK = milestoneId;
+  if (sliceId) process.env.GSD_SLICE_LOCK = sliceId;
   openAutoPause({ blockerKind: "machine_fixable", milestoneId });
   restore();
 }
@@ -484,6 +489,20 @@ test("the pause of a parallel worker scope blocks migration until the doctor fix
   await assert.rejects(
     () => assertMigrationTargetAvailable(base),
     /worker scope M002\/: resume its worker with \/gsd parallel start/,
+  );
+});
+
+test("the migration refusal for the pause of an open slice scope names the slice completion, not the parallel start", async (t) => {
+  const base = makeProject(t);
+  pauseParallelWorker(t, "M001", "S01");
+
+  await assert.rejects(
+    () => assertMigrationTargetAvailable(base),
+    (error: Error) => {
+      assert.match(error.message, /worker scope M001\/S01: it closes when the slice completes/);
+      assert.doesNotMatch(error.message, /parallel start/);
+      return true;
+    },
   );
 });
 
