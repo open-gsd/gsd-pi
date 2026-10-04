@@ -13,7 +13,7 @@ import {
   classifyMilestoneReadiness,
   formatAcceptedDiscussHandoffMessage,
 } from "./milestone-readiness.js";
-import { clearPathCache, gsdRoot, resolveGsdRootFile, resolveMilestoneFile } from "./paths.js";
+import { clearPathCache, resolveMilestoneFile } from "./paths.js";
 import { _getPendingAutoStart, deletePendingAutoStart, type PendingAutoStartEntry } from "./pending-auto-start.js";
 import { logWarning } from "./workflow-logger.js";
 import { removeProjectionFileSync } from "./atomic-write.js";
@@ -124,20 +124,6 @@ function ensureMilestoneRowForAcceptedHandoff(
   return false;
 }
 
-/**
- * Extract milestone IDs from PROJECT.md milestone sequence table.
- * Looks for rows like "| M001 | Name | Status |" and extracts the ID column.
- */
-function parseMilestoneSequenceFromProject(content: string): string[] {
-  const ids: string[] = [];
-  const lines = content.split(/\r?\n/);
-  for (const line of lines) {
-    const match = line.match(/^\|\s*(M\d{3}[A-Z0-9-]*)\s*\|/);
-    if (match) ids.push(match[1]);
-  }
-  return ids;
-}
-
 function hasBlockingDepthGate(entry: PendingAutoStartEntry): boolean {
   const basePathForGate = entry.scope.workspace.projectRoot;
   const pendingGateId = getPendingGate(basePathForGate);
@@ -151,37 +137,7 @@ function discussionManifestPath(entry: PendingAutoStartEntry): string {
   return join(entry.scope.workspace.contract.projectGsd, "DISCUSSION-MANIFEST.json");
 }
 
-function warnForMissingProjectMilestones(entry: PendingAutoStartEntry): string[] {
-  const { ctx, basePath } = entry;
-  const projectFile = resolveGsdRootFile(basePath, "PROJECT");
-  if (!projectFile) return [];
-
-  try {
-    const projectContent = readFileSync(projectFile, "utf-8");
-    const projectIds = parseMilestoneSequenceFromProject(projectContent);
-    if (projectIds.length <= 1) return projectIds;
-
-    const missing = projectIds.filter(id => {
-      const hasContext = !!resolveMilestoneFile(basePath, id, "CONTEXT");
-      const hasDraft = !!resolveMilestoneFile(basePath, id, "CONTEXT-DRAFT");
-      const hasDir = existsSync(join(gsdRoot(basePath), "milestones", id));
-      return !hasContext && !hasDraft && !hasDir;
-    });
-    if (missing.length > 0) {
-      ctx.ui.notify(
-        `Multi-milestone validation: ${missing.join(", ")} not found in filesystem. ` +
-        `Discussion may not have completed all readiness gates.`,
-        "warning",
-      );
-    }
-    return projectIds;
-  } catch (e) {
-    logWarning("guided", `PROJECT.md parsing failed: ${(e as Error).message}`);
-    return [];
-  }
-}
-
-function discussionManifestIsComplete(entry: PendingAutoStartEntry, projectIds: string[]): boolean {
+function discussionManifestIsComplete(entry: PendingAutoStartEntry): boolean {
   const manifestPath = discussionManifestPath(entry);
   if (!existsSync(manifestPath)) return true;
 
@@ -192,17 +148,6 @@ function discussionManifestIsComplete(entry: PendingAutoStartEntry, projectIds: 
 
     if (total > 1 && completed < total) {
       return false;
-    }
-
-    if (projectIds.length > 0) {
-      const manifestIds = Object.keys(manifest.milestones ?? {});
-      const untracked = projectIds.filter(id => !manifestIds.includes(id));
-      if (untracked.length > 0) {
-        entry.ctx.ui.notify(
-          `Discussion manifest missing gates for: ${untracked.join(", ")}`,
-          "warning",
-        );
-      }
     }
   } catch (e) {
     logWarning("guided", `discussion manifest verification failed: ${(e as Error).message}`);
@@ -270,8 +215,7 @@ export function checkAutoStartAfterDiscuss(lookupBasePath?: string): boolean {
     return false;
   }
 
-  const projectIds = warnForMissingProjectMilestones(entry);
-  if (!discussionManifestIsComplete(entry, projectIds)) return false;
+  if (!discussionManifestIsComplete(entry)) return false;
 
   cleanupAcceptedHandoffArtifacts(entry);
   deletePendingAutoStart(basePath);
