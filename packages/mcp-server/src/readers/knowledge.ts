@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { readFileSync, existsSync } from 'node:fs';
+import { KNOWLEDGE_ROW_ID_PATTERN } from '@opengsd/contracts';
 import { resolveGsdRoot, resolveRootFile } from './paths.js';
 
 // ---------------------------------------------------------------------------
@@ -29,6 +30,8 @@ export interface KnowledgeResult {
 // Parser
 // ---------------------------------------------------------------------------
 
+const KNOWLEDGE_ROW_ID = new RegExp(`^${KNOWLEDGE_ROW_ID_PATTERN}$`, 'i');
+
 function parseTableRows(section: string, type: KnowledgeType): KnowledgeEntry[] {
   const entries: KnowledgeEntry[] = [];
   const lines = section.split('\n');
@@ -41,7 +44,7 @@ function parseTableRows(section: string, type: KnowledgeType): KnowledgeEntry[] 
     if (cells[0].startsWith('#') || cells[0].startsWith('-')) continue;
 
     const id = cells[0];
-    if (!/^[KPL]\d+$/i.test(id)) continue;
+    if (!KNOWLEDGE_ROW_ID.test(id)) continue;
 
     if (type === 'rule' && cells.length >= 5) {
       entries.push({

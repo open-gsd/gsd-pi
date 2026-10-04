@@ -625,6 +625,31 @@ describe('readKnowledge', () => {
     assert.ok(k001.content.includes('bcrypt'));
   });
 
+  it('reads a row that has only a memory id, typed by its section', () => {
+    const dir = tmpProject();
+    mkdirSync(join(dir, '.gsd'), { recursive: true });
+    writeFileSync(
+      join(dir, '.gsd', 'KNOWLEDGE.md'),
+      [
+        '# Project Knowledge',
+        '',
+        '## Patterns',
+        '',
+        '| # | Pattern | Where | Notes |',
+        '|---|---------|-------|-------|',
+        '| P001 | Captured pattern | src | — |',
+        '| MEM042 | Extracted pattern | src | — |',
+        '',
+      ].join('\n'),
+    );
+
+    const result = readKnowledge(dir);
+
+    assert.deepEqual(result.entries.map((entry) => [entry.id, entry.type]), [['P001', 'pattern'], ['MEM042', 'pattern']]);
+    assert.equal(result.counts.patterns, 2);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('returns empty for missing KNOWLEDGE.md', () => {
     const empty = tmpProject();
     mkdirSync(join(empty, '.gsd'), { recursive: true });

@@ -3,6 +3,8 @@ import { existsSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { pathToFileURL } from "node:url"
 
+import { KNOWLEDGE_ROW_ID_PATTERN } from "@opengsd/contracts"
+
 import { resolveBridgeRuntimeConfig } from "./bridge-service.ts"
 import { resolveSubprocessModule, buildSubprocessPrefixArgs } from "./ts-subprocess-flags.ts"
 import type { KnowledgeEntry, KnowledgeData } from "../../web/lib/knowledge-captures-types.ts"
@@ -95,7 +97,8 @@ async function readKnowledgeMarkdownFromDb(packageRoot: string, projectCwd: stri
  * Handles two formats:
  * 1. **Freeform**: `## Title` followed by prose paragraphs
  * 2. **Table**: `## Title` followed by a markdown table with rows matching
- *    `| K001 |`, `| P001 |`, or `| L001 |` patterns
+ *    `| K001 |`, `| P001 |`, `| L001 |`, or `| MEM001 |` patterns (a row with
+ *    no knowledge id is rendered under its memory id)
  */
 function parseKnowledgeFile(content: string): KnowledgeEntry[] {
   const entries: KnowledgeEntry[] = []
@@ -127,8 +130,8 @@ function parseKnowledgeFile(content: string): KnowledgeEntry[] {
 
     if (!title || !body) continue
 
-    // Check for table rows with K/P/L prefixed IDs
-    const tableRowRegex = /^\|\s*([KPL]\d{3})\s*\|(.+)\|/gm
+    // Check for table rows with a knowledge id or a memory id
+    const tableRowRegex = new RegExp(`^\\|\\s*(${KNOWLEDGE_ROW_ID_PATTERN})\\s*\\|(.+)\\|`, "gm")
     const tableMatches: Array<{ id: string; rest: string }> = []
     let match: RegExpExecArray | null
 
@@ -139,9 +142,10 @@ function parseKnowledgeFile(content: string): KnowledgeEntry[] {
     if (tableMatches.length > 0) {
       // Table format: parse each row as a structured entry
       for (const row of tableMatches) {
-        const prefix = row.id.charAt(0)
+        // A memory id carries no type: the section it is rendered under does.
+        const kind = row.id.startsWith("MEM") ? title.charAt(0) : row.id.charAt(0)
         const type: KnowledgeEntry["type"] =
-          prefix === "K" ? "rule" : prefix === "P" ? "pattern" : "lesson"
+          kind === "K" || kind === "R" ? "rule" : kind === "P" ? "pattern" : "lesson"
 
         // Extract columns from the rest of the row
         const columns = row.rest

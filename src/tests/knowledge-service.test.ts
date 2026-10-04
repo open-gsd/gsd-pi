@@ -47,6 +47,30 @@ test("collectKnowledgeData returns database rows when KNOWLEDGE.md is stale", as
   assert.equal(JSON.stringify(data.entries).includes("Stale file rule"), false)
 })
 
+test("collectKnowledgeData returns a row that has only a memory id, typed by its section", async (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-web-knowledge-mem-")))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+  useRepoAsPackageRoot(t)
+  mkdirSync(join(base, ".gsd"), { recursive: true })
+
+  openDatabase(join(base, ".gsd", "gsd.db"))
+  const memoryId = createMemory({ category: "pattern", content: "Pattern with no knowledge id", scope: "project" })
+  createMemory({
+    category: "pattern",
+    content: "Pattern with a four digit id",
+    scope: "project",
+    structuredFields: { sourceKnowledgeId: "P1000" },
+  })
+  closeDatabase()
+
+  const data = await collectKnowledgeData(base)
+
+  assert.deepEqual(
+    data.entries.filter((entry) => entry.type === "pattern").map((entry) => [entry.id, entry.title]),
+    [["P1000", "Pattern with a four digit id"], [memoryId, "Pattern with no knowledge id"]],
+  )
+})
+
 test("collectKnowledgeData fails when the project database is missing, even with a KNOWLEDGE.md", async (t) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-web-knowledge-nodb-")))
   t.after(() => rmSync(base, { recursive: true, force: true }))

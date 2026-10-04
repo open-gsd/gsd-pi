@@ -266,3 +266,37 @@ test("/gsd memory import treats a file-only KNOWLEDGE.md row as a local row", as
   assert.match(rendered, /\| K002 \| project \| Imported rule \|/);
   assert.match(messages.join("\n"), /K001 → K002/);
 });
+
+test("/gsd memory import drops the provenance markers of the source database and keeps the knowledge id", async (t) => {
+  const base = makeBase(t);
+
+  await runMemory(base, `import ${exportFile(base, [
+    {
+      category: "architecture",
+      content: "Imported decision memory",
+      structured_fields: { sourceDecisionId: "D007", sourceUnitId: "M001/S01/T01", choice: "kept field" },
+    },
+    { category: "pattern", content: "Imported pattern", structured_fields: { sourceKnowledgeId: "P003", sourceDecisionId: "D008" } },
+  ])}`);
+
+  const fields = (_getAdapter()!
+    .prepare("SELECT structured_fields FROM memories ORDER BY id")
+    .all() as Array<{ structured_fields: string }>).map((row) => JSON.parse(row.structured_fields));
+  assert.deepEqual(fields, [{ choice: "kept field" }, { sourceKnowledgeId: "P003" }]);
+});
+
+test("/gsd memory import that fails part-way reports the rows it imported and renders KNOWLEDGE.md", async (t) => {
+  const base = makeBase(t);
+  createMemory({ category: "pattern", content: "Local row with an id that cannot be remapped", structuredFields: { sourceKnowledgeId: "X1" } });
+
+  const messages = await runMemory(base, `import ${exportFile(base, [
+    { category: "pattern", content: "Imported before the failure", structured_fields: { sourceKnowledgeId: "P001" } },
+    { category: "pattern", content: "Collides on an id that is not K/P/L", structured_fields: { sourceKnowledgeId: "X1" } },
+    { category: "pattern", content: "Never reached", structured_fields: { sourceKnowledgeId: "P002" } },
+  ])}`);
+
+  const shown = messages.join("\n");
+  assert.match(shown, /Import failed: knowledge id X1 is already in use/);
+  assert.match(shown, /Imported 1 memories/);
+  assert.match(knowledgeMd(base), /\| P001 \| Imported before the failure \|/, "the committed row is rendered");
+});

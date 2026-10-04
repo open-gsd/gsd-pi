@@ -398,16 +398,20 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
     ctx.ui.notify("Usage: /gsd memory import <path.json>", "warning");
     return;
   }
+  let parsed: { memories?: ExportedMemory[]; relations?: ExportedRelation[] };
   try {
-    const abs = resolvePath(process.cwd(), target);
-    const raw = readFileSync(abs, "utf-8");
-    const parsed = JSON.parse(raw) as { memories?: ExportedMemory[]; relations?: ExportedRelation[] };
+    parsed = JSON.parse(readFileSync(resolvePath(process.cwd(), target), "utf-8"));
+  } catch (err) {
+    ctx.ui.notify(`Import failed: ${(err as Error).message}`, "error");
+    return;
+  }
 
-    let memoryCount = 0;
-    let relationCount = 0;
-    let duplicateCount = 0;
-    const remapped: string[] = [];
+  let memoryCount = 0;
+  let relationCount = 0;
+  let duplicateCount = 0;
+  const remapped: string[] = [];
 
+  try {
     // An import only adds rows. A row whose category and content a local row
     // already holds (database row or file-only KNOWLEDGE.md row) is skipped,
     // so a re-import adds nothing. A local row is never superseded.
@@ -424,15 +428,22 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
         duplicateCount++;
         continue;
       }
+      // Provenance markers (sourceDecisionId, ...) name rows of the source
+      // database. Only the knowledge id is kept, so an imported memory is
+      // never taken for the memory of a local decision.
+      const structuredFields = Object.fromEntries(
+        Object.entries(mem.structured_fields ?? {}).filter(
+          ([field]) => field === "sourceKnowledgeId" || !/^source[A-Z]\w*Id$/.test(field),
+        ),
+      );
       // A knowledge id (K/P/L###) that a local row already holds stays with
       // the local row: the imported row gets the next free local id.
-      let structuredFields = mem.structured_fields ?? null;
-      const knowledgeId = structuredFields?.["sourceKnowledgeId"];
+      const knowledgeId = structuredFields["sourceKnowledgeId"];
       if (typeof knowledgeId === "string" && local.ids.has(knowledgeId)) {
         const prefix = /^[KPL](?=\d+$)/.exec(knowledgeId)?.[0] as "K" | "P" | "L" | undefined;
         if (!prefix) throw new Error(`knowledge id ${knowledgeId} is already in use and cannot be remapped`);
         const localId = nextKnowledgeId(base, prefix);
-        structuredFields = { ...structuredFields, sourceKnowledgeId: localId };
+        structuredFields["sourceKnowledgeId"] = localId;
         remapped.push(`${knowledgeId} → ${localId}`);
       }
       // createMemory allocates a fresh seq → new MEM### id; imports replay
@@ -446,12 +457,12 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
         scope: mem.scope,
         tags: mem.tags,
         // Keeps the knowledge id (sourceKnowledgeId) so the row stays in KNOWLEDGE.md.
-        structuredFields,
+        structuredFields: Object.keys(structuredFields).length > 0 ? structuredFields : null,
       });
       if (!id) continue;
       memoryCount++;
       seen.add(key);
-      const importedId = structuredFields?.["sourceKnowledgeId"];
+      const importedId = structuredFields["sourceKnowledgeId"];
       if (typeof importedId === "string") local.ids.add(importedId);
     }
 
@@ -461,7 +472,10 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
         relationCount++;
       }
     }
-
+  } catch (err) {
+    ctx.ui.notify(`Import failed: ${(err as Error).message}`, "error");
+  } finally {
+    // Rows imported before a failure are committed: report them and render.
     ctx.ui.notify(
       [
         `Imported ${memoryCount} memories and ${relationCount} relations.`,
@@ -471,8 +485,6 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
       "info",
     );
     renderKnowledgeAfterMemoryChange(ctx);
-  } catch (err) {
-    ctx.ui.notify(`Import failed: ${(err as Error).message}`, "error");
   }
 }
 

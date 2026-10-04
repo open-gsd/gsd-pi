@@ -418,3 +418,10 @@ export const CANONICAL_WORKFLOW_TOOL_NAMES = WORKFLOW_TOOL_CONTRACTS.map(
 export const WORKFLOW_TOOL_ALIAS_NAMES = WORKFLOW_TOOL_CONTRACTS.flatMap(
 	(tool) => tool.aliases,
 ) as readonly string[];
+
+/**
+ * Regular-expression source for the `#` cell of a KNOWLEDGE.md table row: a
+ * knowledge id (K/P/L plus digits) or, for a row with no knowledge id, its
+ * memory id (MEM plus digits). Every parser of the rendered tables uses it.
+ */
+export const KNOWLEDGE_ROW_ID_PATTERN = "(?:[KPL]\\d+|MEM\\d+)";
