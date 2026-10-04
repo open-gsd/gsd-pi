@@ -644,13 +644,44 @@ test("Slice completion accepts a completed child adopted by an Import Applicatio
   `).lifecycle_status, "completed");
 });
 
-test("Slice completion rejects a completed child adopted with no evidence by an operation that is not an import", () => {
+test("Slice completion accepts a completed child adopted by the lifecycle backfill as unverified legacy", () => {
+  const base = makeBase();
+  // T03 is an old row: legacy 'complete' with completion evidence, no lifecycle row, Attempt or verdict.
+  db().exec(`
+    INSERT INTO tasks (
+      milestone_id, slice_id, id, title, status, sequence,
+      completed_at, full_summary_md, verification_result
+    ) VALUES (
+      'M001', 'S01', 'T03', 'Completed before lifecycle authority', 'complete', 3,
+      '2026-07-13T00:00:00.000Z', 'Task summary', 'passed'
+    )
+  `);
+  applyLifecycleBackfill(base);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = 'T03'
+  `).lifecycle_status, "completed");
+  finishTaskWithOptionalEvidence(true);
+
+  const result = completeSlice(validInput("slice-complete/backfilled-completed-child"));
+
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.completedTaskIds, ["T01", "T03"]);
+  // Only new work carries a completion proof.
+  assert.deepEqual((result.proofs as Array<{ taskId: string }>).map((proof) => proof.taskId), ["T01"]);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion rejects a completed child adopted with no evidence by an operation that is not an import or the backfill", () => {
   makeBase();
   db().exec(`
     INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
     VALUES ('M001', 'S01', 'T03', 'Completed with no evidence', 'complete', 3)
   `);
-  // Same lifecycle row as an import adoption (completed at state version 0), but from another operation.
+  // Same lifecycle row as a legacy adoption (completed at state version 0), but from another operation.
   executeAtFence("test.unproven-adoption", "fixture/slice-completion/unproven-adoption", (context) => {
     adoptOrTransitionLifecycle(context, {
       itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T03", lifecycleStatus: "completed",
