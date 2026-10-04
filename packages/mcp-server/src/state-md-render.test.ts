@@ -27,6 +27,7 @@ import { withCommandCwd } from "../../../src/resources/extensions/gsd/commands/c
 import { buildEscalationArtifact, openTaskEscalation } from "../../../src/resources/extensions/gsd/escalation.ts";
 import { internalExecutionInvocation } from "../../../src/resources/extensions/gsd/execution-invocation.ts";
 import { executeDomainOperation } from "../../../src/resources/extensions/gsd/db/domain-operation.ts";
+import { recordExecRun } from "../../../src/resources/extensions/gsd/db/writers/exec-runs.ts";
 import { adoptOrTransitionLifecycle, readDomainOperationFence } from "../../../src/resources/extensions/gsd/db/writers/lifecycle-commands.ts";
 import { deriveState, invalidateStateCache } from "../../../src/resources/extensions/gsd/state.ts";
 import { renderStateContent } from "../../../src/resources/extensions/gsd/workflow-projections.ts";
@@ -255,15 +256,24 @@ for (const transport of ["native", "mcp"] as const) {
     it("UAT result renders STATE.md", async (t) => {
       const fixture = await openFixture(t);
       const evidenceId = `state-md-uat-${transport}`;
-      mkdirSync(join(fixture.root, ".gsd", "exec"), { recursive: true });
-      writeFileSync(join(fixture.root, ".gsd", "exec", `${evidenceId}.meta.json`), JSON.stringify({
+      // The host record of the gsd_uat_exec run the check cites.
+      recordExecRun({
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-01",
         id: evidenceId,
+        runtime: "bash",
+        command: "node check.js",
+        cwd: fixture.root,
         exit_code: 0,
         signal: null,
-        timed_out: false,
+        timedOut: false,
         aborted: false,
-        metadata: { kind: "uat_exec", milestoneId: "M001", sliceId: "S01", checkId: "UAT-01", intent: "uat-artifact-check" },
-      }));
+        started_at: new Date().toISOString(),
+        duration_ms: 1,
+        output_hash: "sha256:test",
+      });
       await assertRendersState(fixture.root, `${transport} UAT`, () => callTool(transport, fixture.root, "gsd_uat_result_save", {
         milestoneId: "M001",
         sliceId: "S01",
