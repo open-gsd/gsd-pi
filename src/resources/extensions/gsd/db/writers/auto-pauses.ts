@@ -56,21 +56,22 @@ export function readOpenAutoPause(): PausedSessionMetadata | null {
   };
 }
 
-/** Whether a worker scope of the project has an open pause. */
-export function hasOpenAutoPause(): boolean {
-  if (!isDbAvailable()) return false;
-  return _getAdapter()!.prepare(
-    `SELECT 1 AS present FROM auto_pauses WHERE closed_at IS NULL LIMIT 1`,
-  ).get() != null;
+/** The worker scopes of the project that have an open pause. */
+export function listOpenAutoPauseScopes(): string[] {
+  if (!isDbAvailable()) return [];
+  const rows = _getAdapter()!.prepare(
+    `SELECT scope FROM auto_pauses WHERE closed_at IS NULL ORDER BY scope`,
+  ).all() as Array<{ scope: string }>;
+  return rows.map((row) => row.scope);
 }
 
-/** Close the open pause of this worker's scope. The row stays in the table. */
-export function closeAutoPause(): void {
+/** Close the open pause of a scope (default: this worker's scope). The row stays in the table. */
+export function closeAutoPause(scope: string = sidecarQueueScope()): void {
   if (!isDbAvailable()) return;
   transaction(() => {
     _getAdapter()!.prepare(
       `UPDATE auto_pauses SET closed_at = :closed_at WHERE scope = :scope AND closed_at IS NULL`,
-    ).run({ ":closed_at": new Date().toISOString(), ":scope": sidecarQueueScope() });
+    ).run({ ":closed_at": new Date().toISOString(), ":scope": scope });
   });
 }
 

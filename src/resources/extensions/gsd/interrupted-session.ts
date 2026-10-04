@@ -18,7 +18,9 @@ import { deriveState } from "./state.js";
 import type { GSDState } from "./types.js";
 import { getRuntimeKv, deleteRuntimeKv } from "./db/runtime-kv.js";
 import { isDispatchExecutionOpen } from "./db/unit-dispatches.js";
-import { closeAutoPause, readOpenAutoPause } from "./db/writers/auto-pauses.js";
+import { closeAutoPause, listOpenAutoPauseScopes, readOpenAutoPause } from "./db/writers/auto-pauses.js";
+import { getMilestone, getSlice } from "./db/queries.js";
+import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
 import type { AutoPauseBlockerKind } from "./recovery-policy.js";
 
 export type InterruptedSessionClassification =
@@ -146,6 +148,30 @@ export function readPausedSessionMetadata(
 export function clearPausedSession(): void {
   closeAutoPause();
   deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+}
+
+/**
+ * The open pauses of a milestone or slice scope whose item is closed or no
+ * longer exists. No worker starts for such an item again, so no resume closes
+ * the pause.
+ */
+export function findStaleScopedPauses(): string[] {
+  return listOpenAutoPauseScopes().filter((scope) => {
+    const [milestoneId, sliceId] = scope.split("/");
+    if (!milestoneId) return false;
+    const milestone = getMilestone(milestoneId);
+    if (!milestone || isClosedStatus(milestone.status) || isDiscardedMilestoneStatus(milestone.status)) return true;
+    if (!sliceId) return false;
+    const slice = getSlice(milestoneId, sliceId);
+    return !slice || isClosedStatus(slice.status);
+  });
+}
+
+/** Close every stale scoped pause and return the scopes. The rows stay in the table. */
+export function closeStaleScopedPauses(): string[] {
+  const stale = findStaleScopedPauses();
+  for (const scope of stale) closeAutoPause(scope);
+  return stale;
 }
 
 export function isBootstrapCrashLock(lock: LockData | null): boolean {

@@ -32,6 +32,7 @@ import type { GSDState } from "./types.js";
 import {
   assessInterruptedSession,
   clearPausedSession as closePausedSession,
+  closeStaleScopedPauses,
   readPausedSessionMetadata,
   type InterruptedSessionAssessment,
 } from "./interrupted-session.js";
@@ -2869,6 +2870,14 @@ export async function startAuto(
       logWarning("session", `${logTag}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
   };
+
+  if (!process.env.GSD_PARALLEL_WORKER) {
+    try {
+      closeStaleScopedPauses();
+    } catch (err) {
+      logWarning("session", `stale scoped pause cleanup failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
+    }
+  }
 
   if (!s.paused) {
     try {

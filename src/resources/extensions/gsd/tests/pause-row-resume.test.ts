@@ -22,6 +22,8 @@ import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
 import { getDispatchStage, markCompleted, recordDispatchClaim, setDispatchStage } from "../db/unit-dispatches.ts";
 import { openAutoPause } from "../db/writers/auto-pauses.ts";
+import { checkRuntimeHealth } from "../doctor-runtime-checks.ts";
+import type { DoctorIssue } from "../doctor-types.ts";
 import {
   assessInterruptedSession,
   clearPausedSession,
@@ -404,33 +406,101 @@ test("restart resumes the named run of a custom-engine pause from the pause row"
   assert.equal(autoSession.activeRunDir, runDir);
 });
 
-test("migration is blocked while a parallel worker scope has an open pause", async (t) => {
-  const base = makeProject(t);
+/** Open the pause of a parallel worker on a milestone, from a process that is not that worker. */
+function pauseParallelWorker(t: TestContext, milestoneId: string): void {
   const previousWorker = process.env.GSD_PARALLEL_WORKER;
   const previousLock = process.env.GSD_MILESTONE_LOCK;
-  t.after(() => {
+  const restore = (): void => {
     if (previousWorker === undefined) delete process.env.GSD_PARALLEL_WORKER;
     else process.env.GSD_PARALLEL_WORKER = previousWorker;
     if (previousLock === undefined) delete process.env.GSD_MILESTONE_LOCK;
     else process.env.GSD_MILESTONE_LOCK = previousLock;
-  });
+  };
+  t.after(restore);
+  process.env.GSD_PARALLEL_WORKER = "1";
+  process.env.GSD_MILESTONE_LOCK = milestoneId;
+  openAutoPause({ blockerKind: "machine_fixable", milestoneId });
+  restore();
+}
+
+function completeMilestone(milestoneId: string): void {
+  _getAdapter()!.prepare(
+    "UPDATE milestones SET status = 'complete' WHERE id = :id",
+  ).run({ ":id": milestoneId });
+}
+
+function pauseRowsOfScope(scope: string): Array<Record<string, unknown>> {
+  return _getAdapter()!.prepare(
+    "SELECT * FROM auto_pauses WHERE scope = :scope ORDER BY id",
+  ).all({ ":scope": scope }) as Array<Record<string, unknown>>;
+}
+
+test("the pause of a parallel worker scope blocks migration until the doctor fix closes it for a closed milestone", async (t) => {
+  const base = makeProject(t);
+  const dbPath = join(base, ".gsd", "gsd.db");
+  insertMilestone({ id: "M002", title: "Open milestone", status: "active" });
 
   await assertMigrationTargetAvailable(base);
 
-  // The pause of a parallel worker on M001. The process that migrates is not
-  // that worker, so its own scope has no open pause.
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  process.env.GSD_PARALLEL_WORKER = "1";
-  process.env.GSD_MILESTONE_LOCK = "M001";
-  openAutoPause({ blockerKind: "machine_fixable", milestoneId: "M001" });
-  delete process.env.GSD_PARALLEL_WORKER;
-  delete process.env.GSD_MILESTONE_LOCK;
+  // The process that migrates is not the worker, so its own scope has no open pause.
+  openDatabase(dbPath);
+  pauseParallelWorker(t, "M001");
   assert.equal(readPausedSessionMetadata(base), null);
-
   await assert.rejects(
     () => assertMigrationTargetAvailable(base),
-    /paused auto-mode session exists/,
+    /paused auto-mode session exists.*worker scope M001\/: resume its worker with \/gsd parallel start/,
   );
+
+  // M001 is completed from the root session: no worker starts for it again.
+  openDatabase(dbPath);
+  completeMilestone("M001");
+  await assert.rejects(
+    () => assertMigrationTargetAvailable(base),
+    /worker scope M001\/: its milestone or slice is closed, run \/gsd doctor fix/,
+  );
+
+  openDatabase(dbPath);
+  const issues: DoctorIssue[] = [];
+  await checkRuntimeHealth(base, issues, [], () => false);
+  assert.deepEqual(
+    issues.filter((issue) => issue.code === "stale_paused_session").map((issue) => issue.unitId),
+    ["M001/"],
+  );
+  assert.equal(pauseRowsOfScope("M001/")[0]["closed_at"], null, "read-only doctor keeps the pause open");
+
+  const fixesApplied: string[] = [];
+  await checkRuntimeHealth(base, [], fixesApplied, (code) => code === "stale_paused_session");
+  assert.ok(fixesApplied.some((fix) => fix.includes("worker scope M001/")), fixesApplied.join(" | "));
+  const closed = pauseRowsOfScope("M001/");
+  assert.equal(closed.length, 1, "the closed pause row stays in the database");
+  assert.notEqual(closed[0]["closed_at"], null);
+  await assertMigrationTargetAvailable(base);
+
+  // A pause of a scope whose milestone is still open is not stale: it still blocks.
+  openDatabase(dbPath);
+  pauseParallelWorker(t, "M002");
+  await checkRuntimeHealth(base, [], [], (code) => code === "stale_paused_session");
+  assert.equal(pauseRowsOfScope("M002/")[0]["closed_at"], null);
+  await assert.rejects(
+    () => assertMigrationTargetAvailable(base),
+    /worker scope M002\/: resume its worker with \/gsd parallel start/,
+  );
+});
+
+test("the root session closes the pause of a parallel worker scope whose milestone is closed at start", async (t) => {
+  const base = makeProject(t);
+  insertMilestone({ id: "M002", title: "Open milestone", status: "active" });
+  pauseParallelWorker(t, "M001");
+  pauseParallelWorker(t, "M002");
+  completeMilestone("M001");
+  process.chdir(base);
+  refuseSessionLock(t);
+  const { ctx, pi } = makeStartAutoHost([]);
+
+  await startAuto(ctx, pi, base, false);
+
+  assert.notEqual(pauseRowsOfScope("M001/")[0]["closed_at"], null);
+  assert.equal(pauseRowsOfScope("M002/")[0]["closed_at"], null);
 });
 
 /** The process that ran the worker was killed: its pid is dead and its heartbeat is old. */

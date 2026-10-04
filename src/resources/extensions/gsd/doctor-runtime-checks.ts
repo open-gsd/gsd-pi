@@ -27,6 +27,8 @@ import {
 } from "./managed-projection-history.js";
 import {
   clearPausedSession,
+  closeStaleScopedPauses,
+  findStaleScopedPauses,
   getSupersedingActiveMilestoneId,
   readStoredPausedSession,
 } from "./interrupted-session.js";
@@ -176,6 +178,25 @@ export async function checkRuntimeHealth(
             fixable: true,
           });
         }
+      }
+    }
+    // The pause of a parallel worker scope whose milestone or slice is closed
+    // or gone: no worker starts for that item again, so no resume closes it.
+    if (shouldFix("stale_paused_session")) {
+      for (const scope of closeStaleScopedPauses()) {
+        fixesApplied.push(`closed stale paused session of worker scope ${scope}`);
+      }
+    } else {
+      for (const scope of findStaleScopedPauses()) {
+        issues.push({
+          severity: "error",
+          code: "stale_paused_session",
+          scope: "project",
+          unitId: scope,
+          message: `Paused auto-mode session of worker scope ${scope} targets a milestone or slice that is closed or no longer exists. No worker resumes it, and the open pause blocks migration.`,
+          file: ".gsd/gsd.db",
+          fixable: true,
+        });
       }
     }
   } catch {
