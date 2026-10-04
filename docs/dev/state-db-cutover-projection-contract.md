@@ -165,6 +165,16 @@ text, checkbox and badge syntax, and the trailing-newline byte stream of every
 file above. Any change beyond appending the §3 stamp is out of scope for this
 milestone.
 
+### 2.4 Not a projection: `.gsd/extensions/`
+
+`.gsd/extensions/` is an operator input directory, not a projection. The
+ecosystem loader (`src/resources/extensions/gsd/ecosystem/loader.ts`) loads
+the `.js` and `.ts` files in it as extensions, and only when the project is
+trusted. No renderer writes the directory, no reader takes workflow state from
+it, and a rebuild leaves it unchanged, so the rules of §1 and the freeze do
+not apply to it. An extension reads workflow state through
+`GSDExtensionAPI.getProjectSnapshot()`, which answers from the database.
+
 ## 3. The additive state-version stamp
 
 ### 3.1 Exact format
@@ -258,7 +268,7 @@ repo:
 
 | Surface | What it reads | Evidence |
 |---|---|---|
-| `@opengsd/mcp-server` | Raw `.gsd/STATE.md` contents returned to MCP clients; milestone `SUMMARY` **existence** as a completion signal; `.gsd/` artifact parsing (STATE.md, milestone ROADMAPs, slice PLANs) in its graph build | `packages/mcp-server/src/server.ts:278`, `:308`, `:1486` |
+| `@opengsd/mcp-server` | Raw `.gsd/STATE.md` contents returned to MCP clients; milestone `SUMMARY` **existence** as a completion signal; `.gsd/` artifact parsing (STATE.md, milestone ROADMAPs, slice PLANs) in its graph build when the workflow database is not available (the build is database-first otherwise) | `packages/mcp-server/src/server.ts:278`, `:308`, `:1486` |
 | `integrations/hermes` (Python) | Requires `.gsd/` with `STATE.md` present; an absent/empty `STATE.md` is documented as the cause of an empty snapshot | `integrations/hermes/docs/setup.md:35`, `:235`; fixture `integrations/hermes/tests/fixtures/minimal-project/.gsd/STATE.md` |
 
 Because the format is frozen and the stamp is ignore-safe, none of these
