@@ -126,4 +126,3 @@ test("auto-dispatch uses discuss-headless prompt for needs-discussion when GSD_H
   assert.match(result.prompt, /This is a \*\*headless\*\* flow/);
   assert.doesNotMatch(result.prompt, /\*\*Structured questions available: true\*\*/);
 });
-

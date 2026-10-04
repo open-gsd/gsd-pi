@@ -99,14 +99,14 @@ Replace the path with the exact global bin directory from your pnpm error messag
 
 ### Auto mode loops on the same unit
 
-**Symptoms:** The same unit (e.g., `research-slice` or `plan-slice`) dispatches repeatedly, then auto mode pauses with an "Artifact still missing..." error after 3 artifact verification retries.
+**Symptoms:** The same unit (e.g., `research-slice` or `plan-slice`) dispatches repeatedly, then auto mode pauses with an "Artifact verification failed..." error after 3 artifact verification retries.
 
 **Causes:**
 
-- Stale cache after a crash — the in-memory file listing doesn't reflect new artifacts
-- The LLM didn't produce the expected artifact file
+- Stale cache after a crash — the in-memory state doesn't reflect the recorded result
+- The LLM didn't record the unit's result in the database (for example, it wrote a file directly and did not call the save tool)
 
-**Fix:** Run `/gsd doctor` to repair state, then resume with `/gsd auto`. If the issue persists, check that the expected artifact file exists on disk.
+**Fix:** Run `/gsd doctor` to repair state, then resume with `/gsd auto`. If the issue persists, read the pause message: it names the result that is missing. A file on disk does not count as the result; see [Artifact Verification Retries](./auto-mode.md#artifact-verification-retries).
 
 ### Auto mode reports that `gsd.db` is locked
 

@@ -2397,4 +2397,3 @@ test("parallel-research verification gives the same answer from a worktree base"
     cleanup(base);
   }
 });
-

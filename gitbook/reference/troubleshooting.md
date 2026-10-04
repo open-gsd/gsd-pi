@@ -89,13 +89,13 @@ Replace the path with the exact global bin directory from your pnpm error messag
 
 The same unit dispatches repeatedly.
 
-**Fix:** Run `/gsd doctor` to repair state, then `/gsd auto`. If it persists, check that the expected artifact file exists on disk.
+**Fix:** Run `/gsd doctor` to repair state, then `/gsd auto`. If it persists, read the pause message: it names the result that the unit did not record in the database. A file on disk does not count as the result.
 
 ### Reactive execute writes `S##-REACTIVE-BLOCKER.md`
 
-A parallel `reactive-execute` batch exhausted artifact retries while one or more dispatched tasks were still missing task summaries. GSD writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks.
+A parallel `reactive-execute` batch exhausted artifact retries while one or more dispatched tasks were still open in the database with no Attempt Result. GSD records a recovery block for the slice and writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks.
 
-**Fix:** Inspect `S##-REACTIVE-BLOCKER.md` and `/gsd status`. The blocker prevents another reactive batch for that slice, but task statuses stay under canonical database Attempt/recovery control; use the appropriate explicit retry, reopen, or replan path for any remaining work.
+**Fix:** Inspect `S##-REACTIVE-BLOCKER.md` and `/gsd status`. The recorded block prevents another reactive batch for that slice, but task statuses stay under canonical database Attempt/recovery control; use the appropriate explicit retry, reopen, or replan path for any remaining work.
 
 ### Auto mode stops with "Loop detected"
 

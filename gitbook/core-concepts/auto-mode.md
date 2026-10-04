@@ -260,7 +260,7 @@ See the authoritative [Auto Mode liveness and recovery guide](../../docs/user-do
 
 ## Artifact Verification Retries
 
-After each unit, GSD verifies the expected artifact and retries missing artifacts with explicit failure context. `reactive-execute` batches use a diagnostic blocker after the retry cap: if dispatched tasks are still missing task summaries, GSD writes `S##-REACTIVE-BLOCKER.md` with the summary-present and summary-missing lists. The blocker prevents another reactive batch for that slice, but it is not lifecycle authority; task statuses stay under canonical database Attempt/recovery control, not summary-file presence.
+After each unit, GSD verifies that the unit recorded its result in the database and retries a unit with no recorded result. A file on disk does not prove completion. See the authoritative [Artifact Verification Retries guide](../../docs/user-docs/auto-mode.md#artifact-verification-retries), which also covers the `reactive-execute` recovery block and `S##-REACTIVE-BLOCKER.md`.
 
 ## Cost Tracking
 

@@ -108,7 +108,7 @@ The task-bearing planning payloads use camel-case `requiredWorkflowTools` on `gs
 |--------|----------|-----------|----------------------|
 | `execute-task` | Task lifecycle, current Attempt/Result/verdict evidence, slices, milestones, memories, quality gates | invokes evidence-backed Task publication; see the [database map](./db-map.md), plus memory hit counts | S##-T##-SUMMARY.md and NN-MM-PLAN.md projections after commit; legacy T##-SUMMARY.md readable |
 | `guided-resume-task` | Task lifecycle, current Attempt/Result/verdict evidence, slices | invokes evidence-backed Task publication; see the [database map](./db-map.md) | S##-T##-SUMMARY.md projection after commit; legacy T##-SUMMARY.md readable |
-| `reactive-execute` | tasks | tasks via N× execute-task subagents; retry-cap exhaustion writes a diagnostic blocker and does not derive completion/skipped state from summaries | S##-T##-SUMMARY.md × N; S##-REACTIVE-BLOCKER.md when batch summaries remain missing after retries |
+| `reactive-execute` | tasks | tasks via N× execute-task subagents; retry-cap exhaustion records a recovery block (`gate_runs`) and does not derive completion/skipped state from summaries | S##-T##-SUMMARY.md × N; S##-REACTIVE-BLOCKER.md diagnostic when batch tasks are still open with no Attempt Result after retries |
 | `quick-task` | — | — (no DB; writes summaryPath directly) | {{summaryPath}} |
 
 ### Quality Gate Phase
@@ -187,7 +187,7 @@ S##-CONTEXT present AND
 
 slices WHERE is_sketch = 1                         → refine-slice
 
-tasks WHERE status='pending' AND count ≥ 3 AND no S##-REACTIVE-BLOCKER
+tasks WHERE status='pending' AND count ≥ 3 AND no recorded reactive recovery block
                                                        → reactive-execute (parallel)
 
 tasks WHERE status='pending' AND count < 3         → execute-task (sequential)
