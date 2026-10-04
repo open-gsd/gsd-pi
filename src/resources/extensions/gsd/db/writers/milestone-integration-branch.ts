@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Database record of the branch each milestone merges back to.
 
-import { getDbOrNull } from "./engine.js";
+import { getDbOrNull } from "../engine.js";
 
 /**
  * The recorded integration branch, `null` when the milestone has no row, or

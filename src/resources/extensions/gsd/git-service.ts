@@ -18,7 +18,7 @@ import { gsdRoot } from "./paths.js";
 import {
   getRecordedIntegrationBranch,
   recordIntegrationBranch,
-} from "./db/milestone-integration-branch.js";
+} from "./db/writers/milestone-integration-branch.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { logWarning } from "./workflow-logger.js";
