@@ -41,12 +41,13 @@ export function uatAttemptRef(milestoneId: string, sliceId: string, attempt: num
  * The Attempt a run belongs to, read in the transaction that stores the run.
  * A UAT run belongs to the run-uat attempt that is not saved yet. Another run
  * belongs to the Task Attempt of its caller that is not settled. The caller is
- * known by its work root: a run inside the worktree of a Milestone belongs to
- * an Attempt of that Milestone, so parallel workers each bind their own runs.
+ * known by its work root: a run inside the worktree of a Milestone (named
+ * `<MID>`) or of a Slice (named `<MID>-<SID>`) belongs to an Attempt of that
+ * Milestone or Slice, so parallel workers each bind their own runs.
  * With no such Attempt, or with more than one, the run is unbound and proves
  * nothing.
  */
-/** Name of the GSD worktree a path is in ("" outside one). A Milestone worktree has the Milestone id as its name. */
+/** Name of the GSD worktree a path is in ("" outside one). */
 function worktreeNameOf(path: string): string {
   const normalized = path.replaceAll("\\", "/");
   const segment = findWorktreeSegment(normalized);
@@ -71,8 +72,12 @@ function currentAttemptRef(input: ExecRunInput): string | null {
      AND lifecycle.project_id = attempt.project_id
     WHERE lifecycle.item_kind = 'task' AND attempt.attempt_state != 'settled'
       AND (
-        NOT EXISTS (SELECT 1 FROM milestones WHERE id = :worktree)
-        OR lifecycle.milestone_id = :worktree
+        lifecycle.milestone_id = :worktree
+        OR lifecycle.milestone_id || '-' || lifecycle.slice_id = :worktree
+        OR (
+          NOT EXISTS (SELECT 1 FROM milestones WHERE id = :worktree)
+          AND NOT EXISTS (SELECT 1 FROM slices WHERE milestone_id || '-' || id = :worktree)
+        )
       )
     LIMIT 2
   `).all({ ":worktree": worktreeNameOf(input.cwd) });
