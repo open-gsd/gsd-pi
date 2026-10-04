@@ -189,16 +189,17 @@ const BASH_GSD_PATH = /[^\s"'`;|&<>()=]*\.gsd[/\\][^\s"'`;|&<>()]+/gi;
 // The same inside quotes, where the path can hold spaces. The lookahead tries each quote as an opener.
 const BASH_QUOTED_GSD_PATH = /(["'])(?=([^"'\r\n]*\.gsd[/\\][^"'\r\n]*)\1)/g;
 
+// The whole shell word that is a redirect or dd target: quoted and unquoted parts, escaped characters.
+const BASH_WRITE_TARGET_WORD = /(?:>{1,2}\|?\s*|\bdd\b[^;|&\r\n]*\bof=)((?:\\.|"[^"\r\n]*"|'[^'\r\n]*'|[^\s"';|&<>()])+)/gi;
+
 function bashWritesTo(command: string, path: string): boolean {
   const target = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const segment = "[^;|&\\r\\n]*";
   return [
-    `>{1,2}\\|?\\s*["']?${target}`,
     `\\btee\\b${segment}${target}`,
     // cp/mv: the path is the destination only when it is the last argument.
     `\\b(?:cp|mv)\\b${segment}\\s["']?${target}["']?(?:\\s+\\d*[<>]${segment})?\\s*(?:$|[;|&\\r\\n])`,
     `\\bsed\\b${segment}\\s-i${segment}${target}`,
-    `\\bdd\\b${segment}of=["']?${target}`,
   ].some((pattern) => new RegExp(pattern, "i").test(command));
 }
 
@@ -210,6 +211,11 @@ function bashWritesTo(command: string, path: string): boolean {
  */
 export function blockedBashWriteReason(command: string): string | null {
   if (isBashWriteToStateFile(command)) return BLOCKED_WRITE_ERROR;
+  for (const match of command.matchAll(BASH_WRITE_TARGET_WORD)) {
+    const path = match[1].replace(/["']/g, "");
+    const tool = projectionSaveTool(path);
+    if (tool) return projectionWriteError(path, tool);
+  }
   const quoted = Array.from(command.matchAll(BASH_QUOTED_GSD_PATH), (match) => match[2]);
   for (const path of [...(command.match(BASH_GSD_PATH) ?? []), ...quoted]) {
     const tool = projectionSaveTool(path);

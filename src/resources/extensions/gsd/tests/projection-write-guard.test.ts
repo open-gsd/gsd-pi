@@ -109,7 +109,7 @@ test("the external state layout and a worktree .gsd are covered", async () => {
   assert.match(worktree?.reason ?? "", /gsd_decision_save/);
 });
 
-test("bash writes to a quoted projection path that has a space are refused", async () => {
+test("bash writes to a quoted, escaped or variable-prefixed projection path are refused", async () => {
   const path = "/Users/me/My Project/.gsd/DECISIONS.md";
   const commands = [
     `echo x >> "${path}"`,
@@ -118,13 +118,28 @@ test("bash writes to a quoted projection path that has a space are refused", asy
     `echo "note" > /tmp/note.txt; echo x >> "${path}"`,
     `cat notes.md | tee "${path}"`,
     `cp /tmp/draft.md "${path}"`,
+    `echo x >> "$PWD"/.gsd/DECISIONS.md`,
+    `echo x >> "$PROJECT_DIR"/.gsd/DECISIONS.md`,
+    `echo x >> "$HOME/My Project"/.gsd/DECISIONS.md`,
+    `echo x >> $HOME/.gsd/projects/app/DECISIONS.md`,
+    `echo x >> /Users/me/My\\ Project/.gsd/DECISIONS.md`,
+    `echo x >> "/Users/me/it's here/.gsd/DECISIONS.md"`,
+    `dd if=/tmp/a of=/Users/me/My\\ Project/.gsd/DECISIONS.md`,
+    `dd if=/tmp/a of="$PWD"/.gsd/DECISIONS.md bs=1k`,
   ];
   for (const command of commands) {
     const result = await guard("bash", { command });
     assert.equal(result?.block, true, `${command} must be blocked`);
     assert.match(result?.reason ?? "", /gsd_decision_save/);
   }
-  for (const command of [`cat "${path}" > /tmp/out.txt`, `cp "${path}" "/tmp/My Copy/decisions.md"`]) {
+  const allowed = [
+    `cat "${path}" > /tmp/out.txt`,
+    `cp "${path}" "/tmp/My Copy/decisions.md"`,
+    `echo x >> "$PWD"/.gsd/notes/DECISIONS.md`,
+    `echo x >> "$HOME/My Project"/docs/DECISIONS.md`,
+    `dd if="${path}" of=/tmp/My\\ Copy/decisions.md`,
+  ];
+  for (const command of allowed) {
     assert.equal(await guard("bash", { command }), undefined, `${command} must pass`);
   }
 });
