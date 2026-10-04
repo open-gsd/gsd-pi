@@ -2055,6 +2055,12 @@ authority_epoch             INTEGER NOT NULL
   a Milestone whose work is on a milestone branch. `milestone.complete` fails
   while a required effect of the current plan has no receipt. Tasks and Slices
   have no plan.
+- Production supersession: `supersedeCloseoutPlan` stores a successor plan with
+  the same effects and no receipts, through the same operation type. It runs
+  when the commit of a `performed` merge receipt is no longer on the
+  integration branch and the milestone work is on that branch again. The merge
+  is then recorded as `recognized` under the successor plan; the old plan and
+  its receipts stay.
 
 #### `workflow_closeout_effects`
 
