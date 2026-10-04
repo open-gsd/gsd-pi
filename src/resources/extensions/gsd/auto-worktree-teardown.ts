@@ -6,7 +6,6 @@
 // clearing.
 
 import { existsSync, rmSync } from "node:fs";
-import { join } from "node:path";
 
 import { GSDError, GSD_IO_ERROR } from "./errors.js";
 import { resolveGsdPathContract } from "./paths.js";
@@ -23,6 +22,7 @@ import {
   _hasWorktreeLocalDb,
   clearProjectRootStateFiles,
   worktreeLocalDbInstruction,
+  worktreeOwnDbPath,
 } from "./auto-worktree-cleanup.js";
 import { logWarning, logError } from "./workflow-logger.js";
 
@@ -80,11 +80,8 @@ export function teardownAutoWorktree(
     //    Keep the worktree, because removing it would delete rows that only
     //    that file holds, and tell the operator how to import them.
     const contract = resolveGsdPathContract(previousCwd, originalBasePath);
-    const worktreeDbPath = join(
-      contract.worktreeGsd ?? join(previousCwd, ".gsd"),
-      "gsd.db",
-    );
-    if (_hasWorktreeLocalDb(worktreeDbPath, contract.projectDb)) {
+    const worktreeDbPath = worktreeOwnDbPath(previousCwd);
+    if (worktreeDbPath && _hasWorktreeLocalDb(worktreeDbPath, contract.projectDb)) {
       logError(
         "worktree",
         `Worktree ${milestoneId} was kept: ${worktreeLocalDbInstruction(worktreeDbPath, milestoneId)}`,

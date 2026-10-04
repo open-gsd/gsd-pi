@@ -752,7 +752,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
   });
 
   test("#2156: mergeMilestoneToMain removes external-state worktrees using the milestone branch name", () => {
-    const { repo } = freshRepoWithExternalGsd();
+    const { repo, externalState } = freshRepoWithExternalGsd();
     const wtPath = createAutoWorktree(repo, "M215");
 
     addSliceToMilestone(repo, wtPath, "M215", "S01", "External cleanup", [
@@ -772,6 +772,13 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
     mkdirSync(join(repo, ".gsd", "worktrees", "M215"), { recursive: true });
     writeFileSync(join(repo, ".gsd", "STATE.md"), "# Local stale state\n");
     writeFileSync(join(repo, ".gsd", "worktrees", "M215", "stale.txt"), "stale local artifact\n");
+    // The worktree `.gsd` still links to the external state, which holds the
+    // database from before the divergence. That file is shared state, not a
+    // worktree-local database: the merge neither stops on it nor merges it,
+    // so the project database must hold the milestone itself.
+    const externalDb = join(externalState, "gsd.db");
+    assert.equal(realpathSync(join(wtPath, ".gsd", "gsd.db")), externalDb);
+    seedMergeReadyMilestone(repo, "M215");
 
     const roadmap = makeRoadmap("M215", "External cleanup", [
       { id: "S01", title: "External cleanup" },
@@ -779,6 +786,7 @@ describe("auto-worktree-milestone-merge", { timeout: 300_000 }, () => {
 
     mergeMilestoneToMain(repo, "M215", roadmap);
 
+    assert.ok(existsSync(externalDb), "the external-state database must be kept");
     assert.ok(
       !run("git worktree list", repo).includes("M215"),
       "merged milestone worktree should be removed from git worktree list",

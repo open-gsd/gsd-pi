@@ -7,11 +7,21 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 
+import { worktreeOwnDbPath } from "../auto-worktree-cleanup.ts";
 import { assertMilestoneDbReadyForMerge } from "../auto-worktree-merge-db-ready.ts";
 import { setActiveWorkspace } from "../auto-worktree-session-registry.ts";
 import { teardownAutoWorktree } from "../auto-worktree-teardown.ts";
@@ -31,6 +41,7 @@ import { createWorktree } from "../worktree-manager.ts";
 import { WorktreeStateProjection } from "../worktree-state-projection.ts";
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
 import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
+import { seedMergeReadyMilestone } from "./merge-ready-fixture.ts";
 
 /** A project root with an open project database and a worktree at the canonical container path. */
 function makeWorktreeProject(t: TestContext): { base: string; wt: string; mainDb: string } {
@@ -181,10 +192,36 @@ test("auto-worktree teardown keeps a worktree that holds its own gsd.db and chan
   assert.deepEqual(projectMilestoneRows(), before);
 });
 
+test("a gsd.db in shared external state is not a worktree-local database and does not stop the merge", (t) => {
+  const { base, wt, mainDb } = makeWorktreeProject(t);
+  assert.equal(worktreeOwnDbPath(wt), join(wt, ".gsd", "gsd.db"));
+
+  // The worktree `.gsd` links to external state that holds a database, and
+  // the project `.gsd` does not link there (the #1852 divergence).
+  const external = realpathSync(mkdtempSync(join(tmpdir(), "gsd-p28-external-")));
+  t.after(() => rmSync(external, { recursive: true, force: true }));
+  seedMergeReadyMilestone(base, "M001");
+  assert.equal(copyWorktreeDb(mainDb, join(external, "gsd.db")), true);
+  rmSync(join(wt, ".gsd"), { recursive: true });
+  symlinkSync(external, join(wt, ".gsd"));
+
+  assert.equal(worktreeOwnDbPath(wt), null);
+  assertMilestoneDbReadyForMerge({ milestoneId: "M001", projectRoot: base, worktreeCwd: wt });
+  assert.equal(existsSync(join(external, "gsd.db")), true, "the external-state database is kept");
+});
+
+/** The revision of the project database and its count of Domain Operations. */
+function projectAuthority(): unknown {
+  return _getAdapter()!.prepare(
+    "SELECT revision, (SELECT COUNT(*) FROM workflow_operations) AS operations FROM project_authority",
+  ).get();
+}
+
 test("the explicit import previews without a row change, then merges the rows and moves the file aside", async (t) => {
   const { wt, mainDb } = makeWorktreeProject(t);
   const wtDb = seedWorktreeLocalDb(mainDb, wt);
   const before = projectMilestoneRows();
+  const authorityBefore = projectAuthority();
 
   let previewedMilestones = 0;
   const cancelled = await importWorktreeLocalDb(mainDb, wtDb, async (preview) => {
@@ -194,9 +231,11 @@ test("the explicit import previews without a row change, then merges the rows an
   assert.equal(cancelled, "cancelled");
   assert.equal(previewedMilestones, 1, "the preview counts the row that would change");
   assert.deepEqual(projectMilestoneRows(), before, "a preview and a cancel change no project row");
+  assert.deepEqual(projectAuthority(), authorityBefore, "a preview records no Domain Operation and no revision");
   assert.equal(existsSync(wtDb), true);
 
   assert.equal(await importWorktreeLocalDb(mainDb, wtDb, async () => true), "imported");
+  assert.notDeepEqual(projectAuthority(), authorityBefore, "the import is a Domain Operation with a revision");
   const [row] = projectMilestoneRows() as Array<{ title: string; status: string }>;
   assert.equal(row!.title, "Worktree title");
   assert.equal(row!.status, "complete");
@@ -209,11 +248,8 @@ function git(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" }).trim();
 }
 
-/**
- * A git project with an open project database, a milestone whose root ROADMAP
- * file is stale, and a manual worktree "feature" that holds one commit.
- */
-function makeManualWorktreeProject(t: TestContext): { base: string; wt: string; mainDb: string } {
+/** A git project with one commit and no GSD state. */
+function makeGitProject(t: TestContext): string {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-p28-manual-")));
   const cwd = process.cwd();
   t.after(() => {
@@ -230,7 +266,25 @@ function makeManualWorktreeProject(t: TestContext): { base: string; wt: string; 
   writeFileSync(join(base, "README.md"), "# project\n");
   git(["add", "."], base);
   git(["commit", "-m", "init"], base);
+  return base;
+}
 
+/** Add a manual worktree "feature" that holds one commit. Returns its path. */
+function addFeatureWorktree(base: string): string {
+  const worktree = createWorktree(base, "feature");
+  writeFileSync(join(worktree.path, "feature.ts"), "export const feature = true;\n");
+  git(["add", "feature.ts"], worktree.path);
+  git(["commit", "-m", "feat: feature"], worktree.path);
+  process.chdir(base);
+  return worktree.path;
+}
+
+/**
+ * A git project with an open project database, a milestone whose root ROADMAP
+ * file is stale, and the manual worktree "feature".
+ */
+function makeManualWorktreeProject(t: TestContext): { base: string; wt: string; mainDb: string } {
+  const base = makeGitProject(t);
   const milestoneDir = join(base, ".gsd", "milestones", "M001");
   mkdirSync(milestoneDir, { recursive: true });
   writeFileSync(join(milestoneDir, "M001-ROADMAP.md"), "# M001\n\n## Slices\n- [ ] **S01: File slice**\n");
@@ -239,12 +293,7 @@ function makeManualWorktreeProject(t: TestContext): { base: string; wt: string; 
   insertMilestone({ id: "M001", title: "Manual merge", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Database slice", status: "pending", risk: "low", depends: [], demo: "demo", sequence: 1 });
 
-  const worktree = createWorktree(base, "feature");
-  writeFileSync(join(worktree.path, "feature.ts"), "export const feature = true;\n");
-  git(["add", "feature.ts"], worktree.path);
-  git(["commit", "-m", "feat: feature"], worktree.path);
-  process.chdir(base);
-  return { base, wt: worktree.path, mainDb };
+  return { base, wt: addFeatureWorktree(base), mainDb };
 }
 
 function manualMergeContext(): { ctx: never; pi: never; notices: Array<{ message: string; level: string }> } {
@@ -269,6 +318,17 @@ test("the manual worktree merge renders the project-root projections from the da
   const roadmap = readFileSync(resolveMilestoneFile(base, "M001", "ROADMAP")!, "utf-8");
   assert.match(roadmap, /Database slice/, "the root ROADMAP is the database render after the merge");
   assert.doesNotMatch(roadmap, /File slice/);
+});
+
+test("the manual worktree merge writes no .gsd file in a repository that has no project database", async (t) => {
+  const base = makeGitProject(t);
+  addFeatureWorktree(base);
+  const { ctx, pi, notices } = manualMergeContext();
+
+  await handleWorktreeCommand("merge feature", ctx, pi, "worktree");
+
+  assert.equal(existsSync(join(base, "feature.ts")), true, `the worktree commit is merged: ${JSON.stringify(notices)}`);
+  assert.equal(existsSync(join(base, ".gsd")), false, "the merge creates no GSD state");
 });
 
 test("the manual worktree merge stops on a worktree-local gsd.db with the import instruction", async (t) => {

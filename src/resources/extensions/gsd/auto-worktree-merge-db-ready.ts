@@ -4,8 +4,6 @@
 // merge, the project DB is the active DB, the worktree holds no gsd.db of its
 // own, and canonical closeout state proves the milestone is safe to merge.
 
-import { join } from "node:path";
-
 import { CLOSEOUT_CONSISTENCY_BLOCKED_REASON } from "./closeout-consistency-gate.js";
 import {
   closeWorkflowDatabase,
@@ -21,7 +19,11 @@ import {
   proveMilestoneCloseout,
 } from "./milestone-closeout-proof.js";
 import { resolveGsdPathContract } from "./paths.js";
-import { _hasWorktreeLocalDb, worktreeLocalDbInstruction } from "./auto-worktree-cleanup.js";
+import {
+  _hasWorktreeLocalDb,
+  worktreeLocalDbInstruction,
+  worktreeOwnDbPath,
+} from "./auto-worktree-cleanup.js";
 import { logError } from "./workflow-logger.js";
 
 export interface MilestoneDbReadyRequest {
@@ -78,7 +80,7 @@ export function _resetMergeDbReadyDepsForTests(): void {
 function assertProjectDbIsTheOnlyDb(request: MilestoneDbReadyRequest): void {
   const { milestoneId, projectRoot, worktreeCwd } = request;
   const contract = deps.resolveGsdPathContract(worktreeCwd, projectRoot);
-  const worktreeDbPath = join(contract.worktreeGsd ?? join(worktreeCwd, ".gsd"), "gsd.db");
+  const worktreeDbPath = worktreeOwnDbPath(worktreeCwd);
   const mainDbPath = contract.projectDb;
 
   try {
@@ -93,7 +95,7 @@ function assertProjectDbIsTheOnlyDb(request: MilestoneDbReadyRequest): void {
         throw new Error(`cannot open project DB at ${mainDbPath}`);
       }
     }
-    if (deps.hasWorktreeLocalDb(worktreeDbPath, mainDbPath)) {
+    if (worktreeDbPath && deps.hasWorktreeLocalDb(worktreeDbPath, mainDbPath)) {
       throw new Error(worktreeLocalDbInstruction(worktreeDbPath, milestoneId));
     }
   } catch (err) {

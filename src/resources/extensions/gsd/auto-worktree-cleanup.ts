@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync, unlinkSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 
-import { gsdRoot } from "./paths.js";
+import { gsdRoot, normalizeRealPath } from "./paths.js";
 import { milestoneMetaPath } from "./git-service.js";
 import { logWarning } from "./workflow-logger.js";
 
@@ -39,6 +39,17 @@ export function _hasWorktreeLocalDb(
   samePath: (a: string, b: string) => boolean = isSamePath,
 ): boolean {
   return pathExists(worktreeDbPath) && !samePath(worktreeDbPath, mainDbPath);
+}
+
+/**
+ * The path where a worktree holds a gsd.db of its own, or null when the
+ * worktree `.gsd` resolves outside the worktree directory. That layout is
+ * shared external state: a gsd.db there is project state, not a worktree-local
+ * file, also when the project `.gsd` no longer points at the same directory.
+ */
+export function worktreeOwnDbPath(worktreeRoot: string): string | null {
+  const ownGsd = join(normalizeRealPath(worktreeRoot), ".gsd");
+  return normalizeRealPath(ownGsd) === ownGsd ? join(ownGsd, "gsd.db") : null;
 }
 
 /**

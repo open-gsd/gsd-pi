@@ -46,6 +46,7 @@ import {
   insertMilestone,
   insertSlice,
 } from "../../gsd-db.ts";
+import { resolveMilestoneFile } from "../../paths.ts";
 import { seedMergeReadyMilestone } from "../merge-ready-fixture.ts";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -489,7 +490,7 @@ test("mergeCompletedMilestone — clean merge, session status cleaned up", async
 
     // The merged ROADMAP file is not authority: after the merge the
     // project-root projection is the database render.
-    const roadmap = readFileSync(join(repo, ".gsd", "milestones", "M010", "M010-ROADMAP.md"), "utf-8");
+    const roadmap = readFileSync(resolveMilestoneFile(repo, "M010", "ROADMAP")!, "utf-8");
     assert.match(roadmap, /Test Slice/, "the root ROADMAP shows the database slice title");
     assert.doesNotMatch(roadmap, /JWT module/, "the merged file content does not win over the database");
   } finally {

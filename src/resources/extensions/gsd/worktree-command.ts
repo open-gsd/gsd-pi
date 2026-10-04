@@ -33,8 +33,7 @@ import { inferCommitType } from "./git-service.js";
 import type { FileLineStat } from "./worktree-manager.js";
 import { existsSync, realpathSync, renameSync } from "node:fs";
 import { nativeMergeAbort } from "./native-git-bridge.js";
-import { join } from "node:path";
-import { _hasWorktreeLocalDb, worktreeLocalDbInstruction } from "./auto-worktree-cleanup.js";
+import { _hasWorktreeLocalDb, worktreeLocalDbInstruction, worktreeOwnDbPath } from "./auto-worktree-cleanup.js";
 import type { ReconcileResult } from "./db/writers/reconcile.js";
 import {
   clearWorktreeOriginalCwd,
@@ -546,8 +545,8 @@ async function handleMerge(
 
     // A worktree-local gsd.db is never merged into the project database here.
     const contract = resolveGsdPathContract(worktreePath(basePath, name), basePath);
-    const wtDbPath = join(contract.worktreeGsd ?? join(contract.workRoot, ".gsd"), "gsd.db");
-    if (_hasWorktreeLocalDb(wtDbPath, contract.projectDb)) {
+    const wtDbPath = worktreeOwnDbPath(contract.workRoot);
+    if (wtDbPath && _hasWorktreeLocalDb(wtDbPath, contract.projectDb)) {
       ctx.ui.notify(`Merge stopped: ${worktreeLocalDbInstruction(wtDbPath, name)}`, "error");
       return;
     }
@@ -635,10 +634,13 @@ async function handleMerge(
     try {
       mergeWorktreeToMain(basePath, name, commitMessage, undefined, mainBranch);
       // A merged `.gsd` file is not authority: render the project-root
-      // projections from the database after the merge.
+      // projections from the database after the merge. A repository with no
+      // project database has no GSD state to render.
       try {
-        const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
-        await rebuildMarkdownProjectionsFromDb(basePath);
+        if (existsSync(contract.projectDb)) {
+          const { rebuildMarkdownProjectionsFromDb } = await import("./commands-maintenance.js");
+          await rebuildMarkdownProjectionsFromDb(basePath);
+        }
       } catch (err) {
         ctx.ui.notify(
           `Projections were not rendered after the merge: ${err instanceof Error ? err.message : String(err)}. Run /gsd rebuild markdown.`,
@@ -724,9 +726,9 @@ async function handleImportDb(
 ): Promise<void> {
   try {
     const contract = resolveGsdPathContract(worktreePath(basePath, name), basePath);
-    const wtDbPath = join(contract.worktreeGsd ?? join(contract.workRoot, ".gsd"), "gsd.db");
-    const outcome = await importWorktreeLocalDb(contract.projectDb, wtDbPath, (preview) => {
-      const { conflicts, error: _error, ...counts } = preview;
+    const wtDbPath = worktreeOwnDbPath(contract.workRoot);
+    const outcome = wtDbPath === null ? "absent" : await importWorktreeLocalDb(contract.projectDb, wtDbPath, (preview) => {
+      const { conflicts, adoptionStatusChanges: _adoption, error: _error, ...counts } = preview;
       const rows = Object.entries(counts).filter(([, count]) => count > 0);
       return showConfirm(ctx, {
         title: "Import worktree database",

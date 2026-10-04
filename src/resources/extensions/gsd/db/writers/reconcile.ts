@@ -85,8 +85,10 @@ function knownStatusSql(row: string): string {
 
 /** Thrown inside the merge transaction of a preview, so that every row change rolls back. */
 class ReconcilePreviewRollback extends Error {
-  constructor(readonly result: ReconcileResult) {
+  readonly result: ReconcileResult;
+  constructor(result: ReconcileResult) {
     super("worktree DB reconciliation preview");
+    this.result = result;
   }
 }
 
