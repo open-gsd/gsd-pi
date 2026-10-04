@@ -1,9 +1,9 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
-import { pathToFileURL } from "node:url";
 import type { DatabaseSync } from "node:sqlite";
 import type { ProjectDetectionKind, ProjectDetectionSignals } from "./bridge-service.ts";
 import { detectMonorepo, detectProjectKind } from "./bridge-service.ts";
+import { openProjectDatabaseReadOnly } from "./project-db-read.ts";
 import { selectActiveMilestone } from "../resources/extensions/gsd/milestone-readiness.ts";
 import { parseMilestoneSequence, splitH2Sections } from "../resources/extensions/gsd/schemas/project-sequence.ts";
 import { isClosedStatus, isDiscardedMilestoneStatus } from "../resources/extensions/gsd/status-guards.ts";
@@ -34,12 +34,7 @@ const EXCLUDED_DIRS = new Set(["node_modules", ".git"]);
 /**
  * Read milestone counts and the active milestone from a project's
  * `.gsd/gsd.db`. The picker lists projects that the user did not open, so the
- * read does not change the project: no migration, no checkout-binding check,
- * and no new file. A database with no `-wal` file was closed cleanly, and it
- * is opened immutable, because a plain read-only open of a WAL-mode database
- * creates `-shm` and `-wal` files. A `-wal` file means that a session has the
- * project open, so a plain read-only open adds nothing and reads the content
- * of that session.
+ * read does not change the project (see `openProjectDatabaseReadOnly`).
  *
  * The active milestone comes from `selectActiveMilestone`, the same rule that
  * state derivation applies. Slice and phase need the full state derivation,
@@ -50,11 +45,7 @@ const EXCLUDED_DIRS = new Set(["node_modules", ".git"]);
 function readDatabaseProgress(projectPath: string): ProjectProgressInfo | null {
   let db: DatabaseSync | undefined;
   try {
-    const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
-    const dbPath = join(projectPath, ".gsd", "gsd.db");
-    const location = pathToFileURL(dbPath);
-    if (!existsSync(`${dbPath}-wal`)) location.searchParams.set("immutable", "1");
-    const connection = db = new DatabaseSync(location, { readOnly: true });
+    const connection = db = openProjectDatabaseReadOnly(projectPath);
 
     // The picker reads databases of every schema version. A query that names an
     // absent table or column throws, so each read names only what is there.

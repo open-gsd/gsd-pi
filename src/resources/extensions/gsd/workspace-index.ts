@@ -1,7 +1,9 @@
 import { join } from "node:path";
 
-import { loadFile } from "./files.js";
 import { isDbAvailable, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
+import { readMilestones } from "./db/lifecycle-read.js";
+import { ensureExistingWorkflowDbOpen } from "./state/derive/db-open.js";
+import { stripIdPrefix } from "./strip-id-prefix.js";
 import {
   resolveMilestoneFile,
   resolveSliceFile,
@@ -72,14 +74,6 @@ export interface WorkspaceIndex {
 
 export type GSDWorkspaceIndex = WorkspaceIndex;
 
-// Extract milestone title from roadmap header without using parsers.
-// Falls back to the milestone ID if no title line found.
-function titleFromRoadmapHeader(content: string, fallbackId: string): string {
-  // Parse the "# M001: Title" header directly
-  const match = content.match(/^#\s+M\d+(?:-[a-z0-9]{6})?[^:]*:\s*(.+)/m);
-  return match?.[1]?.trim() || fallbackId;
-}
-
 async function indexSlice(basePath: string, milestoneId: string, sliceId: string, fallbackTitle: string, done: boolean, roadmapMeta?: { risk?: RiskLevel; depends?: string[]; demo?: string }): Promise<WorkspaceSliceTarget> {
   const planPath = resolveSliceFile(basePath, milestoneId, sliceId, "PLAN") ?? undefined;
   const summaryPath = resolveSliceFile(basePath, milestoneId, sliceId, "SUMMARY") ?? undefined;
@@ -124,39 +118,31 @@ export interface IndexWorkspaceOptions {
 }
 
 export async function indexWorkspace(basePath: string, opts: IndexWorkspaceOptions = {}): Promise<GSDWorkspaceIndex> {
-  const milestoneIds = findMilestoneIds(basePath);
+  // The database is the read authority. It is opened before the first read:
+  // the web boot runs this function in a new process, where nothing else has
+  // opened it.
+  ensureExistingWorkflowDbOpen(basePath);
+  const dbOpen = isDbAvailable();
+  // Milestones and their titles come from database rows; a discarded
+  // Milestone is not listed. With no database only the directory names are known.
+  const milestoneRefs = dbOpen
+    ? readMilestones()
+      .filter((milestone) => !milestone.discarded)
+      .map((milestone) => ({ id: milestone.id, title: stripIdPrefix(milestone.title, milestone.id) || milestone.id }))
+    : findMilestoneIds(basePath).map((id) => ({ id, title: id }));
   const milestones: WorkspaceMilestoneTarget[] = [];
 
-  for (const milestoneId of milestoneIds) {
+  for (const { id: milestoneId, title } of milestoneRefs) {
     const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP") ?? undefined;
-    let title = milestoneId;
-    const slices: WorkspaceSliceTarget[] = [];
-
-    if (roadmapPath || isDbAvailable()) {
-      // Normalize slices from the DB — post-cutover read authority, no markdown fallback.
-      type NormSlice = { id: string; done: boolean; title: string; risk: string; depends: string[]; demo: string };
-      let normSlices: NormSlice[] | null = null;
-      if (isDbAvailable()) {
-        const dbSlices = getMilestoneSlices(milestoneId);
-        normSlices = dbSlices.map(s => ({ id: s.id, done: s.status === "complete", title: s.title, risk: s.risk || "medium", depends: s.depends, demo: s.demo }));
-        // Get title from roadmap header
-        if (roadmapPath) {
-          const roadmapContent = await loadFile(roadmapPath);
-          if (roadmapContent) title = titleFromRoadmapHeader(roadmapContent, milestoneId);
-        }
-      }
-      if (!normSlices) normSlices = [];
-
-      if (normSlices.length > 0) {
-        const sliceResults = await Promise.all(
-          normSlices.map(async (slice) => {
-            return indexSlice(basePath, milestoneId, slice.id, slice.title, slice.done, { risk: slice.risk as RiskLevel, depends: slice.depends, demo: slice.demo });
-          }),
-        );
-
-        slices.push(...sliceResults);
-      }
-    }
+    // Slices come from the database only — no markdown fallback.
+    const slices = dbOpen
+      ? await Promise.all(getMilestoneSlices(milestoneId).map((slice) =>
+        indexSlice(basePath, milestoneId, slice.id, slice.title, slice.status === "complete", {
+          risk: (slice.risk || "medium") as RiskLevel,
+          depends: slice.depends,
+          demo: slice.demo,
+        })))
+      : [];
 
     milestones.push({ id: milestoneId, title, roadmapPath, slices });
   }

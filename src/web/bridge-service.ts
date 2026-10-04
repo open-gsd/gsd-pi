@@ -4,6 +4,9 @@ import { StringDecoder } from "node:string_decoder";
 import type { Readable } from "node:stream";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import type { DatabaseSync } from "node:sqlite";
+import { openProjectDatabaseReadOnly } from "./project-db-read.ts";
+import { isDiscardedMilestoneStatus } from "../resources/extensions/gsd/status-guards.ts";
 import { resolveTypeStrippingFlag, resolveSubprocessModule, buildSubprocessPrefixArgs } from "./ts-subprocess-flags.ts";
 import { safePackageRootFromImportUrl } from "./safe-import-meta-resolve.ts";
 
@@ -518,6 +521,32 @@ export function detectMonorepo(dirPath: string, checkExists?: (path: string) => 
   return false;
 }
 
+/**
+ * True when the project has a Milestone. The database is the authority: a
+ * Milestone row that is not discarded. The hierarchy directories (`phases/`,
+ * or `milestones/` of the older layout) decide only when the database cannot
+ * be read, which is the case for a project that was never migrated.
+ */
+function hasMilestones(projectCwd: string): boolean {
+  let db: DatabaseSync | undefined;
+  try {
+    db = openProjectDatabaseReadOnly(projectCwd);
+    return db.prepare("SELECT status FROM milestones").all()
+      .some((row) => !isDiscardedMilestoneStatus(String(row.status)));
+  } catch {
+    // No database, no SQLite provider, or no milestones table.
+  } finally {
+    db?.close();
+  }
+  return ["phases", "milestones"].some((dir) => {
+    try {
+      return readdirSync(join(projectCwd, ".gsd", dir), { withFileTypes: true }).some((d) => d.isDirectory());
+    } catch {
+      return false;
+    }
+  });
+}
+
 export function detectProjectKind(projectCwd: string): ProjectDetection {
   const checkExists = getBridgeDeps().existsSync ?? existsSync;
 
@@ -554,16 +583,7 @@ export function detectProjectKind(projectCwd: string): ProjectDetection {
   let kind: ProjectDetectionKind;
 
   if (hasGsdFolder) {
-    // Check if milestones exist
-    const milestonesDir = join(projectCwd, ".gsd", "milestones");
-    let hasMilestones = false;
-    try {
-      const dirs = readdirSync(milestonesDir, { withFileTypes: true });
-      hasMilestones = dirs.some(d => d.isDirectory());
-    } catch {
-      // No milestones dir or can't read it
-    }
-    kind = hasMilestones ? "active-gsd" : "empty-gsd";
+    kind = hasMilestones(projectCwd) ? "active-gsd" : "empty-gsd";
   } else if (hasPlanningFolder) {
     kind = "v1-legacy";
   } else if (hasPackageJson || hasCargo || hasGoMod || hasPyproject || fileCount > 2 || (hasGitRepo && fileCount > 0)) {
