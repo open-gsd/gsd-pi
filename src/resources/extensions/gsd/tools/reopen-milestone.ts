@@ -11,6 +11,7 @@
 import {
   getMilestone,
   getMilestoneSlices,
+  getSliceRunUatAssessment,
   getSliceTasks,
   reopenMilestoneCascade,
 } from "../gsd-db.js";
@@ -95,6 +96,14 @@ export async function handleReopenMilestone(
   let canonicalReceipt: MilestoneReopenReceipt | undefined;
   let slicesResetCount = 0;
   let tasksResetCount = 0;
+  // The canonical reopen deletes each run-uat verdict; its ASSESSMENT file goes with it.
+  const slicesWithUatVerdict = new Set(
+    adoptedLifecycle
+      ? getMilestoneSlices(params.milestoneId)
+        .filter((slice) => getSliceRunUatAssessment(params.milestoneId, slice.id) !== null)
+        .map((slice) => slice.id)
+      : [],
+  );
   if (adoptedLifecycle) {
     if (!invocation) {
       return { error: "adopted Milestone reopen requires canonical invocation identity" };
@@ -208,7 +217,7 @@ export async function handleReopenMilestone(
       cleanup: for (const slice of slices) {
         if (superseded) break;
         const sliceDir = resolveSlicePath(basePath, params.milestoneId, slice.id);
-        for (const suffix of ["SUMMARY", "UAT"]) {
+        for (const suffix of ["SUMMARY", "UAT", ...(slicesWithUatVerdict.has(slice.id) ? ["ASSESSMENT"] : [])]) {
           const sliceArtifacts = new Set([
             resolveSliceFile(basePath, params.milestoneId, slice.id, suffix),
             targetSliceFile(basePath, params.milestoneId, slice.id, suffix, milestoneTitle),

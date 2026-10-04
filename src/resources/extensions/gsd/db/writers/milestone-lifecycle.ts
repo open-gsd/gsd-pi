@@ -22,7 +22,7 @@ import {
   recordRequirementDisposition,
   terminateRecoveryWaiver,
 } from "./task-recovery.js";
-import { ensurePendingSliceQ8 } from "./slice-companion-state.js";
+import { ensurePendingSliceQ8, invalidateSliceEvidence } from "./slice-companion-state.js";
 
 export interface MilestoneCompletionHierarchyInput {
   milestoneId: string;
@@ -781,9 +781,15 @@ export function reopenMilestoneHierarchy(
       throw new Error(`Milestone reopen must update Slice ${sliceId}`);
     }
     ensurePendingSliceQ8(context, { milestoneId, sliceId });
+    invalidateSliceEvidence(context, { milestoneId, sliceId });
     reopenedSliceIds.push(sliceId);
   }
   }
+  // A reopened Milestone must be validated again before it closes: the stored
+  // validation verdict judged the Milestone as it was.
+  getDb().prepare(
+    "DELETE FROM assessments WHERE milestone_id = :milestone_id AND scope = 'milestone-validation'",
+  ).run({ ":milestone_id": milestoneId });
 
   const milestoneLifecycle = adoptOrTransitionLifecycle(context, {
     itemKind: "milestone",

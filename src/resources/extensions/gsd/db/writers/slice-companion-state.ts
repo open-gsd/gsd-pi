@@ -47,3 +47,36 @@ export function ensurePendingSliceQ8(
     throw new Error(`Slice ${slice.sliceId} must have one pending Q8 companion gate`);
   }
 }
+
+/**
+ * A reopened Slice is done again, so every proof of the earlier work is stale:
+ * the agent's claimed Task evidence, the run-uat verdict with its ASSESSMENT
+ * artifact, the UAT gate, the run-uat retry count, and UAT exec runs not yet
+ * saved in a result. Remove them so the redo is judged on new evidence only.
+ * gate_runs keeps the history of the UAT attempts.
+ */
+export function invalidateSliceEvidence(
+  context: Readonly<DomainOperationContext>,
+  slice: SliceCompanionIdentity,
+): void {
+  requireActiveDomainOperationContext(context);
+  const parameters = {
+    ":milestone_id": slice.milestoneId,
+    ":slice_id": slice.sliceId,
+  };
+  for (const statement of [
+    "DELETE FROM verification_evidence WHERE milestone_id = :milestone_id AND slice_id = :slice_id",
+    `DELETE FROM artifacts
+     WHERE '.gsd/' || path IN (
+       SELECT path FROM assessments
+       WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND scope = 'run-uat'
+     )`,
+    "DELETE FROM assessments WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND scope = 'run-uat'",
+    "DELETE FROM quality_gates WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND gate_id = 'UAT'",
+    "DELETE FROM uat_retry_counters WHERE milestone_id = :milestone_id AND slice_id = :slice_id",
+    `UPDATE exec_runs SET attempt_ref = NULL
+     WHERE kind = 'uat_exec' AND milestone_id = :milestone_id AND slice_id = :slice_id`,
+  ]) {
+    getDb().prepare(statement).run(parameters);
+  }
+}

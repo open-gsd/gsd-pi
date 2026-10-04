@@ -3,8 +3,8 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import {
@@ -14,8 +14,17 @@ import {
   insertSlice,
   insertTask,
   getSlice,
+  getSliceRunUatAssessment,
   getSliceTasks,
+  getTaskVerificationEvidence,
+  insertAssessment,
+  insertVerificationEvidence,
+  upsertQualityGate,
+  _getAdapter,
 } from '../gsd-db.ts';
+import { readExecRun, recordExecRun } from '../db/writers/exec-runs.ts';
+import { incrementUatRetryAttempts, getUatRetryAttempts } from '../db/writers/runtime-control.ts';
+import { relSliceFile, targetSliceFile } from '../paths.ts';
 import { internalExecutionInvocation } from '../execution-invocation.ts';
 import {
   handleReopenSlice as handleReopenSliceWithInvocation,
@@ -79,6 +88,53 @@ test('handleReopenSlice: resets a complete slice to in_progress and all tasks to
   } finally {
     cleanup(base);
   }
+});
+
+test('handleReopenSlice: the old UAT verdict and the old claimed evidence do not count after reopen', async (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  seedCompleteSlice();
+  insertVerificationEvidence({
+    taskId: 'T01', sliceId: 'S01', milestoneId: 'M001',
+    command: 'npm test', exitCode: 0, verdict: 'pass', durationMs: 5,
+  });
+  // What gsd_uat_result_save stores for a PASS, and the file it renders.
+  insertAssessment({
+    path: relSliceFile(base, 'M001', 'S01', 'ASSESSMENT'),
+    milestoneId: 'M001', sliceId: 'S01', status: 'pass', scope: 'run-uat', fullContent: 'verdict: PASS',
+  });
+  upsertQualityGate({
+    milestoneId: 'M001', sliceId: 'S01', gateId: 'UAT', scope: 'slice', taskId: '',
+    status: 'complete', verdict: 'pass', rationale: 'UAT PASS', findings: '', evaluatedAt: new Date().toISOString(),
+  });
+  const assessmentFile = targetSliceFile(base, 'M001', 'S01', 'ASSESSMENT');
+  mkdirSync(dirname(assessmentFile), { recursive: true });
+  writeFileSync(assessmentFile, 'verdict: PASS\n');
+  incrementUatRetryAttempts('M001', 'S01');
+  // A UAT run the host recorded for an attempt that was never saved.
+  recordExecRun({
+    kind: 'uat_exec', milestoneId: 'M001', sliceId: 'S01', checkId: 'UAT-01',
+    id: 'run-before-reopen', runtime: 'bash', command: 'node check.js', cwd: base,
+    exit_code: 0, signal: null, timedOut: false, aborted: false,
+    started_at: new Date().toISOString(), duration_ms: 1, output_hash: 'sha256:test',
+  });
+  assert.equal(getSliceRunUatAssessment('M001', 'S01')?.status, 'pass');
+  assert.equal(getTaskVerificationEvidence('M001', 'S01', 'T01').length, 1);
+
+  const result = await handleReopenSlice({ milestoneId: 'M001', sliceId: 'S01' }, base);
+
+  assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+  assert.equal(getSliceRunUatAssessment('M001', 'S01'), null, 'the UAT verdict must be gone');
+  assert.deepEqual(getTaskVerificationEvidence('M001', 'S01', 'T01'), [], 'the claimed evidence must be gone');
+  assert.equal(
+    _getAdapter()!.prepare("SELECT COUNT(*) AS n FROM quality_gates WHERE gate_id = 'UAT'").get()?.['n'],
+    0,
+    'the UAT gate must have no verdict',
+  );
+  assert.equal(getUatRetryAttempts('M001', 'S01'), 0, 'the redo gets a new run-uat budget');
+  assert.equal(readExecRun('run-before-reopen')?.attempt_ref, null, 'the old UAT run belongs to no attempt');
+  assert.equal(existsSync(assessmentFile), false, 'the ASSESSMENT projection must be removed');
 });
 
 test('handleReopenSlice: works with a single task', async () => {

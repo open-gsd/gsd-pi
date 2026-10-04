@@ -21,6 +21,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import {
+  getSliceRunUatAssessment,
   getSliceTasks,
   getDb,
 } from "../gsd-db.js";
@@ -121,6 +122,8 @@ export async function handleReopenSlice(
   let operationStatus: "committed" | "replayed";
   let operationId: string;
   let projectionStale = false;
+  // The reopen deletes the run-uat verdict; its ASSESSMENT file goes with it.
+  const hadUatVerdict = getSliceRunUatAssessment(params.milestoneId, params.sliceId) !== null;
   // Converge drifted descendants before the reopen's terminal-parity checks
   // (#2440). Evidence-gated: unverifiable drift fails here, listed, instead of
   // aborting inside the Domain Operation. Legacy (non-adopted) hierarchies —
@@ -220,6 +223,11 @@ export async function handleReopenSlice(
       const existingUat = resolveSliceFile(basePath, params.milestoneId, params.sliceId, "UAT");
       if (existingSummary) sliceArtifacts.add(existingSummary);
       if (existingUat) sliceArtifacts.add(existingUat);
+      if (hadUatVerdict) {
+        sliceArtifacts.add(targetSliceFile(basePath, params.milestoneId, params.sliceId, "ASSESSMENT"));
+        const existingAssessment = resolveSliceFile(basePath, params.milestoneId, params.sliceId, "ASSESSMENT");
+        if (existingAssessment) sliceArtifacts.add(existingAssessment);
+      }
       for (const artifactPath of sliceArtifacts) {
         if (!removeProjectionIfCurrent({ artifactPath, operationId, isCurrent })) {
           projectionStale = true;

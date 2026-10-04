@@ -551,6 +551,22 @@ test("Milestone reopen atomically resets the full hierarchy, revokes Waivers, an
   );
 });
 
+test("Milestone reopen removes the stored validation verdict and each Slice UAT verdict", async () => {
+  await prepareCompletedFixture();
+  db().exec(`
+    INSERT INTO assessments (path, milestone_id, slice_id, status, scope, full_content, created_at) VALUES
+      ('.gsd/test/M001-VALIDATION.md', 'M001', NULL, 'pass', 'milestone-validation', 'verdict: pass', '2026-07-12T00:00:00.000Z'),
+      ('.gsd/test/S01-ASSESSMENT.md', 'M001', 'S01', 'pass', 'run-uat', 'verdict: PASS', '2026-07-12T00:00:00.000Z');
+    INSERT INTO verification_evidence (task_id, slice_id, milestone_id, command, exit_code, verdict, duration_ms, created_at)
+      VALUES ('T01', 'S01', 'M001', 'npm test', 0, 'pass', 5, '2026-07-12T00:00:00.000Z');
+  `);
+
+  reopenMilestone(reopenInput("milestone-reopen/direct/evidence"));
+
+  assert.deepEqual(rows("SELECT scope FROM assessments WHERE milestone_id = 'M001' AND scope IN ('milestone-validation', 'run-uat')"), []);
+  assert.deepEqual(rows("SELECT command FROM verification_evidence WHERE milestone_id = 'M001'"), []);
+});
+
 test("adopted Milestone reopen handler fails closed without canonical invocation identity", async () => {
   const basePath = await prepareCompletedFixture();
   const before = durableSnapshot();
