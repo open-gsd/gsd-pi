@@ -10,7 +10,7 @@
  */
 import { describe, test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -19,7 +19,10 @@ import { resolveExpectedArtifactPath } from "../auto-artifact-paths.ts";
 import { DISPATCH_RULES, type DispatchAction, type DispatchContext } from "../auto-dispatch.ts";
 import { evaluateGuardedCompleteMilestoneDispatch } from "../milestone-closeout.ts";
 import { closeQualityGatesFromEvidence } from "../quality-gate-closure.ts";
+import { _selfHealRuntimeRecordsForTest } from "../guided-flow.ts";
+import { readUnitRuntimeRecord, writeUnitRuntimeRecord } from "../unit-runtime.ts";
 import {
+  _getAdapter,
   closeDatabase,
   getPendingGates,
   hasUnitRecoveryBlock,
@@ -301,6 +304,79 @@ describe("a unit that timed out is not complete", () => {
 
     assert.equal(action?.action, "dispatch");
     assert.equal(action?.action === "dispatch" ? action.unitType : null, "research-slice");
+  });
+
+  test("parallel-research: a failed gate row insert records no block", () => {
+    insertSlice({ id: SID, milestoneId: MID, title: "Slice", status: "pending" });
+    const unitId = `${MID}/parallel-research`;
+    _getAdapter()!.exec("ALTER TABLE gate_runs RENAME TO gate_runs_off");
+
+    const written = writeBlockerPlaceholder("research-slice", unitId, base, "hard recovery exhausted 1 attempts");
+
+    _getAdapter()!.exec("ALTER TABLE gate_runs_off RENAME TO gate_runs");
+    assert.equal(written, null, "a sidecar file without its gate row is not a recorded block");
+    assert.equal(hasUnitRecoveryBlock("research-slice", unitId), false);
+    assert.equal(verifyExpectedArtifact("research-slice", unitId, base), false);
+  });
+
+  test("parallel-research: no open database records no block", () => {
+    closeDatabase();
+
+    assert.equal(
+      writeBlockerPlaceholder("research-slice", `${MID}/parallel-research`, base, "hard recovery exhausted 1 attempts"),
+      null,
+    );
+  });
+});
+
+describe("/gsd start cleanup of stale runtime records is read-only", () => {
+  const notifyCtx = { ui: { notify: () => {} } } as unknown as Parameters<typeof _selfHealRuntimeRecordsForTest>[1];
+
+  function staleCompleteMilestoneRecord(): void {
+    writeUnitRuntimeRecord(base, "complete-milestone", MID, Date.now(), { phase: "finalized" });
+  }
+
+  test("an unproven milestone gets no assessment, gate run or VALIDATION file, and keeps its record", () => {
+    insertSlice({ id: SID, milestoneId: MID, title: "Slice", status: "complete" });
+    updateMilestoneStatus(MID, "complete", new Date().toISOString());
+    staleCompleteMilestoneRecord();
+
+    const { cleared } = _selfHealRuntimeRecordsForTest(base, notifyCtx);
+
+    assert.equal(cleared, 0, "no validation verdict row: the DB does not prove the closeout");
+    assert.notEqual(readUnitRuntimeRecord(base, "complete-milestone", MID), null);
+    const db = _getAdapter()!;
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM assessments").get()?.["n"], 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM gate_runs").get()?.["n"], 0);
+    assert.equal(existsSync(join(milestoneDir(), `${MID}-VALIDATION.md`)), false);
+  });
+
+  test("a proven milestone has its record cleared and its pending gate left pending", () => {
+    insertSlice({ id: SID, milestoneId: MID, title: "Slice", status: "complete" });
+    insertGateRow({ milestoneId: MID, sliceId: SID, gateId: "Q3", scope: "slice" });
+    insertArtifact({
+      path: `milestones/${MID}/slices/${SID}/${SID}-PLAN.md`,
+      artifact_type: "PLAN",
+      milestone_id: MID,
+      slice_id: SID,
+      task_id: null,
+      full_content: [`# ${SID}: Slice`, "", "## Threat Surface", "", "- Reviewed, none."].join("\n"),
+    });
+    insertAssessment({
+      path: `milestones/${MID}/${MID}-VALIDATION.md`,
+      milestoneId: MID,
+      status: "pass",
+      scope: "milestone-validation",
+      fullContent: "---\nverdict: pass\n---\n",
+    });
+    updateMilestoneStatus(MID, "complete", new Date().toISOString());
+    staleCompleteMilestoneRecord();
+
+    const { cleared } = _selfHealRuntimeRecordsForTest(base, notifyCtx);
+
+    assert.equal(cleared, 1);
+    assert.equal(readUnitRuntimeRecord(base, "complete-milestone", MID), null);
+    assert.deepEqual(getPendingGates(MID, SID).map((gate) => gate.gate_id), ["Q3"]);
   });
 });
 

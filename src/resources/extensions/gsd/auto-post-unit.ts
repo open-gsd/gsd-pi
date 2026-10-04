@@ -2410,9 +2410,9 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         s.pendingVerificationRetry = null;
         s.verificationRetryCount.delete(retryKey);
         s.verificationRetryFailureHashes.delete(retryKey);
-        // #2510: the write can return null (artifact path unresolvable) — in that
-        // case neither the diagnostic sidecar nor the recovery gate row exists,
-        // so the UI must not claim a blocker was recorded.
+        // #2510: the write returns null when the artifact path is unresolvable
+        // or the recovery gate row was not written — in that case no block is
+        // recorded, so the UI must not claim a blocker was recorded.
         const blockerPath = writeBlockerPlaceholder(s.currentUnit.type, s.currentUnit.id, s.basePath, reason);
         ctx.ui.notify(
           blockerPath

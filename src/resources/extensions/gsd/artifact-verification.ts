@@ -133,7 +133,12 @@ function hasCompleteProjectResearch(base: string): boolean {
  * Returns null when the unit's result is recorded. The rendered files of the
  * unit are projections of these rows and are not read.
  */
-function missingUnitResult(unitType: string, mid: string, sid: string | undefined): string | null {
+function missingUnitResult(
+  unitType: string,
+  mid: string,
+  sid: string | undefined,
+  readOnly: boolean,
+): string | null {
   switch (unitType) {
     case "discuss-milestone":
       return hasSavedArtifact(mid, null, "CONTEXT") ? null : "no saved milestone CONTEXT in the database";
@@ -152,7 +157,7 @@ function missingUnitResult(unitType: string, mid: string, sid: string | undefine
     case "plan-slice":
       // Re-open a file-backed DB first: the planning tool can commit from
       // another process, and this connection must see those task rows.
-      refreshWorkflowDatabaseFromDisk();
+      if (!readOnly) refreshWorkflowDatabaseFromDisk();
       return getSliceTasks(mid, sid).length > 0 ? null : "the slice has no task rows in the database";
     case "refine-slice":
       return getSlice(mid, sid)?.is_sketch === 0 && getSliceTasks(mid, sid).length > 0
@@ -177,11 +182,15 @@ function missingUnitResult(unitType: string, mid: string, sid: string | undefine
  * Check whether a unit recorded its result. Milestone, slice and task units
  * are verified against database rows only (ADR-046): a rendered file never
  * proves completion and a missing file never blocks it.
+ *
+ * With `readOnly` the check decides from the rows already in the open
+ * database: it does not re-open the database and writes no gate rows.
  */
 export function verifyExpectedArtifact(
   unitType: string,
   unitId: string,
   base: string,
+  options: { readOnly?: boolean } = {},
 ): boolean {
   if (unitType.startsWith("hook/")) return true;
 
@@ -336,7 +345,8 @@ export function verifyExpectedArtifact(
   try {
     if (unitType === "complete-milestone") {
       const closeoutProof = proveMilestoneCloseout(mid, {
-        refreshFromDisk: true,
+        refreshFromDisk: !options.readOnly,
+        readOnly: options.readOnly,
         artifactBasePath: resolveArtifactVerificationBase(unitId, base),
         implementationEvidence: {
           basePath: base,
@@ -352,7 +362,7 @@ export function verifyExpectedArtifact(
       return closeoutProof.ok;
     }
 
-    const missing = missingUnitResult(unitType, mid, sid);
+    const missing = missingUnitResult(unitType, mid, sid, options.readOnly === true);
     if (missing === null) return true;
     logWarning("recovery", `verify-fail ${unitType} ${unitId}: ${missing}`);
     return false;

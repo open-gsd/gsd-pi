@@ -1766,7 +1766,8 @@ function selfHealRuntimeRecords(basePath: string, ctx: ExtensionContext): { clea
       if (unitType.startsWith("hook/")) continue;
       // Clear records of units that recorded their result in the database
       // (completed but not cleaned up). A file on disk is not that evidence.
-      if (verifyExpectedArtifact(unitType, unitId, basePath)) {
+      // Cleanup is read-only: it never records a verdict, gate or projection.
+      if (verifyExpectedArtifact(unitType, unitId, basePath, { readOnly: true })) {
         clearUnitRuntimeRecord(basePath, unitType, unitId);
         cleared++;
         continue;

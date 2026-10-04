@@ -103,6 +103,7 @@ test("#2251: writeBlockerPlaceholder for validate-milestone never occupies the c
   const blockerPath = validationPath.replace(/-VALIDATION\.md$/u, "-RECOVERY-BLOCKER.md");
   const persisted = "# M001 validation\n\nverdict: needs-attention\n";
   writeFileSync(validationPath, persisted, "utf-8");
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const result = writeBlockerPlaceholder(
     "validate-milestone",
@@ -136,6 +137,7 @@ test("#2251: writeBlockerPlaceholder for complete-milestone never occupies the c
   const blockerPath = summaryPath.replace(/-SUMMARY\.md$/u, "-RECOVERY-BLOCKER.md");
   const persisted = "# M001 summary (partial)\n";
   writeFileSync(summaryPath, persisted, "utf-8");
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const result = writeBlockerPlaceholder("complete-milestone", "M001", base, "retries exhausted");
 
@@ -190,6 +192,7 @@ test("#2251: writeBlockerPlaceholder returns a sidecar path that resolves throug
   const validationPath = resolveExpectedArtifactPath("validate-milestone", "M001", base)!;
   const persisted = "# M001 validation\n";
   writeFileSync(validationPath, persisted, "utf-8");
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const result = writeBlockerPlaceholder("validate-milestone", "M001", linkedBase, "retries exhausted");
 

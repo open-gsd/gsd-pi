@@ -440,7 +440,7 @@ export function writeReactiveExecuteBlocker(
 
   clearPathCache();
   clearParseCache();
-  recordUnitRecoveryBlock("reactive-execute", unitId, reason, blockerPath);
+  if (!recordUnitRecoveryBlock("reactive-execute", unitId, reason, blockerPath)) return null;
 
   return {
     blockerPath,
@@ -454,15 +454,15 @@ export function writeReactiveExecuteBlocker(
  * Record the terminal outcome of a unit whose recovery ended without a result:
  * one manual-attention gate run. Dispatch and verification read this row
  * (hasUnitRecoveryBlock, getPlanMilestoneRecoveryBlock); the blocker file is a
- * diagnostic only.
+ * diagnostic only. Returns whether the row was written.
  */
 function recordUnitRecoveryBlock(
   unitType: string,
   unitId: string,
   reason: string,
   blockerArtifactPath: string,
-): void {
-  if (!isDbAvailable()) return;
+): boolean {
+  if (!isDbAvailable()) return false;
   const { milestone: mid, slice: sid } = parseUnitId(unitId);
   const recordedAt = new Date().toISOString();
   try {
@@ -485,8 +485,10 @@ function recordUnitRecoveryBlock(
       evaluatedAt: recordedAt,
     });
     invalidateStateCache();
+    return true;
   } catch (e) {
     logWarning("recovery", `recovery blocker persistence failed for ${unitType} ${unitId}: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
   }
 }
 
@@ -496,7 +498,8 @@ function recordUnitRecoveryBlock(
  * projection file, so no file can pass for the unit's result and the unit
  * stays incomplete.
  *
- * Returns the relative path written, or null if the path couldn't be resolved.
+ * Returns the relative path written, or null if the path couldn't be resolved
+ * or the gate run was not recorded: a sidecar file alone is not a recorded block.
  */
 export function writeBlockerPlaceholder(
   unitType: string,
@@ -545,8 +548,13 @@ export function writeBlockerPlaceholder(
   // slice. The recovery gate remains authoritative while the milestone has no
   // real slices; a later successful plan supersedes it by creating those rows.
   // A Task outcome is already held by its Attempt, Result and Recovery rows.
-  if (unitType !== "execute-task") {
-    recordUnitRecoveryBlock(unitType, unitId, reason, blockerArtifactPath);
+  // The project research gate reads its blocker file, so that file is the block.
+  if (
+    unitType !== "execute-task" &&
+    !recordUnitRecoveryBlock(unitType, unitId, reason, blockerArtifactPath) &&
+    unitType !== "research-project"
+  ) {
+    return null;
   }
 
   const writtenRel = relative(base, blockerArtifactPath);

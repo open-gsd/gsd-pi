@@ -142,6 +142,7 @@ test('writeBlockerPlaceholder: creates directory if missing', () => {
   try {
     // Only create milestone dir, not slice dir
     mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
     // resolveSliceArtifactPath now returns a canonical path even when the dir
     // doesn't exist (relSliceFile fallback), so writeBlockerPlaceholder creates
     // the directory and writes the placeholder file — returning a non-null diagnosis.
@@ -155,6 +156,7 @@ test('writeBlockerPlaceholder: creates directory if missing', () => {
 test('writeBlockerPlaceholder: writes a sidecar for research-milestone, not the RESEARCH file', () => {
   const base = createFixtureBase();
   try {
+    openDatabase(join(base, ".gsd", "gsd.db"));
     const result = writeBlockerPlaceholder("research-milestone", "M001", base, "hard timeout");
     assert.ok(result !== null, "should return relative path");
     const researchPath = resolveExpectedArtifactPath("research-milestone", "M001", base)!;
@@ -176,6 +178,7 @@ test('writeBlockerPlaceholder: plan-slice diagnostics preserve the canonical PLA
   const blockerPath = planPath.replace(/-PLAN\.md$/u, "-RECOVERY-BLOCKER.md");
   const partialPlan = "# S01: Partial plan\n\nPlanning was interrupted before tasks were persisted.\n";
   writeFileSync(planPath, partialPlan, "utf-8");
+  openDatabase(join(base, ".gsd", "gsd.db"));
 
   const result = writeBlockerPlaceholder(
     "plan-slice",

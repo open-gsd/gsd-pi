@@ -353,7 +353,7 @@ export async function recoverTimedOutUnit(
     return fallsBack ? "recovered" : "paused";
   }
 
-  // Fallback: couldn't resolve artifact path — pause as before.
+  // Fallback: no block was recorded (unresolvable path or no gate row) — pause.
   writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnitStartedAt, {
     phase: "paused",
     recoveryAttempts: recoveryAttempts + 1,
