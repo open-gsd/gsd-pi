@@ -871,6 +871,94 @@ test("Forward Repair keeps an imported knowledge row and plans no mutation for i
   assert.equal(plan.targets[0]?.reasonCode, "KNOWLEDGE_MEMORY_RETAINED");
 });
 
+test("Forward Repair restores the backup row of a knowledge row that the import updated, and asks when it changed later", () => {
+  const identity = hashLegacyImportValue({ id: "P001" });
+  const knowledgeRow = (text: string): LegacyImportBaseRow => ({
+    row_set: "knowledge_memories",
+    identity: JSON.stringify({ source_knowledge_id: "P001" }),
+    value: {
+      source_knowledge_id: "P001",
+      category: "pattern",
+      content: text,
+      scope: "project",
+      structured_fields: JSON.stringify({
+        sourceKnowledgeTable: "patterns", pattern: text, where: "", notes: "", sourceKnowledgeId: "P001",
+      }),
+      superseded_by: null,
+    },
+  });
+  const applicationPlan = {
+    planSchemaVersion: 2,
+    previewId: identity,
+    previewHash: identity,
+    baseProjectRevision: 0,
+    baseAuthorityEpoch: 0,
+    instructions: [{
+      action: "update-knowledge-memory",
+      targetKind: "knowledge",
+      targetKey: "P001",
+      knowledgeId: "P001",
+      values: { table: "patterns", cells: '["Imported text","—","—"]' },
+      changeIds: [identity],
+    }],
+  } as unknown as LegacyImportApplicationPlan;
+  const backup = knowledgeRow("Text before the import");
+  const compile = (
+    currentText: string,
+    extra: Partial<Parameters<typeof compileLegacyImportForwardRepairPlan>[0]> = {},
+  ) => compileLegacyImportForwardRepairPlan({
+    applicationOperationId: "application-op",
+    applicationIdentityHash: identity,
+    applicationRelevantRowsHash: identity,
+    previewId: identity,
+    previewHash: identity,
+    backupId: identity,
+    applicationPlan,
+    backupBase: baseSnapshot(0, [backup]),
+    currentBase: baseSnapshot(2, [knowledgeRow(currentText)]),
+    ...extra,
+  });
+  const restore = {
+    action: "restore-knowledge-memory",
+    knowledgeId: "P001",
+    category: "pattern",
+    content: "Text before the import",
+    scope: "project",
+    structuredFields: backup.value["structured_fields"],
+  };
+
+  const unchanged = compile("Imported text").targets[0];
+  assert.equal(unchanged?.disposition, "safe-revert");
+  assert.equal(unchanged?.reasonCode, "KNOWLEDGE_MEMORY_UNCHANGED");
+  assert.deepEqual(unchanged?.mutation, restore);
+
+  const retained = compile("Imported text", { goal: "retain" }).targets[0];
+  assert.equal(retained?.disposition, "already-repaired");
+  assert.equal(retained?.mutation, null);
+
+  const restored = compile("Text before the import").targets[0];
+  assert.equal(restored?.disposition, "already-repaired");
+  assert.equal(restored?.reasonCode, "KNOWLEDGE_MEMORY_ALREADY_RESTORED");
+
+  const later = compile("Text of a later update");
+  assert.equal(later.unresolvedCount, 1);
+  assert.equal(later.mutationCount, 0);
+  assert.equal(later.targets[0]?.disposition, "choice-required");
+  assert.equal(later.targets[0]?.reasonCode, "KNOWLEDGE_MEMORY_CHANGED_LATER");
+  assert.deepEqual(later.targets[0]?.review?.proposedMutation, restore);
+  const chosen = compile("Text of a later update", {
+    choices: [{
+      instructionIndex: 0,
+      targetKind: "knowledge",
+      targetKey: "P001",
+      reviewHash: later.targets[0]!.reviewHash!,
+      decision: "restore-backup",
+    }],
+  }).targets[0];
+  assert.equal(chosen?.reasonCode, "EXPLICIT_CHOICE_RESTORE_BACKUP");
+  assert.deepEqual(chosen?.mutation, restore);
+});
+
 test("the retain goal keeps intact Application rows instead of reverting them", () => {
   const identity = hashLegacyImportValue({ id: "R001" });
   const applicationPlan = {

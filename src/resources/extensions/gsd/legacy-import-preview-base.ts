@@ -89,10 +89,11 @@ const ROW_SET_QUERIES: Record<LegacyImportBaseRowSet, string> = {
       AND instr(structured_fields, '"sourceDecisionId"') > 0`,
   // One row per KNOWLEDGE.md id (K/P/L###). A capture supersedes the prior
   // row that held the id, so an id can have many memories rows: the active
-  // row is the authority, else the newest superseded row.
-  knowledge_memories: `SELECT source_knowledge_id, category, content, scope, structured_fields
+  // row is the authority, else the newest superseded row. `superseded_by` is
+  // set only when no active row holds the id: the row was forgotten.
+  knowledge_memories: `SELECT source_knowledge_id, category, content, scope, structured_fields, superseded_by
     FROM (
-      SELECT source_knowledge_id, category, content, scope, structured_fields,
+      SELECT source_knowledge_id, category, content, scope, structured_fields, superseded_by,
         ROW_NUMBER() OVER (
           PARTITION BY source_knowledge_id
           ORDER BY superseded_by IS NOT NULL, seq DESC

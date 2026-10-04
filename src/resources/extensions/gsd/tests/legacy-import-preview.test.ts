@@ -113,7 +113,7 @@ const EXPECTED_BASE_ROW_KEYS: Record<(typeof EXPECTED_BASE_ROW_SETS)[number], re
     "made_by", "source", "superseded_by",
   ],
   decision_memories: ["source_decision_id", "structured_fields"],
-  knowledge_memories: ["source_knowledge_id", "category", "content", "scope", "structured_fields"],
+  knowledge_memories: ["source_knowledge_id", "category", "content", "scope", "structured_fields", "superseded_by"],
   item_lifecycles: [
     "project_id", "item_kind", "milestone_id", "slice_id", "task_id",
     "lifecycle_status", "state_version", "last_operation_id",

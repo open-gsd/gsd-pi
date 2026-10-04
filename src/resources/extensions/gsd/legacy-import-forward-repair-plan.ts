@@ -4,6 +4,7 @@
 import type { LegacyImportValue } from "./legacy-import-contract.js";
 import { deepFreeze } from "./legacy-import-utils.js";
 import type {
+  LegacyImportApplicationKnowledgeInstruction,
   LegacyImportApplicationPlan,
   LegacyImportApplicationPlanInstruction,
   LegacyImportApplicationRowInstruction,
@@ -13,6 +14,7 @@ import type {
   LegacyImportBaseRowSet,
   LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
+import { legacyImportKnowledgeRow } from "./legacy-import-preview-classifier-targets.js";
 import { canonicalLegacyImportJson, hashLegacyImportValue } from "./legacy-import-preview.js";
 
 export const LEGACY_IMPORT_FORWARD_REPAIR_PLAN_SCHEMA_VERSION = 2 as const;
@@ -59,6 +61,16 @@ export interface LegacyImportForwardRepairDecisionMutation {
   readonly structuredFields: string | null;
 }
 
+/** Write the backup values back to the memories row that holds the knowledge id. */
+export interface LegacyImportForwardRepairKnowledgeMutation {
+  readonly action: "restore-knowledge-memory";
+  readonly knowledgeId: string;
+  readonly category: string;
+  readonly content: string;
+  readonly scope: string;
+  readonly structuredFields: string;
+}
+
 export interface LegacyImportForwardRepairCancelLifecycleMutation {
   readonly action: "cancel-imported-lifecycle";
   readonly itemKind: "milestone" | "slice" | "task";
@@ -82,6 +94,7 @@ export type LegacyImportForwardRepairMutation =
   | LegacyImportForwardRepairRowMutation
   | LegacyImportForwardRepairDependencyMutation
   | LegacyImportForwardRepairDecisionMutation
+  | LegacyImportForwardRepairKnowledgeMutation
   | LegacyImportForwardRepairCancelLifecycleMutation
   | LegacyImportForwardRepairCreateLifecycleMutation;
 
@@ -759,6 +772,73 @@ function decisionTarget(
       });
 }
 
+/**
+ * An imported update of a knowledge row overwrote database text that only the
+ * backup still holds. The rows are compared as the cells KNOWLEDGE.md shows,
+ * the same form the Preview compared.
+ */
+function knowledgeTarget(
+  instruction: LegacyImportApplicationKnowledgeInstruction,
+  instructionIndex: number,
+  backupRows: ReadonlyMap<string, LegacyImportBaseRow>,
+  currentRows: ReadonlyMap<string, LegacyImportBaseRow>,
+  choices: ReadonlyMap<number, Readonly<LegacyImportForwardRepairChoice>>,
+  goal: LegacyImportForwardRepairGoal,
+): LegacyImportForwardRepairTarget {
+  const key = rowKey(
+    "knowledge_memories",
+    canonicalLegacyImportJson({ source_knowledge_id: instruction.knowledgeId }),
+  );
+  const base = backupRows.get(key)?.value;
+  const current = currentRows.get(key)?.value;
+  if (base === undefined) {
+    return target(instruction, instructionIndex, "conflict", "KNOWLEDGE_MEMORY_MISSING_FROM_BACKUP");
+  }
+  if (current === undefined) {
+    // The repair writer restores a knowledge row by UPDATE only.
+    return target(instruction, instructionIndex, "later-modified", "KNOWLEDGE_MEMORY_DELETED_LATER");
+  }
+  const shown = (row: Readonly<Record<string, LegacyImportValue>>): LegacyImportValue => {
+    const { table, cells } = legacyImportKnowledgeRow(row);
+    return { table, cells };
+  };
+  const imported: LegacyImportValue = {
+    table: instruction.values["table"],
+    cells: JSON.parse(String(instruction.values["cells"])) as LegacyImportValue,
+  };
+  const restore: LegacyImportForwardRepairKnowledgeMutation = {
+    action: "restore-knowledge-memory",
+    knowledgeId: instruction.knowledgeId,
+    category: String(base["category"]),
+    content: String(base["content"]),
+    scope: String(base["scope"]),
+    structuredFields: String(base["structured_fields"]),
+  };
+  if (sameValue(shown(current), shown(base))) {
+    // Retain mode: later work undid the Application's update; the later state
+    // is preserved.
+    if (goal === "retain" && !sameValue(imported, shown(base))) {
+      return target(instruction, instructionIndex, "later-modified", "KNOWLEDGE_MEMORY_REVERTED_LATER");
+    }
+    return target(instruction, instructionIndex, "already-repaired", "KNOWLEDGE_MEMORY_ALREADY_RESTORED");
+  }
+  if (!sameValue(shown(current), imported)) {
+    return choiceForTarget(
+      instruction,
+      instructionIndex,
+      choices,
+      "KNOWLEDGE_MEMORY_CHANGED_LATER",
+      restore,
+      current as LegacyImportValue,
+    );
+  }
+  // Retain mode: the Application's update is intact.
+  if (goal === "retain") {
+    return target(instruction, instructionIndex, "already-repaired", "KNOWLEDGE_MEMORY_UNCHANGED");
+  }
+  return target(instruction, instructionIndex, "safe-revert", "KNOWLEDGE_MEMORY_UNCHANGED", restore);
+}
+
 function lifecycleTarget(
   instruction: Extract<LegacyImportApplicationPlanInstruction, { action: "adopt-lifecycle" }>,
   instructionIndex: number,
@@ -830,9 +910,13 @@ function compileTarget(
   if (instruction.action === "adopt-lifecycle") {
     return lifecycleTarget(instruction, instructionIndex, input, compiledTargets);
   }
-  if (instruction.action === "create-knowledge-memory" || instruction.action === "update-knowledge-memory") {
-    // Forward Repair does not change knowledge rows. The row came from
-    // KNOWLEDGE.md, which still holds it, and `/gsd memory forget` removes it.
+  if (instruction.action === "update-knowledge-memory") {
+    return knowledgeTarget(instruction, instructionIndex, backupRows, currentRows, choices, goal);
+  }
+  if (instruction.action === "create-knowledge-memory") {
+    // Forward Repair keeps a knowledge row that the import created. The row
+    // came from KNOWLEDGE.md, which still holds it, and `/gsd memory forget`
+    // removes it.
     return target(instruction, instructionIndex, "preserve", "KNOWLEDGE_MEMORY_RETAINED");
   }
   if (instruction.action === "seed-quality-gate") {

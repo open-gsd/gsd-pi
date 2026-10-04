@@ -824,8 +824,8 @@ function applyDecision(
 /**
  * Write one KNOWLEDGE.md row as a memories row with its knowledge id. A
  * create requires that no memories row holds the id. An update changes the
- * row the Preview base compared: the active row, else the newest superseded
- * row. Cells that the render shows as "—" are stored empty, as a capture does.
+ * active row that holds the id; the Preview plans no update for a forgotten
+ * id. Cells that the render shows as "—" are stored empty, as a capture does.
  */
 function applyKnowledge(
   context: Readonly<DomainOperationContext>,

@@ -391,6 +391,34 @@ function applyDecisionMutation(
   if (changes(result) !== 1) throw new Error("Forward Repair decision memory restore was not exact");
 }
 
+function applyKnowledgeMutation(
+  mutation: Extract<LegacyImportForwardRepairMutation, { action: "restore-knowledge-memory" }>,
+  repairedAt: string,
+): void {
+  // The same row the base snapshot compared: the active row, else the newest
+  // superseded row.
+  const row = getDb().prepare(`SELECT id FROM memories
+    WHERE json_valid(structured_fields)
+      AND json_extract(structured_fields, '$.sourceKnowledgeId') = :knowledge_id
+    ORDER BY superseded_by IS NOT NULL, seq DESC
+    LIMIT 1`).get({ ":knowledge_id": mutation.knowledgeId });
+  if (typeof row?.["id"] !== "string") {
+    throw new Error("Forward Repair knowledge memory identity is not exact");
+  }
+  const result = getDb().prepare(`UPDATE memories
+    SET category = :category, content = :content, scope = :scope,
+        structured_fields = :structured_fields, updated_at = :updated_at
+    WHERE id = :id`).run({
+    ":category": mutation.category,
+    ":content": mutation.content,
+    ":scope": mutation.scope,
+    ":structured_fields": mutation.structuredFields,
+    ":updated_at": repairedAt,
+    ":id": row["id"],
+  });
+  if (changes(result) !== 1) throw new Error("Forward Repair knowledge memory restore was not exact");
+}
+
 function applyLifecycleMutation(
   context: Readonly<DomainOperationContext>,
   mutation: Extract<LegacyImportForwardRepairMutation, { action: "cancel-imported-lifecycle" }>,
@@ -487,6 +515,8 @@ export function applyImportForwardRepairPlan(
       applyLifecycleMutation(context, mutation, repairedAt);
     } else if (mutation.action === "create-cancelled-lifecycle") {
       createCancelledLifecycle(context, mutation, repairedAt);
+    } else if (mutation.action === "restore-knowledge-memory") {
+      applyKnowledgeMutation(mutation, repairedAt);
     } else {
       applyDecisionMutation(mutation, repairedAt);
     }

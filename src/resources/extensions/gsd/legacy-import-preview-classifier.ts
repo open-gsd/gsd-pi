@@ -721,6 +721,26 @@ function ambiguityFor(
   );
 }
 
+/**
+ * The loss report for a KNOWLEDGE.md row whose id was forgotten in the
+ * database. Readers and the render do not show a forgotten row, so the
+ * Preview plans no change for it and says that the file row is lost.
+ */
+function forgottenKnowledgeRow(
+  candidate: LegacyImportInterpretationCandidate,
+): { diagnosis: LegacyImportPreviewDiagnosis; resolution: LegacyImportPreviewResolution } {
+  const diagnosisValue = {
+    code: "knowledge-row-not-imported",
+    severity: "warning" as const,
+    source_id: candidate.raw.source_id,
+    locator: candidate.raw.locator,
+    raw_value: candidate.raw.value,
+    message: "A KNOWLEDGE.md table row is not imported into the database: the database row with its id was forgotten, so the next render removes the row from the file.",
+  };
+  const diagnosis = { diagnosis_id: hashLegacyImportValue(diagnosisValue), ...diagnosisValue };
+  return { diagnosis, resolution: { diagnosis_id: diagnosis.diagnosis_id, disposition: "preserved" } };
+}
+
 function valuesMatch(rowSet: LegacyImportBaseRowSet, current: JsonRecord, patch: JsonRecord): boolean {
   return Object.entries(patch).every(([field, value]) => (
     canonicalLegacyImportJson(normalizeStoredValue(rowSet, field, current[field] ?? null))
@@ -1045,6 +1065,9 @@ export function classifyLegacyImportChanges(
 
   const rows = buildBaseRows(base);
   const originalRows = new Map([...rows].map(([key, row]) => [key, { ...row }]));
+  const forgottenKnowledge = new Set(base.rows
+    .filter((row) => row.row_set === "knowledge_memories" && row.value["superseded_by"] != null)
+    .map((row) => rowAddress(row.row_set, row.identity)));
   const preserves = interpretation.candidates.filter((candidate) => candidate.classification === "preserve");
   const prepared = interpretation.candidates
     .filter((candidate) => candidate.classification === "compare")
@@ -1165,6 +1188,12 @@ export function classifyLegacyImportChanges(
       continue;
     }
     const key = rowAddress(address.rowSet, address.identity);
+    if (forgottenKnowledge.has(key)) {
+      const loss = forgottenKnowledgeRow(candidate);
+      diagnoses.push(loss.diagnosis);
+      resolutions.push(loss.resolution);
+      continue;
+    }
     const current = rows.get(key);
     const complete = completeSetsByRowSet.get(address.rowSet)?.[0];
     const completeMember = complete?.member_keys.includes(address.memberKey) === true;

@@ -30,6 +30,7 @@ import { generateDecisionsMd, generateRequirementsMd, saveDecisionToDb, saveRequ
 import { getAllDecisionsFromMemories } from '../context-store.ts';
 import { captureKnowledgeEntry } from '../knowledge-capture.ts';
 import { renderKnowledgeProjection } from '../knowledge-projection.ts';
+import { supersedeMemory, updateMemoryContent } from '../memory-store.ts';
 import { captureCurrentLegacyImportBaseSnapshot } from '../legacy-import-preview-base.ts';
 import { createLegacyImportPreview } from '../legacy-import-preview.ts';
 import { fingerprintLegacyImportCorpusTree } from './helpers/legacy-import-corpus.ts';
@@ -1729,5 +1730,115 @@ describe('gsd-recover', async () => {
       'CAP_EXCEEDED',
     );
     assert.deepEqual(knowledgeChanges(), []);
+  });
+
+  for (const [label, fileText] of [
+    ['the same text', 'Cache went stale'],
+    ['a different text', 'Cache went stale again'],
+  ] as const) {
+    test(`recover reports a KNOWLEDGE.md row with ${label} as not imported when its database row was forgotten`, async (t) => {
+      const base = createFixtureBase();
+      t.after(() => {
+        closeDatabase();
+        cleanup(base);
+      });
+      openDatabase(join(base, '.gsd', 'gsd.db'));
+      captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+      const lesson = captureKnowledgeEntry(base, 'lesson', 'Cache went stale', 'M001');
+      const knowledgePath = join(base, '.gsd', 'KNOWLEDGE.md');
+      const beforeForget = readFileSync(knowledgePath, 'utf-8');
+      // `/gsd memory forget` supersedes the row with this sentinel and renders.
+      assert.equal(supersedeMemory(lesson.memoryId, 'CAP_EXCEEDED'), true);
+      renderKnowledgeProjection(base);
+      assert.ok(!readFileSync(knowledgePath, 'utf-8').includes('L001'));
+      // A stale file shows the forgotten row again.
+      writeFileSync(knowledgePath, beforeForget.replace('Cache went stale', fileText));
+
+      const first = makeCtx();
+      await handleRecover(first.ctx, base);
+      const preview = first.notes.at(-1)?.message ?? '';
+      assert.doesNotMatch(preview, /knowledge:L001/, 'the Preview plans no change for the forgotten row');
+      const reported = preview
+        .slice(preview.indexOf('Diagnoses:'), preview.indexOf('Resolutions:'))
+        .split('\n')
+        .slice(1)
+        .filter((line) => line.trim().length > 0)
+        .map((line) => JSON.parse(line) as { code: string; severity: string; raw_value: string; message: string })
+        .filter((diagnosis) => diagnosis.code === 'knowledge-row-not-imported');
+      assert.deepEqual(
+        reported.map((diagnosis) => [diagnosis.severity, diagnosis.raw_value]),
+        [['warning', `| L001 | ${fileText} | — | — | M001 |`]],
+      );
+      assert.match(reported[0]!.message, /forgotten.*next render removes/u);
+      const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+      assert.ok(approval, 'the loss report does not block the Preview');
+
+      const second = makeCtx();
+      await handleRecover(second.ctx, base, approval);
+      assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+      assert.deepEqual(
+        { ..._getAdapter()!.prepare('SELECT content, superseded_by FROM memories WHERE id = :id').get({ ':id': lesson.memoryId }) },
+        { content: 'Cache went stale', superseded_by: 'CAP_EXCEEDED' },
+        'the forgotten row is not changed and stays forgotten',
+      );
+      // The report is true: the next render removes the row from the file.
+      assert.ok(!renderKnowledgeProjection(base).content.includes('L001'));
+      const rendered = readFileSync(knowledgePath, 'utf-8');
+      assert.ok(!rendered.includes('L001'));
+      assert.ok(rendered.includes('| P001 | Retry with backoff |'));
+    });
+  }
+
+  test('Forward Repair restores the pre-import text of a knowledge row that the import updated', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const pattern = captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+    // A memory UPDATE changes the database row. KNOWLEDGE.md keeps the old text.
+    assert.equal(updateMemoryContent(pattern.memoryId, 'Retry with jitter'), true);
+    const patternRow = () => {
+      const row = _getAdapter()!
+        .prepare('SELECT content, structured_fields FROM memories WHERE id = :id')
+        .get({ ':id': pattern.memoryId })!;
+      return { content: row['content'], pattern: JSON.parse(String(row['structured_fields'])).pattern };
+    };
+    const beforeImport = _getAdapter()!
+      .prepare('SELECT category, content, scope, structured_fields FROM memories WHERE id = :id')
+      .get({ ':id': pattern.memoryId });
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const preview = first.notes.at(-1)?.message ?? '';
+    assert.ok(preview.includes('update knowledge:P001'), preview);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+    assert.ok(approval, preview);
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+    assert.deepEqual(
+      patternRow(),
+      { content: 'Retry with backoff', pattern: 'Retry with backoff' },
+      'the import wrote the stale file text over the database text',
+    );
+
+    // Later accepted work closes the restore window, so the undo is a Forward Repair.
+    captureKnowledgeEntry(base, 'rule', 'Later rule', 'project');
+    const application = _getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!;
+    const third = makeCtx();
+    await handleRecover(third.ctx, base, `--application=${String(application['operation_id'])} --forward-repair`);
+    assert.match(third.notes.at(-1)?.message ?? '', /Forward Repair: committed/);
+
+    assert.deepEqual(patternRow(), { content: 'Retry with jitter', pattern: 'Retry with jitter' });
+    assert.deepEqual(
+      _getAdapter()!
+        .prepare('SELECT category, content, scope, structured_fields FROM memories WHERE id = :id')
+        .get({ ':id': pattern.memoryId }),
+      beforeImport,
+      'the row is the pre-import row again',
+    );
+    assert.ok(renderKnowledgeProjection(base).content.includes('| P001 | Retry with jitter |'));
   });
 });
