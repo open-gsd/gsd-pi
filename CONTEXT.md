@@ -90,7 +90,7 @@ completed.
 - **`tool-unavailable` (Recovery kind)**: the Recovery Classification failure kind for a tool call that raced the workflow MCP server's registration (`No such tool available` / a Tool Surface Readiness abort). Transient — action `retry` with bounded attempts and its own exit reason; distinct from `tool-schema`/`tool-contract`, which are deterministic stops. The system retries; the model must never improvise a fallback around a missing workflow tool.
 - **Workflow Bridge Warm-up**: the stdio MCP server's eager load + shape-check of the executor and write-gate bridges before connecting when workflow tools are enabled. A broken bridge fails the spawn with the actionable error (fail closed) instead of advertising tools that error on first call; a healthy spawn pre-pays the bridge import.
 
-## State layer (markdown fallback removed; Cutover on first open is opt-in; read cutover not implemented)
+## State layer (markdown fallback removed; Cutover on first open is opt-in)
 
 The 2026-08 state-DB milestone removed the markdown fallback for state
 derivation. It was not a **Cutover** in the glossary sense.
@@ -138,8 +138,8 @@ Cutover at a time. A process that opens the project during the run leaves it
 to the lock holder. The cutover operation is bound to Authority Epoch 0, so
 the epoch advances once.
 
-The Authority Epoch does not select a read path yet, and the ADR-046 program is
-not finished.
+After the Cutover, the read interface `db/lifecycle-read.ts` answers from
+canonical lifecycle rows and Waivers. The ADR-046 program is not finished.
 
 What shipped:
 
@@ -177,9 +177,9 @@ authority. The owner confirmed it on 2026-10-02. Its project-database row is
 not written yet, so D012 is a provisional ID and that row is pending. The read cutover is
 implemented in the read interface `db/lifecycle-read.ts` only: it answers from
 canonical lifecycle rows and Waivers when the Authority Epoch of the Project
-is above 0, and from legacy rows at epoch 0. No production command advances
-the epoch yet, so public status responses, dispatch, and dependency decisions
-still read legacy rows in practice. `gate:lifecycle-shadow-no-cutover` pins
+is above 0, and from legacy rows at epoch 0. The epoch advances only with
+`GSD_AUTHORITY_CUTOVER=1` (see above), so by default public status responses,
+dispatch, and dependency decisions still read legacy rows. `gate:lifecycle-shadow-no-cutover` pins
 both epochs. Other decision sites still read legacy rows directly and must be
 routed through the interface before a Project cuts over. The decision
 document lists both groups.
