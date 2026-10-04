@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Shared SQL literal fragments for runtime database policy.
 // Kept out of the barrel surface so they remain database implementation details.
-import { RAW_CLOSED_STATUSES } from "../status-guards.js";
+import { RAW_CLOSED_STATUSES, RAW_DISCARDED_MILESTONE_STATUSES } from "../status-guards.js";
 
 export function currentEvidenceBackedFailureVerdictSqlV39(
   resultAlias: string,
@@ -71,6 +71,9 @@ export const CURRENT_TASK_RECOVERY_CAUSAL_AUTHORITY_SQL = `(
  *  drift from `isClosedStatus()`. Renders as `'complete', 'done', 'skipped',
  *  'closed', 'cancelled', 'blocker-accepted'`. */
 export const TERMINAL_STATUS_SQL = RAW_CLOSED_STATUSES.map((s) => `'${s}'`).join(", ");
+
+/** SQL `IN (...)` body for the statuses of a discarded milestone, derived from `isDiscardedMilestoneStatus()`. */
+export const DISCARDED_MILESTONE_STATUS_SQL = RAW_DISCARDED_MILESTONE_STATUSES.map((s) => `'${s}'`).join(", ");
 
 /** Event that marks an Open Question as a Task escalation. */
 export const TASK_ESCALATION_OPENED_EVENT = "task.escalation.opened";

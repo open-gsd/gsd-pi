@@ -40,7 +40,7 @@ function makeProject(): string {
   return base;
 }
 
-test("the read interface answers done, parked and discarded for each item status", () => {
+test("the read interface answers done, closed, parked and discarded for each item status", () => {
   makeProject();
   const milestoneStatuses = ["complete", "parked", "skipped", "deferred", "cancelled", "blocker-accepted", "active", "queued"];
   milestoneStatuses.forEach((status, index) => {
@@ -48,16 +48,16 @@ test("the read interface answers done, parked and discarded for each item status
   });
 
   assert.deepEqual(
-    readMilestones().map((m) => [m.id, m.status, m.done, m.parked, m.discarded]),
+    readMilestones().map((m) => [m.id, m.status, m.done, m.closed, m.parked, m.discarded]),
     [
-      ["M001", "complete", true, false, false],
-      ["M002", "parked", false, true, false],
-      ["M003", "skipped", true, false, true],
-      ["M004", "deferred", false, false, true],
-      ["M005", "cancelled", true, false, true],
-      ["M006", "blocker-accepted", true, false, false],
-      ["M007", "active", false, false, false],
-      ["M008", "queued", false, false, false],
+      ["M001", "complete", true, true, false, false],
+      ["M002", "parked", false, false, true, false],
+      ["M003", "skipped", false, true, false, true],
+      ["M004", "deferred", false, false, false, true],
+      ["M005", "cancelled", false, true, false, true],
+      ["M006", "blocker-accepted", true, true, false, false],
+      ["M007", "active", false, false, false, false],
+      ["M008", "queued", false, false, false, false],
     ],
   );
   assert.deepEqual(readMilestone("M002"), readMilestones()[1]);
@@ -163,10 +163,17 @@ test("progress and the project snapshot report the same counts as the read inter
 
   const counts = readProgressCounts();
   assert.deepEqual(counts, {
-    milestones: { total: 4, done: 2, active: 1, pending: 0, parked: 1 },
+    milestones: { total: 3, done: 1, active: 1, pending: 0, parked: 1 },
     slices: { total: 4, done: 2, active: 0, pending: 2 },
     tasks: { total: 2, done: 1, pending: 1 },
   });
+
+  const state = await deriveState(base);
+  assert.deepEqual(
+    state.progress?.milestones,
+    { done: counts.milestones.done, total: counts.milestones.total },
+    "a discarded milestone is in neither count",
+  );
 
   const progress = await readProgressFromDb(base);
   assert.ok(progress);

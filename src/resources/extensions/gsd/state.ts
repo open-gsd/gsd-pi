@@ -164,13 +164,13 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
     // Fail closed: with no DB the locked milestone cannot be confirmed open.
     if (!isDbAvailable()) return null;
     const locked = readMilestone(milestoneLock);
-    if (!locked || locked.done || locked.parked) return null;
+    if (!locked || locked.closed || locked.parked) return null;
     return locked.id;
   }
 
-  // DB-first: the first milestone in workflow order that is not done and not parked
+  // DB-first: the first milestone in workflow order that is not closed and not parked
   if (isDbAvailable()) {
-    return readMilestones().find(m => !m.done && !m.parked)?.id ?? null;
+    return readMilestones().find(m => !m.closed && !m.parked)?.id ?? null;
   }
 
   // Fail closed: an unavailable DB is not a license to parse markdown (T022).

@@ -186,6 +186,9 @@ export function isDiscardedMilestoneStatus(status: string): boolean {
   return normalizeLegacyLifecycleStatus(status) === "cancelled";
 }
 
+/** Every raw status that marks a milestone as discarded; the source of `DISCARDED_MILESTONE_STATUS_SQL`. */
+export const RAW_DISCARDED_MILESTONE_STATUSES = Object.keys(LEGACY_TO_LIFECYCLE_STATUS).filter(isDiscardedMilestoneStatus);
+
 /** Returns true when a prior milestone should not block dispatch ordering. */
 export function isSkippedForDispatch(status: string): boolean {
   return isClosedStatus(status) || status === "parked" || isDeferredStatus(status);

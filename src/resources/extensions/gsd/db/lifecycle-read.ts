@@ -28,8 +28,10 @@ import type { MilestoneRow } from "../db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "../db-task-slice-rows.js";
 
 export interface MilestoneRead extends MilestoneRow {
-  /** Needs no further work. Only a done Milestone satisfies its dependents. */
+  /** Complete. Only a done Milestone satisfies its dependents. A discarded Milestone is never done. */
   readonly done: boolean;
+  /** Takes no further work: done, skipped or cancelled. */
+  readonly closed: boolean;
   readonly parked: boolean;
   /** A tombstone that keeps the id reserved. It is not listed and not dispatched. */
   readonly discarded: boolean;
@@ -46,12 +48,9 @@ export interface TaskRead extends TaskRow {
 }
 
 function toMilestoneRead(row: MilestoneRow): MilestoneRead {
-  return {
-    ...row,
-    done: isClosedStatus(row.status),
-    parked: row.status === "parked",
-    discarded: isDiscardedMilestoneStatus(row.status),
-  };
+  const closed = isClosedStatus(row.status);
+  const discarded = isDiscardedMilestoneStatus(row.status);
+  return { ...row, done: closed && !discarded, closed, parked: row.status === "parked", discarded };
 }
 
 function toSliceRead(row: SliceRow): SliceRead {
@@ -112,7 +111,8 @@ export interface ProgressCounts {
 }
 
 /**
- * Project-wide counts for every progress surface. A caller that needs the
+ * Project-wide counts for every progress surface. The Milestone counts leave
+ * out discarded Milestones. A caller that needs the
  * counts to agree with its other reads calls this inside its read transaction.
  */
 export function readProgressCounts(): ProgressCounts {

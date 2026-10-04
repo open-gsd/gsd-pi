@@ -28,7 +28,7 @@ import {
 import { rowToGate } from "../db-gate-rows.js";
 import { rowToArtifact, rowToMilestone, type ArtifactRow, type MilestoneRow } from "../db-milestone-artifact-rows.js";
 import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "../db-task-slice-rows.js";
-import { TASK_HAS_ESCALATION_SQL, TASK_HAS_OPEN_ESCALATION_SQL, TERMINAL_STATUS_SQL } from "./sql-constants.js";
+import { DISCARDED_MILESTONE_STATUS_SQL, TASK_HAS_ESCALATION_SQL, TASK_HAS_OPEN_ESCALATION_SQL, TERMINAL_STATUS_SQL } from "./sql-constants.js";
 import {
   compareLifecycleShadow,
   normalizeCanonicalLifecycleStatus,
@@ -279,7 +279,8 @@ export function getMilestoneStatusCounts(): MilestoneStatusCounts {
        COALESCE(SUM(CASE WHEN status IN (${TERMINAL_STATUS_SQL}) THEN 1 ELSE 0 END), 0) AS done,
        COALESCE(SUM(CASE WHEN status IN ('active', 'in_progress', 'in-progress') THEN 1 ELSE 0 END), 0) AS active,
        COALESCE(SUM(CASE WHEN status = 'parked' THEN 1 ELSE 0 END), 0) AS parked
-     FROM milestones`,
+     FROM milestones
+     WHERE status NOT IN (${DISCARDED_MILESTONE_STATUS_SQL})`,
   ).get();
   const total = numberColumn(row, "total");
   const done = numberColumn(row, "done");

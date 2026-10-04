@@ -2059,7 +2059,7 @@ export async function resolveDispatch(
         level: "error",
       };
     }
-    if (milestone.done) {
+    if (milestone.closed) {
       return {
         action: "stop",
         reason:
