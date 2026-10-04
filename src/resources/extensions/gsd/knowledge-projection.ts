@@ -26,11 +26,9 @@
 
 import { dirname } from "node:path";
 
-import { atomicWriteSync } from "./atomic-write.js";
-import { recordCompatProjectionWrite } from "./compat/compat-marker.js";
+import { writeProjectionFileSync } from "./compat/compat-marker.js";
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import { gsdRoot } from "./paths.js";
-import { logWarning } from "./workflow-logger.js";
 import {
   KNOWLEDGE_SECTIONS,
   knowledgeMdPath,
@@ -309,14 +307,7 @@ export function renderKnowledgeProjection(basePath: string, bridgeBasePath = bas
   const { content } = buildKnowledgeMarkdown(existing || readKnowledgeMd(bridgeBasePath));
   const path = knowledgeMdPath(basePath);
   const written = content !== existing;
-  if (written) {
-    atomicWriteSync(path, content, "utf-8");
-    try {
-      recordCompatProjectionWrite(dirname(gsdRoot(basePath)), path, content, []);
-    } catch (e) {
-      logWarning("knowledge-projection", `KNOWLEDGE.md rendered, compat baseline not recorded: ${(e as Error).message}`);
-    }
-  }
+  if (written) writeProjectionFileSync(dirname(gsdRoot(basePath)), path, content, []);
   return { written, content };
 }
 

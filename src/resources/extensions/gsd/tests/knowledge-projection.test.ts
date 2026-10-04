@@ -474,7 +474,7 @@ test("render: a marker that cannot be written is a warning, not a render failure
     assert.equal(result.written, true);
     assert.match(readFileSync(knowledgeMdPath(base), "utf-8"), /\| K001 \| project \| Rendered rule \|/);
     const warnings = peekLogs().filter((entry) => entry.severity === "warn").map((entry) => entry.message);
-    assert.ok(warnings.some((message) => /compat baseline not recorded/.test(message)), warnings.join("\n"));
+    assert.ok(warnings.some((message) => /compat marker write failed for KNOWLEDGE\.md/.test(message)), warnings.join("\n"));
   } finally {
     _resetLogs();
     cleanup(base);
