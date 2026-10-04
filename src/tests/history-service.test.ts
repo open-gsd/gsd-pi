@@ -6,7 +6,7 @@ import { join } from "node:path"
 import { tmpdir } from "node:os"
 import test from "node:test"
 
-import { recordUnitMetricsRows } from "../resources/extensions/gsd/db/unit-metrics.ts"
+import { recordUnitMetricsRows } from "../resources/extensions/gsd/db/writers/unit-metrics.ts"
 import { closeDatabase, openDatabase } from "../resources/extensions/gsd/gsd-db.ts"
 import type { UnitMetrics } from "../resources/extensions/gsd/metrics.ts"
 import { collectHistoryData } from "../web/history-service.ts"

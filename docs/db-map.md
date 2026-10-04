@@ -827,7 +827,7 @@ metrics_json  TEXT NOT NULL         ← the full unit record (tokens, model, too
 PRIMARY KEY (unit_type, unit_id, started_at)
 ```
 
-- DDL owner: `db-unit-metrics-schema.ts`. Access: `db/unit-metrics.ts`.
+- DDL owner: `db-unit-metrics-schema.ts`. Reads: `db/unit-metrics.ts`. Write: `db/writers/unit-metrics.ts`.
 - Written by `snapshotUnitMetrics` and `snapshotUnitMetricsByScope` (`metrics.ts`) together with `.gsd/metrics.json`. A second snapshot of the same run replaces the row.
 - Read by the budget ceiling guard (`auto/phases.ts`), the budget pressure of dynamic model routing (`auto-model-selection.ts`), MCP `gsd_history` and the web history panel. `.gsd/metrics.json` stays the telemetry file of the TUI dashboards; it does not decide the budget.
 - A row is telemetry: it is not a Domain Operation and does not change the project revision.

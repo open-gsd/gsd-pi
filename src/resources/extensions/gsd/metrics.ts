@@ -27,7 +27,8 @@ import type { MilestoneScope } from "./workspace.js";
 import { logWarning } from "./workflow-logger.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { isDbAvailable } from "./gsd-db.js";
-import { listUnitMetrics, recordUnitMetricsRows } from "./db/unit-metrics.js";
+import { listUnitMetrics } from "./db/unit-metrics.js";
+import { recordUnitMetricsRows } from "./db/writers/unit-metrics.js";
 
 // Re-export from shared — import directly from format-utils to avoid pulling
 // in the full barrel (mod.js → ui.js → @gsd/pi-tui) which breaks when loaded

@@ -15,7 +15,8 @@ import {
   getBudgetEnforcementAction,
   getNewBudgetAlertLevel,
 } from "../auto-budget.ts";
-import { listUnitMetrics, readUnitSpend, recordUnitMetricsRows } from "../db/unit-metrics.ts";
+import { listUnitMetrics, readUnitSpend } from "../db/unit-metrics.ts";
+import { recordUnitMetricsRows } from "../db/writers/unit-metrics.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";

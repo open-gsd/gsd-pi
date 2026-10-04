@@ -41,7 +41,7 @@ import { importFileOverrides, unimportedFileOverrides, type FileOverride } from 
 import { importFileCaptures, unimportedFileCaptures } from "./captures.js";
 import { importFileBacklogItems, unimportedFileBacklogItems } from "./backlog.js";
 import { formatCost, unimportedLedgerUnits } from "./metrics.js";
-import { recordUnitMetricsRows } from "./db/unit-metrics.js";
+import { recordUnitMetricsRows } from "./db/writers/unit-metrics.js";
 import { convertResolvedLegacyEscalation, readConvertibleLegacyEscalation } from "./escalation.js";
 import { isUnplannedMilestone, milestoneRenderArtifactPaths } from "./markdown-renderer.js";
 import { parseRoadmapSlices } from "./roadmap-slices.js";

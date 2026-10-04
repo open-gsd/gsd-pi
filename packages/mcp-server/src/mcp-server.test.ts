@@ -1168,7 +1168,7 @@ describe('createMcpServer tool registration', () => {
     const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-handler-'));
     const bridge = await importWorkflowBridgeFixture();
     const unitMetrics = await import(
-      new URL('../../../src/resources/extensions/gsd/db/unit-metrics.js', import.meta.url).href
+      new URL('../../../src/resources/extensions/gsd/db/writers/unit-metrics.js', import.meta.url).href
     ) as { recordUnitMetricsRows(units: unknown[]): void };
     t.after(() => {
       bridge.closeDatabase();
