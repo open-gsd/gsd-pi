@@ -178,8 +178,9 @@ function sliceKey(milestoneId: string, sliceId: string): string {
  * cancelled parent is cancelled with it. A row that would be open work under
  * a parent already adopted as completed is adopted as cancelled and listed;
  * a legacy completion without evidence under such a parent stays completed
- * as unverified legacy, with a finding (owner decisions 2026-10-03). A lifecycle row already adopted as cancelled
- * with no active Waiver is listed for its one legacy-attested Waiver.
+ * as unverified legacy, with a finding (owner decisions 2026-10-03). A
+ * lifecycle row already adopted as cancelled with no active Waiver is listed
+ * for its one legacy-attested Waiver.
  * Pure read: writes nothing.
  */
 export function previewLifecycleBackfill(): LifecycleBackfillPreview {

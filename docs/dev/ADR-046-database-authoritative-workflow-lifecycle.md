@@ -278,7 +278,9 @@ Migration is additive and never runs two authorities.
    > A legacy completion with `completed_at`, a summary and a verification
    > result that is not failed is adopted as completed with an
    > `unverified-legacy` evidence marker. Every other legacy completion is
-   > adopted as open work (`ready` or `pending`) and reported as a finding.
+   > adopted as open work (`ready` or `pending`) and reported as a finding,
+   > except under a parent already adopted as completed, where it stays
+   > completed as unverified legacy and is reported as a finding.
    > The per-item-kind evidence rule lives in
    > `src/resources/extensions/gsd/lifecycle-backfill-domain-operation.ts`.
 4. Route one low-risk work family through the kernel, then auto, interactive,
