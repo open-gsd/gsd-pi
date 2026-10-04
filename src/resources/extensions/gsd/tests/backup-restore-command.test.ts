@@ -28,6 +28,7 @@ import { openWorkflowDatabase, resolveProjectRootDbPath } from "../db-workspace.
 import { recordSchemaVersion } from "../db-schema-metadata.ts";
 import { SCHEMA_VERSION } from "../db/engine.ts";
 import { openSqliteReadOnly } from "../sqlite-readonly.ts";
+import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 
 const tempDirs = new Set<string>();
 
@@ -65,9 +66,10 @@ function authorityEpochOf(dbPath: string): number {
  * Build a project DB holding sentinel row M999, rewind it to a v45 stamp, and
  * re-open so the real v45→v46 migration produces a verified gsd.db.backup-v45.
  * - "cut-over-first": the project is cut over before the backup, so the backup
- *   and the live DB are both at Authority Epoch 1.
+ *   and the live DB are both at Authority Epoch 1. Without
+ *   GSD_AUTHORITY_CUTOVER=1 no open cuts over and both stay at epoch 0.
  * - "backup-first": the backup is taken at epoch 0 and that same open cuts the
- *   project over.
+ *   project over. It needs GSD_AUTHORITY_CUTOVER=1.
  * - "never-cut-over": the migrating open is an engine open, which does not cut
  *   over, so the backup and the live DB are both at epoch 0.
  */
@@ -79,7 +81,7 @@ function makeMigrationBackup(mode: "cut-over-first" | "backup-first" | "never-cu
 
   assert.equal(openWorkflowDatabase(base).ok, true);
   if (mode === "cut-over-first") {
-    // The first open of the existing database cuts the project over.
+    // With the flag on, the first open of the existing database cuts the project over.
     closeDatabase();
     assert.equal(openWorkflowDatabase(base).ok, true);
   }
@@ -97,8 +99,9 @@ function makeMigrationBackup(mode: "cut-over-first" | "backup-first" | "never-cu
   const backupPath = `${dbPath}.backup-v45`;
   assert.equal(existsSync(backupPath), true, "migration should leave a verified backup-v45");
   closeDatabase();
-  assert.equal(authorityEpochOf(backupPath), mode === "cut-over-first" ? 1 : 0);
-  assert.equal(authorityEpochOf(dbPath), mode === "never-cut-over" ? 0 : 1);
+  const backupEpoch = authorityEpochOf(backupPath);
+  if (mode !== "cut-over-first") assert.equal(backupEpoch, 0);
+  assert.equal(authorityEpochOf(dbPath), mode === "backup-first" ? 1 : backupEpoch);
   return { base, dbPath, backupPath, backupSha: sha256File(backupPath) };
 }
 
@@ -264,7 +267,8 @@ test("(d) list-style invocations show candidates and mutate nothing", async () =
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
 });
 
-test("(e) a backup taken before the Authority Epoch cutover is refused with valid consent", async () => {
+test("(e) a backup taken before the Authority Epoch cutover is refused with valid consent", async (t) => {
+  t.after(setAuthorityCutoverFlag("1"));
   const fixture = makeMigrationBackup("backup-first");
   const beforeSha = sha256File(fixture.dbPath);
 
@@ -286,7 +290,8 @@ test("(e) a backup taken before the Authority Epoch cutover is refused with vali
   assert.equal(existsSync(`${fixture.dbPath}.recovery`), false);
 });
 
-test("(f) a restore does not cut over the database that it replaces", async () => {
+test("(f) a restore does not cut over the database that it replaces", async (t) => {
+  t.after(setAuthorityCutoverFlag("1"));
   const fixture = makeMigrationBackup("never-cut-over");
 
   const { ctx, notes } = makeCtx();

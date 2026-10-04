@@ -309,7 +309,12 @@ Migration is additive and never runs two authorities.
 5. Increment the per-Project Authority Epoch at cutover. A migrated Project
    cannot downgrade to disk authority.
 
-   > **Note (2026-10-04):** owner decision: the cutover is automatic. The
+   > **Note (2026-10-04):** owner decision: the cutover is automatic, and for
+   > now it is the opt-in canary of step 6. It runs only with the environment
+   > variable `GSD_AUTHORITY_CUTOVER=1`; without it an open changes nothing. It
+   > becomes the default after the writer-coverage gate passes: no writer
+   > creates a hierarchy row with no lifecycle row, and a database trigger
+   > refuses such a row after the cutover. With the flag on, the
    > first open of an existing project database at Authority Epoch 0 writes a
    > verified backup, runs `lifecycle.backfill`, and advances the epoch with
    > the `authority.cutover` Domain Operation. The precondition is a lifecycle
@@ -416,7 +421,7 @@ column when a migration gate passes.
 | ADR-035 Dirty Projection Scope | Superseded before adoption by durable Projection Work. | Partly. The Projection Worker delivers durable Projection Work per row through a kind-to-renderer registry, with retry and `dead_letter`. Each kind that production code enqueues has a renderer; a row of any other kind stays pending and visible. |
 | ADR-038 Dispatch History Module | Superseded by persisted Attempts, Failure Observations, fingerprints, and recovery budgets. | In effect through [ADR-047](ADR-047-auto-mode-liveness-backstop.md), which deleted the dispatch-history module. |
 | ADR-039 Consent Question Module | Superseded by explicit interaction kinds and the narrow consent boundary. | Not yet. `consent-question.ts` is in production. |
-| ADR-040 Write-Gate Snapshot Adapters | Superseded by Domain Operations, revisions, fencing, and Authority Epoch. | Not yet. The write-gate snapshot state is in production. The Authority Epoch advances on first open, but the snapshot state does not read it. |
+| ADR-040 Write-Gate Snapshot Adapters | Superseded by Domain Operations, revisions, fencing, and Authority Epoch. | Not yet. The write-gate snapshot state is in production. The Authority Epoch advances on first open only with `GSD_AUTHORITY_CUTOVER=1`, and the snapshot state does not read it. |
 | ADR-041 Engine Hook Contract | Retained; hooks submit typed adapter results and cannot own lifecycle. | Not assessed. |
 | ADR-042 Three Session Types | Session separation retained; durable GSD lifecycle moves out of AutoSession. | Not assessed. |
 | ADR-045 Flat-Phase Migration | Amended: superseded for startup layout detection and automatic filesystem migration; legacy layouts are explicit import/export formats, not startup authority. Flat-phase projection layout work continues. | Partly. Flat-phase layout work continues (see the amendment below). The read cutover that removes on-disk layout from runtime decisions is open. |

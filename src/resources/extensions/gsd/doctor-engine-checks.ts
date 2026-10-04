@@ -912,7 +912,7 @@ export async function checkEngineHealth(
             fixable: false,
           });
         }
-        // The automatic backfill and Authority Epoch cutover stop on these rows.
+        // /gsd db adopt and the opt-in Authority Epoch cutover on open stop on these rows.
         const unmappable = previewLifecycleBackfill().unknownStatuses;
         if (unmappable.length > 0) {
           issues.push({
@@ -924,7 +924,7 @@ export async function checkEngineHealth(
               `${unmappable.length} milestone, slice or task row(s) have a legacy status with no lifecycle mapping, ` +
               "so the lifecycle backfill and the Authority Epoch cutover cannot run: " +
               `${unmappable.map((entry) => `${entry.row}=${JSON.stringify(entry.rawStatus)}`).join(", ")}. ` +
-              "Fix each status, then reopen the project.",
+              "Fix each status, then run /gsd db adopt.",
             file: ".gsd/gsd.db",
             fixable: false,
           });

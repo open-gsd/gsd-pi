@@ -7,12 +7,14 @@ import { tmpdir } from "node:os";
 import { _getAdapter, closeDatabase, getAllMilestones, insertMilestone, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import { openProjectDbIfPresent } from "../auto-start.ts";
 import { emitWorktreeMerged } from "../worktree-telemetry.ts";
+import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 
 test.afterEach(() => {
   if (isDbAvailable()) closeDatabase();
 });
 
-test("startup database open treats merge JSONL as projection-only", async () => {
+test("startup database open treats merge JSONL as projection-only", async (t) => {
+  t.after(setAuthorityCutoverFlag("1"));
   const base = mkdtempSync(join(tmpdir(), "gsd-merged-reconcile-"));
   try {
     mkdirSync(join(base, ".gsd"), { recursive: true });
@@ -26,8 +28,9 @@ test("startup database open treats merge JSONL as projection-only", async () => 
     await openProjectDbIfPresent(base);
 
     assert.deepEqual(getAllMilestones(), before);
-    // The first open binds the database to this checkout, adopts its rows and
-    // advances the Authority Epoch. No other Domain Operation runs.
+    // With the cutover flag on, the first open binds the database to this
+    // checkout, adopts its rows and advances the Authority Epoch. No other
+    // Domain Operation runs.
     assert.deepEqual(
       _getAdapter()!.prepare("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision").all()
         .map((row) => row["operation_type"]),

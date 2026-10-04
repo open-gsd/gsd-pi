@@ -29,11 +29,13 @@ import { applyLifecycleBackfill, countUnadoptedHierarchyRows } from "../lifecycl
 import { normalizeRealPath } from "../paths.ts";
 import { openSqliteReadOnly } from "../sqlite-readonly.ts";
 import { _resetLogs, peekLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
+import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 
 const CHILD_PATH = fileURLToPath(new URL("./authority-cutover-on-open-child.ts", import.meta.url));
 const RESOLVER_PATH = fileURLToPath(new URL("./resolve-ts.mjs", import.meta.url));
 const tempDirs = new Set<string>();
 let stderrWasEnabled = true;
+let restoreCutoverFlag = (): void => {};
 
 function db(): NonNullable<ReturnType<typeof _getAdapter>> {
   const database = _getAdapter();
@@ -108,11 +110,13 @@ async function spawnOpener(base: string): Promise<{ open(): Promise<ChildOpen> }
 }
 
 beforeEach(() => {
+  restoreCutoverFlag = setAuthorityCutoverFlag("1");
   stderrWasEnabled = setStderrLoggingEnabled(false);
   _resetLogs();
 });
 
 afterEach(() => {
+  restoreCutoverFlag();
   closeDatabase();
   setStderrLoggingEnabled(stderrWasEnabled);
   _resetLogs();
@@ -188,6 +192,34 @@ test("the first open of an old project database backs it up, adopts every row an
   assert.deepEqual(backupFiles(base), backups);
 });
 
+test("without GSD_AUTHORITY_CUTOVER the open of an old project database changes nothing", () => {
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "Old", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending" });
+  const before = durableSnapshot();
+  assert.deepEqual(before.authority, [{ revision: 0, authority_epoch: 0 }]);
+  assert.deepEqual(before.lifecycles, []);
+
+  // Unset is the default. Any value other than 1 or true is also off.
+  for (const value of [undefined, "0"]) {
+    setAuthorityCutoverFlag(value);
+    closeDatabase();
+    assert.equal(openWorkflowDatabase(base).ok, true);
+
+    assert.deepEqual(durableSnapshot(), before);
+    assert.deepEqual(backupFiles(base), []);
+    assert.deepEqual(peekLogs(), []);
+  }
+
+  // The same database is cut over by the next open once the flag is on.
+  setAuthorityCutoverFlag("true");
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  assert.deepEqual(rows("SELECT revision, authority_epoch FROM project_authority"), [{ revision: 2, authority_epoch: 1 }]);
+  assert.equal(backupFiles(base).length, 1);
+});
+
 test("a row with an unmappable status stops the cutover loudly and changes nothing", async () => {
   const base = createProject();
   insertMilestone({ id: "M001", title: "Old", status: "active" });
@@ -214,6 +246,7 @@ test("a row with an unmappable status stops the cutover loudly and changes nothi
   assert.equal(unmappable.length, 1);
   assert.equal(unmappable[0]!.severity, "error");
   assert.match(unmappable[0]!.message, /slice M001\/S01="wip-custom"/);
+  assert.match(unmappable[0]!.message, /then run \/gsd db adopt\./);
 
   // Once the row is fixed, the next open adopts and cuts over.
   db().prepare("UPDATE slices SET status = 'pending' WHERE milestone_id = 'M001' AND id = 'S01'").run();

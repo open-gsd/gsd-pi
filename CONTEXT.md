@@ -90,19 +90,29 @@ completed.
 - **`tool-unavailable` (Recovery kind)**: the Recovery Classification failure kind for a tool call that raced the workflow MCP server's registration (`No such tool available` / a Tool Surface Readiness abort). Transient — action `retry` with bounded attempts and its own exit reason; distinct from `tool-schema`/`tool-contract`, which are deterministic stops. The system retries; the model must never improvise a fallback around a missing workflow tool.
 - **Workflow Bridge Warm-up**: the stdio MCP server's eager load + shape-check of the executor and write-gate bridges before connecting when workflow tools are enabled. A broken bridge fails the spawn with the actionable error (fail closed) instead of advertising tools that error on first call; a healthy spawn pre-pays the bridge import.
 
-## State layer (markdown fallback removed; Cutover runs on first open; read cutover not implemented)
+## State layer (markdown fallback removed; Cutover on first open is opt-in; read cutover not implemented)
 
 The 2026-08 state-DB milestone removed the markdown fallback for state
 derivation. It was not a **Cutover** in the glossary sense.
 
 The **Cutover** runs by itself (owner decision 2026-10-04,
-`authority-cutover-on-open.ts`). The first open of an existing project database
+`authority-cutover-on-open.ts`). For now it is an opt-in canary (ADR-046
+migration step 6): it runs only with the environment variable
+`GSD_AUTHORITY_CUTOVER=1` (or `true`). Without it, an open changes nothing and
+no production path advances the Authority Epoch. Some writers can still create
+a hierarchy row with no lifecycle row; the automatic Cutover becomes the
+default after the writer-coverage gate passes: those writers are closed and a
+database trigger refuses such a row after the Cutover. The rest of this section
+describes an open with the flag on.
+
+The first open of an existing project database
 whose Authority Epoch is 0 writes a verified backup, runs `lifecycle.backfill`,
 and advances the Authority Epoch with `cutoverProjectAuthority`. The
 precondition is a lifecycle row for every milestone, slice and task, and idle
 coordination. A row with an unknown legacy status stops the run with nothing
 changed: the open logs the rows as an error and doctor reports
-`lifecycle_unmappable_status`. Active coordination defers the run to a later
+`lifecycle_unmappable_status` (doctor reports it with the flag off too).
+Active coordination defers the run to a later
 open. A database that an open creates is cut over by its next open. An import
 open (`/gsd recover`, `/gsd migrate`) and `/gsd db restore-backup` do not run
 it: the first seals an Import Preview on the current revision and epoch, and

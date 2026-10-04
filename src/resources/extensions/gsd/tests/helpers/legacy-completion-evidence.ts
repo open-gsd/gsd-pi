@@ -6,7 +6,8 @@ import { _getAdapter, insertSlice } from "../../gsd-db.ts";
 const COMPLETED_AT = "2026-01-01T00:00:00.000Z";
 
 /**
- * The first open of an old database runs lifecycle backfill. It adopts a
+ * With GSD_AUTHORITY_CUTOVER=1 the first open of an old database runs
+ * lifecycle backfill. It adopts a
  * legacy completion as completed only with evidence: a Task needs
  * completed_at, a summary and a verification result; a Slice needs
  * completed_at and a summary; a Milestone needs completed_at and one Slice.
