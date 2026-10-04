@@ -258,19 +258,21 @@ Auto mode also retains a last-resort same-unit consecutive dispatch cap for ever
 
 ### Artifact Verification Retries
 
-After each unit, GSD verifies that the expected artifact exists on disk. If the artifact is missing, auto mode re-dispatches the unit with explicit failure context and records an `artifact-verification-retry` journal event.
+After each unit, GSD verifies that the unit recorded its result in the database: the saved artifact row, the planned slice or task rows, the verdict row, or the Attempt Result. Rendered files are projections of those rows. A file on disk does not prove that a unit is complete, and a missing file does not block a unit whose result is recorded. If the result is missing, auto mode re-dispatches the unit with explicit failure context and records an `artifact-verification-retry` journal event.
 
-`reactive-execute` batches are handled differently after the retry cap. If dispatched tasks are still missing task summary files, GSD writes a slice-level `S##-REACTIVE-BLOCKER.md` diagnostic that lists which summaries are present or missing. The blocker prevents the same slice from launching another reactive batch, but it is not lifecycle authority: task statuses stay under canonical database Attempt/recovery control, not summary-file presence.
+`reactive-execute` batches are handled differently after the retry cap. A batch task is settled when its task row is closed or its latest Attempt has a Result; a task summary file does not settle it. If dispatched tasks are still not settled, GSD records a recovery block for the slice in the database and writes a slice-level `S##-REACTIVE-BLOCKER.md` diagnostic that lists which task summary files are present or missing. The recorded block prevents the same slice from launching another reactive batch. The diagnostic file alone decides nothing, and it is not lifecycle authority: task statuses stay under canonical database Attempt/recovery control.
 
-For `run-uat`, existence alone is not sufficient: a pre-existing
-`S##-ASSESSMENT.md` only counts as completed when it contains a canonical
-verdict field (for example frontmatter `verdict: PASS | FAIL | PARTIAL`). If
-the file exists but has no verdict, artifact verification fails and `run-uat`
-is redispatched. During milestone closeout, a UAT-scoped non-passing verdict is
-also redispatched so closeout can recover with fresh UAT evidence; roadmap and
-backfill assessments do not suppress that UAT run.
+For `run-uat`, the result is the run-uat assessment row that `gsd_uat_result_save`
+records with its verdict (`PASS | FAIL | PARTIAL`). An `S##-ASSESSMENT.md` file
+does not count, with or without a `verdict` field: if the row is missing,
+artifact verification fails and `run-uat` is redispatched. During milestone
+closeout, a UAT-scoped non-passing verdict is also redispatched so closeout can
+recover with fresh UAT evidence; roadmap and backfill assessments do not
+suppress that UAT run.
 
-Artifact verification retries are capped at 3 attempts. If the expected artifact is still missing after those retries, GSD pauses auto mode with an "Artifact still missing..." error instead of relying on loop detection or an unbounded dispatch counter.
+Artifact verification retries are capped at 3 attempts. If the result is still missing after those retries, GSD pauses auto mode with the "Artifact verification failed..." error instead of relying on loop detection or an unbounded dispatch counter.
+
+A unit that records no result is never treated as complete. When timeout recovery exhausts its attempts, or a tool rejects the unit with a deterministic policy error that a retry cannot fix, GSD pauses auto mode for every unit type. It records a manual-attention recovery block in the database (a task keeps its Attempt and recovery records instead) and writes a `-RECOVERY-BLOCKER.md` diagnostic sidecar next to the expected artifact. The sidecar never has the name of the unit's artifact, so it cannot pass for the result. The one exception is the aggregate parallel slice-research unit after timeout recovery: GSD records the block and falls back to per-slice research.
 
 ### Post-Mortem Investigation
 

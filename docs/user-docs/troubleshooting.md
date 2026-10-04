@@ -134,7 +134,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 
 **Symptoms:** A parallel `reactive-execute` batch finishes with a warning that GSD wrote a reactive blocker and advanced.
 
-**Cause:** The batch exhausted artifact verification retries while one or more dispatched tasks were still missing task summaries. Instead of re-dispatching the same parallel batch forever, GSD writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks. The blocker is not lifecycle authority; follow-up task state comes from the canonical database Attempt/recovery records.
+**Cause:** The batch exhausted artifact verification retries while one or more dispatched tasks were still open in the database with no Attempt Result. Instead of re-dispatching the same parallel batch forever, GSD records a recovery block for the slice and writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks. The blocker is not lifecycle authority; follow-up task state comes from the canonical database Attempt/recovery records.
 
 **Fix:** Inspect the blocker file and `/gsd status`. If work is still required, use the appropriate explicit recovery path such as retrying the failed Attempt, reopening a terminal task, or replanning the task before depending on later slice or milestone artifacts.
 

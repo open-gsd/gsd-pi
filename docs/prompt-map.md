@@ -195,7 +195,7 @@ guided-resume-task  (if task was interrupted)
 | Prompt | Purpose | Key Tools Called |
 |--------|---------|-----------------|
 | `execute-task.md` | Execute a single task. Inlines full context stack. | `memory_query`, `gsd_task_complete` |
-| `reactive-execute.md` | Dispatch all ready tasks in parallel subagents. When batch summaries remain missing after retries, writes a diagnostic slice blocker; task lifecycle still follows DB Attempt/recovery authority, not summary-file presence. | `subagent` × N |
+| `reactive-execute.md` | Dispatch all ready tasks in parallel subagents. When batch tasks are still not closed and have no Attempt Result after retries, records a recovery block and writes a diagnostic slice blocker; task lifecycle still follows DB Attempt/recovery authority, not summary-file presence. | `subagent` × N |
 | `guided-resume-task.md` | Resume interrupted task. Reads `{{sliceId}}-CONTINUE.md` for continuation context. | `gsd_task_complete` |
 | `quick-task.md` | Lightweight task outside milestone structure. No DB tools. | writes `{{summaryPath}}` directly |
 
@@ -219,7 +219,7 @@ validate-milestone  (3 parallel reviewers after all slices close)
 | `validate-milestone.md` | 3 parallel reviewers: (A) requirements, (B) integration, (C) acceptance. | `subagent` × 3, `gsd_validate_milestone` |
 | `run-uat.md` | Execute UAT. Modes: artifact-driven, browser-executable, runtime-executable, live-runtime, mixed, human-experience. Runs under `verification` tools policy with UAT-owned execution plus safe read-only/browser inspection tools. | `gsd_uat_result_save`, read-only/browser tools |
 
-`run-uat` completion verification requires a canonical verdict in the written `S##-ASSESSMENT.md` (for example `verdict: PASS | FAIL | PARTIAL`). A pre-existing assessment file without `verdict` does not satisfy artifact verification.
+`run-uat` completion verification requires the run-uat assessment row that `gsd_uat_result_save` records with its verdict (`PASS | FAIL | PARTIAL`). An `S##-ASSESSMENT.md` file, with or without a `verdict` field, does not satisfy artifact verification.
 `src/resources/extensions/gsd/uat-policy.ts` is the shared policy source for UAT mode classification, browser-tool requirements, dispatch decisions, and result-save mode validation.
 
 ### 5f. Completion Flow
