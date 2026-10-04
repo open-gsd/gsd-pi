@@ -228,7 +228,9 @@ describe("TurnStatusTracker", () => {
     assert.ok(!statuses.some((s) => s.text === TURN_STATUS_TEXT["done"]));
   });
 
-  test("end that hands control to the user keeps the waiting status until it clears", async (t) => {
+  test("end that hands control to the user keeps the waiting status until it clears", (t) => {
+    // Mocked timers: a real 30ms sleep races the 5ms poll + 20ms flash on a loaded runner.
+    t.mock.timers.enable({ apis: ["setTimeout", "setInterval"] });
     const { ui, statuses } = makeFakeUi();
     const predicates = { question: false, gate: "gate-1" as string | null };
     const tracker = makeTracker(t, ui, predicates, { doneFlashMs: 20, pollIntervalMs: 5 });
@@ -243,7 +245,9 @@ describe("TurnStatusTracker", () => {
 
     // User approves after the loop ended → completion flash runs then.
     predicates.gate = null;
-    await sleep(30);
+    t.mock.timers.tick(5);
+    assert.strictEqual(tracker.getState(), "done");
+    t.mock.timers.tick(20);
     assert.strictEqual(tracker.getState(), "idle");
     assert.ok(statuses.some((s) => s.text === TURN_STATUS_TEXT["done"]));
   });
