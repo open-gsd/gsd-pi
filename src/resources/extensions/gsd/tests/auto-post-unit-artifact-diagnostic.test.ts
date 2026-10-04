@@ -17,7 +17,7 @@ test("missing execute-task artifact includes completion contract and completion-
 
   const msg = _describeArtifactVerificationFailureForTest("execute-task", "M001/S01/T01", base);
   assert.match(msg, /was not found on disk after unit execution/);
-  assert.match(msg, /Task T01 marked \[x\].*summary written/i);
+  assert.match(msg, /Task T01 completed in the database through gsd_task_complete/);
   assert.match(msg, /No completion tool call detected \(`gsd_task_complete`\/alias\)/);
 });
 
