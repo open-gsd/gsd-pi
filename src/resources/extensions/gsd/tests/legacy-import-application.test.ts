@@ -1134,3 +1134,26 @@ test("terminal coordination statuses do not falsely block Application", () => {
     active_attempts: 0,
   });
 });
+
+test("an Application that changes the status of a row with no lifecycle row commits", () => {
+  const applyLegacyImport = getApplyLegacyImport();
+  // Rows of an older build: no lifecycle row. The source marks S01 and its Task complete.
+  const prepared = prepareCase("gsd-nested", () => {
+    db().exec(`
+      INSERT INTO milestones (id, title, status) VALUES ('M001', 'Foundation', 'active');
+      INSERT INTO slices (milestone_id, id, title, status) VALUES ('M001', 'S01', 'Core setup', 'pending');
+      INSERT INTO tasks (milestone_id, slice_id, id, title, status)
+        VALUES ('M001', 'S01', 'T01', 'Create the project skeleton', 'pending');
+    `);
+  });
+
+  const result = applyLegacyImport(prepared.input);
+
+  assertCommittedResult(prepared, result);
+  assert.deepEqual(
+    rows(`SELECT 'slice' AS kind, status FROM slices WHERE milestone_id = 'M001' AND id = 'S01'
+      UNION ALL
+      SELECT 'task', status FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'`),
+    [{ kind: "slice", status: "complete" }, { kind: "task", status: "complete" }],
+  );
+});
