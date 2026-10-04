@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Regression proof (#1657/#1658) that an applied legacy import mints canonical
 // companion authority — lifecycle rows for every imported hierarchy row and a pending Q8
-// quality gate for every open imported slice.
+// quality gate for every open imported slice — and keeps a markdown completion as unverified legacy.
 
 import assert from "node:assert/strict";
 import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
@@ -41,7 +41,8 @@ afterEach(() => {
   tempDirectories.clear();
 });
 
-test("applied import mints lifecycle rows for every imported milestone, slice, and task (#1657)", () => {
+/** Apply the gsd-nested markdown corpus as one Import Application on an empty database. */
+function applyNestedCorpusImport() {
   const workspace = mkdtempSync(join(tmpdir(), "gsd-legacy-lifecycle-minting-"));
   tempDirectories.add(workspace);
   const source = join(workspace, "source");
@@ -64,7 +65,7 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
     destination_directory: destination,
     label: "pre-application",
   });
-  const receipt = applyLegacyImport({
+  return applyLegacyImport({
     invocation: {
       idempotencyKey: "legacy-import/lifecycle-minting-1657",
       sourceTransport: "internal",
@@ -77,6 +78,10 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
     preview,
     backup,
   });
+}
+
+test("applied import mints lifecycle rows for every imported milestone, slice, and task (#1657)", () => {
+  const receipt = applyNestedCorpusImport();
 
   // Every imported hierarchy row must carry canonical lifecycle authority —
   // execute-task and complete-slice hard-require workflow_item_lifecycles rows,
@@ -154,5 +159,57 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
   assert.deepEqual(rows("SELECT * FROM gate_runs"), []);
   // Restore and Forward Repair verify the retained Application against the
   // live database; a completed slice with no gate row must still verify.
+  verifyLegacyImportApplicationResult(inspectLegacyImportApplicationEvidence(receipt.operationId));
+});
+
+test("an imported markdown completion stays completed as unverified legacy: adopted by the import operation, with no evidence row", () => {
+  const receipt = applyNestedCorpusImport();
+
+  // The markdown attests the completion and nothing else: the imported rows
+  // carry no completion timestamp and no verification result.
+  const completed = rows(`
+    SELECT lifecycle.item_kind, lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id,
+           hierarchy.status AS raw_status, hierarchy.completed_at, hierarchy.verification_result,
+           lifecycle.state_version, lifecycle.last_operation_id, operation.operation_type
+    FROM workflow_item_lifecycles lifecycle
+    JOIN workflow_operations operation ON operation.operation_id = lifecycle.last_operation_id
+    JOIN (
+      SELECT 'milestone' AS item_kind, id AS milestone_id, NULL AS slice_id, NULL AS task_id,
+             status, completed_at, '' AS verification_result FROM milestones
+      UNION ALL
+      SELECT 'slice', milestone_id, id, NULL, status, completed_at, '' FROM slices
+      UNION ALL
+      SELECT 'task', milestone_id, slice_id, id, status, completed_at, verification_result FROM tasks
+    ) hierarchy
+      ON hierarchy.item_kind = lifecycle.item_kind
+     AND hierarchy.milestone_id = lifecycle.milestone_id
+     AND hierarchy.slice_id IS lifecycle.slice_id
+     AND hierarchy.task_id IS lifecycle.task_id
+    WHERE lifecycle.lifecycle_status = 'completed'
+    ORDER BY lifecycle.item_kind, lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
+  `);
+  // The mark of an unverified legacy completion is its provenance: completed
+  // at state version 0, adopted by the import.apply operation itself.
+  const unverifiedLegacy = (itemKind: string, milestoneId: string, taskId: string | null) => ({
+    item_kind: itemKind, milestone_id: milestoneId, slice_id: "S01", task_id: taskId,
+    raw_status: "complete", completed_at: null, verification_result: "",
+    state_version: 0, last_operation_id: receipt.operationId, operation_type: "import.apply",
+  });
+  assert.deepEqual(completed, [
+    unverifiedLegacy("slice", "M001", null),
+    unverifiedLegacy("slice", "M002", null),
+    unverifiedLegacy("task", "M001", "T01"),
+    unverifiedLegacy("task", "M002", "T01"),
+  ]);
+
+  // Verification evidence is required only for new work: the import writes
+  // no Attempt, result, verdict, evidence or gate run for these completions.
+  for (const table of [
+    "workflow_execution_attempts", "workflow_attempt_results", "workflow_technical_verdicts",
+    "workflow_verification_evidence", "verification_evidence", "gate_runs",
+  ]) {
+    assert.deepEqual(rows(`SELECT * FROM ${table}`), [], table);
+  }
+  // The sealed plan is unchanged: the retained Application still validates.
   verifyLegacyImportApplicationResult(inspectLegacyImportApplicationEvidence(receipt.operationId));
 });
