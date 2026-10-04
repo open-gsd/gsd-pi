@@ -117,7 +117,7 @@ export const LEGACY_IMPORT_TARGET_ADAPTERS = {
 /**
  * The target of the report for a KNOWLEDGE.md row with a memory id (MEM###).
  * It is not an import target: the key is the memory id that the classifier
- * looks for in the `knowledge_memory_ids` base rows.
+ * looks for in the `knowledge_memory_rows` base rows.
  */
 export const LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND = "knowledge-memory-row";
 
@@ -244,4 +244,28 @@ export function legacyImportKnowledgeRow(
         .slice(1)
         .map(legacyImportKnowledgeCell),
   };
+}
+
+/**
+ * The cells, without the `#` cell, that the KNOWLEDGE.md render shows for one
+ * `knowledge_memory_rows` base row. The render shows a row with malformed
+ * structured fields as a row with none.
+ */
+export function legacyImportKnowledgeMemoryRowCells(
+  value: Readonly<Record<string, LegacyImportValue>>,
+): string[] {
+  let fields: Record<string, unknown> = {};
+  try {
+    const parsed: unknown = JSON.parse(String(value["structured_fields"]));
+    if (parsed !== null && typeof parsed === "object") fields = parsed as Record<string, unknown>;
+  } catch {
+    // No structured fields.
+  }
+  return knowledgeMemoryCells(
+    KNOWLEDGE_TABLE_BY_CATEGORY[String(value["category"])]!,
+    String(value["id"]),
+    String(value["content"] ?? ""),
+    String(value["scope"] || "project"),
+    fields,
+  ).slice(1).map(legacyImportKnowledgeCell);
 }

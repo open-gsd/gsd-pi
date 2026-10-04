@@ -1972,7 +1972,7 @@ describe('gsd-recover', async () => {
     });
   }
 
-  test('recover gives an info report for a KNOWLEDGE.md memory-id row of an active database memory and a warning for one of no active memory', async (t) => {
+  test('recover gives an info report for a KNOWLEDGE.md memory-id row that an active database memory renders, a conflict for other text and a warning for no active memory', async (t) => {
     const base = createFixtureBase();
     t.after(() => {
       closeDatabase();
@@ -1981,6 +1981,7 @@ describe('gsd-recover', async () => {
     openDatabase(join(base, '.gsd', 'gsd.db'));
     const active = createMemory({ category: 'pattern', content: 'Extracted pattern one' })!;
     const forgotten = createMemory({ category: 'pattern', content: 'Extracted pattern two' })!;
+    const edited = createMemory({ category: 'pattern', content: 'Use adapters' })!;
     const knowledgePath = join(base, '.gsd', 'KNOWLEDGE.md');
     const beforeForget = renderKnowledgeProjection(base).content;
     assert.equal(supersedeMemory(forgotten, 'CAP_EXCEEDED'), true);
@@ -1990,7 +1991,8 @@ describe('gsd-recover', async () => {
       `| ${forgotten} | Extracted pattern two | — | — |\n| MEM999 | Pattern of another checkout | — | — |`,
     );
     assert.notEqual(stale, beforeForget);
-    writeFileSync(knowledgePath, stale);
+    // The file row of an active memory has text that the database does not hold.
+    writeFileSync(knowledgePath, stale.replace('Use adapters', 'Use ports, not adapters'));
 
     const first = makeCtx();
     await handleRecover(first.ctx, base);
@@ -2005,6 +2007,7 @@ describe('gsd-recover', async () => {
       .map((diagnosis) => [diagnosis.code, diagnosis.severity, diagnosis.raw_value]);
     assert.deepEqual(reported.sort(), [
       ['knowledge-memory-row-not-imported', 'info', `| ${active} | Extracted pattern one | — | — |`],
+      ['knowledge-row-conflict', 'warning', `| ${edited} | Use ports, not adapters | — | — |`],
       ['knowledge-row-not-imported', 'warning', '| MEM999 | Pattern of another checkout | — | — |'],
       ['knowledge-row-not-imported', 'warning', `| ${forgotten} | Extracted pattern two | — | — |`],
     ].sort());
@@ -2014,9 +2017,11 @@ describe('gsd-recover', async () => {
     const second = makeCtx();
     await handleRecover(second.ctx, base, approval);
     assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
-    // The reports are true: the next render keeps only the active memory row.
+    // The reports are true: the next render shows only the active database rows.
     const rendered = renderKnowledgeProjection(base).content;
     assert.ok(rendered.includes(`| ${active} | Extracted pattern one |`));
+    assert.ok(rendered.includes(`| ${edited} | Use adapters |`));
+    assert.ok(!rendered.includes('Use ports, not adapters'));
     assert.ok(!rendered.includes(forgotten));
     assert.ok(!rendered.includes('MEM999'));
   });

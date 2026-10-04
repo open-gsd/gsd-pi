@@ -22,7 +22,7 @@ export const LEGACY_IMPORT_BASE_ROW_SETS = [
   "decisions",
   "decision_memories",
   "knowledge_memories",
-  "knowledge_memory_ids",
+  "knowledge_memory_rows",
   "item_lifecycles",
 ] as const;
 
@@ -39,7 +39,7 @@ export const LEGACY_IMPORT_BASE_IDENTITY_COLUMNS: Record<LegacyImportBaseRowSet,
   decisions: ["id"],
   decision_memories: ["source_decision_id"],
   knowledge_memories: ["source_knowledge_id"],
-  knowledge_memory_ids: ["id"],
+  knowledge_memory_rows: ["id"],
   item_lifecycles: ["project_id", "item_kind", "milestone_id", "slice_id", "task_id"],
 };
 
@@ -113,8 +113,8 @@ const ROW_SET_QUERIES: Record<LegacyImportBaseRowSet, string> = {
       WHERE typeof(source_knowledge_id) = 'text' AND trim(source_knowledge_id) <> ''
     )
     WHERE authority_rank = 1`,
-  // The id of each active memory that KNOWLEDGE.md has a table for.
-  knowledge_memory_ids: `SELECT id FROM memories
+  // Each active memory that KNOWLEDGE.md has a table for, by its memory id.
+  knowledge_memory_rows: `SELECT id, category, content, scope, structured_fields FROM memories
     WHERE superseded_by IS NULL AND category IN ('rule', 'pattern', 'gotcha')`,
   item_lifecycles: `SELECT
     project_id, item_kind, milestone_id, slice_id, task_id, lifecycle_status,
@@ -140,7 +140,7 @@ export interface LegacyImportBaseRow {
 
 /**
  * The schema version of a base snapshot. Version 1 has no `knowledge_memories`
- * and no `knowledge_memory_ids` rows. Evidence that an earlier build retained holds hashes of version 1 rows.
+ * and no `knowledge_memory_rows` rows. Evidence that an earlier build retained holds hashes of version 1 rows.
  */
 export const LEGACY_IMPORT_BASE_SNAPSHOT_SCHEMA_VERSION = 2 as const;
 
@@ -351,7 +351,7 @@ export function legacyImportBaseSnapshotAtVersion(
 ): LegacyImportBaseSnapshot {
   if (version >= snapshot.snapshot_schema_version) return snapshot;
   const rows = snapshot.rows.filter((row) => (
-    row.row_set !== "knowledge_memories" && row.row_set !== "knowledge_memory_ids"
+    row.row_set !== "knowledge_memories" && row.row_set !== "knowledge_memory_rows"
   ));
   return freezeSnapshot({
     ...snapshot,

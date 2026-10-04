@@ -81,6 +81,7 @@ const EXPECTED_BASE_ROW_SETS = [
   "decisions",
   "decision_memories",
   "knowledge_memories",
+  "knowledge_memory_rows",
   "item_lifecycles",
 ] as const;
 const EXPECTED_BASE_ROW_KEYS: Record<(typeof EXPECTED_BASE_ROW_SETS)[number], readonly string[]> = {
@@ -117,6 +118,7 @@ const EXPECTED_BASE_ROW_KEYS: Record<(typeof EXPECTED_BASE_ROW_SETS)[number], re
   ],
   decision_memories: ["source_decision_id", "structured_fields"],
   knowledge_memories: ["source_knowledge_id", "category", "content", "scope", "structured_fields", "superseded_by"],
+  knowledge_memory_rows: ["id", "category", "content", "scope", "structured_fields"],
   item_lifecycles: [
     "project_id", "item_kind", "milestone_id", "slice_id", "task_id",
     "lifecycle_status", "state_version", "last_operation_id",
@@ -541,6 +543,7 @@ function sourceFixture(overrides: Partial<LegacyImportBaseSnapshotSource> = {}) 
     ["decisions", [{ id: "D001", decision: "Decision" }]],
     ["decision_memories", [{ source_decision_id: "D002", structured_fields: '{"sourceDecisionId":"D002"}' }]],
     ["knowledge_memories", [{ source_knowledge_id: "K001", structured_fields: '{"sourceKnowledgeId":"K001"}' }]],
+    ["knowledge_memory_rows", [{ id: "MEM001", category: "pattern", content: "Pattern" }]],
     ["item_lifecycles", [{
       project_id: "project-1",
       item_kind: "milestone",
@@ -631,8 +634,10 @@ describe("legacy preview base snapshot", () => {
 
     const earlier = legacyImportBaseSnapshotAtVersion(snapshot, 1);
     assert.equal(earlier.snapshot_schema_version, 1);
-    assert.equal(earlier.rows.length, snapshot.rows.length - 1);
-    assert.deepEqual(earlier.rows, snapshot.rows.filter((row) => row.row_set !== "knowledge_memories"));
+    assert.equal(earlier.rows.length, snapshot.rows.length - 2);
+    assert.deepEqual(earlier.rows, snapshot.rows.filter((row) => (
+      row.row_set !== "knowledge_memories" && row.row_set !== "knowledge_memory_rows"
+    )));
     assert.equal(earlier.relevant_rows_hash, hashLegacyImportValue(earlier.rows));
     assert.notEqual(earlier.relevant_rows_hash, snapshot.relevant_rows_hash);
     assert.deepEqual(earlier.authority, snapshot.authority);
@@ -857,6 +862,11 @@ describe("legacy preview base snapshot", () => {
       // One row per knowledge id: the active memories row, not the superseded one.
       assert.equal(rows.get("knowledge_memories")?.["source_knowledge_id"], "K001");
       assert.equal(rows.get("knowledge_memories")?.["content"], "Newer rule");
+      // One row per active memory with a KNOWLEDGE.md table, by its memory id.
+      assert.deepEqual(
+        snapshot.rows.filter((row) => row.row_set === "knowledge_memory_rows").map((row) => row.value["id"]),
+        ["memory-2"],
+      );
       assert.equal(rows.get("item_lifecycles")?.["lifecycle_status"], "pending");
 
       db.exec(`

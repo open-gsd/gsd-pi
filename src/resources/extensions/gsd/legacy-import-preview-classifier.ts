@@ -30,6 +30,8 @@ import {
   LEGACY_IMPORT_JSON_COLUMNS,
   LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND,
   LEGACY_IMPORT_TARGET_ADAPTERS,
+  legacyImportKnowledgeCell,
+  legacyImportKnowledgeMemoryRowCells,
   legacyImportKnowledgeRow,
   legacyImportTargetIdentity,
   type LegacyImportTargetAdapter,
@@ -38,6 +40,7 @@ import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
 } from "./legacy-import-preview.js";
+import { splitPipeRow } from "./knowledge-parser.js";
 import {
   compareLifecycleShadow,
   normalizeCanonicalLifecycleStatus,
@@ -723,6 +726,8 @@ function ambiguityFor(
   );
 }
 
+const KNOWLEDGE_ROW_CONFLICT_MESSAGE = "A KNOWLEDGE.md table row is not imported into the database: the database row with its id has different content. The database row is kept, so the next render replaces the row in the file.";
+
 /**
  * The loss report for a KNOWLEDGE.md row that the database row with its id
  * wins over. The database content is never lost to file text, so the Preview
@@ -741,7 +746,7 @@ function knowledgeRowLoss(
     raw_value: candidate.raw.value,
     message: forgotten
       ? "A KNOWLEDGE.md table row is not imported into the database: the database row with its id was forgotten, so the next render removes the row from the file."
-      : "A KNOWLEDGE.md table row is not imported into the database: the database row with its id has different content. The database row is kept, so the next render replaces the row in the file.",
+      : KNOWLEDGE_ROW_CONFLICT_MESSAGE,
   };
   const diagnosis = { diagnosis_id: hashLegacyImportValue(diagnosisValue), ...diagnosisValue };
   return { diagnosis, resolution: { diagnosis_id: diagnosis.diagnosis_id, disposition: "preserved" } };
@@ -749,41 +754,47 @@ function knowledgeRowLoss(
 
 /**
  * The diagnoses and resolutions of the interpretation, with the report for a
- * KNOWLEDGE.md memory-id row lowered to info when an active database memory
- * has that id: the row is a render of the memory, so nothing is lost.
+ * KNOWLEDGE.md memory-id row decided against the active database memory that
+ * has its id. The same cells give an info report: the row is a render of the
+ * memory, so nothing is lost. Other cells give the conflict report of a
+ * K/P/L row. With no such memory the not-imported warning stays.
  */
 function knowledgeMemoryRowReports(
   base: LegacyImportBaseSnapshot,
   interpretation: LegacyImportInterpretation,
 ): { diagnoses: LegacyImportPreviewDiagnosis[]; resolutions: LegacyImportPreviewResolution[] } {
-  const activeMemoryIds = new Set(base.rows
-    .filter((row) => row.row_set === "knowledge_memory_ids")
-    .map((row) => row.value["id"]));
-  const rendered = new Map<string, string>();
+  const databaseCells = new Map(base.rows
+    .filter((row) => row.row_set === "knowledge_memory_rows")
+    .map((row) => [String(row.value["id"]), canonicalLegacyImportJson(legacyImportKnowledgeMemoryRowCells(row.value))]));
+  const memoryIds = new Map<string, string>();
   for (const resolution of interpretation.resolutions) {
-    if (
-      resolution.target?.kind === LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND
-      && activeMemoryIds.has(resolution.target.key)
-    ) {
-      rendered.set(resolution.diagnosis_id, "");
+    if (resolution.target?.kind === LEGACY_IMPORT_KNOWLEDGE_MEMORY_ROW_TARGET_KIND) {
+      memoryIds.set(resolution.diagnosis_id, resolution.target.key);
     }
   }
+  const decided = new Map<string, string>();
   const diagnoses = interpretation.diagnoses.map((diagnosis) => {
-    if (!rendered.has(diagnosis.diagnosis_id)) return diagnosis;
+    const memoryId = memoryIds.get(diagnosis.diagnosis_id);
+    const cells = memoryId === undefined ? undefined : databaseCells.get(memoryId);
+    if (cells === undefined) return diagnosis;
+    const fileCells = splitPipeRow(String(diagnosis.raw_value).trim()).slice(1).map(legacyImportKnowledgeCell);
+    const same = canonicalLegacyImportJson(fileCells) === cells;
     const diagnosisValue = {
-      code: "knowledge-memory-row-not-imported",
-      severity: "info" as const,
+      code: same ? "knowledge-memory-row-not-imported" : "knowledge-row-conflict",
+      severity: same ? "info" as const : "warning" as const,
       source_id: diagnosis.source_id,
       locator: diagnosis.locator,
       raw_value: diagnosis.raw_value,
-      message: "A KNOWLEDGE.md table row with a memory id is not imported into the database: an active database memory has that id, so the row is already in the database.",
+      message: same
+        ? "A KNOWLEDGE.md table row with a memory id is not imported into the database: an active database memory has that id and the same content, so the row is already in the database."
+        : KNOWLEDGE_ROW_CONFLICT_MESSAGE,
     };
     const diagnosisId = hashLegacyImportValue(diagnosisValue);
-    rendered.set(diagnosis.diagnosis_id, diagnosisId);
+    decided.set(diagnosis.diagnosis_id, diagnosisId);
     return { diagnosis_id: diagnosisId, ...diagnosisValue };
   });
   const resolutions = interpretation.resolutions.map((resolution) => {
-    const diagnosisId = rendered.get(resolution.diagnosis_id);
+    const diagnosisId = decided.get(resolution.diagnosis_id);
     return diagnosisId === undefined ? resolution : { ...resolution, diagnosis_id: diagnosisId };
   });
   return { diagnoses, resolutions };
