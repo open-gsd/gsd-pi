@@ -2377,7 +2377,6 @@ export async function pauseAuto(
             blockingFindings: [...s.lastPreExecFailure.blockingFindings],
           }
         : null,
-      preExecRetryCount: Object.fromEntries(s.preExecRetryCount),
     };
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pausedMeta);
   } catch (err) {
@@ -2465,7 +2464,7 @@ export async function pauseAuto(
 
 function restorePausedPreExecRepairState(
   meta: PausedSessionMetadata,
-  session: Pick<AutoSession, "lastPreExecFailure" | "preExecRetryCount">,
+  session: Pick<AutoSession, "lastPreExecFailure">,
 ): void {
   session.lastPreExecFailure = meta.lastPreExecFailure
     ? {
@@ -2473,12 +2472,6 @@ function restorePausedPreExecRepairState(
         blockingFindings: [...meta.lastPreExecFailure.blockingFindings],
       }
     : null;
-  session.preExecRetryCount.clear();
-  for (const [unitId, count] of Object.entries(meta.preExecRetryCount ?? {})) {
-    if (Number.isSafeInteger(count) && count > 0) {
-      session.preExecRetryCount.set(unitId, count);
-    }
-  }
 }
 
 export const _restorePausedPreExecRepairStateForTest = restorePausedPreExecRepairState;

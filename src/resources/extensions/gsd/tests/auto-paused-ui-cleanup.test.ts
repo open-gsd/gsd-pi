@@ -309,7 +309,6 @@ test("pauseAuto persists and restores pre-exec repair context", async () => {
     blockingFindings: ["T01 Verify command uses a pipe"],
     verdictExcerpt: "status=fail; 1 blocking issue detected",
   };
-  autoSession.preExecRetryCount.set("M001/S01", 2);
 
   try {
     openDatabase(join(base, ".gsd", "gsd.db"));
@@ -318,10 +317,8 @@ test("pauseAuto persists and restores pre-exec repair context", async () => {
 
     const meta = readPausedSessionMetadata(base);
     assert.deepEqual(meta?.lastPreExecFailure, autoSession.lastPreExecFailure);
-    assert.deepEqual(meta?.preExecRetryCount, { "M001/S01": 2 });
 
     autoSession.lastPreExecFailure = null;
-    autoSession.preExecRetryCount.clear();
     _restorePausedPreExecRepairStateForTest(meta!, autoSession);
 
     const restoredFailure = autoSession.lastPreExecFailure as {
@@ -330,7 +327,6 @@ test("pauseAuto persists and restores pre-exec repair context", async () => {
     } | null;
     assert.equal(restoredFailure?.unitId, "M001/S01");
     assert.deepEqual(restoredFailure?.blockingFindings, ["T01 Verify command uses a pipe"]);
-    assert.equal(autoSession.preExecRetryCount.get("M001/S01"), 2);
   } finally {
     closeDatabase();
     autoSession.reset();

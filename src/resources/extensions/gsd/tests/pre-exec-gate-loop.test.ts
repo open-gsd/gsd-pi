@@ -19,6 +19,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { AutoSession } from "../auto/session.ts";
+import { spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import type { DispatchContext } from "../auto-dispatch.ts";
 import { buildPlanSlicePrompt } from "../auto-prompts.ts";
@@ -276,9 +277,11 @@ test("#4551: dispatch rule injects failure context and clears session field", as
     blockingFindings: ["[file] src/missing.ts: file not found"],
     verdictExcerpt: "status=fail; 1 blocking issue detected",
   };
-  // A pause occurs at the retry cap. On resume this restored count must not
+  // A pause occurs at the retry cap. On resume the used budget must not
   // prevent the restored failure context from reaching the planner.
-  session.preExecRetryCount.set("M001/S01", 2);
+  const preExecBudget = { unitType: "plan-slice", unitId: "M001/S01", kind: "pre-exec" } as const;
+  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
+  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
 
   const ctx: DispatchContext = {
     basePath: base,

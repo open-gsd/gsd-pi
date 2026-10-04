@@ -26,6 +26,7 @@ import { writeUnitRuntimeRecord } from "../unit-runtime.js";
 import { isDbAvailable, getTask, getGateResults } from "../gsd-db.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import { getLatestForUnit } from "../db/unit-dispatches.js";
+import { resetUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
 import { markWorkerStopping } from "../db/auto-workers.js";
 import { releaseMilestoneLease } from "../db/milestone-leases.js";
 import type { MinimalModelRegistry } from "../context-budget.js";
@@ -482,9 +483,6 @@ export async function runUnitPhase(
   // dispatch-phase identifier is the unit type (see setCurrentPhase above).
   setBeforeAgentStartContext({ unitType, phase: unitType });
   s.lastToolInvocationError = null; // #2883: clear stale error from previous unit
-  if (nextDispatchCount <= 1) {
-    s.toolUnavailableRetries = 0;
-  }
   const unitStartSeq = ic.nextSeq();
   deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: unitStartSeq, eventType: "unit-start", data: { unitType, unitId } });
   deps.captureAvailableSkills();
@@ -925,8 +923,8 @@ export async function runUnitPhase(
             unitId,
           });
         } else {
-          const zeroToolKey = `${unitType}/${unitId}`;
-          const attempt = (s.zeroToolRetryCount.get(zeroToolKey) ?? 0) + 1;
+          const zeroToolBudget = { unitType, unitId, kind: "zero-tool" } as const;
+          const attempt = spendUnitBudget(s.unclaimedUnitBudgets, zeroToolBudget);
           debugLog("runUnitPhase", {
             phase: "zero-tool-calls",
             unitType,
@@ -935,7 +933,7 @@ export async function runUnitPhase(
             warning: "Unit completed with 0 tool calls — likely context exhaustion, marking as failed",
           });
           if (attempt > MAX_ZERO_TOOL_RETRIES) {
-            s.zeroToolRetryCount.delete(zeroToolKey);
+            resetUnitBudget(s.unclaimedUnitBudgets, zeroToolBudget);
             ctx.ui.notify(
               `${unitType} ${unitId} completed with 0 tool calls — context exhaustion, pausing auto-mode after ${MAX_ZERO_TOOL_RETRIES} retry.`,
               "error",
@@ -943,7 +941,6 @@ export async function runUnitPhase(
             await deps.pauseAuto(ctx, pi);
             return { action: "break", reason: "zero-tool-calls-exhausted" };
           }
-          s.zeroToolRetryCount.set(zeroToolKey, attempt);
           ctx.ui.notify(
             `${unitType} ${unitId} completed with 0 tool calls — context exhaustion, will retry (attempt ${attempt}/${MAX_ZERO_TOOL_RETRIES})`,
             "warning",
@@ -992,7 +989,7 @@ export async function runUnitPhase(
   if (artifactVerified) {
     s.unitDispatchCount.delete(dispatchKey);
     s.unitRecoveryCount.delete(`${unitType}/${unitId}`);
-    s.zeroToolRetryCount.delete(dispatchKey);
+    resetUnitBudget(s.unclaimedUnitBudgets, { unitType, unitId, kind: "zero-tool" });
   }
 
   // Write phase handoff anchor after successful research/planning completion

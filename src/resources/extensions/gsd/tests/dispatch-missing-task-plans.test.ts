@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import type { DispatchContext } from "../auto-dispatch.ts";
 import type { AutoSession } from "../auto/session.ts";
+import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
 import type { GSDState } from "../types.ts";
 import { enableDebug, disableDebug, getDebugLogPath } from "../debug-logger.ts";
 import {
@@ -277,26 +278,29 @@ test("dispatch: present legacy task plan clears missing-plan recovery retry coun
 
   const session = {
     missingTaskPlanRetryCount: new Map<string, number>([["M002/S03", 1]]),
-    preExecRetryCount: new Map<string, number>([["M002/S03", 2]]),
+    unclaimedUnitBudgets: new Map<string, number>(),
   };
+  const preExecBudget = { unitType: "plan-slice", unitId: "M002/S03", kind: "pre-exec" } as const;
+  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
+  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
   const result = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
 
   assert.equal(result.action, "dispatch");
   assert.ok(result.action === "dispatch" && result.unitType === "execute-task",
     `unitType should be execute-task, got: ${result.action === "dispatch" ? result.unitType : "(stop)"}`);
   assert.equal(session.missingTaskPlanRetryCount.has("M002/S03"), false);
-  assert.equal(session.preExecRetryCount.get("M002/S03"), 2,
-    "pre-exec retry counter must not be cleared when task plan is present");
+  assert.equal(readUnitBudget(session.unclaimedUnitBudgets, preExecBudget), 2,
+    "pre-exec budget must not be reset when task plan is present");
 });
 
 test("dispatch: missing-task-plan recovery loop terminates even when the shared pre-exec key is reset between rounds (#1087)", async (t) => {
   // The recovery rule re-dispatches plan-slice with unitId "${mid}/${sid}".
   // That regenerated plan-slice carries the same currentUnit.id, and on a
-  // pre-execution pass the post-unit hook deletes that key from
-  // preExecRetryCount (auto-post-unit.ts). Missing per-task PLAN projection
+  // pre-execution pass the post-unit hook resets that unit's pre-exec budget
+  // (auto-post-unit.ts). Missing per-task PLAN projection
   // files do not fail pre-exec checks, so the regenerated plan-slice typically
-  // passes and that delete fires every cycle. If recovery shared
-  // preExecRetryCount, its counter would be wiped to 0 each round and the loop
+  // passes and that reset fires every cycle. If recovery shared
+  // the pre-exec budget, its counter would be wiped to 0 each round and the loop
   // would never reach the cap. Here we simulate that reset between rounds and
   // assert the dedicated counter still climbs to MAX and stops.
   const tmp = mkdtempSync(join(tmpdir(), "gsd-1087-loop-term-"));
@@ -308,8 +312,9 @@ test("dispatch: missing-task-plan recovery loop terminates even when the shared 
 
   const session = {
     missingTaskPlanRetryCount: new Map<string, number>(),
-    preExecRetryCount: new Map<string, number>(),
+    unclaimedUnitBudgets: new Map<string, number>(),
   };
+  const preExecBudget = { unitType: "plan-slice", unitId: "M002/S03", kind: "pre-exec" } as const;
 
   // Round 1: missing task plan → recover (counter 0 → 1).
   const r1 = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
@@ -317,9 +322,9 @@ test("dispatch: missing-task-plan recovery loop terminates even when the shared 
     `round 1 should re-dispatch plan-slice, got: ${r1.action === "dispatch" ? r1.unitType : "(stop)"}`);
   assert.equal(session.missingTaskPlanRetryCount.get("M002/S03"), 1);
 
-  // The regenerated plan-slice passes its post-unit pre-exec check, deleting
-  // the shared "${mid}/${sid}" key from preExecRetryCount.
-  session.preExecRetryCount.delete("M002/S03");
+  // The regenerated plan-slice passes its post-unit pre-exec check, resetting
+  // the pre-exec budget of the "${mid}/${sid}" unit.
+  resetUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
 
   // Round 2: still missing → recover (counter 1 → 2), unaffected by the reset.
   const r2 = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
@@ -327,7 +332,7 @@ test("dispatch: missing-task-plan recovery loop terminates even when the shared 
     `round 2 should re-dispatch plan-slice, got: ${r2.action === "dispatch" ? r2.unitType : "(stop)"}`);
   assert.equal(session.missingTaskPlanRetryCount.get("M002/S03"), 2);
 
-  session.preExecRetryCount.delete("M002/S03");
+  resetUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
 
   // Round 3: cap reached → stop. The loop terminates despite the resets.
   const r3 = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));

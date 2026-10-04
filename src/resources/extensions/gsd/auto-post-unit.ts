@@ -110,6 +110,7 @@ import {
 import { validateArtifact } from "./schemas/validate.js";
 import { verificationRetryKey } from "./auto/verification-retry-policy.js";
 import { saveCustomVerifyRetryCounts } from "./auto/custom-verify-retry-store.js";
+import { resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -2425,7 +2426,11 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           s.pendingVerificationRetry = null;
         }
         s.lastToolInvocationError = null;
-        s.toolUnavailableRetries = 0;
+        resetUnitBudget(s.unclaimedUnitBudgets, {
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+          kind: "tool-unavailable",
+        });
         // Deliberately keep verificationRetryCount / verificationRetryFailureHashes:
         // the host verification gate's auto-fix counter shares this key and must
         // stay attempt-independent (per unit + failure). Deleting it here reset
@@ -2572,8 +2577,18 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           // registration. Retry with escalating delay, bounded at 3 attempts.
           // ponytail: MAX constant so the guard, log, and display all agree
           const MAX_TOOL_UNAVAIL_RETRIES = 3;
-          if (s.toolUnavailableRetries >= MAX_TOOL_UNAVAIL_RETRIES) {
-            debugLog("postUnit", { phase: "tool-unavailable-exhausted", unitType: s.currentUnit.type, unitId: s.currentUnit.id, retries: s.toolUnavailableRetries });
+          const toolUnavailableBudget = {
+            unitType: s.currentUnit.type,
+            unitId: s.currentUnit.id,
+            kind: "tool-unavailable",
+          } as const;
+          const toolUnavailableRetries = spendUnitBudget(s.unclaimedUnitBudgets, toolUnavailableBudget);
+          if (toolUnavailableRetries > MAX_TOOL_UNAVAIL_RETRIES) {
+            // The budget is on the dispatch row, so a restart does not grant
+            // it again. The pause hands the unit to a person, and their resume
+            // starts a new budget.
+            resetUnitBudget(s.unclaimedUnitBudgets, toolUnavailableBudget);
+            debugLog("postUnit", { phase: "tool-unavailable-exhausted", unitType: s.currentUnit.type, unitId: s.currentUnit.id, retries: MAX_TOOL_UNAVAIL_RETRIES });
             ctx.ui.notify(
               `Tool unavailable for ${s.currentUnit.type} after ${MAX_TOOL_UNAVAIL_RETRIES} retries: ${s.lastToolInvocationError}. MCP server may not be starting — pausing auto-mode.`,
               "error",
@@ -2582,14 +2597,13 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
             await pauseAuto(ctx, pi);
             return "dispatched";
           }
-          s.toolUnavailableRetries++;
           // Exponential backoff starting at 10s (10s, 20s, 40s capped at 45s). MCP server
           // startup can take tens of seconds; a 1s/2s/3s linear delay re-dispatches before
           // the server finishes connecting, causing a stuck loop. See #817.
-          const delayMs = Math.min(10_000 * Math.pow(2, s.toolUnavailableRetries - 1), 45_000);
-          debugLog("postUnit", { phase: "tool-unavailable-retry", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: s.lastToolInvocationError, attempt: s.toolUnavailableRetries, delayMs });
+          const delayMs = Math.min(10_000 * Math.pow(2, toolUnavailableRetries - 1), 45_000);
+          debugLog("postUnit", { phase: "tool-unavailable-retry", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: s.lastToolInvocationError, attempt: toolUnavailableRetries, delayMs });
           ctx.ui.notify(
-            `Tool unavailable for ${s.currentUnit.type}: ${s.lastToolInvocationError}. Waiting ${delayMs}ms for MCP server — retry ${s.toolUnavailableRetries}/${MAX_TOOL_UNAVAIL_RETRIES}.`,
+            `Tool unavailable for ${s.currentUnit.type}: ${s.lastToolInvocationError}. Waiting ${delayMs}ms for MCP server — retry ${toolUnavailableRetries}/${MAX_TOOL_UNAVAIL_RETRIES}.`,
             "warning",
           );
           s.lastToolInvocationError = null;
@@ -2761,7 +2775,11 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         if (s.pendingVerificationRetry?.unitId === s.currentUnit.id) {
           s.pendingVerificationRetry = null;
         }
-        s.toolUnavailableRetries = 0;
+        resetUnitBudget(s.unclaimedUnitBudgets, {
+          unitType: s.currentUnit.type,
+          unitId: s.currentUnit.id,
+          kind: "tool-unavailable",
+        });
         // For a DB-backed execute-task, artifact readiness only proves the
         // Attempt staged a Result at the verify stage — the host verification
         // gate has not run yet. Its auto-fix retry counter shares this key and
@@ -3081,15 +3099,17 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
             ? `\n  ${NOTIFICATION_BULLET} ...and ${checks.length - MAX_NOTIFICATION_DETAILS} more`
             : "";
           const evidenceNote = `\nSee ${evidencePath} for full details.`;
-          const retryKey = currentUnit.id;
-          const attempt = (s.preExecRetryCount.get(retryKey) ?? 0) + 1;
+          const attempt = spendUnitBudget(s.unclaimedUnitBudgets, {
+            unitType: currentUnit.type,
+            unitId: currentUnit.id,
+            kind: "pre-exec",
+          });
 
           s.lastPreExecFailure = {
             unitId: currentUnit.id,
             blockingFindings: findings,
             verdictExcerpt,
           };
-          s.preExecRetryCount.set(retryKey, attempt);
 
           if (attempt >= MAX_PRE_EXEC_RETRIES) {
             s.pendingVerificationRetry = null;
@@ -3147,7 +3167,11 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         // Reset the retry counter once checks are non-blocking. A successful
         // repair should not make a later unrelated failure hit the cap early.
         if (preExecPost.action === "none") {
-          s.preExecRetryCount.delete(currentUnit.id);
+          resetUnitBudget(s.unclaimedUnitBudgets, {
+            unitType: currentUnit.type,
+            unitId: currentUnit.id,
+            kind: "pre-exec",
+          });
           if (s.lastPreExecFailure?.unitId === currentUnit.id) {
             s.lastPreExecFailure = null;
           }

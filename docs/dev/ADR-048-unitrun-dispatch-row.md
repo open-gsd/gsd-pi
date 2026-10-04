@@ -27,6 +27,23 @@ ADR-047 stays the **block detector**. It must not grow a third identity or new s
 - The canonical loop does not call `openDispatchClaim` after `advance()`. Custom-engine execute-task and sidecar items still claim themselves.
 - Skip reasons keep human-readable strings for logs and liveness payloads; loop branches on `code`, not reason text.
 
+## Amendment 2026-10-03: kernel state for non-task units lives on the dispatch row
+
+ADR-046 names one persisted Lifecycle Kernel but defines Attempts only for Task execution. The owner decision for the other unit types (planning, research, closeout, hooks) is:
+
+- The claimed `unit_dispatches` row is the kernel record of a non-task unit. Retry counts, recovery budgets, pause state and stage checkpoints are columns on that row or child rows keyed by its `id`.
+- Attempts stay for Task execution only. The Attempt table and its claim rules do not change.
+- Advance, resume and recovery read these rows, not session memory. A restart must not change the next work.
+
+The work has four parts:
+
+1. Retry and recovery budgets on the dispatch row.
+2. Pause and resume state on the dispatch row.
+3. The sidecar queue (hooks, triage, quick tasks) as rows linked to the dispatch that triggered them.
+4. Advance selects from the database only.
+
+Part 1 has started. `unit_dispatch_budgets (dispatch_id, kind, used)` holds one count for each budget kind. A retry opens a new dispatch row for the same unit, so the count of a unit is the value on its newest dispatch row that holds the kind, and a reset writes `0` on the newest row. The zero-tool, tool-unavailable and pre-execution repair budgets use it (`db/unit-dispatch-budgets.ts`). A unit that runs with no dispatch row (a custom-engine step) has no durable identity, so its count lasts for the process only.
+
 ## Rejected alternatives
 
 - Freeze 1.15.x — leaves field users wedged.

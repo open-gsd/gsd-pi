@@ -70,7 +70,6 @@ test("readPausedSessionMetadata round-trips a real PausedSessionMetadata payload
       blockingFindings: ["T01 Verify command uses a pipe"],
       verdictExcerpt: "status=fail; 1 blocking issue detected",
     },
-    preExecRetryCount: { "M001/S01": 2 },
   };
   setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, meta);
 
@@ -82,7 +81,6 @@ test("readPausedSessionMetadata round-trips a real PausedSessionMetadata payload
   assert.equal(loaded!.sessionFile, "/tmp/session.jsonl");
   assert.equal(loaded!.pauseReason, "Blocked: waiting for UAT");
   assert.deepEqual(loaded!.lastPreExecFailure, meta.lastPreExecFailure);
-  assert.deepEqual(loaded!.preExecRetryCount, { "M001/S01": 2 });
 });
 
 test("readPausedSessionMetadata auto-deletes stale pseudo-milestone pause rows", (t) => {

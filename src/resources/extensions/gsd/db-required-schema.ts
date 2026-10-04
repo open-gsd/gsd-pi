@@ -6,6 +6,10 @@ import {
   createLivenessBackstopSchema,
   hasLivenessBackstopSchema,
 } from "./db-liveness-backstop-schema.js";
+import {
+  createUnitDispatchBudgetSchema,
+  hasUnitDispatchBudgetSchema,
+} from "./db-unit-dispatch-budget-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -18,6 +22,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "liveness-backstop",
     isPresent: hasLivenessBackstopSchema,
     create: createLivenessBackstopSchema,
+  },
+  {
+    id: "unit-dispatch-budgets",
+    isPresent: hasUnitDispatchBudgetSchema,
+    create: createUnitDispatchBudgetSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

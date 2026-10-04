@@ -200,7 +200,12 @@ export class AutoSession {
   readonly verificationRetryCount = new Map<string, number>();
   readonly verificationRetryFailureHashes = new Map<string, string>();
   readonly exhaustedVerificationUnits = new Set<string>();
-  readonly zeroToolRetryCount = new Map<string, number>();
+  /**
+   * Budget counts for units that run with no unit_dispatches row (custom-engine
+   * steps, no database). A unit with a dispatch row keeps its counts on that
+   * row instead — see db/unit-dispatch-budgets.ts (ADR-048).
+   */
+  readonly unclaimedUnitBudgets = new Map<string, number>();
   pausedSessionFile: string | null = null;
   pausedUnitType: string | null = null;
   pausedUnitId: string | null = null;
@@ -221,16 +226,9 @@ export class AutoSession {
    */
   lastPreExecFailure: PreExecFailure | null = null;
   /**
-   * Tracks how many consecutive times each slice unit has failed pre-execution
-   * checks. Keyed by unitId (e.g. "M001/S01"). Used to break the infinite
-   * plan-slice → pre-exec fail → re-dispatch loop when the planner cannot fix
-   * the issues after MAX_PRE_EXEC_RETRIES re-attempts.
-   */
-  readonly preExecRetryCount: Map<string, number> = new Map();
-  /**
    * Tracks how many times each slice unit has been re-dispatched to plan-slice
    * because task plan files were missing. Keyed by unitId (e.g. "M001/S01").
-   * Separate from preExecRetryCount so pre-exec gate failures do not block or
+   * Separate from the pre-exec budget so pre-exec gate failures do not block or
    * conflate with missing-task-plan recovery.
    */
   readonly missingTaskPlanRetryCount: Map<string, number> = new Map();
@@ -239,8 +237,6 @@ export class AutoSession {
   /** Set when a GSD tool execution ends with isError due to malformed/truncated
    *  JSON arguments. Checked by postUnitPreVerification to break retry loops. */
   lastToolInvocationError: string | null = null;
-  /** Consecutive tool-unavailable retries for the current unit (MCP startup race). */
-  toolUnavailableRetries = 0;
   /** Agent-end messages from the just-finished unit, consumed during finalize. */
   lastUnitAgentEndMessages: unknown[] | null = null;
   /** Set when turn-level git action fails during closeout. */
@@ -425,7 +421,7 @@ export class AutoSession {
     this.verificationRetryCount.clear();
     this.verificationRetryFailureHashes.clear();
     this.exhaustedVerificationUnits.clear();
-    this.zeroToolRetryCount.clear();
+    this.unclaimedUnitBudgets.clear();
     this.pausedSessionFile = null;
     this.pausedUnitType = null;
     this.pausedUnitId = null;
@@ -441,10 +437,8 @@ export class AutoSession {
     this.rewriteAttemptCount = 0;
     this.consecutiveCompleteBootstraps = 0;
     this.lastPreExecFailure = null;
-    this.preExecRetryCount.clear();
     this.missingTaskPlanRetryCount.clear();
     this.lastToolInvocationError = null;
-    this.toolUnavailableRetries = 0;
     this.lastUnitAgentEndMessages = null;
     this.lastGitActionFailure = null;
     this.lastGitActionStatus = null;

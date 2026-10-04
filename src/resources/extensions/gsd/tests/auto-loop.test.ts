@@ -66,6 +66,7 @@ import { recordFailureAndSelectRecovery } from "../task-recovery-domain-operatio
 import { handleReplanTask } from "../tools/replan-task.js";
 import { appendCapture, markCaptureResolved } from "../captures.js";
 import { autoSession } from "../auto-runtime-state.js";
+import { readUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -1841,7 +1842,7 @@ function makeLoopSession(overrides?: Partial<Record<string, unknown>>) {
     unitLifetimeDispatches: new Map<string, number>(),
     unitRecoveryCount: new Map<string, number>(),
     verificationRetryCount: new Map<string, number>(),
-    zeroToolRetryCount: new Map<string, number>(),
+    unclaimedUnitBudgets: new Map<string, number>(),
     gitService: null,
     lastRequestTimestamp: 0,
     autoStartTime: Date.now(),
@@ -6951,7 +6952,10 @@ test("runUnitPhase pauses 0-tool units with pseudo tool-call text as serializati
   assert.equal(result.action, "break");
   assert.equal((result as any).reason, "zero-tool-serialization-drift");
   assert.equal(deps.callLog.includes("pauseAuto"), true);
-  assert.equal(s.zeroToolRetryCount.has("execute-task/M001/S01/T01"), false);
+  assert.equal(
+    readUnitBudget(s.unclaimedUnitBudgets, { unitType: "execute-task", unitId: "M001/S01/T01", kind: "zero-tool" }),
+    0,
+  );
   assert.ok(
     notifications.some((msg) => msg.includes("serialization drift") && msg.includes("bash<arg_key>command")),
     "serialization drift notification should include a snippet of the pseudo tool-call text",
@@ -7004,7 +7008,7 @@ test("runUnitPhase pauses auto-mode when zero-tool-call retry is exhausted", asy
     originalBasePath: basePath,
   });
   // Pre-seed counter at MAX_ZERO_TOOL_RETRIES so the next zero-tool turn exhausts the cap
-  s.zeroToolRetryCount.set("execute-task/M001/S01/T01", 1);
+  spendUnitBudget(s.unclaimedUnitBudgets, { unitType: "execute-task", unitId: "M001/S01/T01", kind: "zero-tool" });
 
   const mockLedger = {
     version: 1,
@@ -7040,6 +7044,115 @@ test("runUnitPhase pauses auto-mode when zero-tool-call retry is exhausted", asy
         activeMilestone: { id: "M001", title: "Milestone" },
         activeSlice: { id: "S01", title: "Slice" },
         activeTask: { id: "T01", title: "Task" },
+        registry: [{ id: "M001", title: "Milestone", status: "active" }],
+        recentDecisions: [],
+        blockers: [],
+        nextAction: "",
+        progress: { milestones: { done: 0, total: 1 } },
+        requirements: { active: 0, validated: 0, deferred: 0, outOfScope: 0, blocked: 0, total: 0 },
+      } as any,
+      mid: "M001",
+      midTitle: "Milestone",
+      isRetry: false,
+      previousTier: undefined,
+    },
+    { consecutiveFinalizeTimeouts: 0 },
+  );
+
+  assert.equal(result.action, "break");
+  assert.equal((result as any).reason, "zero-tool-calls-exhausted");
+  assert.equal(deps.callLog.includes("pauseAuto"), true);
+});
+
+test("runUnitPhase continues the zero-tool budget of a claimed research unit after a restart", async (t) => {
+  _resetPendingResolve();
+
+  const ctx = {
+    ...makeMockCtx(),
+    ui: {
+      notify: () => {},
+      setStatus: () => {},
+      setWorkingMessage: () => {},
+    },
+    sessionManager: {
+      getEntries: () => [],
+    },
+    modelRegistry: {
+      getProviderAuthMode: () => undefined,
+      isProviderRequestReady: () => true,
+    },
+  } as any;
+  const pi = {
+    ...makeMockPi(),
+    sendMessage: () => {
+      queueMicrotask(() => resolveAgentEnd(makeEvent([
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Error: I'll investigate the network error handling next." },
+          ],
+        },
+      ])));
+    },
+  } as any;
+  const s = makeLoopSession();
+  s.canonicalProjectRoot = s.basePath;
+  s.originalBasePath = s.basePath;
+  openLoopDatabase(t, s);
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending" });
+  const workerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) throw new Error("expected test lease");
+  const claim = recordDispatchClaim({
+    traceId: "flow-zero-tool-restart",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "research-slice",
+    unitId: "M001/S01",
+  });
+  assert.equal(claim.ok, true);
+  // The process that died already used the one zero-tool retry. Its session
+  // memory is gone; only the dispatch row still holds the count.
+  spendUnitBudget(new Map<string, number>(), { unitType: "research-slice", unitId: "M001/S01", kind: "zero-tool" });
+
+  const mockLedger = {
+    version: 1,
+    projectStartedAt: Date.now(),
+    units: [] as any[],
+  };
+  const deps = makeMockDeps({
+    closeoutUnit: async () => {
+      mockLedger.units.push({
+        type: "research-slice",
+        id: "M001/S01",
+        startedAt: s.currentUnit?.startedAt ?? Date.now(),
+        toolCalls: 0,
+        assistantMessages: 1,
+        tokens: { input: 100, output: 20, total: 120, cacheRead: 0, cacheWrite: 0 },
+        cost: 0.01,
+      });
+    },
+    getLedger: () => mockLedger,
+  });
+  let seq = 0;
+
+  const result = await runUnitPhase(
+    { ctx, pi, s, deps, prefs: undefined, iteration: 1, flowId: "flow-zero-tool-restart", nextSeq: () => ++seq },
+    {
+      unitType: "research-slice",
+      unitId: "M001/S01",
+      prompt: "do research",
+      finalPrompt: "do research",
+      pauseAfterUatDispatch: false,
+      state: {
+        phase: "researching",
+        activeMilestone: { id: "M001", title: "Milestone" },
+        activeSlice: { id: "S01", title: "Slice" },
+        activeTask: null,
         registry: [{ id: "M001", title: "Milestone", status: "active" }],
         recentDecisions: [],
         blockers: [],

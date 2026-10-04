@@ -40,7 +40,6 @@ export interface PausedSessionMetadata {
   milestoneLock?: string | null;
   pauseReason?: string;
   lastPreExecFailure?: PreExecFailure | null;
-  preExecRetryCount?: Record<string, number>;
 }
 
 export interface InterruptedSessionAssessment {
