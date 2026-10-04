@@ -268,6 +268,9 @@ export async function runFinalize(
     }
   }
 
+  // Keep this call after every pre-verification exit above. Those exits are
+  // for a unit with unfinished work, and its stage must stay `execute` so a
+  // resume replays the tool calls (ADR-048, stage checkpoint).
   onExecuteWorkComplete?.();
 
   if (pauseAfterUatDispatch) {
