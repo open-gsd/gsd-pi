@@ -4,6 +4,7 @@ import { parseUnitId } from "./unit-id.js";
 import { isDbAvailable } from "./gsd-db.js";
 import { readMilestone, readMilestones, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
+import { sliceAwaitsUatVerdict } from "./uat-dispatch.js";
 
 const SLICE_DISPATCH_TYPES = new Set([
   "research-slice",
@@ -14,7 +15,7 @@ const SLICE_DISPATCH_TYPES = new Set([
 ]);
 
 export function getPriorSliceCompletionBlocker(
-  _base: string,
+  base: string,
   _mainBranch: string,
   unitType: string,
   unitId: string,
@@ -82,6 +83,9 @@ export function getPriorSliceCompletionBlocker(
         if (!dependency.satisfiesDependents) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} is not complete.`;
         }
+        if (sliceAwaitsUatVerdict(base, targetMid, depId)) {
+          return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} has no UAT verdict.`;
+        }
       }
     } else {
       const milestoneUsesExplicitDeps = slices.some((slice) => slice.depends.length > 0);
@@ -106,6 +110,12 @@ export function getPriorSliceCompletionBlocker(
         .find((slice) => !slice.done && !reverseDependents.has(slice.id));
       if (incomplete) {
         return `Cannot dispatch ${unitType} ${unitId}: earlier slice ${targetMid}/${incomplete.id} is not complete.`;
+      }
+      const awaitsUat = slices
+        .slice(0, targetIndex)
+        .find((slice) => !reverseDependents.has(slice.id) && sliceAwaitsUatVerdict(base, targetMid, slice.id));
+      if (awaitsUat) {
+        return `Cannot dispatch ${unitType} ${unitId}: earlier slice ${targetMid}/${awaitsUat.id} has no UAT verdict.`;
       }
     }
   }

@@ -6,7 +6,7 @@ import {
   getSliceRunUatAssessment,
   getSliceScopedArtifacts,
 } from "./gsd-db.js";
-import type { GSDPreferences } from "./preferences.js";
+import { loadEffectiveGSDPreferences, type GSDPreferences } from "./preferences.js";
 import {
   classifyUatContentForRun,
   shouldDispatchUatForContent,
@@ -32,6 +32,20 @@ export function readSliceUatSpec(milestoneId: string, sliceId: string): string {
   return getSlice(milestoneId, sliceId)?.full_uat_md
     || getSliceScopedArtifacts(milestoneId, sliceId).find((row) => row.artifact_type === "UAT")?.full_content
     || "";
+}
+
+/**
+ * True when a completed slice still waits for its UAT: the run-uat rule
+ * dispatches a UAT run for it and no run-uat verdict is saved. Such a slice
+ * does not release the slices that depend on it (ADR-046 gate G6). The
+ * conditions are those of the run-uat dispatch, so a waiting slice always has
+ * a run-uat unit to dispatch.
+ */
+export function sliceAwaitsUatVerdict(basePath: string, milestoneId: string, sliceId: string): boolean {
+  if (getSlice(milestoneId, sliceId)?.status !== "complete") return false;
+  const uatContent = readSliceUatSpec(milestoneId, sliceId);
+  if (!uatContent || getSliceRunUatAssessment(milestoneId, sliceId)?.status) return false;
+  return shouldDispatchUatForContent(uatContent, loadEffectiveGSDPreferences(basePath)?.preferences);
 }
 
 /**
