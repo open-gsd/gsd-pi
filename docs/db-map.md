@@ -976,8 +976,11 @@ PRIMARY KEY (gate_kind, gate_id)
 ```
 
 - At most one `pending` row. A verified gate is never also pending.
-- A session start and a resumed session delete the `pending` row and keep the
-  verified rows. `/clear`, `/new` and the discuss→auto handoff delete every row.
+- A session start and a resumed session delete the `pending` row and the
+  `queue_phase` row, and keep the verified rows. `/clear`, `/new` and the
+  discuss→auto handoff delete every row.
+- The latest answer to a gate question wins. A decline deletes the verified
+  rows of that gate and leaves the gate `pending`.
 - No file copy. `.gsd/runtime/write-gate-state.json` (older builds) is not read.
 - The extension host uses the rows while the project database is the open one;
   it opens it at the session boundary and on every turn, and never replaces

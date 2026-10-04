@@ -303,11 +303,12 @@ export function clearDiscussionFlowState(basePath: string): void {
 /**
  * Apply a session boundary of the extension host to gate state.
  *
- * The conversation that asked a pending gate question is gone at every
- * boundary, so the pending gate is cleared. A verified gate is a database row
- * and survives a restart ("start") and a resume: the CONTEXT save it allows
- * may still be outstanding. `/clear` and `/new` ("new") abandon the
- * discussion, so they remove every gate row, like the discuss→auto handoff.
+ * The conversation that asked a pending gate question, and the /gsd queue
+ * conversation, are gone at every boundary, so the pending gate is cleared and
+ * the queue phase ends. A verified gate is a database row and survives a
+ * restart ("start") and a resume: the CONTEXT save it allows may still be
+ * outstanding. `/clear` and `/new` ("new") abandon the discussion, so they
+ * remove every gate row, like the discuss→auto handoff.
  *
  * A session that starts with no database open opens the existing project
  * database first, so the rows an earlier process left are the ones it changes.
@@ -323,7 +324,7 @@ export function applyWriteGateSessionBoundary(
   }
   mutateWriteGateState(basePath, "host", (state) => {
     state.pendingGateId = null;
-    if (boundary === "resume") state.activeQueuePhase = false;
+    state.activeQueuePhase = false;
   });
 }
 
@@ -609,6 +610,21 @@ function verifyAnsweredGate(
   return { status: "verified", gateId, milestoneId };
 }
 
+/**
+ * An explicit decline is the latest answer to a gate question. It revokes a
+ * verification that an earlier answer gave and leaves the gate pending. The
+ * host needs this because a verified row survives a session boundary and the
+ * host does not arm a verified gate when the question is asked again.
+ */
+function revokeDeclinedGate(basePath: string, gateId: string, fallbackMilestoneId?: string | null): void {
+  const milestoneId = extractDepthVerificationMilestoneId(gateId) ?? fallbackMilestoneId;
+  mutateWriteGateState(basePath, defaultWriteGateWriter(), (state) => {
+    state.pendingGateId = gateId;
+    state.verifiedApprovalGates.delete(gateId);
+    if (milestoneId) state.verifiedDepthMilestones.delete(normalizeMilestoneId(milestoneId));
+  });
+}
+
 /** Map an unresolved (non-verified) gate verdict to the caller-facing result. */
 function unresolvedGateResult(
   verdict: "declined" | "waiting" | "cancelled" | "timeout",
@@ -643,7 +659,8 @@ function unresolvedGateResult(
  * persistence/arming side effects:
  *
  * - "verified" verdict → markApprovalGateVerified/markDepthVerified/clearPendingGate.
- * - "declined" verdict → no state change; the gate (if armed) stays pending.
+ * - "declined" verdict → an armed gate stays pending; a gate that is not armed
+ *   loses its verification and becomes pending (revokeDeclinedGate).
  * - "waiting" verdict (empty/missing selection) → no state change; reported as
  *   "waiting" so callers pause instead of proceeding (fail-closed; an empty
  *   answer is never an answer).
@@ -692,6 +709,7 @@ export function applyAskUserQuestionsGateResult(options: {
     if (typeof question.id !== "string" || !isGateQuestionId(question.id)) continue;
     const verdict = evaluateGateAnswer(question, details);
     if (verdict !== "verified") {
+      if (verdict === "declined") revokeDeclinedGate(basePath, question.id, fallbackMilestoneId);
       return unresolvedGateResult(verdict, question.id, details);
     }
     if (currentPendingGate && question.id !== currentPendingGate) {

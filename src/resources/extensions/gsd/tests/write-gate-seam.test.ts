@@ -24,6 +24,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import {
+  applyAskUserQuestionsGateResult,
   applyWriteGateSessionBoundary,
   childWriteGateAdapter,
   clearDiscussionFlowState,
@@ -213,7 +214,7 @@ test("seam: a pending gate armed in another process blocks this one, and no file
   assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, true);
 });
 
-test("seam: a restart and a resume keep verified gates; a new session ends the discussion", (t) => {
+test("seam: a restart and a resume keep verified gates and end the queue phase; a new session ends the discussion", (t) => {
   const dir = makeProject("session-boundary");
   t.after(() => cleanup(dir));
   const arm = () => {
@@ -227,7 +228,7 @@ test("seam: a restart and a resume keep verified gates; a new session ends the d
   assert.deepEqual(loadWriteGateSnapshot(dir), {
     verifiedDepthMilestones: ["M007"],
     verifiedApprovalGates: [],
-    activeQueuePhase: true,
+    activeQueuePhase: false,
     pendingGateId: null,
   });
 
@@ -240,6 +241,42 @@ test("seam: a restart and a resume keep verified gates; a new session ends the d
   arm();
   applyWriteGateSessionBoundary("new", dir);
   assert.deepEqual(gateRows(), [], "a new session removes every gate row of the discussion");
+});
+
+test("seam: a queue phase set by a process that exited does not block a source write after the next session start", async (t) => {
+  const dir = makeProject("queue-restart");
+  t.after(() => cleanup(dir));
+
+  runWorkflowChild(dir, `gate.setQueuePhaseActive(true, dir);`);
+
+  const { handlers, pi } = makeHookHarness();
+  registerHooks(pi, []);
+  const ctx = { cwd: dir, ui: { notify: () => undefined } } as any;
+  const writeSource = async (toolCallId: string): Promise<any> => {
+    let blocked: any;
+    for (const handler of handlers.get("tool_call") ?? []) {
+      const result = await handler({
+        toolCallId,
+        toolName: "write",
+        input: { path: join(dir, "src", "app.ts"), content: "export {};\n" },
+      }, ctx);
+      if (result?.block) blocked = result;
+    }
+    return blocked;
+  };
+
+  assert.match(
+    (await writeSource("t-queue"))?.reason ?? "",
+    /\/gsd queue is a planning tool/,
+    "the queue phase row blocks a source write while the queue conversation is live",
+  );
+
+  // The process that ran /gsd queue is gone. A new host process starts a session.
+  closeDatabase();
+  applyWriteGateSessionBoundary("start", dir);
+
+  assert.equal(isQueuePhaseActive(dir), false);
+  assert.equal(await writeSource("t-restart"), undefined, "a restart ends the queue phase");
 });
 
 // ── (c) verified wins over a host re-arm ─────────────────────────────────────
@@ -338,6 +375,67 @@ test("seam: tool_execution_start re-arm window keeps the child verification", as
 
   assert.equal(getPendingGate(dir), null, "post-hoc replay must not re-arm a verified gate");
   assert.ok(loadWriteGateSnapshot(dir).verifiedDepthMilestones.includes("M007"));
+});
+
+test("seam: a decline after a restart revokes the earlier confirmation of the same gate", async (t) => {
+  const dir = makeProject("decline-after-restart");
+  t.after(() => cleanup(dir));
+
+  const { handlers, pi } = makeHookHarness();
+  registerHooks(pi, []);
+  const ctx = { cwd: dir, ui: { notify: () => undefined } } as any;
+  const questions = [{ id: GATE, options: [{ label: CONFIRM }, { label: "Not quite" }] }];
+  // One native ask_user_questions round: the host hooks see the call and the answer.
+  const ask = async (toolCallId: string, selected: string): Promise<void> => {
+    for (const handler of handlers.get("tool_call") ?? []) {
+      await handler({ toolCallId, toolName: "ask_user_questions", input: { questions } }, ctx);
+    }
+    for (const handler of handlers.get("tool_execution_start") ?? []) {
+      await handler({ toolCallId, toolName: "ask_user_questions", args: { questions } }, ctx);
+    }
+    for (const handler of handlers.get("tool_result") ?? []) {
+      await handler({
+        toolCallId,
+        toolName: "ask_user_questions",
+        input: { questions },
+        details: { response: { answers: { [GATE]: { selected } } } },
+      }, ctx);
+    }
+  };
+
+  await ask("t-confirm", CONFIRM);
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, false);
+
+  applyWriteGateSessionBoundary("start", dir);
+  await ask("t-decline", "Not quite");
+
+  assert.equal(getPendingGate(dir), GATE, "the declined gate is pending");
+  assert.equal(
+    shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block,
+    true,
+    "the latest answer is a decline, so the CONTEXT save is blocked",
+  );
+  assert.equal(shouldBlockContextWrite("write", contextPath(dir, "M007"), null, false, dir).block, true);
+  assert.deepEqual(gateRows(), [{ gate_kind: "pending", gate_id: GATE, writer: "host" }]);
+});
+
+test("seam: a decline of a gate id without a milestone revokes the milestone its confirmation verified", (t) => {
+  const dir = makeProject("decline-fallback");
+  t.after(() => cleanup(dir));
+
+  const gateId = "depth_verification_confirm";
+  const answer = (selected: string) => applyAskUserQuestionsGateResult({
+    basePath: dir,
+    questions: [{ id: gateId, options: [{ label: CONFIRM }, { label: "Not quite" }] }],
+    details: { response: { answers: { [gateId]: { selected } } } },
+    fallbackMilestoneId: "M007",
+  });
+
+  assert.equal(answer(CONFIRM).status, "verified");
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, false);
+
+  assert.deepEqual(answer("Not quite"), { status: "declined", gateId });
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, true);
 });
 
 // ── (d) per-basePath deferred gates ──────────────────────────────────────────
