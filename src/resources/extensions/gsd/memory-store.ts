@@ -13,6 +13,7 @@ import {
   updateMemoryContentRow,
   incrementMemoryHitCount,
   supersedeMemoryRow,
+  updateMemoryStructuredFieldsRow,
   markMemoryUnitProcessed,
   CAP_AND_DECAY_ROWS_SQL,
   decayMemoriesBefore,
@@ -21,6 +22,7 @@ import {
   deleteMemoryRelationsFor,
 } from './gsd-db.js';
 import { createMemoryRelation, isValidRelation } from './memory-relations.js';
+import { KNOWLEDGE_CELL_FIELDS, KNOWLEDGE_TABLE_BY_CATEGORY } from './knowledge-parser.js';
 import { logWarning } from './workflow-logger.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -654,13 +656,22 @@ function doCreateMemory(
 }
 
 /**
- * Update a memory's content and optionally its confidence.
+ * Update a memory's content and optionally its confidence. A knowledge row
+ * (one with a K/P/L `sourceKnowledgeId`) renders its content cell from
+ * `structured_fields`, so that cell is set to the new content too.
  */
 export function updateMemoryContent(id: string, content: string, confidence?: number): boolean {
   if (!isDbAvailable()) return false;
 
   try {
-    updateMemoryContentRow(id, content, confidence, new Date().toISOString());
+    const now = new Date().toISOString();
+    updateMemoryContentRow(id, content, confidence, now);
+    const row = _getAdapter()?.prepare('SELECT category, structured_fields FROM memories WHERE id = :id').get({ ':id': id });
+    const fields = parseStructuredFields(row?.['structured_fields']);
+    const table = KNOWLEDGE_TABLE_BY_CATEGORY[String(row?.['category'])];
+    if (fields && table && typeof fields['sourceKnowledgeId'] === 'string') {
+      updateMemoryStructuredFieldsRow(id, { ...fields, [KNOWLEDGE_CELL_FIELDS[table].content]: content }, now);
+    }
     return true;
   } catch {
     return false;

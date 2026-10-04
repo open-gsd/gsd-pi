@@ -20,7 +20,7 @@ import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../gsd-
 import { captureKnowledgeEntry, nextKnowledgeId } from "../knowledge-capture.ts";
 import { knowledgeMdPath } from "../knowledge-parser.ts";
 import { readKnowledgeMarkdown, renderKnowledgeProjection } from "../knowledge-projection.ts";
-import { createMemory, enforceMemoryCap } from "../memory-store.ts";
+import { applyMemoryActions, createMemory, enforceMemoryCap } from "../memory-store.ts";
 import { preserveProjectionChangesBeforeDispatch, rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
 import { invalidateStateCache } from "../state.ts";
 import { executeMemoryCapture } from "../tools/memory-tools.ts";
@@ -272,7 +272,7 @@ describe("knowledge capture", () => {
 
     const observed = await preserveProjectionChangesBeforeDispatch(base);
 
-    assert.deepEqual(observed.held, [], "there is no KNOWLEDGE import to send the user to, so nothing is held");
+    assert.deepEqual(observed.held, [], "the render keeps the file-only content, so nothing is held");
     assert.deepEqual(observed.preserved, []);
     assertHandEditKept();
   });
@@ -293,6 +293,17 @@ describe("knowledge capture", () => {
     assert.equal(active.filter((row) => row.category !== "rule").length, 50, "the cap still applies to other memories");
     const rules = section(readKnowledge(base), "## Rules");
     for (const id of ["K001", "K002", "K003"]) assert.match(rules, new RegExp(`\\| ${id} \\| project \\| Rule `));
+  });
+
+  test("a memory UPDATE on a knowledge row changes its KNOWLEDGE.md row", () => {
+    const { memoryId } = captureKnowledgeEntry(base, "pattern", "Retry with backoff", "project");
+
+    applyMemoryActions([{ action: "UPDATE", id: memoryId, content: "Retry with jitter" }]);
+    renderKnowledgeProjection(base);
+
+    const patterns = section(readKnowledge(base), "## Patterns");
+    assert.match(patterns, /\| P001 \| Retry with jitter \|/);
+    assert.doesNotMatch(patterns, /Retry with backoff/);
   });
 
   test("with a closed DB the capture fails loud and writes nothing", () => {
