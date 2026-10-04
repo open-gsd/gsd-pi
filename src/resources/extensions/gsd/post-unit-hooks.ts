@@ -111,7 +111,7 @@ function enqueueHookDispatch(
 /**
  * Reconcile a restored `activeHook` against the session's sidecar queue.
  *
- * The registry persists `activeHook` to disk but the pending hook *dispatch*
+ * The registry persists `activeHook` to the database but the pending hook *dispatch*
  * lives only on the non-persisted `s.sidecarQueue`. After a pause/resume or
  * crash-recovery, `restoreHookState` re-hydrates `activeHook` while the dispatch
  * is gone, so the registry believes a hook is in-flight but nothing will ever

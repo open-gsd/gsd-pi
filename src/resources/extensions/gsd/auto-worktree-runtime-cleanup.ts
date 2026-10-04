@@ -62,11 +62,12 @@ export function escapeStaleWorktree(base: string): string {
 }
 
 /**
- * Clean stale runtime unit files for completed milestones.
+ * Clean stale unit runtime records for completed milestones.
  *
- * After restart, stale runtime/units/*.json from prior milestones can
- * cause deriveState to resume the wrong milestone (#887). Removes files
- * for milestones that have a SUMMARY (fully complete).
+ * After restart, stale records from prior milestones can cause deriveState
+ * to resume the wrong milestone (#887). Removes the database rows (in every
+ * work root) and the runtime/units/*.json diagnostic copies for milestones
+ * that have a SUMMARY (fully complete). Returns the number of files removed.
  */
 export function cleanStaleRuntimeUnits(
   gsdRootPath: string,
