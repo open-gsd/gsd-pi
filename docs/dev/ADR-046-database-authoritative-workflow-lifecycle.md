@@ -320,7 +320,7 @@ Migration is additive and never runs two authorities.
    > `CONTEXT.md` (State layer) owns the rest of the contract: when the run
    > stops or waits, and when it becomes the default. The code is
    > `src/resources/extensions/gsd/authority-cutover-on-open.ts`.
-
+   >
    > **Note (2026-10-04, older copy of the database file):** a process that
    > holds a receipt of a Domain Operation above Authority Epoch 0 refuses to
    > open the same Project at a lower epoch. `/gsd db restore-backup` refuses a
