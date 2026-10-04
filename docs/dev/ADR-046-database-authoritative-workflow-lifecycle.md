@@ -129,7 +129,7 @@ verification retry count of a step is on its step row, written by a
 authority: a run directory with no run row (an older release) is imported with
 a `custom_workflow.run.import` Domain Operation before the engine reads it,
 and an import that is refused (an unknown step status) fails loud and writes
-nothing. This import is not an Import Preview. The paused-session record in `runtime_kv` is session state,
+nothing. This import is not an Import Preview. The pause row (`auto_pauses`) is session state,
 not run identity: a command that names a run starts that run and drops the
 record. A markdown-phase template run still keeps its phase state in
 an agent-edited `STATE.json`.
