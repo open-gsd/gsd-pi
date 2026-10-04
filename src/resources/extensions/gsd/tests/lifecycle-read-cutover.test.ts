@@ -197,6 +197,31 @@ test("the Authority Epoch switches the read interface from the legacy rows to th
   }, "after the Cutover the lifecycle rows answer");
 });
 
+test("the canonical lifecycle status of the snapshot comes from the legacy row before the Cutover and from the lifecycle row after it", async () => {
+  const base = seedDisagreement();
+  const statuses = async () =>
+    (await readProjectSnapshotFromDb(base))?.milestones.items.map((m) => [m.id, m.lifecycleStatus]);
+
+  assert.deepEqual(await statuses(), [
+    ["M001", "in_progress"],
+    ["M002", "completed"],
+    ["M003", "in_progress"],
+    ["M004", "in_progress"],
+    ["M005", "completed"],
+  ]);
+
+  cutOver();
+
+  assert.deepEqual(await statuses(), [
+    ["M001", "completed"],
+    ["M002", "ready"],
+    ["M003", "cancelled"],
+    ["M004", "paused"],
+    // No lifecycle row: no work on it is recorded.
+    ["M005", "pending"],
+  ]);
+});
+
 test("after the Cutover a legacy label that names the same lifecycle status is kept", () => {
   makeProject();
   insertMilestone({ id: "M001", title: "Queued", status: "queued" });

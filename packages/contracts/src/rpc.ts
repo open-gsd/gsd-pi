@@ -154,7 +154,26 @@ export interface ProjectSnapshotVerification {
 	evidence: { total: number; passed: number; failed: number };
 }
 
+/**
+ * The canonical lifecycle status vocabulary (ADR-046) and its version. A
+ * snapshot names the version it uses in `lifecycleStatusVersion`; a change of
+ * the list is a new version.
+ */
+export const LIFECYCLE_STATUS_VERSION = 1 as const;
+export const LIFECYCLE_STATUSES = [
+	"pending",
+	"ready",
+	"in_progress",
+	"paused",
+	"completed",
+	"cancelled",
+	"blocker-accepted",
+] as const;
+export type LifecycleStatus = (typeof LIFECYCLE_STATUSES)[number];
+
 export interface ProjectSnapshot {
+	/** Absent in a snapshot from a producer older than the lifecycle status vocabulary. */
+	lifecycleStatusVersion?: typeof LIFECYCLE_STATUS_VERSION;
 	authority: {
 		projectId: string;
 		schemaVersion: number | null;
@@ -179,7 +198,15 @@ export interface ProjectSnapshot {
 	openQuestionsTruncated?: boolean;
 	verification: ProjectSnapshotVerification;
 	milestones: {
-		items: Array<{ id: string; title: string; status: string; sequence: number }>;
+		items: Array<{
+			id: string;
+			title: string;
+			/** Legacy status label. Kept for one contract version; use `lifecycleStatus`. */
+			status: string;
+			/** Canonical lifecycle status; null when it is not known. */
+			lifecycleStatus?: LifecycleStatus | null;
+			sequence: number;
+		}>;
 		truncated: boolean;
 	};
 	capturedAt: string;

@@ -44,6 +44,13 @@ export interface MilestoneRead extends MilestoneRow {
   readonly parked: boolean;
   /** A tombstone that keeps the id reserved. It is not listed and not dispatched. */
   readonly discarded: boolean;
+  /**
+   * The status in the canonical lifecycle vocabulary, for external contracts.
+   * After the Cutover it is the status of the lifecycle row (pending when
+   * there is none). Before it, it is the legacy status mapped to that
+   * vocabulary; null when the legacy status is not in the map.
+   */
+  readonly lifecycleStatus: string | null;
 }
 
 export interface SliceRead extends SliceRow {
@@ -185,11 +192,19 @@ function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): Miles
       closed: done || discarded,
       parked: item?.lifecycleStatus === "paused",
       discarded,
+      lifecycleStatus: item?.lifecycleStatus ?? "pending",
     };
   }
   const closed = isClosedStatus(row.status);
   const discarded = isDiscardedMilestoneStatus(row.status);
-  return { ...row, done: closed && !discarded, closed, parked: row.status === "parked", discarded };
+  return {
+    ...row,
+    done: closed && !discarded,
+    closed,
+    parked: row.status === "parked",
+    discarded,
+    lifecycleStatus: normalizeLegacyLifecycleStatus(row.status),
+  };
 }
 
 function toSliceRead(row: SliceRow, items: LifecycleItems | null): SliceRead {

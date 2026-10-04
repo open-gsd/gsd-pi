@@ -27,7 +27,9 @@ import {
   getWorkflowDatabasePath as getDbPath,
   openWorkflowDatabasePath as openDatabase,
 } from "../db-workspace.js";
+import { normalizeCanonicalLifecycleStatus, type CanonicalLifecycleStatus } from "../status-guards.js";
 import type { GSDState } from "../types.js";
+import { LIFECYCLE_STATUS_VERSION } from "@opengsd/contracts";
 
 const MAX_REVISION_ATTEMPTS = 3;
 
@@ -55,7 +57,10 @@ export type DbProjectSnapshotProgress = ProgressCounts;
 export interface DbProjectSnapshotMilestone {
   id: string;
   title: string;
+  /** Legacy status label. Kept for one contract version; `lifecycleStatus` replaces it. */
   status: string;
+  /** Status in the canonical lifecycle vocabulary (`lifecycleStatusVersion`); null when it is not known. */
+  lifecycleStatus: CanonicalLifecycleStatus | null;
   sequence: number;
   /** Milestone Kind from the current milestone context; "delivery" when none is recorded. */
   kind: string;
@@ -70,6 +75,8 @@ export interface DbProjectSnapshot {
   openQuestions: OpenQuestionRow[];
   openQuestionsTruncated?: boolean;
   verification: VerificationSummaryCounts;
+  /** Version of the lifecycle status vocabulary that `milestones.items[].lifecycleStatus` uses. */
+  lifecycleStatusVersion: typeof LIFECYCLE_STATUS_VERSION;
   milestones: { items: DbProjectSnapshotMilestone[]; truncated: boolean };
   capturedAt: string;
 }
@@ -145,6 +152,7 @@ function readSnapshotDb(): SnapshotDbRead {
         id: m.id,
         title: m.title,
         status: m.status,
+        lifecycleStatus: normalizeCanonicalLifecycleStatus(m.lifecycleStatus),
         sequence: m.sequence,
         kind: kinds.get(m.id) ?? "delivery",
       })),
@@ -211,6 +219,7 @@ export async function readProjectSnapshotFromDb(
         noteSessionRead(dbRead.authority.revision);
         return {
           ...dbRead,
+          lifecycleStatusVersion: LIFECYCLE_STATUS_VERSION,
           current: buildCurrent(state),
           capturedAt: new Date().toISOString(),
         };

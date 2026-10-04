@@ -22,7 +22,9 @@ import {
   setMilestoneQueueOrder,
   transaction,
 } from "../gsd-db.ts";
+import { LIFECYCLE_STATUSES as CONTRACT_LIFECYCLE_STATUSES, LIFECYCLE_STATUS_VERSION } from "@opengsd/contracts";
 import { deriveState, getDeriveTelemetry, invalidateStateCache, resetDeriveTelemetry } from "../state.ts";
+import { LIFECYCLE_STATUSES } from "../status-guards.ts";
 import { readProgressFromDb } from "../state/progress-from-db.ts";
 import {
   MAX_SNAPSHOT_MILESTONES,
@@ -230,6 +232,7 @@ test("readProjectSnapshotFromDb emits exactly the DbProjectSnapshot key set", as
     "blockersTruncated",
     "capturedAt",
     "current",
+    "lifecycleStatusVersion",
     "milestones",
     "openQuestions",
     "openQuestionsTruncated",
@@ -249,6 +252,10 @@ test("readProjectSnapshotFromDb emits exactly the DbProjectSnapshot key set", as
   assert.deepEqual(Object.keys(snapshot.progress.slices), ["total", "done", "active", "pending"]);
   assert.deepEqual(Object.keys(snapshot.progress.tasks), ["total", "done", "pending"]);
   assert.deepEqual(Object.keys(snapshot.milestones), ["items", "truncated"]);
+  // The snapshot names the lifecycle vocabulary of the contract, and the
+  // contract list is the list the extension uses.
+  assert.equal(snapshot.lifecycleStatusVersion, LIFECYCLE_STATUS_VERSION);
+  assert.deepEqual([...CONTRACT_LIFECYCLE_STATUSES], [...LIFECYCLE_STATUSES]);
   assert.deepEqual(Object.keys(snapshot.verification), ["assessments", "evidence"]);
   assert.deepEqual(Object.keys(snapshot.verification.assessments), ["total", "pass", "fail"]);
   assert.deepEqual(Object.keys(snapshot.verification.evidence), ["total", "passed", "failed"]);
@@ -330,7 +337,7 @@ test("readProjectSnapshotFromDb assembles authority, current, progress, open ite
 
   assert.equal(snapshot.milestones.truncated, false);
   assert.deepEqual(snapshot.milestones.items, [
-    { id: "M001", title: "Authority Fixture", status: "active", sequence: 0, kind: "delivery" },
+    { id: "M001", title: "Authority Fixture", status: "active", lifecycleStatus: "in_progress", sequence: 0, kind: "delivery" },
   ]);
 
   assert.equal(typeof snapshot.capturedAt, "string");
