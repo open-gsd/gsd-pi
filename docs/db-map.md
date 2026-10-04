@@ -831,7 +831,7 @@ PRIMARY KEY (unit_type, unit_id, started_at)
 - Written by `snapshotUnitMetrics` and `snapshotUnitMetricsByScope` (`metrics.ts`) together with `.gsd/metrics.json`. A second snapshot of the same run replaces the row.
 - Read by the budget ceiling guard (`auto/phases.ts`), the budget pressure of dynamic model routing (`auto-model-selection.ts`), MCP `gsd_history` and the web history panel. `.gsd/metrics.json` stays the telemetry file of the TUI dashboards; it does not decide the budget.
 - A row is telemetry: it is not a Domain Operation and does not change the project revision.
-- Units that only `.gsd/metrics.json` holds (written by an older release) are not counted. `/gsd doctor` reports them (`metrics_ledger_units_unimported`) and `/gsd doctor --fix` imports them.
+- Units that only `.gsd/metrics.json` holds (written by an older release) are not counted. When a budget ceiling is set, the budget guard warns the operator with the uncounted amount one time per auto session. `/gsd doctor` reports them (`metrics_ledger_units_unimported`) and `/gsd doctor --fix` imports them.
 
 ---
 

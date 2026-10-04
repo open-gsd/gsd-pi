@@ -12,6 +12,7 @@ import { basename } from "node:path";
 import { debugLog } from "../debug-logger.js";
 import { logWarning } from "../workflow-logger.js";
 import { getContextPauseAction } from "../auto-budget.js";
+import { unimportedLedgerUnits } from "../metrics.js";
 import { BUDGET_THRESHOLDS, type IterationContext, type PhaseResult } from "./types.js";
 import type { AutoSession } from "./session.js";
 
@@ -123,9 +124,20 @@ export async function runGuards(
     // metrics.json ledger. In parallel worker mode, only count cost from the
     // current auto-mode session to avoid hitting the ceiling due to historical
     // project-wide spend (#2184).
-    const totalCost = deps.getBudgetSpend(
-      process.env.GSD_PARALLEL_WORKER && s.autoStartTime ? s.autoStartTime : undefined,
-    );
+    const sessionSpendOnly = Boolean(process.env.GSD_PARALLEL_WORKER && s.autoStartTime);
+    const totalCost = deps.getBudgetSpend(sessionSpendOnly ? s.autoStartTime : undefined);
+    // Unit runs that only metrics.json holds (written by an older release) are
+    // not in the sum. The import is an operator action, so the ceiling must not
+    // lose that spend without a message: tell the operator one time per session.
+    if (!sessionSpendOnly && !s.uncountedLedgerSpendNotified) {
+      s.uncountedLedgerSpendNotified = true;
+      const uncounted = unimportedLedgerUnits(s.originalBasePath || s.basePath);
+      if (uncounted.length > 0) {
+        const uncountedCost = uncounted.reduce((sum, unit) => sum + unit.cost, 0);
+        const msg = `Budget ceiling ${deps.formatCost(budgetCeiling)} does not count ${deps.formatCost(uncountedCost)} of earlier spend: ${uncounted.length} unit run(s) are only in .gsd/metrics.json. Run /gsd doctor --fix to import them.`;
+        ctx.ui.notify(msg, "warning");
+      }
+    }
     const budgetPct = totalCost / budgetCeiling;
     const budgetAlertLevel = deps.getBudgetAlertLevel(budgetPct);
     const newBudgetAlertLevel = deps.getNewBudgetAlertLevel(

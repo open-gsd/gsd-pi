@@ -76,10 +76,11 @@ function unit(overrides: Partial<UnitMetrics>): UnitMetrics {
 }
 
 /** The guard with the production budget functions and a $5 halt ceiling. */
-function guardContext(basePath: string, autoStartTime = 0): { ic: IterationContext; stops: string[] } {
+function guardContext(basePath: string, autoStartTime = 0): { ic: IterationContext; stops: string[]; notices: string[] } {
   const stops: string[] = [];
+  const notices: string[] = [];
   const ic = {
-    ctx: { ui: { notify: () => {} } },
+    ctx: { ui: { notify: (message: string, level: string) => { notices.push(`${level}: ${message}`); } } },
     pi: {},
     s: { basePath, originalBasePath: basePath, autoStartTime, lastBudgetAlertLevel: 0 },
     deps: {
@@ -97,7 +98,7 @@ function guardContext(basePath: string, autoStartTime = 0): { ic: IterationConte
     },
     prefs: { budget_ceiling: 5, budget_enforcement: "halt" },
   } as unknown as IterationContext;
-  return { ic, stops };
+  return { ic, stops, notices };
 }
 
 test("budget ceiling stops the run with metrics.json deleted", async (t) => {
@@ -127,7 +128,7 @@ test("a second snapshot of the same unit run replaces its row and is counted onc
   assert.equal(listUnitMetrics().length, 1);
 });
 
-test("metrics.json spend that the database does not hold does not stop the run until doctor imports it", async (t) => {
+test("metrics.json spend that the database does not hold is reported one time and does not stop the run until doctor imports it", async (t) => {
   const base = makeProject(t);
   writeFileSync(
     join(base, ".gsd", "metrics.json"),
@@ -139,6 +140,11 @@ test("metrics.json spend that the database does not hold does not stop the run u
   const before = guardContext(base);
   assert.equal((await runGuards(before.ic, "M001")).action, "next", "the file does not decide the budget");
   assert.deepEqual(before.stops, []);
+  assert.deepEqual(before.notices, [
+    "warning: Budget ceiling $5.00 does not count $10.00 of earlier spend: 1 unit run(s) are only in .gsd/metrics.json. Run /gsd doctor --fix to import them.",
+  ]);
+  await runGuards(before.ic, "M001");
+  assert.equal(before.notices.length, 1, "one auto session reports the uncounted spend one time");
 
   const ledgerIssues = async (options: { repair?: boolean; importFileOverrides?: boolean }, fixes: string[] = []) => {
     const issues: DoctorIssue[] = [];
@@ -158,6 +164,7 @@ test("metrics.json spend that the database does not hold does not stop the run u
   const after = guardContext(base);
   const result = await runGuards(after.ic, "M001");
   assert.deepEqual([result.action, result.action === "break" && result.reason], ["break", "budget-halt"]);
+  assert.deepEqual(after.notices, [], "imported spend is counted, so there is no uncounted-spend warning");
 });
 
 test("a parallel worker counts only the spend of its own auto session", async (t) => {
@@ -170,9 +177,14 @@ test("a parallel worker counts only the spend of its own auto session", async (t
   });
   const sessionStart = 50_000;
   recordUnitMetricsRows([unit({ id: "M001/S01/T01", startedAt: sessionStart - 1, cost: 10 })]);
+  writeFileSync(
+    join(base, ".gsd", "metrics.json"),
+    `${JSON.stringify({ version: 1, projectStartedAt: 1, units: [unit({ id: "M001/S01/T00", startedAt: 1, cost: 10 })] })}\n`,
+  );
 
   const earlier = guardContext(base, sessionStart);
   assert.equal((await runGuards(earlier.ic, "M001")).action, "next", "spend from before the session is not counted");
+  assert.deepEqual(earlier.notices, [], "a worker does not count earlier spend, so the ledger gap changes nothing for it");
 
   recordUnitMetricsRows([unit({ id: "M001/S01/T02", startedAt: sessionStart, cost: 6 })]);
   const inSession = guardContext(base, sessionStart);

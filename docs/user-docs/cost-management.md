@@ -12,7 +12,7 @@ Every unit's metrics are captured automatically:
 - **Tool calls** — number of tool invocations
 - **Message counts** — assistant and user messages
 
-Data is stored in the project database (`unit_metrics` rows) and in `.gsd/metrics.json`, and survives across sessions. The budget ceiling reads the spend from the database, so a deleted or pruned `metrics.json` does not reset it. If `/gsd doctor` reports unit runs that only `metrics.json` holds (from an older release), run `/gsd doctor --fix` to import them so the budget ceiling counts them.
+Data is stored in the project database (`unit_metrics` rows) and in `.gsd/metrics.json`, and survives across sessions. The budget ceiling reads the spend from the database, so a deleted or pruned `metrics.json` does not reset it. Unit runs that only `metrics.json` holds (from an older release) are not counted. When a budget ceiling is set, auto mode shows a warning with the uncounted amount one time per session, and `/gsd doctor` reports them. Run `/gsd doctor --fix` to import them so the budget ceiling counts them.
 
 ### Viewing Costs
 

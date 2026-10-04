@@ -171,6 +171,8 @@ export class AutoSession {
   autoModeStartThinkingLevel: ThinkingLevelSnapshot | null = null;
   originalThinkingLevel: ThinkingLevelSnapshot | null = null;
   lastBudgetAlertLevel: BudgetAlertLevel = 0;
+  /** True after the budget guard looked for metrics.json spend that the database does not hold. */
+  uncountedLedgerSpendNotified = false;
 
   // ── Recovery ─────────────────────────────────────────────────────────────
   pendingCrashRecovery: string | null = null;
@@ -380,6 +382,7 @@ export class AutoSession {
     this.autoModeStartThinkingLevel = null;
     this.originalThinkingLevel = null;
     this.lastBudgetAlertLevel = 0;
+    this.uncountedLedgerSpendNotified = false;
 
     // Recovery
     this.pendingCrashRecovery = null;
