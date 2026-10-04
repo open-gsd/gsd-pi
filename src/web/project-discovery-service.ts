@@ -42,9 +42,15 @@ function readDatabaseProgress(projectPath: string): ProjectProgressInfo | null {
   try {
     const { DatabaseSync } = process.getBuiltinModule("node:sqlite");
     db = new DatabaseSync(join(projectPath, ".gsd", "gsd.db"), { readOnly: true });
-    const rows = db.prepare(
-      "SELECT id, title, status FROM milestones ORDER BY CASE WHEN sequence > 0 THEN 0 ELSE 1 END, sequence, id",
-    ).all();
+    // Workflow order: queued milestones (sequence > 0) first, then sequence, then id.
+    // The sort is here and not in SQL because `sequence` is absent before schema V23,
+    // and a query that names an absent column throws.
+    const sequenceOf = (row: Record<string, unknown>): number => Number(row.sequence ?? 0);
+    const rows = db.prepare("SELECT * FROM milestones").all().sort((a, b) => {
+      const sa = sequenceOf(a);
+      const sb = sequenceOf(b);
+      return Number(sa <= 0) - Number(sb <= 0) || sa - sb || (String(a.id) < String(b.id) ? -1 : 1);
+    });
 
     let activeMilestone: string | null = null;
     let milestonesCompleted = 0;
@@ -66,7 +72,7 @@ function readDatabaseProgress(projectPath: string): ProjectProgressInfo | null {
 
     return { activeMilestone, activeSlice: null, phase: null, milestonesCompleted, milestonesTotal };
   } catch {
-    // No database, no SQLite provider, or a schema this query cannot read.
+    // No database, no SQLite provider, or no milestones table (before schema V5).
     return null;
   } finally {
     db?.close();

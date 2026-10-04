@@ -8,7 +8,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import { discoverProjects } from "../../web/project-discovery-service.ts";
 import { detectMonorepo } from "../../web/bridge-service.ts";
-import { closeDatabase, insertMilestone, openDatabase } from "../../resources/extensions/gsd/gsd-db.ts";
+import { closeDatabase, insertMilestone, openDatabase, setMilestoneQueueOrder } from "../../resources/extensions/gsd/gsd-db.ts";
 import { renderStateContent } from "../../resources/extensions/gsd/workflow-projections.ts";
 
 // ---------------------------------------------------------------------------
@@ -365,19 +365,48 @@ describe("project-discovery — database progress", () => {
     });
   });
 
+  test("the first open milestone follows the queue order, not the id order", (t) => {
+    const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-db-"));
+    t.after(() => {
+      closeDatabase();
+      rmSync(root, { recursive: true, force: true });
+    });
+    const gsdDir = join(root, "app", ".gsd");
+    mkdirSync(gsdDir, { recursive: true });
+    assert.equal(openDatabase(join(gsdDir, "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "Not queued" });
+    insertMilestone({ id: "M002", title: "Queued second" });
+    insertMilestone({ id: "M003", title: "Queued first" });
+    setMilestoneQueueOrder(["M003", "M002"]);
+    closeDatabase();
+
+    const [project] = discoverProjects(root, true);
+    assert.equal(project.progress?.activeMilestone, "M003: Queued first");
+  });
+
   test("reads an old-schema database without migrating it", (t) => {
     const root = mkdtempSync(join(tmpdir(), "gsd-project-discovery-db-"));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const gsdDir = join(root, "app", ".gsd");
     mkdirSync(gsdDir, { recursive: true });
     const dbPath = join(gsdDir, "gsd.db");
+    writeFileSync(join(gsdDir, "STATE.md"), STALE_STATE_MD);
+    // The schema V5 milestones table: no `sequence` column, which schema V23 added.
     // The open path of a GSD session writes to this database and leaves a backup beside it.
     const db = new DatabaseSync(dbPath);
     db.exec(`
-      CREATE TABLE schema_version (version INTEGER NOT NULL);
-      INSERT INTO schema_version (version) VALUES (1);
-      CREATE TABLE milestones (id TEXT PRIMARY KEY, title TEXT, status TEXT, sequence INTEGER DEFAULT 0);
-      INSERT INTO milestones (id, title, status) VALUES ('M001', 'Core setup', 'done'), ('M002', '', 'pending');
+      CREATE TABLE schema_version (version INTEGER NOT NULL, applied_at TEXT NOT NULL);
+      INSERT INTO schema_version (version, applied_at) VALUES (5, '2025-01-01T00:00:00.000Z');
+      CREATE TABLE milestones (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        created_at TEXT NOT NULL,
+        completed_at TEXT DEFAULT NULL
+      );
+      INSERT INTO milestones (id, title, status, created_at) VALUES
+        ('M002', '', 'active', '2025-01-02T00:00:00.000Z'),
+        ('M001', 'Core setup', 'complete', '2025-01-01T00:00:00.000Z');
     `);
     db.close();
     const before = readFileSync(dbPath);
@@ -391,6 +420,6 @@ describe("project-discovery — database progress", () => {
       milestonesTotal: 2,
     });
     assert.deepStrictEqual(readFileSync(dbPath), before, "the database file is unchanged");
-    assert.deepStrictEqual(readdirSync(gsdDir), ["gsd.db"], "the read leaves no other file");
+    assert.deepStrictEqual(readdirSync(gsdDir).sort(), ["STATE.md", "gsd.db"], "the read leaves no other file");
   });
 });
