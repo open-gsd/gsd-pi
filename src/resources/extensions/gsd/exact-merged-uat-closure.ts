@@ -175,7 +175,7 @@ function requireUatExecEvidence(
   row: VerificationEvidenceRow,
 ): string {
   // The host exec_runs row is the record of the run, not `.gsd/exec/*.meta.json`.
-  const run = readExecRunOfRef(row.durable_output_ref);
+  const run = readExecRunOfRef(input.basePath, row.durable_output_ref);
   if (!run || run.kind !== "uat_exec" ||
       run.milestone_id !== input.task.milestoneId ||
       run.slice_id !== input.task.sliceId ||

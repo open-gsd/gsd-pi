@@ -30,7 +30,7 @@ export interface StagedTaskCompletionWriteInput {
 
 export function writeStagedTaskCompletion(
   context: Readonly<DomainOperationContext>,
-  attempt: Readonly<{ milestoneId: string; sliceId: string; taskId: string }>,
+  attempt: Readonly<{ attemptId: string; milestoneId: string; sliceId: string; taskId: string }>,
   completion: Readonly<StagedTaskCompletionWriteInput>,
 ): void {
   if (requireActiveDomainOperationContext(context) !== "attempt.settle") {
@@ -81,9 +81,9 @@ export function writeStagedTaskCompletion(
 
   const insertEvidence = getDb().prepare(`
     INSERT OR IGNORE INTO verification_evidence (
-      task_id, slice_id, milestone_id, command, exit_code, verdict, duration_ms, created_at
+      task_id, slice_id, milestone_id, attempt_ref, command, exit_code, verdict, duration_ms, created_at
     )
-    SELECT :task_id, :slice_id, :milestone_id, :command, :exit_code, :verdict,
+    SELECT :task_id, :slice_id, :milestone_id, :attempt_ref, :command, :exit_code, :verdict,
            :duration_ms, operation.created_at
     FROM workflow_operations operation
     WHERE operation.operation_id = :operation_id
@@ -93,6 +93,7 @@ export function writeStagedTaskCompletion(
       ":task_id": completion.task.taskId,
       ":slice_id": completion.task.sliceId,
       ":milestone_id": completion.task.milestoneId,
+      ":attempt_ref": attempt.attemptId,
       ":command": evidence.command,
       ":exit_code": evidence.exitCode,
       ":verdict": evidence.verdict,

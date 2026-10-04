@@ -1160,23 +1160,27 @@ function toFiniteNumber(raw: unknown): number | undefined {
  * `verify` is prose and every evidence record reports a passing verdict with a
  * zero exit code. Rows with a NULL or non-numeric `exit_code` are reported as
  * `UNKNOWN_VERIFICATION_EXIT_CODE` so they cannot qualify as passing.
+ * With `attemptId`, only the claims that Attempt made are read.
  */
 export function getTaskVerificationEvidence(
   milestoneId: string,
   sliceId: string,
   taskId: string,
+  attemptId?: string,
 ): Array<{ command: string; exitCode: number; verdict: string; durationMs?: number }> {
   if (!getDbOrNull()!) return [];
   const rows = getDbOrNull()!.prepare(
     `SELECT command, exit_code, verdict, duration_ms
      FROM verification_evidence
      WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid
+       AND (:attempt IS NULL OR attempt_ref = :attempt)
        AND created_at = (
          SELECT MAX(created_at) FROM verification_evidence
          WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid
+           AND (:attempt IS NULL OR attempt_ref = :attempt)
        )
      ORDER BY id`,
-  ).all({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }) as Array<Record<string, unknown>>;
+  ).all({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId, ":attempt": attemptId ?? null }) as Array<Record<string, unknown>>;
   return rows.map((row) => {
     const durationMs = toFiniteNumber(row.duration_ms);
     return {

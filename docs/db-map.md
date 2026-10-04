@@ -321,10 +321,16 @@ exit_code    INTEGER DEFAULT 0
 verdict      TEXT NOT NULL DEFAULT ''
 duration_ms  INTEGER DEFAULT 0
 created_at   TEXT NOT NULL DEFAULT ''
+attempt_ref  TEXT NOT NULL DEFAULT ''   ← Attempt that made the claim (non-versioned); '' when no Attempt made it
 FOREIGN KEY (milestone_id, slice_id, task_id) → tasks
 ```
 
-- Indexes: `idx_verification_evidence_task`, unique dedup index (V13)
+- Indexes: `idx_verification_evidence_task`, unique dedup index (V13) on
+  `(task_id, slice_id, milestone_id, attempt_ref, command, verdict)`
+- `attempt_ref` and the dedup index with it are the non-versioned required
+  schema feature `verification-evidence-attempt`. Host verification reads only
+  the claims of the Attempt under verification; the claims of an earlier
+  Attempt stay stored.
 
 ---
 

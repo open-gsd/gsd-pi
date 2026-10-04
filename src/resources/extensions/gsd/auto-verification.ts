@@ -894,7 +894,7 @@ export async function runPostUnitVerification(
       sliceRow = getSlice(mid, sid);
       taskPlanVerify = taskRow?.verify;
       taskEvidence = hostRecordedTaskEvidence(
-        getTaskVerificationEvidence(mid, sid, tid),
+        getTaskVerificationEvidence(mid, sid, tid, latestAttempt.attemptId),
         listExecRunsOfAttempt(latestAttempt.attemptId).map((run) => ({
           id: run.id,
           command: run.command,

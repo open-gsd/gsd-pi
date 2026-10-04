@@ -20,7 +20,7 @@ import {
   type VerificationContext,
 } from "../auto-verification.ts";
 import { AutoSession } from "../auto/session.ts";
-import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, insertVerificationEvidence, _getAdapter } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, getTaskVerificationEvidence, _getAdapter } from "../gsd-db.ts";
 import { readExecRun, recordExecRun } from "../db/writers/exec-runs.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { _clearGsdRootCache } from "../paths.ts";
@@ -238,8 +238,14 @@ function createBasicTask(verify = "echo pass"): void {
 }
 
 /** `whileRunning` runs between the claim and the settle, as the executor does. */
-function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}, milestoneId = "M001", sliceId = "S01"): string {
-  const unit = `${milestoneId}-${sliceId}`;
+function createCanonicalSucceededTaskAttempt(
+  whileRunning: () => void = () => {},
+  milestoneId = "M001",
+  sliceId = "S01",
+  claimedCommands: string[] = [],
+  retryOfAttemptId?: string,
+): string {
+  const unit = `${milestoneId}-${sliceId}${retryOfAttemptId ? "-retry" : ""}`;
   const adapter = _getAdapter();
   assert.ok(adapter);
   adapter.exec(`
@@ -263,11 +269,11 @@ function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}
     ) VALUES (
       'verification-trace-${unit}', 'verification-turn-${unit}', 'verification-worker-${milestoneId}', 7,
       '${milestoneId}', '${sliceId}', 'T01', 'execute-task', '${milestoneId}/${sliceId}/T01',
-      'claimed', 1, '2026-07-13T00:00:00.000Z'
+      'claimed', ${retryOfAttemptId ? 2 : 1}, '2026-07-13T00:00:00.000Z'
     );
   `);
   const fence = readDomainOperationFence();
-  executeDomainOperation({
+  if (!retryOfAttemptId) executeDomainOperation({
     operationType: "test.task.ready",
     idempotencyKey: `fixture/verification-task-ready/${unit}`,
     expectedRevision: fence.revision,
@@ -298,13 +304,16 @@ function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}
       }],
     };
   });
-  const dispatch = adapter.prepare("SELECT id FROM unit_dispatches WHERE milestone_id = ? AND slice_id = ?").get(milestoneId, sliceId) as { id: number };
+  const dispatch = adapter.prepare(
+    "SELECT id FROM unit_dispatches WHERE milestone_id = ? AND slice_id = ? ORDER BY id DESC LIMIT 1",
+  ).get(milestoneId, sliceId) as { id: number };
   const claimed = claimTaskAttempt({
     invocation: internalExecutionInvocation(`fixture/verification-task-claim/${unit}`),
     task: { milestoneId, sliceId, taskId: "T01" },
     workerId: `verification-worker-${milestoneId}`,
     milestoneLeaseToken: 7,
     coordinationDispatchId: dispatch.id,
+    ...(retryOfAttemptId ? { retryOfAttemptId } : {}),
   });
   whileRunning();
   settleTaskAttempt({
@@ -314,6 +323,22 @@ function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}
     failureClass: "none",
     summary: "executor completed",
     output: { changedFiles: [] },
+    // The claim of the executor, staged as gsd_task_complete stages it.
+    ...(claimedCommands.length > 0 ? {
+      stagedTaskCompletion: {
+        task: { milestoneId, sliceId, taskId: "T01" },
+        oneLiner: "executor completed",
+        narrative: "executor completed",
+        verificationResult: "claimed pass",
+        blockerDiscovered: false,
+        deviations: "None.",
+        knownIssues: "None.",
+        keyFiles: [],
+        keyDecisions: [],
+        fullSummaryMd: "# T01",
+        verificationEvidence: claimedCommands.map((command) => ({ command, exitCode: 0, verdict: "pass", durationMs: 5 })),
+      },
+    } : {}),
   });
   return claimed.attemptId;
 }
@@ -1344,8 +1369,9 @@ describe("Post-execution blocking failure retry bypass", () => {
   });
 
   /** Run host verification on the real authority and return what the database holds after it. */
-  async function verifyCanonicalTask(whileRunning?: () => void) {
-    const attemptId = createCanonicalSucceededTaskAttempt(whileRunning);
+  async function verifyCanonicalTask(whileRunning?: () => void, retryOfAttemptId?: string) {
+    const attemptId = createCanonicalSucceededTaskAttempt(whileRunning, "M001", "S01", claimedCommands, retryOfAttemptId);
+    claimedCommands = [];
     const s = makeMockSession(tempDir, { type: "execute-task", id: "M001/S01/T01" });
     const result = await runPostUnitVerification(
       { s, ctx: makeMockCtx(), pi: makeMockPi() } satisfies VerificationContext,
@@ -1353,6 +1379,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     );
     const task = { milestoneId: "M001", sliceId: "S01", taskId: "T01" };
     return {
+      attemptId,
       result,
       verdict: readTaskTechnicalVerdict(attemptId)?.verdict,
       nextStage: readLatestTaskAttempt(task)?.nextStage,
@@ -1362,11 +1389,11 @@ describe("Post-execution blocking failure retry bypass", () => {
 
   const PROSE_VERIFY = "The settings page shows the saved theme after a reload";
 
+  /** Commands the executor of the next Attempt claims in its completion. */
+  let claimedCommands: string[] = [];
+
   function stageClaimedEvidence(command: string): void {
-    insertVerificationEvidence({
-      taskId: "T01", sliceId: "S01", milestoneId: "M001",
-      command, exitCode: 0, verdict: "pass", durationMs: 5,
-    });
+    claimedCommands.push(command);
   }
 
   function recordHostRun(id: string, command: string, exitCode = 0, cwd = tempDir): void {
@@ -1437,6 +1464,33 @@ describe("Post-execution blocking failure retry bypass", () => {
 
     assert.equal(outcome.result, "continue");
     assert.equal(outcome.verdict, "pass");
+  });
+
+  test("a retry Attempt is judged from its own claims and its own host runs; the earlier claims stay stored", async () => {
+    createBasicTask(PROSE_VERIFY);
+    stageClaimedEvidence("node check-theme.js");
+    stageClaimedEvidence("node check-layout.js");
+    const first = await verifyCanonicalTask(() => recordHostRun("run-theme-1", "node check-theme.js", 1));
+    assert.equal(first.verdict, "inconclusive");
+
+    stageClaimedEvidence("node check-theme.js");
+    const retry = await verifyCanonicalTask(() => recordHostRun("run-theme-2", "node check-theme.js"), first.attemptId);
+
+    assert.deepEqual(
+      getTaskVerificationEvidence("M001", "S01", "T01", retry.attemptId).map((claim) => claim.command),
+      ["node check-theme.js"],
+    );
+    assert.equal(retry.result, "continue");
+    assert.equal(retry.verdict, "pass");
+    assert.deepEqual(
+      _getAdapter()!.prepare("SELECT attempt_ref, command FROM verification_evidence ORDER BY id").all()
+        .map((row) => ({ ...row })),
+      [
+        { attempt_ref: first.attemptId, command: "node check-theme.js" },
+        { attempt_ref: first.attemptId, command: "node check-layout.js" },
+        { attempt_ref: retry.attemptId, command: "node check-theme.js" },
+      ],
+    );
   });
 
   test("with two running Attempts, a host run backs the Attempt of the Milestone worktree it ran in", async () => {

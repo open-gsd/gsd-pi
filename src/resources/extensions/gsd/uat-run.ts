@@ -221,10 +221,15 @@ function relativeRefStartsWithin(root: string, ref: string): boolean {
   return normalizedRef === normalizedRoot || normalizedRef.startsWith(`${normalizedRoot}/`);
 }
 
-/** The exec_runs row an exec evidence ref names: a run id, or a path to one of the files of the run. */
-export function readExecRunOfRef(ref: string): ExecRunRow | null {
-  const id = basename(ref.trim().replace(/\\/g, "/")).replace(/\.(?:meta\.json|stdout|stderr)$/, "");
-  return readExecRun(id);
+/** The exec_runs row an exec evidence ref names: the run id, or the path of its .meta.json file under an approved .gsd/exec root. */
+export function readExecRunOfRef(basePath: string, ref: string): ExecRunRow | null {
+  const trimmed = ref.trim();
+  const normalizedRef = trimmed.replace(/\\/g, "/");
+  if (!normalizedRef.endsWith(".meta.json")) return readExecRun(trimmed);
+  const path = isAbsolute(trimmed) ? resolve(trimmed) : resolve(basePath, trimmed);
+  const underExecRoot = relativeRefStartsWithin(".gsd/exec", trimmed) ||
+    approvedEvidenceRoots(basePath).some((root) => pathStartsWithin(join(root, "exec"), path));
+  return underExecRoot ? readExecRun(basename(normalizedRef, ".meta.json")) : null;
 }
 
 /** Every place a relative evidence path can be: the work root, and the .gsd and browser artifact roots. */
@@ -270,12 +275,13 @@ function browserArtifactPathIsApproved(basePath: string, ref: string): boolean {
  * stored row decides this, not the kind the model cites.
  */
 function validateExecEvidenceRef(
+  basePath: string,
   params: UatResultSaveParams,
   runId: string,
   check: UatCheckResultInput,
   evidence: UatEvidenceRef,
 ): string | null {
-  const run = readExecRunOfRef(evidence.ref);
+  const run = readExecRunOfRef(basePath, evidence.ref);
   if (!run) {
     return `${evidence.kind} evidence ref "${evidence.ref}" names no host-recorded run; run the check with gsd_uat_exec and cite the id it returns`;
   }
@@ -313,7 +319,7 @@ function validateEvidenceRef(
   }
   if (!isNonEmptyString(evidence.ref)) return "evidence.ref is required";
   if (evidence.kind === "gsd_uat_exec" || evidence.kind === "gsd_exec") {
-    return validateExecEvidenceRef(params, runId, check, evidence);
+    return validateExecEvidenceRef(basePath, params, runId, check, evidence);
   }
   if (evidence.kind === "url") {
     return isHttpUrlRef(evidence.ref)

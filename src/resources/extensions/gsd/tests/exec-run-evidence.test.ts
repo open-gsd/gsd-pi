@@ -4,7 +4,7 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -230,6 +230,22 @@ describe("UAT evidence is judged from exec_runs rows", () => {
     assert.equal(result.ok, false);
     if (result.ok) return;
     assert.match(result.error.message, /names no host-recorded run/);
+  });
+
+  test("a run is cited by its id or by its .meta.json path under .gsd/exec, and by no other path", async () => {
+    const id = await uatExec("S01", "printf ok");
+    const cite = (ref: string) => prepareUatRun(base, uatResult("S01", [{ kind: "gsd_uat_exec", ref }]));
+
+    assert.equal(cite(id).ok, true);
+    assert.equal(cite(`.gsd/exec/${id}.meta.json`).ok, true);
+    assert.equal(cite(join(realpathSync(base), ".gsd", "exec", `${id}.meta.json`)).ok, true);
+
+    for (const ref of [`.gsd/exec/${id}.stdout`, `.gsd/exec/${id}.stderr`, `other/${id}.meta.json`, join(base, `${id}.meta.json`)]) {
+      const result = cite(ref);
+      assert.equal(result.ok, false, ref);
+      if (result.ok) continue;
+      assert.match(result.error.message, /names no host-recorded run/, ref);
+    }
   });
 
   test("a PASS that cites a failed gsd_exec run is rejected", async () => {

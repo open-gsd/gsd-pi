@@ -27,6 +27,10 @@ import {
   hasUnitDispatchRetrySchema,
 } from "./db-unit-dispatch-retry-schema.js";
 import { createExecRunSchema, hasExecRunSchema } from "./db-exec-run-schema.js";
+import {
+  ensureVerificationEvidenceDedupIndex,
+  hasVerificationEvidenceDedupIndex,
+} from "./db-verification-evidence-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -69,6 +73,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "exec-runs",
     isPresent: hasExecRunSchema,
     create: createExecRunSchema,
+  },
+  {
+    id: "verification-evidence-attempt",
+    isPresent: hasVerificationEvidenceDedupIndex,
+    create: ensureVerificationEvidenceDedupIndex,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 
