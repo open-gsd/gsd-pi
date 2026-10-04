@@ -31,6 +31,7 @@ import {
   type PausedSessionMetadata,
 } from "./interrupted-session.js";
 import { deleteRuntimeKv, getRuntimeKv } from "./db/runtime-kv.js";
+import { deleteUatRetryCounter, listUatRetryCounters, readHookStateJson } from "./db/writers/runtime-control.js";
 
 const MAX_UAT_ATTEMPTS = 3;
 
@@ -318,9 +319,10 @@ export async function checkRuntimeHealth(
 
   // ── Stale hook state ──────────────────────────────────────────────────
   try {
-    const hookStateFile = join(root, "hook-state.json");
-    if (existsSync(hookStateFile)) {
-      const raw = readFileSync(hookStateFile, "utf-8");
+    // Hook state is a database row; hook-state.json is its diagnostic copy.
+    const { hookStateScope } = await import("./rule-registry.js");
+    const raw = readHookStateJson(hookStateScope(basePath));
+    if (raw !== null) {
       const state = JSON.parse(raw);
       const hasCycleCounts = state.cycleCounts && typeof state.cycleCounts === "object"
         && Object.keys(state.cycleCounts).length > 0;
@@ -341,15 +343,14 @@ export async function checkRuntimeHealth(
             code: "stale_hook_state",
             scope: "project",
             unitId: "project",
-            message: `hook-state.json has ${Object.keys(state.cycleCounts).length} residual cycle count(s) from a previous session`,
-            file: ".gsd/hook-state.json",
+            message: `hook state has ${Object.keys(state.cycleCounts).length} residual cycle count(s) from a previous session`,
             fixable: true,
           });
 
           if (shouldFix("stale_hook_state")) {
             const { clearPersistedHookState } = await import("./post-unit-hooks.js");
             clearPersistedHookState(basePath);
-            fixesApplied.push("cleared stale hook-state.json");
+            fixesApplied.push("cleared stale hook state");
           }
         }
       }
@@ -360,39 +361,25 @@ export async function checkRuntimeHealth(
 
   // ── Exhausted run-uat retry counters ──────────────────────────────────
   try {
-    const runtimeDir = join(root, "runtime");
-    if (existsSync(runtimeDir)) {
-      const uatCounterPattern = /^uat-count-(M\d+)-(S\d+)\.json$/;
-      for (const fileName of readdirSync(runtimeDir)) {
-        const match = fileName.match(uatCounterPattern);
-        if (!match) continue;
-        const [, mid, sid] = match;
-        if (!mid || !sid || hasAssessmentVerdict(basePath, mid, sid)) continue;
+    // The retry counter is a database row (uat_retry_counters).
+    for (const counter of listUatRetryCounters()) {
+      const mid = counter.milestone_id;
+      const sid = counter.slice_id;
+      const count = counter.attempts;
+      if (count < MAX_UAT_ATTEMPTS || hasAssessmentVerdict(basePath, mid, sid)) continue;
 
-        const filePath = join(runtimeDir, fileName);
-        let count = 0;
-        try {
-          const parsed = JSON.parse(readFileSync(filePath, "utf-8"));
-          count = typeof parsed.count === "number" ? parsed.count : 0;
-        } catch {
-          count = MAX_UAT_ATTEMPTS + 1;
-        }
-        if (count < MAX_UAT_ATTEMPTS) continue;
+      issues.push({
+        severity: "warning",
+        code: "uat_retry_exhausted",
+        scope: "slice",
+        unitId: `${mid}/${sid}`,
+        message: `run-uat for ${mid}/${sid} exhausted ${count} attempt(s) without an ASSESSMENT verdict. Reset the retry counter after fixing the underlying UAT/tool issue, then rerun /gsd auto.`,
+        fixable: true,
+      });
 
-        issues.push({
-          severity: "warning",
-          code: "uat_retry_exhausted",
-          scope: "slice",
-          unitId: `${mid}/${sid}`,
-          message: `run-uat for ${mid}/${sid} exhausted ${count} attempt(s) without an ASSESSMENT verdict. Reset the retry counter after fixing the underlying UAT/tool issue, then rerun /gsd auto.`,
-          file: `.gsd/runtime/${fileName}`,
-          fixable: true,
-        });
-
-        if (shouldFix("uat_retry_exhausted")) {
-          rmSync(filePath, { force: true });
-          fixesApplied.push(`reset exhausted run-uat retry counter for ${mid}/${sid}`);
-        }
+      if (shouldFix("uat_retry_exhausted")) {
+        deleteUatRetryCounter(mid, sid);
+        fixesApplied.push(`reset exhausted run-uat retry counter for ${mid}/${sid}`);
       }
     }
   } catch {

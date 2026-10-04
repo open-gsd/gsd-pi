@@ -16,6 +16,13 @@ import {
 } from "../gsd-db.ts";
 import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.ts";
 import {
+  getUatRetryAttempts,
+  incrementUatRetryAttempts,
+  readHookStateJson,
+  writeHookStateJson,
+} from "../db/writers/runtime-control.ts";
+import { hookStateScope } from "../rule-registry.ts";
+import {
   PAUSED_SESSION_KV_KEY,
   type PausedSessionMetadata,
 } from "../interrupted-session.ts";
@@ -62,29 +69,36 @@ test("doctor fix respects git.manage_gitignore false (#4161)", async (t) => {
 
 test("doctor fix resets run-uat counters at the dispatch cap", async (t) => {
   const dir = createGitProject();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => {
+    closeDatabase();
+    invalidateAllCaches();
+    rmSync(dir, { recursive: true, force: true });
+  });
 
-  const runtimeDir = join(dir, ".gsd", "runtime");
-  mkdirSync(runtimeDir, { recursive: true });
-  const counterPath = join(runtimeDir, "uat-count-M002-S01.json");
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  openDatabase(join(dir, ".gsd", "gsd.db"));
+  for (let attempt = 1; attempt <= 3; attempt++) incrementUatRetryAttempts("M002", "S01");
+  // A counter file from an older build is not a counter: it is never reported.
+  mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true });
   writeFileSync(
-    counterPath,
+    join(dir, ".gsd", "runtime", "uat-count-M009-S09.json"),
     JSON.stringify({ count: 3, updatedAt: "2026-06-02T19:40:23.289Z" }) + "\n",
     "utf-8",
   );
 
-  const detect = await runGSDDoctor(dir);
-  const issue = detect.issues.find((candidate) => candidate.code === "uat_retry_exhausted");
-  assert.ok(issue, "doctor reports the exhausted UAT retry counter at the dispatch cap");
-  assert.equal(issue.unitId, "M002/S01");
-  assert.match(issue.message, /3 attempt\(s\)/);
+  const issues: DoctorIssue[] = [];
+  const fixesApplied: string[] = [];
+  await checkRuntimeHealth(dir, issues, fixesApplied, () => false);
+  const exhausted = issues.filter((candidate) => candidate.code === "uat_retry_exhausted");
+  assert.deepEqual(exhausted.map((issue) => issue.unitId), ["M002/S01"]);
+  assert.match(exhausted[0]!.message, /3 attempt\(s\)/);
+  assert.equal(getUatRetryAttempts("M002", "S01"), 3, "read-only doctor keeps the counter");
 
-  const fixed = await runGSDDoctor(dir, { fix: true, scope: "M002/S02" });
+  await checkRuntimeHealth(dir, [], fixesApplied, (code) => code === "uat_retry_exhausted");
   assert.ok(
-    fixed.fixesApplied.some((fix) => fix.includes("reset exhausted run-uat retry counter for M002/S01")),
-    "doctor --fix resets the blocked counter even when the current displayed scope has advanced",
+    fixesApplied.some((fix) => fix.includes("reset exhausted run-uat retry counter for M002/S01")),
   );
-  assert.equal(existsSync(counterPath), false);
+  assert.equal(getUatRetryAttempts("M002", "S01"), 0);
 });
 
 test("doctor reports and repairs a paused session superseded by the active milestone", async (t) => {
@@ -216,14 +230,22 @@ test("doctor surfaces unresolved projection evidence with recovery instructions"
   assert.equal(issue.fixable, false);
 });
 
-test("doctor fix preserves a pending gate block in hook-state.json (#2194)", async (t) => {
+test("doctor fix preserves a pending gate block in the hook state (#2194)", async (t) => {
   const dir = createGitProject();
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  t.after(() => {
+    closeDatabase();
+    invalidateAllCaches();
+    rmSync(dir, { recursive: true, force: true });
+  });
 
   mkdirSync(join(dir, ".gsd"), { recursive: true });
-  const hookStatePath = join(dir, ".gsd", "hook-state.json");
+  openDatabase(join(dir, ".gsd", "gsd.db"));
+  const scope = hookStateScope(dir);
+  const runFix = async (): Promise<void> => {
+    await checkRuntimeHealth(dir, [], [], (code) => code === "stale_hook_state");
+  };
   const writeHookState = (gateBlockPending: unknown): void => {
-    writeFileSync(hookStatePath, JSON.stringify({
+    writeHookStateJson(scope, JSON.stringify({
       cycleCounts: { "slice-plan-review/plan-slice/M001/S01": 1 },
       redispatchedGateKeys: [],
       activeHook: null,
@@ -232,7 +254,7 @@ test("doctor fix preserves a pending gate block in hook-state.json (#2194)", asy
       retryTrigger: null,
       gateBlockPending,
       savedAt: new Date().toISOString(),
-    }), "utf-8");
+    }));
   };
   writeHookState({
     hookName: "slice-plan-review",
@@ -247,15 +269,15 @@ test("doctor fix preserves a pending gate block in hook-state.json (#2194)", asy
 
   // A pending block re-arms a failed gate on resume; the stale-state fix
   // must not erase it.
-  await runGSDDoctor(dir, { fix: true });
-  const preserved = JSON.parse(readFileSync(hookStatePath, "utf-8"));
+  await runFix();
+  const preserved = JSON.parse(readHookStateJson(scope)!);
   assert.equal(preserved.gateBlockPending?.hookName, "slice-plan-review");
   assert.equal(preserved.gateBlockPending?.triggerUnitId, "M001/S01");
 
   // Without a pending block the same residual state is still stale and cleared.
   writeHookState(null);
-  await runGSDDoctor(dir, { fix: true });
-  const cleared = JSON.parse(readFileSync(hookStatePath, "utf-8"));
+  await runFix();
+  const cleared = JSON.parse(readHookStateJson(scope)!);
   assert.deepEqual(cleared.cycleCounts, {});
 });
 

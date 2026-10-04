@@ -67,7 +67,7 @@ function makeRecordingCtx() {
   const pi = makeMockPi();
 
   // Simulate the bug: buildRecoveryContext returns {} (empty object).
-  // basePath is undefined, which causes join(undefined, ".gsd") to throw.
+  // Every field is undefined, so the first use of one throws a TypeError.
   const emptyRctx = {} as RecoveryContext;
 
   let crashed = false;
@@ -75,10 +75,7 @@ function makeRecordingCtx() {
     await recoverTimedOutUnit(ctx, pi, "execute-task", "M001/S01/T01", "idle", emptyRctx);
   } catch (err: any) {
     crashed = true;
-    assert.ok(
-      err.message.includes("path") || err.message.includes("string") || err.code === "ERR_INVALID_ARG_TYPE",
-      `should crash with path/type error, got: ${err.message}`,
-    );
+    assert.ok(err instanceof TypeError, `should crash with a type error, got: ${err.message}`);
   }
   assert.ok(crashed, "should crash when basePath is undefined (reproduces #1855)");
 }

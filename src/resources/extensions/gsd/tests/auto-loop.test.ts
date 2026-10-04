@@ -938,6 +938,8 @@ test("runUnit failsafe defers cancellation while timeout recovery is making fres
     const s = makeMockSession();
     s.basePath = makeLoopTestBase("gsd-rununit-recovery-");
     s.currentUnit = { type: "task", id: "T01", startedAt: 1234 };
+    // The failsafe reads the runtime record from the database.
+    openDatabase(":memory:");
 
     const resultPromise = runUnit(ctx, pi, s, "task", "T01", "prompt");
     await waitForMicrotasks(() => pi.calls.length === 1, "unit dispatch");
@@ -974,6 +976,7 @@ test("runUnit failsafe defers cancellation while timeout recovery is making fres
     const result = await resultPromise;
     assert.equal(result.status, "completed");
   } finally {
+    closeDatabase();
     mock.timers.reset();
     process.chdir(originalCwd);
   }
@@ -5975,7 +5978,10 @@ test("runUnitPhase remembers aborted milestone closeout for same-unit resume", a
   _resetPendingResolve();
 
   const basePath = makeLoopTestBase("gsd-aborted-closeout-");
+  // The paused runtime record is a database row.
+  openDatabase(":memory:");
   t.after(() => {
+    closeDatabase();
     rmSync(basePath, { recursive: true, force: true });
   });
 

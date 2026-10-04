@@ -22,7 +22,7 @@ import {
   buildLoopRemediationSteps,
   refreshRecoveryDbForArtifact,
 } from "../auto-recovery.js";
-import { writeUnitRuntimeRecord } from "../unit-runtime.js";
+import { recordUnitEnd, writeUnitRuntimeRecord } from "../unit-runtime.js";
 import { isDbAvailable, getTask, getGateResults } from "../gsd-db.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import { getLatestForUnit } from "../db/unit-dispatches.js";
@@ -1017,6 +1017,11 @@ export async function runUnitPhase(
       : !artifactVerified && unitResult.status === "completed"
         ? "no-artifact"
         : unitResult.status;
+  recordUnitEnd(s.basePath, unitType, unitId, {
+    status: unitEndStatus,
+    artifactVerified,
+    ...(unitResult.errorContext ? { error: unitResult.errorContext.message } : {}),
+  });
   deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: ic.nextSeq(), eventType: "unit-end", data: { unitType, unitId, status: unitEndStatus, artifactVerified, ...(unitResult.errorContext ? { errorContext: unitResult.errorContext } : {}) }, causedBy: { flowId: ic.flowId, seq: unitStartSeq } });
 
   // ── Safety harness: checkpoint cleanup or rollback ──

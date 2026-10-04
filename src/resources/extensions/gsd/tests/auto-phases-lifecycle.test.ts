@@ -448,7 +448,9 @@ test("runFinalize marks unit runtime finalized after successful finalize", async
     startedAt,
   };
 
+  const { openDatabase, closeDatabase } = await import("../gsd-db.ts");
   try {
+    openDatabase(":memory:");
     const result = await runSuccessfulFinalize(s);
     const runtime = readUnitRuntimeRecord(base, "complete-milestone", "M001");
 
@@ -456,6 +458,7 @@ test("runFinalize marks unit runtime finalized after successful finalize", async
     assert.equal(runtime?.phase, "finalized");
     assert.equal(runtime?.lastProgressKind, "finalize-success");
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });

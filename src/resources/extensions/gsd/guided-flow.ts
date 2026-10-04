@@ -1809,6 +1809,10 @@ function selfHealRuntimeRecords(basePath: string, ctx: ExtensionContext): { clea
     let cleared = 0;
     for (const record of records) {
       const { unitType, unitId, phase } = record;
+      // A hook unit's record holds the hook outcome that the hook engine reads
+      // on resume. Clearing it would let a failed hook count as already run.
+      // The record is replaced when the hook is dispatched again.
+      if (unitType.startsWith("hook/")) continue;
       // Clear records whose expected artifact already exists (completed but not cleaned up)
       // TODO(C-future): selfHealRuntimeRecords iterates across all unit types (not just milestone
       // units), so it cannot be converted to resolveExpectedArtifactPathForScope without
@@ -1834,6 +1838,8 @@ function selfHealRuntimeRecords(basePath: string, ctx: ExtensionContext): { clea
     return { cleared: 0 };
   }
 }
+
+export const _selfHealRuntimeRecordsForTest = selfHealRuntimeRecords;
 
 /**
  * True when an agent turn is currently streaming or a dispatched message is

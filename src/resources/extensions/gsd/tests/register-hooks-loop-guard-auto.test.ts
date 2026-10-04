@@ -72,8 +72,13 @@ function makeHookHarness(): {
 function makeRuntimeBase(): string {
   const base = join(tmpdir(), `gsd-hook-runtime-${randomUUID()}`);
   mkdirSync(join(base, ".gsd"), { recursive: true });
+  // The harness abort is a database row. Without an open database nothing is
+  // recorded, and a "no abort recorded" assertion would prove nothing.
+  openDatabase(":memory:");
   return base;
 }
+
+test.after(() => closeDatabase());
 
 test("register-hooks keeps loop-guard block reason interactive outside auto-mode", async (t) => {
   autoSession.reset();

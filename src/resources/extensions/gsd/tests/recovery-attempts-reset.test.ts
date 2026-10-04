@@ -19,6 +19,7 @@ import {
   writeUnitRuntimeRecord,
   readUnitRuntimeRecord,
 } from "../unit-runtime.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { createTestContext } from "./test-helpers.ts";
 
 const { assertEq, assertTrue, report } = createTestContext();
@@ -27,6 +28,8 @@ const { assertEq, assertTrue, report } = createTestContext();
 
 const base = mkdtempSync(join(tmpdir(), "gsd-recovery-reset-test-"));
 mkdirSync(join(base, ".gsd", "runtime", "units"), { recursive: true });
+// The runtime record is a database row.
+openDatabase(":memory:");
 
 try {
   // ═══ #2322: recoveryAttempts should reset on re-dispatch ═══════════════════
@@ -138,6 +141,7 @@ try {
   }
 
 } finally {
+  closeDatabase();
   rmSync(base, { recursive: true, force: true });
 }
 

@@ -55,6 +55,7 @@ export async function failClosedOnFinalizeTimeout(
     timeoutAt: now,
     lastProgressAt: now,
     lastProgressKind: progressKind,
+    unitEnd: { status: "timed-out-finalize", artifactVerified: false },
   });
 
   deps.emitJournalEvent({

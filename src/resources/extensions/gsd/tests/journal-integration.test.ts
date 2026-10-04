@@ -998,10 +998,13 @@ test("session-failed cancellations close out and emit unit-end before hard stop"
   assert.equal((endEvents[0].data as any).errorContext.category, "session-failed");
 });
 
-test("runFinalize pauses and emits unit-end when pre-verification times out", async () => {
+test("runFinalize pauses and emits unit-end when pre-verification times out", async (t) => {
   const capture = createEventCapture();
   let pauseCalls = 0;
   const basePath = makeTestBase("gsd-finalize-timeout-");
+  // The runtime record is a database row.
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
 
   const deps = makeMockDeps(capture, {
     pauseAuto: async () => { pauseCalls++; },
@@ -1052,6 +1055,11 @@ test("runFinalize pauses and emits unit-end when pre-verification times out", as
   assert.ok(runtime, "timed-out finalize should persist a runtime record");
   assert.equal(runtime?.phase, "finalize-timeout");
   assert.equal(runtime?.lastProgressKind, "finalize-pre-timeout");
+  assert.deepEqual(
+    runtime?.unitEnd,
+    { status: "timed-out-finalize", artifactVerified: false },
+    "the unit-end outcome is stored on the database row, not only in the journal",
+  );
 
   const endEvents = capture.events.filter((e) => e.eventType === "unit-end");
   assert.equal(endEvents.length, 1, "timed-out finalize should emit terminal unit-end");

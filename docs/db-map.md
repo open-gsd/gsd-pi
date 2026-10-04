@@ -737,8 +737,9 @@ result_json  TEXT
 
 `db-required-schema.ts` is the registration and completeness authority for
 non-versioned schema features required on every database open. It registers
-the ADR-047 liveness feature and the ADR-048
-[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) feature;
+the ADR-047 liveness feature, the ADR-048
+[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) feature and
+the runtime-control feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
 required objects trigger guarded startup maintenance without changing
@@ -760,6 +761,72 @@ FOREIGN KEY dispatch_id → unit_dispatches(id)
 
 - DDL owner: `db-unit-dispatch-budget-schema.ts`. Access: `db/unit-dispatch-budgets.ts`.
 - Count and release rules: see the 2026-10-03 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### Runtime control rows (non-versioned)
+
+`db-runtime-control-schema.ts` owns the DDL. `db/writers/runtime-control.ts` is
+the only reader and writer. These are coordination rows, written outside
+Domain Operations. They replace runtime files that auto-mode used to read back
+as authority; the files that remain are diagnostic copies that nothing reads.
+
+##### `unit_runtime_records`
+
+One row per unit (`unit_type`, `unit_id`), replaced on each new run.
+
+```
+unit_type                 TEXT NOT NULL
+unit_id                   TEXT NOT NULL
+started_at                INTEGER NOT NULL  ← run identity (epoch ms)
+updated_at                INTEGER NOT NULL
+phase                     TEXT NOT NULL     ← dispatched | wrapup-warning-sent | timeout | finalize-timeout | crashed | recovered | finalized | paused | skipped
+wrapup_warning_sent       INTEGER NOT NULL DEFAULT 0
+continue_here_fired       INTEGER NOT NULL DEFAULT 0
+timeout_at                INTEGER
+last_progress_at          INTEGER NOT NULL
+progress_count            INTEGER NOT NULL DEFAULT 0
+last_progress_kind        TEXT NOT NULL
+recovery_attempts         INTEGER NOT NULL DEFAULT 0  ← timeout recovery budget
+last_recovery_reason      TEXT              ← idle | hard
+harness_abort_kind        TEXT              ← tool-loop-guard | tool-error | turn-abort; blocks result-save tools
+harness_abort_reason      TEXT
+harness_abort_tool_name   TEXT
+harness_abort_count       INTEGER
+harness_abort_recorded_at INTEGER
+end_status                TEXT              ← unit-end outcome of the latest run; decides post-unit hook success
+end_artifact_verified     INTEGER
+end_error                 TEXT
+recovery_json             TEXT              ← execute-task durability snapshot (diagnostic)
+PRIMARY KEY (unit_type, unit_id)
+```
+
+- Diagnostic copy: `.gsd/runtime/units/<type>-<id>.json`.
+
+##### `hook_state`
+
+Post-unit hook engine state: active hook, hook queue, cycle counts, pending
+retry and pending gate block.
+
+```
+scope      TEXT PRIMARY KEY   ← real path of the .gsd directory the state belongs to
+state_json TEXT NOT NULL
+updated_at TEXT NOT NULL
+```
+
+- Diagnostic copy: `.gsd/hook-state.json`.
+
+##### `uat_retry_counters`
+
+run-uat dispatch attempts per slice. The dispatch rule stops at 3.
+
+```
+milestone_id TEXT NOT NULL
+slice_id     TEXT NOT NULL
+attempts     INTEGER NOT NULL
+updated_at   TEXT NOT NULL
+PRIMARY KEY (milestone_id, slice_id)
+```
 
 ---
 

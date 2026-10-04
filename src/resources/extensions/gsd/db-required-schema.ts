@@ -10,6 +10,10 @@ import {
   createUnitDispatchBudgetSchema,
   hasUnitDispatchBudgetSchema,
 } from "./db-unit-dispatch-budget-schema.js";
+import {
+  createRuntimeControlSchema,
+  hasRuntimeControlSchema,
+} from "./db-runtime-control-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -27,6 +31,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "unit-dispatch-budgets",
     isPresent: hasUnitDispatchBudgetSchema,
     create: createUnitDispatchBudgetSchema,
+  },
+  {
+    id: "runtime-control",
+    isPresent: hasRuntimeControlSchema,
+    create: createRuntimeControlSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

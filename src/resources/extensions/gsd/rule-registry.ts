@@ -24,13 +24,14 @@ import { resolvePostUnitHooks, resolvePreDispatchHooks } from "./preferences.js"
 import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseUnitId } from "./unit-id.js";
+import { readHookStateJson, writeHookStateJson } from "./db/writers/runtime-control.js";
 import {
   buildFlatTaskFileName,
+  normalizeRealPath,
   resolveMilestonePath,
   targetMilestoneFile,
   targetSliceFile,
 } from "./paths.js";
-import { queryJournal, type JournalEntry } from "./journal.js";
 import { readUnitRuntimeRecord, type UnitRuntimePhase } from "./unit-runtime.js";
 import { extractFrontmatterVerdict } from "./verdict-parser.js";
 import { getDbOrNull } from "./db/engine.js";
@@ -129,6 +130,15 @@ export function convertDispatchRules(rules: DispatchRule[]): UnifiedRule[] {
 // ─── RuleRegistry ─────────────────────────────────────────────────────────
 
 const HOOK_STATE_FILE = "hook-state.json";
+
+/**
+ * Database scope of the hook state for one base path. It is the real path of
+ * the .gsd directory, so a worktree with its own .gsd keeps its own state and
+ * a worktree that links to the project .gsd shares the project state.
+ */
+export function hookStateScope(basePath: string): string {
+  return normalizeRealPath(join(normalizeRealPath(basePath), ".gsd"));
+}
 const FAILED_HOOK_RUNTIME_PHASES: ReadonlySet<UnitRuntimePhase> = new Set([
   "timeout",
   "finalize-timeout",
@@ -647,55 +657,25 @@ export class RuleRegistry {
     hookName: string,
     unitId: string,
   ): HookCompletionAssessment {
-    const unitType = `hook/${hookName}`;
-    const latestUnitEnd = this._latestHookUnitEnd(basePath, unitType, unitId);
-    if (latestUnitEnd) {
-      const data = latestUnitEnd.data ?? {};
-      const status = data.status;
-      const artifactVerified = data.artifactVerified;
-      if (status === "completed" && artifactVerified !== false) {
+    // The hook unit's outcome is the unit runtime row in the database. The
+    // journal is a diagnostic log and is not read here.
+    const runtime = readUnitRuntimeRecord(basePath, `hook/${hookName}`, unitId);
+    const unitEnd = runtime?.unitEnd;
+    if (unitEnd) {
+      if (unitEnd.status === "completed" && unitEnd.artifactVerified) {
         return { outcome: "success" };
       }
-      return {
-        outcome: "failed",
-        reason: this._formatHookFailureReason(status, artifactVerified, data.errorContext),
-      };
+      const parts = [`status ${unitEnd.status}`];
+      if (!unitEnd.artifactVerified) parts.push("artifact not verified");
+      if (unitEnd.error) parts.push(unitEnd.error);
+      return { outcome: "failed", reason: parts.join("; ") };
     }
 
-    const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
     if (runtime && FAILED_HOOK_RUNTIME_PHASES.has(runtime.phase)) {
       return { outcome: "failed", reason: `runtime phase ${runtime.phase}` };
     }
 
     return { outcome: "unknown" };
-  }
-
-  private _latestHookUnitEnd(
-    basePath: string,
-    unitType: string,
-    unitId: string,
-  ): JournalEntry | null {
-    const unitEnds = queryJournal(basePath, { eventType: "unit-end", unitId })
-      .filter(entry => entry.data?.unitType === unitType);
-    return unitEnds[unitEnds.length - 1] ?? null;
-  }
-
-  private _formatHookFailureReason(
-    status: unknown,
-    artifactVerified: unknown,
-    errorContext: unknown,
-  ): string {
-    const parts = [`status ${typeof status === "string" ? status : "unknown"}`];
-    if (artifactVerified === false) {
-      parts.push("artifact not verified");
-    }
-    if (typeof errorContext === "object" && errorContext !== null && "message" in errorContext) {
-      const message = (errorContext as { message?: unknown }).message;
-      if (typeof message === "string" && message.length > 0) {
-        parts.push(message);
-      }
-    }
-    return parts.join("; ");
   }
 
   private _handleFailedHookCompletion(
@@ -1173,7 +1153,7 @@ export class RuleRegistry {
     return join(basePath, ".gsd", HOOK_STATE_FILE);
   }
 
-  /** Persist current hook state to disk. */
+  /** Persist current hook state to the database. */
   persistState(basePath: string): void {
     try {
       this._persistStateOrThrow(basePath);
@@ -1210,20 +1190,32 @@ export class RuleRegistry {
       })),
       savedAt: new Date().toISOString(),
     };
-    const dir = join(basePath, ".gsd");
-    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    const statePath = this._hookStatePath(basePath);
-    const temporaryPath = `${statePath}.tmp`;
-    writeFileSync(temporaryPath, JSON.stringify(state, null, 2), "utf-8");
-    renameSync(temporaryPath, statePath);
+    this._storeHookState(basePath, JSON.stringify(state, null, 2));
   }
 
-  /** Restore hook state from disk after a crash/restart. */
+  /**
+   * Store the hook state row, then write hook-state.json as a diagnostic copy.
+   * Throws when the row cannot be written. Nothing reads the file back.
+   */
+  private _storeHookState(basePath: string, stateJson: string): void {
+    writeHookStateJson(hookStateScope(basePath), stateJson);
+    try {
+      const dir = join(basePath, ".gsd");
+      if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+      const statePath = this._hookStatePath(basePath);
+      const temporaryPath = `${statePath}.tmp`;
+      writeFileSync(temporaryPath, stateJson, "utf-8");
+      renameSync(temporaryPath, statePath);
+    } catch {
+      // Diagnostic copy only — the database row is already stored.
+    }
+  }
+
+  /** Restore hook state from the database after a crash/restart. */
   restoreState(basePath: string): void {
     try {
-      const filePath = this._hookStatePath(basePath);
-      if (!existsSync(filePath)) return;
-      const raw = readFileSync(filePath, "utf-8");
+      const raw = readHookStateJson(hookStateScope(basePath));
+      if (raw === null) return;
       const state: PersistedHookState = JSON.parse(raw);
       if (state.cycleCounts && typeof state.cycleCounts === "object") {
         this.cycleCounts.clear();
@@ -1301,13 +1293,12 @@ export class RuleRegistry {
     return restored;
   }
 
-  /** Clear persisted hook state file from disk. */
+  /** Clear the persisted hook state. */
   clearPersistedState(basePath: string): void {
     try {
-      const filePath = this._hookStatePath(basePath);
-      if (existsSync(filePath)) {
-        writeFileSync(
-          filePath,
+      if (readHookStateJson(hookStateScope(basePath)) !== null) {
+        this._storeHookState(
+          basePath,
           JSON.stringify({
             cycleCounts: {},
             redispatchedGateKeys: [],
@@ -1319,7 +1310,6 @@ export class RuleRegistry {
             gateBlockQueue: [],
             savedAt: new Date().toISOString(),
           }, null, 2),
-          "utf-8",
         );
       }
     } catch (e) {

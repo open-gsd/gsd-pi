@@ -90,7 +90,7 @@ import {
 } from "./workflow-dispatch-ledger.js";
 import { abortActiveUnitTurn } from "./unit-turn-abort.js";
 import { emitOpenUnitEndForUnit } from "../crash-recovery.js";
-import { writeUnitRuntimeRecord } from "../unit-runtime.js";
+import { recordUnitEnd, writeUnitRuntimeRecord } from "../unit-runtime.js";
 import { ensureDispatchLease, openDispatchClaim } from "./workflow-dispatch-claim.js";
 import { completeWorkflowIteration } from "./workflow-iteration-completion.js";
 import { createWorkflowJournalReporter } from "./workflow-journal-reporter.js";
@@ -2224,6 +2224,11 @@ export async function autoLoop(
           reasons: loopErr.reasons,
         });
         ctx.ui.notify(policyDecision.notifyMessage, "error");
+        recordUnitEnd(s.basePath, loopErr.unitType, loopErr.unitId, {
+          status: policyDecision.journalData.status,
+          artifactVerified: false,
+          error: policyDecision.journalData.reason,
+        });
         journalReporter.emit("unit-end", policyDecision.journalData);
         finishIncompleteIteration({
           status: "blocked",

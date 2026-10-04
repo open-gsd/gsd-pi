@@ -1,5 +1,14 @@
-import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
-import { dirname, join } from "node:path";
+// Project/App: gsd-pi
+// File Purpose: Unit runtime record — recovery budget, harness abort, unit-end
+// outcome and progress for one unit run.
+//
+// The database row is the only record that is read. The JSON file under
+// .gsd/runtime/units is a diagnostic copy written after each row change; nothing
+// reads it back. With no database open there is no record: writes return the
+// computed value without storing it and reads return null.
+
+import { existsSync, unlinkSync } from "node:fs";
+import { join } from "node:path";
 import { atomicWriteSync } from "./atomic-write.js";
 import {
   gsdRoot,
@@ -11,57 +20,13 @@ import { parseUnitId } from "./unit-id.js";
 import { getTask, isDbAvailable } from "./gsd-db.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
 import { isClosedStatus } from "./status-guards.js";
-
-// Per-record advisory lock — prevents read-modify-write races between
-// concurrent writers updating disjoint fields of the same runtime record.
-// Within a single Node process this is moot (writeUnitRuntimeRecord is sync),
-// but cross-process callers (parallel slice executors, doctor --fix while a
-// detached auto-mode session is alive) can otherwise clobber each other.
-const RECORD_LOCK_TIMEOUT_MS = 2_000;
-const RECORD_LOCK_STALE_MS = 5_000;
-const RECORD_LOCK_SLEEP_BUFFER = new SharedArrayBuffer(4);
-const RECORD_LOCK_SLEEP_VIEW = new Int32Array(RECORD_LOCK_SLEEP_BUFFER);
-
-function withRecordLock<T>(recordPath: string, fn: () => T): T {
-  const lockPath = recordPath + ".lock";
-  try {
-    mkdirSync(dirname(lockPath), { recursive: true });
-  } catch {
-    // best-effort
-  }
-  const deadline = Date.now() + RECORD_LOCK_TIMEOUT_MS;
-  while (true) {
-    try {
-      // O_EXCL atomic create-if-not-exists.
-      closeSync(openSync(lockPath, "wx"));
-      break;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      // Existing lock — check for staleness before either waiting or stealing.
-      try {
-        const stat = statSync(lockPath);
-        if (Date.now() - stat.mtimeMs > RECORD_LOCK_STALE_MS) {
-          try { unlinkSync(lockPath); } catch { /* race: already removed */ }
-          continue;
-        }
-      } catch {
-        // stat failed (file removed between EEXIST and stat) — retry create.
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        // Last-resort steal — unlikely in practice but avoids permanent wedge.
-        try { unlinkSync(lockPath); } catch { /* race */ }
-        continue;
-      }
-      Atomics.wait(RECORD_LOCK_SLEEP_VIEW, 0, 0, 5);
-    }
-  }
-  try {
-    return fn();
-  } finally {
-    try { unlinkSync(lockPath); } catch { /* best-effort */ }
-  }
-}
+import {
+  deleteUnitRuntimeRow,
+  listUnitRuntimeRows,
+  readUnitRuntimeRow,
+  updateUnitRuntimeRow,
+  type UnitRuntimeRow,
+} from "./db/writers/runtime-control.js";
 
 export type UnitRuntimePhase =
   | "dispatched"
@@ -103,6 +68,13 @@ export interface UnitHarnessAbortRecord {
   recordedAt: number;
 }
 
+/** How the latest run of a unit ended. Written where the unit-end journal event is emitted. */
+export interface UnitEndRecord {
+  status: string;
+  artifactVerified: boolean;
+  error?: string;
+}
+
 export interface AutoUnitRuntimeRecord {
   version: 1;
   unitType: string;
@@ -120,16 +92,106 @@ export interface AutoUnitRuntimeRecord {
   recoveryAttempts?: number;
   lastRecoveryReason?: "idle" | "hard";
   harnessAbort?: UnitHarnessAbortRecord;
+  unitEnd?: UnitEndRecord;
 }
 
-function runtimeDir(basePath: string): string {
-  return join(gsdRoot(basePath), "runtime", "units");
-}
-
-function runtimePath(basePath: string, unitType: string, unitId: string): string {
+/** File name of the diagnostic copy of one unit runtime record. */
+export function unitRuntimeFileName(unitType: string, unitId: string): string {
   const sanitizedUnitType = unitType.replace(/[\/]/g, "-");
   const sanitizedUnitId = unitId.replace(/[\/]/g, "-");
-  return join(runtimeDir(basePath), `${sanitizedUnitType}-${sanitizedUnitId}.json`);
+  return `${sanitizedUnitType}-${sanitizedUnitId}.json`;
+}
+
+function diagnosticPath(basePath: string, unitType: string, unitId: string): string {
+  return join(gsdRoot(basePath), "runtime", "units", unitRuntimeFileName(unitType, unitId));
+}
+
+function recordFromRow(row: UnitRuntimeRow): AutoUnitRuntimeRecord {
+  return {
+    version: 1,
+    unitType: row.unit_type,
+    unitId: row.unit_id,
+    startedAt: row.started_at,
+    updatedAt: row.updated_at,
+    phase: row.phase as UnitRuntimePhase,
+    wrapupWarningSent: row.wrapup_warning_sent === 1,
+    continueHereFired: row.continue_here_fired === 1,
+    timeoutAt: row.timeout_at,
+    lastProgressAt: row.last_progress_at,
+    progressCount: row.progress_count,
+    lastProgressKind: row.last_progress_kind,
+    recovery: row.recovery_json ? JSON.parse(row.recovery_json) as ExecuteTaskRecoveryStatus : undefined,
+    recoveryAttempts: row.recovery_attempts,
+    lastRecoveryReason: (row.last_recovery_reason as "idle" | "hard" | null) ?? undefined,
+    harnessAbort: row.harness_abort_kind !== null && row.harness_abort_recorded_at !== null
+      ? {
+          kind: row.harness_abort_kind as UnitHarnessAbortRecord["kind"],
+          reason: row.harness_abort_reason ?? "",
+          ...(row.harness_abort_tool_name !== null ? { toolName: row.harness_abort_tool_name } : {}),
+          ...(row.harness_abort_count !== null ? { count: row.harness_abort_count } : {}),
+          recordedAt: row.harness_abort_recorded_at,
+        }
+      : undefined,
+    unitEnd: row.end_status !== null
+      ? {
+          status: row.end_status,
+          artifactVerified: row.end_artifact_verified === 1,
+          ...(row.end_error !== null ? { error: row.end_error } : {}),
+        }
+      : undefined,
+  };
+}
+
+function rowFromRecord(record: AutoUnitRuntimeRecord): UnitRuntimeRow {
+  return {
+    unit_type: record.unitType,
+    unit_id: record.unitId,
+    started_at: record.startedAt,
+    updated_at: record.updatedAt,
+    phase: record.phase,
+    wrapup_warning_sent: record.wrapupWarningSent ? 1 : 0,
+    continue_here_fired: record.continueHereFired ? 1 : 0,
+    timeout_at: record.timeoutAt,
+    last_progress_at: record.lastProgressAt,
+    progress_count: record.progressCount,
+    last_progress_kind: record.lastProgressKind,
+    recovery_attempts: record.recoveryAttempts ?? 0,
+    last_recovery_reason: record.lastRecoveryReason ?? null,
+    harness_abort_kind: record.harnessAbort?.kind ?? null,
+    harness_abort_reason: record.harnessAbort?.reason ?? null,
+    harness_abort_tool_name: record.harnessAbort?.toolName ?? null,
+    harness_abort_count: record.harnessAbort?.count ?? null,
+    harness_abort_recorded_at: record.harnessAbort?.recordedAt ?? null,
+    end_status: record.unitEnd?.status ?? null,
+    end_artifact_verified: record.unitEnd ? (record.unitEnd.artifactVerified ? 1 : 0) : null,
+    end_error: record.unitEnd?.error ?? null,
+    recovery_json: record.recovery ? JSON.stringify(record.recovery) : null,
+  };
+}
+
+/**
+ * Read-modify-write one record in a single database write transaction, then
+ * write the diagnostic copy. `build` receives the stored record and returns
+ * the record to store.
+ */
+function storeRecord(
+  basePath: string,
+  unitType: string,
+  unitId: string,
+  build: (prev: AutoUnitRuntimeRecord | null) => AutoUnitRuntimeRecord,
+): AutoUnitRuntimeRecord {
+  if (!isDbAvailable()) return build(null);
+  const record = recordFromRow(updateUnitRuntimeRow(
+    unitType,
+    unitId,
+    (prev) => rowFromRecord(build(prev ? recordFromRow(prev) : null)),
+  ));
+  try {
+    atomicWriteSync(diagnosticPath(basePath, unitType, unitId), JSON.stringify(record, null, 2) + "\n", "utf-8");
+  } catch {
+    // Diagnostic copy only — the database row is already stored.
+  }
+  return record;
 }
 
 export function writeUnitRuntimeRecord(
@@ -139,12 +201,10 @@ export function writeUnitRuntimeRecord(
   startedAt: number,
   updates: Partial<AutoUnitRuntimeRecord> = {},
 ): AutoUnitRuntimeRecord {
-  const path = runtimePath(basePath, unitType, unitId);
-  return withRecordLock(path, () => {
-    const prev = readUnitRuntimeRecord(basePath, unitType, unitId);
+  return storeRecord(basePath, unitType, unitId, (prev) => {
     const sameRun = prev?.startedAt === startedAt;
     const updatesHarnessAbort = Object.prototype.hasOwnProperty.call(updates, "harnessAbort");
-    const next: AutoUnitRuntimeRecord = {
+    return {
       version: 1,
       unitType,
       unitId,
@@ -163,9 +223,44 @@ export function writeUnitRuntimeRecord(
       harnessAbort: updatesHarnessAbort
         ? updates.harnessAbort
         : (sameRun ? prev?.harnessAbort : undefined),
+      // A new run starts with no outcome; the outcome of the same run is kept.
+      unitEnd: updates.unitEnd ?? (sameRun ? prev?.unitEnd : undefined),
     };
-    atomicWriteSync(path, JSON.stringify(next, null, 2) + "\n", "utf-8");
-    return next;
+  });
+}
+
+/**
+ * Record how the latest run of a unit ended. The post-unit hook engine reads
+ * this row to decide whether a hook unit succeeded.
+ */
+export function recordUnitEnd(
+  basePath: string,
+  unitType: string,
+  unitId: string,
+  unitEnd: UnitEndRecord,
+): AutoUnitRuntimeRecord {
+  return storeRecord(basePath, unitType, unitId, (prev) => {
+    const now = Date.now();
+    return {
+      version: 1,
+      unitType,
+      unitId,
+      startedAt: prev?.startedAt ?? now,
+      updatedAt: now,
+      // A unit that ended before it was dispatched was never in flight.
+      phase: prev?.phase ?? "skipped",
+      wrapupWarningSent: prev?.wrapupWarningSent ?? false,
+      continueHereFired: prev?.continueHereFired ?? false,
+      timeoutAt: prev?.timeoutAt ?? null,
+      lastProgressAt: prev?.lastProgressAt ?? now,
+      progressCount: prev?.progressCount ?? 0,
+      lastProgressKind: prev?.lastProgressKind ?? "unit-end",
+      recovery: prev?.recovery,
+      recoveryAttempts: prev?.recoveryAttempts ?? 0,
+      lastRecoveryReason: prev?.lastRecoveryReason,
+      harnessAbort: prev?.harnessAbort,
+      unitEnd,
+    };
   });
 }
 
@@ -176,14 +271,12 @@ export function recordUnitHarnessAbort(
   startedAt: number,
   abort: Omit<UnitHarnessAbortRecord, "recordedAt"> & { recordedAt?: number },
 ): AutoUnitRuntimeRecord {
-  const path = runtimePath(basePath, unitType, unitId);
-  return withRecordLock(path, () => {
-    const prev = readUnitRuntimeRecord(basePath, unitType, unitId);
+  return storeRecord(basePath, unitType, unitId, (prev) => {
     const sameRun = prev?.startedAt === startedAt;
     if (sameRun && prev?.harnessAbort?.kind === "turn-abort" && abort.kind === "tool-error") {
       return prev;
     }
-    const next: AutoUnitRuntimeRecord = {
+    return {
       version: 1,
       unitType,
       unitId,
@@ -203,9 +296,8 @@ export function recordUnitHarnessAbort(
         ...abort,
         recordedAt: abort.recordedAt ?? Date.now(),
       },
+      unitEnd: sameRun ? prev?.unitEnd : undefined,
     };
-    atomicWriteSync(path, JSON.stringify(next, null, 2) + "\n", "utf-8");
-    return next;
   });
 }
 
@@ -216,36 +308,39 @@ export function clearUnitHarnessAbort(
   startedAt: number,
   expectedKind?: UnitHarnessAbortRecord["kind"],
 ): AutoUnitRuntimeRecord {
-  const path = runtimePath(basePath, unitType, unitId);
-  return withRecordLock(path, () => {
-    const prev = readUnitRuntimeRecord(basePath, unitType, unitId);
-    const sameRun = prev?.startedAt === startedAt;
-    if (!sameRun) {
-      return prev ?? writeUnitRuntimeRecord(basePath, unitType, unitId, startedAt, {});
+  return storeRecord(basePath, unitType, unitId, (prev) => {
+    if (!prev) {
+      return {
+        version: 1,
+        unitType,
+        unitId,
+        startedAt,
+        updatedAt: Date.now(),
+        phase: "dispatched",
+        wrapupWarningSent: false,
+        continueHereFired: false,
+        timeoutAt: null,
+        lastProgressAt: Date.now(),
+        progressCount: 0,
+        lastProgressKind: "dispatch",
+        recoveryAttempts: 0,
+      };
     }
-    if (expectedKind && prev?.harnessAbort?.kind !== expectedKind) {
-      return prev;
-    }
-    const next: AutoUnitRuntimeRecord = {
+    if (prev.startedAt !== startedAt) return prev;
+    if (expectedKind && prev.harnessAbort?.kind !== expectedKind) return prev;
+    return {
       ...prev,
       updatedAt: Date.now(),
       lastProgressAt: Date.now(),
       lastProgressKind: "harness-abort-cleared",
       harnessAbort: undefined,
     };
-    atomicWriteSync(path, JSON.stringify(next, null, 2) + "\n", "utf-8");
-    return next;
   });
 }
 
-export function readUnitRuntimeRecord(basePath: string, unitType: string, unitId: string): AutoUnitRuntimeRecord | null {
-  const path = runtimePath(basePath, unitType, unitId);
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf-8")) as AutoUnitRuntimeRecord;
-  } catch {
-    return null;
-  }
+export function readUnitRuntimeRecord(_basePath: string, unitType: string, unitId: string): AutoUnitRuntimeRecord | null {
+  const row = readUnitRuntimeRow(unitType, unitId);
+  return row ? recordFromRow(row) : null;
 }
 
 export function readUnitHarnessAbort(
@@ -260,29 +355,14 @@ export function readUnitHarnessAbort(
 }
 
 export function clearUnitRuntimeRecord(basePath: string, unitType: string, unitId: string): void {
-  const path = runtimePath(basePath, unitType, unitId);
+  deleteUnitRuntimeRow(unitType, unitId);
+  const path = diagnosticPath(basePath, unitType, unitId);
   if (existsSync(path)) unlinkSync(path);
 }
 
-/**
- * Return all runtime records currently on disk for `basePath`.
- * Returns an empty array if the runtime directory does not exist.
- */
-export function listUnitRuntimeRecords(basePath: string): AutoUnitRuntimeRecord[] {
-  const dir = runtimeDir(basePath);
-  if (!existsSync(dir)) return [];
-  const results: AutoUnitRuntimeRecord[] = [];
-  for (const file of readdirSync(dir)) {
-    if (!file.endsWith(".json")) continue;
-    try {
-      const raw = readFileSync(join(dir, file), "utf-8");
-      const record = JSON.parse(raw) as AutoUnitRuntimeRecord;
-      results.push(record);
-    } catch {
-      // Skip malformed files
-    }
-  }
-  return results;
+/** Return every unit runtime record in the database. */
+export function listUnitRuntimeRecords(_basePath: string): AutoUnitRuntimeRecord[] {
+  return listUnitRuntimeRows().map(recordFromRow);
 }
 
 export async function inspectExecuteTaskDurability(

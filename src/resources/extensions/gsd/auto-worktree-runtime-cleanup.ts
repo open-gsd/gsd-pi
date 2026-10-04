@@ -12,6 +12,8 @@ import {
   projectRootFromWorktreePath,
 } from "./worktree-root.js";
 import { logWarning } from "./workflow-logger.js";
+import { deleteUnitRuntimeRow, listUnitRuntimeRows } from "./db/writers/runtime-control.js";
+import { unitRuntimeFileName } from "./unit-runtime.js";
 
 const LEGACY_DEEP_SETUP_RUNTIME_UNIT_FILES = new Set([
   "workflow-preferences-WORKFLOW-PREFS.json",
@@ -70,6 +72,21 @@ export function cleanStaleRuntimeUnits(
   gsdRootPath: string,
   hasMilestoneSummary: (mid: string) => boolean,
 ): number {
+  // The database rows are the records that are read; the files below are
+  // their diagnostic copies. Both are cleared by the same rule.
+  try {
+    for (const row of listUnitRuntimeRows()) {
+      if (shouldRemoveRuntimeUnit(unitRuntimeFileName(row.unit_type, row.unit_id), hasMilestoneSummary)) {
+        deleteUnitRuntimeRow(row.unit_type, row.unit_id);
+      }
+    }
+  } catch (err) {
+    logWarning(
+      "worktree",
+      `stale runtime unit row cleanup failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   const runtimeUnitsDir = join(gsdRootPath, "runtime", "units");
   if (!existsSync(runtimeUnitsDir)) return 0;
 

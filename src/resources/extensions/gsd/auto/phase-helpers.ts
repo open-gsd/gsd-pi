@@ -2,6 +2,7 @@
 // File Purpose: Shared helpers used across auto-loop phase modules.
 
 import { debugLog } from "../debug-logger.js";
+import { recordUnitEnd } from "../unit-runtime.js";
 import { resolveWorktreeProjectRoot, normalizeWorktreePathForCompare } from "../worktree-root.js";
 import { decideVerificationRetry, verificationRetryKey } from "./verification-retry-policy.js";
 import type { AutoSession } from "./session.js";
@@ -163,6 +164,11 @@ export async function emitCancelledUnitEnd(
   unitStartSeq: number,
   errorContext?: { message: string; category: string; stopReason?: string; isTransient?: boolean; retryAfterMs?: number },
 ): Promise<void> {
+  recordUnitEnd(ic.s.basePath, unitType, unitId, {
+    status: "cancelled",
+    artifactVerified: false,
+    ...(errorContext ? { error: errorContext.message } : {}),
+  });
   ic.deps.emitJournalEvent({
     ts: new Date().toISOString(),
     flowId: ic.flowId,

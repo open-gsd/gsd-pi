@@ -32,11 +32,11 @@ import {
   getSliceRunUatAssessment,
 } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
+import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
 
 import {
-  resolveGsdPathContract,
   resolveMilestoneFile,
   resolveMilestonePath,
   resolveSliceFile,
@@ -49,7 +49,7 @@ import {
   buildTaskFileName,
   gsdProjectionRoot,
 } from "./paths.js";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { writeProjectionFileSync } from "./compat/compat-marker.js";
 import { logWarning, logError } from "./workflow-logger.js";
 import { dirname, join, sep } from "node:path";
@@ -630,28 +630,9 @@ const MAX_REWRITE_ATTEMPTS = 3;
 // ─── Run-UAT dispatch counter (per-slice) ────────────────────────────────
 // Caps run-uat dispatches to prevent infinite replay when verification
 // commands fail before writing a verdict (#3624).
+// The counter is a database row (uat_retry_counters), shared by every worktree
+// of the project. No file is read.
 const MAX_UAT_ATTEMPTS = 3;
-
-function uatCountPath(basePath: string, mid: string, sid: string): string {
-  return join(resolveGsdPathContract(basePath).projectGsd, "runtime", `uat-count-${mid}-${sid}.json`);
-}
-
-export function getUatCount(basePath: string, mid: string, sid: string): number {
-  try {
-    const data = JSON.parse(readFileSync(uatCountPath(basePath, mid, sid), "utf-8"));
-    return typeof data.count === "number" ? data.count : 0;
-  } catch {
-    return 0;
-  }
-}
-
-export function incrementUatCount(basePath: string, mid: string, sid: string): number {
-  const count = getUatCount(basePath, mid, sid) + 1;
-  const filePath = uatCountPath(basePath, mid, sid);
-  mkdirSync(join(resolveGsdPathContract(basePath).projectGsd, "runtime"), { recursive: true });
-  writeFileSync(filePath, JSON.stringify({ count, updatedAt: new Date().toISOString() }) + "\n");
-  return count;
-}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -884,7 +865,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // Cap run-uat dispatch attempts to prevent infinite replay (#3624).
       // Check before incrementing so an exhausted counter cannot create a
       // no-progress skip loop that starves later dispatch rules.
-      const attempts = getUatCount(basePath, mid, sliceId);
+      const attempts = getUatRetryAttempts(mid, sliceId);
       if (attempts >= MAX_UAT_ATTEMPTS) {
         return {
           action: "stop" as const,
@@ -893,7 +874,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
         };
       }
       // Preview must not burn a retry attempt; the dispatch decision is shared.
-      if (!preview) incrementUatCount(basePath, mid, sliceId);
+      if (!preview) incrementUatRetryAttempts(mid, sliceId);
       const uatFile = resolveSliceFile(basePath, mid, sliceId, "UAT")!;
       const uatContent = await loadFile(uatFile);
       return {

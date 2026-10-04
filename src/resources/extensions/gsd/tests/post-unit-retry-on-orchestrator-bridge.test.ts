@@ -17,7 +17,7 @@ import {
   restoreHookState,
 } from "../post-unit-hooks.ts";
 import { getOrCreateRegistry } from "../rule-registry.ts";
-import { emitJournalEvent } from "../journal.ts";
+import { recordUnitEnd } from "../unit-runtime.ts";
 import { _clearGsdRootCache } from "../paths.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
@@ -458,17 +458,22 @@ test("hook retry keeps its durable signal when the database is unavailable", asy
     _clearGsdRootCache();
     invalidateAllCaches();
     resetHookState();
+    const dbPath = join(base, ".gsd", "gsd.db");
+    openDatabase(dbPath);
     seedPersistedTaskRetry(base, "reviewed-completion-a");
+    // The outage: the retry signal is a database row and cannot be re-stored.
+    closeDatabase();
 
     const retryActiveUnit = mock.fn(async () => {});
     await assert.rejects(
       postUnitPostVerification(createRetryBridgeContext(base, retryActiveUnit)),
-      /database unavailable/i,
+      /failed to persist hook state/i,
     );
     assert.equal(retryActiveUnit.mock.callCount(), 0);
     assert.equal(isRetryPending(), true, "DB outage leaves the retry pending");
 
     resetHookState();
+    openDatabase(dbPath);
     restoreHookState(base);
     assert.equal(isRetryPending(), true, "restart restores the retry after a DB outage");
   } finally {
@@ -556,8 +561,7 @@ test("hook retry persistence failure preserves the retry across restart", async 
   mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), {
     recursive: true,
   });
-  const hookStatePath = join(base, ".gsd", "hook-state.json");
-  const temporaryHookStatePath = `${hookStatePath}.tmp`;
+  const dbPath = join(base, ".gsd", "gsd.db");
 
   try {
     process.chdir(base);
@@ -565,7 +569,7 @@ test("hook retry persistence failure preserves the retry across restart", async 
     invalidateAllCaches();
     resetHookState();
     writePreferences(base);
-    openDatabase(join(base, ".gsd", "gsd.db"));
+    openDatabase(dbPath);
     insertMilestone({ id: "M001", title: "Milestone", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active" });
     insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task", status: "complete" });
@@ -583,7 +587,8 @@ test("hook retry persistence failure preserves the retry across restart", async 
     const retryActiveUnit = mock.fn(async () => {
       if (!injectWriteFault) return;
       injectWriteFault = false;
-      mkdirSync(temporaryHookStatePath);
+      // Hook state is a database row, so a closed database is the write fault.
+      closeDatabase();
     });
     const pctx = createRetryBridgeContext(base, retryActiveUnit);
 
@@ -595,7 +600,7 @@ test("hook retry persistence failure preserves the retry across restart", async 
     assert.equal(retryActiveUnit.mock.callCount(), 1);
     assert.equal(isRetryPending(), true, "in-memory retry remains pending after the failed acknowledgement");
 
-    rmSync(temporaryHookStatePath, { recursive: true, force: true });
+    openDatabase(dbPath);
     resetHookState();
     restoreHookState(base);
     assert.equal(isRetryPending(), true, "restart restores the unacknowledged retry");
@@ -635,17 +640,9 @@ test("failed post-unit hook pauses auto-mode even when its artifact exists", asy
 
     const artifactPath = resolveHookArtifactPath(base, "M001/S01/T01", "REVIEW-DEBATE.md");
     writeFileSync(artifactPath, "partial review", "utf-8");
-    emitJournalEvent(base, {
-      ts: "2026-06-03T12:00:00.000Z",
-      flowId: "flow-hook-failed",
-      seq: 3,
-      eventType: "unit-end",
-      data: {
-        unitType: "hook/review-arbiter",
-        unitId: "M001/S01/T01",
-        status: "cancelled",
-        artifactVerified: false,
-      },
+    recordUnitEnd(base, "hook/review-arbiter", "M001/S01/T01", {
+      status: "cancelled",
+      artifactVerified: false,
     });
 
     const pauseAuto = mock.fn(async () => {});

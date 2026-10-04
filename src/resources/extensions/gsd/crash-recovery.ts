@@ -42,7 +42,13 @@ import { gsdRoot, normalizeRealPath } from "./paths.js";
 import { crashResumeHint } from "./guidance.js";
 import { atomicWriteSync } from "./atomic-write.js";
 import { effectiveLockFile } from "./session-lock.js";
-import { isInFlightRuntimePhase, listUnitRuntimeRecords, type AutoUnitRuntimeRecord } from "./unit-runtime.js";
+import {
+  isInFlightRuntimePhase,
+  listUnitRuntimeRecords,
+  readUnitRuntimeRecord,
+  recordUnitEnd,
+  type AutoUnitRuntimeRecord,
+} from "./unit-runtime.js";
 import { settleRunningAttemptsForWorker } from "./task-execution-domain-operation.js";
 
 export interface LockData {
@@ -381,6 +387,17 @@ export function emitOpenUnitEndForUnit(
   errorContext?: { message: string; category: string; stopReason?: string; isTransient?: boolean; retryAfterMs?: number },
 ): boolean {
   try {
+    // The database row is the outcome that workflow decisions read. Record it
+    // for a run that has no outcome yet, whatever the journal holds.
+    const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
+    if (runtime && !runtime.unitEnd) {
+      recordUnitEnd(basePath, unitType, unitId, {
+        status,
+        artifactVerified: false,
+        ...(errorContext ? { error: errorContext.message } : {}),
+      });
+    }
+
     const all = queryJournal(basePath);
 
     const starts = all.filter(
