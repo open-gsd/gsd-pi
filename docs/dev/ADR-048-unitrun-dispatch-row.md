@@ -42,7 +42,7 @@ The work has four parts:
 3. The sidecar queue (hooks, triage, quick tasks) as rows linked to the dispatch that triggered them.
 4. Advance selects from the database only.
 
-Part 1 has started. `unit_dispatch_budgets (dispatch_id, kind, used)` holds one count for each budget kind. A retry opens a new dispatch row for the same unit, so the count of a unit is the value on its newest dispatch row that holds the kind, and a reset writes `0` on the newest row. The zero-tool, tool-unavailable and pre-execution repair budgets use it (`db/unit-dispatch-budgets.ts`). A unit that runs with no dispatch row (a custom-engine step) has no durable identity, so its count lasts for the process only.
+Part 1 has started. `unit_dispatch_budgets (dispatch_id, kind, used)` holds one count for each budget kind. A retry opens a new dispatch row for the same unit, so the count of a unit is the value on its newest dispatch row that holds the kind, and a reset writes `0` on the newest row. The zero-tool, tool-unavailable and pre-execution repair budgets use it (`db/unit-dispatch-budgets.ts`). The three budgets have one release rule: a pass of the unit, or the pause at the cap, writes `0`, so a resume after a person fixed the cause starts a new budget. A unit that runs with no dispatch row (a custom-engine step) has no durable identity, so its count lasts for the process only.
 
 ## Rejected alternatives
 

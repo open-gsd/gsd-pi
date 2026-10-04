@@ -3094,11 +3094,12 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
             ? `\n  ${NOTIFICATION_BULLET} ...and ${checks.length - MAX_NOTIFICATION_DETAILS} more`
             : "";
           const evidenceNote = `\nSee ${evidencePath} for full details.`;
-          const attempt = spendUnitBudget(s.unclaimedUnitBudgets, {
+          const preExecBudget = {
             unitType: currentUnit.type,
             unitId: currentUnit.id,
             kind: "pre-exec",
-          });
+          } as const;
+          const attempt = spendUnitBudget(s.unclaimedUnitBudgets, preExecBudget);
 
           s.lastPreExecFailure = {
             unitId: currentUnit.id,
@@ -3107,6 +3108,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
           };
 
           if (attempt >= MAX_PRE_EXEC_RETRIES) {
+            resetUnitBudget(s.unclaimedUnitBudgets, preExecBudget);
             s.pendingVerificationRetry = null;
             ctx.ui.notify(
               `${heading}\n${details}${suffix}${evidenceNote}\nPlanner repair failed after ${attempt} consecutive pre-exec failures; pausing for human review.`,

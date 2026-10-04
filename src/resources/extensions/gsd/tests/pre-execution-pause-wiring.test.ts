@@ -466,7 +466,11 @@ describe("Pre-execution checks → retry/pause wiring", () => {
       1,
       "pauseAuto should be called when pre-exec repair reaches the retry cap",
     );
-    assert.equal(readUnitBudget(s.unclaimedUnitBudgets, PRE_EXEC_BUDGET), 2);
+    assert.equal(
+      readUnitBudget(s.unclaimedUnitBudgets, PRE_EXEC_BUDGET),
+      0,
+      "the cap pause releases the budget for the resume",
+    );
     assert.equal(s.pendingVerificationRetry, null);
 
     const notifyCalls = ctx.ui.notify.mock.calls;
@@ -502,6 +506,35 @@ describe("Pre-execution checks → retry/pause wiring", () => {
     assert.equal(pauseAutoMock.mock.callCount(), 1);
   });
 
+  test("a restart after the cap pause gives a claimed plan-slice unit a full repair budget again", async () => {
+    createFailingTasks();
+    claimPlanSliceDispatch("trace-pre-exec-cap-restart");
+    // Each call is a new process: a new session with no memory of the last one.
+    const runPlanSlice = () => postUnitPostVerification(
+      makePostUnitContext(
+        makeMockSession(tempDir, { type: "plan-slice", id: "M001/S01" }),
+        makeMockCtx(),
+        makeMockPi(),
+        mock.fn(async () => {}),
+      ),
+    );
+
+    assert.equal(await runPlanSlice(), "retry", "the first failure uses one planner retry");
+    assert.equal(await runPlanSlice(), "stopped", "the second failure reaches the cap and pauses");
+
+    // The user stops auto-mode, edits the plan and starts again. The edit
+    // repairs one input; the plan still fails for the other inputs.
+    closeDatabase();
+    openDatabase(dbPath);
+    writeFileSync(join(tempDir, MISSING_TASK_INPUTS[0]), "");
+
+    assert.equal(
+      await runPlanSlice(),
+      "retry",
+      "the first failure after the restart must get a planner retry, not pause at once",
+    );
+  });
+
   test("a passed pre-execution check gives a claimed plan-slice unit a full repair budget again", async () => {
     createFailingTasks();
     claimPlanSliceDispatch("trace-pre-exec-release");
@@ -527,7 +560,7 @@ describe("Pre-execution checks → retry/pause wiring", () => {
     assert.equal(
       readUnitBudget(new Map(), PRE_EXEC_BUDGET),
       0,
-      "the pass is the only release of the stored count",
+      "the pass releases the stored count",
     );
 
     // A later, unrelated failure of the same slice.
