@@ -15,7 +15,9 @@ import type {
 } from "../../legacy-import-forward-repair-plan.js";
 import { LEGACY_IMPORT_TARGET_ADAPTERS } from "../../legacy-import-preview-classifier-targets.js";
 import { canonicalLegacyImportJson, hashLegacyImportValue } from "../../legacy-import-preview.js";
+import { adoptInsertedHierarchyRows } from "../../lifecycle-backfill-domain-operation.js";
 import { synthesizeDecisionMemoryContent } from "../../memory-backfill.js";
+import { logWarning } from "../../workflow-logger.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export interface AuthorityCutoverReceiptInput {
@@ -206,6 +208,12 @@ function whereClause(record: SqlRecord, params: Record<string, unknown>): string
     return value === null ? `${field} IS NULL` : `${field} = ${parameter}`;
   }).join(" AND ");
 }
+
+const HIERARCHY_ITEM_KINDS: Readonly<Record<string, string | undefined>> = {
+  milestones: "milestone",
+  slices: "slice",
+  tasks: "task",
+};
 
 type ForwardRepairRowMutation = Extract<LegacyImportForwardRepairMutation, {
   action: "create" | "update" | "delete";
@@ -504,11 +512,17 @@ export function applyImportForwardRepairPlan(
   // reverts created rows child-first after dependencies are restored;
   // requireSafeRepairDelete relies on children already being gone when a
   // parent delete is guarded and executed. Do not reorder.
+  const recreated = new Set<string>();
   for (const entry of [...plan.targets].reverse()) {
     const mutation = entry.mutation;
     if (!mutation) continue;
     if ("rowSet" in mutation) {
       applyRowMutation(mutation);
+      const kind = HIERARCHY_ITEM_KINDS[mutation.rowSet];
+      if (mutation.action === "create" && kind) {
+        const { milestone_id, slice_id, id } = mutation.identity;
+        recreated.add(`${kind} ${[milestone_id, slice_id, id].filter((part) => part != null).join("/")}`);
+      }
     } else if (mutation.action === "replace-slice-dependencies") {
       applyDependencyMutation(mutation);
     } else if (mutation.action === "cancel-imported-lifecycle") {
@@ -519,6 +533,18 @@ export function applyImportForwardRepairPlan(
       applyKnowledgeMutation(mutation, repairedAt);
     } else {
       applyDecisionMutation(mutation, repairedAt);
+    }
+  }
+  // An Import Application deletes a hierarchy row only when it has no
+  // lifecycle row, so a row this repair puts back has none either.
+  if (recreated.size > 0) {
+    const { statusChanges } = adoptInsertedHierarchyRows(context, (row) => recreated.has(row));
+    if (statusChanges.length > 0) {
+      logWarning(
+        "db",
+        `Forward Repair adopted ${statusChanges.length} recreated row(s) with a changed legacy status:\n  ` +
+          statusChanges.join("\n  "),
+      );
     }
   }
 }

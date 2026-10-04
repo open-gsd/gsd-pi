@@ -1106,7 +1106,8 @@ export function grantCancellationWaiver(
  * Insert the one Waiver of a legacy row adopted as cancelled. The legacy
  * status is the only attestation, so the Waiver covers no requirement.
  * Closeout accepts it by scope and by the adopting operation type
- * (lifecycle.backfill or import.apply); reopen revokes it by scope.
+ * (lifecycle.backfill, import.apply or import.forward_repair); reopen revokes
+ * it by scope.
  */
 export function grantLegacyAttestedCancellationWaiver(
   context: Readonly<DomainOperationContext>,

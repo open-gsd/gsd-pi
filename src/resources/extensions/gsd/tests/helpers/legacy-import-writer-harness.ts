@@ -5,16 +5,27 @@ import assert from "node:assert/strict";
 
 import { SCHEMA_VERSION, _getAdapter } from "../../gsd-db.ts";
 import {
+  _executeImportForwardRepairDomainOperation,
   executeImportDomainOperation,
+  type DomainJsonValue,
   type DomainOperationContext,
   type DomainOperationMutation,
   type ImportDomainOperationRequest,
 } from "../../db/domain-operation.ts";
+import {
+  applyImportForwardRepairPlan,
+  insertImportForwardRepairReceipt,
+} from "../../db/writers/authority-recovery.ts";
 import { applyLegacyImportApplicationPlan } from "../../db/writers/legacy-import-application.ts";
+import { readDomainOperationFence } from "../../db/writers/lifecycle-commands.ts";
 import type {
   LegacyImportApplicationPlan,
   LegacyImportApplicationPlanInstruction,
 } from "../../legacy-import-application-plan.ts";
+import {
+  LEGACY_IMPORT_FORWARD_REPAIR_PLAN_SCHEMA_VERSION,
+  type LegacyImportForwardRepairPlan,
+} from "../../legacy-import-forward-repair-plan.ts";
 import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
@@ -151,6 +162,7 @@ export function importRequest(artifact: LegacyImportPreviewArtifact): ImportDoma
 export function insertImportApplication(
   context: Readonly<DomainOperationContext>,
   artifact: LegacyImportPreviewArtifact,
+  appliedAt = "2026-07-17T00:00:01.000Z",
 ): void {
   const preview = artifact.preview;
   db().prepare(`
@@ -173,7 +185,7 @@ export function insertImportApplication(
       :preview_json,
       '/tmp/verified-backup.sqlite', :backup_sha256, 1, :backup_schema_version,
       :backup_project_revision, :backup_authority_epoch, 'ok', '2026-07-17T00:00:00.000Z',
-      '2026-07-17T00:00:01.000Z', :resulting_project_revision, :resulting_authority_epoch
+      :applied_at, :resulting_project_revision, :resulting_authority_epoch
     )
   `).run({
     ":operation_id": context.operationId,
@@ -199,6 +211,7 @@ export function insertImportApplication(
     ":backup_schema_version": preview.base_database_schema_version,
     ":backup_project_revision": preview.base_project_revision,
     ":backup_authority_epoch": preview.base_authority_epoch,
+    ":applied_at": appliedAt,
     ":resulting_project_revision": context.resultingRevision,
     ":resulting_authority_epoch": context.resultingAuthorityEpoch,
   });
@@ -233,4 +246,105 @@ export function applyImport(
   });
   assert.ok(writerResult);
   return writerResult;
+}
+
+export interface RecreatedHierarchyRow {
+  rowSet: "milestones" | "slices" | "tasks";
+  identity: Record<string, string>;
+  /** The whole backup row: the identity columns and the other columns. */
+  values: Record<string, string | number | null>;
+}
+
+/**
+ * Put hierarchy rows back through a real import.forward_repair Domain
+ * Operation: the repair of an Import Application that deleted them. The
+ * Application here is empty; the rows are the hand-built plan of the repair.
+ */
+export function forwardRepairRecreate(rows: readonly RecreatedHierarchyRow[]): void {
+  const base = readDomainOperationFence();
+  const artifact = emptyPreview(base.revision, base.authorityEpoch, "forward-repair");
+  const applicationPlan = planFor(artifact, []);
+  const applicationIdentityHash = `sha256:${"5".repeat(64)}`;
+  const backupId = `sha256:${"6".repeat(64)}`;
+  let applicationOperationId = "";
+  executeImportDomainOperation(importRequest(artifact), (context) => {
+    applyLegacyImportApplicationPlan(context, applicationPlan);
+    // The Forward Repair receipt requires an Application applied at the time of its event.
+    insertImportApplication(context, artifact, String(db().prepare(
+      "SELECT created_at FROM workflow_operations WHERE operation_id = :operation_id",
+    ).get({ ":operation_id": context.operationId })?.["created_at"]));
+    applicationOperationId = context.operationId;
+    const applied = mutation(applicationPlan);
+    return {
+      ...applied,
+      // The Forward Repair receipt requires these two facts in the Application event.
+      events: [{
+        ...applied.events[0]!,
+        payload: { previewId: applicationPlan.previewId, applicationIdentityHash, backupId },
+      }],
+    };
+  });
+
+  const targets = rows.map((row, instructionIndex) => ({
+    instructionIndex,
+    targetKind: row.rowSet.slice(0, -1),
+    targetKey: [row.identity["milestone_id"], row.identity["slice_id"], row.identity["id"]]
+      .filter((part) => part !== undefined).join("/"),
+    changeIds: [],
+    disposition: "safe-revert",
+    reasonCode: "DELETED_ROW_STILL_ABSENT",
+    reviewHash: null,
+    review: null,
+    mutation: { action: "create", rowSet: row.rowSet, identity: row.identity, values: row.values },
+  })) as unknown as LegacyImportForwardRepairPlan["targets"];
+  const fence = readDomainOperationFence();
+  const rowsHash = hashLegacyImportValue([]);
+  const plan = {
+    planSchemaVersion: LEGACY_IMPORT_FORWARD_REPAIR_PLAN_SCHEMA_VERSION,
+    goal: "revert",
+    applicationOperationId,
+    applicationIdentityHash,
+    previewId: applicationPlan.previewId,
+    previewHash: applicationPlan.previewHash,
+    backupId,
+    differenceHash: hashLegacyImportValue(targets as unknown as DomainJsonValue),
+    expectedProjectRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    baseRelevantRowsHash: rowsHash,
+    applicationRelevantRowsHash: rowsHash,
+    currentRelevantRowsHash: rowsHash,
+    targetCount: targets.length,
+    mutationCount: targets.length,
+    preservedCount: 0,
+    rejectedCount: 0,
+    unresolvedCount: 0,
+    targets,
+  } satisfies LegacyImportForwardRepairPlan;
+  _executeImportForwardRepairDomainOperation({
+    operationType: "import.forward_repair",
+    idempotencyKey: `legacy-import/forward-repair-recreate-${importSequence}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "agent",
+    actorId: "legacy-import-writer-test",
+    sourceTransport: "internal",
+    payload: plan,
+  }, (context) => {
+    applyImportForwardRepairPlan(context, plan);
+    insertImportForwardRepairReceipt(context, plan);
+    return {
+      events: [{
+        eventType: "legacy-import.forward-repaired",
+        entityType: "legacy-import",
+        entityId: plan.previewId,
+        payload: plan as unknown as DomainJsonValue,
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: "legacy-import/forward-repair",
+        projectionKind: "markdown",
+        rendererVersion: "v1",
+      }],
+    };
+  });
 }

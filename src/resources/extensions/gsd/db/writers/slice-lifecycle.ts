@@ -592,7 +592,8 @@ function currentCompletionProof(lifecycleId: string, taskId: string): SliceCompl
 }
 
 /**
- * An Import Application or the lifecycle backfill adopts a completion that
+ * An Import Application, the lifecycle backfill or a Forward Repair that puts
+ * back a deleted row adopts a completion that
  * the legacy source attests as unverified legacy: it has no completion proof,
  * and verification evidence is required only for new work. The mark is the
  * provenance of the lifecycle row: still at state version 0, with the adopting
@@ -604,7 +605,7 @@ function isLegacyAdoptedCompletion(lifecycleId: string): boolean {
     FROM workflow_item_lifecycles lifecycle
     JOIN workflow_operations operation
       ON operation.operation_id = lifecycle.last_operation_id
-     AND operation.operation_type IN ('import.apply', 'lifecycle.backfill')
+     AND operation.operation_type IN ('import.apply', 'lifecycle.backfill', 'import.forward_repair')
     WHERE lifecycle.lifecycle_id = :lifecycle_id
       AND lifecycle.lifecycle_status = 'completed'
       AND lifecycle.state_version = 0
@@ -626,10 +627,10 @@ function hasCurrentCancellationAuthorization(lifecycleId: string, completedAt: s
       AND (waiver.expires_at IS NULL OR waiver.expires_at > :completed_at)
       AND (
         disposition.disposition_id IS NOT NULL
-        -- Legacy-attested cancellation minted by the lifecycle backfill or by
-        -- an Import Application.
+        -- Legacy-attested cancellation minted by the lifecycle backfill, by
+        -- an Import Application or by a Forward Repair.
         OR (
-          operation.operation_type IN ('lifecycle.backfill', 'import.apply')
+          operation.operation_type IN ('lifecycle.backfill', 'import.apply', 'import.forward_repair')
           AND waiver.requirement_id IS NULL
         )
       )

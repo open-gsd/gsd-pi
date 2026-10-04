@@ -42,7 +42,7 @@ import type { GateId } from "../types.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
 import type { LegacyImportApplicationPlanInstruction } from "../legacy-import-application-plan.ts";
 import { applyLifecycleBackfill } from "../lifecycle-backfill-domain-operation.ts";
-import { applyImport, emptyPreview, planFor } from "./helpers/legacy-import-writer-harness.ts";
+import { applyImport, emptyPreview, forwardRepairRecreate, planFor } from "./helpers/legacy-import-writer-harness.ts";
 
 const tempDirs = new Set<string>();
 let testedSourceRevision = "";
@@ -876,6 +876,40 @@ test("Milestone completion accepts the legacy-attested Waivers of a Slice and Ta
   `).map((waiver) => String(waiver.waiver_id));
   assert.equal(importWaiverIds.length, 2);
   for (const waiverId of importWaiverIds) assert.ok(result.waiverIds.includes(waiverId));
+});
+
+test("Milestone completion accepts the legacy-attested Waivers of a skipped Slice and Task that a Forward Repair put back", async () => {
+  await prepareFixture(() => {
+    // An empty skipped Slice, and a skipped Task under the completed Slice S01.
+    forwardRepairRecreate([
+      {
+        rowSet: "slices",
+        identity: { milestone_id: "M001", id: "S03" },
+        values: { milestone_id: "M001", id: "S03", title: "Skipped before the import", status: "skipped" },
+      },
+      {
+        rowSet: "tasks",
+        identity: { milestone_id: "M001", slice_id: "S01", id: "T09" },
+        values: {
+          milestone_id: "M001", slice_id: "S01", id: "T09", title: "Skipped before the import", status: "skipped",
+        },
+      },
+    ]);
+  });
+
+  const result = await completeMilestone(input("milestone-complete/forward-repair-cancelled"));
+
+  assert.equal(result.status, "committed");
+  assert.ok(result.cancelledSliceIds.includes("S03"));
+  assert.ok(result.cancelledTaskIds.includes("S01/T09"));
+  const repairWaiverIds = rows(`
+    SELECT waiver.waiver_id
+    FROM workflow_waivers waiver
+    JOIN workflow_operations operation ON operation.operation_id = waiver.operation_id
+    WHERE operation.operation_type = 'import.forward_repair'
+  `).map((waiver) => String(waiver.waiver_id));
+  assert.equal(repairWaiverIds.length, 2);
+  for (const waiverId of repairWaiverIds) assert.ok(result.waiverIds.includes(waiverId));
 });
 
 test("Milestone completion accepts a Slice and Task adopted as cancelled with no Waiver once the backfill grants them", async () => {

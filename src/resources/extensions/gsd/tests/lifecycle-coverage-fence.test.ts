@@ -22,6 +22,7 @@ import {
   reconcileWorktreeDb,
 } from "../gsd-db.ts";
 import { registerMilestones } from "../milestone-registration.ts";
+import { forwardRepairRecreate } from "./helpers/legacy-import-writer-harness.ts";
 import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 
 const OUTSIDE_OPERATION = /a hierarchy row needs a lifecycle row from the same Domain Operation/;
@@ -203,6 +204,41 @@ test("after the cutover the status of a row with no lifecycle row can be fixed f
   db().prepare("UPDATE tasks SET status = 'pending' WHERE id = 'T02'").run();
 
   assert.equal(getTask("M001", "S01", "T02")?.status, "pending");
+});
+
+function recreatedTask(id: string, status: string): Parameters<typeof forwardRepairRecreate>[0][number] {
+  return {
+    rowSet: "tasks",
+    identity: { milestone_id: "M001", slice_id: "S01", id },
+    values: { milestone_id: "M001", slice_id: "S01", id, title: "Deleted by an import", status },
+  };
+}
+
+test("after the cutover a Forward Repair adopts the hierarchy row that it puts back", () => {
+  openAdoptedProject();
+  advanceAuthorityEpoch();
+
+  forwardRepairRecreate([recreatedTask("T02", "pending")]);
+
+  assert.equal(getTask("M001", "S01", "T02")?.title, "Deleted by an import");
+  assert.deepEqual(
+    db().prepare(`
+      SELECT lifecycle_status FROM workflow_item_lifecycles
+      WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = 'T02'
+    `).get(),
+    { lifecycle_status: "ready" },
+  );
+});
+
+test("after the cutover a Forward Repair refuses to put back a row with an unknown legacy status", () => {
+  openAdoptedProject();
+  advanceAuthorityEpoch();
+
+  assert.throws(
+    () => forwardRepairRecreate([recreatedTask("T02", "mystery")]),
+    /unknown legacy statuses: task M001\/S01\/T02="mystery"/,
+  );
+  assert.equal(getTask("M001", "S01", "T02"), null);
 });
 
 test("the Authority Epoch cannot advance while a hierarchy row has no lifecycle row", () => {

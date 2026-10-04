@@ -27,7 +27,7 @@ import {
   settleTaskAttempt,
 } from "../task-execution-domain-operation.ts";
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.ts";
-import { applyImport, emptyPreview, planFor } from "./helpers/legacy-import-writer-harness.ts";
+import { applyImport, emptyPreview, forwardRepairRecreate, planFor } from "./helpers/legacy-import-writer-harness.ts";
 import {
   grantTaskWaiver,
   recordTaskRequirementDisposition,
@@ -638,6 +638,50 @@ test("Slice completion accepts a completed child adopted by an Import Applicatio
   assert.deepEqual(result.completedTaskIds, ["T01", "T03"]);
   // Only new work carries a completion proof.
   assert.deepEqual((result.proofs as Array<{ taskId: string }>).map((proof) => proof.taskId), ["T01"]);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion accepts a skipped child and a completed child that a Forward Repair put back", () => {
+  makeBase();
+  finishTaskWithOptionalEvidence(true);
+  const task = (id: string, values: Record<string, string | number | null>) => ({
+    rowSet: "tasks" as const,
+    identity: { milestone_id: "M001", slice_id: "S01", id },
+    values: { milestone_id: "M001", slice_id: "S01", id, ...values },
+  });
+  forwardRepairRecreate([
+    task("T03", { title: "Skipped before the import", status: "skipped", sequence: 3 }),
+    task("T04", {
+      title: "Completed before the import",
+      status: "complete",
+      sequence: 4,
+      completed_at: "2026-07-13T00:00:00.000Z",
+      full_summary_md: "Task summary",
+      verification_result: "passed",
+    }),
+  ]);
+  assert.deepEqual(
+    db().prepare(`
+      SELECT lifecycle.task_id, lifecycle.lifecycle_status, operation.operation_type
+      FROM workflow_item_lifecycles lifecycle
+      JOIN workflow_operations operation ON operation.operation_id = lifecycle.last_operation_id
+      WHERE lifecycle.item_kind = 'task' AND lifecycle.task_id IN ('T03', 'T04')
+      ORDER BY lifecycle.task_id
+    `).all().map((entry) => ({ ...entry })),
+    [
+      { task_id: "T03", lifecycle_status: "cancelled", operation_type: "import.forward_repair" },
+      { task_id: "T04", lifecycle_status: "completed", operation_type: "import.forward_repair" },
+    ],
+    "the repair adopts each row it puts back in its own Domain Operation",
+  );
+
+  const result = completeSlice(validInput("slice-complete/forward-repair-recreated-children"));
+
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.completedTaskIds, ["T01", "T04"]);
   assert.equal(row(`
     SELECT lifecycle_status FROM workflow_item_lifecycles
     WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'

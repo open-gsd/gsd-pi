@@ -377,9 +377,10 @@ function currentSliceCancellationAuthorization(
        )
      )
     WHERE waiver.project_id = :project_id
-      -- An Import Application records one event for the whole import, so its
-      -- legacy-attested cancellation Waiver has no per-Slice event.
-      AND (cancelled.event_id IS NOT NULL OR operation.operation_type = 'import.apply')
+      -- An Import Application and a Forward Repair record one event for the
+      -- whole operation, so their legacy-attested cancellation Waiver has no
+      -- per-Slice event.
+      AND (cancelled.event_id IS NOT NULL OR operation.operation_type IN ('import.apply', 'import.forward_repair'))
       AND waiver.lifecycle_id = :lifecycle_id
       AND waiver.waiver_status = 'active'
       AND waiver.requirement_id IS NULL
@@ -452,11 +453,11 @@ function currentTaskCancellationAuthorization(
           AND disposition_operation.operation_type = 'workflow.slice.plan.authorization'
         )
         OR (
-          -- Legacy-attested cancellation minted by the lifecycle backfill or
-          -- by an Import Application: no requirement, so no disposition can
-          -- exist.
+          -- Legacy-attested cancellation minted by the lifecycle backfill, by
+          -- an Import Application or by a Forward Repair: no requirement, so
+          -- no disposition can exist.
           waiver.scope = :scope
-          AND waiver_operation.operation_type IN ('lifecycle.backfill', 'import.apply')
+          AND waiver_operation.operation_type IN ('lifecycle.backfill', 'import.apply', 'import.forward_repair')
           AND waiver.requirement_id IS NULL
         )
       )

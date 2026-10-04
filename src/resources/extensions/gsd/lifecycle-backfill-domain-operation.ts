@@ -555,33 +555,16 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
   }, (context) => {
     const before = new Set(loadHierarchy().map((row) => `${row.itemKind} ${rowLabel(row)}`));
     const merged = merge();
-    const preview = previewLifecycleBackfill();
-    const cutOver = fence.authorityEpoch > 0;
-    const unknown = preview.unknownStatuses.filter((entry) => !before.has(entry.row));
-    if (cutOver && unknown.length > 0) {
-      throw new LifecycleBackfillRefusedError(
-        `lifecycle backfill refused: unknown legacy statuses: ${
-          unknown.map((entry) => `${entry.row}=${JSON.stringify(entry.rawStatus)}`).join(", ")
-        }`,
-        unknown.map((entry) => entry.row),
-      );
-    }
-    const adopted = preview.items.filter((item) =>
-      cutOver || (!before.has(`${item.itemKind} ${rowLabel(item)}`) && item.projectedLegacyStatus === null)
-    );
-    statusChanges = adopted.filter((item) => item.projectedLegacyStatus !== null).map((item) =>
-      `${item.itemKind} ${rowLabel(item)} ${JSON.stringify(item.rawStatus)} -> ` +
-      `${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
-    );
-    const report: AdoptionReport = { waivers: 0, findings: [], cancelledUnderCompletedParent: [] };
+    const adoption = adoptInsertedHierarchyRows(context, (row) => !before.has(row));
+    statusChanges = adoption.statusChanges;
     return {
       events: [
         { eventType: "legacy.merged", entityType: "project", entityId: source, payload: merged, destinations: ["db"] },
-        ...adopted.map((item) => adoptItem(context, item, report)),
+        ...adoption.events,
       ],
       projections: [
         { projectionKey: "state", projectionKind: "state", rendererVersion: "1" },
-        ...[...new Set(adopted.map((item) => item.milestoneId))].sort().map((milestoneId) => ({
+        ...adoption.milestoneIds.map((milestoneId) => ({
           projectionKey: `lifecycle/${milestoneId}`.toLowerCase(),
           projectionKind: MILESTONE_LIFECYCLE_PROJECTION_KIND,
           rendererVersion: "1",
@@ -590,6 +573,41 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
     };
   });
   return statusChanges;
+}
+
+/**
+ * Adopt the hierarchy rows that the open Domain Operation of the caller
+ * inserted: `inserted` answers for a row label (`kind id`). The rules are the
+ * ones of mergeLegacyRowsWithAdoption, its first caller. A Forward Repair that
+ * puts back a row that an Import Application deleted is the second.
+ */
+export function adoptInsertedHierarchyRows(
+  context: Parameters<typeof adoptOrTransitionLifecycle>[0],
+  inserted: (row: string) => boolean,
+): { events: DomainOperationEventInput[]; milestoneIds: string[]; statusChanges: string[] } {
+  const preview = previewLifecycleBackfill();
+  const cutOver = context.resultingAuthorityEpoch > 0;
+  const unknown = preview.unknownStatuses.filter((entry) => inserted(entry.row));
+  if (cutOver && unknown.length > 0) {
+    throw new LifecycleBackfillRefusedError(
+      `lifecycle backfill refused: unknown legacy statuses: ${
+        unknown.map((entry) => `${entry.row}=${JSON.stringify(entry.rawStatus)}`).join(", ")
+      }`,
+      unknown.map((entry) => entry.row),
+    );
+  }
+  const adopted = preview.items.filter((item) =>
+    cutOver || (inserted(`${item.itemKind} ${rowLabel(item)}`) && item.projectedLegacyStatus === null)
+  );
+  const report: AdoptionReport = { waivers: 0, findings: [], cancelledUnderCompletedParent: [] };
+  return {
+    events: adopted.map((item) => adoptItem(context, item, report)),
+    milestoneIds: [...new Set(adopted.map((item) => item.milestoneId))].sort(),
+    statusChanges: adopted.filter((item) => item.projectedLegacyStatus !== null).map((item) =>
+      `${item.itemKind} ${rowLabel(item)} ${JSON.stringify(item.rawStatus)} -> ` +
+      `${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
+    ),
+  };
 }
 
 /** Number of milestone, slice and task rows with no lifecycle row (doctor). */
