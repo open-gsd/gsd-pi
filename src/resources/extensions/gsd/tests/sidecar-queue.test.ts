@@ -20,15 +20,17 @@ import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
 import {
-  cancelOpenSidecarItems,
-  enqueueSidecarItem,
   hasHeldQuickTask,
-  holdQuickTask,
   listQueuedSidecarItems,
-  promoteHeldQuickTask,
-  settleSidecarItem,
   sidecarQueueScope,
 } from "../db/unit-dispatch-sidecars.ts";
+import {
+  cancelOpenSidecarItems,
+  enqueueSidecarItem,
+  holdQuickTask,
+  promoteHeldQuickTask,
+  settleSidecarItem,
+} from "../db/writers/unit-dispatch-sidecars.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -219,15 +221,15 @@ test("a worker does not see the queue of another milestone or another slice lock
 test("held quick tasks survive a restart and move to the queue one at a time", (t) => {
   const base = makeProject(t);
   const scope = sidecarQueueScope("M001");
-  holdQuickTask(scope, quickTask("CAP-1"), null);
-  holdQuickTask(scope, quickTask("CAP-2"), null);
+  holdQuickTask(quickTask("CAP-1"), null);
+  holdQuickTask(quickTask("CAP-2"), null);
   // A second triage run reports the same capture again.
-  holdQuickTask(scope, quickTask("CAP-1"), null);
+  holdQuickTask(quickTask("CAP-1"), null);
 
   assert.deepEqual(listQueuedSidecarItems(scope), [], "a held quick task is not ready work");
 
   restartProcess(base);
-  assert.equal(hasHeldQuickTask(scope), true);
+  assert.equal(hasHeldQuickTask(), true);
 
   const first = promoteHeldQuickTask(scope);
   assert.equal(first?.captureId, "CAP-1");
@@ -235,7 +237,7 @@ test("held quick tasks survive a restart and move to the queue one at a time", (
   settleSidecarItem(first!.id);
 
   assert.equal(promoteHeldQuickTask(scope)?.captureId, "CAP-2");
-  assert.equal(hasHeldQuickTask(scope), false, "CAP-1 was held once");
+  assert.equal(hasHeldQuickTask(), false, "CAP-1 was held once");
   assert.equal(promoteHeldQuickTask(scope), null);
 });
 
@@ -247,7 +249,7 @@ test("unit close-out moves one held quick task to the queue and marks its captur
   const captureId = appendCapture(base, "Fix the typo in the README.");
   markCaptureResolved(base, captureId, "quick-task", "run as a quick task", "small fix");
   const scope = sidecarQueueScope("M001");
-  holdQuickTask(scope, quickTask(captureId), null);
+  holdQuickTask(quickTask(captureId), null);
 
   // A new process finishes the next unit: the held task is found in the database.
   restartProcess(base);
@@ -256,37 +258,97 @@ test("unit close-out moves one held quick task to the queue and marks its captur
   assert.equal(await postUnitPostVerification(pctx), "continue");
 
   assert.deepEqual(listQueuedSidecarItems(scope).map((item) => item.captureId), [captureId]);
-  assert.equal(hasHeldQuickTask(scope), false);
+  assert.equal(hasHeldQuickTask(), false);
   assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
 });
 
-test("a user stop drops held and queued items of its own scope only", (t) => {
+test("a session that moves to the next milestone still runs the quick tasks it holds", async (t) => {
+  const base = makeProject(t);
+  process.chdir(base);
+  _clearGsdRootCache();
+  resetHookState();
+  const captureIds = ["Fix the typo in the README.", "Rename the helper."].map((text) => {
+    const captureId = appendCapture(base, text);
+    markCaptureResolved(base, captureId, "quick-task", "run as a quick task", "small fix");
+    // Triage held the task while the session ran M001.
+    holdQuickTask(quickTask(captureId), null);
+    return captureId;
+  });
+
+  // The session adopts M002 before a unit close-out takes the held tasks.
+  const scope = sidecarQueueScope("M002");
+  for (const captureId of captureIds) {
+    const pctx = makePostUnitContext(base, "research-slice", "M002/S01");
+    pctx.s.currentMilestoneId = "M002";
+
+    assert.equal(await postUnitPostVerification(pctx), "continue");
+
+    const queued = listQueuedSidecarItems(scope);
+    assert.deepEqual(
+      queued.map((item) => item.captureId),
+      [captureId],
+      "the auto loop of the M002 session finds the task in its queue",
+    );
+    assert.equal(loadAllCaptures(base).find((capture) => capture.id === captureId)?.executed, true);
+    settleSidecarItem(queued[0].id);
+  }
+  assert.equal(hasHeldQuickTask(), false);
+});
+
+test("a parallel worker does not take the quick tasks another worker holds", (t) => {
+  makeProject(t);
+  const previous = {
+    GSD_PARALLEL_WORKER: process.env.GSD_PARALLEL_WORKER,
+    GSD_MILESTONE_LOCK: process.env.GSD_MILESTONE_LOCK,
+  };
+  t.after(() => {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  });
+  process.env.GSD_PARALLEL_WORKER = "1";
+  process.env.GSD_MILESTONE_LOCK = "M001";
+  holdQuickTask(quickTask("CAP-1"), null);
+
+  process.env.GSD_MILESTONE_LOCK = "M002";
+  assert.equal(hasHeldQuickTask(), false);
+  assert.equal(promoteHeldQuickTask(sidecarQueueScope("M002")), null);
+  cancelOpenSidecarItems(sidecarQueueScope("M002"));
+
+  process.env.GSD_MILESTONE_LOCK = "M001";
+  assert.equal(promoteHeldQuickTask(sidecarQueueScope("M001"))?.captureId, "CAP-1");
+});
+
+test("a user stop drops its queued items and its held quick tasks only", (t) => {
   makeProject(t);
   const scope = sidecarQueueScope("M001");
   const otherScope = sidecarQueueScope("M002");
   enqueueSidecarItem(scope, { kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
-  holdQuickTask(scope, quickTask("CAP-1"), null);
+  holdQuickTask(quickTask("CAP-1"), null);
   enqueueSidecarItem(otherScope, { kind: "hook", unitType: "hook/b", unitId: "M002/S01", prompt: "b" }, null);
 
   cancelOpenSidecarItems(scope);
 
   assert.deepEqual(listQueuedSidecarItems(scope), []);
-  assert.equal(hasHeldQuickTask(scope), false);
+  assert.equal(hasHeldQuickTask(), false);
   assert.equal(listQueuedSidecarItems(otherScope).length, 1);
 });
 
 test("stopAuto drops the queue so the next start does not run old follow-on work", async (t) => {
   const base = makeProject(t);
-  const scope = sidecarQueueScope("M001");
-  enqueueSidecarItem(scope, { kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" }, null);
-  holdQuickTask(scope, quickTask("CAP-1"), null);
+  holdQuickTask(quickTask("CAP-1"), null);
+
+  // The session moved from M001 to M002 after triage held the quick task.
+  const scope = sidecarQueueScope("M002");
+  enqueueSidecarItem(scope, { kind: "hook", unitType: "hook/a", unitId: "M002/S01", prompt: "a" }, null);
 
   autoSession.reset();
   t.after(() => autoSession.reset());
   autoSession.active = true;
   autoSession.basePath = base;
   autoSession.originalBasePath = base;
-  autoSession.currentMilestoneId = "M001";
+  autoSession.currentMilestoneId = "M002";
 
   await stopAuto(
     {
@@ -301,5 +363,5 @@ test("stopAuto drops the queue so the next start does not run old follow-on work
   // stopAuto closes the database; the next start opens it again.
   openDatabase(join(base, ".gsd", "gsd.db"));
   assert.deepEqual(listQueuedSidecarItems(scope), []);
-  assert.equal(hasHeldQuickTask(scope), false);
+  assert.equal(hasHeldQuickTask(), false);
 });

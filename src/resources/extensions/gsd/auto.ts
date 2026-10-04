@@ -132,7 +132,8 @@ import {
   reconcileRestoredGateBlock,
   clearPersistedHookState,
 } from "./post-unit-hooks.js";
-import { cancelOpenSidecarItems, sidecarQueueScope } from "./db/unit-dispatch-sidecars.js";
+import { sidecarQueueScope } from "./db/unit-dispatch-sidecars.js";
+import { cancelOpenSidecarItems } from "./db/writers/unit-dispatch-sidecars.js";
 import { runGSDDoctor, rebuildState } from "./doctor.js";
 import {
   preDispatchHealthGate,

@@ -37,11 +37,8 @@ import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";
 import type { SessionLockStatus } from "../session-lock.js";
 import { _getAdapter, openDatabase, closeDatabase, getTask, insertMilestone, insertSlice, insertTask } from "../gsd-db.js";
 import { getOpenWedge } from "../auto-liveness-backstop.js";
-import {
-  enqueueSidecarItem,
-  listQueuedSidecarItems,
-  sidecarQueueScope,
-} from "../db/unit-dispatch-sidecars.js";
+import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.js";
+import { enqueueSidecarItem } from "../db/writers/unit-dispatch-sidecars.js";
 import { isBlockedStopReason, stopNoticeKind } from "../stop-notice.js";
 import { mapStatusToExitCode } from "../../../../headless-events.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";

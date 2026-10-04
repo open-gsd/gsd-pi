@@ -40,11 +40,8 @@ import {
   openDatabase,
 } from "../gsd-db.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
-import {
-  listQueuedSidecarItems,
-  settleSidecarItem,
-  sidecarQueueScope,
-} from "../db/unit-dispatch-sidecars.ts";
+import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.ts";
+import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
 import {
   adoptOrTransitionLifecycle,
   completeLegacyTaskForVerifiedAttempt,

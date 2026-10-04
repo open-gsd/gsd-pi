@@ -27,11 +27,8 @@ import { invalidateAllCaches } from "../cache.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { readHookStateJson, writeHookStateJson } from "../db/writers/runtime-control.ts";
 import { hookStateScope } from "../rule-registry.ts";
-import {
-  enqueueSidecarItem,
-  listQueuedSidecarItems,
-  sidecarQueueScope,
-} from "../db/unit-dispatch-sidecars.ts";
+import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.ts";
+import { enqueueSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
 

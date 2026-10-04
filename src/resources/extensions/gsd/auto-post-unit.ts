@@ -79,13 +79,12 @@ import {
   runMilestoneCloseoutGitHub,
 } from "./milestone-closeout.js";
 import type { AutoSession, SidecarItem } from "./auto/session.js";
+import { hasHeldQuickTask, sidecarQueueScope } from "./db/unit-dispatch-sidecars.js";
 import {
   enqueueSidecarItem,
-  hasHeldQuickTask,
   holdQuickTask,
   promoteHeldQuickTask,
-  sidecarQueueScope,
-} from "./db/unit-dispatch-sidecars.js";
+} from "./db/writers/unit-dispatch-sidecars.js";
 import { getEvidence, clearEvidenceFromDisk, archiveEvidenceToBlocked, isExecutionToolName } from "./safety/evidence-collector.js";
 import { removeProjectionFileSync } from "./atomic-write.js";
 import {
@@ -1970,7 +1969,6 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           const { buildQuickTaskPrompt } = await import("./triage-resolution.js");
           for (const qt of triageResult.quickTasks) {
             holdQuickTask(
-              sidecarQueueScope(s.currentMilestoneId),
               {
                 kind: "quick-task",
                 unitType: "quick-task",
@@ -3308,8 +3306,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   }
 
   // ── Quick-task dispatch ──
-  const quickTaskScope = sidecarQueueScope(s.currentMilestoneId);
-  if (_shouldDispatchQuickTaskForTest(s, () => hasHeldQuickTask(quickTaskScope))) {
+  if (_shouldDispatchQuickTaskForTest(s, hasHeldQuickTask)) {
     try {
       const { markCaptureExecuted } = await import("./captures.js");
 
@@ -3319,7 +3316,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
 
       // The held row becomes the queued work before the capture is marked
       // executed, so a kill between the two steps cannot lose the task.
-      const quickTask = promoteHeldQuickTask(quickTaskScope);
+      const quickTask = promoteHeldQuickTask(sidecarQueueScope(s.currentMilestoneId));
       if (quickTask) {
         if (quickTask.captureId) markCaptureExecuted(s.basePath, quickTask.captureId);
         debugLog("postUnitPostVerification", {

@@ -11,10 +11,8 @@ import type {
   HookStatusEntry,
   PostUnitGateBlock,
 } from "./types.js";
-import {
-  enqueueSidecarItem,
-  listQueuedSidecarItems,
-} from "./db/unit-dispatch-sidecars.js";
+import { listQueuedSidecarItems } from "./db/unit-dispatch-sidecars.js";
+import { enqueueSidecarItem } from "./db/writers/unit-dispatch-sidecars.js";
 import {
   getOrCreateRegistry,
   resolveHookArtifactPath,

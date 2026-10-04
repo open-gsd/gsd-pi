@@ -98,11 +98,8 @@ import { createWorkflowPhaseReporter } from "./workflow-phase-reporter.js";
 import { createWorkflowTurnReporter } from "./workflow-turn-reporter.js";
 import { validateWorkflowSessionLock } from "./workflow-session-lock.js";
 import { dequeueSidecarItem } from "./workflow-sidecar-queue.js";
-import {
-  listQueuedSidecarItems,
-  settleSidecarItem,
-  sidecarQueueScope,
-} from "../db/unit-dispatch-sidecars.js";
+import { listQueuedSidecarItems, sidecarQueueScope } from "../db/unit-dispatch-sidecars.js";
+import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.js";
 import { maintainWorkerHeartbeat, runWithWorkerHeartbeat } from "./workflow-worker-heartbeat.js";
 import { gsdRoot } from "../paths.js";
 import {
