@@ -26,7 +26,7 @@ import { isRemoteConfigured, tryRemoteQuestions } from './remote-questions.js';
 import type { RemoteToolResult } from './remote-questions.js';
 import { readProgress } from './readers/state.js';
 import { readRoadmap } from './readers/roadmap.js';
-import { readHistory } from './readers/metrics.js';
+import { historyResultFromDatabase, readHistory } from './readers/metrics.js';
 import { capturesResultFromDatabase, readCaptures } from './readers/captures.js';
 import { knowledgeResultFromMarkdown, readKnowledge } from './readers/knowledge.js';
 import {
@@ -44,6 +44,7 @@ import {
   hasWorkflowToolBridgeConfiguration,
   readProjectProgressViaBridge,
   readCapturesViaBridge,
+  readHistoryViaBridge,
   readProjectQueryViaBridge,
   readRoadmapViaBridge,
   readKnowledgeViaBridge,
@@ -1493,7 +1494,7 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_history',
-    'Get execution history with cost, token usage, model, and duration per unit. Returns totals across all units. No session required.',
+    'Get execution history with cost, token usage, model, and duration per unit. Returns totals across all units. No session required — reads the workflow database when the GSD runtime is available, .gsd/metrics.json otherwise (the result then carries readMetadata { source: projection, authority: projection-fallback }).',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       limit: z.number().optional().describe('Max entries to return (most recent first). Default: all.'),
@@ -1501,7 +1502,12 @@ export async function createMcpServer(
     async (args: Record<string, unknown>) => {
       const { projectDir, limit } = args as { projectDir: string; limit?: number };
       try {
-        return jsonContent(readHistory(validateProjectDir(projectDir), limit));
+        const dir = validateProjectDir(projectDir);
+        if (hasWorkflowToolBridgeConfiguration()) {
+          const fromDb = await readHistoryViaBridge(dir);
+          if (fromDb !== null) return jsonContent(historyResultFromDatabase(fromDb, limit));
+        }
+        return jsonContent(readHistory(dir, limit));
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }

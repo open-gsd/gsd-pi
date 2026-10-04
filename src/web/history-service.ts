@@ -15,16 +15,17 @@ function resolveTsLoaderPath(packageRoot: string): string {
 }
 
 /**
- * Loads history/metrics data via a child process.
- * Reads the metrics ledger from disk and computes aggregation views
- * (totals, byPhase, bySlice, byModel) for browser consumption.
+ * Loads history/metrics data from the workflow database, not from
+ * .gsd/metrics.json. A child process imports the GSD runtime bridge, opens the
+ * project database, reads the unit_metrics rows and computes the aggregation
+ * views (totals, byPhase, bySlice, byModel). An unavailable database fails.
  */
 export async function collectHistoryData(projectCwdOverride?: string): Promise<HistoryData> {
   const config = resolveBridgeRuntimeConfig(undefined, projectCwdOverride)
   const { packageRoot, projectCwd } = config
 
   const resolveTsLoader = resolveTsLoaderPath(packageRoot)
-  const moduleResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/metrics.ts")
+  const moduleResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/mcp-bridge.ts")
   const historyModulePath = moduleResolution.modulePath
 
   if (!moduleResolution.useCompiledJs && (!existsSync(resolveTsLoader) || !existsSync(historyModulePath))) {
@@ -39,8 +40,9 @@ export async function collectHistoryData(projectCwdOverride?: string): Promise<H
   const script = [
     'const { pathToFileURL } = await import("node:url");',
     `const mod = await import(pathToFileURL(process.env.${HISTORY_MODULE_ENV}).href);`,
-    `const ledger = mod.loadLedgerFromDisk(process.env.GSD_HISTORY_BASE);`,
-    'const units = ledger ? ledger.units : [];',
+    'const opened = mod.openExistingWorkflowDatabase(process.env.GSD_HISTORY_BASE);',
+    'if (!opened.ok) { process.stderr.write(`project database unavailable: ${opened.reason}`); process.exit(1); }',
+    'const units = mod.listUnitMetrics();',
     'const totals = mod.getProjectTotals(units);',
     'const byPhase = mod.aggregateByPhase(units);',
     'const bySlice = mod.aggregateBySlice(units);',

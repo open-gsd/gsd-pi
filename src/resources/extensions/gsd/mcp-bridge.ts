@@ -15,6 +15,8 @@ export {
 } from "./state/external-reads-from-db.js";
 export { readKnowledgeMarkdown } from "./knowledge-projection.js";
 export { loadActionableCaptures, loadAllCaptures, resolveCapture } from "./captures.js";
+export { listUnitMetrics } from "./db/unit-metrics.js";
+export { aggregateByModel, aggregateByPhase, aggregateBySlice, getProjectTotals } from "./metrics.js";
 export {
   _getAdapter,
   checkpointDatabase,

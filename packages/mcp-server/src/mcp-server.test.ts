@@ -1164,6 +1164,74 @@ describe('createMcpServer tool registration', () => {
     assert.deepEqual(read.readMetadata, { source: 'projection', authority: 'projection-fallback' });
   });
 
+  it('registered gsd_history returns database rows when metrics.json is deleted or stale', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-handler-'));
+    const bridge = await importWorkflowBridgeFixture();
+    const unitMetrics = await import(
+      new URL('../../../src/resources/extensions/gsd/db/unit-metrics.js', import.meta.url).href
+    ) as { recordUnitMetricsRows(units: unknown[]): void };
+    t.after(() => {
+      bridge.closeDatabase();
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+    mkdirSync(join(projectDir, '.gsd'));
+    assert.equal(bridge.openDatabase(join(projectDir, '.gsd', 'gsd.db')), true);
+    const unit = (id: string, startedAt: number, cost: number) => ({
+      type: 'execute-task', id, model: 'test-model', startedAt, finishedAt: startedAt + 1000,
+      tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 },
+      cost, toolCalls: 2, assistantMessages: 1, userMessages: 1, apiRequests: 1,
+    });
+    unitMetrics.recordUnitMetricsRows([unit('M001/S01/T01', 1000, 0.5), unit('M001/S01/T02', 5000, 0.25)]);
+    bridge.closeDatabase();
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const historyTool = (server as any)._registeredTools?.gsd_history;
+    assert.ok(historyTool, 'gsd_history should be registered');
+
+    const withoutFile = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+    assert.deepEqual(withoutFile.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T02', 'M001/S01/T01']);
+    assert.deepEqual([withoutFile.totals.units, withoutFile.totals.cost], [2, 0.75]);
+    assert.equal(withoutFile.readMetadata, undefined, 'a database read is not labelled as a fallback');
+
+    // A stale ledger file with a unit the database does not hold.
+    writeFileSync(
+      join(projectDir, '.gsd', 'metrics.json'),
+      JSON.stringify({ version: 1, projectStartedAt: 1, units: [unit('M009/S09/T09', 9000, 99)] }),
+    );
+    const withStaleFile = JSON.parse((await historyTool.handler({ projectDir, limit: 1 })).content[0].text);
+    assert.deepEqual(withStaleFile.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T02']);
+    assert.deepEqual([withStaleFile.totals.units, withStaleFile.totals.cost], [2, 0.75]);
+  });
+
+  it('registered gsd_history labels the file read as a projection fallback when the database is unavailable', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-fallback-'));
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    mkdirSync(join(projectDir, '.gsd'));
+    writeFileSync(
+      join(projectDir, '.gsd', 'metrics.json'),
+      JSON.stringify({ version: 1, projectStartedAt: 1, units: [{ type: 'execute-task', id: 'M001/S01/T01', cost: 0.5 }] }),
+    );
+
+    const previousExecutors = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const previousWriteGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    const previousBridgeDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+    t.after(() => {
+      restoreEnvironmentValue('GSD_WORKFLOW_EXECUTORS_MODULE', previousExecutors);
+      restoreEnvironmentValue('GSD_WORKFLOW_WRITE_GATE_MODULE', previousWriteGate);
+      restoreEnvironmentValue('GSD_WORKFLOW_BRIDGE_TEST_DISABLE', previousBridgeDisable);
+    });
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const historyTool = (server as any)._registeredTools?.gsd_history;
+    const read = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+
+    assert.deepEqual(read.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T01']);
+    assert.deepEqual(read.readMetadata, { source: 'projection', authority: 'projection-fallback' });
+  });
+
   // Flat-phase fixture mirroring the extension renderer's output:
   // .gsd/phases/NN-slug/NN-ROADMAP.md (no .gsd/milestones/ at all).
   function makeFlatPhaseProject(): string {
