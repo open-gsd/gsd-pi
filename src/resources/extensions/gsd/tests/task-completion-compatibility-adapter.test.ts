@@ -228,9 +228,18 @@ function activateExactMergedClosure(basePath: string): string {
   return execFileSync("git", ["rev-parse", "HEAD"], { cwd: basePath, encoding: "utf8" }).trim();
 }
 
-function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeCommit: string): void {
+/**
+ * Record the exact-merged evidence of the Task: a successful gsd_uat_exec run,
+ * the saved passing run-uat run `savedRunId`, and the host verdict that cites
+ * the exec run. The exec run is recorded in run-uat attempt 1.
+ */
+function recordExactMergedUatVerdict(
+  basePath: string,
+  attemptId: string,
+  mergeCommit: string,
+  savedRunId = "uat:M001:S01:attempt-1",
+): void {
   const evidenceId = "exact-merged-uat";
-  const runId = "uat:M001:S01:attempt-2";
   const source = captureVerificationSourceSnapshot([{ id: "project", cwd: basePath }]);
   assert.equal(source.ok, true, source.ok ? undefined : source.error);
   const environment = {
@@ -240,15 +249,9 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     localMergeCommit: mergeCommit,
     sourceContentRevision: source.snapshot.aggregateRevision,
   };
+  // ASSESSMENT text that names every value. The text decides nothing.
   const assessment = [
-    "---",
-    "sliceId: S01",
-    "uatType: runtime-executable",
-    "verdict: PASS",
-    "attempt: 2",
-    `runId: ${runId}`,
-    "---",
-    "",
+    `runId: ${savedRunId}`,
     `gsd_uat_exec:${evidenceId}`,
     mergeCommit,
     source.snapshot.aggregateRevision,
@@ -298,9 +301,9 @@ function recordExactMergedUatVerdict(basePath: string, attemptId: string, mergeC
     ) VALUES (
       'uat:M001:S01', :run_id, 'UAT', 'uat', 'run-uat', 'run-uat:M001/S01',
       'M001', 'S01', 'pass', 'none', 'Exact-merged UAT passed.',
-      :findings, 2, 2, 0, '2026-07-12T00:03:00.000Z'
+      :findings, 1, 1, 0, '2026-07-12T00:03:00.000Z'
     )
-  `).run({ ":run_id": runId, ":findings": assessment });
+  `).run({ ":run_id": savedRunId, ":findings": assessment });
   recordTaskTechnicalVerdict({
     invocation: invocation(`pi:exact-merged-verification:${attemptId}`),
     attemptId,
@@ -1486,6 +1489,23 @@ test("exact-merged UAT evidence authorizes dossier task publication", async () =
   assert.equal(published.status, "committed");
   assert.equal(taskState().status, "complete");
   assert.equal(row("SELECT lifecycle_status FROM workflow_item_lifecycles").lifecycle_status, "completed");
+});
+
+test("an exec run outside the saved passing UAT run does not authorize dossier task publication", async () => {
+  const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const mergeCommit = activateExactMergedClosure(basePath);
+  await stageTaskCompletion(stageInput(basePath));
+  // The ASSESSMENT text names the exec run, the merge commit and the hashes,
+  // but the saved passing run is another run than the one the exec run is in.
+  recordExactMergedUatVerdict(basePath, attemptId, mergeCommit, "uat:M001:S01:attempt-2");
+
+  await assert.rejects(
+    publishVerifiedTaskCompletion(publishInput(basePath, attemptId)),
+    /passing canonical exact-merged UAT gate receipt/,
+  );
+
+  assert.equal(taskState().status, "in_progress");
 });
 
 test("verified publication atomically closes only its task gates from durable Attempt evidence", async () => {
