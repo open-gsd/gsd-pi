@@ -26,7 +26,6 @@ const MAX_DB_ROW_RECOVERIES = 3;
 const PROJECT_DEPTH_GATE_IDS = new Set([
   "depth_verification_project_confirm",
   "depth_verification_requirements_confirm",
-  "depth_verification_research_decision_confirm",
 ]);
 
 export function scheduleAutoStartAfterIdle(

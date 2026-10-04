@@ -1172,23 +1172,10 @@ test("deep project setup: requirements preview question from screenshot is treat
   assert.equal(shouldPauseForQuestion("discuss-requirements", messages), true);
 });
 
-test("deep project setup: research decision question triggers approval boundary pause", () => {
-  assert.equal(
-    shouldPauseForQuestion("research-decision", [
-      {
-        role: "assistant",
-        content: "Run domain research now? (y/n)",
-      },
-    ]),
-    true,
-  );
-});
-
 test("deep project setup: plain-text approval questions map to write-gate ids", () => {
   assert.equal(approvalGateIdForUnit("discuss-project", "PROJECT"), "depth_verification_project_confirm");
   assert.equal(approvalGateIdForUnit("discuss-requirements", "REQUIREMENTS"), "depth_verification_requirements_confirm");
   assert.equal(approvalGateIdForUnit("discuss-milestone", "M001"), "depth_verification_M001_confirm");
-  assert.equal(approvalGateIdForUnit("research-decision", "RESEARCH-DECISION"), "depth_verification_research_decision_confirm");
 });
 
 test("deep project setup: plain-text approval gate clears only on explicit approval", () => {
@@ -1196,7 +1183,6 @@ test("deep project setup: plain-text approval gate clears only on explicit appro
   assert.equal(isExplicitApprovalResponse("go ahead and write it"), true);
   assert.equal(isExplicitApprovalResponse("yes, add delete support first"), false);
   assert.equal(isExplicitApprovalResponse("not quite, remove the due date"), false);
-  assert.equal(isExplicitApprovalResponse("research", "depth_verification_research_decision_confirm"), true);
 });
 
 test("deep project setup: discuss-milestone question failure pauses instead of artifact-retrying", async () => {
