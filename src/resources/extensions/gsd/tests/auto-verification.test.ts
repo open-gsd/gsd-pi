@@ -260,7 +260,7 @@ test("blocker-discovered completion pauses with the blocker surfaced instead of 
 				throw new Error("must not reroute a blocker attempt through task recovery");
 			},
 		},
-	} as never, async (_ctx, _pi, errorContext) => {
+	} as never, async (_ctx, _pi, _blockerKind, errorContext) => {
 		paused = true;
 		pauseMessage = errorContext?.message;
 	});

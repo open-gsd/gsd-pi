@@ -26,11 +26,10 @@ import {
   CONTROL_INTENT_QUARANTINE_MIN_AGE_MS,
 } from "./managed-projection-history.js";
 import {
+  clearPausedSession,
   getSupersedingActiveMilestoneId,
-  PAUSED_SESSION_KV_KEY,
-  type PausedSessionMetadata,
+  readStoredPausedSession,
 } from "./interrupted-session.js";
-import { deleteRuntimeKv, getRuntimeKv } from "./db/runtime-kv.js";
 import { deleteUatRetryCounter, listUatRetryCounters, readHookStateJson } from "./db/writers/runtime-control.js";
 
 const MAX_UAT_ATTEMPTS = 3;
@@ -153,20 +152,16 @@ export async function checkRuntimeHealth(
   // ── Stale paused session ──────────────────────────────────────────────
   // A pause is only resumable while it targets the milestone that state
   // derivation currently considers active. Keeping an older milestone in
-  // runtime_kv can otherwise pin every new /gsd auto invocation to work that
+  // the pause row can otherwise pin every new /gsd auto invocation to work that
   // has been superseded in the project queue (#1643).
   try {
-    const pausedSession = getRuntimeKv<PausedSessionMetadata>(
-      "global",
-      "",
-      PAUSED_SESSION_KV_KEY,
-    );
+    const pausedSession = readStoredPausedSession();
     if (pausedSession?.milestoneId) {
       const state = await deriveState(basePath);
       const activeMilestoneId = getSupersedingActiveMilestoneId(pausedSession, state);
       if (activeMilestoneId) {
         if (shouldFix("stale_paused_session")) {
-          deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+          clearPausedSession();
           fixesApplied.push(
             `cleared stale paused session for ${pausedSession.milestoneId} (active milestone: ${activeMilestoneId})`,
           );

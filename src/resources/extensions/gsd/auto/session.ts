@@ -202,8 +202,8 @@ export class AutoSession {
    */
   readonly unclaimedUnitBudgets = new Map<string, number>();
   pausedSessionFile: string | null = null;
-  pausedUnitType: string | null = null;
-  pausedUnitId: string | null = null;
+  /** The dispatch row the open pause links to (auto_pauses.dispatch_id). */
+  pausedDispatchId: number | null = null;
   resourceVersionOnStart: string | null = null;
 
   // ── Tool invocation errors (#2883) ──────────────────────────────────
@@ -392,8 +392,7 @@ export class AutoSession {
     this.verificationRetryCount.clear();
     this.unclaimedUnitBudgets.clear();
     this.pausedSessionFile = null;
-    this.pausedUnitType = null;
-    this.pausedUnitId = null;
+    this.pausedDispatchId = null;
     this.resourceVersionOnStart = null;
 
     // Metrics

@@ -31,15 +31,12 @@ import { parseUnitId } from "./unit-id.js";
 import type { GSDState } from "./types.js";
 import {
   assessInterruptedSession,
+  clearPausedSession as closePausedSession,
   readPausedSessionMetadata,
-  PAUSED_SESSION_KV_KEY,
   type InterruptedSessionAssessment,
-  type PausedSessionMetadata,
 } from "./interrupted-session.js";
-import {
-  setRuntimeKv,
-  deleteRuntimeKv,
-} from "./db/runtime-kv.js";
+import { openAutoPause } from "./db/writers/auto-pauses.js";
+import type { AutoPauseBlockerKind } from "./recovery-policy.js";
 import { extractSection, getManifestStatus, splitFrontmatter, parseFrontmatterMap } from "./files.js";
 export { inlinePriorMilestoneSummary } from "./files.js";
 import { collectSecretsFromManifest } from "../get-secrets-from-user.js";
@@ -240,7 +237,13 @@ import {
   getWorkflowDatabaseStatus,
   resolveProjectRootDbPath,
 } from "./db-workspace.js";
-import { markActiveForWorkerCanceled } from "./db/unit-dispatches.js";
+import {
+  getActiveForWorker,
+  getDispatchById,
+  getLatestForUnit,
+  isDispatchExecutionOpen,
+  markActiveForWorkerCanceled,
+} from "./db/unit-dispatches.js";
 import { writeUnitRuntimeRecord } from "./unit-runtime.js";
 import { countPendingCaptures } from "./captures.js";
 import { CMUX_CHANNELS, type CmuxLogLevel } from "../shared/cmux-events.js";
@@ -568,66 +571,57 @@ export function _synthesizePausedSessionRecoveryForTest(
 
 type PausedResumeRecoverySessionState = {
   pausedSessionFile: string | null;
-  currentUnit: { type: string; id: string } | null;
-  pausedUnitType: string | null;
-  pausedUnitId: string | null;
+  pausedDispatchId: number | null;
   pendingCrashRecovery: string | null;
 };
 
+/**
+ * Decide whether the resumed session replays the tool calls of the paused
+ * unit. The pause row names the unit through its dispatch link, and the
+ * dispatch row with its stage says whether the unit still has execution to
+ * continue. The session file is read only to build the replay text.
+ */
 function handlePausedSessionResumeRecovery(
   basePath: string,
   state: PausedResumeRecoverySessionState,
   notify: (message: string) => void,
 ): { skippedReplay: boolean } {
-  if (!state.pausedSessionFile) return { skippedReplay: false };
+  const sessionFile = state.pausedSessionFile;
+  const dispatch = state.pausedDispatchId === null ? null : getDispatchById(state.pausedDispatchId);
+  state.pausedSessionFile = null;
+  state.pausedDispatchId = null;
+  if (!sessionFile) return { skippedReplay: false };
 
-  const pausedRecoveryUnitType = state.currentUnit?.type ?? state.pausedUnitType ?? null;
-  const pausedRecoveryUnitId = state.currentUnit?.id ?? state.pausedUnitId ?? null;
-
-  // When the paused-session metadata never captured the unit identity (the
-  // pause happened between units, or the worker died before currentUnit was
-  // set), we have nothing to verify against and nothing correct to target. A
-  // replay synthesized with an "unknown" unit re-injects an unbounded,
-  // mis-identified tool-call blob into the fresh resume context — exactly the
-  // thrash that turns one stuck unit into several. Disk state has already been
-  // rebuilt (rebuildState + doctor) before this runs, so skip the replay and
-  // let the normal dispatcher recompute the next unit from disk.
-  if (!pausedRecoveryUnitType || !pausedRecoveryUnitId) {
-    state.pausedSessionFile = null;
-    state.pausedUnitType = null;
-    state.pausedUnitId = null;
+  // A pause with no dispatch link had no active unit (the pause happened
+  // between units) or ran a unit with no dispatch row. There is no unit to
+  // target, and a replay with an unknown unit puts a tool-call blob of the
+  // wrong unit into the resumed context. The next unit comes from the database.
+  if (!dispatch) {
     state.pendingCrashRecovery = null;
-    notify("Paused session had no recorded unit identity. Skipping tool-call replay and resuming from disk state.");
+    notify("Paused session had no active unit. Skipping tool-call replay and resuming from database state.");
     return { skippedReplay: true };
   }
 
-  const completedPausedUnit = verifyExpectedArtifact(
-    pausedRecoveryUnitType,
-    pausedRecoveryUnitId,
-    basePath,
-  );
-
-  if (completedPausedUnit) {
-    state.pausedSessionFile = null;
-    state.pausedUnitType = null;
-    state.pausedUnitId = null;
+  // The unit left the execute stage, or its result rows exist: it has no
+  // execution to continue.
+  if (
+    !isDispatchExecutionOpen(dispatch.id)
+    || verifyExpectedArtifact(dispatch.unit_type, dispatch.unit_id, basePath)
+  ) {
     state.pendingCrashRecovery = null;
     return { skippedReplay: true };
   }
 
   const recovery = synthesizePausedSessionRecovery(
     basePath,
-    pausedRecoveryUnitType,
-    pausedRecoveryUnitId,
-    state.pausedSessionFile,
+    dispatch.unit_type,
+    dispatch.unit_id,
+    sessionFile,
   );
   if (recovery && recovery.trace.toolCallCount > 0) {
     state.pendingCrashRecovery = recovery.prompt;
     notify(`Recovered ${recovery.trace.toolCallCount} tool calls from paused session. Resuming with context.`);
   }
-  state.pausedSessionFile = null;
-  state.pausedUnitType = null;
-  state.pausedUnitId = null;
   return { skippedReplay: false };
 }
 
@@ -640,7 +634,7 @@ function handlePausedSessionResumeRecovery(
  * passed both checks, got pinned into `session.currentMilestoneId`, and then
  * every dispatch iteration hit the milestone-mismatch guard and stopped —
  * a permanent wedge with no field escape short of hand-editing the
- * `paused_session` runtime_kv row. Per ADR-047 the guard stays; this makes the
+ * pause row. Per ADR-047 the guard stays; this makes the
  * exit reachable by never restoring a superseded pin in the first place.
  *
  * Id comparison uses the dispatch guard's own normalization
@@ -2311,13 +2305,27 @@ export function _selectStopAutoWorktreeExit(args: {
 }
 
 /**
+ * The dispatch row of the unit that is active when auto-mode pauses: the
+ * claimed row of this worker, or the newest row of the current unit when the
+ * loop already settled it. Null when no unit with a dispatch row is active.
+ */
+function activeUnitDispatchId(): number | null {
+  const claimed = s.workerId ? getActiveForWorker(s.workerId) : null;
+  if (claimed) return claimed.id;
+  if (!s.currentUnit) return null;
+  const latest = getLatestForUnit(s.currentUnit.id);
+  return latest?.unit_type === s.currentUnit.type ? latest.id : null;
+}
+
+/**
  * Pause auto-mode without destroying state. Context is preserved.
  * The user can interact with the agent, then `/gsd auto` resumes
  * from disk state. Called when the user presses Escape or runs `/gsd pause`.
  */
 export async function pauseAuto(
-  ctx?: ExtensionContext,
-  _pi?: ExtensionAPI,
+  ctx: ExtensionContext | undefined,
+  _pi: ExtensionAPI | undefined,
+  blockerKind: AutoPauseBlockerKind,
   _errorContext?: ErrorContext,
   options: PauseAutoOptions = {},
 ): Promise<void> {
@@ -2363,11 +2371,11 @@ export async function pauseAuto(
 
   s.pausedSessionFile = normalizeSessionFilePath(ctx?.sessionManager?.getSessionFile() ?? null);
 
-  // Persist paused-session metadata so resume survives /exit (#1383).
-  // Phase C pt 2: persisted to runtime_kv (global scope, key
-  // PAUSED_SESSION_KV_KEY) instead of runtime/paused-session.json. The
-  // fresh-start bootstrap below reads from the same key.
+  // Persist the pause so resume survives /exit (#1383). It is the open
+  // auto_pauses row of this worker's scope; the fresh-start bootstrap below
+  // reads the same row.
   try {
+    s.pausedDispatchId = activeUnitDispatchId();
     const pausedWorktreePath = resolvePausedAutoWorktreePath({
       basePath: s.basePath,
       originalBasePath: s.originalBasePath,
@@ -2375,7 +2383,9 @@ export async function pauseAuto(
       isolationMode: getIsolationMode(s.originalBasePath || s.basePath),
       baseIsAutoWorktree: isInAutoWorktree(s.basePath),
     });
-    const pausedMeta: PausedSessionMetadata = {
+    openAutoPause({
+      blockerKind,
+      dispatchId: s.pausedDispatchId,
       milestoneId: s.currentMilestoneId ?? undefined,
       worktreePath: pausedWorktreePath,
       originalBasePath: s.originalBasePath,
@@ -2389,8 +2399,7 @@ export async function pauseAuto(
       autoStartTime: s.autoStartTime,
       milestoneLock: s.sessionMilestoneLock ?? undefined,
       pauseReason: _errorContext?.message,
-    };
-    setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pausedMeta);
+    });
   } catch (err) {
     // Non-fatal — resume will still work via full bootstrap, just without worktree context
     logWarning("engine", `paused-session DB write failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
@@ -2845,13 +2854,11 @@ export async function startAuto(
   }
 
   // If resuming from paused state, just re-activate and dispatch next unit.
-  // Check persisted paused-session first (#1383) — survives /exit.
-  // Phase C pt 2: persisted in runtime_kv (global scope) instead of
-  // runtime/paused-session.json. The `clearPausedSession` helper
-  // replaces every prior unlinkSync(pausedPath) call.
+  // Check the persisted pause first (#1383) — it survives /exit. The pause
+  // row is the only record that resume routing reads.
   const clearPausedSession = (logTag: string): void => {
     try {
-      deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+      closePausedSession();
     } catch (err) {
       logWarning("session", `${logTag}: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
     }
@@ -2944,8 +2951,7 @@ export async function startAuto(
             s.originalBasePath = meta.originalBasePath || base;
             s.stepMode = meta.stepMode ?? requestedStepMode;
             s.pausedSessionFile = normalizeSessionFilePath(meta.sessionFile ?? null);
-            s.pausedUnitType = meta.unitType ?? null;
-            s.pausedUnitId = meta.unitId ?? null;
+            s.pausedDispatchId = meta.dispatchId ?? null;
             s.autoStartTime = meta.autoStartTime || Date.now();
             s.sessionMilestoneLock = meta.milestoneLock ?? null;
             s.paused = true;
@@ -3537,7 +3543,7 @@ export async function dispatchHookUnit(
       "warning",
     );
     resetHookState();
-    await pauseAuto(ctx, pi);
+    await pauseAuto(ctx, pi, "machine_fixable");
   }, hookHardTimeoutMs);
 
   setAutoActiveStatus(ctx, s.stepMode ? "next" : "auto");

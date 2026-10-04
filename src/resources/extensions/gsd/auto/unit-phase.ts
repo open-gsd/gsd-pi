@@ -447,7 +447,7 @@ export async function runUnitPhase(
       const pauseMsg =
         "GSD workflow MCP config has been written. Restart Claude Code (or reload MCP servers), then run /gsd auto to continue.";
       ctx.ui.notify(pauseMsg, "warning");
-      await deps.pauseAuto(ctx, pi, {
+      await deps.pauseAuto(ctx, pi, "missing_access", {
         category: "provider",
         isTransient: true,
         message: pauseMsg,
@@ -584,7 +584,7 @@ export async function runUnitPhase(
       isTransient: true,
     });
     s.clearCurrentUnit();
-    await deps.pauseAuto(ctx, pi);
+    await deps.pauseAuto(ctx, pi, "machine_fixable");
     return { action: "break", reason: "ghost-completion" };
   }
 
@@ -693,7 +693,7 @@ export async function runUnitPhase(
         await pauseAutoForProviderError(
           ctx.ui,
           detail,
-          () => deps.pauseAuto(ctx, pi),
+          () => deps.pauseAuto(ctx, pi, "external_dependency"),
           {
             isRateLimit: false,
             isTransient,
@@ -750,7 +750,7 @@ export async function runUnitPhase(
         await pauseAutoForProviderError(
           ctx.ui,
           errorDetail,
-          () => deps.pauseAuto(ctx, pi),
+          () => deps.pauseAuto(ctx, pi, "external_dependency"),
           {
             isRateLimit: false,
             isTransient: allowAutoResume,
@@ -779,7 +779,7 @@ export async function runUnitPhase(
         "warning",
       );
       debugLog("autoLoop", { phase: "unit-hard-timeout-pause", unitType, unitId });
-      await deps.pauseAuto(ctx, pi);
+      await deps.pauseAuto(ctx, pi, "machine_fixable");
       await deps.autoCommitUnit?.(s.basePath, unitType, unitId, ctx);
       await emitCancelledUnitEnd(ic, unitType, unitId, unitStartSeq, unitResult.errorContext);
       return { action: "break", reason: "unit-hard-timeout" };
@@ -793,7 +793,7 @@ export async function runUnitPhase(
         "warning",
       );
       debugLog("autoLoop", { phase: "session-start-transient-pause", unitType, unitId, category: errorCategory });
-      await deps.pauseAuto(ctx, pi);
+      await deps.pauseAuto(ctx, pi, "machine_fixable");
       await deps.autoCommitUnit?.(s.basePath, unitType, unitId, ctx);
       await emitCancelledUnitEnd(ic, unitType, unitId, unitStartSeq, unitResult.errorContext);
       return { action: "break", reason: "session-timeout" };
@@ -812,7 +812,7 @@ export async function runUnitPhase(
         "warning",
       );
       debugLog("autoLoop", { phase: "unit-aborted-transient-pause", unitType, unitId, category: errorCategory });
-      await deps.pauseAuto(ctx, pi, unitResult.errorContext);
+      await deps.pauseAuto(ctx, pi, "user_request", unitResult.errorContext);
       await deps.autoCommitUnit?.(s.basePath, unitType, unitId, ctx);
       await emitCancelledUnitEnd(ic, unitType, unitId, unitStartSeq, unitResult.errorContext);
       return { action: "break", reason: "unit-aborted-pause" };
@@ -886,7 +886,7 @@ export async function runUnitPhase(
             `${unitType} ${unitId} completed with 0 tool calls - provider serialization drift: model emitted pseudo-tool-call text. Snippet: ${pseudoToolCallSnippet}`,
             "error",
           );
-          await deps.pauseAuto(ctx, pi);
+          await deps.pauseAuto(ctx, pi, "machine_fixable");
           return { action: "break", reason: "zero-tool-serialization-drift" };
         }
         const providerErrorClass = classifyZeroToolProviderMessage(lastAssistantMessage);
@@ -895,7 +895,7 @@ export async function runUnitPhase(
           await pauseAutoForProviderError(
             ctx.ui,
             ` for ${unitType} ${unitId}`,
-            () => deps.pauseAuto(ctx, pi),
+            () => deps.pauseAuto(ctx, pi, "external_dependency"),
             {
               isRateLimit: providerErrorClass.kind === "rate-limit",
               isTransient: true,
@@ -940,7 +940,7 @@ export async function runUnitPhase(
               `${unitType} ${unitId} completed with 0 tool calls — context exhaustion, pausing auto-mode after ${MAX_ZERO_TOOL_RETRIES} retry.`,
               "error",
             );
-            await deps.pauseAuto(ctx, pi);
+            await deps.pauseAuto(ctx, pi, "machine_fixable");
             return { action: "break", reason: "zero-tool-calls-exhausted" };
           }
           ctx.ui.notify(

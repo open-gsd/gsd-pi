@@ -38,7 +38,7 @@ ADR-046 names one persisted Lifecycle Kernel but defines Attempts only for Task 
 The work has four parts:
 
 1. Retry and recovery budgets on the dispatch row.
-2. Pause and resume state on the dispatch row.
+2. Pause and resume state on the dispatch row. (Changed by the third 2026-10-04 amendment: the pause has its own row with a link to the dispatch row.)
 3. The sidecar queue (hooks, triage, quick tasks) as rows linked to the dispatch that triggered them.
 4. Advance selects from the database only.
 
@@ -98,6 +98,30 @@ This finishes the retry part of part 4 and the verification budgets of part 1. I
 - `exhausted`: a mark, not a count. It is set when the unit used all its artifact verification retries; the `verification` count is reset and the verification retry rows are released at the same time. `exhaustedVerificationUnits` is deleted, and `custom-verify-retries.json` no longer stores an exhausted list.
 
 **Exhausted units.** `resolveDispatch` does not dispatch a unit that holds the `exhausted` mark, with or without a session, so a restart does not dispatch it again. Release rule: a reopen or a re-plan releases the mark of the unit and of every unit below it (`gsd_task_reopen`, `gsd_slice_reopen`, `gsd_milestone_reopen`, `gsd_replan_slice`, `gsd_replan_task`). A pass of the artifact verification of the unit also writes `0`. An exhausted list in a `custom-verify-retries.json` file that an older build wrote is not read.
+
+## Amendment 2026-10-04: the pause is a row, and the dispatch row has a stage checkpoint
+
+This is part 2. Before this amendment the pause was a JSON value in `runtime_kv` (key `paused_session`), and that table is for soft state only. The value decided resume routing.
+
+Decision (2026-10-04): a pause is state of the worker, not of a unit. Auto-mode can pause with no active unit, and a custom-engine step that is not a Task has no dispatch row. So the pause does not live on the dispatch row. It is a row in `auto_pauses` (`db/writers/auto-pauses.ts`).
+
+Rules for the pause row:
+
+- **Scope.** One row is open for each worker scope. The scope is the scope of the sidecar queue: the project root, or the milestone and slice lock of a parallel worker.
+- **Content.** The row holds the blocker kind, the session context a resume needs (milestone, worktree path, step mode, session file, engine, run directory, milestone lock, start time) and `dispatch_id`.
+- **Link.** `dispatch_id` is the claimed `unit_dispatches` row of the worker, or the newest row of the current unit when the loop settled it before the pause. It is `NULL` when no unit was active and when the unit ran with no dispatch row.
+- **Close.** A resume, a discard (the milestone is gone, complete or superseded) and `/gsd doctor fix` close the row (`closed_at`). A new pause closes the row that is still open. A closed row stays in the table.
+- **Legacy.** Nothing writes the `paused_session` key. It is read when the scope has no open row, so a pause that an older build stored can still be resumed. Such a pause has no blocker kind and no dispatch link, so it gets no tool-call replay. The clear of a pause deletes the key.
+
+`pauseAuto` takes the blocker kind as a required parameter, and every call site passes one. The kind is one of the seven human blocker kinds of ADR-046 (`workflow_blockers.blocker_kind`), `user_request` (the user asked for the pause) or `machine_fixable`. `machine_fixable` marks a pause for a failure that ADR-046 does not list as human-only (a timeout, a failed verification, a git failure, a tool failure). These pauses are not changed here; they must move to a Recovery Action. The pause row does not open a `workflow_blockers` row.
+
+Rules for the stage checkpoint (`unit_dispatch_stages (dispatch_id, stage, updated_at)`):
+
+- **Write.** The auto loop writes `verify` when the unit phase ends and finalize starts, `route` when finalize returns, and `closeout` before it settles a completed iteration. A dispatch with no stage row is in `execute`. A retry opens a new dispatch row, so the new run starts in `execute`.
+- **Read.** A resume asks one question of the rows: does the unit still have execution to continue? The answer is yes when the dispatch row is not `completed` and its stage is `execute` (`isDispatchExecutionOpen`), and the result rows of the unit do not exist. Only then the session file of the unit is read, to build the tool-call replay text for the next prompt. The pause path (`handlePausedSessionResumeRecovery`) takes the unit from the dispatch link of the pause row. The crash path (`assessInterruptedSession`) takes it from the newest dispatch row of the dead worker.
+- A live process and a restarted process use the same rule: `pauseAuto` keeps the dispatch link in the session and writes the same value to the row.
+
+Not changed: a restart does not continue a unit at the `verify`, `route` or `closeout` stage. It selects the next unit from state, as before. Continuing at the stored stage is part of the Lifecycle Kernel work. The custom-engine step that is not a Task has no dispatch row and so no stage. In the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing still asks for a milestone directory with content before it restores the milestone of the pause.
 
 ## Rejected alternatives
 

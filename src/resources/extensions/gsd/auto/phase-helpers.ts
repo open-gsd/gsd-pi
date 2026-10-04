@@ -90,7 +90,7 @@ export async function applyVerificationRetryPolicy(
         : "Verification retry requested without retry context. Pausing auto-mode instead of re-dispatching.",
       "warning",
     );
-    await deps.pauseAuto(ctx, pi);
+    await deps.pauseAuto(ctx, pi, "machine_fixable");
     return { action: "break", reason: decision.reason };
   }
 

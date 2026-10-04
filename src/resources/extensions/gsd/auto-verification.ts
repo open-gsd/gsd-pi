@@ -48,7 +48,7 @@ import { evidenceChecks, writeVerificationJSON, type PostExecutionCheckJSON, typ
 import { logWarning } from "./workflow-logger.js";
 import { runPostExecutionChecks, type PostExecutionResult } from "./post-execution-checks.js";
 import type { AutoSession } from "./auto/session.js";
-import type { ErrorContext } from "./auto/types.js";
+import type { PauseAutoFn } from "./auto/loop-deps.js";
 import type { VerificationResult as VerificationGateResult } from "./types.js";
 import { join } from "node:path";
 import { resolveUokFlags } from "./uok/flags.js";
@@ -115,7 +115,6 @@ export interface VerificationContext {
 }
 
 export type VerificationResult = "continue" | "retry" | "pause" | "abort";
-type PauseAutoFn = (ctx?: ExtensionContext, pi?: ExtensionAPI, errorContext?: ErrorContext) => Promise<void>;
 
 interface VerificationEvidenceLocation {
   dir: string;
@@ -579,7 +578,7 @@ async function runValidateMilestonePostCheck(
         `Milestone ${mid} has an open subjective UAT question`,
         mid,
       );
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "subjective_uat", {
         message: `Milestone ${mid} is waiting for a genuine subjective UAT decision. Answer it with /gsd uat-answer.`,
         category: "unknown",
       });
@@ -635,7 +634,7 @@ async function runValidateMilestonePostCheck(
       `Milestone ${mid} validation returned needs-attention`,
       mid,
     );
-    await pauseAuto(ctx, pi, {
+    await pauseAuto(ctx, pi, "machine_fixable", {
       message: `Milestone ${mid} validation needs attention.`,
       category: "unknown",
     });
@@ -697,7 +696,7 @@ async function runValidateMilestonePostCheck(
     `No incomplete slices found for ${mid} while verdict=needs-remediation`,
     mid,
   );
-  await pauseAuto(ctx, pi, {
+  await pauseAuto(ctx, pi, "machine_fixable", {
     message: `Milestone ${mid} validation needs remediation but no remediation slices were added.`,
     category: "unknown",
   });
@@ -825,7 +824,7 @@ export async function runPostUnitVerification(
       // it through, so throwing here wedged auto-mode into the ADR-047
       // liveness backstop with no in-engine exit. Pause with the escalation
       // surfaced instead; the operator resolves and resumes with /gsd auto.
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "ambiguous_intent", {
         message: describeBlockerPause(mid, sid, tid, latestAttempt),
         category: "unknown",
       });
@@ -1037,7 +1036,7 @@ export async function runPostUnitVerification(
       const message = `Verification gate execution fault: ${verdict.failureContext}`;
       ctx.ui.notify(message, "error");
       process.stderr.write(`verification-gate: pausing — ${verdict.failureContext}\n`);
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "machine_fixable", {
         message,
         category: "unknown",
       });
@@ -1438,7 +1437,7 @@ export async function runPostUnitVerification(
       process.stderr.write(
         `${verdict.failureContext}. Install the command or update the verify command, then resume.\n`,
       );
-      await pauseAuto(ctx, pi, {
+      await pauseAuto(ctx, pi, "machine_fixable", {
         message: verdict.failureContext,
         category: "unknown",
       });

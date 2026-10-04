@@ -60,6 +60,8 @@ export interface LockData {
   unitStartedAt: string;
   /** Path to the pi session JSONL file that was active when this unit started. */
   sessionFile?: string;
+  /** The dispatch row of the unit, when the lock comes from one. */
+  dispatchId?: number;
 }
 
 const SESSION_FILE_KV_KEY = "session_file";
@@ -109,18 +111,18 @@ function findActiveWorkerForCurrentProcess(
  * during bootstrap before claiming the first unit).
  */
 function getLatestDispatchForWorker(workerId: string):
-  | { unit_type: string; unit_id: string; started_at: string; status: DispatchStatus }
+  | { id: number; unit_type: string; unit_id: string; started_at: string; status: DispatchStatus }
   | null {
   if (!isDbAvailable()) return null;
   const db = _getAdapter()!;
   const row = db.prepare(
-    `SELECT unit_type, unit_id, started_at, status
+    `SELECT id, unit_type, unit_id, started_at, status
      FROM unit_dispatches
      WHERE worker_id = :worker_id
      ORDER BY id DESC
      LIMIT 1`,
   ).get({ ":worker_id": workerId }) as
-    | { unit_type: string; unit_id: string; started_at: string; status: DispatchStatus }
+    | { id: number; unit_type: string; unit_id: string; started_at: string; status: DispatchStatus }
     | undefined;
   return row ?? null;
 }
@@ -169,6 +171,7 @@ function workerToLockData(basePath: string, worker: AutoWorkerRow): LockData {
     unitId: dispatch?.unit_id ?? "bootstrap",
     unitStartedAt: dispatch?.started_at ?? worker.started_at,
     sessionFile,
+    ...(dispatch ? { dispatchId: dispatch.id } : {}),
   };
 }
 

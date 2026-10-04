@@ -9,6 +9,7 @@ import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import { readCrashLock, isLockProcessAlive } from "../crash-recovery.js";
 import { closeWorkflowDatabase } from "../db-workspace.js";
 import { readPausedSessionMetadata } from "../interrupted-session.js";
+import { hasOpenAutoPause } from "../db/writers/auto-pauses.js";
 import { gsdRoot } from "../paths.js";
 import { canonicalWorktreesDir } from "../worktree-placement.js";
 import type { MigrationPreview } from "./writer.js";
@@ -193,8 +194,7 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
       );
     }
 
-    const paused = readPausedSessionMetadata(targetRoot);
-    if (paused) {
+    if (hasOpenAutoPause() || readPausedSessionMetadata(targetRoot)) {
       throw new MigrationBlockedError(
         "Migration blocked - a paused auto-mode session exists for this project. Resume or stop it before migrating.",
       );

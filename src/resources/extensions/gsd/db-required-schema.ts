@@ -39,6 +39,14 @@ import {
   createUnitMetricsSchema,
   hasUnitMetricsSchema,
 } from "./db-unit-metrics-schema.js";
+import {
+  createUnitDispatchStageSchema,
+  hasUnitDispatchStageSchema,
+} from "./db-unit-dispatch-stage-schema.js";
+import {
+  createAutoPauseSchema,
+  hasAutoPauseSchema,
+} from "./db-auto-pause-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -96,6 +104,16 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "unit-metrics",
     isPresent: hasUnitMetricsSchema,
     create: createUnitMetricsSchema,
+  },
+  {
+    id: "unit-dispatch-stages",
+    isPresent: hasUnitDispatchStageSchema,
+    create: createUnitDispatchStageSchema,
+  },
+  {
+    id: "auto-pauses",
+    isPresent: hasAutoPauseSchema,
+    create: createAutoPauseSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

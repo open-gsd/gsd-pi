@@ -91,7 +91,7 @@ export async function runGuards(
       );
 
       // Pause first — Ensures auto-mode stops even if later steps fail
-      await deps.pauseAuto(ctx, pi);
+      await deps.pauseAuto(ctx, pi, "user_request");
 
       // Mark captures as executed only after successful pause/transition.
       for (const cap of stopCaptures) {
@@ -216,7 +216,7 @@ export async function runGuards(
           );
           deps.sendDesktopNotification("GSD", msg, "warning", "budget", basename(s.originalBasePath || s.basePath));
           deps.logCmuxEvent(prefs, msg, "warning");
-          await deps.pauseAuto(ctx, pi);
+          await deps.pauseAuto(ctx, pi, "user_limit");
           debugLog("autoLoop", { phase: "exit", reason: "budget-pause" });
           return { action: "break", reason: "budget-pause", inputPayload };
         }
@@ -261,7 +261,7 @@ export async function runGuards(
         "attention",
         basename(s.originalBasePath || s.basePath),
       );
-      await deps.pauseAuto(ctx, pi);
+      await deps.pauseAuto(ctx, pi, "user_limit");
       debugLog("autoLoop", { phase: "exit", reason: "context-window" });
       return {
         action: "break",

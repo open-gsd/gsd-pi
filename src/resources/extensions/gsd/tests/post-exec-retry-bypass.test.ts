@@ -561,7 +561,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     createBasicTask();
     const ctx = makeMockCtx();
     const pi = makeMockPi();
-    const pauseAutoMock = mock.fn(async (_ctx?: unknown, _pi?: unknown, _errorContext?: { message: string }) => {});
+    const pauseAutoMock = mock.fn(async (_ctx?: unknown, _pi?: unknown, _blockerKind?: unknown, _errorContext?: { message: string }) => {});
     const s = makeMockSession(tempDir, { type: "execute-task", id: "M001/S01/T01" });
     const vctx = makeVerificationContext(s, ctx, pi);
     const recordTaskTechnicalVerdict = mock.fn(() => verdictReceipt("fail"));
@@ -589,7 +589,7 @@ describe("Post-execution blocking failure retry bypass", () => {
 
     assert.equal(result, "pause");
     assert.equal(pauseAutoMock.mock.callCount(), 1);
-    assert.match(pauseAutoMock.mock.calls[0]?.arguments[2]?.message ?? "", /shell could not parse/i);
+    assert.match(pauseAutoMock.mock.calls[0]?.arguments[3]?.message ?? "", /shell could not parse/i);
     assert.equal(recordTaskTechnicalVerdict.mock.callCount(), 0);
     assert.equal(routeTaskFailure.mock.callCount(), 0);
     assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 0);

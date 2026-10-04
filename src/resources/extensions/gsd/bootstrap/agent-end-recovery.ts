@@ -5,6 +5,7 @@ import { mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { AgentEndEvent, ErrorContext } from "../auto/types.js";
+import type { AutoPauseBlockerKind } from "../recovery-policy.js";
 import { logWarning } from "../workflow-logger.js";
 import {
   checkDeepProjectSetupAfterTurn,
@@ -216,6 +217,7 @@ async function pauseForProviderModelRejection(
     blockReason: string;
     blockNotify: string;
     shouldBlockModel?: boolean;
+    blockerKind: AutoPauseBlockerKind;
     switchedNotify: (label: string) => void;
     buildPauseDetail: () => string;
   },
@@ -230,6 +232,7 @@ async function pauseForProviderModelRejection(
     blockReason,
     blockNotify,
     shouldBlockModel = true,
+    blockerKind,
     switchedNotify,
     buildPauseDetail,
   } = options;
@@ -257,7 +260,7 @@ async function pauseForProviderModelRejection(
 
   const pauseDetail = buildPauseDetail();
   await pauseAutoForProviderError(ctx.ui, errorDetail, () =>
-    pauseAuto(ctx, pi, {
+    pauseAuto(ctx, pi, blockerKind, {
       message: pauseDetail,
       category: "provider",
       isTransient: false,
@@ -519,7 +522,7 @@ async function pauseTransientWithBackoff(
   if (!allowAutoResume) {
     ctx.ui.notify(`Transient provider errors persisted after ${MAX_TRANSIENT_AUTO_RESUMES} auto-resume attempts. Pausing for manual review.`, "warning");
   }
-  await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi, {
+  await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi, "external_dependency", {
     message: `Provider error${errorDetail}`,
     category: "provider",
     isTransient: allowAutoResume,
@@ -636,7 +639,7 @@ export async function handleAgentEnd(
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       ctx.ui.notify(`Auto-mode error after stream-abort placeholder: ${message}. Stopping auto-mode.`, "error");
-      try { await pauseAuto(ctx, pi); } catch (e) { logWarning("bootstrap", `pauseAuto failed after stream-abort placeholder: ${(e as Error).message}`); }
+      try { await pauseAuto(ctx, pi, "machine_fixable"); } catch (e) { logWarning("bootstrap", `pauseAuto failed after stream-abort placeholder: ${(e as Error).message}`); }
     }
     return;
   }
@@ -665,12 +668,12 @@ export async function handleAgentEnd(
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         ctx.ui.notify(`Auto-mode error after empty-content abort: ${message}. Stopping auto-mode.`, "error");
-        try { await pauseAuto(ctx, pi); } catch (e) { logWarning("bootstrap", `pauseAuto failed after empty-content abort: ${(e as Error).message}`); }
+        try { await pauseAuto(ctx, pi, "machine_fixable"); } catch (e) { logWarning("bootstrap", `pauseAuto failed after empty-content abort: ${(e as Error).message}`); }
       }
       return;
     }
 
-    await pauseAuto(ctx, pi, _buildAbortedPauseContext(lastMsg as { errorMessage?: unknown }));
+    await pauseAuto(ctx, pi, "user_request", _buildAbortedPauseContext(lastMsg as { errorMessage?: unknown }));
     return;
   }
   if (isObjectRecord(lastMsg) && "stopReason" in lastMsg && lastMsg.stopReason === "error") {
@@ -751,6 +754,7 @@ export async function handleAgentEnd(
         unitType: dash.currentUnit?.type,
         basePath: dash.basePath,
         blockReason: "unsupported for account",
+        blockerKind: "missing_access",
         blockNotify: rejectedProvider && rejectedId
           ? `Blocked ${rejectedProvider}/${rejectedId} for this project — provider rejected it for the current account.`
           : "Blocked current model for this project.",
@@ -797,6 +801,7 @@ export async function handleAgentEnd(
           ? `Provider rejected ${rejectedProvider}/${rejectedId} request.`
           : "Provider rejected the current model request.",
         shouldBlockModel: false,
+        blockerKind: "machine_fixable",
         switchedNotify: (label) => {
           ctx.ui.notify(`Switched to ${label} after provider request rejection.`, "warning");
         },
@@ -840,7 +845,7 @@ export async function handleAgentEnd(
       });
       if (switched) return;
 
-      await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi, {
+      await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi, "machine_fixable", {
         message: `Tool schema error${errorDetail}`,
         category: "tool-schema",
         isTransient: false,
@@ -952,7 +957,7 @@ export async function handleAgentEnd(
     // failed request would otherwise keep executing against torn-down attempt
     // state (split-brain, #1973). The transient branch above deliberately does
     // NOT abort — it auto-resumes the same unit in the same session.
-    await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi, {
+    await pauseAutoForProviderError(ctx.ui, errorDetail, () => pauseAuto(ctx, pi, cls.kind === "permanent" ? "missing_access" : "machine_fixable", {
       message: `Provider error${errorDetail}`,
       category: "provider",
       isTransient: false,
@@ -975,7 +980,7 @@ export async function handleAgentEnd(
     const message = err instanceof Error ? err.message : String(err);
     ctx.ui.notify(`Auto-mode error in agent_end handler: ${message}. Stopping auto-mode.`, "error");
     try {
-      await pauseAuto(ctx, pi);
+      await pauseAuto(ctx, pi, "machine_fixable");
     } catch (e) {
       logWarning("bootstrap", `pauseAuto failed in agent_end handler: ${(e as Error).message}`);
     }

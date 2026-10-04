@@ -97,7 +97,7 @@ export async function dispatchDirectPhase(
             `Slice ${sid} requires discussion before planning. Run /gsd discuss to discuss this slice, then /gsd auto to resume.`,
             "info",
           );
-          await pauseAuto(ctx, pi);
+          await pauseAuto(ctx, pi, "ambiguous_intent");
           return;
         }
 

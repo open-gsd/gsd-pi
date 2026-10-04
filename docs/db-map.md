@@ -746,8 +746,10 @@ result_json  TEXT
 non-versioned schema features required on every database open. It registers
 the ADR-047 liveness feature, the ADR-048
 [`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned),
-[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) and
-[`unit_dispatch_retries`](#unit_dispatch_retries-non-versioned) features,
+[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned),
+[`unit_dispatch_retries`](#unit_dispatch_retries-non-versioned) and
+[`unit_dispatch_stages`](#unit_dispatch_stages-non-versioned) features,
+the [`auto_pauses`](#auto_pauses-non-versioned) feature,
 the runtime-control feature, the
 [`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
 feature, the
@@ -836,6 +838,50 @@ PRIMARY KEY (unit_type, unit_id, started_at)
 - A parallel worker (`GSD_PARALLEL_WORKER`) counts only its own units against the budget ceiling: rows with `started_at` at or after its session start and with a `unit_id` in its lock scope (`GSD_MILESTONE_LOCK`, or `GSD_MILESTONE_LOCK`/`GSD_SLICE_LOCK`). The coordinator owns the total across workers.
 - When the table has no rows and `.gsd/metrics.json` holds units, MCP `gsd_history` and the web history panel return the ledger units with `readMetadata: { source: "projection", authority: "projection-fallback" }`. They do the same when the database is missing.
 - Units that only `.gsd/metrics.json` holds (written by an older release) are not counted. When a budget ceiling is set, the budget guard warns the operator with the uncounted amount one time per auto session. `/gsd doctor` reports them (`metrics_ledger_units_unimported`) and `/gsd doctor --fix` imports them.
+
+---
+
+#### `unit_dispatch_stages` (non-versioned)
+
+```
+dispatch_id  INTEGER PRIMARY KEY   ← the dispatch whose unit left the execute stage
+stage        TEXT NOT NULL         ← 'verify' | 'route' | 'closeout'; no row means 'execute'
+updated_at   TEXT NOT NULL
+FOREIGN KEY dispatch_id → unit_dispatches(id)
+```
+
+- DDL owner: `db-unit-dispatch-stage-schema.ts`. Access: `db/unit-dispatches.ts` (`setDispatchStage`, `getDispatchStage`, `isDispatchExecutionOpen`).
+- Write and read rules: see the third 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `auto_pauses` (non-versioned)
+
+```
+id                  INTEGER PRIMARY KEY AUTOINCREMENT
+scope               TEXT NOT NULL      ← the worker: '<milestone lock of a parallel worker>/<slice lock>'
+blocker_kind        TEXT NOT NULL      ← the seven human blocker kinds | 'user_request' | 'machine_fixable'
+dispatch_id         INTEGER            ← the unit that was active; NULL when no unit with a dispatch row was active
+milestone_id        TEXT
+unit_type           TEXT
+unit_id             TEXT
+worktree_path       TEXT
+original_base_path  TEXT
+step_mode           INTEGER NOT NULL   ← 0 | 1
+session_file        TEXT
+active_engine_id    TEXT
+active_run_dir      TEXT               ← the run of a custom-engine pause
+auto_start_time     INTEGER
+milestone_lock      TEXT
+pause_reason        TEXT
+paused_at           TEXT NOT NULL
+closed_at           TEXT               ← NULL while the pause is open
+FOREIGN KEY dispatch_id → unit_dispatches(id)
+```
+
+- Index: `idx_auto_pauses_open_scope` UNIQUE (scope) WHERE closed_at IS NULL — one open pause for each worker scope.
+- DDL owner: `db-auto-pause-schema.ts`. Access: `db/writers/auto-pauses.ts`.
+- This row replaces the `paused_session` key in `runtime_kv`. Rules: see the third 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
 
 ---
 

@@ -151,7 +151,7 @@ export async function _runMilestoneMergeWithStashRestore(
       // "stopped" surface.
       const conflictReason = `Merge conflict on milestone ${milestoneId}: ${mergeError.conflictedFiles.join(", ")}. Resolve conflicts manually and run /gsd auto to resume.`;
       ctx.ui.notify(conflictReason, "error");
-      await deps.pauseAuto(ctx, pi, {
+      await deps.pauseAuto(ctx, pi, "machine_fixable", {
         message: conflictReason,
         category: "unknown",
       });
@@ -171,7 +171,7 @@ export async function _runMilestoneMergeWithStashRestore(
     // resumable and stopAuto's teardown does not re-run the failed merge.
     const mergeFailReason = `Merge error on milestone ${milestoneId}: ${mergeError instanceof Error ? mergeError.message : String(mergeError)}. Resolve and run /gsd auto to resume.`;
     ctx.ui.notify(mergeFailReason, "error");
-    await deps.pauseAuto(ctx, pi, {
+    await deps.pauseAuto(ctx, pi, "machine_fixable", {
       message: mergeFailReason,
       category: "unknown",
     });

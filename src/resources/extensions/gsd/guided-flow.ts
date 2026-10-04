@@ -186,8 +186,7 @@ export {
   buildExistingMilestonesContext,
 } from "./guided-flow-queue.js";
 import { logWarning } from "./workflow-logger.js";
-import { deleteRuntimeKv } from "./db/runtime-kv.js";
-import { PAUSED_SESSION_KV_KEY } from "./interrupted-session.js";
+import { clearPausedSession } from "./interrupted-session.js";
 import {
   clearMarkdownAutoRebuildBackoff,
   recordMarkdownAutoRebuildFailure,
@@ -2019,10 +2018,8 @@ export async function showSmartEntry(
   if (interrupted.classification === "stale") {
     clearLock(basePath);
     if (interrupted.pausedSession) {
-      // Phase C pt 2: paused-session.json migrated to runtime_kv
-      // (global scope, key PAUSED_SESSION_KV_KEY).
       try {
-        deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+        clearPausedSession();
       } catch (e) {
         logWarning("guided", `stale paused-session DB cleanup failed: ${(e as Error).message}`, { file: "guided-flow.ts" });
       }

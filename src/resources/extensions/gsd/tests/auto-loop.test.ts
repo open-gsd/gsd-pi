@@ -43,7 +43,7 @@ import { isBlockedStopReason, stopNoticeKind } from "../stop-notice.js";
 import { mapStatusToExitCode } from "../../../../headless-events.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease, getMilestoneLease, milestoneLeaseTtlSeconds } from "../db/milestone-leases.js";
-import { getLatestForUnit, recordDispatchClaim, markCanceled } from "../db/unit-dispatches.js";
+import { getDispatchStage, getLatestForUnit, recordDispatchClaim, markCanceled } from "../db/unit-dispatches.js";
 import { setRuntimeKv, getRuntimeKv } from "../db/runtime-kv.js";
 import { SourceObservationStore } from "../source-observations.js";
 import { autoCommitCurrentBranch } from "../worktree.js";
@@ -1987,7 +1987,7 @@ test("a verification retry whose dispatch fails pre-claim is cleared and auto-mo
         "Task Attempt claim must activate exactly one matching coordination dispatch",
       );
     },
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseContexts.push(errorContext as { message?: string } | undefined);
     },
   });
@@ -2155,7 +2155,7 @@ test("autoLoop pauses visibly when Auto Orchestration Module is not wired", asyn
   let pauseContext: unknown;
 
   const deps = makeMockDeps({
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseContext = errorContext;
       deps.callLog.push("pauseAuto");
     },
@@ -2693,7 +2693,7 @@ test("autoLoop pauses with the finalize cause at the retry closeout when orchest
       stopReasons.push(reason);
       s.active = false;
     },
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseReasons.push(errorContext?.message);
       s.active = false;
     },
@@ -4438,6 +4438,7 @@ test("autoLoop pauses a machine-terminal verification abort with a terminal noti
       pauseAuto: async (
         _ctx?: unknown,
         _pi?: unknown,
+        _blockerKind?: unknown,
         errorContext?: { message?: string },
       ) => {
         // Production pauseAuto notifies the errorContext message itself.
@@ -4549,7 +4550,7 @@ test("autoLoop pauses a predecessor task-recovery abort before any agent turn", 
           throw new Error("all-attempt terminal abort guard must run before the latest-route fallback");
         },
       }),
-    pauseAuto: async (_ctx, _pi, errorContext) => {
+    pauseAuto: async (_ctx, _pi, _blockerKind, errorContext) => {
       pauseReason = errorContext?.message;
       s.active = false;
     },
@@ -8171,4 +8172,79 @@ test("#2385: the adjacent unit-retry guard still trips on unchanged payloads", a
     rig.stopReasons.some((reason) => /liveness backstop tripped: unit-retry/.test(reason ?? "")),
     "the unit-retry wedge must surface as the blocked stop reason",
   );
+});
+
+test("autoLoop stores the stage of the unit on its dispatch row", async (t) => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  ctx.ui.setStatus = () => {};
+  const pi = makeMockPi();
+  const s = makeLoopSession({ currentMilestoneId: "M001" });
+  openLoopDatabase(t, s);
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
+  const workerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claim = recordDispatchClaim({
+    traceId: "flow-stage-checkpoint",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+  });
+  if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+  const dispatchId = claim.dispatchId;
+
+  // The stage a restarted process reads when the process is killed at this point.
+  const stageAt: Record<string, string> = {};
+  let advanceCalls = 0;
+  s.orchestration = {
+    start: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    advance: async () => {
+      advanceCalls++;
+      if (advanceCalls > 1) {
+        s.active = false;
+        return { kind: "stopped" as const, reason: "test wind-down" };
+      }
+      return {
+        kind: "advanced" as const,
+        unit: { unitType: "plan-slice", unitId: "M001/S01" },
+        stateSnapshot: {
+          phase: "planning",
+          activeMilestone: { id: "M001", title: "Test Milestone", status: "active" },
+          activeSlice: { id: "S01", title: "Test Slice" },
+          activeTask: null,
+          registry: [{ id: "M001", status: "active" }],
+          blockers: [],
+        } as any,
+        dispatchId,
+      };
+    },
+    settle: async () => {},
+    completeActiveUnit: async () => {},
+    retryActiveUnit: async () => {},
+    abandonActiveUnit: async () => {},
+    resume: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    stop: async (reason: string) => ({ kind: "stopped" as const, reason }),
+    getStatus: () => ({ phase: "running" as const, transitionCount: advanceCalls }),
+  } satisfies AutoOrchestrationModule;
+  const deps = makeMockDeps({
+    taskExecutionBoundary: async () => {
+      stageAt.execute = getDispatchStage(dispatchId);
+      return { action: "next" as const, data: {} };
+    },
+    postUnitPreVerification: async () => {
+      stageAt.finalize = getDispatchStage(dispatchId);
+      return "continue" as const;
+    },
+  });
+
+  await autoLoop(ctx, pi, s, deps);
+
+  assert.deepEqual(stageAt, { execute: "execute", finalize: "verify" });
+  assert.equal(getDispatchStage(dispatchId), "closeout", "a completed iteration reached the closeout stage");
 });

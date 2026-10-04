@@ -25,7 +25,7 @@ import { saveActivityLog } from "./activity-log.js";
 import { recoverTimedOutUnit, type RecoveryContext } from "./auto-timeout-recovery.js";
 import { resolveAgentEndCancelled } from "./auto/resolve.js";
 import { startGlobalIdleWatchdog } from "./auto/global-idle-watchdog.js";
-import type { PauseAutoOptions } from "./auto/loop-deps.js";
+import type { PauseAutoFn } from "./auto/loop-deps.js";
 import type { AutoSession } from "./auto/session.js";
 import { logWarning, logError } from "./workflow-logger.js";
 
@@ -38,7 +38,7 @@ export interface SupervisionContext {
   prefs: GSDPreferences | undefined;
   buildSnapshotOpts: () => CloseoutOptions & Record<string, unknown>;
   buildRecoveryContext: () => RecoveryContext;
-  pauseAuto: (ctx?: ExtensionContext, pi?: ExtensionAPI, errorContext?: undefined, options?: PauseAutoOptions) => Promise<void>;
+  pauseAuto: PauseAutoFn;
   /** Optional task estimate string (e.g. "30m", "2h") for timeout scaling (#2243). */
   taskEstimate?: string;
 }
@@ -290,7 +290,7 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
         `Unit ${unitType} ${unitId} made no meaningful progress for ${supervisor.idle_timeout_minutes}min. Pausing auto-mode.`,
         "warning",
       );
-      await pauseAuto(ctx, pi, undefined, { expectedCurrentUnit });
+      await pauseAuto(ctx, pi, "machine_fixable", undefined, { expectedCurrentUnit });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logError("timer", `[idle-watchdog] Unhandled error: ${message}`);
@@ -342,7 +342,7 @@ export function startUnitSupervision(sctx: SupervisionContext): void {
         `Unit ${unitType} ${unitId} exceeded ${supervisor.hard_timeout_minutes}min hard timeout. Pausing auto-mode.`,
         "warning",
       );
-      await pauseAuto(ctx, pi, undefined, { expectedCurrentUnit });
+      await pauseAuto(ctx, pi, "machine_fixable", undefined, { expectedCurrentUnit });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       logError("timer", `[hard-timeout] Unhandled error: ${message}`);

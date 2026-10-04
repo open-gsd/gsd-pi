@@ -53,6 +53,8 @@ import {
   markCompleted as markDispatchCompleted,
   markFailed as markDispatchFailed,
   getRecentForUnit as getRecentDispatchesForUnit,
+  setDispatchStage,
+  type DispatchStage,
 } from "../db/unit-dispatches.js";
 import { getRuntimeKv, setRuntimeKv } from "../db/runtime-kv.js";
 import {
@@ -524,7 +526,7 @@ export async function autoLoop(
       `Task recovery requires a verified repair before auto-mode can continue. ${reason}`,
       "warning",
     );
-    await deps.pauseAuto(ctx, pi, {
+    await deps.pauseAuto(ctx, pi, "machine_fixable", {
       message: reason,
       category: "unknown",
     });
@@ -628,6 +630,16 @@ export async function autoLoop(
     // queryable without parsing error_summary prose.
     const exitReasonForBreak = (breakReason: string): string | undefined =>
       breakReason === "unit-hard-timeout" ? "timeout" : undefined;
+    // The stage checkpoint on the dispatch row (ADR-048): a resume reads it to
+    // decide whether the unit still has execution to continue.
+    const checkpointStage = (stage: Exclude<DispatchStage, "execute">): void => {
+      if (dispatchId === null) return;
+      try {
+        setDispatchStage(dispatchId, stage);
+      } catch (err) {
+        logDispatchLedgerWriteFailure(err);
+      }
+    };
     const closeRun = async (
       outcome: IterationRunOutcome,
       reason: string,
@@ -667,7 +679,7 @@ export async function autoLoop(
         // orchestrator surfaced the concrete finalize-failure cause; pause with
         // it (plain /gsd auto resumes after the fix) instead of the generic
         // wedge stop.
-        await deps.pauseAuto(ctx, pi, { message: reason, category: "unknown" });
+        await deps.pauseAuto(ctx, pi, "machine_fixable", { message: reason, category: "unknown" });
         return reason;
       }
       return null;
@@ -1165,6 +1177,7 @@ export async function autoLoop(
         }
 
         // ── Verify first, then reconcile (only mark complete on pass) ──
+        checkpointStage("verify");
         debugLog("autoLoop", { phase: "custom-engine-verify", iteration, unitId: iterData.unitId });
         let humanReviewPolicy = false;
         try {
@@ -1270,7 +1283,7 @@ export async function autoLoop(
             unitId: iterData.unitId,
             inputPayload: verificationInputPayload,
             deps: {
-              pauseAuto: () => deps.pauseAuto(ctx, pi),
+              pauseAuto: () => deps.pauseAuto(ctx, pi, "subjective_uat"),
               stopAuto: reason => deferStopAuto(ctx, pi, reason),
               reportPause: details => phaseReporter.report("custom-engine", "pause", details),
               finishTurn,
@@ -1313,7 +1326,7 @@ export async function autoLoop(
             outcome: retryOutcome,
             inputPayload: verificationInputPayload,
             deps: {
-              pauseAuto: () => deps.pauseAuto(ctx, pi),
+              pauseAuto: () => deps.pauseAuto(ctx, pi, "machine_fixable"),
               stopAuto: reason => deferStopAuto(ctx, pi, reason),
               reportPause: details => phaseReporter.report("custom-engine", "pause", details),
               finishTurn,
@@ -1391,7 +1404,7 @@ export async function autoLoop(
           unitId: iterData.unitId,
           deps: {
             stopAuto: reason => deferStopAuto(ctx, pi, reason),
-            pauseAuto: () => deps.pauseAuto(ctx, pi),
+            pauseAuto: () => deps.pauseAuto(ctx, pi, "machine_fixable"),
             report: (action, details) => phaseReporter.report("custom-engine", action, details),
             finishTurn,
           },
@@ -1467,7 +1480,7 @@ export async function autoLoop(
                 ].join("\n")
               : orchestrationResult.reason;
             if (orchestrationResult.action === "pause") {
-              await deps.pauseAuto(ctx, pi, {
+              await deps.pauseAuto(ctx, pi, "machine_fixable", {
                 message: blockMessage,
                 category: "unknown",
               }, {
@@ -1616,7 +1629,7 @@ export async function autoLoop(
 
           if (orchestrationResult.kind === "error") {
             s.pendingOrchestrationDispatch = null;
-            await deps.pauseAuto(ctx, pi, {
+            await deps.pauseAuto(ctx, pi, "machine_fixable", {
               message: orchestrationResult.reason,
               category: "unknown",
             });
@@ -1773,7 +1786,7 @@ export async function autoLoop(
           }
         } else {
           s.pendingOrchestrationDispatch = null;
-          await deps.pauseAuto(ctx, pi, {
+          await deps.pauseAuto(ctx, pi, "machine_fixable", {
             message: ORCHESTRATION_MISSING_REASON,
             category: "unknown",
           });
@@ -1989,7 +2002,7 @@ export async function autoLoop(
             unitId: iterData.unitId,
             failureClass: "execution",
           });
-          await deps.pauseAuto(ctx, pi, {
+          await deps.pauseAuto(ctx, pi, "machine_fixable", {
             message: retryPauseMessage,
             category: "unknown",
           });
@@ -2053,6 +2066,7 @@ export async function autoLoop(
       // ── Phase 5: Finalize ───────────────────────────────────────────────
 
       let finalizeResult: Awaited<ReturnType<typeof runFinalize>>;
+      checkpointStage("verify");
       journalReporter.emit("post-unit-finalize-start", {
         iteration,
         unitType: iterData.unitType,
@@ -2095,6 +2109,7 @@ export async function autoLoop(
           ));
         throw err;
       }
+      checkpointStage("route");
       phaseReporter.report("finalize", finalizeResult.action, {
         unitType: iterData.unitType,
         unitId: iterData.unitId,
@@ -2193,6 +2208,7 @@ export async function autoLoop(
         continue;
       }
 
+      checkpointStage("closeout");
       await closeRun("completed", "iteration-complete");
       completeIteration();
       finishTurn("completed", "none", undefined, null);
@@ -2250,7 +2266,7 @@ export async function autoLoop(
         // typed error already names the unit (#4959).
         observedUnitType = loopErr.unitType;
         observedUnitId = loopErr.unitId;
-        await deps.pauseAuto(ctx, pi);
+        await deps.pauseAuto(ctx, pi, "user_limit");
         finishTurn(policyDecision.turnStatus, policyDecision.failureClass, msg, "model-policy-dispatch");
         // Do NOT increment consecutiveErrors — the failure is configuration,
         // not a transient runtime fault.

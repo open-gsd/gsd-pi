@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
 import type { ErrorContext, IterationData, UnitPhaseResult } from "./types.js";
+import type { AutoPauseBlockerKind } from "../recovery-policy.js";
 import type { GSDPreferences } from "../preferences.js";
 import type { GSDState } from "../types.js";
 import type { SessionLockStatus } from "../session-lock.js";
@@ -72,9 +73,10 @@ export interface PauseAutoOptions {
   abortActiveTurn?: boolean;
 }
 
-type PauseAutoFn = (
-  ctx?: ExtensionContext,
-  pi?: ExtensionAPI,
+export type PauseAutoFn = (
+  ctx: ExtensionContext | undefined,
+  pi: ExtensionAPI | undefined,
+  blockerKind: AutoPauseBlockerKind,
   errorContext?: ErrorContext,
   options?: PauseAutoOptions,
 ) => Promise<void>;

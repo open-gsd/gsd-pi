@@ -17,6 +17,9 @@ import {
 import { deriveState } from "./state.js";
 import type { GSDState } from "./types.js";
 import { getRuntimeKv, deleteRuntimeKv } from "./db/runtime-kv.js";
+import { isDispatchExecutionOpen } from "./db/unit-dispatches.js";
+import { closeAutoPause, readOpenAutoPause } from "./db/writers/auto-pauses.js";
+import type { AutoPauseBlockerKind } from "./recovery-policy.js";
 
 export type InterruptedSessionClassification =
   | "none"
@@ -38,6 +41,10 @@ export interface PausedSessionMetadata {
   autoStartTime?: number;
   milestoneLock?: string | null;
   pauseReason?: string;
+  /** Absent on a pause that an older build stored in runtime_kv. */
+  blockerKind?: AutoPauseBlockerKind;
+  /** The dispatch row of the unit that was active. Null when the pause had no unit with a dispatch row. */
+  dispatchId?: number | null;
 }
 
 export interface InterruptedSessionAssessment {
@@ -85,11 +92,9 @@ function isStalePseudoMilestonePause(meta: PausedSessionMetadata): boolean {
 }
 
 /**
- * runtime_kv key (global scope) that stores the most recent paused-session
- * metadata. Phase C pt 2: replaces runtime/paused-session.json. The key is
- * project-wide (not worker-scoped) because the paused state represents the
- * last time auto-mode paused on this project — there is at most one paused
- * session per project at a time.
+ * Retired runtime_kv key (global scope) of the paused-session metadata. The
+ * pause is the open auto_pauses row of the worker scope now. Nothing writes
+ * this key; it is read only for a pause that an older build stored.
  */
 export const PAUSED_SESSION_KV_KEY = "paused_session";
 
@@ -110,19 +115,37 @@ export function getSupersedingActiveMilestoneId(
     : null;
 }
 
+/**
+ * The stored pause of this worker's scope: the open pause row, or the pause an
+ * older build left in runtime_kv when no row is open.
+ */
+export function readStoredPausedSession(): PausedSessionMetadata | null {
+  return readOpenAutoPause()
+    ?? getRuntimeKv<PausedSessionMetadata>("global", "", PAUSED_SESSION_KV_KEY);
+}
+
 export function readPausedSessionMetadata(
   basePath: string,
 ): PausedSessionMetadata | null {
   // basePath is unused now (the DB is workspace-scoped via the connection
   // openDatabase opened on it) but kept in the signature for callers.
   void basePath;
-  const meta = getRuntimeKv<PausedSessionMetadata>("global", "", PAUSED_SESSION_KV_KEY);
+  const meta = readStoredPausedSession();
   if (!meta) return null;
   if (isStalePseudoMilestonePause(meta)) {
-    deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+    clearPausedSession();
     return null;
   }
   return meta;
+}
+
+/**
+ * Close the pause of this worker's scope and delete the retired runtime_kv
+ * key. Throws when no database is open.
+ */
+export function clearPausedSession(): void {
+  closeAutoPause();
+  deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
 }
 
 export function isBootstrapCrashLock(lock: LockData | null): boolean {
@@ -180,10 +203,13 @@ export async function assessInterruptedSession(
   const isBootstrapCrash = isBootstrapCrashLock(lock);
   const state = await deriveState(assessmentBasePath);
   const hasResumableDiskState = hasResumableDerivedState(state);
+  // The dispatch row decides first: a unit that left the execute stage has no
+  // agent session to continue, so its session file is not replayed.
+  const executionEnded = lock?.dispatchId != null && !isDispatchExecutionOpen(lock.dispatchId);
   const artifactSatisfied = !!(
     lock &&
     !isBootstrapCrash &&
-    verifyExpectedArtifact(lock.unitType, lock.unitId, assessmentBasePath)
+    (executionEnded || verifyExpectedArtifact(lock.unitType, lock.unitId, assessmentBasePath))
   );
 
   let recovery: RecoveryBriefing | null = null;

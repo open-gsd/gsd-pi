@@ -13,7 +13,7 @@ test("postUnitPreVerification blocks on non-transient git action failure", () =>
   const failureBlock = extractSourceRegion(source, 'if (gitResult.status === "failed")');
   // Deterministic / unknown git failures still pause auto-mode instead of silently continuing.
   assert.ok(failureBlock.includes('ctx.ui.notify(failureMsg, "error")'));
-  assert.ok(failureBlock.includes("await pauseAuto(ctx, pi)"));
+  assert.ok(failureBlock.includes('await pauseAuto(ctx, pi, "machine_fixable")'));
   assert.ok(failureBlock.includes('return "dispatched"'));
   // Only transient failures are allowed to warn-and-continue under softFailure.
   assert.ok(failureBlock.includes('if (opts?.softFailure && gitResult.failureClass === "transient")'));

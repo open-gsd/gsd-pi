@@ -419,8 +419,8 @@ function gsdRootPath(basePath: string): string {
   return join(basePath, ".gsd");
 }
 
-// The paused session is the runtime_kv paused_session row auto-mode writes on
-// pause; there is no paused-session.json file to read.
+// The paused session is the auto_pauses row auto-mode writes on pause; there is
+// no paused-session.json file to read.
 async function readPausedSession(basePath: string): Promise<PausedSessionMeta | null> {
   const mod = await tryImportModule<{ readPausedSessionMetadata(basePath: string): PausedSessionMeta | null }>(
     "../gsd/interrupted-session.js",

@@ -86,7 +86,7 @@ export async function failClosedOnFinalizeTimeout(
     "warning",
   );
 
-  await deps.pauseAuto(ctx, pi);
+  await deps.pauseAuto(ctx, pi, "machine_fixable");
   s.clearCurrentUnit();
   clearCurrentPhase();
   setBeforeAgentStartContext(undefined);
@@ -283,7 +283,7 @@ export async function runFinalize(
       ? `UAT requires human execution. Auto-mode will pause after this unit writes the result file.\n\n${guidance}`
       : "UAT requires human execution. Auto-mode will pause after this unit writes the result file.";
     ctx.ui.notify(pauseMessage, "info");
-    await deps.pauseAuto(ctx, pi);
+    await deps.pauseAuto(ctx, pi, "subjective_uat");
     debugLog("autoLoop", { phase: "exit", reason: "uat-pause" });
     clearFinalizingUnit();
     return { action: "break", reason: "uat-pause" };
@@ -317,7 +317,7 @@ export async function runFinalize(
       const abortMessage = abortId
         ? `Verification auto-fix retries are exhausted — durable recovery aborted this task. Resume with /gsd recover ${abortId} after fixing the failure.`
         : "Verification was aborted by durable task recovery.";
-      await deps.pauseAuto(ctx, pi, { message: abortMessage, category: "unknown" });
+      await deps.pauseAuto(ctx, pi, "machine_fixable", { message: abortMessage, category: "unknown" });
       debugLog("autoLoop", { phase: "exit", reason: abortReason });
       clearFinalizingUnit();
       return { action: "break", reason: abortReason };

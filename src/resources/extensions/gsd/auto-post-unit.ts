@@ -80,6 +80,7 @@ import {
   runMilestoneCloseoutGitHub,
 } from "./milestone-closeout.js";
 import type { AutoSession, SidecarItem } from "./auto/session.js";
+import type { PauseAutoFn } from "./auto/loop-deps.js";
 import { hasHeldQuickTask } from "./db/unit-dispatch-sidecars.js";
 import {
   enqueueSidecarItem,
@@ -488,7 +489,7 @@ export async function handlePendingHookOutcome(
       (s.currentUnit ? `(detected on completion of ${s.currentUnit.type} ${s.currentUnit.id}):` : "(detected on resume):") +
       `${verdict}${artifact} ${gateBlock.reason}. Run /gsd status to inspect, then /gsd auto after recovery.`;
     ctx.ui.notify(message, "warning");
-    await pauseAuto(ctx, pi);
+    await pauseAuto(ctx, pi, "machine_fixable");
     return "stopped";
   }
   return null;
@@ -1113,7 +1114,7 @@ export interface PostUnitContext {
   buildSnapshotOpts: (unitType: string, unitId: string) => CloseoutOptions & Record<string, unknown>;
   lockBase: () => string;
   stopAuto: (ctx?: ExtensionContext, pi?: ExtensionAPI, reason?: string) => Promise<void>;
-  pauseAuto: (ctx?: ExtensionContext, pi?: ExtensionAPI) => Promise<void>;
+  pauseAuto: PauseAutoFn;
   updateProgressWidget: (ctx: ExtensionContext, unitType: string, unitId: string, state: import("./types.js").GSDState) => void;
 }
 
@@ -1325,7 +1326,7 @@ async function pauseExhaustedCommitRepair(
     `Git ${turnAction} failed after ${MAX_GIT_COMMIT_REMEDIATION_RETRIES} remediation attempts: ${detail}. Pausing auto-mode.`,
     "error",
   );
-  await pauseAuto(ctx, pi);
+  await pauseAuto(ctx, pi, "machine_fixable");
 }
 
 /**
@@ -1564,7 +1565,7 @@ async function runCloseoutGitAction(
           return "continue";
         }
         ctx.ui.notify(failureMsg, "error");
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       }
 
@@ -1591,7 +1592,7 @@ async function runCloseoutGitAction(
       return "continue";
     }
     if (uokFlags.gitops) {
-      await pauseAuto(ctx, pi);
+      await pauseAuto(ctx, pi, "machine_fixable");
       return "dispatched";
     }
   }
@@ -2029,7 +2030,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                   if (gitActionResult === "dispatched") {
                     return "evidence-xref-blocked";
                   }
-                  await pauseAuto(ctx, pi);
+                  await pauseAuto(ctx, pi, "machine_fixable");
                   return "evidence-xref-blocked";
                 }
               }
@@ -2098,7 +2099,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           `${worktreeIntegrityFailure} Retry ${s.currentUnit.id} after repair.`,
           "error",
         );
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       }
     }
@@ -2296,7 +2297,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           debugLog("postUnit", { phase: "tool-invocation-error-pause", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: invocationError });
           ctx.ui.notify(toolInvocationPauseMessage(s.currentUnit.type, invocationError), "error");
           s.lastToolInvocationError = null;
-          await pauseAuto(ctx, pi);
+          await pauseAuto(ctx, pi, "machine_fixable");
           return "dispatched";
         }
         if (s.pendingVerificationRetry?.unitId === s.currentUnit.id) {
@@ -2328,7 +2329,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           "info",
         );
         s.lastToolInvocationError = null;
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "ambiguous_intent");
         return "dispatched";
       } else if (!triggerArtifactVerified && getPendingGate(verificationBasePath)) {
         const pendingGateId = getPendingGate(verificationBasePath);
@@ -2343,7 +2344,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           "info",
         );
         s.lastToolInvocationError = null;
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "ambiguous_intent");
         return "dispatched";
       } else if (!triggerArtifactVerified && s.lastToolInvocationError && isDeterministicPolicyError(s.lastToolInvocationError)) {
         debugLog("postUnit", { phase: "deterministic-policy-error-placeholder", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: s.lastToolInvocationError });
@@ -2362,7 +2363,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
         );
         // The unit recorded no result, so it is not complete. Pause for every
         // unit type: a blocker file never lets the pipeline advance.
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       } else if (!triggerArtifactVerified && diagnoseWorktreeIntegrityFailure(verificationBasePath)) {
         const worktreeFailure = diagnoseWorktreeIntegrityFailure(verificationBasePath)!;
@@ -2377,7 +2378,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           `${worktreeFailure} Retry ${s.currentUnit.id} after repair.`,
           "error",
         );
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       } else if (!triggerArtifactVerified && completeSliceHandedBackToExecution(s)) {
         clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
@@ -2398,7 +2399,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           `Artifact missing for ${s.currentUnit.type} ${s.currentUnit.id} — workflow DB is unavailable, so the unit cannot be verified. Auto-mode is paused; resume with /gsd auto once the DB opens.${dbSkipDiag ? ` Expected: ${dbSkipDiag}` : ""}`,
           "error",
         );
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "machine_fixable");
         return "dispatched";
       } else if (!triggerArtifactVerified) {
         if (s.lastToolInvocationError && isToolUnavailableError(s.lastToolInvocationError)) {
@@ -2424,7 +2425,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               "error",
             );
             s.lastToolInvocationError = null;
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "machine_fixable");
             return "dispatched";
           }
           // Exponential backoff starting at 10s (10s, 20s, 40s capped at 45s). MCP server
@@ -2446,7 +2447,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           debugLog("postUnit", { phase: "tool-invocation-error-pause", unitType: s.currentUnit.type, unitId: s.currentUnit.id, error: s.lastToolInvocationError });
           ctx.ui.notify(errMsg, "error");
           s.lastToolInvocationError = null;
-          await pauseAuto(ctx, pi);
+          await pauseAuto(ctx, pi, isUserSkip ? "user_request" : "machine_fixable");
           return "dispatched";
         }
 
@@ -2466,7 +2467,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               `${s.currentUnit.type} ${s.currentUnit.id} declined closeout (see ${relative(s.basePath, verificationFailureMarker)}). Pausing for human review.`,
               "error",
             );
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "machine_fixable");
             return "dispatched";
           }
           const prefs = loadEffectiveGSDPreferences(s.canonicalProjectRoot)?.preferences;
@@ -2481,7 +2482,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               `Unit ${s.currentUnit.id} hit per-unit cap $${perUnitCapUsd.toFixed(2)} — pausing auto-mode.`,
               "error",
             );
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "user_limit");
             return "dispatched";
           }
           if (getUnitCostSpikeAction(unitCostUsd, rollingAvgUsd, resolveUnitCostSpikeMultiplier(prefs)) === "pause") {
@@ -2520,7 +2521,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
                 `Unit ${s.currentUnit.id} cost spike detected (${unitCostUsd.toFixed(2)} vs avg ${rollingAvgUsd.toFixed(2)}) — wrote parallel blocker and pausing auto-mode.`,
                 "error",
               );
-              await pauseAuto(ctx, pi);
+              await pauseAuto(ctx, pi, "user_limit");
               return "dispatched";
             }
             ctx.ui.notify(
@@ -2572,7 +2573,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
               `${failureDetails} Pausing auto-mode after ${MAX_ARTIFACT_VERIFICATION_RETRIES} retries.`,
               "error",
             );
-            await pauseAuto(ctx, pi);
+            await pauseAuto(ctx, pi, "machine_fixable");
             return "dispatched";
           }
           spendUnitBudget(s.unclaimedUnitBudgets, verificationBudgetRef);
@@ -2754,7 +2755,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         `Post-unit hook ${hookFailure.hookName} failed for ${hookFailure.unitId}: ${hookFailure.reason}. Pausing auto-mode.`,
         "warning",
       );
-      await pauseAuto(ctx, pi);
+      await pauseAuto(ctx, pi, "machine_fixable");
       return "stopped";
     }
 
@@ -2779,7 +2780,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
           "warning",
         );
         debugLog("postUnit", { phase: "fast-stop", captureId: stopCapture.id });
-        await pauseAuto(ctx, pi);
+        await pauseAuto(ctx, pi, "user_request");
         return "stopped";
       }
     } catch (e) {
@@ -3053,7 +3054,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         pausing: true,
         reason: "pre-execution repair exhausted or checker errored",
       });
-      await pauseAuto(ctx, pi);
+      await pauseAuto(ctx, pi, "machine_fixable");
       return "stopped";
     }
   }
