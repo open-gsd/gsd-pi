@@ -15,6 +15,7 @@ import {
 } from "../routing-history.js";
 import { closeDatabase, openDatabase } from "../gsd-db.js";
 import { handleRate } from "../commands-rate.js";
+import { getDatabaseReplacementPaths } from "../database-replacement-paths.js";
 
 // ─── Test Setup ──────────────────────────────────────────────────────────────
 
@@ -286,4 +287,18 @@ test("/gsd rate reset clears the stored routing history", async (t) => {
   initRoutingHistory();
   assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), null);
   assert.deepEqual(getRoutingHistory()!.patterns, {});
+});
+
+test("a refused database write does not stop the unit that reports its outcome", (t) => {
+  const dir = makeTmpDir();
+  t.after(() => cleanup(dir));
+  initRoutingHistory();
+
+  // An import or restore is replacing the database: every write is refused.
+  const replacement = getDatabaseReplacementPaths(join(dir, ".gsd", "gsd.db"));
+  mkdirSync(replacement.recoveryDirectory);
+  writeFileSync(replacement.activeIntentPath, "{}");
+
+  assert.doesNotThrow(() => recordOutcome("execute-task", "light", false));
+  assert.equal(getRoutingHistory()!.patterns["execute-task"].light.fail, 1, "the outcome still counts in this session");
 });

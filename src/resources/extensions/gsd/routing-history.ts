@@ -6,6 +6,7 @@
 import type { ComplexityTier } from "./types.js";
 import { getRuntimeKv, setRuntimeKv } from "./db/runtime-kv.js";
 import { isDbAvailable } from "./gsd-db.js";
+import { logWarning } from "./workflow-logger.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -278,5 +279,10 @@ function loadHistory(): RoutingHistoryData {
 function saveHistory(data: RoutingHistoryData): void {
   // Without a database the history lives for this process only.
   if (!isDbAvailable()) return;
-  setRuntimeKv("global", "", HISTORY_KV_KEY, data);
+  try {
+    setRuntimeKv("global", "", HISTORY_KV_KEY, data);
+  } catch (err) {
+    // Learning data only: a failed write must not stop the unit that reports its outcome.
+    logWarning("db", `routing history not stored: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
