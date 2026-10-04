@@ -6,7 +6,7 @@
  * and verifies all 3 steps complete in dependency order.
  */
 
-import { describe, it, afterEach } from "node:test";
+import { describe, it, afterEach, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -575,8 +575,14 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
 
   describe("the dispatch claim of a workflow step", () => {
     /** A one-step run with rows, and a way to start an auto session on it. */
-    function makeClaimedRun() {
+    function makeClaimedRun(t: TestContext) {
       _resetPendingResolve();
+      const sessions: Array<{ active: boolean }> = [];
+      // A failed assertion must not leave a loop waiting for its agent turn.
+      t.after(() => {
+        for (const session of sessions) session.active = false;
+        resolveAgentEnd({ messages: [{ role: "assistant" }] });
+      });
       const base = realpathSync(makeTmpDir());
       mkdirSync(join(base, ".gsd", "workflow-defs"), { recursive: true });
       writeFileSync(join(base, ".gsd", "workflow-defs", "claimed.yaml"), [
@@ -591,7 +597,7 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       ].join("\n"), "utf-8");
       openDatabase(join(base, ".gsd", "gsd.db"));
       const runDir = createRun(base, "claimed");
-      const startSession = () => {
+      const startSession = (overrides?: Partial<LoopDeps>) => {
         const pi = makeMockPi();
         const s = makeLoopSession({
           activeEngineId: "custom",
@@ -607,7 +613,9 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
             deps.callLog.push(`stopAuto:${reason ?? "no-reason"}`);
             s.active = false;
           },
+          ...overrides,
         });
+        sessions.push(s);
         return { pi, s, notices, loop: autoLoop(ctx, pi, s, deps) };
       };
       return { base, runDir, unitId: `${customWorkflowRunId(runDir)}/only`, startSession };
@@ -621,8 +629,8 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       }
     }
 
-    it("a second session cannot run the step that a live session runs", async () => {
-      const { base, unitId, startSession } = makeClaimedRun();
+    it("a second session cannot run the step that a live session runs", async (t) => {
+      const { base, unitId, startSession } = makeClaimedRun(t);
 
       // The first session runs the step: its unit waits for the agent.
       const first = startSession();
@@ -636,10 +644,17 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       // not drop the agent turn that the first one waits for in this process.
       const finishFirstUnit = _getCurrentResolveForTest()!;
 
-      // A second session on the same run is refused and never calls the agent.
-      const second = startSession();
+      // A second session on the same run is refused before its unit runs.
+      let secondRanUnit = false;
+      const second = startSession({
+        taskExecutionBoundary: async () => {
+          secondRanUnit = true;
+          second.s.active = false;
+          return { action: "break", reason: "the second session ran the step" };
+        },
+      });
       await second.loop;
-      assert.equal(second.pi.calls.length, 0);
+      assert.equal(secondRanUnit, false, "the second session must not run the step");
       assert.match(second.notices.join("\n"), /is running in another session/);
       assert.equal(getLatestForUnit(unitId)?.id, claimed?.id, "the refused session wrote no dispatch row");
       assert.equal(getLatestForUnit(unitId)?.status, "running");
@@ -652,8 +667,8 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       assert.deepEqual(listRuns(base)[0]?.steps, { total: 1, completed: 1, pending: 0, active: 0 });
     });
 
-    it("a session takes over the step of a worker that died", async () => {
-      const { base, runDir, unitId, startSession } = makeClaimedRun();
+    it("a session takes over the step of a worker that died", async (t) => {
+      const { base, runDir, unitId, startSession } = makeClaimedRun(t);
 
       // A worker activated the step, claimed it, and died with the claim open.
       const engine = new CustomWorkflowEngine(runDir);
@@ -684,8 +699,8 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       assert.deepEqual(listRuns(base)[0]?.steps, { total: 1, completed: 1, pending: 0, active: 0 });
     });
 
-    it("two runs of one workflow claim the same step id independently", async () => {
-      const { base, unitId, startSession } = makeClaimedRun();
+    it("two runs of one workflow claim the same step id independently", async (t) => {
+      const { base, unitId, startSession } = makeClaimedRun(t);
       const otherRunId = "claimed/2000-01-01T00-00-00";
       const otherWorker = registerAutoWorker({ projectRootRealpath: base });
       const otherClaim = recordRunDispatchClaim({
