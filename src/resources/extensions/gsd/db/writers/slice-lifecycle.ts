@@ -591,6 +591,25 @@ function currentCompletionProof(lifecycleId: string, taskId: string): SliceCompl
   };
 }
 
+/**
+ * An Import Application adopts a completion that the legacy markdown attests
+ * as unverified legacy: it has no completion proof, and verification evidence
+ * is required only for new work. The mark is the provenance of the lifecycle
+ * row: still at state version 0, with the import as its last operation.
+ */
+function isImportAdoptedCompletion(lifecycleId: string): boolean {
+  return Boolean(getDb().prepare(`
+    SELECT 1
+    FROM workflow_item_lifecycles lifecycle
+    JOIN workflow_operations operation
+      ON operation.operation_id = lifecycle.last_operation_id
+     AND operation.operation_type = 'import.apply'
+    WHERE lifecycle.lifecycle_id = :lifecycle_id
+      AND lifecycle.lifecycle_status = 'completed'
+      AND lifecycle.state_version = 0
+  `).get({ ":lifecycle_id": lifecycleId }));
+}
+
 function hasCurrentCancellationAuthorization(lifecycleId: string, completedAt: string): boolean {
   return Boolean(getDb().prepare(`
     SELECT 1
@@ -724,11 +743,12 @@ export function completeSliceHierarchy(
     const legacyStatus = normalizeLegacyLifecycleStatus(state.legacyStatus);
     if (legacyStatus === "completed" && state.lifecycleStatus === "completed") {
       const proof = currentCompletionProof(lifecycleId, taskId);
-      if (!proof) {
+      if (proof) {
+        proofs.push(proof);
+      } else if (!isImportAdoptedCompletion(lifecycleId)) {
         throw new SliceLifecycleValidationError(`Task ${taskId} lacks current passing Technical Verdict and verification evidence`);
       }
       completedTaskIds.push(taskId);
-      proofs.push(proof);
     } else if (legacyStatus === "blocker-accepted" && state.lifecycleStatus === "blocker-accepted") {
       // #2202: the operator accepted a discovered blocker. Terminal in both
       // vocabularies, but deliberately NOT verdict-gated completion — no

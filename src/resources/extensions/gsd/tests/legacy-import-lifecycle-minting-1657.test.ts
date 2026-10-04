@@ -4,7 +4,7 @@
 // quality gate for every open imported slice — and keeps a markdown completion as unverified legacy.
 
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ import { createLegacyImportPreview } from "../legacy-import-preview.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../legacy-import-preview-base.ts";
 import { type DbAdapter } from "../db-adapter.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { completeSlice } from "../slice-lifecycle-domain-operation.ts";
 import { createLegacyImportCorpusSourceRoots } from "./helpers/legacy-import-corpus.ts";
 
 const CORPUS_ROOT = fileURLToPath(new URL("./__fixtures__/legacy-import-corpus/v1/", import.meta.url));
@@ -42,7 +43,7 @@ afterEach(() => {
 });
 
 /** Apply the gsd-nested markdown corpus as one Import Application on an empty database. */
-function applyNestedCorpusImport() {
+function applyNestedCorpusImport(prepareSource: (source: string) => void = () => {}) {
   const workspace = mkdtempSync(join(tmpdir(), "gsd-legacy-lifecycle-minting-"));
   tempDirectories.add(workspace);
   const source = join(workspace, "source");
@@ -52,6 +53,7 @@ function applyNestedCorpusImport() {
     dereference: false,
     verbatimSymlinks: true,
   });
+  prepareSource(source);
   mkdirSync(destination);
   assert.equal(openDatabase(join(workspace, "canonical.sqlite")), true);
   const roots = createLegacyImportCorpusSourceRoots(source);
@@ -202,8 +204,8 @@ test("an imported markdown completion stays completed as unverified legacy: adop
     unverifiedLegacy("task", "M002", "T01"),
   ]);
 
-  // Verification evidence is required only for new work: the import writes
-  // no Attempt, result, verdict, evidence or gate run for these completions.
+  // The import writes no Attempt, result, verdict, evidence or gate run for
+  // these completions. The next test proves that Slice closeout accepts one.
   for (const table of [
     "workflow_execution_attempts", "workflow_attempt_results", "workflow_technical_verdicts",
     "workflow_verification_evidence", "verification_evidence", "gate_runs",
@@ -212,4 +214,57 @@ test("an imported markdown completion stays completed as unverified legacy: adop
   }
   // The sealed plan is unchanged: the retained Application still validates.
   verifyLegacyImportApplicationResult(inspectLegacyImportApplicationEvidence(receipt.operationId));
+});
+
+test("a Slice imported open with a markdown-completed Task closes with no new evidence for that Task", () => {
+  applyNestedCorpusImport((source) => {
+    // The roadmap leaves S02 unchecked; its plan attests T01 as done.
+    writeFileSync(
+      join(source, ".gsd", "milestones", "M001-foundation", "slices", "S02-api", "S02-PLAN.md"),
+      "# S02: API wiring\n\n- [x] T01 Connect the service boundary\n",
+    );
+  });
+  const lifecycleStatuses = () => rows(`
+    SELECT item_kind, lifecycle_status FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M001' AND slice_id = 'S02' ORDER BY item_kind
+  `);
+  assert.deepEqual(lifecycleStatuses(), [
+    { item_kind: "slice", lifecycle_status: "ready" },
+    { item_kind: "task", lifecycle_status: "completed" },
+  ]);
+
+  const receipt = completeSlice({
+    invocation: {
+      idempotencyKey: "slice-complete/imported-open-slice",
+      sourceTransport: "internal",
+      actorType: "agent",
+      actorId: "legacy-import-lifecycle-minting-test",
+      traceId: "imported-open-slice-trace",
+      turnId: "imported-open-slice-turn",
+    },
+    slice: { milestoneId: "M001", sliceId: "S02" },
+    closeout: {
+      sliceTitle: "API wiring",
+      oneLiner: "Closed the imported Slice.",
+      narrative: "The one Task was complete in the legacy source.",
+      verification: "None for the imported Task.",
+      uatContent: "",
+      operationalReadiness: "",
+      deviations: "None.",
+      knownLimitations: "None.",
+      followUps: "None.",
+      provides: [], requires: [], affects: [], keyFiles: [], keyDecisions: [],
+      patternsEstablished: [], observabilitySurfaces: [], drillDownPaths: [],
+      requirementsAdvanced: [], requirementsValidated: [], requirementsSurfaced: [],
+      requirementsInvalidated: [], filesModified: [],
+    },
+  });
+
+  assert.equal(receipt.status, "committed");
+  assert.deepEqual(receipt.completedTaskIds, ["T01"]);
+  assert.deepEqual(receipt.proofs, []);
+  assert.deepEqual(lifecycleStatuses(), [
+    { item_kind: "slice", lifecycle_status: "completed" },
+    { item_kind: "task", lifecycle_status: "completed" },
+  ]);
 });

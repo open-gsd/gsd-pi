@@ -609,6 +609,63 @@ test("Slice completion accepts the legacy-attested Waiver of a skipped child ado
   `).lifecycle_status, "completed");
 });
 
+test("Slice completion accepts a completed child adopted by an Import Application as unverified legacy", () => {
+  makeBase();
+  // T03 is complete in the legacy source only: no Attempt, verdict or evidence.
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Completed in the legacy source', 'complete', 3)
+  `);
+  finishTaskWithOptionalEvidence(true);
+  const fence = readDomainOperationFence();
+  const artifact = emptyPreview(fence.revision, fence.authorityEpoch);
+  applyImport(artifact, planFor(artifact, [{
+    action: "adopt-lifecycle",
+    lifecycleAction: "create",
+    targetKind: "task-lifecycle",
+    targetKey: "M001/S01/T03",
+    itemKind: "task",
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T03",
+    lifecycleStatus: "completed",
+    changeIds: ["adopt-T03"],
+  }]));
+
+  const result = completeSlice(validInput("slice-complete/import-completed-child"));
+
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.completedTaskIds, ["T01", "T03"]);
+  // Only new work carries a completion proof.
+  assert.deepEqual((result.proofs as Array<{ taskId: string }>).map((proof) => proof.taskId), ["T01"]);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion rejects a completed child adopted with no evidence by an operation that is not an import", () => {
+  makeBase();
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Completed with no evidence', 'complete', 3)
+  `);
+  // Same lifecycle row as an import adoption (completed at state version 0), but from another operation.
+  executeAtFence("test.unproven-adoption", "fixture/slice-completion/unproven-adoption", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T03", lifecycleStatus: "completed",
+    });
+  });
+  finishTaskWithOptionalEvidence(true);
+  const before = durableSnapshot();
+
+  assert.throws(
+    () => completeSlice(validInput("slice-complete/unproven-adopted-child")),
+    /Task T03 lacks current passing Technical Verdict and verification evidence/,
+  );
+  assert.deepEqual(durableSnapshot(), before, "unproven-child rejection must leave exact zero residue");
+});
+
 test("Slice completion self-heals a missing Q8 gate (#1679)", () => {
   makeBase();
   finishTaskWithOptionalEvidence(true);
