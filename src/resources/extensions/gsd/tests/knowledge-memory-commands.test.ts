@@ -285,18 +285,36 @@ test("/gsd memory import drops the provenance markers of the source database and
   assert.deepEqual(fields, [{ choice: "kept field" }, { sourceKnowledgeId: "P003" }]);
 });
 
+test("/gsd memory import drops a knowledge id that is not the id form of its table, so repeated renders keep one row", async (t) => {
+  const base = makeBase(t);
+
+  await runMemory(base, `import ${exportFile(base, [
+    { category: "rule", content: "Rule with a custom id", structured_fields: { sourceKnowledgeId: "CUSTOM-1" } },
+    { category: "pattern", content: "Pattern with a rule id", structured_fields: { sourceKnowledgeId: "K009" } },
+  ])}`);
+  await runMemory(base, "cap");
+  await runMemory(base, "cap");
+
+  assert.deepEqual(activeKnowledgeIds(), [], "the invalid ids are not stored");
+  const rendered = knowledgeMd(base);
+  assert.equal(rendered.split("Rule with a custom id").length - 1, 1);
+  assert.equal(rendered.split("Pattern with a rule id").length - 1, 1);
+  assert.match(rendered, /\| MEM\d+ \| project \| Rule with a custom id \|/);
+  assert.match(rendered, /\| MEM\d+ \| Pattern with a rule id \|/);
+});
+
 test("/gsd memory import that fails part-way reports the rows it imported and renders KNOWLEDGE.md", async (t) => {
   const base = makeBase(t);
-  createMemory({ category: "pattern", content: "Local row with an id that cannot be remapped", structuredFields: { sourceKnowledgeId: "X1" } });
 
   const messages = await runMemory(base, `import ${exportFile(base, [
     { category: "pattern", content: "Imported before the failure", structured_fields: { sourceKnowledgeId: "P001" } },
-    { category: "pattern", content: "Collides on an id that is not K/P/L", structured_fields: { sourceKnowledgeId: "X1" } },
+    { category: "pattern", content: 5 },
     { category: "pattern", content: "Never reached", structured_fields: { sourceKnowledgeId: "P002" } },
   ])}`);
 
   const shown = messages.join("\n");
-  assert.match(shown, /Import failed: knowledge id X1 is already in use/);
+  assert.match(shown, /Import failed: /);
   assert.match(shown, /Imported 1 memories/);
+  assert.equal(activeMemoryCount(), 1);
   assert.match(knowledgeMd(base), /\| P001 \| Imported before the failure \|/, "the committed row is rendered");
 });

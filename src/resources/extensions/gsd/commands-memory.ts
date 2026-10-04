@@ -436,12 +436,16 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
           ([field]) => field === "sourceKnowledgeId" || !/^source[A-Z]\w*Id$/.test(field),
         ),
       );
-      // A knowledge id (K/P/L###) that a local row already holds stays with
-      // the local row: the imported row gets the next free local id.
+      // A knowledge id is valid only in the form of its table (rule K###,
+      // pattern P###, gotcha L###). Any other id is dropped and the row renders
+      // under its MEM id: the renderer cannot own a row with a foreign id.
+      const prefix = ({ rule: "K", pattern: "P", gotcha: "L" } as const)[mem.category as "rule" | "pattern" | "gotcha"];
       const knowledgeId = structuredFields["sourceKnowledgeId"];
-      if (typeof knowledgeId === "string" && local.ids.has(knowledgeId)) {
-        const prefix = /^[KPL](?=\d+$)/.exec(knowledgeId)?.[0] as "K" | "P" | "L" | undefined;
-        if (!prefix) throw new Error(`knowledge id ${knowledgeId} is already in use and cannot be remapped`);
+      if (!prefix || typeof knowledgeId !== "string" || !new RegExp(`^${prefix}\\d+$`).test(knowledgeId)) {
+        delete structuredFields["sourceKnowledgeId"];
+      } else if (local.ids.has(knowledgeId)) {
+        // A knowledge id that a local row already holds stays with the local
+        // row: the imported row gets the next free local id.
         const localId = nextKnowledgeId(base, prefix);
         structuredFields["sourceKnowledgeId"] = localId;
         remapped.push(`${knowledgeId} → ${localId}`);
