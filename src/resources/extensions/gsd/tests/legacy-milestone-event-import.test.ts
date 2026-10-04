@@ -105,6 +105,11 @@ test("doctor reports file-only milestone events and writes nothing until the ope
     assert.match(issues[0]!.message, new RegExp(`M001 was completed at ${COMPLETED_AT}.*doctor --fix`));
     assert.match(issues[1]!.message, new RegExp(`M001 was reopened at ${REOPENED_AT}.*doctor --fix`));
     assert.deepEqual(filterDoctorIssues(issues), issues, "the warnings show in a plain /gsd doctor");
+    assert.deepEqual(
+      filterDoctorIssues(issues, { scope: "M001/S01" }),
+      issues,
+      "the warnings show when /gsd doctor is scoped to the active slice",
+    );
   }
 
   assert.equal(importOperations(), 0);
