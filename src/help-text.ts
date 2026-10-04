@@ -135,7 +135,7 @@ const SUBCOMMAND_HELP: Record<string, string> = {
     '          Returns added, removed, and changed nodes and edges.',
     '',
     'Examples:',
-    '  gsd graph build                        Build the graph from .gsd/ artifacts',
+    '  gsd graph build                        Build the graph from the workflow database',
     '  gsd graph status                       Check graph age and node/edge counts',
     '  gsd graph query auth                   Find nodes related to "auth"',
     '  gsd graph diff                         Show changes since last snapshot',

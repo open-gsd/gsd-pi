@@ -23,6 +23,7 @@ import { renderMilestoneShellProjections } from "../workflow-projections.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
+import { rebuildKnowledgeGraph } from "../knowledge-graph-build.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import {
@@ -511,31 +512,11 @@ export async function handleCompleteSlice(
   }
 
   // Fire-and-forget graph rebuild — must NOT await, must NOT crash slice completion.
-  // Dynamic import of the package name (not a relative path) so it resolves
-  // correctly via package.json#exports in both development and production.
-  // eslint-disable-next-line @typescript-eslint/no-floating-promises
   if (!superseded) {
-    (async () => {
-      try {
-        const graphMod = await import("@opengsd/mcp-server") as unknown as Partial<{
-          buildGraph: (dir: string) => Promise<{ nodes: unknown[]; edges: unknown[]; builtAt: string }>;
-          writeGraph: (gsdRoot: string, graph: unknown) => Promise<void>;
-          resolveGsdRoot: (basePath: string) => string;
-        }>;
-        if (
-          typeof graphMod.buildGraph !== "function"
-          || typeof graphMod.writeGraph !== "function"
-          || typeof graphMod.resolveGsdRoot !== "function"
-        ) {
-          throw new Error("graph helpers unavailable from @opengsd/mcp-server");
-        }
-        const g = await graphMod.buildGraph(artifactBasePath);
-        await graphMod.writeGraph(graphMod.resolveGsdRoot(artifactBasePath), g);
-      } catch (graphErr) {
-        // Graph rebuild is best-effort — log at warning level but never propagate
-        logWarning("tool", `complete-slice graph rebuild failed (non-fatal): ${(graphErr as Error).message ?? String(graphErr)}`);
-      }
-    })();
+    rebuildKnowledgeGraph(artifactBasePath).catch((graphErr) => {
+      // Graph rebuild is best-effort — log at warning level but never propagate
+      logWarning("tool", `complete-slice graph rebuild failed (non-fatal): ${(graphErr as Error).message ?? String(graphErr)}`);
+    });
   }
 
   return {

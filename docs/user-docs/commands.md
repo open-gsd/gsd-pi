@@ -448,7 +448,7 @@ The following commands are sent directly in your **Telegram chat** to a configur
 | `gsd install <source> [-l\|--local]` | Install a package from npm, git, a URL, or a local path (e.g. `gsd install npm:@foo/bar`). The default scope is user-wide; `--local` installs into the current project and registers its extensions as project entries. |
 | `gsd remove <source> [-l\|--local]` | Remove a package from the matching user or project scope and unregister its extensions. Use `--local` for a project-local install. |
 | `gsd list` | List installed user/project packages, followed by separate user/project extension sections. |
-| `gsd graph <subcommand>` | Build, query, status, or diff the project knowledge graph built from `.gsd/` artifacts |
+| `gsd graph <subcommand>` | Build, query, status, or diff the project knowledge graph. The build reads the workflow database, and the `.gsd/` artifacts only when the project has no database |
 | `gsd quick <task>` | Execute a quick task without a TUI (alias for `gsd headless quick <task>`) |
 | `gsd headless --json` | Structured JSONL event stream to stdout for scripting, CI, and troubleshooting (alias: `--output-format stream-json`) |
 | `gsd headless new-milestone` | Create a new milestone from a context file (headless — no TUI required) |

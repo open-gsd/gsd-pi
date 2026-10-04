@@ -277,16 +277,15 @@ if (cliFlags.messages[0] === 'hermes') {
 // ---------------------------------------------------------------------------
 if (cliFlags.messages[0] === 'graph') {
   const sub = cliFlags.messages[1]
-  const { buildGraph, writeGraph, graphStatus, graphQuery, graphDiff, resolveGsdRoot } = await import('@opengsd/mcp-server')
+  const { graphStatus, graphQuery, graphDiff } = await import('@opengsd/mcp-server')
 
   const projectDir = process.cwd()
-  const gsdRoot = resolveGsdRoot(projectDir)
 
-  // Projection-write version gating (T003 spike, write side): `graph build`
-  // bypasses the DB, so it must consult the schema stamp and refuse to write
-  // into a newer project; read-only subcommands warn loudly but keep their
-  // read-only semantics. A missing DB keeps current behavior, and the version
-  // knowledge stays in the extension (the mcp-server graph code is untouched).
+  // Version gating (T003 spike, write side): `graph build` consults the schema
+  // stamp and refuses to write into a newer project; read-only subcommands
+  // warn loudly but keep their read-only semantics. A missing DB keeps the
+  // build from the .gsd/ projections, and the version knowledge stays in the
+  // extension.
   const { openExistingWorkflowDatabase } = await import('./resources/extensions/gsd/db-workspace.js')
   const dbOpen = openExistingWorkflowDatabase(projectDir)
   const schemaTooNewMessage = !dbOpen.ok && dbOpen.reason === 'schema-too-new' ? dbOpen.error.message : null
@@ -297,9 +296,9 @@ if (cliFlags.messages[0] === 'graph') {
       process.exit(1)
     }
     try {
-      const graph = await buildGraph(projectDir)
-      await writeGraph(gsdRoot, graph)
-      process.stdout.write(`Graph built: ${graph.nodes.length} nodes, ${graph.edges.length} edges\n`)
+      const { rebuildKnowledgeGraph } = await import('./resources/extensions/gsd/knowledge-graph-build.js')
+      const graph = await rebuildKnowledgeGraph(projectDir)
+      process.stdout.write(`Graph built: ${graph.nodeCount} nodes, ${graph.edgeCount} edges (source: ${graph.source})\n`)
     } catch (err) {
       process.stderr.write(`[gsd] graph build failed: ${err instanceof Error ? err.message : String(err)}\n`)
       process.exit(1)
