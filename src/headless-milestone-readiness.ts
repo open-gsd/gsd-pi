@@ -52,7 +52,7 @@ function milestoneArtifactExistsInResolvedDir(
 }
 
 /**
- * Mirror `buildRegistryAndFindActive` active-milestone selection: defer queued-shell
+ * Mirror `selectActiveMilestone` (milestone-readiness.ts) selection: defer queued-shell
  * milestones (queued, no context, zero slices) so a later planned milestone is
  * treated as active instead of an older orphan shell (#1295).
  */

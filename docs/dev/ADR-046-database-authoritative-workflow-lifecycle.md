@@ -84,7 +84,10 @@ Read-only progress integrations are a display-only compatibility boundary:
 projection only when the project database is missing or cannot be opened, or
 when the standalone MCP package has no GSD runtime bridge. Once the database
 opens, it remains authoritative and any later read failure is reported instead
-of falling back. This exception cannot drive lifecycle state.
+of falling back. The web project picker lists projects that the user did not
+open, so it reads each project database read-only with no migration, and it
+shows the `STATE.md` projection only when that read fails. This exception
+cannot drive lifecycle state.
 
 Only Domain Operations in the Single Writer layer mutate workflow state. A
 Domain Operation validates revision, dependencies, lifecycle, lease/fencing,
