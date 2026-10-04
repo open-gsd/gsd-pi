@@ -1,13 +1,12 @@
 // Data loader for workflow visualizer overlay — aggregates state + metrics.
 
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deriveState } from './state.js';
-import { parseSummary, loadFile } from './files.js';
-import { isDbAvailable, getMilestoneScopedArtifacts, getMilestoneSlices, getSliceTasks } from './gsd-db.js';
+import { parseSummary } from './files.js';
+import { isDbAvailable, getMilestoneScopedArtifacts, getMilestoneSlices, getSlice, getSliceTasks } from './gsd-db.js';
 import { openExistingWorkflowDatabase } from './db-workspace.js';
-import { findMilestoneIds } from './milestone-ids.js';
-import { resolveSliceFile, resolveGsdRootFile, gsdRoot } from './paths.js';
+import { resolveGsdRootFile, gsdRoot } from './paths.js';
 import {
   getLedger,
   getProjectTotals,
@@ -489,14 +488,13 @@ function loadAgentActivity(units: UnitMetrics[], milestones: VisualizerMilestone
 
 // ─── Changelog & Verifications ────────────────────────────────────────────────
 
-const changelogCache = new Map<string, { mtime: number; entry: ChangelogEntry; verification: SliceVerification }>();
-
 interface ChangelogAndVerifications {
   changelog: ChangelogInfo;
   verifications: SliceVerification[];
 }
 
-async function loadChangelogAndVerifications(basePath: string, milestones: VisualizerMilestone[]): Promise<ChangelogAndVerifications> {
+/** Changelog and verification of each done Slice, from the summary stored on the slice row. */
+function loadChangelogAndVerifications(milestones: VisualizerMilestone[]): ChangelogAndVerifications {
   const entries: ChangelogEntry[] = [];
   const verifications: SliceVerification[] = [];
 
@@ -504,26 +502,7 @@ async function loadChangelogAndVerifications(basePath: string, milestones: Visua
     for (const sl of ms.slices) {
       if (!sl.done) continue;
 
-      const summaryFile = resolveSliceFile(basePath, ms.id, sl.id, 'SUMMARY');
-      if (!summaryFile) continue;
-
-      const cacheKey = `${ms.id}/${sl.id}`;
-      const cached = changelogCache.get(cacheKey);
-
-      let mtime = 0;
-      try {
-        mtime = statSync(summaryFile).mtimeMs;
-      } catch {
-        continue;
-      }
-
-      if (cached && cached.mtime === mtime) {
-        entries.push(cached.entry);
-        verifications.push(cached.verification);
-        continue;
-      }
-
-      const content = await loadFile(summaryFile);
+      const content = getSlice(ms.id, sl.id)?.full_summary_md;
       if (!content) continue;
 
       const summary = parseSummary(content);
@@ -553,7 +532,6 @@ async function loadChangelogAndVerifications(basePath: string, milestones: Visua
         })),
       };
 
-      changelogCache.set(cacheKey, { mtime, entry, verification });
       entries.push(entry);
       verifications.push(verification);
     }
@@ -778,14 +756,15 @@ function loadDiscussionState(milestones: VisualizerMilestone[]): VisualizerDiscu
 export async function loadVisualizerData(basePath: string): Promise<VisualizerData> {
   ensureVisualizerDb(basePath);
   const state = await deriveState(basePath);
-  const milestoneIds = findMilestoneIds(basePath);
 
   const milestones: VisualizerMilestone[] = [];
 
-  for (const mid of milestoneIds) {
-    const entry = state.registry.find(r => r.id === mid);
-    const status = entry?.status ?? 'pending';
-    const dependsOn = entry?.dependsOn ?? [];
+  // The Milestone list is the registry, which deriveState builds from database
+  // rows. A Milestone directory with no row is not a Milestone.
+  for (const entry of state.registry) {
+    const mid = entry.id;
+    const status = entry.status;
+    const dependsOn = entry.dependsOn ?? [];
 
     const slices: VisualizerSlice[] = [];
 
@@ -828,7 +807,7 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
 
     milestones.push({
       id: mid,
-      title: entry?.title ?? mid,
+      title: entry.title,
       status,
       dependsOn,
       slices,
@@ -867,7 +846,7 @@ export async function loadVisualizerData(basePath: string): Promise<VisualizerDa
   }
 
   const agentActivity = loadAgentActivity(units, milestones, state.activeMilestone?.id);
-  const { changelog, verifications: sliceVerifications } = await loadChangelogAndVerifications(basePath, milestones);
+  const { changelog, verifications: sliceVerifications } = loadChangelogAndVerifications(milestones);
 
   const knowledge = loadKnowledge(basePath);
   const memories = loadMemories();
