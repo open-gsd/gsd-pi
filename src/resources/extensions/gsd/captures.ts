@@ -3,7 +3,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 
 import { atomicWriteSync } from "./atomic-write.js";
 import { noteRenderedProjectionFile } from "./compat/compat-marker.js";
@@ -85,7 +85,9 @@ function runCaptureOperation(
   executeDomainOperation({
     operationType,
     idempotencyKey: invocation?.idempotencyKey ?? `${operationType}/${fence.revision}`,
-    expectedRevision: fence.revision,
+    // The caller's revision is a precondition of the first send only. A retry
+    // can carry a newer revision, so a replay uses the recorded one.
+    expectedRevision: fence.replay ? fence.revision : invocation?.expectedRevision ?? fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: invocation?.actorType ?? "operator",
     ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),
@@ -105,12 +107,20 @@ function runCaptureOperation(
   }
 }
 
-/** `/gsd capture`: record one pending capture in a capture.register Domain Operation. Returns its id. */
-export function appendCapture(basePath: string, text: string): string {
-  const id = `CAP-${randomUUID().slice(0, 8)}`;
+/**
+ * `/gsd capture` and the `capture_register` workflow command: record one
+ * pending capture in a capture.register Domain Operation. Returns its id.
+ * With an invocation the id comes from the idempotency key, so a command that
+ * is sent again gives the same capture.
+ */
+export function appendCapture(basePath: string, text: string, invocation?: ExecutionInvocation): string {
+  const suffix = invocation
+    ? createHash("sha256").update(invocation.idempotencyKey).digest("hex")
+    : randomUUID();
+  const id = `CAP-${suffix.slice(0, 8)}`;
   runCaptureOperation(basePath, "capture.register", { captureId: id, text }, () => [
     { eventType: "capture.registered", entityId: id, payload: { text } },
-  ]);
+  ], invocation);
   return id;
 }
 

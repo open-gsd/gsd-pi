@@ -2,9 +2,13 @@
 // File Purpose: The typed workflow command (RPC `workflow_command`) runs one Domain Operation per idempotency key and honors the expected revision.
 
 import assert from "node:assert/strict";
+import { rmSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, test } from "node:test";
 
+import { loadAllCaptures } from "../captures.ts";
 import { _getAdapter, getAllMilestones, getMilestone, getProjectAuthorityVersion, insertMilestone } from "../gsd-db.ts";
+import { loadActiveOverrides } from "../overrides.ts";
 import { runWorkflowCommand } from "../workflow-command.ts";
 import { createWorkflowAuthorityFixture, type WorkflowAuthorityFixture } from "./workflow-authority-fixture.ts";
 
@@ -200,6 +204,75 @@ test("a command for a milestone that does not exist is refused with the reason",
   assert.match(result.message, /M404 does not exist/);
 });
 
+test("a capture command sent twice with the same idempotency key gives one pending capture", async () => {
+  const expectedRevision = getProjectAuthorityVersion().revision;
+  const capture = (revision: number) => runWorkflowCommand({
+    cwd: fixture.root,
+    name: "capture_register",
+    args: { text: "Add a retry to the upload" },
+    idempotencyKey: "user-action-3",
+    expectedRevision: revision,
+  });
+
+  const first = await capture(expectedRevision);
+  const second = await capture(first.revision);
+
+  assert.equal(first.ok, true, first.message);
+  assert.deepEqual(second, first, "the second send returns the result of the first");
+  const captures = loadAllCaptures(fixture.root);
+  assert.deepEqual(captures.map((entry) => [entry.text, entry.status]), [["Add a retry to the upload", "pending"]]);
+  assert.equal(first.message, `Captured: ${captures[0]!.id}`);
+  assert.deepEqual(operations("capture.register").map((row) => ({ ...row })), [{
+    idempotency_key: "rpc:capture_register:user-action-3",
+    source_transport: "internal",
+    actor_type: "operator",
+    expected_revision: expectedRevision,
+  }]);
+});
+
+test("an override command sent twice registers one override that is active with OVERRIDES.md deleted", async () => {
+  const expectedRevision = getProjectAuthorityVersion().revision;
+  const steer = (revision: number) => runWorkflowCommand({
+    cwd: fixture.root,
+    name: "override_register",
+    args: { change: "Use Postgres instead of SQLite" },
+    idempotencyKey: "user-action-4",
+    expectedRevision: revision,
+  });
+
+  const first = await steer(expectedRevision);
+  const second = await steer(first.revision);
+
+  assert.equal(first.ok, true, first.message);
+  assert.deepEqual(second, first, "the second send returns the result of the first");
+  rmSync(join(fixture.root, ".gsd", "OVERRIDES.md"));
+  const overrides = loadActiveOverrides(fixture.root);
+  assert.deepEqual(overrides.map((override) => [override.change, override.scope]), [["Use Postgres instead of SQLite", "active"]]);
+  assert.match(overrides[0]!.appliedAt, /^M001\//, "the override records the active unit");
+  assert.deepEqual(operations("override.register").map((row) => ({ ...row })), [{
+    idempotency_key: "rpc:override_register:user-action-4",
+    source_transport: "internal",
+    actor_type: "operator",
+    expected_revision: expectedRevision,
+  }]);
+});
+
+test("a capture or override command with a stale expected revision is refused and changes nothing", async () => {
+  const revision = getProjectAuthorityVersion().revision;
+  const stale = { cwd: fixture.root, idempotencyKey: "user-action-5", expectedRevision: revision - 1 };
+
+  const capture = await runWorkflowCommand({ ...stale, name: "capture_register", args: { text: "Late thought" } });
+  const steer = await runWorkflowCommand({ ...stale, name: "override_register", args: { change: "Late change" } });
+
+  for (const result of [capture, steer]) {
+    assert.equal(result.ok, false);
+    assert.match(result.message, /stale project revision/);
+    assert.equal(result.revision, revision);
+  }
+  assert.deepEqual(loadAllCaptures(fixture.root), []);
+  assert.deepEqual(loadActiveOverrides(fixture.root), []);
+});
+
 test("a malformed command throws before any operation runs", async () => {
   await assert.rejects(park({ name: "milestone_delete_everything" }), /Unknown workflow command/);
   await assert.rejects(park({ idempotencyKey: " " }), /requires an idempotencyKey/);
@@ -208,5 +281,7 @@ test("a malformed command throws before any operation runs", async () => {
   await assert.rejects(park({ cwd: undefined }), /requires a session CWD/);
   await assert.rejects(reorder({ args: { order: "M001" } }), /requires args\.order as a list/);
   await assert.rejects(reorder({ args: { order: ["M001", 2] } }), /requires args\.order as a list/);
+  await assert.rejects(park({ name: "capture_register", args: { text: " " } }), /requires args\.text/);
+  await assert.rejects(park({ name: "override_register", args: {} }), /requires args\.change/);
   assert.deepEqual(operations("milestone.park"), []);
 });

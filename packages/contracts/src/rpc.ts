@@ -215,14 +215,18 @@ export interface ProjectSnapshot {
 /**
  * A workflow mutation that a host sends as a typed command, not as
  * slash-command text. It runs the same executor as the workflow tool of the
- * same name.
+ * same name. `capture_register` and `override_register` have no workflow
+ * tool: they run the Domain Operation of `/gsd capture` and `/gsd steer`,
+ * with the operator as the actor.
  */
 export type WorkflowCommandRequest =
 	| { name: "milestone_park"; args: { milestoneId: string; reason: string } }
 	| { name: "milestone_unpark"; args: { milestoneId: string } }
 	| { name: "milestone_discard"; args: { milestoneId: string; reason: string } }
 	| { name: "milestone_reorder"; args: { order: string[] } }
-	| { name: "milestone_set_dependencies"; args: { milestoneId: string; dependsOn: string[] } };
+	| { name: "milestone_set_dependencies"; args: { milestoneId: string; dependsOn: string[] } }
+	| { name: "capture_register"; args: { text: string } }
+	| { name: "override_register"; args: { change: string } };
 
 export interface WorkflowCommandIdentity {
 	/**
