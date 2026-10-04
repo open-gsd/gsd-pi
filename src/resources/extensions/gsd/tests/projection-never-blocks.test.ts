@@ -4,10 +4,13 @@
 // of the changed bytes, renders the database content again, and reports it.
 
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "node:test";
 
+import { saveRequirementToDb } from "../db-writer.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import {
   describePreservedProjectionChanges,
   preserveProjectionChangesBeforeDispatch,
@@ -81,4 +84,59 @@ test("G2: poisoned projections before dispatch are rendered again and never stop
     assert.equal(notice.split(`.gsd/${rel} -> `).length, 2, `${rel} is in the user notice once`);
   }
   assert.equal(after[statePath], control[statePath], "STATE.md is back to the database render");
+});
+
+describe("external state layout: .gsd is a symlink to the state directory", () => {
+  let project: string;
+  let state: string;
+
+  beforeEach(() => {
+    project = realpathSync.native(mkdtempSync(join(tmpdir(), "gsd-external-project-")));
+    state = realpathSync.native(mkdtempSync(join(tmpdir(), "gsd-external-state-")));
+    symlinkSync(state, join(project, ".gsd"), process.platform === "win32" ? "junction" : "dir");
+    assert.equal(openDatabase(join(project, ".gsd", "gsd.db")), true);
+  });
+
+  afterEach(() => {
+    closeDatabase();
+    rmSync(project, { recursive: true, force: true });
+    rmSync(state, { recursive: true, force: true });
+  });
+
+  const requirement = (description: string) => ({
+    class: "core-capability",
+    status: "active",
+    description,
+    why: "The state directory is outside the project.",
+    source: "projection-never-blocks",
+    primary_owner: "M001/S01",
+    validation: "The hand edit is kept.",
+  });
+  const handEdit = "# Requirements\n\nEdited by hand.\n";
+
+  test("a GSD write through the real path keeps one copy of a hand edit", async () => {
+    await saveRequirementToDb(requirement("First requirement"), project);
+    writeFileSync(join(state, "REQUIREMENTS.md"), handEdit);
+
+    await saveRequirementToDb(requirement("Second requirement"), project);
+
+    assert.match(readFileSync(join(state, "REQUIREMENTS.md"), "utf-8"), /Second requirement/);
+    assert.deepEqual(quarantineCopies(project, "REQUIREMENTS.md"), [handEdit]);
+  });
+
+  test("the Projection Worker keeps one copy of a hand edit, renders the file again, and names the copy", async () => {
+    await saveRequirementToDb(requirement("First requirement"), project);
+    const rendered = readFileSync(join(state, "REQUIREMENTS.md"), "utf-8");
+    writeFileSync(join(state, "REQUIREMENTS.md"), handEdit);
+
+    const observation = await preserveProjectionChangesBeforeDispatch(project);
+
+    assert.deepEqual(observation.errors, []);
+    assert.equal(readFileSync(join(state, "REQUIREMENTS.md"), "utf-8"), rendered);
+    assert.deepEqual(quarantineCopies(project, "REQUIREMENTS.md"), [handEdit]);
+    assert.match(
+      describePreservedProjectionChanges(project, observation.preserved),
+      /REQUIREMENTS\.md -> .*quarantine\/projections\/[^\n]*\/gsd\/REQUIREMENTS\.md/,
+    );
+  });
 });
