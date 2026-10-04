@@ -184,42 +184,63 @@ export function blockedWriteReason(filePath: string): string | null {
   return tool ? projectionWriteError(filePath, tool) : null;
 }
 
-// A shell word that names a file under a .gsd directory.
-const BASH_GSD_PATH = /[^\s"'`;|&<>()=]*\.gsd[/\\][^\s"'`;|&<>()]+/gi;
-// The same inside quotes, where the path can hold spaces. The lookahead tries each quote as an opener.
-const BASH_QUOTED_GSD_PATH = /(["'])(?=([^"'\r\n]*\.gsd[/\\][^"'\r\n]*)\1)/g;
+// One shell token: a redirect operator, a command separator, or a whole word
+// (quoted and unquoted parts, escaped characters, command substitutions).
+const BASH_TOKEN = /(\d*(?:>{1,2}[|&]?|<{1,3}))|([;|&\r\n]+)|((?:\\.|"[^"\r\n]*"|'[^'\r\n]*'|\$\((?:[^()\r\n]|\([^()\r\n]*\))*\)|`[^`\r\n]*`|[^\s"'`;|&<>()])+)/g;
+const BASH_LAST_ARG_WRITERS = new Set(["cp", "mv", "install"]);
 
-// The whole shell word that is a redirect or dd target: quoted and unquoted parts, escaped characters.
-const BASH_WRITE_TARGET_WORD = /(?:>{1,2}\|?\s*|\bdd\b[^;|&\r\n]*\bof=)((?:\\.|"[^"\r\n]*"|'[^'\r\n]*'|[^\s"';|&<>()])+)/gi;
+/** The words of one simple command that name a file the command writes. */
+function commandWriteTargets(words: string[]): string[] {
+  const names = words.map((word) => word.slice(word.lastIndexOf("/") + 1).toLowerCase());
+  const at = names.findIndex((name) => BASH_LAST_ARG_WRITERS.has(name) || ["tee", "dd", "sed"].includes(name));
+  if (at < 0) return [];
+  const args = words.slice(at + 1);
+  const files = args.filter((arg) => !arg.startsWith("-"));
+  if (names[at] === "tee") return files;
+  if (names[at] === "dd") return args.filter((arg) => /^of=/i.test(arg)).map((arg) => arg.slice(3));
+  if (names[at] === "sed") return args.some((arg) => /^(?:-i|--in-place)/.test(arg)) ? files : [];
+  return files.slice(-1);
+}
 
-function bashWritesTo(command: string, path: string): boolean {
-  const target = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const segment = "[^;|&\\r\\n]*";
-  return [
-    `\\btee\\b${segment}${target}`,
-    // cp/mv: the path is the destination only when it is the last argument.
-    `\\b(?:cp|mv)\\b${segment}\\s["']?${target}["']?(?:\\s+\\d*[<>]${segment})?\\s*(?:$|[;|&\\r\\n])`,
-    `\\bsed\\b${segment}\\s-i${segment}${target}`,
-  ].some((pattern) => new RegExp(pattern, "i").test(command));
+/** Every file a bash command writes by redirect, tee, dd, sed -i, cp, mv or install. */
+function bashWriteTargets(command: string): string[] {
+  const targets: string[] = [];
+  let words: string[] = [];
+  let redirect = "";
+  for (const [, operator, separator, rawWord] of command.matchAll(BASH_TOKEN)) {
+    if (operator) {
+      redirect = operator;
+    } else if (separator) {
+      targets.push(...commandWriteTargets(words));
+      words = [];
+      redirect = "";
+    } else {
+      const word = rawWord.replace(/["']/g, "");
+      if (redirect.includes(">")) targets.push(word);
+      else if (!redirect) words.push(word);
+      redirect = "";
+    }
+  }
+  return [...targets, ...commandWriteTargets(words)];
 }
 
 /**
  * Refusal text when a bash command writes STATE.md, gsd.db or a managed
  * projection that has a save tool; null when the command is allowed.
- * Like the state-file guard this is a pattern guard, not a shell parser: it
- * sees only paths written with their .gsd directory.
+ * Like the state-file guard this is a pattern guard, not a shell parser. It
+ * resolves the whole target word of a redirect, tee, dd of=, sed -i and the
+ * last argument of cp, mv and install; a variable or command substitution
+ * before `/.gsd/` is part of that word. Known limits, not covered: a write
+ * inside a command substitution or an eval string, a target named without
+ * its .gsd directory (after `cd .gsd`, a directory destination, a variable
+ * that holds the whole path), rm, and writes from an interpreter
+ * (python, perl, node).
  */
 export function blockedBashWriteReason(command: string): string | null {
   if (isBashWriteToStateFile(command)) return BLOCKED_WRITE_ERROR;
-  for (const match of command.matchAll(BASH_WRITE_TARGET_WORD)) {
-    const path = match[1].replace(/["']/g, "");
+  for (const path of bashWriteTargets(command)) {
     const tool = projectionSaveTool(path);
     if (tool) return projectionWriteError(path, tool);
-  }
-  const quoted = Array.from(command.matchAll(BASH_QUOTED_GSD_PATH), (match) => match[2]);
-  for (const path of [...(command.match(BASH_GSD_PATH) ?? []), ...quoted]) {
-    const tool = projectionSaveTool(path);
-    if (tool && bashWritesTo(command, path)) return projectionWriteError(path, tool);
   }
   return null;
 }

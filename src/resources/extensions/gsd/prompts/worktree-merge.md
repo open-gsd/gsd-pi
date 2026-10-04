@@ -67,6 +67,8 @@ Classify each changed file.
 - **Requirements** — changes to REQUIREMENTS.md
 - **Other** — anything else
 
+**Managed `.gsd` projections are never hand-merged.** Roadmaps, plans, RESEARCH/CONTEXT, DECISIONS.md, REQUIREMENTS.md, STATE.md and KNOWLEDGE.md are renders of the GSD database. List them, but do not reconcile their text and do not write or edit them.
+
 ### Step 2: Conflict Assessment
 
 For each **modified** file, check whether main also changed since the worktree branched. Flag diverged files for manual reconciliation.
@@ -80,7 +82,7 @@ To compare versions:
 Classify each modified file:
 
 - **Clean merges** — main unchanged; apply worktree changes directly.
-- **Conflicts** — both changed same file; reconcile.
+- **Conflicts** — both changed same file; reconcile. For a managed `.gsd` projection, do not reconcile: plan to take either side.
 - **Stale changes** — main replaced/removed a file the worktree modified.
 
 ### Step 3: Merge Strategy
@@ -101,11 +103,13 @@ Ask the user to confirm the merge plan before proceeding.
 Once the user has explicitly confirmed, run all commands from `{{mainTreePath}}` (your CWD):
 
 1. Ensure you are on the target branch: `git checkout {{mainBranch}}`
-2. If conflicts require manual reconciliation, apply reconciled versions first
+2. If source-file conflicts require manual reconciliation, apply reconciled versions first
 3. Run `git merge --squash {{worktreeBranch}}` to bring in all changes
-4. Review staged changes; adjust reconciled files if needed
+4. Review staged changes; adjust reconciled source files if needed
+   - For a conflict in a managed `.gsd` projection, take either side with git (`git checkout --theirs -- <path>` or `--ours`, then `git add <path>`). Do not edit the file.
 5. Commit with message: `merge(worktree/{{worktreeName}}): <summary of what was merged>`
 6. Report what was merged
+7. If a managed `.gsd` projection was in the merge, tell the user to run `/gsd rebuild markdown` to render the files again from the database. A real content change to a roadmap, plan, decision or requirement goes through the workflow tools, not a file edit.
 
 ### Step 5: Cleanup Prompt
 
@@ -127,5 +131,5 @@ git branch -D {{worktreeBranch}}
 
 - Never silently discard changes from either branch.
 - When in doubt, show both versions and ask.
-- Preserve GSD artifact formatting: frontmatter, sections, checkbox states.
+- The GSD database is the authority for managed `.gsd` projections; the files are rendered from it.
 - If new milestone IDs conflict with main, flag immediately.
