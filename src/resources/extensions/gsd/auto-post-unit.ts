@@ -1310,13 +1310,6 @@ export async function autoCommitUnit(
   }
 }
 
-/**
- * Execute the turn-level git action (commit, snapshot, or status-only).
- *
- * @param opts.softFailure - Defaults to false. When true, retry git failures,
- * warn, and continue only for transient git failures. Deterministic task
- * commit hook failures are routed through task remediation instead.
- */
 /** The git-commit repair of the task used all its attempts: release its stored retry and pause. */
 async function pauseExhaustedCommitRepair(
   pctx: PostUnitContext,
@@ -1354,6 +1347,13 @@ async function softGitFailureEndsCommitRepair(
   return true;
 }
 
+/**
+ * Execute the turn-level git action (commit, snapshot, or status-only).
+ *
+ * @param opts.softFailure - Defaults to false. When true, retry git failures,
+ * warn, and continue only for transient git failures. Deterministic task
+ * commit hook failures are routed through task remediation instead.
+ */
 async function runCloseoutGitAction(
   pctx: PostUnitContext,
   unit: NonNullable<AutoSession["currentUnit"]>,
