@@ -1420,19 +1420,6 @@ export function diffWorktreeNumstat(
 }
 
 /**
- * Get the full diff content for .gsd/ between the worktree branch and main.
- * Returns the raw unified diff for LLM consumption.
- */
-export function getWorktreeGSDDiff(basePath: string, name: string, mainBranchOverride?: string): string {
-  basePath = normalizeBasePathForWorktreeOps(basePath);
-
-  const branch = worktreeBranchName(name);
-  const mainBranch = mainBranchOverride ?? nativeDetectMainBranch(basePath);
-
-  return nativeDiffContent(basePath, mainBranch, branch, ".gsd/", undefined, true);
-}
-
-/**
  * Get the full diff content for non-.gsd/ files between the worktree branch and main.
  * Returns the raw unified diff for LLM consumption.
  */

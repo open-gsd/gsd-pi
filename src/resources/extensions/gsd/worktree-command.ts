@@ -24,7 +24,6 @@ import {
   mergeWorktreeToMain,
   diffWorktreeAll,
   diffWorktreeNumstat,
-  getWorktreeGSDDiff,
   getWorktreeCodeDiff,
   getWorktreeLog,
   worktreeBranchName,
@@ -556,7 +555,6 @@ async function handleMerge(
     // Gather merge context — full repo diff, not just .gsd/
     const diffSummary = diffWorktreeAll(basePath, name, undefined, mainBranch);
     const numstat = diffWorktreeNumstat(basePath, name, undefined, mainBranch);
-    const gsdDiff = getWorktreeGSDDiff(basePath, name, mainBranch);
     const codeDiff = getWorktreeCodeDiff(basePath, name, mainBranch);
     const commitLog = getWorktreeLog(basePath, name, mainBranch);
 
@@ -696,7 +694,6 @@ async function handleMerge(
       addedFiles: formatFiles(diffSummary.added),
       modifiedFiles: formatFiles(diffSummary.modified),
       removedFiles: formatFiles(diffSummary.removed),
-      gsdDiff: gsdDiff || "(no GSD artifact changes)",
       codeDiff: codeDiff || "(no code changes)",
     });
 

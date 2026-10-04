@@ -992,8 +992,9 @@ test("active replacement intent prevents worktree reconciliation from mutating m
 
   openDatabase(main.databasePath);
   createReplacementIntent(main.databasePath);
-  const result = reconcileWorktreeDb(main.databasePath, worktree.databasePath);
+  const { error, ...result } = reconcileWorktreeDb(main.databasePath, worktree.databasePath);
 
+  assert.match(error ?? "", /Database writes are fenced while replacement intent exists/);
   assert.deepEqual(result, {
     decisions: 0,
     requirements: 0,

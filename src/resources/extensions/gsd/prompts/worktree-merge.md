@@ -10,7 +10,7 @@ Your CWD is the **main project tree** at `{{mainTreePath}}` on `{{mainBranch}}`.
 
 ## Context
 
-The worktree may contain code, milestones, roadmaps, plans, research, decisions, requirements, or other artifacts to merge.
+The worktree contains code changes to merge. Files under `.gsd/` are renders of the GSD database and are not merge input.
 
 ### Commit History (worktree)
 
@@ -35,12 +35,6 @@ The worktree may contain code, milestones, roadmaps, plans, research, decisions,
 {{codeDiff}}
 ```
 
-### GSD Artifact Diff
-
-```diff
-{{gsdDiff}}
-```
-
 ## Your Task
 
 Analyze and guide the merge exactly:
@@ -56,18 +50,7 @@ Classify each changed file.
 - **Config changes** — package.json, tsconfig, build config, etc.
 - **Deleted files** — removed source/config.
 
-**GSD artifact changes:**
-
-- **New milestones** — new M###/ directories with roadmaps.
-- **New slices/tasks** — planning artifacts inside existing milestones.
-- **Updated roadmaps** — changed M###-ROADMAP.md files.
-- **Updated plans** — changed slice/task plans.
-- **Research/context** — new or updated RESEARCH.md, CONTEXT.md.
-- **Decisions** — changes to DECISIONS.md
-- **Requirements** — changes to REQUIREMENTS.md
-- **Other** — anything else
-
-**Managed `.gsd` projections are never hand-merged.** Roadmaps, plans, RESEARCH/CONTEXT, DECISIONS.md, REQUIREMENTS.md, STATE.md and KNOWLEDGE.md are renders of the GSD database. List them, but do not reconcile their text and do not write or edit them.
+**Managed `.gsd` projections are never hand-merged.** Roadmaps, plans, RESEARCH/CONTEXT, DECISIONS.md, REQUIREMENTS.md, STATE.md and KNOWLEDGE.md are renders of the GSD database. Do not reconcile their text and do not write or edit them.
 
 ### Step 2: Conflict Assessment
 

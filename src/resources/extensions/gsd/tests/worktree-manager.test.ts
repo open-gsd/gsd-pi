@@ -11,7 +11,6 @@ import {
   removeWorktree,
   diffWorktreeGSD,
   diffWorktreeNumstat,
-  getWorktreeGSDDiff,
   getWorktreeLog,
   mergeWorktreeToMain,
   worktreeBranchName,
@@ -454,7 +453,7 @@ describe("listWorktrees", () => {
 
 // ─── diffWorktreeGSD ─────────────────────────────────────────────────────────
 
-describe("diffWorktreeGSD and getWorktreeGSDDiff", () => {
+describe("diffWorktreeGSD", () => {
   let base: string;
   beforeEach(() => {
     const repo = makeRepoWithChanges("feature-x");
@@ -475,12 +474,6 @@ describe("diffWorktreeGSD and getWorktreeGSDDiff", () => {
       "M001 roadmap should be in modified files",
     );
     assert.strictEqual(diff.removed.length, 0, "should have no removed files");
-  });
-
-  test("returns patch content", () => {
-    const fullDiff = getWorktreeGSDDiff(base, "feature-x");
-    assert.ok(fullDiff.includes("M002"), "diff should mention M002");
-    assert.ok(fullDiff.includes("updated"), "diff should mention the update");
   });
 });
 
