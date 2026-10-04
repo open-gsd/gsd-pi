@@ -37,7 +37,7 @@ function insertValidationPass(): void {
   });
 }
 
-function writeSummary(base: string, status = "complete"): void {
+function writeSummary(base: string, status: string): void {
   writeFileSync(
     join(base, ".gsd", "milestones", "M001", "M001-SUMMARY.md"),
     `---\nstatus: ${status}\n---\n\n# Summary\n`,
@@ -52,15 +52,14 @@ test.after(() => {
   }
 });
 
-test("proveMilestoneCloseout accepts closed DB state plus summary artifact", () => {
+test("proveMilestoneCloseout accepts closed DB state", () => {
   const base = makeBase();
   insertMilestone({ id: "M001", title: "Done", status: "complete" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
   insertValidationPass();
-  writeSummary(base);
 
   const result = proveMilestoneCloseout("M001", {
-    summaryArtifactBasePath: base,
+    artifactBasePath: base,
   });
 
   assert.deepEqual(result, { ok: true });
@@ -71,17 +70,16 @@ test("proveMilestoneCloseout can prove readiness before DB milestone is closed",
   insertMilestone({ id: "M001", title: "Ready", status: "active" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
   insertValidationPass();
-  writeSummary(base);
 
   const result = proveMilestoneCloseout("M001", {
     allowOpenMilestone: true,
-    summaryArtifactBasePath: base,
+    artifactBasePath: base,
   });
 
   assert.deepEqual(result, { ok: true });
 });
 
-test("proveMilestoneCloseout rejects explicit failure summaries", () => {
+test("proveMilestoneCloseout takes the outcome from the database, not from the SUMMARY file", () => {
   const base = makeBase();
   insertMilestone({ id: "M001", title: "Done", status: "complete" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
@@ -89,11 +87,8 @@ test("proveMilestoneCloseout rejects explicit failure summaries", () => {
   writeSummary(base, "failed");
 
   const result = proveMilestoneCloseout("M001", {
-    summaryArtifactBasePath: base,
+    artifactBasePath: base,
   });
 
-  assert.equal(result.ok, false);
-  if (!result.ok) {
-    assert.equal(result.reason, "summary-artifact-failed");
-  }
+  assert.deepEqual(result, { ok: true });
 });

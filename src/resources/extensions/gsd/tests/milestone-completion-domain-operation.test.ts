@@ -512,15 +512,11 @@ afterEach(cleanupFixtures);
 
 test("adopted closeout proof inspects quality gates without mutating them", async () => {
   const basePath = await prepareFixture();
-  writeFileSync(
-    join(basePath, ".gsd", "milestones", "M001", "M001-SUMMARY.md"),
-    "# Milestone Summary\n",
-  );
   const before = qualityGateSnapshot();
 
   const result = proveMilestoneCloseout("M001", {
     allowOpenMilestone: true,
-    summaryArtifactBasePath: basePath,
+    artifactBasePath: basePath,
   });
 
   assert.deepEqual(result, { ok: true });

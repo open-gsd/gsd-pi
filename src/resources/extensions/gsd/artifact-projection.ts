@@ -13,7 +13,6 @@ export interface CloseoutArtifactProjectionInput {
 export interface CloseoutArtifactProjection {
   projectRoot: string;
   canonicalMilestoneRoot: string;
-  summaryArtifactBasePath: string;
   gateEvidenceBasePath: string;
 }
 
@@ -25,7 +24,6 @@ export function resolveCloseoutArtifactProjection(
   return {
     projectRoot,
     canonicalMilestoneRoot,
-    summaryArtifactBasePath: canonicalMilestoneRoot,
     gateEvidenceBasePath: canonicalMilestoneRoot,
   };
 }
