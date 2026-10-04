@@ -482,7 +482,7 @@ test("dispatch-rule-coverage: rule registry has the expected size", () => {
   // intentionally.
   assert.equal(
     DISPATCH_RULES.length,
-    30,
+    29,
     `DISPATCH_RULES length changed (got ${DISPATCH_RULES.length}). ` +
       "If you added a rule, add a state stub to dispatch-rule-coverage.test.ts " +
       "and update this expected count.",
