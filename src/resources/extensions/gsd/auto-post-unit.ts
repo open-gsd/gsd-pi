@@ -2614,7 +2614,13 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
     }
   }
 
-  if (s.currentUnit && !s.currentUnit.type.startsWith("hook/")) {
+  // An execute-task Task is complete only after host verification publishes
+  // it, so its GitHub sync runs in postUnitPostVerification.
+  if (
+    s.currentUnit &&
+    !s.currentUnit.type.startsWith("hook/") &&
+    !shouldDeferCloseoutGitAction(s.currentUnit.type)
+  ) {
     await runPostUnitGitHubSyncIfNeeded(s.basePath, s.currentUnit);
   }
 
@@ -2671,6 +2677,9 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
       } catch (e) {
         debugLog("postUnit", { phase: "safety-file-change", error: String(e) });
       }
+      // The Task is verified, published and committed: the sync reads the
+      // complete task row.
+      await runPostUnitGitHubSyncIfNeeded(s.basePath, s.currentUnit);
     }
 
     try {
