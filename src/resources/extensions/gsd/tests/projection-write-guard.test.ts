@@ -109,6 +109,26 @@ test("the external state layout and a worktree .gsd are covered", async () => {
   assert.match(worktree?.reason ?? "", /gsd_decision_save/);
 });
 
+test("bash writes to a quoted projection path that has a space are refused", async () => {
+  const path = "/Users/me/My Project/.gsd/DECISIONS.md";
+  const commands = [
+    `echo x >> "${path}"`,
+    `echo x > '${path}'`,
+    `dd if=/tmp/draft.md of="${path}"`,
+    `echo "note" > /tmp/note.txt; echo x >> "${path}"`,
+    `cat notes.md | tee "${path}"`,
+    `cp /tmp/draft.md "${path}"`,
+  ];
+  for (const command of commands) {
+    const result = await guard("bash", { command });
+    assert.equal(result?.block, true, `${command} must be blocked`);
+    assert.match(result?.reason ?? "", /gsd_decision_save/);
+  }
+  for (const command of [`cat "${path}" > /tmp/out.txt`, `cp "${path}" "/tmp/My Copy/decisions.md"`]) {
+    assert.equal(await guard("bash", { command }), undefined, `${command} must pass`);
+  }
+});
+
 test("a workflow file name outside the paths the renderers own is not blocked", async () => {
   // /gsd milestone-summary writes its report to .gsd/summaries, named after the milestone.
   const documents = [

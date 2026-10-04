@@ -186,6 +186,8 @@ export function blockedWriteReason(filePath: string): string | null {
 
 // A shell word that names a file under a .gsd directory.
 const BASH_GSD_PATH = /[^\s"'`;|&<>()=]*\.gsd[/\\][^\s"'`;|&<>()]+/gi;
+// The same inside quotes, where the path can hold spaces. The lookahead tries each quote as an opener.
+const BASH_QUOTED_GSD_PATH = /(["'])(?=([^"'\r\n]*\.gsd[/\\][^"'\r\n]*)\1)/g;
 
 function bashWritesTo(command: string, path: string): boolean {
   const target = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -208,7 +210,8 @@ function bashWritesTo(command: string, path: string): boolean {
  */
 export function blockedBashWriteReason(command: string): string | null {
   if (isBashWriteToStateFile(command)) return BLOCKED_WRITE_ERROR;
-  for (const path of command.match(BASH_GSD_PATH) ?? []) {
+  const quoted = Array.from(command.matchAll(BASH_QUOTED_GSD_PATH), (match) => match[2]);
+  for (const path of [...(command.match(BASH_GSD_PATH) ?? []), ...quoted]) {
     const tool = projectionSaveTool(path);
     if (tool && bashWritesTo(command, path)) return projectionWriteError(path, tool);
   }
