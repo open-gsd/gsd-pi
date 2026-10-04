@@ -9,7 +9,13 @@ import { noteRenderedProjectionFile } from "./compat/compat-marker.js";
 import type { DomainJsonValue } from "./db/domain-operation.js";
 import { getDbOrNull } from "./db/engine.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
-import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
+import {
+  executeDomainOperation,
+  isDbAvailable,
+  type DomainOperationContext,
+  type DomainOperationMutation,
+} from "./gsd-db.js";
+import { registerMilestoneRows } from "./milestone-registration.js";
 import { gsdRoot } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
 
@@ -123,12 +129,16 @@ interface BacklogEvent {
   payload: DomainJsonValue;
 }
 
-/** Run one backlog Domain Operation, then render BACKLOG.md from the committed rows. */
+/**
+ * Run one backlog Domain Operation, then render BACKLOG.md from the committed rows.
+ * `also` writes other rows inside the same operation and returns their events.
+ */
 function runBacklogOperation(
   basePath: string,
   operationType: string,
   payload: DomainJsonValue,
   events: BacklogEvent[],
+  also?: (context: DomainOperationContext) => DomainOperationMutation,
 ): void {
   if (!isDbAvailable()) throw new Error(`${operationType} requires the GSD database`);
   const fence = readDomainOperationFence();
@@ -140,10 +150,19 @@ function runBacklogOperation(
     actorType: "operator",
     sourceTransport: "internal",
     payload,
-  }, () => ({
-    events: events.map((event) => ({ ...event, entityType: "backlog_item", destinations: ["projection"] })),
-    projections: [{ projectionKey: "backlog", projectionKind: "markdown", rendererVersion: "1" }],
-  }));
+  }, (context) => {
+    const other = also?.(context);
+    return {
+      events: [
+        ...(other?.events ?? []),
+        ...events.map((event) => ({ ...event, entityType: "backlog_item", destinations: ["projection"] })),
+      ],
+      projections: [
+        ...(other?.projections ?? []),
+        { projectionKey: "backlog", projectionKind: "markdown", rendererVersion: "1" },
+      ],
+    };
+  });
   try {
     renderBacklogProjection(basePath);
   } catch (err) {
@@ -233,12 +252,21 @@ export function addBacklogItem(basePath: string, title: string): string {
   return id;
 }
 
-/** Record that an item became the given milestone, in a backlog.promote Domain Operation. */
-export function promoteBacklogItem(basePath: string, itemId: string, milestoneId: string): void {
+/**
+ * Promote an item in one backlog.promote Domain Operation: the queued milestone
+ * row, its milestone.registered event and the backlog.promoted event commit
+ * together. A promote that fails leaves no milestone row, so a retry does not
+ * register a second milestone.
+ */
+export function promoteBacklogItem(
+  basePath: string,
+  item: Pick<BacklogItem, "id" | "title">,
+  milestoneId: string,
+): void {
   const note = `promoted ${new Date().toISOString().slice(0, 10)} as ${milestoneId}`;
-  runBacklogOperation(basePath, "backlog.promote", { itemId, milestoneId }, [
-    { eventType: "backlog.promoted", entityId: itemId, payload: { milestoneId, note } },
-  ]);
+  runBacklogOperation(basePath, "backlog.promote", { itemId: item.id, milestoneId }, [
+    { eventType: "backlog.promoted", entityId: item.id, payload: { milestoneId, note } },
+  ], (context) => registerMilestoneRows(context, [{ id: milestoneId, title: item.title }], "backlog-promote"));
 }
 
 /** Remove an item in a backlog.remove Domain Operation. */

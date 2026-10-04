@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 
 import { importFileBacklogItems, loadBacklogItems, unimportedFileBacklogItems } from "../backlog.ts";
 import { handleBacklog } from "../commands-backlog.ts";
+import { _setDomainOperationFaultForTest } from "../db/domain-operation.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
 import { _getAdapter, closeDatabase, getAllMilestones, isDbAvailable } from "../gsd-db.ts";
@@ -129,14 +130,50 @@ test("backlog promote creates a queued milestone and works with BACKLOG.md delet
     getAllMilestones().map((milestone) => [milestone.id, milestone.title, milestone.status]),
     [["M001", "OAuth support", "queued"]],
   );
-  assert.equal(operations("milestone.register"), 1);
   assert.equal(operations("backlog.promote"), 1);
+  assert.deepEqual(
+    _getAdapter()!.prepare(`
+      SELECT operation.operation_type, event.event_type, event.entity_id
+      FROM workflow_domain_events event
+      JOIN workflow_operations operation ON operation.operation_id = event.operation_id
+      WHERE event.event_type IN ('milestone.registered', 'backlog.promoted')
+      ORDER BY event.event_index
+    `).all().map((row) => [row["operation_type"], row["event_type"], row["entity_id"]]),
+    [["backlog.promote", "milestone.registered", "M001"], ["backlog.promote", "backlog.promoted", "999.1"]],
+    "the milestone row and the promotion are one operation",
+  );
   assert.match(notifications.join("\n"), /queued as milestone M001/);
   assert.deepEqual(loadBacklogItems().map((item) => [item.id, item.done]), [["999.1", true]]);
   assert.match(readBacklog(base), /^- \[x\] 999\.1 — OAuth support \(promoted \d{4}-\d{2}-\d{2} as M001\)$/m);
 
   assert.match((await runBacklog("promote 999.1")).join("\n"), /already promoted/);
   assert.equal(getAllMilestones().length, 1, "a second promote registers no second milestone");
+});
+
+test("a backlog promote that fails registers no milestone, and the retry registers one", async (t) => {
+  const base = makeTmpBase();
+  enterBacklogDir(t, base);
+  t.after(() => cleanup(base));
+  t.after(() => _setDomainOperationFaultForTest(null));
+  await runBacklog("add OAuth support");
+
+  // The operation fails after its writes and before its commit.
+  _setDomainOperationFaultForTest("after-mutation", "backlog.promote");
+  await assert.rejects(runBacklog("promote 999.1"), /domain operation fault/);
+
+  assert.deepEqual(getAllMilestones(), [], "the failed promote leaves no milestone row");
+  assert.deepEqual(loadBacklogItems().map((item) => item.done), [false]);
+
+  _setDomainOperationFaultForTest(null);
+  const notifications = await runBacklog("promote 999.1");
+
+  assert.match(notifications.join("\n"), /queued as milestone M001/);
+  assert.deepEqual(
+    getAllMilestones().map((milestone) => [milestone.id, milestone.title, milestone.status]),
+    [["M001", "OAuth support", "queued"]],
+    "the retry registers one milestone",
+  );
+  assert.deepEqual(loadBacklogItems().map((item) => item.done), [true]);
 });
 
 test("backlog promote allocates its own milestone id and leaves another flow's reservation", async (t) => {
