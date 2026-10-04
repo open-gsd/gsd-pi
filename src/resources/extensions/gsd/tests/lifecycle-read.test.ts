@@ -1,5 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: Behavior tests for the one read interface (db/lifecycle-read.ts)
+// File Purpose: Behavior tests for the read interface (db/lifecycle-read.ts)
 // and for the decision readers that must give its answers.
 
 import assert from "node:assert/strict";

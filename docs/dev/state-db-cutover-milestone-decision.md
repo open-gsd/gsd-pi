@@ -295,13 +295,38 @@ D012 is a decision. It is not the cutover:
   the gate.
 - The nine `deferredCutoverBlockers` in the dossier stay open. They are the
   Removal Gates listed below.
-- Step 1 of the read cutover is done: `db/lifecycle-read.ts` is the one read
-  interface for status, phase, dispatch-eligibility, and dependency decisions
-  (`deriveState`, the dispatch guard, `resolveDispatch`, the status response,
-  progress, and the project snapshot). It answers from legacy rows, and the
-  gate check `read-interface-legacy-authority` pins that. Step 2 changes only
-  that module to canonical lifecycle rows and inverts the gate. Step 2 must
-  wait until every hierarchy row has a lifecycle row.
+- Step 1 of the read cutover is done for these callers only. They ask their
+  status questions through the read interface `db/lifecycle-read.ts`:
+  `deriveState` (`state/derive/from-db.ts` and the
+  active-milestone lookup in `state.ts`), the dispatch guard
+  (`dispatch-guard.ts`), the milestone guard at the start of `resolveDispatch`
+  and the slice-research rule in `auto-dispatch.ts`, the research check in
+  `artifact-verification.ts`, the status response, progress, and the project
+  snapshot. The interface answers from legacy rows, and the gate check
+  `read-interface-legacy-authority` pins that.
+- Other decision sites do not use the interface. They read legacy rows
+  directly and apply the status vocabulary themselves. The known sites on the
+  dispatch and dependency paths are:
+  - `auto-dispatch.ts`: the rule "complete → stop", `findMissingSummaries`,
+    and the skipped-task check of the missing-PLAN preview.
+  - `auto/dispatch.ts`: `getAlreadyClosedDispatchReason`.
+  - `slice-parallel-eligibility.ts`: `getEligibleSlicesFromRows`.
+  - `queue-order.ts`: the dependency graph, the dependency warnings, and the
+    closed check of `set-dependencies`.
+  - `reactive-graph.ts`: the done flag of each Task.
+  - `auto-start.ts` and `auto.ts`: the closed-status checks.
+  - `state.ts`: `isGhostMilestone`.
+  - `state/derive/from-db.ts`: the Milestone readiness class, which uses the
+    raw status.
+
+  This list is not complete. On 2026-10-03, 55 production files of the GSD
+  extension other than `db/lifecycle-read.ts` import `status-guards.ts`; each
+  one is a candidate.
+- Step 2 changes the interface to canonical lifecycle rows and inverts the
+  gate. Before that, the sites above must read through the interface. If they
+  do not, authority is split: `deriveState` and the dispatch guard follow
+  canonical rows, and those sites follow legacy rows. Step 2 must also wait
+  until every hierarchy row has a lifecycle row.
 
 **Database record — pending.** The project database is the source of truth for
 decisions, and on 2026-10-02 it has no row for this decision: the last decision

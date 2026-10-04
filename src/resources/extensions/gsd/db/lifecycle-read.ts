@@ -1,10 +1,13 @@
 // Project/App: gsd-pi
-// File Purpose: The one read interface for status, phase, dispatch-eligibility
-// and dependency decisions (ADR-046). deriveState, the dispatch guard,
-// resolveDispatch, the status response, progress and the project snapshot ask
-// their questions here and do not apply a status vocabulary themselves.
-// The answers come from the legacy status rows (D005). The read cutover to
-// canonical lifecycle rows changes this module only.
+// File Purpose: The read interface for status, phase, dispatch-eligibility
+// and dependency decisions (ADR-046). deriveState, the dispatch guard, the
+// milestone guard of resolveDispatch, the status response, progress and the
+// project snapshot ask their status questions here.
+// Other decision sites still read legacy rows directly and apply the status
+// vocabulary themselves; docs/dev/state-db-cutover-milestone-decision.md
+// (D012) lists them. The answers come from the legacy status rows (D005).
+// The read cutover to canonical lifecycle rows must route those sites here
+// before it changes this module.
 
 import {
   getAllMilestones,
