@@ -394,7 +394,10 @@ export async function handleCapture(args: string, ctx: ExtensionCommandContext):
 
 export async function handleTriage(ctx: ExtensionCommandContext, pi: ExtensionAPI, basePath: string): Promise<void> {
   const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
-  await ensureDbOpen(basePath);
+  if (!(await ensureDbOpen(basePath))) {
+    ctx.ui.notify("Cannot triage captures: the GSD database is not available.", "error");
+    return;
+  }
   if (!hasPendingCaptures(basePath)) {
     ctx.ui.notify("No pending captures to triage.", "info");
     return;

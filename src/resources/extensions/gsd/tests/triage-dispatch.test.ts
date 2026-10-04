@@ -14,6 +14,7 @@ import {
   markCaptureExecuted,
   markCaptureResolved,
 } from "../captures.ts";
+import { handleTriage } from "../commands-handlers.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { checkPostUnitHooks } from "../post-unit-hooks.ts";
 import {
@@ -45,6 +46,25 @@ function makeProject(): string {
   );
   return base;
 }
+
+test("/gsd triage reports an error when the database cannot be opened", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-triage-no-db-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "gsd.db"), "this is not a sqlite database\n".repeat(64), "utf-8");
+  closeDatabase();
+  const notes: Array<{ message: string; level: string }> = [];
+  const ctx = { ui: { notify: (message: string, level: string) => notes.push({ message, level }) } };
+
+  await handleTriage(ctx as any, {} as any, base);
+
+  assert.deepEqual(notes, [
+    { message: "Cannot triage captures: the GSD database is not available.", level: "error" },
+  ]);
+});
 
 test("post-unit hooks exclude triage and quick-task units", () => {
   assert.equal(checkPostUnitHooks("triage-captures", "M001/S01/triage", "/tmp/project"), null);
