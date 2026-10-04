@@ -178,14 +178,15 @@ What shipped:
   every other line of the file (free text, a note under a capture). The triage
   agent records a classification with `gsd_capture_resolve`. A quick-task
   capture is executed only when its agent calls `gsd_capture_complete`; the
-  host does not mark it before the unit runs. A backtrack directive records its
-  target on the `capture.executed` event; no BACKTRACK-TRIGGER.md or
+  host does not mark it before the unit runs. A backtrack directive pauses
+  auto-mode and its capture is recorded as executed; no BACKTRACK-TRIGGER.md or
   REGRESSION.md file is written. A file section that no database capture holds
   is not read. The render keeps it as it is, doctor reports it as a warning,
   and `/gsd doctor --fix` imports it with a `capture.import` Domain Operation.
 - Backlog items (`/gsd backlog`) are `backlog.*` events of Domain Operations.
-  `/gsd backlog promote` registers a queued milestone (`milestone.register`)
-  and records its id on the item. BACKLOG.md is rendered from the events, but
+  `/gsd backlog promote` runs one `backlog.promote` operation: the queued
+  milestone row and the promotion of the item commit together, and the item
+  records the milestone id. BACKLOG.md is rendered from the events, but
   is not a pure projection: the render sets each database item's header line
   and keeps every other line of the file (notes under an item, free text). A
   ticked checkbox in the file promotes nothing. An item line that no database
