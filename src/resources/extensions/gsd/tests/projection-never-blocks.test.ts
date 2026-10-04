@@ -4,13 +4,13 @@
 // of the changed bytes, renders the database content again, and reports it.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, sep } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
 
 import { saveRequirementToDb } from "../db-writer.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 import {
   describePreservedProjectionChanges,
   preserveProjectionChangesBeforeDispatch,
@@ -20,7 +20,11 @@ import {
 import { invalidateStateCache } from "../state.ts";
 import { reconcileBeforeDispatch } from "../state-reconciliation/index.ts";
 import { poisonProjections, snapshotProjections, snapshotWorkflowTables } from "./db-authority-gate.ts";
-import { createWorkflowAuthorityFixture, type WorkflowAuthorityFixture } from "./workflow-authority-fixture.ts";
+import {
+  createWorkflowAuthorityFixture,
+  seedPrerequisiteCompletionEvidence,
+  type WorkflowAuthorityFixture,
+} from "./workflow-authority-fixture.ts";
 
 let fixture: WorkflowAuthorityFixture;
 
@@ -84,6 +88,29 @@ test("G2: poisoned projections before dispatch are rendered again and never stop
     assert.equal(notice.split(`.gsd/${rel} -> `).length, 2, `${rel} is in the user notice once`);
   }
   assert.equal(after[statePath], control[statePath], "STATE.md is back to the database render");
+});
+
+test("drift repair renders again a task summary that is older than the database", async () => {
+  fixture = await createWorkflowAuthorityFixture();
+  const base = fixture.root;
+  seedPrerequisiteCompletionEvidence();
+  assert.deepEqual((await rebuildMarkdownProjectionsFromDb(base)).errors, []);
+  const summaryPath = Object.entries(liveProjections(base)).find(([, content]) => content.includes("# T01 summary"))?.[0];
+  assert.ok(summaryPath, "the control render includes the T01 summary");
+
+  _getAdapter()!.exec(`
+    UPDATE tasks SET full_summary_md = '# T01 summary\n\nNewer database content.\n'
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
+  `);
+  invalidateStateCache();
+
+  const drift = await repairProjectionDrift(base);
+
+  assert.deepEqual(drift.errors, []);
+  assert.deepEqual(drift.repaired.map((record) => record.kind), ["stale-render"]);
+  assert.match(readFileSync(summaryPath, "utf-8"), /Newer database content\./);
+  assert.equal(existsSync(join(base, ".gsd", "quarantine")), false, "the file had no outside change to keep");
+  assert.deepEqual(await repairProjectionDrift(base), { repaired: [], errors: [] });
 });
 
 describe("external state layout: .gsd is a symlink to the state directory", () => {
