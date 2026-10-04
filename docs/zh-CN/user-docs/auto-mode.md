@@ -317,7 +317,7 @@ Token profile 可以通过跳过某些阶段来降低成本：
 
 ## 响应式 Task 执行
 
-响应式 task 执行现在默认开启。执行 task 时，GSD 会从 task plan 中的 IO 注解推导依赖图。默认配置下，只有当至少 3 个 ready tasks 可以被安全评估时，互不冲突的 tasks（没有共享文件读写）才会通过 subagents 并行派发；存在依赖的 tasks 会等待前驱完成。
+响应式 task 执行现在默认开启。执行 task 时，GSD 会从数据库 task 行中计划的输入和预期输出推导依赖图，不读取 PLAN 文件。带有 lifecycle 行的 task（`gsd_plan_slice` 规划的每个 task 都有）不会进入并行批次，而是通过顺序执行器逐个运行。默认配置下，只有当至少 3 个 ready tasks 可以被安全评估时，互不冲突的 tasks（没有共享文件读写）才会通过 subagents 并行派发；存在依赖的 tasks 会等待前驱完成。
 
 ```yaml
 reactive_execution:
