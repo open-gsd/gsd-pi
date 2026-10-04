@@ -969,7 +969,9 @@ updated_at         TEXT NOT NULL
 ```
 
 - DDL owner: `db-integration-branch-schema.ts`. Reader and writer: `db/writers/milestone-integration-branch.ts`.
-- This is a git coordination row, written outside Domain Operations.
+- The row is workflow state. Only the `milestone.integration_branch.record`
+  Domain Operation writes it, with a `milestone.integration_branch.recorded`
+  event. Nothing is written when no database is open.
 - The row is the merge target. `<MID>-META.json` is a rendered copy; it is read
   only when the milestone has no row or no database is open.
 
@@ -2191,8 +2193,16 @@ project_revision            INTEGER NOT NULL
 authority_epoch             INTEGER NOT NULL
 ```
 
-- A plan requires a causally prior succeeded, settled Attempt. One immutable
+- A plan requires a causally prior settled Attempt of its lifecycle. The
+  Attempt must have succeeded, or the lifecycle must hold a causally prior
+  active `milestone-validation` Waiver that has not expired. One immutable
   lineage exists per lifecycle; its head is current.
+- Plan Attempt trigger (non-versioned,
+  `db-projection-import-kernel-closeout-foundation-schema.ts`):
+  `ensureCloseoutPlanAttemptTrigger` creates
+  `trg_workflow_closeout_plan_attempt` on every open that does not find it
+  with the Waiver branch, and replaces a trigger without that branch. The
+  startup-repair check (`hasCloseoutPlanAttemptTrigger`) starts that open.
 - Supersession preserves project/lifecycle and may retain the Attempt or name a
   later Attempt in the same lifecycle. There is no mutable plan status.
 - Tested-source and readiness-basis hashes must use lowercase `sha256:` format;
@@ -2466,7 +2476,7 @@ error names the row and `/gsd db adopt`.
 | `gsd_task_complete` | project_authority, workflow operations/lifecycles, current Attempt/Result/verdict/evidence, tasks, slices, rework briefs/findings | project_authority, workflow operations/events/outbox/Projection Work, Attempt Result/checkpoints, Technical Verdict evidence/publication, tasks, verification evidence, rework findings | S##-T##-SUMMARY.md; toggles checkbox in NN-MM-PLAN.md after commit; reads legacy T##-SUMMARY.md |
 | `gsd_slice_complete` | project_authority, workflow operations/lifecycles, Tasks and their Attempts/Results/verdict evidence, milestones, slices, quality_gates | project_authority, workflow operations/events/outbox/Projection Work, Milestone/Slice lifecycles, milestones, slices, quality_gates, gate_runs | S##-SUMMARY.md, S##-UAT.md; toggles checkpoint in ROADMAP.md after commit |
 | `gsd_uat_result_save` | project_authority, workflow_operations, slices, artifacts, gate_runs (the highest UAT `attempt` of the Slice gives the next attempt number), exec_runs (each cited `gsd_exec` / `gsd_uat_exec` evidence ref) | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, artifacts, assessments, quality_gates, gate_runs (one `uat-result.save` operation) | S##-ASSESSMENT.md; UAT attempt JSON, both written after commit. A replay writes the attempt JSON again from the stored result |
-| `gsd_complete_milestone` | project_authority, workflow operations/lifecycles, current validation Attempt/Result/verdict/evidence, Waivers, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, Milestone lifecycle, milestones. For a Milestone with a milestone branch and a succeeded validation Attempt, the tool writes workflow_closeout_plans and workflow_closeout_effects and leaves the Milestone open; the host writes workflow_settlement_receipts and completes the Milestone after the merge | M##-SUMMARY.md projection after commit |
+| `gsd_complete_milestone` | project_authority, workflow operations/lifecycles, current validation Attempt/Result/verdict/evidence, Waivers, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, Milestone lifecycle, milestones. For an adopted Milestone with a milestone branch, validated or closed out on a validation Waiver, the tool writes workflow_closeout_plans and workflow_closeout_effects and leaves the Milestone open; the host writes workflow_settlement_receipts and completes the Milestone after the merge. For a waived Milestone the plan cites the newest settled validation Attempt; when validation never ran, the tool first writes one workflow_execution_attempts row and one workflow_attempt_results row (outcome `interrupted`, failure class `validation-waived`) in an `attempt.settle` operation with a `milestone.validation.attempt_waived` event | M##-SUMMARY.md projection after commit |
 | `gsd_validate_milestone` | project_authority, Milestone lifecycle, planned verification classes, current criteria/verdict/evidence, milestones, slices, tasks | project_authority, workflow operations/events/outbox/Projection Work, validation Attempts/Results, acceptance criteria, Technical Verdicts/evidence, assessments, quality_gates, gate_runs | VALIDATION.md projection after commit |
 | `gsd_prepare_milestone_subjective_uat` | project_authority, Milestone lifecycle, current acceptance criteria, open questions, interactions, and validation events | project_authority, workflow operations/events/outbox/Projection Work, acceptance criteria, open questions, interactions, and interaction options | — |
 | `/gsd uat-answer` (host command, no model tool; writes only from the terminal UI, not from an RPC or headless session) | project_authority, Milestone lifecycle, current subjective criterion, open question, interaction/options, validation events, and Human Acceptance | project_authority, workflow operations/events/outbox/Projection Work, Answers, Human Acceptance, and open-question/interactions status | — |
