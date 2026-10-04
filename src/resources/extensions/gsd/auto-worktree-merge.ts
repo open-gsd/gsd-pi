@@ -22,7 +22,9 @@ import {
   nativeCommit,
   nativeConflictFiles,
   nativeCommitCountBetween,
+  nativeDiffNumstat,
   nativeGetCurrentBranch,
+  nativeIsAncestor,
   nativeMergeRegular,
   nativeMergeSquash,
   nativeWorkingTreeStatus,
@@ -181,6 +183,15 @@ export function mergeMilestoneToMain(
       roadmapContent,
       settledMerge,
     });
+  }
+  // The branch is gone (merged and deleted by hand): there is nothing to merge.
+  if (!nativeBranchExists(originalBasePath_, milestoneBranch)) {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Milestone branch ${milestoneBranch} does not exist, so there is nothing to merge. ` +
+        `If its work is already on the integration branch, run \`/gsd dispatch complete-milestone ${milestoneId}\` ` +
+        `to complete the Milestone.`,
+    );
   }
   if (shouldAutoCommit) autoCommitDirtyState(worktreeCwd);
 
@@ -468,6 +479,21 @@ function finishSettledMilestoneMerge(request: {
       GSD_GIT_ERROR,
       `Milestone branch ${milestoneBranch} has commits after its recorded merge ${settledMerge.commitSha}. ` +
         `The branch is preserved; merge the new commits manually or re-run milestone validation.`,
+    );
+  }
+  // A recognized merge means GSD did not merge the branch itself. Remove the
+  // branch only while its work is still on the integration branch.
+  if (
+    settledMerge.recognized &&
+    nativeBranchExists(projectRoot, milestoneBranch) &&
+    !nativeIsAncestor(projectRoot, milestoneBranch, settledMerge.integrationBranch) &&
+    nativeDiffNumstat(projectRoot, settledMerge.commitSha, milestoneBranch)
+      .some((entry) => !entry.path.startsWith(".gsd/"))
+  ) {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Milestone branch ${milestoneBranch} was recorded as already merged, but its work is not on ` +
+        `${settledMerge.integrationBranch}. The branch is preserved; merge it manually.`,
     );
   }
   const { commitMessage, milestoneTitle, sliceSummaries } = buildMilestoneMergeMessage({

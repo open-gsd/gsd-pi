@@ -36,6 +36,23 @@ export interface AlreadyMergedMilestoneResult {
   codeFilesChanged: true;
 }
 
+/**
+ * True when the milestone branch tip is reachable from the integration branch.
+ * Throws when it is reachable but milestone-touched code is no longer there.
+ */
+export function isMilestoneBranchMerged(request: {
+  projectRoot: string;
+  milestoneBranch: string;
+  mainBranch: string;
+  previousCwd: string;
+}): boolean {
+  if (!nativeIsAncestor(request.projectRoot, request.milestoneBranch, request.mainBranch)) {
+    return false;
+  }
+  assertNoUnanchoredRegularMergeCodeChanges(request);
+  return true;
+}
+
 export function finalizeAlreadyMergedMilestoneIfReachable(
   request: AlreadyMergedMilestoneRequest,
 ): AlreadyMergedMilestoneResult | null {
@@ -48,16 +65,9 @@ export function finalizeAlreadyMergedMilestoneIfReachable(
     commitMessage,
   } = request;
 
-  if (!nativeIsAncestor(projectRoot, milestoneBranch, mainBranch)) {
+  if (!isMilestoneBranchMerged({ projectRoot, milestoneBranch, mainBranch, previousCwd })) {
     return null;
   }
-
-  assertNoUnanchoredRegularMergeCodeChanges({
-    projectRoot,
-    milestoneBranch,
-    mainBranch,
-    previousCwd,
-  });
 
   // The work is already on the integration branch: recognize the merge effect
   // of the Closeout Plan and complete the Milestone before the branch goes.

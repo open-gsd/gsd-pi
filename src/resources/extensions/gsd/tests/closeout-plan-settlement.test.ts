@@ -530,10 +530,9 @@ test("a branch that is already merged is recognized and the Milestone completes"
   assert.equal(getMilestone("M001")?.status, "complete");
 });
 
-test("a skipped merge under degraded isolation recognizes the effect instead of leaving the Milestone open", async () => {
-  const { repo, worktree } = await milestoneInWorktree();
-
-  const result = mergeMilestoneStandalone(
+/** The merge is skipped the way a session with degraded isolation skips it. */
+function skipMergeUnderDegradedIsolation(repo: string, worktree: string) {
+  return mergeMilestoneStandalone(
     {
       gitServiceFactory: () => { throw new Error("not used"); },
       worktreeProjection: new WorktreeStateProjection(),
@@ -547,10 +546,112 @@ test("a skipped merge under degraded isolation recognizes the effect instead of 
       notify: () => {},
     },
   );
+}
+
+test("a skipped merge recognizes the effect when the milestone branch is already merged", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  git(["merge", "--no-ff", "-m", "manual merge", "milestone/M001"], repo);
+
+  const result = skipMergeUnderDegradedIsolation(repo, worktree);
 
   assert.equal(result.merged, false);
   assert.equal(mergeEffectReceipt()?.outcome, "recognized");
   assert.equal(getMilestone("M001")?.status, "complete");
+});
+
+test("a skipped merge keeps the Milestone open while the milestone branch has unmerged work", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  const branchTip = git(["rev-parse", "milestone/M001"], repo);
+
+  assert.throws(() => skipMergeUnderDegradedIsolation(repo, worktree), /milestone\/M001 is not merged/);
+
+  assert.equal(mergeEffectReceipt(), null);
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "ready");
+  assert.equal(git(["rev-parse", "milestone/M001"], repo), branchTip);
+  assert.equal(git(["show", "main:feature.txt"], repo), "base");
+
+  // The later merge is a real merge: the work reaches main before the branch goes.
+  process.chdir(worktree);
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(git(["show", "main:feature.txt"], repo), "milestone work");
+  assert.equal(mergeEffectReceipt()?.outcome, "performed");
+  assert.equal(getMilestone("M001")?.status, "complete");
+});
+
+test("a recognized receipt does not let the merge delete a branch whose work is not on the integration branch", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  const branchTip = git(["rev-parse", "milestone/M001"], repo);
+  const mainHead = git(["rev-parse", "main"], repo);
+  recordSettlementReceipt({
+    milestoneId: "M001",
+    effectKind: "milestone-merge",
+    outcome: "recognized",
+    externalRef: mainHead,
+    proof: { commitSha: mainHead, integrationBranch: "main", milestoneBranchSha: branchTip, codeFilesChanged: true },
+  });
+
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /recorded as already merged, but its work is not on main/);
+
+  assert.equal(git(["rev-parse", "milestone/M001"], repo), branchTip);
+  assert.equal(existsSync(worktree), true);
+  assert.equal(git(["rev-parse", "main"], repo), mainHead);
+});
+
+test("a plan that waits for a branch merged and deleted by hand is superseded and the Milestone completes", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  process.chdir(repo);
+  git(["merge", "milestone/M001"], repo);
+  git(["worktree", "remove", "--force", worktree], repo);
+  git(["branch", "-D", "milestone/M001"], repo);
+
+  assert.throws(
+    () => mergeMilestoneToMain(repo, "M001", ROADMAP),
+    /milestone\/M001 does not exist, so there is nothing to merge.*\/gsd dispatch complete-milestone M001/,
+  );
+  assert.equal(getMilestone("M001")?.status, "active");
+
+  const completed = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-after-manual-merge"));
+
+  assert.ok(!("error" in completed), `completion failed: ${"error" in completed ? completed.error : ""}`);
+  assert.equal(completed.pendingCloseoutEffects, undefined);
+  assert.deepEqual(readMilestoneCloseoutPlan("M001")?.effects, []);
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
+  assert.equal(git(["show", "main:feature.txt"], repo), "milestone work");
+});
+
+test("after a conflict resolved by hand, a new validation lets the tool complete the Milestone", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  commitOnMain(repo, "conflicting change on main\n");
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), MergeConflictError);
+  process.chdir(repo);
+  commitOnMain(repo, "resolved by hand\n");
+  git(["worktree", "remove", "--force", worktree], repo);
+  git(["branch", "-D", "milestone/M001"], repo);
+
+  const stale = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-stale"));
+  assert.ok("error" in stale && /canonical validation is not current/.test(stale.error), JSON.stringify(stale));
+  assert.equal(getMilestone("M001")?.status, "active");
+
+  const validated = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: "| S01 | delivered |",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
+    verdictRationale: "The resolved merge passes.",
+  }, repo, { invocation: invocation("fixture/validate-resolved"), skipBrowserEvidenceGate: true });
+  assert.ok(!("error" in validated), `validation failed: ${"error" in validated ? validated.error : ""}`);
+  const completed = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-resolved"));
+
+  assert.ok(!("error" in completed), `completion failed: ${"error" in completed ? completed.error : ""}`);
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(readMilestoneLifecycleStatus("M001"), "completed");
 });
 
 test("the interactive closeout notice says a prepared Milestone is not complete yet", async () => {

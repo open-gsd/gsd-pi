@@ -40,6 +40,8 @@ export function milestoneCloseoutEffects(basePath: string, milestoneId: string):
 }
 
 export interface SettledMilestoneMerge {
+  /** The work was found on the integration branch; GSD did not merge it. */
+  recognized: boolean;
   commitSha: string;
   integrationBranch: string;
   /** Tip of the milestone branch that was merged. */
@@ -58,10 +60,12 @@ function revParse(basePath: string, ref: string): string {
 /** The merge receipt of the current Closeout Plan, or null when the merge has not settled. */
 export function readSettledMilestoneMerge(milestoneId: string): SettledMilestoneMerge | null {
   if (!isDbAvailable()) return null;
-  const proof = readMilestoneCloseoutPlan(milestoneId)?.effects
-    .find((effect) => effect.effectKind === MILESTONE_MERGE_EFFECT)?.receipt?.proof;
-  if (!proof) return null;
+  const receipt = readMilestoneCloseoutPlan(milestoneId)?.effects
+    .find((effect) => effect.effectKind === MILESTONE_MERGE_EFFECT)?.receipt;
+  if (!receipt) return null;
+  const { proof } = receipt;
   return {
+    recognized: receipt.outcome === "recognized",
     commitSha: String(proof["commitSha"]),
     integrationBranch: String(proof["integrationBranch"]),
     milestoneBranchSha: String(proof["milestoneBranchSha"]),

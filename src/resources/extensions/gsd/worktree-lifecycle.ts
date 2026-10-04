@@ -65,7 +65,7 @@ import {
   autoCommitCurrentBranch,
   getCurrentBranch,
 } from "./worktree.js";
-import { nativeCheckoutBranch } from "./native-git-bridge.js";
+import { nativeBranchExists, nativeCheckoutBranch } from "./native-git-bridge.js";
 // ADR-016 phase 2 / C2 (#5625): lifecycle uses focused auto-worktree
 // modules instead of the legacy compatibility barrel. Branch, entry/path,
 // creation, and teardown primitives are still implementation-level seams for
@@ -84,6 +84,8 @@ import { teardownAutoWorktree } from "./auto-worktree-teardown.js";
 import { inspectUncommittedWorktreeState, isStaleWorktreeRegistrationError } from "./worktree-manager.js";
 import { resolveRoadmapForMilestoneMerge } from "./milestone-merge-roadmap.js";
 import type { MilestoneMergeTransactionRunner } from "./milestone-merge-transaction.js";
+import { isMilestoneBranchMerged } from "./auto-worktree-merge-already-merged.js";
+import { GSDError, GSD_GIT_ERROR } from "./errors.js";
 import {
   hasPendingCloseoutEffect,
   settleMilestoneMerge,
@@ -1389,9 +1391,11 @@ function pushIfAheadAtCloseout(
 }
 
 /**
- * The merge is skipped because the work already sits on the current branch.
- * A Closeout Plan that waits for the merge effect would never settle, so
- * recognize the effect and complete the Milestone. No-op without a plan.
+ * The merge is skipped because the work should already sit on the current
+ * branch. A Closeout Plan that waits for the merge effect would never settle,
+ * so recognize the effect and complete the Milestone — but only when the
+ * milestone branch is gone or merged into the current branch. A branch with
+ * unmerged work keeps the Milestone open. No-op without a plan.
  */
 function recognizeSkippedMilestoneMerge(
   deps: WorktreeLifecycleDeps,
@@ -1399,11 +1403,30 @@ function recognizeSkippedMilestoneMerge(
   milestoneId: string,
 ): void {
   if (!hasPendingCloseoutEffect(milestoneId)) return;
+  const milestoneBranch = lifecycleAutoWorktreeBranch(deps, milestoneId);
+  const integrationBranch = currentLifecycleBranch(deps, basePath);
+  if (
+    nativeBranchExists(basePath, milestoneBranch) &&
+    (integrationBranch === milestoneBranch ||
+      !isMilestoneBranchMerged({
+        projectRoot: basePath,
+        milestoneBranch,
+        mainBranch: integrationBranch,
+        previousCwd: process.cwd(),
+      }))
+  ) {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Milestone ${milestoneId} merge was skipped, but ${milestoneBranch} is not merged ` +
+        `(current branch: ${integrationBranch}). The branch is kept and the Milestone stays open. ` +
+        `Merge it manually, or delete the branch if its work is already merged, then run /gsd auto to resume.`,
+    );
+  }
   settleMilestoneMerge({
     projectRoot: basePath,
     milestoneId,
-    milestoneBranch: lifecycleAutoWorktreeBranch(deps, milestoneId),
-    integrationBranch: currentLifecycleBranch(deps, basePath),
+    milestoneBranch,
+    integrationBranch,
     recognized: true,
     codeFilesChanged: true,
   });
