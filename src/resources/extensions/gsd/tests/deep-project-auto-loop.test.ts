@@ -1468,6 +1468,81 @@ test("a task commit that succeeds after a repair releases the stored repair retr
   assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
 });
 
+test("a transient commit failure in the repair run of a refused commit counts against the repair budget", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: base, stdio: "ignore" });
+  const hookPath = join(base, ".git", "hooks", "pre-commit");
+  writeFileSync(hookPath, ["#!/bin/sh", "echo blocked by test hook >&2", "exit 1"].join("\n"));
+  chmodSync(hookPath, 0o755);
+  writeFileSync(join(base, "work.txt"), "changed\n");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+  const dispatch = claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  let pauseCalled = false;
+  const notifications: string[] = [];
+  const closeOut = () => {
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.originalBasePath = base;
+    s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+    return postUnitPostVerification({
+      s,
+      ctx: { ui: { notify: (message: string) => notifications.push(message) } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => { pauseCalled = true; },
+      updateProgressWidget: () => {},
+    });
+  };
+
+  assert.equal(await closeOut(), "retry", "the hook refuses the commit and the repair retry is stored");
+  assert.match(readStoredUnitRetry("execute-task", "M001/S01/T01")?.signature ?? "", /^git-commit:/);
+
+  // Each repair run ends with a transient git failure, so its commit does not
+  // succeed and the stored retry selects the closed task again.
+  writeFileSync(
+    hookPath,
+    ["#!/bin/sh", "echo \"fatal: Unable to create '.git/index.lock': File exists.\" >&2", "exit 1"].join("\n"),
+  );
+  let repairRuns = 0;
+  while (!pauseCalled && repairRuns < 3) {
+    dispatch.claimNext();
+    repairRuns++;
+    const result = await closeOut();
+    assert.notEqual(result, "retry", "a transient failure does not store a new repair retry");
+  }
+
+  assert.equal(pauseCalled, true, "the repair budget must stop the repair runs");
+  assert.equal(repairRuns, 2, "the refused commit and the first transient failure use the 2 repair attempts");
+  assert.ok(
+    notifications.some((message) => message.includes("after 2 remediation attempts")),
+    `expected the remediation-cap message, got: ${notifications.join("\n")}`,
+  );
+  assert.equal(
+    readStoredUnitRetry("execute-task", "M001/S01/T01"),
+    null,
+    "a repair retry that stays stored makes the dispatch rules select the closed task again",
+  );
+  assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
+});
+
 test("verified task git closeout partial multi-repo commit pauses instead of redoing task", async () => {
   const root = join(tmpdir(), `gsd-deep-project-parent-commit-${randomUUID()}`);
   const initChildRepo = (dir: string) => {

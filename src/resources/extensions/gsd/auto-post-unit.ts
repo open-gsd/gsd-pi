@@ -121,7 +121,7 @@ import {
   verificationBudget,
 } from "./auto/verification-retry-state.js";
 import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
-import { releaseCommitRepairRetry, releaseUnitRetry } from "./db/unit-dispatch-retries.js";
+import { readStoredUnitRetry, releaseCommitRepairRetry, releaseUnitRetry } from "./db/unit-dispatch-retries.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -1317,6 +1317,43 @@ export async function autoCommitUnit(
  * warn, and continue only for transient git failures. Deterministic task
  * commit hook failures are routed through task remediation instead.
  */
+/** The git-commit repair of the task used all its attempts: release its stored retry and pause. */
+async function pauseExhaustedCommitRepair(
+  pctx: PostUnitContext,
+  unit: NonNullable<AutoSession["currentUnit"]>,
+  turnAction: string,
+  detail: string,
+): Promise<void> {
+  const { s, ctx, pi, pauseAuto } = pctx;
+  s.pendingVerificationRetry = null;
+  resetUnitBudget(s.unclaimedUnitBudgets, { unitType: unit.type, unitId: unit.id, kind: "git-commit" });
+  releaseUnitRetry(unit.type, unit.id);
+  ctx.ui.notify(
+    `Git ${turnAction} failed after ${MAX_GIT_COMMIT_REMEDIATION_RETRIES} remediation attempts: ${detail}. Pausing auto-mode.`,
+    "error",
+  );
+  await pauseAuto(ctx, pi);
+}
+
+/**
+ * A soft git failure keeps a stored git-commit repair retry, and that retry
+ * selects the closed task again. So a soft failure in a repair run counts
+ * against the git-commit budget. True when the budget is used up and auto-mode
+ * is paused.
+ */
+async function softGitFailureEndsCommitRepair(
+  pctx: PostUnitContext,
+  unit: NonNullable<AutoSession["currentUnit"]>,
+  turnAction: string,
+  detail: string,
+): Promise<boolean> {
+  if (!readStoredUnitRetry(unit.type, unit.id)?.signature?.startsWith("git-commit:")) return false;
+  const used = spendUnitBudget(pctx.s.unclaimedUnitBudgets, { unitType: unit.type, unitId: unit.id, kind: "git-commit" });
+  if (used <= MAX_GIT_COMMIT_REMEDIATION_RETRIES) return false;
+  await pauseExhaustedCommitRepair(pctx, unit, turnAction, detail);
+  return true;
+}
+
 async function runCloseoutGitAction(
   pctx: PostUnitContext,
   unit: NonNullable<AutoSession["currentUnit"]>,
@@ -1512,18 +1549,18 @@ async function runCloseoutGitAction(
             return "retry";
           }
 
-          s.pendingVerificationRetry = null;
-          resetUnitBudget(s.unclaimedUnitBudgets, gitCommitBudget);
-          releaseUnitRetry(unit.type, unit.id);
-          ctx.ui.notify(
-            `Git ${turnAction} failed after ${MAX_GIT_COMMIT_REMEDIATION_RETRIES} remediation attempts: ${fullError.split("\n")[0]} (full details: ${failureLogPath}). Pausing auto-mode.`,
-            "error",
+          await pauseExhaustedCommitRepair(
+            pctx,
+            unit,
+            turnAction,
+            `${fullError.split("\n")[0]} (full details: ${failureLogPath})`,
           );
-          await pauseAuto(ctx, pi);
           return "dispatched";
         }
         if (opts?.softFailure && gitResult.failureClass === "transient") {
           ctx.ui.notify(failureMsg, "warning");
+          const detail = `${fullError.split("\n")[0]} (full details: ${failureLogPath})`;
+          if (await softGitFailureEndsCommitRepair(pctx, unit, turnAction, detail)) return "dispatched";
           return "continue";
         }
         ctx.ui.notify(failureMsg, "error");
@@ -1550,6 +1587,7 @@ async function runCloseoutGitAction(
     debugLog("postUnit", { phase: "git-action", error: message, action: turnAction });
     ctx.ui.notify(`Git ${turnAction} failed: ${message.split("\n")[0]}`, opts?.softFailure ? "warning" : "error");
     if (opts?.softFailure) {
+      if (await softGitFailureEndsCommitRepair(pctx, unit, turnAction, message.split("\n")[0])) return "dispatched";
       return "continue";
     }
     if (uokFlags.gitops) {
@@ -2528,7 +2566,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
             // dispatch the unit again. A reopen or a re-plan releases it, and
             // the unit then starts with a full retry count.
             spendUnitBudget(s.unclaimedUnitBudgets, { ...verificationBudgetRef, kind: "exhausted" });
-            resetUnitBudget(s.unclaimedUnitBudgets, verificationBudgetRef);
+            clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
             debugLog("postUnit", { phase: "artifact-verify-exhausted", unitType: s.currentUnit.type, unitId: s.currentUnit.id, attempt });
             ctx.ui.notify(
               `${failureDetails} Pausing auto-mode after ${MAX_ARTIFACT_VERIFICATION_RETRIES} retries.`,

@@ -48,7 +48,7 @@ import {
 import { SourceObservationStore } from "../source-observations.js";
 import { registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease } from "../db/milestone-leases.js";
-import { recordDispatchClaim } from "../db/unit-dispatches.js";
+import { markCanceled, recordDispatchClaim } from "../db/unit-dispatches.js";
 import { storeUnitRetry } from "../db/unit-dispatch-retries.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -831,6 +831,105 @@ test("runUnitPhase gives a restarted planner the retry context stored on its dis
     "the planner prompt must carry the stored findings",
   );
   assert.ok(sentPrompts[0].includes("plan the slice"), "the planner prompt must keep the unit prompt");
+});
+
+test("runUnitPhase gives a re-planned unit a prompt with no failure context from before its retries ran out", async (t) => {
+  const base = await setupGateEvaluateFixture(t, "gsd-exhausted-retry-prompt-", { q3: "absent", q4: "absent" });
+  const { postUnitPreVerification, MAX_ARTIFACT_VERIFICATION_RETRIES } = await import("../auto-post-unit.ts");
+  const { releaseExhaustedUnits } = await import("../db/unit-dispatch-budgets.ts");
+  const { AutoSession } = await import("../auto/session.ts");
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claimDispatch = (): void => {
+    const claim = recordDispatchClaim({
+      traceId: "trace",
+      workerId,
+      milestoneLeaseToken: lease.token,
+      milestoneId: "M001",
+      sliceId: "S01",
+      unitType: "complete-slice",
+      unitId: "M001/S01",
+    });
+    if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+    markCanceled(claim.dispatchId, "test: the unit runs again");
+  };
+
+  // Each run of complete-slice ends with no SUMMARY, until the retries run out.
+  let paused = false;
+  for (let run = 0; run <= MAX_ARTIFACT_VERIFICATION_RETRIES; run++) {
+    claimDispatch();
+    const closing = new AutoSession();
+    closing.active = true;
+    closing.basePath = base;
+    closing.currentUnit = { type: "complete-slice", id: "M001/S01", startedAt: Date.now() };
+    await postUnitPreVerification({
+      s: closing,
+      ctx: { ui: { notify: () => {} } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => { paused = true; },
+      updateProgressWidget: () => {},
+    }, { skipSettleDelay: true, skipWorktreeSync: true });
+  }
+  assert.equal(paused, true, "the unit used all its retries");
+
+  // A person re-plans the slice, and auto-mode dispatches the unit again.
+  releaseExhaustedUnits("M001/S01");
+  claimDispatch();
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+  const sentPrompts: string[] = [];
+  const ic = makeIC(makeMockDeps(capture), {
+    pi: {
+      sendMessage: (msg: { content?: unknown }) => {
+        sentPrompts.push(String(msg?.content ?? ""));
+      },
+      setModel: async () => true,
+      getThinkingLevel: () => "off",
+      setThinkingLevel: () => {},
+    } as any,
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "complete-slice",
+    unitId: "M001/S01",
+    prompt: "complete the slice",
+    finalPrompt: "complete the slice",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "summarizing",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+
+  const run = runUnitPhase(ic, iterData, { consecutiveFinalizeTimeouts: 0 });
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+  await run;
+
+  assert.equal(sentPrompts.length, 1, "the unit is dispatched once");
+  assert.ok(
+    !sentPrompts[0].includes("AUTO-FIX ATTEMPT"),
+    `the prompt must not carry the attempt number from before the re-plan, got: ${sentPrompts[0].slice(0, 200)}`,
+  );
+  assert.ok(sentPrompts[0].includes("complete the slice"), "the prompt must keep the unit prompt");
 });
 
 test("runUnitPhase increments unitDispatchCount for repeated artifact-missing retries", async () => {

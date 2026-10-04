@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { postUnitPreVerification } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
 import { MAX_ARTIFACT_VERIFICATION_RETRIES } from "../auto-post-unit.ts";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.ts";
 import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
 import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
@@ -260,5 +261,22 @@ test("a failed artifact verification survives a restart: context, count and exha
     usedUnitBudget(completeSliceSession(base), "complete-slice", "M001/S01", "exhausted"),
     1,
     "a restarted process must see that the unit used all its retries",
+  );
+  assert.equal(
+    readStoredUnitRetry("complete-slice", "M001/S01"),
+    null,
+    "the pause releases the stored retries, so a later run does not get the old failure context",
+  );
+
+  // A person re-plans the slice. The unit runs again and its artifact is missing again.
+  releaseExhaustedUnits("M001/S01");
+  dispatch.claimNext();
+  const notifications: string[] = [];
+  const replanned = completeSliceSession(base);
+  assert.equal(await postUnitPreVerification(makePostUnitContext(base, replanned, notifications), opts), "retry");
+  assert.equal(readStoredUnitRetry("complete-slice", "M001/S01")?.attempt, 1, "the count starts again at 1");
+  assert.ok(
+    notifications.some((message) => message.includes("Retrying (attempt 1/3).")),
+    `expected a first-attempt notification, got: ${notifications.join("\n")}`,
   );
 });
