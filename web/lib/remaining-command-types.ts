@@ -4,6 +4,8 @@
 // Do NOT import from those modules directly — they use Node.js APIs
 // unavailable in the browser.
 
+import type { ProjectProgressReadMetadata } from "@opengsd/contracts"
+
 // ─── History (mirrors metrics.ts: TokenCounts, UnitMetrics, aggregates, ProjectTotals) ──
 
 export interface HistoryTokenCounts {
@@ -81,6 +83,7 @@ export interface InspectData {
   counts: { decisions: number; requirements: number; artifacts: number }
   recentDecisions: Array<{ id: string; decision: string; choice: string }>
   recentRequirements: Array<{ id: string; status: string; description: string }>
+  readMetadata?: ProjectProgressReadMetadata
 }
 
 // ─── Hooks (mirrors types.ts HookStatusEntry) ───────────────────────────────

@@ -35,6 +35,7 @@ export async function collectInspectData(projectCwdOverride?: string): Promise<I
         .prepare("SELECT id, status, description FROM requirements ORDER BY id DESC LIMIT 5")
         .all()
         .map((r) => ({ id: String(r.id), status: String(r.status), description: String(r.description) })),
+      readMetadata: { source: "database", authority: "db-authoritative" },
     }
   } catch {
     // No database, no SQLite provider, or a schema older than these tables.
@@ -43,6 +44,7 @@ export async function collectInspectData(projectCwdOverride?: string): Promise<I
       counts: { decisions: 0, requirements: 0, artifacts: 0 },
       recentDecisions: [],
       recentRequirements: [],
+      readMetadata: { source: "projection", authority: "projection-fallback" },
     }
   } finally {
     db?.close()

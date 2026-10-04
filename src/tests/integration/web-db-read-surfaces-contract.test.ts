@@ -30,14 +30,18 @@ describe("detectProjectKind", () => {
     insertMilestone({ id: "M001", title: "Database only", status: "active" });
     closeDatabase();
 
-    assert.equal(detectProjectKind(root).kind, "active-gsd");
+    const detection = detectProjectKind(root);
+    assert.equal(detection.kind, "active-gsd");
+    assert.deepEqual(detection.readMetadata, { source: "database", authority: "db-authoritative" });
   });
 
   test("a flat-phase project with no database is active-gsd", (t) => {
     const { root, gsdDir } = makeProject(t);
     mkdirSync(join(gsdDir, "phases", "01-foundation"), { recursive: true });
 
-    assert.equal(detectProjectKind(root).kind, "active-gsd");
+    const detection = detectProjectKind(root);
+    assert.equal(detection.kind, "active-gsd");
+    assert.deepEqual(detection.readMetadata, { source: "projection", authority: "projection-fallback" });
     assert.deepEqual(readdirSync(gsdDir), ["phases"], "the read creates no database");
   });
 
@@ -92,6 +96,7 @@ describe("collectInspectData", () => {
 
     const data = await collectInspectData(root);
 
+    assert.deepEqual(data.readMetadata, { source: "database", authority: "db-authoritative" });
     assert.equal(typeof data.schemaVersion, "number");
     assert.equal(data.counts.decisions, 1);
     assert.equal(data.counts.requirements, 1);
@@ -109,6 +114,7 @@ describe("collectInspectData", () => {
       counts: { decisions: 0, requirements: 0, artifacts: 0 },
       recentDecisions: [],
       recentRequirements: [],
+      readMetadata: { source: "projection", authority: "projection-fallback" },
     });
   });
 });

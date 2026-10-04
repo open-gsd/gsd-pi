@@ -15,6 +15,7 @@ import { deriveState } from "./state.js";
 import { readMilestoneValidationVerdict } from "./milestone-validation-verdict.js";
 import { milestoneIdSort, findMilestoneIds } from "./guided-flow.js";
 import type { RiskLevel } from "./types.js";
+import type { ProjectProgressReadMetadata } from "@opengsd/contracts";
 import { getSliceBranchName, detectWorktreeName } from "./worktree.js";
 
 export interface WorkspaceTaskTarget {
@@ -70,6 +71,8 @@ export interface WorkspaceIndex {
   };
   scopes: WorkspaceScopeTarget[];
   validationIssues: WorkspaceValidationIssue[];
+  /** Where the hierarchy came from: database rows, or directory names when the database cannot be read. */
+  readMetadata?: ProjectProgressReadMetadata;
 }
 
 export type GSDWorkspaceIndex = WorkspaceIndex;
@@ -188,7 +191,10 @@ export async function indexWorkspace(basePath: string, opts: IndexWorkspaceOptio
     }
   }
 
-  return { milestones, active, scopes, validationIssues: [] };
+  const readMetadata: ProjectProgressReadMetadata = dbOpen
+    ? { source: "database", authority: "db-authoritative" }
+    : { source: "projection", authority: "projection-fallback" };
+  return { milestones, active, scopes, validationIssues: [], readMetadata };
 }
 
 export async function listDoctorScopeSuggestions(basePath: string): Promise<Array<{ value: string; label: string }>> {

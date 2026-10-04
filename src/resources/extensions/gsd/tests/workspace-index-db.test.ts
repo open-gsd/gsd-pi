@@ -2,6 +2,9 @@
 // File Purpose: The workspace index (web boot payload, doctor scopes) lists the hierarchy from database rows.
 
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 
 import { closeDatabase, insertMilestone } from "../gsd-db.ts";
@@ -50,6 +53,7 @@ for (const [name, damage] of [
 
     assert.deepEqual(hierarchyOf(index), DATABASE_HIERARCHY);
     assert.equal(index.active.milestoneId, "M001");
+    assert.deepEqual(index.readMetadata, { source: "database", authority: "db-authoritative" });
   });
 }
 
@@ -62,4 +66,21 @@ test("indexWorkspace does not list a discarded milestone", async (t) => {
   const index = await indexWorkspace(fixture.root);
 
   assert.deepEqual(index.milestones.map((milestone) => milestone.id), ["M001"]);
+});
+
+test("indexWorkspace labels the directory fallback when the project has no database", async (t) => {
+  closeDatabase();
+  invalidateStateCache();
+  const root = mkdtempSync(join(tmpdir(), "gsd-workspace-index-no-db-"));
+  t.after(() => {
+    closeDatabase();
+    invalidateStateCache();
+    rmSync(root, { recursive: true, force: true });
+  });
+  mkdirSync(join(root, ".gsd", "milestones", "M001"), { recursive: true });
+
+  const index = await indexWorkspace(root);
+
+  assert.deepEqual(index.milestones.map((milestone) => milestone.id), ["M001"]);
+  assert.deepEqual(index.readMetadata, { source: "projection", authority: "projection-fallback" });
 });
