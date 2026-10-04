@@ -6,10 +6,27 @@
 import { execFileSync } from "node:child_process";
 
 import { GSDError, GSD_GIT_ERROR } from "./errors.js";
-import { nativeDiffNumstat } from "./native-git-bridge.js";
 import { logWarning } from "./workflow-logger.js";
 
 const GIT_EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+function diffPaths(basePath: string, ...range: string[]): string[] {
+  return execFileSync(
+    "git",
+    ["diff", "--name-only", "--no-renames", "-z", ...range],
+    { cwd: basePath, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" },
+  ).split("\0").filter(Boolean);
+}
+
+/**
+ * Code paths the milestone branch changed since it left `ref` whose content
+ * is not on `ref`. Files only `ref` has are not milestone work.
+ */
+export function milestoneCodeNotOn(basePath: string, ref: string, milestoneBranch: string): string[] {
+  const differing = new Set(diffPaths(basePath, ref, milestoneBranch));
+  return diffPaths(basePath, `${ref}...${milestoneBranch}`)
+    .filter((path) => !path.startsWith(".gsd/") && differing.has(path));
+}
 
 export function assertNoUnanchoredCodeChangesAfterEmptyMerge(
   basePath: string,
@@ -20,8 +37,7 @@ export function assertNoUnanchoredCodeChangesAfterEmptyMerge(
 ): void {
   if (!nothingToCommit) return;
 
-  const codeChanges = nativeDiffNumstat(basePath, mainBranch, milestoneBranch)
-    .filter((entry) => !entry.path.startsWith(".gsd/"));
+  const codeChanges = milestoneCodeNotOn(basePath, mainBranch, milestoneBranch);
   if (codeChanges.length === 0) return;
 
   throw new GSDError(

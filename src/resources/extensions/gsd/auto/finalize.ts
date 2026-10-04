@@ -32,6 +32,7 @@ import {
   isIsolatedWorktreeSession,
 } from "./phase-helpers.js";
 import { _runMilestoneMergeOnceWithStashRestore } from "./closeout.js";
+import { runMilestoneCloseoutGitHub } from "../milestone-closeout.js";
 import { isTaskExecutionReadyForHostVerification } from "./task-execution-cutover.js";
 import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
 import { MAX_FINALIZE_TIMEOUTS } from "./types.js";
@@ -522,6 +523,7 @@ export async function runFinalize(
       clearFinalizingUnit();
       return stop;
     }
+    await runMilestoneCloseoutGitHub(s.basePath, s.currentMilestoneId);
   }
 
   // Both pre and post verification completed without timeout — reset counter

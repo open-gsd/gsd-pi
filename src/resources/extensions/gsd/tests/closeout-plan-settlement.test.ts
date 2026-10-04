@@ -47,6 +47,7 @@ import {
   completeMilestone,
   reopenMilestone,
 } from "../milestone-lifecycle-domain-operation.ts";
+import { runMilestoneCloseoutGitHub } from "../milestone-closeout.ts";
 import { evaluateAllCompleteSettlement } from "../milestone-settlement.ts";
 import { _clearGsdRootCache, clearPathCache } from "../paths.ts";
 import { publishMilestone } from "../publication.ts";
@@ -59,6 +60,13 @@ import { _resetServiceCache } from "../worktree.ts";
 import { mergeMilestoneStandalone } from "../worktree-lifecycle.ts";
 import { worktreePath } from "../worktree-manager.ts";
 import { WorktreeStateProjection } from "../worktree-state-projection.ts";
+import {
+  _resetGhCache,
+  _setGhAvailableForTest,
+  _setGhRateLimitOkForTest,
+} from "../../github-sync/cli.ts";
+import { createEmptyMapping, loadSyncMapping, setMilestoneRecord } from "../../github-sync/mapping.ts";
+import { _resetConfigCache, _setGhCloseOverridesForTest } from "../../github-sync/sync.ts";
 
 const tempDirs = new Set<string>();
 
@@ -180,6 +188,11 @@ const savedHome = process.env.HOME;
 const savedGsdHome = process.env.GSD_HOME;
 
 afterEach(() => {
+  _setGhCloseOverridesForTest(null);
+  _setGhAvailableForTest(null);
+  _setGhRateLimitOkForTest(null);
+  _resetGhCache();
+  _resetConfigCache();
   _resetPreTeardownSafetyDepsForTests();
   process.chdir(savedCwd);
   if (savedHome === undefined) delete process.env.HOME; else process.env.HOME = savedHome;
@@ -336,7 +349,7 @@ function mergeEffectReceipt() {
  * M001 runs in its own worktree on `milestone/M001` and is validated there.
  * M002 depends on M001. `autoPush` adds a remote the push can be pointed at.
  */
-async function milestoneInWorktree(options: { autoPush?: boolean } = {}): Promise<{
+async function milestoneInWorktree(options: { autoPush?: boolean; githubSync?: boolean } = {}): Promise<{
   repo: string;
   worktree: string;
   remote: string;
@@ -372,6 +385,20 @@ async function milestoneInWorktree(options: { autoPush?: boolean } = {}): Promis
     mkdirSync(join(base, ".gsd"), { recursive: true });
     if (options.autoPush) {
       writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\ngit:\n  auto_push: true\n---\n");
+    }
+    if (options.githubSync) {
+      writeFileSync(
+        join(base, ".gsd", "PREFERENCES.md"),
+        "---\nversion: 1\ngithub:\n  enabled: true\n  repo: owner/repo\n---\n",
+      );
+      const mapping = createEmptyMapping("owner/repo");
+      setMilestoneRecord(mapping, "M001", {
+        issueNumber: 10,
+        ghMilestoneNumber: 3,
+        lastSyncedAt: "2025-01-01T00:00:00Z",
+        state: "open",
+      });
+      writeFileSync(join(base, ".gsd", "github-sync.json"), JSON.stringify(mapping));
     }
   }
 
@@ -451,6 +478,76 @@ test("a merge conflict leaves the Milestone open and its dependent locked", asyn
   const state = await deriveState(repo);
   assert.equal(state.activeMilestone?.id, "M001");
   assert.notEqual(state.registry.find((entry) => entry.id === "M002")?.status, "active");
+});
+
+/** GitHub sync is on and every close call to GitHub is counted. */
+function countGitHubCloses(): { calls: number } {
+  const closes = { calls: 0 };
+  _setGhAvailableForTest(true);
+  _setGhRateLimitOkForTest(true);
+  _setGhCloseOverridesForTest({
+    closeIssue: () => { closes.calls++; return { ok: true }; },
+    closeMilestone: () => { closes.calls++; return { ok: true }; },
+  });
+  return closes;
+}
+
+test("a merge conflict after prepare leaves the GitHub milestone open", async () => {
+  const { repo, worktree } = await milestoneInWorktree({ githubSync: true });
+  const closes = countGitHubCloses();
+  commitOnMain(repo, "conflicting change on main\n");
+
+  // The post-unit step of complete-milestone runs before the merge.
+  await runMilestoneCloseoutGitHub(worktree, "M001");
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), MergeConflictError);
+  await runMilestoneCloseoutGitHub(worktree, "M001");
+
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(closes.calls, 0);
+  assert.equal(loadSyncMapping(worktree)?.milestones.M001?.state, "open");
+});
+
+test("the GitHub milestone closes after the merge settled the Milestone", async () => {
+  const { repo, worktree } = await milestoneInWorktree({ githubSync: true });
+  const closes = countGitHubCloses();
+
+  await runMilestoneCloseoutGitHub(worktree, "M001");
+  assert.equal(closes.calls, 0);
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+  await runMilestoneCloseoutGitHub(repo, "M001");
+
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(closes.calls, 2);
+  assert.equal(loadSyncMapping(repo)?.milestones.M001?.state, "closed");
+});
+
+test("a recognized squash merge finishes cleanup when the integration branch has files of its own", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+  // Main has work the milestone branch never saw, then gets the milestone
+  // work through a squash merge done by hand.
+  writeFileSync(join(repo, "other.txt"), "work of another milestone\n");
+  git(["add", "other.txt"], repo);
+  git(["commit", "-m", "feat: other milestone"], repo);
+  git(["merge", "--squash", "milestone/M001"], repo);
+  git(["commit", "-m", "feat: milestone work by hand"], repo);
+  const mainHead = git(["rev-parse", "main"], repo);
+
+  _setPreTeardownSafetyDepsForTests({
+    existsSync: () => { throw new Error("process stopped before cleanup"); },
+  });
+  assert.throws(() => mergeMilestoneToMain(repo, "M001", ROADMAP), /process stopped before cleanup/);
+  _resetPreTeardownSafetyDepsForTests();
+  assert.equal(mergeEffectReceipt()?.outcome, "recognized");
+  assert.equal(getMilestone("M001")?.status, "complete");
+  assert.equal(existsSync(worktree), true);
+
+  process.chdir(worktree);
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(git(["rev-parse", "main"], repo), mainHead);
+  assert.equal(existsSync(worktree), false);
+  assert.equal(git(["branch", "--list", "milestone/M001"], repo), "");
 });
 
 test("a run that stops after the merge commit finishes from the receipt without a second merge", async () => {

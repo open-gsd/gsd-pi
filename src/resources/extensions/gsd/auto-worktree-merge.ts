@@ -22,7 +22,6 @@ import {
   nativeCommit,
   nativeConflictFiles,
   nativeCommitCountBetween,
-  nativeDiffNumstat,
   nativeGetCurrentBranch,
   nativeIsAncestor,
   nativeMergeRegular,
@@ -38,6 +37,7 @@ import { createMilestoneDirectoryShelter } from "./auto-worktree-milestone-shelt
 import { getActiveWorkspace } from "./auto-worktree-session-registry.js";
 import {
   assertNoUnanchoredCodeChangesAfterEmptyMerge,
+  milestoneCodeNotOn,
   detectMergedCodeFilesChanged,
 } from "./auto-worktree-merge-code-changes.js";
 import { reconcileMilestoneBranchHead } from "./auto-worktree-merge-branch-head.js";
@@ -487,8 +487,7 @@ function finishSettledMilestoneMerge(request: {
     settledMerge.recognized &&
     nativeBranchExists(projectRoot, milestoneBranch) &&
     !nativeIsAncestor(projectRoot, milestoneBranch, settledMerge.integrationBranch) &&
-    nativeDiffNumstat(projectRoot, settledMerge.commitSha, milestoneBranch)
-      .some((entry) => !entry.path.startsWith(".gsd/"))
+    milestoneCodeNotOn(projectRoot, settledMerge.commitSha, milestoneBranch).length > 0
   ) {
     throw new GSDError(
       GSD_GIT_ERROR,
