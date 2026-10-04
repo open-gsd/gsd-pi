@@ -234,7 +234,7 @@ export function autoWorkerHeartbeatTtlSeconds(): number {
   return HEARTBEAT_TTL_SECONDS;
 }
 
-function isWorkerProcessAlive(candidate: Pick<AutoWorkerRow, "host" | "pid">): boolean {
+export function isWorkerProcessAlive(candidate: Pick<AutoWorkerRow, "host" | "pid">): boolean {
   const pid = candidate.pid;
   if (!Number.isInteger(pid) || pid <= 0) return false;
   if (candidate.host !== hostname()) return false;

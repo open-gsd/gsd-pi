@@ -3151,6 +3151,66 @@ test("autoLoop refreshes its milestone lease while an execute-task call is pendi
   }
 });
 
+test("autoLoop keeps the worker heartbeat and the milestone lease fresh during a long finalize", async (t) => {
+  _resetPendingResolve();
+  mock.timers.enable({ apis: ["setInterval"] });
+  t.after(() => mock.timers.reset());
+
+  const ctx = makeMockCtx();
+  ctx.ui.setStatus = () => {};
+  ctx.sessionManager = { getSessionFile: () => "/tmp/session.json" };
+  const pi = makeMockPi();
+  const s = makeLoopSession();
+  openLoopDatabase(t, s);
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  const workerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+  s.workerId = workerId;
+  s.milestoneLeaseToken = lease.token;
+  enqueueSidecarItem({
+    kind: "hook" as const,
+    unitType: "hook/review",
+    unitId: "M001/S01/T01",
+    prompt: "review the code",
+  }, null);
+
+  const past = "1970-01-01T00:00:00.000Z";
+  let duringFinalize: { heartbeatAt?: string; leaseExpiresAt?: string } = {};
+  const deps = makeMockDeps({
+    isDbAvailable: () => true,
+    postUnitPostVerification: async () => {
+      // The finalize step runs longer than the heartbeat interval.
+      _getAdapter()!.prepare("UPDATE workers SET last_heartbeat_at = :past").run({ ":past": past });
+      _getAdapter()!.prepare("UPDATE milestone_leases SET expires_at = :past").run({ ":past": past });
+      mock.timers.tick(milestoneLeaseTtlSeconds() * 500);
+      duringFinalize = {
+        heartbeatAt: getAutoWorker(workerId)?.last_heartbeat_at,
+        leaseExpiresAt: getMilestoneLease("M001")?.expires_at,
+      };
+      s.active = false;
+      return "continue" as const;
+    },
+  });
+
+  const loopPromise = autoLoop(ctx, pi, s, deps);
+  for (let i = 0; !_hasPendingResolveForTest() && i < 100; i++) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
+  resolveAgentEnd(makeEvent());
+  await loopPromise;
+
+  assert.ok(
+    Date.parse(duringFinalize.heartbeatAt ?? "") > Date.parse(past),
+    `the heartbeat is renewed during finalize: ${duringFinalize.heartbeatAt}`,
+  );
+  assert.ok(
+    Date.parse(duringFinalize.leaseExpiresAt ?? "") > Date.now(),
+    `the lease is renewed during finalize: ${duringFinalize.leaseExpiresAt}`,
+  );
+});
+
 test("autoLoop pauses when provider readiness cancels before dispatch", async (t) => {
   _resetPendingResolve();
 

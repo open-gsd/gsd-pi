@@ -2062,17 +2062,23 @@ export async function autoLoop(
         unitType: iterData.unitType,
         unitId: iterData.unitId,
       });
+      const finalizeIterData = iterData;
       try {
-        finalizeResult = await runFinalize(ic, iterData, loopState, sidecarItem, async () => {
-          await (deps.taskPublicationBoundary ?? publishVerifiedTaskExecution)({
-            unitType: unitIterData.unitType,
-            unitId: unitIterData.unitId,
-            workerId: s.workerId,
-            traceId: flowId,
-            turnId,
-            basePath: s.basePath,
-          }, VERIFIED_TASK_PUBLICATION_DEPS);
-        });
+        finalizeResult = await runWithWorkerHeartbeat(
+          s,
+          workerHeartbeatDeps,
+          WORKER_HEARTBEAT_INTERVAL_MS,
+          () => runFinalize(ic, finalizeIterData, loopState, sidecarItem, async () => {
+            await (deps.taskPublicationBoundary ?? publishVerifiedTaskExecution)({
+              unitType: unitIterData.unitType,
+              unitId: unitIterData.unitId,
+              workerId: s.workerId,
+              traceId: flowId,
+              turnId,
+              basePath: s.basePath,
+            }, VERIFIED_TASK_PUBLICATION_DEPS);
+          }),
+        );
       } catch (err) {
         const error = formatDispatchExceptionSummary({ error: err });
         journalReporter.emit("post-unit-finalize-end", {

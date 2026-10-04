@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { spawnSync } from "node:child_process";
 
 import { stopAuto } from "../auto.ts";
 import { postUnitPostVerification, type PostUnitContext } from "../auto-post-unit.ts";
@@ -347,8 +348,8 @@ function asParallelWorkerOfM001<T>(fn: () => T): T {
   }
 }
 
-/** The M001 parallel worker queues a hook and holds a quick task. It is another process. */
-function queueWorkAsOtherParallelWorker(base: string): void {
+/** The M001 parallel worker queues a hook and holds a quick task. It is the process `pid`. */
+function queueWorkAsOtherParallelWorker(base: string, pid: number): void {
   asParallelWorkerOfM001(() => {
     claimDispatch(base, "plan-slice", "M001/S01");
     enqueueSidecarItem(
@@ -357,14 +358,20 @@ function queueWorkAsOtherParallelWorker(base: string): void {
     );
     holdQuickTask(quickTask("CAP-1"), null);
   });
-  // The pid of init: a live process that is not this one.
-  _getAdapter()!.prepare("UPDATE workers SET pid = 1").run();
+  _getAdapter()!.prepare("UPDATE workers SET pid = :pid").run({ ":pid": pid });
 }
 
-test("a plain start leaves the rows of a live parallel worker alone", (t) => {
-  const base = makeProject(t);
-  queueWorkAsOtherParallelWorker(base);
+/** The pid of init: a live process that is not this one. */
+const LIVE_PID = 1;
 
+/** The heartbeat and the milestone lease of every worker were not renewed for 10 minutes. */
+function letHeartbeatAndLeaseLapse(): void {
+  const past = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  _getAdapter()!.prepare("UPDATE workers SET last_heartbeat_at = :past").run({ ":past": past });
+  _getAdapter()!.prepare("UPDATE milestone_leases SET expires_at = :past").run({ ":past": past });
+}
+
+function assertPlainStartTakesNothing(): void {
   assert.deepEqual(listQueuedSidecarItems(), []);
   assert.equal(hasHeldQuickTask(), false);
   assert.equal(promoteHeldQuickTask("M002"), null);
@@ -374,16 +381,37 @@ test("a plain start leaves the rows of a live parallel worker alone", (t) => {
     assert.equal(listQueuedSidecarItems().length, 1, "the worker still has its queue");
     assert.equal(hasHeldQuickTask(), true);
   });
+}
+
+test("a plain start leaves the rows of a live parallel worker alone", (t) => {
+  const base = makeProject(t);
+  queueWorkAsOtherParallelWorker(base, LIVE_PID);
+
+  assertPlainStartTakesNothing();
+});
+
+test("a plain start leaves the rows of a parallel worker whose process is alive but whose heartbeat and lease lapsed", (t) => {
+  const base = makeProject(t);
+  queueWorkAsOtherParallelWorker(base, LIVE_PID);
+  // A long step of the worker did not renew them.
+  letHeartbeatAndLeaseLapse();
+
+  assertPlainStartTakesNothing();
+});
+
+test("a plain start leaves the rows of a parallel worker with a dead pid while its heartbeat is fresh", (t) => {
+  const base = makeProject(t);
+  // The pid is from another host or was not updated: the fresh heartbeat decides.
+  queueWorkAsOtherParallelWorker(base, spawnSync(process.execPath, ["-e", ""]).pid);
+
+  assertPlainStartTakesNothing();
 });
 
 test("a plain start runs the rows of a parallel worker that was killed", (t) => {
   const base = makeProject(t);
-  queueWorkAsOtherParallelWorker(base);
-
-  // The worker is killed: its heartbeat and its milestone lease are not renewed.
-  const past = new Date(Date.now() - 10 * 60 * 1000).toISOString();
-  _getAdapter()!.prepare("UPDATE workers SET last_heartbeat_at = :past").run({ ":past": past });
-  _getAdapter()!.prepare("UPDATE milestone_leases SET expires_at = :past").run({ ":past": past });
+  // The worker is killed: its process is gone, and its heartbeat and its milestone lease are not renewed.
+  queueWorkAsOtherParallelWorker(base, spawnSync(process.execPath, ["-e", ""]).pid);
+  letHeartbeatAndLeaseLapse();
   restartProcess(base);
 
   assert.deepEqual(listQueuedSidecarItems().map((item) => item.unitType), ["hook/a"]);
