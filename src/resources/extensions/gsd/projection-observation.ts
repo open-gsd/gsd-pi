@@ -141,7 +141,8 @@ export function quarantineProjectionEvidence(
  * render them from database authority. With `holdTracked`, a changed file that
  * git tracks (a teammate's change from pull, merge, rebase or branch switch) is
  * not moved: it is returned in `held` so the caller stops for a choice, and no
- * other changed file is moved until that choice is made.
+ * other changed file is moved until that choice is made. With `dryRun` nothing
+ * is moved or written; `held` is still reported.
  */
 export async function preserveProjectionEvidence(
   basePath: string,
@@ -195,6 +196,10 @@ export async function preserveProjectionEvidence(
     for (const absPath of paths) {
       if (dryRun) {
         if (!existsSync(absPath)) continue;
+        if (holdTracked && isGitTracked(basePath, absPath)) {
+          held.push(absPath);
+          continue;
+        }
         preserved.push({
           sourcePath: absPath,
           quarantinePath: quarantinePath(basePath, absPath, stamp),

@@ -188,12 +188,21 @@ Committed `.gsd/` markdown (tracked mode, team repositories) is an export, not
 shared authority. A clone with milestone projections and no database, or a
 database with no milestone rows beside a planned (ROADMAP) projection, fails
 closed with `authority-missing` in every entry point and every internal reopen
-until Import Application (`/gsd recover`) or a restore. A `/gsd recover` that
+until Import Application (`/gsd recover`), a restore, or the explicit
+start-empty choice. The same refusal applies to a git-tracked `PROJECT.md`,
+`DECISIONS.md` or `REQUIREMENTS.md` beside no database, or beside a database
+with no workflow rows and no Domain Operation: only rows produce these files.
+`KNOWLEDGE.md` is not such evidence, because a render with no rows writes its
+empty frame. `/gsd db start-empty` stores the choice as one Domain Operation
+(`project.start_empty`), so every later open admits the database. It moves and
+deletes no file: a milestone that exists only as markdown still blocks dispatch
+until the user discards, renames or imports it. A `/gsd recover` that
 applies nothing closes the handle it opened, so the same process refuses the
 database again. Guided entry holds a changed tracked projection
 the same way before its markdown self-heal. A tracked projection changed by pull, merge,
 rebase, or branch switch raises one "changed outside GSD" state before
-dispatch: the user imports it through Import Preview or discards it with a
+dispatch in auto mode, parallel spawn, guided flow and `/gsd dispatch`: the
+user imports it through Import Preview or discards it with a
 projection rebuild; GSD never quarantines and re-renders it silently. The
 render baseline (`.gsd/.compat.json`) and `.gsd/quarantine/` are runtime files
 and are never committed.

@@ -736,6 +736,15 @@ async function dispatchWorkflow(
   const getDispatchReadinessError = resolvedOptions.deps?.getDispatchReadinessError
     ?? getUnitWorkflowDispatchReadinessErrorForModel;
 
+  // A tracked projection changed by pull, merge, rebase or branch switch stops
+  // every guided dispatch until the user imports or discards it.
+  const { heldProjectionChangesBeforeDispatch } = await import("./state-reconciliation.js");
+  const heldProjectionChanges = await heldProjectionChangesBeforeDispatch(projectRoot);
+  if (heldProjectionChanges) {
+    ctx?.ui.notify(heldProjectionChanges, "error");
+    return;
+  }
+
   // Route through the dynamic routing pipeline (complexity classification,
   // tier downgrade, fallback chains) — same path as auto-mode dispatches (#2958).
   if (ctx && unitType) {

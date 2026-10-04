@@ -9,6 +9,7 @@ import type {
 } from "@gsd/pi-coding-agent";
 
 import { deriveState } from "./state.js";
+import { heldProjectionChangesBeforeDispatch } from "./state-reconciliation.js";
 import { loadFile } from "./files.js";
 import { isDbAvailable, getClosedSliceIds } from "./gsd-db.js";
 import {
@@ -52,6 +53,14 @@ export async function dispatchDirectPhase(
   base: string,
   opts: { milestoneId?: string } = {},
 ): Promise<void> {
+  // A tracked projection changed by pull, merge, rebase or branch switch stops
+  // the dispatch until the user imports or discards it.
+  const heldProjectionChanges = await heldProjectionChangesBeforeDispatch(base);
+  if (heldProjectionChanges) {
+    ctx.ui.notify(heldProjectionChanges, "error");
+    return;
+  }
+
   const parsed = parseDirectDispatchPhase(phase);
   const state = await deriveState(base);
   const mid = opts.milestoneId ?? parsed.milestoneId ?? state.activeMilestone?.id;

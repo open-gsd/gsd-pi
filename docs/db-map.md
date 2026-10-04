@@ -1170,6 +1170,9 @@ FOREIGN KEY project_id → project_authority(project_id)
 - `(project_id, idempotency_key)` and `(project_id, resulting_revision)` are
   unique. The composite operation/project/result revision/result epoch key binds
   emitted events to the exact recorded operation result.
+- A `project.start_empty` row is the stored `/gsd db start-empty` choice: the
+  open admits a database with no milestone rows beside projections it did not
+  produce; see ADR-046, "One database per bound checkout".
 - Index: `idx_workflow_operations_created` (project_id, created_at, operation_id)
 
 #### `workflow_domain_events`

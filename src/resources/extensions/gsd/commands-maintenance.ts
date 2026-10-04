@@ -29,6 +29,7 @@ import {
   loadVerifiedRecoverApplication,
   openWorkflowDatabase,
   prepareVerifiedRecoverApplication,
+  recordStartEmptyChoice,
   resolvePreparedVerifiedRecoverApplication,
   type PreparedVerifiedRecoverApplication,
 } from "./db-workspace.js";
@@ -1802,6 +1803,40 @@ export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): vo
   }
   if (!wasOpen) closeWorkflowDatabase();
   ctx.ui.notify(`gsd db bind: ${result.location.projectDb} now belongs to this checkout.`, "info");
+}
+
+/**
+ * `gsd db start-empty` — Start from an empty database on purpose, although
+ * `.gsd` holds projections that this database did not produce (a re-clone of
+ * tracked `.gsd`). The choice is stored in the database, so every later open
+ * admits it. No file is moved or deleted.
+ */
+export function handleDbStartEmpty(ctx: ExtensionCommandContext, basePath: string): void {
+  const wasOpen = isWorkflowDatabaseOpen();
+  const result = openWorkflowDatabase(basePath, { createEmptyAuthority: true });
+  if (!result.ok) {
+    ctx.ui.notify(`gsd db start-empty: ${result.error?.message ?? result.reason}`, "error");
+    return;
+  }
+  let stored: boolean;
+  try {
+    stored = recordStartEmptyChoice(basePath);
+  } finally {
+    if (!wasOpen) closeWorkflowDatabase();
+  }
+  if (!stored) {
+    ctx.ui.notify(
+      `gsd db start-empty: ${result.location.projectDb} is not refused as an empty database, so no choice was stored.`,
+      "info",
+    );
+    return;
+  }
+  ctx.ui.notify(
+    `gsd db start-empty: ${result.location.projectDb} now starts without the earlier workflow history. ` +
+    "No file in .gsd was changed. A milestone directory that the database does not know still stops " +
+    "dispatch until you delete it, rename it, or import it with /gsd recover.",
+    "info",
+  );
 }
 
 /**

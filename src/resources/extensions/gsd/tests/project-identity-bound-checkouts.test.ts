@@ -8,10 +8,13 @@ import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFile
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { dispatchDirectPhase } from "../auto-direct-dispatch.ts";
 import { bootstrapAutoSession } from "../auto-start.ts";
 import { AutoSession } from "../auto/session.ts";
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.ts";
-import { handleDbBind, handleRebuild, handleRecover } from "../commands-maintenance.ts";
+import { handleDbBind, handleDbStartEmpty, handleRebuild, handleRecover } from "../commands-maintenance.ts";
+import { getAllDecisionsFromMemories } from "../context-store.ts";
+import { generateDecisionsMd, saveDecisionToDb } from "../db-writer.ts";
 import {
   ensureWorkflowDbAtPath,
   ensureWorkflowDbForBase,
@@ -22,8 +25,8 @@ import {
   resolveProjectRootDbPath,
 } from "../db-workspace.ts";
 import { GitServiceImpl } from "../git-service.ts";
-import { showSmartEntry } from "../guided-flow.ts";
-import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
+import { _dispatchWorkflowForTest, showSmartEntry } from "../guided-flow.ts";
+import { closeDatabase, insertDecision, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { renderTaskSummary } from "../markdown-renderer.ts";
 import { describeHeldProjectionChanges, preserveProjectionChangesBeforeDispatch } from "../projection-worker.ts";
 import { ensureGsdSymlink } from "../repo-identity.ts";
@@ -33,7 +36,11 @@ import { openSqliteReadOnly } from "../sqlite-readonly.ts";
 import { executeSummarySave } from "../tools/workflow-tool-executors.ts";
 
 const tempDirs = new Set<string>();
-const savedEnv = { GSD_STATE_DIR: process.env.GSD_STATE_DIR, GSD_PROJECT_ID: process.env.GSD_PROJECT_ID };
+const savedEnv = {
+  GSD_STATE_DIR: process.env.GSD_STATE_DIR,
+  GSD_PROJECT_ID: process.env.GSD_PROJECT_ID,
+  GSD_WORKFLOW_PATH: process.env.GSD_WORKFLOW_PATH,
+};
 
 afterEach(() => {
   closeDatabase();
@@ -88,13 +95,17 @@ function makeCtx(): { ctx: any; notes: Array<{ message: string; level?: string }
   };
 }
 
-function boundRoot(dbPath: string): unknown {
+function projectAuthority(dbPath: string): Record<string, unknown> | undefined {
   const { db } = openSqliteReadOnly(dbPath);
   try {
-    return db.prepare("SELECT project_root_realpath FROM project_authority WHERE singleton = 1").get()?.["project_root_realpath"];
+    return db.prepare("SELECT project_root_realpath, revision FROM project_authority WHERE singleton = 1").get();
   } finally {
     db.close();
   }
+}
+
+function boundRoot(dbPath: string): unknown {
+  return projectAuthority(dbPath)?.["project_root_realpath"];
 }
 
 test("a second clone of one remote opens the same state dir and is refused until bound", async () => {
@@ -185,11 +196,31 @@ test("an empty database bound to another root beside a ROADMAP is bound here, th
   assert.equal(openWorkflowDatabase(moved, { createEmptyAuthority: true }).ok, true, "the /gsd recover open now succeeds");
 });
 
-for (const existingDb of ["none", "schema-only"] as const) test(`a re-clone with tracked projections and ${existingDb === "none" ? "no" : "a schema-only"} database blocks auto, guided, headless and MCP writes`, async () => {
+const TEAM_DECISION = {
+  seq: 1,
+  id: "D001",
+  when_context: "M001",
+  scope: "architecture",
+  decision: "Storage engine",
+  choice: "SQLite",
+  rationale: "One file",
+  revisable: "No",
+  made_by: "human",
+  source: "discussion",
+  superseded_by: null,
+} as const;
+
+/** A fresh clone of a team repository that tracks `.gsd` projections; gsd.db is never committed. */
+function recloneOfTrackedProject(projections: "a planned milestone" | "root projections only"): string {
   const origin = tempDir("gsd-tracked-origin-");
   initRepo(origin);
   mkdirSync(join(origin, ".gsd", "phases", "01-foo"), { recursive: true });
-  writeFileSync(join(origin, ".gsd", "phases", "01-foo", "01-ROADMAP.md"), "# M001: Team plan\n");
+  if (projections === "a planned milestone") {
+    writeFileSync(join(origin, ".gsd", "phases", "01-foo", "01-ROADMAP.md"), "# M001: Team plan\n");
+  } else {
+    writeFileSync(join(origin, ".gsd", "PROJECT.md"), "# Project\n\nTeam project.\n");
+    writeFileSync(join(origin, ".gsd", "DECISIONS.md"), generateDecisionsMd([TEAM_DECISION]));
+  }
   writeFileSync(join(origin, ".gsd", "PREFERENCES.md"), "---\ngit:\n  isolation: \"none\"\n---\n");
   writeFileSync(join(origin, ".gitignore"), ".gsd/gsd.db*\n");
   git(origin, "add", "-A");
@@ -199,6 +230,11 @@ for (const existingDb of ["none", "schema-only"] as const) test(`a re-clone with
   const clone = join(parent, "clone");
   git(clone, "config", "user.email", "test@test.com");
   git(clone, "config", "user.name", "Test");
+  return clone;
+}
+
+for (const projections of ["a planned milestone", "root projections only"] as const) for (const existingDb of ["none", "schema-only"] as const) test(`a re-clone with tracked projections (${projections}) and ${existingDb === "none" ? "no" : "a schema-only"} database blocks auto, guided, headless and MCP writes`, async () => {
+  const clone = recloneOfTrackedProject(projections);
   const dbPath = join(clone, ".gsd", "gsd.db");
   const recoverInstruction = /authority-missing: .*\/gsd recover/s;
   if (existingDb === "schema-only") {
@@ -252,6 +288,115 @@ for (const existingDb of ["none", "schema-only"] as const) test(`a re-clone with
       db.close();
     }
     assert.equal(openWorkflowDatabase(clone, { createEmptyAuthority: true }).ok, true, "the explicit import path still opens it");
+  }
+});
+
+test("/gsd recover imports the tracked root projections of a re-clone, and the database then opens", async () => {
+  const clone = recloneOfTrackedProject("root projections only");
+  assert.equal(openWorkflowDatabase(clone).reason, "authority-missing");
+
+  const first = makeCtx();
+  await handleRecover(first.ctx, clone);
+  const approval = /--preview=sha256:[0-9a-f]{64}/u.exec(first.notes.at(-1)?.message ?? "")?.[0];
+  assert.ok(approval, JSON.stringify(first.notes));
+  assert.equal(openWorkflowDatabase(clone).reason, "authority-missing", "a Preview that is not applied admits nothing");
+
+  const second = makeCtx();
+  await handleRecover(second.ctx, clone, approval);
+  assert.notEqual(second.notes.at(-1)?.level, "error", JSON.stringify(second.notes));
+  closeDatabase();
+
+  assert.equal(openWorkflowDatabase(clone).ok, true, "the recover instruction clears the block");
+  assert.deepEqual(getAllDecisionsFromMemories().map(({ id, choice }) => ({ id, choice })), [{ id: "D001", choice: "SQLite" }]);
+});
+
+test("a tracked KNOWLEDGE.md frame beside an empty database is a new project, not a lost authority", async () => {
+  const origin = tempDir("gsd-tracked-new-project-");
+  initRepo(origin);
+  mkdirSync(join(origin, ".gsd"));
+  assert.equal(openWorkflowDatabase(origin).ok, true);
+  // A full render with no rows writes the empty KNOWLEDGE.md frame.
+  await handleRebuild(makeCtx().ctx, origin, "markdown");
+  closeDatabase();
+  assert.equal(existsSync(join(origin, ".gsd", "KNOWLEDGE.md")), true);
+  writeFileSync(join(origin, ".gitignore"), ".gsd/gsd.db*\n.gsd/.compat.json\n");
+  git(origin, "add", "-A");
+  git(origin, "commit", "-m", "new project");
+
+  assert.equal(openWorkflowDatabase(origin).reason, "opened-existing", "the same checkout opens its own empty database");
+  closeDatabase();
+  const parent = tempDir("gsd-tracked-new-clone-");
+  git(parent, "clone", "-q", origin, "clone");
+  assert.equal(openWorkflowDatabase(join(parent, "clone")).reason, "created-empty", "a clone of a project with no rows starts empty");
+});
+
+test("a project in discussion opens beside its own tracked root projections", async () => {
+  const base = tempDir("gsd-tracked-own-rows-");
+  initRepo(base);
+  mkdirSync(join(base, ".gsd"));
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  // The real writer saves the row and renders DECISIONS.md; no milestone is planned yet.
+  await saveDecisionToDb({ scope: "architecture", decision: "Storage engine", choice: "SQLite", rationale: "One file", made_by: "human" }, base);
+  closeDatabase();
+  assert.equal(existsSync(join(base, ".gsd", "DECISIONS.md")), true);
+  writeFileSync(join(base, ".gitignore"), ".gsd/gsd.db*\n.gsd/.compat.json\n");
+  git(base, "add", "-A");
+  git(base, "commit", "-m", "decisions");
+
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  closeDatabase();
+
+  // Nothing is refused, so start-empty writes no operation.
+  const dbPath = join(base, ".gsd", "gsd.db");
+  const revision = projectAuthority(dbPath)?.["revision"];
+  const { ctx, notes } = makeCtx();
+  handleDbStartEmpty(ctx, base);
+  assert.match(notes.at(-1)?.message ?? "", /no choice was stored/, JSON.stringify(notes));
+  assert.equal(projectAuthority(dbPath)?.["revision"], revision);
+});
+
+test("a database from an older GSD that holds rows but no Domain Operation opens beside its tracked root projections", () => {
+  const base = tempDir("gsd-tracked-legacy-rows-");
+  initRepo(base);
+  mkdirSync(join(base, ".gsd"));
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  // The legacy writer: a decisions row, with no workflow_operations row.
+  insertDecision({ ...TEAM_DECISION });
+  closeDatabase();
+  writeFileSync(join(base, ".gsd", "DECISIONS.md"), generateDecisionsMd([TEAM_DECISION]));
+  writeFileSync(join(base, ".gitignore"), ".gsd/gsd.db*\n");
+  git(base, "add", "-A");
+  git(base, "commit", "-m", "decisions");
+
+  assert.equal(openWorkflowDatabase(base).ok, true);
+});
+
+for (const projections of ["a planned milestone", "root projections only"] as const) test(`/gsd db start-empty stores the choice, and a re-clone (${projections}) opens from then on`, async () => {
+  const clone = recloneOfTrackedProject(projections);
+  const projection = join(clone, ".gsd", projections === "a planned milestone" ? join("phases", "01-foo", "01-ROADMAP.md") : "DECISIONS.md");
+  const tracked = readFileSync(projection, "utf-8");
+  const refused = openWorkflowDatabase(clone);
+  assert.equal(refused.ok, false);
+  assert.match(refused.error?.message ?? "", /authority-missing: .*\/gsd db start-empty/s);
+
+  const { ctx, notes } = makeCtx();
+  handleDbStartEmpty(ctx, clone);
+  assert.match(notes.at(-1)?.message ?? "", /now starts without the earlier workflow history/, JSON.stringify(notes));
+  assert.equal(isWorkflowDatabaseOpen(), false, "the command leaves no handle, so the next open judges the database again");
+
+  // The choice is in the database file: every later open admits it.
+  for (let open = 0; open < 2; open += 1) {
+    assert.equal(openWorkflowDatabase(clone).ok, true);
+    assert.equal(ensureWorkflowDbAtPath(join(clone, ".gsd", "gsd.db")), true);
+    closeDatabase();
+  }
+  assert.equal(readFileSync(projection, "utf-8"), tracked, "start-empty changes no projection file");
+
+  if (projections === "a planned milestone") {
+    // A milestone that exists only as markdown still needs its own choice before dispatch.
+    const gate = await reconcileBeforeSpawn(clone);
+    assert.equal(gate.ok, false);
+    assert.match(gate.reason ?? "", /M001 exists only as markdown projection/);
   }
 });
 
@@ -427,6 +572,57 @@ test("guided entry does not self-heal over a pulled projection change: it keeps 
   assert.match(readFileSync(summaryPath, "utf-8"), /Teammate edit/, "the pulled change stays in place");
   assert.equal(existsSync(join(base, roadmap)), false, "no rebuild ran");
   assert.equal(existsSync(join(base, ".gsd", "quarantine")), false);
+});
+
+test("a pulled projection change stops a guided dispatch and /gsd dispatch; a hand edit of an untracked projection does not", async () => {
+  const { base, summaryPath, ctx: rebuildCtx } = await trackedProjectAfterPull();
+  const workflowPath = join(tempDir("gsd-guided-workflow-"), "GSD-WORKFLOW.md");
+  writeFileSync(workflowPath, "# Workflow\n");
+  process.env.GSD_WORKFLOW_PATH = workflowPath;
+  let sent = 0;
+  const pi = {
+    sendMessage: () => { sent += 1; },
+    getActiveTools: () => [],
+    setActiveTools: () => {},
+  } as any;
+  const { ctx, notes } = makeCtx();
+  ctx.newSession = () => { throw new Error("/gsd dispatch must not start a session on old content"); };
+  const guidedDispatch = () => _dispatchWorkflowForTest(pi, "Plan the slice.", "gsd-run", ctx, undefined, { basePath: base });
+
+  // The state persists until the user chooses: each entry point stops, and stops again.
+  for (const dispatch of [guidedDispatch, () => dispatchDirectPhase(ctx, pi, "plan", base), guidedDispatch]) {
+    notes.length = 0;
+    await dispatch();
+    assert.equal(sent, 0, "no dispatch proceeds on old content without a choice");
+    assert.deepEqual(notes.map((note) => note.level), ["error"], JSON.stringify(notes));
+    assert.match(notes[0]!.message, /changed outside GSD: .*T01-SUMMARY\.md.*\/gsd recover.*\/gsd rebuild markdown/s);
+    assert.match(readFileSync(summaryPath, "utf-8"), /Teammate edit/, "the pulled change stays in place");
+    assert.equal(existsSync(join(base, ".gsd", "quarantine")), false, "the hold moves nothing");
+  }
+
+  // Discard choice, then a hand edit of a projection that git does not track.
+  await handleRebuild(rebuildCtx, base, "markdown");
+  insertTask({
+    id: "T02",
+    sliceId: "S01",
+    milestoneId: "M001",
+    title: "Second task",
+    status: "complete",
+    oneLiner: "Second task complete",
+    narrative: "Canonical narrative.",
+    verificationResult: "passed",
+    fullSummaryMd: "# T02 Summary\n\nCanonical second summary.\n",
+  });
+  assert.equal(await renderTaskSummary(base, "M001", "S01", "T02"), true);
+  const handEditPath = join(dirname(summaryPath), "T02-SUMMARY.md");
+  writeFileSync(handEditPath, "# T02 Summary\n\nHand edit.\n");
+  const quarantinedBefore = listFiles(join(base, ".gsd", "quarantine")).length;
+
+  await guidedDispatch();
+
+  assert.equal(sent, 1, "guided dispatch proceeds as before");
+  assert.match(readFileSync(handEditPath, "utf-8"), /Hand edit/, "the guided hold is read-only");
+  assert.equal(listFiles(join(base, ".gsd", "quarantine")).length, quarantinedBefore);
 });
 
 test("one resolver finds the database from gsd.db, not from projection files", () => {

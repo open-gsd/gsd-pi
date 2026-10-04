@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 
 import { syncDirectoryEntry } from "@gsd/native/directory-sync";
 
@@ -14,6 +14,7 @@ import {
   closeAllDatabases,
   closeDatabase,
   closeDatabaseByWorkspace,
+  executeDomainOperation,
   getDbPath,
   getDbStatus,
   getDbProvider,
@@ -90,6 +91,8 @@ import { resolveGsdPathContract, gsdRoot, normalizeRealPath } from "./paths.js";
 import { logWarning, setLogBasePath } from "./workflow-logger.js";
 import { parseDecisionsTable } from "./decision-markdown-parser.js";
 import { isSqliteBusyError } from "./sqlite-errors.js";
+import { nativeLsFiles } from "./native-git-bridge.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 
 export interface WorkflowDatabaseLocation {
   projectRoot: string;
@@ -190,7 +193,8 @@ export function resolveProjectRootDbPath(basePath: string): string {
 /**
  * True when `.gsd` proves an earlier Workflow Authority existed: a milestone
  * directory with content (current `phases/` or legacy `milestones/` layout),
- * or a migration backup. An absent or zero-byte
+ * a git-tracked root projection that only database rows produce, or a
+ * migration backup. An absent or zero-byte
  * gsd.db beside them is a lost authority, not a fresh project.
  */
 function hasWorkflowHistoryWithoutDatabase(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): boolean {
@@ -200,7 +204,30 @@ function hasWorkflowHistoryWithoutDatabase(location: Pick<WorkflowDatabaseLocati
     // Absent database: fall through to the history check.
   }
   return milestoneProjectionEntries(location.projectGsd).length > 0
-    || dirEntries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"));
+    || dirEntries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"))
+    || hasTrackedRootProjection(location.projectGsd);
+}
+
+/**
+ * Root projections that GSD writes only from database rows. KNOWLEDGE.md is
+ * not one: a render with no rows writes its empty frame, and a render keeps
+ * the file rows that are not imported.
+ */
+const ROW_BACKED_ROOT_PROJECTIONS = ["PROJECT.md", "DECISIONS.md", "REQUIREMENTS.md"] as const;
+
+/**
+ * True when git tracks a root projection that only database rows produce: a
+ * clone of tracked `.gsd` (team mode) brings the file but not the rows.
+ */
+function hasTrackedRootProjection(projectGsd: string): boolean {
+  const present = ROW_BACKED_ROOT_PROJECTIONS.filter((name) => existsSync(join(projectGsd, name)));
+  if (present.length === 0) return false;
+  try {
+    return present.some((name) => nativeLsFiles(dirname(projectGsd), `${basename(projectGsd)}/${name}`).length > 0);
+  } catch {
+    // No repository or a git failure: the file is not a tracked team projection.
+    return false;
+  }
 }
 
 function dirEntries(dir: string): string[] {
@@ -219,15 +246,62 @@ function milestoneProjectionEntries(projectGsd: string): string[] {
   });
 }
 
+const START_EMPTY_OPERATION = "project.start_empty";
+
+function openDatabaseHas(sql: string): boolean {
+  return _getAdapter()?.prepare(sql).get() !== undefined;
+}
+
 /**
- * True when the open database has no milestone rows but `.gsd` holds a planned
- * milestone (a ROADMAP projection), such as a re-clone of tracked `.gsd` beside
- * a schema-only gsd.db. Only Import Application may fill it. Discussion scratch
- * (CONTEXT or CONTEXT-DRAFT without a ROADMAP) is not planned work.
+ * True when the open database did not produce the projections beside it, such
+ * as a re-clone of tracked `.gsd` beside a schema-only gsd.db. Either it has no
+ * milestone rows but `.gsd` holds a planned milestone (a ROADMAP projection),
+ * or it has no workflow rows at all but git tracks a root projection that only
+ * rows produce. Only Import Application or the stored start-empty choice
+ * admits it. Discussion scratch (CONTEXT or CONTEXT-DRAFT without a ROADMAP)
+ * is not planned work.
  */
-function isEmptyDatabaseBesidePlannedProjections(projectGsd: string): boolean {
-  if (_getAdapter()?.prepare("SELECT 1 FROM milestones LIMIT 1").get() !== undefined) return false;
-  return milestoneProjectionEntries(projectGsd).some((entry) => entry.endsWith("ROADMAP.md"));
+function isEmptyDatabaseBesideProjections(projectGsd: string): boolean {
+  if (openDatabaseHas("SELECT 1 FROM milestones LIMIT 1")) return false;
+  if (openDatabaseHas(`SELECT 1 FROM workflow_operations WHERE operation_type = '${START_EMPTY_OPERATION}' LIMIT 1`)) return false;
+  if (milestoneProjectionEntries(projectGsd).some((entry) => entry.endsWith("ROADMAP.md"))) return true;
+  return !openDatabaseHas(
+    "SELECT 1 FROM artifacts UNION ALL SELECT 1 FROM decisions UNION ALL SELECT 1 FROM memories " +
+    "UNION ALL SELECT 1 FROM requirements UNION ALL SELECT 1 FROM workflow_operations LIMIT 1",
+  ) && hasTrackedRootProjection(projectGsd);
+}
+
+/**
+ * Store the operator's explicit choice to start from the open database as it
+ * is, although `.gsd` holds projections it did not produce (/gsd db
+ * start-empty). It is one Domain Operation, so the choice is durable. Returns
+ * false and stores nothing when the open would not refuse the database: a
+ * needless operation would close the Restore Window of an import.
+ */
+export function recordStartEmptyChoice(basePath: string): boolean {
+  if (!isEmptyDatabaseBesideProjections(resolveWorkflowDatabaseLocation(basePath).projectGsd)) return false;
+  const idempotencyKey = "project/start-empty";
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: START_EMPTY_OPERATION,
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "operator",
+    sourceTransport: "internal",
+    payload: {},
+  }, () => ({
+    events: [{
+      eventType: "project.started_empty",
+      entityType: "project",
+      entityId: fence.projectId,
+      payload: {},
+      destinations: ["db"],
+    }],
+    // The choice changes no hierarchy file; STATE.md is its projection.
+    projections: [{ projectionKey: "state", projectionKind: "state", rendererVersion: "1" }],
+  }));
+  return true;
 }
 
 function authorityMissingError(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): GSDError {
@@ -235,7 +309,7 @@ function authorityMissingError(location: Pick<WorkflowDatabaseLocation, "project
     GSD_STALE_STATE,
     `authority-missing: ${location.projectGsd} holds workflow history but ${location.projectDb} is ` +
     "missing or empty. No empty database was created. Restore a backup with /gsd db restore-backup, " +
-    "or import the markdown with /gsd recover.",
+    "or import the markdown with /gsd recover. To start with an empty database on purpose, run /gsd db start-empty.",
   );
 }
 
@@ -358,7 +432,7 @@ function openWorkflowDatabaseWithMode(
     if (!opened) {
       return { ok: false, reason: "open-failed", location };
     }
-    if (!options.createEmptyAuthority && !options.bindCheckout && !alreadyOpen && isEmptyDatabaseBesidePlannedProjections(location.projectGsd)) {
+    if (!options.createEmptyAuthority && !options.bindCheckout && !alreadyOpen && isEmptyDatabaseBesideProjections(location.projectGsd)) {
       closeDatabase();
       return { ok: false, reason: "authority-missing", location, error: authorityMissingError(location) };
     }
@@ -434,7 +508,7 @@ export function openWorkflowDatabasePath(path: string): boolean {
   const alreadyOpen = isOpenAt(path);
   if (!openDatabase(path)) return false;
   if (alreadyOpen) return true;
-  const refusal = isEmptyDatabaseBesidePlannedProjections(location.projectGsd)
+  const refusal = isEmptyDatabaseBesideProjections(location.projectGsd)
     ? authorityMissingError(location)
     : enforcePathBinding(path);
   if (!refusal) return true;
