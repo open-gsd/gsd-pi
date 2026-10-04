@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,18 @@ import {
   setResearchProjectPromptBuilderForTest,
   type DispatchContext,
 } from "../auto-dispatch.ts";
+import { AutoSession } from "../auto/session.ts";
+import {
+  claimUnitRun,
+  iterationDataForClaim,
+  UNIT_RUN_CLAIM_FAIL_LOG,
+  UNIT_RUN_CLAIM_REJECT_LOG,
+  UNIT_RUN_LEASE_FAIL_LOG,
+  UNIT_RUN_LEASE_LOG,
+} from "../auto/unit-run.ts";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.ts";
+import { getDispatchById, getRecentForUnit, markRunning, recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { piExecutionInvocation } from "../execution-invocation.ts";
 import { _getAdapter, closeDatabase, insertArtifact, insertMilestone, openDatabase } from "../gsd-db.ts";
 import type { GSDPreferences } from "../preferences.ts";
@@ -49,18 +62,45 @@ function saveRootArtifact(path: "PROJECT.md" | "REQUIREMENTS.md", content: strin
   });
 }
 
+const state: GSDState = {
+  phase: "pre-planning",
+  activeMilestone: { id: "M001", title: "Test" },
+  activeSlice: null,
+  activeTask: null,
+  recentDecisions: [],
+  blockers: [],
+  nextAction: "",
+  registry: [{ id: "M001", title: "Test", status: "active" }],
+};
+
 function ctx(): DispatchContext {
-  const state: GSDState = {
-    phase: "pre-planning",
-    activeMilestone: { id: "M001", title: "Test" },
-    activeSlice: null,
-    activeTask: null,
-    recentDecisions: [],
-    blockers: [],
-    nextAction: "",
-    registry: [{ id: "M001", title: "Test", status: "active" }],
-  };
   return { basePath: base, mid: "M001", midTitle: "Test", state, prefs: deepPrefs, structuredQuestionsAvailable: "false" };
+}
+
+/** Claim a unit run for a new auto worker, with the dependencies auto-mode uses. */
+function claimAsNewWorker(unitType: string, unitId: string) {
+  const session = new AutoSession();
+  session.basePath = base;
+  session.workerId = registerAutoWorker({ projectRootRealpath: base });
+  const result = claimUnitRun({
+    session,
+    flowId: `flow-${session.workerId}`,
+    turnId: `turn-${session.workerId}`,
+    iterData: iterationDataForClaim(unitType, unitId, state, session),
+    leaseDeps: {
+      claimMilestoneLease,
+      logLeaseRecovered: UNIT_RUN_LEASE_LOG,
+      logLeaseRecoveryFailed: UNIT_RUN_LEASE_FAIL_LOG,
+    },
+    claimDeps: {
+      getRecentDispatchesForUnit: getRecentForUnit,
+      recordDispatchClaim,
+      markDispatchRunning: markRunning,
+      logClaimRejected: UNIT_RUN_CLAIM_REJECT_LOG,
+      logClaimFailed: UNIT_RUN_CLAIM_FAIL_LOG,
+    },
+  });
+  return { workerId: session.workerId, result };
 }
 
 function matchRule(name: string) {
@@ -235,5 +275,43 @@ describe("deep project setup reads database facts", () => {
 
     const dispatched = await matchRule(RESEARCH_PROJECT_RULE);
     assert.equal(dispatched?.action === "dispatch" ? dispatched.unitType : dispatched?.action, "research-project");
+  });
+
+  test("a crashed research run is released by its database claim", async (t) => {
+    saveRootArtifact("PROJECT.md", VALID_PROJECT);
+    saveRootArtifact("REQUIREMENTS.md", VALID_REQUIREMENTS);
+    await saveResearchDecision("research", "call-1");
+    t.after(setResearchProjectPromptBuilderForTest(async () => "research prompt"));
+    const dispatched = await matchRule(RESEARCH_PROJECT_RULE);
+    if (dispatched?.action !== "dispatch") throw new Error(`expected a dispatch, got ${JSON.stringify(dispatched)}`);
+    const db = _getAdapter()!;
+
+    // The research run is a claimed unit: a dispatch row under the lease of the active milestone.
+    const crashed = claimAsNewWorker(dispatched.unitType, dispatched.unitId);
+    assert.equal(crashed.result.kind, "opened", JSON.stringify(crashed.result));
+    if (crashed.result.kind !== "opened") return;
+    const crashedDispatchId = crashed.result.dispatchId;
+    assert.equal(getDispatchById(crashedDispatchId)?.unit_type, "research-project");
+    assert.equal(getDispatchById(crashedDispatchId)?.milestone_id, "M001");
+    assert.equal(getDispatchById(crashedDispatchId)?.status, "running");
+
+    // The worker process dies. Its lease still holds the run until the lease expires.
+    const exited = spawnSync(process.execPath, ["-e", ""]);
+    db.prepare("UPDATE workers SET pid = :pid WHERE worker_id = :worker_id")
+      .run({ ":pid": exited.pid, ":worker_id": crashed.workerId });
+    const blocked = claimAsNewWorker(dispatched.unitType, dispatched.unitId);
+    assert.equal(blocked.result.kind, "blocked", JSON.stringify(blocked.result));
+    assert.equal(getDispatchById(crashedDispatchId)?.status, "running");
+
+    // The dead worker does not refresh the lease, so the lease expires.
+    db.prepare("UPDATE milestone_leases SET expires_at = '2000-01-01T00:00:00.000Z' WHERE milestone_id = 'M001'").run();
+    const next = claimAsNewWorker(dispatched.unitType, dispatched.unitId);
+
+    assert.equal(next.result.kind, "opened", JSON.stringify(next.result));
+    if (next.result.kind !== "opened") return;
+    assert.equal(getDispatchById(crashedDispatchId)?.status, "canceled");
+    assert.equal(getDispatchById(next.result.dispatchId)?.status, "running");
+    assert.equal(getDispatchById(next.result.dispatchId)?.worker_id, next.workerId);
+    assert.equal(getMilestoneLease("M001")?.worker_id, next.workerId);
   });
 });

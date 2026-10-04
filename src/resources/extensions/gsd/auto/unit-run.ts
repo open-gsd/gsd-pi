@@ -11,6 +11,7 @@ import {
 import { isDeadLocalAutoWorker, markWorkerCrashed } from "../db/auto-workers.js";
 import { forceReleaseLeasesForWorker } from "../db/milestone-leases.js";
 import { debugLog } from "../debug-logger.js";
+import { MILESTONE_ID_RE } from "../milestone-ids.js";
 import { parseUnitId } from "../unit-id.js";
 import type { GSDState } from "../types.js";
 import type { UnitRef } from "./contracts.js";
@@ -64,6 +65,12 @@ export function iterationDataForClaim(
   session: AutoSession,
 ): IterationData {
   const parsed = parseUnitId(unitId);
+  // A project-level unit id (RESEARCH-PROJECT, REQUIREMENTS) names a setup
+  // stage, not a milestones row. The milestone lease needs a milestones parent
+  // row, so the unit claims under the active milestone.
+  const unitMilestone = parsed.milestone && !MILESTONE_ID_RE.test(parsed.milestone)
+    ? state.activeMilestone?.id
+    : parsed.milestone;
   return {
     unitType,
     unitId,
@@ -71,7 +78,7 @@ export function iterationDataForClaim(
     finalPrompt: "",
     pauseAfterUatDispatch: false,
     state,
-    mid: parsed.milestone || session.currentMilestoneId || undefined,
+    mid: unitMilestone || session.currentMilestoneId || undefined,
     midTitle: state.activeMilestone?.title,
     isRetry: false,
     previousTier: undefined,

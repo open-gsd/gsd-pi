@@ -28,8 +28,13 @@ import {
 import type { OrchestratorContext } from "../auto/orchestrator.js";
 import type { AutoOrchestrationModule, AutoSessionContext } from "../auto/contracts.js";
 import type { GSDState } from "../types.js";
-import { resolveDispatch, type DispatchContext } from "../auto-dispatch.js";
-import { RuleRegistry, setRegistry, resetRegistry } from "../rule-registry.js";
+import {
+  DISPATCH_RULES,
+  resolveDispatch,
+  setResearchProjectPromptBuilderForTest,
+  type DispatchContext,
+} from "../auto-dispatch.js";
+import { RuleRegistry, convertDispatchRules, initRegistry, setRegistry, resetRegistry } from "../rule-registry.js";
 import type { UnifiedRule } from "../rule-types.js";
 import { supportsStructuredQuestions } from "../workflow-mcp.js";
 import {
@@ -45,10 +50,11 @@ import {
 import { AutoSession } from "../auto/session.js";
 import { markWorkerCrashed, registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease, forceReleaseLeasesForWorker, getMilestoneLease, releaseMilestoneLease } from "../db/milestone-leases.js";
-import { recordDispatchClaim } from "../db/unit-dispatches.js";
+import { getDispatchById, recordDispatchClaim } from "../db/unit-dispatches.js";
+import { executeResearchDecisionSave } from "../tools/research-decision.js";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.js";
 import { recordFailureAndSelectRecovery, resumeTaskRecovery } from "../task-recovery-domain-operation.js";
-import { internalExecutionInvocation } from "../execution-invocation.js";
+import { internalExecutionInvocation, piExecutionInvocation } from "../execution-invocation.js";
 import { normalizeRealPath, resolveMilestoneFile } from "../paths.js";
 import { acquireSessionLock, releaseSessionLock } from "../session-lock.js";
 import { queryJournal } from "../journal.js";
@@ -542,6 +548,46 @@ test("advance() claims the active milestone lease even when session still holds 
   assert.equal(f.session.milestoneLeaseToken, activeLease?.fencing_token);
   assert.ok(f.journalNames().includes("advance"));
   assert.ok(!f.journalNames().includes("advance-blocked"));
+});
+
+test("advance() claims research-project under the active milestone after a research decision in deep setup", async (t) => {
+  const f = makeFixture({ noTask: true });
+  t.after(() => f.cleanup());
+  t.after(setResearchProjectPromptBuilderForTest(async () => "research prompt"));
+  // The dispatch rules that auto-mode registers at start, not the fixture rule.
+  initRegistry(convertDispatchRules(DISPATCH_RULES));
+  // The milestone is registered and not planned yet, as after the PROJECT save.
+  rmSync(join(f.base, ".gsd", "milestones"), { recursive: true });
+
+  writeFileSync(join(f.base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
+  for (const name of ["project", "requirements"]) {
+    insertArtifact({
+      path: `${name.toUpperCase()}.md`,
+      artifact_type: name.toUpperCase(),
+      milestone_id: null,
+      slice_id: null,
+      task_id: null,
+      full_content: readFileSync(new URL(`../schemas/__fixtures__/valid-${name}.md`, import.meta.url), "utf-8"),
+    });
+  }
+  const saved = await executeResearchDecisionSave(
+    { decision: "research" },
+    f.base,
+    piExecutionInvocation("gsd_research_decision_save", "call-1"),
+  );
+  assert.equal(saved.isError, undefined);
+
+  const result = await f.orchestrator.advance();
+
+  assert.equal(result.kind, "advanced", JSON.stringify(result));
+  if (result.kind !== "advanced") return;
+  assert.deepEqual(result.unit, { unitType: "research-project", unitId: "RESEARCH-PROJECT" });
+  const dispatch = getDispatchById(result.dispatchId);
+  assert.equal(dispatch?.unit_id, "RESEARCH-PROJECT");
+  assert.equal(dispatch?.milestone_id, "M001");
+  assert.equal(dispatch?.status, "running");
+  assert.equal(dispatch?.worker_id, f.session.workerId);
+  assert.equal(getMilestoneLease("M001")?.worker_id, f.session.workerId);
 });
 
 test("advance() blocks source dispatch when an earlier slice is incomplete", async (t) => {
