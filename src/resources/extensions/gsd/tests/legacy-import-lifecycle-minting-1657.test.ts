@@ -20,7 +20,7 @@ import { verifyLegacyImportApplicationResult } from "../legacy-import-applicatio
 import { createLegacyImportPreview } from "../legacy-import-preview.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../legacy-import-preview-base.ts";
 import { type DbAdapter } from "../db-adapter.ts";
-import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
 import { completeSlice } from "../slice-lifecycle-domain-operation.ts";
 import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 import { createLegacyImportCorpusSourceRoots } from "./helpers/legacy-import-corpus.ts";
@@ -321,38 +321,82 @@ const IMPORTED_COMPLETION_MARKERS = [
   importedCompletionMarker("task", "M002/S01/T01"),
 ];
 
-test("/gsd db adopt --apply stores one unverified-legacy evidence marker for each imported completion, once", async () => {
-  const { projectRoot, importOperationId } = importIntoProjectDatabase();
+/** Each operation in commit order. The Restore Window of an import is open while `import.apply` is the last one. */
+function operationTypes(): unknown[] {
+  return rows("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision")
+    .map((row) => row["operation_type"]);
+}
+
+function lifecycleRows(): Array<Record<string, unknown>> {
+  return rows(`
+    SELECT lifecycle_id, lifecycle_status, state_version, last_operation_id
+    FROM workflow_item_lifecycles ORDER BY lifecycle_id
+  `);
+}
+
+test("/gsd db adopt leaves the evidence markers and the open Restore Window of a fresh import alone", async () => {
+  const { projectRoot } = importIntoProjectDatabase();
   const notes: string[] = [];
   const ctx = { ui: { notify: (message: string) => notes.push(message) } };
   // The import has one event for the whole Application: it stores no marker.
   assert.deepEqual(evidenceMarkers(), []);
+  assert.deepEqual(operationTypes(), ["import.apply"]);
+
+  await handleDbAdopt(ctx as any, projectRoot);
+  await handleDbAdopt(ctx as any, projectRoot, "--apply");
+
+  for (const note of notes) {
+    assert.match(note, /5 imported completion\(s\) have no unverified-legacy evidence marker yet/);
+    assert.match(note, /wait until the Restore Window of the import closes/);
+    assert.match(note, /the import can still be restored/);
+  }
+  assert.equal(notes.length, 2);
+  assert.deepEqual(evidenceMarkers(), []);
+  assert.deepEqual(operationTypes(), ["import.apply"], "no operation closed the Restore Window");
+});
+
+test("/gsd db adopt --apply stores one unverified-legacy evidence marker for each imported completion, once the Restore Window is closed", async () => {
+  const { projectRoot } = importIntoProjectDatabase();
+  const notes: string[] = [];
+  const ctx = { ui: { notify: (message: string) => notes.push(message) } };
+  // Accepted work closes the Restore Window of the import.
+  assert.equal(completeImportedSliceS02().status, "committed");
+  const lifecyclesBefore = lifecycleRows();
 
   await handleDbAdopt(ctx as any, projectRoot);
   assert.match(notes[0]!, /5 imported completion\(s\) would get the unverified-legacy evidence marker/);
   assert.match(notes[0]!, /import-adopted-completion: 5/);
+  assert.doesNotMatch(notes[0]!, /Restore Window/);
   assert.deepEqual(evidenceMarkers(), [], "the preview writes nothing");
 
   await handleDbAdopt(ctx as any, projectRoot, "--apply");
   assert.match(notes[1]!, /adopted 0 row\(s\) .* 5 unverified-legacy evidence marker\(s\)/);
   assert.deepEqual(evidenceMarkers(), IMPORTED_COMPLETION_MARKERS);
-  // The marker is an event only: every lifecycle row is as the import left it.
-  assert.deepEqual(rows(`
-    SELECT lifecycle_id FROM workflow_item_lifecycles
-    WHERE state_version != 0 OR last_operation_id != '${importOperationId}'
-  `), []);
+  // The marker is an event only: no lifecycle row changes.
+  assert.deepEqual(lifecycleRows(), lifecyclesBefore);
 
   // A second run finds every marker and writes nothing.
   await handleDbAdopt(ctx as any, projectRoot, "--apply");
   assert.match(notes[2]!, /every imported completion has its evidence marker/);
   assert.equal(evidenceMarkers().length, 5);
-  assert.equal(rows("SELECT operation_id FROM workflow_operations WHERE operation_type = 'lifecycle.backfill'").length, 1);
+  assert.deepEqual(operationTypes(), ["import.apply", "slice.complete", "lifecycle.backfill"]);
+});
 
-  // Slice closeout still accepts the imported completion that now has its marker.
-  const receipt = completeImportedSliceS02();
-  assert.equal(receipt.status, "committed");
-  assert.deepEqual(receipt.completedTaskIds, ["T01"]);
-  assert.deepEqual(receipt.proofs, []);
+test("/gsd db adopt --apply with a row that has no lifecycle row runs in an open Restore Window, and the preview says it closes it", async () => {
+  const { projectRoot } = importIntoProjectDatabase();
+  const notes: string[] = [];
+  const ctx = { ui: { notify: (message: string) => notes.push(message) } };
+  insertMilestone({ id: "M900", title: "Old work", status: "active" });
+
+  await handleDbAdopt(ctx as any, projectRoot);
+  assert.match(notes[0]!, /1 row\(s\) would be adopted/);
+  assert.match(notes[0]!, /--apply closes it: after that, the import cannot be restored/);
+  assert.deepEqual(operationTypes(), ["import.apply"]);
+
+  await handleDbAdopt(ctx as any, projectRoot, "--apply");
+  assert.match(notes[1]!, /adopted 1 row\(s\) .* 5 unverified-legacy evidence marker\(s\)/);
+  assert.deepEqual(operationTypes(), ["import.apply", "lifecycle.backfill"]);
+  assert.deepEqual(evidenceMarkers(), IMPORTED_COMPLETION_MARKERS);
 });
 
 test("the Authority Epoch cutover on open stores the evidence marker of each imported completion", (t) => {

@@ -20,7 +20,7 @@ import {
 import { logError, logWarning } from "./workflow-logger.js";
 
 /** True while the operation head is an Import Application: its Restore Window is still open. */
-function importRestoreWindowIsOpen(fence: { projectId: string; revision: number }): boolean {
+export function importRestoreWindowIsOpen(fence: { projectId: string; revision: number }): boolean {
   const head = getDb().prepare(`
     SELECT operation_type FROM workflow_operations
     WHERE project_id = :project_id AND resulting_revision = :revision

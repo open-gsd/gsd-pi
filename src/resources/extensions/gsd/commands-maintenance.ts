@@ -1797,6 +1797,8 @@ export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): vo
  * lifecycle row, and stores the evidence marker of each imported completion.
  * `--apply` first writes a verified backup beside the database
  * so `/gsd db restore-backup` can roll the change back.
+ * Evidence markers alone never close the Restore Window of an import: while
+ * it is open and no other work is pending, the command writes nothing.
  */
 export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: string, args = ""): Promise<void> {
   const { isAutoActive } = await import("./auto.js");
@@ -1834,6 +1836,19 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
       );
       return;
     }
+    const { importRestoreWindowIsOpen } = await import("./authority-cutover-on-open.js");
+    const { readDomainOperationFence } = await import("./db/writers/lifecycle-commands.js");
+    const restoreWindowOpen = importRestoreWindowIsOpen(readDomainOperationFence());
+    if (restoreWindowOpen && preview.items.length === 0 && preview.waiverRepairs.length === 0) {
+      ctx.ui.notify(
+        `gsd db adopt: ${preview.unmarkedImportCompletions.length} imported completion(s) have no ` +
+          "unverified-legacy evidence marker yet. The markers wait until the Restore Window of the import closes: " +
+          "nothing was written, and the import can still be restored. " +
+          "The next accepted work closes the Restore Window; run /gsd db adopt --apply after it.",
+        "info",
+      );
+      return;
+    }
     const byRule = new Map<string, number>();
     for (const item of preview.items) byRule.set(item.rule, (byRule.get(item.rule) ?? 0) + 1);
     if (preview.waiverRepairs.length > 0) {
@@ -1854,7 +1869,10 @@ export async function handleDbAdopt(ctx: ExtensionCommandContext, basePath: stri
           `${preview.waiverRepairs.length} adopted cancellation(s) would get a Waiver and ` +
           `${preview.unmarkedImportCompletions.length} imported completion(s) would get the ` +
           `unverified-legacy evidence marker:\n${summary}\n` +
-          "Run /gsd db adopt --apply to adopt them in one operation (a verified backup is written first).",
+          "Run /gsd db adopt --apply to adopt them in one operation (a verified backup is written first)." +
+          (restoreWindowOpen
+            ? "\nThe Restore Window of the last import is still open. --apply closes it: after that, the import cannot be restored."
+            : ""),
         "info",
       );
       return;
