@@ -12,8 +12,8 @@ export function hasIntegrationBranchSchema(db: DbAdapter): boolean {
 /**
  * ADR-046: the branch a milestone merges back to is a database fact. The
  * `<MID>-META.json` file is a rendered copy; deleting it must not change the
- * merge target. This is a git coordination row (like milestone_leases), so it
- * is written outside Domain Operations. Idempotent.
+ * merge target. The row is workflow state: only the
+ * milestone.integration_branch.record Domain Operation writes it. Idempotent.
  */
 export function createIntegrationBranchSchema(db: DbAdapter): void {
   db.exec(`

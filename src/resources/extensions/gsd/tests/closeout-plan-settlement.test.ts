@@ -1179,6 +1179,32 @@ test("the interactive closeout notice says a prepared Milestone is not complete 
   assert.match(notices[0] ?? "", /closeout is prepared on milestone\/M001.*\/gsd dispatch complete-milestone M001/);
 });
 
+test("each change of the integration branch is one Domain Operation that names the branch it replaced", async () => {
+  const { basePath } = await validatedMilestone();
+  const revision = readDomainOperationFence().revision;
+
+  writeIntegrationBranch(basePath, "M001", "release");
+  writeIntegrationBranch(basePath, "M001", "release");
+  writeIntegrationBranch(basePath, "M001", "main");
+  writeIntegrationBranch(basePath, "M001", "release");
+
+  const recorded = _getAdapter()!.prepare(`
+    SELECT event.payload_json
+    FROM workflow_domain_events event
+    JOIN workflow_operations operation ON operation.operation_id = event.operation_id
+    WHERE operation.operation_type = 'milestone.integration_branch.record'
+      AND event.event_type = 'milestone.integration_branch.recorded'
+    ORDER BY event.project_revision
+  `).all().map((row) => JSON.parse(String(row["payload_json"])));
+  assert.deepEqual(recorded, [
+    { milestoneId: "M001", integrationBranch: "release", previous: null },
+    { milestoneId: "M001", integrationBranch: "main", previous: "release" },
+    { milestoneId: "M001", integrationBranch: "release", previous: "main" },
+  ]);
+  assert.equal(readDomainOperationFence().revision, revision + 3);
+  assert.equal(readIntegrationBranch(basePath, "M001"), "release");
+});
+
 test("deleting META.json does not change the branch the Milestone merges to", async () => {
   const { repo } = await milestoneInWorktree();
   git(["checkout", "-b", "release"], repo);
