@@ -5,7 +5,6 @@
  * - "stop" and "backtrack" are valid classification types
  * - loadStopCaptures returns unexecuted stop+backtrack captures
  * - an executor edit of CAPTURES.md does not silence a capture
- * - resolveBacktrackTarget reads the target milestone of a backtrack capture
  * - the stop guard reads only the database and writes no BACKTRACK-TRIGGER.md
  */
 
@@ -25,7 +24,6 @@ import {
 import { runGuards } from "../auto/phases.ts";
 import type { IterationContext } from "../auto/types.ts";
 import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
-import { resolveBacktrackTarget } from "../triage-resolution.ts";
 
 /** A temp project with an open in-memory database. The database is closed after each test. */
 function makeTempDir(prefix: string): string {
@@ -99,38 +97,6 @@ test("an executor that writes Status: resolved to CAPTURES.md does not silence t
   rmSync(tmp, { recursive: true, force: true });
 });
 
-// ─── resolveBacktrackTarget ───────────────────────────────────────────────────
-
-test("resolveBacktrackTarget reads the target milestone and ignores the current one", () => {
-  const capture = {
-    id: "CAP-test123",
-    text: "M005 failed, backtrack from M005 to M003",
-    timestamp: new Date().toISOString(),
-    status: "resolved" as const,
-    classification: "backtrack" as const,
-  };
-
-  assert.equal(resolveBacktrackTarget("M005", capture), "M003");
-  assert.equal(
-    resolveBacktrackTarget("M005", { ...capture, resolution: "Backtrack to M002" }),
-    "M002",
-    "the resolution wins over the capture text",
-  );
-});
-
-test("resolveBacktrackTarget returns null for no target or an ambiguous target", () => {
-  const capture = {
-    id: "CAP-test456",
-    text: "go back and redo the earlier work",
-    timestamp: new Date().toISOString(),
-    status: "resolved" as const,
-    classification: "backtrack" as const,
-  };
-
-  assert.equal(resolveBacktrackTarget("M005", capture), null);
-  assert.equal(resolveBacktrackTarget("M005", { ...capture, resolution: "Backtrack to M002 or M003" }), null);
-});
-
 // ─── Stop guard (runGuards) ───────────────────────────────────────────────────
 
 function guardContext(basePath: string): { ic: IterationContext; pauses: number[] } {
@@ -187,7 +153,7 @@ test("stop guard: an edited CAPTURES.md does not pause", async () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test("stop guard: a backtrack capture pauses and records its target in the database, with no trigger file", async () => {
+test("stop guard: a backtrack capture pauses and is recorded as executed, with no trigger file", async () => {
   const tmp = makeTempDir("guard-backtrack");
   const id = appendCapture(tmp, "M005 missed auth, go back");
   markCaptureResolved(tmp, id, "backtrack", "Backtrack to M003", "User backtrack", "M005");
@@ -200,11 +166,7 @@ test("stop guard: a backtrack capture pauses and records its target in the datab
   const executed = _getAdapter()!.prepare(
     "SELECT payload_json FROM workflow_domain_events WHERE event_type = 'capture.executed' AND entity_id = :id",
   ).get({ ":id": id });
-  assert.deepEqual(JSON.parse(String(executed?.["payload_json"])), {
-    captureId: id,
-    backtrackFrom: "M005",
-    backtrackTarget: "M003",
-  });
+  assert.deepEqual(JSON.parse(String(executed?.["payload_json"])), { captureId: id });
   assert.equal(existsSync(join(tmp, ".gsd", "BACKTRACK-TRIGGER.md")), false);
   rmSync(tmp, { recursive: true, force: true });
 });

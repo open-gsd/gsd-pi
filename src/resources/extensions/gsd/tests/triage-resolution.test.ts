@@ -466,6 +466,22 @@ test("resolution: executeTriageResolutions skips already-executed captures", () 
   }
 });
 
+test("resolution: executeTriageResolutions reports that a backtrack capture pauses auto-mode", (t) => {
+  const tmp = makeTempDir("res-exec-backtrack");
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const quickTaskId = appendCapture(tmp, "fix the typo");
+  markCaptureResolved(tmp, quickTaskId, "quick-task", "fix inline", "small");
+  const backtrackId = appendCapture(tmp, "go back to M003");
+  markCaptureResolved(tmp, backtrackId, "backtrack", "Backtrack to M003", "User backtrack");
+
+  const result = executeTriageResolutions(tmp, "M005", "S01");
+
+  assert.deepEqual(result.backtracks.map((capture) => capture.id), [backtrackId]);
+  assert.deepEqual(result.actions.filter((action) => action.includes(backtrackId)), [
+    `Backtrack directive from ${backtrackId}: "go back to M003" — auto-mode pauses on the next dispatch`,
+  ]);
+});
+
 test("resolution: executeTriageResolutions returns empty result when no actionable captures", () => {
   const tmp = makeTempDir("res-exec-empty");
   try {

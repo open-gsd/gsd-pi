@@ -124,26 +124,6 @@ export function executeReplan(
   }
 }
 
-// ─── Backtrack (Milestone Regression) ────────────────────────────────────────
-
-/**
- * The milestone a backtrack capture points at, read from its resolution (or
- * its text). The current milestone is not a target, so "backtrack from M004
- * to M003" gives M003. Null when no target or more than one target is named.
- */
-export function resolveBacktrackTarget(
-  currentMilestoneId: string,
-  capture: CaptureEntry,
-): string | null {
-  const sourceText = capture.resolution ?? capture.text;
-  const targets = new Set(
-    [...sourceText.matchAll(/\b(M\d{3}(?:-[a-z0-9]{6})?)\b/g)]
-      .map(m => m[1])
-      .filter(id => id !== currentMilestoneId),
-  );
-  return targets.size === 1 ? [...targets][0] : null;
-}
-
 // ─── File Overlap Detection ───────────────────────────────────────────────────
 
 /**
@@ -456,7 +436,7 @@ export function executeTriageResolutions(
       result.actions.push(`Stop directive from ${cap.id}: "${cap.text}" — will pause on next dispatch`);
     } else if (cap.classification === "backtrack") {
       result.backtracks.push(cap);
-      result.actions.push(`Backtrack directive from ${cap.id}: "${cap.text}" — will trigger milestone regression on next dispatch`);
+      result.actions.push(`Backtrack directive from ${cap.id}: "${cap.text}" — auto-mode pauses on the next dispatch`);
     }
   }
 
