@@ -1792,7 +1792,7 @@ export async function bootstrapAutoSession(
     initMetrics(s.basePath);
 
     // Initialize routing history
-    initRoutingHistory(s.basePath);
+    initRoutingHistory();
 
     // Restore the model that was active when auto bootstrap began (#650, #2829).
     if (startModelSnapshot) {

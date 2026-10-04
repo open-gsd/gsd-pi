@@ -6,6 +6,7 @@
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { loadLedgerFromDisk } from "./metrics.js";
 import { recordFeedback, initRoutingHistory } from "./routing-history.js";
+import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 import type { ComplexityTier } from "./complexity-classifier.js";
 
 const VALID_RATINGS = new Set(["over", "under", "ok"]);
@@ -45,7 +46,12 @@ export async function handleRate(
     return;
   }
 
-  initRoutingHistory(basePath);
+  // The rating is stored in the project database; without one it would be lost.
+  if (!(await ensureDbOpen(basePath))) {
+    ctx.ui.notify("Rating not recorded: the project database could not be opened.", "error");
+    return;
+  }
+  initRoutingHistory();
   recordFeedback(lastUnit.type, lastUnit.id, tier, rating as "over" | "under" | "ok");
 
   ctx.ui.notify(

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -13,16 +13,19 @@ import {
   clearRoutingHistory,
   getRoutingHistory,
 } from "../routing-history.js";
+import { closeDatabase, openDatabase } from "../gsd-db.js";
 
 // ─── Test Setup ──────────────────────────────────────────────────────────────
 
 function makeTmpDir(): string {
   const dir = join(tmpdir(), `gsd-routing-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
   mkdirSync(join(dir, ".gsd"), { recursive: true });
+  openDatabase(join(dir, ".gsd", "gsd.db"));
   return dir;
 }
 
 function cleanup(dir: string): void {
+  closeDatabase();
   try { rmSync(dir, { recursive: true, force: true }); } catch {}
   resetRoutingHistory();
 }
@@ -32,7 +35,7 @@ function cleanup(dir: string): void {
 test("recordOutcome tracks success and failure counts", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordOutcome("execute-task", "standard", true);
     recordOutcome("execute-task", "standard", true);
     recordOutcome("execute-task", "standard", false);
@@ -48,7 +51,7 @@ test("recordOutcome tracks success and failure counts", () => {
 test("recordOutcome tracks tag-specific patterns", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordOutcome("execute-task", "light", true, ["docs"]);
 
     const history = getRoutingHistory()!;
@@ -61,7 +64,7 @@ test("recordOutcome tracks tag-specific patterns", () => {
 test("recordOutcome applies rolling window", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     // Record 60 successes — should be capped to 50
     for (let i = 0; i < 60; i++) {
       recordOutcome("execute-task", "standard", true);
@@ -81,7 +84,7 @@ test("recordOutcome applies rolling window", () => {
 test("no adjustment when insufficient data", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordOutcome("execute-task", "light", false);
     // Only 1 data point — not enough
     const adj = getAdaptiveTierAdjustment("execute-task", "light");
@@ -94,7 +97,7 @@ test("no adjustment when insufficient data", () => {
 test("bumps tier when failure rate exceeds threshold", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     // Record high failure rate at light tier
     recordOutcome("execute-task", "light", false);
     recordOutcome("execute-task", "light", false);
@@ -111,7 +114,7 @@ test("bumps tier when failure rate exceeds threshold", () => {
 test("no adjustment when success rate is high", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     for (let i = 0; i < 10; i++) {
       recordOutcome("execute-task", "light", true);
     }
@@ -125,7 +128,7 @@ test("no adjustment when success rate is high", () => {
 test("tag-specific patterns take precedence", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     // Base pattern has high success rate (tagged calls also count toward base)
     for (let i = 0; i < 15; i++) {
       recordOutcome("execute-task", "light", true);
@@ -152,7 +155,7 @@ test("tag-specific patterns take precedence", () => {
 test("recordFeedback stores feedback entries", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordFeedback("execute-task", "M001/S01/T01", "standard", "over");
 
     const history = getRoutingHistory()!;
@@ -167,7 +170,7 @@ test("recordFeedback stores feedback entries", () => {
 test("recordFeedback 'under' increases failure count at tier", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordFeedback("execute-task", "M001/S01/T01", "light", "under");
 
     const history = getRoutingHistory()!;
@@ -181,7 +184,7 @@ test("recordFeedback 'under' increases failure count at tier", () => {
 test("recordFeedback 'over' increases success count at lower tier", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordFeedback("execute-task", "M001/S01/T01", "standard", "over");
 
     const history = getRoutingHistory()!;
@@ -197,9 +200,9 @@ test("recordFeedback 'over' increases success count at lower tier", () => {
 test("clearRoutingHistory resets all data", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordOutcome("execute-task", "light", true);
-    clearRoutingHistory(dir);
+    clearRoutingHistory();
 
     const history = getRoutingHistory()!;
     assert.deepEqual(history.patterns, {});
@@ -211,18 +214,62 @@ test("clearRoutingHistory resets all data", () => {
 
 // ─── Persistence ─────────────────────────────────────────────────────────────
 
-test("routing history persists to disk and reloads", () => {
+test("routing history is a database row: it reloads with no file on disk", () => {
   const dir = makeTmpDir();
   try {
-    initRoutingHistory(dir);
+    initRoutingHistory();
     recordOutcome("execute-task", "standard", true);
     recordOutcome("execute-task", "standard", true);
     resetRoutingHistory();
 
-    // Reload from disk
-    initRoutingHistory(dir);
+    assert.equal(existsSync(join(dir, ".gsd", "routing-history.json")), false, "no history file is written");
+
+    initRoutingHistory();
     const history = getRoutingHistory()!;
     assert.equal(history.patterns["execute-task"].standard.success, 2);
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("a routing-history.json written by hand does not change the model tier", () => {
+  const dir = makeTmpDir();
+  try {
+    // The file claims that light always fails for execute-task.
+    writeFileSync(
+      join(dir, ".gsd", "routing-history.json"),
+      JSON.stringify({
+        version: 1,
+        patterns: {
+          "execute-task": {
+            light: { success: 0, fail: 10 },
+            standard: { success: 0, fail: 0 },
+            heavy: { success: 0, fail: 0 },
+          },
+        },
+        feedback: [],
+        updatedAt: new Date().toISOString(),
+      }),
+      "utf-8",
+    );
+
+    initRoutingHistory();
+    assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), null);
+    assert.deepEqual(getRoutingHistory()!.patterns, {});
+  } finally {
+    cleanup(dir);
+  }
+});
+
+test("failures recorded in the database bump the tier in a later session", () => {
+  const dir = makeTmpDir();
+  try {
+    initRoutingHistory();
+    for (let i = 0; i < 3; i++) recordOutcome("execute-task", "light", false);
+    resetRoutingHistory();
+
+    initRoutingHistory();
+    assert.equal(getAdaptiveTierAdjustment("execute-task", "light"), "standard");
   } finally {
     cleanup(dir);
   }
