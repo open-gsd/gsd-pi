@@ -9,10 +9,6 @@ import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
 import { noteSessionRead } from "../db/domain-operation.js";
 import {
   _getAdapter,
-  getAllMilestones,
-  getHierarchyCompletionCounts,
-  getInFlightSliceCount,
-  getMilestoneStatusCounts,
   getOpenBlockers,
   getOpenQuestions,
   getProjectAuthorityRow,
@@ -25,6 +21,7 @@ import {
   type OpenQuestionRow,
   type VerificationSummaryCounts,
 } from "../gsd-db.js";
+import { readMilestones, readProgressCounts, type ProgressCounts } from "../db/lifecycle-read.js";
 import {
   closeWorkflowDatabase as closeDatabase,
   getWorkflowDatabasePath as getDbPath,
@@ -53,11 +50,7 @@ export interface DbProjectSnapshotCurrent {
   nextAction: string;
 }
 
-export interface DbProjectSnapshotProgress {
-  milestones: { total: number; done: number; active: number; pending: number; parked: number };
-  slices: { total: number; done: number; active: number; pending: number };
-  tasks: { total: number; done: number; pending: number };
-}
+export type DbProjectSnapshotProgress = ProgressCounts;
 
 export interface DbProjectSnapshotMilestone {
   id: string;
@@ -142,26 +135,9 @@ function readSnapshotDb(): SnapshotDbRead {
       authorityEpoch: authorityRow.authorityEpoch,
     };
 
-    const counts = getHierarchyCompletionCounts();
-    const milestoneCounts = getMilestoneStatusCounts();
-    const slicesActive = getInFlightSliceCount();
-    const slicesPending = counts.slicesTotal - counts.slices - slicesActive;
-    const progress: DbProjectSnapshotProgress = {
-      milestones: milestoneCounts,
-      slices: {
-        total: counts.slicesTotal,
-        done: counts.slices,
-        active: slicesActive,
-        pending: slicesPending,
-      },
-      tasks: {
-        total: counts.tasksTotal,
-        done: counts.tasks,
-        pending: counts.tasksTotal - counts.tasks,
-      },
-    };
+    const progress = readProgressCounts();
 
-    const all = getAllMilestones();
+    const all = readMilestones();
     const kinds = readMilestoneKinds();
     const truncated = all.length > MAX_SNAPSHOT_MILESTONES;
     const milestones = {

@@ -1,21 +1,20 @@
 // Project/App: gsd-pi
 // File Purpose: DB-backed GSD state derivation pipeline stage.
 // Post-cutover (T007) this module is the sole state authority on the live
-// derive path: DB rows decide phase/registry/progress. Markdown state
-// projections on disk (STATE.md, roadmaps, plans, summaries) are never
-// parsed as authority here; DB-unavailable fails closed in db-open.ts.
+// derive path: DB rows decide phase/registry/progress. Item status answers
+// (done, parked, discarded) come from the read interface db/lifecycle-read.ts.
+// Markdown state projections on disk (STATE.md, roadmaps, plans, summaries)
+// are never parsed as authority here; DB-unavailable fails closed in db-open.ts.
 // Canonical-lifecycle read authority (handleAllSlicesDone +
 // resolveMilestoneValidationVerdict) is pinned by D005 and unchanged.
 
 import type { ActiveRef, GSDState, MilestoneRegistryEntry, Phase } from '../../types.js';
-import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from '../../status-guards.js';
 import { parseProject } from '../../schemas/parsers.js';
 import {
   queryDecisions,
   queryDecisionsFromMemories,
 } from '../../context-store.js';
 import {
-  getAllMilestones,
   getArtifact,
   getMilestoneScopedArtifacts,
   getPlanMilestoneRecoveryBlock,
@@ -23,11 +22,15 @@ import {
   getReplanHistory,
   getRequirementCounts,
   getSlice,
-  getSliceTasks,
-  getSlicesByMilestoneIds,
 } from '../../gsd-db.js';
-import type { MilestoneRow } from '../../db-milestone-artifact-rows.js';
-import type { SliceRow, TaskRow } from '../../db-task-slice-rows.js';
+import {
+  readMilestones,
+  readSliceTasks,
+  readSlicesByMilestoneIds,
+  type MilestoneRead,
+  type SliceRead,
+  type TaskRead,
+} from '../../db/lifecycle-read.js';
 import {
   classifyMilestoneReadiness,
   readinessNeedsDiscussion,
@@ -50,8 +53,6 @@ import {
 } from './db-open.js';
 import { resolveMilestoneValidationVerdict } from '../../milestone-validation-verdict.js';
 import { isMilestoneLifecycleAdopted } from '../../db/milestone-closeout-readiness.js';
-
-const isStatusDone = isClosedStatus;
 
 type MilestoneProgress = { done: number; total: number };
 type SliceProgress = { done: number; total: number };
@@ -110,7 +111,7 @@ function stripMilestonePrefix(title: string): string {
   return title.replace(/^M\d+(?:-[a-z0-9]{6})?[^:]*:\s*/, '') || title;
 }
 
-function buildCompletenessSet(basePath: string, milestones: MilestoneRow[]) {
+function buildCompletenessSet(basePath: string, milestones: MilestoneRead[]) {
   const completeMilestoneIds = new Set<string>();
   const parkedMilestoneIds = new Set<string>();
 
@@ -119,11 +120,11 @@ function buildCompletenessSet(basePath: string, milestones: MilestoneRow[]) {
   // (crashed complete-milestone turn, partial merge, manual edit) must not
   // flip derived state to complete and cascade into a false auto-merge (#4179).
   for (const m of milestones) {
-    if (m.status === 'parked') {
+    if (m.parked) {
       parkedMilestoneIds.add(m.id);
       continue;
     }
-    if (isStatusDone(m.status)) {
+    if (m.done) {
       completeMilestoneIds.add(m.id);
       continue;
     }
@@ -160,13 +161,13 @@ function loadProjectSequenceIds(): Set<string> {
 }
 
 async function buildRegistryAndFindActive(
-  milestones: MilestoneRow[],
+  milestones: MilestoneRead[],
   completeMilestoneIds: Set<string>,
   parkedMilestoneIds: Set<string>
 ) {
   const registry: MilestoneRegistryEntry[] = [];
   let activeMilestone: ActiveRef | null = null;
-  let activeMilestoneSlices: SliceRow[] = [];
+  let activeMilestoneSlices: SliceRead[] = [];
   let activeMilestoneFound = false;
   let activeMilestoneHasDraft = false;
   let firstPromotableQueuedShell: { id: string; title: string; deps: string[]; hasDraftContext: boolean } | null = null;
@@ -176,7 +177,7 @@ async function buildRegistryAndFindActive(
   const activeMilestoneIds = milestones
     .filter((m) => !parkedMilestoneIds.has(m.id))
     .map((m) => m.id);
-  const slicesByMilestone = getSlicesByMilestoneIds(activeMilestoneIds);
+  const slicesByMilestone = readSlicesByMilestoneIds(activeMilestoneIds);
 
   for (const m of milestones) {
     if (parkedMilestoneIds.has(m.id)) {
@@ -195,7 +196,7 @@ async function buildRegistryAndFindActive(
       continue;
     }
 
-    const allSlicesDone = slices.length > 0 && slices.every(s => isInactiveStatus(s.status));
+    const allSlicesDone = slices.length > 0 && slices.every(s => s.done);
 
     const title = stripMilestonePrefix(m.title) || m.id;
     const artifacts = getMilestoneScopedArtifacts(m.id);
@@ -398,9 +399,9 @@ async function handleAllSlicesDone(
   );
 }
 
-function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSlice: ActiveRef | null, activeSliceRow: SliceRow | null } {
+function resolveSliceDependencies(activeMilestoneSlices: SliceRead[]): { activeSlice: ActiveRef | null, activeSliceRow: SliceRead | null } {
   const doneSliceIds = new Set(
-    activeMilestoneSlices.filter(s => isInactiveStatus(s.status)).map(s => s.id)
+    activeMilestoneSlices.filter(s => s.done).map(s => s.id)
   );
 
   const sliceLock = process.env.GSD_PARALLEL_WORKER ? process.env.GSD_SLICE_LOCK : undefined;
@@ -415,7 +416,7 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSl
   }
 
   for (const s of activeMilestoneSlices) {
-    if (isInactiveStatus(s.status)) continue;
+    if (s.done) continue;
     if (s.depends.every(dep => doneSliceIds.has(dep))) {
       return { activeSlice: { id: s.id, title: s.title }, activeSliceRow: s };
     }
@@ -424,8 +425,8 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRow[]): { activeSl
   return { activeSlice: null, activeSliceRow: null };
 }
 
-async function detectBlockers(basePath: string, milestoneId: string, sliceId: string, tasks: TaskRow[]): Promise<string | null> {
-  const completedTasks = tasks.filter(t => isStatusDone(t.status));
+async function detectBlockers(basePath: string, milestoneId: string, sliceId: string, tasks: TaskRead[]): Promise<string | null> {
+  const completedTasks = tasks.filter(t => t.done);
   for (const ct of completedTasks) {
     if (ct.blocker_discovered) {
       return ct.id;
@@ -452,8 +453,8 @@ export async function deriveStateFromDb(
 
   const requirements = getRequirementCounts();
 
-  const allMilestones = getAllMilestones()
-    .filter(m => !isDiscardedMilestoneStatus(m.status));
+  const allMilestones = readMilestones()
+    .filter(m => !m.discarded);
 
   const milestoneLock = getRequestedMilestoneLock();
   const milestones = milestoneLock
@@ -508,9 +509,9 @@ export async function deriveStateFromDb(
     );
   }
 
-  const allSlicesDone = activeMilestoneSlices.every(s => isInactiveStatus(s.status));
+  const allSlicesDone = activeMilestoneSlices.every(s => s.done);
   const sliceProgress = {
-    done: activeMilestoneSlices.filter(s => isInactiveStatus(s.status)).length,
+    done: activeMilestoneSlices.filter(s => s.done).length,
     total: activeMilestoneSlices.length,
   };
   const sliceStateContext: DerivedStateContext = {
@@ -559,10 +560,10 @@ export async function deriveStateFromDb(
     );
   }
 
-  const tasks = getSliceTasks(activeMilestone.id, activeSlice.id);
+  const tasks = readSliceTasks(activeMilestone.id, activeSlice.id);
   
   const taskProgress = {
-    done: tasks.filter(t => isStatusDone(t.status)).length,
+    done: tasks.filter(t => t.done).length,
     total: tasks.length,
   };
   const taskStateContext: DerivedStateContext = {
@@ -571,7 +572,7 @@ export async function deriveStateFromDb(
     taskProgress,
   };
 
-  const activeTaskRow = tasks.find(t => !isStatusDone(t.status));
+  const activeTaskRow = tasks.find(t => !t.done);
 
   if (!activeTaskRow && tasks.length > 0) {
     return buildDerivedState(

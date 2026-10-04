@@ -7,15 +7,13 @@
 import { deriveState, invalidateStateCache } from "./derive/index.js";
 import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
 import {
-  getHierarchyCompletionCounts,
-  getInFlightSliceCount,
   getProgressHierarchyDetails,
-  getMilestoneStatusCounts,
   getProjectAuthorityVersion,
   isDbAvailable,
   _getAdapter,
   readTransaction,
 } from "../gsd-db.js";
+import { readProgressCounts, type ProgressCounts } from "../db/lifecycle-read.js";
 import type { ProjectProgressReadMetadata } from "@opengsd/contracts";
 import type { GSDState } from "../types.js";
 
@@ -67,12 +65,6 @@ function toRef(value: { id: string; title: string } | null): { id: string; title
   return value ? { id: value.id, title: value.title } : null;
 }
 
-interface ProgressHierarchy {
-  counts: ReturnType<typeof getHierarchyCompletionCounts>;
-  milestones: ReturnType<typeof getMilestoneStatusCounts>;
-  slicesActive: number;
-}
-
 interface ProgressStabilityToken {
   revision: number;
   authorityEpoch: number;
@@ -98,40 +90,16 @@ function stabilityTokensMatch(
     && before.dataVersion === after.dataVersion;
 }
 
-function readProgressHierarchy(): ProgressHierarchy {
-  return readTransaction(() => ({
-    counts: getHierarchyCompletionCounts(),
-    milestones: getMilestoneStatusCounts(),
-    slicesActive: getInFlightSliceCount(),
-  }));
-}
-
 function buildProgressResult(
   state: GSDState,
-  hierarchy: ReturnType<typeof readProgressHierarchy>,
+  counts: ProgressCounts,
 ): DbProgressResult {
-  const slicesDone = hierarchy.counts.slices;
-  const slicesTotal = hierarchy.counts.slicesTotal;
-  const tasksDone = hierarchy.counts.tasks;
-  const tasksTotal = hierarchy.counts.tasksTotal;
-
   return {
     activeMilestone: toRef(state.activeMilestone),
     activeSlice: toRef(state.activeSlice),
     activeTask: toRef(state.activeTask),
     phase: state.phase,
-    milestones: hierarchy.milestones,
-    slices: {
-      total: slicesTotal,
-      done: slicesDone,
-      active: hierarchy.slicesActive,
-      pending: slicesTotal - slicesDone - hierarchy.slicesActive,
-    },
-    tasks: {
-      total: tasksTotal,
-      done: tasksDone,
-      pending: tasksTotal - tasksDone,
-    },
+    ...counts,
     requirements:
       state.requirements && state.requirements.total > 0
         ? {
@@ -161,7 +129,7 @@ async function readProgressFromDbInternal(
   for (let attempt = 1; ; attempt++) {
     const before = readProgressStabilityToken();
     const state = await deriveState(basePath);
-    const progress = buildProgressResult(state, readProgressHierarchy());
+    const progress = buildProgressResult(state, readTransaction(readProgressCounts));
     const details = includeHierarchyDetails ? getProgressHierarchyDetails() : undefined;
     const result: DbProgressResult | DbProjectProgressResult = details
       ? {

@@ -22,7 +22,6 @@ import { getUatBrowserToolSupportError, type UatType } from "./uat-policy.js";
 import {
   isDbAvailable,
   getMilestoneSlices,
-  getMilestoneSliceSummaries,
   getClosedSliceIds,
   getPendingGatesForTurn,
   markPendingGatesOmittedForTurn,
@@ -32,6 +31,7 @@ import {
   getAssessment,
   getSliceRunUatAssessment,
 } from "./gsd-db.js";
+import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { extractVerdict, isAcceptableUatVerdict } from "./verdict-parser.js";
 
@@ -1195,7 +1195,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       // DB-authoritative slice list (ADR-017): the ROADMAP projection is
       // never parsed for dispatch decisions. No DB / no rows → skip this rule.
       if (!isDbAvailable()) return null;
-      const dbSlices = getMilestoneSliceSummaries(mid);
+      const dbSlices = readMilestoneSlices(mid);
       if (dbSlices.length === 0) return null;
 
       // Find slices that need research (no RESEARCH file, dependencies done).
@@ -2051,7 +2051,7 @@ export async function resolveDispatch(
         level: "error",
       };
     }
-    const milestone = getMilestone(dispatchCtx.mid);
+    const milestone = readMilestone(dispatchCtx.mid);
     if (!milestone) {
       return {
         action: "stop",
@@ -2059,7 +2059,7 @@ export async function resolveDispatch(
         level: "error",
       };
     }
-    if (isClosedStatus(milestone.status)) {
+    if (milestone.done) {
       return {
         action: "stop",
         reason:

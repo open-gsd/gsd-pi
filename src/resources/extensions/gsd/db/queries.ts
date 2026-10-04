@@ -7,7 +7,7 @@
 import { createHash } from "node:crypto";
 
 import { getDbOrNull, readTransaction } from "./engine.js";
-import { isClosedStatus, isInactiveStatus } from "../status-guards.js";
+import { isClosedStatus } from "../status-guards.js";
 import { getGateIdsForTurn, type OwnerTurn } from "../gate-registry.js";
 import type { Decision, Requirement, GateRow, GateScope } from "../types.js";
 import {
@@ -1172,31 +1172,6 @@ export function getProgressHierarchyDetails(): ProgressHierarchyDetails {
     milestonesTruncated: milestones.length > maxMilestones,
     tasksTruncated,
   };
-}
-
-/** Dispatch-eligibility shape consumed by decision-path callers (ADR-017). */
-export interface MilestoneSliceSummary {
-  id: string;
-  title: string;
-  /** Closed per the canonical status vocabulary (complete/done/skipped/closed/cancelled). */
-  done: boolean;
-  depends: string[];
-}
-
-/**
- * Consolidated DB read for dispatch/gate/completion decisions (ADR-017).
- * `done` uses the shared slice predicate `isInactiveStatus` (closed, or
- * deferred by a decision) — the same answer deriveState gives. Decision
- * paths must consume this instead of parsing `.gsd/*.md` projections.
- * Rows keep `getMilestoneSlices` ordering (sequence, then id).
- */
-export function getMilestoneSliceSummaries(milestoneId: string): MilestoneSliceSummary[] {
-  return getMilestoneSlices(milestoneId).map((s) => ({
-    id: s.id,
-    title: s.title,
-    done: isInactiveStatus(s.status),
-    depends: s.depends ?? [],
-  }));
 }
 
 /**

@@ -10,8 +10,6 @@ import {
   getAllMilestones,
   getMilestone,
   getMilestoneLifecycleShadowSnapshot,
-  getSliceStatusSummary,
-  getSliceTaskCounts,
   getTask,
   getUnresolvedBlockingReworkFindingsForTask,
   insertAssessment,
@@ -44,6 +42,7 @@ export { executeResearchDecisionSave } from "./research-decision.js";
 import { emitLifecycleShadowObservation } from "../uok/audit.js";
 import { extractMilestoneSeq } from "../milestone-ids.js";
 import { registerMilestones } from "../milestone-registration.js";
+import { readMilestoneStatus } from "../db/lifecycle-read.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
 import { isClosedStatus } from "../status-guards.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
@@ -2703,8 +2702,8 @@ export async function executeMilestoneStatus(
     }
 
     const observedRead = readTransaction(() => {
-      const milestone = getMilestone(params.milestoneId);
-      if (!milestone) {
+      const status = readMilestoneStatus(params.milestoneId);
+      if (!status) {
         const response = {
           content: [{ type: "text" as const, text: `Milestone ${params.milestoneId} not found in database.` }],
           details: { operation: "milestone_status", milestoneId: params.milestoneId, found: false },
@@ -2716,22 +2715,15 @@ export async function executeMilestoneStatus(
         };
       }
 
-      const sliceStatuses = getSliceStatusSummary(params.milestoneId);
-      const slices = sliceStatuses.map((s) => ({
-        id: s.id,
-        status: s.status,
-        taskCounts: getSliceTaskCounts(params.milestoneId, s.id),
-      }));
-
       const result = {
-        milestoneId: milestone.id,
-        title: milestone.title,
-        status: milestone.status,
-        createdAt: milestone.created_at,
-        completedAt: milestone.completed_at,
-        dependsOn: milestone.depends_on ?? [],
-        sliceCount: slices.length,
-        slices,
+        milestoneId: status.milestone.id,
+        title: status.milestone.title,
+        status: status.milestone.status,
+        createdAt: status.milestone.created_at,
+        completedAt: status.milestone.completed_at,
+        dependsOn: status.milestone.depends_on ?? [],
+        sliceCount: status.slices.length,
+        slices: status.slices,
       };
 
       milestoneStatusReadInterleaveForTest?.();

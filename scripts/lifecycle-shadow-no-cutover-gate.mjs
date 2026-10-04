@@ -17,9 +17,34 @@ export const LIFECYCLE_SHADOW_SOURCE_FILES = Object.freeze({
   resolver: "src/resources/extensions/gsd/auto-dispatch.ts",
   state: "src/resources/extensions/gsd/state/derive/from-db.ts",
   validation: "src/resources/extensions/gsd/milestone-validation-verdict.ts",
+  read: "src/resources/extensions/gsd/db/lifecycle-read.ts",
   gate: "scripts/lifecycle-shadow-no-cutover-gate.mjs",
 });
 const SOURCE_FILES = LIFECYCLE_SHADOW_SOURCE_FILES;
+
+// The read interface answers every decision reader. Until the read cutover it
+// must answer from these legacy readers only.
+const READ_INTERFACE_ENTRIES = [
+  "readMilestones",
+  "readMilestone",
+  "readMilestoneSlices",
+  "readSlicesByMilestoneIds",
+  "readSliceTasks",
+  "readMilestoneStatus",
+  "readProgressCounts",
+];
+const READ_INTERFACE_LEGACY_READERS = [
+  "./queries.js#getAllMilestones",
+  "./queries.js#getMilestone",
+  "./queries.js#getMilestoneSlices",
+  "./queries.js#getSlicesByMilestoneIds",
+  "./queries.js#getSliceTasks",
+  "./queries.js#getSliceStatusSummary",
+  "./queries.js#getSliceTaskCounts",
+  "./queries.js#getHierarchyCompletionCounts",
+  "./queries.js#getMilestoneStatusCounts",
+  "./queries.js#getInFlightSliceCount",
+];
 
 const DECISION_IMPORT_POLICY = Object.freeze({
   eligibility: {
@@ -35,29 +60,26 @@ const DECISION_IMPORT_POLICY = Object.freeze({
   },
   dispatch: {
     required: new Set([
-      "./gsd-db.js#getAllMilestones",
-      "./gsd-db.js#getMilestone",
-      "./gsd-db.js#getMilestoneSliceSummaries",
+      "./db/lifecycle-read.js#readMilestones",
+      "./db/lifecycle-read.js#readMilestone",
+      "./db/lifecycle-read.js#readMilestoneSlices",
     ]),
     approved: new Set([
       "./unit-id.js#parseUnitId",
       "./gsd-db.js#isDbAvailable",
-      "./gsd-db.js#getAllMilestones",
-      "./gsd-db.js#getMilestoneSliceSummaries",
-      "./gsd-db.js#getMilestone",
-      "./status-guards.js#isSkippedForDispatch",
+      "./db/lifecycle-read.js#readMilestones",
+      "./db/lifecycle-read.js#readMilestone",
+      "./db/lifecycle-read.js#readMilestoneSlices",
     ]),
   },
   resolver: {
     required: new Set([
       "./gsd-db.js#isDbAvailable",
-      "./gsd-db.js#getMilestone",
-      "./status-guards.js#isClosedStatus",
+      "./db/lifecycle-read.js#readMilestone",
     ]),
     approved: new Set([
       "./gsd-db.js#isDbAvailable",
-      "./gsd-db.js#getMilestone",
-      "./status-guards.js#isClosedStatus",
+      "./db/lifecycle-read.js#readMilestone",
       "./worktree.js#detectWorktreeName",
     ]),
   },
@@ -81,6 +103,15 @@ const DECISION_IMPORT_POLICY = Object.freeze({
       "./gsd-db.js#getLatestAssessmentByScope",
       "./gsd-db.js#isDbAvailable",
       "./verdict-parser.js#isValidMilestoneVerdict",
+    ]),
+  },
+  read: {
+    required: new Set(READ_INTERFACE_LEGACY_READERS),
+    approved: new Set([
+      ...READ_INTERFACE_LEGACY_READERS,
+      "../status-guards.js#isClosedStatus",
+      "../status-guards.js#isDiscardedMilestoneStatus",
+      "../status-guards.js#isInactiveStatus",
     ]),
   },
 });
@@ -341,8 +372,8 @@ function analyzeStatusBoundary(source) {
   const mutationValues = responseMutationValues(fn.body, initialFacts.identifiers);
   const facts = dependencyFacts([...responseRoots, ...mutationValues], initializers);
   const imports = bindingMap(sourceFile);
-  for (const required of ["getMilestone", "getSliceStatusSummary", "getSliceTaskCounts"]) {
-    if (!facts.calls.has(required)) throw new Error(`status response lost legacy witness ${required}`);
+  if (!facts.calls.has("readMilestoneStatus")) {
+    throw new Error("status response lost read-interface witness readMilestoneStatus");
   }
   for (const call of facts.calls) {
     if (isCanonicalImport(imports.get(call))) {
@@ -654,6 +685,12 @@ export function analyzeLifecycleShadowSources(sources) {
       DECISION_IMPORT_POLICY.state,
     )],
     ["validation-assessment-authority", () => analyzeValidationAssessmentBoundary(sources.validation)],
+    ["read-interface-legacy-authority", () => analyzeDecisionBoundary(
+      SOURCE_FILES.read,
+      sources.read,
+      READ_INTERFACE_ENTRIES,
+      DECISION_IMPORT_POLICY.read,
+    )],
     ["closed-local-inputs", () => analyzeLocalInputBoundary(sources.gate)],
   ];
 

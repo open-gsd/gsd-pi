@@ -13,7 +13,6 @@ import {
   gsdRoot,
 } from './paths.js';
 
-import { isClosedStatus } from './status-guards.js';
 import { join } from 'path';
 import { existsSync } from 'node:fs';
 import { extractVerdict } from './verdict-parser.js';
@@ -38,9 +37,9 @@ export {
 
 import {
   isDbAvailable,
-  getAllMilestones,
   getMilestone,
 } from './gsd-db.js';
+import { readMilestone, readMilestones } from './db/lifecycle-read.js';
 
 /**
  * A "ghost" milestone directory contains only META.json (and no substantive
@@ -164,22 +163,14 @@ export async function getActiveMilestoneId(basePath: string): Promise<string | n
   if (milestoneLock) {
     // Fail closed: with no DB the locked milestone cannot be confirmed open.
     if (!isDbAvailable()) return null;
-    const locked = getAllMilestones().find(m => m.id === milestoneLock);
-    if (!locked || isClosedStatus(locked.status) || locked.status === "parked") return null;
+    const locked = readMilestone(milestoneLock);
+    if (!locked || locked.done || locked.parked) return null;
     return locked.id;
   }
 
-  // DB-first: query milestones table for the first non-complete, non-parked milestone
+  // DB-first: the first milestone in workflow order that is not done and not parked
   if (isDbAvailable()) {
-    const allMilestones = getAllMilestones();
-    if (allMilestones.length > 0) {
-      for (const m of allMilestones) {
-        if (isClosedStatus(m.status) || m.status === "parked") continue;
-        return m.id;
-      }
-      return null;
-    }
-    return null;
+    return readMilestones().find(m => !m.done && !m.parked)?.id ?? null;
   }
 
   // Fail closed: an unavailable DB is not a license to parse markdown (T022).

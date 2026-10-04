@@ -30,7 +30,6 @@ import {
   insertTask,
   getTask,
   getSliceTasks,
-  getMilestoneSliceSummaries,
   getClosedSliceIds,
   getSliceTaskCounts,
   checkpointDatabase,
@@ -1080,7 +1079,7 @@ describe('gsd-db', () => {
     closeDatabase();
   });
 
-  test('gsd-db: slice summaries use the canonical closed vocabulary; getClosedSliceIds filters to closed ids', () => {
+  test('gsd-db: getClosedSliceIds filters to closed ids', () => {
     openDatabase(':memory:');
     insertMilestone({ id: 'M001', status: 'active' });
     insertSlice({ milestoneId: 'M001', id: 'S01', title: 'Complete', status: 'complete', depends: [], sequence: 1 });
@@ -1089,15 +1088,6 @@ describe('gsd-db', () => {
     insertSlice({ milestoneId: 'M001', id: 'S04', title: 'Closed', status: 'closed', depends: [], sequence: 4 });
     insertSlice({ milestoneId: 'M001', id: 'S05', title: 'Active', status: 'active', depends: [], sequence: 5 });
     insertSlice({ milestoneId: 'M001', id: 'S06', title: 'Pending', status: 'pending', depends: ['S05'], sequence: 6 });
-
-    const summaries = getMilestoneSliceSummaries('M001');
-    assert.deepStrictEqual(summaries[0], { id: 'S01', title: 'Complete', done: true, depends: [] });
-    assert.deepStrictEqual(summaries[5], { id: 'S06', title: 'Pending', done: false, depends: ['S05'] });
-    assert.deepStrictEqual(
-      summaries.map((s) => s.done),
-      [true, true, true, true, false, false],
-      'complete/done/skipped/closed are closed; active/pending are not',
-    );
 
     assert.deepStrictEqual(getClosedSliceIds('M001'), ['S01', 'S02', 'S03', 'S04']);
     assert.deepStrictEqual(getClosedSliceIds('M999'), [], 'unknown milestone yields no closed ids');

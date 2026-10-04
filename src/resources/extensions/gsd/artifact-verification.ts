@@ -9,9 +9,9 @@ import {
   isDbAvailable,
   getSlice,
   getSliceTasks,
-  getMilestoneSliceSummaries,
   getPendingGatesForTurn,
 } from "./gsd-db.js";
+import { readMilestoneSlices } from "./db/lifecycle-read.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
@@ -345,7 +345,7 @@ export function verifyExpectedArtifact(
       return false;
     }
     try {
-      const slices = getMilestoneSliceSummaries(mid);
+      const slices = readMilestoneSlices(mid);
       const milestoneResearchFile = resolveExpectedArtifactPath("research-milestone", mid, base);
       const hasMilestoneResearch = !!milestoneResearchFile && existsSync(milestoneResearchFile);
       for (const slice of slices) {

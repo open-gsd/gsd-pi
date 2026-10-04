@@ -1,8 +1,9 @@
 // Structural invariant: the legacy markdown state-path is gone (T020/T022).
 //
 // The DB is the single source of truth; `.gsd/*.md` files are projections.
-// Dispatch/gate/completion code must read state via gsd-db queries (e.g.
-// getMilestoneSliceSummaries), never by parsing markdown projections.
+// Dispatch/gate/completion code must read state via the DB read interface
+// (db/lifecycle-read.ts, e.g. readMilestoneSlices), never by parsing markdown
+// projections.
 //
 // KEYED ON SYMBOLS, NOT THE MODULE SPECIFIER (T033). This registry counts a
 // module as a legacy-parser consumer when it references
@@ -158,7 +159,7 @@ test("decision-path modules do not consume the legacy parsers (ADR-017)", () => 
   assert.deepEqual(
     violations,
     [],
-    `Decision-path modules must read the DB (db/queries.ts, e.g. getMilestoneSliceSummaries), ` +
+    `Decision-path modules must read the DB (db/lifecycle-read.ts, e.g. readMilestoneSlices), ` +
       `not parse .gsd/*.md projections. Violations:\n  ${violations.join("\n  ")}`,
   );
 });

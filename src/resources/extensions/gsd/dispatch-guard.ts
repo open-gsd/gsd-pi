@@ -1,8 +1,8 @@
 // GSD Dispatch Guard — prevents out-of-order slice dispatch
 
 import { parseUnitId } from "./unit-id.js";
-import { isDbAvailable, getAllMilestones, getMilestoneSliceSummaries, getMilestone } from "./gsd-db.js";
-import { isSkippedForDispatch } from "./status-guards.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readMilestone, readMilestones, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 
 const SLICE_DISPATCH_TYPES = new Set([
@@ -25,7 +25,7 @@ export function getPriorSliceCompletionBlocker(
   if (!MILESTONE_ID_RE.test(targetMid) || !SLICE_DISPATCH_TYPES.has(unitType)) return null;
   if (!targetSid) return `Cannot dispatch ${unitType} ${unitId}: slice identity is missing.`;
 
-  const allMilestones = getAllMilestones();
+  const allMilestones = readMilestones();
   const milestoneById = new Map(allMilestones.map((milestone) => [milestone.id, milestone]));
 
   const milestoneLock = process.env.GSD_MILESTONE_LOCK;
@@ -43,9 +43,9 @@ export function getPriorSliceCompletionBlocker(
     if (!milestoneRow) {
       return `Cannot dispatch ${unitType} ${unitId}: milestone ${mid} is missing from the workflow DB.`;
     }
-    if (isSkippedForDispatch(milestoneRow.status)) continue;
+    if (milestoneRow.done || milestoneRow.parked || milestoneRow.discarded) continue;
 
-    const slices = getMilestoneSliceSummaries(mid);
+    const slices = readMilestoneSlices(mid);
     if (slices.length === 0) {
       // An earlier milestone with no slice rows is a placeholder; it cannot
       // have incomplete slices, so it never gates the target milestone.
@@ -119,7 +119,7 @@ export function getDispatchAuthorityBlocker(unitType: string, unitId: string): s
   if (!isDbAvailable()) {
     return `Cannot dispatch ${unitType} ${unitId}: workflow DB is unavailable.`;
   }
-  return getMilestone(milestone)
+  return readMilestone(milestone)
     ? null
     : `Cannot dispatch ${unitType} ${unitId}: milestone ${milestone} is missing from the workflow DB.`;
 }
