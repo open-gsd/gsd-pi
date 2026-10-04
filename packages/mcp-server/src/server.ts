@@ -29,7 +29,15 @@ import { readRoadmap } from './readers/roadmap.js';
 import { readHistory } from './readers/metrics.js';
 import { capturesResultFromDatabase, readCaptures } from './readers/captures.js';
 import { knowledgeResultFromMarkdown, readKnowledge } from './readers/knowledge.js';
-import { buildGraph, writeGraph, writeSnapshot, graphStatus, graphQuery, graphDiff } from './readers/graph.js';
+import {
+  buildGraph,
+  writeGraph,
+  writeSnapshot,
+  graphStatus,
+  graphQuery,
+  graphDiff,
+  type GraphDatabaseSource,
+} from './readers/graph.js';
 import { resolveGsdRoot, findMilestoneIds, resolveMilestoneFile } from './readers/paths.js';
 import { runDoctorLite } from './readers/doctor-lite.js';
 import {
@@ -275,6 +283,25 @@ function normalizeQuery(query: string | undefined): QueryCategory {
   const key = (query ?? 'all').trim().toLowerCase();
   if (key in QUERY_FIELDS) return key as QueryCategory;
   return 'all';
+}
+
+/**
+ * The node source of a `gsd_graph` build from the workflow database, or
+ * undefined when the GSD runtime or the database is not available. The build
+ * then parses the .gsd/ projections and the result is labelled a projection
+ * fallback.
+ */
+async function readGraphDatabaseSource(projectDir: string): Promise<GraphDatabaseSource | undefined> {
+  if (!hasWorkflowToolBridgeConfiguration()) return undefined;
+  const roadmap = await readRoadmapViaBridge(projectDir) as Pick<GraphDatabaseSource, 'milestones'> | null;
+  if (roadmap === null) return undefined;
+  const query = await readProjectQueryViaBridge(projectDir, QUERY_FIELDS.state);
+  const knowledge = await readKnowledgeViaBridge(projectDir);
+  return {
+    state: typeof query?.state === 'string' ? query.state : '',
+    knowledge: knowledge ?? '',
+    milestones: roadmap.milestones,
+  };
 }
 
 /**
@@ -1559,7 +1586,8 @@ export async function createMcpServer(
   // gsd_graph — knowledge graph for GSD projects
   //
   // Modes:
-  //   build   Parse .gsd/ artifacts and write graph.json atomically.
+  //   build   Build the graph from the workflow database (.gsd/ projections
+  //           when it is not available) and write graph.json atomically.
   //   query   Search the graph for nodes matching a term (BFS, budget-trimmed).
   //   status  Check whether graph.json exists and whether it is stale (>24h).
   //   diff    Compare graph.json with the last build snapshot.
@@ -1570,8 +1598,11 @@ export async function createMcpServer(
       'Manage the GSD project knowledge graph. No session required.',
       '',
       'Modes:',
-      '  build   Parse .gsd/ artifacts (STATE.md, milestone ROADMAPs, slice PLANs,',
-      '          KNOWLEDGE.md) and write .gsd/graphs/graph.json atomically.',
+      '  build   Build the graph and write .gsd/graphs/graph.json atomically. Milestone,',
+      '          slice, task, state and knowledge nodes come from the workflow database',
+      '          when the GSD runtime is available, from the .gsd/ projections (STATE.md,',
+      '          milestone ROADMAPs, slice PLANs, KNOWLEDGE.md) otherwise. The result',
+      '          carries readMetadata provenance.',
       '  query   Search graph nodes by term (BFS from seed matches, budget-trimmed).',
       '          Returns matching nodes and reachable edges within the token budget.',
       '  status  Show whether graph.json exists, its age, node/edge counts, and',
@@ -1606,13 +1637,17 @@ export async function createMcpServer(
             if (snapshot) {
               await writeSnapshot(gsdRoot).catch(() => { /* best-effort */ });
             }
-            const graph = await buildGraph(projectDir);
+            const database = await readGraphDatabaseSource(projectDir);
+            const graph = await buildGraph(projectDir, database);
             await writeGraph(gsdRoot, graph);
             return jsonContent({
               built: true,
               nodeCount: graph.nodes.length,
               edgeCount: graph.edges.length,
               builtAt: graph.builtAt,
+              readMetadata: database
+                ? { source: 'database', authority: 'db-authoritative' }
+                : { source: 'projection', authority: 'projection-fallback' },
             });
           }
 

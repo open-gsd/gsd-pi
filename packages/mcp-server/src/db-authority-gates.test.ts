@@ -39,6 +39,8 @@ async function readTools(base: string) {
     progress: await call("gsd_progress"),
     query: await call("gsd_query"),
     doctor: await call("gsd_doctor"),
+    graphBuild: await call("gsd_graph", { mode: "build" }),
+    graphQuery: await call("gsd_graph", { mode: "query", term: "0" }),
   };
 }
 
@@ -46,13 +48,13 @@ for (const [gate, damage] of [
   ["G1: files deleted", deleteProjections],
   ["G2: files poisoned", poisonProjections],
 ] as const) {
-  test(`${gate}: gsd_roadmap, gsd_progress, gsd_query and gsd_doctor return the database state`, async () => {
+  test(`${gate}: gsd_roadmap, gsd_progress, gsd_query, gsd_doctor and gsd_graph return the database state`, async () => {
     fixture = await createWorkflowAuthorityFixture();
     assert.deepEqual((await renderAllFromDb(fixture.root)).errors, []);
 
     damage(fixture.root);
 
-    const { roadmap, progress, query, doctor } = await readTools(fixture.root);
+    const { roadmap, progress, query, doctor, graphBuild, graphQuery } = await readTools(fixture.root);
 
     assert.deepEqual(roadmap.readMetadata, DATABASE_READ);
     assert.deepEqual(
@@ -94,5 +96,22 @@ for (const [gate, damage] of [
     assert.deepEqual(doctor.readMetadata, DATABASE_READ);
     assert.equal(doctor.ok, true);
     assert.equal(doctor.counts.error, 0, JSON.stringify(doctor.issues));
+
+    // Every hierarchy node label holds a "0" (M001, S01, S02, T01), so the
+    // query returns the whole hierarchy of the graph that the build wrote.
+    assert.deepEqual(graphBuild.readMetadata, DATABASE_READ);
+    assert.deepEqual(
+      graphQuery.nodes
+        .filter((node: any) => ["milestone", "slice", "task"].includes(node.type))
+        .map((node: any) => [node.id, node.label])
+        .sort(),
+      [
+        ["milestone:M001", "M001: Authority Fixture"],
+        ["slice:M001:S01", "S01: Completed prerequisite"],
+        ["slice:M001:S02", "S02: Ready dependent slice"],
+        ["task:M001:S01:T01", "T01: Completed task"],
+        ["task:M001:S02:T01", "T01: Ready task"],
+      ],
+    );
   });
 }

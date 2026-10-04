@@ -262,7 +262,7 @@ Cancel the active session for a project directory when `sessionId` is unavailabl
 
 Query GSD project state without an active session. Returns the state, project and requirements documents and the milestone listing.
 
-When the GSD runtime is available, the tool reads the workflow database: the documents are built from database rows and each milestone has its `title` and `status`. When the project has no openable database, the tool reads the `.gsd/` files and `readMetadata` says so. `gsd_roadmap` and `gsd_doctor` follow the same rule and also return `readMetadata`.
+When the GSD runtime is available, the tool reads the workflow database: the documents are built from database rows and each milestone has its `title` and `status`. When the project has no openable database, the tool reads the `.gsd/` files and `readMetadata` says so. `gsd_roadmap`, `gsd_doctor` and the `gsd_graph` build follow the same rule and also return `readMetadata`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|

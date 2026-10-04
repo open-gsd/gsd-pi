@@ -208,6 +208,53 @@ describe('buildGraph', () => {
     );
   });
 
+  it('with a database source, builds the hierarchy from its rows and reads no STATE, ROADMAP or PLAN file', async (t) => {
+    const project = tmpProject();
+    t.after(() => rmSync(project, { recursive: true, force: true }));
+    // Files that contradict the database: another active milestone, another
+    // title, a task and a slice with no row, and a directory with no row.
+    writeFixture(project, '.gsd/STATE.md', '**Active Milestone:** M099: From the file\n**Phase:** from-file\n');
+    writeFixture(project, '.gsd/KNOWLEDGE.md', '## Rules\n\n| K099 | global | Rule from the file |\n');
+    writeFixture(project, '.gsd/milestones/M001/M001-ROADMAP.md', '# M001: Title from the file\n');
+    writeFixture(project, '.gsd/milestones/M001/slices/S09/S09-PLAN.md', '# S09: Slice from the file\n\n- [ ] **T09: Task from the file**\n');
+    writeFixture(project, '.gsd/milestones/M001/M001-LEARNINGS.md', '## Lessons\n\n- Lesson of a database milestone.\n');
+    writeFixture(project, '.gsd/milestones/M098/M098-LEARNINGS.md', '## Lessons\n\n- Lesson of a directory with no row.\n');
+
+    const graph = await buildGraph(project, {
+      state: '**Active Milestone:** M001: Auth System\n**Phase:** executing\n',
+      knowledge: '## Rules\n\n| K001 | global | Rule from the database |\n',
+      milestones: [
+        {
+          id: 'M001',
+          title: 'Auth System',
+          slices: [{ id: 'S01', title: 'Login flow', tasks: [{ id: 'T01', title: 'Add the form' }] }],
+        },
+        { id: 'M002', title: 'M002', slices: [] },
+      ],
+    });
+
+    assert.deepEqual(
+      graph.nodes.map((n) => [n.id, n.label]),
+      [
+        ['milestone:M001', 'M001: Auth System'],
+        ['concept:phase:executing', 'Phase: executing'],
+        ['rule:K001', 'K001'],
+        ['slice:M001:S01', 'S01: Login flow'],
+        ['task:M001:S01:T01', 'T01: Add the form'],
+        ['milestone:M002', 'M002'],
+        ['lesson:M001:1', 'Lesson of a database milestone.'],
+      ],
+    );
+    assert.deepEqual(
+      graph.edges.map((e) => [e.from, e.type, e.to]),
+      [
+        ['milestone:M001', 'contains', 'slice:M001:S01'],
+        ['slice:M001:S01', 'contains', 'task:M001:S01:T01'],
+        ['milestone:M001', 'relates_to', 'lesson:M001:1'],
+      ],
+    );
+  });
+
   it('produces a non-empty set of edges for a project with artifacts', async () => {
     // Previous `edgeCount >= 0` was a pure tautology. For a project
     // with STATE/KNOWLEDGE/LEARNINGS/milestone artifacts, the graph

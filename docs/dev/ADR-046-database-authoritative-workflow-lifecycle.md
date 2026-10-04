@@ -81,7 +81,8 @@ prose.
 
 Read-only integrations are a display-only compatibility boundary:
 `gsd read progress`, `gsd read roadmap` and packaged MCP `gsd_progress`,
-`gsd_query`, `gsd_roadmap` and `gsd_doctor` may serve the `.gsd/` projections
+`gsd_query`, `gsd_roadmap`, `gsd_doctor` and the `gsd_graph` build may serve
+the `.gsd/` projections
 only when the project database is missing or cannot be opened, or
 when the standalone MCP package has no GSD runtime bridge. Once the database
 opens, it remains authoritative and any later read failure is reported instead
