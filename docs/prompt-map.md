@@ -247,7 +247,7 @@ complete-milestone
 | `replan-slice.md` | Replan after a blocker discovered mid-slice. Preserves completed Tasks; every updated Task declares execution-compatible `requiredWorkflowTools`. | `gsd_replan_slice` |
 | `replan-task.md` | Replace one pending Task plan for a durable recovery action. Declares execution-compatible `requiredWorkflowTools` before a replacement Attempt can be claimed. | `gsd_replan_task` |
 | `rethink.md` | Reorder, park, unpark, skip, or discard milestones, and change dependencies. | `gsd_skip_slice`, `gsd_milestone_reorder`, `gsd_milestone_park`, `gsd_milestone_unpark`, `gsd_milestone_discard`, `gsd_milestone_set_dependencies`; `QUEUE-ORDER.json` and `PARKED.md` are rendered from the DB |
-| `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. Managed `.gsd` projections are not hand-merged; they are rendered again with `/gsd rebuild markdown`. | git merge (main tree CWD) |
+| `worktree-merge.md` | Merge a worktree branch into a target branch from the main tree. Managed `.gsd` projections are not hand-merged; GSD renders them again from the database after the merge commit. | git merge (main tree CWD) |
 | `reassess-roadmap.md` | *(see Completion Flow above)* | — |
 | `rewrite-docs.md` | Apply active steer overrides (database rows, rendered to OVERRIDES.md) across all plans. Planning files are not edited; they are rendered from the DB. | `gsd_plan_task`, `gsd_plan_slice`, `gsd_decision_save`, `gsd_requirement_update`, `gsd_summary_save(PROJECT)` |
 | `review-migration.md` | Audit `.planning → .gsd` migration correctness. | `deriveState` |

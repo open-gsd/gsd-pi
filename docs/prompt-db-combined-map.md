@@ -287,10 +287,10 @@ user cancels
   └─► worker polls: SELECT FROM cancellation_requests WHERE status='pending'
   └─► UPDATE cancellation_requests SET status='acked', acked_worker_id, acked_at
 
-command broadcast
-  └─► INSERT INTO command_queue (target_worker=NULL, command, args_json)  ← NULL = all workers
-  └─► INSERT INTO command_queue (target_worker='w-123', command, args_json) ← targeted
-  └─► worker claims with BEGIN IMMEDIATE so read-then-write claim races serialize under WAL
+parallel pause / resume / stop (details: db-map.md, `command_queue`)
+  └─► INSERT INTO command_queue (target_worker='<milestone ID>', command)
+  └─► worker takes the oldest pending row at a unit boundary; the take runs in
+      BEGIN IMMEDIATE so read-then-write claim races serialize under WAL
 
 unit completes
   └─► UPDATE unit_dispatches SET status='done'|'failed', ended_at, exit_reason, error_summary

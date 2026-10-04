@@ -54,7 +54,7 @@ Written atomically (`.tmp` + rename) by each worker at `.gsd/parallel/<milestone
 
 An external orchestrator stops a worker with `SIGTERM`.
 
-**Deprecated:** a signal file `.gsd/parallel/<milestoneId>.signal.json` with `{"signal":"pause"}` (or `resume`, `stop`) is still accepted for compatibility. Between units, the worker writes its command as a `command_queue` row, removes the file, and logs a deprecation warning. The file is input only; the worker acts on the row.
+**Deprecated:** a signal file `.gsd/parallel/<milestoneId>.signal.json` with `{"signal":"pause"}` (or `resume`, `stop`) is still accepted for compatibility. Between units, the worker writes its command as a `command_queue` row, removes the file, and logs a deprecation warning. The file is input only; the worker acts on the row. A file that the worker did not take before its session ended is removed and does not reach the next worker of the milestone.
 
 ## Spawning Workers
 
