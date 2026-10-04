@@ -259,7 +259,7 @@ async function buildPause(basePath: string): Promise<string> {
   try {
     const capturesMod = await import("../gsd/captures.js");
     const id = capturesMod.appendCapture(basePath, "Remote pause via Telegram /pause command");
-    capturesMod.markCaptureResolved(
+    await capturesMod.resolveCapture(
       basePath,
       id,
       "stop",

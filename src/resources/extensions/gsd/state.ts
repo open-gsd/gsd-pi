@@ -156,8 +156,7 @@ export function isValidationTerminal(validationContent: string): boolean {
   return extractVerdict(validationContent) != null;
 }
 
-/** The active Milestone id, read only from the open database. */
-export function readActiveMilestoneId(): string | null {
+export async function getActiveMilestoneId(basePath: string): Promise<string | null> {
   // Milestone-scoped execution. Parallel workers and explicit solo commands
   // such as `/gsd auto M002` both set GSD_MILESTONE_LOCK; state derivation must
   // honor it so recovery/adoption sees the requested milestone, not the first
@@ -178,8 +177,4 @@ export function readActiveMilestoneId(): string | null {
 
   // Fail closed: an unavailable DB is not a license to parse markdown (T022).
   return null;
-}
-
-export async function getActiveMilestoneId(basePath: string): Promise<string | null> {
-  return readActiveMilestoneId();
 }

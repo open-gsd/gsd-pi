@@ -5,12 +5,11 @@ import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import {
   loadAllCaptures,
   markCaptureExecuted,
-  markCaptureResolved,
+  resolveCapture,
   VALID_CLASSIFICATIONS,
   type Classification,
 } from "../captures.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
-import { deriveState } from "../state.js";
 import { logError } from "../workflow-logger.js";
 import type { ToolExecutionResult } from "./context-mode-tool-result.js";
 
@@ -48,7 +47,7 @@ async function runCaptureTool(
   }
 }
 
-/** Classify one capture. The host stamps the active milestone, so a later milestone does not run a stale resolution. */
+/** Classify one capture. */
 export function executeCaptureResolve(
   params: CaptureResolveExecutorParams,
   basePath: string,
@@ -59,8 +58,7 @@ export function executeCaptureResolve(
     if (!VALID_CLASSIFICATIONS.includes(classification)) {
       throw new Error(`classification must be one of ${VALID_CLASSIFICATIONS.join(", ")}, got "${classification}"`);
     }
-    const milestoneId = (await deriveState(basePath)).activeMilestone?.id;
-    markCaptureResolved(basePath, captureId, classification as Classification, resolution, rationale, milestoneId, invocation);
+    await resolveCapture(basePath, captureId, classification as Classification, resolution, rationale, invocation);
     return `Capture ${captureId} classified as ${classification}.`;
   });
 }

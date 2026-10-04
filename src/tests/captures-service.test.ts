@@ -70,7 +70,7 @@ test("collectCapturesData returns database rows when CAPTURES.md is edited, and 
   )
 })
 
-test("resolveCaptureAction records the active milestone, so a later milestone does not run the capture", async (t) => {
+test("resolveCaptureAction records the dispatch milestone, not an earlier milestone with an unmet dependency", async (t) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-web-captures-stamp-")))
   t.after(() => {
     closeDatabase()
@@ -80,8 +80,8 @@ test("resolveCaptureAction records the active milestone, so a later milestone do
   mkdirSync(join(base, ".gsd"), { recursive: true })
 
   openDatabase(join(base, ".gsd", "gsd.db"))
-  insertMilestone({ id: "M001", title: "First", status: "active" })
-  insertMilestone({ id: "M002", title: "Second", status: "queued" })
+  insertMilestone({ id: "M001", title: "Blocked", status: "active", depends_on: ["M002"] })
+  insertMilestone({ id: "M002", title: "Dispatch", status: "active" })
   const id = appendCapture(base, "Fix the dialog width")
   closeDatabase()
 
@@ -91,9 +91,9 @@ test("resolveCaptureAction records the active milestone, so a later milestone do
   )
 
   openDatabase(join(base, ".gsd", "gsd.db"))
-  assert.equal(loadAllCaptures(base).find((entry) => entry.id === id)?.resolvedInMilestone, "M001")
-  assert.deepEqual(loadActionableCaptures(base, "M001").map((entry) => entry.id), [id])
-  assert.deepEqual(loadActionableCaptures(base, "M002"), [])
+  assert.equal(loadAllCaptures(base).find((entry) => entry.id === id)?.resolvedInMilestone, "M002")
+  assert.deepEqual(loadActionableCaptures(base, "M002").map((entry) => entry.id), [id])
+  assert.deepEqual(loadActionableCaptures(base, "M001"), [])
 })
 
 test("collectCapturesData fails when the project database is missing, even with a CAPTURES.md", async (t) => {

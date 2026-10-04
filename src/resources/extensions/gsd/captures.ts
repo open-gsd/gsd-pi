@@ -14,7 +14,7 @@ import type { ExecutionInvocation } from "./execution-invocation.js";
 import { executeDomainOperation, isDbAvailable } from "./gsd-db.js";
 import { gsdRoot } from "./paths.js";
 import { logWarning } from "./workflow-logger.js";
-import { readActiveMilestoneId } from "./state.js";
+import { deriveState } from "./state.js";
 import { projectRootFromWorktreePath } from "./worktree-root.js";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -120,11 +120,7 @@ function requireCapture(captureId: string): void {
   }
 }
 
-/**
- * Classify one capture in a capture.resolve Domain Operation. An unknown id
- * fails loud. With no `milestoneId`, the operation records the active
- * Milestone that the database holds in the same transaction.
- */
+/** Classify one capture in a capture.resolve Domain Operation. An unknown id fails loud. */
 export function markCaptureResolved(
   basePath: string,
   captureId: string,
@@ -136,14 +132,26 @@ export function markCaptureResolved(
 ): void {
   requireCapture(captureId);
   const payload = { captureId, classification, resolution, rationale, ...(milestoneId ? { milestoneId } : {}) };
-  runCaptureOperation(basePath, "capture.resolve", payload, () => {
-    const resolvedIn = milestoneId ?? readActiveMilestoneId();
-    return [{
-      eventType: "capture.resolved",
-      entityId: captureId,
-      payload: { ...payload, ...(resolvedIn ? { milestoneId: resolvedIn } : {}) },
-    }];
-  }, invocation);
+  runCaptureOperation(basePath, "capture.resolve", payload, () => [
+    { eventType: "capture.resolved", entityId: captureId, payload },
+  ], invocation);
+}
+
+/**
+ * Classify one capture and record the active Milestone of the project, so a
+ * later Milestone does not run a stale resolution. The active Milestone is the
+ * one that dispatch and triage use (deriveState).
+ */
+export async function resolveCapture(
+  basePath: string,
+  captureId: string,
+  classification: Classification,
+  resolution: string,
+  rationale: string,
+  invocation?: ExecutionInvocation,
+): Promise<void> {
+  const milestoneId = (await deriveState(basePath)).activeMilestone?.id;
+  markCaptureResolved(basePath, captureId, classification, resolution, rationale, milestoneId, invocation);
 }
 
 /** Record that a capture's resolution was carried out, in a capture.execute Domain Operation. An unknown id fails loud. */

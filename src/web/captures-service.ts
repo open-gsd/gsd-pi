@@ -90,7 +90,7 @@ export async function collectCapturesData(projectCwdOverride?: string): Promise<
 
 /**
  * Resolves (triages) a single capture: a child process opens the project
- * database and runs markCaptureResolved() (one capture.resolve Domain
+ * database and runs resolveCapture() (one capture.resolve Domain
  * Operation). Returns { ok: true, captureId } on success.
  */
 export async function resolveCaptureAction(request: CaptureResolveRequest, projectCwdOverride?: string): Promise<CaptureResolveResult> {
@@ -120,7 +120,7 @@ export async function resolveCaptureAction(request: CaptureResolveRequest, proje
     `const mod = await import(pathToFileURL(process.env.${CAPTURES_MODULE_ENV}).href);`,
     'const opened = mod.openExistingWorkflowDatabase(process.env.GSD_CAPTURES_BASE);',
     'if (!opened.ok) { process.stderr.write(`project database unavailable: ${opened.reason}`); process.exit(1); }',
-    `mod.markCaptureResolved(process.env.GSD_CAPTURES_BASE, ${safeId}, ${safeClassification}, ${safeResolution}, ${safeRationale});`,
+    `await mod.resolveCapture(process.env.GSD_CAPTURES_BASE, ${safeId}, ${safeClassification}, ${safeResolution}, ${safeRationale});`,
     `process.stdout.write(JSON.stringify({ ok: true, captureId: ${safeId} }));`,
   ].join(" ")
 
