@@ -206,21 +206,42 @@ function oneLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-/** The "Resume State" prompt section of one task, built from its head checkpoint row. */
-export function buildResumeSection(milestoneId: string, sliceId: string, taskId: string): string {
-  const checkpoint = readWorkCheckpoint({ milestoneId, sliceId, taskId });
-  if (!checkpoint) {
-    return ["## Resume State", "- No Work Checkpoint saved for this task. Start from the top of the task plan."].join("\n");
-  }
+function resumeSection(checkpoint: WorkCheckpoint | null, none: string): string {
+  if (!checkpoint) return ["## Resume State", `- ${none}`].join("\n");
   const lines = [
     "## Resume State",
-    `Source: Work Checkpoint saved ${checkpoint.createdAt} (${checkpoint.kind})`,
+    `Source: Work Checkpoint of ${scopeEntity(checkpoint)} saved ${checkpoint.createdAt} (${checkpoint.kind})`,
     `- Completed: ${oneLine(checkpoint.confirmedContext)}`,
   ];
   if (checkpoint.unresolvedSummary) lines.push(`- Remaining: ${oneLine(checkpoint.unresolvedSummary)}`);
   if (checkpoint.evidenceSummary) lines.push(`- Evidence: ${oneLine(checkpoint.evidenceSummary)}`);
   lines.push(`- Next action: ${oneLine(checkpoint.suggestedNextAction)}`);
   return lines.join("\n");
+}
+
+/** The "Resume State" prompt section of one task, built from its head checkpoint row. */
+export function buildResumeSection(milestoneId: string, sliceId: string, taskId: string): string {
+  return resumeSection(
+    readWorkCheckpoint({ milestoneId, sliceId, taskId }),
+    "No Work Checkpoint saved for this task. Start from the top of the task plan.",
+  );
+}
+
+/**
+ * The "Resume State" of the active unit, for /gsd resume-work: the head
+ * checkpoint of the active task, else the newest one of the active slice and
+ * its tasks, else the head one of the active milestone.
+ */
+export function buildActiveResumeSection(active: Partial<WorkCheckpointScope>): string {
+  const { milestoneId, sliceId, taskId } = active;
+  const checkpoint = !milestoneId ? null
+    : (sliceId && taskId ? readWorkCheckpoint({ milestoneId, sliceId, taskId }) : null)
+      ?? (sliceId ? readLatestSliceWorkCheckpoint(milestoneId, sliceId) : null)
+      ?? readWorkCheckpoint({ milestoneId });
+  return resumeSection(
+    checkpoint,
+    "No Work Checkpoint saved for the active task, slice or milestone. Take the next step from the canonical state.",
+  );
 }
 
 /** The markdown of the CONTINUE file that renders one checkpoint row. */

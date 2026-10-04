@@ -9,6 +9,7 @@ import { test, type TestContext } from "node:test";
 import { buildExecuteTaskPrompt } from "../auto-prompts.ts";
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import { invalidateAllCaches } from "../cache.ts";
+import { handleResumeWork } from "../commands-gsd-core.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import {
   _getAdapter,
@@ -180,6 +181,45 @@ test("/gsd offers Resume for a task with a checkpoint row, and Execute for a tas
   invalidateAllCaches();
   await showSmartEntry(ctx, pi, base);
   assert.match(menus.at(-1)!.join("\n"), /Resume T01/);
+});
+
+test("/gsd resume-work takes the handoff from the checkpoint row of the active unit, not from a CONTINUE file", async (t) => {
+  const base = makeProject(t);
+  const milestoneFile = join(base, ".gsd", "milestones", "M001", "M001-CONTINUE.md");
+  const resumePrompt = async (): Promise<string> => {
+    const sent: Array<{ content: string }> = [];
+    invalidateAllCaches();
+    await handleResumeWork("", { cwd: base, ui: { notify() {} } } as any, { sendMessage: (message: any) => sent.push(message) } as any);
+    assert.equal(sent.length, 1);
+    return sent[0]!.content;
+  };
+
+  // Files with no row: the legacy handoff.
+  writeFileSync(join(base, CONTINUE_FILE), "## Next Action\nFILE-ONLY-STATE\n");
+  writeFileSync(join(base, SLICE_DIR, "continue.md"), "## Next Action\nLEGACY-FILE-STATE\n");
+  writeFileSync(milestoneFile, "## Next Action\nMILESTONE-FILE-STATE\n");
+  const fromFiles = await resumePrompt();
+  assert.match(fromFiles, /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  assert.doesNotMatch(fromFiles, /FILE-ONLY-STATE|LEGACY-FILE-STATE|MILESTONE-FILE-STATE/);
+  assert.match(fromFiles, /Do not read a `CONTINUE\.md`, `continue\.md`, or `HANDOFF\.md` file/);
+
+  // Rows with no file: milestone scope, then slice scope, then the active task.
+  rmSync(join(base, CONTINUE_FILE));
+  rmSync(join(base, SLICE_DIR, "continue.md"));
+  rmSync(milestoneFile);
+  saveWorkCheckpoint({ milestoneId: "M001", kind: "handoff", confirmedContext: "Milestone handoff.", nextAction: "Plan the next slice." });
+  assert.match(await resumePrompt(), /Source: Work Checkpoint of M001 saved [^\n]+\n- Completed: Milestone handoff\.\n- Next action: Plan the next slice\./);
+
+  saveWorkCheckpoint({ milestoneId: "M001", sliceId: "S01", kind: "handoff", confirmedContext: "Paused between tasks.", nextAction: "Start T02." });
+  const fromSlice = await resumePrompt();
+  assert.match(fromSlice, /Source: Work Checkpoint of M001\/S01 saved [^\n]+\n- Completed: Paused between tasks\.\n- Next action: Start T02\./);
+  assert.doesNotMatch(fromSlice, /Milestone handoff\./);
+
+  saveWorkCheckpoint(HANDOFF);
+  const fromTask = await resumePrompt();
+  assert.match(fromTask, /Source: Work Checkpoint of M001\/S01\/T01 saved [^\n]+\n- Completed: Parser rewritten; two fixture tests still fail\./);
+  assert.match(fromTask, /- Next action: Add expiresAt to fixtures\/sessions\.ts and run the tests again\./);
+  assert.equal(existsSync(join(base, CONTINUE_FILE)), false);
 });
 
 test("a checkpoint is the resume state of its own task only, and the newest one is the head", (t) => {

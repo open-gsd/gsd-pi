@@ -4,7 +4,7 @@ You are running the GSD **resume-work** workflow — resume work from a previous
 
 1. **Reconcile state.** Read the canonical gsd-pi state (DB + markdown projections) and run reconciliation so any drift between disk and DB is repaired before resuming. Do not resume on top of drift.
 
-2. **Load the handoff.** The prior session saved it as a Work Checkpoint row with `gsd_checkpoint_save`. Read its render: the `CONTINUE.md` file of the active slice (or of the active milestone when no slice is active). It holds the intended next step, open threads, and in-flight work. The file is a render; do not edit it.
+2. **Load the handoff.** The Resume State below is the Work Checkpoint that the prior session saved with `gsd_checkpoint_save`, read from the GSD database for the active task, slice, or milestone. It holds the intended next step, open threads, and in-flight work. Do not read a `CONTINUE.md`, `continue.md`, or `HANDOFF.md` file for the handoff: `CONTINUE.md` is a render of the checkpoint and is never read back.
 
 3. **Reconstruct context.** Combine: the active milestone/slice/task, the last completed unit, the open threads, and a bounded codebase snapshot of what was being edited. This is the resume context — present a concise summary.
 
@@ -18,3 +18,5 @@ You are running the GSD **resume-work** workflow — resume work from a previous
 - The handoff is honored unless canonical state contradicts it.
 - The resume summary is concise and grounded in state.
 - Control returns to the gsd-pi lifecycle rather than ad-hoc work.
+
+{{resumeState}}
