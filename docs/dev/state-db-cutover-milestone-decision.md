@@ -377,9 +377,8 @@ D012 is a decision. It is not the cutover:
 decisions, and on 2026-10-02 it has no row for this decision: the last decision
 is D011. Until the row exists, this decision is recorded in prose only.
 
-- The row must be written with `gsd_decision_save`. That tool has no field that
-  sets `superseded_by` on D005, so the `decision` text of the row must name
-  D005.
+- The row must be written with `gsd_decision_save` with `supersedes` set to
+  D005. The tool marks D005 as superseded in the same operation.
 - D012 is the predicted next ID, not an assigned ID. If a different decision is
   saved first, the tool assigns a different ID, and every "D012" in this
   document, `CONTEXT.md`, `.project/STATE.md`, and the plan-of-plans closeout
