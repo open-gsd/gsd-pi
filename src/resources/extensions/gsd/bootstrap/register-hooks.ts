@@ -12,7 +12,7 @@ import { ALWAYS_PRESERVED_SHIM_TOOL_NAMES } from "@gsd/pi-ai";
 import type { GSDEcosystemBeforeAgentStartHandler } from "../ecosystem/gsd-extension-api.js";
 import { updateSnapshot } from "../ecosystem/gsd-extension-api.js";
 
-import { buildMilestoneFileName, canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
+import { canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
 import { applyAskUserQuestionsGateResult, clearDiscussionFlowState, currentWriteGateSnapshot, formatPendingAskUserQuestionsGateMessage, formatTimedOutAskUserQuestionsGateMessage, hostWriteGateAdapter, isApprovalGateVerifiedInSnapshot, isDepthConfirmationAnswer, isMilestoneDepthVerifiedInSnapshot, isQueuePhaseActive, resetWriteGateState, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, shouldBlockWorktreeBash, shouldBlockWorktreeWrite, isGateQuestionId, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId, type WriteGateSnapshot } from "./write-gate.js";
 import { canonicalToolName } from "../engine-hook-contract.js";
 import { resolveManifest } from "../unit-context-manifest.js";
@@ -1082,7 +1082,7 @@ function formatQuestionExchange(
   return lines.join("\n");
 }
 
-async function ensureMilestoneShell(basePath: string, milestoneId: string): Promise<string> {
+async function ensureMilestoneShell(basePath: string, milestoneId: string): Promise<void> {
   // When no milestone dir exists yet, prefer the legacy container when it has
   // at least one milestone subdirectory; an empty milestones/ dir (e.g. one
   // created by an old bootstrapGsdProject) is not a real legacy layout.
@@ -1113,63 +1113,72 @@ async function ensureMilestoneShell(basePath: string, milestoneId: string): Prom
   } catch (err) {
     safetyLogWarning("guided", `failed to persist milestone shell for ${milestoneId}: ${(err as Error).message}`);
   }
-
-  return milestoneDir;
 }
 
+/**
+ * Append one answered question round to the milestone's DISCUSSION log and
+ * CONTEXT-DRAFT. Both are database artifact rows: the next round is built from
+ * the row, and the files are rendered from it.
+ */
 async function saveDiscussionQuestionRound(
   basePath: string,
   milestoneId: string,
   questions: StructuredQuestion[],
   details: any,
 ): Promise<void> {
-  const milestoneDir = await ensureMilestoneShell(basePath, milestoneId);
-  const answers = details?.response?.answers;
-  const timestamp = new Date().toISOString();
-  const exchange = formatQuestionExchange(questions, answers);
-
-  // Layout-aware filename: legacy dirs use MID-SUFFIX.md; flat-phase use NN-SUFFIX.md.
-  const legacyBase = legacyMilestonesDir(basePath);
-  const isLegacyDir = milestoneDir.startsWith(legacyBase + "/") || milestoneDir.startsWith(legacyBase + "\\");
-  const milestoneFileName = (suffix: string): string =>
-    isLegacyDir ? `${milestoneId}-${suffix}.md` : buildMilestoneFileName(milestoneId, suffix);
-
-  const discussionPath = join(milestoneDir, milestoneFileName("DISCUSSION"));
-  const existingDiscussion = await loadFile(discussionPath) ?? `# ${milestoneId} Discussion Log\n\n`;
-  await saveFile(
-    discussionPath,
-    `${existingDiscussion}## Exchange — ${timestamp}\n\n${exchange}---\n\n`,
-  );
-
-  const draftPath = join(milestoneDir, milestoneFileName("CONTEXT-DRAFT"));
-  const existingDraft = await loadFile(draftPath);
-  const draftHeader = existingDraft
-    ?? [
-      `# ${milestoneId}: New milestone ${milestoneId}`,
-      "",
-      "This draft was captured automatically from structured question responses.",
-      "Use it so `/gsd` can resume the in-flight milestone discussion.",
-      "",
-    ].join("\n");
-  const draftContent = `${draftHeader.trimEnd()}\n\n## Captured Question Round — ${timestamp}\n\n${exchange}`;
-  await saveFile(draftPath, draftContent);
-
-  try {
-    const { ensureDbOpen } = await import("./dynamic-tools.js");
-    if (await ensureDbOpen(basePath)) {
-      const { insertArtifact } = await import("../gsd-db.js");
-      insertArtifact({
-        path: relMilestoneFile(basePath, milestoneId, "CONTEXT-DRAFT").replace(/^\.gsd\//, ""),
-        artifact_type: "CONTEXT-DRAFT",
-        milestone_id: milestoneId,
-        slice_id: null,
-        task_id: null,
-        full_content: draftContent,
-      });
-    }
-  } catch (err) {
-    safetyLogWarning("guided", `failed to persist CONTEXT-DRAFT artifact for ${milestoneId}: ${(err as Error).message}`);
+  await ensureMilestoneShell(basePath, milestoneId);
+  const { ensureDbOpen } = await import("./dynamic-tools.js");
+  if (!(await ensureDbOpen(basePath))) {
+    safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the GSD database is unavailable`);
+    return;
   }
+  const { getArtifact } = await import("../gsd-db.js");
+  const { saveArtifactToDb } = await import("../db-writer.js");
+  const timestamp = new Date().toISOString();
+  const exchange = formatQuestionExchange(questions, details?.response?.answers);
+
+  const appendRound = async (artifactType: string, build: (existing: string | null) => string): Promise<void> => {
+    const path = relMilestoneFile(basePath, milestoneId, artifactType).replace(/^\.gsd\//, "");
+    await saveArtifactToDb({
+      path,
+      artifact_type: artifactType,
+      content: build(getArtifact(path)?.full_content ?? null),
+      milestone_id: milestoneId,
+    }, basePath);
+  };
+
+  await appendRound("DISCUSSION", (existing) =>
+    `${existing ?? `# ${milestoneId} Discussion Log\n\n`}## Exchange — ${timestamp}\n\n${exchange}---\n\n`);
+  await appendRound("CONTEXT-DRAFT", (existing) => {
+    const draftHeader = existing
+      ?? [
+        `# ${milestoneId}: New milestone ${milestoneId}`,
+        "",
+        "This draft was captured automatically from structured question responses.",
+        "Use it so `/gsd` can resume the in-flight milestone discussion.",
+        "",
+      ].join("\n");
+    return `${draftHeader.trimEnd()}\n\n## Captured Question Round — ${timestamp}\n\n${exchange}`;
+  });
+}
+
+/**
+ * Capture an answered ask_user_questions round of a milestone discussion.
+ * Called from tool_execution_end, so it also runs under external engines,
+ * which never fire tool_result.
+ */
+async function captureAnsweredQuestionRound(basePath: string, result: unknown): Promise<void> {
+  const details = resolveAskUserQuestionsGateDetails({
+    details: (result as { details?: unknown } | undefined)?.details,
+    result,
+  });
+  if (!details?.response) return;
+  const questions = asQuestionArray(details.questions) as StructuredQuestion[];
+  const outcome = evaluateAskUserQuestionsRound(questions, details);
+  if (outcome === "cancelled" || outcome === "timeout" || outcome === "waiting") return;
+  const milestoneId = await getDiscussionMilestoneIdFor(basePath);
+  if (!milestoneId) return;
+  await saveDiscussionQuestionRound(basePath, milestoneId, questions, details);
 }
 
 function withDepthGateDisplayReason<T extends { block: boolean; reason?: string }>(
@@ -2189,9 +2198,6 @@ export function registerHooks(
         break;
       }
     }
-
-    if (!milestoneId) return;
-    await saveDiscussionQuestionRound(basePath, milestoneId, questions, details);
   });
 
   // Engine hook contract: tool_execution_start is UNIVERSAL_TOOL_HOOKS — the
@@ -2238,9 +2244,14 @@ export function registerHooks(
   // Engine hook contract: tool_execution_end is UNIVERSAL_TOOL_HOOKS — fires
   // for every finalized tool call on every engine, so error classification
   // and evidence persistence here cover external engines that skip tool_result.
-  pi.on("tool_execution_end", async (event) => {
+  pi.on("tool_execution_end", async (event, ctx) => {
     const toolName = canonicalToolName(event.toolName);
     markToolEnd(event.toolCallId);
+    if (toolName === "ask_user_questions" && !event.isError) {
+      // A failed capture must not skip the error classification below.
+      await captureAnsweredQuestionRound(contextBasePath(ctx), event.result).catch((err) =>
+        safetyLogWarning("guided", `question round capture failed: ${err instanceof Error ? err.message : String(err)}`));
+    }
     // #2883/#4974: Capture deterministic invocation/policy errors
     // so postUnitPreVerification can break the retry loop instead of re-dispatching.
     if (event.isError) {
