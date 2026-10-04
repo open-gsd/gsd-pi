@@ -106,8 +106,8 @@ checks: [{
 
 Accepted `evidence.kind` values and `ref` rules:
 
-- `gsd_uat_exec` - `ref` is the `gsd_uat_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The metadata file must exist and be typed as `uat_exec`.
-- `gsd_exec` - `ref` is a `gsd_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The metadata file must exist.
+- `gsd_uat_exec` - `ref` is the `gsd_uat_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The host must have recorded the run as `uat_exec`, for this slice, in this run-uat attempt.
+- `gsd_exec` - `ref` is a `gsd_exec` evidence ID, or a `.meta.json` path under `.gsd/exec/`. The host must have recorded the run.
 - `screenshot` - `ref` is a path under `.artifacts/browser/`, `.gsd/exec/`, or `.gsd/uat/`.
 - `log` - `ref` is a path under `.gsd/exec/`, `.gsd/uat/`, or `.artifacts/browser/`.
 - `url` - `ref` is an `http://` or `https://` URL.
