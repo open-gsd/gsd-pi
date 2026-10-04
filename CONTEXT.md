@@ -214,7 +214,10 @@ What shipped:
   an evidence row, and a step completes only from a row that passed or carries
   a waiver rationale. A `human-review` or `prompt-verify` step pauses the run
   until `/gsd workflow approve <name>/<timestamp> <step>` records the decision
-  of the operator as such a row. The verification retry count of a step is on
+  of the operator as such a row. A step that auto-mode runs is claimed as a
+  `unit_dispatches` row with the unit id `<name>/<timestamp>/<stepId>`: a second
+  session cannot run it, and takes it over only when the worker that claimed
+  it is dead. The verification retry count of a step is on
   its step row, written by a `custom_workflow.step.retry` Domain Operation. A
   run directory from an older release has no rows: the engine imports it to
   rows before its first read, and an import that is refused (an unknown step

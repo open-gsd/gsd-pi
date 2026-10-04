@@ -120,10 +120,11 @@ no lifecycle row. A step with a `human-review` or `prompt-verify` policy
 records `inconclusive` with no waiver and pauses the run;
 `/gsd workflow approve <name>/<timestamp> <step>` records the decision of the
 operator as a `pass` row written by a `user` actor and completes the step. A
-step has no claim yet: the dispatch claim for custom steps (ADR-048) is a
-follow-up. Until then the run revision fence of the Domain Operation is the
-write safety: each call has its own idempotency key, so a second session that
-read the same revision gets a revision conflict and never a silent replay. The
+step that auto-mode runs is claimed as a `unit_dispatches` row (ADR-048), so a
+second session cannot run it. A step is not a Task: it has no Attempt. The run
+revision fence of the Domain Operation is the write safety of the step rows:
+each call has its own idempotency key, so a second session that read the same
+revision gets a revision conflict and never a silent replay. The
 verification retry count of a step is on its step row, written by a
 `custom_workflow.step.retry` Domain Operation. The rows are the only
 authority: a run directory with no run row (an older release) is imported with

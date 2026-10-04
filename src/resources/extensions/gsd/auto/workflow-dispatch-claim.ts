@@ -141,22 +141,58 @@ export function openDispatchClaim(
   const mid = iterData.mid;
   if (!mid) return { kind: "degraded", reason: "missing-milestone" };
 
+  return claimUnit(s, iterData, deps, {
+    traceId: flowId,
+    turnId,
+    workerId: s.workerId,
+    milestoneLeaseToken: s.milestoneLeaseToken,
+    milestoneId: mid,
+    sliceId: iterData.state.activeSlice?.id ?? null,
+    taskId: iterData.state.activeTask?.id ?? null,
+    unitType: iterData.unitType,
+    unitId: iterData.unitId,
+  });
+}
+
+/**
+ * Record the dispatch claim of a custom workflow step. A run is not a
+ * milestone, so the claim has no milestone lease: `deps.recordDispatchClaim`
+ * must be the run claim (recordRunDispatchClaim), which ignores the token.
+ *
+ * Returns "skip" when another live worker runs the step. The claim of a dead
+ * worker is canceled first, so the step is taken over.
+ */
+export function openRunDispatchClaim(
+  s: AutoSession,
+  flowId: string,
+  turnId: string,
+  iterData: IterationData,
+  runId: string,
+  deps: OpenDispatchClaimDeps,
+): DispatchClaimOutcome {
+  if (!s.workerId) return { kind: "degraded", reason: "missing-worker" };
+  return claimUnit(s, iterData, deps, {
+    traceId: flowId,
+    turnId,
+    workerId: s.workerId,
+    milestoneLeaseToken: 0,
+    milestoneId: runId,
+    unitType: iterData.unitType,
+    unitId: iterData.unitId,
+  });
+}
+
+function claimUnit(
+  s: AutoSession,
+  iterData: IterationData,
+  deps: OpenDispatchClaimDeps,
+  input: Omit<RecordDispatchClaimInput, "attemptN">,
+): DispatchClaimOutcome {
   const recent = deps.getRecentDispatchesForUnit(iterData.unitId, 1);
   const attemptN = (recent[0]?.attempt_n ?? 0) + 1;
 
   try {
-    const claimInput = {
-      traceId: flowId,
-      turnId,
-      workerId: s.workerId,
-      milestoneLeaseToken: s.milestoneLeaseToken,
-      milestoneId: mid,
-      sliceId: iterData.state.activeSlice?.id ?? null,
-      taskId: iterData.state.activeTask?.id ?? null,
-      unitType: iterData.unitType,
-      unitId: iterData.unitId,
-      attemptN,
-    };
+    const claimInput = { ...input, attemptN };
     let claim = deps.recordDispatchClaim(claimInput);
     const reclaimOwner = deps.reclaimDeadDispatchOwner;
     if (

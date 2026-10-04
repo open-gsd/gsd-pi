@@ -1072,6 +1072,9 @@ custom_workflow_step_verifications
 - These are workflow-state rows: every write is a `custom_workflow.*` Domain
   Operation (`run.create`, `run.import`, `step.activate`, `step.expand`,
   `step.complete`, `step.verify`, `step.retry`).
+- A step that auto-mode runs also has a `unit_dispatches` row: `unit_type`
+  `custom-step`, `unit_id` `<run_id>/<step_id>`, `milestone_id` the run id and
+  `milestone_lease_token` 0 (a run has no milestone lease).
 - `GRAPH.yaml`, `DEFINITION.yaml` and `PARAMS.json` in the run directory are
   renders of these rows, written by the Projection Worker
   (`custom-workflow-run` projection kind).

@@ -48,7 +48,6 @@ import {
 } from "../task-verification-domain-operation.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 import { buildExecuteTaskPrompt, buildTaskRecoveryReplanPrompt } from "../auto-prompts.ts";
-import { buildCustomEngineIterationData } from "../auto/workflow-custom-engine-iteration.ts";
 import { runWithTaskExecutionAttempt } from "../auto/task-execution-cutover.ts";
 import { handleReplanTask } from "../tools/replan-task.ts";
 import { applyBlockerAcceptedDisposition } from "../task-settle.ts";
@@ -294,74 +293,8 @@ test("gsd_task_recovery_resume authorizes a current remediate action", () => {
   });
 });
 
-for (const recoveryCase of [
-  { failureKind: "tool-unavailable" as const, action: "retry" },
-  { failureKind: "worktree-invalid" as const, action: "repair" },
-  { failureKind: "verification-failed" as const, action: "remediate" },
-]) {
-  test(`custom-engine ${recoveryCase.action} derives its execution prompt from durable recovery`, async () => {
-    const scope = seedFailedAttempt();
-    db().prepare(`
-      UPDATE tasks
-      SET description = 'Repair the canonical database contract',
-          estimate = '45m',
-          files = '["src/canonical-recovery.ts"]',
-          verify = 'pnpm test canonical-recovery',
-          inputs = '["durable failure evidence"]',
-          expected_output = '["recovered execution"]'
-      WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'
-    `).run();
-    const routed = recordFailureAndSelectRecovery({
-      invocation: invocation(`recovery/custom-engine/${recoveryCase.action}`),
-      attemptId: scope.attemptId,
-      resultId: scope.resultId,
-      owner: "agent",
-      classification: { failureKind: recoveryCase.failureKind },
-      summary: `${recoveryCase.action} must use durable failure evidence`,
-      evidence: { source: "durable-recovery-test", action: recoveryCase.action },
-      rationale: `The ${recoveryCase.action} action governs the next execution.`,
-    });
-    assert.equal(routed.action, recoveryCase.action);
-
-    closeDatabase();
-    assert.equal(openDatabase(scope.dbPath), true);
-    const staleEnginePrompt = `Repeat the stale engine plan for ${recoveryCase.action}.`;
-    const adapted = await buildCustomEngineIterationData({
-      step: {
-        unitType: "execute-task",
-        unitId: "M001/S01/T01",
-        prompt: staleEnginePrompt,
-      },
-      basePath: scope.basePath,
-      canonicalProjectRoot: scope.basePath,
-      currentMilestoneId: "M001",
-      deriveState: async () => ({
-        activeMilestone: { id: "M001", title: "Recovery" },
-        activeSlice: { id: "S01", title: "Recovery operation" },
-        activeTask: { id: "T01", title: "Recover atomically" },
-        phase: "executing",
-        recentDecisions: [],
-        blockers: [],
-        nextAction: "",
-        registry: [],
-      }),
-      logPostDerive: () => {},
-    });
-
-    assert.notEqual(adapted.prompt, staleEnginePrompt);
-    assert.match(adapted.prompt, new RegExp(`Required action:\\*\\* ${recoveryCase.action}`));
-    assert.match(adapted.prompt, new RegExp(`${recoveryCase.action} must use durable failure evidence`));
-    assert.match(adapted.prompt, /Repair the canonical database contract/);
-    assert.match(adapted.prompt, /src\/canonical-recovery\.ts/);
-    assert.match(adapted.prompt, /pnpm test canonical-recovery/);
-    assert.match(adapted.prompt, /Non-authoritative Custom Engine Context/);
-    assert.match(adapted.prompt, new RegExp(`Repeat the stale engine plan for ${recoveryCase.action}`));
-  });
-}
-
 test("replan recovery durably carries its evidence into restart-safe dispatch context", async () => {
   const scope = seedFailedAttempt();
-  const staleEnginePrompt = "Run the stale custom engine implementation step without the migration boundary.";
   const routed = recordFailureAndSelectRecovery({
     invocation: invocation("recovery/replan/context"),
     attemptId: scope.attemptId,
@@ -457,25 +390,6 @@ test("replan recovery durably carries its evidence into restart-safe dispatch co
     "the preparation unit cannot complete before a durable Task replan",
   );
 
-  const customPreparation = await buildCustomEngineIterationData({
-    step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: staleEnginePrompt,
-    },
-    basePath: scope.basePath,
-    canonicalProjectRoot: scope.basePath,
-    currentMilestoneId: "M001",
-    deriveState: async () => state,
-    logPostDerive: () => {},
-  });
-  assert.equal(customPreparation.unitType, "replan-task");
-  assert.equal(customPreparation.unitId, "M001/S01/T01");
-  assert.equal(customPreparation.customEnginePreparation, "task-replan");
-  assert.match(customPreparation.prompt, /planning-only recovery unit/i);
-  assert.match(customPreparation.prompt, /call `gsd_replan_task`/i);
-  assert.doesNotMatch(customPreparation.prompt, /stale custom engine implementation step/i);
-
   const taskDir = join(scope.basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
   mkdirSync(taskDir, { recursive: true });
   writeFileSync(join(taskDir, "T01-PLAN.md"), "# T01: Recover atomically\n\nOld invalid plan.\n");
@@ -526,29 +440,6 @@ test("replan recovery durably carries its evidence into restart-safe dispatch co
   assert.match(execution.prompt, /replacement Task plan is durable/i);
   assert.match(execution.prompt, /Honor the migration boundary before execution/);
 
-  const customExecution = await buildCustomEngineIterationData({
-    step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: staleEnginePrompt,
-    },
-    basePath: scope.basePath,
-    canonicalProjectRoot: scope.basePath,
-    currentMilestoneId: "M001",
-    deriveState: async () => state,
-    logPostDerive: () => {},
-  });
-  assert.equal(customExecution.unitType, "execute-task");
-  assert.equal(customExecution.customEnginePreparation, undefined);
-  assert.notEqual(customExecution.prompt, staleEnginePrompt);
-  assert.match(customExecution.prompt, /Durable Task Recovery/);
-  assert.match(customExecution.prompt, /replacement Task plan is durable/i);
-  assert.match(customExecution.prompt, /Canonical Task Plan \(Database Authority\)/);
-  assert.match(customExecution.prompt, /Honor the migration boundary before execution/);
-  assert.match(customExecution.prompt, /migration contract/);
-  assert.match(customExecution.prompt, /Non-authoritative Custom Engine Context/);
-  assert.match(customExecution.prompt, /stale custom engine implementation step/i);
-
   const retryClaim = claimTaskAttempt({
     invocation: invocation("recovery/replan/claim-after-plan"),
     task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
@@ -566,20 +457,6 @@ test("replan recovery durably carries its evidence into restart-safe dispatch co
     sliceId: "S01",
     taskId: "T01",
   }), null, "the claimed replacement Attempt supersedes predecessor recovery context");
-
-  const normalCustomExecution = await buildCustomEngineIterationData({
-    step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: staleEnginePrompt,
-    },
-    basePath: scope.basePath,
-    canonicalProjectRoot: scope.basePath,
-    currentMilestoneId: "M001",
-    deriveState: async () => state,
-    logPostDerive: () => {},
-  });
-  assert.equal(normalCustomExecution.prompt, staleEnginePrompt);
 });
 
 function seedRetryFailure(
@@ -1374,38 +1251,14 @@ test("durable budget use survives retries and exhausts to agent abort", async ()
   const builtInPrompt = await buildExecuteTaskPrompt(
     "M001", "S01", "Recovery operation", "T01", "Recover atomically", firstFailure.basePath,
   );
-  const customPrompt = (await buildCustomEngineIterationData({
-    step: {
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "Repeat the stale engine plan.",
-    },
-    basePath: firstFailure.basePath,
-    canonicalProjectRoot: firstFailure.basePath,
-    currentMilestoneId: "M001",
-    deriveState: async () => ({
-      activeMilestone: { id: "M001", title: "Recovery" },
-      activeSlice: { id: "S01", title: "Recovery operation" },
-      activeTask: { id: "T01", title: "Recover atomically" },
-      phase: "executing",
-      recentDecisions: [],
-      blockers: [],
-      nextAction: "",
-      registry: [],
-    }),
-    logPostDerive: () => {},
-  })).prompt;
-  for (const prompt of [builtInPrompt, customPrompt]) {
-    assert.match(prompt, /Required action:\*\* continue/);
-    assert.match(prompt, new RegExp(summaries[2]));
-    assert.match(prompt, /The missing tool surface was restored in the executor runtime/);
-    assert.match(prompt, /open-gsd\/gsd-pi#1457/);
-    assert.match(prompt, /focused recovery tests passed/);
-    assert.match(prompt, /resume authorization is already durable/i);
-    assert.match(prompt, /do not call `gsd_task_recovery_resume`/i);
-    assert.match(prompt, /continue from the checkpoint/i);
-  }
-  assert.match(customPrompt, /Non-authoritative Custom Engine Context/);
+  assert.match(builtInPrompt, /Required action:\*\* continue/);
+  assert.match(builtInPrompt, new RegExp(summaries[2]));
+  assert.match(builtInPrompt, /The missing tool surface was restored in the executor runtime/);
+  assert.match(builtInPrompt, /open-gsd\/gsd-pi#1457/);
+  assert.match(builtInPrompt, /focused recovery tests passed/);
+  assert.match(builtInPrompt, /resume authorization is already durable/i);
+  assert.match(builtInPrompt, /do not call `gsd_task_recovery_resume`/i);
+  assert.match(builtInPrompt, /continue from the checkpoint/i);
   assert.deepEqual(row(`
     SELECT event_type, payload_json
     FROM workflow_domain_events

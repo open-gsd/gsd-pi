@@ -13,7 +13,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { autoLoop } from "../auto/loop.js";
-import { resolveAgentEnd, _hasPendingResolveForTest, _resetPendingResolve } from "../auto/resolve.js";
+import {
+  resolveAgentEnd,
+  _getCurrentResolveForTest,
+  _hasPendingResolveForTest,
+  _resetPendingResolve,
+} from "../auto/resolve.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
 import type { SessionLockStatus } from "../session-lock.js";
@@ -21,6 +26,8 @@ import { writeGraph, readGraph, type WorkflowGraph, type GraphStep } from "../gr
 import { SourceObservationStore } from "../source-observations.js";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.js";
 import { markWorkerStopping, registerAutoWorker } from "../db/auto-workers.ts";
+import { getDispatchById, getLatestForUnit, recordRunDispatchClaim } from "../db/unit-dispatches.ts";
+import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
 import {
   customWorkflowRunId,
   getLatestCustomWorkflowStepVerification,
@@ -129,6 +136,11 @@ function makeMockPi() {
 
 function makeLoopSession(overrides?: Record<string, unknown>) {
   return {
+    // A custom workflow step is claimed as a dispatch row, so a session that
+    // runs one needs a registered worker.
+    workerId: overrides?.activeEngineId === "custom" && _getAdapter()
+      ? registerAutoWorker({ projectRootRealpath: String(overrides.basePath) })
+      : null,
     active: true,
     verbose: false,
     stepMode: false,
@@ -306,7 +318,6 @@ async function runVerificationScenario(input: {
   runDir: string;
   mutateFiles: () => void;
   observations: VerificationObservation[];
-  hostBoundary?: NonNullable<LoopDeps["customEngineHostVerificationBoundary"]>;
 }): Promise<void> {
   input.mutateFiles();
   _resetPendingResolve();
@@ -318,7 +329,6 @@ async function runVerificationScenario(input: {
     basePath: input.runDir,
   });
   const deps = makeMockDeps({
-    ...(input.hostBoundary ? { customEngineHostVerificationBoundary: input.hostBoundary } : {}),
     adjudicateNonAdvancingOutcome: (_session, outcome) => {
       const recorded = recordNonAdvancingOutcome({
         scopeId: realpathSync(input.runDir),
@@ -561,6 +571,140 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       assert.equal(verification?.verdict, "inconclusive", stepId);
       assert.equal(verification?.waiverRationale, "The step has no verify policy.", stepId);
     }
+  });
+
+  describe("the dispatch claim of a workflow step", () => {
+    /** A one-step run with rows, and a way to start an auto session on it. */
+    function makeClaimedRun() {
+      _resetPendingResolve();
+      const base = realpathSync(makeTmpDir());
+      mkdirSync(join(base, ".gsd", "workflow-defs"), { recursive: true });
+      writeFileSync(join(base, ".gsd", "workflow-defs", "claimed.yaml"), [
+        "version: 1",
+        "name: claimed",
+        "steps:",
+        "  - id: only",
+        "    name: Only",
+        "    prompt: Do the only step",
+        "    requires: []",
+        "    produces: []",
+      ].join("\n"), "utf-8");
+      openDatabase(join(base, ".gsd", "gsd.db"));
+      const runDir = createRun(base, "claimed");
+      const startSession = () => {
+        const pi = makeMockPi();
+        const s = makeLoopSession({
+          activeEngineId: "custom",
+          activeRunDir: runDir,
+          basePath: base,
+          canonicalProjectRoot: base,
+        });
+        const notices: string[] = [];
+        const ctx = makeMockCtx();
+        ctx.ui.notify = (message: string) => { notices.push(message); };
+        const deps = makeMockDeps({
+          stopAuto: async (_ctx, _pi, reason) => {
+            deps.callLog.push(`stopAuto:${reason ?? "no-reason"}`);
+            s.active = false;
+          },
+        });
+        return { pi, s, notices, loop: autoLoop(ctx, pi, s, deps) };
+      };
+      return { base, runDir, unitId: `${customWorkflowRunId(runDir)}/only`, startSession };
+    }
+
+    async function waitForUnit(): Promise<void> {
+      const deadline = Date.now() + 3_000;
+      while (!_hasPendingResolveForTest()) {
+        assert.ok(Date.now() < deadline, "the session did not start the step");
+        await new Promise((r) => setTimeout(r, 5));
+      }
+    }
+
+    it("a second session cannot run the step that a live session runs", async () => {
+      const { base, unitId, startSession } = makeClaimedRun();
+
+      // The first session runs the step: its unit waits for the agent.
+      const first = startSession();
+      await waitForUnit();
+      const claimed = getLatestForUnit(unitId);
+      assert.equal(claimed?.status, "running");
+      assert.equal(claimed?.worker_id, first.s.workerId);
+      assert.equal(claimed?.unit_type, "custom-step");
+
+      // The two sessions are two processes: the exit of the second loop must
+      // not drop the agent turn that the first one waits for in this process.
+      const finishFirstUnit = _getCurrentResolveForTest()!;
+
+      // A second session on the same run is refused and never calls the agent.
+      const second = startSession();
+      await second.loop;
+      assert.equal(second.pi.calls.length, 0);
+      assert.match(second.notices.join("\n"), /is running in another session/);
+      assert.equal(getLatestForUnit(unitId)?.id, claimed?.id, "the refused session wrote no dispatch row");
+      assert.equal(getLatestForUnit(unitId)?.status, "running");
+
+      // The first session finishes the step and settles its claim.
+      finishFirstUnit({ status: "completed", event: { messages: [{ role: "assistant" }] } });
+      await first.loop;
+      assert.equal(first.pi.calls.length, 1);
+      assert.equal(getDispatchById(claimed!.id)?.status, "completed");
+      assert.deepEqual(listRuns(base)[0]?.steps, { total: 1, completed: 1, pending: 0, active: 0 });
+    });
+
+    it("a session takes over the step of a worker that died", async () => {
+      const { base, runDir, unitId, startSession } = makeClaimedRun();
+
+      // A worker activated the step, claimed it, and died with the claim open.
+      const engine = new CustomWorkflowEngine(runDir);
+      await engine.resolveDispatch(await engine.deriveState(base), { basePath: base });
+      const deadWorker = registerAutoWorker({ projectRootRealpath: base });
+      const deadClaim = recordRunDispatchClaim({
+        traceId: "dead-session",
+        workerId: deadWorker,
+        milestoneId: customWorkflowRunId(runDir),
+        unitType: "custom-step",
+        unitId,
+      });
+      assert.equal(deadClaim.ok, true);
+      _getAdapter()!.prepare("UPDATE workers SET pid = -1 WHERE worker_id = :worker_id")
+        .run({ ":worker_id": deadWorker });
+
+      const next = startSession();
+      await waitForUnit();
+      assert.equal(deadClaim.ok && getDispatchById(deadClaim.dispatchId)?.status, "canceled");
+      const takenOver = getLatestForUnit(unitId);
+      assert.equal(takenOver?.worker_id, next.s.workerId);
+      assert.equal(takenOver?.status, "running");
+      assert.equal(takenOver?.attempt_n, 2);
+
+      await resolveNextAgentEnd();
+      await next.loop;
+      assert.equal(getDispatchById(takenOver!.id)?.status, "completed");
+      assert.deepEqual(listRuns(base)[0]?.steps, { total: 1, completed: 1, pending: 0, active: 0 });
+    });
+
+    it("two runs of one workflow claim the same step id independently", async () => {
+      const { base, unitId, startSession } = makeClaimedRun();
+      const otherRunId = "claimed/2000-01-01T00-00-00";
+      const otherWorker = registerAutoWorker({ projectRootRealpath: base });
+      const otherClaim = recordRunDispatchClaim({
+        traceId: "other-run",
+        workerId: otherWorker,
+        milestoneId: otherRunId,
+        unitType: "custom-step",
+        unitId: `${otherRunId}/only`,
+      });
+      assert.equal(otherClaim.ok, true);
+
+      const session = startSession();
+      await waitForUnit();
+      assert.equal(getLatestForUnit(unitId)?.status, "running");
+      await resolveNextAgentEnd();
+      await session.loop;
+      assert.equal(getLatestForUnit(unitId)?.status, "completed");
+      assert.equal(getLatestForUnit(`${otherRunId}/only`)?.status, "claimed");
+    });
   });
 
   it("a human-review step pauses once, the operator approves it, and the next step runs", async () => {
@@ -1282,18 +1426,18 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       }],
     }));
 
+    const dbPath = join(runDir, ".gsd", "gsd.db");
+    mkdirSync(join(runDir, ".gsd"), { recursive: true });
+    openDatabase(dbPath);
+    t.after(() => {
+      try { closeDatabase(); } catch { /* noop */ }
+    });
     const ctx = makeMockCtx();
     const pi = makeMockPi();
     const s = makeLoopSession({
       activeEngineId: "custom",
       activeRunDir: runDir,
       basePath: runDir,
-    });
-    const dbPath = join(runDir, ".gsd", "gsd.db");
-    mkdirSync(join(runDir, ".gsd"), { recursive: true });
-    openDatabase(dbPath);
-    t.after(() => {
-      try { closeDatabase(); } catch { /* noop */ }
     });
     let stopOutcome: {
       guardId: string;
@@ -1577,80 +1721,6 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
     assert.equal(observations[1]?.tripped, false);
     assert.equal(payloads[1], payloads[2]);
     assert.equal(observations[2]?.tripped, true);
-  });
-
-  it("#1674: the loop composes host evidence over the policy read that preceded it", async () => {
-    // ADR-047 §3: one verification turn can read twice — the policy, then the
-    // host boundary's own decisive inputs (post-policy source drift here, and a
-    // second host call once interactive human review resolves the blocker).
-    // First-write-wins kept the stale policy read, so two different host
-    // decisions behind one policy failure shared a signature and tripped the
-    // wedge falsely at occurrence two. The host boundary is injected through its
-    // production seam so the loop's composition is what is under test; the stub
-    // mirrors the real boundary's post-policy source-drift path.
-    _resetPendingResolve();
-
-    const runDir = makeTmpDir();
-    const graph = makeGraph([makeStep({ id: "compose-step" })], "compose-fidelity");
-    writeGraph(runDir, graph);
-    writeFileSync(join(runDir, "DEFINITION.yaml"), stringify({
-      version: 1,
-      name: "compose-fidelity",
-      steps: [{
-        id: "compose-step",
-        name: "compose-step",
-        prompt: "Do compose-step",
-        produces: ["compose-step/output.md"],
-        verify: { policy: "content-heuristic", pattern: "^ok" },
-      }],
-    }));
-    mkdirSync(join(runDir, "compose-step"), { recursive: true });
-    writeFileSync(join(runDir, "compose-step", "output.md"), "unchanged-failure\n");
-
-    mkdirSync(join(runDir, ".gsd"), { recursive: true });
-    openDatabase(join(runDir, ".gsd", "gsd.db"));
-
-    const verifyOutcomes: VerificationObservation[] = [];
-
-    const runWithHostDecision = async (sourceRevisionAfter: string): Promise<void> => {
-      await runVerificationScenario({
-        runDir,
-        mutateFiles: () => {},
-        observations: verifyOutcomes,
-        hostBoundary: async (input) => {
-          await input.verifyPolicy();
-          input.recordHostEvidence?.({
-            path: "post-policy-source-drift",
-            sourceRevisionBefore: "sha256:before",
-            sourceRevisionAfter,
-          });
-          return "pause";
-        },
-      });
-    };
-
-    await runWithHostDecision("sha256:after-1");
-    await runWithHostDecision("sha256:after-2");
-    await runWithHostDecision("sha256:after-2");
-
-    assert.equal(verifyOutcomes.length, 3, "each host pause must reach adjudication once");
-    const payloads = verifyOutcomes.map((outcome) => outcome.inputPayload);
-    assert.notEqual(
-      payloads[0],
-      payloads[1],
-      "a different host decision behind an identical policy read must produce distinct evidence",
-    );
-    assert.ok(
-      payloads[0]?.includes("sha256:after-1"),
-      `the composed payload must carry the host read; got ${payloads[0]}`,
-    );
-    assert.ok(
-      payloads[0]?.includes("content-heuristic"),
-      `the composed payload must keep the policy read it followed; got ${payloads[0]}`,
-    );
-    assert.equal(verifyOutcomes[1]?.tripped, false, "a changed host decision must not trip the backstop");
-    assert.equal(payloads[1], payloads[2], "identical reads must produce identical evidence");
-    assert.equal(verifyOutcomes[2]?.tripped, true, "identical reads must trip at occurrence two");
   });
 
   it("two-step workflow drives both steps to complete and stops when isComplete fires", async () => {

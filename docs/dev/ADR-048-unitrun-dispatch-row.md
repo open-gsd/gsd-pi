@@ -24,7 +24,7 @@ ADR-047 stays the **block detector**. It must not grow a third identity or new s
 ## Consequences
 
 - `lastAdvanceKey`, `orchestrationUnitPendingCloseout`, and optional `releaseActiveUnit` are deleted.
-- The canonical loop does not call `openDispatchClaim` after `advance()`. Custom-engine execute-task and sidecar items still claim themselves.
+- The canonical loop does not call `openDispatchClaim` after `advance()`. Custom workflow steps and sidecar items still claim themselves.
 - Skip reasons keep human-readable strings for logs and liveness payloads; loop branches on `code`, not reason text.
 
 ## Amendment 2026-10-03: kernel state for non-task units lives on the dispatch row
@@ -42,7 +42,7 @@ The work has four parts:
 3. The sidecar queue (hooks, triage, quick tasks) as rows linked to the dispatch that triggered them.
 4. Advance selects from the database only.
 
-Part 1 has started. `unit_dispatch_budgets (dispatch_id, kind, used)` holds one count for each budget kind. A retry opens a new dispatch row for the same unit, so the count of a unit is the value on its newest dispatch row that holds the kind, and a reset writes `0` on the newest row. The zero-tool, tool-unavailable and pre-execution repair budgets use it (`db/unit-dispatch-budgets.ts`). The three budgets have one release rule: a pass of the unit, or the pause at the cap, writes `0`, so a resume after a person fixed the cause starts a new budget. A unit that runs with no dispatch row (a custom-engine step) has no durable identity, so its count lasts for the process only.
+Part 1 has started. `unit_dispatch_budgets (dispatch_id, kind, used)` holds one count for each budget kind. A retry opens a new dispatch row for the same unit, so the count of a unit is the value on its newest dispatch row that holds the kind, and a reset writes `0` on the newest row. The zero-tool, tool-unavailable and pre-execution repair budgets use it (`db/unit-dispatch-budgets.ts`). The three budgets have one release rule: a pass of the unit, or the pause at the cap, writes `0`, so a resume after a person fixed the cause starts a new budget. A unit that runs with no dispatch row has no durable identity, so its count lasts for the process only.
 
 Part 4 has started with one decision: the planner retry after a failed pre-execution check (see the second 2026-10-04 amendment). One session field was deleted with no database replacement: the findings of a failed pre-execution check (`lastPreExecFailure` on the auto session and in the paused-session metadata). Its only reader was the `planning → plan-slice` dispatch rule. That rule matches only a slice with no task rows. The check stores findings only for a slice that has task rows, and the rows stay after the failure, so the reader was unreachable. A paused-session row written by an older build may still carry the deleted field; it is ignored.
 
@@ -52,7 +52,7 @@ Owner decision 2026-10-03: the claimed `unit_dispatches` row is the kernel recor
 
 Rules:
 
-- **Link.** `trigger_dispatch_id` is the newest `unit_dispatches` row of the unit whose close-out queued the item. It is `NULL` when that unit ran with no dispatch row (a custom-engine step that is not an execute-task), and when a resume queues a restored hook again.
+- **Link.** `trigger_dispatch_id` is the newest `unit_dispatches` row of the unit whose close-out queued the item. It is `NULL` when that unit ran with no dispatch row, and when a resume queues a restored hook again.
 - **Scope.** A row belongs to the worker, not to the milestone it runs: the scope has no milestone unless the worker is a parallel worker (`GSD_PARALLEL_WORKER`), which stays on the milestone of its lock, and on the slice of its lock for a slice-parallel worker (`GSD_SLICE_LOCK`). A worker reads only the rows of its own scope, so two live workers do not run the queue of each other. A restarted worker has the same scope and takes the rows of the process that died, also when the restart is on the next milestone: the rows of the finished milestone run before the new work. A start that is not a parallel worker also takes the `held` and `queued` rows of a parallel scope that no live worker owns, so a parallel worker that was killed at the end of its milestone does not strand its rows. A scope has an owner when another process holds an unexpired `milestone_leases` row of the scope, or when the worker that holds the lease or that ran the dispatch which queued the row is live. A live worker is an active `workers` row of another process with a fresh heartbeat or with a process that is alive on this host. So a scope is ownerless only when the lease is expired, the heartbeat is stale and the process is dead. The loop renews the heartbeat and the lease during the unit phase and the finalize phase, so a long verification does not make a live worker look dead.
 - **Status.** `held` is a quick task that waits (one quick task runs between two units). `queued` is ready work: the auto loop runs the oldest queued row before it selects a unit. `done` is set when the loop iteration that ran the row ends, with any result. `canceled` is set by `stopAuto`.
 - **Kill.** A killed process leaves the row `held` or `queued`. The next start runs it. A pause or a stop is not a kill: a pause in the middle of an item closes its row, and `stopAuto` cancels every queued row and every held quick task of the worker, as the in-memory queue did.
@@ -123,6 +123,20 @@ Rules for the stage checkpoint (`unit_dispatch_stages (dispatch_id, stage, updat
 - A live process and a restarted process use the same rule: `pauseAuto` keeps the dispatch link in the session and writes the same value to the row.
 
 Not changed: a restart does not continue a unit at the `verify`, `route` or `closeout` stage. It selects the next unit from state, as before. Continuing at the stored stage is part of the Lifecycle Kernel work. The custom-engine step that is not a Task has no dispatch row and so no stage. In the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing still asks for a milestone directory with content before it restores the milestone of the pause.
+
+## Amendment 2026-10-04: a custom workflow step is claimed as a dispatch row
+
+A custom workflow step (`custom-step`) is a non-task unit, so its kernel record is the claimed `unit_dispatches` row. It has no Attempt. The custom engine emits only `custom-step` units: the `execute-task` branches of the custom loop path (lease, Attempt, host verification, human-review response, publication) had no production producer and are deleted.
+
+Rules:
+
+- **Unit id.** `<name>/<timestamp>/<stepId>`: the run id and the step id. The claim guard is the partial unique index on `unit_id`, so two runs of one workflow do not block each other.
+- **Scope.** `milestone_id` on the row is the run id. A run is not a milestone and `milestone_leases` references `milestones`, so a step claim has no lease and `milestone_lease_token` is `0` (`recordRunDispatchClaim`).
+- **Second session.** A second session that resumes the run gets the active step again, fails the claim, and stops with a notice that names the worker. It does not call the agent.
+- **Dead worker.** When the worker that holds the claim is dead (its process is not alive on this host), the next session cancels that row and claims the step with the next `attempt_n`.
+- **Settle.** A verified step settles the row `completed` before the step row is marked complete. A unit break, a unit retry, a verification retry and a verification pause settle it `failed` with the reason.
+
+Not changed: the custom loop path is still a separate branch of the auto loop. It shares guards, the unit phase and the dispatch ledger with the standard path. `/gsd workflow approve` completes a step with no dispatch row, because no unit runs.
 
 ## Rejected alternatives
 

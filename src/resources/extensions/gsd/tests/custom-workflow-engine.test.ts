@@ -13,7 +13,8 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { parse } from "yaml";
 
-import { CustomWorkflowEngine } from "../custom-workflow-engine.ts";
+import { CustomWorkflowEngine, stepIdOfUnit } from "../custom-workflow-engine.ts";
+import { customWorkflowRunId } from "../db/custom-workflow-runs.ts";
 import { CustomExecutionPolicy } from "../custom-execution-policy.ts";
 import { runCustomVerificationWithEvidence } from "../custom-verification.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
@@ -134,7 +135,7 @@ describe("CustomWorkflowEngine.deriveState", () => {
 
 describe("CustomWorkflowEngine.resolveDispatch", () => {
   it("returns dispatch for first pending step", async () => {
-    const { engine } = setupEngine([
+    const { engine, runDir } = setupEngine([
       makeStep({ id: "step-1", prompt: "Do the first thing" }),
       makeStep({ id: "step-2", dependsOn: ["step-1"] }),
     ], "my-workflow");
@@ -145,7 +146,8 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     assert.equal(dispatch.action, "dispatch");
     if (dispatch.action === "dispatch") {
       assert.equal(dispatch.step.unitType, "custom-step");
-      assert.equal(dispatch.step.unitId, "my-workflow/step-1");
+      // The unit id carries the run id, so two runs of one workflow have different unit ids.
+      assert.equal(dispatch.step.unitId, `${customWorkflowRunId(runDir)}/step-1`);
       assert.equal(dispatch.step.prompt, "Do the first thing");
     }
   });
@@ -176,14 +178,14 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     const firstDispatch = await engine.resolveDispatch(state, { basePath: "/unused" });
     assert.equal(firstDispatch.action, "dispatch");
     if (firstDispatch.action === "dispatch") {
-      assert.equal(firstDispatch.step.unitId, "my-workflow/step-1");
+      assert.equal(stepIdOfUnit(firstDispatch.step.unitId), "step-1");
     }
 
     state = await engine.deriveState("/unused");
     const secondDispatch = await engine.resolveDispatch(state, { basePath: "/unused" });
     assert.equal(secondDispatch.action, "dispatch");
     if (secondDispatch.action === "dispatch") {
-      assert.equal(secondDispatch.step.unitId, "my-workflow/step-1");
+      assert.equal(stepIdOfUnit(secondDispatch.step.unitId), "step-1");
       assert.equal(secondDispatch.step.prompt, "Do the first thing");
     }
   });
@@ -267,7 +269,7 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     // Should pick "a" (no deps), not "b" or "c"
     assert.equal(dispatch.action, "dispatch");
     if (dispatch.action === "dispatch") {
-      assert.equal(dispatch.step.unitId, "dep-wf/a");
+      assert.equal(stepIdOfUnit(dispatch.step.unitId), "a");
     }
   });
 
@@ -284,7 +286,7 @@ describe("CustomWorkflowEngine.resolveDispatch", () => {
     // "a" is done, "b" deps met, should pick "b"
     assert.equal(dispatch.action, "dispatch");
     if (dispatch.action === "dispatch") {
-      assert.equal(dispatch.step.unitId, "dep-wf/b");
+      assert.equal(stepIdOfUnit(dispatch.step.unitId), "b");
     }
   });
 });

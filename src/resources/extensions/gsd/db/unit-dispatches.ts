@@ -163,6 +163,76 @@ function settleStaleActiveDispatchForUnit(input: RecordClaimInput, now: string):
   });
 }
 
+/** Insert the `claimed` row. Runs inside the transaction of the caller. */
+function insertClaim(input: RecordClaimInput, now: string): RecordClaimResult {
+  const db = _getAdapter()!;
+  try {
+    const result = db.prepare(
+      `INSERT INTO unit_dispatches (
+        trace_id, turn_id, worker_id, milestone_lease_token,
+        milestone_id, slice_id, task_id,
+        unit_type, unit_id, status, attempt_n,
+        started_at, max_attempts
+      ) VALUES (
+        :trace_id, :turn_id, :worker_id, :milestone_lease_token,
+        :milestone_id, :slice_id, :task_id,
+        :unit_type, :unit_id, 'claimed', :attempt_n,
+        :started_at, :max_attempts
+      )`,
+    ).run({
+      ":trace_id": input.traceId,
+      ":turn_id": input.turnId ?? null,
+      ":worker_id": input.workerId,
+      ":milestone_lease_token": input.milestoneLeaseToken,
+      ":milestone_id": input.milestoneId,
+      ":slice_id": input.sliceId ?? null,
+      ":task_id": input.taskId ?? null,
+      ":unit_type": input.unitType,
+      ":unit_id": input.unitId,
+      ":attempt_n": input.attemptN ?? 1,
+      ":started_at": now,
+      ":max_attempts": input.maxAttempts ?? 3,
+    });
+    const id = Number((result as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0);
+
+    insertAuditEvent({
+      eventId: randomUUID(),
+      traceId: input.traceId,
+      turnId: input.turnId ?? undefined,
+      category: "orchestration",
+      type: "dispatch-claimed",
+      ts: now,
+      payload: {
+        dispatchId: id,
+        unitId: input.unitId,
+        unitType: input.unitType,
+        workerId: input.workerId,
+        attemptN: input.attemptN ?? 1,
+      },
+    });
+
+    return { ok: true, dispatchId: id };
+  } catch (err) {
+    if (!isAlreadyActiveConstraintError(err)) throw err;
+
+    // Partial unique index rejected the INSERT — surface the existing
+    // active dispatch so callers can decide what to do.
+    const existing = db.prepare(
+      `SELECT id, status, worker_id FROM unit_dispatches
+       WHERE unit_id = :unit_id AND status IN ('claimed','running')
+       ORDER BY id DESC LIMIT 1`,
+    ).get({ ":unit_id": input.unitId }) as { id: number; status: DispatchStatus; worker_id: string } | undefined;
+
+    return {
+      ok: false,
+      error: "already_active",
+      existingId: existing?.id ?? 0,
+      existingStatus: existing?.status ?? "claimed",
+      existingWorker: existing?.worker_id ?? "unknown",
+    };
+  }
+}
+
 /**
  * Insert a new dispatch row in `claimed` state. Atomic guard against
  * double-claim (B2): the partial unique index
@@ -211,72 +281,24 @@ export function recordDispatchClaim(input: RecordClaimInput): RecordClaimResult 
 
     settleStaleActiveDispatchForUnit(input, now);
 
-    try {
-      const result = db.prepare(
-        `INSERT INTO unit_dispatches (
-          trace_id, turn_id, worker_id, milestone_lease_token,
-          milestone_id, slice_id, task_id,
-          unit_type, unit_id, status, attempt_n,
-          started_at, max_attempts
-        ) VALUES (
-          :trace_id, :turn_id, :worker_id, :milestone_lease_token,
-          :milestone_id, :slice_id, :task_id,
-          :unit_type, :unit_id, 'claimed', :attempt_n,
-          :started_at, :max_attempts
-        )`,
-      ).run({
-        ":trace_id": input.traceId,
-        ":turn_id": input.turnId ?? null,
-        ":worker_id": input.workerId,
-        ":milestone_lease_token": input.milestoneLeaseToken,
-        ":milestone_id": input.milestoneId,
-        ":slice_id": input.sliceId ?? null,
-        ":task_id": input.taskId ?? null,
-        ":unit_type": input.unitType,
-        ":unit_id": input.unitId,
-        ":attempt_n": input.attemptN ?? 1,
-        ":started_at": now,
-        ":max_attempts": input.maxAttempts ?? 3,
-      });
-      const id = Number((result as { lastInsertRowid?: number | bigint }).lastInsertRowid ?? 0);
-
-      insertAuditEvent({
-        eventId: randomUUID(),
-        traceId: input.traceId,
-        turnId: input.turnId ?? undefined,
-        category: "orchestration",
-        type: "dispatch-claimed",
-        ts: now,
-        payload: {
-          dispatchId: id,
-          unitId: input.unitId,
-          unitType: input.unitType,
-          workerId: input.workerId,
-          attemptN: input.attemptN ?? 1,
-        },
-      });
-
-      return { ok: true, dispatchId: id };
-    } catch (err) {
-      if (!isAlreadyActiveConstraintError(err)) throw err;
-
-      // Partial unique index rejected the INSERT — surface the existing
-      // active dispatch so callers can decide what to do.
-      const existing = db.prepare(
-        `SELECT id, status, worker_id FROM unit_dispatches
-         WHERE unit_id = :unit_id AND status IN ('claimed','running')
-         ORDER BY id DESC LIMIT 1`,
-      ).get({ ":unit_id": input.unitId }) as { id: number; status: DispatchStatus; worker_id: string } | undefined;
-
-      return {
-        ok: false,
-        error: "already_active",
-        existingId: existing?.id ?? 0,
-        existingStatus: existing?.status ?? "claimed",
-        existingWorker: existing?.worker_id ?? "unknown",
-      };
-    }
+    return insertClaim(input, now);
   });
+}
+
+/**
+ * Claim a unit of a run that is not a milestone (a custom workflow step).
+ * `milestoneId` is the run id. milestone_leases references milestones, so no
+ * lease can fence this claim and the stored token is 0. The partial unique
+ * index on the unit id is the only guard: a second claim of the same unit is
+ * refused while the first is active.
+ */
+export function recordRunDispatchClaim(
+  input: Omit<RecordClaimInput, "milestoneLeaseToken">,
+): RecordClaimResult {
+  if (!isDbAvailable()) {
+    throw new Error("recordRunDispatchClaim: DB unavailable");
+  }
+  return transaction(() => insertClaim({ ...input, milestoneLeaseToken: 0 }, new Date().toISOString()));
 }
 
 /** Transition a `claimed` dispatch into `running`. */

@@ -125,6 +125,4 @@ export interface IterationData {
   previousTier: string | undefined;
   /** Model override from pre-dispatch hooks (applied after standard model selection). */
   hookModelOverride?: string;
-  /** Internal planning-only preparation that must not reconcile a custom-engine step. */
-  customEnginePreparation?: "task-replan";
 }

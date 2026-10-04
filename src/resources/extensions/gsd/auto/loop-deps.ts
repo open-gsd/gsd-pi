@@ -31,8 +31,6 @@ import type { JournalEntry } from "../journal.js";
 import type { MergeReconcileResult } from "../auto-recovery.js";
 import type { UokTurnObserver } from "../uok/contracts.js";
 import type { PostflightResult, PreflightResult } from "../clean-root-preflight.js";
-import type { VerificationOutcome } from "../custom-verification.js";
-import type { CustomEngineHostVerificationInput } from "./custom-task-host-verification.js";
 import type {
   TaskExecutionCutoverDeps,
   TaskExecutionCutoverInput,
@@ -122,9 +120,6 @@ export interface LoopDeps {
     input: VerifiedTaskPublicationInput,
     deps: VerifiedTaskPublicationDeps,
   ) => Promise<void>;
-  customEngineHostVerificationBoundary?: (
-    input: CustomEngineHostVerificationInput,
-  ) => Promise<VerificationOutcome>;
   lockBase: () => string;
   buildSnapshotOpts: (
     unitType: string,

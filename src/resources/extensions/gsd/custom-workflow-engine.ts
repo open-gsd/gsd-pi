@@ -11,7 +11,9 @@
  * The engine imports it to rows before its first read; a refused import throws.
  *
  * Observability:
- * - `resolveDispatch` returns unitType "custom-step" with unitId "<name>/<stepId>".
+ * - `resolveDispatch` returns unitType "custom-step" with unitId "<runId>/<stepId>".
+ *   The run id is in the unit id because the dispatch claim is per unit id: two
+ *   runs of one workflow do not block each other.
  * - `getDisplayMetadata` provides step N/M progress for dashboard rendering.
  */
 
@@ -74,7 +76,7 @@ function formatBlockedWorkflowReason(graph: WorkflowGraph): string {
     : "Workflow blocked: no pending steps are ready.";
 }
 
-/** The step id of a custom-step unit id "<workflowName>/<stepId>". */
+/** The step id of a custom-step unit id "<name>/<timestamp>/<stepId>". */
 export function stepIdOfUnit(unitId: string): string {
   const { milestone, slice, task } = parseUnitId(unitId);
   return task ?? slice ?? milestone;
@@ -142,12 +144,12 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     };
   }
 
-  private dispatchStep(graph: WorkflowGraph, step: GraphStep): EngineDispatchAction {
+  private dispatchStep(step: GraphStep): EngineDispatchAction {
     return {
       action: "dispatch",
       step: {
         unitType: "custom-step",
-        unitId: `${graph.metadata.name}/${step.id}`,
+        unitId: `${this.runId}/${step.id}`,
         // Enrich prompt with context from prior step artifacts
         prompt: injectContext(this.runDir, step.id, step.prompt),
       },
@@ -248,7 +250,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     }
 
     return {
-      action: this.dispatchStep(activeGraph, activeStep),
+      action: this.dispatchStep(activeStep),
       transition: { operationType: "step.activate", stepId: nextId, graph: activeGraph },
     };
   }
@@ -262,7 +264,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
    * rows, the step transition fails with a revision conflict.
    *
    * Returns a dispatch with unitType "custom-step" and unitId in
-   * "<workflowName>/<stepId>" format.
+   * "<name>/<timestamp>/<stepId>" format.
    */
   async resolveDispatch(
     state: EngineState,
@@ -276,7 +278,7 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     const active = graph.steps.find((step) => step.status === "active");
     let action: EngineDispatchAction;
     if (active) {
-      action = this.dispatchStep(graph, active);
+      action = this.dispatchStep(active);
     } else {
       const next = this.nextStep(graph);
       if (next.transition) saveCustomWorkflowSteps({ fence, runId: this.runId, ...next.transition });
