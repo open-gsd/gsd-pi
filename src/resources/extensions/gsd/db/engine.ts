@@ -2339,6 +2339,40 @@ function runStartupRepair(adapter: DbAdapter, path: string, forceMemoriesFtsRebu
   });
 }
 
+/** Highest Authority Epoch above 0 of the Domain Operation receipts this process holds, by Project. */
+const _receiptAuthorityEpochs = new Map<string, number>();
+
+export function noteAuthorityEpochReceipt(projectId: string, authorityEpoch: number): void {
+  if (authorityEpoch > (_receiptAuthorityEpochs.get(projectId) ?? 0)) {
+    _receiptAuthorityEpochs.set(projectId, authorityEpoch);
+  }
+}
+
+/**
+ * ADR-046 migration step 5: a Project cannot go back after the cutover. A
+ * database at a lower Authority Epoch than a receipt this process holds for
+ * the same Project is an older copy of the file, so the open fails closed.
+ */
+function assertAuthorityEpochNotBelowReceipt(db: DbAdapter, path: string): void {
+  if (_receiptAuthorityEpochs.size === 0) return;
+  const hasAuthority = db.prepare(`
+    SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'project_authority'
+  `).get();
+  if (hasAuthority === undefined) return;
+  const authority = db.prepare(`
+    SELECT project_id, authority_epoch FROM project_authority WHERE singleton = 1
+  `).get();
+  const receiptEpoch = _receiptAuthorityEpochs.get(String(authority?.["project_id"]));
+  const epoch = Number(authority?.["authority_epoch"]);
+  if (receiptEpoch === undefined || epoch >= receiptEpoch) return;
+  throw new GSDError(
+    GSD_STALE_STATE,
+    `gsd-db: ${path} is at Authority Epoch ${epoch}, lower than Authority Epoch ${receiptEpoch} of the last ` +
+    "Domain Operation receipt of this process. The file was replaced by an older copy. A Project cannot go " +
+    "back after the cutover: put the current database file back, or use Forward Repair (/gsd recover).",
+  );
+}
+
 function retainOrCloseFailedOpen(
   adapter: DbAdapter,
   maintenance: DatabaseMaintenanceCleanupState | undefined,
@@ -2491,6 +2525,14 @@ function openDatabaseInternal(path: string, allowReplacementWrite: boolean, crea
       retainOrCloseFailedOpen(adapter, startupMaintenance, false, !runtimeAdapterOpened);
       throw error;
     }
+  }
+
+  try {
+    assertAuthorityEpochNotBelowReceipt(adapter, path);
+  } catch (error) {
+    _dbOpenState.recordError("open", error);
+    retainOrCloseFailedOpen(adapter, undefined, false);
+    throw error;
   }
 
   currentDb = adapter;

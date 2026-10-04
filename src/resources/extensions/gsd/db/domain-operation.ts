@@ -24,6 +24,7 @@ import {
   getDb,
   immediateTransaction,
   isInTransaction,
+  noteAuthorityEpochReceipt,
   withDatabaseReplacementWriteBypass,
   type DatabaseReplacementReceiptCapability,
 } from "./engine.js";
@@ -1233,6 +1234,8 @@ function executeDomainOperationCore(
     preCommit?.();
     return loadReceipt(storedOperation, "committed");
   });
+
+  noteAuthorityEpochReceipt(result.projectId, result.resultingAuthorityEpoch);
 
   // The session's read is used up by its own committed write.
   if (result.status === "committed") {
