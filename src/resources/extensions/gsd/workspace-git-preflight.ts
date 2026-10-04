@@ -12,6 +12,7 @@ import {
   reconcileGitConflictsOnSignal,
   type GitConflictProbeResult,
 } from "./git-conflict-state.js";
+import { resolveGsdPathContract } from "./paths.js";
 import { deriveState } from "./state.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 
@@ -42,7 +43,15 @@ function normalizeTargetPath(path: string): string {
   }
 }
 
-export async function resolveWorkspaceGitTargets(base: string): Promise<string[]> {
+export interface WorkspaceGitTargetOptions {
+  /** Open the database only when it exists: no database means no active milestone worktree. */
+  existingDbOnly?: boolean;
+}
+
+export async function resolveWorkspaceGitTargets(
+  base: string,
+  options: WorkspaceGitTargetOptions = {},
+): Promise<string[]> {
   const projectRoot = resolveWorktreeProjectRoot(base);
   const seen = new Set<string>();
   const targets: string[] = [];
@@ -56,6 +65,7 @@ export async function resolveWorkspaceGitTargets(base: string): Promise<string[]
   };
 
   addTarget(projectRoot);
+  if (options.existingDbOnly && !existsSync(resolveGsdPathContract(projectRoot).projectDb)) return targets;
 
   try {
     await ensureDbOpen(projectRoot);
@@ -200,8 +210,11 @@ export async function ensureWorkspaceGitReadyForPath(
   return result;
 }
 
-export async function ensureWorkspaceGitReady(base: string): Promise<WorkspaceGitReadyResult> {
-  const targets = await resolveWorkspaceGitTargets(base);
+export async function ensureWorkspaceGitReady(
+  base: string,
+  options: WorkspaceGitTargetOptions = {},
+): Promise<WorkspaceGitReadyResult> {
+  const targets = await resolveWorkspaceGitTargets(base, options);
   const fixesApplied: string[] = [];
 
   for (const target of targets) {

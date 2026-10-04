@@ -22,6 +22,7 @@ import { openWorkflowDatabase } from "../db-workspace.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { handleDoctor } from "../commands-handlers.ts";
 import { withCommandCwd } from "../commands/context.ts";
+import { handleGSDCommand } from "../commands/dispatcher.ts";
 
 function runGit(args: string[], cwd: string): string {
   return execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"], encoding: "utf-8" });
@@ -141,6 +142,24 @@ test("plain /gsd doctor does not create a database", async (t) => {
   });
 
   assert.equal(notifications.length, 2, "both runs report");
+  assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false);
+});
+
+test("plain /gsd doctor through the command dispatcher does not create a database", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-doctor-dispatch-no-create-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  runGit(["init", "-b", "main"], base);
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  closeDatabase();
+
+  const notifications: string[] = [];
+  const ctx = { cwd: base, ui: { notify: (message: string) => notifications.push(message) } } as any;
+  await handleGSDCommand("doctor --json", ctx, {} as any);
+
+  assert.equal(notifications.length, 1, "doctor reports");
   assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false);
 });
 
