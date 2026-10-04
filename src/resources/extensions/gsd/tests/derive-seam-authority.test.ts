@@ -27,7 +27,9 @@ import {
   insertTask,
   insertDecision,
   insertArtifact,
+  _getAdapter,
 } from '../gsd-db.ts';
+import { replaceProjectMilestoneSequence } from '../db/writers/project-milestone-sequence.ts';
 import { recordProjectionReads } from './db-authority-gate.ts';
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
@@ -294,25 +296,32 @@ describe('derive-seam-authority', () => {
     const fromDisk = await deriveState(base);
     assert.equal(fromDisk.activeMilestone, null, 'seam: disk PROJECT.md must not promote a queued shell');
 
+    const projectDocument = [
+      '# Project',
+      '',
+      '## Milestone Sequence',
+      '',
+      '- [ ] M001: Foundation - Establish the first runnable slice.',
+      '',
+    ].join('\n');
     insertArtifact({
       path: 'PROJECT.md',
       artifact_type: 'PROJECT',
       milestone_id: null,
       slice_id: null,
       task_id: null,
-      full_content: [
-        '# Project',
-        '',
-        '## Milestone Sequence',
-        '',
-        '- [ ] M001: Foundation - Establish the first runnable slice.',
-        '',
-      ].join('\n'),
+      full_content: projectDocument,
     });
 
     invalidateStateCache();
+    const fromArtifactText = await deriveState(base);
+    assert.equal(fromArtifactText.activeMilestone, null, 'seam: the text of the PROJECT artifact row is not parsed');
+
+    replaceProjectMilestoneSequence(_getAdapter()!, projectDocument);
+
+    invalidateStateCache();
     const fromDb = await deriveState(base);
-    assert.equal(fromDb.activeMilestone?.id, 'M001', 'seam: PROJECT artifact promotes the in-sequence shell');
+    assert.equal(fromDb.activeMilestone?.id, 'M001', 'seam: the Milestone Sequence row promotes the in-sequence shell');
     assert.equal(fromDb.phase, 'pre-planning', 'seam: in-sequence shell goes to pre-planning');
   });
 });

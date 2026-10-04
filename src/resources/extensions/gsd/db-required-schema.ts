@@ -47,6 +47,10 @@ import {
   createAutoPauseSchema,
   hasAutoPauseSchema,
 } from "./db-auto-pause-schema.js";
+import {
+  createProjectMilestoneSequenceSchema,
+  hasProjectMilestoneSequenceSchema,
+} from "./db-project-milestone-sequence-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -114,6 +118,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "auto-pauses",
     isPresent: hasAutoPauseSchema,
     create: createAutoPauseSchema,
+  },
+  {
+    id: "project-milestone-sequence",
+    isPresent: hasProjectMilestoneSequenceSchema,
+    create: createProjectMilestoneSequenceSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

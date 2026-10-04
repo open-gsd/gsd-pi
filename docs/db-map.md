@@ -753,8 +753,10 @@ the [`auto_pauses`](#auto_pauses-non-versioned) feature,
 the runtime-control feature, the
 [`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
 feature, the
-[custom workflow run](#custom-workflow-run-tables-non-versioned) feature and
-the [`unit_metrics`](#unit_metrics-non-versioned) feature below;
+[custom workflow run](#custom-workflow-run-tables-non-versioned) feature, the
+[`unit_metrics`](#unit_metrics-non-versioned) feature and the
+[`project_milestone_sequence`](#project_milestone_sequence-non-versioned)
+feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
 required objects trigger guarded startup maintenance without changing
@@ -1075,6 +1077,25 @@ custom_workflow_step_verifications
   (`custom-workflow-run` projection kind).
 - Authority, approval and import rules: see
   [ADR-046](dev/ADR-046-database-authoritative-workflow-lifecycle.md).
+
+---
+
+#### `project_milestone_sequence` (non-versioned)
+
+The Milestone Sequence of the PROJECT artifact. One row per milestone line.
+
+```
+milestone_id TEXT PRIMARY KEY      ← the id as the sequence line writes it
+position     INTEGER NOT NULL      ← 0-based order of the line in the sequence
+```
+
+- DDL owner: `db-project-milestone-sequence-schema.ts`. Reader and writers: `db/writers/project-milestone-sequence.ts`.
+- Writer: the `artifact.save` Domain Operation of `gsd_summary_save(PROJECT)` replaces all rows in the
+  transaction that stores the PROJECT artifact row. A line that leaves the sequence leaves the table.
+- Backfill: when startup maintenance creates the table and the table is empty, the rows are filled once from
+  the stored `PROJECT.md` artifact row.
+- Reader: `deriveState` promotes a content-less queued milestone only when it has a row here. The text of
+  PROJECT.md is not parsed for that decision, on disk or in the artifact row.
 
 ---
 

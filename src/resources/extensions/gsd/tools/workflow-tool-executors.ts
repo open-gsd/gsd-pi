@@ -9,6 +9,7 @@ import {
   getActiveRequirements,
   getAllMilestones,
   getArtifact,
+  getDb,
   getMilestone,
   getMilestoneLifecycleShadowSnapshot,
   getSlice,
@@ -50,6 +51,7 @@ import {
   type MilestoneRegistration,
 } from "../milestone-registration.js";
 import { readMilestoneStatus } from "../db/lifecycle-read.js";
+import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.js";
 import { readMilestoneMergeObservation } from "../db/milestone-closeout-readiness.js";
 import { isClosedStatus } from "../status-guards.js";
 import { GATE_REGISTRY } from "../gate-registry.js";
@@ -846,9 +848,14 @@ export async function executeSummarySave(
                 }
                 // Rebuild after registration: a line for a milestone that had no row
                 // before this save must stay in the sequence.
-                insertRow(milestoneSequenceSelfHealed
+                const rebuiltContent = milestoneSequenceSelfHealed
                   ? rebuildMilestoneSequenceSection(contentToSave, milestoneSequenceRows())
-                  : undefined);
+                  : undefined;
+                insertRow(rebuiltContent);
+                // The sequence rows follow the stored PROJECT document in this transaction.
+                if (params.artifact_type === "PROJECT") {
+                  replaceProjectMilestoneSequence(getDb(), rebuiltContent ?? contentToSave);
+                }
                 return {
                   entityId: relativePath,
                   result: { path: relativePath, artifactType: params.artifact_type },

@@ -25,6 +25,7 @@ import {
   startDeepProjectSetupForeground,
 } from "../guided-flow.ts";
 import {
+  _getAdapter,
   closeDatabase,
   insertArtifact,
   insertMilestone,
@@ -34,6 +35,7 @@ import {
 } from "../gsd-db.ts";
 import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
 import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
+import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.ts";
 import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import type { GSDPreferences } from "../preferences.ts";
 import type { GSDState } from "../types.ts";
@@ -150,6 +152,7 @@ function saveSetupArtifact(path: "PROJECT.md" | "REQUIREMENTS.md", content: stri
     task_id: null,
     full_content: content,
   });
+  if (path === "PROJECT.md") replaceProjectMilestoneSequence(_getAdapter()!, content);
 }
 
 function makeRepo(): string {
