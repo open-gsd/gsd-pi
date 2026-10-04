@@ -14,13 +14,17 @@ import type { UnitMetrics } from "../metrics.js";
 
 /**
  * Total cost of the stored unit runs in USD. With `sinceMs`, only the runs
- * that started at or after that time. 0 when no database is open.
+ * that started at or after that time. With `unitScope` (`<MID>` or
+ * `<MID>/<SID>`), only the runs of that Milestone or Slice. 0 when no database
+ * is open.
  */
-export function readUnitSpend(sinceMs?: number): number {
+export function readUnitSpend(sinceMs?: number, unitScope?: string): number {
   if (!isDbAvailable()) return 0;
   const row = _getAdapter()!.prepare(
-    `SELECT COALESCE(SUM(cost), 0) AS spend FROM unit_metrics WHERE started_at >= :since`,
-  ).get({ ":since": sinceMs ?? 0 }) as { spend: number } | undefined;
+    `SELECT COALESCE(SUM(cost), 0) AS spend FROM unit_metrics
+     WHERE started_at >= :since
+       AND (:scope = '' OR unit_id = :scope OR substr(unit_id, 1, length(:scope) + 1) = :scope || '/')`,
+  ).get({ ":since": sinceMs ?? 0, ":scope": unitScope ?? "" }) as { spend: number } | undefined;
   return row?.spend ?? 0;
 }
 

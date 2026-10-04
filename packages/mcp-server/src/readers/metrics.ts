@@ -34,7 +34,7 @@ export interface HistoryResult {
     units: number;
     durationMs: number;
   };
-  /** Set only on the file read: the database was not available, so the rows come from .gsd/metrics.json. */
+  /** Set only on the file read: the database was not available or holds no unit rows, so the rows come from .gsd/metrics.json. */
   readMetadata?: { source: 'projection'; authority: 'projection-fallback' };
 }
 
@@ -108,7 +108,8 @@ export function historyResultFromDatabase(rows: readonly unknown[], limit?: numb
 }
 
 /**
- * Display-only file read, used when the project database cannot be opened.
+ * Display-only file read, used when the project database cannot be opened or
+ * holds no unit rows (a ledger that `/gsd doctor --fix` did not import).
  * The result is labelled as a projection fallback so the caller can tell it
  * from a database read.
  */

@@ -1,4 +1,4 @@
-// gsd-pi Web — history service reads unit metrics from the workflow database, not metrics.json.
+// gsd-pi Web — history service reads unit metrics from the workflow database; metrics.json is the labelled fallback.
 
 import assert from "node:assert/strict"
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs"
@@ -58,9 +58,32 @@ test("collectHistoryData returns database rows when metrics.json holds other uni
   assert.deepEqual(data.units.map((entry) => entry.id), ["M001/S01/T01", "M001/S01/T02"])
   assert.deepEqual([data.totals.units, data.totals.cost], [2, 0.75])
   assert.deepEqual(data.bySlice.map((slice) => [slice.sliceId, slice.cost]), [["M001/S01", 0.75]])
+  assert.equal(data.readMetadata, undefined, "a database read is not labelled as a fallback")
 })
 
-test("collectHistoryData fails when the project database is missing, even with a metrics.json", async (t) => {
+test("collectHistoryData returns the metrics.json ledger with the fallback label when the database holds no unit rows", async (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-web-history-empty-")))
+  t.after(() => {
+    closeDatabase()
+    rmSync(base, { recursive: true, force: true })
+  })
+  useRepoAsPackageRoot(t)
+  mkdirSync(join(base, ".gsd"), { recursive: true })
+  openDatabase(join(base, ".gsd", "gsd.db"))
+  closeDatabase()
+  writeFileSync(
+    join(base, ".gsd", "metrics.json"),
+    JSON.stringify({ version: 1, projectStartedAt: 1, units: [unit("M001/S01/T01", 1000, 0.5)] }),
+  )
+
+  const data = await collectHistoryData(base)
+
+  assert.deepEqual(data.units.map((entry) => entry.id), ["M001/S01/T01"])
+  assert.deepEqual([data.totals.units, data.totals.cost], [1, 0.5])
+  assert.deepEqual(data.readMetadata, { source: "projection", authority: "projection-fallback" })
+})
+
+test("collectHistoryData returns the metrics.json ledger with the fallback label when the project database is missing", async (t) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-web-history-nodb-")))
   t.after(() => rmSync(base, { recursive: true, force: true }))
   useRepoAsPackageRoot(t)
@@ -70,5 +93,20 @@ test("collectHistoryData fails when the project database is missing, even with a
     JSON.stringify({ version: 1, projectStartedAt: 1, units: [unit("M001/S01/T01", 1000, 0.5)] }),
   )
 
-  await assert.rejects(() => collectHistoryData(base), /project database unavailable/)
+  const data = await collectHistoryData(base)
+
+  assert.deepEqual(data.units.map((entry) => entry.id), ["M001/S01/T01"])
+  assert.deepEqual([data.totals.units, data.totals.cost], [1, 0.5])
+  assert.deepEqual(data.readMetadata, { source: "projection", authority: "projection-fallback" })
+})
+
+test("collectHistoryData returns an empty history for a project with no database and no ledger", async (t) => {
+  const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-web-history-none-")))
+  t.after(() => rmSync(base, { recursive: true, force: true }))
+  useRepoAsPackageRoot(t)
+
+  const data = await collectHistoryData(base)
+
+  assert.deepEqual([data.units, data.totals.units, data.totals.cost], [[], 0, 0])
+  assert.deepEqual(data.readMetadata, { source: "projection", authority: "projection-fallback" })
 })

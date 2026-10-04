@@ -123,9 +123,16 @@ export async function runGuards(
     // The spend is the sum of the unit_metrics rows of the database, not the
     // metrics.json ledger. In parallel worker mode, only count cost from the
     // current auto-mode session to avoid hitting the ceiling due to historical
-    // project-wide spend (#2184).
+    // project-wide spend (#2184). All workers write to one database, so the
+    // sum is also limited to the units of this worker's lock (Milestone, or
+    // Milestone and Slice). The coordinator owns the total across workers.
     const sessionSpendOnly = Boolean(process.env.GSD_PARALLEL_WORKER && s.autoStartTime);
-    const totalCost = deps.getBudgetSpend(sessionSpendOnly ? s.autoStartTime : undefined);
+    const milestoneLock = process.env.GSD_MILESTONE_LOCK?.trim();
+    const sliceLock = process.env.GSD_SLICE_LOCK?.trim();
+    const workerScope = milestoneLock && sliceLock ? `${milestoneLock}/${sliceLock}` : milestoneLock;
+    const totalCost = sessionSpendOnly
+      ? deps.getBudgetSpend(s.autoStartTime, workerScope)
+      : deps.getBudgetSpend();
     // Unit runs that only metrics.json holds (written by an older release) are
     // not in the sum. The import is an operator action, so the ceiling must not
     // lose that spend without a message: tell the operator one time per session.

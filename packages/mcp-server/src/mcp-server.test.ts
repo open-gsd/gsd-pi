@@ -1203,6 +1203,34 @@ describe('createMcpServer tool registration', () => {
     assert.deepEqual([withStaleFile.totals.units, withStaleFile.totals.cost], [2, 0.75]);
   });
 
+  it('registered gsd_history returns the metrics.json ledger with the fallback label when the database holds no unit rows', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-empty-db-'));
+    const bridge = await importWorkflowBridgeFixture();
+    t.after(() => {
+      bridge.closeDatabase();
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+    mkdirSync(join(projectDir, '.gsd'));
+    assert.equal(bridge.openDatabase(join(projectDir, '.gsd', 'gsd.db')), true);
+    bridge.closeDatabase();
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const historyTool = (server as any)._registeredTools?.gsd_history;
+
+    const noLedger = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+    assert.deepEqual([noLedger.entries, noLedger.totals.units], [[], 0]);
+    assert.equal(noLedger.readMetadata, undefined, 'an empty database with no ledger is a database read');
+
+    writeFileSync(
+      join(projectDir, '.gsd', 'metrics.json'),
+      JSON.stringify({ version: 1, projectStartedAt: 1, units: [{ type: 'execute-task', id: 'M001/S01/T01', cost: 0.5 }] }),
+    );
+    const read = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+    assert.deepEqual(read.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T01']);
+    assert.deepEqual([read.totals.units, read.totals.cost], [1, 0.5]);
+    assert.deepEqual(read.readMetadata, { source: 'projection', authority: 'projection-fallback' });
+  });
+
   it('registered gsd_history labels the file read as a projection fallback when the database is unavailable', async (t) => {
     const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-fallback-'));
     t.after(() => rmSync(projectDir, { recursive: true, force: true }));

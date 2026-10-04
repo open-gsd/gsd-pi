@@ -1494,7 +1494,7 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_history',
-    'Get execution history with cost, token usage, model, and duration per unit. Returns totals across all units. No session required — reads the workflow database when the GSD runtime is available, .gsd/metrics.json otherwise (the result then carries readMetadata { source: projection, authority: projection-fallback }).',
+    'Get execution history with cost, token usage, model, and duration per unit. Returns totals across all units. No session required — reads the workflow database when the GSD runtime is available. When the database is not available or holds no unit rows, reads .gsd/metrics.json (the result then carries readMetadata { source: projection, authority: projection-fallback }).',
     {
       projectDir: z.string().describe('Absolute path to the project directory'),
       limit: z.number().optional().describe('Max entries to return (most recent first). Default: all.'),
@@ -1503,11 +1503,14 @@ export async function createMcpServer(
       const { projectDir, limit } = args as { projectDir: string; limit?: number };
       try {
         const dir = validateProjectDir(projectDir);
+        const fromFile = readHistory(dir, limit);
         if (hasWorkflowToolBridgeConfiguration()) {
           const fromDb = await readHistoryViaBridge(dir);
-          if (fromDb !== null) return jsonContent(historyResultFromDatabase(fromDb, limit));
+          if (fromDb !== null && (fromDb.length > 0 || fromFile.totals.units === 0)) {
+            return jsonContent(historyResultFromDatabase(fromDb, limit));
+          }
         }
-        return jsonContent(readHistory(dir, limit));
+        return jsonContent(fromFile);
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }

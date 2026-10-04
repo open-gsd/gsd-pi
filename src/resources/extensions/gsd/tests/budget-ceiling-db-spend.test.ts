@@ -76,7 +76,7 @@ function unit(overrides: Partial<UnitMetrics>): UnitMetrics {
 }
 
 /** The guard with the production budget functions and a $5 halt ceiling. */
-function guardContext(basePath: string, autoStartTime = 0): { ic: IterationContext; stops: string[]; notices: string[] } {
+function guardContext(basePath: string, autoStartTime = 0, budgetCeiling = 5): { ic: IterationContext; stops: string[]; notices: string[] } {
   const stops: string[] = [];
   const notices: string[] = [];
   const ic = {
@@ -96,7 +96,7 @@ function guardContext(basePath: string, autoStartTime = 0): { ic: IterationConte
       logCmuxEvent: () => {},
       getManifestStatus: async () => null,
     },
-    prefs: { budget_ceiling: 5, budget_enforcement: "halt" },
+    prefs: { budget_ceiling: budgetCeiling, budget_enforcement: "halt" },
   } as unknown as IterationContext;
   return { ic, stops, notices };
 }
@@ -189,6 +189,65 @@ test("a parallel worker counts only the spend of its own auto session", async (t
   recordUnitMetricsRows([unit({ id: "M001/S01/T02", startedAt: sessionStart, cost: 6 })]);
   const inSession = guardContext(base, sessionStart);
   const result = await runGuards(inSession.ic, "M001");
+  assert.deepEqual([result.action, result.action === "break" && result.reason], ["break", "budget-halt"]);
+});
+
+/** Run `fn` as the parallel worker that holds the given Milestone (and Slice) lock. */
+async function asWorker<T>(milestoneId: string, sliceId: string | undefined, fn: () => Promise<T>): Promise<T> {
+  const keys = ["GSD_PARALLEL_WORKER", "GSD_MILESTONE_LOCK", "GSD_SLICE_LOCK"] as const;
+  const previous = keys.map((key) => process.env[key]);
+  process.env.GSD_PARALLEL_WORKER = "1";
+  process.env.GSD_MILESTONE_LOCK = milestoneId;
+  if (sliceId === undefined) delete process.env.GSD_SLICE_LOCK;
+  else process.env.GSD_SLICE_LOCK = sliceId;
+  try {
+    return await fn();
+  } finally {
+    keys.forEach((key, index) => {
+      if (previous[index] === undefined) delete process.env[key];
+      else process.env[key] = previous[index];
+    });
+  }
+}
+
+test("parallel workers on different milestones do not count the spend of each other", async (t) => {
+  const base = makeProject(t);
+  const sessionStart = 50_000;
+  const milestones = ["M001", "M002", "M003", "M004"];
+  recordUnitMetricsRows(milestones.map((mid) => unit({ id: `${mid}/S01/T01`, startedAt: sessionStart, cost: 13 })));
+  assert.equal(readUnitSpend(sessionStart), 52, "the project spend since the start is over the ceiling");
+
+  for (const mid of milestones) {
+    const worker = guardContext(base, sessionStart, 50);
+    const result = await asWorker(mid, undefined, () => runGuards(worker.ic, mid));
+    assert.equal(result.action, "next", `${mid} worker spent 13 of 50`);
+    assert.deepEqual(worker.stops, []);
+  }
+
+  recordUnitMetricsRows([unit({ id: "M002/S02/T01", startedAt: sessionStart + 1, cost: 38 })]);
+  const heavy = guardContext(base, sessionStart, 50);
+  const result = await asWorker("M002", undefined, () => runGuards(heavy.ic, "M002"));
+  assert.deepEqual([result.action, result.action === "break" && result.reason], ["break", "budget-halt"]);
+  assert.deepEqual(heavy.stops, ["Budget ceiling reached"]);
+
+  const sibling = guardContext(base, sessionStart, 50);
+  assert.equal((await asWorker("M001", undefined, () => runGuards(sibling.ic, "M001"))).action, "next");
+});
+
+test("a slice worker counts only the spend of its own slice", async (t) => {
+  const base = makeProject(t);
+  const sessionStart = 50_000;
+  recordUnitMetricsRows([
+    unit({ id: "M001/S01/T01", startedAt: sessionStart, cost: 4 }),
+    unit({ id: "M001/S02/T01", startedAt: sessionStart, cost: 4 }),
+    unit({ id: "M001/S010/T01", startedAt: sessionStart, cost: 4 }),
+  ]);
+
+  const worker = guardContext(base, sessionStart);
+  assert.equal((await asWorker("M001", "S01", () => runGuards(worker.ic, "M001"))).action, "next");
+
+  const milestoneWorker = guardContext(base, sessionStart);
+  const result = await asWorker("M001", undefined, () => runGuards(milestoneWorker.ic, "M001"));
   assert.deepEqual([result.action, result.action === "break" && result.reason], ["break", "budget-halt"]);
 });
 

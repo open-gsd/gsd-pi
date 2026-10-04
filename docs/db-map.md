@@ -830,7 +830,9 @@ PRIMARY KEY (unit_type, unit_id, started_at)
 - DDL owner: `db-unit-metrics-schema.ts`. Reads: `db/unit-metrics.ts`. Write: `db/writers/unit-metrics.ts`.
 - Written by `snapshotUnitMetrics` and `snapshotUnitMetricsByScope` (`metrics.ts`) together with `.gsd/metrics.json`. A second snapshot of the same run replaces the row.
 - Read by the budget ceiling guard (`auto/phases.ts`), the budget pressure of dynamic model routing (`auto-model-selection.ts`), MCP `gsd_history` and the web history panel. `.gsd/metrics.json` stays the telemetry file of the TUI dashboards; it does not decide the budget.
-- A row is telemetry: it is not a Domain Operation and does not change the project revision.
+- A row is telemetry: it is not a Domain Operation and does not change the project revision. `unit_metrics` is an exempt runtime/telemetry table, like `gate_runs` and the exec runs: one writer module (`db/writers/unit-metrics.ts`) writes it directly.
+- A parallel worker (`GSD_PARALLEL_WORKER`) counts only its own units against the budget ceiling: rows with `started_at` at or after its session start and with a `unit_id` in its lock scope (`GSD_MILESTONE_LOCK`, or `GSD_MILESTONE_LOCK`/`GSD_SLICE_LOCK`). The coordinator owns the total across workers.
+- When the table has no rows and `.gsd/metrics.json` holds units, MCP `gsd_history` and the web history panel return the ledger units with `readMetadata: { source: "projection", authority: "projection-fallback" }`. They do the same when the database is missing.
 - Units that only `.gsd/metrics.json` holds (written by an older release) are not counted. When a budget ceiling is set, the budget guard warns the operator with the uncounted amount one time per auto session. `/gsd doctor` reports them (`metrics_ledger_units_unimported`) and `/gsd doctor --fix` imports them.
 
 ---

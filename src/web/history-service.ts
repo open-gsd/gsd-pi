@@ -15,10 +15,12 @@ function resolveTsLoaderPath(packageRoot: string): string {
 }
 
 /**
- * Loads history/metrics data from the workflow database, not from
- * .gsd/metrics.json. A child process imports the GSD runtime bridge, opens the
- * project database, reads the unit_metrics rows and computes the aggregation
- * views (totals, byPhase, bySlice, byModel). An unavailable database fails.
+ * Loads history/metrics data from the workflow database. A child process
+ * imports the GSD runtime bridge, opens the project database, reads the
+ * unit_metrics rows and computes the aggregation views (totals, byPhase,
+ * bySlice, byModel). When the database is missing or holds no unit rows, the
+ * units come from .gsd/metrics.json and the result is labelled as a projection
+ * fallback. A database that is too new or not bound to this checkout fails.
  */
 export async function collectHistoryData(projectCwdOverride?: string): Promise<HistoryData> {
   const config = resolveBridgeRuntimeConfig(undefined, projectCwdOverride)
@@ -41,13 +43,17 @@ export async function collectHistoryData(projectCwdOverride?: string): Promise<H
     'const { pathToFileURL } = await import("node:url");',
     `const mod = await import(pathToFileURL(process.env.${HISTORY_MODULE_ENV}).href);`,
     'const opened = mod.openExistingWorkflowDatabase(process.env.GSD_HISTORY_BASE);',
-    'if (!opened.ok) { process.stderr.write(`project database unavailable: ${opened.reason}`); process.exit(1); }',
-    'const units = mod.listUnitMetrics();',
+    'if (!opened.ok && (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound")) { process.stderr.write(`project database unavailable: ${opened.reason}`); process.exit(1); }',
+    'const rows = opened.ok ? mod.listUnitMetrics() : [];',
+    'const ledgerUnits = rows.length === 0 ? (mod.loadLedgerFromDisk(process.env.GSD_HISTORY_BASE)?.units ?? []) : [];',
+    'const fromFile = !opened.ok || ledgerUnits.length > 0;',
+    'const units = fromFile ? ledgerUnits : rows;',
+    'const readMetadata = fromFile ? { source: "projection", authority: "projection-fallback" } : undefined;',
     'const totals = mod.getProjectTotals(units);',
     'const byPhase = mod.aggregateByPhase(units);',
     'const bySlice = mod.aggregateBySlice(units);',
     'const byModel = mod.aggregateByModel(units);',
-    'process.stdout.write(JSON.stringify({ units, totals, byPhase, bySlice, byModel }));',
+    'process.stdout.write(JSON.stringify({ units, totals, byPhase, bySlice, byModel, readMetadata }));',
   ].join(" ")
 
   const prefixArgs = buildSubprocessPrefixArgs(packageRoot, moduleResolution, pathToFileURL(resolveTsLoader).href)
