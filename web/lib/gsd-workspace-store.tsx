@@ -1195,8 +1195,10 @@ function createInitialState(): WorkspaceStoreState {
 }
 
 export function buildProjectUrl(path: string, projectCwd?: string): string {
-  if (!projectCwd) return path
-  const url = new URL(path, "http://localhost")
+  const base = process.env.NEXT_PUBLIC_BASE_PATH ?? ""
+  const prefixed = base && path.startsWith("/") ? `${base}${path}` : path
+  if (!projectCwd) return prefixed
+  const url = new URL(prefixed, "http://localhost")
   url.searchParams.set("project", projectCwd)
   return url.pathname + url.search
 }

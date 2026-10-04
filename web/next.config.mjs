@@ -6,6 +6,10 @@ const repoRoot = resolve(webRoot, '..')
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  // The GSD web host is served under the OpenClaw plugin tab route (and the portal
+  // proxy path) rather than at an origin root; the path is baked in at build time.
+  basePath: process.env.GSD_WEB_BASE_PATH || undefined,
+  env: { NEXT_PUBLIC_BASE_PATH: process.env.GSD_WEB_BASE_PATH || '' },
   output: 'standalone',
   outputFileTracingRoot: repoRoot,
   typescript: {

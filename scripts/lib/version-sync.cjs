@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const RELEASE_WORKSPACE_PACKAGE_DIRS = [
   "extensions/google-search",
+  "integrations/openclaw",
   "packages/contracts",
   "packages/daemon",
   "packages/gsd-agent-core",
@@ -32,6 +33,7 @@ const INTERNAL_PACKAGE_NAMES = new Set([
   "@opengsd/contracts",
   "@opengsd/daemon",
   "@opengsd/mcp-server",
+  "@opengsd/open-gsd-openclaw",
   "@opengsd/rpc-client",
   "@gsd/native",
   "@gsd/pi-agent-core",
@@ -44,6 +46,7 @@ const NATIVE_CRATE_NAMES = new Set(["gsd-ast", "gsd-engine", "gsd-grep"]);
 
 const HERMES_PYPROJECT_PATH = "integrations/hermes/pyproject.toml";
 const HERMES_CLIENT_PATH = "integrations/hermes/open_gsd_hermes/gsd_client.py";
+const OPENCLAW_MANIFEST_PATH = "integrations/openclaw/openclaw.plugin.json";
 const STABLE_SEMVER_PATTERN = /^\d+\.\d+\.\d+$/;
 
 /**
@@ -200,6 +203,35 @@ function verifyHermesVersion(root, expectedVersion, issues) {
   }
 }
 
+// The OpenClaw plugin manifest ships inside @opengsd/open-gsd-openclaw and is the
+// version the host reports for the installed plugin. integrations/openclaw is
+// in RELEASE_WORKSPACE_PACKAGE_DIRS, so its package.json is bumped on every
+// channel (dev, next, stable); the manifest must follow unconditionally.
+function syncOpenclawVersion(root, version) {
+  const manifestPath = path.join(root, OPENCLAW_MANIFEST_PATH);
+  if (!fs.existsSync(manifestPath)) return;
+  const manifest = fs.readFileSync(manifestPath, "utf8");
+  const nextManifest = replaceRequired(
+    manifest,
+    /(^\s*"version": )"[^"]+"/m,
+    `$1"${version}"`,
+    OPENCLAW_MANIFEST_PATH,
+    "open-gsd-openclaw manifest version",
+  );
+  if (nextManifest !== manifest) {
+    fs.writeFileSync(manifestPath, nextManifest);
+  }
+}
+
+function verifyOpenclawVersion(root, expectedVersion, issues) {
+  const manifestPath = path.join(root, OPENCLAW_MANIFEST_PATH);
+  if (!fs.existsSync(manifestPath)) return;
+  const version = fs.readFileSync(manifestPath, "utf8").match(/^\s*"version": "([^"]+)"/m)?.[1];
+  if (version !== expectedVersion) {
+    issues.push(`${OPENCLAW_MANIFEST_PATH} version is ${version ?? "missing"}, expected ${expectedVersion}`);
+  }
+}
+
 function syncVersionSurfaces(root, version, options = {}) {
   if (options.updateRoot !== false) {
     const rootPkgPath = path.join(root, "package.json");
@@ -219,6 +251,7 @@ function syncVersionSurfaces(root, version, options = {}) {
   setPackageVersion(root, "pkg", version);
   syncNativeCargoVersion(root, version);
   syncHermesVersion(root, version);
+  syncOpenclawVersion(root, version);
 }
 
 function getNativeCargoVersion(root) {
@@ -311,6 +344,7 @@ function verifyVersionSync(root) {
     }
   }
   verifyHermesVersion(root, expectedVersion, issues);
+  verifyOpenclawVersion(root, expectedVersion, issues);
 
   return issues;
 }

@@ -1454,6 +1454,10 @@ export class BridgeService {
     return event;
   }
 
+  /** Non-starting readiness check for require_existing subscription callers. */
+  isStarted(): boolean {
+    return Boolean(this.process && this.snapshot.phase === "ready");
+  }
   async ensureStarted(): Promise<void> {
     await this.runWhenReady(() => undefined);
   }

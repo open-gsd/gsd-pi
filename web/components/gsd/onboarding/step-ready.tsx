@@ -5,6 +5,7 @@ import { motion } from "motion/react"
 import { CheckCircle2, Zap } from "lucide-react"
 
 import { Button } from "@/components/ui/button"
+import { withBasePath } from "@/lib/auth"
 
 interface StepReadyProps {
   providerLabel: string
@@ -55,14 +56,14 @@ export function StepReady({ providerLabel, onFinish }: StepReadyProps) {
       >
         <div className="flex items-center gap-2 text-xs text-muted-foreground">
           <Image
-            src="/logo-icon-white.svg"
+            src={withBasePath("/logo-icon-white.svg")}
             alt=""
             width={14}
             height={14}
             className="hidden opacity-40 dark:block"
           />
           <Image
-            src="/logo-icon-black.svg"
+            src={withBasePath("/logo-icon-black.svg")}
             alt=""
             width={14}
             height={14}

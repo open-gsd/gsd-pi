@@ -304,3 +304,14 @@ test("production release stages bundled open-gsd-hermes version files", () => {
   assert.match(commitRelease.run, /integrations\/hermes\/pyproject\.toml/);
   assert.match(commitRelease.run, /integrations\/hermes\/open_gsd_hermes\/gsd_client\.py/);
 });
+
+test("production release stages open-gsd-openclaw version files", () => {
+  const steps = workflow.jobs["prod-release"].steps;
+  const commitRelease = steps.find((step) => step.name === "Commit and tag release");
+
+  assert.ok(commitRelease, "prod-release must create a release commit");
+  // integrations/openclaw is outside the packages/*/package.json glob, and its
+  // manifest is a second version surface synced by version-sync.cjs.
+  assert.match(commitRelease.run, /integrations\/openclaw\/package\.json/);
+  assert.match(commitRelease.run, /integrations\/openclaw\/openclaw\.plugin\.json/);
+});

@@ -9,6 +9,7 @@ const {
   realpathSync,
   rmSync,
   statSync,
+  renameSync,
 } = require('node:fs')
 const { dirname, join, resolve } = require('node:path')
 
@@ -184,7 +185,8 @@ function stageWebStandalone(root = resolve(__dirname, '..')) {
   const staticRoot = join(webRoot, '.next', 'static')
   const publicRoot = join(webRoot, 'public')
   const distWebRoot = join(root, 'dist', 'web')
-  const distStandaloneRoot = join(distWebRoot, 'standalone')
+  const stagingWebRoot = join(root, 'dist', '.web-staging')
+  const distStandaloneRoot = join(stagingWebRoot, 'standalone')
   const sourceNodePtyRoot = join(webRoot, 'node_modules', 'node-pty')
 
   if (!existsSync(standaloneAppRoot)) {
@@ -192,7 +194,7 @@ function stageWebStandalone(root = resolve(__dirname, '..')) {
     process.exit(1)
   }
 
-  rmSync(distWebRoot, { recursive: true, force: true })
+  rmSync(stagingWebRoot, { recursive: true, force: true })
   mkdirSync(distStandaloneRoot, { recursive: true })
 
   cpSync(standaloneAppRoot, distStandaloneRoot, COPY_OPTIONS)
@@ -215,7 +217,21 @@ function stageWebStandalone(root = resolve(__dirname, '..')) {
 
   const hydratedTargets = overlayNodePty(distStandaloneRoot, sourceNodePtyRoot)
 
-  console.log(`[gsd] Staged web standalone host at ${distStandaloneRoot}`)
+  // Atomic swap: stage fully into .web-staging, then rename into place so a
+  // live daemon keeps serving open files from the old inode tree, and the
+  // previous generation is preserved as an instant rollback artifact.
+  const distWebPrevious = join(root, 'dist', '.web-previous')
+  rmSync(distWebPrevious, { recursive: true, force: true })
+  if (existsSync(distWebRoot)) renameSync(distWebRoot, distWebPrevious)
+  try {
+    renameSync(stagingWebRoot, distWebRoot)
+  } catch (error) {
+    if (existsSync(distWebPrevious) && !existsSync(distWebRoot)) {
+      renameSync(distWebPrevious, distWebRoot)
+    }
+    throw error
+  }
+  console.log('[gsd] Atomically swapped staged web host into ' + distWebRoot + (existsSync(distWebPrevious) ? ' (previous generation kept at dist/.web-previous)' : ''))
   if (hoistedCount > 0) {
     console.log(`[gsd] Flattened ${hoistedCount} package(s) from the pnpm virtual store so they survive npm pack.`)
   }

@@ -35,7 +35,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { authFetch } from "@/lib/auth"
+import { authFetch, withBasePath } from "@/lib/auth"
 import {
   Dialog,
   DialogContent,
@@ -1094,14 +1094,14 @@ export function ProjectSelectionGate() {
           {/* ─── Logo + subtitle ─── */}
           <div className="flex flex-col items-center text-center mb-10">
             <Image
-              src="/logo-black.svg"
+              src={withBasePath("/logo-black.svg")}
               alt="GSD-Pi Web"
               width={100}
               height={28}
               className="h-7 w-auto dark:hidden"
             />
             <Image
-              src="/logo-white.svg"
+              src={withBasePath("/logo-white.svg")}
               alt="GSD-Pi Web"
               width={100}
               height={28}
