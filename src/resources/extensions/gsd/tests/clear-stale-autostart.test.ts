@@ -7,11 +7,11 @@
 
 import { describe, test, afterEach, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync, readFileSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 
+import { clearDiscussionFlowState, getPendingGate, setPendingGate } from "../bootstrap/write-gate.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
   _getAdapter,
@@ -27,9 +27,8 @@ import {
   setPendingAutoStart,
   showSmartEntry,
 } from "../guided-flow.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 import { cleanup, makeTempRepo } from "./test-utils.ts";
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function pendingInput(basePath: string, milestoneId: string) {
   return {
@@ -161,26 +160,62 @@ describe("clear stale pending auto-start (#3667)", () => {
     assert.match(notifications.join("\n"), /Discussion already in progress/);
   });
 
-  test("guided-flow recovers a finished-but-unconsumed discussion instead of dead-ending", () => {
-    // CONTEXT exists + no live turn means the discussion completed but the
-    // agent_end handoff never consumed the entry (e.g. an external-engine
-    // post-hoc gate re-arm wiped the depth verification after the save).
-    // Without recovery, every /gsd prints "Discussion already in progress"
-    // forever: the stale heuristic requires CONTEXT to be absent and
-    // discussPlanComplete requires a ROADMAP that planning never produced.
-    const source = readFileSync(join(__dirname, "..", "guided-flow.ts"), "utf-8");
-    assert.ok(
-      source.includes("milestoneHasContext && !isAgentTurnInFlight(ctx)"),
-      "pending-entry guard must have a recovery branch for CONTEXT-present, no-turn-in-flight entries",
-    );
-    assert.ok(
-      source.includes("extractDepthVerificationMilestoneId(pendingGateId) === entry.milestoneId"),
-      "recovery must only clear a pending gate belonging to the entry's own milestone",
-    );
-    assert.ok(
-      source.includes("if (checkAutoStartAfterDiscuss(basePath)) return;"),
-      "recovery must re-run the discuss→auto handoff after clearing the stale gate",
-    );
+  test("a CONTEXT file with no saved row leaves an old pending entry stale", async (t) => {
+    const base = openParkedMilestoneProject(t);
+    writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# Context\n");
+    const { ctx, notifications } = makeCtx();
+    setPendingAutoStart(base, { ...pendingInput(base, "M001"), createdAt: 123 });
+
+    await showSmartEntry(ctx, pi, base);
+
+    assert.equal(_getPendingAutoStart(base), null, "the CONTEXT file does not prove a finished discussion");
+    assert.doesNotMatch(notifications.join("\n"), /Discussion already in progress/);
+  });
+
+  test("a saved CONTEXT row recovers a finished-but-unconsumed discussion instead of dead-ending", async (t) => {
+    // The discussion saved CONTEXT but the agent_end handoff never consumed the
+    // entry (e.g. an external-engine post-hoc gate re-arm wiped the depth
+    // verification after the save). Without recovery, every /gsd prints
+    // "Discussion already in progress" forever.
+    const base = openParkedMilestoneProject(t);
+    t.after(() => clearDiscussionFlowState(base));
+    saveContextArtifact("M001");
+    setPendingGate("depth_verification_M001_confirm", base);
+    const { ctx, notifications } = makeCtx();
+    const handoff = makeCtx();
+    setPendingAutoStart(base, {
+      ...pendingInput(base, "M001"),
+      ctx: handoff.ctx,
+      createdAt: 123,
+      startAuto: false,
+    });
+
+    await showSmartEntry(ctx, pi, base);
+
+    assert.equal(getPendingGate(base), null, "the stale depth gate of this milestone is cleared");
+    assert.match(handoff.notifications.join("\n"), /Milestone M001 context captured/);
+    assert.equal(_getPendingAutoStart(base), null, "the handoff consumed the entry");
+    assert.doesNotMatch(notifications.join("\n"), /Discussion already in progress/);
+  });
+
+  test("recovery leaves a pending depth gate of another milestone armed", async (t) => {
+    const base = openParkedMilestoneProject(t);
+    t.after(() => clearDiscussionFlowState(base));
+    saveContextArtifact("M001");
+    setPendingGate("depth_verification_M999_confirm", base);
+    const { ctx } = makeCtx();
+    const handoff = makeCtx();
+    setPendingAutoStart(base, {
+      ...pendingInput(base, "M001"),
+      ctx: handoff.ctx,
+      createdAt: 123,
+      startAuto: false,
+    });
+
+    await showSmartEntry(ctx, pi, base);
+
+    assert.match(handoff.notifications.join("\n"), /Milestone M001 context captured/);
+    assert.equal(getPendingGate(base), "depth_verification_M999_confirm");
   });
 
 });
