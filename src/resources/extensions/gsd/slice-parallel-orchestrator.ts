@@ -31,6 +31,7 @@ import { fileURLToPath } from "node:url";
 import { gsdRoot } from "./paths.js";
 import { createWorktree, worktreePath, removeWorktree } from "./worktree-manager.js";
 import { autoWorktreeBranch } from "./auto-worktree-branch-lifecycle.js";
+import { nativeDetectMainBranch, nativeIsAncestor } from "./native-git-bridge.js";
 import { syncGsdStateToWorktreeByScope } from "./auto-worktree-sync.js";
 import { runWorktreePostCreateHook } from "./worktree-post-create-hook.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
@@ -153,10 +154,16 @@ async function waitForStartupGrace(pid: number, graceMs: number): Promise<boolea
 /**
  * Remove a slice worktree directory and keep its `slice/<MID>/<SID>` branch.
  * No code merges that branch yet, so deleting it would delete the commits of
- * a slice worker. The next start for the slice reuses the kept branch.
+ * a slice worker. The next start for the slice reuses the kept branch when it
+ * holds commits of its own; a branch without own commits moves to the current
+ * start point.
  */
 function removeSliceWorktree(basePath: string, wtName: string): void {
   removeWorktree(basePath, wtName, { deleteBranch: false, force: true });
+}
+
+export function _createSliceWorktreeForTest(basePath: string, milestoneId: string, sliceId: string): string {
+  return createSliceWorktree(basePath, milestoneId, sliceId);
 }
 
 function createSliceWorktree(basePath: string, milestoneId: string, sliceId: string): string {
@@ -168,7 +175,12 @@ function createSliceWorktree(basePath: string, milestoneId: string, sliceId: str
     rmSync(wtPath, { recursive: true, force: true });
   }
   if (!existsSync(wtPath)) {
-    createWorktree(basePath, wtName, { branch: wtBranch, reuseExistingBranch: true });
+    const startPoint = nativeDetectMainBranch(basePath);
+    createWorktree(basePath, wtName, {
+      branch: wtBranch,
+      startPoint,
+      reuseExistingBranch: !nativeIsAncestor(basePath, wtBranch, startPoint),
+    });
   }
 
   const hookError = runWorktreePostCreateHook(basePath, wtPath);
