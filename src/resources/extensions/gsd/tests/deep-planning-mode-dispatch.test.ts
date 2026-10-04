@@ -344,23 +344,21 @@ test("Deep mode: workflow-preferences captures defaults in-process when PREFEREN
   const result = await rule(WORKFLOW_PREFS_RULE_NAME).match(makeCtx(base, prefs));
   assert.strictEqual(result, null, "workflow prefs are written deterministically, not dispatched to an agent");
   const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(content, /^workflow_prefs_captured:\s*true\s*$/m);
   assert.match(content, /^commit_policy:\s*per-task\s*$/m);
   assert.equal(isWorkflowPreferencesCaptured(), true, "the stage is recorded in the database");
   assert.equal(existsSync(join(base, ".gsd", "runtime", "research-decision.json")), false);
 });
 
-test("Deep mode: workflow-preferences self-heals PREFERENCES.md when capture marker is missing", async (t) => {
+test("Deep mode: workflow-preferences self-heals PREFERENCES.md when the stage is not recorded in the database", async (t) => {
   const base = makeIsolatedBaseWithCleanup(t);
 
   // Partial PREFERENCES.md (e.g. only planning_depth set) must not falsely
-  // suppress the defaults write — the explicit captured marker is required.
+  // suppress the defaults write — the database fact is required.
   writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\nplanning_depth: deep\n---\n");
   const prefs = { planning_depth: "deep" } as GSDPreferences;
   const result = await rule(WORKFLOW_PREFS_RULE_NAME).match(makeCtx(base, prefs));
   assert.strictEqual(result, null);
   const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(content, /^workflow_prefs_captured:\s*true\s*$/m);
   assert.match(content, /^branch_model:\s*single\s*$/m);
 });
 
@@ -372,7 +370,7 @@ test("Deep mode: workflow-preferences self-heals malformed frontmatter", async (
   const result = await rule(WORKFLOW_PREFS_RULE_NAME).match(makeCtx(base, prefs));
   assert.strictEqual(result, null);
   const content = readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8");
-  assert.match(content, /^workflow_prefs_captured:\s*true\s*$/m);
+  assert.match(content, /^commit_policy:\s*per-task\s*$/m);
   assert.ok(content.includes("this is not valid yaml"), "malformed original content is preserved as body");
 });
 

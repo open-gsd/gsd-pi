@@ -109,5 +109,4 @@ function applyDeepWorkflowPreferenceDefaults(frontmatter: Record<string, unknown
     models.executor_class = "balanced";
   }
   frontmatter.models = models;
-  frontmatter.workflow_prefs_captured = true;
 }

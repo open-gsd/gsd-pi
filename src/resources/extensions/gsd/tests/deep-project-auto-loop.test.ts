@@ -423,7 +423,6 @@ test("deep project setup: new-project command only writes planning_depth with --
     const deepMessages = await runNewProjectCommand(deepBase, "new-project --deep");
     const deepPrefs = readFileSync(join(deepBase, ".gsd", "PREFERENCES.md"), "utf-8");
     assert.match(deepPrefs, /planning_depth:\s*deep/);
-    assert.match(deepPrefs, /workflow_prefs_captured:\s*true/);
     assert.equal(deepMessages.length, 1, "deep new-project should dispatch the foreground project setup interview");
     assert.match(String((deepMessages[0] as any).content), /Foreground Deep Setup Question Policy/);
   } finally {
