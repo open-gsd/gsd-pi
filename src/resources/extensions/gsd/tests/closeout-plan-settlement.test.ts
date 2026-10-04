@@ -47,14 +47,18 @@ import {
   completeMilestone,
   reopenMilestone,
 } from "../milestone-lifecycle-domain-operation.ts";
+import { evaluateAllCompleteSettlement } from "../milestone-settlement.ts";
 import { _clearGsdRootCache, clearPathCache } from "../paths.ts";
 import { publishMilestone } from "../publication.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
+import { closeUnit } from "../unit-closeout.ts";
 import { _resetServiceCache } from "../worktree.ts";
+import { mergeMilestoneStandalone } from "../worktree-lifecycle.ts";
 import { worktreePath } from "../worktree-manager.ts";
+import { WorktreeStateProjection } from "../worktree-state-projection.ts";
 
 const tempDirs = new Set<string>();
 
@@ -460,6 +464,17 @@ test("a run that stops after the merge commit finishes from the receipt without 
   assert.equal(mergeEffectReceipt()?.externalRef, mergeCommit);
   assert.equal(getMilestone("M001")?.status, "complete");
   assert.equal(existsSync(worktree), true);
+  // The receipt, not the leftover worktree, says whether the merge is done.
+  assert.deepEqual(
+    evaluateAllCompleteSettlement({
+      milestoneId: "M001",
+      statePhase: "complete",
+      basePath: worktree,
+      originalBasePath: repo,
+      milestoneMerged: false,
+    }),
+    { ok: true, reason: "settled" },
+  );
 
   // Main moves on. A second squash merge of the same branch would now conflict.
   commitOnMain(repo, "later change on main\n");
@@ -501,6 +516,59 @@ test("a failed push leaves the push effect without a receipt and the next closeo
   assert.equal(retried.pushed, true);
   assert.equal(git(["rev-parse", "main"], remote), git(["rev-parse", "main"], repo));
   assert.equal(pushEffect().receipt?.externalRef, "origin/main");
+});
+
+test("a branch that is already merged is recognized and the Milestone completes", async () => {
+  const { repo } = await milestoneInWorktree();
+  git(["merge", "--no-ff", "-m", "manual merge", "milestone/M001"], repo);
+  const mainHead = git(["rev-parse", "main"], repo);
+
+  mergeMilestoneToMain(repo, "M001", ROADMAP);
+
+  assert.equal(git(["rev-parse", "main"], repo), mainHead);
+  assert.equal(mergeEffectReceipt()?.outcome, "recognized");
+  assert.equal(getMilestone("M001")?.status, "complete");
+});
+
+test("a skipped merge under degraded isolation recognizes the effect instead of leaving the Milestone open", async () => {
+  const { repo, worktree } = await milestoneInWorktree();
+
+  const result = mergeMilestoneStandalone(
+    {
+      gitServiceFactory: () => { throw new Error("not used"); },
+      worktreeProjection: new WorktreeStateProjection(),
+      mergeMilestone: () => { throw new Error("the merge must be skipped"); },
+    },
+    {
+      originalBasePath: repo,
+      worktreeBasePath: worktree,
+      milestoneId: "M001",
+      isolationDegraded: true,
+      notify: () => {},
+    },
+  );
+
+  assert.equal(result.merged, false);
+  assert.equal(mergeEffectReceipt()?.outcome, "recognized");
+  assert.equal(getMilestone("M001")?.status, "complete");
+});
+
+test("the interactive closeout notice says a prepared Milestone is not complete yet", async () => {
+  const { worktree } = await milestoneInWorktree();
+  const notices: string[] = [];
+
+  const result = closeUnit(
+    { basePath: worktree, unitType: "complete-milestone", unitId: "M001", boundary: "milestone", outcome: "complete" },
+    {
+      isolationMode: () => "worktree",
+      currentBranch: () => "milestone/M001",
+      commit: () => null,
+      notify: (message) => { notices.push(message); },
+    },
+  );
+
+  assert.equal(result.gitVerdict, "milestone-branch");
+  assert.match(notices[0] ?? "", /closeout is prepared on milestone\/M001.*\/gsd dispatch complete-milestone M001/);
 });
 
 test("deleting META.json does not change the branch the Milestone merges to", async () => {
