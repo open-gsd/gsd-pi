@@ -59,6 +59,7 @@ import {
   getOpenWedge,
 } from "../auto-liveness-backstop.js";
 import { renderRoadmapFromDb } from "../markdown-renderer.js";
+import { migrateToFlatPhase, needsFlatPhaseMigration } from "../flat-phase-migration.js";
 import {
   clearInFlightTools,
   getInFlightToolCount,
@@ -384,6 +385,8 @@ test("advance() dispatches the resolved unit and journals advance", async (t) =>
 test("advance() preserves an external projection edit without blocking valid work", async (t) => {
   const f = makeFixture();
   t.after(() => f.cleanup());
+  // Dispatch settles the layout first, so the edit is to the settled projection.
+  await migrateToFlatPhase(f.base);
   const rendered = await renderRoadmapFromDb(f.base, "M001");
   assert.ok("roadmapPath" in rendered);
   const externalEdit = Buffer.from("# External roadmap evidence\n");
@@ -1366,6 +1369,24 @@ test("advance() blocks dispatch while a tracked projection changed outside GSD i
   assert.match(result.reason, /changed outside GSD: \.gsd\/PROJECT\.md\..*\/gsd recover.*\/gsd rebuild markdown/s);
   assert.ok(f.journalNames().includes("advance-blocked"));
   assert.ok(!f.journalNames().includes("advance"));
+});
+
+test("advance() settles a pending flat-phase migration before the projection hold observes the tree", async (t) => {
+  // The session_start migration can still be pending at the first dispatch.
+  // The hold must not see the legacy files it is about to move.
+  const f = makeFixture();
+  t.after(() => f.cleanup());
+  assert.equal(needsFlatPhaseMigration(f.base), true, "fixture must start in the legacy layout");
+  let pendingAtHold: boolean | undefined;
+  const restoreProjectionObservation = _setPreserveProjectionChangesFnForTests(async () => {
+    pendingAtHold = needsFlatPhaseMigration(f.base);
+    return { preserved: [], refreshedPassthrough: [], held: [] };
+  });
+  t.after(restoreProjectionObservation);
+
+  await f.orchestrator.advance();
+
+  assert.equal(pendingAtHold, false, "the layout must be settled before the hold runs");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

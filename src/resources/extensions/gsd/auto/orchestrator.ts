@@ -24,6 +24,7 @@ export type AutoAdvanceFailureResult = Extract<AutoAdvanceResult, { kind: "pause
 import { debugCount, debugLog, debugTime } from "../debug-logger.js";
 import {
   reconcileBeforeDispatch,
+  settleFlatPhaseMigration,
   type ReconciliationBlockerDetail,
 } from "../state-reconciliation.js";
 import { isLegalEdge, IllegalPhaseTransitionError } from "../state-transition-matrix.js";
@@ -671,6 +672,9 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
     }
   > {
     const activeBasePath = this.getLiveDispatchBasePath();
+    // Settle the layout before the hold: a legacy file that the migration is
+    // about to move is not a change from outside GSD.
+    await settleFlatPhaseMigration(activeBasePath);
     let held: readonly string[];
     try {
       ({ held } = await (_preserveProjectionChangesFn ?? preserveProjectionChangesBeforeDispatch)(activeBasePath));

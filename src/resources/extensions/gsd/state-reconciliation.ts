@@ -5,6 +5,7 @@
 
 export {
   reconcileBeforeDispatch,
+  settleFlatPhaseMigration,
   ReconciliationFailedError,
   DRIFT_REGISTRY,
 } from "./state-reconciliation/index.js";
