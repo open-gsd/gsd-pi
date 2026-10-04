@@ -796,26 +796,22 @@ describe("state-machine-live-validation", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // PHASE 4: Phantom parents and auto-creation (H6)
+  // PHASE 4: Phantom parents are refused
   // ─────────────────────────────────────────────────────────────────────────
 
-  describe("phantom parent auto-creation (H6)", () => {
-    test("completing task for non-existent milestone/slice auto-creates them", async () => {
+  describe("phantom parent refusal", () => {
+    test("completing task for non-existent milestone/slice is refused and creates no rows", async () => {
       base = createFullFixture();
       openDatabase(join(base, ".gsd", "gsd.db"));
-      // No milestone or slice pre-inserted — handler will auto-create
+      // No milestone, slice or task pre-inserted — planning owns row creation
 
       const result = await handleCompleteTask(makeTaskParams("T01", "S99", "M099") as any, base);
-      assert.ok(!("error" in result), `expected success: ${JSON.stringify(result)}`);
+      assert.ok("error" in result, `expected refusal: ${JSON.stringify(result)}`);
+      assert.match((result as any).error, /task M099\/S99\/T01 does not exist/);
 
-      // Phantom milestone created — H6 fix: now uses ID as title instead of empty string
-      const milestone = getMilestone("M099");
-      assert.ok(milestone, "phantom milestone M099 should exist");
-      assert.equal(milestone!.title, "M099", "H6 fix: phantom milestone uses ID as title");
-
-      // Phantom slice created
-      const slice = getSlice("M099", "S99");
-      assert.ok(slice, "phantom slice S99 should exist");
+      assert.equal(getMilestone("M099"), null, "no phantom milestone M099");
+      assert.equal(getSlice("M099", "S99"), null, "no phantom slice S99");
+      assert.equal(getTask("M099", "S99", "T01"), null, "no phantom task T01");
     });
 
     test("completing a legacy-only slice fails closed until explicit adoption", async () => {
