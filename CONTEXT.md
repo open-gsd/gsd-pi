@@ -237,9 +237,15 @@ canonical lifecycle rows and Waivers when the Authority Epoch of the Project
 is above 0, and from legacy rows at epoch 0. The epoch advances only with
 `GSD_AUTHORITY_CUTOVER=1` (see above), so by default public status responses,
 dispatch, and dependency decisions still read legacy rows. `gate:lifecycle-shadow-no-cutover` pins
-both epochs. Other decision sites still read legacy rows directly and must be
-routed through the interface before a Project cuts over. The decision
-document lists both groups.
+both epochs. Since 2026-10-04 the dispatch, eligibility, queue, closeout,
+recovery, post-unit and verification sites read through the interface. Some
+decision sites still read legacy rows directly: the preconditions of the
+planning and completion commands, the discard operation, the hook retry of a
+Task, the stale-branch cleanup, three prompt builders, and the doctor and
+drift checks. They must be routed, or deleted with the legacy path, before the
+automatic Cutover becomes the default. The sites that only render or display a
+status stay on legacy rows. The decision document names each site of the
+three groups.
 The decision, the
 Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
 are recorded in
