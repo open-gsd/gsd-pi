@@ -19,8 +19,7 @@ import type { GSDState } from "./types.js";
 import { getRuntimeKv, deleteRuntimeKv } from "./db/runtime-kv.js";
 import { isDispatchExecutionOpen } from "./db/unit-dispatches.js";
 import { closeAutoPause, listOpenAutoPauseScopes, readOpenAutoPause } from "./db/writers/auto-pauses.js";
-import { getMilestone, getSlice } from "./db/queries.js";
-import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
+import { readMilestone, readSlice } from "./db/lifecycle-read.js";
 import type { AutoPauseBlockerKind } from "./recovery-policy.js";
 
 export type InterruptedSessionClassification =
@@ -159,11 +158,11 @@ export function findStaleScopedPauses(): string[] {
   return listOpenAutoPauseScopes().filter((scope) => {
     const [milestoneId, sliceId] = scope.split("/");
     if (!milestoneId) return false;
-    const milestone = getMilestone(milestoneId);
-    if (!milestone || isClosedStatus(milestone.status) || isDiscardedMilestoneStatus(milestone.status)) return true;
+    const milestone = readMilestone(milestoneId);
+    if (!milestone || milestone.closed || milestone.discarded) return true;
     if (!sliceId) return false;
-    const slice = getSlice(milestoneId, sliceId);
-    return !slice || isClosedStatus(slice.status);
+    const slice = readSlice(milestoneId, sliceId);
+    return !slice || slice.closed;
   });
 }
 

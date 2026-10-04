@@ -51,6 +51,7 @@ import {
   openDatabase,
   setSliceUatMd,
 } from "../gsd-db.ts";
+import { findStaleScopedPauses } from "../interrupted-session.ts";
 import { discardMilestone, isParked, parkMilestone, unparkMilestone } from "../milestone-actions.ts";
 import { evaluateGuardedCompleteMilestoneDispatch } from "../milestone-closeout.ts";
 import { analyzeParallelEligibility } from "../parallel-eligibility.ts";
@@ -832,4 +833,24 @@ test("after the Cutover the run-uat candidates, the UAT hold and the reassessmen
   cutOver();
 
   assert.deepEqual(await answers(), { runUat: "S02", awaitsUat: [false, true], reassess: "S02", completed: ["S02"] });
+});
+
+test("after the Cutover a scoped pause is stale when the lifecycle row of its milestone or slice is closed", () => {
+  seedDisagreement();
+  const db = _getAdapter();
+  assert.ok(db);
+  for (const scope of ["M001", "M002", "M002/S01", "M002/S02"]) {
+    db.prepare(`
+      INSERT INTO auto_pauses (scope, blocker_kind, step_mode, paused_at)
+      VALUES (:scope, 'user_request', 0, '2026-10-04T00:00:00.000Z')
+    `).run({ ":scope": scope });
+  }
+
+  // The legacy rows: M002 is complete, so each pause in M002 is stale.
+  assert.deepEqual(findStaleScopedPauses(), ["M002", "M002/S01", "M002/S02"]);
+
+  cutOver();
+
+  // The lifecycle rows: M001 is completed. M002 is open and its Slice S02 is completed.
+  assert.deepEqual(findStaleScopedPauses(), ["M001", "M002/S02"]);
 });
