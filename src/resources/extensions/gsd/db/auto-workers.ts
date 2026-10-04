@@ -259,6 +259,18 @@ export function isAutoWorkerLive(workerId: string): boolean {
 }
 
 /**
+ * Whether an active worker row of this project belongs to a process that runs
+ * now. The heartbeat age is not checked: a long unit does not refresh it.
+ */
+export function hasLiveAutoWorkerForProject(projectRoot: string): boolean {
+  const root = normalizeRealPath(projectRoot);
+  return getAllAutoWorkers().some((worker) =>
+    worker.status === "active"
+    && normalizeRealPath(worker.project_root_realpath) === root
+    && isWorkerProcessAlive(worker));
+}
+
+/**
  * Stale-worker detection scope (#1773): active workers, plus workers already
  * marked `stopping` that still own an active dispatch — a stopping worker can
  * strand pending, claimed, or running work just as permanently as an active one.

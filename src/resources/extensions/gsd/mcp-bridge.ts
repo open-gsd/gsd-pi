@@ -6,6 +6,8 @@ export {
 } from "./bootstrap/write-gate.js";
 export { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 export { openExistingWorkflowDatabase } from "./db-workspace.js";
+export { hasLiveAutoWorkerForProject } from "./db/auto-workers.js";
+export { readStoredPausedSession } from "./interrupted-session.js";
 export { readProgressFromDb, readProjectProgressFromDb } from "./state/progress-from-db.js";
 export { readProjectSnapshotFromDb } from "./state/project-snapshot.js";
 export {
