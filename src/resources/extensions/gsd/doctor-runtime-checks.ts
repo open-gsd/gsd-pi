@@ -204,9 +204,9 @@ export async function checkRuntimeHealth(
   }
 
   // ── Stale crash lock ──────────────────────────────────────────────────
-  // Phase C pt 2: the lock state lives in the workers + unit_dispatches
-  // tables now, not auto.lock. readCrashLock synthesizes a LockData from
-  // the DB; isLockProcessAlive is a pure OS PID check.
+  // A crash is decided by the workers + unit_dispatches tables, never by
+  // auto.lock. readCrashLock synthesizes a LockData from the DB;
+  // isLockProcessAlive is a pure OS PID check.
   try {
     const lock = readCrashLock(basePath);
     if (lock) {

@@ -1,8 +1,8 @@
 // Project/App: gsd-pi
-// File Purpose: ADR-017 stale-worker drift handler. Detects session-lock
-// artifacts whose owning PID is no longer alive (typical after SIGKILL or
-// laptop sleep where the heartbeat wasn't released cleanly), and clears them
-// before the next dispatch attempts to acquire the lock.
+// File Purpose: ADR-017 stale-worker drift handler. Detects a worker row
+// whose process is no longer alive (typical after SIGKILL or laptop sleep
+// where the heartbeat wasn't released cleanly), and a session-lock artifact
+// left by a dead process, and clears them before the next dispatch.
 
 import {
   effectiveLockFile,
@@ -24,17 +24,9 @@ export function detectStaleWorkerDrift(
   _state: GSDState,
   ctx: DriftContext,
 ): StaleWorkerDrift[] {
-  const data = readSessionLockData(ctx.basePath);
-  if (data && typeof data.pid === "number") {
-    return isSessionLockProcessAlive(data)
-      ? []
-      : [{ kind: "stale-worker", lockPath: effectiveLockFile(), pid: data.pid }];
-  }
-
-  // The lock file is missing or unparseable. It is not the only source of
-  // truth: a crashed worker can leave a workers row 'active' with held leases
-  // and in-flight dispatches even when its lock file is gone. Fall back to the
-  // DB worker registry so that state is still detected and repaired.
+  // The worker registry decides. A crashed worker leaves a workers row
+  // 'active' with held leases and in-flight dispatches; the lock file of a
+  // live session (this one, after a restart) must not hide that row.
   if (isDbAvailable()) {
     try {
       const stale = findStaleWorkerForProject(normalizeRealPath(ctx.basePath));
@@ -45,9 +37,16 @@ export function detectStaleWorkerDrift(
       // Best-effort: detection must never throw and abort the reconcile cycle.
       logWarning(
         "reconcile",
-        `stale-worker DB fallback detection failed: ${(err as Error).message}`,
+        `stale-worker detection failed: ${(err as Error).message}`,
       );
     }
+  }
+
+  // No dead worker row. A lock file left by a dead process is still removed,
+  // so it cannot block the next lock acquisition.
+  const data = readSessionLockData(ctx.basePath);
+  if (data && typeof data.pid === "number" && !isSessionLockProcessAlive(data)) {
+    return [{ kind: "stale-worker", lockPath: effectiveLockFile(), pid: data.pid }];
   }
 
   return [];

@@ -5,7 +5,7 @@
 // gate block. A file or journal line written by hand must not create one.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
@@ -14,6 +14,7 @@ import { autoSession } from "../auto-runtime-state.ts";
 import { recoverTimedOutUnit } from "../auto-timeout-recovery.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import {
+  _getAdapter,
   closeDatabase,
   getPendingGates,
   insertGateRow,
@@ -29,7 +30,13 @@ import {
   readHookStateJson,
   writeHookStateJson,
 } from "../db/writers/runtime-control.ts";
-import { emitCrashRecoveredUnitEnd } from "../crash-recovery.ts";
+import { emitCrashRecoveredUnitEnd, readCrashLock } from "../crash-recovery.ts";
+import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
+import { claimMilestoneLease } from "../db/milestone-leases.ts";
+import { getLatestForUnit, recordDispatchClaim } from "../db/unit-dispatches.ts";
+import { assessInterruptedSession } from "../interrupted-session.ts";
+import { normalizeRealPath } from "../paths.ts";
+import { detectStaleWorkerDrift, repairStaleWorker } from "../state-reconciliation/drift/stale-worker.ts";
 import { emitJournalEvent } from "../journal.ts";
 import {
   checkPostUnitHooks,
@@ -87,6 +94,36 @@ function deleteRuntimeControlFiles(base: string): void {
   for (const name of ["runtime", "journal", "hook-state.json", "auto.lock"]) {
     rmSync(join(base, ".gsd", name), { recursive: true, force: true });
   }
+}
+
+const DEAD_PID = 999_999_999; // process.kill(pid, 0) fails with ESRCH
+
+/** A session lock file as the lock owner writes it. */
+function writeLockFile(base: string, pid: number, unitType: string, unitId: string): string {
+  const now = new Date().toISOString();
+  const path = join(base, ".gsd", "auto.lock");
+  writeFileSync(path, JSON.stringify({ pid, startedAt: now, unitType, unitId, unitStartedAt: now }), "utf-8");
+  return path;
+}
+
+/** A worker that claimed a unit and then died without cleanup. */
+function crashWorker(base: string, unitType: string, unitId: string): string {
+  const workerId = registerAutoWorker({ projectRootRealpath: normalizeRealPath(base) });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) throw new Error("lease not claimed");
+  recordDispatchClaim({
+    traceId: "gate-trace",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    unitType,
+    unitId,
+  });
+  _getAdapter()!.prepare(
+    `UPDATE workers SET pid = :pid, last_heartbeat_at = '1970-01-01T00:00:00.000Z' WHERE worker_id = :w`,
+  ).run({ ":pid": DEAD_PID, ":w": workerId });
+  return workerId;
 }
 
 /** One hard-timeout recovery in a fresh process: the in-memory counter is empty. */
@@ -378,4 +415,51 @@ test("the database replacement fence rejects every runtime-control write", (t) =
   assert.equal(readHookStateJson(scope), storedBefore, "the fenced hook state write stored nothing");
   assert.equal(readUnitRuntimeRecord(base, "execute-task", unitId)?.phase, "dispatched", "the fenced delete kept the unit row");
   assert.equal(getUatRetryAttempts("M001", "S01"), 1, "the fenced delete kept the retry counter");
+});
+
+test("G1: an auto.lock of a dead process written by hand does not create a crash recovery", async (t) => {
+  const base = makeProject(t);
+  writeLockFile(base, DEAD_PID, "execute-task", "M001/S01/T01");
+
+  assert.equal(readCrashLock(base), null, "the file is not a crash record");
+  const assessment = await assessInterruptedSession(base);
+  assert.equal(assessment.classification, "none");
+  assert.equal(assessment.lock, null);
+  assert.equal(assessment.recoveryPrompt, null);
+});
+
+test("G1: the crash record of a dead worker is unchanged after auto.lock is replaced or deleted", (t) => {
+  const base = makeProject(t);
+  crashWorker(base, "plan-slice", "M001/S01");
+
+  const expected = { pid: DEAD_PID, unitType: "plan-slice", unitId: "M001/S01" };
+  const read = () => {
+    const lock = readCrashLock(base);
+    return lock && { pid: lock.pid, unitType: lock.unitType, unitId: lock.unitId };
+  };
+
+  // A lock file that names another dead process and another unit.
+  const lockFile = writeLockFile(base, DEAD_PID - 1, "execute-task", "M001/S01/T09");
+  assert.deepEqual(read(), expected, "the worker row decides, not the file");
+
+  rmSync(lockFile);
+  assert.deepEqual(read(), expected, "the crash record does not need the file");
+});
+
+test("G1: the lock file of a live session does not hide a dead worker row", (t) => {
+  const base = makeProject(t);
+  const workerId = crashWorker(base, "plan-slice", "M001/S01");
+  // PID 1 is alive for the lock check. The restarted session owns this file.
+  const lockFile = writeLockFile(base, 1, "starting", "bootstrap");
+  const ctx = { basePath: base } as any;
+
+  const drift = detectStaleWorkerDrift({} as any, ctx);
+  assert.deepEqual(drift.map((record) => record.pid), [DEAD_PID]);
+
+  repairStaleWorker(drift[0]!, ctx);
+
+  assert.equal(getAutoWorker(workerId)?.status, "stopping", "the dead worker is retired");
+  assert.equal(getLatestForUnit("M001/S01")?.status, "canceled", "its dispatch no longer blocks a new claim");
+  assert.equal(existsSync(lockFile), true, "the live session keeps its lock file");
+  assert.deepEqual(detectStaleWorkerDrift({} as any, ctx), [], "the repair leaves no drift");
 });
