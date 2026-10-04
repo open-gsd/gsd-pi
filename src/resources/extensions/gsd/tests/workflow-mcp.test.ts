@@ -173,6 +173,22 @@ test("deep project setup units declare required workflow MCP tools", () => {
   ]);
 });
 
+test("detectWorkflowMcpLaunchConfig gives the server the worker locks of a parallel worker", () => {
+  const command = { GSD_WORKFLOW_MCP_COMMAND: "node" };
+
+  const worker = detectWorkflowMcpLaunchConfig("/tmp/project", {
+    ...command,
+    GSD_MILESTONE_LOCK: "M001",
+    GSD_SLICE_LOCK: "S02",
+  });
+  assert.equal(worker?.env?.GSD_MILESTONE_LOCK, "M001");
+  assert.equal(worker?.env?.GSD_SLICE_LOCK, "S02");
+
+  const unlocked = detectWorkflowMcpLaunchConfig("/tmp/project", command);
+  assert.equal("GSD_MILESTONE_LOCK" in (unlocked?.env ?? {}), false);
+  assert.equal("GSD_SLICE_LOCK" in (unlocked?.env ?? {}), false);
+});
+
 test("detectWorkflowMcpLaunchConfig prefers explicit env override", () => {
   const launch = detectWorkflowMcpLaunchConfig("/tmp/project", {
     GSD_WORKFLOW_MCP_NAME: "workflow-tools",

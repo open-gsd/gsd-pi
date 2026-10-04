@@ -309,9 +309,13 @@ export function detectWorkflowMcpLaunchConfig(
     explicitCwd ||
     projectRoot;
   const resolvedWorkflowProjectRoot = resolve(workflowProjectRoot);
+  // The server binds a gsd_exec run to the Attempt of the worker these locks name.
+  const workerLocks = Object.fromEntries(
+    (["GSD_MILESTONE_LOCK", "GSD_SLICE_LOCK"] as const).flatMap((key) => (env[key] ? [[key, env[key]]] : [])),
+  ) as Record<string, string>;
 
   if (explicitCommand) {
-    const launchEnv = buildWorkflowLaunchEnv(resolve(workflowProjectRoot), gsdCliPath, explicitEnv);
+    const launchEnv = buildWorkflowLaunchEnv(resolve(workflowProjectRoot), gsdCliPath, { ...workerLocks, ...explicitEnv });
     return {
       name,
       command: explicitCommand,
@@ -328,7 +332,7 @@ export function detectWorkflowMcpLaunchConfig(
       command: process.execPath,
       args: [distCli],
       cwd: resolvedWorkflowProjectRoot,
-      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, undefined, distCli),
+      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, workerLocks, distCli),
     };
   }
 
@@ -339,7 +343,7 @@ export function detectWorkflowMcpLaunchConfig(
       command: process.execPath,
       args: [bundledCli],
       cwd: resolvedWorkflowProjectRoot,
-      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, undefined, bundledCli),
+      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, workerLocks, bundledCli),
     };
   }
 
@@ -349,7 +353,7 @@ export function detectWorkflowMcpLaunchConfig(
       name,
       command: binPath,
       cwd: resolvedWorkflowProjectRoot,
-      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath),
+      env: buildWorkflowLaunchEnv(resolvedWorkflowProjectRoot, gsdCliPath, workerLocks),
     };
   }
 

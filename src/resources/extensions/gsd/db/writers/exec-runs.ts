@@ -41,9 +41,10 @@ export function uatAttemptRef(milestoneId: string, sliceId: string, attempt: num
  * The Attempt a run belongs to, read in the transaction that stores the run.
  * A UAT run belongs to the run-uat attempt that is not saved yet. Another run
  * belongs to the Task Attempt of its caller that is not settled. The caller is
- * known by its work root: a run inside the worktree of a Milestone (named
- * `<MID>`) or of a Slice (named `<MID>-<SID>`) belongs to an Attempt of that
- * Milestone or Slice, so parallel workers each bind their own runs.
+ * known by the scope of its worker: `<MID>` for a Milestone, `<MID>-<SID>` for
+ * a Slice. The scope is the worker lock (GSD_MILESTONE_LOCK, GSD_SLICE_LOCK);
+ * without a lock it is the name of the worktree the run is in. So parallel
+ * workers each bind their own runs.
  * With no such Attempt, or with more than one, the run is unbound and proves
  * nothing.
  */
@@ -52,6 +53,13 @@ function worktreeNameOf(path: string): string {
   const normalized = path.replaceAll("\\", "/");
   const segment = findWorktreeSegment(normalized);
   return segment ? normalized.slice(segment.afterWorktrees).split("/")[0] ?? "" : "";
+}
+
+function callerScopeOf(cwd: string): string {
+  const milestoneLock = process.env.GSD_MILESTONE_LOCK?.trim();
+  if (!milestoneLock) return worktreeNameOf(cwd);
+  const sliceLock = process.env.GSD_SLICE_LOCK?.trim();
+  return sliceLock ? `${milestoneLock}-${sliceLock}` : milestoneLock;
 }
 
 function currentAttemptRef(input: ExecRunInput): string | null {
@@ -72,15 +80,15 @@ function currentAttemptRef(input: ExecRunInput): string | null {
      AND lifecycle.project_id = attempt.project_id
     WHERE lifecycle.item_kind = 'task' AND attempt.attempt_state != 'settled'
       AND (
-        lifecycle.milestone_id = :worktree
-        OR lifecycle.milestone_id || '-' || lifecycle.slice_id = :worktree
+        lifecycle.milestone_id = :scope
+        OR lifecycle.milestone_id || '-' || lifecycle.slice_id = :scope
         OR (
-          NOT EXISTS (SELECT 1 FROM milestones WHERE id = :worktree)
-          AND NOT EXISTS (SELECT 1 FROM slices WHERE milestone_id || '-' || id = :worktree)
+          NOT EXISTS (SELECT 1 FROM milestones WHERE id = :scope)
+          AND NOT EXISTS (SELECT 1 FROM slices WHERE milestone_id || '-' || id = :scope)
         )
       )
     LIMIT 2
-  `).all({ ":worktree": worktreeNameOf(input.cwd) });
+  `).all({ ":scope": callerScopeOf(input.cwd) });
   return open.length === 1 ? String(open[0]!["attempt_id"]) : null;
 }
 

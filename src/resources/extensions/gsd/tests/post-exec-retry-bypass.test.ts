@@ -1489,6 +1489,39 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(readExecRun("run-milestone")?.attempt_ref, null);
   });
 
+  test("with the worker locks set, a host run from the project root backs the Attempt of its own Slice worker", async (t) => {
+    createBasicTask(PROSE_VERIFY);
+    stageClaimedEvidence("node check-theme.js");
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Parallel Slice", risk: "low" });
+    insertTask({ id: "T01", sliceId: "S02", milestoneId: "M001", title: "Parallel task", status: "pending" });
+    const saved = { milestone: process.env.GSD_MILESTONE_LOCK, slice: process.env.GSD_SLICE_LOCK };
+    const setLocks = (milestone: string | undefined, slice: string | undefined) => {
+      for (const [key, value] of [["GSD_MILESTONE_LOCK", milestone], ["GSD_SLICE_LOCK", slice]] as const) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    };
+    t.after(() => setLocks(saved.milestone, saved.slice));
+    let otherAttemptId = "";
+
+    const outcome = await verifyCanonicalTask(() => {
+      otherAttemptId = createCanonicalSucceededTaskAttempt(() => {
+        // The workflow MCP server of each worker runs in the project root.
+        setLocks("M001", "S01");
+        recordHostRun("run-s01", "node check-theme.js");
+        setLocks("M001", "S02");
+        recordHostRun("run-s02", "node check-theme.js", 1);
+        setLocks(saved.milestone, saved.slice);
+      }, "M001", "S02");
+    });
+
+    assert.equal(outcome.result, "continue");
+    assert.equal(outcome.verdict, "pass");
+    assert.equal(readExecRun("run-s02")?.attempt_ref, otherAttemptId);
+    assert.ok(readExecRun("run-s01")?.attempt_ref);
+    assert.notEqual(readExecRun("run-s01")?.attempt_ref, otherAttemptId);
+  });
+
   test("auto-discovered package.json verification failure retries instead of continuing", async () => {
     createTaskWithoutVerify();
     writeFileSync(
