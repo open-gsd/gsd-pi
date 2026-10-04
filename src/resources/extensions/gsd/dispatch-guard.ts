@@ -79,7 +79,7 @@ export function getPriorSliceCompletionBlocker(
         if (!dependency) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} is missing from the workflow DB.`;
         }
-        if (!dependency.done) {
+        if (!dependency.satisfiesDependents) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} is not complete.`;
         }
       }

@@ -128,13 +128,15 @@ Downgrade recovery uses the explicit backup-restore command:
 
 Decision D012 (2026-10-02) supersedes D005 for canonical lifecycle *read*
 authority. The owner confirmed it on 2026-10-02. Its project-database row is
-not written yet, so D012 is a provisional ID and that row is pending. The read cutover is not
-implemented: public status responses,
-dispatch, and dependency decisions still read legacy rows, and that surface is
-still pinned by `gate:lifecycle-shadow-no-cutover`. Some of those decisions read
-through the interface `db/lifecycle-read.ts`; other decision sites still read
-legacy rows directly, and the read cutover must route them through the
-interface first. The decision document lists both groups.
+not written yet, so D012 is a provisional ID and that row is pending. The read cutover is
+implemented in the read interface `db/lifecycle-read.ts` only: it answers from
+canonical lifecycle rows and Waivers when the Authority Epoch of the Project
+is above 0, and from legacy rows at epoch 0. No production command advances
+the epoch yet, so public status responses, dispatch, and dependency decisions
+still read legacy rows in practice. `gate:lifecycle-shadow-no-cutover` pins
+both epochs. Other decision sites still read legacy rows directly and must be
+routed through the interface before a Project cuts over. The decision
+document lists both groups.
 The decision, the
 Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
 are recorded in

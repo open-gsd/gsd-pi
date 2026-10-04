@@ -287,12 +287,14 @@ decision research require before a lifecycle read-authority cutover.
 D012 is a decision. It is not the cutover:
 
 - Runtime behavior does not change with this record. Hierarchy reads still come
-  from legacy database rows. No Project has advanced its Authority Epoch:
-  `cutoverProjectAuthority` has no production caller.
-- `gate:lifecycle-shadow-no-cutover` stays in `verify:pr` until the read
-  cutover work replaces it. That work inverts the gate into a structural
-  "no legacy status read outside the read interface" gate. It does not delete
-  the gate.
+  from legacy database rows while the Authority Epoch of the Project is 0. No
+  Project has advanced its Authority Epoch: `cutoverProjectAuthority` has no
+  production caller.
+- `gate:lifecycle-shadow-no-cutover` stays in `verify:pr`. Its checks for a
+  Project at Authority Epoch 0 are unchanged. Step 2 inverted its
+  read-interface check (see below). The work that removes the legacy reads
+  turns the gate into a structural "no legacy status read outside the read
+  interface" gate. It does not delete the gate.
 - The nine `deferredCutoverBlockers` in the dossier stay open. They are the
   Removal Gates listed below.
 - Step 1 of the read cutover is done for these callers only. They ask their
@@ -302,8 +304,7 @@ D012 is a decision. It is not the cutover:
   (`dispatch-guard.ts`), the milestone guard at the start of `resolveDispatch`
   and the slice-research rule in `auto-dispatch.ts`, the research check in
   `artifact-verification.ts`, the status response, progress, and the project
-  snapshot. The interface answers from legacy rows, and the gate check
-  `read-interface-legacy-authority` pins that.
+  snapshot.
 - Step 1 changes one answer. A discarded Milestone is never done: it does not
   satisfy a dependent, and the Milestone counts of progress and of the project
   snapshot leave it out of `total` and `done`. All other answers are the same
@@ -326,11 +327,48 @@ D012 is a decision. It is not the cutover:
   This list is not complete. On 2026-10-03, 55 production files of the GSD
   extension other than `db/lifecycle-read.ts` import `status-guards.ts`; each
   one is a candidate.
-- Step 2 changes the interface to canonical lifecycle rows and inverts the
-  gate. Before that, the sites above must read through the interface. If they
-  do not, authority is split: `deriveState` and the dispatch guard follow
-  canonical rows, and those sites follow legacy rows. Step 2 must also wait
-  until every hierarchy row has a lifecycle row.
+- Step 2 is done in the read interface (2026-10-04). The project Authority
+  Epoch chooses the read source, in one function (`cutoverHasRun`) and per
+  Project, never per item:
+  - Epoch 0: the interface answers from legacy rows, as in step 1.
+  - Epoch above 0 (the Cutover has run): the interface answers from the
+    canonical lifecycle rows. A Milestone is done when its lifecycle is
+    `completed`, parked when it is `paused`, and discarded when it is
+    `cancelled`. A Slice or Task needs no further work when its lifecycle is
+    `completed` or `cancelled`. A hierarchy row with no lifecycle row is
+    pending; its legacy status does not answer for it.
+  - After the Cutover a cancelled Slice releases the Slices that depend on it
+    only when it has an active cancellation Waiver. The legacy `skipped` and
+    `deferred` statuses do not release a dependent. A cancelled Milestone
+    never satisfies a dependent Milestone, with or without a Waiver (the
+    step 1 rule).
+  - After the Cutover the status label of an item (`status`) is the legacy
+    label when that label names the same lifecycle status, because the
+    lifecycle vocabulary has no word for queued, active, parked or deferred.
+    When the legacy row names another status, the label is the legacy name of
+    the lifecycle status. The label decides nothing except the Milestone
+    readiness class (queued shell, needs discussion) and the "active" count of
+    progress.
+  - A read that cannot query `project_authority` fails. It does not answer
+    from either source.
+- The gate check `read-interface-epoch-authority` is the inverse of the former
+  `read-interface-legacy-authority` check. It fails when the read interface
+  does not read the Authority Epoch, reads it in more than one function, does
+  not query canonical lifecycle rows, or loses a legacy reader. The gate has
+  five behavior witnesses for a cut-over Project in
+  `tests/lifecycle-read-cutover.test.ts`.
+- The legacy readers and the adopted/unadopted branches are not deleted. That
+  is later work.
+- The decision sites in the list above still read legacy rows directly. On a
+  cut-over Project authority is split for them: `deriveState`, the dispatch
+  guard, the status response, progress and the snapshot follow canonical rows,
+  and those sites follow legacy rows. The two agree while Domain Operations
+  keep the legacy row aligned with the lifecycle row. They differ for a
+  cancelled Slice with no Waiver, and when the rows disagree. These sites must
+  read through the interface before a production command advances the
+  Authority Epoch.
+- The interface does not check that every hierarchy row has a lifecycle row.
+  The cutover command must check that before it advances the Authority Epoch.
 
 **Database record — pending.** The project database is the source of truth for
 decisions, and on 2026-10-02 it has no row for this decision: the last decision

@@ -3,12 +3,15 @@
 // and dependency decisions (ADR-046). deriveState, the dispatch guard, the
 // milestone guard of resolveDispatch, the status response, progress and the
 // project snapshot ask their status questions here.
+// The project Authority Epoch chooses the read source, in `cutoverHasRun`
+// only: canonical lifecycle rows and Waivers after the Cutover, legacy status
+// rows (D005) before it. The choice is per Project, never per item.
 // Other decision sites still read legacy rows directly and apply the status
 // vocabulary themselves; docs/dev/state-db-cutover-milestone-decision.md
-// (D012) lists them. The answers come from the legacy status rows (D005).
-// The read cutover to canonical lifecycle rows must route those sites here
-// before it changes this module.
+// (D012) lists them.
 
+import { getDb } from "./engine.js";
+import { compareLifecycleShadow } from "./lifecycle-shadow-comparison.js";
 import {
   getAllMilestones,
   getHierarchyCompletionCounts,
@@ -16,13 +19,19 @@ import {
   getMilestone,
   getMilestoneSlices,
   getMilestoneStatusCounts,
+  getProjectAuthorityRow,
   getSliceStatusSummary,
   getSliceTaskCounts,
   getSliceTasks,
   getSlicesByMilestoneIds,
   type MilestoneStatusCounts,
 } from "./queries.js";
-import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from "../status-guards.js";
+import {
+  isClosedStatus,
+  isDiscardedMilestoneStatus,
+  isInactiveStatus,
+  normalizeLegacyLifecycleStatus,
+} from "../status-guards.js";
 import type { TaskStatusCounts } from "../db-lightweight-query-rows.js";
 import type { MilestoneRow } from "../db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "../db-task-slice-rows.js";
@@ -38,8 +47,14 @@ export interface MilestoneRead extends MilestoneRow {
 }
 
 export interface SliceRead extends SliceRow {
-  /** Needs no further work: closed, or deferred by a decision. Satisfies its dependents. */
+  /** Needs no further work: closed, or deferred by a decision. */
   readonly done: boolean;
+  /**
+   * Releases the Slices that depend on it. Before the Cutover this is `done`.
+   * After the Cutover a cancelled Slice releases them only with an active
+   * cancellation Waiver.
+   */
+  readonly satisfiesDependents: boolean;
 }
 
 export interface TaskRead extends TaskRow {
@@ -47,42 +62,187 @@ export interface TaskRead extends TaskRow {
   readonly done: boolean;
 }
 
-function toMilestoneRead(row: MilestoneRow): MilestoneRead {
+/**
+ * The one place that chooses the read source. An Authority Epoch above 0 means
+ * the Cutover has run: every answer of this module then comes from the
+ * canonical lifecycle rows. Before that every answer comes from the legacy
+ * status rows.
+ */
+function cutoverHasRun(): boolean {
+  return (getProjectAuthorityRow()?.authorityEpoch ?? 0) > 0;
+}
+
+type ItemKind = "milestone" | "slice" | "task";
+
+/** One hierarchy row as the canonical lifecycle rows describe it. */
+interface LifecycleItem {
+  /** The status of the legacy row. It is a label only and decides nothing. */
+  legacyStatus: string;
+  /** Null when the row has no lifecycle row: no work on it is recorded. */
+  lifecycleStatus: string | null;
+  /** A Slice with an active cancellation Waiver. */
+  waived: boolean;
+}
+
+type LifecycleItems = Map<string, LifecycleItem>;
+
+const HIERARCHY_SQL = {
+  milestone: { table: "milestones", milestone: "hierarchy.id", slice: "NULL", task: "NULL" },
+  slice: { table: "slices", milestone: "hierarchy.milestone_id", slice: "hierarchy.id", task: "NULL" },
+  task: { table: "tasks", milestone: "hierarchy.milestone_id", slice: "hierarchy.slice_id", task: "hierarchy.id" },
+} as const;
+
+/**
+ * The lifecycle of every row of one hierarchy table, keyed by item path
+ * (`M001`, `M001/S01`, `M001/S01/T01`). Read only after the Cutover.
+ */
+function readLifecycleItems(kind: ItemKind, milestoneId?: string, sliceId?: string): LifecycleItems {
+  const sql = HIERARCHY_SQL[kind];
+  const rows = getDb().prepare(`
+    SELECT ${sql.milestone} AS milestone_id, ${sql.slice} AS slice_id, ${sql.task} AS task_id,
+           hierarchy.status AS legacy_status, lifecycle.lifecycle_status,
+           EXISTS (
+             SELECT 1 FROM workflow_waivers waiver
+             WHERE waiver.lifecycle_id = lifecycle.lifecycle_id
+               AND waiver.project_id = lifecycle.project_id
+               AND waiver.waiver_status = 'active'
+               AND waiver.scope = 'slice:' || lifecycle.milestone_id || '/' || lifecycle.slice_id
+               AND (waiver.expires_at IS NULL OR waiver.expires_at > :now)
+           ) AS waived
+    FROM ${sql.table} hierarchy
+    LEFT JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = '${kind}'
+     AND lifecycle.milestone_id = ${sql.milestone}
+     AND lifecycle.slice_id IS ${sql.slice}
+     AND lifecycle.task_id IS ${sql.task}
+     AND lifecycle.project_id = (SELECT project_id FROM project_authority WHERE singleton = 1)
+    WHERE (:milestone_id IS NULL OR ${sql.milestone} = :milestone_id)
+      AND (:slice_id IS NULL OR ${sql.slice} = :slice_id)
+  `).all({
+    ":now": new Date().toISOString(),
+    ":milestone_id": milestoneId ?? null,
+    ":slice_id": sliceId ?? null,
+  });
+  return new Map(rows.map((row) => [
+    [row["milestone_id"], row["slice_id"], row["task_id"]].filter((id) => id != null).join("/"),
+    {
+      legacyStatus: String(row["legacy_status"]),
+      lifecycleStatus: typeof row["lifecycle_status"] === "string" ? row["lifecycle_status"] : null,
+      waived: Number(row["waived"]) === 1,
+    },
+  ]));
+}
+
+/** The legacy label of each lifecycle status, for a legacy row that names another status. */
+const LIFECYCLE_LABEL: Readonly<Record<string, string>> = {
+  pending: "pending",
+  ready: "pending",
+  in_progress: "in_progress",
+  paused: "blocked",
+  completed: "complete",
+  cancelled: "skipped",
+  "blocker-accepted": "blocker-accepted",
+};
+const MILESTONE_LIFECYCLE_LABEL: Readonly<Record<string, string>> = {
+  ...LIFECYCLE_LABEL,
+  ready: "active",
+  in_progress: "active",
+  paused: "parked",
+};
+
+/**
+ * The status label after the Cutover. The lifecycle row decides it. The legacy
+ * label stays when it names the same lifecycle status, because the lifecycle
+ * vocabulary has no word for queued, active, parked or deferred. A row with no
+ * lifecycle row is pending.
+ */
+function statusLabel(kind: ItemKind, item: LifecycleItem | undefined): string {
+  const lifecycleStatus = item?.lifecycleStatus ?? null;
+  if (!item || lifecycleStatus === null) return "pending";
+  const agreement = compareLifecycleShadow(item.legacyStatus, lifecycleStatus).kind;
+  if (agreement === "match" || agreement === "semantic_match_exact_delta") return item.legacyStatus;
+  return (kind === "milestone" ? MILESTONE_LIFECYCLE_LABEL : LIFECYCLE_LABEL)[lifecycleStatus] ?? lifecycleStatus;
+}
+
+/** Completed, or closed by an accepted blocker. */
+function isComplete(item: LifecycleItem | undefined): boolean {
+  return item?.lifecycleStatus === "completed" || item?.lifecycleStatus === "blocker-accepted";
+}
+
+function isCancelled(item: LifecycleItem | undefined): boolean {
+  return item?.lifecycleStatus === "cancelled";
+}
+
+function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): MilestoneRead {
+  if (items) {
+    const item = items.get(row.id);
+    const done = isComplete(item);
+    const discarded = isCancelled(item);
+    return {
+      ...row,
+      status: statusLabel("milestone", item),
+      done,
+      closed: done || discarded,
+      parked: item?.lifecycleStatus === "paused",
+      discarded,
+    };
+  }
   const closed = isClosedStatus(row.status);
   const discarded = isDiscardedMilestoneStatus(row.status);
   return { ...row, done: closed && !discarded, closed, parked: row.status === "parked", discarded };
 }
 
-function toSliceRead(row: SliceRow): SliceRead {
-  return { ...row, done: isInactiveStatus(row.status) };
+function toSliceRead(row: SliceRow, items: LifecycleItems | null): SliceRead {
+  if (items) {
+    const item = items.get(`${row.milestone_id}/${row.id}`);
+    const complete = isComplete(item);
+    const cancelled = isCancelled(item);
+    return {
+      ...row,
+      status: statusLabel("slice", item),
+      done: complete || cancelled,
+      satisfiesDependents: complete || (cancelled && item?.waived === true),
+    };
+  }
+  const done = isInactiveStatus(row.status);
+  return { ...row, done, satisfiesDependents: done };
 }
 
 /** Every Milestone in workflow order (sequence, then id). Includes discarded tombstones. */
 export function readMilestones(): MilestoneRead[] {
-  return getAllMilestones().map(toMilestoneRead);
+  const items = cutoverHasRun() ? readLifecycleItems("milestone") : null;
+  return getAllMilestones().map((row) => toMilestoneRead(row, items));
 }
 
 export function readMilestone(milestoneId: string): MilestoneRead | null {
   const row = getMilestone(milestoneId);
-  return row ? toMilestoneRead(row) : null;
+  if (!row) return null;
+  return toMilestoneRead(row, cutoverHasRun() ? readLifecycleItems("milestone", milestoneId) : null);
 }
 
 /** The Slices of one Milestone in workflow order (sequence, then id). */
 export function readMilestoneSlices(milestoneId: string): SliceRead[] {
-  return getMilestoneSlices(milestoneId).map(toSliceRead);
+  const items = cutoverHasRun() ? readLifecycleItems("slice", milestoneId) : null;
+  return getMilestoneSlices(milestoneId).map((row) => toSliceRead(row, items));
 }
 
 /** `readMilestoneSlices` for many Milestones in one query. A Milestone with no Slice has no entry. */
 export function readSlicesByMilestoneIds(milestoneIds: readonly string[]): Map<string, SliceRead[]> {
+  const items = cutoverHasRun() ? readLifecycleItems("slice") : null;
   const slices = new Map<string, SliceRead[]>();
   for (const [milestoneId, rows] of getSlicesByMilestoneIds(milestoneIds)) {
-    slices.set(milestoneId, rows.map(toSliceRead));
+    slices.set(milestoneId, rows.map((row) => toSliceRead(row, items)));
   }
   return slices;
 }
 
 export function readSliceTasks(milestoneId: string, sliceId: string): TaskRead[] {
-  return getSliceTasks(milestoneId, sliceId).map((row) => ({ ...row, done: isClosedStatus(row.status) }));
+  const items = cutoverHasRun() ? readLifecycleItems("task", milestoneId, sliceId) : null;
+  return getSliceTasks(milestoneId, sliceId).map((row) => {
+    if (!items) return { ...row, done: isClosedStatus(row.status) };
+    const item = items.get(`${milestoneId}/${sliceId}/${row.id}`);
+    return { ...row, status: statusLabel("task", item), done: isComplete(item) || isCancelled(item) };
+  });
 }
 
 export interface MilestoneStatusRead {
@@ -94,6 +254,20 @@ export interface MilestoneStatusRead {
 export function readMilestoneStatus(milestoneId: string): MilestoneStatusRead | null {
   const milestone = readMilestone(milestoneId);
   if (!milestone) return null;
+  if (cutoverHasRun()) {
+    return {
+      milestone,
+      slices: readMilestoneSlices(milestoneId).map((slice) => {
+        const tasks = readSliceTasks(milestoneId, slice.id);
+        const done = tasks.filter((task) => task.done).length;
+        return {
+          id: slice.id,
+          status: slice.status,
+          taskCounts: { total: tasks.length, done, pending: tasks.length - done },
+        };
+      }),
+    };
+  }
   return {
     milestone,
     slices: getSliceStatusSummary(milestoneId).map((slice) => ({
@@ -110,12 +284,44 @@ export interface ProgressCounts {
   tasks: { total: number; done: number; pending: number };
 }
 
+function isInFlight(kind: ItemKind, item: LifecycleItem): boolean {
+  return normalizeLegacyLifecycleStatus(statusLabel(kind, item)) === "in_progress";
+}
+
+/** `readProgressCounts` from the canonical lifecycle rows. */
+function readLifecycleProgressCounts(): ProgressCounts {
+  const milestones = { total: 0, done: 0, active: 0, pending: 0, parked: 0 };
+  for (const item of readLifecycleItems("milestone").values()) {
+    if (isCancelled(item)) continue;
+    milestones.total++;
+    if (isComplete(item)) milestones.done++;
+    else if (item.lifecycleStatus === "paused") milestones.parked++;
+    else if (isInFlight("milestone", item)) milestones.active++;
+    else milestones.pending++;
+  }
+  const slices = { total: 0, done: 0, active: 0, pending: 0 };
+  for (const item of readLifecycleItems("slice").values()) {
+    slices.total++;
+    if (isComplete(item) || isCancelled(item)) slices.done++;
+    else if (isInFlight("slice", item)) slices.active++;
+    else slices.pending++;
+  }
+  const tasks = { total: 0, done: 0, pending: 0 };
+  for (const item of readLifecycleItems("task").values()) {
+    tasks.total++;
+    if (isComplete(item) || isCancelled(item)) tasks.done++;
+    else tasks.pending++;
+  }
+  return { milestones, slices, tasks };
+}
+
 /**
  * Project-wide counts for every progress surface. The Milestone counts leave
  * out discarded Milestones. A caller that needs the
  * counts to agree with its other reads calls this inside its read transaction.
  */
 export function readProgressCounts(): ProgressCounts {
+  if (cutoverHasRun()) return readLifecycleProgressCounts();
   const counts = getHierarchyCompletionCounts();
   const slicesActive = getInFlightSliceCount();
   return {

@@ -22,9 +22,11 @@ export const LIFECYCLE_SHADOW_SOURCE_FILES = Object.freeze({
 });
 const SOURCE_FILES = LIFECYCLE_SHADOW_SOURCE_FILES;
 
-// The read interface answers every decision reader. Until the read cutover it
-// must answer from these legacy readers only. The gate follows direct calls
-// only, so the row mappers that are passed to `.map()` are listed as entries.
+// The read interface answers every decision reader. The project Authority
+// Epoch chooses its read source in one function: canonical lifecycle rows
+// after the Cutover, these legacy readers before it. The gate follows direct
+// calls only, so the row mappers are listed as entries.
+const READ_INTERFACE_EPOCH_READER = "./queries.js#getProjectAuthorityRow";
 const READ_INTERFACE_ENTRIES = [
   "readMilestones",
   "readMilestone",
@@ -98,6 +100,9 @@ const DECISION_IMPORT_POLICY = Object.freeze({
       // (#1720): recentDecisions come from DB/memories, not markdown.
       "../../context-store.js#queryDecisionsFromMemories",
       "../../context-store.js#queryDecisions",
+      // Adoption selects the wording of the blocker guidance only; the
+      // validation verdict still decides the phase.
+      "../../db/milestone-closeout-readiness.js#isMilestoneLifecycleAdopted",
     ]),
   },
   validation: {
@@ -109,12 +114,16 @@ const DECISION_IMPORT_POLICY = Object.freeze({
     ]),
   },
   read: {
-    required: new Set(READ_INTERFACE_LEGACY_READERS),
+    required: new Set([READ_INTERFACE_EPOCH_READER, ...READ_INTERFACE_LEGACY_READERS]),
     approved: new Set([
+      READ_INTERFACE_EPOCH_READER,
       ...READ_INTERFACE_LEGACY_READERS,
+      "./engine.js#getDb",
+      "./lifecycle-shadow-comparison.js#compareLifecycleShadow",
       "../status-guards.js#isClosedStatus",
       "../status-guards.js#isDiscardedMilestoneStatus",
       "../status-guards.js#isInactiveStatus",
+      "../status-guards.js#normalizeLegacyLifecycleStatus",
     ]),
   },
 });
@@ -129,10 +138,10 @@ export const LIFECYCLE_SHADOW_BEHAVIORAL_WITNESSES = Object.freeze([
   witness("runtime-disagreement", "semantic-shadow-no-cutover.test.ts",
     "legacy milestone status remains public when canonical lifecycle disagrees"),
   witness("same-status-repair", "adopted-lifecycle-bypass-closure.test.ts",
-    "same-status completion timestamp repair remains available when adopted state is aligned"),
+    "same-status writes cannot stamp completion time on an adopted closed row"),
   witness("park-unpark", "park-db-sync.test.ts", "unparkMilestone updates DB status to 'active' (#2694)"),
   witness("discard", "park-milestone.test.ts",
-    "discardMilestone removes DB rows, worktree, and milestone branch"),
+    "discard tombstones an adopted milestone and removes files after the commit"),
   witness("skipped-dispatch", "dispatch-guard-closed-status.test.ts",
     "skipped prior DB slices do not block later slice dispatch"),
   witness("db-unavailable-dispatch", "dispatch-guard-closed-status.test.ts",
@@ -147,6 +156,18 @@ export const LIFECYCLE_SHADOW_BEHAVIORAL_WITNESSES = Object.freeze([
     "gsd_milestone_status handles missing DB gracefully"),
   witness("state-derivation-authority", "semantic-shadow-no-cutover.test.ts",
     "legacy validation assessment steers state when canonical lifecycle disagrees"),
+  // After the Cutover (Authority Epoch above 0) the same readers follow the
+  // canonical lifecycle rows.
+  witness("cutover-read-authority", "lifecycle-read-cutover.test.ts",
+    "the Authority Epoch switches the read interface from the legacy rows to the lifecycle rows"),
+  witness("cutover-status-response", "lifecycle-read-cutover.test.ts",
+    "after the Cutover the status tool reports the lifecycle status of the milestone, its slices and its tasks"),
+  witness("cutover-state-derivation", "lifecycle-read-cutover.test.ts",
+    "after the Cutover deriveState takes the phase and the active unit from the lifecycle rows"),
+  witness("cutover-resolve-dispatch", "lifecycle-read-cutover.test.ts",
+    "after the Cutover resolveDispatch stops on a canonically completed milestone and dispatches a canonically open one"),
+  witness("cutover-dependency-waiver", "lifecycle-read-cutover.test.ts",
+    "after the Cutover a cancelled dependency unlocks its dependent only with a Waiver"),
 ]);
 
 export function parseArgs(argv = process.argv.slice(2)) {
@@ -297,7 +318,12 @@ function dependencyFacts(roots, initializers) {
     ) {
       memberCalls.push({ receiver: node.expression.expression.text, member: node.expression.name.text });
     }
-    if (ts.isStringLiteralLike(node) && /workflow_item_lifecycles/i.test(node.text)) sql.push(node.text);
+    if (
+      (ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddleOrTemplateTail(node))
+      && /workflow_item_lifecycles/i.test(node.text)
+    ) {
+      sql.push(node.text);
+    }
     ts.forEachChild(node, visit);
   }
 
@@ -420,7 +446,7 @@ function functionClosureFactsFromRoots(sourceFile, initialRoots) {
   return dependencyFacts(roots, new Map());
 }
 
-function assertDecisionBoundary(entryName, imports, facts, importPolicy) {
+function assertDecisionBoundary(entryName, imports, facts, importPolicy, readsCanonicalRows = false) {
   const reachedImports = new Set();
   for (const call of facts.calls) {
     const bindingKey = importBindingKey(imports.get(call));
@@ -438,7 +464,7 @@ function assertDecisionBoundary(entryName, imports, facts, importPolicy) {
   }
   for (const call of facts.calls) {
     const binding = imports.get(call);
-    if (isCanonicalImport(binding)) {
+    if (!readsCanonicalRows && isCanonicalImport(binding)) {
       throw new Error(`${entryName} calls canonical lifecycle binding ${call}`);
     }
     const bindingKey = importBindingKey(binding);
@@ -451,7 +477,7 @@ function assertDecisionBoundary(entryName, imports, facts, importPolicy) {
     const memberBinding = binding?.imported === "*"
       ? { ...binding, imported: call.member }
       : null;
-    if (memberBinding && isCanonicalImport(memberBinding)) {
+    if (!readsCanonicalRows && memberBinding && isCanonicalImport(memberBinding)) {
       throw new Error(`${entryName} calls canonical lifecycle binding ${call.receiver}.${call.member}`);
     }
     const bindingKey = importBindingKey(memberBinding);
@@ -459,7 +485,12 @@ function assertDecisionBoundary(entryName, imports, facts, importPolicy) {
       throw new Error(`${entryName} calls unapproved imported decision binding ${bindingKey}`);
     }
   }
-  if (facts.sql.length > 0) throw new Error(`${entryName} queries canonical lifecycle rows`);
+  if (readsCanonicalRows && facts.sql.length === 0) {
+    throw new Error(`${entryName} does not query canonical lifecycle rows`);
+  }
+  if (!readsCanonicalRows && facts.sql.length > 0) {
+    throw new Error(`${entryName} queries canonical lifecycle rows`);
+  }
 }
 
 function functionClosureFacts(sourceFile, entryNames) {
@@ -480,6 +511,30 @@ function analyzeDecisionBoundary(file, source, entryNames, importPolicy) {
     functionClosureFacts(sourceFile, entryNames),
     importPolicy,
   );
+}
+
+// The inverse of the no-cutover decision boundary. The read interface is the
+// module that reads canonical lifecycle rows, and one function chooses the
+// read source from the project Authority Epoch. The legacy readers stay
+// required for a Project that has not cut over.
+function analyzeReadInterfaceBoundary(source) {
+  const sourceFile = parseSource(SOURCE_FILES.read, source);
+  const imports = bindingMap(sourceFile);
+  assertDecisionBoundary(
+    "read interface",
+    imports,
+    functionClosureFacts(sourceFile, READ_INTERFACE_ENTRIES),
+    DECISION_IMPORT_POLICY.read,
+    true,
+  );
+  const epochReaders = [...functionMap(sourceFile).values()].filter((fn) => fn.body
+    && [...dependencyFacts([fn.body], new Map()).calls]
+      .some((call) => importBindingKey(imports.get(call)) === READ_INTERFACE_EPOCH_READER));
+  if (epochReaders.length !== 1) {
+    throw new Error(
+      `read interface must choose its read source in one function; ${epochReaders.length} functions read the Authority Epoch`,
+    );
+  }
 }
 
 function analyzeResolveDispatchBoundary(source) {
@@ -688,12 +743,7 @@ export function analyzeLifecycleShadowSources(sources) {
       DECISION_IMPORT_POLICY.state,
     )],
     ["validation-assessment-authority", () => analyzeValidationAssessmentBoundary(sources.validation)],
-    ["read-interface-legacy-authority", () => analyzeDecisionBoundary(
-      SOURCE_FILES.read,
-      sources.read,
-      READ_INTERFACE_ENTRIES,
-      DECISION_IMPORT_POLICY.read,
-    )],
+    ["read-interface-epoch-authority", () => analyzeReadInterfaceBoundary(sources.read)],
     ["closed-local-inputs", () => analyzeLocalInputBoundary(sources.gate)],
   ];
 

@@ -2,11 +2,13 @@
 // File Purpose: DB-backed GSD state derivation pipeline stage.
 // Post-cutover (T007) this module is the sole state authority on the live
 // derive path: DB rows decide phase/registry/progress. Item status answers
-// (done, parked, discarded) come from the read interface db/lifecycle-read.ts.
+// (done, parked, discarded, dependency satisfaction) come from the read
+// interface db/lifecycle-read.ts, which answers from canonical lifecycle rows
+// after the Authority Epoch Cutover and from legacy rows before it.
 // Markdown state projections on disk (STATE.md, roadmaps, plans, summaries)
 // are never parsed as authority here; DB-unavailable fails closed in db-open.ts.
-// Canonical-lifecycle read authority (handleAllSlicesDone +
-// resolveMilestoneValidationVerdict) is pinned by D005 and unchanged.
+// The validation verdict (handleAllSlicesDone +
+// resolveMilestoneValidationVerdict) still reads the legacy assessment (D005).
 
 import type { ActiveRef, GSDState, MilestoneRegistryEntry, Phase } from '../../types.js';
 import { parseProject } from '../../schemas/parsers.js';
@@ -342,8 +344,8 @@ async function handleAllSlicesDone(
 }
 
 function resolveSliceDependencies(activeMilestoneSlices: SliceRead[]): { activeSlice: ActiveRef | null, activeSliceRow: SliceRead | null } {
-  const doneSliceIds = new Set(
-    activeMilestoneSlices.filter(s => s.done).map(s => s.id)
+  const satisfiedDependencyIds = new Set(
+    activeMilestoneSlices.filter(s => s.satisfiesDependents).map(s => s.id)
   );
 
   const sliceLock = process.env.GSD_PARALLEL_WORKER ? process.env.GSD_SLICE_LOCK : undefined;
@@ -359,7 +361,7 @@ function resolveSliceDependencies(activeMilestoneSlices: SliceRead[]): { activeS
 
   for (const s of activeMilestoneSlices) {
     if (s.done) continue;
-    if (s.depends.every(dep => doneSliceIds.has(dep))) {
+    if (s.depends.every(dep => satisfiedDependencyIds.has(dep))) {
       return { activeSlice: { id: s.id, title: s.title }, activeSliceRow: s };
     }
   }
