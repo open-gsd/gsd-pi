@@ -45,6 +45,7 @@ import { effectiveLockFile } from "./session-lock.js";
 import {
   isInFlightRuntimePhase,
   listUnitRuntimeRecords,
+  listUnitRuntimeWorkRoots,
   readUnitRuntimeRecord,
   recordUnitEnd,
   type AutoUnitRuntimeRecord,
@@ -368,7 +369,10 @@ export function formatCrashInfo(lock: LockData): string {
  */
 export function emitCrashRecoveredUnitEnd(basePath: string, lock: LockData): void {
   if (!lock.unitType || !lock.unitId || lock.unitType === "starting") return;
-  emitOpenUnitEndForUnit(basePath, lock.unitType, lock.unitId, "crash-recovered");
+  // The crashed session may have run the unit in a worktree; its record is there.
+  for (const root of new Set([basePath, ...listUnitRuntimeWorkRoots(lock.unitType, lock.unitId)])) {
+    emitOpenUnitEndForUnit(root, lock.unitType, lock.unitId, "crash-recovered");
+  }
 }
 
 /**

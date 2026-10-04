@@ -9,6 +9,8 @@
 import { _getAdapter, getDb, immediateTransaction, isDbAvailable, transaction } from "../engine.js";
 
 export interface UnitRuntimeRow {
+  /** Real path of the worktree or project root that runs the unit. */
+  work_root: string;
   unit_type: string;
   unit_id: string;
   started_at: number;
@@ -34,6 +36,7 @@ export interface UnitRuntimeRow {
 }
 
 const UNIT_RUNTIME_COLUMNS = [
+  "work_root",
   "unit_type",
   "unit_id",
   "started_at",
@@ -58,18 +61,20 @@ const UNIT_RUNTIME_COLUMNS = [
   "recovery_json",
 ] as const satisfies readonly (keyof UnitRuntimeRow)[];
 
-export function readUnitRuntimeRow(unitType: string, unitId: string): UnitRuntimeRow | null {
+export function readUnitRuntimeRow(workRoot: string, unitType: string, unitId: string): UnitRuntimeRow | null {
   if (!isDbAvailable()) return null;
   const row = _getAdapter()!.prepare(
-    `SELECT * FROM unit_runtime_records WHERE unit_type = :unit_type AND unit_id = :unit_id`,
-  ).get({ ":unit_type": unitType, ":unit_id": unitId });
+    `SELECT * FROM unit_runtime_records
+     WHERE work_root = :work_root AND unit_type = :unit_type AND unit_id = :unit_id`,
+  ).get({ ":work_root": workRoot, ":unit_type": unitType, ":unit_id": unitId });
   return (row as unknown as UnitRuntimeRow | undefined) ?? null;
 }
 
+/** Rows of every work root. A row belongs to the session that runs in its work root. */
 export function listUnitRuntimeRows(): UnitRuntimeRow[] {
   if (!isDbAvailable()) return [];
   return _getAdapter()!.prepare(
-    `SELECT * FROM unit_runtime_records ORDER BY unit_type, unit_id`,
+    `SELECT * FROM unit_runtime_records ORDER BY work_root, unit_type, unit_id`,
   ).all() as unknown as UnitRuntimeRow[];
 }
 
@@ -79,12 +84,13 @@ export function listUnitRuntimeRows(): UnitRuntimeRow[] {
  * write. `next` returns the row to store.
  */
 export function updateUnitRuntimeRow(
+  workRoot: string,
   unitType: string,
   unitId: string,
   next: (prev: UnitRuntimeRow | null) => UnitRuntimeRow,
 ): UnitRuntimeRow {
   return immediateTransaction(() => {
-    const row = next(readUnitRuntimeRow(unitType, unitId));
+    const row = next(readUnitRuntimeRow(workRoot, unitType, unitId));
     getDb().prepare(
       `INSERT OR REPLACE INTO unit_runtime_records (${UNIT_RUNTIME_COLUMNS.join(", ")})
        VALUES (${UNIT_RUNTIME_COLUMNS.map((column) => `:${column}`).join(", ")})`,
@@ -93,12 +99,13 @@ export function updateUnitRuntimeRow(
   });
 }
 
-export function deleteUnitRuntimeRow(unitType: string, unitId: string): void {
+export function deleteUnitRuntimeRow(workRoot: string, unitType: string, unitId: string): void {
   if (!isDbAvailable()) return;
   transaction(() => {
     getDb().prepare(
-      `DELETE FROM unit_runtime_records WHERE unit_type = :unit_type AND unit_id = :unit_id`,
-    ).run({ ":unit_type": unitType, ":unit_id": unitId });
+      `DELETE FROM unit_runtime_records
+       WHERE work_root = :work_root AND unit_type = :unit_type AND unit_id = :unit_id`,
+    ).run({ ":work_root": workRoot, ":unit_type": unitType, ":unit_id": unitId });
   });
 }
 

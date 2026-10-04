@@ -29,6 +29,7 @@ import {
   readHookStateJson,
   writeHookStateJson,
 } from "../db/writers/runtime-control.ts";
+import { emitCrashRecoveredUnitEnd } from "../crash-recovery.ts";
 import { emitJournalEvent } from "../journal.ts";
 import {
   checkPostUnitHooks,
@@ -47,6 +48,7 @@ import { hookStateScope } from "../rule-registry.ts";
 import { executeSaveGateResult } from "../tools/workflow-tool-executors.ts";
 import {
   clearUnitRuntimeRecord,
+  listUnitRuntimeRecords,
   readUnitRuntimeRecord,
   recordUnitEnd,
   recordUnitHarnessAbort,
@@ -299,6 +301,50 @@ test("a hook-state.json from an older build with no hook state row restores noth
   // The first hook cycle is not counted as already spent.
   persistHookState(base);
   assert.deepEqual(JSON.parse(readHookStateJson(hookStateScope(base))!).cycleCounts, {});
+});
+
+test("/gsd at the project root keeps the record of a unit that auto-mode runs in a worktree", (t) => {
+  const base = makeProject(t);
+  const worktree = join(base, ".gsd", "worktrees", "M001");
+  mkdirSync(worktree, { recursive: true });
+  const unitId = "M001/S01/T01";
+
+  // Terminal 1: auto-mode runs execute-task in the worktree. One timeout
+  // recovery is spent and the harness aborted the turn.
+  writeUnitRuntimeRecord(worktree, "execute-task", unitId, 1, { phase: "dispatched", recoveryAttempts: 1 });
+  recordUnitHarnessAbort(worktree, "execute-task", unitId, 1, { kind: "tool-loop-guard", reason: "loop" });
+  // A stale record of an earlier session at the project root.
+  writeUnitRuntimeRecord(base, "plan-slice", "M001/S01", 1, { phase: "dispatched" });
+
+  // Terminal 2: /gsd at the project root runs the self-heal.
+  assert.deepEqual(
+    _selfHealRuntimeRecordsForTest(base, { ui: { notify: () => {} } } as any),
+    { cleared: 1 },
+    "self-heal clears the project-root record only",
+  );
+
+  const live = readUnitRuntimeRecord(worktree, "execute-task", unitId);
+  assert.equal(live?.phase, "dispatched", "the idle watchdog still has its record");
+  assert.equal(live?.recoveryAttempts, 1, "the recovery budget is not reset");
+  assert.equal(live?.harnessAbort?.kind, "tool-loop-guard", "the harness abort still blocks result-save tools");
+  assert.deepEqual(listUnitRuntimeRecords(worktree).map((record) => record.unitId), [unitId]);
+  assert.deepEqual(listUnitRuntimeRecords(base), []);
+  assert.equal(readUnitRuntimeRecord(base, "execute-task", unitId), null, "the project root does not read the worktree record");
+});
+
+test("crash recovery at the project root records the outcome of a unit that ran in a worktree", (t) => {
+  const base = makeProject(t);
+  const worktree = join(base, ".gsd", "worktrees", "M001");
+  mkdirSync(worktree, { recursive: true });
+  writeUnitRuntimeRecord(worktree, "hook/review-arbiter", "M001/S01", 1, { phase: "dispatched" });
+
+  emitCrashRecoveredUnitEnd(base, { unitType: "hook/review-arbiter", unitId: "M001/S01" } as any);
+
+  assert.deepEqual(
+    readUnitRuntimeRecord(worktree, "hook/review-arbiter", "M001/S01")?.unitEnd,
+    { status: "crash-recovered", artifactVerified: false },
+  );
+  assert.deepEqual(listUnitRuntimeRecords(base), [], "no record is created at the project root");
 });
 
 test("the database replacement fence rejects every runtime-control write", (t) => {

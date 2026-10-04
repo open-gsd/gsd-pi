@@ -73,11 +73,12 @@ export function cleanStaleRuntimeUnits(
   hasMilestoneSummary: (mid: string) => boolean,
 ): number {
   // The database rows are the records that are read; the files below are
-  // their diagnostic copies. Both are cleared by the same rule.
+  // their diagnostic copies. Both are cleared by the same rule. A closed
+  // milestone has no live unit, so its rows are cleared in every work root.
   try {
     for (const row of listUnitRuntimeRows()) {
       if (shouldRemoveRuntimeUnit(unitRuntimeFileName(row.unit_type, row.unit_id), hasMilestoneSummary)) {
-        deleteUnitRuntimeRow(row.unit_type, row.unit_id);
+        deleteUnitRuntimeRow(row.work_root, row.unit_type, row.unit_id);
       }
     }
   } catch (err) {

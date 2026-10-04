@@ -31,6 +31,7 @@ export function hasRuntimeControlSchema(db: DbAdapter): boolean {
 export function createRuntimeControlSchema(db: DbAdapter): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS unit_runtime_records (
+      work_root TEXT NOT NULL,
       unit_type TEXT NOT NULL,
       unit_id TEXT NOT NULL,
       started_at INTEGER NOT NULL,
@@ -53,7 +54,7 @@ export function createRuntimeControlSchema(db: DbAdapter): void {
       end_artifact_verified INTEGER,
       end_error TEXT,
       recovery_json TEXT,
-      PRIMARY KEY (unit_type, unit_id)
+      PRIMARY KEY (work_root, unit_type, unit_id)
     );
 
     CREATE TABLE IF NOT EXISTS hook_state (

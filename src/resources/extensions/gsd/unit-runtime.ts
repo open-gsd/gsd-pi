@@ -2,7 +2,8 @@
 // File Purpose: Unit runtime record — recovery budget, harness abort, unit-end
 // outcome and progress for one unit run.
 //
-// The database row is the only record that is read. The JSON file under
+// The database row is the only record that is read. A row belongs to one work
+// root (a worktree or the project root). The JSON file under
 // .gsd/runtime/units is a diagnostic copy written after each row change; nothing
 // reads it back. With no database open there is no record: writes return the
 // computed value without storing it and reads return null.
@@ -12,6 +13,7 @@ import { join } from "node:path";
 import { atomicWriteSync } from "./atomic-write.js";
 import {
   gsdRoot,
+  normalizeRealPath,
   relTaskFile,
   resolveTaskFile,
 } from "./paths.js";
@@ -106,6 +108,11 @@ function diagnosticPath(basePath: string, unitType: string, unitId: string): str
   return join(gsdRoot(basePath), "runtime", "units", unitRuntimeFileName(unitType, unitId));
 }
 
+/** Work root of the rows for one base path: its real path. */
+function unitRuntimeWorkRoot(basePath: string): string {
+  return normalizeRealPath(basePath);
+}
+
 function recordFromRow(row: UnitRuntimeRow): AutoUnitRuntimeRecord {
   return {
     version: 1,
@@ -142,8 +149,9 @@ function recordFromRow(row: UnitRuntimeRow): AutoUnitRuntimeRecord {
   };
 }
 
-function rowFromRecord(record: AutoUnitRuntimeRecord): UnitRuntimeRow {
+function rowFromRecord(workRoot: string, record: AutoUnitRuntimeRecord): UnitRuntimeRow {
   return {
+    work_root: workRoot,
     unit_type: record.unitType,
     unit_id: record.unitId,
     started_at: record.startedAt,
@@ -181,10 +189,12 @@ function storeRecord(
   build: (prev: AutoUnitRuntimeRecord | null) => AutoUnitRuntimeRecord,
 ): AutoUnitRuntimeRecord {
   if (!isDbAvailable()) return build(null);
+  const workRoot = unitRuntimeWorkRoot(basePath);
   const record = recordFromRow(updateUnitRuntimeRow(
+    workRoot,
     unitType,
     unitId,
-    (prev) => rowFromRecord(build(prev ? recordFromRow(prev) : null)),
+    (prev) => rowFromRecord(workRoot, build(prev ? recordFromRow(prev) : null)),
   ));
   try {
     atomicWriteSync(diagnosticPath(basePath, unitType, unitId), JSON.stringify(record, null, 2) + "\n", "utf-8");
@@ -338,8 +348,8 @@ export function clearUnitHarnessAbort(
   });
 }
 
-export function readUnitRuntimeRecord(_basePath: string, unitType: string, unitId: string): AutoUnitRuntimeRecord | null {
-  const row = readUnitRuntimeRow(unitType, unitId);
+export function readUnitRuntimeRecord(basePath: string, unitType: string, unitId: string): AutoUnitRuntimeRecord | null {
+  const row = readUnitRuntimeRow(unitRuntimeWorkRoot(basePath), unitType, unitId);
   return row ? recordFromRow(row) : null;
 }
 
@@ -355,14 +365,22 @@ export function readUnitHarnessAbort(
 }
 
 export function clearUnitRuntimeRecord(basePath: string, unitType: string, unitId: string): void {
-  deleteUnitRuntimeRow(unitType, unitId);
+  deleteUnitRuntimeRow(unitRuntimeWorkRoot(basePath), unitType, unitId);
   const path = diagnosticPath(basePath, unitType, unitId);
   if (existsSync(path)) unlinkSync(path);
 }
 
-/** Return every unit runtime record in the database. */
-export function listUnitRuntimeRecords(_basePath: string): AutoUnitRuntimeRecord[] {
-  return listUnitRuntimeRows().map(recordFromRow);
+/** Return the unit runtime records of one work root. */
+export function listUnitRuntimeRecords(basePath: string): AutoUnitRuntimeRecord[] {
+  const workRoot = unitRuntimeWorkRoot(basePath);
+  return listUnitRuntimeRows().filter((row) => row.work_root === workRoot).map(recordFromRow);
+}
+
+/** Work roots that hold a record for the unit. */
+export function listUnitRuntimeWorkRoots(unitType: string, unitId: string): string[] {
+  return listUnitRuntimeRows()
+    .filter((row) => row.unit_type === unitType && row.unit_id === unitId)
+    .map((row) => row.work_root);
 }
 
 export async function inspectExecuteTaskDurability(

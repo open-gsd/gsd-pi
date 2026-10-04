@@ -773,9 +773,12 @@ as authority; the files that remain are diagnostic copies that nothing reads.
 
 ##### `unit_runtime_records`
 
-One row per unit (`unit_type`, `unit_id`), replaced on each new run.
+One row per work root and unit (`work_root`, `unit_type`, `unit_id`), replaced on
+each new run. A reader sees only the rows of its own work root, so a session at
+the project root does not read or clear the rows of a session in a worktree.
 
 ```
+work_root                 TEXT NOT NULL     ← real path of the worktree or project root that runs the unit
 unit_type                 TEXT NOT NULL
 unit_id                   TEXT NOT NULL
 started_at                INTEGER NOT NULL  ← run identity (epoch ms)
@@ -798,7 +801,7 @@ end_status                TEXT              ← unit-end outcome of the latest r
 end_artifact_verified     INTEGER
 end_error                 TEXT
 recovery_json             TEXT              ← execute-task durability snapshot (diagnostic)
-PRIMARY KEY (unit_type, unit_id)
+PRIMARY KEY (work_root, unit_type, unit_id)
 ```
 
 - Diagnostic copy: `.gsd/runtime/units/<type>-<id>.json`.
