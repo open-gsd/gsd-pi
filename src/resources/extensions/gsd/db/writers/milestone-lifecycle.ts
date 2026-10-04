@@ -22,7 +22,12 @@ import {
   recordRequirementDisposition,
   terminateRecoveryWaiver,
 } from "./task-recovery.js";
-import { ensurePendingSliceQ8, invalidateSliceEvidence } from "./slice-companion-state.js";
+import {
+  ensurePendingSliceQ8,
+  invalidateSliceEvidence,
+  removeInvalidatedRows,
+  type InvalidatedEvidence,
+} from "./slice-companion-state.js";
 
 export interface MilestoneCompletionHierarchyInput {
   milestoneId: string;
@@ -66,6 +71,8 @@ export interface MilestoneReopenHierarchyResult {
   reopenedTaskIds: string[];
   revokedWaiverIds: string[];
   supersedingDispositionIds: string[];
+  /** The rows the reopen removed: per Slice id, and under "milestone" the validation verdict. */
+  invalidatedEvidence: Record<string, InvalidatedEvidence>;
   shadows: LifecycleShadowRecord[];
 }
 
@@ -726,6 +733,7 @@ export function reopenMilestoneHierarchy(
     : revokeCancellationWaivers(context, milestoneId, reason, reopenedAt);
   const reopenedTaskIds: string[] = [];
   const reopenedSliceIds: string[] = [];
+  const invalidatedEvidence: Record<string, InvalidatedEvidence> = {};
   if (!keepCompleted) {
   for (const task of tasks) {
     const taskId = task.taskId!;
@@ -781,15 +789,16 @@ export function reopenMilestoneHierarchy(
       throw new Error(`Milestone reopen must update Slice ${sliceId}`);
     }
     ensurePendingSliceQ8(context, { milestoneId, sliceId });
-    invalidateSliceEvidence(context, { milestoneId, sliceId });
+    invalidatedEvidence[sliceId] = invalidateSliceEvidence(context, { milestoneId, sliceId });
     reopenedSliceIds.push(sliceId);
   }
   }
   // A reopened Milestone must be validated again before it closes: the stored
   // validation verdict judged the Milestone as it was.
-  getDb().prepare(
-    "DELETE FROM assessments WHERE milestone_id = :milestone_id AND scope = 'milestone-validation'",
-  ).run({ ":milestone_id": milestoneId });
+  invalidatedEvidence["milestone"] = removeInvalidatedRows(
+    [["assessments", "milestone_id = :milestone_id AND scope = 'milestone-validation'"]],
+    { ":milestone_id": milestoneId },
+  );
 
   const milestoneLifecycle = adoptOrTransitionLifecycle(context, {
     itemKind: "milestone",
@@ -832,6 +841,7 @@ export function reopenMilestoneHierarchy(
     reopenedSliceIds,
     reopenedTaskIds,
     ...waiverResult,
+    invalidatedEvidence,
     shadows,
   };
 }

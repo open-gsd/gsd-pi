@@ -6,6 +6,7 @@
 // rows; they never read `.gsd/exec/<id>.meta.json`.
 
 import { getDb, transaction } from "../engine.js";
+import { findWorktreeSegment } from "../../worktree-root.js";
 
 export interface ExecRunRow {
   id: string;
@@ -39,9 +40,19 @@ export function uatAttemptRef(milestoneId: string, sliceId: string, attempt: num
 /**
  * The Attempt a run belongs to, read in the transaction that stores the run.
  * A UAT run belongs to the run-uat attempt that is not saved yet. Another run
- * belongs to the one Task Attempt that is not settled; with none, or with more
- * than one (parallel workers), the run is unbound and proves nothing.
+ * belongs to the Task Attempt of its caller that is not settled. The caller is
+ * known by its work root: a run inside the worktree of a Milestone belongs to
+ * an Attempt of that Milestone, so parallel workers each bind their own runs.
+ * With no such Attempt, or with more than one, the run is unbound and proves
+ * nothing.
  */
+/** Name of the GSD worktree a path is in ("" outside one). A Milestone worktree has the Milestone id as its name. */
+function worktreeNameOf(path: string): string {
+  const normalized = path.replaceAll("\\", "/");
+  const segment = findWorktreeSegment(normalized);
+  return segment ? normalized.slice(segment.afterWorktrees).split("/")[0] ?? "" : "";
+}
+
 function currentAttemptRef(input: ExecRunInput): string | null {
   if (input.kind === "uat_exec") {
     const row = getDb().prepare(`
@@ -59,8 +70,12 @@ function currentAttemptRef(input: ExecRunInput): string | null {
       ON lifecycle.lifecycle_id = attempt.lifecycle_id
      AND lifecycle.project_id = attempt.project_id
     WHERE lifecycle.item_kind = 'task' AND attempt.attempt_state != 'settled'
+      AND (
+        NOT EXISTS (SELECT 1 FROM milestones WHERE id = :worktree)
+        OR lifecycle.milestone_id = :worktree
+      )
     LIMIT 2
-  `).all();
+  `).all({ ":worktree": worktreeNameOf(input.cwd) });
   return open.length === 1 ? String(open[0]!["attempt_id"]) : null;
 }
 

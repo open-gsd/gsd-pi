@@ -16,7 +16,7 @@ import {
 } from "./lifecycle-commands.js";
 import { compareLifecycleShadow, normalizeLegacyLifecycleStatus } from "../lifecycle-shadow-comparison.js";
 import { terminalizeTaskExecutionDispatch } from "./task-execution.js";
-import { ensurePendingSliceQ8, invalidateSliceEvidence } from "./slice-companion-state.js";
+import { ensurePendingSliceQ8, invalidateSliceEvidence, type InvalidatedEvidence } from "./slice-companion-state.js";
 
 interface SliceIdentity {
   milestoneId: string;
@@ -71,6 +71,7 @@ export interface SliceReopenHierarchyResult {
   sliceLifecycleId: string;
   reopenedTaskIds: string[];
   revokedWaiverIds: string[];
+  invalidatedEvidence: InvalidatedEvidence;
   shadows: LifecycleShadowRecord[];
 }
 
@@ -1236,7 +1237,7 @@ export function reopenSliceHierarchy(
   `).run({ ":milestone_id": slice.milestoneId, ":slice_id": slice.sliceId });
   if (Number((updated as { changes?: number }).changes ?? 0) !== 1) throw new Error("Slice reopen must update one Slice");
   ensurePendingSliceQ8(context, slice);
-  invalidateSliceEvidence(context, slice);
+  const invalidatedEvidence = invalidateSliceEvidence(context, slice);
   const shadows = [
     readLifecycleShadowComparison(context, { itemKind: "slice", ...slice }),
     ...reopenedTaskIds.map((taskId) => readLifecycleShadowComparison(context, { itemKind: "task", ...slice, taskId })),
@@ -1244,7 +1245,7 @@ export function reopenSliceHierarchy(
   if (shadows.some((shadow) => shadow.kind !== "match" && shadow.kind !== "semantic_match_exact_delta")) {
     throw new Error("Slice reopen did not converge canonical and legacy lifecycle state");
   }
-  return { sliceLifecycleId: sliceLifecycle.lifecycleId, reopenedTaskIds, revokedWaiverIds, shadows };
+  return { sliceLifecycleId: sliceLifecycle.lifecycleId, reopenedTaskIds, revokedWaiverIds, invalidatedEvidence, shadows };
 }
 
 /**

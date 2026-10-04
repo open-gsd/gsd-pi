@@ -694,10 +694,10 @@ describe("verification-gate: execution", () => {
       );
     });
 
-    test("a claim can name its run by the run id", () => {
+    test("a claim that names a run id, not the script of the run, is not evidence", () => {
       assert.deepEqual(
-        hostRecordedTaskEvidence([claim("gsd_exec[run-1] artifact check")], [run("run-1", "node check.js")]),
-        [{ command: "node check.js", exitCode: 0, verdict: "pass", durationMs: 40 }],
+        hostRecordedTaskEvidence([claim("npm test (run run-1)")], [run("run-1", "true")]),
+        [],
       );
     });
 

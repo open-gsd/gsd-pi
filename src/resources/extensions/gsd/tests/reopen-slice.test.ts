@@ -135,6 +135,13 @@ test('handleReopenSlice: the old UAT verdict and the old claimed evidence do not
   assert.equal(getUatRetryAttempts('M001', 'S01'), 0, 'the redo gets a new run-uat budget');
   assert.equal(readExecRun('run-before-reopen')?.attempt_ref, null, 'the old UAT run belongs to no attempt');
   assert.equal(existsSync(assessmentFile), false, 'the ASSESSMENT projection must be removed');
+  // The removed content is still in the database, in the reopen event.
+  const reopened = JSON.parse(String(_getAdapter()!.prepare(
+    "SELECT payload_json FROM workflow_domain_events WHERE event_type = 'slice.reopened'",
+  ).get()?.['payload_json']));
+  assert.equal(reopened.invalidatedEvidence.assessments[0].full_content, 'verdict: PASS');
+  assert.equal(reopened.invalidatedEvidence.verification_evidence[0].command, 'npm test');
+  assert.equal(reopened.invalidatedEvidence.quality_gates[0].rationale, 'UAT PASS');
 });
 
 test('handleReopenSlice: works with a single task', async () => {

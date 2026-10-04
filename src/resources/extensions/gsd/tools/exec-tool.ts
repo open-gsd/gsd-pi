@@ -238,6 +238,7 @@ interface UatExecBinding {
 /**
  * Store the run as an exec_runs row. Evidence checks read that row, so a run
  * outside a GSD project (no workflow database) is not evidence of anything.
+ * Returns the reason when a project database exists and the run is not stored.
  */
 function recordRun(
   baseDir: string,
@@ -245,8 +246,27 @@ function recordRun(
   script: string,
   startedAt: Date,
   uat: UatExecBinding | undefined,
+): string | null {
+  try {
+    const opened = openExistingWorkflowDatabase(baseDir);
+    if (!opened.ok) {
+      if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") return null;
+      return opened.error?.message ?? `workflow database ${opened.reason}`;
+    }
+    storeRun(baseDir, result, script, startedAt, uat);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+function storeRun(
+  baseDir: string,
+  result: ExecSandboxResult,
+  script: string,
+  startedAt: Date,
+  uat: UatExecBinding | undefined,
 ): void {
-  if (!openExistingWorkflowDatabase(baseDir).ok) return;
   const hash = createHash("sha256");
   for (const path of [result.stdout_path, result.stderr_path]) hash.update(readFileSync(path));
   recordExecRun({
@@ -293,9 +313,10 @@ export async function executeGsdExec(
   );
   const run = deps.run ?? runExecSandbox;
 
+  const startedAt = (deps.now ?? (() => new Date()))();
+  let result: ExecSandboxResult;
   try {
-    const startedAt = (deps.now ?? (() => new Date()))();
-    const result = await run(
+    result = await run(
       {
         runtime,
         script,
@@ -305,8 +326,6 @@ export async function executeGsdExec(
       },
       opts,
     );
-    recordRun(deps.baseDir, result, script, startedAt, uat);
-    return formatResult(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -315,6 +334,18 @@ export async function executeGsdExec(
       isError: true,
     };
   }
+  const formatted = formatResult(result);
+  const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat);
+  if (notRecorded === null) return formatted;
+  return {
+    ...formatted,
+    content: [{
+      type: "text",
+      text: `${formatted.content[0]!.text}\n--- warning ---\nThe command ran, but the host did not record this run: ${notRecorded}. ` +
+        "This run is not verification or UAT evidence. Do not run the command again only to get the output.",
+    }],
+    details: { ...formatted.details, run_not_recorded: notRecorded },
+  };
 }
 
 export async function executeUatExec(

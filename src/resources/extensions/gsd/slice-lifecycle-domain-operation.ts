@@ -242,6 +242,7 @@ export function reopenSlice(input: {
           audit,
           reopenedTaskIds: result.reopenedTaskIds,
           revokedWaiverIds: result.revokedWaiverIds,
+          invalidatedEvidence: result.invalidatedEvidence,
           lifecycleShadowComparisons: shadowPayload(result),
         },
         destinations: ["projection"],

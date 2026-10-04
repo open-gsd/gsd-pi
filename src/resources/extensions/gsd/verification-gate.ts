@@ -159,9 +159,8 @@ export interface HostExecRun {
  * The agent's claimed evidence, replaced by the host's own record of it. The
  * claim counts only when it qualifies and the host ran every claimed command
  * through gsd_exec in this Attempt with success. A claimed command names its
- * run by the run id, or by the exact script (then the latest run of that
- * script counts). One claimed command without such a run voids the whole set:
- * the result is empty.
+ * run by the exact script, and the latest run of that script counts. One
+ * claimed command without such a run voids the whole set: the result is empty.
  */
 export function hostRecordedTaskEvidence(
   claimed: TaskVerificationEvidence[],
@@ -173,8 +172,7 @@ export function hostRecordedTaskEvidence(
   const recorded = new Map<string, TaskVerificationEvidence>();
   for (const record of claimed) {
     // The host stores a command with secrets redacted, so compare in that form.
-    const run = attemptRuns.find((candidate) => record.command.includes(candidate.id))
-      ?? latestRun.get(normalizeCommandIdentity(redactSecrets(record.command)));
+    const run = latestRun.get(normalizeCommandIdentity(redactSecrets(record.command)));
     if (!run?.succeeded) return [];
     recorded.set(run.id, { command: run.command, exitCode: 0, verdict: "pass", durationMs: run.durationMs });
   }

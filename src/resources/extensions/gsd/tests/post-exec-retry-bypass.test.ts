@@ -21,7 +21,7 @@ import {
 } from "../auto-verification.ts";
 import { AutoSession } from "../auto/session.ts";
 import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, insertVerificationEvidence, _getAdapter } from "../gsd-db.ts";
-import { recordExecRun } from "../db/writers/exec-runs.ts";
+import { readExecRun, recordExecRun } from "../db/writers/exec-runs.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { _clearGsdRootCache } from "../paths.ts";
 import { initMetrics, resetMetrics } from "../metrics.ts";
@@ -238,7 +238,7 @@ function createBasicTask(verify = "echo pass"): void {
 }
 
 /** `whileRunning` runs between the claim and the settle, as the executor does. */
-function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}): string {
+function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}, milestoneId = "M001"): string {
   const adapter = _getAdapter();
   assert.ok(adapter);
   adapter.exec(`
@@ -246,13 +246,13 @@ function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}
       worker_id, host, pid, started_at, version, last_heartbeat_at, status,
       project_root_realpath
     ) VALUES (
-      'verification-worker', 'test-host', 1, '2026-07-13T00:00:00.000Z', 'test',
+      'verification-worker-${milestoneId}', 'test-host', 1, '2026-07-13T00:00:00.000Z', 'test',
       '2026-07-13T00:00:00.000Z', 'active', '${tempDir.replaceAll("'", "''")}'
     );
     INSERT INTO milestone_leases (
       milestone_id, worker_id, fencing_token, acquired_at, expires_at, status
     ) VALUES (
-      'M001', 'verification-worker', 7, '2026-07-13T00:00:00.000Z',
+      '${milestoneId}', 'verification-worker-${milestoneId}', 7, '2026-07-13T00:00:00.000Z',
       '2099-07-13T00:00:00.000Z', 'held'
     );
     INSERT INTO unit_dispatches (
@@ -260,15 +260,15 @@ function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}
       milestone_id, slice_id, task_id, unit_type, unit_id,
       status, attempt_n, started_at
     ) VALUES (
-      'verification-trace', 'verification-turn', 'verification-worker', 7,
-      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01',
+      'verification-trace-${milestoneId}', 'verification-turn-${milestoneId}', 'verification-worker-${milestoneId}', 7,
+      '${milestoneId}', 'S01', 'T01', 'execute-task', '${milestoneId}/S01/T01',
       'claimed', 1, '2026-07-13T00:00:00.000Z'
     );
   `);
   const fence = readDomainOperationFence();
   executeDomainOperation({
     operationType: "test.task.ready",
-    idempotencyKey: "fixture/verification-task-ready",
+    idempotencyKey: `fixture/verification-task-ready/${milestoneId}`,
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
     actorType: "test",
@@ -277,7 +277,7 @@ function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}
   }, (context) => {
     adoptOrTransitionLifecycle(context, {
       itemKind: "task",
-      milestoneId: "M001",
+      milestoneId,
       sliceId: "S01",
       taskId: "T01",
       lifecycleStatus: "ready",
@@ -286,28 +286,28 @@ function createCanonicalSucceededTaskAttempt(whileRunning: () => void = () => {}
       events: [{
         eventType: "test.task.ready",
         entityType: "task",
-        entityId: "M001/S01/T01",
+        entityId: `${milestoneId}/S01/T01`,
         payload: { taskId: "T01" },
         destinations: ["test"],
       }],
       projections: [{
-        projectionKey: "test/m001/s01/t01",
+        projectionKey: `test/${milestoneId.toLowerCase()}/s01/t01`,
         projectionKind: "test",
         rendererVersion: "1",
       }],
     };
   });
-  const dispatch = adapter.prepare("SELECT id FROM unit_dispatches").get() as { id: number };
+  const dispatch = adapter.prepare("SELECT id FROM unit_dispatches WHERE milestone_id = ?").get(milestoneId) as { id: number };
   const claimed = claimTaskAttempt({
-    invocation: internalExecutionInvocation("fixture/verification-task-claim"),
-    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
-    workerId: "verification-worker",
+    invocation: internalExecutionInvocation(`fixture/verification-task-claim/${milestoneId}`),
+    task: { milestoneId, sliceId: "S01", taskId: "T01" },
+    workerId: `verification-worker-${milestoneId}`,
     milestoneLeaseToken: 7,
     coordinationDispatchId: dispatch.id,
   });
   whileRunning();
   settleTaskAttempt({
-    invocation: internalExecutionInvocation("fixture/verification-task-settle"),
+    invocation: internalExecutionInvocation(`fixture/verification-task-settle/${milestoneId}`),
     attemptId: claimed.attemptId,
     outcome: "succeeded",
     failureClass: "none",
@@ -1368,9 +1368,9 @@ describe("Post-execution blocking failure retry bypass", () => {
     });
   }
 
-  function recordHostRun(id: string, command: string, exitCode = 0): void {
+  function recordHostRun(id: string, command: string, exitCode = 0, cwd = tempDir): void {
     recordExecRun({
-      kind: "exec", id, runtime: "bash", command, cwd: tempDir,
+      kind: "exec", id, runtime: "bash", command, cwd,
       exit_code: exitCode, signal: null, timedOut: false, aborted: false,
       started_at: new Date().toISOString(), duration_ms: 12, output_hash: "sha256:test",
     });
@@ -1436,6 +1436,31 @@ describe("Post-execution blocking failure retry bypass", () => {
 
     assert.equal(outcome.result, "continue");
     assert.equal(outcome.verdict, "pass");
+  });
+
+  test("with two running Attempts, a host run backs the Attempt of the Milestone worktree it ran in", async () => {
+    createBasicTask(PROSE_VERIFY);
+    stageClaimedEvidence("node check-theme.js");
+    insertMilestone({ id: "M002" });
+    insertSlice({ id: "S01", milestoneId: "M002", title: "Parallel Slice", risk: "low" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M002", title: "Parallel task", status: "pending" });
+    const worktree = (milestoneId: string) => join(tempDir, ".gsd", "worktrees", milestoneId);
+    let otherAttemptId = "";
+
+    const outcome = await verifyCanonicalTask(() => {
+      otherAttemptId = createCanonicalSucceededTaskAttempt(() => {
+        recordHostRun("run-m001", "node check-theme.js", 0, worktree("M001"));
+        recordHostRun("run-m002", "node check-theme.js", 1, worktree("M002"));
+        recordHostRun("run-project-root", "node check-theme.js", 1);
+      }, "M002");
+    });
+
+    // The failed run of the other worker and the unbound run do not void the claim.
+    assert.equal(outcome.result, "continue");
+    assert.equal(outcome.verdict, "pass");
+    assert.equal(readExecRun("run-m002")?.attempt_ref, otherAttemptId);
+    assert.notEqual(readExecRun("run-m001")?.attempt_ref, otherAttemptId);
+    assert.equal(readExecRun("run-project-root")?.attempt_ref, null);
   });
 
   test("auto-discovered package.json verification failure retries instead of continuing", async () => {

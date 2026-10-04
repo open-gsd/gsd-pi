@@ -2530,7 +2530,7 @@ const taskCompleteParams = {
       "When true, the recommendation is recorded as the default, but auto-mode still pauses until the user resolves via /gsd escalate resolve.",
     ),
   }).optional().describe("ADR-011 Phase 2: optional escalation payload. Only honored when phases.mid_execution_escalation is true."),
-  verificationEvidence: verificationEvidenceSchema.optional().describe("Verification evidence entries, or that array encoded as JSON. Each command is the exact gsd_exec script, or text that contains the gsd_exec run id"),
+  verificationEvidence: verificationEvidenceSchema.optional().describe("Verification evidence entries, or that array encoded as JSON. Each command is the exact gsd_exec script"),
   reworkResolution: z.array(z.object({
     findingId: nonEmptyString("findingId"),
     status: z.enum(["resolved", "deferred-with-override"]),

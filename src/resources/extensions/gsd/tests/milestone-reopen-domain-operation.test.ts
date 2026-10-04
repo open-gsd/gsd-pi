@@ -565,6 +565,16 @@ test("Milestone reopen removes the stored validation verdict and each Slice UAT 
 
   assert.deepEqual(rows("SELECT scope FROM assessments WHERE milestone_id = 'M001' AND scope IN ('milestone-validation', 'run-uat')"), []);
   assert.deepEqual(rows("SELECT command FROM verification_evidence WHERE milestone_id = 'M001'"), []);
+  // The removed content is still in the database, in the reopen event.
+  const reopened = JSON.parse(String(
+    rows("SELECT payload_json FROM workflow_domain_events WHERE event_type = 'milestone.reopened'")[0]!["payload_json"],
+  ));
+  assert.ok(
+    reopened.invalidatedEvidence.milestone.assessments.some((row: { path: string; full_content: string }) =>
+      row.path === ".gsd/test/M001-VALIDATION.md" && row.full_content === "verdict: pass"),
+  );
+  assert.equal(reopened.invalidatedEvidence.S01.assessments[0].full_content, "verdict: PASS");
+  assert.equal(reopened.invalidatedEvidence.S01.verification_evidence[0].command, "npm test");
 });
 
 test("adopted Milestone reopen handler fails closed without canonical invocation identity", async () => {

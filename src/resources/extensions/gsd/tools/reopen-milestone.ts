@@ -200,11 +200,12 @@ export async function handleReopenMilestone(
         return removeProjectionIfCurrent({ artifactPath, operationId, isCurrent });
       };
 
-      const milestoneSummaries = new Set([
-        resolveMilestoneFile(basePath, params.milestoneId, "SUMMARY"),
-        targetMilestoneFile(basePath, params.milestoneId, "SUMMARY", milestoneTitle),
-        ...(milestoneDir ? [join(milestoneDir, `${params.milestoneId}-SUMMARY.md`)] : []),
-      ].filter((path): path is string => Boolean(path)));
+      // The canonical reopen deletes the validation verdict; its VALIDATION file goes with it.
+      const milestoneSummaries = new Set(["SUMMARY", ...(adoptedLifecycle ? ["VALIDATION"] : [])].flatMap((suffix) => [
+        resolveMilestoneFile(basePath, params.milestoneId, suffix),
+        targetMilestoneFile(basePath, params.milestoneId, suffix, milestoneTitle),
+        ...(milestoneDir ? [join(milestoneDir, `${params.milestoneId}-${suffix}.md`)] : []),
+      ]).filter((path): path is string => Boolean(path)));
       for (const artifactPath of milestoneSummaries) {
         if (!remove(artifactPath)) {
           superseded = true;

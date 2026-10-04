@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Establish the database-owned companion state required by Slice lifecycle operations.
 
-import type { DomainOperationContext } from "../domain-operation.js";
+import type { DomainJsonValue, DomainOperationContext } from "../domain-operation.js";
 import { getDb } from "../engine.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
@@ -48,35 +48,49 @@ export function ensurePendingSliceQ8(
   }
 }
 
+/** The rows a reopen removed, by table. They live on in the reopen event payload. */
+export type InvalidatedEvidence = Record<string, DomainJsonValue[]>;
+
+/** Remove the rows a reopen invalidates and return them, so their content is not lost. */
+export function removeInvalidatedRows(
+  removals: ReadonlyArray<readonly [table: string, where: string]>,
+  parameters: Record<string, string>,
+): InvalidatedEvidence {
+  const removed: InvalidatedEvidence = {};
+  for (const [table, where] of removals) {
+    removed[table] = getDb().prepare(`SELECT * FROM ${table} WHERE ${where}`).all(parameters) as DomainJsonValue[];
+    getDb().prepare(`DELETE FROM ${table} WHERE ${where}`).run(parameters);
+  }
+  return removed;
+}
+
 /**
  * A reopened Slice is done again, so every proof of the earlier work is stale:
  * the agent's claimed Task evidence, the run-uat verdict with its ASSESSMENT
  * artifact, the UAT gate, the run-uat retry count, and UAT exec runs not yet
  * saved in a result. Remove them so the redo is judged on new evidence only.
- * gate_runs keeps the history of the UAT attempts.
+ * The removed rows are returned for the reopen event payload: the redo does
+ * not read them, and the database does not lose them.
  */
 export function invalidateSliceEvidence(
   context: Readonly<DomainOperationContext>,
   slice: SliceCompanionIdentity,
-): void {
+): InvalidatedEvidence {
   requireActiveDomainOperationContext(context);
   const parameters = {
     ":milestone_id": slice.milestoneId,
     ":slice_id": slice.sliceId,
   };
-  for (const statement of [
-    "DELETE FROM verification_evidence WHERE milestone_id = :milestone_id AND slice_id = :slice_id",
-    `DELETE FROM artifacts
-     WHERE '.gsd/' || path IN (
-       SELECT path FROM assessments
-       WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND scope = 'run-uat'
-     )`,
-    "DELETE FROM assessments WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND scope = 'run-uat'",
-    "DELETE FROM quality_gates WHERE milestone_id = :milestone_id AND slice_id = :slice_id AND gate_id = 'UAT'",
-    "DELETE FROM uat_retry_counters WHERE milestone_id = :milestone_id AND slice_id = :slice_id",
-    `UPDATE exec_runs SET attempt_ref = NULL
-     WHERE kind = 'uat_exec' AND milestone_id = :milestone_id AND slice_id = :slice_id`,
-  ]) {
-    getDb().prepare(statement).run(parameters);
-  }
+  const ofSlice = "milestone_id = :milestone_id AND slice_id = :slice_id";
+  const removed = removeInvalidatedRows([
+    ["verification_evidence", ofSlice],
+    ["artifacts", `'.gsd/' || path IN (SELECT path FROM assessments WHERE ${ofSlice} AND scope = 'run-uat')`],
+    ["assessments", `${ofSlice} AND scope = 'run-uat'`],
+    ["quality_gates", `${ofSlice} AND gate_id = 'UAT'`],
+    ["uat_retry_counters", ofSlice],
+  ], parameters);
+  getDb().prepare(
+    `UPDATE exec_runs SET attempt_ref = NULL WHERE kind = 'uat_exec' AND ${ofSlice}`,
+  ).run(parameters);
+  return removed;
 }

@@ -1557,7 +1557,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				Type.Array(
 					Type.Object({
 						command: Type.String({
-							description: "Verification command that was run: the exact gsd_exec script, or text that contains the gsd_exec run id",
+							description: "Verification command that was run: the exact gsd_exec script",
 						}),
 						exitCode: Type.Number({ description: "Exit code of the command" }),
 						verdict: Type.String({

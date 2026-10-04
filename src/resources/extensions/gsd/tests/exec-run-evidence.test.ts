@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { closeDatabase, insertGateRun, openDatabase } from "../gsd-db.ts";
+import { runExecSandbox } from "../exec-sandbox.ts";
 import { readExecRun } from "../db/writers/exec-runs.ts";
 import { executeGsdExec, executeUatExec } from "../tools/exec-tool.ts";
 import { buildRunUatPresentationForType } from "../tool-presentation-plan.ts";
@@ -89,6 +90,27 @@ describe("host exec runs are database rows", () => {
     assert.match(run?.output_hash ?? "", /^sha256:[0-9a-f]{64}$/);
     // No Task Attempt is running, so the run is bound to none and backs no claim.
     assert.equal(run?.attempt_ref, null);
+  });
+
+  test("a run the host cannot record still returns its exit code and output, with a warning", async () => {
+    // The output file is gone before the host hashes it, so the record step fails.
+    const result = await executeGsdExec({ script: "printf done; exit 3" }, {
+      baseDir: base,
+      preferences: null,
+      run: async (request, options) => {
+        const ran = await runExecSandbox(request, options);
+        rmSync(ran.stdout_path);
+        return ran;
+      },
+    });
+
+    const text = result.content[0]!.text;
+    assert.equal(result.details?.exit_code, 3);
+    assert.match(text, /exit=3/);
+    assert.match(text, /done/);
+    assert.match(text, /did not record this run: ENOENT/);
+    assert.match(String(result.details?.run_not_recorded), /ENOENT/);
+    assert.equal(readExecRun(String(result.details?.id)), null);
   });
 
   test("gsd_uat_exec stores the slice and the run-uat attempt of the run", async () => {

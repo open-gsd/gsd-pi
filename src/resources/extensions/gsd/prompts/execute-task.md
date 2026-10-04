@@ -55,7 +55,7 @@ You execute. The inlined task plan is authoritative. Verify referenced files and
 
 - If task sections exist for Failure Modes (Q5), Load Profile (Q6), Negative Tests (Q7), or Observability Impact, implement and verify them.
 - Verify must-haves with concrete commands or observable behavior.
-- Run verification commands through `gsd_exec` / Context Mode evidence when workflow MCP tools are presented. Use `gsd_exec_search` before rerunning noisy checks, and `gsd_resume` after compaction or resume. Do not call direct `bash` for final verification evidence in this unit. The host accepts a `verificationEvidence` entry only when its `command` is the exact `gsd_exec` script, or contains the `gsd_exec` run id, of a run in this unit that exited 0.
+- Run verification commands through `gsd_exec` / Context Mode evidence when workflow MCP tools are presented. Use `gsd_exec_search` before rerunning noisy checks, and `gsd_resume` after compaction or resume. Do not call direct `bash` for final verification evidence in this unit. The host accepts a `verificationEvidence` entry only when its `command` is the exact `gsd_exec` script of a run in this unit that exited 0.
 - Run slice-level verification from the slice plan. Final tasks need all checks passing; intermediate tasks should record partial passes.
 - Populate `## Verification Evidence` with `formatEvidenceTable` rows: command, exit code, verdict, duration. If no checks were found, say so.
 - For UI/browser/DOM/user-visible web changes, exercise the real flow and record explicit checks.

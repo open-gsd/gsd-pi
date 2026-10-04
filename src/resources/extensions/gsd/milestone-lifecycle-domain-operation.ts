@@ -458,6 +458,7 @@ export function reopenMilestone(input: {
             reopenedTaskIds: result.reopenedTaskIds,
             revokedWaiverIds: result.revokedWaiverIds,
             supersedingDispositionIds: result.supersedingDispositionIds,
+            invalidatedEvidence: result.invalidatedEvidence,
             lifecycleShadowComparisons: result.shadows.map((shadow) => shadowPayload(shadow)),
           },
           destinations: ["projection"],
