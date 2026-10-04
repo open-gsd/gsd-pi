@@ -2,7 +2,7 @@
 // File Purpose: Unit tests for the gsd-core compat marker (`.gsd/.compat.json`).
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
@@ -10,7 +10,8 @@ import { randomUUID } from "node:crypto";
 import {
   readCompatMarker,
   writeCompatMarker,
-  recordCompatProjectionWrite,
+  writeProjectionFile,
+  writeProjectionFileSync,
   normalizeForHash,
   computeProjectionSha,
   pruneOrphanedProjectionEntries,
@@ -268,7 +269,7 @@ test("readCompatMarker heals invalid keys that canonicalize back under .gsd", ()
   );
 });
 
-test("recordCompatProjectionWrite skips entries whose derived key escapes .gsd (#2130)", () => {
+test("writeProjectionFileSync records no baseline for a key that escapes .gsd (#2130)", () => {
   const base = makeTmpBase();
   // Pre-existing safe baseline that must survive the unsafe write.
   writeCompatMarker(base, {
@@ -284,7 +285,7 @@ test("recordCompatProjectionWrite skips entries whose derived key escapes .gsd (
   // ../-prefixed key.
   const outside = join(base, "outside.md");
   writeFileSync(outside, "# outside\n", "utf-8");
-  recordCompatProjectionWrite(base, outside, "# outside\n", []);
+  writeProjectionFileSync(base, outside, "# outside\n", []);
 
   // Assert the RAW on-disk bytes BEFORE any read: readCompatMarker's heal
   // rewrites the file, which would mask a regression of the write guard.
@@ -387,3 +388,70 @@ test("hostile marker makes the drift detector read nothing outside the project",
     "detector must not reference the out-of-project sentinel",
   );
 });
+
+// ─── The projection write rule ────────────────────────────────────────────
+// One rule for every projection file: write the bytes and record the baseline;
+// write nothing when the file and its baseline already hold the content.
+
+const WRITE_RULE_VARIANTS = [
+  ["writeProjectionFileSync", async (...args: Parameters<typeof writeProjectionFileSync>) => writeProjectionFileSync(...args)],
+  ["writeProjectionFile", writeProjectionFile],
+] as const;
+
+for (const [name, write] of WRITE_RULE_VARIANTS) {
+  test(`${name} writes the file and its baseline, then writes nothing for the same content`, async () => {
+    const base = makeTmpBase();
+    const file = join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
+    const content = "# M001 Validation\n";
+
+    assert.equal(await write(base, file, content, ["M001"]), true, "the first write writes the file");
+    assert.equal(readFileSync(file, "utf-8"), content);
+    assert.deepEqual(
+      readCompatMarker(base).projections["milestones/M001/M001-VALIDATION.md"],
+      { sha: computeProjectionSha(content), entities: ["M001"] },
+    );
+
+    const fileMtime = statSync(file).mtimeMs;
+    const markerBytes = readFileSync(compatMarkerPath(base), "utf-8");
+    assert.equal(await write(base, file, content, ["M001"]), false, "the same content is not written again");
+    assert.equal(statSync(file).mtimeMs, fileMtime, "the file is not rewritten");
+    assert.equal(readFileSync(compatMarkerPath(base), "utf-8"), markerBytes, "the marker is not rewritten");
+  });
+
+  test(`${name} repairs a changed file, a missing baseline and a baseline of another scope`, async () => {
+    const base = makeTmpBase();
+    const file = join(base, ".gsd", "QUEUE.md");
+    const key = "QUEUE.md";
+    const content = "# Queue\n";
+    const baseline = { sha: computeProjectionSha(content), entities: [] };
+    await write(base, file, content, []);
+
+    writeFileSync(file, "# Edited outside GSD\n", "utf-8");
+    assert.equal(await write(base, file, content, []), true, "a changed file is written again");
+    assert.equal(readFileSync(file, "utf-8"), content);
+
+    const noEntry = readCompatMarker(base);
+    delete noEntry.projections[key];
+    writeCompatMarker(base, noEntry);
+    assert.equal(await write(base, file, content, []), true, "a file with no baseline is written again");
+    assert.deepEqual(readCompatMarker(base).projections[key], baseline);
+
+    const otherScope = readCompatMarker(base);
+    otherScope.projections[key] = { ...baseline, entities: ["M009"] };
+    writeCompatMarker(base, otherScope);
+    assert.equal(await write(base, file, content, []), true, "a baseline of another scope is written again");
+    assert.deepEqual(readCompatMarker(base).projections[key], baseline);
+  });
+
+  test(`${name} still writes the file when the marker cannot be written`, async () => {
+    const base = makeTmpBase();
+    // A directory in the place of the marker file: every marker write fails.
+    mkdirSync(compatMarkerPath(base));
+    const file = join(base, ".gsd", "ROADMAP.md");
+
+    assert.equal(await write(base, file, "# Roadmap\n", []), true);
+    assert.equal(readFileSync(file, "utf-8"), "# Roadmap\n");
+    // No baseline was recorded, so the next render writes the file again.
+    assert.equal(await write(base, file, "# Roadmap\n", []), true);
+  });
+}

@@ -209,6 +209,13 @@ the root drafts (written by the db-writer), the milestone VALIDATION file
 do not go through `writeAndStore` and carry no stamp. A reader must therefore
 treat "no stamp" as normal, never as evidence of tampering or staleness.
 
+Stamped or not, every one of these files except `STATE.md` and the
+`.planning/` projections is written by one rule, `writeProjectionFile` in
+`compat/compat-marker.ts`, which `writeAndStore` also uses: nothing is written
+when the file and its marker baseline already hold the content; otherwise the
+file is written and its baseline is recorded. `STATE.md` is overwritten on
+every render and has no baseline.
+
 ### 3.5 How drift detection uses it
 
 Drift judgments are **stamp-insensitive**: the on-disk bytes are stripped of

@@ -135,6 +135,7 @@ test("rebuild restores a deleted artifact row without rewriting clean files", as
   assert.equal(restored.full_content, readFileSync(roadmapPath, "utf-8"), "restored row must hold the rendered bytes");
   const after = snapshotMarkdown(base);
   assert.equal(after.get(planPath)!.mtimeMs, before.get(planPath)!.mtimeMs, "clean PLAN must take the skip path");
+  assert.equal(after.get(roadmapPath)!.mtimeMs, before.get(roadmapPath)!.mtimeMs, "the row repair must not rewrite the ROADMAP file, which already holds the bytes");
 });
 
 test("rebuild rewrites a projection whose compat-marker entry is missing", async () => {

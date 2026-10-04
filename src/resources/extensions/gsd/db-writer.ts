@@ -13,8 +13,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import type { Decision, Requirement } from './types.js';
 import { summarizeRequirementsCoverage } from './requirements-backlog.js';
 import { gsdRoot, resolveGsdRootFile } from './paths.js';
-import { saveFile } from './files.js';
-import { compatProjectionIsCurrent, recordCompatProjectionWrite } from './compat/compat-marker.js';
+import { writeProjectionFile } from './compat/compat-marker.js';
 import { GSDError, GSD_STALE_STATE, GSD_IO_ERROR } from './errors.js';
 import { logWarning, logError } from './workflow-logger.js';
 import { invalidateStateCache } from './state.js';
@@ -27,17 +26,6 @@ import { createMemory } from './memory-store.js';
 import { synthesizeDecisionMemoryContent } from './memory-backfill.js';
 import { executeRecordDomainOperation } from './record-domain-operation.js';
 import { internalPlanningInvocation, type PlanningInvocation } from './planning-invocation.js';
-
-async function writeGsdProjection(
-  basePath: string,
-  filePath: string,
-  content: string,
-  entities: string[] = [],
-): Promise<void> {
-  if (compatProjectionIsCurrent(basePath, filePath, content, entities)) return;
-  await saveFile(filePath, content);
-  recordCompatProjectionWrite(basePath, filePath, content, entities);
-}
 
 // ─── Freeform Detection ───────────────────────────────────────────────────
 
@@ -496,7 +484,7 @@ export async function readDecisionsProjectionIntent(
 export async function regenerateDecisionsMarkdown(basePath: string): Promise<void> {
   const intent = await readDecisionsProjectionIntent(basePath);
   if (!intent) return;
-  await writeGsdProjection(basePath, intent.path, intent.content);
+  await writeProjectionFile(basePath, intent.path, intent.content, []);
 }
 
 /**
@@ -523,10 +511,11 @@ export async function regenerateRequirementsMarkdown(basePath: string): Promise<
     full_content: row['full_content'] as string,
     superseded_by: (row['superseded_by'] as string) ?? null,
   }));
-  await writeGsdProjection(
+  await writeProjectionFile(
     basePath,
     filePath,
     generateRequirementsMd(requirements.filter(r => r.superseded_by == null)),
+    [],
   );
   return true;
 }
@@ -547,10 +536,11 @@ export async function regenerateRootArtifactsMarkdown(basePath: string): Promise
      ORDER BY artifact_type`,
   ).all() ?? [];
   for (const row of rows) {
-    await writeGsdProjection(
+    await writeProjectionFile(
       basePath,
       join(gsdRoot(basePath), `${row['artifact_type'] as string}.md`),
       row['full_content'] as string,
+      [],
     );
   }
   return rows.length > 0;
@@ -681,7 +671,7 @@ export async function saveDecisionToDb(
     }
 
     try {
-      await writeGsdProjection(basePath, filePath, md);
+      await writeProjectionFile(basePath, filePath, md, []);
     } catch (diskErr) {
       logWarning('projection', 'DECISIONS.md projection write failed; DB decision remains committed', { fn: 'saveDecisionToDb', id, error: String((diskErr as Error).message) });
     }
@@ -848,7 +838,7 @@ export async function saveArtifactToDbForWorkspace(
 
     try {
       const basePath = dirname(gsdDir);
-      await writeGsdProjection(basePath, fullPath, contentToPersist);
+      await writeProjectionFile(basePath, fullPath, contentToPersist, []);
     } catch (diskErr) {
       logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbForWorkspace', path: opts.path, error: String((diskErr as Error).message) });
     }
@@ -913,7 +903,7 @@ export async function saveArtifactToDbByScope(
     // changed outside GSD is kept by the projection mutation guard, not here.
     try {
       const basePath = dirname(gsdDir);
-      await writeGsdProjection(
+      await writeProjectionFile(
         basePath,
         fullPath,
         contentToPersist,

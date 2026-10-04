@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -219,11 +219,18 @@ test("adopted waiver replay is exact and projection loss cannot block closeout",
   assert.ok(rule);
   const context = dispatchContext(basePath);
 
+  const validationPath = join(basePath, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
+  const markerPath = join(basePath, ".gsd", ".compat.json");
   assert.equal((await rule.match(context))?.action, "dispatch");
+  const written = { mtimeMs: statSync(validationPath).mtimeMs, marker: readFileSync(markerPath, "utf-8") };
   assert.equal((await rule.match(context))?.action, "dispatch");
   assert.equal(row(`SELECT COUNT(*) AS count FROM workflow_waivers`).count, 1);
   assert.equal(row(`SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'milestone.validation.waive'`).count, 1);
-  const validationPath = join(basePath, ".gsd", "milestones", "M001", "M001-VALIDATION.md");
+  assert.deepEqual(
+    { mtimeMs: statSync(validationPath).mtimeMs, marker: readFileSync(markerPath, "utf-8") },
+    written,
+    "the replayed waiver rewrites neither the VALIDATION file nor its baseline",
+  );
   const summaryPath = join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md");
   unlinkSync(validationPath);
   unlinkSync(summaryPath);

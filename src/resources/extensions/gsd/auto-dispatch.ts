@@ -50,8 +50,7 @@ import {
   gsdProjectionRoot,
 } from "./paths.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { atomicWriteSync } from "./atomic-write.js";
-import { recordCompatProjectionWrite } from "./compat/compat-marker.js";
+import { writeProjectionFileSync } from "./compat/compat-marker.js";
 import { logWarning, logError } from "./workflow-logger.js";
 import { dirname, join, sep } from "node:path";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
@@ -613,8 +612,7 @@ function recordAdoptedMilestoneValidationWaiver(
     "",
   ].join("\n");
   try {
-    atomicWriteSync(validationPath, content, "utf-8");
-    recordCompatProjectionWrite(artifactBasePath, validationPath, content, [milestoneId]);
+    writeProjectionFileSync(artifactBasePath, validationPath, content, [milestoneId]);
   } catch (error) {
     logWarning(
       "projection",

@@ -10,7 +10,7 @@
 // parseRoadmap(), parsePlan(), parseSummary() in files.ts.
 
 import { readFileSync, existsSync, mkdirSync, statSync } from "node:fs";
-import { atomicWriteSync, createProjectionDirectorySync, removeProjectionFileSync } from "./atomic-write.js";
+import { createProjectionDirectorySync, removeProjectionFileSync } from "./atomic-write.js";
 import { logWarning } from "./workflow-logger.js";
 import { isClosedStatus, isDiscardedMilestoneStatus, isHiddenFromRoadmap, toStatus } from "./status-guards.js";
 import { isCanonicalStagedTaskSummaryState } from "./task-summary-projection-policy.js";
@@ -53,20 +53,17 @@ import {
   buildTaskFileName,
   buildSliceFileName,
 } from "./paths.js";
-import { saveFile, clearParseCache, registerCacheClearCallback } from "./files.js";
+import { clearParseCache, registerCacheClearCallback } from "./files.js";
 import { parseProjectionRoadmap } from "./schemas/parsers.js";
 import { stripIdPrefix } from "./strip-id-prefix.js";
 import { renderMilestoneParkedMarker } from "./milestone-park-projection.js";
 import { invalidateStateCache } from "./state.js";
 import { clearPathCache, milestonesDir, legacyMilestonesDir, isLegacyMilestonesLayout, resolveMilestonePath, relSliceFile, canonicalPhaseDirName } from "./paths.js";
 import {
-  compatProjectionIsCurrent,
   readCompatMarker,
-  recordCompatProjectionWrite,
-  writeCompatMarker,
-  computeProjectionSha,
   deriveCompatProjectionKey,
-  noteRenderedProjectionFile,
+  writeProjectionFile,
+  writeProjectionFileSync,
 } from "./compat/compat-marker.js";
 import type { RiskLevel } from "./types.js";
 import {
@@ -77,62 +74,6 @@ import {
   readMilestoneCompletionProjection,
   renderMilestoneSummaryMarkdown,
 } from "./milestone-summary-projection.js";
-
-// ─── Compat marker invalidation ───────────────────────────────────────────
-// Every successful projection write pushes its (basePath, projectionPath,
-// entities) here; invalidateCaches() drains it and refreshes .gsd/.compat.json
-// so the next reconcile pass sees gsd-pi's own writes as expected. This is the
-// feedback-loop-prevention mechanism for cross-tool compatibility.
-const _pendingProjectionWrites: Array<{
-  basePath: string;
-  projectionPath: string;
-  entities: string[];
-  sha: string;
-}> = [];
-
-function recordProjectionWrite(
-  basePath: string,
-  projectionPath: string,
-  entities: string[],
-  content: string,
-): void {
-  _pendingProjectionWrites.push({
-    basePath,
-    projectionPath,
-    entities,
-    sha: computeProjectionSha(content),
-  });
-}
-
-function flushProjectionWritesToMarker(): void {
-  if (_pendingProjectionWrites.length === 0) return;
-  // Group by basePath (defensive — multiple projects are unusual but possible).
-  const byBase = new Map<string, Map<string, { entities: string[]; sha: string }>>();
-  for (const w of _pendingProjectionWrites) {
-    let bucket = byBase.get(w.basePath);
-    if (!bucket) { bucket = new Map(); byBase.set(w.basePath, bucket); }
-    bucket.set(w.projectionPath, { entities: w.entities, sha: w.sha });
-  }
-  _pendingProjectionWrites.length = 0;
-
-  for (const [basePath, writes] of byBase) {
-    try {
-      const marker = readCompatMarker(basePath);
-      for (const [projectionPath, write] of writes) {
-        marker.projections[projectionPath] = {
-          sha: write.sha,
-          entities: write.entities,
-        };
-      }
-      marker.lastWriter = "gsd-pi";
-      marker.lastProjectedAt = new Date().toISOString();
-      writeCompatMarker(basePath, marker);
-    } catch (e) {
-      // Marker I/O must never break projection. Reconcile will heal on next run.
-      logWarning("renderer", `compat marker flush failed: ${(e as Error).message}`);
-    }
-  }
-}
 
 // ─── State-version stamp ──────────────────────────────────────────────────
 // Every projection written by this renderer carries an additive trailing
@@ -236,7 +177,6 @@ function toArtifactPath(absPath: string, basePath: string): string {
  * Invalidate all caches after a disk write.
  */
 function invalidateCaches(): void {
-  flushProjectionWritesToMarker();
   invalidateStateCache();
   clearPathCache();
   clearParseCache();
@@ -294,12 +234,12 @@ function sanitizeInlineRoadmapText(value: string | null | undefined): string {
 // A zero-drift rebuild previously rewrote every projection: an fsync'd
 // saveFile plus a full-content artifact row plus invalidateCaches() per file,
 // which takes hours on large projects. writeAndStore therefore short-circuits
-// only when ALL three baselines already match this render — on-disk bytes,
-// the DB artifact row (content AND artifact_type/milestone/slice/task scope),
-// and the compat-marker entry (sha AND entity scope). Any single mismatch — a
-// drifted file, a missing/diverged/mis-scoped row, an absent/mis-scoped
-// marker entry — falls through to the normal write path, so drift repair is
-// never skipped.
+// only when ALL three baselines already match this render — on-disk bytes and
+// the compat-marker entry (sha AND entity scope), both checked by
+// writeProjectionFile, and the DB artifact row (content AND
+// artifact_type/milestone/slice/task scope). Any single mismatch — a drifted
+// file, a missing/diverged/mis-scoped row, an absent/mis-scoped marker entry —
+// is repaired, so drift repair is never skipped.
 function projectionEntities(opts: {
   milestone_id: string;
   slice_id?: string;
@@ -339,52 +279,13 @@ function artifactRowHoldsRender(
   return getArtifactContentHash(artifactPath) === createHash("sha256").update(stamped).digest("hex");
 }
 
-function projectionWriteAlreadyApplied(
-  absPath: string,
-  artifactPath: string,
-  stamped: string,
-  basePath: string,
-  opts: {
-    artifact_type: string;
-    milestone_id: string;
-    slice_id?: string;
-    task_id?: string;
-  },
-): boolean {
-  let disk: Buffer;
-  try {
-    disk = readFileSync(absPath);
-  } catch {
-    return false;
-  }
-  if (!disk.equals(Buffer.from(stamped, "utf-8"))) return false;
-  if (!artifactRowHoldsRender(artifactPath, stamped, opts)) return false;
-
-  if (basePath) {
-    try {
-      const entry = readCompatMarker(basePath).projections[artifactPath];
-      const entities = projectionEntities(opts);
-      if (
-        !entry ||
-        entry.sha !== computeProjectionSha(stamped) ||
-        entry.entities.length !== entities.length ||
-        !entities.every((id, i) => entry.entities[i] === id)
-      ) {
-        return false;
-      }
-    } catch {
-      return false;
-    }
-  }
-  return true;
-}
-
 /**
  * Write rendered content to disk and update the artifacts table.
  * The content is stamped with the current DB state version before writing;
  * disk bytes, artifact content, and the returned string are identical.
- * When every baseline already matches (#2349), the write is skipped and the
- * stamped content is still returned.
+ * The file and its marker baseline go through writeProjectionFile, the one
+ * write rule of a projection file. When every baseline already matches
+ * (#2349), nothing is written and the stamped content is still returned.
  */
 async function writeAndStore(
   absPath: string,
@@ -399,12 +300,9 @@ async function writeAndStore(
   basePath: string,
 ): Promise<string> {
   const stamped = stampProjectionContent(content);
-  if (projectionWriteAlreadyApplied(absPath, artifactPath, stamped, basePath, opts)) {
-    noteRenderedProjectionFile(absPath, stamped);
-    return stamped;
-  }
-  await saveFile(absPath, stamped);
+  const written = await writeProjectionFile(basePath, absPath, stamped, projectionEntities(opts));
 
+  let stored = false;
   try {
     // A repair of a changed or deleted file re-renders bytes the row already
     // holds; that render must not write the database.
@@ -417,6 +315,7 @@ async function writeAndStore(
         task_id: opts.task_id ?? null,
         full_content: stamped,
       });
+      stored = true;
     }
   } catch (error) {
     // Disk is a rebuildable projection, but callers must not report success
@@ -430,15 +329,7 @@ async function writeAndStore(
     );
   }
 
-  // Record the projection write so invalidateCaches() can refresh the compat
-  // marker. basePath is optional only to avoid forcing every caller; when
-  // present, the marker gets updated. artifactPath is already .gsd/-relative.
-  if (basePath) {
-    recordProjectionWrite(basePath, artifactPath, projectionEntities(opts), stamped);
-  }
-
-  invalidateCaches();
-  noteRenderedProjectionFile(absPath, stamped);
+  if (written || stored) invalidateCaches();
   return stamped;
 }
 
@@ -1972,10 +1863,7 @@ export function renderMilestoneValidation(
   const content = getLatestAssessmentByScope(milestoneId, "milestone-validation")?.["full_content"];
   if (typeof content !== "string" || !content.trim()) return false;
   const absPath = targetMilestoneFile(basePath, milestoneId, "VALIDATION", getMilestone(milestoneId)?.title);
-  if (compatProjectionIsCurrent(basePath, absPath, content, [milestoneId])) return true;
-  atomicWriteSync(absPath, content);
-  recordCompatProjectionWrite(basePath, absPath, content, [milestoneId]);
-  invalidateCaches();
+  if (writeProjectionFileSync(basePath, absPath, content, [milestoneId])) invalidateCaches();
   return true;
 }
 

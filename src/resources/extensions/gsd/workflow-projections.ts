@@ -14,7 +14,7 @@ import {
 import type { MilestoneRow } from "./db-milestone-artifact-rows.js";
 import type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
 import { atomicWriteSync } from "./atomic-write.js";
-import { compatProjectionIsCurrent, recordCompatProjectionWrite } from "./compat/compat-marker.js";
+import { writeProjectionFileSync } from "./compat/compat-marker.js";
 import { join } from "node:path";
 import { mkdirSync, existsSync, readFileSync } from "node:fs";
 import { logWarning } from "./workflow-logger.js";
@@ -143,18 +143,11 @@ export function renderTopLevelRoadmapContent(milestones: readonly MilestoneRow[]
   return lines.join("\n");
 }
 
-/**
- * Write a file at the root of `.gsd` and record its bytes as the projection
- * baseline, so a later change of the file is seen as an external edit.
- * Nothing is written when the file and its baseline already hold the content.
- */
+/** Write a file at the root of `.gsd` through the projection write rule. */
 function writeRootProjection(basePath: string, fileName: string, content: string): void {
   const dir = gsdRoot(basePath);
   mkdirSync(dir, { recursive: true });
-  const filePath = join(dir, fileName);
-  if (compatProjectionIsCurrent(basePath, filePath, content, [])) return;
-  atomicWriteSync(filePath, content);
-  recordCompatProjectionWrite(basePath, filePath, content, []);
+  writeProjectionFileSync(basePath, join(dir, fileName), content, []);
 }
 
 export function renderTopLevelRoadmapFromDb(basePath: string): void {
