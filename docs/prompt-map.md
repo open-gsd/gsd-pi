@@ -438,7 +438,7 @@ projection-delivery contracts are owned by the
 
 ## 10. Dispatch Rule Priority Order
 
-`auto-dispatch.ts` evaluates 29 rules top-to-bottom, first match wins. Source of
+`auto-dispatch.ts` evaluates 28 rules top-to-bottom, first match wins. Source of
 truth is the `DISPATCH_RULES` array in `auto-dispatch.ts`; the canary test
 `tests/dispatch-rule-coverage.test.ts` pins the count.
 
@@ -449,31 +449,30 @@ Priority  Rule                                          Fires When
  2        rewrite-docs (override gate)                  active override rows in the database
  3        summarizing → complete-slice                  slice in 'summarizing' phase
  4        run-uat (post-completion)                     slice complete, stored UAT spec, no run-uat verdict row
- 5        uat-verdict-gate (non-PASS continues)         UAT non-PASS — continue for remediation; final milestone closure still requires PASS sign-off
- 6        reassess-roadmap (post-completion)            slice closed, no roadmap assessment row
- 7        needs-discussion → discuss-milestone          milestone explicitly flagged for discussion
- 8        deep: workflow-preferences                    deep mode + workflow preferences fact not recorded (in-process, no unit)
- 9        deep: discuss-project                         deep mode + no valid PROJECT artifact row
-10        deep: discuss-requirements                    deep mode + no valid REQUIREMENTS artifact row
-11        deep: research-project                        deep mode + recorded decision is `research`, files missing
-12        pre-planning (no context) → discuss-milestone active milestone, no saved CONTEXT row
-13        pre-planning (no research) → research-mile…   CONTEXT saved, no saved RESEARCH row
-14        pre-planning (has research) → plan-milestone  CONTEXT + RESEARCH saved, no slice rows
-15        planning (require_slice_discussion) → pause   slice has no saved CONTEXT row (#3454)
-16        planning (multi slices need research) → par…  slices planned, saved slice RESEARCH missing × ≥2
-17        planning (no research) → research-slice       single slice has no saved RESEARCH row
-18        refining → refine-slice                       slice is sketch, needs expansion
-19        planning → plan-slice                         slice has no task rows
-20        stored retry → plan-slice / refine-slice      the pre-execution check refused the slice plan and the retry is stored on the planner's dispatch row
-21        evaluating-gates → gate-evaluate              gates pending evaluation
-22        replanning-slice → replan-slice               slice in 'replanning' phase
-23        executing → replan-task recovery              pending Task recovery action for the active task
-24        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block
-25        executing → execute-task (render plan)        slice PLAN file missing — render it from the DB, then fall through
-26        executing → execute-task                      1–2 tasks ready (sequential mode)
-27        validating-milestone → validate-milestone     all slices closed, not yet validated
-28        completing-milestone → complete-milestone     validated, not yet completed
-29        complete → stop                               nothing left to do
+ 5        reassess-roadmap (post-completion)            slice closed, no roadmap assessment row
+ 6        needs-discussion → discuss-milestone          milestone explicitly flagged for discussion
+ 7        deep: workflow-preferences                    deep mode + workflow preferences fact not recorded (in-process, no unit)
+ 8        deep: discuss-project                         deep mode + no valid PROJECT artifact row
+ 9        deep: discuss-requirements                    deep mode + no valid REQUIREMENTS artifact row
+10        deep: research-project                        deep mode + recorded decision is `research`, files missing
+11        pre-planning (no context) → discuss-milestone active milestone, no saved CONTEXT row
+12        pre-planning (no research) → research-mile…   CONTEXT saved, no saved RESEARCH row
+13        pre-planning (has research) → plan-milestone  CONTEXT + RESEARCH saved, no slice rows
+14        planning (require_slice_discussion) → pause   slice has no saved CONTEXT row (#3454)
+15        planning (multi slices need research) → par…  slices planned, saved slice RESEARCH missing × ≥2
+16        planning (no research) → research-slice       single slice has no saved RESEARCH row
+17        refining → refine-slice                       slice is sketch, needs expansion
+18        planning → plan-slice                         slice has no task rows
+19        stored retry → plan-slice / refine-slice      the pre-execution check refused the slice plan and the retry is stored on the planner's dispatch row
+20        evaluating-gates → gate-evaluate              gates pending evaluation
+21        replanning-slice → replan-slice               slice in 'replanning' phase
+22        executing → replan-task recovery              pending Task recovery action for the active task
+23        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block
+24        executing → execute-task (render plan)        slice PLAN file missing — render it from the DB, then fall through
+25        executing → execute-task                      1–2 tasks ready (sequential mode)
+26        validating-milestone → validate-milestone     all slices closed, not yet validated
+27        completing-milestone → complete-milestone     validated, not yet completed
+28        complete → stop                               nothing left to do
 ```
 
 ---

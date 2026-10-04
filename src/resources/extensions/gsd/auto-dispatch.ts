@@ -729,30 +729,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
     },
   },
   {
-    name: "uat-verdict-gate (non-PASS observed; closeout enforces)",
-    match: async ({ mid, prefs }) => {
-      // Only applies when UAT dispatch is enabled
-      if (!prefs?.uat_dispatch) return null;
-
-      // DB-authoritative (ADR-017): closed slices come from the DB only; the
-      // ROADMAP projection is never parsed for gate decisions.
-      if (!isDbAvailable()) return null;
-      for (const sliceId of getClosedSliceIds(mid)) {
-        const result = readUatGateVerdict(mid, sliceId);
-        if (!result) continue;
-        const { verdict, uatType } = result;
-
-        if (!isAcceptableUatVerdict(verdict, uatType)) {
-          // Observe non-PASS verdicts without hard-stopping auto-mode. Allow
-          // progression so follow-up slices can remediate, while
-          // complete-milestone still enforces manual UAT PASS sign-off before closure.
-          continue;
-        }
-      }
-      return null;
-    },
-  },
-  {
     name: "reassess-roadmap (post-completion)",
     match: async ({ state, mid, midTitle, basePath, prefs }) => {
       if (prefs?.phases?.skip_reassess) return null;
