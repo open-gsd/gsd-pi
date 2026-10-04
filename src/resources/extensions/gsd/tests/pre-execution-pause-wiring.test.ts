@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { postUnitPostVerification, type PostUnitContext } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
 import { readUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
+import { readPreExecFailure } from "../db/unit-dispatch-pre-exec-failure.ts";
 import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
@@ -339,13 +340,6 @@ describe("Pre-execution checks → retry/pause wiring", () => {
     );
 
     assert.equal(readUnitBudget(s.unclaimedUnitBudgets, PRE_EXEC_BUDGET), 1);
-    assert.equal(s.lastPreExecFailure?.unitId, "M001/S01");
-    assert.ok(
-      s.lastPreExecFailure?.blockingFindings.some((finding) =>
-        finding.includes("nonexistent-file-that-does-not-exist.ts"),
-      ),
-      "lastPreExecFailure should preserve actionable missing-file findings",
-    );
     assert.equal(s.pendingVerificationRetry?.unitId, "M001/S01");
     assert.equal(s.pendingVerificationRetry?.attempt, 1);
     assert.ok(
@@ -482,7 +476,7 @@ describe("Pre-execution checks → retry/pause wiring", () => {
     assert.ok(errorNotify, "Should show an error notification when pre-exec repair is exhausted");
   });
 
-  test("a restart continues the pre-execution repair budget of a claimed plan-slice unit", async () => {
+  test("a restart continues the pre-execution repair budget and keeps the findings of a claimed plan-slice unit", async () => {
     createFailingTasks();
     claimPlanSliceDispatch("trace-pre-exec-restart");
 
@@ -495,6 +489,12 @@ describe("Pre-execution checks → retry/pause wiring", () => {
     // Kill: the session is gone and the database file is opened again.
     closeDatabase();
     openDatabase(dbPath);
+    assert.ok(
+      readPreExecFailure("M001/S01")?.blockingFindings.some((finding) =>
+        finding.includes("nonexistent-file-that-does-not-exist.ts"),
+      ),
+      "the restarted process must still have the actionable missing-file findings",
+    );
     const pauseAutoMock = mock.fn(async () => {});
     const afterRestart = makeMockSession(tempDir, { type: "plan-slice", id: "M001/S01" });
 
@@ -550,6 +550,7 @@ describe("Pre-execution checks → retry/pause wiring", () => {
 
     assert.equal(await runPlanSlice(), "retry", "the first failure uses one planner retry");
     assert.equal(readUnitBudget(new Map(), PRE_EXEC_BUDGET), 1);
+    assert.notEqual(readPreExecFailure("M001/S01"), null, "the failure stores its findings");
 
     // The planner repair worked: the files the task reads now exist.
     for (const input of MISSING_TASK_INPUTS) writeFileSync(join(tempDir, input), "");
@@ -557,6 +558,11 @@ describe("Pre-execution checks → retry/pause wiring", () => {
 
     closeDatabase();
     openDatabase(dbPath);
+    assert.equal(
+      readPreExecFailure("M001/S01"),
+      null,
+      "the pass drops the stored findings, so a later plan of the slice does not get them",
+    );
     assert.equal(
       readUnitBudget(new Map(), PRE_EXEC_BUDGET),
       0,

@@ -2,12 +2,12 @@
  * pre-exec-gate-loop.test.ts — Regression tests for #4551.
  *
  * Verifies that when a pre-execution gate fails on a plan-slice unit:
- *   1. `s.lastPreExecFailure` is populated on the AutoSession with the blocking
- *      findings and a verdict excerpt.
- *   2. The `planning → plan-slice` dispatch rule reads that field and injects a
- *      "Fix these specific issues" section into the prompt.
- *   3. The field is cleared (consumed) after the prompt is built so that stale
- *      context does not bleed into an unrelated future plan-slice run.
+ *   1. The blocking findings and a verdict excerpt are stored on the dispatch
+ *      row of the plan (ADR-048), so they survive a kill.
+ *   2. The `planning → plan-slice` dispatch rule reads them from the database
+ *      and injects a "Fix these specific issues" section into the prompt.
+ *   3. The next dispatch of the slice has no findings of its own, so stale
+ *      context does not bleed into a later plan-slice run.
  *   4. When the failure belongs to a *different* unit ID, the dispatch rule
  *      does NOT inject the stale context into the prompt.
  */
@@ -20,6 +20,10 @@ import { tmpdir } from "node:os";
 
 import { AutoSession } from "../auto/session.ts";
 import { spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
+import { readPreExecFailure, recordPreExecFailure } from "../db/unit-dispatch-pre-exec-failure.ts";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import { claimMilestoneLease } from "../db/milestone-leases.ts";
+import { markCanceled, recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import type { DispatchContext } from "../auto-dispatch.ts";
 import { buildPlanSlicePrompt } from "../auto-prompts.ts";
@@ -63,6 +67,33 @@ function seedPlanningState(base: string): void {
     join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"),
     "# Roadmap\n",
   );
+}
+
+interface TestWorker {
+  workerId: string;
+  leaseToken: number;
+}
+
+function registerWorker(base: string): TestWorker {
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  return { workerId, leaseToken: lease.token };
+}
+
+/** Claim a plan-slice dispatch of the slice, so its findings have a real dispatch row. */
+function claimPlanSlice(worker: TestWorker, sliceId: string): number {
+  const claim = recordDispatchClaim({
+    traceId: `trace-${sliceId}`,
+    workerId: worker.workerId,
+    milestoneLeaseToken: worker.leaseToken,
+    milestoneId: "M001",
+    sliceId,
+    unitType: "plan-slice",
+    unitId: `M001/${sliceId}`,
+  });
+  if (!claim.ok) throw new Error(`expected test claim: ${claim.error}`);
+  return claim.dispatchId;
 }
 
 function cleanup(base: string, originalCwd: string): void {
@@ -167,22 +198,6 @@ test("pre-exec retry guidance for non-runnable rejections states the known-prefi
   assert.ok(context.includes("breaks the run"));
 });
 
-test("#4551: AutoSession.lastPreExecFailure defaults to null", () => {
-  const s = new AutoSession();
-  assert.equal(s.lastPreExecFailure, null, "lastPreExecFailure must start null");
-});
-
-test("#4551: AutoSession.reset() clears lastPreExecFailure", () => {
-  const s = new AutoSession();
-  s.lastPreExecFailure = {
-    unitId: "M001/S01",
-    blockingFindings: ["[file] src/foo.ts: file not found"],
-    verdictExcerpt: "status=fail; 1 blocking issue detected",
-  };
-  s.reset();
-  assert.equal(s.lastPreExecFailure, null, "reset() must clear lastPreExecFailure");
-});
-
 test("#4551: buildPlanSlicePrompt injects fix section when priorPreExecFailure provided", async (t) => {
   const originalCwd = process.cwd();
   const base = makeTempBase();
@@ -250,7 +265,7 @@ test("#4551: buildPlanSlicePrompt with no priorPreExecFailure does NOT include f
   );
 });
 
-test("#4551: dispatch rule injects failure context and clears session field", async (t) => {
+test("#4551: after a kill, the dispatch rule gives the planner the stored findings for one re-plan", async (t) => {
   const originalCwd = process.cwd();
   const base = makeTempBase();
   t.after(() => cleanup(base, originalCwd));
@@ -269,19 +284,30 @@ test("#4551: dispatch rule injects failure context and clears session field", as
   const state = await deriveStateFromDb(base);
   assert.equal(state.phase, "planning", "state must be in planning phase");
 
+  // The plan of the first dispatch failed the check at the retry cap. The used
+  // budget must not keep the findings from the planner.
+  const worker = registerWorker(base);
+  const failedDispatchId = claimPlanSlice(worker, "S01");
+  const preExecBudget = { unitType: "plan-slice", unitId: "M001/S01", kind: "pre-exec" } as const;
+  spendUnitBudget(new Map(), preExecBudget);
+  spendUnitBudget(new Map(), preExecBudget);
+  assert.equal(
+    recordPreExecFailure("M001/S01", {
+      blockingFindings: ["[file] src/missing.ts: file not found"],
+      verdictExcerpt: "status=fail; 1 blocking issue detected",
+    }),
+    true,
+  );
+
+  // The cap pause stops orchestration, which cancels the active dispatch row.
+  markCanceled(failedDispatchId, "pause");
+
+  // Kill: the session is gone and the database file is opened again.
+  closeDatabase();
+  openDatabase(join(base, ".gsd", "gsd.db"));
   const session = new AutoSession();
   session.basePath = base;
   session.active = true;
-  session.lastPreExecFailure = {
-    unitId: "M001/S01",
-    blockingFindings: ["[file] src/missing.ts: file not found"],
-    verdictExcerpt: "status=fail; 1 blocking issue detected",
-  };
-  // A pause occurs at the retry cap. On resume the used budget must not
-  // prevent the restored failure context from reaching the planner.
-  const preExecBudget = { unitType: "plan-slice", unitId: "M001/S01", kind: "pre-exec" } as const;
-  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
-  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
 
   const ctx: DispatchContext = {
     basePath: base,
@@ -292,26 +318,32 @@ test("#4551: dispatch rule injects failure context and clears session field", as
     session,
   };
 
-  const result = await resolveDispatch(ctx);
-  assert.equal(result.action, "dispatch", "must dispatch a unit");
-  if (result.action !== "dispatch") throw new Error("unreachable");
-  assert.equal(result.unitType, "plan-slice", "must be a plan-slice unit");
+  // The rule only reads. A second evaluation before the claim (a recheck, a
+  // preview) must give the same prompt.
+  for (const evaluation of ["first", "second"]) {
+    const result = await resolveDispatch(ctx);
+    assert.equal(result.action, "dispatch", "must dispatch a unit");
+    if (result.action !== "dispatch") throw new Error("unreachable");
+    assert.equal(result.unitType, "plan-slice", "must be a plan-slice unit");
+    assert.ok(
+      result.prompt.includes("Fix these specific issues from the prior pre-exec check"),
+      `${evaluation} evaluation: dispatched prompt must include the fix section`,
+    );
+    assert.ok(
+      result.prompt.includes("src/missing.ts: file not found"),
+      `${evaluation} evaluation: dispatched prompt must include the specific blocking finding`,
+    );
+  }
 
-  // The fix section must appear in the prompt
+  // The re-plan is dispatched. Its findings are its own: the old ones must not
+  // reach a later plan of the slice.
+  claimPlanSlice(worker, "S01");
+  const afterReplan = await resolveDispatch(ctx);
+  assert.equal(afterReplan.action, "dispatch");
+  if (afterReplan.action !== "dispatch") throw new Error("unreachable");
   assert.ok(
-    result.prompt.includes("Fix these specific issues from the prior pre-exec check"),
-    "dispatched prompt must include the fix section",
-  );
-  assert.ok(
-    result.prompt.includes("src/missing.ts: file not found"),
-    "dispatched prompt must include the specific blocking finding",
-  );
-
-  // Field must be cleared after consumption
-  assert.equal(
-    session.lastPreExecFailure,
-    null,
-    "lastPreExecFailure must be cleared after being consumed by the dispatch rule",
+    !afterReplan.prompt.includes("Fix these specific issues from the prior pre-exec check"),
+    "the findings must reach one re-plan only",
   );
 });
 
@@ -338,11 +370,12 @@ test("#4551: dispatch rule does NOT inject stale failure for a different slice",
   session.basePath = base;
   session.active = true;
   // Failure belongs to a different slice (S02), not the active one (S01)
-  session.lastPreExecFailure = {
-    unitId: "M001/S02",
+  claimPlanSlice(registerWorker(base), "S02");
+  const otherSliceFailure = {
     blockingFindings: ["[file] src/other.ts: file not found"],
     verdictExcerpt: "status=fail; 1 blocking issue detected",
   };
+  assert.equal(recordPreExecFailure("M001/S02", otherSliceFailure), true);
 
   const ctx: DispatchContext = {
     basePath: base,
@@ -367,10 +400,20 @@ test("#4551: dispatch rule does NOT inject stale failure for a different slice",
     "prompt must NOT include findings from a different slice",
   );
 
-  // Field must remain untouched (not consumed)
-  assert.notEqual(
-    session.lastPreExecFailure,
-    null,
-    "lastPreExecFailure must NOT be cleared when unit IDs don't match",
+  // The findings stay with their own slice.
+  assert.deepEqual(readPreExecFailure("M001/S02"), otherSliceFailure);
+});
+
+test("pre-exec findings of a slice with no dispatch row have no place to go", (t) => {
+  const originalCwd = process.cwd();
+  const base = makeTempBase();
+  t.after(() => cleanup(base, originalCwd));
+  seedPlanningState(base);
+
+  assert.equal(
+    recordPreExecFailure("M001/S01", { blockingFindings: ["[file] a.ts"], verdictExcerpt: "status=fail" }),
+    false,
+    "the caller must learn that nothing was stored",
   );
+  assert.equal(readPreExecFailure("M001/S01"), null);
 });

@@ -572,3 +572,35 @@ export function setDispatchBudgetUsed(dispatchId: number, kind: string, used: nu
     });
   });
 }
+
+/** Store the findings of the failed pre-execution check of the dispatch row's plan. */
+export function setDispatchPreExecFailure(
+  dispatchId: number,
+  failure: { blockingFindings: string[]; verdictExcerpt: string },
+): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `INSERT INTO unit_dispatch_pre_exec_failures
+         (dispatch_id, blocking_findings, verdict_excerpt, recorded_at)
+       VALUES (:dispatch_id, :blocking_findings, :verdict_excerpt, :recorded_at)
+       ON CONFLICT (dispatch_id) DO UPDATE SET
+         blocking_findings = excluded.blocking_findings,
+         verdict_excerpt = excluded.verdict_excerpt,
+         recorded_at = excluded.recorded_at`,
+    ).run({
+      ":dispatch_id": dispatchId,
+      ":blocking_findings": JSON.stringify(failure.blockingFindings),
+      ":verdict_excerpt": failure.verdictExcerpt,
+      ":recorded_at": new Date().toISOString(),
+    });
+  });
+}
+
+/** Remove the stored pre-execution failure of the dispatch row. */
+export function deleteDispatchPreExecFailure(dispatchId: number): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `DELETE FROM unit_dispatch_pre_exec_failures WHERE dispatch_id = :dispatch_id`,
+    ).run({ ":dispatch_id": dispatchId });
+  });
+}

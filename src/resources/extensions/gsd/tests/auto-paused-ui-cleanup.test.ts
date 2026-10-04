@@ -9,7 +9,6 @@ import { join, dirname } from "node:path";
 
 import {
   anchorProcessCwdForAutoResume,
-  _restorePausedPreExecRepairStateForTest,
   cleanupAfterLoopExit,
   maybeRerootStepSessionForHighContext,
   pauseAuto,
@@ -288,47 +287,6 @@ test("pauseAuto preserves artifact retry counts across pause/resume", async () =
     assert.equal(autoSession.pendingVerificationRetry, null);
     assert.equal(autoSession.verificationRetryCount.get(retryKey), 2);
   } finally {
-    autoSession.reset();
-    process.chdir(previousCwd);
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("pauseAuto persists and restores pre-exec repair context", async () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-pause-pre-exec-context-"));
-  const previousCwd = process.cwd();
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-
-  autoSession.reset();
-  autoSession.active = true;
-  autoSession.basePath = base;
-  autoSession.originalBasePath = base;
-  autoSession.currentMilestoneId = "M001";
-  autoSession.lastPreExecFailure = {
-    unitId: "M001/S01",
-    blockingFindings: ["T01 Verify command uses a pipe"],
-    verdictExcerpt: "status=fail; 1 blocking issue detected",
-  };
-
-  try {
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    process.chdir(base);
-    await pauseAuto();
-
-    const meta = readPausedSessionMetadata(base);
-    assert.deepEqual(meta?.lastPreExecFailure, autoSession.lastPreExecFailure);
-
-    autoSession.lastPreExecFailure = null;
-    _restorePausedPreExecRepairStateForTest(meta!, autoSession);
-
-    const restoredFailure = autoSession.lastPreExecFailure as {
-      unitId: string;
-      blockingFindings: string[];
-    } | null;
-    assert.equal(restoredFailure?.unitId, "M001/S01");
-    assert.deepEqual(restoredFailure?.blockingFindings, ["T01 Verify command uses a pipe"]);
-  } finally {
-    closeDatabase();
     autoSession.reset();
     process.chdir(previousCwd);
     rmSync(base, { recursive: true, force: true });

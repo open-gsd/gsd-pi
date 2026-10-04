@@ -34,6 +34,7 @@ import {
 } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
+import { readPreExecFailure } from "./db/unit-dispatch-pre-exec-failure.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
@@ -1124,27 +1125,19 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "planning → plan-slice",
-    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, sessionProvider, session }) => {
+    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "planning") return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
       const sTitle = state.activeSlice!.title;
-      // #4551: Consume any persisted pre-exec failure for this slice so the
-      // re-dispatched prompt includes the exact blocked references. Clear the
-      // field immediately after reading to prevent stale context leaking into
-      // a later, unrelated plan-slice run.
+      // #4551: give the planner the pre-exec findings of the last plan of this
+      // slice, so the re-dispatched prompt includes the exact blocked
+      // references. They are on the dispatch row of that plan (ADR-048), so a
+      // resume or a restart still has them. beginPreExecRepair owns the retry
+      // cap. This read changes nothing: the dispatch this rule opens becomes
+      // the newest row of the slice, and it has no findings of its own.
       const unitId = `${mid}/${sid}`;
-      let priorPreExecFailure: { blockingFindings: string[]; verdictExcerpt: string } | undefined;
-      if (session?.lastPreExecFailure?.unitId === unitId) {
-        // beginPreExecRepair owns the retry cap and pauses for human review.
-        // If the user resumes, always give the planner the persisted findings;
-        // stopping here would discard the exact repair signal pause preserved.
-        priorPreExecFailure = {
-          blockingFindings: session.lastPreExecFailure.blockingFindings,
-          verdictExcerpt: session.lastPreExecFailure.verdictExcerpt,
-        };
-        session.lastPreExecFailure = null;
-      }
+      const priorPreExecFailure = readPreExecFailure(unitId) ?? undefined;
       return {
         action: "dispatch",
         unitType: "plan-slice",

@@ -117,6 +117,7 @@ import { validateArtifact } from "./schemas/validate.js";
 import { verificationRetryKey } from "./auto/verification-retry-policy.js";
 import { saveCustomVerifyRetryCounts } from "./auto/custom-verify-retry-store.js";
 import { resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
+import { clearPreExecFailure, recordPreExecFailure } from "./db/unit-dispatch-pre-exec-failure.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -3044,11 +3045,15 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
           } as const;
           const attempt = spendUnitBudget(s.unclaimedUnitBudgets, preExecBudget);
 
-          s.lastPreExecFailure = {
-            unitId: currentUnit.id,
-            blockingFindings: findings,
-            verdictExcerpt,
-          };
+          // The findings go on the dispatch row, so a re-plan after a pause or
+          // a restart still gets them.
+          if (!recordPreExecFailure(currentUnit.id, { blockingFindings: findings, verdictExcerpt })) {
+            logWarning(
+              "engine",
+              `pre-execution findings for ${currentUnit.type} ${currentUnit.id} were not stored: the unit has no dispatch row`,
+              { file: "auto-post-unit.ts" },
+            );
+          }
 
           if (attempt >= MAX_PRE_EXEC_RETRIES) {
             resetUnitBudget(s.unclaimedUnitBudgets, preExecBudget);
@@ -3112,9 +3117,7 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
             unitId: currentUnit.id,
             kind: "pre-exec",
           });
-          if (s.lastPreExecFailure?.unitId === currentUnit.id) {
-            s.lastPreExecFailure = null;
-          }
+          clearPreExecFailure(currentUnit.id);
         }
 
         debugLog("postUnitPostVerification", {

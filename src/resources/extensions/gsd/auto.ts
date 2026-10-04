@@ -2379,12 +2379,6 @@ export async function pauseAuto(
       autoStartTime: s.autoStartTime,
       milestoneLock: s.sessionMilestoneLock ?? undefined,
       pauseReason: _errorContext?.message,
-      lastPreExecFailure: s.lastPreExecFailure
-        ? {
-            ...s.lastPreExecFailure,
-            blockingFindings: [...s.lastPreExecFailure.blockingFindings],
-          }
-        : null,
     };
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, pausedMeta);
   } catch (err) {
@@ -2469,20 +2463,6 @@ export async function pauseAuto(
     lifecycle.notifyLevel,
   );
 }
-
-function restorePausedPreExecRepairState(
-  meta: PausedSessionMetadata,
-  session: Pick<AutoSession, "lastPreExecFailure">,
-): void {
-  session.lastPreExecFailure = meta.lastPreExecFailure
-    ? {
-        ...meta.lastPreExecFailure,
-        blockingFindings: [...meta.lastPreExecFailure.blockingFindings],
-      }
-    : null;
-}
-
-export const _restorePausedPreExecRepairStateForTest = restorePausedPreExecRepairState;
 
 /**
  * Build a WorktreeLifecycle Module wrapping the current session.
@@ -2952,7 +2932,6 @@ export async function startAuto(
             s.pausedUnitId = meta.unitId ?? null;
             s.autoStartTime = meta.autoStartTime || Date.now();
             s.sessionMilestoneLock = meta.milestoneLock ?? null;
-            restorePausedPreExecRepairState(meta, s);
             s.paused = true;
             // Build scope from persisted state. Use worktreePath when present and
             // still on disk so mode is detected correctly; fall back to project root.

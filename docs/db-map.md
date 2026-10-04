@@ -738,9 +738,10 @@ result_json  TEXT
 `db-required-schema.ts` is the registration and completeness authority for
 non-versioned schema features required on every database open. It registers
 the ADR-047 liveness feature, the ADR-048
-[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) and
-[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) features and
-the runtime-control feature below;
+[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned),
+[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) and
+[`unit_dispatch_pre_exec_failures`](#unit_dispatch_pre_exec_failures-non-versioned)
+features and the runtime-control feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
 required objects trigger guarded startup maintenance without changing
@@ -785,6 +786,21 @@ FOREIGN KEY trigger_dispatch_id → unit_dispatches(id)
 
 - DDL owner: `db-unit-dispatch-sidecar-schema.ts`. Reader: `db/unit-dispatch-sidecars.ts`. Writer: `db/writers/unit-dispatch-sidecars.ts`.
 - Scope, status and kill rules: see the 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `unit_dispatch_pre_exec_failures` (non-versioned)
+
+```
+dispatch_id        INTEGER PRIMARY KEY
+blocking_findings  TEXT NOT NULL      ← JSON array of finding strings
+verdict_excerpt    TEXT NOT NULL
+recorded_at        TEXT NOT NULL
+FOREIGN KEY dispatch_id → unit_dispatches(id)
+```
+
+- DDL owner: `db-unit-dispatch-pre-exec-failure-schema.ts`. Access: `db/unit-dispatch-pre-exec-failure.ts`.
+- Read and release rules: see the 2026-10-03 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
 
 ---
 

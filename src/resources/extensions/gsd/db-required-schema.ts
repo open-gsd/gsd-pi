@@ -11,6 +11,10 @@ import {
   hasUnitDispatchBudgetSchema,
 } from "./db-unit-dispatch-budget-schema.js";
 import {
+  createUnitDispatchPreExecFailureSchema,
+  hasUnitDispatchPreExecFailureSchema,
+} from "./db-unit-dispatch-pre-exec-failure-schema.js";
+import {
   createRuntimeControlSchema,
   hasRuntimeControlSchema,
 } from "./db-runtime-control-schema.js";
@@ -35,6 +39,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "unit-dispatch-budgets",
     isPresent: hasUnitDispatchBudgetSchema,
     create: createUnitDispatchBudgetSchema,
+  },
+  {
+    id: "unit-dispatch-pre-exec-failures",
+    isPresent: hasUnitDispatchPreExecFailureSchema,
+    create: createUnitDispatchPreExecFailureSchema,
   },
   {
     id: "runtime-control",
