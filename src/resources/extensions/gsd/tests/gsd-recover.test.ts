@@ -45,6 +45,8 @@ import {
   prepareVerifiedRecoverApplication,
   resolvePreparedVerifiedRecoverApplication,
 } from '../db-workspace.ts';
+import { inspectLegacyImportApplicationEvidence } from '../legacy-import-application-evidence.ts';
+import { verifyLegacyImportApplicationTargets } from '../legacy-import-application-result.ts';
 import { executeLegacyImportRecoveryAction } from '../legacy-import-recovery-action.ts';
 import { _restoreLegacyImportLiveForTest } from '../legacy-import-live-restore.ts';
 import {
@@ -1677,6 +1679,64 @@ describe('gsd-recover', async () => {
       'Projection: a file rendered from the database.',
     ]) {
       assert.ok(rendered.includes(kept), kept);
+    }
+  });
+
+  test('recover imports a KNOWLEDGE.md row with empty cells and reads the database row back as the same cells', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    writeFile(base, 'KNOWLEDGE.md', [
+      '# Project Knowledge',
+      '',
+      '## Rules',
+      '',
+      '| # | Scope | Rule | Why | Added |',
+      '|---|-------|------|-----|-------|',
+      '| K001 | project | Use tabs | | |',
+      '| K002 | | Use spaces | Team style | manual |',
+      '',
+      '## Lessons Learned',
+      '',
+      '| # | What Happened | Root Cause | Fix | Scope |',
+      '|---|--------------|------------|-----|-------|',
+      '| L001 | Cache went stale | | | |',
+      '',
+    ].join('\n'));
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(approval, first.notes.at(-1)?.message);
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+
+    // The database rows match the content that the Application retained.
+    const application = _getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!;
+    verifyLegacyImportApplicationTargets(inspectLegacyImportApplicationEvidence(String(application['operation_id'])));
+    assert.deepEqual(
+      _getAdapter()!
+        .prepare("SELECT scope, json_extract(structured_fields, '$.sourceKnowledgeId') AS id FROM memories ORDER BY id")
+        .all()
+        .map((row) => [row['id'], row['scope']]),
+      [['K001', 'project'], ['K002', 'project'], ['L001', 'project']],
+    );
+    // The import is exact: the same file gives no further knowledge change.
+    assert.deepEqual(
+      recoverPreview(base).preview.changes.filter((change) => change.target.kind === 'knowledge'),
+      [],
+    );
+    const rendered = renderKnowledgeProjection(base).content;
+    for (const row of [
+      '| K001 | project | Use tabs | — | — |',
+      '| K002 | project | Use spaces | Team style | manual |',
+      '| L001 | Cache went stale | — | — | project |',
+    ]) {
+      assert.ok(rendered.includes(row), row);
     }
   });
 

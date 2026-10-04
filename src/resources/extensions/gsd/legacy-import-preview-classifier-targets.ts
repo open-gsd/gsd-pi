@@ -3,7 +3,12 @@
 
 import type { LegacyImportValue } from "./legacy-import-contract.js";
 import type { LegacyImportBaseRowSet } from "./legacy-import-preview-base.js";
-import { KNOWLEDGE_TABLE_BY_CATEGORY, knowledgeMemoryCells } from "./knowledge-parser.js";
+import {
+  KNOWLEDGE_CELL_FIELDS,
+  KNOWLEDGE_TABLE_BY_CATEGORY,
+  knowledgeMemoryCells,
+  type KnowledgeTable,
+} from "./knowledge-parser.js";
 
 export interface LegacyImportTargetAdapter {
   rowSet: LegacyImportBaseRowSet;
@@ -192,6 +197,23 @@ export const LEGACY_IMPORT_COMPLETE_TARGET_KINDS: Partial<Record<LegacyImportBas
 /** One cell as it reads back from a rendered KNOWLEDGE.md table row. */
 export function legacyImportKnowledgeCell(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The comparable cells of one KNOWLEDGE.md file row, without its `#` cell. An
+ * empty cell holds the value the render shows for the memories row that the
+ * import writes for it, so the file row and that database row compare equal.
+ */
+export function legacyImportKnowledgeFileCells(
+  table: KnowledgeTable,
+  id: string,
+  cells: readonly string[],
+): string[] {
+  const fields = KNOWLEDGE_CELL_FIELDS[table];
+  const structured = Object.fromEntries(
+    fields.cells.map((field, index) => [field, legacyImportKnowledgeCell(cells[index] ?? "")]),
+  );
+  return knowledgeMemoryCells(table, id, structured[fields.content]!, "project", structured).slice(1);
 }
 
 /**

@@ -12,13 +12,12 @@ import {
 import { parseLegacyImportJson, type LegacyImportJsonDocument } from "./legacy-import-preview-json.js";
 import { hashLegacyImportBytes } from "./legacy-import-preview.js";
 import {
-  KNOWLEDGE_CELL_FIELDS,
   KNOWLEDGE_DEFAULT_INTRO,
   KNOWLEDGE_SECTIONS,
   parseKnowledgeRows,
   splitPipeRow,
 } from "./knowledge-parser.js";
-import { legacyImportKnowledgeCell } from "./legacy-import-preview-classifier-targets.js";
+import { legacyImportKnowledgeFileCells } from "./legacy-import-preview-classifier-targets.js";
 
 interface KnowledgeGraphNode {
   id: string;
@@ -143,8 +142,9 @@ function interpretKnowledgeMarkdown(
       }
       const id = new RegExp(`^\\|\\s*(${section.idPrefix}\\d+)\\s*\\|`, "u").exec(trimmed)?.[1];
       if (id !== undefined) {
-        const cells = splitPipeRow(trimmed).slice(1).map(legacyImportKnowledgeCell);
-        if (cells.length !== KNOWLEDGE_CELL_FIELDS[section.table].cells.length) {
+        const fileCells = splitPipeRow(trimmed).slice(1);
+        const cells = legacyImportKnowledgeFileCells(section.table, id, fileCells);
+        if (fileCells.length !== cells.length) {
           rowNotImported(line, "its cell count does not match its table");
         } else if (mappedIds.has(id)) {
           rowNotImported(line, "an earlier row has the same id");
