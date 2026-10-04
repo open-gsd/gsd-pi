@@ -114,7 +114,7 @@ function useProjectDbForMerge(base: string): void {
       worktreeGsd: join(base, ".gsd-worktrees", "M001", ".gsd"),
     } as never),
     getWorkflowDatabasePath: () => dbPath,
-    shouldReconcileWorktreeDb: () => false,
+    hasWorktreeLocalDb: () => false,
     proveMilestoneCloseout: () => ({ ok: true }),
   });
 }

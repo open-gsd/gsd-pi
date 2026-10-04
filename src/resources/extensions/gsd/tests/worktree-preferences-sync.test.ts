@@ -6,7 +6,6 @@
  *
  *   1. syncGsdStateToWorktree() forward-syncs PREFERENCES.md (additive only)
  *   2. syncGsdStateToWorktree() still accepts legacy lowercase preferences.md
- *   3. syncWorktreeStateBack() does NOT overwrite project root PREFERENCES.md
  */
 
 import test from "node:test";
@@ -25,7 +24,6 @@ import { tmpdir } from "node:os";
 
 import {
   syncGsdStateToWorktree,
-  syncWorktreeStateBack,
 } from "../auto-worktree-sync.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────
@@ -151,30 +149,5 @@ test("#2684: syncGsdStateToWorktree does NOT overwrite existing worktree prefere
     readFileSync(join(wtBase, ".gsd", "PREFERENCES.md"), "utf-8"),
     wtPrefs,
     "existing worktree PREFERENCES.md must not be overwritten",
-  );
-});
-
-test("#2684: syncWorktreeStateBack does NOT overwrite project root PREFERENCES.md", (t) => {
-  const mainBase = makeTempDir("main");
-  const wtBase = makeTempDir("wt");
-  const mid = "M001";
-  t.after(() => cleanup(mainBase, wtBase));
-
-  const rootPrefs = "# Root preferences\nauthoritative: true";
-  const wtPrefs = "# Worktree preferences\nstale-copy: true";
-
-  writeFile(mainBase, ".gsd/PREFERENCES.md", rootPrefs);
-  writeFile(wtBase, ".gsd/PREFERENCES.md", wtPrefs);
-
-  // Worktree needs at least a milestone dir for the function to proceed
-  mkdirSync(join(wtBase, ".gsd", "milestones", mid), { recursive: true });
-  mkdirSync(join(mainBase, ".gsd", "milestones"), { recursive: true });
-
-  syncWorktreeStateBack(mainBase, wtBase, mid);
-
-  assert.equal(
-    readFileSync(join(mainBase, ".gsd", "PREFERENCES.md"), "utf-8"),
-    rootPrefs,
-    "project root PREFERENCES.md must NOT be overwritten by worktree copy",
   );
 });

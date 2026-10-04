@@ -1,7 +1,7 @@
 // gsd-pi — Auto-worktree cleanup helpers.
 //
 // Owns shared cleanup primitives used by teardown and merge cleanup paths:
-// same-file DB reconciliation checks, transient project-root state removal,
+// the worktree-local DB check, transient project-root state removal,
 // git pathspec conversion for externally-rooted .gsd paths, and expected
 // unlink error classification.
 
@@ -27,13 +27,29 @@ export function _isSamePath(a: string, b: string): boolean {
   return isSamePath(a, b);
 }
 
-export function _shouldReconcileWorktreeDb(
+/**
+ * True when the worktree holds its own gsd.db, a file other than the project
+ * database. Worktrees share the project database, so such a file comes from
+ * an older release, a manual copy, or a git-tracked gsd.db.
+ */
+export function _hasWorktreeLocalDb(
   worktreeDbPath: string,
   mainDbPath: string,
   pathExists: (path: string) => boolean = existsSync,
   samePath: (a: string, b: string) => boolean = isSamePath,
 ): boolean {
   return pathExists(worktreeDbPath) && !samePath(worktreeDbPath, mainDbPath);
+}
+
+/**
+ * The stop message for a worktree-local gsd.db. GSD never merges such a file
+ * into the project database on its own: the operator imports it explicitly.
+ */
+export function worktreeLocalDbInstruction(worktreeDbPath: string, worktreeName: string): string {
+  return `worktree-local database found at ${worktreeDbPath}. ` +
+    `GSD does not merge it into the project database automatically. ` +
+    `Run /worktree import-db ${worktreeName} to preview and import its rows, ` +
+    `or delete the file when its rows are not needed.`;
 }
 
 export function _isExpectedWorktreeUnlinkError(

@@ -343,8 +343,7 @@ export interface MergeContext {
   originalBasePath: string;
   /**
    * Current worktree path or project root when in branch mode. Used as the
-   * cwd anchor for the milestone merge transaction and the source for
-   * `Projection.finalizeProjectionForMerge`.
+   * cwd anchor for the milestone merge transaction.
    */
   worktreeBasePath: string;
   milestoneId: string;
@@ -926,9 +925,8 @@ export function _enterMilestoneCore(
       deps.worktreeProjection.projectRootToWorktree(enterScope);
     } catch (projErr) {
       // Non-fatal: projection failures must not block worktree entry.
-      // The pre-dispatch path in auto/phases.ts performs the same projection
-      // on every iteration, so a transient failure here self-heals on the
-      // next loop pass.
+      // The post-unit pipeline refreshes the root projections after every
+      // unit, so a transient failure here self-heals on the next unit.
       debugLog("WorktreeLifecycle", {
         action: "enterMilestone",
         phase: "projection-on-enter",
@@ -1105,24 +1103,6 @@ function _mergeWorktreeModeImpl(
   }
 
   try {
-    // ADR-016: final projection before teardown. Replaces the legacy
-    // syncWorktreeStateBack(originalBase, basePath, milestoneId) call.
-    const finalScope = scopeMilestone(
-      createWorkspace(worktreeBasePath),
-      milestoneId,
-    );
-    const { synced } = deps.worktreeProjection.finalizeProjectionForMerge(
-      finalScope,
-    );
-    if (synced.length > 0) {
-      debugLog("WorktreeLifecycle", {
-        action: "mergeAndExit",
-        milestoneId,
-        phase: "reverse-sync",
-        synced: synced.length,
-      });
-    }
-
     const roadmapSearchPaths = [originalBasePath];
     if (!isSamePathPhysical(worktreeBasePath, originalBasePath)) {
       roadmapSearchPaths.push(worktreeBasePath);

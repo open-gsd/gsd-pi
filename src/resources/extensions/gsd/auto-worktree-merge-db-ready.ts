@@ -1,8 +1,8 @@
 // gsd-pi — Milestone merge DB readiness guard.
 //
 // Owns the invariant that, before leaving worktree context for a milestone
-// merge, the project DB is the active DB, worktree DB state is reconciled, and
-// canonical closeout state proves the milestone is safe to merge.
+// merge, the project DB is the active DB, the worktree holds no gsd.db of its
+// own, and canonical closeout state proves the milestone is safe to merge.
 
 import { join } from "node:path";
 
@@ -15,16 +15,13 @@ import {
 import { readMilestoneMergeObservation } from "./db/milestone-closeout-readiness.js";
 import { isMilestoneCloseoutPrepared } from "./db/writers/closeout.js";
 import { GSDError, GSD_GIT_ERROR } from "./errors.js";
-import {
-  isDbAvailable,
-  reconcileWorktreeDb,
-} from "./gsd-db.js";
+import { isDbAvailable } from "./gsd-db.js";
 import {
   formatCloseoutProofBlock,
   proveMilestoneCloseout,
 } from "./milestone-closeout-proof.js";
 import { resolveGsdPathContract } from "./paths.js";
-import { _shouldReconcileWorktreeDb } from "./auto-worktree-cleanup.js";
+import { _hasWorktreeLocalDb, worktreeLocalDbInstruction } from "./auto-worktree-cleanup.js";
 import { logError } from "./workflow-logger.js";
 
 export interface MilestoneDbReadyRequest {
@@ -43,9 +40,8 @@ interface MergeDbReadyDeps {
   openWorkflowDatabasePath: typeof openWorkflowDatabasePath;
   proveMilestoneCloseout: typeof proveMilestoneCloseout;
   readMilestoneMergeObservation: typeof readMilestoneMergeObservation;
-  reconcileWorktreeDb: typeof reconcileWorktreeDb;
   resolveGsdPathContract: typeof resolveGsdPathContract;
-  shouldReconcileWorktreeDb: typeof _shouldReconcileWorktreeDb;
+  hasWorktreeLocalDb: typeof _hasWorktreeLocalDb;
 }
 
 const defaultDeps: MergeDbReadyDeps = {
@@ -58,9 +54,8 @@ const defaultDeps: MergeDbReadyDeps = {
   openWorkflowDatabasePath,
   proveMilestoneCloseout,
   readMilestoneMergeObservation,
-  reconcileWorktreeDb,
   resolveGsdPathContract,
-  shouldReconcileWorktreeDb: _shouldReconcileWorktreeDb,
+  hasWorktreeLocalDb: _hasWorktreeLocalDb,
 };
 
 let deps: MergeDbReadyDeps = defaultDeps;
@@ -75,7 +70,12 @@ export function _resetMergeDbReadyDepsForTests(): void {
   deps = defaultDeps;
 }
 
-function reconcileWorktreeDatabase(request: MilestoneDbReadyRequest): void {
+/**
+ * Open the project DB, and stop when the worktree holds a gsd.db of its own.
+ * That file is never merged here: no project row changes, and the error names
+ * the explicit import.
+ */
+function assertProjectDbIsTheOnlyDb(request: MilestoneDbReadyRequest): void {
   const { milestoneId, projectRoot, worktreeCwd } = request;
   const contract = deps.resolveGsdPathContract(worktreeCwd, projectRoot);
   const worktreeDbPath = join(contract.worktreeGsd ?? join(worktreeCwd, ".gsd"), "gsd.db");
@@ -86,18 +86,18 @@ function reconcileWorktreeDatabase(request: MilestoneDbReadyRequest): void {
     const dbAvailable = deps.isDbAvailable();
     const projectDbActive = dbAvailable
       && activeDbPath !== null
-      && !deps.shouldReconcileWorktreeDb(activeDbPath, mainDbPath);
+      && !deps.hasWorktreeLocalDb(activeDbPath, mainDbPath);
     if (!projectDbActive) {
       if (dbAvailable) deps.closeWorkflowDatabase();
       if (!deps.openWorkflowDatabasePath(mainDbPath) || !deps.isDbAvailable()) {
         throw new Error(`cannot open project DB at ${mainDbPath}`);
       }
     }
-    if (deps.shouldReconcileWorktreeDb(worktreeDbPath, mainDbPath)) {
-      deps.reconcileWorktreeDb(mainDbPath, worktreeDbPath);
+    if (deps.hasWorktreeLocalDb(worktreeDbPath, mainDbPath)) {
+      throw new Error(worktreeLocalDbInstruction(worktreeDbPath, milestoneId));
     }
   } catch (err) {
-    const message = `DB reconciliation failed before milestone ${milestoneId} merge: ${err instanceof Error ? err.message : String(err)}`;
+    const message = `Milestone ${milestoneId} merge blocked: ${err instanceof Error ? err.message : String(err)}`;
     deps.logError("worktree", message);
     throw new GSDError(
       GSD_GIT_ERROR,
@@ -147,7 +147,7 @@ function assertAdoptedMilestoneCloseoutReady(milestoneId: string): void {
 export function assertMilestoneDbReadyForMerge(
   request: MilestoneDbReadyRequest,
 ): void {
-  reconcileWorktreeDatabase(request);
+  assertProjectDbIsTheOnlyDb(request);
   assertAdoptedMilestoneCloseoutReady(request.milestoneId);
   assertCloseoutProof(request.milestoneId);
 }

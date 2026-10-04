@@ -1,9 +1,10 @@
 // Project/App: gsd-pi
 // File Purpose: Worktree DB reconciliation writers for the single-writer layer.
-// Owns reconcileWorktreeDb: the ATTACH-and-merge of an
-// auto-worktree's gsd.db back into the project-root DB, with conflict
-// detection. Reads the shared engine handle via getDbOrNull(); opens the
-// project-root DB via the engine's openDatabase().
+// Owns reconcileWorktreeDb: the ATTACH-and-merge of a worktree-local gsd.db
+// into the project-root DB, with conflict detection. Its only production
+// caller is the explicit `/worktree import-db` command; no merge, teardown or
+// projection path calls it. Reads the shared engine handle via getDbOrNull();
+// opens the project-root DB via the engine's openDatabase().
 import { existsSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { GSDError, GSD_STALE_STATE } from "../../errors.js";
@@ -67,6 +68,8 @@ export interface ReconcileResult {
   conflicts: string[];
   /** Legacy status changes that the adoption of merged rows made (only after the Cutover). */
   adoptionStatusChanges: string[];
+  /** Set when the merge did not run or failed. The counts are then zero. */
+  error?: string;
 }
 
 /** The statement that gives one hierarchy row (`kind M/S/T`) of a worktree database a known status. */
@@ -80,9 +83,21 @@ function knownStatusSql(row: string): string {
   return `UPDATE milestones SET status = 'queued' WHERE id = ${milestoneId}`;
 }
 
+/** Thrown inside the merge transaction of a preview, so that every row change rolls back. */
+class ReconcilePreviewRollback extends Error {
+  constructor(readonly result: ReconcileResult) {
+    super("worktree DB reconciliation preview");
+  }
+}
+
+/**
+ * Merge the rows of a worktree-local gsd.db into the project DB.
+ * With `preview`, returns the same counts and conflicts and changes no row.
+ */
 export function reconcileWorktreeDb(
   mainDbPath: string,
   worktreeDbPath: string,
+  options: { preview?: boolean } = {},
 ): ReconcileResult {
   const zero: ReconcileResult = {
     decisions: 0,
@@ -113,13 +128,13 @@ export function reconcileWorktreeDb(
   // so we use strict allowlist validation instead.
   if (/['";\x00]/.test(worktreeDbPath)) {
     logError("db", "worktree DB reconciliation failed: path contains unsafe characters");
-    return zero;
+    return { ...zero, error: "path contains unsafe characters" };
   }
   if (!getDbOrNull()!) {
     const opened = openMainDb(mainDbPath);
     if (!opened) {
       logError("db", "worktree DB reconciliation failed: cannot open main DB");
-      return zero;
+      return { ...zero, error: "cannot open main DB" };
     }
   }
   const adapter = getDbOrNull()!!;
@@ -346,7 +361,8 @@ export function reconcileWorktreeDb(
         : "COALESCE(m.target_repositories, '[]')";
 
       // One Domain Operation: the merge commits with a revision bump, and
-      // the hierarchy rows it inserts get their lifecycle rows with it.
+      // the hierarchy rows it inserts get their lifecycle rows with it. A preview
+      // throws inside it, so the operation rolls back and writes nothing.
       const adoptionStatusChanges = mergeLegacyRowsWithAdoption("worktree-reconcile", () => transaction(() => {
         // Join the target decisions so we can prefer an existing main.source
         // when the worktree predates v16 — otherwise a write-through reconcile
@@ -728,6 +744,9 @@ export function reconcileWorktreeDb(
           `).run());
         }
 
+        if (options.preview) {
+          throw new ReconcilePreviewRollback({ ...merged, conflicts, adoptionStatusChanges: [] });
+        }
         return { ...merged };
       }));
       if (adoptionStatusChanges.length > 0) {
@@ -742,6 +761,7 @@ export function reconcileWorktreeDb(
       try { adapter.exec("DETACH DATABASE wt"); } catch (e) { logWarning("db", `detach worktree DB failed: ${(e as Error).message}`); }
     }
   } catch (err) {
+    if (err instanceof ReconcilePreviewRollback) return err.result;
     if (err instanceof CanonicalWorktreeDivergenceError) throw err;
     // A merged row that cannot be adopted stays in the worktree database.
     if (err instanceof LifecycleBackfillRefusedError) {
@@ -756,7 +776,7 @@ export function reconcileWorktreeDb(
       throw new CanonicalWorktreeDivergenceError([`${err.message} Nothing was merged`]);
     }
     logError("db", "worktree DB reconciliation failed", { error: (err as Error).message });
-    return { ...zero, conflicts };
+    return { ...zero, conflicts, error: (err as Error).message };
   }
 }
 

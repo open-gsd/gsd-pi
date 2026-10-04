@@ -188,7 +188,6 @@ import { checkResourcesStale, readResourceVersion } from "./auto-worktree-resour
 import { escapeStaleWorktree } from "./auto-worktree-runtime-cleanup.js";
 import { teardownWarmedBrowserDaemons } from "./browser-daemon-auto-prep.js";
 import { getAutoWorktreeOriginalBase } from "./auto-worktree-session-registry.js";
-import { syncWorktreeStateBack } from "./auto-worktree-sync.js";
 import { teardownAutoWorktree } from "./auto-worktree-teardown.js";
 import { pruneQueueOrder } from "./queue-order.js";
 import { startCommandPolling as _startCommandPolling, isRemoteConfigured } from "../remote-questions/manager.js";

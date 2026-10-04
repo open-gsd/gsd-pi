@@ -7,6 +7,7 @@
  *   /worktree <name>        — create a new worktree
  *   /worktree list          — list existing worktrees
  *   /worktree merge [name] [target] — start LLM-guided merge (auto-detects when inside a worktree)
+ *   /worktree import-db <name> — preview and import a worktree-local gsd.db into the project database
  *   /worktree remove <name> — remove a worktree and its branch
  */
 
@@ -15,7 +16,7 @@ import { loadPrompt } from "./prompt-loader.js";
 import { autoCommitCurrentBranch, getMainBranch, resolveGitHeadPath, nudgeGitBranchCache } from "./worktree.js";
 import { runWorktreePostCreateHook } from "./worktree-post-create-hook.js";
 import { showConfirm } from "../shared/tui.js";
-import { gsdRoot, milestonesDir, resolveGsdPathContract } from "./paths.js";
+import { resolveGsdPathContract } from "./paths.js";
 import {
   createWorktree,
   listWorktrees,
@@ -31,10 +32,11 @@ import {
 } from "./worktree-manager.js";
 import { inferCommitType } from "./git-service.js";
 import type { FileLineStat } from "./worktree-manager.js";
-import { existsSync, realpathSync, readdirSync } from "node:fs";
+import { existsSync, realpathSync, renameSync } from "node:fs";
 import { nativeMergeAbort } from "./native-git-bridge.js";
 import { join } from "node:path";
-import { removeProjectionFileSync, removeProjectionTreeSync } from "./atomic-write.js";
+import { _hasWorktreeLocalDb, worktreeLocalDbInstruction } from "./auto-worktree-cleanup.js";
+import type { ReconcileResult } from "./db/writers/reconcile.js";
 import {
   clearWorktreeOriginalCwd,
   ensureWorktreeOriginalCwdFromPath,
@@ -45,19 +47,30 @@ import {
 
 export { getActiveWorktreeName, getWorktreeOriginalCwd } from "./worktree-session-state.js";
 
-export async function reconcileWorktreeDbBeforeManualMerge(
+/**
+ * `/worktree import-db`: the only path that merges a worktree-local gsd.db
+ * into the project database. The preview changes no row. After the operator
+ * confirms, the rows are merged and the file is renamed to `gsd.db.imported`,
+ * so the worktree can merge. Throws when the preview or the merge fails.
+ */
+export async function importWorktreeLocalDb(
   mainDbPath: string,
   worktreeDbPath: string,
-): Promise<void> {
-  const {
-    CanonicalWorktreeDivergenceError,
-    reconcileWorktreeDb,
-  } = await import("./gsd-db.js");
-  try {
-    reconcileWorktreeDb(mainDbPath, worktreeDbPath);
-  } catch (error) {
-    if (error instanceof CanonicalWorktreeDivergenceError) throw error;
+  confirm: (preview: ReconcileResult) => Promise<boolean>,
+): Promise<"absent" | "cancelled" | "imported"> {
+  if (!_hasWorktreeLocalDb(worktreeDbPath, mainDbPath)) return "absent";
+  const { reconcileWorktreeDb } = await import("./gsd-db.js");
+  const preview = reconcileWorktreeDb(mainDbPath, worktreeDbPath, { preview: true });
+  if (preview.error) throw new Error(`cannot read ${worktreeDbPath}: ${preview.error}`);
+  if (!(await confirm(preview))) return "cancelled";
+  const applied = reconcileWorktreeDb(mainDbPath, worktreeDbPath);
+  if (applied.error) throw new Error(`import of ${worktreeDbPath} failed: ${applied.error}`);
+  for (const suffix of ["", "-wal", "-shm"]) {
+    if (existsSync(worktreeDbPath + suffix)) {
+      renameSync(worktreeDbPath + suffix, `${worktreeDbPath}.imported${suffix}`);
+    }
   }
+  return "imported";
 }
 
 /**
@@ -69,7 +82,7 @@ export async function reconcileWorktreeDbBeforeManualMerge(
 
 function worktreeCompletions(prefix: string) {
   const parts = prefix.trim().split(/\s+/);
-  const subcommands = ["list", "merge", "remove", "switch", "create", "return"];
+  const subcommands = ["list", "merge", "remove", "switch", "create", "return", "import-db"];
 
   if (parts.length <= 1) {
     const partial = parts[0] ?? "";
@@ -88,7 +101,7 @@ function worktreeCompletions(prefix: string) {
     }
   }
 
-  if ((parts[0] === "merge" || parts[0] === "remove" || parts[0] === "switch" || parts[0] === "create") && parts.length <= 2) {
+  if ((parts[0] === "merge" || parts[0] === "remove" || parts[0] === "switch" || parts[0] === "create" || parts[0] === "import-db") && parts.length <= 2) {
     const namePrefix = parts[1] ?? "";
     try {
       const mainBase = getWorktreeOriginalCwd() ?? process.cwd();
@@ -129,6 +142,7 @@ async function worktreeHandler(
         `  /${alias} return        — switch back to the main project tree`,
         `  /${alias} list          — list all worktrees`,
         `  /${alias} merge [name] [target] — merge worktree into target branch (auto-detects when inside a worktree)`,
+        `  /${alias} import-db <name> — preview and import a worktree-local gsd.db into the project database`,
         `  /${alias} remove <name|all> — remove a worktree (or all) and its branch`,
       ].join("\n"),
       "info",
@@ -197,6 +211,16 @@ async function worktreeHandler(
     return;
   }
 
+  if (trimmed === "import-db" || trimmed.startsWith("import-db ")) {
+    const name = trimmed.replace(/^import-db\s*/, "").trim() || getActiveWorktreeName();
+    if (!name) {
+      ctx.ui.notify(`Usage: /${alias} import-db <name>`, "warning");
+      return;
+    }
+    await handleImportDb(getWorktreeOriginalCwd() ?? basePath, name, ctx);
+    return;
+  }
+
   if (trimmed === "remove" || trimmed.startsWith("remove ")) {
     const name = trimmed.replace(/^remove\s*/, "").trim();
     const mainBase = getWorktreeOriginalCwd() ?? basePath;
@@ -215,7 +239,7 @@ async function worktreeHandler(
     return;
   }
 
-  const RESERVED = ["list", "return", "switch", "create", "merge", "remove"];
+  const RESERVED = ["list", "return", "switch", "create", "merge", "remove", "import-db"];
   if (RESERVED.includes(trimmed)) {
     ctx.ui.notify(`Usage: /${alias} ${trimmed}${trimmed === "list" || trimmed === "return" ? "" : " <name>"}`, "warning");
     return;
@@ -272,44 +296,6 @@ export function registerWorktreeCommand(pi: ExtensionAPI): void {
 
 // ─── Handlers ──────────────────────────────────────────────────────────────
 
-/**
- * Check if the worktree has existing GSD milestones that would
- * cause auto-mode to continue previous work instead of starting fresh.
- */
-function hasExistingMilestones(wtPath: string): boolean {
-  const mDir = milestonesDir(wtPath);
-  if (!existsSync(mDir)) return false;
-  try {
-    const entries = readdirSync(mDir, { withFileTypes: true })
-      .filter(d => d.isDirectory() && /^M\d+(?:-[a-z0-9]{6})?/.test(d.name));
-    return entries.length > 0;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Clear GSD planning artifacts so auto-mode starts fresh with the discuss flow.
- * Keeps the .gsd/ directory structure intact but removes milestones and root planning files.
- */
-function clearGSDPlans(wtPath: string): void {
-  const mDir = milestonesDir(wtPath);
-  if (existsSync(mDir)) {
-    removeProjectionTreeSync(mDir);
-  }
-
-  // Remove root planning files — PROJECT.md, DECISIONS.md, QUEUE.md, REQUIREMENTS.md
-  // Keep STATE.md (gitignored, will be rebuilt) and other runtime files
-  const root = gsdRoot(wtPath);
-  const planningFiles = ["PROJECT.md", "DECISIONS.md", "QUEUE.md", "REQUIREMENTS.md"];
-  for (const file of planningFiles) {
-    const filePath = join(root, file);
-    if (existsSync(filePath)) {
-      removeProjectionFileSync(filePath);
-    }
-  }
-}
-
 async function handleCreate(
   basePath: string,
   name: string,
@@ -337,33 +323,8 @@ async function handleCreate(
     process.chdir(info.path);
     nudgeGitBranchCache(prevCwd);
 
-    // If the worktree inherited existing milestones, ask whether to keep or clear them
-    let clearedPlans = false;
-    if (hasExistingMilestones(info.path)) {
-      // confirmLabel = Continue (safe default, on the left / first)
-      // declineLabel = Start fresh (destructive, on the right)
-      const keepExisting = await showConfirm(ctx, {
-        title: "Worktree Setup",
-        message: [
-          `This worktree inherited existing GSD milestones from the main branch.`,
-          ``,
-          `  Continue — keep milestones and pick up where main left off`,
-          `  Start fresh — clear milestones so /gsd auto starts a new project`,
-        ].join("\n"),
-        confirmLabel: "Continue",
-        declineLabel: "Start fresh",
-      });
-      if (!keepExisting) {
-        clearGSDPlans(info.path);
-        clearedPlans = true;
-      }
-    }
-
     const commitNote = commitMsg
       ? `  ${CLR.muted("Auto-committed on previous branch before switching.")}`
-      : "";
-    const freshNote = clearedPlans
-      ? `  ${CLR.ok("✓")} Cleared milestones — ${CLR.hint("/gsd auto")} will start fresh.`
       : "";
     ctx.ui.notify(
       [
@@ -372,7 +333,6 @@ async function handleCreate(
         `  ${CLR.label("path")}     ${CLR.path(info.path)}`,
         `  ${CLR.label("branch")}   ${CLR.branch(info.branch)}`,
         commitNote,
-        freshNote,
         "",
         `  ${CLR.hint(`/worktree merge ${name}`)}  ${CLR.muted("merge back when done")}`,
         `  ${CLR.hint("/worktree return")}${" ".repeat(Math.max(1, name.length - 2))}  ${CLR.muted("switch back to main tree")}`,
@@ -585,6 +545,14 @@ async function handleMerge(
       return;
     }
 
+    // A worktree-local gsd.db is never merged into the project database here.
+    const contract = resolveGsdPathContract(worktreePath(basePath, name), basePath);
+    const wtDbPath = join(contract.worktreeGsd ?? join(contract.workRoot, ".gsd"), "gsd.db");
+    if (_hasWorktreeLocalDb(wtDbPath, contract.projectDb)) {
+      ctx.ui.notify(`Merge stopped: ${worktreeLocalDbInstruction(wtDbPath, name)}`, "error");
+      return;
+    }
+
     // Gather merge context — full repo diff, not just .gsd/
     const diffSummary = diffWorktreeAll(basePath, name, undefined, mainBranch);
     const numstat = diffWorktreeNumstat(basePath, name, undefined, mainBranch);
@@ -666,15 +634,6 @@ async function handleMerge(
     const commitType = inferCommitType(name);
     const commitMessage = `${commitType}: merge worktree ${name}\n\nGSD-Worktree: ${name}`;
 
-    // Reconcile worktree DB into main DB before squash merge. Ordinary legacy
-    // failures remain best-effort; canonical divergence blocks the merge.
-    const contract = resolveGsdPathContract(worktreePath(basePath, name), basePath);
-    const wtDbPath = join(contract.worktreeGsd ?? join(contract.workRoot, ".gsd"), "gsd.db");
-    const mainDbPath = contract.projectDb;
-    if (existsSync(wtDbPath) && existsSync(mainDbPath)) {
-      await reconcileWorktreeDbBeforeManualMerge(mainDbPath, wtDbPath);
-    }
-
     try {
       mergeWorktreeToMain(basePath, name, commitMessage, undefined, mainBranch);
       ctx.ui.notify(
@@ -747,6 +706,55 @@ async function handleMerge(
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     ctx.ui.notify(`Failed to start merge: ${msg}`, "error");
+  }
+}
+
+async function handleImportDb(
+  basePath: string,
+  name: string,
+  ctx: ExtensionCommandContext,
+): Promise<void> {
+  try {
+    const contract = resolveGsdPathContract(worktreePath(basePath, name), basePath);
+    const wtDbPath = join(contract.worktreeGsd ?? join(contract.workRoot, ".gsd"), "gsd.db");
+    const outcome = await importWorktreeLocalDb(contract.projectDb, wtDbPath, (preview) => {
+      const { conflicts, error: _error, ...counts } = preview;
+      const rows = Object.entries(counts).filter(([, count]) => count > 0);
+      return showConfirm(ctx, {
+        title: "Import worktree database",
+        message: [
+          `Import ${CLR.path(wtDbPath)} into the project database?`,
+          "",
+          rows.length > 0 ? "  Rows that change in the project database:" : "  No project row changes.",
+          ...rows.map(([table, count]) => `    ${table}: ${count}`),
+          ...(conflicts.length > 0
+            ? ["", "  Changed on both sides (the worktree value replaces the project value):", ...conflicts.map((c) => `    ${c}`)]
+            : []),
+        ].join("\n"),
+        confirmLabel: "Import",
+        declineLabel: "Cancel",
+      });
+    });
+    if (outcome === "absent") {
+      ctx.ui.notify(`Worktree ${CLR.name(name)} has no database of its own. Nothing to import.`, "info");
+      return;
+    }
+    if (outcome === "cancelled") {
+      ctx.ui.notify("Import cancelled. No database changes made.", "info");
+      return;
+    }
+    const { rebuildMarkdownProjectionsFromDb } = await import("./projection-worker.js");
+    const rebuilt = await rebuildMarkdownProjectionsFromDb(basePath);
+    ctx.ui.notify(
+      [
+        `${CLR.ok("✓")} Imported the database of worktree ${CLR.name(name)}. The file was kept as ${CLR.path(`${wtDbPath}.imported`)}.`,
+        ...rebuilt.errors.map((error) => `  projection: ${error}`),
+      ].join("\n"),
+      rebuilt.errors.length > 0 ? "warning" : "info",
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    ctx.ui.notify(`Failed to import the worktree database: ${msg}`, "error");
   }
 }
 

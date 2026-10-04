@@ -1668,7 +1668,8 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
       await rebuildState(s.basePath);
     });
 
-    // Sync worktree state back to project root (skipped for lightweight sidecars)
+    // Refresh the worktree copies of the root projections from the project
+    // root render (skipped for lightweight sidecars). Nothing flows back.
     if (!opts?.skipWorktreeSync && s.originalBasePath && !isSamePathLocal(s.originalBasePath, s.basePath)) {
       await runSafely("postUnit", "worktree-sync", () => {
         let scope = s.scope;
@@ -1682,7 +1683,7 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
             scope = null;
           }
         }
-        if (scope) _worktreeProjection.projectWorktreeToRoot(scope);
+        if (scope) _worktreeProjection.refreshRootProjections(scope);
       });
     }
 

@@ -110,7 +110,7 @@ Auto mode creates and manages worktrees automatically:
 4. On milestone completion, the worktree is squash-merged to the integration branch
 5. The worktree and branch are removed
 
-Before merge or teardown, GSD reconciles legacy worktree rows without replacing hierarchy identities. If the worktree contains canonical operations or lifecycle state that is missing from or ahead of the project database, GSD blocks the merge/cleanup and preserves the worktree for recovery instead of discarding canonical history. If the project database already has a newer lifecycle head, worktree planning metadata can still merge, but it cannot replace the newer status, completion summaries, verification results, or blocker/escalation evidence.
+Worktrees share the project database. GSD never merges a worktree-local `gsd.db` (left by an older release, a manual copy, or a tracked `gsd.db`) into the project database on its own. When a worktree holds such a file, GSD stops the merge, keeps the worktree on teardown, and changes no project row. Run `/worktree import-db <name>` to see a preview of the rows that would change and to import them after you confirm; the file is then kept as `gsd.db.imported`. If the file contains canonical operations or lifecycle state that is missing from or ahead of the project database, the import is refused.
 
 ### Manual
 
@@ -120,6 +120,7 @@ Use the `/worktree` (or `/wt`) command for standalone manual worktree management
 /worktree create
 /worktree switch
 /worktree merge
+/worktree import-db
 /worktree remove
 ```
 

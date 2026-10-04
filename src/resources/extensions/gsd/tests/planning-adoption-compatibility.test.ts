@@ -27,7 +27,7 @@ import {
   reconcileWorktreeDb,
 } from "../gsd-db.ts";
 import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
-import { reconcileWorktreeDbBeforeManualMerge } from "../worktree-command.ts";
+import { importWorktreeLocalDb } from "../worktree-command.ts";
 import { worktreePath } from "../worktree-manager.ts";
 import { createWorkspace } from "../workspace.ts";
 import { _resetLogs, peekLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
@@ -484,7 +484,7 @@ test("worktree reconcile rejects extra canonical operations and lifecycle state 
   assert.deepEqual(hierarchyIdentitySnapshot(), before);
 });
 
-test("manual merge preflight propagates canonical divergence instead of continuing", async (t) => {
+test("the explicit worktree database import refuses canonical divergence", async (t) => {
   const mainDb = openFixture(t);
   adoptHierarchy();
   const worktreeDb = join(tempDir("gsd-manual-merge-worktree-"), "gsd.db");
@@ -497,12 +497,12 @@ test("manual merge preflight propagates canonical divergence instead of continui
 
   assert.equal(openDatabase(mainDb), true);
   await assert.rejects(
-    reconcileWorktreeDbBeforeManualMerge(mainDb, worktreeDb),
+    importWorktreeLocalDb(mainDb, worktreeDb, async () => true),
     /canonical worktree divergence/i,
   );
 });
 
-test("auto-worktree teardown preserves canonical divergence when the database starts closed", (t) => {
+test("auto-worktree teardown keeps a worktree that holds its own database", (t) => {
   const originalCwd = process.cwd();
   const base = tempDir("gsd-teardown-divergence-");
   const mainDb = join(base, ".gsd", "gsd.db");
@@ -527,8 +527,8 @@ test("auto-worktree teardown preserves canonical divergence when the database st
     setActiveWorkspace(workspace);
     process.chdir(worktreeRoot);
     teardownAutoWorktree(base, "M001", { preserveWorktree: true, preserveBranch: true });
-    assert.equal(existsSync(worktreeRoot), true, "divergent canonical history must preserve worktree contents");
-    assert.equal(getActiveWorkspace(), workspace, "divergent canonical history must keep workspace registered for recovery");
+    assert.equal(existsSync(worktreeRoot), true, "a worktree-local database must preserve worktree contents");
+    assert.equal(getActiveWorkspace(), workspace, "a worktree-local database must keep workspace registered for recovery");
   } finally {
     setActiveWorkspace(null);
     process.chdir(originalCwd);
