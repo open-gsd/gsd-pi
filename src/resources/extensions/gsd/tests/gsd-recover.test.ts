@@ -2072,4 +2072,67 @@ describe('gsd-recover', async () => {
     assert.ok(rendered.includes('| P001 | Retry with jitter |'));
     assert.ok(!rendered.includes('Retry with backoff'));
   });
+
+  test('recover writes a conflicting KNOWLEDGE.md row over its database row only by explicit choice, and Forward Repair restores the database row', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    const pattern = captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+    // A memory UPDATE changes the database row. KNOWLEDGE.md keeps the old text.
+    assert.equal(updateMemoryContent(pattern.memoryId, 'Retry with jitter'), true);
+    const databaseText = () => _getAdapter()!
+      .prepare('SELECT content FROM memories WHERE id = :id')
+      .get({ ':id': pattern.memoryId })?.['content'];
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const choice = /--choice=P001\.use-file/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(choice, 'the conflict report names the explicit choice');
+
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, choice);
+    const preview = second.notes.at(-1)?.message ?? '';
+    assert.match(preview, /update knowledge:P001 \(knowledge-row-mapped\)/u);
+    assert.doesNotMatch(preview, /knowledge-row-conflict/u);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+    assert.ok(approval);
+    assert.equal(databaseText(), 'Retry with jitter', 'a Preview changes nothing');
+
+    // The approved hash is the hash of the choice Preview: without the choice it applies nothing.
+    await handleRecover(makeCtx().ctx, base, approval);
+    assert.equal(databaseText(), 'Retry with jitter');
+
+    const third = makeCtx();
+    await handleRecover(third.ctx, base, `${choice} ${approval}`);
+    assert.equal(third.notes.at(-1)?.kind, 'success', third.notes.at(-1)?.message);
+    assert.equal(databaseText(), 'Retry with backoff', 'the chosen file text replaces the database row');
+
+    // Later accepted work closes the restore window, so the undo is a Forward Repair.
+    captureKnowledgeEntry(base, 'rule', 'Later rule', 'project');
+    const application = _getAdapter()!.prepare('SELECT operation_id FROM workflow_import_applications').get()!;
+    const repair = makeCtx();
+    await handleRecover(repair.ctx, base, `--application=${String(application['operation_id'])} --forward-repair`);
+    assert.match(repair.notes.at(-1)?.message ?? '', /Forward Repair: committed/u);
+    assert.equal(databaseText(), 'Retry with jitter', 'Forward Repair restores the database row of the backup');
+  });
+
+  test('recover refuses a knowledge row choice for a row that does not differ from its database row', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    captureKnowledgeEntry(base, 'pattern', 'Retry with backoff', 'project');
+
+    const { ctx, notes } = makeCtx();
+    await handleRecover(ctx, base, '--choice=P001.use-file');
+
+    assert.equal(notes.at(-1)?.kind, 'error');
+    assert.match(notes.at(-1)?.message ?? '', /does not differ from an active database row: P001/u);
+    assert.equal(_getAdapter()!.prepare('SELECT COUNT(*) AS count FROM workflow_import_applications').get()?.['count'], 0);
+  });
 });

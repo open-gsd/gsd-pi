@@ -730,9 +730,10 @@ const KNOWLEDGE_ROW_CONFLICT_MESSAGE = "A KNOWLEDGE.md table row is not imported
 
 /**
  * The loss report for a KNOWLEDGE.md row that the database row with its id
- * wins over. The database content is never lost to file text, so the Preview
- * plans no change for the row and says that the file row is lost: a forgotten
- * id stays forgotten, and an active row with other content is kept.
+ * wins over. The database content is never lost to file text without the
+ * explicit choice of the operator (`knowledgeFileRows`), so the Preview plans
+ * no change for the row and says that the file row is lost: a forgotten id
+ * stays forgotten, and an active row with other content is kept.
  */
 function knowledgeRowLoss(
   candidate: LegacyImportInterpretationCandidate,
@@ -1094,9 +1095,15 @@ function derivedCounts(
   };
 }
 
+/**
+ * `knowledgeFileRows` holds the knowledge ids (K/P/L###) that the operator
+ * chose explicitly: for these, the KNOWLEDGE.md row text replaces a differing
+ * active database row as an `update` change. A forgotten id stays forgotten.
+ */
 export function classifyLegacyImportChanges(
   baseInput: LegacyImportBaseSnapshot,
   interpretationInput: LegacyImportInterpretation,
+  knowledgeFileRows: ReadonlySet<string> = new Set(),
 ): LegacyImportClassification {
   const base = structuredClone(baseInput);
   const interpretation = structuredClone(interpretationInput);
@@ -1250,7 +1257,10 @@ export function classifyLegacyImportChanges(
     if (
       address.rowSet === "knowledge_memories"
       && current !== undefined
-      && (forgottenKnowledge.has(key) || !valuesMatch(address.rowSet, current, patch))
+      && (
+        forgottenKnowledge.has(key)
+        || (!valuesMatch(address.rowSet, current, patch) && !knowledgeFileRows.has(candidate.target.key))
+      )
     ) {
       const loss = knowledgeRowLoss(candidate, forgottenKnowledge.has(key));
       diagnoses.push(loss.diagnosis);

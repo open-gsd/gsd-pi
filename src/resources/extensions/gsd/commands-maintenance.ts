@@ -39,6 +39,7 @@ import {
 import {
   formatLegacyImportForwardRepairChoice,
   parseLegacyImportForwardRepairChoices,
+  parseLegacyImportKnowledgeFileRowChoices,
   parseLegacyImportPreviewChoices,
 } from "./legacy-import-forward-repair-choice-token.js";
 import { LEGACY_IMPORT_RESTORE_ASSESSMENT_CONSENT_SCHEMA_VERSION, type LegacyImportRestoreAssessmentConsent } from "./legacy-import-restore-assessment.js";
@@ -793,11 +794,14 @@ export async function handleRecover(
       : loadRetainedVerifiedRecoverApplication();
     if (!application) {
       // Reviewed --choice tokens resolve 'requires-user' diagnoses and seal a
-      // new Preview; its hash is the one the operator approves.
+      // new Preview; its hash is the one the operator approves. A knowledge
+      // row choice makes the Preview write that KNOWLEDGE.md row over its
+      // differing database row.
       const previewChoices = parseLegacyImportPreviewChoices(args);
+      const created = prepareVerifiedRecoverApplication(basePath, parseLegacyImportKnowledgeFileRowChoices(args));
       const prepared = previewChoices.length === 0
-        ? prepareVerifiedRecoverApplication(basePath)
-        : resolvePreparedVerifiedRecoverApplication(prepareVerifiedRecoverApplication(basePath), previewChoices);
+        ? created
+        : resolvePreparedVerifiedRecoverApplication(created, previewChoices);
       const unresolved = formatUnresolvedRecoverDiagnoses(prepared);
       if (unresolved) {
         ctx.ui.notify(

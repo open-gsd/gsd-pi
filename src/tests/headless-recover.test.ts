@@ -28,7 +28,9 @@ import {
   insertMilestone,
   _getAdapter,
 } from "../resources/extensions/gsd/gsd-db.ts";
+import { captureKnowledgeEntry } from "../resources/extensions/gsd/knowledge-capture.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../resources/extensions/gsd/legacy-import-preview-base.ts";
+import { updateMemoryContent } from "../resources/extensions/gsd/memory-store.ts";
 import { createLegacyImportPreview } from "../resources/extensions/gsd/legacy-import-preview.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
 import { executeDomainOperation } from "../resources/extensions/gsd/db/domain-operation.ts";
@@ -326,6 +328,44 @@ test("headless recover resolves a requires-user diagnosis with the --choice toke
   assert.match(stderr.join(""), /gsd-recover: recovered 1M\/1S\/1T hierarchy/u);
   assert.equal(await ensureDbOpen(base), true);
   assert.ok(getMilestone("M001"));
+});
+
+test("headless recover writes a conflicting KNOWLEDGE.md row over its database row with the --choice token it prints", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-headless-recover-"));
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  assert.equal(await ensureDbOpen(base), true);
+  const pattern = captureKnowledgeEntry(base, "pattern", "Retry with backoff", "project");
+  // A memory UPDATE changes the database row. KNOWLEDGE.md keeps the old text.
+  assert.equal(updateMemoryContent(pattern.memoryId, "Retry with jitter"), true);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  assert.equal((await handleHeadlessRecover(base)).exitCode, 1);
+  const choice = /--choice=P001\.use-file/u.exec(stderr.join(""))?.[0];
+  assert.ok(choice, stderr.join(""));
+
+  stderr = [];
+  assert.equal((await handleHeadlessRecover(base, [choice])).exitCode, 1);
+  const choiceHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(choiceHash, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, [choice, `--preview=${choiceHash}`]);
+  assert.equal(result.exitCode, 0, stderr.join(""));
+  assert.equal(await ensureDbOpen(base), true);
+  assert.equal(
+    _getAdapter()!.prepare("SELECT content FROM memories WHERE id = :id").get({ ":id": pattern.memoryId })?.["content"],
+    "Retry with backoff",
+  );
 });
 
 test("headless recover uses the entrypoint-neutral retained-backup Import Application path", async (t) => {

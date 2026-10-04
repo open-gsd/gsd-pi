@@ -55,13 +55,17 @@ import {
   createLegacyImportPreview,
   hashLegacyImportValue,
   legacyImportBaseSnapshotForPreview,
+  legacyImportKnowledgeFileRows,
   revalidateLegacyImportPreview,
   resolveLegacyImportPreview,
   type LegacyImportPreviewArtifact,
   type LegacyImportPreviewCreateInput,
   type LegacyImportPreviewResolutionChoice,
 } from "./legacy-import-preview.js";
-import { formatLegacyImportPreviewChoice } from "./legacy-import-forward-repair-choice-token.js";
+import {
+  formatLegacyImportKnowledgeFileRowChoice,
+  formatLegacyImportPreviewChoice,
+} from "./legacy-import-forward-repair-choice-token.js";
 import { drillLegacyImportBackupRestore } from "./legacy-import-restore-drill.js";
 import { inspectSqliteReadOnlySnapshot } from "./sqlite-readonly.js";
 import { atomicWriteSync } from "./atomic-write.js";
@@ -640,9 +644,10 @@ function requireVerifiedImportDatabase(basePath: string): void {
 function prepareVerifiedImportPreview(
   basePath: string,
   previewInput: LegacyImportPreviewCreateInput,
+  knowledgeFileRows: readonly string[] = [],
 ): Pick<PreparedVerifiedRecoverApplication, "basePath" | "previewInput" | "preview"> {
   requireVerifiedImportDatabase(basePath);
-  return { basePath, previewInput, preview: createLegacyImportPreview(previewInput) };
+  return { basePath, previewInput, preview: createLegacyImportPreview(previewInput, knowledgeFileRows) };
 }
 
 function revalidateVerifiedImportPreview(
@@ -708,12 +713,23 @@ function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string 
     ...preview.preview.diagnoses.map((diagnosis) => `  ${JSON.stringify(diagnosis)}`),
     "Resolutions:",
     ...preview.preview.resolutions.map((resolution) => `  ${JSON.stringify(resolution)}`),
+    // A knowledge-row-conflict keeps the database row. The file text is
+    // applied only by this explicit choice; a memory-id row has no choice.
+    ...preview.preview.diagnoses
+      .filter((diagnosis) => diagnosis.code === "knowledge-row-conflict")
+      .flatMap((diagnosis) => /^\s*\|\s*([KPL]\d+)\s*\|/u.exec(String(diagnosis.raw_value))?.[1] ?? [])
+      .map((id) => (
+        `To write the KNOWLEDGE.md text of ${id} over its database row: ${formatLegacyImportKnowledgeFileRowChoice(id)}`
+      )),
   ].join("\n");
 }
 
 const RECOVER_ROOT_FILES = ["DECISIONS", "REQUIREMENTS", "KNOWLEDGE", "PROJECT", "QUEUE"] as const;
 
-function prepareVerifiedRecoverEvidence(basePath: string): PreparedVerifiedRecoverApplication {
+function prepareVerifiedRecoverEvidence(
+  basePath: string,
+  knowledgeFileRows: readonly string[] = [],
+): PreparedVerifiedRecoverApplication {
   const location = resolveWorkflowDatabaseLocation(basePath);
   const evidence = prepareVerifiedImportPreview(basePath, {
     roots: [
@@ -742,12 +758,29 @@ function prepareVerifiedRecoverEvidence(basePath: string): PreparedVerifiedRecov
         presence: "optional" as const,
       })),
     ],
-  });
+  }, knowledgeFileRows);
   return { ...evidence, authorizationText: recoverAuthorizationText(evidence.preview) };
 }
 
-export function prepareVerifiedRecoverApplication(basePath: string): PreparedVerifiedRecoverApplication {
-  return prepareVerifiedRecoverEvidence(basePath);
+/**
+ * Prepare the sealed recover Preview. `knowledgeFileRows` names the
+ * KNOWLEDGE.md rows (K/P/L###) whose file text the operator chose over a
+ * differing database row. A chosen row that has no such conflict is refused,
+ * so a choice never passes without effect.
+ */
+export function prepareVerifiedRecoverApplication(
+  basePath: string,
+  knowledgeFileRows: readonly string[] = [],
+): PreparedVerifiedRecoverApplication {
+  const evidence = prepareVerifiedRecoverEvidence(basePath, knowledgeFileRows);
+  const applied = new Set(legacyImportKnowledgeFileRows(evidence.preview));
+  const unused = knowledgeFileRows.filter((id) => !applied.has(id));
+  if (unused.length > 0) {
+    throw new Error(
+      `--choice names a KNOWLEDGE.md row that does not differ from an active database row: ${unused.join(", ")}`,
+    );
+  }
+  return evidence;
 }
 
 export function resolvePreparedVerifiedRecoverApplication(
