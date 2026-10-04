@@ -3,7 +3,6 @@
 
 import { importExtensionModule, type ExtensionAPI, type ExtensionContext } from "@gsd/pi-coding-agent";
 
-import { join, basename } from "node:path";
 import { existsSync, cpSync } from "node:fs";
 import type { AutoSession } from "./session.js";
 import type { LoopDeps } from "./loop-deps.js";
