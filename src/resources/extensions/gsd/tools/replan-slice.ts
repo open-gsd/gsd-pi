@@ -13,6 +13,7 @@ import {
   projectCanonicalStatusToLegacy,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { renderPlanFromDb, renderSliceReplan } from "../markdown-renderer.js";
@@ -523,6 +524,9 @@ export async function handleReplanSlice(
     if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
+
+  // A re-planned unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}`);
 
   // ── Render artifacts ──────────────────────────────────────────────
   // The replan is committed. A failed render must not fail the tool: its

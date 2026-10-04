@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 
 import { AutoSession } from "../auto/session.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 import { resolveUnitSupervisionTimeouts } from "../auto-timers.ts";
 import { bootstrapAutoSession } from "../auto-start.ts";
 import { postUnitPostVerification, postUnitPreVerification } from "../auto-post-unit.ts";
@@ -27,8 +28,12 @@ import {
   closeDatabase,
   insertArtifact,
   insertMilestone,
+  insertSlice,
+  insertTask,
   openDatabase,
 } from "../gsd-db.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import type { GSDPreferences } from "../preferences.ts";
 import type { GSDState } from "../types.ts";
@@ -818,7 +823,7 @@ test("deep project setup: research-project partial output writes dimension block
     }
     assert.equal(verifyExpectedArtifact("research-project", "RESEARCH-PROJECT", base), true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("without rerunning all scouts")),
       "should notify that partial research was finalized without another full fan-out",
@@ -856,7 +861,7 @@ test("deep project setup: research-project empty output writes global blocker wi
     assert.equal(existsSync(join(base, ".gsd", "research", "PROJECT-RESEARCH-BLOCKER.md")), true);
     assert.equal(verifyExpectedArtifact("research-project", "RESEARCH-PROJECT", base), false);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("PROJECT-RESEARCH-BLOCKER.md")),
       "should notify that project research is fail-closed",
@@ -1006,7 +1011,7 @@ test("deep project setup: project question pauses instead of artifact-retrying",
     assert.equal(result, "dispatched");
     assert.equal(pauseCalled, true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("waiting for your input")),
       "should notify that the project unit is waiting for user input",
@@ -1222,7 +1227,7 @@ test("deep project setup: discuss-milestone question failure pauses instead of a
     assert.equal(result, "dispatched");
     assert.equal(pauseCalled, true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.size, 0);
+    assert.equal(s.unclaimedUnitBudgets.size, 0);
     assert.ok(
       notifications.some((message) => message.includes("waiting for your input")),
       "should notify that the discuss unit is waiting for user input",
@@ -1280,7 +1285,7 @@ test("verified task git closeout hook failure re-dispatches task remediation", a
     assert.equal(s.pendingVerificationRetry?.unitId, "M001/S01/T01");
     assert.equal(s.pendingVerificationRetry?.attempt, 1);
     assert.match(s.pendingVerificationRetry?.failureContext ?? "", /blocked by test hook/);
-    assert.equal(s.verificationRetryCount.get("git-commit:execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01", "git-commit"), 1);
     const preCommitCount = Number(readFileSync(join(base, ".git", "pre-commit-count"), "utf-8"));
     assert.equal(Number.isFinite(preCommitCount), true);
     assert.equal(preCommitCount, 2, "git closeout should not outer-retry deterministic hook failures");
@@ -1316,7 +1321,7 @@ test("verified task git closeout hook failure pauses after remediation cap", asy
     s.basePath = base;
     s.originalBasePath = base;
     s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
-    s.verificationRetryCount.set("git-commit:execute-task:M001/S01/T01", 2);
+    useUnitBudget(s, "execute-task", "M001/S01/T01", 2, "git-commit");
 
     let pauseCalled = false;
     const notifications: Array<{ message: string; severity?: string }> = [];
@@ -1334,7 +1339,7 @@ test("verified task git closeout hook failure pauses after remediation cap", asy
     assert.equal(result, "stopped");
     assert.equal(pauseCalled, true);
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.has("git-commit:execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01", "git-commit"), 0);
     assert.ok(
       notifications.some((entry) => entry.severity === "error" && entry.message.includes("after 2 remediation attempts")),
       "hook commit failure should pause after the remediation cap",
@@ -1342,6 +1347,67 @@ test("verified task git closeout hook failure pauses after remediation cap", asy
   } finally {
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("a refused task commit survives a restart: the repair retry and its count are on the dispatch row", async (t) => {
+  const base = makeBase();
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  execFileSync("git", ["init"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: base, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Test User"], { cwd: base, stdio: "ignore" });
+  const hookPath = join(base, ".git", "hooks", "pre-commit");
+  writeFileSync(hookPath, ["#!/bin/sh", "echo blocked by test hook >&2", "exit 1"].join("\n"));
+  chmodSync(hookPath, 0o755);
+  writeFileSync(join(base, "work.txt"), "changed\n");
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "in_progress" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "complete" });
+  const dispatch = claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+
+  // Every close-out is a new process: a new session that holds nothing about the task.
+  let pauseCalled = false;
+  const closeOut = () => {
+    const s = new AutoSession();
+    s.active = true;
+    s.basePath = base;
+    s.originalBasePath = base;
+    s.currentUnit = { type: "execute-task", id: "M001/S01/T01", startedAt: Date.now() };
+    return postUnitPostVerification({
+      s,
+      ctx: { ui: { notify() {} } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => { pauseCalled = true; },
+      updateProgressWidget: () => {},
+    });
+  };
+
+  for (const attempt of [1, 2]) {
+    assert.equal(await closeOut(), "retry");
+    const stored = readStoredUnitRetry("execute-task", "M001/S01/T01");
+    assert.equal(stored?.attempt, attempt, "the count goes on from the last process, it does not start again");
+    assert.match(stored?.signature ?? "", /^git-commit:/, "the dispatch rules select the closed task by this signature");
+    assert.match(stored?.failureContext ?? "", /blocked by test hook/);
+    assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), attempt);
+    dispatch.claimNext();
+  }
+
+  assert.equal(await closeOut(), "stopped", "the cap counts the repairs of the processes before the restart");
+  assert.equal(pauseCalled, true);
+  assert.equal(readStoredUnitRetry("execute-task", "M001/S01/T01"), null, "the pause releases the stored retry");
+  assert.equal(usedUnitBudget(new AutoSession(), "execute-task", "M001/S01/T01", "git-commit"), 0);
 });
 
 test("verified task git closeout partial multi-repo commit pauses instead of redoing task", async () => {
@@ -1417,7 +1483,7 @@ test("verified task git closeout partial multi-repo commit pauses instead of red
     assert.equal(pauseCalled, true);
     // No task remediation retry is scheduled when work is already partially committed.
     assert.equal(s.pendingVerificationRetry, null);
-    assert.equal(s.verificationRetryCount.has("git-commit:execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01", "git-commit"), 0);
     assert.ok(
       notifications.some(
         (entry) => entry.severity === "error" && entry.message.includes("backend"),
@@ -1440,7 +1506,7 @@ test("deep project setup: approval wait wins over deterministic write-gate place
     s.basePath = base;
     s.currentUnit = { type: "discuss-requirements", id: "REQUIREMENTS", startedAt: Date.now() };
     s.lastToolInvocationError = "gsd_summary_save: Error saving artifact: root_artifact_write_blocked";
-    s.verificationRetryCount.set("discuss-requirements:REQUIREMENTS", 2);
+    useUnitBudget(s, "discuss-requirements", "REQUIREMENTS", 2);
 
     let pauseCalled = false;
     const notifications: string[] = [];

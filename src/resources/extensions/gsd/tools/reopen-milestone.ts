@@ -23,6 +23,7 @@ import {
 import { isMilestoneLifecycleAdopted } from "../db/milestone-closeout-readiness.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { invalidateStateCache } from "../state.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
 import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.js";
@@ -169,6 +170,9 @@ export async function handleReopenMilestone(
     slicesResetCount = outcome.slicesReset;
     tasksResetCount = outcome.tasksReset;
   }
+
+  // A reopened unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(params.milestoneId);
 
   // ── Invalidate caches ────────────────────────────────────────────────────
   invalidateStateCache();

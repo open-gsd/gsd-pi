@@ -53,7 +53,12 @@ import type { VerificationResult as VerificationGateResult } from "./types.js";
 import { join } from "node:path";
 import { resolveUokFlags } from "./uok/flags.js";
 import { UokGateRunner } from "./uok/gate-runner.js";
-import { verificationRetryKey } from "./auto/verification-retry-policy.js";
+import {
+  clearVerificationRetry,
+  setVerificationRetry,
+  verificationBudget,
+} from "./auto/verification-retry-state.js";
+import { readUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
 import { decideVerificationVerdict, describeHostVerificationRationale } from "./verification-verdict.js";
 import { DEFAULT_COMMAND_TIMEOUT_MS } from "./constants.js";
 import type { SliceRow } from "./db-task-slice-rows.js";
@@ -175,18 +180,13 @@ function verificationFailureSummary(
 
 function recordDurableVerificationRetry(
   session: AutoSession,
-  retryKey: string,
   failureContext: string,
 ): VerificationResult {
-  if (!session.currentUnit) throw new Error("Task verification retry requires a current unit");
-  if (session.pendingVerificationRetry?.unitId === session.currentUnit.id) return "retry";
-  const attempt = (session.verificationRetryCount.get(retryKey) ?? 0) + 1;
-  session.verificationRetryCount.set(retryKey, attempt);
-  session.pendingVerificationRetry = {
-    unitId: session.currentUnit.id,
-    failureContext,
-    attempt,
-  };
+  const unit = session.currentUnit;
+  if (!unit) throw new Error("Task verification retry requires a current unit");
+  if (session.pendingVerificationRetry?.unitId === unit.id) return "retry";
+  const attempt = spendUnitBudget(session.unclaimedUnitBudgets, verificationBudget(unit.type, unit.id));
+  setVerificationRetry(session, unit.type, { unitId: unit.id, failureContext, attempt });
   return "retry";
 }
 
@@ -541,21 +541,19 @@ async function runValidateMilestonePostCheck(
   const { milestone: mid } = parseUnitId(s.currentUnit.id);
   if (!mid) return "continue";
 
-  const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
+  const validationUnit = s.currentUnit;
+  const validationBudget = verificationBudget(validationUnit.type, validationUnit.id);
   const clearValidationRetry = (): void => {
-    s.pendingVerificationRetry = null;
-    s.verificationRetryCount.delete(retryKey);
-    s.verificationRetryFailureHashes.delete(retryKey);
+    clearVerificationRetry(s, validationUnit.type, validationUnit.id);
   };
 
   const setToolFailureRetry = (message: string): VerificationResult => {
-    const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
-    s.verificationRetryCount.set(retryKey, attempt);
-    s.pendingVerificationRetry = {
-      unitId: s.currentUnit!.id,
+    const attempt = spendUnitBudget(s.unclaimedUnitBudgets, validationBudget);
+    setVerificationRetry(s, validationUnit.type, {
+      unitId: validationUnit.id,
       failureContext: message,
       attempt,
-    };
+    });
     return "retry";
   };
 
@@ -597,7 +595,7 @@ async function runValidateMilestonePostCheck(
     // technical failure. Canonical validation gets one bounded re-validation
     // (the evidence may be stale); when the verdict recurs, pause for human
     // review instead of retrying until the liveness backstop wedges.
-    if (canonicalValidation && (s.verificationRetryCount.get(retryKey) ?? 0) < 1) {
+    if (canonicalValidation && readUnitBudget(s.unclaimedUnitBudgets, validationBudget) < 1) {
       await persistMilestoneValidationGate(
         "retry",
         "verification",
@@ -863,18 +861,15 @@ export async function runPostUnitVerification(
       typeof prefs?.verification_max_retries === "number"
         ? prefs.verification_max_retries
         : 2;
-    const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
+    const hostVerificationBudget = verificationBudget(s.currentUnit.type, s.currentUnit.id);
 
     if (replayedRecovery === "abort") {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       return "abort";
     }
     if (replayedRecovery === "retry") {
       return recordDurableVerificationRetry(
         s,
-        retryKey,
         `Stored host verification verdict is ${replayedVerdict?.verdict}`,
       );
     }
@@ -920,9 +915,7 @@ export async function runPostUnitVerification(
         replayedVerdict.testedSourceRevision.startsWith("sha256:") &&
         sourceBeforeResult.snapshot.aggregateRevision === replayedVerdict.testedSourceRevision
       ) {
-        s.verificationRetryCount.delete(retryKey);
-        s.verificationRetryFailureHashes.delete(retryKey);
-        s.pendingVerificationRetry = null;
+        clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
         return "continue";
       }
       const failureContext = sourceBeforeResult.ok
@@ -951,7 +944,7 @@ export async function runPostUnitVerification(
         }),
       }, "verification-drift", recordAbort);
       if (recovery === "abort") return "abort";
-      return recordDurableVerificationRetry(s, retryKey, failureContext);
+      return recordDurableVerificationRetry(s, failureContext);
     }
     let result: VerificationGateResult;
     if (unresolvedExplicitTargets) {
@@ -1036,9 +1029,7 @@ export async function runPostUnitVerification(
     }
 
     if (verdict.reason === "execution-fault") {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       const message = `Verification gate execution fault: ${verdict.failureContext}`;
       ctx.ui.notify(message, "error");
       process.stderr.write(`verification-gate: pausing — ${verdict.failureContext}\n`);
@@ -1123,7 +1114,7 @@ export async function runPostUnitVerification(
     }
 
     // Write verification evidence JSON
-    const attempt = s.verificationRetryCount.get(retryKey) ?? 0;
+    const attempt = readUnitBudget(s.unclaimedUnitBudgets, hostVerificationBudget);
     // ── Post-execution checks (run after main verification passes for execute-task units) ──
     let postExecChecks: PostExecutionCheckJSON[] | undefined;
     let postExecBlockingFailure = false;
@@ -1439,9 +1430,7 @@ export async function runPostUnitVerification(
 
     // ── Auto-fix retry logic ──
     if (unrunnablePause) {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       process.stderr.write(
         `${verdict.failureContext}. Install the command or update the verify command, then resume.\n`,
       );
@@ -1451,14 +1440,10 @@ export async function runPostUnitVerification(
       });
       return "pause";
     } else if (hostTechnicalPassed) {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       return "continue";
     } else if (durableRecovery === "abort") {
-      s.verificationRetryCount.delete(retryKey);
-      s.verificationRetryFailureHashes.delete(retryKey);
-      s.pendingVerificationRetry = null;
+      clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
       return "abort";
     } else if (durableRecovery === "retry") {
       if (s.pendingVerificationRetry?.unitId === s.currentUnit.id) return "retry";
@@ -1472,13 +1457,13 @@ export async function runPostUnitVerification(
       const nextAttempt = attempt + 1;
       const failureContext = postExecFailureSummary || verdict.failureContext || formatFailureContext(result);
       const failureSignature = formatFailureSignature(result);
-      s.verificationRetryCount.set(retryKey, nextAttempt);
-      s.pendingVerificationRetry = {
+      spendUnitBudget(s.unclaimedUnitBudgets, hostVerificationBudget);
+      setVerificationRetry(s, s.currentUnit.type, {
         unitId: s.currentUnit.id,
         failureContext,
         ...(failureSignature ? { signature: failureSignature } : {}),
         attempt: nextAttempt,
-      };
+      });
       const failedCmds = result.checks
         .filter((c) => c.exitCode !== 0)
         .map((c) => c.command);
@@ -1519,8 +1504,7 @@ export async function runPostUnitVerification(
         }),
       }, storedVerdict.supersedesVerdictId ? "verification-drift" : "verification-failed", recordAbort);
       if (recovery === "abort") return "abort";
-      const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
-      return recordDurableVerificationRetry(s, retryKey, message);
+      return recordDurableVerificationRetry(s, message);
     }
     const recorded = recordHostTechnicalVerdict({
       context: vctx,
@@ -1562,8 +1546,7 @@ export async function runPostUnitVerification(
       }),
     }, "verification-failed", recordAbort);
     if (recovery === "abort") return "abort";
-    const retryKey = verificationRetryKey(s.currentUnit.type, s.currentUnit.id);
-    return recordDurableVerificationRetry(s, retryKey, message);
+    return recordDurableVerificationRetry(s, message);
   }
 }
 

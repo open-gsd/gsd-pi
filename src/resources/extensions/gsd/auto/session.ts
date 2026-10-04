@@ -139,7 +139,6 @@ export class AutoSession {
   // ── Dispatch counters ────────────────────────────────────────────────────
   readonly unitDispatchCount = new Map<string, number>();
   readonly unitLifetimeDispatches = new Map<string, number>();
-  readonly unitRecoveryCount = new Map<string, number>();
 
   // ── Timers ───────────────────────────────────────────────────────────────
   unitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -188,9 +187,12 @@ export class AutoSession {
    * journal, the dispatch ledger, and the operator.
    */
   lastSafetyBlockRecovery: { recoveryActionId?: string; resumeInstruction: string } | null = null;
+  /**
+   * Verification retry counts of custom-engine steps, saved in
+   * custom-verify-retries.json. A dev-engine unit keeps its count on its
+   * dispatch row (budget kind `verification`).
+   */
   readonly verificationRetryCount = new Map<string, number>();
-  readonly verificationRetryFailureHashes = new Map<string, string>();
-  readonly exhaustedVerificationUnits = new Set<string>();
   /**
    * Budget counts for units that run with no unit_dispatches row (custom-engine
    * steps, no database). A unit with a dispatch row keeps its counts on that
@@ -261,7 +263,6 @@ export class AutoSession {
   // ── Orchestration seam ───────────────────────────────────────────────────
   orchestration: AutoOrchestrationModule | null = null;
   pendingOrchestrationDispatch: PendingOrchestrationDispatch | null = null;
-  pendingVerificationRetryDispatch: PendingOrchestrationDispatch | null = null;
 
   // ── Loop promise state ──────────────────────────────────────────────────
   // Per-unit resolve function and session-switch guard live at module level
@@ -359,7 +360,6 @@ export class AutoSession {
     // Dispatch
     this.unitDispatchCount.clear();
     this.unitLifetimeDispatches.clear();
-    this.unitRecoveryCount.clear();
 
     // Unit
     this.clearCurrentUnit();
@@ -387,8 +387,6 @@ export class AutoSession {
     this.lastTaskRecoveryAbortId = null;
     this.lastSafetyBlockRecovery = null;
     this.verificationRetryCount.clear();
-    this.verificationRetryFailureHashes.clear();
-    this.exhaustedVerificationUnits.clear();
     this.unclaimedUnitBudgets.clear();
     this.pausedSessionFile = null;
     this.pausedUnitType = null;
@@ -423,7 +421,6 @@ export class AutoSession {
     // Orchestration seam
     this.orchestration = null;
     this.pendingOrchestrationDispatch = null;
-    this.pendingVerificationRetryDispatch = null;
 
     // Loop promise state lives in auto-loop.ts module scope
   }

@@ -6,6 +6,7 @@ import {
   upsertTaskPlanning,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { assertVerifyIsShellCheckable, validateVerificationCommand } from "../verification-gate.js";
@@ -250,6 +251,9 @@ export async function handleReplanTask(
     if (err instanceof PlanningGuardError || err instanceof UnknownLegacyStatusError) return { error: err.message };
     return { error: `db write failed: ${(err as Error).message}` };
   }
+
+  // A re-planned unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}/${params.taskId}`);
 
   // The replan is committed. A failed render must not fail the tool: its
   // Projection Work stays pending and the Projection Worker renders it again.

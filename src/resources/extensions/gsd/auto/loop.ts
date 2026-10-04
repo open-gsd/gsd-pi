@@ -99,6 +99,7 @@ import { createWorkflowPhaseReporter } from "./workflow-phase-reporter.js";
 import { createWorkflowTurnReporter } from "./workflow-turn-reporter.js";
 import { validateWorkflowSessionLock } from "./workflow-session-lock.js";
 import { dequeueSidecarItem } from "./workflow-sidecar-queue.js";
+import { releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.js";
 import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.js";
 import { maintainWorkerHeartbeat, runWithWorkerHeartbeat } from "./workflow-worker-heartbeat.js";
@@ -492,7 +493,7 @@ export async function autoLoop(
     }
   }
   let iteration = 0;
-  // Load persisted verification retry state so the exhausted-unit guard fires on restart (#651)
+  // Load the persisted verification retry counts of custom-engine steps.
   hydrateCustomVerifyRetryCounts(s, { logFailure: logCustomVerifyRetryLoadFailure });
   const loopState: LoopState = {
     consecutiveFinalizeTimeouts: 0,
@@ -1968,14 +1969,14 @@ export async function autoLoop(
               logWriteFailure: logDispatchLedgerWriteFailure,
             },
           ));
-        // #2127: the dispatch selector returns pendingVerificationRetry's unit
-        // unconditionally, and a pre-claim failure (e.g. "Task Attempt claim
-        // must activate exactly one matching coordination dispatch") escapes
-        // the cutover boundary without consuming the marker. Leaving it armed
-        // makes every iteration reselect the same unit. Discard the retry and
-        // pause loudly instead.
+        // #2127: the dispatch rules select the unit of a stored retry, and a
+        // pre-claim failure (e.g. "Task Attempt claim must activate exactly
+        // one matching coordination dispatch") escapes the cutover boundary
+        // without releasing it. Leaving it stored makes every iteration
+        // reselect the same unit. Discard the retry and pause loudly instead.
         if (s.pendingVerificationRetry?.unitId === iterData.unitId) {
           s.pendingVerificationRetry = null;
+          releaseUnitRetry(iterData.unitType, iterData.unitId);
           const retryFailure = formatDispatchExceptionSummary({ error: err });
           const retryPauseMessage =
             `Verification retry for ${iterData.unitType} ${iterData.unitId} failed before the unit started: ${retryFailure} ` +

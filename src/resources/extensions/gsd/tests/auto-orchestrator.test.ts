@@ -52,6 +52,8 @@ import { markWorkerCrashed, registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease, forceReleaseLeasesForWorker, getMilestoneLease, releaseMilestoneLease } from "../db/milestone-leases.js";
 import { getDispatchById, recordDispatchClaim } from "../db/unit-dispatches.js";
 import { executeResearchDecisionSave } from "../tools/research-decision.js";
+import { readStoredUnitRetry, storeUnitRetry } from "../db/unit-dispatch-retries.js";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.js";
 import { recordFailureAndSelectRecovery, resumeTaskRecovery } from "../task-recovery-domain-operation.js";
 import { internalExecutionInvocation, piExecutionInvocation } from "../execution-invocation.js";
@@ -1781,20 +1783,10 @@ test("decideOrchestratorDispatch does not replay milestone-scoped verification r
   };
   const ctx = { model: {}, modelRegistry: { getAll: () => [], getAvailable: () => [] } } as never;
   const pi = { getActiveTools: () => [] } as never;
-  const stalePendingRetry = {
-    unitType: "execute-task",
-    unitId: "M027.S1.T1",
-    prompt: "stale retry prompt",
-    pauseAfterUatDispatch: false,
-    state: stateSnapshot,
-    mid: "M027",
-    midTitle: "Parked",
-  };
   const session = {
     basePath: base,
     originalBasePath: base,
     currentMilestoneId: "M027",
-    pendingVerificationRetryDispatch: stalePendingRetry,
   } as never;
 
   const result = await decideOrchestratorDispatch(ctx, pi, base, session, { stateSnapshot });
@@ -1802,11 +1794,6 @@ test("decideOrchestratorDispatch does not replay milestone-scoped verification r
   assert.ok(result && "unitType" in result, `expected project-level dispatch, got ${JSON.stringify(result)}`);
   assert.equal(result.unitType, "discuss-project");
   assert.equal(result.unitId, "PROJECT");
-  // The stale retry must be preserved for a future tick, not consumed by this
-  // no-active-milestone path (mirrors pre-#712-fix behavior where !active
-  // returned null before touching the retry).
-  const sess = session as unknown as { pendingVerificationRetryDispatch: unknown };
-  assert.equal(sess.pendingVerificationRetryDispatch, stalePendingRetry);
 });
 
 test("decideOrchestratorDispatch adopts next active milestone after the session milestone is closed, parked, or deferred", async (t) => {
@@ -1910,85 +1897,6 @@ test("decideOrchestratorDispatch keeps blocking stale milestone worktree scope",
   assert.equal((session as { currentMilestoneId: string }).currentMilestoneId, "M001");
 });
 
-test("decideOrchestratorDispatch replays pending verification retry dispatch", async () => {
-  const stateSnapshot = makeState();
-  const base = mkdtempSync(join(tmpdir(), "gsd-orchestrator-retry-"));
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  insertMilestone({ id: "M004", title: "Milestone 4", status: "active" });
-  insertSlice({ id: "S01", milestoneId: "M004", title: "Slice", status: "active", depends: [] });
-  const ctx = { model: {}, modelRegistry: { getAll: () => [], getAvailable: () => [] } } as never;
-  const pi = { getActiveTools: () => [] } as never;
-  const session = {
-    basePath: "/tmp/worktree-fixture",
-    pendingOrchestrationDispatch: null,
-    pendingVerificationRetryDispatch: {
-      unitType: "complete-slice",
-      unitId: "M004/S01",
-      prompt: "repair slice closeout",
-      pauseAfterUatDispatch: false,
-      state: stateSnapshot,
-      mid: "M004",
-      midTitle: "Milestone 4",
-    },
-  } as never;
-
-  const result = await decideOrchestratorDispatch(ctx, pi, base, session, { stateSnapshot });
-
-  assert.ok(result);
-  if (!result || !("unitType" in result)) assert.fail("expected dispatch decision");
-  assert.equal(result.unitType, "complete-slice");
-  assert.equal(result.unitId, "M004/S01");
-  assert.equal(result.reason, "verification-retry");
-  const sess = session as {
-    pendingVerificationRetryDispatch: unknown;
-    pendingOrchestrationDispatch: { prompt?: string; state?: unknown } | null;
-  };
-  assert.equal(sess.pendingVerificationRetryDispatch, null);
-  assert.equal(sess.pendingOrchestrationDispatch?.prompt, "repair slice closeout");
-  assert.equal(sess.pendingOrchestrationDispatch?.state, stateSnapshot);
-  closeDatabase();
-  rmSync(base, { recursive: true, force: true });
-});
-
-test("decideOrchestratorDispatch blocks a non-slice verification retry without DB authority", async () => {
-  closeDatabase();
-  const stateSnapshot = makeState();
-  const pendingRetry = {
-    unitType: "validate-milestone",
-    unitId: "M001",
-    prompt: "retry validation",
-    pauseAfterUatDispatch: false,
-    state: stateSnapshot,
-    mid: "M001",
-    midTitle: "Milestone",
-  };
-  const session = {
-    basePath: "/tmp/worktree-fixture",
-    pendingOrchestrationDispatch: null,
-    pendingVerificationRetryDispatch: pendingRetry,
-  } as never;
-
-  const result = await decideOrchestratorDispatch(
-    { model: {}, modelRegistry: { getAll: () => [], getAvailable: () => [] } } as never,
-    { getActiveTools: () => [] } as never,
-    "/tmp/project-fixture",
-    session,
-    { stateSnapshot },
-  );
-
-  assert.deepEqual(result, {
-    kind: "blocked",
-    reason: "Cannot dispatch validate-milestone M001: workflow DB is unavailable.",
-    action: "stop",
-    guardId: "dispatch-authority",
-  });
-  assert.equal(
-    (session as unknown as { pendingVerificationRetryDispatch: unknown }).pendingVerificationRetryDispatch,
-    pendingRetry,
-  );
-});
-
 test("decideOrchestratorDispatch clears verification retry state when skipping an already closed retry dispatch", async () => {
   const stateSnapshot = makeState();
   const base = mkdtempSync(join(tmpdir(), "gsd-orchestrator-closed-retry-"));
@@ -2043,65 +1951,72 @@ test("decideOrchestratorDispatch clears verification retry state when skipping a
   }
 });
 
-test("decideOrchestratorDispatch re-dispatches a closed execute-task for git-commit remediation instead of skipping", async () => {
+test("decideOrchestratorDispatch re-dispatches a closed execute-task for git-commit remediation instead of skipping", async (t) => {
   // Regression for #1491 / bugbot 3609601306: after task verification the task
   // is already `complete` in the DB, but its post-task commit was rejected by a
   // pre-commit hook. The remediation retry carries a `git-commit:` signature, so
   // the already-closed dispatch guard must honor it (re-deliver the hook rejection
-  // to the agent) rather than clearing the retry and stranding the uncommitted work.
+  // to the agent) rather than releasing the retry and stranding the uncommitted work.
+  //
+  // ADR-048: the retry is on the task's dispatch row. The session holds nothing
+  // about it, as after a restart.
   const stateSnapshot = makeState();
   const base = mkdtempSync(join(tmpdir(), "gsd-orchestrator-closed-remediation-"));
+  const retry = {
+    unitId: "M001/S01/T01",
+    failureContext: "Git commit failed after task verification. blocked by test hook",
+    signature: "git-commit:1:blocked by test hook",
+    attempt: 1,
+  };
 
-  try {
-    mkdirSync(join(base, ".gsd"), { recursive: true });
-    openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Milestone", status: "active" });
-    insertSlice({ milestoneId: "M001", id: "S01", title: "Slice", status: "active" });
-    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Task", status: "complete" });
-
-    const ctx = { model: {}, modelRegistry: { getAll: () => [], getAvailable: () => [] } } as never;
-    const pi = { getActiveTools: () => [] } as never;
-    const session = {
-      basePath: base,
-      pendingOrchestrationDispatch: null,
-      pendingVerificationRetryDispatch: {
-        unitType: "execute-task",
-        unitId: "M001/S01/T01",
-        prompt: "retry commit remediation",
-        pauseAfterUatDispatch: false,
-        state: stateSnapshot,
-        mid: "M001",
-        midTitle: "Milestone",
-      },
-      pendingVerificationRetry: {
-        unitId: "M001/S01/T01",
-        failureContext: "Git commit failed after task verification. blocked by test hook",
-        signature: "git-commit:1:blocked by test hook",
-        attempt: 1,
-      },
-    } as never;
-
-    const result = await decideOrchestratorDispatch(ctx, pi, base, session, { stateSnapshot });
-
-    assert.ok(result);
-    if (!result || !("unitType" in result)) assert.fail("expected dispatch decision, not skip");
-    assert.equal(result.unitType, "execute-task");
-    assert.equal(result.unitId, "M001/S01/T01");
-    assert.equal(result.reason, "verification-retry");
-    const sess = session as {
-      pendingVerificationRetry: { unitId?: string } | null;
-      pendingVerificationRetryDispatch: unknown;
-      pendingOrchestrationDispatch: { prompt?: string } | null;
-    };
-    // The retry must survive the already-closed guard (not be cleared) so the
-    // hook rejection is re-delivered to the agent on the next unit run.
-    assert.equal(sess.pendingVerificationRetry?.unitId, "M001/S01/T01");
-    assert.equal(sess.pendingVerificationRetryDispatch, null);
-    assert.equal(sess.pendingOrchestrationDispatch?.prompt, "retry commit remediation");
-  } finally {
+  t.after(() => {
+    resetRegistry();
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
-  }
+  });
+
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ milestoneId: "M001", id: "S01", title: "Slice", status: "active" });
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Task", status: "complete" });
+  claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  storeUnitRetry("execute-task", retry);
+
+  setRegistry(new RuleRegistry([{
+    name: "test-commit-repair",
+    when: "dispatch",
+    evaluation: "first-match",
+    where: async () => ({
+      action: "dispatch" as const,
+      unitType: "execute-task",
+      unitId: "M001/S01/T01",
+      prompt: "retry commit remediation",
+    }),
+    then: (r: unknown) => r,
+  }]));
+
+  const ctx = { model: {}, modelRegistry: { getAll: () => [], getAvailable: () => [] } } as never;
+  const pi = { getActiveTools: () => [] } as never;
+  const session = { basePath: base, pendingOrchestrationDispatch: null } as never;
+
+  const result = await decideOrchestratorDispatch(ctx, pi, base, session, { stateSnapshot });
+
+  assert.ok(result);
+  if (!result || !("unitType" in result)) assert.fail("expected dispatch decision, not skip");
+  assert.equal(result.unitType, "execute-task");
+  assert.equal(result.unitId, "M001/S01/T01");
+  // The retry must survive the already-closed guard (not be released) so the
+  // hook rejection is re-delivered to the agent on the next unit run.
+  assert.deepEqual(readStoredUnitRetry("execute-task", "M001/S01/T01"), retry);
+  const sess = session as { pendingOrchestrationDispatch: { prompt?: string } | null };
+  assert.match(sess.pendingOrchestrationDispatch?.prompt ?? "", /^retry commit remediation/);
 });
 
 test("decideOrchestratorDispatch preserves stop reason as a blocked decision", async (t) => {

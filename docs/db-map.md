@@ -764,7 +764,7 @@ detected repair of the liveness feature.
 
 ```
 dispatch_id  INTEGER NOT NULL
-kind         TEXT NOT NULL      ← 'zero-tool' | 'tool-unavailable' | 'pre-exec'
+kind         TEXT NOT NULL      ← 'zero-tool' | 'tool-unavailable' | 'pre-exec' | 'verification' | 'git-commit' | 'timeout-recovery' | 'exhausted'
 used         INTEGER NOT NULL CHECK (used >= 0)
 updated_at   TEXT NOT NULL
 PRIMARY KEY (dispatch_id, kind)
@@ -773,6 +773,7 @@ FOREIGN KEY dispatch_id → unit_dispatches(id)
 
 - DDL owner: `db-unit-dispatch-budget-schema.ts`. Access: `db/unit-dispatch-budgets.ts`.
 - Count and release rules: see the 2026-10-03 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+- `exhausted` is a mark: a unit that holds it is not dispatched until a reopen or a re-plan releases it. See the third 2026-10-04 amendment in ADR-048.
 
 ---
 
@@ -806,11 +807,12 @@ dispatch_id      INTEGER PRIMARY KEY   ← the dispatch whose close-out decided 
 failure_context  TEXT NOT NULL         ← the text the next run of the unit gets in its prompt
 attempt          INTEGER NOT NULL CHECK (attempt >= 1)
 created_at       TEXT NOT NULL
+signature        TEXT                  ← what the duplicate-failure check compares; 'pre-execution:…' and 'git-commit:…' rows are selected by a dispatch rule
 FOREIGN KEY dispatch_id → unit_dispatches(id)
 ```
 
 - DDL owner: `db-unit-dispatch-retry-schema.ts`. Access: `db/unit-dispatch-retries.ts`.
-- Store, read and release rules: see the second 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+- Store, read and release rules: see the second and third 2026-10-04 amendments in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
 
 ---
 

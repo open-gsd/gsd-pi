@@ -4,6 +4,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { postUnitPreVerification, type PostUnitContext } from "../auto-post-unit.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 import { AutoSession } from "../auto/session.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import {
@@ -86,7 +87,7 @@ test("DB-backed execute-task missing an Attempt Result bypasses generic artifact
     failureContext: "Legacy artifact retry",
     attempt: 3,
   };
-  pctx.s.verificationRetryCount.set("execute-task:M001/S01/T01", 3);
+  useUnitBudget(pctx.s, "execute-task", "M001/S01/T01", 3);
 
   const result = await postUnitPreVerification(pctx, {
     skipSettleDelay: true,
@@ -99,7 +100,7 @@ test("DB-backed execute-task missing an Attempt Result bypasses generic artifact
   // stay attempt-independent — deleting it here reset the retry bound to
   // "attempt 1/2" on every new Attempt (#1971).
   assert.equal(
-    pctx.s.verificationRetryCount.get("execute-task:M001/S01/T01"),
+    usedUnitBudget(pctx.s, "execute-task", "M001/S01/T01"),
     3,
     "host auto-fix retry counter must survive the durable-authority deferral",
   );
@@ -293,7 +294,7 @@ test("staged awaiting-verification Attempt preserves the host auto-fix retry cou
   const pauseCalls: string[] = [];
   const pctx = createTaskContext(basePath, pauseCalls);
   // As if the host gate already failed this unit once ("auto-fix attempt 1/2").
-  pctx.s.verificationRetryCount.set("execute-task:M001/S01/T01", 1);
+  useUnitBudget(pctx.s, "execute-task", "M001/S01/T01", 1);
 
   const result = await postUnitPreVerification(pctx, {
     skipSettleDelay: true,
@@ -302,7 +303,7 @@ test("staged awaiting-verification Attempt preserves the host auto-fix retry cou
 
   assert.equal(result, "continue");
   assert.equal(
-    pctx.s.verificationRetryCount.get("execute-task:M001/S01/T01"),
+    usedUnitBudget(pctx.s, "execute-task", "M001/S01/T01"),
     1,
     "a new staged Attempt must not reset the host auto-fix retry counter",
   );

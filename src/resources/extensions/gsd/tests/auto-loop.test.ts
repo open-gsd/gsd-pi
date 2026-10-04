@@ -1837,13 +1837,10 @@ function makeLoopSession(overrides?: Partial<Record<string, unknown>>) {
     lastBaselineCharCount: undefined,
     lastBudgetAlertLevel: 0,
     pendingVerificationRetry: null,
-    pendingVerificationRetryDispatch: null,
     pendingCrashRecovery: null,
-    verificationRetryFailureHashes: new Map<string, string>(),
     autoModeStartModel: null,
     unitDispatchCount: new Map<string, number>(),
     unitLifetimeDispatches: new Map<string, number>(),
-    unitRecoveryCount: new Map<string, number>(),
     verificationRetryCount: new Map<string, number>(),
     unclaimedUnitBudgets: new Map<string, number>(),
     gitService: null,
@@ -6164,9 +6161,6 @@ test("runUnitPhase remembers aborted milestone closeout for same-unit resume", a
 
   assert.equal(result.action, "break");
   assert.equal((result as any).reason, "unit-aborted-pause");
-  assert.equal(s.pendingVerificationRetryDispatch?.unitType, "complete-milestone");
-  assert.equal(s.pendingVerificationRetryDispatch?.unitId, "M004");
-  assert.equal(s.pendingVerificationRetryDispatch?.prompt, "complete milestone prompt");
   assert.equal(runtime?.phase, "paused");
   assert.equal(runtime?.lastProgressKind, "unit-aborted-pause");
 });

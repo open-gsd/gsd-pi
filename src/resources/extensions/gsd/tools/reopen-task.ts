@@ -11,6 +11,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { invalidateStateCache } from "../state.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
@@ -81,6 +82,9 @@ export async function handleReopenTask(
   } catch (err) {
     return { error: err instanceof Error ? err.message : String(err) };
   }
+
+  // A reopened unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}/${params.taskId}`);
 
   // ── Invalidate caches ────────────────────────────────────────────────────
   invalidateStateCache();

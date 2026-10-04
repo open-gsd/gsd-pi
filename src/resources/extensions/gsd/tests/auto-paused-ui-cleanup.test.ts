@@ -16,6 +16,7 @@ import {
   stopAuto,
 } from "../auto.ts";
 import { autoSession } from "../auto-runtime-state.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 import { closeDatabase, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease, getMilestoneLease } from "../db/milestone-leases.ts";
@@ -268,11 +269,10 @@ test("cleanupAfterLoopExit preserves completionStopInProgress even when preserve
 test("pauseAuto preserves artifact retry counts across pause/resume", async () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-pause-retry-count-"));
   const previousCwd = process.cwd();
-  const retryKey = "execute-task:M001/S01/T01";
 
   autoSession.reset();
   autoSession.active = true;
-  autoSession.verificationRetryCount.set(retryKey, 2);
+  useUnitBudget(autoSession, "execute-task", "M001/S01/T01", 2);
   autoSession.pendingVerificationRetry = {
     unitId: "M001/S01/T01",
     failureContext: "Missing expected artifact (attempt 2/3).",
@@ -285,7 +285,7 @@ test("pauseAuto preserves artifact retry counts across pause/resume", async () =
 
     assert.equal(autoSession.paused, true);
     assert.equal(autoSession.pendingVerificationRetry, null);
-    assert.equal(autoSession.verificationRetryCount.get(retryKey), 2);
+    assert.equal(usedUnitBudget(autoSession, "execute-task", "M001/S01/T01"), 2);
   } finally {
     autoSession.reset();
     process.chdir(previousCwd);

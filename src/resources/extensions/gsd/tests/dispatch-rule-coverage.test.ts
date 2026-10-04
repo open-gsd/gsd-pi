@@ -16,11 +16,9 @@ import { DISPATCH_RULES } from "../auto-dispatch.ts";
 import type { DispatchContext, DispatchAction } from "../auto-dispatch.ts";
 import type { GSDState } from "../types.ts";
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
-import { closeDatabase, insertArtifact, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
-import { registerAutoWorker } from "../db/auto-workers.ts";
-import { claimMilestoneLease } from "../db/milestone-leases.ts";
-import { recordDispatchClaim } from "../db/unit-dispatches.ts";
+import { closeDatabase, insertArtifact, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
 import { storeUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 
 // ─── State helpers ────────────────────────────────────────────────────────
 
@@ -401,48 +399,84 @@ test("dispatch-rule-coverage: executing with task plan present → execute-task"
   );
 });
 
-test("dispatch-rule-coverage: executing honors pending verification retry unit", async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-exec-retry-"));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+/**
+ * A database with a claimed dispatch row for the unit, as a unit that ran in
+ * auto-mode has. No AutoSession holds anything about it: the dispatch rules see
+ * what a restarted process sees.
+ */
+function openProjectWithDispatch(
+  t: { after(cb: () => void): void },
+  basePath: string,
+  unitType: string,
+  unitId: string,
+): void {
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "First Slice" });
+  claimTestDispatch(basePath, { milestoneId: "M001", sliceId: "S01", unitType, unitId });
+}
 
+const COMMIT_REPAIR_RETRY = {
+  unitId: "M001/S01/T01",
+  failureContext: "Git commit failed after task verification. The hook refused the changes.",
+  signature: "git-commit:1:the hook refused the changes",
+  attempt: 1,
+};
+
+for (const { phase, activeTask } of [
+  { phase: "executing", activeTask: { id: "T02", title: "Second Task" } },
+  { phase: "summarizing", activeTask: null },
+] as const) {
+  test(`dispatch-rule-coverage: ${phase} with a stored commit repair retry → the closed execute-task`, async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-commit-repair-"));
+    t.after(() => rmSync(tmp, { recursive: true, force: true }));
+    writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
+    writeSliceFile(tmp, "M001", "S01", "PLAN", "# Plan\n");
+    writeTaskPlan(tmp, "M001", "S01", "T01");
+    writeTaskPlan(tmp, "M001", "S01", "T02");
+    openProjectWithDispatch(t, tmp, "execute-task", "M001/S01/T01");
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First Task", status: "complete" });
+    storeUnitRetry("execute-task", COMMIT_REPAIR_RETRY);
+
+    const match = await findFirstMatch({
+      ...makeCtx(tmp, makeState({ phase, activeSlice: { id: "S01", title: "First Slice" }, activeTask })),
+      prefs: { reactive_execution: { enabled: false } } as DispatchContext["prefs"],
+    });
+    assertMatch(
+      match,
+      { ruleName: "stored retry → execute-task (commit repair)", action: "dispatch", unitType: "execute-task" },
+      `${phase} with a stored commit repair retry`,
+    );
+    assert.equal(
+      match?.result.action === "dispatch" ? match.result.unitId : null,
+      "M001/S01/T01",
+      "state derivation does not select a closed task, so the stored retry must",
+    );
+  });
+}
+
+test("dispatch-rule-coverage: a stored verification retry of the active task does not change the selection", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-task-retry-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
   writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
   writeSliceFile(tmp, "M001", "S01", "PLAN", "# Plan\n");
   writeTaskPlan(tmp, "M001", "S01", "T01");
-  writeTaskPlan(tmp, "M001", "S01", "T02");
+  openProjectWithDispatch(t, tmp, "execute-task", "M001/S01/T01");
+  storeUnitRetry("execute-task", { unitId: "M001/S01/T01", failureContext: "npm test failed", attempt: 1 });
 
-  const state = makeState({
-    phase: "executing",
-    activeSlice: { id: "S01", title: "First Slice" },
-    activeTask: { id: "T02", title: "Second Task" },
-  });
-  const ctx: DispatchContext = {
-    basePath: tmp,
-    mid: "M001",
-    midTitle: "Test Milestone",
-    state,
+  const match = await findFirstMatch({
+    ...makeCtx(tmp, makeState({
+      phase: "executing",
+      activeSlice: { id: "S01", title: "First Slice" },
+      activeTask: { id: "T01", title: "First Task" },
+    })),
     prefs: { reactive_execution: { enabled: false } } as DispatchContext["prefs"],
-    session: {
-      pendingVerificationRetry: {
-        unitId: "M001/S01/T01",
-        attempt: 2,
-        failureContext: "verification failed",
-      },
-    } as DispatchContext["session"],
-  };
-  const match = await findFirstMatch(ctx);
+  });
   assertMatch(
     match,
-    {
-      ruleName: "executing → execute-task",
-      action: "dispatch",
-      unitType: "execute-task",
-    },
-    "executing pending verification retry",
-  );
-  assert.equal(
-    match?.result.action === "dispatch" ? match.result.unitId : null,
-    "M001/S01/T01",
-    "executing pending verification retry: should redispatch the retry unit",
+    { ruleName: "executing → execute-task", action: "dispatch", unitType: "execute-task" },
+    "executing with a stored verification retry of the active task",
   );
 });
 
@@ -450,27 +484,16 @@ for (const { phase, unitType } of [
   { phase: "executing", unitType: "plan-slice" },
   { phase: "evaluating-gates", unitType: "refine-slice" },
 ] as const) {
-  test(`dispatch-rule-coverage: ${phase} with a stored ${unitType} retry → ${unitType}`, async (t) => {
+  test(`dispatch-rule-coverage: ${phase} with a stored ${unitType} pre-execution retry → ${unitType}`, async (t) => {
     const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-stored-retry-"));
     t.after(() => rmSync(tmp, { recursive: true, force: true }));
-    openDatabase(":memory:");
-    t.after(() => closeDatabase());
-    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
-    insertSlice({ id: "S01", milestoneId: "M001", title: "First Slice" });
-    const workerId = registerAutoWorker({ projectRootRealpath: tmp });
-    const lease = claimMilestoneLease(workerId, "M001");
-    if (!lease.ok) throw new Error("expected test lease");
-    const claim = recordDispatchClaim({
-      traceId: "trace",
-      workerId,
-      milestoneLeaseToken: lease.token,
-      milestoneId: "M001",
-      sliceId: "S01",
-      unitType,
+    openProjectWithDispatch(t, tmp, unitType, "M001/S01");
+    storeUnitRetry(unitType, {
       unitId: "M001/S01",
+      failureContext: "the plan failed its check",
+      signature: "pre-execution:1",
+      attempt: 1,
     });
-    if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
-    storeUnitRetry(unitType, { unitId: "M001/S01", failureContext: "the plan failed its check", attempt: 1 });
 
     const match = await findFirstMatch(makeCtx(
       tmp,
@@ -487,6 +510,33 @@ for (const { phase, unitType } of [
     );
   });
 }
+
+test("dispatch-rule-coverage: a stored artifact retry of the planner does not send an executing slice back", async (t) => {
+  // Only a plan that the pre-execution check refused goes back to the planner.
+  // An artifact retry is for a planner that saved no plan; a slice in the
+  // executing phase has a plan.
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-artifact-retry-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
+  writeSliceFile(tmp, "M001", "S01", "PLAN", "# Plan\n");
+  writeTaskPlan(tmp, "M001", "S01", "T01");
+  openProjectWithDispatch(t, tmp, "plan-slice", "M001/S01");
+  storeUnitRetry("plan-slice", { unitId: "M001/S01", failureContext: "the plan artifact is missing", attempt: 1 });
+
+  const match = await findFirstMatch({
+    ...makeCtx(tmp, makeState({
+      phase: "executing",
+      activeSlice: { id: "S01", title: "First Slice" },
+      activeTask: { id: "T01", title: "First Task" },
+    })),
+    prefs: { reactive_execution: { enabled: false } } as DispatchContext["prefs"],
+  });
+  assertMatch(
+    match,
+    { ruleName: "executing → execute-task", action: "dispatch", unitType: "execute-task" },
+    "executing with a stored artifact retry of the planner",
+  );
+});
 
 test("dispatch-rule-coverage: summarizing → complete-slice", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-sum-"));
@@ -540,7 +590,7 @@ test("dispatch-rule-coverage: rule registry has the expected size", () => {
   // intentionally.
   assert.equal(
     DISPATCH_RULES.length,
-    28,
+    29,
     `DISPATCH_RULES length changed (got ${DISPATCH_RULES.length}). ` +
       "If you added a rule, add a state stub to dispatch-rule-coverage.test.ts " +
       "and update this expected count.",

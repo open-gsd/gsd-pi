@@ -74,7 +74,30 @@ Rules:
 - **Prompt.** The unit prompt gets the stored failure context when the session has none for the unit.
 - **Release.** The row is deleted when the next close-out of the planner unit does not ask for a retry (the check passed, or it did not run), when the retry cap pauses auto-mode, and when the retry policy pauses auto-mode. This is the release rule of the budgets. A new dispatch of the unit does not release the row, so a process that is killed in the middle of the re-plan runs the re-plan again. A pause or a stop by the user does not release it.
 
-Not changed: every other verification retry (artifact verification, host verification of a Task, milestone validation, the git-commit repair) is still session memory, and `exhaustedVerificationUnits` is still a session set. For these units a restart selects the same unit from state; it loses only the failure context and the retry count.
+Not changed by this amendment: every other verification retry (artifact verification, host verification of a Task, milestone validation, the git-commit repair) and `exhaustedVerificationUnits`. The next amendment moves them.
+
+## Amendment 2026-10-04: every verification retry, its count and its failure history are rows on the dispatch row
+
+This finishes the retry part of part 4 and the verification budgets of part 1. It replaces the store and select rules of the amendment above where they differ.
+
+**Retry rows.** Every close-out that decides to run a unit again stores the decision in `unit_dispatch_retries`: artifact verification, host verification of a Task, milestone validation, the git-commit repair, the complete-slice tool error, the gate-evaluate missing verdict, and the pre-execution check. The row has a new nullable column `signature`.
+
+- **Select.** The `pendingVerificationRetryDispatch` session snapshot is deleted. The dispatch rules select the next unit from the database in a live process and after a restart. State derivation selects a unit again when its verification failed, because the unit is not complete. Two retries are for a unit that state derivation does not select again, so a rule selects the unit by its row:
+  - a pre-execution retry (signature `pre-execution:`), rule `stored retry → plan-slice / refine-slice`;
+  - a git-commit repair retry (signature `git-commit:`), rule `stored retry → execute-task (commit repair)`. The task is closed when its commit is refused. The rule runs before `summarizing → complete-slice`, so the slice does not close with the commit open.
+- **Prompt.** The unit prompt gets the failure context of the stored retry of the unit.
+- **Release.** A verification gate that clears the retry state of a unit (a pass, a pause for a person, an abort) deletes the rows that a verification gate stored. It does not delete a pre-execution retry or a git-commit repair retry: the check that stored each one releases it (the pre-execution check on a result that is not a retry; the git action on a commit that succeeds or at its cap). The retry-policy pause, and the skip of a closed unit that has no git-commit repair retry, delete every row of the unit.
+- **Failure history.** Each retry of a unit opens a new dispatch row, so the retry rows of the earlier dispatches are the failure history of the unit. The duplicate-failure check compares the new failure with the retry that an earlier dispatch of the unit stored. `verificationRetryFailureHashes` is deleted. A restart keeps the check.
+- **Session.** `pendingVerificationRetry` stays as the hand-over inside one close-out (from the gate that decides the retry to the retry policy and the journal) and as the failure context of a unit that has no dispatch row.
+
+**Budget kinds.** `unit_dispatch_budgets` has four more kinds:
+
+- `verification`: the count of verification retries of the unit (artifact verification, host verification, milestone validation). Dev-engine units no longer use `verificationRetryCount`; that map and `custom-verify-retries.json` now hold only the counts of custom-engine steps.
+- `git-commit`: the count of git-commit repair retries of a task.
+- `timeout-recovery`: the count of timeout recoveries of the unit (`unitRecoveryCount` is deleted). A start of auto-mode no longer resets it, so a restart keeps the backoff.
+- `exhausted`: a mark, not a count. It is set when the unit used all its artifact verification retries; the `verification` count is reset at the same time. `exhaustedVerificationUnits` is deleted, and `custom-verify-retries.json` no longer stores an exhausted list.
+
+**Exhausted units.** `resolveDispatch` does not dispatch a unit that holds the `exhausted` mark, with or without a session, so a restart does not dispatch it again. Release rule: a reopen or a re-plan releases the mark of the unit and of every unit below it (`gsd_task_reopen`, `gsd_slice_reopen`, `gsd_milestone_reopen`, `gsd_replan_slice`, `gsd_replan_task`). A pass of the artifact verification of the unit also writes `0`. An exhausted list in a `custom-verify-retries.json` file that an older build wrote is not read.
 
 ## Rejected alternatives
 

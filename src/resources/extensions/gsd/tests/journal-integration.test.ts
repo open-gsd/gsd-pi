@@ -218,7 +218,6 @@ function makeSession() {
     autoModeStartModel: null,
     unitDispatchCount: new Map<string, number>(),
     unitLifetimeDispatches: new Map<string, number>(),
-    unitRecoveryCount: new Map<string, number>(),
     verificationRetryCount: new Map<string, number>(),
     unclaimedUnitBudgets: new Map<string, number>(),
     gitService: null,
@@ -349,8 +348,6 @@ test("runUnitPhase retries complete-slice tool errors with their failure context
     ic.s.pendingVerificationRetry?.failureContext,
     `gsd_slice_complete failed without writing the slice completion artifacts:\n\n${toolError}`,
   );
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitType, "complete-slice");
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitId, "M001/S01");
 
   const endEvents = capture.events.filter(e => e.eventType === "unit-end");
   assert.equal(endEvents.length, 1);
@@ -439,8 +436,6 @@ test("runUnitPhase fails a gate-evaluate unit whose scope has gates without pers
     failureContext.includes("gsd_save_gate_result"),
     "corrective message must instruct persisting via gsd_save_gate_result",
   );
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitType, "gate-evaluate");
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitId, "M001/S01/gates+Q3,Q4");
 
   const endEvents = capture.events.filter(e => e.eventType === "unit-end");
   assert.equal(endEvents.length, 1);

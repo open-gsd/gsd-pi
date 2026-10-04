@@ -246,7 +246,6 @@ describe("session management", () => {
     s.currentMilestoneId = "M001";
     s.unitDispatchCount.set("M001/S01/T01", 3);
     s.unitLifetimeDispatches.set("M001/S01/T01", 5);
-    s.unitRecoveryCount.set("M001/S01/T01", 1);
 
     s.reset();
 
@@ -256,7 +255,6 @@ describe("session management", () => {
     assert.equal(s.currentMilestoneId, null, "currentMilestoneId should be null");
     assert.equal(s.unitDispatchCount.size, 0, "dispatch counts cleared");
     assert.equal(s.unitLifetimeDispatches.size, 0, "lifetime dispatches cleared");
-    assert.equal(s.unitRecoveryCount.size, 0, "recovery counts cleared");
   });
 
   test("NEW_SESSION_TIMEOUT_MS is 120 seconds", () => {

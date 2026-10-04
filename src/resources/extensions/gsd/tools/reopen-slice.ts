@@ -35,6 +35,7 @@ import { isMilestoneLifecycleAdopted } from "../db/milestone-closeout-readiness.
 import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { invalidateStateCache } from "../state.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { renderPlanCheckboxes } from "../markdown-renderer.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
@@ -178,6 +179,9 @@ export async function handleReopenSlice(
     if (!(error instanceof SliceLifecycleValidationError)) throw error;
     return { error: error.message };
   }
+
+  // A reopened unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(`${params.milestoneId}/${params.sliceId}`);
 
   // ── Invalidate caches ────────────────────────────────────────────────────
   invalidateStateCache();

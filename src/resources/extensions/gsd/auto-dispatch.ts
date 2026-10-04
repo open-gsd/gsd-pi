@@ -112,7 +112,8 @@ import {
 } from "./verification-source-integrity.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
-import { readStoredUnitRetry } from "./db/unit-dispatch-retries.js";
+import { readUnitBudget } from "./db/unit-dispatch-budgets.js";
+import { hasStoredPreExecutionRetry, readStoredCommitRepairRetry } from "./db/unit-dispatch-retries.js";
 import {
   grantMilestoneValidationWaiver,
   type MilestoneValidationWaiverReason,
@@ -615,6 +616,38 @@ export const DISPATCH_RULES: DispatchRule[] = [
           state.activeSlice,
           basePath,
           pendingOverrides,
+        ),
+      };
+    },
+  },
+  {
+    // ADR-048: the commit hook refused the changes of a task of this slice
+    // after the task closed (#2119), and the retry is stored on the task's
+    // dispatch row. State derivation does not select a closed task, so this
+    // rule sends the task back to the executor before the slice moves on. It
+    // reads the database only, so a restart selects the same unit as a live
+    // process.
+    name: "stored retry → execute-task (commit repair)",
+    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
+      if (!state.activeSlice) return null;
+      const sid = state.activeSlice.id;
+      const retry = readStoredCommitRepairRetry(mid, sid);
+      const tid = retry ? parseUnitId(retry.unitId).task : undefined;
+      if (!retry || !tid) return null;
+      const terminalAbort = readExecuteTaskTerminalAbort(mid, sid, tid);
+      if (terminalAbort) return terminalAbort;
+      return {
+        action: "dispatch",
+        unitType: "execute-task",
+        unitId: retry.unitId,
+        prompt: await buildExecuteTaskPrompt(
+          mid,
+          sid,
+          state.activeSlice.title,
+          tid,
+          state.activeTask?.id === tid ? state.activeTask.title : tid,
+          basePath,
+          { sessionContextWindow, modelRegistry, sessionProvider },
         ),
       };
     },
@@ -1136,7 +1169,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       const sTitle = state.activeSlice.title;
       const unitId = `${mid}/${sid}`;
       const unitType = (["plan-slice", "refine-slice"] as const)
-        .find((type) => readStoredUnitRetry(type, unitId) !== null);
+        .find((type) => hasStoredPreExecutionRetry(type, unitId));
       if (!unitType) return null;
       const buildPrompt = unitType === "refine-slice" ? buildRefineSlicePrompt : buildPlanSlicePrompt;
       return {
@@ -1391,36 +1424,11 @@ export const DISPATCH_RULES: DispatchRule[] = [
   },
   {
     name: "executing → execute-task",
-    match: async ({ state, mid, basePath, session, sessionContextWindow, modelRegistry, sessionProvider }) => {
+    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
       if (state.phase !== "executing") return null;
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
       const sTitle = state.activeSlice!.title;
-      const retryUnitId = session?.pendingVerificationRetry?.unitId;
-      if (retryUnitId) {
-        const { milestone: retryMid, slice: retrySid, task: retryTid } = parseUnitId(retryUnitId);
-        if (retryMid === mid && retrySid === sid && retryTid) {
-          const retryAbort = readExecuteTaskTerminalAbort(retryMid, retrySid, retryTid);
-          if (retryAbort) return retryAbort;
-          const retryTitle = state.activeTask?.id === retryTid
-            ? state.activeTask.title
-            : retryTid;
-          return {
-            action: "dispatch",
-            unitType: "execute-task",
-            unitId: retryUnitId,
-            prompt: await buildExecuteTaskPrompt(
-              mid,
-              sid,
-              sTitle,
-              retryTid,
-              retryTitle,
-              basePath,
-              { sessionContextWindow, modelRegistry, sessionProvider },
-            ),
-          };
-        }
-      }
 
       if (!state.activeTask) return null;
       const tid = state.activeTask.id;
@@ -1653,6 +1661,22 @@ function appendToolAffordanceToDispatch(
  * loop over DISPATCH_RULES for backward compatibility (tests that import
  * resolveDispatch directly without registry initialization).
  */
+/**
+ * ADR-048: a unit that used all its artifact verification retries holds the
+ * `exhausted` mark on its dispatch row. It is not dispatched again, also after
+ * a restart, until a reopen or a re-plan releases the mark.
+ */
+function isVerificationExhausted(ctx: DispatchContext, unitType: string, unitId: string): boolean {
+  return readUnitBudget(
+    ctx.session?.unclaimedUnitBudgets ?? new Map(),
+    { unitType, unitId, kind: "exhausted" },
+  ) > 0;
+}
+
+function verificationExhaustedReason(unitId: string): string {
+  return `Unit ${unitId} used all its verification retries. Reopen or re-plan it to run it again.`;
+}
+
 export async function resolveDispatch(
   ctx: DispatchContext,
 ): Promise<DispatchAction> {
@@ -1731,11 +1755,11 @@ export async function resolveDispatch(
     const action = annotateBackgroundable(await registry.evaluateDispatch(dispatchCtx));
     if (
       action.action === "dispatch" &&
-      dispatchCtx.session?.exhaustedVerificationUnits?.has(`${action.unitType}:${action.unitId}`)
+      isVerificationExhausted(dispatchCtx, action.unitType, action.unitId)
     ) {
       return {
         action: "stop",
-        reason: `Unit ${action.unitId} exhausted verification retries this session.`,
+        reason: verificationExhaustedReason(action.unitId),
         level: "error",
       };
     }
@@ -1752,11 +1776,11 @@ export async function resolveDispatch(
       const action = annotateBackgroundable(result);
       if (
         action.action === "dispatch" &&
-        dispatchCtx.session?.exhaustedVerificationUnits?.has(`${action.unitType}:${action.unitId}`)
+        isVerificationExhausted(dispatchCtx, action.unitType, action.unitId)
       ) {
         return {
           action: "stop",
-          reason: `Unit ${action.unitId} exhausted verification retries this session.`,
+          reason: verificationExhaustedReason(action.unitId),
           level: "error",
           matchedRule: rule.name,
         };

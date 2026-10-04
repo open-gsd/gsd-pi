@@ -1612,7 +1612,6 @@ export async function bootstrapAutoSession(
     // (originalBasePath is empty on a fresh bootstrap).
     buildLifecycle().adoptSessionRoot(base);
     s.unitDispatchCount.clear();
-    s.unitRecoveryCount.clear();
     s.lastBudgetAlertLevel = 0;
     s.unitLifetimeDispatches.clear();
     resetHookState();

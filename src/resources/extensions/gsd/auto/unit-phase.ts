@@ -26,7 +26,7 @@ import { recordUnitEnd, writeUnitRuntimeRecord } from "../unit-runtime.js";
 import { isDbAvailable, getTask, getGateResults } from "../gsd-db.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import { getLatestForUnit } from "../db/unit-dispatches.js";
-import { resetUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
+import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
 import { readStoredUnitRetry } from "../db/unit-dispatch-retries.js";
 import { markWorkerStopping } from "../db/auto-workers.js";
 import { releaseMilestoneLease } from "../db/milestone-leases.js";
@@ -45,7 +45,7 @@ import { classifyError, isTransient } from "../error-classifier.js";
 import { setCurrentPhase, clearCurrentPhase } from "../../shared/gsd-phase-state.js";
 import { setAutoActiveStatus } from "../auto-dashboard.js";
 import { runUnit } from "./run-unit.js";
-import { verificationRetryKey } from "./verification-retry-policy.js";
+import { setVerificationRetry, verificationBudget } from "./verification-retry-state.js";
 import { validateSourceWriteWorktreeSafety } from "./worktree-safety-phase.js";
 import { isTaskExecutionReadyForHostVerification } from "./task-execution-cutover.js";
 import {
@@ -54,7 +54,6 @@ import {
   emitCancelledUnitEnd,
   _buildCancelledUnitStopReason,
   _isPauseOriginCancelledResult,
-  rememberRetryDispatch,
 } from "./phase-helpers.js";
 import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
 import { MAX_RECOVERY_CHARS } from "./types.js";
@@ -98,11 +97,11 @@ export const _classifyZeroToolProviderMessageForTest = classifyZeroToolProviderM
 export const _zeroToolPseudoToolCallSnippetForTest = zeroToolPseudoToolCallSnippet;
 
 export function resolveDispatchRecoveryAttempts(
-  unitRecoveryCount: Map<string, number>,
+  unclaimedUnitBudgets: Map<string, number>,
   unitType: string,
   unitId: string,
 ): number | undefined {
-  return (unitRecoveryCount.get(`${unitType}/${unitId}`) ?? 0) > 0
+  return readUnitBudget(unclaimedUnitBudgets, { unitType, unitId, kind: "timeout-recovery" }) > 0
     ? 0
     : undefined;
 }
@@ -502,7 +501,7 @@ export async function runUnitPhase(
       lastProgressAt: unitStartedAt,
       progressCount: 0,
       lastProgressKind: "dispatch",
-      recoveryAttempts: resolveDispatchRecoveryAttempts(s.unitRecoveryCount, unitType, unitId),
+      recoveryAttempts: resolveDispatchRecoveryAttempts(s.unclaimedUnitBudgets, unitType, unitId),
     },
   );
 
@@ -525,7 +524,7 @@ export async function runUnitPhase(
       basePath: s.basePath,
       verbose: s.verbose,
       currentUnitStartedAt: s.currentUnit?.startedAt ?? Date.now(),
-      unitRecoveryCount: s.unitRecoveryCount,
+      unclaimedUnitBudgets: s.unclaimedUnitBudgets,
     }),
     pauseAuto: deps.pauseAuto,
   });
@@ -803,7 +802,6 @@ export async function runUnitPhase(
       unitResult.errorContext?.isTransient &&
       errorCategory === "aborted"
     ) {
-      rememberRetryDispatch(s, { type: unitType, id: unitId }, iterData);
       writeUnitRuntimeRecord(s.basePath, unitType, unitId, s.currentUnit?.startedAt ?? Date.now(), {
         phase: "paused",
         lastProgressAt: Date.now(),
@@ -992,7 +990,7 @@ export async function runUnitPhase(
   }
   if (artifactVerified) {
     s.unitDispatchCount.delete(dispatchKey);
-    s.unitRecoveryCount.delete(`${unitType}/${unitId}`);
+    resetUnitBudget(s.unclaimedUnitBudgets, { unitType, unitId, kind: "timeout-recovery" });
     resetUnitBudget(s.unclaimedUnitBudgets, { unitType, unitId, kind: "zero-tool" });
   }
 
@@ -1083,15 +1081,12 @@ export async function runUnitPhase(
       ? `${String(failedToolResult.toolName)} returned an error`
       : null);
     if (toolError) {
-      const retryKey = verificationRetryKey(unitType, unitId);
-      const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
-      s.verificationRetryCount.set(retryKey, attempt);
-      s.pendingVerificationRetry = {
+      const attempt = spendUnitBudget(s.unclaimedUnitBudgets, verificationBudget(unitType, unitId));
+      setVerificationRetry(s, unitType, {
         unitId,
         failureContext: `gsd_slice_complete failed without writing the slice completion artifacts:\n\n${toolError}`,
         attempt,
-      };
-      rememberRetryDispatch(s, { type: unitType, id: unitId }, iterData);
+      });
       ctx.ui.notify(
         `complete-slice ${unitId} returned a tool error without writing its artifacts. Retrying with the tool error context.`,
         "warning",
@@ -1112,20 +1107,13 @@ export async function runUnitPhase(
   // corrective context naming the missing gate ids, mirroring the
   // complete-slice no-artifact retry above.
   if (unitEndStatus === "no-artifact" && unitType === "gate-evaluate" && missingGateIds.length > 0) {
-    const retryKey = verificationRetryKey(unitType, unitId);
-    const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
-    s.verificationRetryCount.set(retryKey, attempt);
+    const attempt = spendUnitBudget(s.unclaimedUnitBudgets, verificationBudget(unitType, unitId));
     const missing = missingGateIds.join(", ");
     const failureContext =
       `gate-evaluate ${unitId} ended without a persisted verdict for: ${missing}. ` +
       `Dispatch gate evaluations synchronously (subagent with run_in_background: false) and call ` +
       `gsd_save_gate_result for every gate still missing a verdict (${missing}) before finishing.`;
-    s.pendingVerificationRetry = {
-      unitId,
-      failureContext,
-      attempt,
-    };
-    rememberRetryDispatch(s, { type: unitType, id: unitId }, iterData);
+    setVerificationRetry(s, unitType, { unitId, failureContext, attempt });
     ctx.ui.notify(
       `gate-evaluate ${unitId} did not persist verdicts for: ${missing}. Retrying with the missing-gate context.`,
       "warning",

@@ -26,6 +26,8 @@ import { readExecRun, recordExecRun } from '../db/writers/exec-runs.ts';
 import { incrementUatRetryAttempts, getUatRetryAttempts } from '../db/writers/runtime-control.ts';
 import { relSliceFile, targetSliceFile } from '../paths.ts';
 import { internalExecutionInvocation } from '../execution-invocation.ts';
+import { readUnitBudget, spendUnitBudget } from '../db/unit-dispatch-budgets.ts';
+import { claimTestDispatch } from './helpers/unit-dispatch.ts';
 import {
   handleReopenSlice as handleReopenSliceWithInvocation,
   type ReopenSliceParams,
@@ -61,6 +63,30 @@ function seedCompleteSlice(): void {
 }
 
 // ─── Success path ────────────────────────────────────────────────────────
+
+test('handleReopenSlice: releases the exhausted mark of the slice units, and of no other slice', async (t) => {
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, '.gsd', 'gsd.db'));
+  seedCompleteSlice();
+  insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Other Slice', status: 'pending' });
+  const exhausted = (unitId: string) => ({ unitType: 'complete-slice', unitId, kind: 'exhausted' }) as const;
+  for (const sliceId of ['S01', 'S02']) {
+    claimTestDispatch(base, {
+      milestoneId: 'M001',
+      sliceId,
+      unitType: 'complete-slice',
+      unitId: `M001/${sliceId}`,
+    });
+    spendUnitBudget(new Map(), exhausted(`M001/${sliceId}`));
+  }
+
+  const result = await handleReopenSlice({ milestoneId: 'M001', sliceId: 'S01' }, base);
+
+  assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
+  assert.equal(readUnitBudget(new Map(), exhausted('M001/S01')), 0, 'the reopened slice can be dispatched again');
+  assert.equal(readUnitBudget(new Map(), exhausted('M001/S02')), 1, 'a slice that was not reopened stays exhausted');
+});
 
 test('handleReopenSlice: resets a complete slice to in_progress and all tasks to pending', async () => {
   const base = makeTmpBase();

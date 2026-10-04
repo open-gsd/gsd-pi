@@ -2,12 +2,12 @@
 // File Purpose: Shared helpers used across auto-loop phase modules.
 
 import { debugLog } from "../debug-logger.js";
-import { releaseUnitRetry } from "../db/unit-dispatch-retries.js";
+import { readPreviousUnitRetry, releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { recordUnitEnd } from "../unit-runtime.js";
 import { resolveWorktreeProjectRoot, normalizeWorktreePathForCompare } from "../worktree-root.js";
-import { decideVerificationRetry, verificationRetryKey } from "./verification-retry-policy.js";
+import { decideVerificationRetry, hashVerificationFailureContext } from "./verification-retry-policy.js";
 import type { AutoSession } from "./session.js";
-import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
+import type { IterationContext, LoopState, PhaseResult } from "./types.js";
 import type { Phase } from "../types.js";
 import type { EnterResult } from "../worktree-lifecycle.js";
 
@@ -57,17 +57,19 @@ export async function applyVerificationRetryPolicy(
 ): Promise<PhaseResult | null> {
   const { ctx, pi, s, deps } = ic;
   const retryInfo = s.pendingVerificationRetry;
-  const key = unitType && retryInfo
-    ? verificationRetryKey(unitType, retryInfo.unitId)
-    : undefined;
   // Task host verification only returns retry after durable recovery authorizes it.
   // Repeated evidence belongs to that policy, not this legacy loop guard.
   const durableTaskRetry = unitType === "execute-task" && phase === "verification-retry";
+  // ADR-048: the failure before this one is the retry that an earlier dispatch
+  // of the unit stored, so a restart does not lose the comparison.
+  const previousRetry = !durableTaskRetry && unitType && retryInfo
+    ? readPreviousUnitRetry(unitType, retryInfo.unitId)
+    : null;
   const decision = decideVerificationRetry({
     unitType,
     retryInfo,
-    previousFailureHash: !durableTaskRetry && key
-      ? s.verificationRetryFailureHashes.get(key)
+    previousFailureHash: previousRetry
+      ? hashVerificationFailureContext(previousRetry.signature ?? previousRetry.failureContext)
       : undefined,
   });
 
@@ -92,7 +94,6 @@ export async function applyVerificationRetryPolicy(
     return { action: "break", reason: decision.reason };
   }
 
-  s.verificationRetryFailureHashes.set(decision.key, decision.failureHash);
   debugLog("autoLoop", {
     phase: `${phase}-backoff`,
     iteration: ic.iteration,
@@ -105,23 +106,6 @@ export async function applyVerificationRetryPolicy(
   });
   await new Promise<void>((resolve) => setTimeout(resolve, decision.delayMs));
   return null;
-}
-
-export function rememberRetryDispatch(
-  s: AutoSession,
-  unit: { type: string; id: string } | null,
-  iterData: IterationData,
-): void {
-  if (!unit) return;
-  s.pendingVerificationRetryDispatch = {
-    unitType: unit.type,
-    unitId: unit.id,
-    prompt: iterData.prompt,
-    pauseAfterUatDispatch: iterData.pauseAfterUatDispatch,
-    state: iterData.state,
-    mid: iterData.mid,
-    midTitle: iterData.midTitle,
-  };
 }
 
 /**

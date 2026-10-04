@@ -98,7 +98,7 @@ async function recoverPlanSlice(base: string, startedAt: number): Promise<{ resu
     "plan-slice",
     "M001/S01",
     "hard",
-    { basePath: base, verbose: false, currentUnitStartedAt: startedAt, unitRecoveryCount: new Map() },
+    { basePath: base, verbose: false, currentUnitStartedAt: startedAt, unclaimedUnitBudgets: new Map() },
   );
   return { result, steering: messages.length };
 }

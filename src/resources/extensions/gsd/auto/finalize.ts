@@ -24,11 +24,10 @@ import {
   hasAnyIssues,
 } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
-import { readStoredUnitRetry } from "../db/unit-dispatch-retries.js";
+import { releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { buildPhaseHandoffOutcome, setAutoOutcomeWidget } from "../auto-dashboard.js";
 import {
   applyVerificationRetryPolicy,
-  rememberRetryDispatch,
   _resolveCurrentUnitStartedAtForTest,
   isIsolatedWorktreeSession,
 } from "./phase-helpers.js";
@@ -242,6 +241,7 @@ export async function runFinalize(
         && isTaskExecutionReadyForHostVerification(preUnitSnapshot.type, preUnitSnapshot.id);
       if (finalizeOnlyArtifactRetry) {
         s.pendingVerificationRetry = null;
+        releaseUnitRetry(preUnitSnapshot.type, preUnitSnapshot.id);
         debugLog("autoLoop", {
           phase: "finalize-only-retry-verified-artifact",
           iteration: ic.iteration,
@@ -258,8 +258,8 @@ export async function runFinalize(
           clearFinalizingUnit();
           return retryPolicyResult;
         }
-        // Continue the loop — next iteration will inject the retry context into the prompt.
-        rememberRetryDispatch(s, preUnitSnapshot, iterData);
+        // Continue the loop. The dispatch rules select the unit again from the
+        // database, and the unit prompt gets the retry context.
         debugLog("autoLoop", { phase: "artifact-verification-retry", iteration: ic.iteration });
         clearFinalizingUnit();
         return { action: "continue" };
@@ -369,8 +369,8 @@ export async function runFinalize(
           clearFinalizingUnit();
           return retryPolicyResult;
         }
-        // Continue the loop — next iteration will inject the retry context into the prompt.
-        rememberRetryDispatch(s, preUnitSnapshot, iterData);
+        // Continue the loop. The dispatch rules select the unit again from the
+        // database, and the unit prompt gets the retry context.
         debugLog("autoLoop", { phase: "verification-retry", iteration: ic.iteration });
         clearFinalizingUnit();
         return { action: "continue" };
@@ -448,12 +448,7 @@ export async function runFinalize(
         clearFinalizingUnit();
         return retryPolicyResult;
       }
-      // ADR-048: a retry stored on the dispatch row is selected by the dispatch
-      // rules from the database. Only a unit with no stored retry is replayed
-      // from the session snapshot.
-      if (!preUnitSnapshot || !readStoredUnitRetry(preUnitSnapshot.type, preUnitSnapshot.id)) {
-        rememberRetryDispatch(s, preUnitSnapshot, iterData);
-      }
+      // ADR-048: the dispatch rules select the unit again from the database.
       debugLog("autoLoop", {
         phase: retryPhase,
         iteration: ic.iteration,

@@ -150,7 +150,6 @@ function makeLoopSession(overrides?: Record<string, unknown>) {
     autoModeStartModel: null,
     unitDispatchCount: new Map<string, number>(),
     unitLifetimeDispatches: new Map<string, number>(),
-    unitRecoveryCount: new Map<string, number>(),
     verificationRetryCount: new Map<string, number>(),
     unclaimedUnitBudgets: new Map<string, number>(),
     gitService: null,

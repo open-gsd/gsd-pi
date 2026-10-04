@@ -44,7 +44,6 @@ export {
   shouldRunPlanV2Gate,
   _resolveCurrentUnitStartedAtForTest,
   applyVerificationRetryPolicy,
-  rememberRetryDispatch,
   emitCancelledUnitEnd,
   _buildCancelledUnitStopReason,
   _isPauseOriginCancelledResult,

@@ -573,20 +573,44 @@ export function setDispatchBudgetUsed(dispatchId: number, kind: string, used: nu
   });
 }
 
-/** Store the retry decision that the close-out of the dispatch row's unit made. */
-export function setDispatchRetry(dispatchId: number, failureContext: string, attempt: number): void {
+/**
+ * Write 0 on every budget row of the kind that a unit in the scope holds. The
+ * scope is one unit id and every unit id below it.
+ */
+export function resetDispatchBudgetsInScope(scopeUnitId: string, kind: string): void {
   transaction(() => {
     _getAdapter()!.prepare(
-      `INSERT INTO unit_dispatch_retries (dispatch_id, failure_context, attempt, created_at)
-       VALUES (:dispatch_id, :failure_context, :attempt, :created_at)
+      `UPDATE unit_dispatch_budgets
+       SET used = 0, updated_at = :updated_at
+       WHERE kind = :kind AND used > 0
+         AND dispatch_id IN (
+           SELECT id FROM unit_dispatches
+           WHERE unit_id = :scope
+              OR substr(unit_id, 1, length(:scope) + 1) = :scope || '/'
+         )`,
+    ).run({ ":scope": scopeUnitId, ":kind": kind, ":updated_at": new Date().toISOString() });
+  });
+}
+
+/** Store the retry decision that the close-out of the dispatch row's unit made. */
+export function setDispatchRetry(
+  dispatchId: number,
+  retry: { failureContext: string; signature?: string; attempt: number },
+): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `INSERT INTO unit_dispatch_retries (dispatch_id, failure_context, signature, attempt, created_at)
+       VALUES (:dispatch_id, :failure_context, :signature, :attempt, :created_at)
        ON CONFLICT (dispatch_id) DO UPDATE SET
          failure_context = excluded.failure_context,
+         signature = excluded.signature,
          attempt = excluded.attempt,
          created_at = excluded.created_at`,
     ).run({
       ":dispatch_id": dispatchId,
-      ":failure_context": failureContext,
-      ":attempt": attempt,
+      ":failure_context": retry.failureContext,
+      ":signature": retry.signature ?? null,
+      ":attempt": retry.attempt,
       ":created_at": new Date().toISOString(),
     });
   });
@@ -600,6 +624,27 @@ export function deleteUnitDispatchRetries(unitType: string, unitId: string): voi
        WHERE dispatch_id IN (
          SELECT id FROM unit_dispatches
          WHERE unit_type = :unit_type AND unit_id = :unit_id
+       )`,
+    ).run({ ":unit_type": unitType, ":unit_id": unitId });
+  });
+}
+
+/**
+ * Delete the stored retry decisions of the unit that a verification gate made.
+ * A pre-execution retry and a git-commit repair retry stay: the check that
+ * stored each one releases it.
+ */
+export function deleteUnitVerificationRetries(unitType: string, unitId: string): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `DELETE FROM unit_dispatch_retries
+       WHERE dispatch_id IN (
+         SELECT id FROM unit_dispatches
+         WHERE unit_type = :unit_type AND unit_id = :unit_id
+       )
+       AND (
+         signature IS NULL
+         OR (signature NOT LIKE 'pre-execution:%' AND signature NOT LIKE 'git-commit:%')
        )`,
     ).run({ ":unit_type": unitType, ":unit_id": unitId });
   });

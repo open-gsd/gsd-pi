@@ -8,6 +8,8 @@ import { join } from "node:path";
 
 import { runPostUnitVerification, type VerificationContext } from "../auto-verification.ts";
 import { AutoSession } from "../auto/session.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import { clearPathCache } from "../paths.ts";
 import {
   openDatabase,
@@ -265,6 +267,38 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
     assert.equal(result, "retry");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.match(s.pendingVerificationRetry?.failureContext ?? "", /objective evidence/i);
+  });
+
+  test("a restart does not grant the bounded needs-attention retry again: the count is on the dispatch row", async (t) => {
+    insertMilestone({ id: "M001" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
+    writeCanonicalValidation("inconclusive");
+    writeValidationFile("needs-attention");
+    const dispatch = claimTestDispatch(tempDir, { milestoneId: "M001", unitType: "validate-milestone", unitId: "M001" });
+    const pauseAutoMock = mock.fn(async () => {});
+    const stderrWrite = mock.method(process.stderr, "write", () => true);
+    t.after(() => stderrWrite.mock.restore());
+
+    const first = makeMockSession(tempDir, "validate-milestone", "M001");
+    assert.equal(
+      await runPostUnitVerification({ s: first, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext, pauseAutoMock),
+      "retry",
+    );
+    const stored = readStoredUnitRetry("validate-milestone", "M001");
+    assert.equal(stored?.attempt, 1);
+    assert.match(stored?.failureContext ?? "", /objective evidence/i);
+
+    // The process is killed. The next one has a new session and a new dispatch.
+    dispatch.claimNext();
+    const restarted = makeMockSession(tempDir, "validate-milestone", "M001");
+    assert.equal(
+      await runPostUnitVerification({ s: restarted, ctx: makeMockCtx(), pi: makeMockPi() } as VerificationContext, pauseAutoMock),
+      "pause",
+      "the retry the last process used must count",
+    );
+
+    assert.equal(pauseAutoMock.mock.callCount(), 1);
+    assert.equal(readStoredUnitRetry("validate-milestone", "M001"), null, "the pause releases the stored retry");
   });
 
   test("pauses with a manual-attention gate when adopted needs-attention recurs after the bounded retry", async () => {

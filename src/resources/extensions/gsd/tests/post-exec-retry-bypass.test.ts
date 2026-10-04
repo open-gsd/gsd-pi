@@ -20,6 +20,9 @@ import {
   type VerificationContext,
 } from "../auto-verification.ts";
 import { AutoSession } from "../auto/session.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
 import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, getTaskVerificationEvidence, _getAdapter } from "../gsd-db.ts";
 import { readExecRun, recordExecRun } from "../db/writers/exec-runs.ts";
 import { invalidateAllCaches } from "../cache.ts";
@@ -74,7 +77,6 @@ function makeMockSession(basePath: string, currentUnit?: { type: string; id: str
   const s = new AutoSession();
   s.basePath = basePath;
   s.active = true;
-  // verificationRetryCount is readonly but initialized as an empty Map in AutoSession
   s.pendingVerificationRetry = null;
   if (currentUnit) {
     s.currentUnit = {
@@ -590,7 +592,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.match(pauseAutoMock.mock.calls[0]?.arguments[2]?.message ?? "", /shell could not parse/i);
     assert.equal(recordTaskTechnicalVerdict.mock.callCount(), 0);
     assert.equal(routeTaskFailure.mock.callCount(), 0);
-    assert.equal(s.verificationRetryCount.has("execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 0);
     assert.equal(s.pendingVerificationRetry, null);
   });
 
@@ -743,7 +745,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(routed.length, 1);
     assert.equal(routed[0]?.classification.failureKind, "verification-drift");
     assert.equal(routed[0]?.resultId, "result-test");
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
     assert.equal(pauseAutoMock.mock.callCount(), 0);
   });
 
@@ -895,7 +897,7 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(routeTaskFailure.mock.calls[0]?.arguments[0].resultId, "result-exact");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(existsSync(commandMarker), false);
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
   });
 
   test("re-reading one stored failure does not consume another repair attempt", async () => {
@@ -931,7 +933,7 @@ describe("Post-execution blocking failure retry bypass", () => {
 
     assert.equal(await runPostUnitVerification(vctx, pauseAutoMock), "retry");
     assert.equal(await runPostUnitVerification(vctx, pauseAutoMock), "retry");
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
     assert.equal(s.pendingVerificationRetry?.attempt, 1);
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(routeTaskFailure.mock.callCount(), 2);
@@ -1106,14 +1108,14 @@ describe("Post-execution blocking failure retry bypass", () => {
     const s = makeMockSession(tempDir, { type: "execute-task", id: "M001/S01/T01" });
     
     // Pre-set some retry state
-    s.verificationRetryCount.set("execute-task:M001/S01/T01", 2);
+    useUnitBudget(s, "execute-task", "M001/S01/T01", 2);
 
     const vctx = makeVerificationContext(s, ctx, pi);
     const result = await runPostUnitVerification(vctx, pauseAutoMock);
 
     // On success, retry count should be cleared
     assert.equal(result, "continue");
-    assert.equal(s.verificationRetryCount.has("execute-task:M001/S01/T01"), false);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 0);
   });
 
   test("cost spike during verification retry is warning telemetry, not the pause reason", async () => {
@@ -1620,13 +1622,56 @@ describe("Post-execution blocking failure retry bypass", () => {
     assert.equal(result, "retry");
     assert.equal(pauseAutoMock.mock.callCount(), 0);
     assert.equal(s.pendingVerificationRetry?.unitId, "M001/S01/T01");
-    assert.equal(s.verificationRetryCount.get("execute-task:M001/S01/T01"), 1);
+    assert.equal(usedUnitBudget(s, "execute-task", "M001/S01/T01"), 1);
 
     const evidencePath = join(tempDir, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-VERIFY.json");
     const evidence = JSON.parse(readFileSync(evidencePath, "utf-8"));
     assert.equal(evidence.passed, false);
     assert.equal(evidence.retryAttempt, 1);
     assert.equal(evidence.maxRetries, 2);
+  });
+
+  test("a failed host verification survives a restart: context and count are on the dispatch row", async () => {
+    createFailingVerifyTask("complete");
+    writePreferences({
+      enhanced_verification: true,
+      enhanced_verification_post: false,
+      verification_auto_fix: true,
+      verification_max_retries: 2,
+    });
+    const dispatch = claimTestDispatch(tempDir, {
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      unitType: "execute-task",
+      unitId: "M001/S01/T01",
+    });
+    const pauseAutoMock = mock.fn(async () => {});
+    const unit = { type: "execute-task", id: "M001/S01/T01" };
+
+    const first = makeMockSession(tempDir, unit);
+    assert.equal(
+      await runPostUnitVerification(makeVerificationContext(first, makeMockCtx(), makeMockPi()), pauseAutoMock),
+      "retry",
+    );
+
+    // The process is killed. The next one has a new session.
+    const restarted = makeMockSession(tempDir, unit);
+    const stored = readStoredUnitRetry("execute-task", "M001/S01/T01");
+    assert.equal(stored?.attempt, 1);
+    assert.equal(stored?.failureContext, first.pendingVerificationRetry?.failureContext);
+    assert.equal(usedUnitBudget(restarted, "execute-task", "M001/S01/T01"), 1);
+
+    dispatch.claimNext();
+    assert.equal(
+      await runPostUnitVerification(makeVerificationContext(restarted, makeMockCtx(), makeMockPi()), pauseAutoMock),
+      "retry",
+    );
+    assert.equal(
+      readStoredUnitRetry("execute-task", "M001/S01/T01")?.attempt,
+      2,
+      "the count goes on from the last process, it does not start again",
+    );
   });
 });
 
