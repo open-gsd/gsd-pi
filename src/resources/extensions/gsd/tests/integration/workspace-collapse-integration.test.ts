@@ -194,9 +194,10 @@ describe("workspace-collapse integration: Test 3 — write-gate snapshot survive
 
   afterEach(() => {
     process.chdir(savedCwd);
-    closeAllDatabases();
     clearDiscussionFlowState(projectDir);
     try { clearDiscussionFlowState(otherDir); } catch { /* best-effort */ }
+    // Gate state is rows of the project database, so the databases close last.
+    closeAllDatabases();
     rmSync(projectDir, { recursive: true, force: true });
     rmSync(otherDir, { recursive: true, force: true });
   });

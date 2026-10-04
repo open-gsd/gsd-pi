@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import { resetToolCallLoopGuard } from "../bootstrap/tool-call-loop-guard.ts";
-import { markDepthVerified, resetWriteGateState } from "../bootstrap/write-gate.ts";
+import { markDepthVerified, clearDiscussionFlowState } from "../bootstrap/write-gate.ts";
 
 type Handler = (event: any, ctx?: any) => Promise<any> | any;
 type Block = { block?: boolean; reason?: string } | undefined;
@@ -20,7 +20,7 @@ const ctx = { cwd: BASE, ui: { notify: () => undefined } } as any;
 // M001 has passed the depth question, so its CONTEXT write reaches the projection guard.
 markDepthVerified("M001", BASE);
 after(() => {
-  resetWriteGateState(BASE);
+  clearDiscussionFlowState(BASE);
   rmSync(BASE, { recursive: true, force: true });
 });
 

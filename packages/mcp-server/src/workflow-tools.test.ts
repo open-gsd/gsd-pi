@@ -194,24 +194,22 @@ function seedContextModeFixture(base: string): void {
   );
 }
 
-function writeWriteGateSnapshot(
+/**
+ * Store gate rows in the project database as another process (the extension
+ * host) left them, then close it so the MCP tool opens it itself.
+ */
+function writeWriteGateRows(
   base: string,
-  snapshot: { verifiedDepthMilestones?: string[]; activeQueuePhase?: boolean; pendingGateId?: string | null },
+  gate: { activeQueuePhase?: boolean; pendingGateId?: string },
 ): void {
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(
-    join(base, ".gsd", "runtime", "write-gate-state.json"),
-    JSON.stringify(
-      {
-        verifiedDepthMilestones: snapshot.verifiedDepthMilestones ?? [],
-        activeQueuePhase: snapshot.activeQueuePhase ?? false,
-        pendingGateId: snapshot.pendingGateId ?? null,
-      },
-      null,
-      2,
-    ),
-    "utf-8",
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  const insert = _getAdapter()!.prepare(
+    "INSERT INTO write_gate_state (gate_kind, gate_id, writer, updated_at) VALUES (?, ?, 'host', ?)",
   );
+  const now = new Date().toISOString();
+  if (gate.pendingGateId) insert.run("pending", gate.pendingGateId, now);
+  if (gate.activeQueuePhase) insert.run("queue_phase", "active", now);
+  closeDatabase();
 }
 
 function makeMockServer() {
@@ -1029,7 +1027,7 @@ describe("workflow MCP tools", () => {
   it("gsd_exec is blocked by the MCP discussion-gate write gate", async () => {
     const base = makeTmpBase();
     try {
-      writeWriteGateSnapshot(base, { pendingGateId: "depth_verification_M001_confirm" });
+      writeWriteGateRows(base, { pendingGateId: "depth_verification_M001_confirm" });
       const server = makeMockServer();
       registerWorkflowTools(server as any);
       const tool = server.tools.find((t) => t.name === "gsd_exec");
@@ -1432,7 +1430,7 @@ describe("workflow MCP tools", () => {
         join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
         "# S01\n\n- [ ] **T01: Demo** `est:5m`\n",
       );
-      writeWriteGateSnapshot(base, { pendingGateId: "depth_verification_M001_confirm" });
+      writeWriteGateRows(base, { pendingGateId: "depth_verification_M001_confirm" });
 
       const server = makeMockServer();
       registerWorkflowTools(server as any);
@@ -1462,7 +1460,7 @@ describe("workflow MCP tools", () => {
         join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
         "# S01\n\n- [ ] **T01: Demo** `est:5m`\n",
       );
-      writeWriteGateSnapshot(base, { activeQueuePhase: true });
+      writeWriteGateRows(base, { activeQueuePhase: true });
 
       const server = makeMockServer();
       registerWorkflowTools(server as any);

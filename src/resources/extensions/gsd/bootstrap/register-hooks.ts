@@ -13,7 +13,7 @@ import type { GSDEcosystemBeforeAgentStartHandler } from "../ecosystem/gsd-exten
 import { updateSnapshot } from "../ecosystem/gsd-extension-api.js";
 
 import { canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
-import { applyAskUserQuestionsGateResult, clearDiscussionFlowState, currentWriteGateSnapshot, formatPendingAskUserQuestionsGateMessage, formatTimedOutAskUserQuestionsGateMessage, hostWriteGateAdapter, isApprovalGateVerifiedInSnapshot, isDepthConfirmationAnswer, isMilestoneDepthVerifiedInSnapshot, isQueuePhaseActive, resetWriteGateState, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, shouldBlockWorktreeBash, shouldBlockWorktreeWrite, isGateQuestionId, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId, type WriteGateSnapshot } from "./write-gate.js";
+import { applyAskUserQuestionsGateResult, applyWriteGateSessionBoundary, formatPendingAskUserQuestionsGateMessage, formatTimedOutAskUserQuestionsGateMessage, hostWriteGateAdapter, isApprovalGateVerifiedInSnapshot, isDepthConfirmationAnswer, isMilestoneDepthVerifiedInSnapshot, isQueuePhaseActive, loadWriteGateSnapshot, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, shouldBlockWorktreeBash, shouldBlockWorktreeWrite, isGateQuestionId, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId, type WriteGateSnapshot } from "./write-gate.js";
 import { canonicalToolName } from "../engine-hook-contract.js";
 import { resolveManifest } from "../unit-context-manifest.js";
 import { getIsolationMode, resolveEffectiveUnitIsolationMode } from "../preferences.js";
@@ -796,10 +796,10 @@ function isDestructiveConfirmationBlocking(basePath: string): boolean {
 }
 
 function deferApprovalGate(gateId: string, basePath: string): void {
-  // Verified-on-disk wins (same adapter policy as activation/re-arm): if the
+  // Verified wins (same adapter policy as activation/re-arm): if the
   // workflow MCP child already verified this gate, deferring would block
   // tools for a gate that can never legitimately arm.
-  const snapshot = hostWriteGateAdapter.readState(basePath);
+  const snapshot = loadWriteGateSnapshot(basePath);
   deferApprovalGateFromSnapshot(gateId, basePath, snapshot);
 }
 
@@ -971,9 +971,9 @@ function activateDeferredApprovalGate(basePath: string): void {
   const gateId = deferredApprovalGates.get(basePath);
   if (gateId === undefined) return;
   deferredApprovalGates.delete(basePath);
-  // hostWriteGateAdapter.setPending applies the verified-on-disk-wins merge
-  // policy: it refuses to arm (and thereby clobber) a gate the workflow MCP
-  // child already verified on disk.
+  // hostWriteGateAdapter.setPending applies the verified-wins policy: it
+  // refuses to arm (and thereby clobber) a gate the workflow MCP child
+  // already verified.
   hostWriteGateAdapter.setPending(gateId, basePath);
 }
 
@@ -1266,7 +1266,7 @@ export function registerHooks(
       const { initHealthWidget } = await import("../health-widget.js");
       initHealthWidget(ctx);
     }
-    resetWriteGateState(basePath);
+    applyWriteGateSessionBoundary("start", basePath);
     resetToolCallLoopGuard();
     clearNativeMilestoneStatusSourceRevisions();
     clearPendingModelRouting();
@@ -1358,7 +1358,6 @@ export function registerHooks(
     const basePath = contextBasePath(ctx);
     const preserveCloseoutSurface = isAutoCompletionStopInProgress();
     initSessionNotifications(ctx);
-    resetWriteGateState(basePath);
     resetToolCallLoopGuard();
     clearNativeMilestoneStatusSourceRevisions();
     clearPendingModelRouting();
@@ -1366,7 +1365,7 @@ export function registerHooks(
     clearDeferredApprovalGate();
     clearDeferredDestructiveConfirmationPause();
     await resetAskUserQuestionsTurnCache();
-    clearDiscussionFlowState(basePath);
+    applyWriteGateSessionBoundary(event.reason === "new" ? "new" : "resume", basePath);
     // /clear or /new destroys the conversation holding a discuss interview, so
     // its pending discuss→auto handoff can never be answered — clear it. Resume
     // restores the interview transcript, so the entry survives. Auto-mode's own
@@ -1720,7 +1719,7 @@ export function registerHooks(
     const gateId = approvalGateIdForUnit(unitType, unitId);
     if (gateId) {
       const basePath = contextBasePath(ctx);
-      const gateSnapshot = currentWriteGateSnapshot(basePath);
+      const gateSnapshot = loadWriteGateSnapshot(basePath);
       // Skip the gate if this milestone is already depth-verified — the approval
       // pattern matched again on post-verification text (a false-positive re-trigger).
       // Without this guard, the second firing blocks gsd_plan_milestone in the same
@@ -2242,9 +2241,9 @@ export function registerHooks(
         // verifiedDepthMilestones/verifiedApprovalGates, so an unconditional
         // re-arm here would wipe the child's verification and leave the
         // discuss→auto handoff permanently blocked. hostWriteGateAdapter
-        // .setPending applies the verified-on-disk-wins policy and skips the
+        // .setPending applies the verified-wins policy and skips the
         // re-arm in that case. Stale verified state cannot leak into a later
-        // re-discussion: a successful handoff deletes the snapshot via
+        // re-discussion: a successful handoff deletes the gate rows via
         // clearDiscussionFlowState.
         hostWriteGateAdapter.setPending(questionId, basePath);
         clearDeferredApprovalGate(basePath);

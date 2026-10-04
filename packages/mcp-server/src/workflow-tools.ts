@@ -1282,7 +1282,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return proto === null || proto === Object.prototype;
 }
 
-async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): Promise<T> {
+export async function runSerializedWorkflowOperation<T>(fn: () => Promise<T>): Promise<T> {
   // The shared DB adapter and workflow log base path are process-global, so
   // workflow MCP mutations must not overlap within a single server process.
   // A per-operation deadline prevents a single stuck call from wedging its
@@ -1567,12 +1567,29 @@ function mapCanonicalReadError(
   });
 }
 
+/**
+ * Gate state is rows of the project database, so the check opens that
+ * database. It runs in the workflow queue, like every other database use: a
+ * call for another project cannot replace the open database under a running
+ * operation.
+ */
 async function enforceWorkflowWriteGate(
   toolName: string,
   projectDir: string,
   milestoneId: string | null = null,
 ): Promise<void> {
+  await runSerializedWorkflowOperation(() => checkWorkflowWriteGate(toolName, projectDir, milestoneId));
+}
+
+/** The gate check itself. Call it directly only from inside the workflow queue. */
+async function checkWorkflowWriteGate(
+  toolName: string,
+  projectDir: string,
+  milestoneId: string | null = null,
+): Promise<void> {
   const writeGate = await getWorkflowWriteGateModule();
+  // A project with no database yet has no gate rows; the result is not needed.
+  (await importBridgeModule()).openExistingWorkflowDatabase(projectDir);
   const snapshot = writeGate.loadWriteGateSnapshot(projectDir);
   const pendingGate = writeGate.shouldBlockPendingGateInSnapshot(
     snapshot,
@@ -1633,7 +1650,7 @@ async function handleTaskRecoveryResume(
   return adaptExecutorResult(
     await runSerializedWorkflowOperation(async () => {
       const resolvedProjectDir = await resolveRecoveryActionProjectDir(projectDir, args.recoveryActionId);
-      await enforceWorkflowWriteGate("gsd_task_recovery_resume", resolvedProjectDir);
+      await checkWorkflowWriteGate("gsd_task_recovery_resume", resolvedProjectDir);
       const { executeTaskRecoveryResume } = await getWorkflowToolExecutors();
       return executeTaskRecoveryResume(args, resolvedProjectDir, invocation);
     }),

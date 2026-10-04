@@ -12,11 +12,12 @@ import {
 import { _getAdapter, closeDatabase, getMilestone, openDatabase } from "../gsd-db.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import {
+  childWriteGateAdapter,
   getPendingGate,
   loadWriteGateSnapshot,
   markApprovalGateVerified,
   markDepthVerified,
-  resetWriteGateState,
+  clearDiscussionFlowState,
   setPendingGate,
   shouldBlockContextArtifactSave,
   shouldBlockContextWrite,
@@ -90,11 +91,11 @@ test("register-hooks keeps depth-gate reason model-facing and adds displayReason
   const dir = makeTempDir("display-reason");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -134,11 +135,11 @@ test("register-hooks unlocks milestone depth verification from question id witho
   const dir = makeTempDir("manual");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -206,11 +207,11 @@ test("register-hooks canonicalizes lower-case milestone ids in depth-verificatio
   const dir = makeTempDir("lowercase-mid");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -280,12 +281,12 @@ test("an answered question round is captured into the database under an external
   const dir = makeTempDir("question-draft");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
       closeDatabase();
     } finally {
@@ -462,12 +463,12 @@ test("the first captured round keeps a draft and a discussion log that have no d
   const dir = makeTempDir("question-adopt");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
       closeDatabase();
     } finally {
@@ -544,11 +545,11 @@ test("register-hooks clears depth gate when remote (Telegram/Slack/Discord) answ
   const dir = makeTempDir("remote");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -611,11 +612,11 @@ test("register-hooks returns hard blocker when depth question is cancelled", asy
   const dir = makeTempDir("cancelled");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -683,11 +684,11 @@ test("register-hooks clears deferred approval gate after depth confirmation (hea
   const dir = makeTempDir("deferred-clear");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -766,11 +767,11 @@ test("register-hooks recovers from a cancelled depth question via re-asked ask_u
   const dir = makeTempDir("recovery");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -861,11 +862,11 @@ test("register-hooks gates MCP ask_user_questions cancellation before requiremen
   const dir = makeTempDir("mcp-cancelled");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -975,13 +976,13 @@ test("register-hooks message_update does NOT pause while an interactive elicitat
   const dir = makeTempDir("elicitation-pause-guard");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
   clearInFlightTools();
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
       clearInFlightTools();
     } finally {
@@ -1052,28 +1053,20 @@ test("register-hooks message_update does NOT pause while an interactive elicitat
   );
 });
 
-test("register-hooks agent_end does not re-arm deferred gate after workflow MCP verified write-gate on disk", async (t) => {
-  const dir = makeTempDir("mcp-disk-sync");
+test("register-hooks agent_end does not re-arm deferred gate after workflow MCP verified the gate", async (t) => {
+  const dir = makeTempDir("mcp-verified-sync");
   const originalCwd = process.cwd();
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
-  process.env.GSD_PERSIST_WRITE_GATE_STATE = "1";
 
   const gateId = "depth_verification_M005_confirm";
-  const statePath = join(dir, ".gsd", "runtime", "write-gate-state.json");
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
     } finally {
-      if (originalEnv === undefined) {
-        delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-      } else {
-        process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-      }
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1114,13 +1107,9 @@ test("register-hooks agent_end does not re-arm deferred gate after workflow MCP 
   }
 
   setPendingGate(gateId, dir);
-  mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(statePath, JSON.stringify({
-    verifiedDepthMilestones: ["M005"],
-    verifiedApprovalGates: [gateId],
-    activeQueuePhase: false,
-    pendingGateId: null,
-  }, null, 2), "utf-8");
+  // The workflow MCP child records the user's answer.
+  childWriteGateAdapter.markApprovalGateVerified(gateId, dir);
+  childWriteGateAdapter.markDepthVerified("M005", dir);
 
   for (const handler of handlers.get("agent_end") ?? []) {
     await handler({ messages: [] }, ctx);
@@ -1140,28 +1129,20 @@ test("register-hooks agent_end does not re-arm deferred gate after workflow MCP 
   });
 });
 
-test("register-hooks message_update uses in-memory write-gate snapshot instead of disk reconcile", async (t) => {
-  const dir = makeTempDir("message-update-memory-snapshot");
+test("register-hooks message_update does not arm the approval pause for a milestone the workflow MCP verified", async (t) => {
+  const dir = makeTempDir("message-update-verified");
   const originalCwd = process.cwd();
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
   process.chdir(dir);
-  process.env.GSD_PERSIST_WRITE_GATE_STATE = "1";
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   clearPendingAutoStart(dir);
 
   const gateId = "depth_verification_M012_confirm";
-  const statePath = join(dir, ".gsd", "runtime", "write-gate-state.json");
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
       clearPendingAutoStart(dir);
     } finally {
-      if (originalEnv === undefined) {
-        delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-      } else {
-        process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-      }
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1190,13 +1171,10 @@ test("register-hooks message_update uses in-memory write-gate snapshot instead o
     pi: { sendMessage: () => undefined } as any,
   });
 
-  mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(statePath, JSON.stringify({
-    verifiedDepthMilestones: ["M012"],
-    verifiedApprovalGates: [gateId],
-    activeQueuePhase: false,
-    pendingGateId: null,
-  }, null, 2), "utf-8");
+  // The workflow MCP child records the user's answer. The host has no copy
+  // of gate state, so the streaming hook reads the same verification.
+  childWriteGateAdapter.markApprovalGateVerified(gateId, dir);
+  childWriteGateAdapter.markDepthVerified("M012", dir);
 
   const approvalMessage = {
     role: "assistant",
@@ -1210,21 +1188,21 @@ test("register-hooks message_update uses in-memory write-gate snapshot instead o
   }
 
   assert.equal(
-    notices.some((n) => /discuss-milestone M012 is waiting for your approval - pausing/.test(n.text)),
-    true,
-    "streaming hook must not suppress the pause from a disk-only verification",
+    notices.some((n) => /waiting for your approval - pausing/.test(n.text)),
+    false,
+    "approval-looking text after the verification must not pause the turn",
   );
   assert.equal(
     shouldBlockContextArtifactSave("CONTEXT", "M012", null, dir).block,
-    true,
-    "streaming hook must not reconcile disk-only verification into the in-memory snapshot",
+    false,
+    "the verified milestone context write stays unlocked",
   );
 
   for (const handler of handlers.get("agent_end") ?? []) {
     await handler({ messages: [] }, ctx);
   }
 
-  assert.equal(getPendingGate(dir), null, "agent_end still reconciles disk and suppresses durable re-arm");
+  assert.equal(getPendingGate(dir), null, "agent_end must not arm a gate for the verified milestone");
 });
 
 // ── External-engine post-hoc gate replay (write-gate two-process sync) ──────
@@ -1251,9 +1229,9 @@ function makeHookHarness(): {
 
 test("tool_execution_start does not re-arm a depth gate the MCP child already verified", async (t) => {
   const dir = makeTempDir("posthoc-no-rearm");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1289,9 +1267,9 @@ test("tool_execution_start does not re-arm a depth gate the MCP child already ve
 
 test("tool_execution_start still arms an unverified depth gate", async (t) => {
   const dir = makeTempDir("live-arm");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1312,9 +1290,9 @@ test("tool_execution_start still arms an unverified depth gate", async (t) => {
 
 test("tool_result verifies the gate from result.structuredContent when event.details is missing", async (t) => {
   const dir = makeTempDir("structured-fallback");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1358,9 +1336,9 @@ test("tool_result verifies the gate from result.structuredContent when event.det
 
 test("tool_result normalizes provider answers shape before verifying a depth gate (#1894)", async (t) => {
   const dir = makeTempDir("provider-answers");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -1418,9 +1396,9 @@ test("tool_result normalizes provider answers shape before verifying a depth gat
 
 test("tool_result without details or structured content leaves the gate pending without crashing", async (t) => {
   const dir = makeTempDir("no-details");
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   t.after(() => {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     rmSync(dir, { recursive: true, force: true });
   });
 

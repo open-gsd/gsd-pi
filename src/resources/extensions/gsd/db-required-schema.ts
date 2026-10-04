@@ -51,6 +51,7 @@ import {
   createProjectMilestoneSequenceSchema,
   hasProjectMilestoneSequenceSchema,
 } from "./db-project-milestone-sequence-schema.js";
+import { createWriteGateSchema, hasWriteGateSchema } from "./db-write-gate-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -123,6 +124,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "project-milestone-sequence",
     isPresent: hasProjectMilestoneSequenceSchema,
     create: createProjectMilestoneSequenceSchema,
+  },
+  {
+    id: "write-gate-state",
+    isPresent: hasWriteGateSchema,
+    create: createWriteGateSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

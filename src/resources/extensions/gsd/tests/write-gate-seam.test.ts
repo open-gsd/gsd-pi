@@ -1,46 +1,45 @@
-// gsd-pi - Write-gate two-process seam tests.
+// gsd-pi - Write-gate state tests: database rows shared by two processes.
 /**
- * Deterministic interleaving tests for the host/child write-gate adapters
- * (write-gate.ts). The "child" (workflow MCP server) runs in a separate
- * process in production; these tests simulate its writes by stamping the
- * snapshot file directly, exactly as childWriteGateAdapter persists it.
+ * Write-gate state is rows of the project database (write_gate_state). The
+ * extension host and the workflow MCP child read them through one reader.
+ * These tests run the second writer as a real child process where the
+ * behavior depends on two processes or on a restart:
  *
- * Covered interleavings:
- *   (a) child verifies on disk while the host holds stale memory — the host
- *       re-arm must NOT clobber the verification, on BOTH windows
- *       (tool_execution_start re-arm and the tool_call defer path);
- *   (b) concurrent writes: every persist is an unconditional read-merge-write
- *       (read disk → union-merge → mutate → atomic rename), so a write the
- *       other process landed in between is folded in, never overwritten;
- *   (c) two basePaths defer approval gates in the same process — both stay
- *       deferred and both activate (regression for the old single global slot);
- *   (d) old snapshot files (including ones carrying the retired epoch field)
- *       keep loading; stale fields are dropped on the next write.
+ *   (a) a gate verified in one process survives that process and the next
+ *       session start, and allows the CONTEXT save;
+ *   (b) a pending gate armed in one process blocks the other; no file can
+ *       verify or clear it;
+ *   (c) the host does not re-arm a gate the child verified, on the adapter and
+ *       on both hook windows (tool_call defer, tool_execution_start re-arm);
+ *   (d) two basePaths defer approval gates in the same process.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import {
-  _setWriteGateInterleaveHookForTest,
+  applyWriteGateSessionBoundary,
   childWriteGateAdapter,
   clearDiscussionFlowState,
   getPendingGate,
   hostWriteGateAdapter,
   loadWriteGateSnapshot,
-  markDepthVerified,
-  refreshWriteGateStateFromDisk,
-  setPendingGate,
-  type WriteGateSnapshot,
+  isQueuePhaseActive,
+  setQueuePhaseActive,
+  shouldBlockContextArtifactSave,
+  shouldBlockContextWrite,
+  shouldBlockPendingGate,
 } from "../bootstrap/write-gate.ts";
-import { acquireSyncLock, releaseSyncLock } from "../sync-lock.ts";
-import { _resetLogs, drainLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
+import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 
-const WRITE_GATE_LOCK_NAME = "write-gate.lock";
+const GATE = "depth_verification_M007_confirm";
+const CONFIRM = "Yes, you got it (Recommended)";
 
 function makeTempDir(prefix: string): string {
   const dir = join(
@@ -51,24 +50,57 @@ function makeTempDir(prefix: string): string {
   return dir;
 }
 
-function snapshotPath(basePath: string): string {
-  return join(basePath, ".gsd", "runtime", "write-gate-state.json");
+/** A project whose workflow database this process (the extension host) has open. */
+function makeProject(prefix: string): string {
+  const dir = makeTempDir(prefix);
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  openDatabase(join(dir, ".gsd", "gsd.db"));
+  return dir;
 }
 
-/** Simulate a write from the OTHER process by stamping the file directly. */
-function foreignProcessWrites(basePath: string, snapshot: Partial<WriteGateSnapshot>): void {
-  mkdirSync(join(basePath, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(snapshotPath(basePath), JSON.stringify({
-    verifiedDepthMilestones: [],
-    verifiedApprovalGates: [],
-    activeQueuePhase: false,
-    pendingGateId: null,
-    ...snapshot,
-  }, null, 2), "utf-8");
+function cleanup(dir: string): void {
+  clearDiscussionFlowState(dir);
+  closeDatabase();
+  rmSync(dir, { recursive: true, force: true });
 }
 
-function readDiskRaw(basePath: string): Record<string, unknown> {
-  return JSON.parse(readFileSync(snapshotPath(basePath), "utf-8"));
+function gateRows(): Array<Record<string, unknown>> {
+  return _getAdapter()!.prepare(
+    "SELECT gate_kind, gate_id, writer FROM write_gate_state ORDER BY gate_kind, gate_id",
+  ).all().map((row) => ({ ...row }));
+}
+
+/**
+ * Run `body` in another process, as the workflow MCP child runs: its own
+ * database handle and GSD_WORKFLOW_PROJECT_ROOT in the environment. The
+ * process exits without closing the database, like a killed process.
+ */
+function runWorkflowChild(dir: string, body: string): string {
+  // Strip-types runs have no compiled .js sibling on disk, so hand the worker
+  // the .ts entrypoint; compiled runs keep the .js URL. spawn() takes the
+  // loader flags in the args array.
+  const jsPath = fileURLToPath(new URL("../bootstrap/write-gate.js", import.meta.url));
+  const writeGateUrl = pathToFileURL(existsSync(jsPath) ? jsPath : jsPath.replace(/\.js$/, ".ts")).href;
+  const workerExecArgs: string[] = [];
+  for (let i = 0; i < process.execArgv.length; i++) {
+    const arg = process.execArgv[i]!;
+    if (arg === "--experimental-strip-types" || arg.startsWith("--import")) {
+      workerExecArgs.push(arg);
+      if (arg === "--import") workerExecArgs.push(process.execArgv[++i]!);
+    }
+  }
+  const worker = [
+    `const gate = await import(${JSON.stringify(writeGateUrl)});`,
+    `const dir = ${JSON.stringify(dir)};`,
+    body,
+    "process.exit(0);",
+  ].join("\n");
+  const result = spawnSync(process.execPath, [...workerExecArgs, "--input-type=module", "-e", worker], {
+    encoding: "utf-8",
+    env: { ...process.env, GSD_WORKFLOW_PROJECT_ROOT: dir },
+  });
+  assert.equal(result.status, 0, `workflow child failed: ${result.stderr}`);
+  return result.stdout.trim();
 }
 
 function makeHookHarness(): {
@@ -86,48 +118,175 @@ function makeHookHarness(): {
   return { handlers, pi };
 }
 
-function cleanup(dir: string): void {
-  clearDiscussionFlowState(dir);
-  rmSync(dir, { recursive: true, force: true });
+function contextPath(dir: string, milestoneId: string): string {
+  return join(dir, ".gsd", "milestones", milestoneId, `${milestoneId}-CONTEXT.md`);
 }
 
-const GATE = "depth_verification_M007_confirm";
+// ── (a) a verified gate is a database row ────────────────────────────────────
 
-// ── (a) verified-on-disk wins over a host re-arm ────────────────────────────
-
-test("seam: host setPending does not clobber a child verification on disk", (t) => {
-  const dir = makeTempDir("no-clobber-adapter");
+test("seam: a depth gate answered in another process survives its exit and the next session start", (t) => {
+  const dir = makeProject("restart");
   t.after(() => cleanup(dir));
 
-  // Host has stale memory: it armed the gate earlier (persisted to disk).
-  assert.equal(setPendingGate(GATE, dir), true, "fresh gate must arm");
+  const status = runWorkflowChild(dir, `
+    gate.setPendingGate(${JSON.stringify(GATE)}, dir);
+    const result = gate.applyAskUserQuestionsGateResult({
+      basePath: dir,
+      questions: [{ id: ${JSON.stringify(GATE)}, options: [{ label: ${JSON.stringify(CONFIRM)} }, { label: "Not quite" }] }],
+      details: { response: { answers: { ${JSON.stringify(GATE)}: { selected: ${JSON.stringify(CONFIRM)} } } } },
+    });
+    console.log(result.status);
+  `);
+  assert.equal(status, "verified", "the child must record the confirmed depth answer");
+
+  // The process that recorded the answer is gone. A new host process has no
+  // database open when its session starts (the session_start hook applies
+  // this boundary).
+  closeDatabase();
+  applyWriteGateSessionBoundary("start", dir);
+
+  assert.equal(
+    shouldBlockContextWrite("write", contextPath(dir, "M007"), null, false, dir).block,
+    false,
+    "the verified milestone CONTEXT write is allowed after the restart",
+  );
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, false);
+  assert.equal(
+    shouldBlockContextArtifactSave("CONTEXT", "M008", null, dir).block,
+    true,
+    "a milestone the user did not confirm stays blocked",
+  );
+  assert.deepEqual(gateRows(), [
+    { gate_kind: "approval_verified", gate_id: GATE, writer: "child" },
+    { gate_kind: "depth_verified", gate_id: "M007", writer: "child" },
+  ]);
+  assert.equal(
+    existsSync(join(dir, ".gsd", "runtime", "write-gate-state.json")),
+    false,
+    "no snapshot file is written",
+  );
+});
+
+test("seam: verifications written by two processes are all kept", (t) => {
+  const dir = makeProject("two-writers");
+  t.after(() => cleanup(dir));
+
+  hostWriteGateAdapter.markDepthVerified("M001", dir);
+  runWorkflowChild(dir, `gate.markDepthVerified("M002", dir);`);
+  // The host holds no copy of the rows, so its next write cannot drop M002.
+  hostWriteGateAdapter.markDepthVerified("M003", dir);
+
+  assert.deepEqual(loadWriteGateSnapshot(dir).verifiedDepthMilestones, ["M001", "M002", "M003"]);
+  assert.deepEqual(gateRows().map((row) => row.writer), ["host", "child", "host"]);
+});
+
+// ── (b) a pending gate is a database row ─────────────────────────────────────
+
+test("seam: a pending gate armed in another process blocks this one, and no file changes it", (t) => {
+  const dir = makeProject("pending");
+  t.after(() => cleanup(dir));
+
+  runWorkflowChild(dir, `gate.setPendingGate(${JSON.stringify(GATE)}, dir);`);
+
+  assert.equal(getPendingGate(dir), GATE, "the host reads the gate the child armed");
+  assert.equal(shouldBlockPendingGate("write", "M007", false, dir).block, true);
+
+  // A snapshot file of an older build claims the gate is verified and not pending.
+  mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true });
+  writeFileSync(
+    join(dir, ".gsd", "runtime", "write-gate-state.json"),
+    JSON.stringify({ verifiedDepthMilestones: ["M007"], verifiedApprovalGates: [GATE], pendingGateId: null }),
+    "utf-8",
+  );
+  assert.equal(getPendingGate(dir), GATE, "the file is not read");
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, true);
+
+  // Deleting the runtime directory was the old way to clear the gate.
+  rmSync(join(dir, ".gsd", "runtime"), { recursive: true, force: true });
   assert.equal(getPendingGate(dir), GATE);
 
-  // Child verifies the gate in its own process (newer write on disk).
-  foreignProcessWrites(dir, {
+  // The session that asked the question is gone: the question is no longer
+  // pending, but nothing was confirmed, so the CONTEXT save stays blocked.
+  closeDatabase();
+  applyWriteGateSessionBoundary("start", dir);
+  assert.equal(getPendingGate(dir), null);
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, true);
+});
+
+test("seam: a restart and a resume keep verified gates; a new session ends the discussion", (t) => {
+  const dir = makeProject("session-boundary");
+  t.after(() => cleanup(dir));
+  const arm = () => {
+    hostWriteGateAdapter.markDepthVerified("M007", dir);
+    hostWriteGateAdapter.setPending("depth_verification_M008_confirm", dir);
+    setQueuePhaseActive(true, dir);
+  };
+
+  arm();
+  applyWriteGateSessionBoundary("start", dir);
+  assert.deepEqual(loadWriteGateSnapshot(dir), {
     verifiedDepthMilestones: ["M007"],
-    verifiedApprovalGates: [GATE],
-    writer: "child",
+    verifiedApprovalGates: [],
+    activeQueuePhase: true,
+    pendingGateId: null,
   });
 
-  // Host attempts a re-arm — adapter policy: verified on disk wins.
+  arm();
+  applyWriteGateSessionBoundary("resume", dir);
+  assert.deepEqual(loadWriteGateSnapshot(dir).verifiedDepthMilestones, ["M007"]);
+  assert.equal(getPendingGate(dir), null);
+  assert.equal(isQueuePhaseActive(dir), false);
+
+  arm();
+  applyWriteGateSessionBoundary("new", dir);
+  assert.deepEqual(gateRows(), [], "a new session removes every gate row of the discussion");
+});
+
+// ── (c) verified wins over a host re-arm ─────────────────────────────────────
+
+test("seam: host setPending does not re-arm a gate the child verified", (t) => {
+  const dir = makeProject("no-clobber-adapter");
+  t.after(() => cleanup(dir));
+
+  assert.equal(hostWriteGateAdapter.setPending(GATE, dir), true, "fresh gate must arm");
+  assert.equal(getPendingGate(dir), GATE);
+
+  // The child records the user's answer.
+  childWriteGateAdapter.markApprovalGateVerified(GATE, dir);
+  childWriteGateAdapter.markDepthVerified("M007", dir);
+  assert.equal(getPendingGate(dir), null, "a verified gate is not pending");
+
   assert.equal(hostWriteGateAdapter.setPending(GATE, dir), false, "re-arm must be suppressed");
   const snapshot = loadWriteGateSnapshot(dir);
-  assert.ok(snapshot.verifiedDepthMilestones.includes("M007"), "verification must survive");
-  assert.ok((snapshot.verifiedApprovalGates ?? []).includes(GATE));
-  assert.equal(getPendingGate(dir), null, "no pending gate after suppressed re-arm");
+  assert.deepEqual(snapshot.verifiedDepthMilestones, ["M007"], "verification must survive");
+  assert.deepEqual(snapshot.verifiedApprovalGates, [GATE]);
+  assert.equal(snapshot.pendingGateId, null, "no pending gate after suppressed re-arm");
+});
+
+test("seam: child setPending revokes the verification of the gate it asks again", (t) => {
+  const dir = makeProject("child-rearm");
+  t.after(() => cleanup(dir));
+
+  childWriteGateAdapter.markApprovalGateVerified(GATE, dir);
+  childWriteGateAdapter.markDepthVerified("M007", dir);
+  childWriteGateAdapter.markDepthVerified("M001", dir);
+
+  assert.equal(childWriteGateAdapter.setPending(GATE, dir), true);
+  assert.deepEqual(loadWriteGateSnapshot(dir), {
+    verifiedDepthMilestones: ["M001"],
+    verifiedApprovalGates: [],
+    activeQueuePhase: false,
+    pendingGateId: GATE,
+  });
 });
 
 test("seam: tool_call defer path does not block tools for a gate the child verified", async (t) => {
-  const dir = makeTempDir("no-clobber-defer");
+  const dir = makeProject("no-clobber-defer");
   t.after(() => cleanup(dir));
 
   // Child verified the gate before the host ever saw the tool block.
-  foreignProcessWrites(dir, {
-    verifiedDepthMilestones: ["M007"],
-    verifiedApprovalGates: [GATE],
-    writer: "child",
-  });
+  childWriteGateAdapter.markApprovalGateVerified(GATE, dir);
+  childWriteGateAdapter.markDepthVerified("M007", dir);
 
   const { handlers, pi } = makeHookHarness();
   registerHooks(pi, []);
@@ -159,14 +318,11 @@ test("seam: tool_call defer path does not block tools for a gate the child verif
 });
 
 test("seam: tool_execution_start re-arm window keeps the child verification", async (t) => {
-  const dir = makeTempDir("no-clobber-exec-start");
+  const dir = makeProject("no-clobber-exec-start");
   t.after(() => cleanup(dir));
 
-  foreignProcessWrites(dir, {
-    verifiedDepthMilestones: ["M007"],
-    verifiedApprovalGates: [GATE],
-    writer: "child",
-  });
+  childWriteGateAdapter.markApprovalGateVerified(GATE, dir);
+  childWriteGateAdapter.markDepthVerified("M007", dir);
 
   const { handlers, pi } = makeHookHarness();
   registerHooks(pi, []);
@@ -184,59 +340,34 @@ test("seam: tool_execution_start re-arm window keeps the child verification", as
   assert.ok(loadWriteGateSnapshot(dir).verifiedDepthMilestones.includes("M007"));
 });
 
-// ── (b) concurrent writes re-merge instead of overwriting ───────────────────
+// ── (d) per-basePath deferred gates ──────────────────────────────────────────
 
-test("seam: host persist re-merges a concurrent child write (unconditional read-merge-write)", (t) => {
-  const dir = makeTempDir("concurrent-write");
-  t.after(() => cleanup(dir));
-
-  // Host persists its own verification.
-  markDepthVerified("M001", dir);
-
-  // Child lands a different verification on disk while the host is idle.
-  foreignProcessWrites(dir, {
-    verifiedDepthMilestones: ["M002"],
-    writer: "child",
+test("seam: the host never replaces an open database to read the gate of another project", (t) => {
+  const dir = makeProject("other-project");
+  const other = makeTempDir("other-open");
+  t.after(() => {
+    cleanup(dir);
+    rmSync(other, { recursive: true, force: true });
   });
+  hostWriteGateAdapter.setPending(GATE, dir);
 
-  // Host persists again — every mutation re-reads the disk snapshot and
-  // union-merges before writing, so the child's verification survives.
-  markDepthVerified("M003", dir);
-  const merged = loadWriteGateSnapshot(dir);
-  assert.deepEqual(merged.verifiedDepthMilestones, ["M001", "M002", "M003"]);
-  assert.equal(readDiskRaw(dir).writer, "host");
+  openDatabase(join(other, "other.db"));
+  assert.equal(getPendingGate(dir), null, "the gate of a project whose database is not open is not read");
+  assert.equal(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM write_gate_state").get()?.["count"], 0);
+  hostWriteGateAdapter.markDepthVerified("M009", dir);
+  assert.equal(
+    _getAdapter()!.prepare("SELECT COUNT(*) AS count FROM write_gate_state").get()?.["count"],
+    0,
+    "a gate write for another project does not land in the open database",
+  );
+  closeDatabase();
+
+  openDatabase(join(dir, ".gsd", "gsd.db"));
+  assert.equal(getPendingGate(dir), GATE, "the project's rows are unchanged");
 });
-
-test("seam: missing snapshot resets stale in-memory pending gate before mutation", (t) => {
-  const dir = makeTempDir("missing-snapshot-reset");
-  t.after(() => cleanup(dir));
-
-  assert.equal(setPendingGate(GATE, dir), true);
-  rmSync(snapshotPath(dir), { force: true });
-
-  markDepthVerified("M008", dir);
-
-  const snapshot = loadWriteGateSnapshot(dir);
-  assert.equal(snapshot.pendingGateId, null);
-  assert.deepEqual(snapshot.verifiedDepthMilestones, ["M008"]);
-  assert.equal(readDiskRaw(dir).pendingGateId, null);
-});
-
-test("seam: childWriteGateAdapter is write-through and stamps writer provenance", (t) => {
-  const dir = makeTempDir("child-write-through");
-  t.after(() => cleanup(dir));
-
-  foreignProcessWrites(dir, { verifiedDepthMilestones: ["M001"], writer: "host" });
-  childWriteGateAdapter.markDepthVerified("M002", dir);
-
-  const disk = readDiskRaw(dir);
-  assert.deepEqual(disk.verifiedDepthMilestones, ["M001", "M002"], "fresh disk read, then mutate");
-  assert.equal(disk.writer, "child");
-});
-
-// ── (c) per-basePath deferred gates ──────────────────────────────────────────
 
 test("seam: two basePaths defer gates in one process and both activate", async (t) => {
+  // Neither directory has a workflow database: the gates stay in this process.
   const dirA = makeTempDir("defer-a");
   const dirB = makeTempDir("defer-b");
   t.after(() => {
@@ -275,166 +406,6 @@ test("seam: two basePaths defer gates in one process and both activate", async (
     for (const handler of handlers.get("tool_execution_start") ?? []) {
       await handler({ toolCallId: "act", toolName: "ask_user_questions", args: { questions: [{ id: gate }] } }, ctx);
     }
-    assert.equal(getPendingGate(dir), gate, `gate must arm durably for ${dir}`);
+    assert.equal(getPendingGate(dir), gate, `gate must arm for ${dir}`);
   }
-});
-
-// ── (d) backward compatibility: legacy snapshot fields ──────────────────────
-
-test("seam: old snapshot with a retired epoch field loads and sheds it on write", (t) => {
-  const dir = makeTempDir("legacy-snapshot");
-  t.after(() => cleanup(dir));
-
-  writeFileSync(
-    (mkdirSync(join(dir, ".gsd", "runtime"), { recursive: true }), snapshotPath(dir)),
-    JSON.stringify({
-      verifiedDepthMilestones: ["M001"],
-      verifiedApprovalGates: ["depth_verification_M001_confirm"],
-      activeQueuePhase: false,
-      pendingGateId: null,
-      // Written by an older build that still stamped the write-only epoch.
-      epoch: 7,
-    }),
-    "utf-8",
-  );
-
-  const loaded = loadWriteGateSnapshot(dir);
-  assert.deepEqual(loaded.verifiedDepthMilestones, ["M001"]);
-  assert.equal("epoch" in loaded, false, "retired epoch field is not surfaced");
-
-  const refreshed = refreshWriteGateStateFromDisk(dir);
-  assert.ok(refreshed.verifiedDepthMilestones.includes("M001"));
-
-  markDepthVerified("M002", dir);
-  const upgraded = readDiskRaw(dir);
-  assert.deepEqual(upgraded.verifiedDepthMilestones, ["M001", "M002"]);
-  assert.equal("epoch" in upgraded, false, "retired epoch field is dropped on rewrite");
-  assert.equal(upgraded.writer, "host");
-});
-
-// ── (e) corrupt snapshot is treated as a reset (matches "delete the file") ──
-
-test("seam: corrupt snapshot file resets host state instead of persisting stale pendingGateId", (t) => {
-  const dir = makeTempDir("corrupt-snapshot");
-  t.after(() => cleanup(dir));
-
-  // Host arms a gate; stale pendingGateId now lives in memory and on disk.
-  assert.equal(setPendingGate(GATE, dir), true);
-  assert.equal(getPendingGate(dir), GATE);
-
-  // The snapshot file is corrupted out-of-band (e.g. partial write from a
-  // crashed editor, foreign tool, or filesystem fault).
-  writeFileSync(snapshotPath(dir), "{ not json", "utf-8");
-
-  // refreshWriteGateStateFromDisk must treat the unreadable file the same
-  // as a missing file: full reset, including dropping the stale pending id.
-  const refreshed = refreshWriteGateStateFromDisk(dir);
-  assert.equal(refreshed.pendingGateId, null, "stale pendingGateId must not survive a corrupt snapshot");
-  assert.deepEqual(refreshed.verifiedDepthMilestones, []);
-  assert.deepEqual(refreshed.verifiedApprovalGates, []);
-  assert.equal(getPendingGate(dir), null);
-
-  // A subsequent mutation must not write the stale gate back to disk.
-  markDepthVerified("M042", dir);
-  const persisted = readDiskRaw(dir);
-  assert.equal(persisted.pendingGateId, null, "next persist must not re-stamp the stale pending id");
-  assert.deepEqual(persisted.verifiedDepthMilestones, ["M042"]);
-});
-
-test("seam: mutateWriteGateState reset path drops stale pendingGateId on a corrupt snapshot", (t) => {
-  const dir = makeTempDir("corrupt-snapshot-mutate");
-  t.after(() => cleanup(dir));
-
-  // Host arms a gate first.
-  assert.equal(setPendingGate(GATE, dir), true);
-
-  // Corrupt the snapshot directly (skipping the refresh path so we exercise
-  // the reconcile-on-mutate branch in mutateWriteGateState).
-  writeFileSync(snapshotPath(dir), "}}}", "utf-8");
-
-  // markDepthVerified runs through mutateWriteGateState; the reconcile pass
-  // must reset the in-memory state when the disk read returns null, even
-  // though the file still exists on disk.
-  markDepthVerified("M099", dir);
-
-  const persisted = readDiskRaw(dir);
-  assert.equal(persisted.pendingGateId, null, "stale pending id must not be persisted after a corrupt-snapshot reconcile");
-  assert.deepEqual(persisted.verifiedDepthMilestones, ["M099"]);
-});
-
-// ── (f) cross-process lock closes the read-merge-write lost-update window ────
-
-test("seam: read-merge-write holds the write-gate lock across the whole critical section", (t) => {
-  const dir = makeTempDir("lock-held");
-  t.after(() => {
-    _setWriteGateInterleaveHookForTest(null);
-    cleanup(dir);
-  });
-
-  // Fire inside the host's critical section, standing in for the OTHER process
-  // attempting to enter its own read-merge-write. The lock must lock it out.
-  let peerAcquiredMidSection: boolean | null = null;
-  _setWriteGateInterleaveHookForTest((lockRoot) => {
-    const res = acquireSyncLock(lockRoot, 0, WRITE_GATE_LOCK_NAME);
-    peerAcquiredMidSection = res.acquired;
-    if (res.acquired) releaseSyncLock(lockRoot, WRITE_GATE_LOCK_NAME);
-  });
-
-  markDepthVerified("M001", dir);
-
-  assert.equal(
-    peerAcquiredMidSection,
-    false,
-    "a concurrent process must be locked out of the read-merge-write section — this is what prevents the lost-update",
-  );
-  // The lock is released after the mutation, and the mutation still took effect.
-  assert.ok(loadWriteGateSnapshot(dir).verifiedDepthMilestones.includes("M001"));
-  assert.equal(acquireSyncLock(dir, 0, WRITE_GATE_LOCK_NAME).acquired, true, "lock released after mutation");
-  releaseSyncLock(dir, WRITE_GATE_LOCK_NAME);
-});
-
-test("seam: gate mutation fails OPEN when a live peer holds the lock (never blocks/refuses)", (t) => {
-  const dir = makeTempDir("lock-fail-open");
-  t.after(() => cleanup(dir));
-
-  // A live peer holds the lock (its own PID → never stolen as stale).
-  assert.equal(acquireSyncLock(dir, 0, WRITE_GATE_LOCK_NAME).acquired, true);
-  try {
-    // Host arms a gate while contended: fail-open means it proceeds anyway.
-    const armed = setPendingGate(GATE, dir);
-    assert.equal(armed, true, "arm must succeed (fail-open) even though the lock is held");
-    assert.equal(getPendingGate(dir), GATE);
-    assert.equal(readDiskRaw(dir).pendingGateId, GATE, "fail-open still persists the mutation");
-  } finally {
-    releaseSyncLock(dir, WRITE_GATE_LOCK_NAME);
-  }
-});
-
-test("seam: lock-held fail-open warning states the intentional contract, not a malfunction", (t) => {
-  const dir = makeTempDir("lock-fail-open-message");
-  const previousStderr = setStderrLoggingEnabled(false);
-  _resetLogs();
-  t.after(() => {
-    _resetLogs();
-    setStderrLoggingEnabled(previousStderr);
-    releaseSyncLock(dir, WRITE_GATE_LOCK_NAME);
-    cleanup(dir);
-  });
-
-  // A live peer holds the lock (its own PID → never stolen as stale).
-  assert.equal(acquireSyncLock(dir, 0, WRITE_GATE_LOCK_NAME).acquired, true);
-
-  // Contended mutation: fail-open must still arm and persist, and the warning
-  // must describe the intentional contract (the occurrence marks a real
-  // lost-update race window, but it is not a lock failure).
-  assert.equal(setPendingGate(GATE, dir), true, "arm must succeed (fail-open) while the lock is held");
-  const warns = drainLogs().filter((e) => e.component === "intercept" && e.severity === "warn");
-  assert.equal(warns.length, 1, "exactly one fail-open warning per contended mutation");
-  assert.match(warns[0].message, /fail-open by contract/, "warning must state the intentional fail-open contract");
-  assert.doesNotMatch(
-    warns[0].message,
-    /proceeding without cross-process lock/,
-    "old phrasing read like a lock failure",
-  );
-  assert.equal(warns[0].context?.lockRoot, resolve(dir), "lockRoot diagnostic detail is preserved");
 });

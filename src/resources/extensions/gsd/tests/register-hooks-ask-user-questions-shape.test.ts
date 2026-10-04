@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { registerHooks } from "../bootstrap/register-hooks.ts";
-import { getPendingGate, resetWriteGateState } from "../bootstrap/write-gate.ts";
+import { getPendingGate, clearDiscussionFlowState } from "../bootstrap/write-gate.ts";
 
 function makeTempDir(prefix: string): string {
   const dir = join(
@@ -53,11 +53,11 @@ test("ask_user_questions with a non-array questions arg must not arm a gate or t
   const dir = makeTempDir("non-array");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -73,14 +73,14 @@ test("ask_user_questions with a non-array questions arg must not arm a gate or t
     ["undefined", undefined],
   ];
   for (const [label, questions] of shapes) {
-    resetWriteGateState(dir);
+    clearDiscussionFlowState(dir);
     await fire(handlers, "tool_call", { toolName: "ask_user_questions", input: { questions } });
     await fire(handlers, "tool_execution_start", { toolName: "ask_user_questions", args: { questions } });
     assert.equal(getPendingGate(), null, `${label} questions must not arm a gate`);
   }
 
   // Normal array shape still arms the gate.
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
   await fire(handlers, "tool_call", { toolName: "ask_user_questions", input: { questions: GATE_QUESTIONS } });
   await fire(handlers, "tool_execution_start", { toolName: "ask_user_questions", args: { questions: GATE_QUESTIONS } });
   assert.equal(getPendingGate(), GATE_QUESTION_ID, "array questions must still arm the gate");
@@ -90,11 +90,11 @@ test("tool_result with a non-array questions input degrades to no gate match (#2
   const dir = makeTempDir("result-non-array");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -129,11 +129,11 @@ test("tool_result falls back to details.questions when input.questions is malfor
   const dir = makeTempDir("details-fallback");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -168,11 +168,11 @@ test("tool_result with malformed input.questions and malformed details.questions
   const dir = makeTempDir("both-malformed");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -198,11 +198,11 @@ test("tool_result input.questions keeps precedence over details.questions even w
   const dir = makeTempDir("input-precedence");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });
@@ -237,11 +237,11 @@ test("tool_result resolves questions from result.structuredContent when details 
   const dir = makeTempDir("structured-fallback");
   const originalCwd = process.cwd();
   process.chdir(dir);
-  resetWriteGateState(dir);
+  clearDiscussionFlowState(dir);
 
   t.after(() => {
     try {
-      resetWriteGateState(dir);
+      clearDiscussionFlowState(dir);
     } finally {
       process.chdir(originalCwd);
       rmSync(dir, { recursive: true, force: true });

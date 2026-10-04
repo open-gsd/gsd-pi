@@ -958,6 +958,34 @@ PRIMARY KEY (milestone_id, slice_id)
 
 - Deleted by `slice.reopen` and `milestone.reopen`, so a redone slice gets a new budget.
 
+##### `write_gate_state`
+
+Discussion write-gate state: verified depth milestones, verified approval
+gates, the pending gate and the queue phase. `db-write-gate-schema.ts` owns the
+DDL. `db/writers/write-gate.ts` is the only reader and writer, and
+`bootstrap/write-gate.ts` is its only caller. The extension host and the
+workflow MCP child read the same rows; every change is one write transaction.
+These are enforcement rows, written outside Domain Operations.
+
+```
+gate_kind  TEXT NOT NULL   ← depth_verified | approval_verified | pending | queue_phase
+gate_id    TEXT NOT NULL   ← milestone id (depth_verified), gate question id (approval_verified, pending), 'active' (queue_phase)
+writer     TEXT NOT NULL   ← host | child (diagnostic)
+updated_at TEXT NOT NULL
+PRIMARY KEY (gate_kind, gate_id)
+```
+
+- At most one `pending` row. A verified gate is never also pending.
+- A session start and a resumed session delete the `pending` row and keep the
+  verified rows. `/clear`, `/new` and the discuss→auto handoff delete every row.
+- No file copy. `.gsd/runtime/write-gate-state.json` (older builds) is not read.
+- The extension host uses the rows while the project database is the open one;
+  it opens it at the session boundary and on every turn, and never replaces
+  another open database for a gate call. The workflow MCP child opens the
+  project database for the gate, inside its workflow queue.
+- A process whose open database is not the project's (or a project with no
+  database) keeps the gate in process memory.
+
 ##### `exec_runs`
 
 One row for each `gsd_exec` / `gsd_uat_exec` command the host ran. Evidence

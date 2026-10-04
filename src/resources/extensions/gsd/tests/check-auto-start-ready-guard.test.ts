@@ -90,13 +90,14 @@ describe("checkAutoStartAfterDiscuss ready-notify DB guard (R3b)", () => {
   });
 
   afterEach(() => {
-    closeDatabase();
     clearPendingAutoStart();
     if (base) {
       try { clearDiscussionFlowState(base); } catch { /* */ }
       try { clearPendingGate(base); } catch { /* */ }
-      rmSync(base, { recursive: true, force: true });
     }
+    // Gate state is rows of the project database, so the database closes last.
+    closeDatabase();
+    if (base) rmSync(base, { recursive: true, force: true });
   });
 
   test("repairs a missing milestone row when a saved CONTEXT artifact row exists", () => {

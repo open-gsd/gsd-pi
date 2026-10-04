@@ -50,6 +50,7 @@ import {
   readKnowledgeViaBridge,
   runDoctorViaBridge,
   registerWorkflowTools,
+  runSerializedWorkflowOperation,
   validateProjectDir,
   warmWorkflowToolBridges,
 } from './workflow-tools.js';
@@ -755,11 +756,15 @@ async function recordAskUserQuestionsPendingGate(
   if (!writeGate) return;
 
   const basePath = askUserQuestionsWriteGateBasePath(deps);
-  for (const question of questions) {
-    if (writeGate.isGateQuestionId(question.id)) {
-      writeGate.setPendingGate(question.id, basePath);
+  // Gate state is rows of the project database, so the write runs in the
+  // workflow queue like every other database use.
+  await runSerializedWorkflowOperation(async () => {
+    for (const question of questions) {
+      if (writeGate.isGateQuestionId(question.id)) {
+        writeGate.setPendingGate(question.id, basePath);
+      }
     }
-  }
+  });
 }
 
 async function recordAskUserQuestionsGateResult(
@@ -771,24 +776,27 @@ async function recordAskUserQuestionsGateResult(
   if (!writeGate) return;
 
   const basePath = askUserQuestionsWriteGateBasePath(deps);
-  if (writeGate.applyAskUserQuestionsGateResult) {
-    writeGate.applyAskUserQuestionsGateResult({
-      basePath,
-      questions: structured.questions,
-      details: structured,
-    });
-    return;
-  }
+  const response = structured.response;
+  await runSerializedWorkflowOperation(async () => {
+    if (writeGate.applyAskUserQuestionsGateResult) {
+      writeGate.applyAskUserQuestionsGateResult({
+        basePath,
+        questions: structured.questions,
+        details: structured,
+      });
+      return;
+    }
 
-  for (const question of structured.questions) {
-    if (!writeGate.isGateQuestionId(question.id)) continue;
-    const selected = structured.response.answers[question.id]?.selected;
-    if (!writeGate.isDepthConfirmationAnswer(selected, question.options)) continue;
+    for (const question of structured.questions) {
+      if (!writeGate.isGateQuestionId(question.id)) continue;
+      const selected = response.answers[question.id]?.selected;
+      if (!writeGate.isDepthConfirmationAnswer(selected, question.options)) continue;
 
-    writeGate.markApprovalGateVerified(question.id, basePath);
-    writeGate.markDepthVerified(writeGate.extractDepthVerificationMilestoneId(question.id), basePath);
-    writeGate.clearPendingGate(basePath);
-  }
+      writeGate.markApprovalGateVerified(question.id, basePath);
+      writeGate.markDepthVerified(writeGate.extractDepthVerificationMilestoneId(question.id), basePath);
+      writeGate.clearPendingGate(basePath);
+    }
+  });
 }
 
 /**
