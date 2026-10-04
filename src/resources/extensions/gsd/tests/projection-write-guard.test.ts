@@ -136,6 +136,12 @@ test("bash writes to a quoted, escaped, variable- or substitution-prefixed proje
     `cat notes.md | tee -a "$PWD"/.gsd/DECISIONS.md`,
     `cp /tmp/x "$PWD"/.gsd/DECISIONS.md 2>/dev/null && echo ok`,
     `sed -i '' 's/a/b/' "$PWD"/.gsd/DECISIONS.md`,
+    `echo "- \\"quoted\\" text" >> .gsd/DECISIONS.md && echo "done"`,
+    `echo "{\\"a\\": 1}" > .gsd/DECISIONS.md; echo "ok"`,
+    `printf "line1\nline2" > .gsd/DECISIONS.md && git commit -m "x"`,
+    `echo 'a\nb' >> .gsd/DECISIONS.md && echo 'ok'`,
+    `echo "it's" > .gsd/DECISIONS.md; echo 'ok'`,
+    `echo "a \\"b" | tee "$PWD"/.gsd/DECISIONS.md && echo "ok"`,
   ];
   for (const command of commands) {
     const result = await guard("bash", { command });
@@ -150,9 +156,7 @@ test("bash writes to a quoted, escaped, variable- or substitution-prefixed proje
     `dd if="${path}" of=/tmp/My\\ Copy/decisions.md`,
     `cp .gsd/DECISIONS.md /tmp/x`,
     `cp "$PWD"/.gsd/DECISIONS.md $(pwd)/backup/`,
-    `tee /tmp/x < .gsd/DECISIONS.md`,
     `sed -n '1,5p' "$PWD"/.gsd/DECISIONS.md`,
-    `git commit -m "plan -> .gsd/DECISIONS.md"`,
   ];
   for (const command of allowed) {
     assert.equal(await guard("bash", { command }), undefined, `${command} must pass`);

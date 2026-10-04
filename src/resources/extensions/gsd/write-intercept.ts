@@ -186,7 +186,7 @@ export function blockedWriteReason(filePath: string): string | null {
 
 // One shell token: a redirect operator, a command separator, or a whole word
 // (quoted and unquoted parts, escaped characters, command substitutions).
-const BASH_TOKEN = /(\d*(?:>{1,2}[|&]?|<{1,3}))|([;|&\r\n]+)|((?:\\.|"[^"\r\n]*"|'[^'\r\n]*'|\$\((?:[^()\r\n]|\([^()\r\n]*\))*\)|`[^`\r\n]*`|[^\s"'`;|&<>()])+)/g;
+const BASH_TOKEN = /(\d*(?:>{1,2}[|&]?|<{1,3}))|([;|&\r\n]+)|((?:\\.|"(?:\\[\s\S]|[^"\\])*"|'[^']*'|\$\((?:[^()\r\n]|\([^()\r\n]*\))*\)|`[^`\r\n]*`|[^\s"'`;|&<>()])+)/g;
 const BASH_LAST_ARG_WRITERS = new Set(["cp", "mv", "install"]);
 
 /** The words of one simple command that name a file the command writes. */
@@ -224,13 +224,45 @@ function bashWriteTargets(command: string): string[] {
   return [...targets, ...commandWriteTargets(words)];
 }
 
+// A shell word that names a file under a .gsd directory.
+const BASH_GSD_PATH = /[^\s"'`;|&<>()=]*\.gsd[/\\][^\s"'`;|&<>()]+/gi;
+// The same inside quotes, where the path can hold spaces. The lookahead tries each quote as an opener.
+const BASH_QUOTED_GSD_PATH = /(["'])(?=([^"'\r\n]*\.gsd[/\\][^"'\r\n]*)\1)/g;
+// The word after a redirect or dd of=, read without regard to the quotes around it.
+const BASH_WRITE_TARGET_WORD = /(?:>{1,2}\|?\s*|\bdd\b[^;|&\r\n]*\bof=)((?:\\.|"[^"\r\n]*"|'[^'\r\n]*'|[^\s"';|&<>()])+)/gi;
+
+function bashPatternWritesTo(command: string, path: string): boolean {
+  const target = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const segment = "[^;|&\\r\\n]*";
+  return [
+    `\\btee\\b${segment}${target}`,
+    // cp/mv: the path is the destination only when it is the last argument.
+    `\\b(?:cp|mv)\\b${segment}\\s["']?${target}["']?(?:\\s+\\d*[<>]${segment})?\\s*(?:$|[;|&\\r\\n])`,
+    `\\bsed\\b${segment}\\s-i${segment}${target}`,
+  ].some((pattern) => new RegExp(pattern, "i").test(command));
+}
+
+/**
+ * Write targets found by patterns that do not pair quotes. This pass keeps a
+ * write blocked when the tokenizer reads a command with an unbalanced quote
+ * as one long string.
+ */
+function bashPatternWriteTargets(command: string): string[] {
+  const redirected = Array.from(command.matchAll(BASH_WRITE_TARGET_WORD), (match) => match[1].replace(/["']/g, ""));
+  const quoted = Array.from(command.matchAll(BASH_QUOTED_GSD_PATH), (match) => match[2]);
+  const named = [...(command.match(BASH_GSD_PATH) ?? []), ...quoted];
+  return [...redirected, ...named.filter((path) => bashPatternWritesTo(command, path))];
+}
+
 /**
  * Refusal text when a bash command writes STATE.md, gsd.db or a managed
  * projection that has a save tool; null when the command is allowed.
  * Like the state-file guard this is a pattern guard, not a shell parser. It
  * resolves the whole target word of a redirect, tee, dd of=, sed -i and the
  * last argument of cp, mv and install; a variable or command substitution
- * before `/.gsd/` is part of that word. Known limits, not covered: a write
+ * before `/.gsd/` is part of that word. A second pass that does not pair
+ * quotes also runs; the command is refused when either pass finds a
+ * projection write. Known limits, not covered: a write
  * inside a command substitution or an eval string, a target named without
  * its .gsd directory (after `cd .gsd`, a directory destination, a variable
  * that holds the whole path), rm, and writes from an interpreter
@@ -238,7 +270,7 @@ function bashWriteTargets(command: string): string[] {
  */
 export function blockedBashWriteReason(command: string): string | null {
   if (isBashWriteToStateFile(command)) return BLOCKED_WRITE_ERROR;
-  for (const path of bashWriteTargets(command)) {
+  for (const path of [...bashWriteTargets(command), ...bashPatternWriteTargets(command)]) {
     const tool = projectionSaveTool(path);
     if (tool) return projectionWriteError(path, tool);
   }
