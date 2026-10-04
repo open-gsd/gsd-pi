@@ -2426,11 +2426,6 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           s.pendingVerificationRetry = null;
         }
         s.lastToolInvocationError = null;
-        resetUnitBudget(s.unclaimedUnitBudgets, {
-          unitType: s.currentUnit.type,
-          unitId: s.currentUnit.id,
-          kind: "tool-unavailable",
-        });
         // Deliberately keep verificationRetryCount / verificationRetryFailureHashes:
         // the host verification gate's auto-fix counter shares this key and must
         // stay attempt-independent (per unit + failure). Deleting it here reset
