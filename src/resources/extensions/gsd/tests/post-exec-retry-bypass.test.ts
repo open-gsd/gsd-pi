@@ -39,7 +39,6 @@ import {
 } from "../task-execution-domain-operation.ts";
 import {
   invalidateTaskTechnicalPass,
-  readHostVerificationOutput,
   readTaskTechnicalVerdict,
   recordTaskTechnicalVerdict,
 } from "../task-verification-domain-operation.ts";
@@ -1426,16 +1425,21 @@ describe("Post-execution blocking failure retry bypass", () => {
     rmSync(join(tempDir, ".gsd", "milestones"), { recursive: true, force: true });
     rmSync(join(tempDir, ".gsd", "exec"), { recursive: true, force: true });
 
-    const output = readHostVerificationOutput(`db://host-verification/${outcome.attemptId}`);
-    assert.equal(output?.attemptId, outcome.attemptId);
-    assert.equal(output?.observation, "failed");
-    assert.equal(output?.checks.length, 1);
-    const check = output?.checks[0] as { command: string; exitCode: number; verdict: string; stderrExcerpt: string };
-    assert.equal(check.command, "node fail.js");
-    assert.equal(check.exitCode, 3);
-    assert.equal(check.verdict, "fail");
-    assert.match(check.stderrExcerpt, /boom-marker/);
-    assert.equal(readHostVerificationOutput("db://host-verification/no-such-attempt"), null);
+    const row = _getAdapter()!.prepare(`
+      SELECT attempt_id, observation, environment_json
+      FROM workflow_verification_evidence
+      WHERE durable_output_ref = :durable_output_ref
+    `).get({ ":durable_output_ref": `db://host-verification/${outcome.attemptId}` }) as
+      { attempt_id: string; observation: string; environment_json: string };
+    assert.equal(row.attempt_id, outcome.attemptId);
+    assert.equal(row.observation, "failed");
+    const checks = JSON.parse(row.environment_json).checks as
+      Array<{ command: string; exitCode: number; verdict: string; stderrExcerpt: string }>;
+    assert.equal(checks.length, 1);
+    assert.equal(checks[0].command, "node fail.js");
+    assert.equal(checks[0].exitCode, 3);
+    assert.equal(checks[0].verdict, "fail");
+    assert.match(checks[0].stderrExcerpt, /boom-marker/);
   });
 
   test("a host verdict is refused when its evidence reference does not resolve", async () => {
