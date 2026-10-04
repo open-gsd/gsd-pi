@@ -652,7 +652,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_summary_save (formerly gsd_save_summary) ──────────────────────
 
 	const summarySaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -663,6 +663,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			return await executeSummarySave(
 				params,
 				resolveWorkflowToolBasePath(_ctx, params),
+				piPlanningInvocation("gsd_summary_save", toolCallId),
 			);
 		} catch (err) {
 			return {
@@ -755,7 +756,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_uat_result_save ─────────────────────────────────────────────────
 
 	const uatResultSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -765,6 +766,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		return executeUatResultSave(
 			params,
 			resolveWorkflowToolBasePath(_ctx, params),
+			piExecutionInvocation("gsd_uat_result_save", toolCallId),
 		);
 	};
 

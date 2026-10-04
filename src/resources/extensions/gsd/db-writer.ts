@@ -799,6 +799,15 @@ export interface SaveArtifactOpts {
 }
 
 /**
+ * Commits the artifacts row of a save. A tool call passes a function that runs
+ * `insertRow` inside its Domain Operation, with the content when the operation
+ * decides it. The default writes the row alone.
+ */
+export type ArtifactRowStore = (insertRow: (content?: string) => void) => void;
+
+const storeArtifactRowAlone: ArtifactRowStore = (insertRow) => insertRow();
+
+/**
  * Save a root-level artifact (no milestone) to DB and write to disk,
  * routing path construction through workspace.contract.projectGsd directly.
  * Use this instead of saveArtifactToDbByScope when milestone_id is absent.
@@ -806,6 +815,7 @@ export interface SaveArtifactOpts {
 export async function saveArtifactToDbForWorkspace(
   workspace: GsdWorkspace,
   opts: SaveArtifactOpts,
+  storeRow: ArtifactRowStore = storeArtifactRowAlone,
 ): Promise<void> {
   try {
     const db = await import('./gsd-db.js');
@@ -827,18 +837,19 @@ export async function saveArtifactToDbForWorkspace(
       contentToPersist = generateRequirementsMd(activeRequirements);
     }
 
-    db.insertArtifact({
+    storeRow((content = contentToPersist) => db.insertArtifact({
       path: opts.path,
       artifact_type: opts.artifact_type,
       milestone_id: null,
       slice_id: null,
       task_id: null,
-      full_content: contentToPersist,
-    });
+      full_content: content,
+    }));
 
     try {
       const basePath = dirname(gsdDir);
-      await writeProjectionFile(basePath, fullPath, contentToPersist, []);
+      // A replayed call writes no row: the file follows the row that is stored.
+      await writeProjectionFile(basePath, fullPath, db.getArtifact(opts.path)?.full_content ?? contentToPersist, []);
     } catch (diskErr) {
       logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbForWorkspace', path: opts.path, error: String((diskErr as Error).message) });
     }
@@ -861,6 +872,7 @@ export async function saveArtifactToDbForWorkspace(
 export async function saveArtifactToDbByScope(
   scope: MilestoneScope,
   opts: SaveArtifactOpts,
+  storeRow: ArtifactRowStore = storeArtifactRowAlone,
 ): Promise<void> {
   // Guard: an empty milestoneId produces malformed paths (milestoneDir = join(gsd, "milestones", "")).
   // Callers that have no milestone should use saveArtifactToDbForWorkspace instead.
@@ -890,23 +902,24 @@ export async function saveArtifactToDbByScope(
       contentToPersist = generateRequirementsMd(activeRequirements);
     }
 
-    db.insertArtifact({
+    storeRow((content = contentToPersist) => db.insertArtifact({
       path: opts.path,
       artifact_type: opts.artifact_type,
       milestone_id: opts.milestone_id ?? null,
       slice_id: opts.slice_id ?? null,
       task_id: opts.task_id ?? null,
-      full_content: contentToPersist,
-    });
+      full_content: content,
+    }));
 
-    // The DB row is the authority, so the file always follows it. A file that
-    // changed outside GSD is kept by the projection mutation guard, not here.
+    // The DB row is the authority, so the file always follows it (a replayed
+    // call writes no row). A file that changed outside GSD is kept by the
+    // projection mutation guard, not here.
     try {
       const basePath = dirname(gsdDir);
       await writeProjectionFile(
         basePath,
         fullPath,
-        contentToPersist,
+        db.getArtifact(opts.path)?.full_content ?? contentToPersist,
         [
           opts.milestone_id,
           opts.slice_id && `${opts.milestone_id}/${opts.slice_id}`,
@@ -939,11 +952,12 @@ export async function saveArtifactToDbByScope(
 export async function saveArtifactToDb(
   opts: SaveArtifactOpts,
   basePath: string,
+  storeRow?: ArtifactRowStore,
 ): Promise<void> {
   const workspace = createWorkspace(basePath);
   const milestoneId = opts.milestone_id;
   if (milestoneId) {
-    return saveArtifactToDbByScope(scopeMilestone(workspace, milestoneId), opts);
+    return saveArtifactToDbByScope(scopeMilestone(workspace, milestoneId), opts, storeRow);
   }
-  return saveArtifactToDbForWorkspace(workspace, opts);
+  return saveArtifactToDbForWorkspace(workspace, opts, storeRow);
 }

@@ -7,7 +7,11 @@ import { isAbsolute, join, relative, sep } from "node:path";
 
 import { collectRenderedProjectionFiles, noteRenderedProjectionFile } from "./compat/compat-marker.js";
 import { refreshWorkflowDatabaseFromDisk } from "./db-workspace.js";
-import { regenerateDecisionsMarkdown, regenerateRequirementsMarkdown } from "./db-writer.js";
+import {
+  regenerateDecisionsMarkdown,
+  regenerateRequirementsMarkdown,
+  regenerateRootArtifactsMarkdown,
+} from "./db-writer.js";
 import { milestoneLeaseTtlSeconds } from "./db/milestone-leases.js";
 import { getRuntimeKv, setRuntimeKv } from "./db/runtime-kv.js";
 import {
@@ -198,6 +202,15 @@ export function projectionRendererFor(kind: string, key: string): ProjectionRend
       target: "requirements",
       render: async (root) => {
         await regenerateRequirementsMarkdown(root);
+      },
+    };
+  }
+  // artifact.save enqueues this key for PROJECT.md and the root drafts.
+  if (key === "planning/root-artifacts") {
+    return {
+      target: "root-artifacts",
+      render: async (root) => {
+        await regenerateRootArtifactsMarkdown(root);
       },
     };
   }

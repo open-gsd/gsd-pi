@@ -30,6 +30,7 @@ import {
   openDatabase,
   _getAdapter,
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
+import { _setDomainOperationFaultForTest } from "../../../src/resources/extensions/gsd/db/domain-operation.ts";
 import { registerDbTools } from "../../../src/resources/extensions/gsd/bootstrap/db-tools.ts";
 import { registerMemoryTools } from "../../../src/resources/extensions/gsd/bootstrap/memory-tools.ts";
 import { registerQueryTools } from "../../../src/resources/extensions/gsd/bootstrap/query-tools.ts";
@@ -462,6 +463,28 @@ const SUMMARY_SAVE_ARGS = {
   slice_id: "S01",
   artifact_type: "SUMMARY",
   content: "# Summary\n\nparity matrix artifact",
+};
+
+const UAT_RESULT_SAVE_ARGS = {
+  milestoneId: "M001",
+  sliceId: "S01",
+  uatType: "artifact-driven",
+  verdict: "PASS",
+  checks: [{
+    id: "UAT-01",
+    description: "Artifact check passes",
+    mode: "artifact",
+    result: "PASS",
+    evidence: [{ kind: "gsd_uat_exec", ref: "operation-only-uat" }],
+    notes: "Passed.",
+  }],
+  presentation: {
+    surface: "mcp",
+    presentedTools: ["gsd_uat_exec", "gsd_uat_result_save", "gsd_resume", "gsd_milestone_status", "gsd_journal_query"],
+    blockedTools: ["gsd_exec", "gsd_summary_save", "gsd_save_gate_result"]
+      .map((name) => ({ name, reason: "forbidden during run-uat" })),
+  },
+  notes: "UAT passed for the operation-only gate.",
 };
 
 const DECISION_SAVE_ARGS = {
@@ -937,14 +960,16 @@ describe("Slice lifecycle persistent retry parity", () => {
 // milestone tools run in an order that each one can follow: discard is last.
 // `piTool` is the native name when it differs from the MCP name. `seed` runs
 // before the write fence is set. `renderPassesWith` names the package that
-// stops the tool's inline render from writing a workflow table.
+// stops the tool's inline render from writing a workflow table. `variant`
+// names the write path of a tool that has more than one.
 const OPERATION_ONLY_CASES: ReadonlyArray<{
   tool: string;
   piTool?: string;
+  variant?: string;
   args: Record<string, unknown>;
   passesWith: string | null;
   renderPassesWith?: string;
-  seed?: () => void;
+  seed?: (base: string) => void;
   prepare?: (base: string) => Promise<unknown>;
 }> = [
   { tool: "gsd_slice_complete", args: SLICE_LIFECYCLE_CASES[0].args, passesWith: "P35" },
@@ -953,7 +978,45 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
     args: { ...DECISION_SAVE_ARGS, when_context: "parity matrix", made_by: "agent" },
     passesWith: null,
   },
-  { tool: "gsd_summary_save", args: SUMMARY_SAVE_ARGS, passesWith: "P15" },
+  { tool: "gsd_summary_save", variant: "slice artifact", args: SUMMARY_SAVE_ARGS, passesWith: null },
+  {
+    tool: "gsd_summary_save",
+    variant: "UAT carrier",
+    args: { milestone_id: "M001", slice_id: "S02", artifact_type: "UAT", content: "# UAT\n\nparity matrix UAT" },
+    passesWith: null,
+  },
+  {
+    tool: "gsd_summary_save",
+    variant: "PROJECT",
+    args: {
+      artifact_type: "PROJECT",
+      content: "# Project\n\n## Milestone Sequence\n\n- [ ] M001: Authority Fixture - The fixture milestone.\n",
+    },
+    passesWith: null,
+  },
+  {
+    // The projection write stores the artifacts row of a task SUMMARY.
+    tool: "gsd_summary_save",
+    variant: "task SUMMARY",
+    args: { ...SUMMARY_SAVE_ARGS, slice_id: "S02", task_id: "T01" },
+    passesWith: "P12",
+  },
+  {
+    tool: "gsd_uat_result_save",
+    args: UAT_RESULT_SAVE_ARGS,
+    passesWith: null,
+    seed: (base) => {
+      mkdirSync(join(base, ".gsd", "exec"), { recursive: true });
+      writeFileSync(join(base, ".gsd", "exec", "operation-only-uat.meta.json"), JSON.stringify({
+        id: "operation-only-uat",
+        exit_code: 0,
+        signal: null,
+        timed_out: false,
+        aborted: false,
+        metadata: { kind: "uat_exec", milestoneId: "M001", sliceId: "S01", checkId: "UAT-01", intent: "uat-artifact-check" },
+      }));
+    },
+  },
   {
     tool: "gsd_requirement_save",
     args: {
@@ -1050,10 +1113,11 @@ async function withOperationOnlyFixture(
 describe("G4: workflow tables are written only inside a Domain Operation", () => {
   for (const transport of ["pi", "mcp"] as const) {
     for (const gateCase of OPERATION_ONLY_CASES) {
-      const label = `${gateCase.tool}${gateCase.args.category ? ` (${gateCase.args.category})` : ""}`;
+      const variant = gateCase.variant ?? gateCase.args.category;
+      const label = `${gateCase.tool}${variant ? ` (${variant})` : ""}`;
       it(`${transport} ${label}: one operation per call, none on replay, no write outside it`, async () => {
         await withOperationOnlyFixture(transport, async (call, base) => {
-          gateCase.seed?.();
+          gateCase.seed?.(base);
           await gateCase.prepare?.(base);
           const before = operationCount();
           const fence = fenceWorkflowWrites();
@@ -1086,7 +1150,7 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
       await withOperationOnlyFixture(transport, async (call, base) => {
         const wroteProjections: string[] = [];
         for (const gateCase of OPERATION_ONLY_CASES) {
-          gateCase.seed?.();
+          gateCase.seed?.(base);
           const before = snapshotProjections(base);
           const result = await call(gateCase);
           assert.ok(!(result as { isError?: boolean }).isError, `${gateCase.tool} must succeed`);
@@ -1102,6 +1166,114 @@ describe("G4: workflow tables are written only inside a Domain Operation", () =>
       });
     });
   }
+});
+
+describe("slice SUMMARY and UAT carriers commit inside the operation that writes them", () => {
+  const carriers = () => ({ ..._getAdapter()!.prepare(
+    "SELECT full_summary_md AS summary, full_uat_md AS uat FROM slices WHERE milestone_id = 'M001' AND id = 'S02'",
+  ).get() }) as { summary: string; uat: string };
+
+  it("a replay of gsd_slice_complete keeps a later UAT correction", async () => {
+    await withOperationOnlyFixture("pi", async (_call, base) => {
+      const complete = () => runNativeDbTool(base, "gsd_slice_complete", SLICE_LIFECYCLE_CASES[0].args, "carrier-complete");
+      const fence = fenceWorkflowWrites();
+      const first = await complete();
+      fence.restore();
+      assert.ok(!(first as { isError?: boolean }).isError, "the completion succeeds");
+      assert.ok(!fence.violations.includes("slices"), "the carriers are written inside slice.complete");
+      const completed = carriers();
+      assert.match(completed.summary, /Persistent lifecycle parity is complete/);
+
+      const correction = "# UAT\n\nCorrected after completion.\n";
+      const saved = await runNativeDbTool(base, "gsd_summary_save", {
+        milestone_id: "M001",
+        slice_id: "S02",
+        artifact_type: "UAT",
+        content: correction,
+      }, "carrier-correction");
+      assert.ok(!(saved as { isError?: boolean }).isError, "the correction is saved");
+
+      await complete();
+
+      assert.deepEqual(carriers(), { summary: completed.summary, uat: correction });
+      assert.equal(
+        readFileSync(join(base, ".gsd", String(executorDetails(saved).path)), "utf-8"),
+        correction,
+        "the UAT file follows the carrier",
+      );
+    });
+  });
+});
+
+describe("gsd_uat_result_save commits its rows in one Domain Operation", () => {
+  const uatCase = OPERATION_ONLY_CASES.find((entry) => entry.tool === "gsd_uat_result_save")!;
+  const count = (sql: string) => Number(_getAdapter()!.prepare(sql).get()?.count);
+  const uatRows = () => ({
+    artifacts: count("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'ASSESSMENT' AND slice_id = 'S01'"),
+    assessments: count("SELECT COUNT(*) AS count FROM assessments WHERE scope = 'run-uat'"),
+    verdicts: count("SELECT COUNT(*) AS count FROM quality_gates WHERE gate_id = 'UAT' AND status = 'complete'"),
+    gateRuns: count("SELECT COUNT(*) AS count FROM gate_runs WHERE gate_id = 'UAT'"),
+  });
+  const attemptFile = (base: string, attempt: number) =>
+    join(base, ".gsd", "uat", "M001", "S01", `attempt-${attempt}.json`);
+
+  async function openUatFixture(t: { after: (fn: () => void) => void }): Promise<string> {
+    const fixture = await createWorkflowAuthorityFixture();
+    t.after(() => fixture.cleanup());
+    seedPrerequisiteCompletionEvidence();
+    uatCase.seed?.(fixture.root);
+    return fixture.root;
+  }
+
+  it("a replay returns the first attempt and records no second attempt", async (t) => {
+    const base = await openUatFixture(t);
+
+    const first = await runNativeDbTool(base, uatCase.tool, uatCase.args, "uat-replay");
+    const replay = await runNativeDbTool(base, uatCase.tool, uatCase.args, "uat-replay");
+
+    assert.equal(executorDetails(first).attempt, 1);
+    assert.deepEqual(executorDetails(replay), executorDetails(first));
+    assert.deepEqual(uatRows(), { artifacts: 1, assessments: 1, verdicts: 1, gateRuns: 1 });
+    assert.ok(existsSync(attemptFile(base, 1)), "the first call records attempt 1");
+    assert.ok(!existsSync(attemptFile(base, 2)), "the replay records no attempt 2");
+  });
+
+  it("a replay writes the attempt file that the first call did not write, and the next attempt number comes from the database", async (t) => {
+    const base = await openUatFixture(t);
+    const blocker = join(base, ".gsd", "uat");
+    writeFileSync(blocker, "not a directory");
+
+    const first = await runNativeDbTool(base, uatCase.tool, uatCase.args, "uat-lost-file");
+    assert.equal((first as { isError?: boolean }).isError, true, "the attempt file write fails");
+    assert.deepEqual(uatRows(), { artifacts: 1, assessments: 1, verdicts: 1, gateRuns: 1 }, "the operation is committed");
+
+    rmSync(blocker);
+    const replay = await runNativeDbTool(base, uatCase.tool, uatCase.args, "uat-lost-file");
+    assert.equal(executorDetails(replay).attempt, 1);
+    assert.equal(
+      JSON.parse(readFileSync(join(base, ".gsd", String(executorDetails(replay).attemptPath)), "utf-8")).runId,
+      executorDetails(replay).runId,
+      "the returned attemptPath holds the record of the stored run",
+    );
+    assert.deepEqual(uatRows(), { artifacts: 1, assessments: 1, verdicts: 1, gateRuns: 1 }, "the replay writes no row");
+
+    rmSync(attemptFile(base, 1));
+    const next = await runNativeDbTool(base, uatCase.tool, { ...uatCase.args, attempt: "auto" }, "uat-next");
+    assert.equal(executorDetails(next).attempt, 2, "attempt files on disk do not set the attempt number");
+    assert.ok(existsSync(attemptFile(base, 2)));
+  });
+
+  it("a failed operation saves no row and no attempt file", async (t) => {
+    const base = await openUatFixture(t);
+    _setDomainOperationFaultForTest("after-mutation", "uat-result.save");
+    t.after(() => _setDomainOperationFaultForTest(null));
+
+    const result = await runNativeDbTool(base, uatCase.tool, uatCase.args, "uat-fault");
+
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.deepEqual(uatRows(), { artifacts: 0, assessments: 0, verdicts: 0, gateRuns: 0 });
+    assert.ok(!existsSync(attemptFile(base, 1)), "no attempt is recorded for a write that rolled back");
+  });
 });
 
 describe("revision fencing: a mutation is checked against the session's last read", () => {
@@ -1181,5 +1353,29 @@ describe("revision fencing: a mutation is checked against the session's last rea
         fixture.cleanup();
       }
     });
+
+    for (const gateCase of OPERATION_ONLY_CASES.filter((entry) =>
+      entry.tool === "gsd_uat_result_save" || entry.variant === "slice artifact")) {
+      it(`${transport}: ${gateCase.tool} after a stale read is rejected and saves no row`, async (t) => {
+        const fixture = await createWorkflowAuthorityFixture();
+        t.after(() => fixture.cleanup());
+        seedPrerequisiteCompletionEvidence();
+        gateCase.seed?.(fixture.root);
+        const call = (tool: string, args: Record<string, unknown>, key: string) => transport === "pi"
+          ? runNativeDbTool(fixture.root, tool, args, key)
+          : callMcpLifecycleTool(fixture.root, tool, args, key);
+        const rows = () => _getAdapter()!.prepare("SELECT path FROM artifacts ORDER BY path").all();
+
+        await call("gsd_milestone_status", { milestoneId: "M001" }, "stale-artifact-read");
+        moveRevision(`${transport}-${gateCase.tool}-stale`);
+        const before = rows();
+        const operationsBefore = operationCount();
+        const stale = await call(gateCase.tool, gateCase.args, "stale-artifact-write");
+
+        assert.match(text(stale), /stale view: the project changed after this session last read it/);
+        assert.deepEqual(rows(), before, "a rejected write saves no artifact row");
+        assert.equal(operationCount(), operationsBefore, "a rejected write commits no operation");
+      });
+    }
   }
 });
