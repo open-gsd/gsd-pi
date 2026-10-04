@@ -726,7 +726,6 @@ test("deep project setup: same project advances when agent_end session id change
 
 test("deep project setup: foreground dispatcher does not probe research-project rule", () => {
   assert.equal(FOREGROUND_DEEP_SETUP_RULE_NAMES.has("deep: pre-planning (no PROJECT) → discuss-project"), true);
-  assert.equal(FOREGROUND_DEEP_SETUP_RULE_NAMES.has("deep: pre-planning (no research decision) → research-decision"), true);
   assert.equal(FOREGROUND_DEEP_SETUP_RULE_NAMES.has("deep: pre-planning (no PROJECT research) → research-project"), false);
 });
 

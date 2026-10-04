@@ -54,7 +54,6 @@ const EXPECTED_KNOWN_UNIT_TYPES = [
   "workflow-preferences",
   "discuss-project",
   "discuss-requirements",
-  "research-decision",
   "research-project",
 ];
 
@@ -84,7 +83,6 @@ const EXPECTED_PHASE_CHAINS: Record<string, string[] | undefined> = {
   "discuss-project": ["discuss", "planning"],
   "discuss-requirements": ["discuss", "planning"],
   "workflow-preferences": ["discuss", "planning"],
-  "research-decision": ["discuss", "planning"],
   "execute-task": ["execution"],
   "reactive-execute": ["execution"],
   "execute-task-simple": ["execution_simple", "execution"],
@@ -123,7 +121,6 @@ const EXPECTED_DIRECT_PROMPT_TEMPLATES: Record<string, string> = {
   "workflow-preferences": "guided-workflow-preferences",
   "discuss-project": "guided-discuss-project",
   "discuss-requirements": "guided-discuss-requirements",
-  "research-decision": "guided-research-decision",
   "research-project": "guided-research-project",
 };
 

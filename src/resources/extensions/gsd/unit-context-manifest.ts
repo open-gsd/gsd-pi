@@ -728,23 +728,6 @@ export const UNIT_MANIFESTS: Record<UnitType, UnitContextManifest> = {
     },
     maxSystemPromptChars: COMMON_BUDGET_MEDIUM,
   },
-  // research-decision: lightweight one-question yes/no unit. Records the
-  // decision in the database; no project artifacts needed.
-  "research-decision": {
-    skills: { mode: "none" },
-    knowledge: "none",
-    memory: "none",
-    codebaseMap: false,
-    preferences: "none",
-    contextMode: "none",
-    tools: TOOLS_PLANNING,
-    artifacts: {
-      inline: [],
-      excerpt: [],
-      onDemand: [],
-    },
-    maxSystemPromptChars: COMMON_BUDGET_SMALL,
-  },
   // research-project: orchestrator that fans out 4 parallel scout subagents
   // for project research (stack, features, architecture, pitfalls). Needs the
   // planning-dispatch policy to dispatch them. PROJECT.md + REQUIREMENTS.md

@@ -428,13 +428,11 @@ const pendingDeepProjectSetupMap = new Map<string, PendingDeepProjectSetupEntry>
 const USER_DRIVEN_DEEP_SETUP_UNITS = new Set([
   "discuss-project",
   "discuss-requirements",
-  "research-decision",
 ]);
 export const FOREGROUND_DEEP_SETUP_RULE_NAMES = new Set([
   "deep: pre-planning (no workflow prefs) → workflow-preferences",
   "deep: pre-planning (no PROJECT) → discuss-project",
   "deep: pre-planning (no REQUIREMENTS) → discuss-requirements",
-  "deep: pre-planning (no research decision) → research-decision",
 ]);
 const LEGACY_DEEP_SETUP_PSEUDO_MILESTONE_DIRS = new Set([
   "PROJECT",

@@ -526,7 +526,6 @@ const GSD_PHASE_PATTERNS: Array<[string, RegExp]> = [
 	["gate-evaluate", /\bUNIT:\s*Gate Evaluate\b/i],
 	["research-milestone", /\bUNIT:\s*Research Milestone\b/i],
 	["research-slice", /\bUNIT:\s*Research Slice\b/i],
-	["research-decision", /\bUNIT:\s*Research Decision\b/i],
 	["discuss-milestone", /\bUNIT:\s*Discuss Milestone\b/i],
 	["discuss-slice", /\bUNIT:\s*Discuss Slice\b/i],
 	["discuss-project", /\bUNIT:\s*Discuss Project\b/i],

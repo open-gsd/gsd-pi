@@ -466,7 +466,7 @@ export const UNIT_REGISTRY = {
     phaseChain: ["discuss", "planning"],
     promptTemplate: "guided-discuss-project",
     toolContract: {
-      allowedGsdTools: ["gsd_summary_save", "gsd_decision_save", "gsd_requirement_save"],
+      allowedGsdTools: ["gsd_summary_save", "gsd_decision_save", "gsd_requirement_save", "gsd_research_decision_save"],
       requiredWorkflowTools: ["ask_user_questions", "gsd_summary_save"],
     },
   },
@@ -476,18 +476,8 @@ export const UNIT_REGISTRY = {
     phaseChain: ["discuss", "planning"],
     promptTemplate: "guided-discuss-requirements",
     toolContract: {
-      allowedGsdTools: ["gsd_requirement_save", "gsd_summary_save"],
+      allowedGsdTools: ["gsd_requirement_save", "gsd_summary_save", "gsd_research_decision_save"],
       requiredWorkflowTools: ["ask_user_questions", "gsd_requirement_save", "gsd_summary_save"],
-    },
-  },
-  "research-decision": {
-    kind: "primary",
-    scopeClass: "standard",
-    phaseChain: ["discuss", "planning"],
-    promptTemplate: "guided-research-decision",
-    toolContract: {
-      allowedGsdTools: ["gsd_research_decision_save"],
-      requiredWorkflowTools: ["ask_user_questions", "gsd_research_decision_save"],
     },
   },
   // research-project dispatches 4 parallel scout subagents (Task calls); each scout

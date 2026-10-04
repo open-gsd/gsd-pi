@@ -93,7 +93,7 @@ Workflow Preferences -> Project Context -> Requirements -> Research Decision -> 
 | `.gsd/PREFERENCES.md` | `--deep` / `workflow-preferences` | Holds `planning_depth: deep` and captured workflow settings |
 | `.gsd/PROJECT.md` | `discuss-project` | Project vision, users, anti-goals, constraints, and rough milestone sequence |
 | `.gsd/REQUIREMENTS.md` | `discuss-requirements` | Capability contract using `R###` requirements grouped by Active, Validated, Deferred, and Out of Scope |
-| (database only) | `research-decision` | Records `research` or `skip` with `gsd_research_decision_save`; this unit only asks the question. No recorded decision means `skip` |
+| (database only) | `discuss-project` or `discuss-requirements` | Records `research` with `gsd_research_decision_save` when the user asks for project research. No recorded decision means `skip` |
 | `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, `PITFALLS.md` | `research-project`, only when the decision is `research` | Four scout-backed project research outputs for stack, feature norms, architecture, and pitfalls |
 | `.gsd/phases/<NN-slug>/<NN>-CONTEXT.md` and `<NN>-ROADMAP.md` | Normal milestone discussion/planning | Milestone-specific context and executable roadmap; `` `[sketch]` `` marks slices awaiting `refine-slice`. Legacy projects may still resolve to `.gsd/milestones/<MID>/<MID>-*.md` until migrated. |
 

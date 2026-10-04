@@ -10,7 +10,6 @@ export type DeepProjectSetupStage =
   | "workflow-preferences"
   | "project"
   | "requirements"
-  | "research-decision"
   | "project-research";
 
 export type DeepProjectSetupState =

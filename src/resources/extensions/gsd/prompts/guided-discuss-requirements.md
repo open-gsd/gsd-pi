@@ -86,6 +86,12 @@ If they adjust, absorb and re-verify.
 
 ---
 
+## Project Research Decision
+
+Project research is skipped by default. If the user asks for domain research before milestone planning, call `gsd_research_decision_save` with `decision: "research"`. Do not ask about research yourself, and do not call the tool when the user did not raise it.
+
+---
+
 ## Output
 
 Once the user confirms:

@@ -103,7 +103,6 @@ test("#4782 phase 1: every manifest has a positive maxSystemPromptChars", () => 
 test("Context Mode: every manifest declares the expected contextMode lane", () => {
   const expected: Record<string, ContextModePolicy> = {
     "workflow-preferences": "none",
-    "research-decision": "none",
     "discuss-project": "interview",
     "discuss-requirements": "interview",
     "discuss-milestone": "interview",

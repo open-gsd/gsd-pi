@@ -1,6 +1,6 @@
 **Working directory:** `{{workingDirectory}}`. All file reads, writes, and shell commands MUST operate relative to this directory. Do NOT `cd` to any other directory.
 
-Run one-time **project-level domain research** after `discuss-requirements` and the `research-decision` gate, before milestone work. Read `.gsd/PROJECT.md` and `.gsd/REQUIREMENTS.md`, then spawn 4 parallel `Task` calls with agent class `{{scoutAgentType}}`, one per research dimension, each writing exactly one file under `.gsd/research/`.
+Run one-time **project-level domain research** after `discuss-requirements` and a recorded `research` decision, before milestone work. Read `.gsd/PROJECT.md` and `.gsd/REQUIREMENTS.md`, then spawn 4 parallel `Task` calls with agent class `{{scoutAgentType}}`, one per research dimension, each writing exactly one file under `.gsd/research/`.
 
 **Structured questions available: {{structuredQuestionsAvailable}}**
 

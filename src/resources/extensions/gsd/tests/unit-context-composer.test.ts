@@ -447,13 +447,9 @@ test("Context Mode composer: lane guidance tools pass unit contracts", () => {
   }
 });
 
-test("Context Mode composer: workflow-preferences and research-decision render no Context Mode block", () => {
+test("Context Mode composer: workflow-preferences renders no Context Mode block", () => {
   assert.strictEqual(
     composeContextModeInstructions("workflow-preferences", { enabled: true, renderMode: "standalone" }),
-    "",
-  );
-  assert.strictEqual(
-    composeContextModeInstructions("research-decision", { enabled: true, renderMode: "standalone" }),
     "",
   );
 });

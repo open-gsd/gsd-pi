@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { verifyExpectedArtifact } from "../artifact-verification.ts";
+import { shouldBlockAutoUnitToolCall } from "../auto-unit-tool-scope.ts";
 import {
   DISPATCH_RULES,
   getDeepStageGate,
@@ -162,15 +163,30 @@ describe("deep project setup reads database facts", () => {
   test("the research decision stays when .gsd/runtime is deleted", async () => {
     saveRootArtifact("PROJECT.md", VALID_PROJECT);
     saveRootArtifact("REQUIREMENTS.md", VALID_REQUIREMENTS);
-    assert.equal(verifyExpectedArtifact("research-decision", "RESEARCH-DECISION", base), false);
-
     const saved = await saveResearchDecision("research", "call-1");
     assert.equal(saved.isError, undefined);
     mkdirSync(gsdPath("runtime"), { recursive: true });
     rmSync(gsdPath("runtime"), { recursive: true, force: true });
 
     assert.equal(readResearchDecision(), "research");
-    assert.equal(verifyExpectedArtifact("research-decision", "RESEARCH-DECISION", base), true);
+    assert.deepEqual(gate(), { status: "pending", stage: "project-research" });
+  });
+
+  test("a research decision recorded in a discuss unit makes project research the pending stage", async () => {
+    for (const unitType of ["discuss-project", "discuss-requirements"]) {
+      assert.equal(shouldBlockAutoUnitToolCall(unitType, "gsd_research_decision_save").block, false, unitType);
+    }
+    assert.equal(shouldBlockAutoUnitToolCall("execute-task", "gsd_research_decision_save").block, true);
+
+    const saved = await saveResearchDecision("research", "call-1");
+    assert.equal(saved.isError, undefined);
+    assert.deepEqual(gate(), { status: "pending", stage: "workflow-preferences" });
+
+    await matchRule(PREFS_RULE);
+    saveRootArtifact("PROJECT.md", VALID_PROJECT);
+    assert.deepEqual(gate(), { status: "pending", stage: "requirements" });
+    saveRootArtifact("REQUIREMENTS.md", VALID_REQUIREMENTS);
+
     assert.deepEqual(gate(), { status: "pending", stage: "project-research" });
   });
 
@@ -184,7 +200,6 @@ describe("deep project setup reads database facts", () => {
     );
 
     assert.equal(readResearchDecision(), null);
-    assert.equal(verifyExpectedArtifact("research-decision", "RESEARCH-DECISION", base), false);
     assert.deepEqual(gate(), { status: "complete", stage: null });
   });
 

@@ -1240,7 +1240,6 @@ export const USER_DRIVEN_DEEP_UNITS = new Set([
   "discuss-project",
   "discuss-requirements",
   "discuss-milestone",
-  "research-decision",
 ]);
 export { isAwaitingUserInput } from "./consent-question.js";
 

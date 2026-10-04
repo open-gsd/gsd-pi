@@ -182,8 +182,6 @@ export function resolveExpectedArtifactPath(
       return join(gsdRoot(base), "PROJECT.md");
     case "discuss-requirements":
       return join(gsdRoot(base), "REQUIREMENTS.md");
-    case "research-decision":
-      return null;
     case "research-project":
       return join(gsdRoot(base), "research", "PROJECT-RESEARCH-BLOCKER.md");
     case "discuss-milestone": {
@@ -288,8 +286,6 @@ export function diagnoseExpectedArtifact(
       return "a valid PROJECT artifact saved with gsd_summary_save";
     case "discuss-requirements":
       return "a valid REQUIREMENTS artifact saved with gsd_summary_save";
-    case "research-decision":
-      return "a research decision (research|skip) recorded with gsd_research_decision_save";
     case "research-project":
       return ".gsd/research/{STACK,FEATURES,ARCHITECTURE,PITFALLS}.md with at least one real research file; blocker-only outputs stop";
     case "discuss-milestone":

@@ -518,11 +518,11 @@ planning_depth: deep
 | Value | Behavior |
 |-------|----------|
 | `light` | Default. Uses the normal milestone discussion flow that writes milestone context and roadmap artifacts. |
-| `deep` | Runs staged project discovery first: workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, a research decision marker, and optional project research before milestone planning. |
+| `deep` | Runs staged project discovery first: workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, and optional project research before milestone planning. |
 
 Enable deep mode for the current project with `/gsd new-project --deep` or `/gsd new-milestone --deep`; both write `planning_depth: deep` to `.gsd/PREFERENCES.md`. You can also set it manually in project or global preferences.
 
-In deep mode, the research decision (`research` or `skip`) is recorded in the database with `gsd_research_decision_save`; no decision means `skip`, and a `.gsd/runtime/research-decision.json` file from an older version is not read. A `research` decision dispatches `research-project`, which writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`; a `skip` decision proceeds directly to milestone work.
+In deep mode, the research decision (`research` or `skip`) is recorded in the database with `gsd_research_decision_save`. Ask for research during the project or requirements discussion to record `research`; no decision means `skip`, and a `.gsd/runtime/research-decision.json` file from an older version is not read. A `research` decision dispatches `research-project`, which writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`; a `skip` decision proceeds directly to milestone work.
 
 ### `workspace`
 

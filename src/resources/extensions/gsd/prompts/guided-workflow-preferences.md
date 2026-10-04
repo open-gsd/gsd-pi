@@ -24,7 +24,7 @@ Use these recommended defaults without asking:
 - `branch_model: single` — all work on current branch
 - `uat_dispatch: true` — verification runs automatically; failures pause execution
 - `models.executor_class: balanced` — sensible cost/quality default
-- `research: skip` — deterministic default; the dedicated research-decision stage can later switch to `research`
+- `research: skip` — deterministic default; `gsd_research_decision_save` can later switch to `research`
 
 ---
 

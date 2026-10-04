@@ -61,7 +61,6 @@ import {
   buildDiscussMilestonePrompt,
   buildDiscussProjectPrompt,
   buildDiscussRequirementsPrompt,
-  buildResearchDecisionPrompt,
   buildResearchProjectPrompt,
   buildResearchMilestonePrompt,
   buildPlanMilestonePrompt,
@@ -375,7 +374,7 @@ export async function readUatGateVerdict(
 /**
  * Deep planning mode: check whether any project-level stage gate
  * (workflow-preferences, discuss-project, discuss-requirements,
- * research-decision, research-project) still has work pending.
+ * research-project) still has work pending.
  *
  * Used by the milestone-level discuss rules to yield to project-level
  * deep-mode rules when the project hasn't finished its setup interview.
@@ -971,7 +970,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (state.phase !== "needs-discussion") return null;
       // Deep mode bypass: yield to the project-level deep stage gates
       // (workflow-prefs, discuss-project, discuss-requirements,
-      // research-decision, research-project) when any of them still have
+      // research-project) when any of them still have
       // work pending. Without this guard, the milestone discuss rule wins
       // before the deep rules ever get a chance to fire.
       if (hasPendingDeepStage(prefs, basePath)) return null;
@@ -1049,27 +1048,6 @@ export const DISPATCH_RULES: DispatchRule[] = [
         unitId: "REQUIREMENTS",
         prompt: await buildDiscussRequirementsPrompt(basePath, structuredQuestionsAvailable),
         pauseAfterDispatch: !process.env.GSD_HEADLESS,
-      };
-    },
-  },
-  {
-    // Deep mode research gate: capture user's research decision.
-    // Fires when the setup gate reports the research-decision stage as pending.
-    // Asks one yes/no question via ask_user_questions and records the answer
-    // with gsd_research_decision_save. The research-project rule reads that
-    // database fact to decide whether to fan out 4 parallel research subagents.
-    // Light mode skips entirely.
-    name: "deep: pre-planning (no research decision) → research-decision",
-    match: async ({ state, basePath, prefs, structuredQuestionsAvailable }) => {
-      if (prefs?.planning_depth !== "deep") return null;
-      if (state.phase !== "pre-planning" && state.phase !== "needs-discussion") return null;
-      const gate = resolveDeepProjectSetupState(prefs, basePath);
-      if (gate.status !== "pending" || gate.stage !== "research-decision") return null;
-      return {
-        action: "dispatch",
-        unitType: "research-decision",
-        unitId: "RESEARCH-DECISION",
-        prompt: await buildResearchDecisionPrompt(basePath, structuredQuestionsAvailable),
       };
     },
   },

@@ -1847,22 +1847,6 @@ export async function buildResearchProjectPrompt(
 }
 
 /**
- * Build a prompt for the research-decision unit type (deep mode).
- * Fixed-question stage: asks "research first or skip?" via ask_user_questions
- * and records the answer with gsd_research_decision_save. Fires after discuss-requirements
- * and before research-project-parallel.
- */
-export async function buildResearchDecisionPrompt(
-  base: string,
-  structuredQuestionsAvailable = "false",
-): Promise<string> {
-  return prependContextModeToBlock("research-decision", base, loadPrompt("guided-research-decision", {
-    workingDirectory: base,
-    structuredQuestionsAvailable,
-  }));
-}
-
-/**
  * Build a prompt for the discuss-project unit type (deep mode).
  * Project-level interview: produces .gsd/PROJECT.md.
  * Fires before any milestone-level work when planning_depth === "deep" and

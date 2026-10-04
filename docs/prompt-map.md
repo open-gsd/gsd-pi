@@ -137,18 +137,14 @@ guided-discuss-project
 guided-discuss-requirements
          │
          ▼
-research-decision  (gate: deep mode opt-in)
-         │
-         ▼
-guided-research-project  (deep mode only — 4 parallel subagents)
+guided-research-project  (only when the recorded research decision is `research` — 4 parallel subagents)
 ```
 
 | Prompt | Purpose | Key Tools Called |
 |--------|---------|-----------------|
 | `guided-workflow-preferences.md` | Write `.gsd/PREFERENCES.md` with defaults. No user questions. | — |
-| `guided-discuss-project.md` | Interview-style project scoping. Classifies project shape (tiny/small/medium/large). | `ask_user_questions`, `gsd_summary_save(PROJECT)` |
-| `guided-discuss-requirements.md` | Interview-style requirements capture. | `ask_user_questions`, `gsd_requirement_save`, `gsd_summary_save(REQUIREMENTS)` |
-| `guided-research-decision.md` | Single fixed-question gate: opt into deep research or proceed lean. | `ask_user_questions`, `gsd_research_decision_save` |
+| `guided-discuss-project.md` | Interview-style project scoping. Classifies project shape (tiny/small/medium/large). | `ask_user_questions`, `gsd_summary_save(PROJECT)`, `gsd_research_decision_save` (only when the user asks for research) |
+| `guided-discuss-requirements.md` | Interview-style requirements capture. | `ask_user_questions`, `gsd_requirement_save`, `gsd_summary_save(REQUIREMENTS)`, `gsd_research_decision_save` (only when the user asks for research) |
 | `guided-research-project.md` | Spawns 4 parallel scout subagents (stack, features, architecture, pitfalls). Headless. | `subagent` × 4 |
 
 ### 5c. Milestone Planning Flow
@@ -289,9 +285,6 @@ gsd.db (derived GSDState)
               ├── [setup] guided-discuss-requirements
               │              │ writes REQUIREMENTS.md
               │              │
-              ├── [gate]  guided-research-decision
-              │              │ gsd_research_decision_save
-              │              │
               ├── [deep]  guided-research-project ──► 4× subagent
               │              │ writes RESEARCH artifacts
               │              │
@@ -383,7 +376,6 @@ Phase                   Artifact Written
 guided-workflow-preferences  →  .gsd/PREFERENCES.md
 guided-discuss-project       →  .gsd/PROJECT.md
 guided-discuss-requirements  →  .gsd/REQUIREMENTS.md
-guided-research-decision     →  (no file; decision recorded in the database)
 guided-research-project      →  .gsd/phases/<NN-slug>/<NN>-RESEARCH.md (×4 aspects)
 
 discuss / guided-discuss-milestone  →  .gsd/phases/<NN-slug>/<NN>-CONTEXT.md
@@ -444,7 +436,7 @@ projection-delivery contracts are owned by the
 
 ## 10. Dispatch Rule Priority Order
 
-`auto-dispatch.ts` evaluates 29 rules top-to-bottom, first match wins. Source of
+`auto-dispatch.ts` evaluates 28 rules top-to-bottom, first match wins. Source of
 truth is the `DISPATCH_RULES` array in `auto-dispatch.ts`; the canary test
 `tests/dispatch-rule-coverage.test.ts` pins the count at 29.
 
@@ -462,24 +454,23 @@ Priority  Rule                                          Fires When
  9        deep: workflow-preferences                    deep mode + PREFERENCES.md missing
 10        deep: discuss-project                         deep mode + PROJECT artifact missing
 11        deep: discuss-requirements                    deep mode + REQUIREMENTS missing
-12        deep: research-decision                       deep mode + research decision not made
-13        deep: research-project                        deep mode + research approved, files missing
-14        pre-planning (no context) → discuss-milestone active milestone, CONTEXT missing
-15        pre-planning (no research) → research-mile…   CONTEXT done, RESEARCH missing
-16        pre-planning (has research) → plan-milestone  CONTEXT + RESEARCH done, ROADMAP missing
-17        planning (require_slice_discussion) → pause   slice flagged for discussion (#3454)
-18        planning (multi slices need research) → par…  ROADMAP done, slice RESEARCH missing × ≥2
-19        planning (no research) → research-slice       single slice needs RESEARCH
-20        refining → refine-slice                       slice is sketch, needs expansion
-21        planning → plan-slice                         slice CONTEXT done, PLAN missing
-22        evaluating-gates → gate-evaluate              gates pending evaluation
-23        replanning-slice → replan-slice               slice in 'replanning' phase
-24        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no reactive blocker
-25        executing → execute-task (recover plan)       task plan missing — recover via plan-slice
-26        executing → execute-task                      1–2 tasks ready (sequential mode)
-27        validating-milestone → validate-milestone     all slices closed, not yet validated
-28        completing-milestone → complete-milestone     validated, not yet completed
-29        complete → stop                               nothing left to do
+12        deep: research-project                        deep mode + research approved, files missing
+13        pre-planning (no context) → discuss-milestone active milestone, CONTEXT missing
+14        pre-planning (no research) → research-mile…   CONTEXT done, RESEARCH missing
+15        pre-planning (has research) → plan-milestone  CONTEXT + RESEARCH done, ROADMAP missing
+16        planning (require_slice_discussion) → pause   slice flagged for discussion (#3454)
+17        planning (multi slices need research) → par…  ROADMAP done, slice RESEARCH missing × ≥2
+18        planning (no research) → research-slice       single slice needs RESEARCH
+19        refining → refine-slice                       slice is sketch, needs expansion
+20        planning → plan-slice                         slice CONTEXT done, PLAN missing
+21        evaluating-gates → gate-evaluate              gates pending evaluation
+22        replanning-slice → replan-slice               slice in 'replanning' phase
+23        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no reactive blocker
+24        executing → execute-task (recover plan)       task plan missing — recover via plan-slice
+25        executing → execute-task                      1–2 tasks ready (sequential mode)
+26        validating-milestone → validate-milestone     all slices closed, not yet validated
+27        completing-milestone → complete-milestone     validated, not yet completed
+28        complete → stop                               nothing left to do
 ```
 
 ---

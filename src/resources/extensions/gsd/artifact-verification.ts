@@ -40,7 +40,6 @@ import { getProjectResearchStatus } from "./project-research-policy.js";
 import {
   isSetupArtifactSaved,
   isWorkflowPreferencesCaptured,
-  readResearchDecision,
 } from "./project-setup-facts.js";
 import { isGsdWorktreePath } from "./worktree-root.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -267,10 +266,6 @@ export function verifyExpectedArtifact(
 
   if (unitType === "discuss-requirements") {
     return isSetupArtifactSaved("requirements");
-  }
-
-  if (unitType === "research-decision") {
-    return readResearchDecision() !== null;
   }
 
   if (unitType === "research-project") {

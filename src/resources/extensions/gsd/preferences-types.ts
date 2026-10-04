@@ -242,7 +242,7 @@ export const KNOWN_UNIT_LABELS = [
   "discuss-milestone", "discuss-slice", "worktree-merge",
   // Deep planning mode (project-level) units
   "workflow-preferences", "discuss-project", "discuss-requirements",
-  "research-decision", "research-project",
+  "research-project",
 ] as const;
 export type UnitLabel = (typeof KNOWN_UNIT_LABELS)[number];
 

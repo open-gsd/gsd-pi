@@ -30,7 +30,6 @@ import type { GSDPreferences } from "../preferences.ts";
 const WORKFLOW_PREFS_RULE_NAME = "deep: pre-planning (no workflow prefs) → workflow-preferences";
 const PROJECT_RULE_NAME = "deep: pre-planning (no PROJECT) → discuss-project";
 const REQUIREMENTS_RULE_NAME = "deep: pre-planning (no REQUIREMENTS) → discuss-requirements";
-const RESEARCH_DECISION_RULE_NAME = "deep: pre-planning (no research decision) → research-decision";
 const RESEARCH_PROJECT_RULE_NAME = "deep: pre-planning (research approved, files missing) → research-project";
 
 const VALID_PROJECT_MD = [
@@ -547,52 +546,6 @@ test("Deep mode: discuss-requirements DOES dispatch when REQUIREMENTS.md exists 
   }
 });
 
-// ─── research-decision rule ───────────────────────────────────────────────
-
-test("Deep mode: research-decision does NOT dispatch in light mode", async (t) => {
-  const base = makeIsolatedBaseWithCleanup(t);
-
-  writeValidProject(base);
-  writeValidRequirements(base);
-  const result = await rule(RESEARCH_DECISION_RULE_NAME).match(makeCtx(base, undefined));
-  assert.strictEqual(result, null);
-});
-
-test("Deep mode: research-decision does NOT dispatch when REQUIREMENTS.md missing", async (t) => {
-  const base = makeIsolatedBaseWithCleanup(t);
-
-  writeValidProject(base);
-  // No REQUIREMENTS.md
-  const prefs = { planning_depth: "deep" } as GSDPreferences;
-  const result = await rule(RESEARCH_DECISION_RULE_NAME).match(makeCtx(base, prefs));
-  assert.strictEqual(result, null, "REQUIREMENTS.md must exist before research decision is asked");
-});
-
-test("Deep mode: research-decision does NOT dispatch when no decision is recorded because default is skip", async (t) => {
-  const base = makeIsolatedBaseWithCleanup(t);
-
-  writeCapturedDeepPrefs(base);
-  writeValidProject(base);
-  writeValidRequirements(base);
-  const prefs = { planning_depth: "deep" } as GSDPreferences;
-  const result = await rule(RESEARCH_DECISION_RULE_NAME).match(makeCtx(base, prefs));
-  assert.strictEqual(result, null);
-  assert.equal(getDeepStageGate(prefs, base).status, "complete");
-  assert.equal(existsSync(join(base, ".gsd", "runtime", "research-decision.json")), false, "the default is not written");
-});
-
-test("Deep mode: research-decision does NOT dispatch when decision marker exists", async (t) => {
-  const base = makeIsolatedBaseWithCleanup(t);
-
-  writeValidProject(base);
-  writeValidRequirements(base);
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  recordResearchDecision("skip");
-  const prefs = { planning_depth: "deep" } as GSDPreferences;
-  const result = await rule(RESEARCH_DECISION_RULE_NAME).match(makeCtx(base, prefs));
-  assert.strictEqual(result, null, "decision already recorded — fall through");
-});
-
 // ─── research-project rule ────────────────────────────────────────────────
 
 function setupReadyForResearchProject(base: string): void {
@@ -850,21 +803,18 @@ test("Deep mode: deep-mode rules registered in correct order", () => {
   const workflowIdx = DISPATCH_RULES.findIndex(r => r.name === WORKFLOW_PREFS_RULE_NAME);
   const projectIdx = DISPATCH_RULES.findIndex(r => r.name === PROJECT_RULE_NAME);
   const requirementsIdx = DISPATCH_RULES.findIndex(r => r.name === REQUIREMENTS_RULE_NAME);
-  const researchDecisionIdx = DISPATCH_RULES.findIndex(r => r.name === RESEARCH_DECISION_RULE_NAME);
   const researchProjectIdx = DISPATCH_RULES.findIndex(r => r.name === RESEARCH_PROJECT_RULE_NAME);
   const milestoneIdx = DISPATCH_RULES.findIndex(r => r.name === "pre-planning (no context) → discuss-milestone");
 
   assert.ok(workflowIdx >= 0, "workflow-preferences rule must be registered");
   assert.ok(projectIdx >= 0, "project rule must be registered");
   assert.ok(requirementsIdx >= 0, "requirements rule must be registered");
-  assert.ok(researchDecisionIdx >= 0, "research-decision rule must be registered");
   assert.ok(researchProjectIdx >= 0, "research-project rule must be registered");
   assert.ok(milestoneIdx >= 0, "milestone rule must be registered");
 
-  // Order: workflow-prefs → discuss-project → discuss-requirements → research-decision → research-project → discuss-milestone
+  // Order: workflow-prefs → discuss-project → discuss-requirements → research-project → discuss-milestone
   assert.ok(workflowIdx < projectIdx, "workflow-prefs must fire before discuss-project");
   assert.ok(projectIdx < requirementsIdx, "discuss-project must fire before discuss-requirements");
-  assert.ok(requirementsIdx < researchDecisionIdx, "discuss-requirements must fire before research-decision");
-  assert.ok(researchDecisionIdx < researchProjectIdx, "research-decision must fire before research-project (gate before action)");
+  assert.ok(requirementsIdx < researchProjectIdx, "discuss-requirements must fire before research-project");
   assert.ok(researchProjectIdx < milestoneIdx, "research-project must fire before discuss-milestone");
 });
