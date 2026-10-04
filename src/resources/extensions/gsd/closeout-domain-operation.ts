@@ -15,9 +15,11 @@ import {
   closeoutPlanHasEffects,
   insertCloseoutPlan,
   insertSettlementReceipt,
+  insertWaivedValidationAttempt,
   pendingRequiredCloseoutEffects,
   readCloseoutAttemptId,
   readMilestoneCloseoutPlan,
+  WAIVED_VALIDATION_ATTEMPT_OPERATION,
   type CloseoutEffectInput,
   type CloseoutPlan,
   type CloseoutSettlementReceipt,
@@ -148,6 +150,39 @@ function insertPreparedCloseoutPlan(
 }
 
 /**
+ * A Milestone whose validation was waived before it ran has no Attempt. Record
+ * the Attempt the Waiver settled, so the Closeout Plan cites an Attempt like
+ * the plan of a validated Milestone.
+ */
+function recordWaivedValidationAttempt(milestoneId: string, waiverId: string): string {
+  executeDomainOperation(
+    operationRequest(
+      WAIVED_VALIDATION_ATTEMPT_OPERATION,
+      internalExecutionInvocation(`internal:closeout.waived_attempt:${waiverId}`),
+      { milestoneId, waiverId },
+    ),
+    (context) => {
+      const attemptId = insertWaivedValidationAttempt(context, {
+        lifecycleId: requireOpenMilestoneLifecycle(context.projectId, milestoneId),
+        waiverId,
+        settledAt: new Date().toISOString(),
+      });
+      return {
+        events: [{
+          eventType: "milestone.validation.attempt_waived",
+          entityType: "milestone",
+          entityId: milestoneId,
+          payload: { attemptId, waiverId },
+          destinations: ["projection"],
+        }],
+        projections: lifecycleProjection(milestoneId),
+      };
+    },
+  );
+  return readCloseoutAttemptId(milestoneId, true)!;
+}
+
+/**
  * Store the Closeout Plan while the Milestone is still open. The plan proves
  * the completion requirements at one source revision and lists the host
  * effects that must settle before `milestone.complete` may run.
@@ -180,7 +215,9 @@ export function prepareCloseout(input: {
     revision: authorization.revision,
     sourceRevision,
   });
-  const attemptId = readCloseoutAttemptId(milestoneId);
+  const waiverId = authorization.kind === "waived" ? authorization.waiverId : undefined;
+  const attemptId = readCloseoutAttemptId(milestoneId, Boolean(waiverId)) ??
+    (waiverId ? recordWaivedValidationAttempt(milestoneId, waiverId) : null);
   if (!attemptId) {
     throw new MilestoneLifecycleValidationError(
       `Milestone ${milestoneId} has no settled, succeeded Attempt for a Closeout Plan`,

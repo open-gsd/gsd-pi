@@ -36,7 +36,6 @@ import {
   readMilestoneCloseoutAuthorization,
   readMilestoneLifecycleStatus,
 } from "../db/milestone-closeout-readiness.js";
-import { readCloseoutAttemptId } from "../db/writers/closeout.js";
 import {
   pendingRequiredCloseoutEffects,
   prepareCloseout,
@@ -293,16 +292,11 @@ export async function handleCompleteMilestone(
       const effects = lifecycleStatus === "ready" || lifecycleStatus === "in_progress"
         ? milestoneCloseoutEffects(artifactBasePath, params.milestoneId)
         : [];
-      // A Closeout Plan must cite a succeeded Attempt. A Milestone closed out
-      // on a validation Waiver has none, so it completes here as before.
       // A live plan that waits for an effect the Milestone no longer needs
       // (the branch was merged and deleted by hand, or the work now runs on
       // the integration branch) is superseded by a plan with the current
       // effects, so it does not block completion forever.
-      if (
-        (effects.length > 0 || hasPendingCloseoutEffect(params.milestoneId)) &&
-        readCloseoutAttemptId(params.milestoneId)
-      ) {
+      if (effects.length > 0 || hasPendingCloseoutEffect(params.milestoneId)) {
         const plan = prepareCloseout({
           invocation: { ...invocation, idempotencyKey: `${invocation.idempotencyKey}/closeout.prepare` },
           milestoneId: params.milestoneId,

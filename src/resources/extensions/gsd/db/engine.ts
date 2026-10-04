@@ -104,7 +104,11 @@ import { createConversationFoundationSchemaV33 } from "../db-conversation-founda
 import { rebuildWorkflowItemLifecyclesForBlockerAccepted } from "../db-blocker-accepted-closeout-schema.js";
 import { ensureLifecycleCoverageFence, hasLifecycleCoverageFence } from "../db-lifecycle-coverage-schema.js";
 import { createLifecycleFoundationSchemaV32 } from "../db-lifecycle-foundation-schema.js";
-import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "../db-projection-import-kernel-closeout-foundation-schema.js";
+import {
+  createProjectionImportKernelCloseoutFoundationSchemaV35,
+  ensureCloseoutPlanAttemptTrigger,
+  hasCloseoutPlanAttemptTrigger,
+} from "../db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "../db-recovery-evidence-foundation-schema.js";
 import {
   invalidateMemoriesFtsRebuildMarker,
@@ -227,6 +231,7 @@ function assessStartupRepair(db: DbAdapter): StartupRepairAssessment {
     || getCurrentSchemaVersion(db) !== SCHEMA_VERSION
     || !hasCanonicalOutboxInvariantsV31(db)
     || !hasLifecycleCoverageFence(db)
+    || !hasCloseoutPlanAttemptTrigger(db)
     || !hasVerificationEvidenceDedupIndex(db)
     || !hasRuntimeKvSchemaV25(db)
     || !hasRequiredSchemaObjects(db)
@@ -456,6 +461,7 @@ function initSchema(
   migrateSchema(db, dbPath, startupTransactionOpen, migrationBackupPrepared);
   ensureCanonicalOutboxInvariantsV31(db);
   ensureLifecycleCoverageFence(db);
+  ensureCloseoutPlanAttemptTrigger(db);
   rebuildMemoriesFtsSchemaOnce(db, {
     force: forceMemoriesFtsRebuild,
     onRebuildFailed: (message) => logWarning("db", message),

@@ -13,6 +13,8 @@ import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export const CLOSEOUT_PREPARE_OPERATION = "milestone.closeout.prepare";
 export const CLOSEOUT_SETTLE_EFFECT_OPERATION = "milestone.closeout.settle_effect";
+/** The only operation type the schema lets insert an Attempt that is already settled. */
+export const WAIVED_VALIDATION_ATTEMPT_OPERATION = "attempt.settle";
 
 export interface CloseoutEffectInput {
   /** One effect per kind in a plan; the kind is also the idempotency key. */
@@ -208,8 +210,12 @@ export function readUnsettledEffectsBehind(
       .some((effect) => effect.effectKind === effectKind && !effect.receipt));
 }
 
-/** The settled, succeeded Attempt a Closeout Plan must cite, newest first. */
-export function readCloseoutAttemptId(milestoneId: string): string | null {
+/**
+ * The settled Attempt a Closeout Plan must cite, newest first. The Attempt
+ * must have succeeded, unless the Milestone closes out on a validation Waiver:
+ * then the newest settled Attempt of any outcome is the one the Waiver covers.
+ */
+export function readCloseoutAttemptId(milestoneId: string, waived = false): string | null {
   const row = getDb().prepare(`
     SELECT attempt.attempt_id
     FROM workflow_execution_attempts attempt
@@ -221,16 +227,69 @@ export function readCloseoutAttemptId(milestoneId: string): string | null {
      AND authority.singleton = 1
     JOIN workflow_attempt_results result
       ON result.attempt_id = attempt.attempt_id
-     AND result.outcome = 'succeeded'
     WHERE lifecycle.item_kind = 'milestone'
       AND lifecycle.milestone_id = :milestone_id
       AND lifecycle.slice_id IS NULL
       AND lifecycle.task_id IS NULL
       AND attempt.attempt_state = 'settled'
+      AND (:waived = 1 OR result.outcome = 'succeeded')
     ORDER BY attempt.attempt_number DESC
     LIMIT 1
-  `).get({ ":milestone_id": milestoneId });
+  `).get({ ":milestone_id": milestoneId, ":waived": waived ? 1 : 0 });
   return typeof row?.["attempt_id"] === "string" ? row["attempt_id"] : null;
+}
+
+/**
+ * Record the validation Attempt of a Milestone whose validation was waived
+ * before it ran: the first Attempt of the lifecycle, settled as interrupted
+ * by the Waiver. The Closeout Plan of the Milestone cites it.
+ */
+export function insertWaivedValidationAttempt(
+  context: Readonly<DomainOperationContext>,
+  input: { lifecycleId: string; waiverId: string; settledAt: string },
+): string {
+  if (requireActiveDomainOperationContext(context) !== WAIVED_VALIDATION_ATTEMPT_OPERATION) {
+    throw new Error(`Waived validation Attempt requires a ${WAIVED_VALIDATION_ATTEMPT_OPERATION} Domain Operation`);
+  }
+  const attemptId = randomUUID();
+  const provenance = {
+    ":attempt_id": attemptId,
+    ":project_id": context.projectId,
+    ":lifecycle_id": input.lifecycleId,
+    ":settled_at": input.settledAt,
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  };
+  getDb().prepare(`
+    INSERT INTO workflow_execution_attempts (
+      attempt_id, project_id, lifecycle_id, attempt_number, retry_of_attempt_id,
+      attempt_state, claimed_at, ended_at, settle_outcome,
+      claim_operation_id, claim_project_revision, claim_authority_epoch,
+      settle_operation_id, settle_project_revision, settle_authority_epoch
+    ) VALUES (
+      :attempt_id, :project_id, :lifecycle_id, 1, NULL,
+      'settled', :settled_at, :settled_at, 'interrupted',
+      :operation_id, :project_revision, :authority_epoch,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run(provenance);
+  getDb().prepare(`
+    INSERT INTO workflow_attempt_results (
+      result_id, project_id, lifecycle_id, attempt_id, outcome,
+      failure_class, summary, output_json, created_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :result_id, :project_id, :lifecycle_id, :attempt_id, 'interrupted',
+      'validation-waived', 'Milestone validation was waived before it ran.', :output_json, :settled_at,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ...provenance,
+    ":result_id": randomUUID(),
+    ":output_json": canonicalDomainJson({ waiverId: input.waiverId }),
+  });
+  return attemptId;
 }
 
 export function insertCloseoutPlan(
