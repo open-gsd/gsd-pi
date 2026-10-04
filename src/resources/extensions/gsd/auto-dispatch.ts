@@ -34,7 +34,6 @@ import {
 } from "./gsd-db.js";
 import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
-import { readPreExecFailure } from "./db/unit-dispatch-pre-exec-failure.js";
 import { isClosedStatus, isInactiveStatus } from "./status-guards.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
@@ -1130,18 +1129,10 @@ export const DISPATCH_RULES: DispatchRule[] = [
       if (!state.activeSlice) return missingSliceStop(mid, state.phase);
       const sid = state.activeSlice!.id;
       const sTitle = state.activeSlice!.title;
-      // #4551: give the planner the pre-exec findings of the last plan of this
-      // slice, so the re-dispatched prompt includes the exact blocked
-      // references. They are on the dispatch row of that plan (ADR-048), so a
-      // resume or a restart still has them. beginPreExecRepair owns the retry
-      // cap. This read changes nothing: the dispatch this rule opens becomes
-      // the newest row of the slice, and it has no findings of its own.
-      const unitId = `${mid}/${sid}`;
-      const priorPreExecFailure = readPreExecFailure(unitId) ?? undefined;
       return {
         action: "dispatch",
         unitType: "plan-slice",
-        unitId,
+        unitId: `${mid}/${sid}`,
         prompt: await buildPlanSlicePrompt(
           mid,
           midTitle,
@@ -1149,7 +1140,7 @@ export const DISPATCH_RULES: DispatchRule[] = [
           sTitle,
           basePath,
           undefined,
-          { sessionContextWindow, modelRegistry, sessionProvider, priorPreExecFailure },
+          { sessionContextWindow, modelRegistry, sessionProvider },
         ),
       };
     },

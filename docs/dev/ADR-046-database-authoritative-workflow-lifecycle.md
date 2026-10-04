@@ -202,8 +202,7 @@ Attempts are the kernel record of Task execution. For every other unit type the
 kernel record is the claimed `unit_dispatches` row. The target is that retry and
 recovery budgets, pause state and stage checkpoints are stored on that row.
 Today only three retry budgets (zero-tool, tool-unavailable and pre-execution
-repair) and the findings of a failed pre-execution check are stored there. See
-the 2026-10-03 amendment in
+repair) are stored there. See the 2026-10-03 amendment in
 [ADR-048](ADR-048-unitrun-dispatch-row.md) for the parts that are done.
 
 The refactor remains provider-neutral and extension-first. Provider-specific

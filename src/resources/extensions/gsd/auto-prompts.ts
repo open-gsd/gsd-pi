@@ -2643,13 +2643,6 @@ export async function buildPlanSlicePrompt(
     sessionContextWindow?: number;
     modelRegistry?: MinimalModelRegistry;
     sessionProvider?: string;
-    /** Failure context from a prior pre-exec gate run (#4551). When present, a
-     *  "Fix these specific issues" section is appended so the LLM addresses the
-     *  exact problems instead of producing an identical plan that fails again. */
-    priorPreExecFailure?: {
-      blockingFindings: string[];
-      verdictExcerpt: string;
-    };
   },
 ): Promise<string> {
   const prependBlocks: string[] = [];
@@ -2661,34 +2654,6 @@ export async function buildPlanSlicePrompt(
     prependBlocks.push(
       `## Prior Sketch Scope (soft hint — non-binding)\n\n${options.softScopeHint.trim()}\n\n` +
       `This scope was captured during an earlier progressive-planning pass that was later disabled. Treat it as context only — you may plan beyond it if the work genuinely requires more scope. Do NOT treat this as a hard boundary.`,
-    );
-  }
-  // #4551: inject pre-exec failure context so the re-dispatched plan-slice
-  // addresses the exact blocked references rather than reproducing the same plan.
-  if (options?.priorPreExecFailure) {
-    const { blockingFindings, verdictExcerpt } = options.priorPreExecFailure;
-    const findingsList = blockingFindings.length > 0
-      ? blockingFindings.map(f => `- ${f}`).join("\n")
-      : "- (no specific findings recorded)";
-    prependBlocks.push(
-      `## Fix these specific issues from the prior pre-exec check\n\n` +
-      `The previous plan-slice attempt was blocked by pre-execution validation.\n` +
-      `Gate verdict: ${verdictExcerpt}\n\n` +
-      `Blocked references that must be resolved in this plan:\n${findingsList}\n\n` +
-      `**How to fix each type of issue:**\n` +
-      `- **"[file] X doesn't exist and isn't created by prior or same-task outputs"**: ` +
-      `Either (a) add an earlier task that creates X on disk before the task that needs it, ` +
-      `or (b) if this task IS the one that creates X, move X from inputs to expected_output. ` +
-      `Do NOT put X in a task's expected_output if that task only reads or verifies X — only tasks that actually write X to disk should list it in expected_output.\n` +
-      `- **"[file] X: ... GSD planning artifacts are projections preloaded as context / written by workflow tools"**: ` +
-      `Remove X from the task's inputs, files, and expectedOutput entirely. Planning artifacts (anything under .gsd/, .planning/, or .audits/, or names like M001-CONTEXT.md / S01-PLAN.md) are preloaded as context and written by workflow tools — ` +
-      `do NOT add a task that creates X and do NOT move X to expectedOutput.\n` +
-      `- **"[file] X: Task T_early reads X but it's created by task T_late (sequence violation)"**: ` +
-      `Either (a) reorder tasks so T_late (the creator) runs before T_early (the reader), ` +
-      `or (b) if T_late doesn't actually create X (it only reads/tests it), remove X from T_late's expected_output entirely.\n` +
-      `- **"[package] P not found on npm"**: Either remove the npm install for P, or use the correct package name.\n\n` +
-      `Every file listed in a task's inputs must either exist on disk already or appear in an earlier task's expected_output. ` +
-      `A task's expected_output must only list files it actually writes to disk.`,
     );
   }
   return renderSlicePrompt({
