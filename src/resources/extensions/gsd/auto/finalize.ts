@@ -24,6 +24,7 @@ import {
   hasAnyIssues,
 } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.js";
 import { buildPhaseHandoffOutcome, setAutoOutcomeWidget } from "../auto-dashboard.js";
 import {
   applyVerificationRetryPolicy,
@@ -447,7 +448,12 @@ export async function runFinalize(
         clearFinalizingUnit();
         return retryPolicyResult;
       }
-      rememberRetryDispatch(s, preUnitSnapshot, iterData);
+      // ADR-048: a retry stored on the dispatch row is selected by the dispatch
+      // rules from the database. Only a unit with no stored retry is replayed
+      // from the session snapshot.
+      if (!preUnitSnapshot || !readStoredUnitRetry(preUnitSnapshot.type, preUnitSnapshot.id)) {
+        rememberRetryDispatch(s, preUnitSnapshot, iterData);
+      }
       debugLog("autoLoop", {
         phase: retryPhase,
         iteration: ic.iteration,

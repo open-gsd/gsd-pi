@@ -112,6 +112,7 @@ import {
 } from "./verification-source-integrity.js";
 import { internalExecutionInvocation } from "./execution-invocation.js";
 import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
+import { readStoredUnitRetry } from "./db/unit-dispatch-retries.js";
 import {
   grantMilestoneValidationWaiver,
   type MilestoneValidationWaiverReason,
@@ -1140,6 +1141,34 @@ export const DISPATCH_RULES: DispatchRule[] = [
           sTitle,
           basePath,
           undefined,
+          { sessionContextWindow, modelRegistry, sessionProvider },
+        ),
+      };
+    },
+  },
+  {
+    // ADR-048: the pre-execution check refused the plan of this slice and the
+    // retry is stored on the planner's dispatch row. The task rows of the
+    // refused plan put the slice in a later phase, so this rule sends the slice
+    // back to the planner before a gate or a task uses that plan. It reads the
+    // database only, so a restart selects the same unit as a live process.
+    name: "stored retry → plan-slice / refine-slice",
+    match: async ({ state, mid, midTitle, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
+      if (state.phase !== "evaluating-gates" && state.phase !== "executing") return null;
+      if (!state.activeSlice) return null;
+      const sid = state.activeSlice.id;
+      const sTitle = state.activeSlice.title;
+      const unitId = `${mid}/${sid}`;
+      const unitType = (["plan-slice", "refine-slice"] as const)
+        .find((type) => readStoredUnitRetry(type, unitId) !== null);
+      if (!unitType) return null;
+      const buildPrompt = unitType === "refine-slice" ? buildRefineSlicePrompt : buildPlanSlicePrompt;
+      return {
+        action: "dispatch",
+        unitType,
+        unitId,
+        prompt: await buildPrompt(
+          mid, midTitle, sid, sTitle, basePath, undefined,
           { sessionContextWindow, modelRegistry, sessionProvider },
         ),
       };

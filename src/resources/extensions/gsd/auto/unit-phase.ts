@@ -27,6 +27,7 @@ import { isDbAvailable, getTask, getGateResults } from "../gsd-db.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import { getLatestForUnit } from "../db/unit-dispatches.js";
 import { resetUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.js";
 import { markWorkerStopping } from "../db/auto-workers.js";
 import { releaseMilestoneLease } from "../db/milestone-leases.js";
 import type { MinimalModelRegistry } from "../context-budget.js";
@@ -280,9 +281,12 @@ export async function runUnitPhase(
     }
   }
 
-  if (s.pendingVerificationRetry && s.pendingVerificationRetry.unitId === unitId) {
-    const retryCtx = s.pendingVerificationRetry;
-    s.pendingVerificationRetry = null;
+  // The retry context of this process, or the one stored on the dispatch row
+  // of the unit (ADR-048) when a restart lost the session.
+  const sessionRetry = s.pendingVerificationRetry?.unitId === unitId ? s.pendingVerificationRetry : null;
+  if (sessionRetry) s.pendingVerificationRetry = null;
+  const retryCtx = sessionRetry ?? readStoredUnitRetry(unitType, unitId);
+  if (retryCtx) {
     const capped =
       retryCtx.failureContext.length > MAX_RECOVERY_CHARS
         ? retryCtx.failureContext.slice(0, MAX_RECOVERY_CHARS) +

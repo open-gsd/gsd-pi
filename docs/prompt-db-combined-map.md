@@ -21,7 +21,7 @@ See also:
                        │  reads
                        ▼
               auto-dispatch.ts
-            (DISPATCH_RULES, 28 rules,
+            (DISPATCH_RULES, 29 rules,
              first match → prompt + builder)
                        │
                        ▼

@@ -44,7 +44,7 @@ The work has four parts:
 
 Part 1 has started. `unit_dispatch_budgets (dispatch_id, kind, used)` holds one count for each budget kind. A retry opens a new dispatch row for the same unit, so the count of a unit is the value on its newest dispatch row that holds the kind, and a reset writes `0` on the newest row. The zero-tool, tool-unavailable and pre-execution repair budgets use it (`db/unit-dispatch-budgets.ts`). The three budgets have one release rule: a pass of the unit, or the pause at the cap, writes `0`, so a resume after a person fixed the cause starts a new budget. A unit that runs with no dispatch row (a custom-engine step) has no durable identity, so its count lasts for the process only.
 
-Part 4 has not started. One session field is deleted with no database replacement: the findings of a failed pre-execution check (`lastPreExecFailure` on the auto session and in the paused-session metadata). Its only reader was the `planning → plan-slice` dispatch rule. That rule matches only a slice with no task rows. The check stores findings only for a slice that has task rows, and the rows stay after the failure, so the reader was unreachable. The planner retry gets the findings from the verification retry context. That context is session memory and a kill loses it; to store it on the dispatch row is part 4 work. A paused-session row written by an older build may still carry the deleted field; it is ignored.
+Part 4 has started with one decision: the planner retry after a failed pre-execution check (see the second 2026-10-04 amendment). One session field was deleted with no database replacement: the findings of a failed pre-execution check (`lastPreExecFailure` on the auto session and in the paused-session metadata). Its only reader was the `planning → plan-slice` dispatch rule. That rule matches only a slice with no task rows. The check stores findings only for a slice that has task rows, and the rows stay after the failure, so the reader was unreachable. A paused-session row written by an older build may still carry the deleted field; it is ignored.
 
 ## Amendment 2026-10-04: the sidecar queue is rows linked to the dispatch row
 
@@ -60,6 +60,21 @@ Rules:
 - **Quick tasks.** Triage stores each quick task as a `held` row. A capture that already has a `held` or `queued` row is not added again. The capture is marked executed after its row becomes `queued`, so a kill between the two steps cannot lose the task. When the row becomes `queued` its unit id takes the milestone the session runs at that time, so a session that moves to the next milestone runs the quick tasks it holds as units of that milestone.
 
 Not changed: the auto loop still takes queued rows before `advance()`. Selecting them inside `advance()` is part of the Lifecycle Kernel work.
+
+## Amendment 2026-10-04: the planner retry after a failed pre-execution check is a row on the dispatch row
+
+This is the first piece of part 4. The pre-execution check runs at the close-out of a `plan-slice` or `refine-slice` unit. When it refuses the plan, the host decides to run the planner again with the findings. Before this amendment the decision was session memory only (`pendingVerificationRetry` and the `pendingVerificationRetryDispatch` snapshot). The task rows of the refused plan stay in the database, so a restart derived the `executing` phase and ran the first task of the refused plan.
+
+The decision is now a row in `unit_dispatch_retries (dispatch_id, failure_context, attempt, created_at)` (`db/unit-dispatch-retries.ts`).
+
+Rules:
+
+- **Store.** The check stores the retry on the newest dispatch row of the planner unit, together with the pre-execution budget count it used. A unit with no dispatch row stores nothing and keeps the session snapshot, so its retry lasts for the process only.
+- **Select.** The dispatch rule `stored retry → plan-slice / refine-slice` reads the row. It matches in the `evaluating-gates` and `executing` phases, before a gate or a task uses the refused plan, and sends the slice back to the unit type that stored the retry. A live process and a restarted process use the same rule: finalize keeps no session snapshot for a retry that has a row.
+- **Prompt.** The unit prompt gets the stored failure context when the session has none for the unit.
+- **Release.** The row is deleted when the next close-out of the planner unit does not ask for a retry (the check passed, or it did not run), when the retry cap pauses auto-mode, and when the retry policy pauses auto-mode. This is the release rule of the budgets. A new dispatch of the unit does not release the row, so a process that is killed in the middle of the re-plan runs the re-plan again. A pause or a stop by the user does not release it.
+
+Not changed: every other verification retry (artifact verification, host verification of a Task, milestone validation, the git-commit repair) is still session memory, and `exhaustedVerificationUnits` is still a session set. For these units a restart selects the same unit from state; it loses only the failure context and the retry count.
 
 ## Rejected alternatives
 

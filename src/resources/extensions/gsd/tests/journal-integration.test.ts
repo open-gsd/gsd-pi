@@ -46,6 +46,10 @@ import {
   openDatabase,
 } from "../gsd-db.js";
 import { SourceObservationStore } from "../source-observations.js";
+import { registerAutoWorker } from "../db/auto-workers.js";
+import { claimMilestoneLease } from "../db/milestone-leases.js";
+import { recordDispatchClaim } from "../db/unit-dispatches.js";
+import { storeUnitRetry } from "../db/unit-dispatch-retries.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -753,6 +757,85 @@ test("runUnitPhase retry dispatch receives the missing-gate corrective context a
   assert.ok(retryPrompt.includes("evaluate gates"), "retry prompt must retain the original unit prompt");
 
   try { closeDatabase(); } catch { /* already closed by t.after ordering */ }
+});
+
+test("runUnitPhase gives a restarted planner the retry context stored on its dispatch row", async (t) => {
+  const base = await setupGateEvaluateFixture(t, "gsd-stored-planner-retry-", { q3: "absent", q4: "absent" });
+  // The planner run that the pre-execution check refused, before the kill.
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claim = recordDispatchClaim({
+    traceId: "trace",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+  });
+  if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+  storeUnitRetry("plan-slice", {
+    unitId: "M001/S01",
+    failureContext: "Task T01 reads missing-input.ts, which no task creates.",
+    attempt: 1,
+  });
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+  const sentPrompts: string[] = [];
+  // The restarted process: a session with no retry context in memory.
+  const ic = makeIC(makeMockDeps(capture), {
+    pi: {
+      sendMessage: (msg: { content?: unknown }) => {
+        sentPrompts.push(String(msg?.content ?? ""));
+      },
+      setModel: async () => true,
+      getThinkingLevel: () => "off",
+      setThinkingLevel: () => {},
+    } as any,
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+    prompt: "plan the slice",
+    finalPrompt: "plan the slice",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "executing",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+
+  const run = runUnitPhase(ic, iterData, { consecutiveFinalizeTimeouts: 0 });
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+  await run;
+
+  assert.equal(sentPrompts.length, 1, "the planner is dispatched once");
+  assert.ok(
+    sentPrompts[0].includes("VERIFICATION FAILED — AUTO-FIX ATTEMPT 1"),
+    "the planner prompt must carry the stored attempt number",
+  );
+  assert.ok(
+    sentPrompts[0].includes("missing-input.ts"),
+    "the planner prompt must carry the stored findings",
+  );
+  assert.ok(sentPrompts[0].includes("plan the slice"), "the planner prompt must keep the unit prompt");
 });
 
 test("runUnitPhase increments unitDispatchCount for repeated artifact-missing retries", async () => {

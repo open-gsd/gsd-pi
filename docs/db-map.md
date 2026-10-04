@@ -739,8 +739,9 @@ result_json  TEXT
 `db-required-schema.ts` is the registration and completeness authority for
 non-versioned schema features required on every database open. It registers
 the ADR-047 liveness feature, the ADR-048
-[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned) and
-[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) features,
+[`unit_dispatch_budgets`](#unit_dispatch_budgets-non-versioned),
+[`unit_dispatch_sidecars`](#unit_dispatch_sidecars-non-versioned) and
+[`unit_dispatch_retries`](#unit_dispatch_retries-non-versioned) features,
 the runtime-control feature and the
 [`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
 feature below;
@@ -788,6 +789,21 @@ FOREIGN KEY trigger_dispatch_id → unit_dispatches(id)
 
 - DDL owner: `db-unit-dispatch-sidecar-schema.ts`. Reader: `db/unit-dispatch-sidecars.ts`. Writer: `db/writers/unit-dispatch-sidecars.ts`.
 - Scope, status and kill rules: see the 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `unit_dispatch_retries` (non-versioned)
+
+```
+dispatch_id      INTEGER PRIMARY KEY   ← the dispatch whose close-out decided the retry
+failure_context  TEXT NOT NULL         ← the text the next run of the unit gets in its prompt
+attempt          INTEGER NOT NULL CHECK (attempt >= 1)
+created_at       TEXT NOT NULL
+FOREIGN KEY dispatch_id → unit_dispatches(id)
+```
+
+- DDL owner: `db-unit-dispatch-retry-schema.ts`. Access: `db/unit-dispatch-retries.ts`.
+- Store, read and release rules: see the second 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
 
 ---
 

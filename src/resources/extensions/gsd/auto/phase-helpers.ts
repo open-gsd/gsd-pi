@@ -2,6 +2,7 @@
 // File Purpose: Shared helpers used across auto-loop phase modules.
 
 import { debugLog } from "../debug-logger.js";
+import { releaseUnitRetry } from "../db/unit-dispatch-retries.js";
 import { recordUnitEnd } from "../unit-runtime.js";
 import { resolveWorktreeProjectRoot, normalizeWorktreePathForCompare } from "../worktree-root.js";
 import { decideVerificationRetry, verificationRetryKey } from "./verification-retry-policy.js";
@@ -72,6 +73,8 @@ export async function applyVerificationRetryPolicy(
 
   if (decision.action === "pause") {
     s.pendingVerificationRetry = null;
+    // The pause hands the unit to a person, so its stored retry is released.
+    if (unitType && retryInfo) releaseUnitRetry(unitType, retryInfo.unitId);
     debugLog("autoLoop", {
       phase: `${phase}-paused`,
       reason: decision.reason,

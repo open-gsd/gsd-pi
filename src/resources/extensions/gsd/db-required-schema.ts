@@ -22,6 +22,10 @@ import {
   createIntegrationBranchSchema,
   hasIntegrationBranchSchema,
 } from "./db-integration-branch-schema.js";
+import {
+  createUnitDispatchRetrySchema,
+  hasUnitDispatchRetrySchema,
+} from "./db-unit-dispatch-retry-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -54,6 +58,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "integration-branch",
     isPresent: hasIntegrationBranchSchema,
     create: createIntegrationBranchSchema,
+  },
+  {
+    id: "unit-dispatch-retries",
+    isPresent: hasUnitDispatchRetrySchema,
+    create: createUnitDispatchRetrySchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

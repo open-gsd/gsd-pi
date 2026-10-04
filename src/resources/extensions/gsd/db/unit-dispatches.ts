@@ -572,3 +572,35 @@ export function setDispatchBudgetUsed(dispatchId: number, kind: string, used: nu
     });
   });
 }
+
+/** Store the retry decision that the close-out of the dispatch row's unit made. */
+export function setDispatchRetry(dispatchId: number, failureContext: string, attempt: number): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `INSERT INTO unit_dispatch_retries (dispatch_id, failure_context, attempt, created_at)
+       VALUES (:dispatch_id, :failure_context, :attempt, :created_at)
+       ON CONFLICT (dispatch_id) DO UPDATE SET
+         failure_context = excluded.failure_context,
+         attempt = excluded.attempt,
+         created_at = excluded.created_at`,
+    ).run({
+      ":dispatch_id": dispatchId,
+      ":failure_context": failureContext,
+      ":attempt": attempt,
+      ":created_at": new Date().toISOString(),
+    });
+  });
+}
+
+/** Delete the stored retry decisions of every dispatch row of the unit. */
+export function deleteUnitDispatchRetries(unitType: string, unitId: string): void {
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `DELETE FROM unit_dispatch_retries
+       WHERE dispatch_id IN (
+         SELECT id FROM unit_dispatches
+         WHERE unit_type = :unit_type AND unit_id = :unit_id
+       )`,
+    ).run({ ":unit_type": unitType, ":unit_id": unitId });
+  });
+}

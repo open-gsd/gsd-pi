@@ -16,7 +16,11 @@ import { DISPATCH_RULES } from "../auto-dispatch.ts";
 import type { DispatchContext, DispatchAction } from "../auto-dispatch.ts";
 import type { GSDState } from "../types.ts";
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
-import { closeDatabase, insertArtifact, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertArtifact, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import { claimMilestoneLease } from "../db/milestone-leases.ts";
+import { recordDispatchClaim } from "../db/unit-dispatches.ts";
+import { storeUnitRetry } from "../db/unit-dispatch-retries.ts";
 
 // ─── State helpers ────────────────────────────────────────────────────────
 
@@ -442,6 +446,48 @@ test("dispatch-rule-coverage: executing honors pending verification retry unit",
   );
 });
 
+for (const { phase, unitType } of [
+  { phase: "executing", unitType: "plan-slice" },
+  { phase: "evaluating-gates", unitType: "refine-slice" },
+] as const) {
+  test(`dispatch-rule-coverage: ${phase} with a stored ${unitType} retry → ${unitType}`, async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-stored-retry-"));
+    t.after(() => rmSync(tmp, { recursive: true, force: true }));
+    openDatabase(":memory:");
+    t.after(() => closeDatabase());
+    insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "First Slice" });
+    const workerId = registerAutoWorker({ projectRootRealpath: tmp });
+    const lease = claimMilestoneLease(workerId, "M001");
+    if (!lease.ok) throw new Error("expected test lease");
+    const claim = recordDispatchClaim({
+      traceId: "trace",
+      workerId,
+      milestoneLeaseToken: lease.token,
+      milestoneId: "M001",
+      sliceId: "S01",
+      unitType,
+      unitId: "M001/S01",
+    });
+    if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+    storeUnitRetry(unitType, { unitId: "M001/S01", failureContext: "the plan failed its check", attempt: 1 });
+
+    const match = await findFirstMatch(makeCtx(
+      tmp,
+      makeState({
+        phase,
+        activeSlice: { id: "S01", title: "First Slice" },
+        activeTask: { id: "T01", title: "First Task" },
+      }),
+    ));
+    assertMatch(
+      match,
+      { ruleName: "stored retry → plan-slice / refine-slice", action: "dispatch", unitType },
+      `${phase} with a stored ${unitType} retry`,
+    );
+  });
+}
+
 test("dispatch-rule-coverage: summarizing → complete-slice", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-sum-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
@@ -494,7 +540,7 @@ test("dispatch-rule-coverage: rule registry has the expected size", () => {
   // intentionally.
   assert.equal(
     DISPATCH_RULES.length,
-    28,
+    29,
     `DISPATCH_RULES length changed (got ${DISPATCH_RULES.length}). ` +
       "If you added a rule, add a state stub to dispatch-rule-coverage.test.ts " +
       "and update this expected count.",

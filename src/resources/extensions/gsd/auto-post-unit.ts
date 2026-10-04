@@ -118,6 +118,7 @@ import { validateArtifact } from "./schemas/validate.js";
 import { verificationRetryKey } from "./auto/verification-retry-policy.js";
 import { saveCustomVerifyRetryCounts } from "./auto/custom-verify-retry-store.js";
 import { resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
+import { releaseUnitRetry, storeUnitRetry } from "./db/unit-dispatch-retries.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -2936,6 +2937,9 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
             }),
             attempt,
           };
+          // ADR-048: the retry is also on the planner's dispatch row, so a
+          // restart sends the slice back to the planner with these findings.
+          storeUnitRetry(currentUnit.type, s.pendingVerificationRetry);
           ctx.ui.notify(
             `${heading}\n${details}${suffix}${evidenceNote}\nRetrying planning with this failure context.`,
             "warning",
@@ -3024,6 +3028,14 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
         preExecPost.action = "pause";
       }
     });
+
+    // Every result but a retry releases the stored planner retry: the plan
+    // passed or was not checked, or auto-mode pauses for a person.
+    if (preExecPost.action !== "retry") {
+      await runSafely("postUnitPostVerification", "pre-execution-retry-release", () => {
+        releaseUnitRetry(currentUnit.type, currentUnit.id);
+      });
+    }
 
     // Check for blocking failures after runSafely completes
     if (preExecPost.action === "retry") {

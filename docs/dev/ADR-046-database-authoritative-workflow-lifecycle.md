@@ -201,8 +201,9 @@ not a second lifecycle or a DAG wrapped around one work item.
 Attempts are the kernel record of Task execution. For every other unit type the
 kernel record is the claimed `unit_dispatches` row. The target is that retry and
 recovery budgets, pause state and stage checkpoints are stored on that row.
-Today only three retry budgets (zero-tool, tool-unavailable and pre-execution
-repair) are stored there. See the 2026-10-03 amendment in
+Today three retry budgets (zero-tool, tool-unavailable and pre-execution
+repair), the sidecar queue and the planner retry after a failed pre-execution
+check are stored there. See the amendments in
 [ADR-048](ADR-048-unitrun-dispatch-row.md) for the parts that are done.
 
 The refactor remains provider-neutral and extension-first. Provider-specific

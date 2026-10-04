@@ -14,6 +14,11 @@ import { hashVerificationFailureContext } from "../auto/verification-retry-polic
 import { readUnitRuntimeRecord, writeUnitRuntimeRecord } from "../unit-runtime.ts";
 import { captureRootDirtySnapshot } from "../root-write-leak-guard.ts";
 import { emitJournalEvent as emitJournalEventFn, type JournalEntry } from "../journal.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import { claimMilestoneLease } from "../db/milestone-leases.ts";
+import { recordDispatchClaim } from "../db/unit-dispatches.ts";
+import { readStoredUnitRetry, storeUnitRetry } from "../db/unit-dispatch-retries.ts";
 
 function runGit(cwd: string, args: string[]): void {
   execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -435,6 +440,123 @@ test("runFinalize still pauses a non-task post-verification retry with a repeate
   assert.equal(retryEvents.length, 1);
   assert.equal(retryEvents[0]?.data.unitId, "M001/S01");
   assert.equal(retryEvents[0]?.data.attempt, 2);
+});
+
+/** A project database with a claimed plan-slice dispatch row for M001/S01. */
+function openProjectWithPlanSliceDispatch(t: { after(cb: () => void): void }): string {
+  const base = mkdtempSync(join(tmpdir(), "gsd-finalize-stored-retry-"));
+  t.after(() => {
+    try { closeDatabase(); } catch { /* noop */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claim = recordDispatchClaim({
+    traceId: "trace",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+  });
+  if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+  return base;
+}
+
+/** Run the retry delay of the retry policy with no wait. */
+function skipRetryDelay(t: { after(cb: () => void): void }): void {
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((handler: (...args: unknown[]) => void, _timeout?: number, ...args: unknown[]) =>
+    originalSetTimeout(handler, 0, ...args)) as typeof setTimeout;
+  t.after(() => {
+    globalThis.setTimeout = originalSetTimeout;
+  });
+}
+
+const PLANNER_RETRY = {
+  unitId: "M001/S01",
+  failureContext: "pre-execution check: task T01 reads a file that no task creates",
+  attempt: 1,
+};
+
+test("runFinalize keeps no session snapshot for a planner retry stored on the dispatch row", async (t) => {
+  const s = new AutoSession();
+  s.basePath = openProjectWithPlanSliceDispatch(t);
+  s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: 1 };
+  skipRetryDelay(t);
+
+  const result = await runFinalizeWithDeps(s, {
+    emitJournalEvent() {},
+    postUnitPostVerification: async () => {
+      s.pendingVerificationRetry = PLANNER_RETRY;
+      storeUnitRetry("plan-slice", PLANNER_RETRY);
+      return "retry";
+    },
+  });
+
+  assert.deepEqual(result, { action: "continue" });
+  assert.equal(
+    s.pendingVerificationRetryDispatch,
+    null,
+    "the dispatch rules select a stored retry from the database, not from a session snapshot",
+  );
+  assert.deepEqual(readStoredUnitRetry("plan-slice", "M001/S01"), PLANNER_RETRY);
+});
+
+test("runFinalize replays a planner retry with no dispatch row from the session snapshot", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-finalize-unclaimed-retry-"));
+  t.after(() => {
+    rmSync(base, { recursive: true, force: true });
+  });
+  const s = new AutoSession();
+  s.basePath = base;
+  s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: 1 };
+  skipRetryDelay(t);
+
+  const result = await runFinalizeWithDeps(s, {
+    emitJournalEvent() {},
+    postUnitPostVerification: async () => {
+      s.pendingVerificationRetry = PLANNER_RETRY;
+      storeUnitRetry("plan-slice", PLANNER_RETRY);
+      return "retry";
+    },
+  });
+
+  assert.deepEqual(result, { action: "continue" });
+  assert.equal(s.pendingVerificationRetryDispatch?.unitType, "plan-slice");
+  assert.equal(s.pendingVerificationRetryDispatch?.unitId, "M001/S01");
+});
+
+test("a retry-policy pause releases the planner retry stored on the dispatch row", async (t) => {
+  const s = new AutoSession();
+  s.basePath = openProjectWithPlanSliceDispatch(t);
+  s.currentUnit = { type: "plan-slice", id: "M001/S01", startedAt: 1 };
+  s.verificationRetryFailureHashes.set(
+    "plan-slice:M001/S01",
+    hashVerificationFailureContext(PLANNER_RETRY.failureContext),
+  );
+
+  const result = await runFinalizeWithDeps(s, {
+    emitJournalEvent() {},
+    postUnitPostVerification: async () => {
+      s.pendingVerificationRetry = PLANNER_RETRY;
+      storeUnitRetry("plan-slice", PLANNER_RETRY);
+      return "retry";
+    },
+  });
+
+  assert.deepEqual(result, { action: "break", reason: "duplicate-failure-context" });
+  assert.equal(
+    readStoredUnitRetry("plan-slice", "M001/S01"),
+    null,
+    "the pause gives the plan to a person, so a resume must not send the slice back to the planner",
+  );
 });
 
 test("runFinalize marks unit runtime finalized after successful finalize", async () => {

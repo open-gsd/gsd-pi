@@ -20,7 +20,11 @@ import { join } from "node:path";
 
 import { postUnitPostVerification, type PostUnitContext } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
+import { DISPATCH_RULES, resolveDispatch } from "../auto-dispatch.ts";
+import { convertDispatchRules, initRegistry, resetRegistry } from "../rule-registry.ts";
+import { deriveState } from "../state.ts";
 import { readUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.ts";
 import { registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
@@ -155,6 +159,7 @@ function cleanupTestEnvironment(): void {
   } catch {
     // Ignore close errors
   }
+  resetRegistry();
   resetAllCaches();
   try {
     rmSync(tempDir, { recursive: true, force: true });
@@ -562,6 +567,102 @@ describe("Pre-execution checks → retry/pause wiring", () => {
       await runPlanSlice(),
       "retry",
       "a later failure must get a planner retry, not pause on its first failure",
+    );
+  });
+
+  /** One plan-slice close-out in a new process: a session with no memory. */
+  function runPlanSliceCloseout(): Promise<string> {
+    return postUnitPostVerification(
+      makePostUnitContext(
+        makeMockSession(tempDir, { type: "plan-slice", id: "M001/S01" }),
+        makeMockCtx(),
+        makeMockPi(),
+        mock.fn(async () => {}),
+      ),
+    );
+  }
+
+  /** Kill, then the unit the first advance of the new process selects. */
+  async function nextUnitAfterRestart(): Promise<unknown> {
+    closeDatabase();
+    openDatabase(dbPath);
+    resetAllCaches();
+    // Auto start registers the dispatch rules of the process.
+    initRegistry(convertDispatchRules(DISPATCH_RULES));
+    const state = await deriveState(tempDir);
+    const action = await resolveDispatch({
+      basePath: tempDir,
+      mid: "M001",
+      midTitle: "Test Milestone",
+      state,
+      prefs: undefined,
+      session: new AutoSession(),
+    });
+    // A result that is not a dispatch is returned whole, so a failure shows it.
+    return action.action === "dispatch" ? { unitType: action.unitType, unitId: action.unitId } : { state, action };
+  }
+
+  test("a restart after a failed pre-execution check sends the slice back to the planner with the findings", async () => {
+    createFailingTasks();
+    claimPlanSliceDispatch("trace-pre-exec-retry-restart");
+
+    assert.equal(await runPlanSliceCloseout(), "retry", "the failed check asks for a planner retry");
+
+    assert.deepEqual(
+      await nextUnitAfterRestart(),
+      { unitType: "plan-slice", unitId: "M001/S01" },
+      "the refused plan must go back to the planner, not to its first task",
+    );
+    const stored = readStoredUnitRetry("plan-slice", "M001/S01");
+    assert.equal(stored?.attempt, 1);
+    assert.ok(
+      stored?.failureContext.includes("nonexistent-file-that-does-not-exist.ts"),
+      "the stored retry holds the blocking finding for the planner",
+    );
+  });
+
+  test("a restart after the planner repaired the plan runs the first task", async () => {
+    createFailingTasks();
+    claimPlanSliceDispatch("trace-pre-exec-retry-pass");
+
+    assert.equal(await runPlanSliceCloseout(), "retry", "the failed check asks for a planner retry");
+    // The planner repair worked: the files the task reads now exist.
+    for (const input of MISSING_TASK_INPUTS) writeFileSync(join(tempDir, input), "");
+    assert.equal(await runPlanSliceCloseout(), "continue", "the repaired plan passes the check");
+
+    assert.deepEqual(
+      await nextUnitAfterRestart(),
+      { unitType: "execute-task", unitId: "M001/S01/T01" },
+      "a plan that passed the check must not go back to the planner",
+    );
+  });
+
+  test("a restart after the cap pause does not send the slice back to the planner", async () => {
+    createFailingTasks();
+    claimPlanSliceDispatch("trace-pre-exec-retry-cap");
+
+    assert.equal(await runPlanSliceCloseout(), "retry", "the first failure uses one planner retry");
+    assert.equal(await runPlanSliceCloseout(), "stopped", "the second failure reaches the cap and pauses");
+
+    assert.deepEqual(
+      await nextUnitAfterRestart(),
+      { unitType: "execute-task", unitId: "M001/S01/T01" },
+      "the pause gave the plan to a person, so the resume runs the task",
+    );
+  });
+
+  test("a restart after the pre-execution check was turned off does not send the slice back to the planner", async () => {
+    createFailingTasks();
+    claimPlanSliceDispatch("trace-pre-exec-retry-prefs");
+
+    assert.equal(await runPlanSliceCloseout(), "retry", "the failed check asks for a planner retry");
+    writePreferences({ enhanced_verification_pre: false });
+    assert.equal(await runPlanSliceCloseout(), "continue", "the retry closes with no check");
+
+    assert.deepEqual(
+      await nextUnitAfterRestart(),
+      { unitType: "execute-task", unitId: "M001/S01/T01" },
+      "a planner run that was not refused must release the stored retry",
     );
   });
 

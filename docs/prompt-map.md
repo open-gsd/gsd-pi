@@ -438,7 +438,7 @@ projection-delivery contracts are owned by the
 
 ## 10. Dispatch Rule Priority Order
 
-`auto-dispatch.ts` evaluates 28 rules top-to-bottom, first match wins. Source of
+`auto-dispatch.ts` evaluates 29 rules top-to-bottom, first match wins. Source of
 truth is the `DISPATCH_RULES` array in `auto-dispatch.ts`; the canary test
 `tests/dispatch-rule-coverage.test.ts` pins the count.
 
@@ -464,15 +464,16 @@ Priority  Rule                                          Fires When
 17        planning (no research) → research-slice       single slice has no saved RESEARCH row
 18        refining → refine-slice                       slice is sketch, needs expansion
 19        planning → plan-slice                         slice has no task rows
-20        evaluating-gates → gate-evaluate              gates pending evaluation
-21        replanning-slice → replan-slice               slice in 'replanning' phase
-22        executing → replan-task recovery              pending Task recovery action for the active task
-23        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block
-24        executing → execute-task (render plan)        slice PLAN file missing — render it from the DB, then fall through
-25        executing → execute-task                      1–2 tasks ready (sequential mode)
-26        validating-milestone → validate-milestone     all slices closed, not yet validated
-27        completing-milestone → complete-milestone     validated, not yet completed
-28        complete → stop                               nothing left to do
+20        stored retry → plan-slice / refine-slice      the pre-execution check refused the slice plan and the retry is stored on the planner's dispatch row
+21        evaluating-gates → gate-evaluate              gates pending evaluation
+22        replanning-slice → replan-slice               slice in 'replanning' phase
+23        executing → replan-task recovery              pending Task recovery action for the active task
+24        executing → reactive-execute (parallel)       ≥3 tasks ready (parallel mode), no recorded reactive block
+25        executing → execute-task (render plan)        slice PLAN file missing — render it from the DB, then fall through
+26        executing → execute-task                      1–2 tasks ready (sequential mode)
+27        validating-milestone → validate-milestone     all slices closed, not yet validated
+28        completing-milestone → complete-milestone     validated, not yet completed
+29        complete → stop                               nothing left to do
 ```
 
 ---
