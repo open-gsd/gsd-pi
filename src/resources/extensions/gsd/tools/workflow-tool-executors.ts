@@ -501,15 +501,22 @@ function rebuildMilestoneSequenceSection(content: string, milestones: MilestoneS
   ].join("\n");
 }
 
+/** Said to the caller when the change is committed but its readable plan file is not rendered yet. */
+const PLAN_PROJECTION_STALE_NOTICE = ". The readable plan update is pending repair.";
+
+/**
+ * Copy a saved artifact into the active worktree. The save is already stored at
+ * the project root, so a failed copy never fails the tool.
+ * @returns true when the worktree copy is stale.
+ */
 async function mirrorArtifactToActiveWorktreeProjection(
   basePath: string,
   relativePath: string,
   content: string,
-  required: boolean = false,
-): Promise<void> {
+): Promise<boolean> {
   const contract = resolveGsdPathContract(basePath);
-  if (!contract.worktreeGsd) return;
-  if (contract.worktreeGsd === contract.projectGsd) return;
+  if (!contract.worktreeGsd) return false;
+  if (contract.worktreeGsd === contract.projectGsd) return false;
 
   const fullPath = join(contract.worktreeGsd, relativePath);
   try {
@@ -517,11 +524,12 @@ async function mirrorArtifactToActiveWorktreeProjection(
     clearPathCache();
     clearParseCache();
     invalidateStateCache();
+    return false;
   } catch (err) {
     logWarning("tool", `gsd_summary_save worktree projection mirror failed: ${(err as Error).message}`, {
       path: relativePath,
     });
-    if (required) throw err;
+    return true;
   }
 }
 
@@ -800,7 +808,7 @@ export async function executeSummarySave(
         basePath,
       );
     }
-    await mirrorArtifactToActiveWorktreeProjection(basePath, relativePath, projectedContent, isTaskSummary);
+    const worktreeCopyStale = await mirrorArtifactToActiveWorktreeProjection(basePath, relativePath, projectedContent);
 
     if (params.artifact_type === "CONTEXT" && !params.task_id) {
       try {
@@ -826,6 +834,7 @@ export async function executeSummarySave(
         content_source: contentSource,
         ...(registeredMilestones.length > 0 ? { registeredMilestones } : {}),
         ...(milestoneSequenceSelfHealed ? { milestoneSequenceSelfHealed: true } : {}),
+        ...(worktreeCopyStale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -1160,11 +1169,11 @@ export async function executeTaskComplete(
           }
         }
       }
-      const stagedText = staged.nextStage === "verify"
+      const stagedText = (staged.nextStage === "verify"
         ? `Staged task ${params.taskId}; awaiting host verification before completion.`
         : `Recorded blocker for task ${params.taskId}; awaiting recovery routing.${
           recoveryRoute ? recoveryRouteLever(recoveryRoute) : ""
-        }`;
+        }`) + (staged.stale ? " The readable status update is pending repair." : "");
       const recommended = escalation?.options.find((option) => option.id === escalation?.recommendation);
       return {
         content: [{
@@ -1187,6 +1196,7 @@ export async function executeTaskComplete(
           resultId: staged.resultId,
           summaryPath: staged.summaryPath,
           nextStage: staged.nextStage,
+          ...(staged.stale ? { stale: true } : {}),
           ...(escalation ? { escalation } : {}),
           ...(recoveryRoute ? {
             recoveryActionId: recoveryRoute.recoveryActionId,
@@ -2104,13 +2114,14 @@ export async function executeReassessRoadmap(
       };
     }
     return {
-      content: [{ type: "text", text: `Reassessed roadmap for milestone ${result.milestoneId} after ${result.completedSliceId}` }],
+      content: [{ type: "text", text: `Reassessed roadmap for milestone ${result.milestoneId} after ${result.completedSliceId}${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
       details: {
         operation: "reassess_roadmap",
         milestoneId: result.milestoneId,
         completedSliceId: result.completedSliceId,
         assessmentPath: result.assessmentPath,
         roadmapPath: result.roadmapPath,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2209,7 +2220,7 @@ export async function executeSaveGateResult(
   }
   projectionStale ||= (await renderStateProjection(basePath)).stale;
 
-  const projectionNotice = projectionStale ? ". The readable plan update is pending repair." : "";
+  const projectionNotice = projectionStale ? PLAN_PROJECTION_STALE_NOTICE : "";
   return {
     content: [{ type: "text", text: `Gate ${params.gateId} result saved: verdict=${params.verdict}${projectionNotice}` }],
     details: {
@@ -2453,11 +2464,12 @@ export async function executePlanMilestone(
       };
     }
     return {
-      content: [{ type: "text", text: `Planned milestone ${result.milestoneId}` }],
+      content: [{ type: "text", text: `Planned milestone ${result.milestoneId}${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
       details: {
         operation: "plan_milestone",
         milestoneId: result.milestoneId,
         roadmapPath: result.roadmapPath,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2504,17 +2516,18 @@ export async function executePlanSlice(
       isError: true,
       };
     }
-    const zeroTaskWarning = result.planPath === "" && result.taskPlanPaths.length === 0
+    const zeroTaskWarning = !result.stale && result.planPath === "" && result.taskPlanPaths.length === 0
       ? "\n\nWarning: no non-skipped tasks remain for this slice. Pass tasks to gsd_plan_slice or call gsd_plan_task to persist them."
       : "";
     return {
-      content: [{ type: "text", text: `Planned slice ${result.sliceId} (${result.milestoneId})${zeroTaskWarning}` }],
+      content: [{ type: "text", text: `Planned slice ${result.sliceId} (${result.milestoneId})${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}${zeroTaskWarning}` }],
       details: {
         operation: "plan_slice",
         milestoneId: result.milestoneId,
         sliceId: result.sliceId,
         planPath: result.planPath,
         taskPlanPaths: result.taskPlanPaths,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2552,13 +2565,14 @@ export async function executeReplanTask(
       };
     }
     return {
-      content: [{ type: "text", text: `Replanned task ${result.taskId} (${result.sliceId}/${result.milestoneId})` }],
+      content: [{ type: "text", text: `Replanned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
       details: {
         operation: "replan_task",
         milestoneId: result.milestoneId,
         sliceId: result.sliceId,
         taskId: result.taskId,
         taskPlanPath: result.taskPlanPath,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {
@@ -2639,13 +2653,14 @@ export async function executeReplanSlice(
       };
     }
     return {
-      content: [{ type: "text", text: `Replanned slice ${result.sliceId} (${result.milestoneId})` }],
+      content: [{ type: "text", text: `Replanned slice ${result.sliceId} (${result.milestoneId})${result.stale ? PLAN_PROJECTION_STALE_NOTICE : ""}` }],
       details: {
         operation: "replan_slice",
         milestoneId: result.milestoneId,
         sliceId: result.sliceId,
         replanPath: result.replanPath,
         planPath: result.planPath,
+        ...(result.stale ? { stale: true } : {}),
       },
     };
   } catch (err) {

@@ -387,6 +387,10 @@ test("advance() preserves an external projection edit without blocking valid wor
   t.after(() => f.cleanup());
   // Dispatch settles the layout first, so the edit is to the settled projection.
   await migrateToFlatPhase(f.base);
+  const notices: string[] = [];
+  (f.ctx.ctx as any).ui.notify = (message: string) => {
+    notices.push(message);
+  };
   const rendered = await renderRoadmapFromDb(f.base, "M001");
   assert.ok("roadmapPath" in rendered);
   const externalEdit = Buffer.from("# External roadmap evidence\n");
@@ -401,11 +405,31 @@ test("advance() preserves an external projection edit without blocking valid wor
   assert.ok(currentRoadmapPath);
   assert.match(readFileSync(currentRoadmapPath, "utf-8"), /S01: Slice/);
   const quarantineRoot = join(f.base, ".gsd", "quarantine", "projections");
-  const preservedPath = readdirSync(quarantineRoot, { recursive: true })
+  const preservedPaths = readdirSync(quarantineRoot, { recursive: true })
     .map(String)
-    .find((path) => path.endsWith("ROADMAP.md")
+    .filter((path) => path.endsWith("ROADMAP.md")
       && readFileSync(join(quarantineRoot, path)).equals(externalEdit));
-  assert.ok(preservedPath);
+  assert.equal(preservedPaths.length, 1, "the edit has one quarantine copy");
+  const copyPath = preservedPaths[0]!.replace(/\\/g, "/");
+  const editNotices = notices.filter((notice) => notice.includes(copyPath));
+  assert.equal(editNotices.length, 1, "the user gets one notice that names the copy");
+  assert.match(editNotices[0]!, /changed outside GSD/);
+  assert.ok(!f.journalNames().includes("advance-blocked"));
+});
+
+test("advance() dispatches when projection observation fails", async (t) => {
+  const f = makeFixture();
+  t.after(() => f.cleanup());
+  const restoreProjectionObservation = _setPreserveProjectionChangesFnForTests(async () => {
+    throw new Error("EACCES: permission denied, open '.gsd/.compat.json'");
+  });
+  t.after(restoreProjectionObservation);
+
+  const result = await f.orchestrator.advance();
+
+  assert.equal(result.kind, "advanced");
+  if (result.kind !== "advanced") return;
+  assert.deepEqual(result.unit, { unitType: "execute-task", unitId: "M001/S01/T01" });
   assert.ok(!f.journalNames().includes("advance-blocked"));
 });
 
@@ -1070,7 +1094,9 @@ test("retryActiveUnit pauses with the finalize cause when finalize-retry trips t
   const f = makeFixture();
   t.after(() => f.cleanup());
   (f.ctx.ctx as any).ui.notify = (message: string, level: string) => {
-    notifications.push([message, level]);
+    // The first advance renders the fixture's hand-written projections again
+    // and reports that as a warning; only the pause errors are under test.
+    if (level === "error") notifications.push([message, level]);
   };
 
   const cause = "finalize-retry: source-integrity inconclusive: host snapshot no longer matches closeout evidence";
@@ -1359,6 +1385,7 @@ test("advance() blocks dispatch while a tracked projection changed outside GSD i
     preserved: [],
     refreshedPassthrough: [],
     held: [heldPath],
+    errors: [],
   }));
   t.after(restoreProjectionObservation);
 

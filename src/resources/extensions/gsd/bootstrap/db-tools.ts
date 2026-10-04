@@ -1313,7 +1313,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text" as const,
-						text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})`,
+						text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? ". The readable plan update is pending repair." : ""}`,
 					},
 				],
 				details: {
@@ -1322,6 +1322,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					sliceId: result.sliceId,
 					taskId: result.taskId,
 					taskPlanPath: result.taskPlanPath,
+					...(result.stale ? { stale: true } : {}),
 				} as any,
 			};
 		} catch (err) {

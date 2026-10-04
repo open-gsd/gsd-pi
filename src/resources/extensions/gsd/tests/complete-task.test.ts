@@ -532,9 +532,9 @@ console.log('\n=== complete-task: projection failure preserves DB completion ===
 
   const result = await handleCompleteTask(makeValidParams(), basePath);
 
-  assertTrue('error' in result, 'projection failure should return an error');
-  if ('error' in result) {
-    assertMatch(result.error, /projection write failed/, 'error should mention projection write failure');
+  assertTrue(!('error' in result), 'projection failure after commit should not return an error');
+  if (!('error' in result)) {
+    assertEq(result.stale, true, 'the committed receipt should carry the stale flag');
   }
 
   const task = getTask('M001', 'S01', 'T01');

@@ -98,6 +98,8 @@ export interface ReassessRoadmapResult {
   completedSliceId: string;
   assessmentPath: string;
   roadmapPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function assessmentDbPathForRenderedFile(basePath: string, absPath: string): string {
@@ -628,65 +630,72 @@ export async function handleReassessRoadmap(
   removeSlicePlanProjections(basePath, params.milestoneId, params.sliceChanges.removed);
 
   // ── Render artifacts ──────────────────────────────────────────────
+  // The reassessment is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let roadmapPath = "";
+  let renderedAssessmentPath = "";
+  let stale = false;
   try {
     const roadmapResult = await renderRoadmapFromDb(basePath, params.milestoneId);
-    if ("skipped" in roadmapResult) {
-      return { error: `roadmap render skipped: milestone ${params.milestoneId} has no planned slices` };
-    }
+    if ("skipped" in roadmapResult) throw new Error(`milestone ${params.milestoneId} has no planned slices`);
+    roadmapPath = roadmapResult.roadmapPath;
     const assessmentResult = await renderRoadmapAssessment(basePath, params.milestoneId);
     if (!assessmentResult) throw new Error("durable roadmap assessment not found");
-
-    // ── Remove stale VALIDATION file from disk (#2957) ────────────
-    if (invalidatesMilestoneValidation) {
-      const milestoneDir = resolveMilestonePath(basePath, params.milestoneId);
-      const validationFiles = new Set([
-        resolveMilestoneFile(basePath, params.milestoneId, "VALIDATION"),
-        targetMilestoneFile(
-          basePath,
-          params.milestoneId,
-          "VALIDATION",
-          getMilestone(params.milestoneId)?.title,
-        ),
-        milestoneDir ? join(milestoneDir, `${params.milestoneId}-VALIDATION.md`) : null,
-      ].filter((file): file is string => Boolean(file)));
-      for (const validationFile of validationFiles) {
-        try {
-          if (existsSync(validationFile)) removeProjectionFileSync(validationFile);
-        } catch (e) {
-          logWarning("tool", `validation file cleanup failed: ${(e as Error).message}`);
-        }
-      }
-    }
-
-    // ── Invalidate caches ─────────────────────────────────────────
-    invalidateStateCache();
-    clearParseCache();
-
-    // ── Post-mutation hook: projections, manifest, event log ─────
-    try {
-      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-      await writeManifestAndFlush(basePath);
-      if (operationStatus === "committed") {
-        appendEvent(basePath, {
-          cmd: "reassess-roadmap",
-          params: { milestoneId: params.milestoneId, completedSliceId: params.completedSliceId },
-          ts: new Date().toISOString(),
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
-      }
-    } catch (hookErr) {
-      logWarning("tool", `reassess-roadmap post-mutation hook warning: ${(hookErr as Error).message}`);
-    }
-
-    return {
-      milestoneId: params.milestoneId,
-      completedSliceId: params.completedSliceId,
-      assessmentPath: assessmentResult.assessmentPath,
-      roadmapPath: roadmapResult.roadmapPath,
-    };
+    renderedAssessmentPath = assessmentResult.assessmentPath;
   } catch (err) {
-    return { error: `render failed: ${(err as Error).message}` };
+    stale = true;
+    logWarning("projection", `reassess_roadmap render failed for ${params.milestoneId}; the reassessment stays committed`, { error: (err as Error).message });
   }
+
+  // ── Remove stale VALIDATION file from disk (#2957) ────────────
+  if (invalidatesMilestoneValidation) {
+    const milestoneDir = resolveMilestonePath(basePath, params.milestoneId);
+    const validationFiles = new Set([
+      resolveMilestoneFile(basePath, params.milestoneId, "VALIDATION"),
+      targetMilestoneFile(
+        basePath,
+        params.milestoneId,
+        "VALIDATION",
+        getMilestone(params.milestoneId)?.title,
+      ),
+      milestoneDir ? join(milestoneDir, `${params.milestoneId}-VALIDATION.md`) : null,
+    ].filter((file): file is string => Boolean(file)));
+    for (const validationFile of validationFiles) {
+      try {
+        if (existsSync(validationFile)) removeProjectionFileSync(validationFile);
+      } catch (e) {
+        logWarning("tool", `validation file cleanup failed: ${(e as Error).message}`);
+      }
+    }
+  }
+
+  // ── Invalidate caches ─────────────────────────────────────────
+  invalidateStateCache();
+  clearParseCache();
+
+  // ── Post-mutation hook: projections, manifest, event log ─────
+  try {
+    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+    await writeManifestAndFlush(basePath);
+    if (operationStatus === "committed") {
+      appendEvent(basePath, {
+        cmd: "reassess-roadmap",
+        params: { milestoneId: params.milestoneId, completedSliceId: params.completedSliceId },
+        ts: new Date().toISOString(),
+        actor: "agent",
+        actor_name: params.actorName,
+        trigger_reason: params.triggerReason,
+      });
+    }
+  } catch (hookErr) {
+    logWarning("tool", `reassess-roadmap post-mutation hook warning: ${(hookErr as Error).message}`);
+  }
+
+  return {
+    milestoneId: params.milestoneId,
+    completedSliceId: params.completedSliceId,
+    assessmentPath: renderedAssessmentPath,
+    roadmapPath,
+    ...(stale ? { stale: true as const } : {}),
+  };
 }

@@ -68,6 +68,8 @@ export interface ReplanTaskResult {
   sliceId: string;
   taskId: string;
   taskPlanPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function validateParams(params: ReplanTaskParams): ReplanTaskParams {
@@ -249,6 +251,10 @@ export async function handleReplanTask(
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
+  // The replan is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let taskPlanPath = "";
+  let stale = false;
   try {
     const milestonePath = resolveMilestonePath(basePath, params.milestoneId);
     const slicePath = resolveSlicePath(basePath, params.milestoneId, params.sliceId);
@@ -256,35 +262,37 @@ export async function handleReplanTask(
     const renderResult = isLegacySliceLayout
       ? await renderTaskPlanFromDb(basePath, params.milestoneId, params.sliceId, params.taskId)
       : await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
-    const taskPlanPath = "taskPlanPath" in renderResult ? renderResult.taskPlanPath : renderResult.planPath;
-
-    invalidateStateCache();
-    clearParseCache();
-
-    try {
-      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-      await writeManifestAndFlush(basePath);
-      if (operationStatus === "committed") {
-        appendEvent(basePath, {
-          cmd: "replan-task",
-          params: { milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
-          ts: new Date().toISOString(),
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
-      }
-    } catch (hookErr) {
-      logWarning("tool", `replan-task post-mutation hook warning: ${(hookErr as Error).message}`);
-    }
-
-    return {
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      taskId: params.taskId,
-      taskPlanPath,
-    };
+    taskPlanPath = "taskPlanPath" in renderResult ? renderResult.taskPlanPath : renderResult.planPath;
   } catch (err) {
-    return { error: `render failed: ${(err as Error).message}` };
+    stale = true;
+    logWarning("projection", `replan_task render failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}; the replan stays committed`, { error: (err as Error).message });
   }
+
+  invalidateStateCache();
+  clearParseCache();
+
+  try {
+    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+    await writeManifestAndFlush(basePath);
+    if (operationStatus === "committed") {
+      appendEvent(basePath, {
+        cmd: "replan-task",
+        params: { milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
+        ts: new Date().toISOString(),
+        actor: "agent",
+        actor_name: params.actorName,
+        trigger_reason: params.triggerReason,
+      });
+    }
+  } catch (hookErr) {
+    logWarning("tool", `replan-task post-mutation hook warning: ${(hookErr as Error).message}`);
+  }
+
+  return {
+    milestoneId: params.milestoneId,
+    sliceId: params.sliceId,
+    taskId: params.taskId,
+    taskPlanPath,
+    ...(stale ? { stale: true as const } : {}),
+  };
 }

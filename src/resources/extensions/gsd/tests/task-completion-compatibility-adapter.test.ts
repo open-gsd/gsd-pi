@@ -31,13 +31,14 @@ import {
 } from "../gsd-db.js";
 import { readCompatMarker, writeCompatMarker } from "../compat/compat-marker.js";
 import { stripProjectionStamp } from "../markdown-renderer.js";
-import { clearPathCache } from "../paths.js";
+import { clearPathCache, targetTaskFile } from "../paths.js";
 import {
   claimTaskAttempt,
   readLatestTaskAttempt,
   settleTaskAttempt,
 } from "../task-execution-domain-operation.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
+import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
 import {
   recordFailureAndSelectRecovery,
   resumeTaskRecovery,
@@ -105,12 +106,14 @@ interface StagedTaskCompletionReceipt {
   resultId: string;
   summaryPath: string;
   nextStage: "verify" | "route";
+  stale?: true;
 }
 
 interface PublishedTaskCompletionReceipt {
   status: "committed" | "replayed";
   attemptId: string;
   summaryPath: string;
+  stale?: true;
 }
 
 interface TaskCompletionCompatibilityAdapter {
@@ -1334,7 +1337,7 @@ test("changed stage replay payload conflicts without restaging Task metadata or 
   assert.deepEqual(settlementState(), before);
 });
 
-test("a summary projection failure leaves the immutable Result and staged legacy state intact for replay repair", async () => {
+test("a summary projection failure returns the committed staging receipt with a stale flag", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath, attemptId } = createFixture();
   _setManagedMutationBoundaryForTest((boundary, target) => {
@@ -1343,7 +1346,12 @@ test("a summary projection failure leaves the immutable Result and staged legacy
     }
   });
 
-  await assert.rejects(stageTaskCompletion(stageInput(basePath)), /projection|summary/i);
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  assert.equal(staged.status, "committed");
+  assert.equal(staged.attemptId, attemptId);
+  assert.equal(staged.nextStage, "verify");
+  assert.equal(staged.stale, true);
+  assert.equal(staged.summaryPath, "");
 
   assert.deepEqual(row("SELECT attempt_state, settle_outcome FROM workflow_execution_attempts"), {
     attempt_state: "settled",
@@ -1359,9 +1367,14 @@ test("a summary projection failure leaves the immutable Result and staged legacy
   assert.equal(count("verification_evidence"), 1);
 
   _setManagedMutationBoundaryForTest(null);
+  await assertWorkerRendersStaleProjection(
+    basePath,
+    targetTaskFile(basePath, "M001", "S01", "T01", "SUMMARY", "Compatibility adapter"),
+  );
   const replayed = await stageTaskCompletion(stageInput(basePath));
   assert.equal(replayed.status, "replayed");
   assert.equal(replayed.attemptId, attemptId);
+  assert.equal(replayed.stale, undefined);
   assert.equal(existsSync(replayed.summaryPath), true);
   assert.equal(count("workflow_attempt_results"), 1);
   assert.equal(count("verification_evidence"), 1);
@@ -1775,7 +1788,7 @@ test("exact stage and publication replay repair projections without duplicate fa
   }, beforeReplay);
 });
 
-test("auto publication replays a committed Task completion after PLAN projection failure", async () => {
+test("auto publication commits the Task completion when the PLAN projection fails, and a replay renders it", async () => {
   const { publishVerifiedTaskCompletion, stageTaskCompletion } = await subject();
   const { publishVerifiedTaskExecution } = await import("../auto/task-execution-cutover.js");
   const { basePath, planPath, attemptId } = createFixture();
@@ -1796,10 +1809,7 @@ test("auto publication replays a committed Task completion after PLAN projection
   };
   const dependencies = { readLatestTaskAttempt, publishVerifiedTaskCompletion };
 
-  await assert.rejects(
-    publishVerifiedTaskExecution(input, dependencies),
-    /PLAN projection failed/i,
-  );
+  await publishVerifiedTaskExecution(input, dependencies);
   assert.equal(taskState().status, "complete");
   assert.equal(
     readLatestTaskAttempt(TASK)?.nextStage,
@@ -1814,6 +1824,7 @@ test("auto publication replays a committed Task completion after PLAN projection
   };
 
   _setManagedMutationBoundaryForTest(null);
+  await assertWorkerRendersStaleProjection(basePath, planPath);
   await publishVerifiedTaskExecution(input, dependencies);
 
   assert.match(readFileSync(planPath, "utf8"), /\[x\][^\n]*\*\*T01/i);

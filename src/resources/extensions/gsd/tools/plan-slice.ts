@@ -92,6 +92,8 @@ export interface PlanSliceResult {
   sliceId: string;
   planPath: string;
   taskPlanPaths: string[];
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function validateRepositoryTargetIds(
@@ -737,6 +739,10 @@ export async function handlePlanSlice(
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
+  // The plan is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let renderResult = { planPath: "", taskPlanPaths: [] as string[] };
+  let stale = false;
   try {
     const allSliceTasks = getSliceTasks(params.milestoneId, params.sliceId);
     const sliceTasks = allSliceTasks.filter((task) => task.status !== "skipped");
@@ -751,43 +757,42 @@ export async function handlePlanSlice(
         removeOwnedPlanProjection(basePath, slicePlanPath);
       }
     }
-    const hasClosedTasks = sliceTasks.some((task) => isClosedStatus(task.status));
-    const renderResult = sliceTasks.length === 0
-      ? { planPath: "", taskPlanPaths: [] as string[] }
-      : await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
-    if (sliceTasks.length > 0 && hasClosedTasks) {
-      await renderPlanCheckboxes(basePath, params.milestoneId, params.sliceId);
-    }
-    invalidateStateCache();
-    clearParseCache();
-
-    // ── Post-mutation hook: manifest, event log ─────────────────────────
-    try {
-      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-      await writeManifestAndFlush(basePath);
-      if (operationStatus === "committed") {
-        appendEvent(basePath, {
-          cmd: "plan-slice",
-          params: { milestoneId: params.milestoneId, sliceId: params.sliceId },
-          ts: new Date().toISOString(),
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
+    if (sliceTasks.length > 0) {
+      renderResult = await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
+      if (sliceTasks.some((task) => isClosedStatus(task.status))) {
+        await renderPlanCheckboxes(basePath, params.milestoneId, params.sliceId);
       }
-    } catch (hookErr) {
-      logWarning("tool", `plan-slice post-mutation hook warning: ${(hookErr as Error).message}`);
     }
-
-    return {
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      planPath: renderResult.planPath ? normalizeRealPath(renderResult.planPath) : "",
-      taskPlanPaths: renderResult.taskPlanPaths.map(normalizeRealPath),
-    };
   } catch (renderErr) {
-    logWarning("tool", `plan_slice — render failed (DB rows preserved for debugging): ${(renderErr as Error).message}`);
-    invalidateStateCache();
-    return { error: `render failed: ${(renderErr as Error).message}` };
+    stale = true;
+    logWarning("projection", `plan_slice render failed for ${params.milestoneId}/${params.sliceId}; the plan stays committed`, { error: (renderErr as Error).message });
   }
+  invalidateStateCache();
+  clearParseCache();
+
+  // ── Post-mutation hook: manifest, event log ─────────────────────────
+  try {
+    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+    await writeManifestAndFlush(basePath);
+    if (operationStatus === "committed") {
+      appendEvent(basePath, {
+        cmd: "plan-slice",
+        params: { milestoneId: params.milestoneId, sliceId: params.sliceId },
+        ts: new Date().toISOString(),
+        actor: "agent",
+        actor_name: params.actorName,
+        trigger_reason: params.triggerReason,
+      });
+    }
+  } catch (hookErr) {
+    logWarning("tool", `plan-slice post-mutation hook warning: ${(hookErr as Error).message}`);
+  }
+
+  return {
+    milestoneId: params.milestoneId,
+    sliceId: params.sliceId,
+    planPath: renderResult.planPath ? normalizeRealPath(renderResult.planPath) : "",
+    taskPlanPaths: renderResult.taskPlanPaths.map(normalizeRealPath),
+    ...(stale ? { stale: true as const } : {}),
+  };
 }

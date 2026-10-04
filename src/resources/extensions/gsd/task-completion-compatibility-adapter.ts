@@ -34,6 +34,7 @@ import {
 } from "./task-recovery-domain-operation.js";
 import { readTaskTechnicalVerdict } from "./task-verification-domain-operation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { logWarning } from "./workflow-logger.js";
 import {
   captureVerificationSourceSnapshot,
   resolveVerificationRepositoryTargets,
@@ -84,14 +85,20 @@ export interface StagedTaskCompletionReceipt {
   status: "committed" | "replayed";
   attemptId: string;
   resultId: string;
+  /** Empty when no summary file was rendered: a blocker staging, or a failed render (`stale`). */
   summaryPath: string;
   nextStage: "verify" | "route";
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 export interface PublishedTaskCompletionReceipt {
   status: "committed" | "replayed";
   attemptId: string;
+  /** Empty when the summary render failed (`stale`). */
   summaryPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 interface AttemptRow {
@@ -370,17 +377,13 @@ async function renderTaskSummaryProjection(
   basePath: string,
   task: TaskCompletionIdentity,
 ): Promise<string> {
-  try {
-    const wroteSummary = await renderTaskSummary(
-      basePath,
-      task.milestoneId,
-      task.sliceId,
-      task.taskId,
-    );
-    if (!wroteSummary) throw new Error("summary projection write returned false");
-  } catch (error) {
-    throw new Error(`Task completion summary projection failed: ${(error as Error).message}`);
-  }
+  const wroteSummary = await renderTaskSummary(
+    basePath,
+    task.milestoneId,
+    task.sliceId,
+    task.taskId,
+  );
+  if (!wroteSummary) throw new Error("summary projection write returned false");
 
   clearPathCache();
   const summaryPath = resolveTaskFile(
@@ -390,32 +393,57 @@ async function renderTaskSummaryProjection(
     task.taskId,
     "SUMMARY",
   );
-  if (!summaryPath) throw new Error("Task completion projection failed: summary path is missing");
+  if (!summaryPath) throw new Error("summary path is missing");
   return summaryPath;
 }
 
+interface TaskCompletionProjection {
+  summaryPath: string;
+  stale?: true;
+}
+
+/**
+ * Render the summary at the project root and, in a worktree, at the worktree.
+ * The settlement is committed before this render, so a failed render never
+ * fails the caller: its Projection Work stays pending and the Projection
+ * Worker renders the file again.
+ */
 async function renderTaskSummaryProjections(
   basePath: string,
   task: TaskCompletionIdentity,
-): Promise<string> {
-  const contract = resolveGsdPathContract(basePath);
-  const canonicalPath = await renderTaskSummaryProjection(contract.projectRoot, task);
-  if (!contract.isWorktree || contract.workRoot === contract.projectRoot) return canonicalPath;
-  return renderTaskSummaryProjection(contract.workRoot, task);
+): Promise<TaskCompletionProjection> {
+  try {
+    const contract = resolveGsdPathContract(basePath);
+    const canonicalPath = await renderTaskSummaryProjection(contract.projectRoot, task);
+    if (!contract.isWorktree || contract.workRoot === contract.projectRoot) return { summaryPath: canonicalPath };
+    return { summaryPath: await renderTaskSummaryProjection(contract.workRoot, task) };
+  } catch (error) {
+    logWarning(
+      "projection",
+      `task completion summary render failed for ${task.milestoneId}/${task.sliceId}/${task.taskId}; the settlement stays committed`,
+      { error: (error as Error).message },
+    );
+    return { summaryPath: "", stale: true };
+  }
 }
 
 async function renderPublishedTaskCompletionProjections(
   basePath: string,
   task: TaskCompletionIdentity,
-): Promise<string> {
-  const summaryPath = await renderTaskSummaryProjections(basePath, task);
+): Promise<TaskCompletionProjection> {
+  const projection = await renderTaskSummaryProjections(basePath, task);
   try {
     const wrotePlan = await renderPlanCheckboxes(basePath, task.milestoneId, task.sliceId);
     if (!wrotePlan) throw new Error("plan projection write returned false");
   } catch (error) {
-    throw new Error(`Task completion PLAN projection failed: ${(error as Error).message}`);
+    logWarning(
+      "projection",
+      `task completion PLAN render failed for ${task.milestoneId}/${task.sliceId}/${task.taskId}; the completion stays committed`,
+      { error: (error as Error).message },
+    );
+    return { ...projection, stale: true };
   }
-  return summaryPath;
+  return projection;
 }
 
 export async function stageTaskCompletion(
@@ -458,16 +486,15 @@ export async function stageTaskCompletion(
 
   // A blockerDiscovered staging must not project a SUMMARY at all (#1726):
   // the Attempt failed, so there is no completion to render.
-  let summaryPath = "";
-  if (!blocked) {
-    summaryPath = await renderTaskSummaryProjections(input.basePath, input.task);
-  }
+  const projection: TaskCompletionProjection = blocked
+    ? { summaryPath: "" }
+    : await renderTaskSummaryProjections(input.basePath, input.task);
   return {
     status: settlement.status,
     attemptId,
     resultId: settlement.resultId,
-    summaryPath,
     nextStage: settlement.nextStage,
+    ...projection,
   };
 }
 
@@ -723,10 +750,10 @@ export async function publishVerifiedTaskCompletion(
   requireCurrentVerifiedSource(input);
   readoptReadyLifecycleShadowForPublication(input);
   const status = publishCanonicalCompletion(input);
-  const summaryPath = await renderPublishedTaskCompletionProjections(input.basePath, input.task);
+  const projection = await renderPublishedTaskCompletionProjections(input.basePath, input.task);
   return {
     status,
     attemptId: input.attemptId,
-    summaryPath,
+    ...projection,
   };
 }

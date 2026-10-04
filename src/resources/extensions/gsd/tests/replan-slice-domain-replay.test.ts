@@ -25,6 +25,7 @@ import type { PlanningInvocation } from "../planning-invocation.ts";
 import { claimTaskAttempt } from "../task-execution-domain-operation.ts";
 import { handlePlanSlice } from "../tools/plan-slice.ts";
 import { handleReplanSlice, type ReplanSliceParams } from "../tools/replan-slice.ts";
+import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
 
 function invocation(idempotencyKey: string): PlanningInvocation {
   return {
@@ -197,6 +198,28 @@ test("slice replan exact retry replays once and changed reuse conflicts without 
     assert.ok("error" in conflict);
     assert.match(conflict.error, /idempotency conflict/i);
     assert.deepEqual(snapshot(), afterCommit, "conflicting reuse must leave no residue");
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("slice replan returns the committed replan with a stale flag when the render fails", async () => {
+  const base = makeBase();
+  try {
+    await seedPlannedSlice(base);
+    // A directory in the place of the slice plan makes the render fail (EISDIR).
+    const planPath = join(base, ".gsd", "phases", "01-test", "01-01-PLAN.md");
+    rmSync(planPath);
+    mkdirSync(planPath);
+
+    const result = await handleReplanSlice(replanParams(), base, invocation("replan-slice/render-failure"));
+    assert.ok(!("error" in result), "a render failure after commit is not a tool error");
+    assert.equal(result.stale, true);
+    assert.equal(getTask("M001", "S01", "T03")?.title, "Replacement", "the replan is committed");
+
+    rmSync(planPath, { recursive: true });
+    await assertWorkerRendersStaleProjection(base, planPath);
   } finally {
     closeDatabase();
     rmSync(base, { recursive: true, force: true });

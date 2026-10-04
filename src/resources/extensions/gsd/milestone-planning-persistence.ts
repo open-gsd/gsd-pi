@@ -68,6 +68,8 @@ export interface PersistMilestonePlanParams {
 export interface PersistMilestonePlanResult {
   milestoneId: string;
   roadmapPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function validatePlanPromotion(
@@ -263,30 +265,25 @@ function persistPlanOperation(
   });
 }
 
+/**
+ * Render ROADMAP.md and return its path, or null when the render failed. The
+ * plan is committed (#1634): the DB is the authority, so a failed render never
+ * fails the tool. Its Projection Work stays pending and the Projection Worker
+ * renders the file again.
+ */
 async function renderPlanArtifacts(
   basePath: string,
   params: PersistMilestonePlanParams,
-): Promise<string | { error: string }> {
+): Promise<string | null> {
   try {
     const renderResult = await renderRoadmapFromDb(basePath, params.milestoneId);
-    // renderRoadmapFromDb only skips for unplanned milestones (zero slices +
-    // empty vision); persistMilestonePlan always populates both via writePlanRows
-    // before this render, so the skipped branch is unreachable here. Fall back to
-    // resolving the projected path so a future invariant still surfaces a clear
-    // render failure rather than an undefined dereference.
-    if ("skipped" in renderResult) {
-      return { error: `render skipped: milestone ${params.milestoneId} has no planned slices` };
-    }
+    // renderRoadmapFromDb skips only an unplanned milestone (zero slices and an
+    // empty vision). writePlanRows sets both before this render.
+    if ("skipped" in renderResult) throw new Error(`milestone ${params.milestoneId} has no planned slices`);
     return renderResult.roadmapPath;
   } catch (renderErr) {
-    // #1634: DB rows stay committed on purpose — the DB is the authority and
-    // ROADMAP.md is only a projection. The roadmap-missing drift handler
-    // detects the absent file and re-renders it on the next reconciliation
-    // pass, so a failed render is transient drift, never a permanently
-    // orphaned milestone.
-    logWarning("tool", `plan_milestone — render failed (DB plan kept; roadmap-missing drift repair re-renders ROADMAP.md on the next reconciliation pass): ${(renderErr as Error).message}`);
-    invalidateStateCache();
-    return { error: `render failed: ${(renderErr as Error).message}. The milestone plan is saved in the DB; ROADMAP.md will be re-rendered by drift reconciliation on the next dispatch (or run /gsd sync).` };
+    logWarning("projection", `plan_milestone render failed for ${params.milestoneId}; the plan stays committed`, { error: (renderErr as Error).message });
+    return null;
   }
 }
 
@@ -327,7 +324,6 @@ export async function persistMilestonePlan(
   }
 
   const roadmapPath = await renderPlanArtifacts(basePath, params);
-  if (typeof roadmapPath !== "string") return roadmapPath;
 
   invalidateStateCache();
   clearParseCache();
@@ -336,6 +332,7 @@ export async function persistMilestonePlan(
 
   return {
     milestoneId: params.milestoneId,
-    roadmapPath,
+    roadmapPath: roadmapPath ?? "",
+    ...(roadmapPath === null ? { stale: true as const } : {}),
   };
 }

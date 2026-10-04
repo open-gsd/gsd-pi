@@ -714,6 +714,9 @@ export async function handleCompleteTask(
     params.taskId,
   );
 
+  // The completion is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let projectionStale = false;
   try {
     await persistTaskSummaryProjection(
       artifactBasePath,
@@ -734,19 +737,12 @@ export async function handleCompleteTask(
       throw new Error(`plan projection write returned false for ${params.milestoneId}/${params.sliceId}`);
     }
   } catch (renderErr) {
+    projectionStale = true;
     logWarning(
       "projection",
-      `complete_task projection write failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}`,
+      `complete_task projection write failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}; the completion stays committed`,
       { error: (renderErr as Error).message },
     );
-    // The database completion is authoritative. Leave its summary/evidence and
-    // any successfully written projection in place so recovery can repair the
-    // stale disk projection without another lifecycle mutation.
-    clearPathCache();
-    clearParseCache();
-    return {
-      error: `complete_task projection write failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}; completion remains committed and the disk projection is stale`,
-    };
   }
 
   // ── ADR-011 Phase 2: record the escalation question (opt-in) ───────────
@@ -773,12 +769,11 @@ export async function handleCompleteTask(
   // ── Post-mutation hook: projections, manifest, event log ───────────────
   // Separate try/catch per step so a projection failure doesn't prevent
   // the event log entry (critical for worktree reconciliation).
-  let projectionStale = false;
   try {
     const rendered = await renderMilestoneShellProjections(artifactBasePath, params.milestoneId, {
       skipRoadmap: skipRoadmapProjectionAfterCompletion,
     });
-    projectionStale = rendered.stale;
+    projectionStale ||= rendered.stale;
   } catch (projErr) {
     projectionStale = true;
     logWarning("tool", `complete-task projection warning: ${(projErr as Error).message}`);

@@ -27,6 +27,7 @@ import {
   releaseSessionLock,
   validateSessionLock,
 } from "../session-lock.ts";
+import { repairProjectionDrift } from "../projection-worker.ts";
 import { reconcileBeforeDispatch } from "../state-reconciliation.ts";
 import type { GSDState } from "../types.ts";
 
@@ -117,9 +118,9 @@ test("reconcile settles a pending flat-phase migration while the session lock is
   });
 
   assert.equal(result.ok, true);
-  assert.equal(
-    result.repaired.filter((d) => d.kind === "roadmap-missing").length,
-    0,
+  assert.deepEqual(
+    (await repairProjectionDrift(base)).repaired.filter((d) => d.kind === "roadmap-missing"),
+    [],
     "no phantom roadmap-missing repair may run against the pre-migration layout",
   );
   assert.ok(existsSync(flatRoadmapPath(base)), "migration must have rendered the flat-phase ROADMAP");
@@ -155,9 +156,9 @@ test("reconcile waits out an in-flight migration instead of repairing the transi
   });
 
   assert.equal(result.ok, true);
-  assert.equal(
-    result.repaired.filter((d) => d.kind === "roadmap-missing").length,
-    0,
+  assert.deepEqual(
+    (await repairProjectionDrift(base)).repaired.filter((d) => d.kind === "roadmap-missing"),
+    [],
     "the transient gap is not drift — the migration resume owns the render",
   );
   assert.ok(existsSync(flatRoadmapPath(base)), "resumed migration must render the flat-phase ROADMAP");

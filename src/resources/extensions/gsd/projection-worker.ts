@@ -36,6 +36,7 @@ import {
 import { gsdProjectionRoot, gsdRoot, normalizeRealPath, resolveGsdPathContract } from "./paths.js";
 import {
   preserveProjectionEvidence,
+  type PreservedProjectionEvidence,
   type ProjectionObservationResult,
 } from "./projection-observation.js";
 import {
@@ -49,6 +50,13 @@ import { PROJECTION_LOCK_TRANSIENT_BACKOFF_MS } from "./recovery-policy.js";
 import { deriveState, invalidateStateCache } from "./state.js";
 import { isDiscardedMilestoneStatus } from "./status-guards.js";
 import { detectArtifactDbDrift } from "./state-reconciliation/drift/artifact-db.js";
+import {
+  detectRoadmapDivergenceDrift,
+  detectRoadmapMissingDrift,
+  repairRoadmapDrift,
+} from "./state-reconciliation/drift/roadmap.js";
+import { detectStaleRenderDrift, repairStaleRender } from "./state-reconciliation/drift/stale-render.js";
+import type { DriftRecord } from "./state-reconciliation/types.js";
 import {
   renderStateProjection,
   renderTopLevelQueueFromDb,
@@ -460,23 +468,133 @@ function resolveDiskArtifactPath(basePath: string, artifactPath: string): string
   return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
 }
 
-/** Preserve changed projection bytes without participating in workflow progression. */
-export function preserveProjectionChanges(
-  basePath: string,
-  dryRun = false,
-): Promise<ProjectionObservationResult> {
-  return preserveProjectionEvidence(basePath, [], dryRun);
+export interface ProjectionPreservationResult extends ProjectionObservationResult {
+  /** Failures of the render that follows the copy. They are reported and never stop work. */
+  errors: string[];
+}
+
+/** Render every projection file from the database: the hierarchy, the root files, KNOWLEDGE.md, STATE.md and OVERRIDES.md. */
+async function renderEveryProjection(basePath: string): Promise<RenderAllResult> {
+  const rendered = await renderAllFromDb(basePath);
+  try {
+    if (renderKnowledgeProjection(basePath).written) rendered.rendered++;
+    else rendered.skipped++;
+  } catch (err) {
+    rendered.errors.push(`knowledge: ${(err as Error).message}`);
+  }
+  // STATE.md is part of the full render, with or without a Projection Work row of kind "state".
+  if ((await renderStateProjection(basePath)).stale) rendered.errors.push("STATE.md: render failed");
+  try {
+    renderOverridesProjection(basePath);
+  } catch (err) {
+    rendered.errors.push(`overrides: ${(err as Error).message}`);
+  }
+  return rendered;
 }
 
 /**
- * Before dispatch: preserve changed projection bytes, but hold a changed
- * git-tracked projection (team mode) in place. A non-empty `held` means the
- * caller must stop: see describeHeldProjectionChanges.
+ * Move changed projection bytes to quarantine, then render the database
+ * content again at once, so a changed file is never left missing. A render
+ * failure is returned in `errors`; the next drift repair or rebuild retries.
+ */
+async function preserveAndRender(
+  basePath: string,
+  holdTracked: boolean,
+): Promise<ProjectionPreservationResult> {
+  const observation = await preserveProjectionEvidence(basePath, [], false, holdTracked);
+  if (observation.preserved.length === 0) return { ...observation, errors: [] };
+  try {
+    return { ...observation, errors: (await renderEveryProjection(basePath)).errors };
+  } catch (error) {
+    return { ...observation, errors: [(error as Error).message] };
+  }
+}
+
+/**
+ * Preserve changed projection bytes and render the database content again.
+ * Does not participate in workflow progression. With `dryRun`, reports what
+ * would be preserved and writes nothing.
+ */
+export async function preserveProjectionChanges(
+  basePath: string,
+  dryRun = false,
+): Promise<ProjectionPreservationResult> {
+  if (dryRun) return { ...(await preserveProjectionEvidence(basePath, [], true)), errors: [] };
+  return preserveAndRender(basePath, false);
+}
+
+/**
+ * Before dispatch: preserve changed projection bytes and render the database
+ * content again, but hold a changed git-tracked projection (team mode) in
+ * place. A non-empty `held` means the caller must stop: see
+ * describeHeldProjectionChanges. Nothing else in the result may stop dispatch.
  */
 export function preserveProjectionChangesBeforeDispatch(
   basePath: string,
-): Promise<ProjectionObservationResult> {
-  return preserveProjectionEvidence(basePath, [], false, true);
+): Promise<ProjectionPreservationResult> {
+  return preserveAndRender(basePath, true);
+}
+
+/** The user notice for projection files that were changed outside GSD and rendered again from the database. */
+export function describePreservedProjectionChanges(
+  basePath: string,
+  preserved: readonly PreservedProjectionEvidence[],
+): string {
+  const root = normalizeRealPath(basePath);
+  const rel = (path: string) => relative(root, normalizeRealPath(path)).split(sep).join("/");
+  return [
+    `Projection files changed outside GSD: ${preserved.length}. The database is authoritative, so GSD rendered them again.`,
+    "The changed bytes are kept. To keep a change, review its copy and run `/gsd recover` to import it through Import Preview.",
+    ...preserved.map((evidence) => `  ${rel(evidence.sourcePath)} -> ${rel(evidence.quarantinePath)}`),
+  ].join("\n");
+}
+
+export interface ProjectionDriftRepairResult {
+  /** Drift whose file was rendered again from the database. */
+  repaired: DriftRecord[];
+  /** Detect and render failures. They are reported and never stop work. */
+  errors: string[];
+}
+
+/**
+ * Render again every projection file that is missing or that differs from the
+ * database: slice plans, task and slice summaries, UAT files, and roadmaps.
+ * This is the only place that detects projection drift. It never throws for a
+ * file or render fault, so projection state cannot block database-backed work.
+ */
+export async function repairProjectionDrift(basePath: string): Promise<ProjectionDriftRepairResult> {
+  const result: ProjectionDriftRepairResult = { repaired: [], errors: [] };
+  const detect = <T extends DriftRecord>(kind: T["kind"], find: (basePath: string) => T[]): T[] => {
+    try {
+      return find(basePath);
+    } catch (error) {
+      result.errors.push(`${kind} detection: ${(error as Error).message}`);
+      return [];
+    }
+  };
+  const repair = async <T extends DriftRecord>(
+    records: T[],
+    render: (record: T, basePath: string) => Promise<void>,
+  ): Promise<void> => {
+    for (const record of records) {
+      try {
+        await render(record, basePath);
+        result.repaired.push(record);
+      } catch (error) {
+        result.errors.push(`${record.kind}: ${(error as Error).message}`);
+      }
+    }
+  };
+  // Detect every kind before any repair, so a kind is not judged on a tree
+  // that another repair has half rendered.
+  const staleRenders = detect("stale-render", detectStaleRenderDrift);
+  const roadmaps = [
+    ...detect("roadmap-missing", detectRoadmapMissingDrift),
+    ...detect("roadmap-divergence", detectRoadmapDivergenceDrift),
+  ];
+  await repair(staleRenders, repairStaleRender);
+  await repair(roadmaps, repairRoadmapDrift);
+  return result;
 }
 
 /** The one "changed outside GSD" state: no dispatch on old content until the user chooses. */
@@ -508,20 +626,7 @@ export async function rebuildMarkdownProjectionsFromDb(
   const observation = await preserveProjectionEvidence(basePath, legacyDriftPaths);
   const preserved = observation.preserved;
 
-  const rendered = await renderAllFromDb(basePath);
-  try {
-    if (renderKnowledgeProjection(basePath).written) rendered.rendered++;
-    else rendered.skipped++;
-  } catch (err) {
-    rendered.errors.push(`knowledge: ${(err as Error).message}`);
-  }
-  // STATE.md is part of the full rebuild, with or without a Projection Work row of kind "state".
-  if ((await renderStateProjection(basePath)).stale) rendered.errors.push("STATE.md: render failed");
-  try {
-    renderOverridesProjection(basePath);
-  } catch (err) {
-    rendered.errors.push(`overrides: ${(err as Error).message}`);
-  }
+  const rendered = await renderEveryProjection(basePath);
   const drained = await repairProjectionWork(basePath);
   invalidateStateCache();
 

@@ -31,6 +31,7 @@ import { deriveState, invalidateStateCache } from '../state.ts';
 import { claimTaskAttempt, settleTaskAttempt } from '../task-execution-domain-operation.ts';
 import { recordTaskTechnicalVerdict } from '../task-verification-domain-operation.ts';
 import { completeSlice } from '../slice-lifecycle-domain-operation.ts';
+import { assertWorkerRendersStaleProjection } from './projection-render-failure-gate.ts';
 
 function handlePlanSlice(
   params: Parameters<typeof handlePlanSliceWithInvocation>[0],
@@ -650,8 +651,8 @@ test('handlePlanSlice commits sketch refinement when render fails before artifac
     mkdirSync(join(base, '.gsd', 'phases', '01-test', '01-02-PLAN.md'), { recursive: true });
 
     const result = await handlePlanSlice(validParams(), base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
     assert.equal(getSlice('M001', 'S02')?.is_sketch, 0, 'projection failure must not compensate committed planning authority');
   } finally {
     cleanup(base);
@@ -1000,7 +1001,7 @@ test('handlePlanSlice rejects missing parent slice', async () => {
   }
 });
 
-test('handlePlanSlice surfaces render failures without changing parse-visible task-plan state for the failing task', async () => {
+test('handlePlanSlice returns the committed plan with a stale flag when the render fails', async () => {
   const base = makeTmpBase();
   openDatabase(join(base, '.gsd', 'gsd.db'));
 
@@ -1013,11 +1014,15 @@ test('handlePlanSlice surfaces render failures without changing parse-visible ta
     mkdirSync(failingTaskPlanPath, { recursive: true });
 
     const result = await handlePlanSlice(validParams(), base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
+    assert.equal(result.planPath, '');
 
     assert.ok(existsSync(failingTaskPlanPath), 'failing task plan path should remain the blocking directory');
     assert.equal(getTask('M001', 'S02', 'T01')?.description, 'Implement the slice planning handler.');
+
+    rmSync(failingTaskPlanPath, { recursive: true });
+    await assertWorkerRendersStaleProjection(base, failingTaskPlanPath);
   } finally {
     cleanup(base);
   }

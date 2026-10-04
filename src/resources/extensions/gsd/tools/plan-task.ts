@@ -72,6 +72,8 @@ export interface PlanTaskResult {
   sliceId: string;
   taskId: string;
   taskPlanPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 export function validateRepositoryTargetIds(field: string, value: unknown): string[] {
@@ -404,11 +406,14 @@ export async function handlePlanTask(
     return { error: `db write failed: ${(err as Error).message}` };
   }
 
+  // The task plan is committed. A failed render must not fail the tool: its
+  // Projection Work stays pending and the Projection Worker renders it again.
+  let renderedPath = "";
+  let stale = false;
   try {
     const milestonePath = resolveMilestonePath(basePath, params.milestoneId);
     const slicePath = resolveSlicePath(basePath, params.milestoneId, params.sliceId);
     const isLegacySliceLayout = Boolean(milestonePath && slicePath && slicePath !== milestonePath);
-    let renderedPath: string;
 
     if (isLegacySliceLayout) {
       const renderResult = await renderTaskPlanFromDb(basePath, params.milestoneId, params.sliceId, params.taskId);
@@ -417,35 +422,37 @@ export async function handlePlanTask(
       const renderResult = await renderPlanFromDb(basePath, params.milestoneId, params.sliceId);
       renderedPath = renderResult.planPath;
     }
-
-    invalidateStateCache();
-    clearParseCache();
-
-    // ── Post-mutation hook: projections, manifest, event log ─────────────
-    try {
-      await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
-      await writeManifestAndFlush(basePath);
-      if (operationStatus === "committed") {
-        appendEvent(basePath, {
-          cmd: "plan-task",
-          params: { milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
-          ts: new Date().toISOString(),
-          actor: "agent",
-          actor_name: params.actorName,
-          trigger_reason: params.triggerReason,
-        });
-      }
-    } catch (hookErr) {
-      logWarning("tool", `plan-task post-mutation hook warning: ${(hookErr as Error).message}`);
-    }
-
-    return {
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      taskId: params.taskId,
-      taskPlanPath: renderedPath,
-    };
   } catch (err) {
-    return { error: `render failed: ${(err as Error).message}` };
+    stale = true;
+    logWarning("projection", `plan_task render failed for ${params.milestoneId}/${params.sliceId}/${params.taskId}; the task plan stays committed`, { error: (err as Error).message });
   }
+
+  invalidateStateCache();
+  clearParseCache();
+
+  // ── Post-mutation hook: projections, manifest, event log ─────────────
+  try {
+    await flushWorkflowProjections(basePath, { milestoneId: params.milestoneId });
+    await writeManifestAndFlush(basePath);
+    if (operationStatus === "committed") {
+      appendEvent(basePath, {
+        cmd: "plan-task",
+        params: { milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
+        ts: new Date().toISOString(),
+        actor: "agent",
+        actor_name: params.actorName,
+        trigger_reason: params.triggerReason,
+      });
+    }
+  } catch (hookErr) {
+    logWarning("tool", `plan-task post-mutation hook warning: ${(hookErr as Error).message}`);
+  }
+
+  return {
+    milestoneId: params.milestoneId,
+    sliceId: params.sliceId,
+    taskId: params.taskId,
+    taskPlanPath: renderedPath,
+    ...(stale ? { stale: true as const } : {}),
+  };
 }

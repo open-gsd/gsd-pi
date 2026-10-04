@@ -64,7 +64,12 @@ import { getErrorMessage } from "../error-utils.js";
 import { parseUnitId } from "../unit-id.js";
 import { logWarning } from "../workflow-logger.js";
 import { normalizeRealPath } from "../paths.js";
-import { describeHeldProjectionChanges, preserveProjectionChangesBeforeDispatch } from "../projection-worker.js";
+import {
+  describeHeldProjectionChanges,
+  describePreservedProjectionChanges,
+  preserveProjectionChangesBeforeDispatch,
+  repairProjectionDrift,
+} from "../projection-worker.js";
 import { throwIfTransientProjectionLockError } from "../projection-root-errors.js";
 import { buildDispatchKey } from "./dispatch-key.js";
 import { stableClaimSignature } from "./lease-conflict-notice.js";
@@ -675,20 +680,20 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
     // Settle the layout before the hold: a legacy file that the migration is
     // about to move is not a change from outside GSD.
     await settleFlatPhaseMigration(activeBasePath);
-    let held: readonly string[];
+    let held: readonly string[] = [];
     try {
-      ({ held } = await (_preserveProjectionChangesFn ?? preserveProjectionChangesBeforeDispatch)(activeBasePath));
+      const observation = await (_preserveProjectionChangesFn ?? preserveProjectionChangesBeforeDispatch)(activeBasePath);
+      held = observation.held;
+      if (observation.preserved.length > 0) {
+        this.ctx.ui.notify(describePreservedProjectionChanges(activeBasePath, observation.preserved), "warning");
+      }
+      for (const error of observation.errors) logWarning("projection", `projection render failed: ${error}`);
     } catch (error) {
       // Keep transient Windows projection-lock failures on the typed recovery
       // path so autoLoop receives their classification and bounded backoff.
       throwIfTransientProjectionLockError(error);
-      const reason = `Projection observation failed: ${getErrorMessage(error)}`;
-      logWarning("reconcile", reason);
-      return {
-        ok: false,
-        reason,
-        blockerDetails: [{ message: reason }],
-      };
+      // Projection files are not workflow state: report the failure and go on.
+      logWarning("reconcile", `Projection observation failed: ${getErrorMessage(error)}`);
     }
     if (held.length > 0) {
       const reason = describeHeldProjectionChanges(activeBasePath, held);
@@ -703,6 +708,9 @@ export class AutoOrchestrator implements AutoOrchestrationModule {
         blockerDetails: result.blockerDetails,
       };
     }
+    // After reconciliation, so the layout is settled before files are compared.
+    const drift = await repairProjectionDrift(activeBasePath);
+    for (const error of drift.errors) logWarning("projection", `projection drift repair failed: ${error}`);
     const repairedKinds = result.repaired.map((d) => d.kind);
     return {
       ok: true,

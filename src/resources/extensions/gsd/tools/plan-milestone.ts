@@ -62,6 +62,8 @@ export interface PlanMilestoneParams {
 export interface PlanMilestoneResult {
   milestoneId: string;
   roadmapPath: string;
+  /** True when the committed change is not yet in the readable files. The Projection Worker retries the render. */
+  stale?: true;
 }
 
 function validateRiskEntries(value: unknown): Array<{ risk: string; whyItMatters: string }> {

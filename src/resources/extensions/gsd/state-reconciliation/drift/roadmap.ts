@@ -1,8 +1,10 @@
 // Project/App: gsd-pi
-// File Purpose: ADR-017 roadmap-divergence drift handler. Detects mismatches
-// between ROADMAP.md (parsed slice sequence, depends declarations, and
-// checkboxes) and the DB slice rows for that milestone, then re-renders the
-// ROADMAP projection from the authoritative DB rows.
+// File Purpose: Roadmap projection drift. Detects a ROADMAP.md that is missing
+// or that differs from the DB slice rows of its milestone (slice sequence,
+// depends declarations, checkboxes), and renders the file again from the DB.
+// Detected and repaired by the Projection Worker only (ADR-046). It is not
+// part of pre-dispatch reconciliation, so a file fault cannot block
+// database-backed work.
 
 import { existsSync, readFileSync } from "node:fs";
 
@@ -22,15 +24,14 @@ import {
   isHiddenFromRoadmap,
   isSkippedForDispatch,
 } from "../../status-guards.js";
-import type { GSDState } from "../../types.js";
-import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
+import type { DriftRecord } from "../types.js";
 
-type RoadmapDivergenceDrift = Extract<
+export type RoadmapDivergenceDrift = Extract<
   DriftRecord,
   { kind: "roadmap-divergence" }
 >;
 
-type RoadmapMissingDrift = Extract<DriftRecord, { kind: "roadmap-missing" }>;
+export type RoadmapMissingDrift = Extract<DriftRecord, { kind: "roadmap-missing" }>;
 
 function arraysEqual(a: readonly string[], b: readonly string[]): boolean {
   if (a.length !== b.length) return false;
@@ -82,7 +83,7 @@ function milestoneHasDivergence(
   // Without this, a skipped slice counts as "ready" (skipped ∈
   // RAW_CLOSED_STATUSES) but never appears in the rendered markdown, so the
   // absence/order checks below report a divergence that re-rendering can never
-  // repair — reconcileBeforeDispatch then throws on every dispatch.
+  // repair, so the Projection Worker would render the file on every dispatch.
   const dbSlices = getMilestoneSlices(milestoneId).filter((s) => s.status !== "skipped");
   const dbSliceMap = new Map(dbSlices.map((s) => [s.id, s]));
   // Sequence positions are compared against the *rendered* slice list, which
@@ -116,20 +117,17 @@ function milestoneHasDivergence(
   return false;
 }
 
-export function detectRoadmapDivergenceDrift(
-  _state: GSDState,
-  ctx: DriftContext,
-): RoadmapDivergenceDrift[] {
+export function detectRoadmapDivergenceDrift(basePath: string): RoadmapDivergenceDrift[] {
   if (!isDbAvailable()) return [];
 
   const drifts: RoadmapDivergenceDrift[] = [];
-  for (const milestoneId of findMilestoneIds(ctx.basePath)) {
+  for (const milestoneId of findMilestoneIds(basePath)) {
     // Skip milestones that don't yet have a DB row — that's the
     // unregistered-milestone drift handler's responsibility.
     const milestone = getMilestone(milestoneId);
     if (!milestone) continue;
     if (isSkippedForDispatch(milestone.status)) continue;
-    if (milestoneHasDivergence(ctx.basePath, milestoneId)) {
+    if (milestoneHasDivergence(basePath, milestoneId)) {
       drifts.push({ kind: "roadmap-divergence", milestoneId });
     }
   }
@@ -137,22 +135,18 @@ export function detectRoadmapDivergenceDrift(
 }
 
 /**
- * Repair a milestone's roadmap divergence by regenerating the projection from
- * DB rows. ROADMAP.md is a projection; runtime reconciliation must not import
- * slice presence, sequence, dependencies, or checkbox state from markdown.
+ * Repair a missing or divergent roadmap by regenerating the projection from DB
+ * rows. ROADMAP.md is a projection; nothing imports slice presence, sequence,
+ * dependencies, or checkbox state from markdown. The write target creates the
+ * phase dir when it is absent, so this converges even when the original render
+ * failed before the milestone dir ever existed.
  */
-export async function repairRoadmapDivergence(
-  record: RoadmapDivergenceDrift,
-  ctx: DriftContext,
+export async function repairRoadmapDrift(
+  record: RoadmapDivergenceDrift | RoadmapMissingDrift,
+  basePath: string,
 ): Promise<void> {
-  await renderRoadmapFromDb(ctx.basePath, record.milestoneId);
+  await renderRoadmapFromDb(basePath, record.milestoneId);
 }
-
-export const roadmapDivergenceHandler: DriftHandler<RoadmapDivergenceDrift> = {
-  kind: "roadmap-divergence",
-  detect: detectRoadmapDivergenceDrift,
-  repair: repairRoadmapDivergence,
-};
 
 /**
  * #1634: a milestone whose ROADMAP.md is missing entirely produced ZERO drift
@@ -182,37 +176,16 @@ export function isRoadmapRenderable(
   return renderableSlices.length > 0 || milestone.vision.trim() !== '';
 }
 
-export function detectRoadmapMissingDrift(
-  _state: GSDState,
-  ctx: DriftContext,
-): RoadmapMissingDrift[] {
+export function detectRoadmapMissingDrift(basePath: string): RoadmapMissingDrift[] {
   if (!isDbAvailable()) return [];
 
   const drifts: RoadmapMissingDrift[] = [];
   for (const milestone of getAllMilestones()) {
     if (!isRoadmapRenderable(milestone)) continue;
-    const roadmapPath = resolveMilestoneFile(ctx.basePath, milestone.id, "ROADMAP");
+    const roadmapPath = resolveMilestoneFile(basePath, milestone.id, "ROADMAP");
     if (!roadmapPath || !existsSync(roadmapPath)) {
       drifts.push({ kind: "roadmap-missing", milestoneId: milestone.id });
     }
   }
   return drifts;
 }
-
-/**
- * Repair by re-rendering the projection from DB rows. The write target creates
- * the phase dir when it is absent, so this converges even when the original
- * render failed before the milestone dir ever existed.
- */
-export async function repairRoadmapMissing(
-  record: RoadmapMissingDrift,
-  ctx: DriftContext,
-): Promise<void> {
-  await renderRoadmapFromDb(ctx.basePath, record.milestoneId);
-}
-
-export const roadmapMissingHandler: DriftHandler<RoadmapMissingDrift> = {
-  kind: "roadmap-missing",
-  detect: detectRoadmapMissingDrift,
-  repair: repairRoadmapMissing,
-};

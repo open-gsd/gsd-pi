@@ -333,7 +333,7 @@ test("executeSummarySave surfaces task summary projection failures", async (t) =
   assert.equal(getArtifact(artifactPath), null);
 });
 
-test("executeSummarySave surfaces task summary worktree mirror failures", async (t) => {
+test("executeSummarySave returns the saved task summary with a stale flag when the worktree mirror fails", async (t) => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
   t.after(() => {
@@ -357,8 +357,9 @@ test("executeSummarySave surfaces task summary worktree mirror failures", async 
     content: "# T01 Summary\n\nMirror failure must be visible.\n",
   }, worktree));
 
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /Error saving artifact/);
+  assert.notEqual(result.isError, true, "a failed worktree copy after the save is not a tool error");
+  assert.match(result.content[0]!.text, /Saved SUMMARY artifact/);
+  assert.equal(result.details.stale, true);
   assert.ok(getArtifact(artifactPath));
 });
 

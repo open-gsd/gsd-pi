@@ -1,9 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: Regression tests for #1634 (map #1651): a milestone persisted
 // to the DB whose ROADMAP.md render failed (or was deleted) must never stay a
-// permanent orphan — the roadmap-missing drift handler re-renders the
-// projection from the DB and reconciliation converges, doctor agrees the issue
-// is fixable, and the reconciliation cap error names its repair command.
+// permanent orphan — the Projection Worker drift repair re-renders the
+// projection from the DB and converges, doctor agrees the issue is fixable,
+// and the reconciliation cap error names its repair command.
 
 import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -23,30 +23,11 @@ import {
 import { persistMilestonePlan } from "../milestone-planning-persistence.ts";
 import { internalPlanningInvocation } from "../planning-invocation.ts";
 import { targetMilestoneFile } from "../paths.ts";
-import {
-  reconcileBeforeDispatch,
-  ReconciliationFailedError,
-} from "../state-reconciliation.ts";
+import { repairProjectionDrift } from "../projection-worker.ts";
+import { ReconciliationFailedError } from "../state-reconciliation.ts";
 import { detectRoadmapMissingDrift } from "../state-reconciliation/drift/roadmap.ts";
 import { checkGsdStateHealth } from "../doctor-state-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
-import type { GSDState } from "../types.ts";
-
-function makeState(overrides: Partial<GSDState> = {}): GSDState {
-  return {
-    activeMilestone: { id: "M001", title: "Milestone" },
-    activeSlice: null,
-    activeTask: null,
-    phase: "planning",
-    recentDecisions: [],
-    blockers: [],
-    nextAction: "Plan milestone",
-    registry: [],
-    requirements: { active: 0, validated: 0, deferred: 0, outOfScope: 0, blocked: 0, total: 0 },
-    progress: { milestones: { done: 0, total: 1 } },
-    ...overrides,
-  };
-}
 
 afterEach(() => {
   try { closeDatabase(); } catch { /* already closed */ }
@@ -115,15 +96,12 @@ test("#1634 (b): missing ROADMAP.md with DB planning rows emits roadmap-missing 
   seedPlannedMilestone();
 
   // No ROADMAP.md anywhere on disk — the milestone dir does not even exist.
-  const records = detectRoadmapMissingDrift(makeState(), { basePath: base, state: makeState() });
+  const records = detectRoadmapMissingDrift(base);
   assert.equal(records.length, 1, "missing roadmap must emit exactly one drift record");
   assert.deepEqual(records[0], { kind: "roadmap-missing", milestoneId: "M001" });
 
-  const result = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => makeState(),
-  });
-  assert.equal(result.ok, true);
+  const result = await repairProjectionDrift(base);
+  assert.deepEqual(result.errors, []);
   assert.ok(
     result.repaired.some((d) => d.kind === "roadmap-missing"),
     "repaired list should include the roadmap-missing drift",
@@ -133,16 +111,7 @@ test("#1634 (b): missing ROADMAP.md with DB planning rows emits roadmap-missing 
   assert.match(readFileSync(roadmapPath, "utf-8"), /# M001: Test/);
 
   // Convergence proof: a second pass detects nothing and repairs nothing.
-  const second = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => makeState(),
-  });
-  assert.equal(second.ok, true);
-  assert.equal(
-    second.repaired.filter((d) => d.kind === "roadmap-missing" || d.kind === "roadmap-divergence").length,
-    0,
-    "second pass must be clean — repair converged",
-  );
+  assert.deepEqual(await repairProjectionDrift(base), { repaired: [], errors: [] }, "second pass must be clean — repair converged");
 });
 
 test("#1634/#2063: unplanned bare milestone rows and closed milestones do not emit roadmap-missing drift", async (t) => {
@@ -172,7 +141,7 @@ test("#1634/#2063: unplanned bare milestone rows and closed milestones do not em
   });
   insertMilestone({ id: "M005", title: "Cancelled placeholder", status: "cancelled" });
 
-  const records = detectRoadmapMissingDrift(makeState(), { basePath: base, state: makeState() });
+  const records = detectRoadmapMissingDrift(base);
   assert.equal(records.length, 0, "neither bare nor closed milestones may be flagged");
 });
 
@@ -188,28 +157,20 @@ test("#1634 (a): persistMilestonePlan with a failing render keeps the DB plan an
   mkdirSync(roadmapPath, { recursive: true });
 
   const result = await persistMilestonePlan(planParams(), base, internalPlanningInvocation());
-  assert.ok("error" in result, "render failure must surface as an error");
-  assert.match(result.error, /render failed:/);
-  assert.match(
-    result.error,
-    /drift reconciliation|\/gsd sync/,
-    "the error must name the self-heal route instead of a dead end",
-  );
+  assert.ok(!("error" in result), "a render failure after commit is not a tool error");
+  assert.equal(result.stale, true);
 
   // The DB plan is committed — DB is the authority, not the projection.
   assert.ok(getMilestone("M001"), "milestone row must survive the render failure");
   assert.equal(getMilestoneSlices("M001").length, 1, "slice rows must survive the render failure");
 
-  // Unblock the path; the next reconciliation pass heals the orphan.
+  // Unblock the path; the next Projection Worker drift repair heals the orphan.
   rmSync(roadmapPath, { recursive: true, force: true });
-  const reconciled = await reconcileBeforeDispatch(base, {
-    invalidateStateCache: () => {},
-    deriveState: async () => makeState(),
-  });
-  assert.equal(reconciled.ok, true);
+  const repair = await repairProjectionDrift(base);
+  assert.deepEqual(repair.errors, []);
   assert.ok(
-    reconciled.repaired.some((d) => d.kind === "roadmap-missing" && d.milestoneId === "M001"),
-    "the orphaned milestone must be repaired by the roadmap-missing handler",
+    repair.repaired.some((d) => d.kind === "roadmap-missing" && d.milestoneId === "M001"),
+    "the orphaned milestone must be repaired as roadmap-missing drift",
   );
   assert.ok(existsSync(roadmapPath), "ROADMAP.md must exist after the drift pass");
   assert.match(readFileSync(roadmapPath, "utf-8"), /# M001: Test/);
