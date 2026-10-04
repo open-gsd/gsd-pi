@@ -6,6 +6,7 @@ import { _getAdapter, isDbAvailable, transaction } from "../engine.js";
 import type { SidecarItem } from "../../auto/session.js";
 import {
   sidecarQueueScope,
+  sidecarReadScope,
   sidecarItemFromRow,
   type QueuedSidecarItem,
   type SidecarRow,
@@ -87,13 +88,14 @@ export function promoteHeldQuickTask(milestoneId: string | null): QueuedSidecarI
   if (!isDbAvailable()) return null;
   return transaction(() => {
     const db = _getAdapter()!;
+    const { where, params } = sidecarReadScope();
     const row = db.prepare(
       `SELECT id, kind, unit_type, unit_id, prompt, model, capture_id
        FROM unit_dispatch_sidecars
-       WHERE scope = :scope AND status = 'held'
+       WHERE ${where} AND status = 'held'
        ORDER BY id
        LIMIT 1`,
-    ).get({ ":scope": sidecarQueueScope() }) as SidecarRow | undefined;
+    ).get(params) as SidecarRow | undefined;
     if (!row) return null;
     row.unit_id = `${milestoneId}/${row.capture_id}`;
     db.prepare(
@@ -122,12 +124,13 @@ export function settleSidecarItem(id: number): void {
 export function cancelOpenSidecarItems(): void {
   if (!isDbAvailable()) return;
   transaction(() => {
+    const { where, params } = sidecarReadScope();
     _getAdapter()!.prepare(
       `UPDATE unit_dispatch_sidecars
        SET status = 'canceled', settled_at = :settled_at
-       WHERE scope = :scope AND status IN ('held', 'queued')`,
+       WHERE ${where} AND status IN ('held', 'queued')`,
     ).run({
-      ":scope": sidecarQueueScope(),
+      ...params,
       ":settled_at": new Date().toISOString(),
     });
   });

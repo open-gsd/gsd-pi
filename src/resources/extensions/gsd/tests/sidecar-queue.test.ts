@@ -329,6 +329,70 @@ test("a session that moves to the next milestone still runs the quick tasks it h
   assert.equal(hasHeldQuickTask(), false);
 });
 
+/** Run `fn` as the parallel worker of M001, then go back to a plain session. */
+function asParallelWorkerOfM001<T>(fn: () => T): T {
+  const previous = {
+    GSD_PARALLEL_WORKER: process.env.GSD_PARALLEL_WORKER,
+    GSD_MILESTONE_LOCK: process.env.GSD_MILESTONE_LOCK,
+  };
+  process.env.GSD_PARALLEL_WORKER = "1";
+  process.env.GSD_MILESTONE_LOCK = "M001";
+  try {
+    return fn();
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+}
+
+/** The M001 parallel worker queues a hook and holds a quick task. It is another process. */
+function queueWorkAsOtherParallelWorker(base: string): void {
+  asParallelWorkerOfM001(() => {
+    claimDispatch(base, "plan-slice", "M001/S01");
+    enqueueSidecarItem(
+      { kind: "hook", unitType: "hook/a", unitId: "M001/S01", prompt: "a" },
+      { type: "plan-slice", id: "M001/S01" },
+    );
+    holdQuickTask(quickTask("CAP-1"), null);
+  });
+  // The pid of init: a live process that is not this one.
+  _getAdapter()!.prepare("UPDATE workers SET pid = 1").run();
+}
+
+test("a plain start leaves the rows of a live parallel worker alone", (t) => {
+  const base = makeProject(t);
+  queueWorkAsOtherParallelWorker(base);
+
+  assert.deepEqual(listQueuedSidecarItems(), []);
+  assert.equal(hasHeldQuickTask(), false);
+  assert.equal(promoteHeldQuickTask("M002"), null);
+  cancelOpenSidecarItems();
+
+  asParallelWorkerOfM001(() => {
+    assert.equal(listQueuedSidecarItems().length, 1, "the worker still has its queue");
+    assert.equal(hasHeldQuickTask(), true);
+  });
+});
+
+test("a plain start runs the rows of a parallel worker that was killed", (t) => {
+  const base = makeProject(t);
+  queueWorkAsOtherParallelWorker(base);
+
+  // The worker is killed: its heartbeat and its milestone lease are not renewed.
+  const past = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+  _getAdapter()!.prepare("UPDATE workers SET last_heartbeat_at = :past").run({ ":past": past });
+  _getAdapter()!.prepare("UPDATE milestone_leases SET expires_at = :past").run({ ":past": past });
+  restartProcess(base);
+
+  assert.deepEqual(listQueuedSidecarItems().map((item) => item.unitType), ["hook/a"]);
+  const quick = promoteHeldQuickTask("M002");
+  assert.equal(quick?.captureId, "CAP-1");
+  assert.equal(quick?.unitId, "M002/CAP-1");
+  assert.deepEqual(listQueuedSidecarItems().map((item) => item.unitType), ["hook/a", "quick-task"]);
+});
+
 test("a parallel worker does not take the quick tasks another worker holds", (t) => {
   makeProject(t);
   const previous = {
