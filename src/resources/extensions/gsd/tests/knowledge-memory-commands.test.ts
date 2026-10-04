@@ -318,3 +318,30 @@ test("/gsd memory import that fails part-way reports the rows it imported and re
   assert.equal(activeMemoryCount(), 1);
   assert.match(knowledgeMd(base), /\| P001 \| Imported before the failure \|/, "the committed row is rendered");
 });
+
+test("/gsd memory import adds a row again after the local row was forgotten", async (t) => {
+  const base = makeBase(t);
+  const forgotten = captureKnowledgeEntry(base, "pattern", "Pattern that comes back", "project");
+  await runMemory(base, `forget ${forgotten.memoryId}`);
+  assert.doesNotMatch(knowledgeMd(base), /Pattern that comes back/);
+
+  const messages = await runMemory(base, `import ${exportFile(base, [
+    { category: "pattern", content: "Pattern that comes back", structured_fields: { sourceKnowledgeId: "P001" } },
+  ])}`);
+
+  assert.match(messages.join("\n"), /Imported 1 memories/);
+  assert.doesNotMatch(messages.join("\n"), /already present locally/);
+  assert.deepEqual(activeKnowledgeIds(), ["P002"], "the id of the forgotten row is not used again");
+  assert.match(knowledgeMd(base), /\| P002 \| Pattern that comes back \|/);
+});
+
+test("/gsd memory import that fails before the first row reports only the failure", async (t) => {
+  const base = makeBase(t);
+  const path = exportFile(base, [{ category: "pattern", content: "Never imported" }]);
+  _getAdapter()!.exec("ALTER TABLE memories RENAME TO memories_unavailable");
+
+  const messages = await runMemory(base, `import ${path}`);
+
+  assert.equal(messages.length, 1, messages.join("\n"));
+  assert.match(messages[0]!, /^Import failed: /);
+});

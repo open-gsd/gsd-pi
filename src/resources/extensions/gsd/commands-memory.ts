@@ -409,6 +409,7 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
   let memoryCount = 0;
   let relationCount = 0;
   let duplicateCount = 0;
+  let reachedRows = false;
   const remapped: string[] = [];
 
   try {
@@ -420,6 +421,7 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
     const contentKey = (category: string, content: string) =>
       `${category}\n${content.replace(/\s+/g, " ").trim().toLowerCase()}`;
     const seen = new Set(local.contents.map((row) => contentKey(row.category, row.content)));
+    reachedRows = true;
 
     for (const mem of parsed.memories ?? []) {
       if (!mem.category || !mem.content) continue;
@@ -480,15 +482,18 @@ function handleImport(ctx: ExtensionCommandContext, target: string | undefined):
     ctx.ui.notify(`Import failed: ${(err as Error).message}`, "error");
   } finally {
     // Rows imported before a failure are committed: report them and render.
-    ctx.ui.notify(
-      [
-        `Imported ${memoryCount} memories and ${relationCount} relations.`,
-        duplicateCount > 0 ? `Skipped ${duplicateCount} already present locally.` : "",
-        remapped.length > 0 ? `Knowledge ids already in use were remapped: ${remapped.join(", ")}.` : "",
-      ].filter(Boolean).join(" "),
-      "info",
-    );
-    renderKnowledgeAfterMemoryChange(ctx);
+    // A failure before the first row changed nothing.
+    if (reachedRows) {
+      ctx.ui.notify(
+        [
+          `Imported ${memoryCount} memories and ${relationCount} relations.`,
+          duplicateCount > 0 ? `Skipped ${duplicateCount} already present locally.` : "",
+          remapped.length > 0 ? `Knowledge ids already in use were remapped: ${remapped.join(", ")}.` : "",
+        ].filter(Boolean).join(" "),
+        "info",
+      );
+      renderKnowledgeAfterMemoryChange(ctx);
+    }
   }
 }
 

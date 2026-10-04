@@ -231,17 +231,21 @@ export function knowledgeUnavailableBlock(reason: string): string {
 }
 
 /**
- * Every local knowledge row for the memory import: the category and content
- * of each memories row (active or superseded) and of each K/P/L row in the
- * file, plus every knowledge id they hold. Throws when the database is not
- * available.
+ * The local rows for the memory import. `contents` is the category and
+ * content of each active memories row and of each file-only K/P/L row: a
+ * superseded or forgotten row is not a duplicate of an imported row. `ids` is
+ * every knowledge id a memories row (active or superseded) or a file row
+ * holds. Throws when the database is not available.
  */
 export function readLocalKnowledgeIndex(basePath: string): { contents: Array<{ category: string; content: string }>; ids: Set<string> } {
   const adapter = isDbAvailable() ? _getAdapter() : null;
   if (!adapter) throw new Error("GSD database is not available; cannot read local knowledge rows");
-  const contents = adapter.prepare("SELECT category, content FROM memories").all() as Array<{ category: string; content: string }>;
+  const contents = adapter
+    .prepare("SELECT category, content FROM memories WHERE superseded_by IS NULL")
+    .all() as Array<{ category: string; content: string }>;
   const ids = readDbKnowledge().knownIds;
   for (const row of parseKnowledgeRows(readKnowledgeMd(basePath))) {
+    if (ids.has(row.id)) continue;
     ids.add(row.id);
     const category = Object.keys(TABLE_BY_CATEGORY).find((key) => TABLE_BY_CATEGORY[key] === row.table)!;
     contents.push({ category, content: row.cells[row.table === "rules" ? 2 : 1] ?? "" });
