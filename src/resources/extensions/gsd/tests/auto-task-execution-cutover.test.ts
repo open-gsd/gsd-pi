@@ -637,7 +637,7 @@ test("agent remediation of a failed Technical Verdict runs in a lineage-linked A
       endedAt: "2026-07-12T00:02:01.000Z",
       exitCode: 1,
       observation: "failed",
-      durableOutputRef: "db://host-verification/attempt-1",
+      durableOutputRef: `db://host-verification/${firstAttempt.attemptId}`,
       environment: { runner: "node-test", platform: "test" },
     },
   });
@@ -725,7 +725,7 @@ test("agent remediation of a failed Technical Verdict runs in a lineage-linked A
       endedAt: "2026-07-12T00:04:01.000Z",
       exitCode: 0,
       observation: "passed",
-      durableOutputRef: "db://host-verification/attempt-2",
+      durableOutputRef: `db://host-verification/${secondAttempt.attemptId}`,
       environment: { runner: "node-test", platform: "test" },
     },
   });

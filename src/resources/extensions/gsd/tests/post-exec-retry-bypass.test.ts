@@ -39,6 +39,7 @@ import {
 } from "../task-execution-domain-operation.ts";
 import {
   invalidateTaskTechnicalPass,
+  readHostVerificationOutput,
   readTaskTechnicalVerdict,
   recordTaskTechnicalVerdict,
 } from "../task-verification-domain-operation.ts";
@@ -1414,6 +1415,56 @@ describe("Post-execution blocking failure retry bypass", () => {
     // The Task did not leave the route stage, so slice completion has no passing proof for it.
     assert.equal(outcome.nextStage, "route");
     assert.notEqual(outcome.lifecycleStatus, "completed");
+  });
+
+  test("the output of a failed host check resolves from the database after the VERIFY file and .gsd/exec are deleted", async () => {
+    writeFileSync(join(tempDir, "fail.js"), "console.error('boom-marker'); process.exit(3);\n");
+    createBasicTask("node fail.js");
+
+    const outcome = await verifyCanonicalTask();
+    assert.equal(outcome.verdict, "fail");
+    rmSync(join(tempDir, ".gsd", "milestones"), { recursive: true, force: true });
+    rmSync(join(tempDir, ".gsd", "exec"), { recursive: true, force: true });
+
+    const output = readHostVerificationOutput(`db://host-verification/${outcome.attemptId}`);
+    assert.equal(output?.attemptId, outcome.attemptId);
+    assert.equal(output?.observation, "failed");
+    assert.equal(output?.checks.length, 1);
+    const check = output?.checks[0] as { command: string; exitCode: number; verdict: string; stderrExcerpt: string };
+    assert.equal(check.command, "node fail.js");
+    assert.equal(check.exitCode, 3);
+    assert.equal(check.verdict, "fail");
+    assert.match(check.stderrExcerpt, /boom-marker/);
+    assert.equal(readHostVerificationOutput("db://host-verification/no-such-attempt"), null);
+  });
+
+  test("a host verdict is refused when its evidence reference does not resolve", async () => {
+    createBasicTask();
+    const attemptId = createCanonicalSucceededTaskAttempt();
+    const record = (durableOutputRef: string) => recordTaskTechnicalVerdict({
+      invocation: internalExecutionInvocation(`fixture/unresolved-ref/${durableOutputRef}`),
+      attemptId,
+      testedSourceRevision: currentSourceRevision(),
+      verdict: "pass",
+      rationale: "All host-owned technical verification checks passed.",
+      evidence: {
+        evidenceClass: "command",
+        commandOrTool: "echo pass",
+        workingDirectory: tempDir,
+        startedAt: "2026-07-13T00:00:00.000Z",
+        endedAt: "2026-07-13T00:00:01.000Z",
+        exitCode: 0,
+        observation: "passed",
+        durableOutputRef,
+        environment: { node: process.version },
+      },
+    });
+
+    assert.throws(() => record("db://host-verification/another-attempt"), /does not name Attempt/);
+    assert.throws(() => record("exec-run-never-recorded"), /names no host-recorded exec run/);
+    assert.equal(readTaskTechnicalVerdict(attemptId), null);
+
+    assert.equal(record(`db://host-verification/${attemptId}`).status, "committed");
   });
 
   test("a browser-facing task with no host check gets an inconclusive verdict, not a pass", async () => {

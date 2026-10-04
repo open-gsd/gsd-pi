@@ -862,7 +862,7 @@ test("genuine blockers pause and continue only through fresh agent-owned Attempt
     endedAt: "2026-07-13T02:00:03.000Z",
     exitCode: 1,
     observation: "inconclusive" as const,
-    durableOutputRef: "db://host-verification/sabotage",
+    durableOutputRef: `db://host-verification/${claim.attemptId}`,
     environment: { runner: "node-test", platform: "test" },
   };
   const verdict = recordTaskTechnicalVerdict({

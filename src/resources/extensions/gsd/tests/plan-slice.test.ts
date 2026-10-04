@@ -1527,7 +1527,7 @@ function runTaskToCompleted(taskId: string): void {
       endedAt: '2026-09-10T00:01:01.000Z',
       exitCode: 0,
       observation: 'passed',
-      durableOutputRef: `db://fixture/${taskId}/verification`,
+      durableOutputRef: `db://host-verification/${attemptId}`,
       environment: { runner: 'node-test', fixture: 'plan-slice-replay' },
     },
   });

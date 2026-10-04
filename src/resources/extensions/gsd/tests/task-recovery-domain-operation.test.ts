@@ -733,7 +733,7 @@ function seedSucceededVerificationFailure(
       endedAt: "2026-07-13T01:00:01.000Z",
       exitCode: 1,
       observation: technicalVerdict === "fail" ? "failed" : "inconclusive",
-      durableOutputRef: "db://host-verification/current-head",
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { runner: "node-test", platform: "test" },
     },
   });
@@ -786,7 +786,7 @@ test("host Technical Verdict rejects a blank rationale before SQLite persistence
       startedAt: "2026-07-13T01:00:00.000Z",
       endedAt: "2026-07-13T01:00:01.000Z",
       observation: "failed",
-      durableOutputRef: "db://host-verification/runtime-errors",
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { source: "bg-shell" },
     },
   }), /rationale must not be blank/);
@@ -2062,7 +2062,7 @@ test("a newer agent-owned non-abort route supersedes an older terminal abort (#1
       endedAt: "2026-07-13T00:05:01.000Z",
       exitCode: 1,
       observation: "failed",
-      durableOutputRef: "db://host-verification/superseding",
+      durableOutputRef: "db://host-verification/attempt-superseding",
       environment: { runner: "node-test", platform: "test" },
     },
   });

@@ -6,6 +6,7 @@ import {
   type DomainJsonValue,
 } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
+import { readExecRun } from "./db/writers/exec-runs.js";
 import {
   appendKernelCheckpoint,
   readDomainOperationFence,
@@ -169,6 +170,56 @@ export function readTaskTechnicalVerdict(attemptId: string): TaskTechnicalVerdic
   };
 }
 
+export interface HostVerificationOutput {
+  attemptId: string;
+  verdictId: string;
+  evidenceId: string;
+  observation: RecordTaskTechnicalVerdictInput["evidence"]["observation"];
+  /** One record per host check: command, exit code, verdict and bounded output. */
+  checks: DomainJsonValue[];
+}
+
+/**
+ * The stored host verification output that a `db://<kind>/<attemptId>`
+ * evidence reference names, or null. It is read from the evidence row; a
+ * T##-VERIFY.json file is not read.
+ */
+export function readHostVerificationOutput(durableOutputRef: string): HostVerificationOutput | null {
+  const row = getDb().prepare(`
+    SELECT attempt_id, verdict_id, evidence_id, observation, environment_json
+    FROM workflow_verification_evidence
+    WHERE durable_output_ref = :durable_output_ref
+    ORDER BY project_revision DESC
+    LIMIT 1
+  `).get({ ":durable_output_ref": durableOutputRef });
+  if (!row) return null;
+  const checks = (JSON.parse(String(row["environment_json"])) as { checks?: DomainJsonValue })["checks"];
+  return {
+    attemptId: String(row["attempt_id"]),
+    verdictId: String(row["verdict_id"]),
+    evidenceId: String(row["evidence_id"]),
+    observation: String(row["observation"]) as HostVerificationOutput["observation"],
+    checks: Array.isArray(checks) ? checks : [],
+  };
+}
+
+/**
+ * An evidence reference must resolve when it is stored. A `db://<kind>/<attemptId>`
+ * reference names the evidence row of the Attempt under verification. Any
+ * other reference is the id of a host-recorded exec run.
+ */
+function requireResolvableOutputRef(durableOutputRef: string, attemptId: string): void {
+  if (durableOutputRef.startsWith("db://")) {
+    if (durableOutputRef.split("/")[3] === attemptId) return;
+    throw new Error(
+      `Host verification evidence reference ${durableOutputRef} does not name Attempt ${attemptId}`,
+    );
+  }
+  if (!readExecRun(durableOutputRef)) {
+    throw new Error(`Host verification evidence reference ${durableOutputRef} names no host-recorded exec run`);
+  }
+}
+
 export function isPendingTaskHumanReviewVerdict(attemptId: string, verdictId: string): boolean {
   const stored = getDb().prepare(`
     SELECT 1 AS pending
@@ -195,6 +246,7 @@ export function recordTaskTechnicalVerdict(
   if (Object.keys(input.evidence.environment).length === 0) {
     throw new Error("Host verification evidence environment must not be empty");
   }
+  requireResolvableOutputRef(input.evidence.durableOutputRef, input.attemptId);
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
   let recorded: StoredVerdict | undefined;
   const operation = executeDomainOperation({
@@ -278,6 +330,7 @@ export function invalidateTaskTechnicalPass(
   if (Object.keys(input.evidence.environment).length === 0) {
     throw new Error("Host verification evidence environment must not be empty");
   }
+  requireResolvableOutputRef(input.evidence.durableOutputRef, input.attemptId);
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
   let recorded: StoredVerdict | undefined;
   const operation = executeDomainOperation({

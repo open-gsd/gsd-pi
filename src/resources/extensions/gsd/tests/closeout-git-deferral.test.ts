@@ -249,7 +249,7 @@ test("deferred closeout source recapture invalidates a stale passing verdict", (
         endedAt: "2026-07-12T00:02:01.000Z",
         exitCode: 0,
         observation: "passed",
-        durableOutputRef: "db://host-verification/attempt-1",
+        durableOutputRef: `db://host-verification/${attempt.attemptId}`,
         environment: { runner: "node-test", platform: "test" },
       },
     });

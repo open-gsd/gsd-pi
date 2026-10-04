@@ -44,7 +44,7 @@ import {
   hostRecordedTaskEvidence,
 } from "./verification-gate.js";
 import type { VerificationTarget, TaskVerificationEvidence } from "./verification-gate.js";
-import { writeVerificationJSON, type PostExecutionCheckJSON, type EvidenceJSON } from "./verification-evidence.js";
+import { evidenceChecks, writeVerificationJSON, type PostExecutionCheckJSON, type EvidenceJSON } from "./verification-evidence.js";
 import { logWarning } from "./workflow-logger.js";
 import { runPostExecutionChecks, type PostExecutionResult } from "./post-execution-checks.js";
 import type { AutoSession } from "./auto/session.js";
@@ -61,6 +61,7 @@ import { getSlice } from "./gsd-db.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { formatPostUnitStatusCard } from "./auto-status-message.js";
+import type { DomainJsonValue } from "./db/domain-operation.js";
 import { execRunSucceeded, listExecRunsOfAttempt } from "./db/writers/exec-runs.js";
 import {
   isTaskAttemptAwaitingVerification,
@@ -231,6 +232,9 @@ function recordHostTechnicalVerdict(input: {
         node: process.version,
         platform: process.platform,
         discoverySource: input.result.discoverySource,
+        // The output of each host check, so durableOutputRef resolves from the
+        // database and not from T##-VERIFY.json (ADR-046).
+        checks: evidenceChecks(input.result) as unknown as DomainJsonValue[],
         targetSourceRevisions,
         sourceRevisionAfter: input.sourceAfter?.aggregateRevision ?? "unavailable",
         sourceIntegrity: input.sourceError ?? "stable",

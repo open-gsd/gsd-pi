@@ -462,7 +462,7 @@ for (const contract of [
           endedAt: "2026-07-12T00:02:01.000Z",
           exitCode: 0,
           observation: "passed",
-          durableOutputRef: "db://host-verification/attempt-1",
+          durableOutputRef: `db://host-verification/${claim.attemptId}`,
           environment: { runner: "node-test", platform: "test" },
         },
       });
@@ -557,7 +557,7 @@ test("failed host verification records immutable evidence and routes before retr
       endedAt: "2026-07-12T00:02:01.000Z",
       exitCode: 1,
       observation: "failed",
-      durableOutputRef: "db://host-verification/attempt-1",
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { runner: "node-test", platform: "test" },
     },
   });
@@ -635,7 +635,7 @@ test("one Attempt cannot record a second host Technical Verdict", async () => {
       workingDirectory: "/tmp/project",
       startedAt: "2026-07-12T00:02:00.000Z",
       endedAt: "2026-07-12T00:02:01.000Z",
-      durableOutputRef: "db://host-verification/attempt-1",
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { runner: "node-test", platform: "test" },
     },
   };
@@ -695,7 +695,7 @@ test("source drift supersedes a passing verdict atomically and replays without d
       endedAt: "2026-07-12T00:02:01.000Z",
       exitCode: 0,
       observation: "passed",
-      durableOutputRef: "db://host-verification/attempt-1/pass",
+      durableOutputRef: `db://host-verification/${claim.attemptId}`,
       environment: { runner: "node-test", sourceRevisionAfter: "sha256:original-source" },
     },
   });
@@ -712,7 +712,7 @@ test("source drift supersedes a passing verdict atomically and replays without d
       endedAt: "2026-07-12T00:03:00.000Z",
       exitCode: 1,
       observation: "inconclusive" as const,
-      durableOutputRef: "db://host-verification/attempt-1/source-drift",
+      durableOutputRef: `db://host-verification/${claim.attemptId}/source-drift`,
       environment: {
         runner: "node-test",
         sourceRevisionBefore: "sha256:original-source",
