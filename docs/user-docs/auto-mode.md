@@ -272,8 +272,10 @@ suppress that UAT run.
 
 A completed slice whose UAT must run does not release the slices that depend on
 it until a run-uat verdict is saved. Until then GSD dispatches `run-uat` for
-that slice and refuses to dispatch work for a dependent slice ("dependency
-slice ... has no UAT verdict"). A slice whose UAT is not dispatched
+that slice and refuses to dispatch new work (research, planning, task
+execution) for a dependent slice ("dependency slice ... has no UAT verdict").
+A dependent slice whose tasks are already done is still completed first; the
+`run-uat` unit comes after that. A slice whose UAT is not dispatched
 (artifact-driven UAT with `uat_dispatch` off) releases its dependents when it
 completes.
 

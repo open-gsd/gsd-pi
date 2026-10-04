@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { resolveDispatch } from "../auto-dispatch.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { getPriorSliceCompletionBlocker } from "../dispatch-guard.ts";
 import {
@@ -586,3 +587,43 @@ test("a slice whose UAT is not dispatched releases its dependents; uat_dispatch 
     "Cannot dispatch plan-slice M001/S02: dependency slice M001/S01 has no UAT verdict.",
   );
 });
+
+for (const depends of [["S01"], []]) {
+  const order = depends.length > 0 ? "a dependency" : "an earlier slice";
+  test(`a summarizing slice gets a dispatchable unit while ${order} awaits its UAT verdict (G6)`, async (t) => {
+    const repo = setupRepo();
+    t.after(() => teardownRepo(repo));
+    writeProjectPreferences(repo, false);
+
+    insertMilestone({ id: "M001", title: "Test", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Runtime", status: "complete", depends: [], sequence: 1 });
+    insertSlice({ id: "S02", milestoneId: "M001", title: "Summarizing", status: "in_progress", depends, sequence: 2 });
+    setSliceUatMd("M001", "S01", RUNTIME_UAT);
+
+    // The same two steps as the auto loop: the rule table picks the unit, then the guard judges it.
+    const action = await resolveDispatch({
+      basePath: repo,
+      mid: "M001",
+      midTitle: "Test",
+      state: {
+        activeMilestone: { id: "M001", title: "Test" },
+        activeSlice: { id: "S02", title: "Summarizing" },
+        activeTask: null,
+        phase: "summarizing",
+        recentDecisions: [],
+        blockers: [],
+        nextAction: "",
+        registry: [],
+      },
+      prefs: { uat_dispatch: false },
+    });
+
+    assert.ok(action.action === "dispatch", `expected a unit, got ${action.action}`);
+    assert.equal(getPriorSliceCompletionBlocker(repo, "main", action.unitType, action.unitId), null);
+    // The hold stays on new work for the slice.
+    assert.match(
+      getPriorSliceCompletionBlocker(repo, "main", "execute-task", "M001/S02/T01") ?? "",
+      /M001\/S01 has no UAT verdict\.$/,
+    );
+  });
+}

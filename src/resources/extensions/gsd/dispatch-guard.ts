@@ -73,6 +73,11 @@ export function getPriorSliceCompletionBlocker(
       return `Cannot dispatch ${unitType} ${unitId}: slice ${targetMid}/${targetSid} is missing from the workflow DB.`;
     }
 
+    // complete-slice starts no new work on the dependency, and its dispatch
+    // rule comes before run-uat. A UAT hold on it would stop auto-mode with no
+    // unit to dispatch, so the hold applies only to the other slice units.
+    const holdsForUat = unitType !== "complete-slice";
+
     if (targetSlice.depends.length > 0) {
       const sliceMap = new Map(slices.map((slice) => [slice.id, slice]));
       for (const depId of targetSlice.depends) {
@@ -83,7 +88,7 @@ export function getPriorSliceCompletionBlocker(
         if (!dependency.satisfiesDependents) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} is not complete.`;
         }
-        if (sliceAwaitsUatVerdict(base, targetMid, depId)) {
+        if (holdsForUat && sliceAwaitsUatVerdict(base, targetMid, depId)) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} has no UAT verdict.`;
         }
       }
@@ -111,7 +116,7 @@ export function getPriorSliceCompletionBlocker(
       if (incomplete) {
         return `Cannot dispatch ${unitType} ${unitId}: earlier slice ${targetMid}/${incomplete.id} is not complete.`;
       }
-      const awaitsUat = slices
+      const awaitsUat = holdsForUat && slices
         .slice(0, targetIndex)
         .find((slice) => !reverseDependents.has(slice.id) && sliceAwaitsUatVerdict(base, targetMid, slice.id));
       if (awaitsUat) {
