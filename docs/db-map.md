@@ -1084,8 +1084,13 @@ last_authority_epoch  INTEGER NOT NULL
   `trg_tasks_lifecycle_coverage` refuse an inserted hierarchy row when no
   Domain Operation is open, and `trg_project_authority_lifecycle_coverage`
   refuses the `project_authority` update of a Domain Operation, and of the
-  cutover itself, while a hierarchy row has no lifecycle row. Epoch 0 is not
-  fenced.
+  cutover itself, while a hierarchy row has no lifecycle row. The Domain
+  Operation error names each such row and `/gsd db adopt`. Epoch 0 is not
+  fenced. A database that is already above epoch 0 and holds such a row (a
+  canary cutover by an earlier build) is repaired when it opens: the open
+  writes a verified backup, runs `lifecycle.backfill` for those rows and logs
+  each legacy status that it changed. A row with an unknown raw status stops
+  that run with an error that names it; `/gsd doctor` reports it too.
 
 #### `workflow_execution_attempts`
 
@@ -2223,10 +2228,15 @@ execution evidence remain authoritative. The merge runs in one
 `lifecycle.backfill` Domain Operation with one revision bump. Each hierarchy
 row that the merge inserts gets its lifecycle row in that operation, by the
 rules of the lifecycle backfill. A row that main already held keeps its
-adoption state. An inserted row with an unknown raw status refuses the whole
-merge as a canonical divergence, so the worktree is kept. So does an inserted
-row whose adoption would change its legacy status: a legacy completion with no
-evidence, or open work under a completed or cancelled parent.
+adoption state. At Authority Epoch 0 the merge never refuses for adoption: an
+inserted row with an unknown raw status, or whose adoption would change its
+legacy status (a legacy completion with no evidence, or open work under a
+completed or cancelled parent), merges with no lifecycle row and waits for
+`/gsd db adopt`. After the Cutover the merge applies those status changes,
+logs them and returns them in `adoptionStatusChanges`. An inserted row with an
+unknown raw status then refuses the whole merge as a canonical divergence, so
+the worktree is kept; the error names each row and the `sqlite3` statement
+that gives it a known status in the worktree database.
 
 ---
 

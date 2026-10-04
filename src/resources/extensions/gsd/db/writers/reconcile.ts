@@ -64,6 +64,19 @@ export interface ReconcileResult {
   gate_runs: number;
   milestone_commit_attributions: number;
   conflicts: string[];
+  /** Legacy status changes that the adoption of merged rows made (only after the Cutover). */
+  adoptionStatusChanges: string[];
+}
+
+/** The statement that gives one hierarchy row (`kind M/S/T`) of a worktree database a known status. */
+function knownStatusSql(row: string): string {
+  const [kind, label = ""] = row.split(" ");
+  const [milestoneId, sliceId, taskId] = label.split("/").map((id) => `'${id.replaceAll("'", "''")}'`);
+  if (kind === "task") {
+    return `UPDATE tasks SET status = 'pending' WHERE milestone_id = ${milestoneId} AND slice_id = ${sliceId} AND id = ${taskId}`;
+  }
+  if (kind === "slice") return `UPDATE slices SET status = 'pending' WHERE milestone_id = ${milestoneId} AND id = ${sliceId}`;
+  return `UPDATE milestones SET status = 'queued' WHERE id = ${milestoneId}`;
 }
 
 export function reconcileWorktreeDb(
@@ -86,6 +99,7 @@ export function reconcileWorktreeDb(
     gate_runs: 0,
     milestone_commit_attributions: 0,
     conflicts: [],
+    adoptionStatusChanges: [],
   };
   if (!existsSync(worktreeDbPath)) return zero;
   // Guard: bail when both paths resolve to the same physical file.
@@ -331,8 +345,8 @@ export function reconcileWorktreeDb(
         : "COALESCE(m.target_repositories, '[]')";
 
       // One Domain Operation: the merge commits with a revision bump, and
-      // every hierarchy row it inserts gets its lifecycle row with it.
-      mergeLegacyRowsWithAdoption("worktree-reconcile", () => transaction(() => {
+      // the hierarchy rows it inserts get their lifecycle rows with it.
+      const adoptionStatusChanges = mergeLegacyRowsWithAdoption("worktree-reconcile", () => transaction(() => {
         // Join the target decisions so we can prefer an existing main.source
         // when the worktree predates v16 — otherwise a write-through reconcile
         // would clobber 'escalation'-sourced decisions with the literal default.
@@ -715,14 +729,28 @@ export function reconcileWorktreeDb(
 
         return { ...merged };
       }));
-      return { ...merged, conflicts };
+      if (adoptionStatusChanges.length > 0) {
+        logWarning(
+          "db",
+          `worktree DB reconciliation changed the legacy status of ${adoptionStatusChanges.length} merged row(s) ` +
+            `to adopt them:\n  ${adoptionStatusChanges.join("\n  ")}`,
+        );
+      }
+      return { ...merged, conflicts, adoptionStatusChanges };
     } finally {
       try { adapter.exec("DETACH DATABASE wt"); } catch (e) { logWarning("db", `detach worktree DB failed: ${(e as Error).message}`); }
     }
   } catch (err) {
     if (err instanceof CanonicalWorktreeDivergenceError) throw err;
     // A merged row that cannot be adopted stays in the worktree database.
-    if (err instanceof LifecycleBackfillRefusedError) throw new CanonicalWorktreeDivergenceError([err.message]);
+    if (err instanceof LifecycleBackfillRefusedError) {
+      throw new CanonicalWorktreeDivergenceError([
+        `${err.message}. Nothing was merged. Give each row a known legacy status in the worktree database, ` +
+          `then merge again: ${
+            err.unknownRows.map((row) => `sqlite3 '${worktreeDbPath}' "${knownStatusSql(row)}"`).join("; ")
+          }`,
+      ]);
+    }
     logError("db", "worktree DB reconciliation failed", { error: (err as Error).message });
     return { ...zero, conflicts };
   }

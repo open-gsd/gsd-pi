@@ -26,6 +26,7 @@ import {
   insertTask,
 } from "../gsd-db.ts";
 import { applyLifecycleBackfill, countUnadoptedHierarchyRows } from "../lifecycle-backfill-domain-operation.ts";
+import { registerMilestones } from "../milestone-registration.ts";
 import { normalizeRealPath } from "../paths.ts";
 import { openSqliteReadOnly } from "../sqlite-readonly.ts";
 import { _resetLogs, peekLogs, setStderrLoggingEnabled } from "../workflow-logger.ts";
@@ -350,6 +351,96 @@ test("open work under a cancelled parent stops the cutover and is not cancelled"
   closeDatabase();
   assert.equal(openWorkflowDatabase(base).ok, true);
   assert.deepEqual(rows("SELECT revision, authority_epoch FROM project_authority"), [{ revision: 2, authority_epoch: 1 }]);
+});
+
+/**
+ * A project that an earlier build cut over. That build had no coverage fence,
+ * so `insert` leaves hierarchy rows with no lifecycle row after the cutover.
+ */
+function cutOverProjectOfEarlierBuild(insert: () => void): string {
+  const base = createProject();
+  insertMilestone({ id: "M001", title: "Old", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", status: "in_progress" });
+  insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", status: "pending" });
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  assert.deepEqual(rows("SELECT authority_epoch FROM project_authority"), [{ authority_epoch: 1 }]);
+  db().exec(`
+    DROP TRIGGER trg_tasks_lifecycle_coverage;
+    DROP TRIGGER trg_project_authority_lifecycle_coverage;
+  `);
+  insert();
+  closeDatabase();
+  _resetLogs();
+  // The repair of a project that is already cut over does not need the flag.
+  setAuthorityCutoverFlag(undefined);
+  return base;
+}
+
+test("the open of a cut-over project adopts the rows an earlier build left without a lifecycle row", () => {
+  const base = cutOverProjectOfEarlierBuild(() => {
+    insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "pending" });
+    // A completion with no evidence: adoption reopens it.
+    insertTask({ id: "T03", milestoneId: "M001", sliceId: "S01", status: "complete" });
+  });
+  const backupsBefore = backupFiles(base).length;
+
+  assert.equal(openWorkflowDatabase(base).ok, true);
+
+  assert.equal(countUnadoptedHierarchyRows(), 0);
+  assert.equal(getTask("M001", "S01", "T03")?.status, "pending");
+  assert.deepEqual(
+    rows("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision").map((row) => row["operation_type"]),
+    ["lifecycle.backfill", "authority.cutover", "lifecycle.backfill"],
+  );
+  assert.equal(backupFiles(base).length, backupsBefore + 1);
+  assert.deepEqual(logged("error"), []);
+  const warnings = logged("warn");
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /adopted 2 row\(s\)/);
+  assert.match(warnings[0]!, /task M001\/S01\/T03: "complete" -> "pending" \(legacy-complete-unproven\)/);
+
+  // The project is not write-locked: the next Domain Operation commits.
+  assert.deepEqual(registerMilestones([{ id: "M002", title: "Next" }], "test"), ["M002"]);
+});
+
+test("a row that cannot be adopted after the cutover gives an error that names it, on open, on write and in doctor", async () => {
+  const base = cutOverProjectOfEarlierBuild(() => {
+    insertTask({ id: "T02", milestoneId: "M001", sliceId: "S01", status: "wip-custom" });
+  });
+  const backupsBefore = backupFiles(base).length;
+
+  assert.equal(openWorkflowDatabase(base).ok, true, "the open itself still succeeds");
+
+  assert.equal(getTask("M001", "S01", "T02")?.status, "wip-custom");
+  assert.equal(backupFiles(base).length, backupsBefore);
+  const errors = logged("error");
+  assert.equal(errors.length, 1);
+  assert.match(errors[0]!, /Lifecycle backfill stopped: 1 row\(s\)/);
+  assert.match(errors[0]!, /task M001\/S01\/T02: "wip-custom"/);
+  assert.match(errors[0]!, /\/gsd db adopt/);
+
+  assert.throws(
+    () => registerMilestones([{ id: "M002", title: "Next" }], "test"),
+    /a hierarchy row has no lifecycle row: task M001\/S01\/T02="wip-custom"\. .*\/gsd db adopt/,
+  );
+
+  const issues: DoctorIssue[] = [];
+  await checkEngineHealth(base, issues, []);
+  const unmappable = issues.filter((issue) => issue.code === "lifecycle_unmappable_status");
+  assert.equal(unmappable.length, 1);
+  assert.match(unmappable[0]!.message, /task M001\/S01\/T02="wip-custom"/);
+  assert.match(unmappable[0]!.message, /\/gsd db adopt/);
+
+  // Once the row is fixed, the next open adopts it and writes work again.
+  db().exec(`
+    DROP TRIGGER trg_tasks_lifecycle_coverage;
+    UPDATE tasks SET status = 'pending' WHERE id = 'T02';
+  `);
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  assert.equal(countUnadoptedHierarchyRows(), 0);
+  assert.deepEqual(registerMilestones([{ id: "M002", title: "Next" }], "test"), ["M002"]);
 });
 
 test("active coordination defers the backfill and the cutover to a later open", () => {

@@ -90,9 +90,12 @@ export interface LifecycleBackfillResult {
 }
 
 export class LifecycleBackfillRefusedError extends Error {
-  constructor(message: string) {
+  /** Rows (`kind id`) whose raw status is not in the one legacy map. */
+  readonly unknownRows: readonly string[];
+  constructor(message: string, unknownRows: readonly string[] = []) {
     super(message);
     this.name = "LifecycleBackfillRefusedError";
+    this.unknownRows = unknownRows;
   }
 }
 
@@ -521,18 +524,22 @@ function adoptItem(
 
 /**
  * Run `merge`, which copies legacy rows from another database (a
- * worktree-local gsd.db) into the open one, and adopt every hierarchy row it
+ * worktree-local gsd.db) into the open one, and adopt the hierarchy rows it
  * inserted, in one lifecycle.backfill Domain Operation. The merge and the
- * adoption commit together with one revision bump, so a merged row never
- * exists without its lifecycle row. A row that was in the database before the
- * merge keeps its adoption state. `merge` returns the payload of the
- * `legacy.merged` event. Refuses, and writes nothing, when an inserted row
- * has a raw status that is not in the one legacy map, or when its adoption
- * would change its legacy status: reopen a legacy completion that has no
- * evidence, or cancel open work under a completed or cancelled parent.
+ * adoption commit together with one revision bump. A row that was in the
+ * database before the merge keeps its adoption state. `merge` returns the
+ * payload of the `legacy.merged` event.
+ *
+ * At Authority Epoch 0 the merge never refuses: an inserted row whose
+ * adoption would change its legacy status, or whose raw status is not in the
+ * one legacy map, stays unadopted for `/gsd db adopt`. After the Cutover every
+ * inserted row is adopted with the rules of the backfill, also the rules that
+ * change a legacy status, and each such change comes back to the caller. An
+ * unknown raw status then refuses the merge, and nothing is written.
  */
-export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJsonValue): void {
+export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJsonValue): string[] {
   const fence = readDomainOperationFence();
+  let statusChanges: string[] = [];
   executeDomainOperation({
     operationType: LIFECYCLE_BACKFILL_OPERATION_TYPE,
     idempotencyKey: `${source}/lifecycle-backfill/${fence.revision}`,
@@ -545,28 +552,23 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
     const before = new Set(loadHierarchy().map((row) => `${row.itemKind} ${rowLabel(row)}`));
     const merged = merge();
     const preview = previewLifecycleBackfill();
+    const cutOver = fence.authorityEpoch > 0;
     const unknown = preview.unknownStatuses.filter((entry) => !before.has(entry.row));
-    if (unknown.length > 0) {
+    if (cutOver && unknown.length > 0) {
       throw new LifecycleBackfillRefusedError(
         `lifecycle backfill refused: unknown legacy statuses: ${
           unknown.map((entry) => `${entry.row}=${JSON.stringify(entry.rawStatus)}`).join(", ")
         }`,
+        unknown.map((entry) => entry.row),
       );
     }
-    const inserted = preview.items.filter((item) => !before.has(`${item.itemKind} ${rowLabel(item)}`));
-    // The same owner rule as the cutover on open: a status change needs the
-    // preview of /gsd db adopt, so the merge never makes one.
-    const statusChanges = inserted.filter((item) => item.projectedLegacyStatus !== null);
-    if (statusChanges.length > 0) {
-      throw new LifecycleBackfillRefusedError(
-        `lifecycle backfill refused: adoption would change the legacy status of ${statusChanges.length} merged row(s): ${
-          statusChanges.map((item) =>
-            `${item.itemKind} ${rowLabel(item)} ${JSON.stringify(item.rawStatus)} -> ` +
-            `${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
-          ).join(", ")
-        }. Nothing was merged. A status change needs the /gsd db adopt preview`,
-      );
-    }
+    const inserted = preview.items.filter((item) =>
+      !before.has(`${item.itemKind} ${rowLabel(item)}`) && (cutOver || item.projectedLegacyStatus === null)
+    );
+    statusChanges = inserted.filter((item) => item.projectedLegacyStatus !== null).map((item) =>
+      `${item.itemKind} ${rowLabel(item)} ${JSON.stringify(item.rawStatus)} -> ` +
+      `${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
+    );
     const report: AdoptionReport = { waivers: 0, findings: [], cancelledUnderCompletedParent: [] };
     return {
       events: [
@@ -583,6 +585,7 @@ export function mergeLegacyRowsWithAdoption(source: string, merge: () => DomainJ
       ],
     };
   });
+  return statusChanges;
 }
 
 /** Number of milestone, slice and task rows with no lifecycle row (doctor). */

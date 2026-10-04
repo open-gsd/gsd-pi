@@ -20,6 +20,43 @@ export function hasLifecycleCoverageFence(db: DbAdapter): boolean {
   return Number(row?.["count"]) === FENCE_TRIGGERS.length;
 }
 
+const UNCOVERED_MESSAGE = "a hierarchy row has no lifecycle row";
+
+/** Every hierarchy row with no lifecycle row, as `kind id="raw status"`. */
+export function listUncoveredHierarchyRows(db: DbAdapter): string[] {
+  const uncovered = (kind: string, slice: string, task: string) => `NOT EXISTS (
+        SELECT 1 FROM workflow_item_lifecycles lifecycle
+        WHERE lifecycle.item_kind = '${kind}'
+          AND lifecycle.milestone_id = item.${kind === "milestone" ? "id" : "milestone_id"}
+          AND lifecycle.slice_id IS ${slice}
+          AND lifecycle.task_id IS ${task}
+      )`;
+  return db.prepare(`
+    SELECT 'milestone ' || item.id AS label, item.status FROM milestones item
+    WHERE ${uncovered("milestone", "NULL", "NULL")}
+    UNION ALL
+    SELECT 'slice ' || item.milestone_id || '/' || item.id, item.status FROM slices item
+    WHERE ${uncovered("slice", "item.id", "NULL")}
+    UNION ALL
+    SELECT 'task ' || item.milestone_id || '/' || item.slice_id || '/' || item.id, item.status FROM tasks item
+    WHERE ${uncovered("task", "item.slice_id", "item.id")}
+  `).all().map((row) => `${row["label"]}=${JSON.stringify(row["status"])}`);
+}
+
+/**
+ * The error of the commit trigger, with the rows and the remedy. Call it
+ * before the transaction rolls back, so a row that the refused Domain
+ * Operation inserted is named too. Any other error comes back as it is.
+ */
+export function describeLifecycleCoverageRefusal(db: DbAdapter, error: unknown): unknown {
+  if (!(error instanceof Error) || !error.message.includes(UNCOVERED_MESSAGE)) return error;
+  return new Error(
+    `${UNCOVERED_MESSAGE}: ${listUncoveredHierarchyRows(db).join(", ")}. The Domain Operation was not committed. ` +
+      "Run /gsd db adopt to preview the lifecycle backfill, then /gsd db adopt --apply.",
+    { cause: error },
+  );
+}
+
 function missingLifecycle(table: string, alias: string, identity: string): string {
   return `EXISTS (
         SELECT 1 FROM ${table} ${alias}
@@ -80,7 +117,7 @@ export function ensureLifecycleCoverageFence(db: DbAdapter): void {
             AND lifecycle.task_id = task.id`)}
     )
     BEGIN
-      SELECT RAISE(ABORT, 'a hierarchy row has no lifecycle row');
+      SELECT RAISE(ABORT, '${UNCOVERED_MESSAGE}');
     END
   `);
 }

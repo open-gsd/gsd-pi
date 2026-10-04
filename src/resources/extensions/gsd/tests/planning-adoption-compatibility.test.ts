@@ -297,7 +297,7 @@ test("worktree reconcile adopts every hierarchy row it inserts in one Domain Ope
   ]);
 });
 
-test("worktree reconcile keeps a row with an unknown status in the worktree database", (t) => {
+test("before the cutover worktree reconcile merges a row with an unknown status and leaves it unadopted", (t) => {
   const mainDb = openFixture(t);
   const worktreeDb = join(tempDir("gsd-reconcile-unknown-worktree-"), "gsd.db");
 
@@ -305,25 +305,20 @@ test("worktree reconcile keeps a row with an unknown status in the worktree data
   assert.equal(copyWorktreeDb(mainDb, worktreeDb), true);
   assert.equal(openDatabase(worktreeDb), true);
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Worktree task", status: "not-a-status" });
-  db().prepare("UPDATE milestones SET title = 'Must not merge' WHERE id = 'M001'").run();
   closeDatabase();
 
   assert.equal(openDatabase(mainDb), true);
-  const before = hierarchyIdentitySnapshot();
-  const revision = projectRevision();
-  assert.throws(
-    () => reconcileWorktreeDb(mainDb, worktreeDb),
-    /canonical worktree divergence.*unknown legacy statuses: task M001\/S01\/T02="not-a-status"/,
+  const result = reconcileWorktreeDb(mainDb, worktreeDb);
+
+  assert.deepEqual(result.adoptionStatusChanges, []);
+  assert.deepEqual(
+    { ...db().prepare("SELECT status FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'").get() },
+    { status: "not-a-status" },
   );
-  assert.deepEqual(hierarchyIdentitySnapshot(), before, "a refused adoption must roll back the whole merge");
-  assert.equal(projectRevision(), revision);
-  assert.equal(
-    db().prepare("SELECT 1 FROM tasks WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'").get(),
-    undefined,
-  );
+  assert.deepEqual(lifecycleRows(), []);
 });
 
-test("worktree reconcile keeps rows in the worktree database when adoption would change their status", (t) => {
+test("before the cutover worktree reconcile merges rows whose adoption would change their status", (t) => {
   const mainDb = openFixture(t);
   const worktreeDb = join(tempDir("gsd-reconcile-status-change-worktree-"), "gsd.db");
 
@@ -338,23 +333,25 @@ test("worktree reconcile keeps rows in the worktree database when adoption would
   closeDatabase();
 
   assert.equal(openDatabase(mainDb), true);
-  const before = hierarchyIdentitySnapshot();
   const revision = projectRevision();
-  assert.throws(
-    () => reconcileWorktreeDb(mainDb, worktreeDb),
-    (error: Error) => {
-      assert.match(error.message, /canonical worktree divergence/);
-      assert.match(error.message, /task M001\/S01\/T02 "complete" -> "pending" \(legacy-complete-unproven\)/);
-      assert.match(error.message, /task M001\/S02\/T01 "pending" -> "skipped" \(cancelled-with-parent\)/);
-      assert.match(error.message, /\/gsd db adopt/);
-      return true;
-    },
+  const result = reconcileWorktreeDb(mainDb, worktreeDb);
+
+  assert.deepEqual(result.adoptionStatusChanges, [], "no legacy status changes before the cutover");
+  assert.deepEqual(
+    db().prepare("SELECT slice_id, id, status FROM tasks ORDER BY slice_id, id").all().map((row) => ({ ...row })),
+    [
+      { slice_id: "S01", id: "T01", status: "pending" },
+      { slice_id: "S01", id: "T02", status: "complete" },
+      { slice_id: "S02", id: "T01", status: "pending" },
+    ],
   );
-  assert.deepEqual(hierarchyIdentitySnapshot(), before, "a refused adoption must roll back the whole merge");
-  assert.equal(projectRevision(), revision);
-  assert.equal(Number(db().prepare("SELECT count(*) AS n FROM tasks").get()?.["n"]), 1, "no worktree task is merged");
-  assert.equal(Number(db().prepare("SELECT count(*) AS n FROM slices").get()?.["n"]), 1, "no worktree slice is merged");
-  assert.equal(Number(db().prepare("SELECT count(*) AS n FROM workflow_item_lifecycles").get()?.["n"]), 0);
+  // Only the row whose adoption keeps its status is adopted. The others wait for /gsd db adopt.
+  assert.deepEqual(lifecycleRows(), [
+    {
+      item_kind: "slice", milestone_id: "M001", slice_id: "S02", task_id: null, lifecycle_status: "cancelled",
+      last_project_revision: revision + 1, operation_type: "lifecycle.backfill",
+    },
+  ]);
 });
 
 test("worktree reconcile fails closed when canonical authority advanced in the worktree", (t) => {

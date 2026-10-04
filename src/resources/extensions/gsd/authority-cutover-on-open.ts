@@ -3,6 +3,7 @@
 
 import { copyFileSync, existsSync } from "node:fs";
 
+import { listUncoveredHierarchyRows } from "./db-lifecycle-coverage-schema.js";
 import { backupDatabaseBeforeMigration } from "./db-migration-backup.js";
 import { getDb, getDbPath, SCHEMA_VERSION } from "./db/engine.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
@@ -88,6 +89,41 @@ function backfillAndCutOver(basePath: string): void {
   });
 }
 
+/**
+ * A project that an earlier build cut over can hold a hierarchy row with no
+ * lifecycle row. The coverage fence then refuses every Domain Operation, so
+ * the open adopts those rows first, with the rules of the backfill and a
+ * verified backup, and logs each legacy status it changed. A row with an
+ * unknown raw status stops the run: the fence stays, and the error names it.
+ */
+function adoptRowsLeftAfterCutover(basePath: string): void {
+  if (listUncoveredHierarchyRows(getDb()).length === 0) return;
+  const preview = previewLifecycleBackfill();
+  if (preview.unknownStatuses.length > 0) {
+    logError(
+      "db",
+      `Lifecycle backfill stopped: ${preview.unknownStatuses.length} row(s) have a legacy status with no lifecycle mapping. ` +
+        "Nothing was changed, and the project refuses every write until each row has a lifecycle row. " +
+        "Fix each status, then run /gsd db adopt --apply:\n" +
+        preview.unknownStatuses.map((entry) => `  ${entry.row}: ${JSON.stringify(entry.rawStatus)}`).join("\n"),
+    );
+    return;
+  }
+  backupDatabaseBeforeMigration(getDb(), getDbPath(), SCHEMA_VERSION, { existsSync, copyFileSync, logWarning });
+  const { adopted, findings } = applyLifecycleBackfill(basePath);
+  const statusChanges = preview.items.filter((item) => item.projectedLegacyStatus !== null).map((item) =>
+    `${item.itemKind} ${[item.milestoneId, item.sliceId, item.taskId].filter(Boolean).join("/")}: ` +
+    `${JSON.stringify(item.rawStatus)} -> ${JSON.stringify(item.projectedLegacyStatus)} (${item.rule})`
+  );
+  logWarning(
+    "db",
+    `Lifecycle backfill adopted ${adopted} row(s) that had no lifecycle row after the Authority Epoch cutover. ` +
+      "A verified backup was written beside the database." +
+      (statusChanges.length > 0 ? `\nLegacy status changed:\n  ${statusChanges.join("\n  ")}` : "") +
+      (findings.length > 0 ? `\nFindings:\n  ${findings.join("\n  ")}` : ""),
+  );
+}
+
 function authorityEpochAdvanced(): boolean {
   try {
     return readDomainOperationFence().authorityEpoch > 0;
@@ -118,22 +154,34 @@ function authorityEpochAdvanced(): boolean {
  * run it at a time: without it, a process that opens the project during the
  * run fails on the busy database and logs a false error. That process leaves
  * the run to the lock holder. No failure here fails the open.
+ *
+ * A database that is already cut over needs no flag: the open adopts every
+ * hierarchy row that has no lifecycle row (adoptRowsLeftAfterCutover).
  */
 export function cutOverProjectAuthorityOnOpen(basePath: string): void {
-  // Off by default: some writers can still create a hierarchy row without a
-  // lifecycle row. The default becomes on after those writers are closed and
-  // a database trigger refuses such a row after the cutover.
-  if (process.env.GSD_AUTHORITY_CUTOVER !== "1") return;
+  let cutOver = false;
   try {
-    if (readDomainOperationFence().authorityEpoch > 0) return;
+    cutOver = readDomainOperationFence().authorityEpoch > 0;
+    // Off by default: some writers can still create a hierarchy row without a
+    // lifecycle row. The default becomes on after those writers are closed.
+    if (!cutOver && process.env.GSD_AUTHORITY_CUTOVER !== "1") return;
     const databasePath = getDbPath();
     if (databasePath === null) return;
-    withFileLockSync(databasePath, () => backfillAndCutOver(basePath), { retries: 0 });
+    if (cutOver && listUncoveredHierarchyRows(getDb()).length === 0) return;
+    withFileLockSync(
+      databasePath,
+      () => cutOver ? adoptRowsLeftAfterCutover(basePath) : backfillAndCutOver(basePath),
+      { retries: 0 },
+    );
   } catch (error) {
     // Another process holds the lock, or finished the cutover while this one failed.
-    if ((error as { code?: unknown } | null)?.code === "ELOCKED" || authorityEpochAdvanced()) return;
+    if ((error as { code?: unknown } | null)?.code === "ELOCKED" || (!cutOver && authorityEpochAdvanced())) return;
     const cause = error instanceof Error && error.cause instanceof Error ? `: ${error.cause.message}` : "";
     const message = (error instanceof Error ? error.message : String(error)) + cause;
+    if (cutOver) {
+      logError("db", `Lifecycle backfill of the rows left without a lifecycle row failed: ${message}`);
+      return;
+    }
     if (error instanceof ProjectAuthorityCutoverError && error.retryable) {
       logWarning("db", `Authority cutover deferred to a later open: ${message}`);
       return;

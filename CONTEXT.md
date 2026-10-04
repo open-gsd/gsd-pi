@@ -102,7 +102,9 @@ migration step 6): it runs only with the environment variable
 no production path advances the Authority Epoch. After the Cutover, database
 triggers refuse a hierarchy row with no lifecycle row
 (`db-lifecycle-coverage-schema.ts`), and a process that holds a receipt of the
-Cutover refuses an older copy of the database file. At Authority Epoch 0 two
+Cutover refuses an older copy of the database file. A project that was cut
+over before those triggers existed can hold such a row: its next open adopts
+the row with `lifecycle.backfill`, with or without the environment variable. At Authority Epoch 0 two
 writers can still create a hierarchy row with no lifecycle row: a Forward
 Repair that puts back a row that an Import Application deleted, and the legacy
 Task completion writer when it has no call identity. The automatic Cutover

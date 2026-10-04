@@ -201,6 +201,104 @@ test("after the cutover a worktree database merge adopts the rows it inserts", (
   );
 });
 
+/** A worktree copy of the adopted project, taken before the cutover of main, with `seed` applied to it. */
+function worktreeCopy(mainDb: string, seed: () => void): string {
+  const worktreeDb = tempDbPath("gsd-lifecycle-coverage-worktree-");
+  closeDatabase();
+  assert.equal(copyWorktreeDb(mainDb, worktreeDb), true);
+  assert.equal(openDatabase(worktreeDb), true);
+  seed();
+  closeDatabase();
+  assert.equal(openDatabase(mainDb), true);
+  return worktreeDb;
+}
+
+function taskState(sliceId: string, taskId: string): { status: unknown; lifecycle: unknown } {
+  return {
+    status: getTask("M001", sliceId, taskId)?.status,
+    lifecycle: db().prepare(`
+      SELECT lifecycle_status FROM workflow_item_lifecycles
+      WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = :slice_id AND task_id = :task_id
+    `).get({ ":slice_id": sliceId, ":task_id": taskId })?.["lifecycle_status"],
+  };
+}
+
+test("after the cutover a worktree database merge applies the status changes of adoption and reports them", () => {
+  const mainDb = openAdoptedProject();
+  const worktreeDb = worktreeCopy(mainDb, () => {
+    // A completion with no summary and no verification in the database.
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Unproven", status: "complete" });
+    // Open work under a cancelled parent.
+    insertSlice({ milestoneId: "M001", id: "S02", title: "Skipped slice", status: "skipped", sequence: 2 });
+    insertTask({ milestoneId: "M001", sliceId: "S02", id: "T01", title: "Open task", status: "pending" });
+  });
+  advanceAuthorityEpoch();
+
+  const result = reconcileWorktreeDb(mainDb, worktreeDb);
+
+  assert.deepEqual([...result.adoptionStatusChanges].sort(), [
+    'task M001/S01/T02 "complete" -> "pending" (legacy-complete-unproven)',
+    'task M001/S02/T01 "pending" -> "skipped" (cancelled-with-parent)',
+  ]);
+  assert.deepEqual(taskState("S01", "T02"), { status: "pending", lifecycle: "ready" });
+  assert.deepEqual(taskState("S02", "T01"), { status: "skipped", lifecycle: "cancelled" });
+  assert.equal(getSlice("M001", "S02")?.status, "skipped");
+  assert.deepEqual(
+    { ...db().prepare(`
+      SELECT lifecycle_status FROM workflow_item_lifecycles
+      WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S02'
+    `).get() },
+    { lifecycle_status: "cancelled" },
+  );
+});
+
+test("after the cutover a worktree database merge refuses an unknown status and names the row and the fix", () => {
+  const mainDb = openAdoptedProject();
+  const worktreeDb = worktreeCopy(mainDb, () => {
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Unknown", status: "not-a-status" });
+  });
+  advanceAuthorityEpoch();
+  const before = authority();
+
+  assert.throws(
+    () => reconcileWorktreeDb(mainDb, worktreeDb),
+    (error: Error) => {
+      assert.match(error.message, /canonical worktree divergence/);
+      assert.match(error.message, /unknown legacy statuses: task M001\/S01\/T02="not-a-status"/);
+      assert.ok(error.message.includes(
+        `sqlite3 '${worktreeDb}' "UPDATE tasks SET status = 'pending' ` +
+          `WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'"`,
+      ));
+      return true;
+    },
+  );
+  assert.equal(getTask("M001", "S01", "T02"), null);
+  assert.deepEqual(authority(), before);
+
+  // The named statement makes the same merge pass.
+  closeDatabase();
+  assert.equal(openDatabase(worktreeDb), true);
+  db().prepare(
+    "UPDATE tasks SET status = 'pending' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'",
+  ).run();
+  closeDatabase();
+  assert.equal(openDatabase(mainDb), true);
+  reconcileWorktreeDb(mainDb, worktreeDb);
+  assert.deepEqual(taskState("S01", "T02"), { status: "pending", lifecycle: "ready" });
+});
+
+test("a refused Domain Operation names each hierarchy row that has no lifecycle row and the command that adopts it", () => {
+  openAdoptedProject();
+  advanceAuthorityEpoch();
+
+  assert.throws(
+    () => operate(() => {
+      insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "No lifecycle", status: "pending" });
+    }),
+    /a hierarchy row has no lifecycle row: task M001\/S01\/T02="pending"\. .*\/gsd db adopt/,
+  );
+});
+
 test("a database that lost the fence gets it back on the next open", () => {
   const path = openAdoptedProject();
   advanceAuthorityEpoch();
