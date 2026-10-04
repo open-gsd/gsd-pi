@@ -185,6 +185,68 @@ describe("custom workflow runs in the database", () => {
     assert.equal(statuses(readGraph(runDir))["review"], "complete");
   });
 
+  test("only a step that waits for a decision can be approved", async () => {
+    mkdirSync(join(base, ".gsd", "workflow-defs"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "workflow-defs", "audit.yaml"), [
+      "version: 1",
+      "name: audit",
+      "steps:",
+      "  - id: scan",
+      "    name: Scan",
+      "    prompt: Scan the code",
+      "    requires: []",
+      "    produces: [scan.md]",
+      "    verify:",
+      "      policy: content-heuristic",
+      "  - id: judge",
+      "    name: Judge",
+      "    prompt: Judge the scan",
+      "    requires: [scan]",
+      "    produces: []",
+      "    verify:",
+      "      policy: prompt-verify",
+      "      prompt: Is the scan complete?",
+    ].join("\n"), "utf-8");
+    const runDir = createRun(base, "audit");
+    const runId = customWorkflowRunId(runDir);
+    const session = worker();
+    const engine = new CustomWorkflowEngine(runDir, session);
+
+    // scan failed its check (scan.md is missing): a failed check is not approved.
+    await dispatch(engine);
+    await assert.rejects(engine.approveStep("scan"), /verification result is missing/);
+    assert.equal(runCustomVerificationWithEvidence(runDir, "scan").outcome, "pause");
+    await assert.rejects(engine.approveStep("scan"), /verification result is fail/);
+    assert.equal(statuses(readGraph(runDir))["scan"], "active");
+
+    writeFileSync(join(runDir, "scan.md"), "No findings.", "utf-8");
+    assert.equal(runCustomVerificationWithEvidence(runDir, "scan").outcome, "continue");
+    await engine.reconcile(await engine.deriveState(base), {
+      unitType: "custom-step",
+      unitId: "audit/scan",
+      startedAt: 0,
+      finishedAt: 1,
+    });
+
+    // judge waits for a decision, but the session that runs it is still live.
+    await dispatch(engine);
+    assert.equal(runCustomVerificationWithEvidence(runDir, "judge").outcome, "pause");
+    await assert.rejects(engine.approveStep("judge"), /"judge" is running in another session/);
+    assert.equal(statuses(readGraph(runDir))["judge"], "active");
+
+    // The session paused: the operator can decide.
+    markWorkerCrashed(session);
+    assert.deepEqual(await engine.approveStep("judge"), { outcome: "milestone-complete" });
+    assert.deepEqual(getLatestCustomWorkflowStepVerification(runId, "judge"), {
+      verdict: "pass",
+      evidence: { policy: "prompt-verify", approvedBy: "operator" },
+      waiverRationale: null,
+    });
+    assert.deepEqual(statuses(readGraph(runDir)), { scan: "complete", judge: "complete" });
+    // A decided step does not wait for a second decision.
+    await assert.rejects(engine.approveStep("judge"), /verification result is pass/);
+  });
+
   test("a run resumes by its id after a crash that wrote no pause", async () => {
     const runDir = createRun(base, "pipeline");
     const runId = customWorkflowRunId(runDir);

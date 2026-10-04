@@ -20,7 +20,7 @@ import type { SessionLockStatus } from "../session-lock.js";
 import { writeGraph, readGraph, type WorkflowGraph, type GraphStep } from "../graph.ts";
 import { SourceObservationStore } from "../source-observations.js";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.js";
-import { registerAutoWorker } from "../db/auto-workers.ts";
+import { markWorkerStopping, registerAutoWorker } from "../db/auto-workers.ts";
 import {
   customWorkflowRunId,
   getLatestCustomWorkflowStepVerification,
@@ -558,6 +558,98 @@ describe("Custom engine loop integration", { concurrency: 1 }, () => {
       assert.equal(verification?.verdict, "inconclusive", stepId);
       assert.equal(verification?.waiverRationale, "The step has no verify policy.", stepId);
     }
+  });
+
+  it("a human-review step pauses once, the operator approves it, and the next step runs", async () => {
+    _resetPendingResolve();
+
+    const base = realpathSync(makeTmpDir());
+    mkdirSync(join(base, ".gsd", "workflow-defs"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "workflow-defs", "release.yaml"), [
+      "version: 1",
+      "name: release",
+      "steps:",
+      "  - id: publish",
+      "    name: Publish",
+      "    prompt: Do publish",
+      "    requires: []",
+      "    produces: []",
+      "    verify:",
+      "      policy: human-review",
+      "  - id: announce",
+      "    name: Announce",
+      "    prompt: Do announce",
+      "    requires: [publish]",
+      "    produces: []",
+    ].join("\n"), "utf-8");
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    const runDir = createRun(base, "release");
+    const runId = customWorkflowRunId(runDir);
+
+    const notices: string[] = [];
+    const ctx = makeMockCtx();
+    ctx.ui.notify = (message: string) => { notices.push(message); };
+    const pi = makeMockPi();
+    /** One auto session on the run: it ends at a pause or a stop. */
+    const runSession = async (): Promise<string[]> => {
+      const s = makeLoopSession({
+        activeEngineId: "custom",
+        activeRunDir: runDir,
+        basePath: base,
+        workerId: registerAutoWorker({ projectRootRealpath: base }),
+      });
+      const deps = makeMockDeps({
+        // pauseAuto releases the worker of the session, as auto.ts does.
+        pauseAuto: async () => {
+          deps.callLog.push("pauseAuto");
+          markWorkerStopping(s.workerId);
+          s.active = false;
+        },
+        stopAuto: async (_ctx, _pi, reason) => {
+          deps.callLog.push(`stopAuto:${reason ?? "no-reason"}`);
+          s.active = false;
+        },
+      });
+      const loopPromise = autoLoop(ctx, pi, s, deps);
+      await resolveNextAgentEnd();
+      await loopPromise;
+      return deps.callLog;
+    };
+
+    // The publish step runs, and its human-review policy pauses the run.
+    assert.ok((await runSession()).includes("pauseAuto"));
+    assert.equal(pi.calls.length, 1, "publish is dispatched once");
+    assert.equal(getLatestCustomWorkflowStepVerification(runId, "publish")?.verdict, "inconclusive");
+    assert.ok(
+      notices.some((message) =>
+        message.includes(`/gsd workflow approve ${runId} publish`)
+        && message.includes(`/gsd workflow resume ${runId}`)),
+      `the pause notice names the approve and resume commands, got: ${notices.join(" | ")}`,
+    );
+
+    const { handleWorkflowCommand } = await import("../commands/handlers/workflow.ts");
+    const { withCommandCwd } = await import("../commands/context.ts");
+    const replies: string[] = [];
+    const commandCtx = { ui: { notify: (message: string) => { replies.push(message); } } };
+    await withCommandCwd(base, () => handleWorkflowCommand(`workflow approve ${runId} publish`, commandCtx as any, pi));
+
+    // The approval is a stored verification result of the operator.
+    const approval = _getAdapter()!.prepare(
+      `SELECT verification.verdict AS verdict, operation.actor_type AS actor
+       FROM custom_workflow_step_verifications verification
+       JOIN workflow_operations operation ON operation.operation_id = verification.operation_id
+       WHERE verification.run_id = :run_id AND verification.step_id = 'publish'
+       ORDER BY verification.id DESC LIMIT 1`,
+    ).get({ ":run_id": runId });
+    assert.deepEqual({ ...approval }, { verdict: "pass", actor: "user" }, replies.join(" | "));
+    assert.deepEqual(readGraph(runDir).steps.map((step) => step.status), ["complete", "pending"]);
+
+    // The resumed run dispatches announce. publish does not run again.
+    const resumed = await runSession();
+    assert.ok(resumed.includes("stopAuto:Workflow complete"), resumed.join("\n"));
+    assert.equal(pi.calls.length, 2, "only announce is dispatched after the approval");
+    assert.ok(String((pi.calls[1] as [{ content?: string }])[0]?.content).includes("Do announce"));
+    assert.deepEqual(readGraph(runDir).steps.map((step) => step.status), ["complete", "complete"]);
   });
 
   it("a verification retry of a database-backed run writes no retry file", async () => {

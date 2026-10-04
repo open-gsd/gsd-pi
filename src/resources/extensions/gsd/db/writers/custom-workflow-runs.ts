@@ -26,13 +26,14 @@ function runOperation(
   runId: string,
   payload: { [key: string]: DomainJsonValue },
   write: (context: Readonly<DomainOperationContext>) => void,
+  actorType: "system" | "user" = "system",
 ): void {
   executeDomainOperation({
     operationType: `custom_workflow.${operationType}`,
     idempotencyKey: `custom_workflow.${operationType}/${runId}/${fence.revision}`,
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: "system",
+    actorType,
     sourceTransport: "internal",
     payload: { runId, ...payload },
   }, (context) => {
@@ -135,7 +136,10 @@ export function saveCustomWorkflowSteps(input: {
   });
 }
 
-/** Record one verification result of a step as an evidence row. */
+/**
+ * Record one verification result of a step as an evidence row. `actorType` is
+ * "user" when the operator decided the result (/gsd workflow approve).
+ */
 export function insertCustomWorkflowStepVerification(input: {
   fence: DomainOperationFence;
   runId: string;
@@ -143,6 +147,7 @@ export function insertCustomWorkflowStepVerification(input: {
   verdict: "pass" | "fail" | "inconclusive";
   evidence: { [key: string]: DomainJsonValue };
   waiverRationale: string | null;
+  actorType?: "system" | "user";
 }): void {
   const payload = { stepId: input.stepId, verdict: input.verdict, waived: input.waiverRationale !== null };
   runOperation(input.fence, "step.verify", input.runId, payload, (context) => {
@@ -160,7 +165,7 @@ export function insertCustomWorkflowStepVerification(input: {
       ":recorded_at": new Date().toISOString(),
       ":operation_id": context.operationId,
     });
-  });
+  }, input.actorType);
 }
 
 /** Set the verification retries a step has used. A retry budget, like unit_dispatch_budgets. */

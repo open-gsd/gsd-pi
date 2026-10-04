@@ -45,7 +45,11 @@ import {
   getLatestCustomWorkflowStepVerification,
   readCustomWorkflowGraph,
 } from "./db/custom-workflow-runs.js";
-import { saveCustomWorkflowSteps } from "./db/writers/custom-workflow-runs.js";
+import type { DomainJsonValue } from "./db/domain-operation.js";
+import {
+  insertCustomWorkflowStepVerification,
+  saveCustomWorkflowSteps,
+} from "./db/writers/custom-workflow-runs.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import type { StepDefinition } from "./definition-loader.js";
 import { readFrozenDefinition, renderRunDirectory } from "./definition-io.js";
@@ -71,6 +75,29 @@ function formatBlockedWorkflowReason(graph: WorkflowGraph): string {
   return blockedSteps.length > 0
     ? `Workflow blocked: no pending steps are ready. Blocked steps: ${blockedSteps.join("; ")}`
     : "Workflow blocked: no pending steps are ready.";
+}
+
+/** The step id of a custom-step unit id "<workflowName>/<stepId>". */
+function stepIdOfUnit(unitId: string): string {
+  const { milestone, slice, task } = parseUnitId(unitId);
+  return task ?? slice ?? milestone;
+}
+
+/**
+ * The notice for a step that paused and waits for a decision of the operator
+ * (a human-review or prompt-verify policy): its newest verification result is
+ * inconclusive and has no waiver. Null when the step paused for another cause,
+ * such as a failed check, or when the run has no rows.
+ */
+export function customStepApprovalNotice(runDir: string | null, unitId: string): string | null {
+  if (!runDir) return null;
+  const runId = customWorkflowRunId(runDir);
+  const stepId = stepIdOfUnit(unitId);
+  const verification = getLatestCustomWorkflowStepVerification(runId, stepId);
+  if (verification?.verdict !== "inconclusive" || verification.waiverRationale !== null) return null;
+  return `Workflow step "${stepId}" waits for your review. ` +
+    `To approve it: /gsd workflow approve ${runId} ${stepId}\n` +
+    `Then continue the run: /gsd workflow resume ${runId}`;
 }
 
 /** The step transition that one resolveDispatch call decided on. */
@@ -309,10 +336,10 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     state: EngineState,
     completedStep: CompletedStep,
   ): Promise<ReconcileResult> {
-    // Extract stepId from "<workflowName>/<stepId>"
-    const { milestone, slice, task } = parseUnitId(completedStep.unitId);
-    const stepId = task ?? slice ?? milestone;
+    return this.completeStep(stepIdOfUnit(completedStep.unitId));
+  }
 
+  private async completeStep(stepId: string): Promise<ReconcileResult> {
     const run = getCustomWorkflowRun(this.runId);
     let updatedGraph: WorkflowGraph;
     if (run) {
@@ -349,6 +376,38 @@ export class CustomWorkflowEngine implements WorkflowEngine {
     return {
       outcome: allDone ? "milestone-complete" : "continue",
     };
+  }
+
+  /**
+   * Record the approval of the operator for a step that waits for a decision
+   * (`/gsd workflow approve`), then complete the step. A step waits for a
+   * decision when its newest verification result is inconclusive and has no
+   * waiver. A failed check is not approved: the step runs again on resume.
+   *
+   * @throws Error when the step does not wait for a decision, or a live session runs it.
+   */
+  async approveStep(stepId: string): Promise<ReconcileResult> {
+    const fence = readDomainOperationFence();
+    const pending = getLatestCustomWorkflowStepVerification(this.runId, stepId);
+    if (pending?.verdict !== "inconclusive" || pending.waiverRationale !== null) {
+      throw new Error(
+        `Workflow step "${stepId}" does not wait for approval: its verification result is ${pending?.verdict ?? "missing"}`,
+      );
+    }
+    const owner = getCustomWorkflowStepClaim(this.runId, stepId);
+    if (owner !== null && isAutoWorkerLive(owner)) {
+      throw new Error(`Workflow step "${stepId}" is running in another session (worker ${owner}).`);
+    }
+    insertCustomWorkflowStepVerification({
+      fence,
+      runId: this.runId,
+      stepId,
+      verdict: "pass",
+      evidence: { ...pending.evidence, approvedBy: "operator" } as { [key: string]: DomainJsonValue },
+      waiverRationale: null,
+      actorType: "user",
+    });
+    return this.completeStep(stepId);
   }
 
   /**

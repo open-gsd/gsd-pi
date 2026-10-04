@@ -2859,7 +2859,13 @@ export async function startAuto(
   if (!s.paused) {
     try {
       const meta = freshStartAssessment.pausedSession ?? readPausedSessionMetadata(base);
-      if (meta?.activeEngineId && meta.activeEngineId !== "dev") {
+      if (meta?.activeEngineId && meta.activeEngineId !== "dev" && s.activeRunDir !== null) {
+        // The command named the run (/gsd workflow run, /gsd workflow resume
+        // <run>). The run rows are its identity, so the named run starts and
+        // the pause record of the earlier session is dropped; that run stays
+        // resumable by its id.
+        clearPausedSession("paused-session DB cleanup failed (named workflow run)");
+      } else if (meta?.activeEngineId && meta.activeEngineId !== "dev") {
         // Custom workflow resume — restore engine state
         s.activeEngineId = meta.activeEngineId;
         s.activeRunDir = meta.activeRunDir ?? null;

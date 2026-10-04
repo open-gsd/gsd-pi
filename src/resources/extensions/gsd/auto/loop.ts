@@ -119,6 +119,7 @@ import {
   handleCustomEngineVerifyRetryOutcome,
   type VerificationRead,
 } from "./workflow-custom-engine-verify-outcome.js";
+import { customStepApprovalNotice } from "../custom-workflow-engine.js";
 import { handleCustomEngineReconcile } from "./workflow-custom-engine-reconcile.js";
 import { handleCustomEngineReconcileOutcome } from "./workflow-custom-engine-reconcile-outcome.js";
 import { formatLeaseConflictNotice } from "./lease-conflict-notice.js";
@@ -1286,6 +1287,8 @@ export async function autoLoop(
               finishTurn,
             },
           });
+          const approvalNotice = customStepApprovalNotice(s.activeRunDir, iterData.unitId);
+          if (approvalNotice) ctx.ui.notify(approvalNotice, "info");
           if (verifyFlow.action === "break") {
             finishIncompleteIteration({
               status: "paused",

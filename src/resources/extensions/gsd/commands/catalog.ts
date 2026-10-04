@@ -94,7 +94,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "fast", desc: "Toggle OpenAI service tier (on/off/flex/status)" },
   { cmd: "mcp", desc: "MCP server status, connectivity, and local config bootstrap (status, check, init)" },
   { cmd: "rethink", desc: "Conversational project reorganization — reorder, park, discard, add milestones" },
-  { cmd: "workflow", desc: "Custom workflow lifecycle (new, run, list, info, install, uninstall, validate, pause, resume) or run <name> directly" },
+  { cmd: "workflow", desc: "Custom workflow lifecycle (new, run, list, info, install, uninstall, validate, pause, resume, approve) or run <name> directly" },
   { cmd: "codebase", desc: "Generate, refresh, and inspect the codebase map cache (.gsd/CODEBASE.md)" },
   { cmd: "ship", desc: "Create PR from milestone artifacts and open for review" },
   { cmd: "do", desc: "Route freeform text to the right GSD command" },
@@ -333,6 +333,7 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "validate", desc: "Validate a workflow definition YAML" },
     { cmd: "pause", desc: "Pause custom workflow auto-mode" },
     { cmd: "resume", desc: "Resume paused custom workflow auto-mode, or a run by <name>/<timestamp>" },
+    { cmd: "approve", desc: "Approve a step that waits for review: <name>/<timestamp> <step>" },
   ],
   codebase: [
     { cmd: "generate", desc: "Generate or regenerate CODEBASE.md" },

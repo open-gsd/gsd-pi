@@ -184,6 +184,7 @@
 | `/gsd workflow pause` | 暂停自定义 workflow 的自动模式 |
 | `/gsd workflow resume` | 恢复已暂停的自定义 workflow 自动模式 |
 | `/gsd workflow resume <name>/<timestamp>` | 按 `/gsd workflow list` 显示的名称和时间戳恢复一次 YAML 运行（崩溃后同样适用） |
+| `/gsd workflow approve <name>/<timestamp> <step>` | 批准一个暂停等待人工审核的步骤（`human-review` 或 `prompt-verify`），之后再恢复该运行 |
 
 ## 扩展
 

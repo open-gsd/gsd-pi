@@ -199,7 +199,9 @@ What shipped:
   directory are one-way renders: the engine writes them again after each step
   and never reads them for a run that has rows. Each verification of a step is
   an evidence row, and a step completes only from a row that passed or carries
-  a waiver rationale. A run directory from an older release has no rows: it is
+  a waiver rationale. A `human-review` or `prompt-verify` step pauses the run
+  until `/gsd workflow approve <name>/<timestamp> <step>` records the decision
+  of the operator as such a row. A run directory from an older release has no rows: it is
   read from its files for one release, and
   `/gsd workflow resume <name>/<timestamp>` imports it.
 
