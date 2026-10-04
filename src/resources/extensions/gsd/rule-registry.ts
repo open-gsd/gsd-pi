@@ -1206,8 +1206,9 @@ export class RuleRegistry {
       const temporaryPath = `${statePath}.tmp`;
       writeFileSync(temporaryPath, stateJson, "utf-8");
       renameSync(temporaryPath, statePath);
-    } catch {
+    } catch (e) {
       // Diagnostic copy only — the database row is already stored.
+      logWarning("registry", `failed to write hook-state.json diagnostic copy: ${(e as Error).message}`);
     }
   }
 
