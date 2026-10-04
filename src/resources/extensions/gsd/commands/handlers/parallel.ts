@@ -61,6 +61,8 @@ export async function handleParallelCommand(trimmed: string, _ctx: ExtensionComm
     if (result.errors.length > 0) {
       lines.push(`Errors: ${result.errors.map((entry) => `${entry.mid}: ${entry.error}`).join("; ")}`);
     }
+    // Names the repaired drift and each preserved copy of a projection changed outside GSD.
+    if (gate.reason) lines.push(gate.reason);
     emitParallelMessage(pi, `${report}\n\n${lines.join("\n")}`);
     return true;
   }
