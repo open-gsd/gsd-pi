@@ -1,7 +1,10 @@
 // Project/App: gsd-pi
 // File Purpose: Replay-safe Slice lifecycle Domain Operations.
 
+import { createHash } from "node:crypto";
+
 import {
+  canonicalDomainJson,
   executeDomainOperation,
   type DomainJsonValue,
   type DomainOperationRequest,
@@ -394,6 +397,18 @@ export function isCurrentSliceReopenOperation(
   });
 }
 
+/**
+ * One hash over the tested source revision of every completed Task of the
+ * Slice, in Task id order. It identifies the source set the Slice was
+ * completed on; it changes when a Task is verified on another revision.
+ */
+export function testedSourceSetHash(proofs: readonly SliceCompletionProof[]): string {
+  const sourceSet = proofs
+    .map((proof) => [proof.taskId, proof.testedSourceRevision])
+    .sort(([left], [right]) => (left! < right! ? -1 : left! > right! ? 1 : 0));
+  return `sha256:${createHash("sha256").update(canonicalDomainJson(sourceSet)).digest("hex")}`;
+}
+
 export function isCurrentSliceCompletionOperation(
   operationId: string,
   slice: SliceLifecycleIdentity,
@@ -434,6 +449,7 @@ export function completeSlice(input: {
           completedTaskIds: result.completedTaskIds,
           cancelledTaskIds: result.cancelledTaskIds,
           proofs: result.proofs.map((proof) => ({ ...proof })),
+          testedSourceSetHash: testedSourceSetHash(result.proofs),
           q8Verdict: result.q8Verdict,
           closeout: input.closeout as unknown as DomainJsonValue,
           audit,

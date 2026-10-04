@@ -277,7 +277,7 @@ function finishTaskWithOptionalEvidence(includeVerdict: boolean, authorizeCancel
         endedAt: "2026-07-14T00:01:01.000Z",
         exitCode: 0,
         observation: "passed",
-        durableOutputRef: "db://fixture/T01/verification",
+        durableOutputRef: `db://host-verification/${attemptId}`,
         environment: { runner: "node-test", fixture: "slice-completion" },
       },
     });
@@ -451,9 +451,29 @@ test("Slice completion atomically publishes normalized closeout, Q8, lifecycle, 
   assert.equal(event.event_type, "slice.completed");
   assert.equal(event.entity_type, "slice");
   assert.equal(event.entity_id, "M001/S01");
-  const eventPayload = JSON.parse(String(event.payload_json)) as { closeout: unknown; completedAt: unknown };
+  const eventPayload = JSON.parse(String(event.payload_json)) as {
+    closeout: unknown;
+    completedAt: unknown;
+    testedSourceSetHash: unknown;
+  };
   assert.deepEqual(eventPayload.closeout, input.closeout);
   assert.equal(eventPayload.completedAt, result.completedAt);
+  // One hash binds the Slice to the tested source revision of each of its Tasks.
+  const sourceProofs = result.proofs as Parameters<typeof sliceLifecycle.testedSourceSetHash>[0];
+  assert.ok(sourceProofs.length > 0);
+  assert.equal(eventPayload.testedSourceSetHash, sliceLifecycle.testedSourceSetHash(sourceProofs));
+  assert.match(String(eventPayload.testedSourceSetHash), /^sha256:[0-9a-f]{64}$/);
+  assert.notEqual(
+    sliceLifecycle.testedSourceSetHash(sourceProofs.map((proof) => ({ ...proof, testedSourceRevision: "sha256:another-revision" }))),
+    eventPayload.testedSourceSetHash,
+    "a Task verified on another revision gives another source set hash",
+  );
+  const second = { ...sourceProofs[0]!, taskId: "T02", testedSourceRevision: "sha256:second-task" };
+  assert.equal(
+    sliceLifecycle.testedSourceSetHash([second, sourceProofs[0]!]),
+    sliceLifecycle.testedSourceSetHash([sourceProofs[0]!, second]),
+    "the hash does not depend on Task order",
+  );
   assert.deepEqual(row(`
     SELECT projection_key, projection_kind
     FROM workflow_projection_work WHERE enqueue_operation_id = '${String(result.operationId)}'
