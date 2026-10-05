@@ -208,4 +208,3 @@ test("/gsd in a later process of the same conversation finishes the saved handof
   assert.equal(readDiscussionHandoffRow(base), null);
   assert.equal(_getPendingAutoStart(base), null);
 });
-
