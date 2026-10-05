@@ -981,7 +981,7 @@ function inlineCompactTemplate(name: "plan" | "task-summary" | "slice-summary", 
  * evidence; follow-up PR can extend or parameterize.
  *
  * If parsing fails (unrecognizable frontmatter, missing id, etc.) the
- * function falls back to `inlineFile` so the closer loses no information.
+ * function falls back to the full summary text so the closer loses no information.
  */
 export async function buildSliceSummaryExcerpt(
   content: string | null, relPath: string, sid: string,
@@ -3783,7 +3783,7 @@ export async function buildRunUatPrompt(
     switch (key) {
       case "slice-uat": {
         // Use the in-memory snapshot the caller already loaded (#4925 review).
-        // Re-reading from disk via inlineFile(p, uatPath, ...) would risk
+        // Re-reading the UAT here would risk
         // drift between the inlined body and uatType (computed from
         // uatContent below) if the file changes mid-dispatch.
         const trimmed = uatContent.trim();

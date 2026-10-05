@@ -486,7 +486,11 @@ D012 is a decision. It is not the cutover:
   A file with no artifact row is not narrative: the prompt shows the same
   "not found" note as for a missing file. The Task SUMMARY list of a Slice
   comes from the rows; the tasks directory is not listed. The source path in
-  the prompt is the path of the artifact row. Behavior tests:
+  the prompt is the path of the artifact row. With no artifact row it is the
+  path where the projection file is rendered; for the Task plan of the
+  execute-task and reactive-execute prompts it is then the text "durable
+  task planning state".
+  Behavior tests:
   `tests/prompt-narrative-gate-g1.test.ts` (Gate G1 for these prompts: the
   files deleted, and the files changed). The G2 prompt check of
   `tests/db-authority-gates.test.ts` is enforced.
