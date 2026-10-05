@@ -61,6 +61,22 @@ describe("extensions discovery", () => {
 		expect(path.basename(result.extensions[0].path)).toBe("foo.js");
 	});
 
+	it("skips TypeScript declaration (.d.ts) files instead of erroring", async () => {
+		// A stray declaration file (e.g. emitted into an extensions directory by a
+		// declaration-emitting build) is not a loadable extension: it has no
+		// runtime exports, so attempting to load it produces a spurious
+		// "does not export a valid factory function" error.
+		fs.writeFileSync(path.join(extensionsDir, "real.js"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "real.d.ts"), "export declare function helper(): void;\n");
+		fs.writeFileSync(path.join(extensionsDir, "stray.d.ts"), "export declare function orphan(): void;\n");
+
+		const result = await discoverAndLoadExtensions([], tempDir, tempDir);
+
+		expect(result.errors).toHaveLength(0);
+		expect(result.extensions).toHaveLength(1);
+		expect(path.basename(result.extensions[0].path)).toBe("real.js");
+	});
+
 	it("discovers subdirectory with index.ts", async () => {
 		const subdir = path.join(extensionsDir, "my-extension");
 		fs.mkdirSync(subdir);
