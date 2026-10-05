@@ -494,7 +494,6 @@ guards.
 
 Other stale-file cleanup remains mechanical:
 
-- Continue file exists for completed task → delete continue file
 - State points to nonexistent slice/task → rebuild the STATE projection from the database
 
 ---

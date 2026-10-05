@@ -1785,12 +1785,20 @@ authority_epoch        INTEGER NOT NULL
   active task.
 - The head of a `continue:` chain selects the resume path: the Resume State of
   the execute-task and guided-resume-task prompts, the Resume choice of `/gsd`,
-  and the handoff of `/gsd resume-work` (active task, else the newest of the
-  active slice and its tasks, else the active milestone). `CONTINUE.md` is a
-  one-way render of the row (`renderWorkCheckpoint`); no reader takes resume
-  state from `CONTINUE.md`, `continue.md` or `HANDOFF.md`, and the write
-  intercept refuses an agent write to a `CONTINUE.md` under `.gsd/milestones`
-  or `.gsd/phases`.
+  and the handoff of `/gsd resume-work`. `CONTINUE.md` is a one-way render of
+  the row (`renderWorkCheckpoint`); no reader takes resume state from
+  `CONTINUE.md`, `continue.md` or `HANDOFF.md`, and the write intercept refuses
+  an agent write to a `CONTINUE.md` under `.gsd/milestones` or `.gsd/phases`.
+- `/gsd resume-work` reads the head of one item only: the active task, else the
+  active slice, else the active milestone. It does not use the checkpoint of
+  another item. The head is shown only while its item is not `completed` or
+  `cancelled` and the work of the item did not change after the save. A later
+  domain event of the same item with a type in `WORK_CHANGE_EVENT_TYPES`
+  (`work-checkpoint.ts`: planned, replanned, completed, cancelled, discarded,
+  reopened) or a later `artifact.saved` event in the scope of the item
+  supersedes it. Attempt, verification, recovery and dispatch events do not. A
+  superseded row is hidden, not deleted. The other readers do not apply this
+  filter.
 
 Index `idx_workflow_questions_open` supports open-Question lookup by project,
 lifecycle, and status.

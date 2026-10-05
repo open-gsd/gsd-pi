@@ -1,5 +1,5 @@
 // GSD Extension - File Parsing and I/O
-// Parsers for roadmap, plan, summary, and continue files.
+// Parsers for roadmap, plan, and summary files.
 // Used by state derivation and the status widget.
 // Pure functions, zero Pi dependencies - uses only Node built-ins.
 
