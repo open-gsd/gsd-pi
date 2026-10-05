@@ -47,13 +47,16 @@ async function guard(toolName: string, input: Record<string, unknown>): Promise<
 // Each managed projection kind, in both layouts, with the tool that owns it.
 const PROJECTIONS: Array<[path: string, tool: RegExp]> = [
   [".gsd/PROJECT.md", /gsd_summary_save/],
+  [".gsd/PROJECT-DRAFT.md", /artifact_type "PROJECT-DRAFT"/],
   [".gsd/REQUIREMENTS.md", /gsd_requirement_save/],
+  [".gsd/REQUIREMENTS-DRAFT.md", /artifact_type "REQUIREMENTS-DRAFT"/],
   [".gsd/DECISIONS.md", /gsd_decision_save/],
   [".gsd/KNOWLEDGE.md", /capture_thought/],
   [".gsd/CAPTURES.md", /gsd_capture_resolve/],
   [".gsd/QUEUE.md", /gsd_milestone_reorder/],
   [".gsd/QUEUE-ORDER.json", /gsd_milestone_reorder/],
   [".gsd/OVERRIDES.md", /\/gsd steer/],
+  [".gsd/BACKLOG.md", /\/gsd backlog/],
   [".gsd/milestones/M001/slices/S01/S01-REPLAN.md", /gsd_replan_slice/],
   [".gsd/ROADMAP.md", /gsd_plan_milestone/],
   [".gsd/milestones/M001/M001-ROADMAP.md", /gsd_plan_milestone/],

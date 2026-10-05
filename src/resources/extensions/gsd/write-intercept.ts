@@ -129,13 +129,16 @@ type ProjectionSaveTool = { name: RegExp; tool: string };
  */
 const ROOT_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /^PROJECT\.md$/i, tool: 'gsd_summary_save with artifact_type "PROJECT"' },
+  { name: /^PROJECT-DRAFT\.md$/i, tool: 'gsd_summary_save with artifact_type "PROJECT-DRAFT"' },
   { name: /^REQUIREMENTS\.md$/i, tool: "gsd_requirement_save or gsd_requirement_update" },
+  { name: /^REQUIREMENTS-DRAFT\.md$/i, tool: 'gsd_summary_save with artifact_type "REQUIREMENTS-DRAFT"' },
   { name: /^DECISIONS\.md$/i, tool: "gsd_decision_save" },
   { name: /^KNOWLEDGE\.md$/i, tool: "capture_thought" },
   { name: /^CAPTURES\.md$/i, tool: "/gsd capture (new capture), gsd_capture_resolve or gsd_capture_complete" },
   { name: /^QUEUE\.md$/i, tool: "gsd_milestone_reorder, gsd_milestone_park or gsd_milestone_discard" },
   { name: /^QUEUE-ORDER\.json$/i, tool: "gsd_milestone_reorder" },
   { name: /^OVERRIDES\.md$/i, tool: "/gsd steer (the user registers the override)" },
+  { name: /^BACKLOG\.md$/i, tool: "/gsd backlog (the user manages the items)" },
   { name: /^ROADMAP\.md$/i, tool: "gsd_plan_milestone or gsd_reassess_roadmap" },
 ];
 

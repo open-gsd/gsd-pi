@@ -34,12 +34,14 @@ database — a rendered view, not a record.
   remain outside its supported parsing. Regression cases live in
   `src/resources/extensions/gsd/tests/block-db-writes.test.ts`.
   The same module refuses a direct Write, Edit or shell write to a managed
-  projection that has a save tool (root renders: PROJECT, REQUIREMENTS,
-  DECISIONS, KNOWLEDGE, CAPTURES, QUEUE, QUEUE-ORDER.json, OVERRIDES.md,
-  ROADMAP; hierarchy kinds below `.gsd/milestones` and `.gsd/phases`: ROADMAP,
-  PLAN, REPLAN, SUMMARY, VALIDATION, ASSESSMENT, UAT, CONTEXT, CONTEXT-DRAFT,
-  RESEARCH, UI-SPEC, AI-SPEC, SPEC, PARKED, CONTINUE) and names that tool
-  (`/gsd steer` for OVERRIDES.md: the user registers the override). It covers
+  projection that has a save tool (root renders: PROJECT, PROJECT-DRAFT,
+  REQUIREMENTS, REQUIREMENTS-DRAFT, DECISIONS, KNOWLEDGE, CAPTURES, QUEUE,
+  QUEUE-ORDER.json, OVERRIDES.md, BACKLOG.md, ROADMAP; hierarchy kinds below
+  `.gsd/milestones` and `.gsd/phases`: ROADMAP, PLAN, REPLAN, SUMMARY,
+  VALIDATION, ASSESSMENT, UAT, CONTEXT, CONTEXT-DRAFT, RESEARCH, UI-SPEC,
+  AI-SPEC, SPEC, PARKED, CONTINUE) and names that tool
+  (`/gsd steer` for OVERRIDES.md: the user registers the override; `/gsd
+  backlog` for BACKLOG.md: the user manages the items). It covers
   only the paths the renderers own: the root kinds at the `.gsd`
   root and the other kinds below `.gsd/milestones` and `.gsd/phases`. A file
   with such a name in another directory (for example a `/gsd milestone-summary`
