@@ -19,6 +19,7 @@ import { bashReferencesProjectRootOutsideWorktree } from "../worktree-shell-guar
 import { evaluateGateAnswer } from "../consent-verdict.js";
 import { getWorkflowDatabasePath, openExistingWorkflowDatabase, resolveProjectRootDbPath } from "../db-workspace.js";
 import { isDbAvailable } from "../db/engine.js";
+import { blockedWriteReason } from "../write-intercept.js";
 import { normalizeRealPath } from "../paths.js";
 import { listWriteGateRows, updateWriteGateRows, type WriteGateRow } from "../db/writers/write-gate.js";
 
@@ -1161,6 +1162,11 @@ type PlanningUnitBlockResult = {
  *                  → allows reads, GSD workflow tools, and declared read-only
  *                    subagents; blocks generic Bash and direct file writes.
  *
+ * In the .gsd-writing modes (planning, planning-dispatch, docs,
+ * verification), a write to a managed projection (write-intercept's block
+ * list: STATE.md, gsd.db, and the renderer-owned files that have a save tool)
+ * is refused even under .gsd/, with the refusal naming that save tool.
+ *
  * `pathOrCommand` is the file path for write/edit-shaped tools and the
  * shell command for bash. Other tools ignore this argument.
  *
@@ -1291,8 +1297,15 @@ export function shouldBlockPlanningUnit(
     }
     const absPath = isAbsolute(pathOrCommand) ? pathOrCommand : resolve(basePath, pathOrCommand);
 
-    // Always allow .gsd/ writes — that's where planning artifacts live.
-    if (isPathUnderGsd(absPath, basePath)) return { block: false };
+    if (isPathUnderGsd(absPath, basePath)) {
+      // Managed projections are refused here too: the projection block list is
+      // decisive, so the policy allow cannot outrank it and the refusal names
+      // the save tool that renders the file.
+      const projectionReason = blockedWriteReason(absPath);
+      if (projectionReason) return planningBlock(unitType, policy.mode, projectionReason);
+      // Other .gsd/ writes are allowed — that is where planning documents live.
+      return { block: false };
+    }
 
     // docs mode additionally allows the manifest's allowedPathGlobs.
     if (policy.mode === "docs" && matchesAllowedGlob(absPath, basePath, policy.allowedPathGlobs)) {
