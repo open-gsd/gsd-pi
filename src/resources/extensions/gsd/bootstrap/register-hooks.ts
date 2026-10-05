@@ -1192,12 +1192,12 @@ async function captureAnsweredQuestionRound(basePath: string, inputQuestions: un
   await saveDiscussionQuestionRound(basePath, milestoneId, questions, details);
 }
 
-function withDepthGateDisplayReason<T extends { block: boolean; reason?: string }>(
+function withDepthGateDisplayReason<T extends { block: boolean; reason?: string; displayReason?: string }>(
   result: T,
   displayReason = "Depth confirmation is waiting for your answer.",
 ): T & { displayReason?: string } {
   if (!result.block) return result;
-  return { ...result, displayReason };
+  return { ...result, displayReason: result.displayReason ?? displayReason };
 }
 
 function shouldBlockDeferredApprovalTool(
@@ -1816,8 +1816,7 @@ export function registerHooks(
     // ── Discussion gate enforcement: block tool calls while gate is pending ──
     // If ask_user_questions was called with a gate ID but hasn't been confirmed,
     // block all non-read-only tool calls to prevent the model from skipping gates.
-    const pendingGateSnapshot = loadWriteGateSnapshot(discussionBasePath);
-    if (pendingGateSnapshot.pendingGateId || pendingGateSnapshot.storeError) {
+    if (getPendingGate(discussionBasePath)) {
       const milestoneId = await getDiscussionMilestoneIdFor(discussionBasePath);
       if (isToolCallEventType("bash", event)) {
         const bashGuard = shouldBlockPendingGateBash(

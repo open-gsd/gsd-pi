@@ -1588,8 +1588,6 @@ async function checkWorkflowWriteGate(
   milestoneId: string | null = null,
 ): Promise<void> {
   const writeGate = await getWorkflowWriteGateModule();
-  // A project with no database yet has no gate rows; the result is not needed.
-  (await importBridgeModule()).openExistingWorkflowDatabase(projectDir);
   const snapshot = writeGate.loadWriteGateSnapshot(projectDir);
   const pendingGate = writeGate.shouldBlockPendingGateInSnapshot(
     snapshot,

@@ -161,7 +161,7 @@ export interface WriteGateSnapshot {
   verifiedApprovalGates?: string[];
   activeQueuePhase: boolean;
   pendingGateId: string | null;
-  /** Set when the project database exists but could not be opened: every gated tool is blocked. */
+  /** Set when the project database exists but could not be opened: every gated write is blocked. */
   storeError?: string;
 }
 
@@ -203,10 +203,11 @@ function adoptMemoryWriteGateState(basePath: string): void {
   const key = memoryWriteGateKey(basePath);
   const memory = memoryWriteGateStates.get(key);
   if (!memory) return;
-  memoryWriteGateStates.delete(key);
   const memoryRows = rowsFromState(memory);
-  if (memoryRows.length === 0) return;
-  updateWriteGateRows(defaultWriteGateWriter(), (rows) => rowsFromState(stateFromRows([...rows, ...memoryRows])));
+  if (memoryRows.length > 0) {
+    updateWriteGateRows(defaultWriteGateWriter(), (rows) => rowsFromState(stateFromRows([...rows, ...memoryRows])));
+  }
+  memoryWriteGateStates.delete(key);
 }
 
 function stateFromRows(rows: readonly WriteGateRow[]): WriteGateState {
@@ -252,19 +253,34 @@ export function loadWriteGateSnapshot(basePath: string): WriteGateSnapshot {
   };
 }
 
+/** What the user sees when a gated write is refused because the gate state cannot be read. */
+const WRITE_GATE_STORE_ERROR_DISPLAY_REASON = "The project database could not be opened.";
+
+/** A gate verdict. `displayReason` is set when the user-facing label is not the caller's default. */
+export interface WriteGateVerdict {
+  block: boolean;
+  reason?: string;
+  displayReason?: string;
+}
+
 /**
- * The block for a gate state that cannot be read. A pending gate cannot be
- * ruled out, so the gate fails closed.
+ * The block for a gate state that cannot be read. It applies to the gated
+ * writes only (milestone CONTEXT, PROJECT, REQUIREMENTS and requirement
+ * writes): an approval cannot be confirmed, so they fail closed. Every other
+ * tool stays usable, so the user can work and repair the database.
  */
-function storeErrorBlock(snapshot: WriteGateSnapshot): { block: true; reason: string } | null {
+function storeErrorBlock(snapshot: WriteGateSnapshot): WriteGateVerdict | null {
   if (!snapshot.storeError) return null;
   return {
     block: true,
     reason: [
       `HARD BLOCK: ${snapshot.storeError}`,
-      `A pending discussion gate cannot be ruled out, so this call is blocked until the database opens.`,
-      `Do NOT proceed and do NOT use alternative approaches. Tell the user about the database error.`,
+      `This write needs the user's recorded approval, and the approval cannot be read or recorded until the database opens.`,
+      `This is a database problem, not a question that waits for an answer: do NOT ask the user to confirm again.`,
+      `Tell the user to repair the database: the error above names the command when there is one`,
+      `(a checkout-unbound error: /gsd db bind; a schema-too-new error: upgrade GSD); otherwise run /gsd doctor. Then retry this write.`,
     ].join(" "),
+    displayReason: WRITE_GATE_STORE_ERROR_DISPLAY_REASON,
   };
 }
 
@@ -560,8 +576,6 @@ export function shouldBlockPendingGateInSnapshot(
   _milestoneId: string | null,
   _queuePhaseActive?: boolean,
 ): { block: boolean; reason?: string } {
-  const storeBlock = storeErrorBlock(snapshot);
-  if (storeBlock) return storeBlock;
   if (!snapshot.pendingGateId) return { block: false };
 
   if (GATE_SAFE_TOOLS.has(canonicalToolName(toolName))) return { block: false };
@@ -598,8 +612,6 @@ export function shouldBlockPendingGateBashInSnapshot(
   _milestoneId: string | null,
   _queuePhaseActive?: boolean,
 ): { block: boolean; reason?: string } {
-  const storeBlock = storeErrorBlock(snapshot);
-  if (storeBlock) return storeBlock;
   if (!snapshot.pendingGateId) return { block: false };
 
   return {
@@ -820,7 +832,7 @@ export function shouldBlockContextWrite(
   milestoneId: string | null,
   _queuePhaseActive?: boolean,
   basePath: string = process.cwd(),
-): { block: boolean; reason?: string } {
+): WriteGateVerdict {
   if (toolName !== "write") return { block: false };
   if (!MILESTONE_CONTEXT_RE.test(inputPath)) return { block: false };
 
@@ -836,7 +848,10 @@ export function shouldBlockContextWrite(
     };
   }
 
-  if (isMilestoneDepthVerified(targetMilestoneId, basePath)) return { block: false };
+  const snapshot = loadWriteGateSnapshot(basePath);
+  const storeBlock = storeErrorBlock(snapshot);
+  if (storeBlock) return storeBlock;
+  if (isMilestoneDepthVerifiedInSnapshot(snapshot, targetMilestoneId)) return { block: false };
 
   return {
     block: true,
@@ -860,7 +875,7 @@ export function shouldBlockContextArtifactSave(
   milestoneId: string | null,
   sliceId?: string | null,
   basePath: string = process.cwd(),
-): { block: boolean; reason?: string } {
+): WriteGateVerdict {
   return shouldBlockContextArtifactSaveInSnapshot(loadWriteGateSnapshot(basePath), artifactType, milestoneId, sliceId);
 }
 
@@ -869,7 +884,7 @@ export function shouldBlockContextArtifactSaveInSnapshot(
   artifactType: string,
   milestoneId: string | null,
   sliceId?: string | null,
-): { block: boolean; reason?: string } {
+): WriteGateVerdict {
   if (artifactType !== "CONTEXT") return { block: false };
   if (sliceId) return { block: false };
   if (!milestoneId) {
@@ -881,6 +896,8 @@ export function shouldBlockContextArtifactSaveInSnapshot(
       ].join(" "),
     };
   }
+  const storeBlock = storeErrorBlock(snapshot);
+  if (storeBlock) return storeBlock;
   if (isMilestoneDepthVerifiedInSnapshot(snapshot, milestoneId)) return { block: false };
 
   return {
@@ -913,7 +930,7 @@ export function shouldBlockRootArtifactSaveInSnapshot(
   snapshot: WriteGateSnapshot,
   artifactType: string,
   opts: { requireVerifiedApproval?: boolean } = {},
-): { block: boolean; reason?: string } {
+): WriteGateVerdict {
   if (!FINAL_ROOT_ARTIFACTS.has(artifactType)) return { block: false };
 
   const storeBlock = storeErrorBlock(snapshot);

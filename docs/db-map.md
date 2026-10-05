@@ -985,9 +985,10 @@ PRIMARY KEY (gate_kind, gate_id)
 - A gate call opens the existing project database when it is not the open one,
   in the extension host and in the workflow MCP child. It never creates a
   database.
-- A project database that exists and does not open fails closed: every gated
-  tool is blocked with the open error, and a gate write records nothing and
-  logs a warning.
+- A project database that exists and does not open fails closed for the gated
+  writes only (milestone CONTEXT, PROJECT, REQUIREMENTS and requirement
+  writes): they are refused with the open error and its remedy. Every other
+  tool runs. A gate write records nothing and logs a warning.
 - Only a project with no database keeps the gate in process memory. The first
   gate call after the database exists moves that state into the rows.
 

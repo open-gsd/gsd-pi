@@ -13,14 +13,15 @@
  *       on both hook windows (tool_call defer, tool_execution_start re-arm);
  *   (d) two basePaths defer approval gates in the same process;
  *   (e) the rows are the one store: the host opens the project database for a
- *       gate call, and a database that does not open blocks;
+ *       gate call, and a database that does not open blocks the gated writes
+ *       only;
  *   (f) the native requirement tools report the gate block.
  */
 
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -40,7 +41,10 @@ import {
   shouldBlockContextArtifactSave,
   shouldBlockContextWrite,
   shouldBlockPendingGate,
+  shouldBlockPendingGateBash,
+  shouldBlockRootArtifactSaveInSnapshot,
 } from "../bootstrap/write-gate.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
 
 const GATE = "depth_verification_M007_confirm";
@@ -519,7 +523,7 @@ test("seam: gate state armed before the project had a database moves into its ro
   assert.deepEqual(gateRows(), [{ gate_kind: "pending", gate_id: GATE, writer: "host" }]);
 });
 
-test("seam: a project database that does not open blocks every tool and records no approval", (t) => {
+test("seam: a project database that does not open blocks the gated writes only and records no approval", (t) => {
   const dir = makeTempDir("unopenable");
   mkdirSync(join(dir, ".gsd"), { recursive: true });
   writeFileSync(join(dir, ".gsd", "gsd.db"), "this file is not a SQLite database\n".repeat(200));
@@ -530,18 +534,64 @@ test("seam: a project database that does not open blocks every tool and records 
 
   const snapshot = loadWriteGateSnapshot(dir);
   assert.match(snapshot.storeError ?? "", /could not be opened/);
-  for (const toolName of ["glob", "ask_user_questions"]) {
-    const guard = shouldBlockPendingGate(toolName, null, false, dir);
-    assert.equal(guard.block, true, `${toolName} is blocked while the gate state cannot be read`);
-    assert.match(guard.reason ?? "", /Write-gate state is unavailable/);
+  for (const toolName of ["read", "glob", "bash", "ask_user_questions"]) {
+    assert.equal(
+      shouldBlockPendingGate(toolName, null, false, dir).block,
+      false,
+      `${toolName} is not a gated write, so it runs`,
+    );
   }
+  assert.equal(shouldBlockPendingGateBash("ls", null, false, dir).block, false);
   assert.equal(hostWriteGateAdapter.setPending(GATE, dir), false, "a gate write reports that nothing was recorded");
   hostWriteGateAdapter.markDepthVerified("M007", dir);
-  assert.equal(
-    shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block,
-    true,
-    "an approval that was not recorded does not unlock the CONTEXT save",
-  );
+  const contextSave = shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir);
+  assert.equal(contextSave.block, true, "an approval that was not recorded does not unlock the CONTEXT save");
+  assert.match(contextSave.reason ?? "", /Write-gate state is unavailable/);
+  for (const artifactType of ["PROJECT", "REQUIREMENTS"]) {
+    const rootSave = shouldBlockRootArtifactSaveInSnapshot(snapshot, artifactType);
+    assert.equal(rootSave.block, true, `${artifactType} save is refused`);
+    assert.equal(rootSave.displayReason, "The project database could not be opened.");
+  }
+  assert.equal(shouldBlockRootArtifactSaveInSnapshot(snapshot, "REQUIREMENTS-DRAFT").block, false);
+});
+
+test("seam: an unbound checkout lets a read tool run and refuses a gated write with the database message", async (t) => {
+  const origin = makeTempDir("unbound-origin");
+  const moved = `${origin}-moved`;
+  mkdirSync(join(origin, ".gsd"), { recursive: true });
+  assert.equal(openWorkflowDatabase(origin).ok, true, "the first open binds the database to its checkout");
+  closeDatabase();
+  renameSync(origin, moved);
+  t.after(() => {
+    closeDatabase();
+    rmSync(moved, { recursive: true, force: true });
+  });
+
+  const { handlers, pi } = makeHookHarness();
+  registerHooks(pi, []);
+  const ctx = { cwd: moved, ui: { notify: () => undefined } } as any;
+  const callTool = async (toolName: string, input: Record<string, unknown>): Promise<any> => {
+    let blocked: any;
+    for (const handler of handlers.get("tool_call") ?? []) {
+      const result = await handler({ toolCallId: `call-${toolName}`, toolName, input }, ctx);
+      if (result?.block) blocked ??= result;
+    }
+    return blocked;
+  };
+
+  assert.equal(await callTool("read", { path: join(moved, "README.md") }), undefined, "a read tool runs");
+  assert.equal(await callTool("bash", { command: "ls" }), undefined, "bash runs");
+
+  const write = await callTool("write", { path: contextPath(moved, "M007"), content: "# Context\n" });
+  assert.equal(write?.block, true, "the milestone CONTEXT write is refused");
+  assert.match(write.reason, /checkout-unbound/);
+  assert.match(write.reason, /\/gsd db bind/);
+  assert.doesNotMatch(write.reason, /depth_verification|Depth confirmation/);
+  assert.equal(write.displayReason, "The project database could not be opened.");
+
+  const save = shouldBlockRootArtifactSaveInSnapshot(loadWriteGateSnapshot(moved), "REQUIREMENTS");
+  assert.equal(save.block, true, "a requirement write is refused");
+  assert.match(save.reason ?? "", /\/gsd db bind/);
 });
 
 // ── (f) the native requirement tools report the gate block ───────────────────

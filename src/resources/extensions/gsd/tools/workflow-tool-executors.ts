@@ -601,7 +601,7 @@ export async function executeSummarySave(
       details: {
         operation: "save_summary",
         error: "root_artifact_write_blocked",
-        displayReason: "Approval confirmation required before saving final project setup artifacts.",
+        displayReason: rootArtifactGuard.displayReason ?? "Approval confirmation required before saving final project setup artifacts.",
       },
       isError: true,
     };
@@ -618,7 +618,7 @@ export async function executeSummarySave(
       details: {
         operation: "save_summary",
         error: "context_write_blocked",
-        displayReason: "Depth check required before writing milestone context.",
+        displayReason: contextGuard.displayReason ?? "Depth check required before writing milestone context.",
       },
       isError: true,
     };
