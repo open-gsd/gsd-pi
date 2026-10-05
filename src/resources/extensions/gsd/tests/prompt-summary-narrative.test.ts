@@ -13,9 +13,10 @@ import { afterEach, test } from "node:test";
 import {
   buildCarryForwardSection,
   buildCompleteSlicePrompt,
+  buildExecuteTaskPrompt,
   buildReassessRoadmapPrompt,
   buildValidateMilestonePrompt,
-  getPriorTaskSummaryPaths,
+  getPriorTaskSummaries,
   inlineDependencySummaries,
 } from "../auto-prompts.ts";
 import { invalidateAllCaches } from "../cache.ts";
@@ -27,10 +28,12 @@ import {
   insertSlice,
   insertTask,
   openDatabase,
+  setTaskSummaryMd,
 } from "../gsd-db.ts";
 import { renderTaskSummary } from "../markdown-renderer.ts";
 import { flushWorkflowProjections } from "../projection-flush.ts";
 import { handleCompleteSlice } from "../tools/complete-slice.ts";
+import { handleCompleteTask } from "../tools/complete-task.ts";
 import { handleReopenSlice } from "../tools/reopen-slice.ts";
 import { handleReopenTask } from "../tools/reopen-task.ts";
 import type { CompleteSliceParams } from "../types.ts";
@@ -143,9 +146,9 @@ test("a reopened Task gives no SUMMARY to the prompts, although its artifact row
   // The projection seam of the Task completion: the file and the SUMMARY artifact row.
   assert.equal(await renderTaskSummary(base, "M001", "S01", "T01"), true);
 
-  const priorPaths = await getPriorTaskSummaryPaths("M001", "S01", "T02");
-  assert.equal(priorPaths.length, 1);
-  assert.match(await buildCarryForwardSection(priorPaths), /TASK-SUMMARY-MARKER/);
+  const priorSummaries = await getPriorTaskSummaries(base, "M001", "S01", "T02");
+  assert.equal(priorSummaries.length, 1);
+  assert.match(await buildCarryForwardSection(priorSummaries), /TASK-SUMMARY-MARKER/);
   assert.match(await buildCompleteSlicePrompt("M001", "Checkout", "S01", "Foundation", base), /TASK-SUMMARY-MARKER/);
 
   const reopened = await handleReopenTask(
@@ -161,11 +164,65 @@ test("a reopened Task gives no SUMMARY to the prompts, although its artifact row
   );
 
   invalidateAllCaches();
-  const pathsAfterReopen = await getPriorTaskSummaryPaths("M001", "S01", "T02");
-  assert.deepEqual(pathsAfterReopen, []);
-  assert.doesNotMatch(await buildCarryForwardSection(pathsAfterReopen), /TASK-SUMMARY-MARKER/);
+  const summariesAfterReopen = await getPriorTaskSummaries(base, "M001", "S01", "T02");
+  assert.deepEqual(summariesAfterReopen, []);
+  assert.doesNotMatch(await buildCarryForwardSection(summariesAfterReopen), /TASK-SUMMARY-MARKER/);
   assert.doesNotMatch(
     await buildCompleteSlicePrompt("M001", "Checkout", "S01", "Foundation", base),
     /TASK-SUMMARY-MARKER/,
   );
+});
+
+test("a completed Task gives its SUMMARY to the next prompts when its projection is not rendered", async () => {
+  const base = makeProject();
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Receipt", status: "pending" });
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T03", title: "Refund", status: "pending" });
+  // A directory at the path of the SUMMARY file: the completion commits and its projection render fails.
+  mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T02-SUMMARY.md"), { recursive: true });
+
+  const completed = await handleCompleteTask({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T02",
+    oneLiner: "COMMITTED-TASK-MARKER",
+    narrative: "The receipt was built.",
+    verification: "The tests pass.",
+    deviations: "None.",
+    knownIssues: "None.",
+    keyFiles: ["src/receipt.ts"],
+    keyDecisions: [],
+    blockerDiscovered: false,
+    verificationEvidence: [{ command: "pnpm test receipt", exitCode: 0, verdict: "pass", durationMs: 25 }],
+  }, base);
+  assert.ok(!("error" in completed), `unexpected error: ${"error" in completed ? completed.error : ""}`);
+  assert.equal(getScopedArtifact("M001", "S01", "T02", "SUMMARY"), null, "the SUMMARY artifact row is not written");
+
+  invalidateAllCaches();
+  assert.deepEqual(
+    (await getPriorTaskSummaries(base, "M001", "S01", "T03")).map((summary) => summary.taskId),
+    ["T01", "T02"],
+  );
+  assert.match(
+    await buildExecuteTaskPrompt("M001", "S01", "Foundation", "T03", "Refund", base),
+    /COMMITTED-TASK-MARKER/,
+    "the execute-task prompt of the next Task has the summary",
+  );
+  assert.match(
+    await buildCompleteSlicePrompt("M001", "Checkout", "S01", "Foundation", base),
+    /COMMITTED-TASK-MARKER/,
+    "the complete-slice prompt has the summary",
+  );
+});
+
+test("the SUMMARY carrier of a done Task comes before its artifact row", async () => {
+  const base = makeProject();
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Receipt", status: "pending" });
+  assert.equal(await renderTaskSummary(base, "M001", "S01", "T01"), true);
+  // A second completion of T01 that has no drain: the artifact row holds the first text.
+  setTaskSummaryMd("M001", "S01", "T01", "---\nid: T01\n---\n\n# T01: Gateway\n\n**SECOND-COMPLETION-MARKER**\n");
+
+  invalidateAllCaches();
+  const carryForward = await buildCarryForwardSection(await getPriorTaskSummaries(base, "M001", "S01", "T02"));
+  assert.match(carryForward, /SECOND-COMPLETION-MARKER/);
+  assert.doesNotMatch(carryForward, /TASK-SUMMARY-MARKER/);
 });

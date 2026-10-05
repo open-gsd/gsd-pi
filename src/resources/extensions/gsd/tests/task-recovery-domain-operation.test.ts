@@ -344,9 +344,14 @@ test("replan recovery durably carries its evidence into restart-safe dispatch co
 
   closeDatabase();
   assert.equal(openDatabase(scope.dbPath), true);
+  // The plan operation wrote the Task plan carrier; no PLAN artifact row is saved.
+  db().prepare("UPDATE tasks SET full_plan_md = :plan WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'")
+    .run({ ":plan": "# T01: Recover atomically\n\nCARRIER-TASK-PLAN-MARKER\n" });
   const recoveryPrompt = await buildTaskRecoveryReplanPrompt(
     "M001", "S01", "Recovery operation", "T01", "Recover atomically", scope.basePath,
   );
+  assert.match(recoveryPrompt, /CARRIER-TASK-PLAN-MARKER/, "the Task plan comes from the carrier");
+  assert.doesNotMatch(recoveryPrompt, /current Task plan projection is missing/);
   assert.match(recoveryPrompt, /planning-only recovery unit/i);
   assert.match(recoveryPrompt, /Task plan omitted the required migration boundary/);
   assert.match(recoveryPrompt, /migration contract/);

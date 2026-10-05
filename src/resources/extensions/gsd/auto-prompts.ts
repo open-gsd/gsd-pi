@@ -39,14 +39,11 @@ import {
   getPendingGates,
   getPendingGatesForTurn,
   getRoadmapAssessmentForSlice,
-  getArtifact,
   getScopedArtifact,
   getSlice,
-  getSliceTaskArtifacts,
-  getTask,
   isDbAvailable,
 } from "./gsd-db.js";
-import { readListedMilestoneIds, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
+import { readListedMilestoneIds, readMilestoneSlices, readSliceTasks, type TaskRead } from "./db/lifecycle-read.js";
 import {
   GATE_REGISTRY,
   assertGateCoverage,
@@ -666,6 +663,8 @@ export interface Narrative {
   /** Null when the database has no saved row with content, or is unavailable. */
   content: string | null;
   relPath: string;
+  /** True when `content` is the carrier column of the item row, not the artifact row. */
+  fromCarrier?: boolean;
 }
 
 /** With no row, `targetRelPath` gives the path where the projection file is rendered. */
@@ -685,32 +684,57 @@ export function milestoneNarrative(base: string, mid: string, type: string): Nar
 }
 
 /**
- * `milestoneNarrative` for a Slice. A SUMMARY follows the Slice row: only a
- * done Slice has one, and its text is the carrier that the completion
- * operation writes (`full_summary_md`). The artifact row is written later, by
- * a projection drain, and stays after a reopen. It gives the text only for a
- * done Slice with no carrier (an imported summary).
+ * The one precedence rule for narrative that has a carrier column
+ * (`tasks.full_plan_md`, `tasks.full_summary_md`, `slices.full_summary_md`).
+ * The carrier is the first source: the Domain Operation writes it in the
+ * transaction of the lifecycle change, and a reopen or a re-plan clears or
+ * replaces it. The artifact row is the second source: a projection drain
+ * writes it later, and it stays after a reopen.
  */
-export function sliceNarrative(base: string, mid: string, sid: string, type: string): Narrative {
-  const narrative = toNarrative(getScopedArtifact(mid, sid, null, type), () => relSliceFile(base, mid, sid, type));
-  if (type !== "SUMMARY") return narrative;
-  const slice = readMilestoneSlices(mid).find((row) => row.id === sid);
-  return { ...narrative, content: slice?.done ? slice.full_summary_md || narrative.content : null };
+function carrierFirst(narrative: Narrative, carrier: string | undefined): Narrative {
+  return carrier?.trim() ? { ...narrative, content: carrier, fromCarrier: true } : narrative;
 }
 
 /**
- * The saved SUMMARY rows of the done Tasks of a Slice, in Task id order. A
- * reopened Task keeps its SUMMARY row, so the Task row decides: a Task that
- * is not done has no SUMMARY narrative.
+ * A SUMMARY follows the item row: an item that is not done has no SUMMARY
+ * narrative, although its artifact row stays after a reopen.
  */
-function doneTaskSummaries(mid: string, sid: string) {
-  const done = new Set(readSliceTasks(mid, sid).filter((task) => task.done).map((task) => task.id));
-  return getSliceTaskArtifacts(mid, sid, "SUMMARY").filter((row) => done.has(row.task_id!));
+function summaryOfItem(narrative: Narrative, item: { done: boolean; full_summary_md: string } | undefined): Narrative {
+  return item?.done ? carrierFirst(narrative, item.full_summary_md) : { ...narrative, content: null };
 }
 
-/** `milestoneNarrative` for a Task. */
-function taskNarrative(base: string, mid: string, sid: string, tid: string, type: string): Narrative {
-  return toNarrative(getScopedArtifact(mid, sid, tid, type), () => relTaskFile(base, mid, sid, tid, type));
+/** `milestoneNarrative` for a Slice. A SUMMARY follows `carrierFirst` and `summaryOfItem`. */
+export function sliceNarrative(base: string, mid: string, sid: string, type: string): Narrative {
+  const narrative = toNarrative(getScopedArtifact(mid, sid, null, type), () => relSliceFile(base, mid, sid, type));
+  if (type !== "SUMMARY") return narrative;
+  return summaryOfItem(narrative, readMilestoneSlices(mid).find((row) => row.id === sid));
+}
+
+/** PLAN or SUMMARY of a Task: `milestoneNarrative` with `carrierFirst` and `summaryOfItem`. */
+function taskNarrative(
+  base: string, mid: string, sid: string, tid: string, type: "PLAN" | "SUMMARY",
+  task: TaskRead | undefined = readSliceTasks(mid, sid).find((row) => row.id === tid),
+): Narrative {
+  const narrative = toNarrative(getScopedArtifact(mid, sid, tid, type), () => relTaskFile(base, mid, sid, tid, type));
+  return type === "PLAN" ? carrierFirst(narrative, task?.full_plan_md) : summaryOfItem(narrative, task);
+}
+
+/** The SUMMARY of one done Task: its text and the display path of its projection file. */
+export interface TaskSummaryNarrative {
+  taskId: string;
+  content: string;
+  relPath: string;
+}
+
+/** The SUMMARY narrative of the done Tasks of a Slice, in Task id order. */
+function doneTaskSummaries(base: string, mid: string, sid: string): TaskSummaryNarrative[] {
+  return readSliceTasks(mid, sid)
+    .filter((task) => task.done)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .flatMap((task) => {
+      const { content, relPath } = taskNarrative(base, mid, sid, task.id, "SUMMARY", task);
+      return content ? [{ taskId: task.id, content, relPath }] : [];
+    });
 }
 
 /**
@@ -1475,15 +1499,12 @@ function oneLine(text: string): string {
  * Carry-forward lines for Task SUMMARY paths (`.gsd/`-relative). The text of
  * each summary is read from its artifact row, never from the file.
  */
-export async function buildCarryForwardSection(priorSummaryPaths: string[]): Promise<string> {
-  if (priorSummaryPaths.length === 0) {
+export async function buildCarryForwardSection(priorSummaries: TaskSummaryNarrative[]): Promise<string> {
+  if (priorSummaries.length === 0) {
     return ["## Carry-Forward Context", "- No prior task summaries in this slice."].join("\n");
   }
 
-  const items = priorSummaryPaths.map((relPath) => {
-    const content = getArtifact(relPath.replace(/^\.gsd\//, ""))?.full_content;
-    if (!content) return `- \`${relPath}\``;
-
+  const items = priorSummaries.map(({ content, relPath }) => {
     const summary = parseSummary(content);
     const provided = summary.frontmatter.provides.slice(0, 2).join("; ");
     const decisions = summary.frontmatter.key_decisions.slice(0, 2).join("; ");
@@ -1541,21 +1562,18 @@ function taskNumber(taskId: string): number {
 }
 
 /**
- * Projection paths (`.gsd/`-relative) of the saved SUMMARY rows of the done Tasks
- * that come before `currentTid` in the Slice. The rows are read from the
- * database; the tasks directory is not listed.
+ * The SUMMARY narrative of the done Tasks that come before `currentTid` in
+ * the Slice. It is read from the database; the tasks directory is not listed.
  */
-export async function getPriorTaskSummaryPaths(
-  mid: string, sid: string, currentTid: string,
-): Promise<string[]> {
+export async function getPriorTaskSummaries(
+  base: string, mid: string, sid: string, currentTid: string,
+): Promise<TaskSummaryNarrative[]> {
   const currentNum = taskNumber(currentTid);
-  return doneTaskSummaries(mid, sid)
-    .filter((row) => taskNumber(row.task_id!) < currentNum)
-    .map((row) => `.gsd/${row.path}`);
+  return doneTaskSummaries(base, mid, sid).filter((summary) => taskNumber(summary.taskId) < currentNum);
 }
 
 /**
- * Get carry-forward summary paths scoped to a task's derived dependencies.
+ * Get carry-forward summaries scoped to a task's derived dependencies.
  *
  * Instead of all prior tasks (order-based), returns only summaries for task
  * IDs in `dependsOn`. Used by reactive-execute to give each subagent only
@@ -1564,19 +1582,17 @@ export async function getPriorTaskSummaryPaths(
  * Falls back to order-based when dependsOn is empty (root tasks still get
  * any available prior summaries for continuity).
  */
-export async function getDependencyTaskSummaryPaths(
-  mid: string, sid: string, currentTid: string,
+export async function getDependencyTaskSummaries(
+  base: string, mid: string, sid: string, currentTid: string,
   dependsOn: string[],
-): Promise<string[]> {
+): Promise<TaskSummaryNarrative[]> {
   // If no dependencies, fall back to order-based for root tasks
   if (dependsOn.length === 0) {
-    return getPriorTaskSummaryPaths(mid, sid, currentTid);
+    return getPriorTaskSummaries(base, mid, sid, currentTid);
   }
 
   const depSet = new Set(dependsOn.map((d) => d.toUpperCase()));
-  return doneTaskSummaries(mid, sid)
-    .filter((row) => depSet.has(row.task_id!.toUpperCase()))
-    .map((row) => `.gsd/${row.path}`);
+  return doneTaskSummaries(base, mid, sid).filter((summary) => depSet.has(summary.taskId.toUpperCase()));
 }
 
 // ─── Adaptive Replanning Checks ────────────────────────────────────────────
@@ -2672,8 +2688,8 @@ export async function buildRefineSlicePrompt(
 /** Options for customizing execute-task prompt construction. */
 export interface ExecuteTaskPromptOptions {
   level?: InlineLevel;
-  /** Override carry-forward paths (dependency-based instead of order-based). */
-  carryForwardPaths?: string[];
+  /** Override carry-forward summaries (dependency-based instead of order-based). */
+  carryForward?: TaskSummaryNarrative[];
   /** Session model context window in tokens, forwarded to the budget engine. */
   sessionContextWindow?: number;
   /** Model registry forwarded to the budget engine for executor-model lookup. */
@@ -2714,7 +2730,7 @@ async function resolveExecuteTaskPlan(input: {
   taskId: string;
   slicePlanContent: string | null;
 }): Promise<{ content: string | null; relativePath: string; source: string }> {
-  const { content: savedPlan, relPath: relativePath } = taskNarrative(
+  const { content: savedPlan, relPath: relativePath, fromCarrier } = taskNarrative(
     input.basePath,
     input.milestoneId,
     input.sliceId,
@@ -2722,17 +2738,12 @@ async function resolveExecuteTaskPlan(input: {
     "PLAN",
   );
   if (savedPlan) {
-    return { content: savedPlan, relativePath, source: `\`${relativePath}\`` };
-  }
-
-  const durablePlan = isDbAvailable()
-    ? getTask(input.milestoneId, input.sliceId, input.taskId)?.full_plan_md.trim() || null
-    : null;
-  if (durablePlan) {
     return {
-      content: durablePlan,
+      content: savedPlan,
       relativePath,
-      source: `durable task planning state for ${input.milestoneId}/${input.sliceId}/${input.taskId}`,
+      source: fromCarrier
+        ? `durable task planning state for ${input.milestoneId}/${input.sliceId}/${input.taskId}`
+        : `\`${relativePath}\``,
     };
   }
 
@@ -2801,9 +2812,9 @@ export async function buildExecuteTaskPrompt(
   // Inject phase handoff anchor from planning phase (if available)
   const planAnchor = readPhaseAnchor(base, mid, "plan-slice");
 
-  const priorSummaries = opts.carryForwardPaths ?? await getPriorTaskSummaryPaths(mid, sid, tid);
+  const priorSummaries = opts.carryForward ?? await getPriorTaskSummaries(base, mid, sid, tid);
   const priorLines = priorSummaries.length > 0
-    ? priorSummaries.map(p => `- \`${p}\``).join("\n")
+    ? priorSummaries.map(p => `- \`${p.relPath}\``).join("\n")
     : "- (no prior tasks)";
 
   const slicePlan = sliceNarrative(base, mid, sid, "PLAN");
@@ -3115,8 +3126,8 @@ export async function buildCompleteSlicePrompt(
         }
       case "prior-task-summaries": {
         const blocks: string[] = [];
-        for (const row of doneTaskSummaries(mid, sid)) {
-          blocks.push(await buildTaskSummaryExcerpt(row.full_content, `.gsd/${row.path}`, row.task_id!));
+        for (const summary of doneTaskSummaries(base, mid, sid)) {
+          blocks.push(await buildTaskSummaryExcerpt(summary.content, summary.relPath, summary.taskId));
         }
         const body = blocks.length > 0 ? blocks.join("\n\n---\n\n") : null;
         trackPromptContext(contextTelemetry, "prior-task-summaries", body ? "excerpt" : "skipped", body, body ? undefined : "missing");
@@ -3701,11 +3712,11 @@ export async function buildReplanSlicePrompt(
 
   // Find the blocker task summary — the completed task with blocker_discovered: true
   let blockerTaskId = "";
-  for (const row of doneTaskSummaries(mid, sid)) {
-    const summary = parseSummary(row.full_content);
+  for (const done of doneTaskSummaries(base, mid, sid)) {
+    const summary = parseSummary(done.content);
     if (summary.frontmatter.blocker_discovered) {
-      blockerTaskId = summary.frontmatter.id || row.task_id!;
-      inlined.push(await buildTaskSummaryExcerpt(row.full_content, `.gsd/${row.path}`, blockerTaskId, { blocker: true }));
+      blockerTaskId = summary.frontmatter.id || done.taskId;
+      inlined.push(await buildTaskSummaryExcerpt(done.content, done.relPath, blockerTaskId, { blocker: true }));
     }
   }
 
@@ -4099,9 +4110,9 @@ export async function buildReactiveExecutePrompt(
     const tTitle = node?.title ?? tid;
     readyTaskListLines.push(`- **${tid}: ${tTitle}**`);
 
-    // Build dependency-scoped carry-forward paths for this task
-    const depPaths = await getDependencyTaskSummaryPaths(
-      mid, sid, tid, node?.dependsOn ?? [],
+    // Build dependency-scoped carry-forward summaries for this task
+    const depSummaries = await getDependencyTaskSummaries(
+      base, mid, sid, tid, node?.dependsOn ?? [],
     );
 
     const taskPlan = await resolveExecuteTaskPlan({
@@ -4123,7 +4134,7 @@ export async function buildReactiveExecutePrompt(
           "## Inlined Task Plan (authoritative local execution contract)",
           `Task plan not found at dispatch time. Read ${taskPlan.source} before executing.`,
         ].join("\n");
-    const carryForwardSection = await buildCarryForwardSection(depPaths);
+    const carryForwardSection = await buildCarryForwardSection(depSummaries);
     const finalCarryForwardSection = carryForwardSection.length > perSubagentCarryForwardBudget
       ? truncateAtSectionBoundary(carryForwardSection, perSubagentCarryForwardBudget).content
       : carryForwardSection;

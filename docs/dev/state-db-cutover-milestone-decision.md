@@ -492,10 +492,17 @@ D012 is a decision. It is not the cutover:
   `tests/db-authority-gates.test.ts` is enforced.
 - A SUMMARY follows the item row, not the artifact row alone. A Slice or Task
   that is not done has no SUMMARY narrative: a reopen removes the file and
-  keeps the artifact row. The SUMMARY text of a done Slice is the
-  `full_summary_md` carrier that the completion operation writes. Its
-  artifact row is written later, by a projection drain; the row gives the
-  text only when the carrier is empty (an imported summary). A CONTEXT-DRAFT
+  keeps the artifact row. One precedence rule applies to all narrative that
+  has a carrier column (`tasks.full_plan_md`, `tasks.full_summary_md`,
+  `slices.full_summary_md`): the carrier is the first source, because the
+  Domain Operation writes it in the transaction of the lifecycle change and
+  a reopen or a re-plan clears or replaces it. The artifact row is the
+  second source: a projection drain writes it later, and it gives the text
+  only when the carrier is empty (an imported summary). So a Task that
+  `gsd_task_complete` just committed gives its summary to the next prompt
+  before its projection is rendered, and the recovery re-plan prompt has the
+  Task plan from the carrier. Narrative with no carrier (ROADMAP, CONTEXT,
+  CONTEXT-DRAFT, RESEARCH, Slice PLAN) comes from the artifact row. A CONTEXT-DRAFT
   row is a discussion seed only while the Milestone has no saved CONTEXT:
   saving the final CONTEXT removes the draft file and keeps the draft row.
   Behavior tests: `tests/prompt-summary-narrative.test.ts` (the real
