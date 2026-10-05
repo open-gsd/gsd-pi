@@ -51,6 +51,7 @@ import {
   runDoctorViaBridge,
   registerWorkflowTools,
   runSerializedWorkflowOperation,
+  resolvePersistedBlockerViaBridge,
   validateProjectDir,
   warmWorkflowToolBridges,
 } from './workflow-tools.js';
@@ -1392,18 +1393,44 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   // gsd_resolve_blocker — resolve a pending blocker
   // -----------------------------------------------------------------------
+  //
+  // Two kinds of blocker:
+  //   1. A UI request that a live session waits on. It exists only while the
+  //      session's child process runs, so it is answered through the session.
+  //   2. An open escalation question in the project database. It is a row, so
+  //      it is resolved from the database and needs no session (it works after
+  //      a server restart).
+  // -----------------------------------------------------------------------
   server.tool(
     'gsd_resolve_blocker',
-    'Resolve a pending blocker in a GSD session by sending a response to the UI request.',
+    'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir: resolve the open escalation stored in the project database (this works after a server restart). For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
     {
-      sessionId: z.string().describe('Session ID returned from gsd_execute'),
+      sessionId: z.string().optional().describe('Session ID returned from gsd_execute'),
+      projectDir: z.string().optional().describe('Absolute path to the project directory. Resolves the open escalation in the project database.'),
+      questionId: z.string().optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open.'),
       response: z.string().describe('Response to send for the pending blocker'),
     },
     async (args: Record<string, unknown>) => {
-      const { sessionId, response } = args as { sessionId: string; response: string };
+      const { sessionId, projectDir, questionId, response } = args as {
+        sessionId?: string; projectDir?: string; questionId?: string; response: string;
+      };
       try {
-        await sessionManager.resolveBlocker(sessionId, response);
-        return jsonContent({ resolved: true });
+        const session = sessionId ? sessionManager.getSession(sessionId) : undefined;
+        if (sessionId && session?.pendingBlocker) {
+          await sessionManager.resolveBlocker(sessionId, response);
+          return jsonContent({ resolved: true });
+        }
+        const dir = projectDir ?? session?.projectDir;
+        if (!dir) {
+          return errorContent(sessionId
+            ? `Session not found: ${sessionId}. Pass projectDir to resolve a blocker that the project database holds.`
+            : 'Either sessionId or projectDir must be provided');
+        }
+        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(dir), response, questionId);
+        if (result.status !== 'resolved' && result.status !== 'rejected-to-blocker') {
+          return errorContent(result.message);
+        }
+        return jsonContent({ resolved: true, source: 'database', ...result });
       } catch (err) {
         return errorContent(err instanceof Error ? err.message : String(err));
       }

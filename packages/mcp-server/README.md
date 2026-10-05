@@ -289,14 +289,19 @@ The projection fallback returns `readMetadata: { "source": "projection", "author
 
 ### `gsd_resolve_blocker`
 
-Resolve a pending blocker in a session by sending a response to the blocked UI request.
+Resolve a pending blocker. There are two kinds:
+
+- A UI request that a live session waits on. Pass `sessionId`. This blocker exists only while the session runs.
+- An open escalation in the project database. Pass `projectDir`. This blocker is a database row, so the call needs no session and works after a server restart. `gsd_project_snapshot` lists it under `openQuestions`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `sessionId` | `string` | ✅ | Session ID from `gsd_execute` |
-| `response` | `string` | ✅ | Response to send for the pending blocker |
+| `sessionId` | `string` | | Session ID from `gsd_execute` |
+| `projectDir` | `string` | | Absolute path to the project directory. Give `sessionId` or `projectDir` |
+| `questionId` | `string` | | The open question to resolve. Required only when more than one escalation is open |
+| `response` | `string` | ✅ | Response for the pending blocker. For an escalation: `<choice> [rationale]`, where choice is an option id, `accept`, or `reject-blocker` |
 
-**Returns:** `{ resolved: true }`
+**Returns:** `{ resolved: true }` for a session blocker. For an escalation: `{ resolved: true, source: "database", status, message, questionId, milestoneId, sliceId, taskId, decisionId }`.
 
 ## Environment Variables
 
