@@ -669,3 +669,30 @@ export function getRecoveryActionMilestoneId(db: DbAdapter, recoveryActionId: st
   `).get({ ":recovery_action_id": recoveryActionId });
   return typeof row?.["milestone_id"] === "string" ? row["milestone_id"] : null;
 }
+
+/**
+ * tools/complete-slice.ts — the payload of the newest slice.completed event of
+ * one Slice. The caller owns which operation wins: `where` and `bindings`
+ * carry the idempotency-key match of the retrying invocation, or `1 = 1` with
+ * no bindings for the newest event of any operation.
+ */
+export function getSliceCompletedEventPayloadRow(
+  entityId: string,
+  where: string,
+  bindings: Record<string, string>,
+): Record<string, unknown> | undefined {
+  return getDb().prepare(`
+    SELECT event.payload_json
+    FROM workflow_domain_events event
+    JOIN workflow_operations operation ON operation.operation_id = event.operation_id
+    WHERE event.event_type = 'slice.completed'
+      AND event.entity_type = 'slice'
+      AND event.entity_id = :entity_id
+      AND ${where}
+    ORDER BY event.project_revision DESC
+    LIMIT 1
+  `).get({
+    ":entity_id": entityId,
+    ...bindings,
+  }) as Record<string, unknown> | undefined;
+}

@@ -12,7 +12,8 @@
 import { join } from "node:path";
 
 import type { CompleteSliceParams } from "../types.js";
-import { getDb, getSlice } from "../gsd-db.js";
+import { getSlice } from "../gsd-db.js";
+import { getSliceCompletedEventPayloadRow } from "../db/lifecycle-queries.js";
 import { clearPathCache, relSliceFile } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
 import { checkOwnership, sliceUnitKey } from "../unit-ownership.js";
@@ -231,24 +232,12 @@ function readPriorCloseout(
   params: Pick<CompleteSliceParams, "milestoneId" | "sliceId">,
   invocation: ExecutionInvocation,
 ): SliceCompletionCloseout | undefined {
-  const query = (where: string, bindings: Record<string, string>) => getDb().prepare(`
-    SELECT event.payload_json
-    FROM workflow_domain_events event
-    JOIN workflow_operations operation ON operation.operation_id = event.operation_id
-    WHERE event.event_type = 'slice.completed'
-      AND event.entity_type = 'slice'
-      AND event.entity_id = :entity_id
-      AND ${where}
-    ORDER BY event.project_revision DESC
-    LIMIT 1
-  `).get({
-    ":entity_id": `${params.milestoneId}/${params.sliceId}`,
-    ...bindings,
-  }) as Record<string, unknown> | undefined;
-  const row = query(
+  const entityId = `${params.milestoneId}/${params.sliceId}`;
+  const row = getSliceCompletedEventPayloadRow(
+    entityId,
     "operation.idempotency_key = :idempotency_key",
     { ":idempotency_key": invocation.idempotencyKey },
-  ) ?? query("1 = 1", {});
+  ) ?? getSliceCompletedEventPayloadRow(entityId, "1 = 1", {});
   if (!row) return undefined;
   const payload = JSON.parse(String(row["payload_json"])) as { closeout?: SliceCompletionCloseout };
   return payload.closeout;
