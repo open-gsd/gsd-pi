@@ -262,6 +262,7 @@ FOREIGN KEY milestone_id → milestones(id)
 
 - Index: `idx_slices_active` (milestone_id, status)
 - Status values: `pending`, `in_progress`, `complete`, `skipped` (legacy/imported `done` and `closed` are treated as closed aliases by `status-guards.ts`)
+- `replan_triggered_at` is the replan trigger that the state derivation reads. A capture that asks for a replan stamps it in one `slice.replan.trigger` Domain Operation (`triage-resolution.ts`). `S##-REPLAN-TRIGGER.md` is a render of the column; nothing reads the file.
 
 ---
 
@@ -306,6 +307,7 @@ FOREIGN KEY (milestone_id, slice_id) → slices(milestone_id, id)
 
 - Indexes: `idx_tasks_active` (milestone_id, slice_id, status), `idx_tasks_escalation_pending`
 - Status values: `pending`, `in_progress`, `complete`, `skipped`, `blocked` (legacy/imported `done` and `closed` are treated as complete aliases; `insertTask` stamps `completed_at` for `complete`/`done`/`closed`, but not `skipped`)
+- The `escalation_*` columns hold only an escalation from before the database stored escalations as Open Questions. A new escalation does not set them: its open question is the pause, and the `task.escalation.override_claimed` event (the `task.escalation.override.claim` Domain Operation) records that a prompt received the response. The columns are still read for a Task that has no escalation question, so that a pre-database pause or response is not lost. They are not retired.
 
 ---
 
