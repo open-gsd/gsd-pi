@@ -92,6 +92,14 @@ function registerWorkflowTool(pi: ExtensionAPI, definition: any): void {
 	}
 }
 
+function rootArtifactWriteBlock(
+	err: unknown,
+): { details: { error: "root_artifact_write_blocked" } } | null {
+	return (err as { code?: unknown } | null)?.code === "root_artifact_write_blocked"
+		? { details: { error: "root_artifact_write_blocked" } }
+		: null;
+}
+
 /**
  * Read a tool result's structured payload, accommodating MCP's `details` →
  * `structuredContent` rename (#4472, #4477). In-process executions still
@@ -402,6 +410,16 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			};
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
+			const gateBlock = rootArtifactWriteBlock(err);
+			if (gateBlock) {
+				return {
+					content: [
+						{ type: "text" as const, text: `Error updating requirement: ${msg}` },
+					],
+					details: { operation: "update_requirement", ...gateBlock.details } as any,
+					isError: true,
+				};
+			}
 			logError("tool", `gsd_requirement_update tool failed: ${msg}`, {
 				tool: "gsd_requirement_update",
 				error: String(err),
@@ -531,6 +549,16 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			};
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
+			const gateBlock = rootArtifactWriteBlock(err);
+			if (gateBlock) {
+				return {
+					content: [
+						{ type: "text" as const, text: `Error saving requirement: ${msg}` },
+					],
+					details: { operation: "save_requirement", ...gateBlock.details } as any,
+					isError: true,
+				};
+			}
 			logError("tool", `gsd_requirement_save tool failed: ${msg}`, {
 				tool: "gsd_requirement_save",
 				error: String(err),

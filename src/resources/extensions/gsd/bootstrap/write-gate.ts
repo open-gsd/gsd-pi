@@ -95,6 +95,8 @@ interface WriteGateState {
   verifiedApprovalGates: Set<string>;
   activeQueuePhase: boolean;
   pendingGateId: string | null;
+  /** Why the project database could not be opened; the gate then fails closed. */
+  storeError: string | null;
 }
 
 function createEmptyWriteGateState(): WriteGateState {
@@ -103,19 +105,25 @@ function createEmptyWriteGateState(): WriteGateState {
     verifiedApprovalGates: new Set<string>(),
     activeQueuePhase: false,
     pendingGateId: null,
+    storeError: null,
   };
 }
 
 /**
- * Gate state of a project whose workflow database is not the open one: no
- * `.gsd`, no gsd.db yet, a database this process may not open, or a process
- * that holds another database. It keeps an armed gate blocking inside this
- * process. Keyed by project root so workspaces in one process stay apart.
+ * Gate state of a project that has no workflow database at all: no `.gsd`, or
+ * no gsd.db yet. It keeps an armed gate blocking inside this process until the
+ * database exists; the first gate call after that moves it into the rows. A
+ * project that has a database never uses it. Keyed by project root so
+ * workspaces in one process stay apart.
  */
 const memoryWriteGateStates = new Map<string, WriteGateState>();
 
+function memoryWriteGateKey(basePath: string): string {
+  return normalizeRealPath(resolveWorktreeProjectRoot(basePath));
+}
+
 function memoryWriteGateState(basePath: string): WriteGateState {
-  const key = normalizeRealPath(resolveWorktreeProjectRoot(basePath));
+  const key = memoryWriteGateKey(basePath);
   let state = memoryWriteGateStates.get(key);
   if (!state) {
     state = createEmptyWriteGateState();
@@ -153,26 +161,52 @@ export interface WriteGateSnapshot {
   verifiedApprovalGates?: string[];
   activeQueuePhase: boolean;
   pendingGateId: string | null;
+  /** Set when the project database exists but could not be opened: every gated tool is blocked. */
+  storeError?: string;
 }
 
 /**
- * True when the project's workflow database is the open one. Gate state is
- * project-scoped: a worktree resolves to the project database.
- *
- * The workflow MCP child reads and writes the gate before any tool has opened
- * the database, so it opens the existing project database here; its gate calls
- * run in the workflow queue, where replacing the process-global handle is
- * safe. The extension host never opens or replaces a database from a gate
- * call: it opens the project database at the session boundary
- * (applyWriteGateSessionBoundary) and on every turn. A database is never
- * created here.
+ * Where the gate state of a project is: the rows of its open database
+ * ("rows"), process memory because the project has no database ("memory"), or
+ * nowhere readable, with the reason as the value.
  */
-function isWriteGateDatabaseOpen(basePath: string): boolean {
+type WriteGateStore = "rows" | "memory" | { storeError: string };
+
+/**
+ * Open the gate state of a project. Gate state is project-scoped: a worktree
+ * resolves to the project database.
+ *
+ * A gate call can run before anything opened the database (the workflow MCP
+ * child before its first tool) or after it was closed (the host after
+ * `/gsd stop`), so the existing project database is opened here. A database is
+ * never created here. A database that exists and does not open is not treated
+ * as "no gate": the caller fails closed.
+ */
+function openWriteGateStore(basePath: string): WriteGateStore {
   const openPath = isDbAvailable() ? getWorkflowDatabasePath() : null;
-  if (openPath !== null && normalizeRealPath(openPath) === normalizeRealPath(resolveProjectRootDbPath(basePath))) {
-    return true;
+  if (openPath === null || normalizeRealPath(openPath) !== normalizeRealPath(resolveProjectRootDbPath(basePath))) {
+    const opened = openExistingWorkflowDatabase(basePath);
+    if (!opened.ok) {
+      if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") return "memory";
+      const detail = opened.error ? `${opened.reason}: ${opened.error.message}` : opened.reason;
+      return {
+        storeError: `Write-gate state is unavailable: the project database ${opened.location.projectDb} could not be opened (${detail}).`,
+      };
+    }
   }
-  return defaultWriteGateWriter() === "child" && openExistingWorkflowDatabase(basePath).ok;
+  adoptMemoryWriteGateState(basePath);
+  return "rows";
+}
+
+/** Move gate state that was armed before the project had a database into its rows. */
+function adoptMemoryWriteGateState(basePath: string): void {
+  const key = memoryWriteGateKey(basePath);
+  const memory = memoryWriteGateStates.get(key);
+  if (!memory) return;
+  memoryWriteGateStates.delete(key);
+  const memoryRows = rowsFromState(memory);
+  if (memoryRows.length === 0) return;
+  updateWriteGateRows(defaultWriteGateWriter(), (rows) => rowsFromState(stateFromRows([...rows, ...memoryRows])));
 }
 
 function stateFromRows(rows: readonly WriteGateRow[]): WriteGateState {
@@ -196,9 +230,10 @@ function rowsFromState(state: WriteGateState): WriteGateRow[] {
 }
 
 function readWriteGateState(basePath: string): WriteGateState {
-  return isWriteGateDatabaseOpen(basePath)
-    ? stateFromRows(listWriteGateRows())
-    : memoryWriteGateState(basePath);
+  const store = openWriteGateStore(basePath);
+  if (store === "rows") return stateFromRows(listWriteGateRows());
+  if (store === "memory") return memoryWriteGateStates.get(memoryWriteGateKey(basePath)) ?? createEmptyWriteGateState();
+  return { ...createEmptyWriteGateState(), storeError: store.storeError };
 }
 
 /**
@@ -213,6 +248,23 @@ export function loadWriteGateSnapshot(basePath: string): WriteGateSnapshot {
     verifiedApprovalGates: [...state.verifiedApprovalGates].sort(),
     activeQueuePhase: state.activeQueuePhase,
     pendingGateId: state.pendingGateId,
+    ...(state.storeError ? { storeError: state.storeError } : {}),
+  };
+}
+
+/**
+ * The block for a gate state that cannot be read. A pending gate cannot be
+ * ruled out, so the gate fails closed.
+ */
+function storeErrorBlock(snapshot: WriteGateSnapshot): { block: true; reason: string } | null {
+  if (!snapshot.storeError) return null;
+  return {
+    block: true,
+    reason: [
+      `HARD BLOCK: ${snapshot.storeError}`,
+      `A pending discussion gate cannot be ruled out, so this call is blocked until the database opens.`,
+      `Do NOT proceed and do NOT use alternative approaches. Tell the user about the database error.`,
+    ].join(" "),
   };
 }
 
@@ -230,7 +282,8 @@ function isGateVerified(state: WriteGateState, gateId: string): boolean {
 /**
  * Read-modify-write primitive for gate mutations. With a database the read,
  * the mutation and the write are one SQLite write transaction, so the host and
- * the workflow MCP child cannot overwrite each other.
+ * the workflow MCP child cannot overwrite each other. A database that does not
+ * open records nothing: the change is logged and this function returns false.
  *
  * The mutate callback sees the stored state, so policy checks (the host's
  * verified-wins guard in setPending) live inside it. Returning `false` from
@@ -246,7 +299,12 @@ function mutateWriteGateState(
     dropVerifiedPendingGate(state);
     return true;
   };
-  if (!isWriteGateDatabaseOpen(basePath)) return apply(memoryWriteGateState(basePath));
+  const store = openWriteGateStore(basePath);
+  if (store === "memory") return apply(memoryWriteGateState(basePath));
+  if (store !== "rows") {
+    logWarning("intercept", `write-gate change by the ${writer} was not recorded. ${store.storeError}`);
+    return false;
+  }
   return updateWriteGateRows(writer, (rows) => {
     const state = stateFromRows(rows);
     return apply(state) ? rowsFromState(state) : null;
@@ -309,15 +367,11 @@ export function clearDiscussionFlowState(basePath: string): void {
  * restart ("start") and a resume: the CONTEXT save it allows may still be
  * outstanding. `/clear` and `/new` ("new") abandon the discussion, so they
  * remove every gate row, like the discuss→auto handoff.
- *
- * A session that starts with no database open opens the existing project
- * database first, so the rows an earlier process left are the ones it changes.
  */
 export function applyWriteGateSessionBoundary(
   boundary: "start" | "resume" | "new",
   basePath: string,
 ): void {
-  if (!isDbAvailable()) openExistingWorkflowDatabase(basePath);
   if (boundary === "new") {
     clearDiscussionFlowState(basePath);
     return;
@@ -506,6 +560,8 @@ export function shouldBlockPendingGateInSnapshot(
   _milestoneId: string | null,
   _queuePhaseActive?: boolean,
 ): { block: boolean; reason?: string } {
+  const storeBlock = storeErrorBlock(snapshot);
+  if (storeBlock) return storeBlock;
   if (!snapshot.pendingGateId) return { block: false };
 
   if (GATE_SAFE_TOOLS.has(canonicalToolName(toolName))) return { block: false };
@@ -542,6 +598,8 @@ export function shouldBlockPendingGateBashInSnapshot(
   _milestoneId: string | null,
   _queuePhaseActive?: boolean,
 ): { block: boolean; reason?: string } {
+  const storeBlock = storeErrorBlock(snapshot);
+  if (storeBlock) return storeBlock;
   if (!snapshot.pendingGateId) return { block: false };
 
   return {
@@ -857,6 +915,9 @@ export function shouldBlockRootArtifactSaveInSnapshot(
   opts: { requireVerifiedApproval?: boolean } = {},
 ): { block: boolean; reason?: string } {
   if (!FINAL_ROOT_ARTIFACTS.has(artifactType)) return { block: false };
+
+  const storeBlock = storeErrorBlock(snapshot);
+  if (storeBlock) return storeBlock;
 
   if (snapshot.pendingGateId) {
     return {

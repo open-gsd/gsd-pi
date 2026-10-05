@@ -982,12 +982,14 @@ PRIMARY KEY (gate_kind, gate_id)
 - The latest answer to a gate question wins. A decline deletes the verified
   rows of that gate and leaves the gate `pending`.
 - No file copy. `.gsd/runtime/write-gate-state.json` (older builds) is not read.
-- The extension host uses the rows while the project database is the open one;
-  it opens it at the session boundary and on every turn, and never replaces
-  another open database for a gate call. The workflow MCP child opens the
-  project database for the gate, inside its workflow queue.
-- A process whose open database is not the project's (or a project with no
-  database) keeps the gate in process memory.
+- A gate call opens the existing project database when it is not the open one,
+  in the extension host and in the workflow MCP child. It never creates a
+  database.
+- A project database that exists and does not open fails closed: every gated
+  tool is blocked with the open error, and a gate write records nothing and
+  logs a warning.
+- Only a project with no database keeps the gate in process memory. The first
+  gate call after the database exists moves that state into the rows.
 
 ##### `exec_runs`
 

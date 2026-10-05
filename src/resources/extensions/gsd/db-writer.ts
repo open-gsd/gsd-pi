@@ -353,7 +353,12 @@ export interface SaveRequirementFields {
  */
 function assertRequirementsWriteAllowed(basePath: string): void {
   const guard = shouldBlockRootArtifactSaveInSnapshot(loadWriteGateSnapshot(basePath), 'REQUIREMENTS');
-  if (guard.block) throw new Error(guard.reason ?? 'requirements write blocked');
+  if (guard.block) throw new RootArtifactWriteBlockedError(guard.reason ?? 'requirements write blocked');
+}
+
+/** The write gate refused a root artifact write. Tool handlers report `code` as the error. */
+export class RootArtifactWriteBlockedError extends Error {
+  readonly code = 'root_artifact_write_blocked';
 }
 
 /**

@@ -11,7 +11,10 @@
  *       verify or clear it;
  *   (c) the host does not re-arm a gate the child verified, on the adapter and
  *       on both hook windows (tool_call defer, tool_execution_start re-arm);
- *   (d) two basePaths defer approval gates in the same process.
+ *   (d) two basePaths defer approval gates in the same process;
+ *   (e) the rows are the one store: the host opens the project database for a
+ *       gate call, and a database that does not open blocks;
+ *   (f) the native requirement tools report the gate block.
  */
 
 import test from "node:test";
@@ -22,6 +25,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { registerDbTools } from "../bootstrap/db-tools.ts";
 import { registerHooks } from "../bootstrap/register-hooks.ts";
 import {
   applyAskUserQuestionsGateResult,
@@ -440,7 +444,7 @@ test("seam: a decline of a gate id without a milestone revokes the milestone its
 
 // ── (d) per-basePath deferred gates ──────────────────────────────────────────
 
-test("seam: the host never replaces an open database to read the gate of another project", (t) => {
+test("seam: a gate call reads and writes the rows of its project when another database is open", (t) => {
   const dir = makeProject("other-project");
   const other = makeTempDir("other-open");
   t.after(() => {
@@ -450,18 +454,130 @@ test("seam: the host never replaces an open database to read the gate of another
   hostWriteGateAdapter.setPending(GATE, dir);
 
   openDatabase(join(other, "other.db"));
-  assert.equal(getPendingGate(dir), null, "the gate of a project whose database is not open is not read");
-  assert.equal(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM write_gate_state").get()?.["count"], 0);
+  assert.equal(getPendingGate(dir), GATE, "the gate is read from the rows of its own project");
   hostWriteGateAdapter.markDepthVerified("M009", dir);
+  assert.deepEqual(gateRows(), [
+    { gate_kind: "depth_verified", gate_id: "M009", writer: "host" },
+    { gate_kind: "pending", gate_id: GATE, writer: "host" },
+  ]);
+
+  openDatabase(join(other, "other.db"));
   assert.equal(
     _getAdapter()!.prepare("SELECT COUNT(*) AS count FROM write_gate_state").get()?.["count"],
     0,
-    "a gate write for another project does not land in the open database",
+    "a gate write for another project does not land in the database that was open",
   );
+});
+
+// ── (e) one store: the rows, also after the host closed its database ─────────
+
+test("seam: a plain-text approval typed after auto-mode stopped is recorded on the rows", async (t) => {
+  const dir = makeProject("approval-after-stop");
+  const originalCwd = process.cwd();
+  t.after(() => {
+    process.chdir(originalCwd);
+    cleanup(dir);
+  });
+  hostWriteGateAdapter.setPending(GATE, dir);
+  // stopAuto closes the host's database; the pending gate stays a row.
   closeDatabase();
 
+  process.chdir(dir);
+  const { handlers, pi } = makeHookHarness();
+  Object.assign(pi, { getActiveTools: () => [], getAllTools: () => [], setActiveTools() {} });
+  registerHooks(pi, []);
+  const ctx = {
+    cwd: dir,
+    model: { provider: "anthropic", baseUrl: "https://api.anthropic.com" },
+    modelRegistry: { getProviderAuthMode: () => "apiKey", isProviderRequestReady: () => true },
+    getSystemPrompt: () => "base",
+    ui: { notify: () => undefined, setWidget: () => undefined },
+  } as any;
+  for (const handler of handlers.get("before_agent_start") ?? []) {
+    await handler({ prompt: "yes, looks good", systemPrompt: "base" }, ctx);
+  }
+
   openDatabase(join(dir, ".gsd", "gsd.db"));
-  assert.equal(getPendingGate(dir), GATE, "the project's rows are unchanged");
+  assert.deepEqual(gateRows(), [
+    { gate_kind: "approval_verified", gate_id: GATE, writer: "host" },
+    { gate_kind: "depth_verified", gate_id: "M007", writer: "host" },
+  ]);
+  assert.equal(shouldBlockPendingGate("glob", null, false, dir).block, false, "the tool is not blocked again");
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block, false);
+});
+
+test("seam: gate state armed before the project had a database moves into its rows", (t) => {
+  const dir = makeTempDir("adopt-memory");
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  t.after(() => cleanup(dir));
+
+  hostWriteGateAdapter.setPending(GATE, dir);
+  assert.equal(getPendingGate(dir), GATE, "the gate blocks before a database exists");
+
+  openDatabase(join(dir, ".gsd", "gsd.db"));
+  assert.equal(getPendingGate(dir), GATE, "the gate still blocks after the database is created");
+  assert.deepEqual(gateRows(), [{ gate_kind: "pending", gate_id: GATE, writer: "host" }]);
+});
+
+test("seam: a project database that does not open blocks every tool and records no approval", (t) => {
+  const dir = makeTempDir("unopenable");
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  writeFileSync(join(dir, ".gsd", "gsd.db"), "this file is not a SQLite database\n".repeat(200));
+  t.after(() => {
+    closeDatabase();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const snapshot = loadWriteGateSnapshot(dir);
+  assert.match(snapshot.storeError ?? "", /could not be opened/);
+  for (const toolName of ["glob", "ask_user_questions"]) {
+    const guard = shouldBlockPendingGate(toolName, null, false, dir);
+    assert.equal(guard.block, true, `${toolName} is blocked while the gate state cannot be read`);
+    assert.match(guard.reason ?? "", /Write-gate state is unavailable/);
+  }
+  assert.equal(hostWriteGateAdapter.setPending(GATE, dir), false, "a gate write reports that nothing was recorded");
+  hostWriteGateAdapter.markDepthVerified("M007", dir);
+  assert.equal(
+    shouldBlockContextArtifactSave("CONTEXT", "M007", null, dir).block,
+    true,
+    "an approval that was not recorded does not unlock the CONTEXT save",
+  );
+});
+
+// ── (f) the native requirement tools report the gate block ───────────────────
+
+test("seam: the native requirement tools return root_artifact_write_blocked while a gate is pending", async (t) => {
+  const dir = makeProject("native-requirement-gate");
+  t.after(() => cleanup(dir));
+  const tools = new Map<string, any>();
+  registerDbTools({ registerTool(tool: any) { tools.set(tool.name, tool); } } as any);
+  hostWriteGateAdapter.setPending("depth_verification_requirements_confirm", dir);
+
+  const saved = await tools.get("gsd_requirement_save").execute(
+    "call-save",
+    { class: "functional", description: "Blocked requirement", why: "gate test", source: "user" },
+    undefined,
+    undefined,
+    { cwd: dir },
+  );
+  assert.equal(saved.isError, true);
+  assert.equal(saved.details.error, "root_artifact_write_blocked");
+  assert.match(saved.content[0].text, /has not been confirmed/);
+
+  const updated = await tools.get("gsd_requirement_update").execute(
+    "call-update",
+    { id: "R001", notes: "blocked" },
+    undefined,
+    undefined,
+    { cwd: dir },
+  );
+  assert.equal(updated.isError, true);
+  assert.equal(updated.details.error, "root_artifact_write_blocked");
+  assert.equal(
+    _getAdapter()!.prepare("SELECT COUNT(*) AS count FROM requirements").get()?.["count"],
+    0,
+    "a blocked call writes no requirement",
+  );
 });
 
 test("seam: two basePaths defer gates in one process and both activate", async (t) => {
