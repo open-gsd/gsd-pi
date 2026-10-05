@@ -39,6 +39,7 @@ import {
 } from "../task-execution-domain-operation.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
 import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
   recordFailureAndSelectRecovery,
   resumeTaskRecovery,
@@ -937,6 +938,32 @@ test("#2417: doctor reports a settled succeeded verify-stage Attempt on a non-te
   assert.match(stranded[0].message, new RegExp(attemptId));
 });
 
+test("after the Cutover doctor reports a stranded succeeded Attempt of a Task that only the legacy row closes", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  // Only the legacy row closes the Task. Its lifecycle row stays open.
+  db().exec("UPDATE tasks SET status = 'complete' WHERE id = 'T01'");
+  const adopted = new Set(
+    db().prepare("SELECT item_kind FROM workflow_item_lifecycles").all().map((item) => item["item_kind"]),
+  );
+  seedLifecycles("stranded-attempt", [
+    { itemKind: "milestone" as const, milestoneId: "M001", lifecycleStatus: "ready" as const },
+    { itemKind: "slice" as const, milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" as const },
+  ].filter((lifecycle) => !adopted.has(lifecycle.itemKind)));
+  const stranded = async () => {
+    const issues: DoctorIssue[] = [];
+    await checkEngineHealth(basePath, issues, []);
+    return issues.filter((issue) => issue.code === "unpublished_succeeded_attempt").map((issue) => issue.unitId);
+  };
+
+  assert.deepEqual(await stranded(), [], "before the Cutover the legacy row answers that the Task is terminal");
+
+  cutOver();
+
+  assert.deepEqual(await stranded(), ["M001/S01/T01"]);
+});
+
 test("#1677: inside a worktree the classifier falls back to the project-root copy", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath } = createFixture();
@@ -1273,6 +1300,36 @@ test("#2427: an abandoned staged SUMMARY with genuinely different DB intent stil
     /Artifact\/DB status drift/,
     "genuinely different content must stay fail-closed",
   );
+});
+
+test("after the Cutover the abandoned staged SUMMARY repair takes the in-progress Task from the lifecycle row", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  interruptedRetryFixture(basePath, attemptId);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  // Only the lifecycle row says that the Task is in progress.
+  db().exec("UPDATE tasks SET status = 'pending' WHERE id = 'T01'");
+  seedLifecycles("abandoned-staged-summary", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+  ]);
+
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "before the Cutover the legacy row answers that the Task is pending",
+  );
+
+  cutOver();
+
+  assert.equal(describeArtifactDbDriftBlocker(drift, { basePath, state }), null);
+  await repairArtifactDbDrift(drift, { basePath, state });
+  assert.equal(existsSync(staged.summaryPath), false, "the repair moves the abandoned projection to quarantine");
 });
 
 test("staging normalizes a pending legacy Task and clears its stale completion timestamp", async () => {

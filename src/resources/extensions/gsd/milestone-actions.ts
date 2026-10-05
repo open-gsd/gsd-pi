@@ -18,7 +18,7 @@ import {
   isDbAvailable,
   projectCanonicalStatusToLegacy,
 } from "./gsd-db.js";
-import { readMilestone } from "./db/lifecycle-read.js";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import { getDiscardRows } from "./db/lifecycle-queries.js";
 import type { DomainOperationContext } from "./db/domain-operation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
@@ -31,7 +31,7 @@ import {
 import { removeWorktree } from "./worktree-manager.js";
 import { logWarning } from "./workflow-logger.js";
 import { isAutoActive } from "./auto-runtime-state.js";
-import { adoptionLifecycleStatus, isClosedStatus } from "./status-guards.js";
+import { adoptionLifecycleStatus } from "./status-guards.js";
 import { removeManagedProjectionTreeExactSync } from "./managed-projection-history.js";
 import { GSDError, GSD_STALE_STATE } from "./errors.js";
 import { readMilestoneParkRecord, renderMilestoneParkedMarker } from "./milestone-park-projection.js";
@@ -227,6 +227,18 @@ export async function unparkMilestone(
 /** Every hierarchy row the discard of one Milestone cancels (the read lives in db/lifecycle-queries.ts). */
 const loadDiscardRows = getDiscardRows;
 
+/** The Slices (`S01`) and Tasks (`S01/T01`) of the milestone that the read interface answers as closed. */
+function readClosedDiscardItems(milestoneId: string): Set<string> {
+  const closed = new Set<string>();
+  for (const slice of readMilestoneSlices(milestoneId)) {
+    if (slice.closed) closed.add(slice.id);
+    for (const task of readSliceTasks(milestoneId, slice.id)) {
+      if (task.done) closed.add(`${slice.id}/${task.id}`);
+    }
+  }
+  return closed;
+}
+
 /**
  * Tombstone the milestone: every open task, slice and the milestone itself
  * moves to cancelled (legacy 'skipped') and a milestone-scoped Waiver records
@@ -242,10 +254,10 @@ function cancelMilestoneHierarchy(
   if (rows.some((row) => row.lifecycle_status === "in_progress" && row.task_id !== null)) {
     throw new Error(`${milestoneId} has running task work; settle it first with /gsd task settle`);
   }
+  const closed = readClosedDiscardItems(milestoneId);
   let milestoneLifecycleId = "";
   for (const row of rows) {
-    if (isClosedStatus(row.status) && row.task_id !== null) continue;
-    if (isClosedStatus(row.status) && row.slice_id !== null) continue;
+    if (row.slice_id !== null && closed.has(row.task_id !== null ? `${row.slice_id}/${row.task_id}` : row.slice_id)) continue;
     const identity = row.task_id !== null
       ? { itemKind: "task" as const, milestoneId, sliceId: row.slice_id!, taskId: row.task_id }
       : row.slice_id !== null

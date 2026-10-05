@@ -37,6 +37,7 @@ import {
 } from "../db/writers/lifecycle-commands.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import { reopenTask } from "../task-lifecycle-domain-operation.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 
 function writePreferences(basePath: string): void {
   const content = `---
@@ -438,6 +439,53 @@ test("hook retry without a canonical completion identity fails closed across res
     resetHookState();
     restoreHookState(base);
     assert.equal(isRetryPending(), true, "restart restores the unacknowledged retry signal");
+  } finally {
+    closeDatabase();
+    process.chdir(originalCwd);
+    resetHookState();
+    invalidateAllCaches();
+    _clearGsdRootCache();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("after the Cutover a hook retry takes the completion of its Task from the lifecycle row", async () => {
+  const originalCwd = process.cwd();
+  const base = mkdtempSync(join(tmpdir(), "gsd-post-unit-retry-cutover-"));
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+
+  try {
+    process.chdir(base);
+    _clearGsdRootCache();
+    invalidateAllCaches();
+    resetHookState();
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "active" });
+    // The Task is legacy complete and canonical ready.
+    insertTask({ id: "T01", milestoneId: "M001", sliceId: "S01", title: "Task", status: "complete" });
+    seedLifecycles("hook-retry", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+      { itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "ready" },
+    ]);
+    seedPersistedTaskRetry(base, "reviewed-completion-a");
+    const retryActiveUnit = mock.fn(async () => {});
+    const pctx = createRetryBridgeContext(base, retryActiveUnit);
+
+    // Before the Cutover the legacy row answers: the Task is complete, and
+    // its completion has no canonical identity.
+    await assert.rejects(postUnitPostVerification(pctx), /canonical completion identity/i);
+    assert.equal(isRetryPending(), true);
+
+    cutOver();
+
+    // After the Cutover the lifecycle row answers: the Task is not complete,
+    // so the retry of the reviewed completion is obsolete.
+    assert.equal(await postUnitPostVerification(pctx), "continue");
+    assert.equal(isRetryPending(), false, "the obsolete trigger is acknowledged");
+    assert.equal(retryActiveUnit.mock.callCount(), 0);
+    assert.equal(getTask("M001", "S01", "T01")?.status, "complete", "the legacy row does not change");
   } finally {
     closeDatabase();
     process.chdir(originalCwd);

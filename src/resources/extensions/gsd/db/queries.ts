@@ -48,25 +48,6 @@ import {
 } from "../lifecycle-shadow-observation.js";
 
 
-function parseStringArrayColumn(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw.filter((entry): entry is string => typeof entry === "string");
-  if (typeof raw !== "string") return [];
-  const trimmed = raw.trim();
-  if (!trimmed) return [];
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) return parsed.filter((entry): entry is string => typeof entry === "string");
-    if (typeof parsed === "string") return [parsed];
-  } catch {
-    return trimmed.split(",");
-  }
-  return [];
-}
-
-function normalizeRepoPath(file: string): string {
-  return file.trim().replace(/\\/g, "/").replace(/^\.\/+/, "");
-}
-
 export interface HierarchyCompletionCounts {
   milestones: number;
   milestonesTotal: number;
@@ -762,26 +743,6 @@ export function getSliceTasks(milestoneId: string, sliceId: string): TaskRow[] {
     "SELECT * FROM tasks WHERE milestone_id = :mid AND slice_id = :sid ORDER BY sequence, id",
   ).all({ ":mid": milestoneId, ":sid": sliceId });
   return rows.map(rowToTask);
-}
-
-export function getCompletedMilestoneTaskFileHints(milestoneId: string): string[] {
-  if (!getDbOrNull()!) return [];
-  const rows = getDbOrNull()!.prepare(
-    `SELECT files, key_files
-     FROM tasks
-     WHERE milestone_id = :mid AND status IN ('complete', 'done')`,
-  ).all({ ":mid": milestoneId }) as Array<Record<string, unknown>>;
-
-  const hints = new Set<string>();
-  for (const row of rows) {
-    for (const raw of [row["files"], row["key_files"]]) {
-      for (const file of parseStringArrayColumn(raw)) {
-        const normalized = normalizeRepoPath(file);
-        if (normalized) hints.add(normalized);
-      }
-    }
-  }
-  return [...hints];
 }
 
 /**

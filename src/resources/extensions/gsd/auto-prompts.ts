@@ -35,7 +35,6 @@ import type { TokenProvider } from "./token-counter.js";
 import {
   getBlockingReworkFindingsForTask,
   getGateResults,
-  getMilestoneSlices,
   getPendingGates,
   getPendingGatesForTurn,
   getRoadmapAssessmentForSlice,
@@ -3276,11 +3275,13 @@ export async function buildCompleteMilestonePrompt(
   inlined.push(roadmapInline);
   trackPromptContext(contextTelemetry, "roadmap", "inline", roadmapInline);
 
-  // Inline all slice summaries (deduplicated by slice ID)
+  // Inline all slice summaries (deduplicated by slice ID). The Slices come
+  // from the read interface: after the Cutover the status label follows the
+  // lifecycle rows, so a Slice that only the legacy row skips is not inlined.
   let sliceIds: string[] = [];
   try {
     if (isDbAvailable()) {
-      sliceIds = getMilestoneSlices(mid)
+      sliceIds = readMilestoneSlices(mid)
         .filter(s => s.status !== "skipped")
         .map(s => s.id);
     }
@@ -3479,7 +3480,9 @@ export async function buildValidateMilestonePrompt(
   let valSliceIds: string[] = [];
   try {
     if (isDbAvailable()) {
-      valSliceIds = getMilestoneSlices(mid)
+      // Read interface: after the Cutover the status label follows the
+      // lifecycle rows (see buildCompleteMilestonePrompt).
+      valSliceIds = readMilestoneSlices(mid)
         .filter(s => s.status !== "skipped")
         .map(s => s.id);
     }
@@ -4425,13 +4428,15 @@ export async function buildRewriteDocsPrompt(
       docList.push(`- Slice plan: \`${slicePlanRel}\``);
       const tDir = resolveTasksDir(base, mid, sid);
       if (tDir) {
-        // DB primary path — get incomplete tasks
+        // DB primary path — get incomplete tasks. The Tasks come from the
+        // read interface: `done` is the closed set at epoch 0 (the legacy
+        // vocabulary of `isClosedStatus`) and the lifecycle answer after it.
         let incompleteTasks: { id: string }[] | null = null;
         try {
-          const { isDbAvailable, getSliceTasks } = await import("./gsd-db.js");
+          const { isDbAvailable } = await import("./gsd-db.js");
           if (isDbAvailable()) {
-            incompleteTasks = getSliceTasks(mid, sid)
-              .filter(t => !isClosedStatus(t.status))
+            incompleteTasks = readSliceTasks(mid, sid)
+              .filter(t => !t.done)
               .map(t => ({ id: t.id }));
           }
         } catch (err) {

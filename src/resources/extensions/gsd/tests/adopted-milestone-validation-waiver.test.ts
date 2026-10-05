@@ -18,6 +18,8 @@ import {
 } from "../db/domain-operation.ts";
 import { readMilestoneCloseoutAuthorization } from "../db/milestone-closeout-readiness.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import { reportMilestoneValidationSourceDrift } from "../doctor-engine-checks.ts";
+import type { DoctorIssue } from "../doctor-types.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -39,6 +41,7 @@ import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 import { renderMilestoneValidation } from "../markdown-renderer.ts";
 import { observeExternalMarkdownEdits } from "../state-reconciliation/drift/external-markdown-edit.ts";
 import { deriveStateFromDb } from "../state.ts";
+import { cutOver } from "./helpers/authority-cutover.ts";
 
 const tempDirs = new Set<string>();
 
@@ -600,6 +603,31 @@ test("source changes after a waiver keep state validating and leave validation g
     row(`SELECT status, verdict FROM quality_gates WHERE milestone_id = 'M001' AND gate_id = 'MV01'`),
     { status: "pending", verdict: "" },
   );
+});
+
+test("after the Cutover doctor reports validation source drift of a Milestone that only the lifecycle row closes", async () => {
+  const basePath = makeFixture();
+  const rule = DISPATCH_RULES.find((candidate) =>
+    candidate.name === "validating-milestone → validate-milestone"
+  );
+  assert.ok(rule);
+  assert.equal((await rule.match(dispatchContext(basePath)))?.action, "dispatch");
+  writeFileSync(join(basePath, "source.ts"), "export const source = 'changed-after-waiver';\n");
+  // Only the lifecycle row closes the Milestone. Its legacy row stays active.
+  executeAtFence("milestone.complete", (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "completed" });
+  });
+  const drifted = () => {
+    const issues: DoctorIssue[] = [];
+    reportMilestoneValidationSourceDrift(basePath, issues);
+    return issues.map((issue) => `${issue.code} ${issue.unitId}`);
+  };
+
+  assert.deepEqual(drifted(), [], "before the Cutover the legacy row answers that the Milestone is open");
+
+  cutOver();
+
+  assert.deepEqual(drifted(), ["validation_source_revision_mismatch M001"]);
 });
 
 test("source changes after a passing validation do not cut state derivation over to canonical authority", async () => {

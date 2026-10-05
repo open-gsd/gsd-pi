@@ -1252,8 +1252,11 @@ export async function buildDiscussSlicePrompt(
   {
     type NormSlice = { id: string; done: boolean };
     let normSlices: NormSlice[] = [];
+    // Completed Slices come from the read interface: after the Cutover the
+    // status label follows the lifecycle rows, so a Slice that only the
+    // lifecycle row completes is inlined here.
     if (isDbAvailable()) {
-      normSlices = getMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete" }));
+      normSlices = readMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete" }));
     }
     for (const s of normSlices) {
       if (!s.done || s.id === sid) continue;
