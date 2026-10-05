@@ -757,9 +757,11 @@ the runtime-control feature, the
 feature, the
 [custom workflow run](#custom-workflow-run-tables-non-versioned) feature, the
 [`unit_metrics`](#unit_metrics-non-versioned) feature, the
-[`project_milestone_sequence`](#project_milestone_sequence-non-versioned)
-feature and the
+[`project_milestone_sequence`](#project_milestone_sequence-non-versioned),
+the
 [`remote_question_prompts`](#remote_question_prompts-non-versioned)
+feature and the
+[`workflow_decision_statement_impacts`](#workflow_decision_statement_impacts-non-versioned)
 feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
@@ -1781,6 +1783,38 @@ PRIMARY KEY (decision_id, lifecycle_id)
   Question. `inform` works with either dependency Kind; `revalidate` and
   `invalidate` require a `revalidate` dependency. Updates and deletes fail.
 - Index: `idx_workflow_decision_impacts_lifecycle` (lifecycle_id, effect)
+
+#### `workflow_decision_statement_impacts` (non-versioned)
+
+```
+decision_id              TEXT NOT NULL    ← D### of the statement decision (gsd_decision_save)
+impact_ordinal           INTEGER NOT NULL ← 1-based order within the saving call
+impact_kind              TEXT NOT NULL    ← 'revalidates' | 'supersedes' | 'blocks'
+milestone_id             TEXT
+slice_id                 TEXT             ← requires milestone_id
+task_id                  TEXT             ← requires milestone_id and slice_id
+target_scope             TEXT             ← free scope text; for 'supersedes' the D### amended
+payload                  TEXT NOT NULL
+created_at               TEXT NOT NULL
+created_operation_id     TEXT NOT NULL
+created_project_revision INTEGER NOT NULL
+PRIMARY KEY (decision_id, impact_ordinal)
+```
+
+- Impacts of a statement decision. A `gsd_decision_save` decision is a
+  statement with a free-text scope — no Open Question, no interaction, no
+  Answer — so the conversation-domain `workflow_decision_impacts` table (which
+  requires an accepted Answer from the same operation) cannot hold them.
+  Added 2026-10-05 (P19g); the conversation tables and their triggers are
+  unchanged.
+- Written only by the `decision.save` Domain Operation. Updates and deletes
+  fail. `impacts` is optional on the tool: omitted or empty writes no rows. A
+  superseding save also writes one `supersedes` row whose scope is the amended
+  D### (`idx_workflow_statement_impact_supersedes` allows one per decision).
+- Reads: `gsd_decision_get` / `gsd_decision_list` return the rows of a
+  decision, and the DECISIONS.md render re-emits the supersede as the
+  `(amends D###)` cell suffix derived from the stored supersede, never by
+  parsing file text.
 
 #### `workflow_work_checkpoints`
 
