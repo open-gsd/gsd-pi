@@ -161,6 +161,21 @@ test("the same questions asked again are sent as a new message, and the earlier 
   assert.equal(promptRows().length, 2);
 });
 
+test("the answer is returned to the caller when the prompt row cannot be written", async (t) => {
+  const slack = slackFixture(t);
+  _getAdapter()!.exec(`
+    CREATE TRIGGER refuse_prompt_write BEFORE INSERT ON remote_question_prompts
+    BEGIN SELECT RAISE(ABORT, 'database is locked'); END
+  `);
+  slack.answered.add("100.000");
+
+  const result = await tryRemoteQuestions(QUESTIONS);
+
+  assert.deepEqual(JSON.parse(result!.content[0]!.text), { answers: { q1: { answers: ["JSON array"] } } });
+  assert.equal(result!.details!["status"], "answered");
+  assert.equal(promptRows().length, 0, "the refused write stored nothing");
+});
+
 test("a remote question is asked and answered with no project database open, and nothing is stored", async (t) => {
   const slack = slackFixture(t);
   closeDatabase();
