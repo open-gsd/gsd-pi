@@ -14,10 +14,11 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
+import { openWorkflowDatabase } from "../../resources/extensions/gsd/db-workspace.ts";
 import { registerAutoWorker } from "../../resources/extensions/gsd/db/auto-workers.ts";
 import { openAutoPause } from "../../resources/extensions/gsd/db/writers/auto-pauses.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../../resources/extensions/gsd/gsd-db.ts";
@@ -186,4 +187,26 @@ test("auto.lock and paused-session.json written by hand do not change the run st
 
   assert.equal(result.active, false, "a lock file with a live PID is not a running session");
   assert.equal(result.paused, false, "a paused-session.json file is not a pause");
+});
+
+test("a database that belongs to another checkout → inactive, and the reason is written to stderr", async (t) => {
+  const fixture = makeTempFixture();
+  t.after(() => fixture.cleanup());
+
+  // The source checkout binds the database and holds an open pause. The
+  // project is then copied: the copy carries a database it does not own.
+  const copyCwd = join(fixture.projectCwd, "..", "copy");
+  assert.equal(openWorkflowDatabase(fixture.projectCwd).ok, true);
+  openAutoPause({ blockerKind: "user_request", milestoneId: "M001", originalBasePath: fixture.projectCwd });
+  closeDatabase();
+  cpSync(fixture.projectCwd, copyCwd, { recursive: true });
+
+  const stderrWrite = t.mock.method(process.stderr, "write", () => true);
+  const result = await collect(copyCwd);
+  const stderr = stderrWrite.mock.calls.map((call) => String(call.arguments[0])).join("");
+  stderrWrite.mock.restore();
+
+  assert.equal(result.active, false);
+  assert.equal(result.paused, false, "the pause of the other checkout is not this project's pause");
+  assert.match(stderr, /checkout-unbound: .*\/gsd db bind/s);
 });

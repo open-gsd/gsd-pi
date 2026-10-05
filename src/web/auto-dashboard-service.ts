@@ -75,7 +75,9 @@ export async function collectAuthoritativeAutoDashboardData(
 
   // The subprocess starts with fresh session state, so its own answer is
   // always inactive (#2705). The run state is read from the project database:
-  // an open pause, else an active worker row whose process runs now.
+  // an open pause, else an active worker row whose process runs now. The run
+  // state is part of the web boot payload, so a database that is too new or
+  // belongs to another checkout reads as inactive; the reason goes to stderr.
   const script = [
     'const { pathToFileURL } = await import("node:url");',
     `const mod = await import(pathToFileURL(process.env.${AUTO_DASHBOARD_MODULE_ENV}).href);`,
@@ -84,7 +86,7 @@ export async function collectAuthoritativeAutoDashboardData(
     'if (projectCwd && !result.active && !result.paused) {',
     `const bridge = await import(pathToFileURL(process.env.${AUTO_DASHBOARD_BRIDGE_MODULE_ENV}).href);`,
     'const opened = bridge.openExistingWorkflowDatabase(projectCwd);',
-    'if (!opened.ok && (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound")) { process.stderr.write(`project database unavailable: ${opened.reason}`); process.exit(1); }',
+    'if (!opened.ok && (opened.reason === "schema-too-new" || opened.reason === "checkout-unbound")) process.stderr.write(`auto dashboard: project database unavailable: ${opened.error?.message ?? opened.reason}\\n`);',
     'if (opened.ok && bridge.readStoredPausedSession()) result.paused = true;',
     'else if (opened.ok && bridge.hasLiveAutoWorkerForProject(projectCwd)) result.active = true;',
     '}',
@@ -120,6 +122,7 @@ export async function collectAuthoritativeAutoDashboardData(
           reject(new Error(`authoritative auto dashboard subprocess failed: ${stderr || error.message}`));
           return;
         }
+        if (stderr) process.stderr.write(stderr);
 
         try {
           resolveResult(JSON.parse(stdout) as AutoDashboardData);
