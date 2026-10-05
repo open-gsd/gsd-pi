@@ -294,6 +294,8 @@ Resolve a pending blocker. There are two kinds:
 - A UI request that a live session waits on. Pass `sessionId`. This blocker exists only while the session runs.
 - An open escalation in the project database. Pass `projectDir`. This blocker is a database row, so the call needs no session and works after a server restart. `gsd_project_snapshot` lists it under `openQuestions`.
 
+To resolve an escalation is a workflow mutation. The server refuses it while a discussion gate waits for the user and in queue mode. The request must carry the replay-stable `_meta` identity of a workflow mutation (see [Workflow tools](#workflow-tools)). The answer and its decision record the MCP caller: transport `workflow-mcp`, actor `agent`, and `made_by: agent`. Only `/gsd escalate resolve` records a response from the user.
+
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `sessionId` | `string` | | Session ID from `gsd_execute` |

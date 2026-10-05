@@ -20,8 +20,15 @@ import { buildEscalationArtifact, detectPendingEscalation, openTaskEscalation, r
 import { listOpenEscalations, resolvePendingEscalation } from "../escalation-resolution.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import { adoptOrTransitionLifecycle, readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
-import { internalExecutionInvocation } from "../execution-invocation.ts";
+import { internalExecutionInvocation, type ExecutionInvocation } from "../execution-invocation.ts";
 import { getAllDecisionsFromMemories } from "../context-store.ts";
+
+/** The caller identity that the workflow MCP server passes. */
+const MCP_CALLER: ExecutionInvocation = {
+  idempotencyKey: "mcp:gsd_resolve_blocker:test",
+  sourceTransport: "workflow-mcp",
+  actorType: "agent",
+};
 
 function makeBase(t: { after(fn: () => void): void }): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-escalation-resolution-"));
@@ -83,7 +90,7 @@ test("the pending escalation is resolved from the database after a restart, with
   assert.equal(pending?.taskId, "T01");
   assert.equal(pending?.question, "Which store?");
 
-  const result = await resolvePendingEscalation(base, "B fewer moving parts");
+  const result = await resolvePendingEscalation(base, "B fewer moving parts", MCP_CALLER);
   assert.equal(result.status, "resolved");
   assert.equal(result.questionId, pending!.questionId);
   assert.equal(result.taskId, "T01");
@@ -97,16 +104,16 @@ test("the pending escalation is resolved from the database after a restart, with
   const decision = getAllDecisionsFromMemories().find((row) => row.id === result.decisionId);
   assert.equal(decision?.scope, "M001/S01/T01");
   assert.equal(decision?.choice, "JSON array");
-  assert.equal(decision?.made_by, "human");
+  assert.equal(decision?.made_by, "agent", "the decision names the caller, not the user");
 
-  await assert.rejects(resolvePendingEscalation(base, "A"), /No pending blocker/);
+  await assert.rejects(resolvePendingEscalation(base, "A", MCP_CALLER), /No pending blocker/);
 });
 
 test("a response that is not a valid choice leaves the escalation open", async (t) => {
   const base = makeBase(t);
   seedEscalation(base, "T01", "Which store?");
 
-  const result = await resolvePendingEscalation(base, "Z");
+  const result = await resolvePendingEscalation(base, "Z", MCP_CALLER);
   assert.equal(result.status, "invalid-choice");
   assert.match(result.message, /Valid choices: accept, reject-blocker, A, B/);
   assert.equal(listOpenEscalations().length, 1);
@@ -122,10 +129,10 @@ test("more than one open escalation needs a questionId, and only that one is res
   seedEscalation(base, "T02", "Second?");
   const second = listOpenEscalations().find((escalation) => escalation.taskId === "T02")!;
 
-  await assert.rejects(resolvePendingEscalation(base, "accept"), /More than one escalation is open/);
-  await assert.rejects(resolvePendingEscalation(base, "accept", "no-such-question"), /No open escalation with questionId/);
+  await assert.rejects(resolvePendingEscalation(base, "accept", MCP_CALLER), /More than one escalation is open/);
+  await assert.rejects(resolvePendingEscalation(base, "accept", MCP_CALLER, "no-such-question"), /No open escalation with questionId/);
 
-  const result = await resolvePendingEscalation(base, "reject-blocker none fit", second.questionId);
+  const result = await resolvePendingEscalation(base, "reject-blocker none fit", MCP_CALLER, second.questionId);
   assert.equal(result.status, "rejected-to-blocker");
   assert.equal(result.decisionId, undefined, "a rejection records no decision");
   assert.deepEqual(listOpenEscalations().map((escalation) => escalation.taskId), ["T01"]);

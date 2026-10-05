@@ -11,6 +11,7 @@ import { saveDecisionToDb } from "./db-writer.js";
 import { getDb } from "./db/engine.js";
 import { TASK_ESCALATION_OPENED_EVENT } from "./db/sql-constants.js";
 import { readTaskEscalation, resolveEscalation, type ResolveEscalationResult } from "./escalation.js";
+import type { ExecutionInvocation } from "./execution-invocation.js";
 import { emitUokAuditEvent, buildAuditEnvelope } from "./uok/audit.js";
 import { renderStateProjection } from "./workflow-projections.js";
 
@@ -54,8 +55,10 @@ export function listOpenEscalations(): OpenEscalation[] {
 }
 
 /**
- * Record the user's resolution of an escalation in the decision register and
- * return the decision id.
+ * Record the resolution of an escalation in the decision register and return
+ * the decision id. `invocation` is the transport and the actor of the
+ * resolution. Without it the resolution is from the user, through
+ * `/gsd escalate`.
  */
 export async function recordEscalationDecision(
   basePath: string,
@@ -63,6 +66,7 @@ export async function recordEscalationDecision(
   choice: string,
   rationale: string,
   chosenOption: EscalationOption | undefined,
+  invocation?: ExecutionInvocation,
 ): Promise<string> {
   const { milestoneId, sliceId, taskId } = task;
   const art = readTaskEscalation(milestoneId, sliceId, taskId);
@@ -74,10 +78,10 @@ export async function recordEscalationDecision(
     decision: art?.question ?? `escalation on ${taskId}`,
     choice: choiceLabel,
     rationale: rationale || chosenOption?.tradeoffs || "User-resolved escalation.",
-    made_by: "human",
+    made_by: !invocation || invocation.actorType === "user" ? "human" : "agent",
     source: "escalation",
     when_context: `ADR-011 escalation resolved ${new Date().toISOString()}`,
-  }, basePath);
+  }, basePath, invocation);
 
   emitUokAuditEvent(basePath, buildAuditEnvelope({
     traceId: `escalation:${milestoneId}:${sliceId}:${taskId}`,
@@ -98,12 +102,15 @@ export interface PendingEscalationResolution extends ResolveEscalationResult, Op
 /**
  * Resolve the project's pending escalation. `response` is
  * `<choice> [rationale...]`, where choice is an option id, `accept`, or
- * `reject-blocker`. `questionId` selects one escalation when more than one is
- * open. Throws when no escalation is open or the selection is not unique.
+ * `reject-blocker`. `invocation` is the transport and the actor of the caller:
+ * the answer and the decision record them. `questionId` selects one escalation
+ * when more than one is open. Throws when no escalation is open or the
+ * selection is not unique.
  */
 export async function resolvePendingEscalation(
   basePath: string,
   response: string,
+  invocation: ExecutionInvocation,
   questionId?: string,
 ): Promise<PendingEscalationResolution> {
   const open = listOpenEscalations();
@@ -123,7 +130,7 @@ export async function resolvePendingEscalation(
   const rationale = rationaleWords.join(" ");
 
   const result = resolveEscalation(
-    basePath, escalation.milestoneId, escalation.sliceId, escalation.taskId, choice, rationale,
+    basePath, escalation.milestoneId, escalation.sliceId, escalation.taskId, choice, rationale, invocation,
   );
   await renderStateProjection(basePath);
   if (result.status !== "resolved") return { ...escalation, ...result };
@@ -131,7 +138,7 @@ export async function resolvePendingEscalation(
     return {
       ...escalation,
       ...result,
-      decisionId: await recordEscalationDecision(basePath, escalation, choice, rationale, result.chosenOption),
+      decisionId: await recordEscalationDecision(basePath, escalation, choice, rationale, result.chosenOption, invocation),
     };
   } catch (err) {
     return { ...escalation, ...result, decisionError: (err as Error).message };

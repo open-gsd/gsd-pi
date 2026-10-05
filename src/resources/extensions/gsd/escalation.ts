@@ -461,17 +461,20 @@ export interface ResolveEscalationResult {
  * Note: this does NOT persist a decision via saveDecisionToDb — the caller
  * (commands/handlers/escalate.ts) owns that step so it can fail gracefully
  * and surface the decision id in the user-visible message.
+ *
+ * `invocation` is the transport and the actor of the response. Without it the
+ * response is from the user, through `/gsd escalate`.
  */
 export function resolveEscalation(
   basePath: string, milestoneId: string, sliceId: string, taskId: string,
-  choice: string, rationale: string,
+  choice: string, rationale: string, invocation?: ExecutionInvocation,
 ): ResolveEscalationResult {
   const stored = readTaskEscalation(milestoneId, sliceId, taskId);
   if (stored?.respondedAt) {
     return { status: "already-resolved", message: `Escalation for ${taskId} was already resolved at ${stored.respondedAt}.` };
   }
   const question = readTaskEscalationQuestion(milestoneId, sliceId, taskId);
-  if (question) return applyEscalationResponse(basePath, question, null, choice, rationale);
+  if (question) return applyEscalationResponse(basePath, question, null, choice, rationale, undefined, invocation);
 
   const task = getTask(milestoneId, sliceId, taskId);
   if (!task || !hasPauseFlag(task)) {
@@ -487,7 +490,7 @@ export function resolveEscalation(
       };
     }
     const result = applyEscalationResponse(
-      basePath, null, null, choice, rationale, { milestoneId, sliceId, taskId },
+      basePath, null, null, choice, rationale, { milestoneId, sliceId, taskId }, invocation,
     );
     return result.status === "resolved"
       ? {
@@ -498,6 +501,7 @@ export function resolveEscalation(
   }
   return applyEscalationResponse(
     basePath, fitsChoiceInteraction(legacy) ? importLegacyEscalation(basePath, legacy) : null, legacy, choice, rationale,
+    undefined, invocation,
   );
 }
 
@@ -505,7 +509,9 @@ export function resolveEscalation(
  * Validate a response and record it in one task.escalation.resolve Domain
  * Operation. `question` is the escalation stored as question rows. `legacy` is
  * a legacy escalation; without a `question` it is stored whole in the resolve
- * event. With neither, only the pause is cleared.
+ * event. With neither, only the pause is cleared. The operation is keyed by
+ * the escalation: an escalation has one response. `invocation` gives only the
+ * transport and the actor.
  */
 function applyEscalationResponse(
   basePath: string,
@@ -514,6 +520,7 @@ function applyEscalationResponse(
   choice: string,
   rationale: string,
   ids: Pick<EscalationArtifact, "milestoneId" | "sliceId" | "taskId"> = (question ?? legacy)!,
+  invocation?: ExecutionInvocation,
 ): ResolveEscalationResult {
   const { milestoneId, sliceId, taskId } = ids;
   const escalation = question ?? legacy;
@@ -548,8 +555,11 @@ function applyEscalationResponse(
     idempotencyKey,
     expectedRevision: fence.revision,
     expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: "user",
-    sourceTransport: "internal",
+    actorType: invocation?.actorType ?? "user",
+    ...(invocation?.actorId ? { actorId: invocation.actorId } : {}),
+    sourceTransport: invocation?.sourceTransport ?? "internal",
+    ...(invocation?.traceId ? { traceId: invocation.traceId } : {}),
+    ...(invocation?.turnId ? { turnId: invocation.turnId } : {}),
     payload: { questionId, milestoneId, sliceId, taskId, choice, rationale },
   }, (context) => {
     const answerId = question

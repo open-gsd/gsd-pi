@@ -1410,7 +1410,7 @@ export async function createMcpServer(
       questionId: z.string().optional().describe('The open question to resolve (openQuestions in gsd_project_snapshot). Required only when more than one escalation is open.'),
       response: z.string().describe('Response to send for the pending blocker'),
     },
-    async (args: Record<string, unknown>) => {
+    async (args: Record<string, unknown>, extra?: McpToolExtra) => {
       const { sessionId, projectDir, questionId, response } = args as {
         sessionId?: string; projectDir?: string; questionId?: string; response: string;
       };
@@ -1426,7 +1426,7 @@ export async function createMcpServer(
             ? `Session not found: ${sessionId}. Pass projectDir to resolve a blocker that the project database holds.`
             : 'Either sessionId or projectDir must be provided');
         }
-        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(dir), response, questionId);
+        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(dir), response, questionId, extra);
         if (result.status !== 'resolved' && result.status !== 'rejected-to-blocker') {
           return errorContent(result.message);
         }

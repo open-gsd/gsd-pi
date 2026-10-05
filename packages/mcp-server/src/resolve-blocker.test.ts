@@ -2,7 +2,7 @@
 // File Purpose: gsd_resolve_blocker resolves the pending blocker that the project database holds, with no session (after a server restart).
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -17,8 +17,10 @@ import {
   openTaskEscalation,
   readTaskEscalation,
 } from "../../../src/resources/extensions/gsd/escalation.ts";
+import { getAllDecisionsFromMemories } from "../../../src/resources/extensions/gsd/context-store.ts";
 import { internalExecutionInvocation } from "../../../src/resources/extensions/gsd/execution-invocation.ts";
 import {
+  _getAdapter,
   closeDatabase,
   insertMilestone,
   insertSlice,
@@ -75,15 +77,45 @@ function seedProjectWithOpenEscalation(t: { after(fn: () => void): void }): stri
   return projectDir;
 }
 
-/** The gsd_resolve_blocker handler of a new server that tracks no session: the state after a restart. */
+type ToolResult = { isError?: boolean; content: Array<{ text: string }> };
+
+let callSequence = 0;
+
+/**
+ * The gsd_resolve_blocker handler of a new server that tracks no session: the
+ * state after a restart. Each call carries the request identity that an MCP
+ * client sends.
+ */
 async function resolveBlockerToolAfterRestart() {
   const { server } = await createMcpServer(new SessionManager(), { includeWorkflowTools: false });
   const tool = (server as any)._registeredTools?.gsd_resolve_blocker;
   assert.ok(tool, "gsd_resolve_blocker should be registered");
-  return tool.handler as (args: Record<string, unknown>) => Promise<{
-    isError?: boolean;
-    content: Array<{ text: string }>;
-  }>;
+  return (args: Record<string, unknown>): Promise<ToolResult> => tool.handler(args, {
+    _meta: { "io.opengsd/idempotency-key": `resolve-blocker-test:${++callSequence}` },
+  });
+}
+
+/** The write-gate state that the extension host leaves for the workflow MCP server. */
+function writeWriteGateSnapshot(
+  projectDir: string,
+  snapshot: { activeQueuePhase?: boolean; pendingGateId?: string },
+): void {
+  mkdirSync(join(projectDir, ".gsd", "runtime"), { recursive: true });
+  writeFileSync(
+    join(projectDir, ".gsd", "runtime", "write-gate-state.json"),
+    JSON.stringify({
+      verifiedDepthMilestones: [],
+      activeQueuePhase: snapshot.activeQueuePhase ?? false,
+      pendingGateId: snapshot.pendingGateId ?? null,
+    }),
+    "utf-8",
+  );
+}
+
+function assertEscalationStillOpen(projectDir: string): void {
+  closeDatabase();
+  openDatabase(join(projectDir, ".gsd", "gsd.db"));
+  assert.equal(readTaskEscalation("M001", "S01", "T01")?.respondedAt, undefined);
 }
 
 test("gsd_resolve_blocker resolves the open escalation from the project database after a server restart", async (t) => {
@@ -118,9 +150,65 @@ test("gsd_resolve_blocker rejects a response that is not a valid choice and keep
   assert.equal(result.isError, true);
   assert.match(result.content[0]!.text, /Valid choices: accept, reject-blocker, A, B/);
 
+  assertEscalationStillOpen(projectDir);
+});
+
+test("gsd_resolve_blocker does not resolve the escalation while a discussion gate is pending", async (t) => {
+  const projectDir = seedProjectWithOpenEscalation(t);
+  writeWriteGateSnapshot(projectDir, { pendingGateId: "depth_verification_M001_confirm" });
+  const resolveBlocker = await resolveBlockerToolAfterRestart();
+
+  const result = await resolveBlocker({ projectDir, response: "accept" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /Discussion gate .* has not been confirmed/);
+
+  assertEscalationStillOpen(projectDir);
+});
+
+test("gsd_resolve_blocker does not resolve the escalation in queue mode", async (t) => {
+  const projectDir = seedProjectWithOpenEscalation(t);
+  writeWriteGateSnapshot(projectDir, { activeQueuePhase: true });
+  const resolveBlocker = await resolveBlockerToolAfterRestart();
+
+  const result = await resolveBlocker({ projectDir, response: "accept" });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /not permitted during queue mode/);
+
+  assertEscalationStillOpen(projectDir);
+});
+
+test("gsd_resolve_blocker records the MCP transport and the agent actor on the answer and on the decision", async (t) => {
+  const projectDir = seedProjectWithOpenEscalation(t);
+  const resolveBlocker = await resolveBlockerToolAfterRestart();
+
+  const result = await resolveBlocker({ projectDir, response: "accept" });
+  assert.notEqual(result.isError, true, result.content[0]?.text);
+  const { decisionId } = JSON.parse(result.content[0]!.text);
+
   closeDatabase();
   openDatabase(join(projectDir, ".gsd", "gsd.db"));
-  assert.equal(readTaskEscalation("M001", "S01", "T01")?.respondedAt, undefined);
+  const operations = _getAdapter()!.prepare(`
+    SELECT operation_type, actor_type, source_transport FROM workflow_operations
+    WHERE operation_type IN ('task.escalation.resolve', 'decision.save')
+    ORDER BY resulting_revision
+  `).all().map((row) => ({ ...row }));
+  assert.deepEqual(operations, [
+    { operation_type: "task.escalation.resolve", actor_type: "agent", source_transport: "workflow-mcp" },
+    { operation_type: "decision.save", actor_type: "agent", source_transport: "workflow-mcp" },
+  ]);
+  assert.equal(getAllDecisionsFromMemories().find((row) => row.id === decisionId)?.made_by, "agent");
+});
+
+test("gsd_resolve_blocker does not resolve the escalation for a request with no replay-stable identity", async (t) => {
+  const projectDir = seedProjectWithOpenEscalation(t);
+  const { server } = await createMcpServer(new SessionManager(), { includeWorkflowTools: false });
+  const tool = (server as any)._registeredTools.gsd_resolve_blocker;
+
+  const result: ToolResult = await tool.handler({ projectDir, response: "accept" }, {});
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /requires replay-stable private request metadata/);
+
+  assertEscalationStillOpen(projectDir);
 });
 
 test("gsd_resolve_blocker with an unknown session and no projectDir names the database path", async () => {
