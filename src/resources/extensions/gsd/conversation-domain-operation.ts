@@ -7,7 +7,7 @@ import { classifyQuestion } from "./consent-question.js";
 import { isDepthConfirmationAnswer } from "./consent-verdict.js";
 import { canonicalDomainJson, executeDomainOperation } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
-import { insertAcceptedAnswer, insertPresentedQuestion, withdrawOpenQuestion } from "./db/writers/conversation.js";
+import { insertAcceptedAnswer, insertPresentedQuestion } from "./db/writers/conversation.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 
 export interface QuestionRoundQuestion {
@@ -128,7 +128,7 @@ function readAskedQuestions(operationId: string): Array<{ questionId: string; in
  * `stored` holds only questions whose accepted Answer row exists. A question
  * that does not fit the interaction contract is not stored as rows and is
  * returned in `skipped`. When the answers cannot be stored, the questions of
- * the round are withdrawn and returned in `skipped`. A replay of the same
+ * the round stay open and are returned in `skipped`. A replay of the same
  * round writes only what is missing.
  */
 export function recordAnsweredQuestionRound(input: {
@@ -266,37 +266,12 @@ export function recordAnsweredQuestionRound(input: {
       projections,
     }));
   } catch (error) {
-    // The questions are stored and their answers are not. A question must not
-    // stay open with no record of why: withdraw the round and report it.
     const reason = error instanceof Error ? error.message : String(error);
-    const withdrawKey = `${roundKey}:withdraw`;
-    const withdrawFence = readDomainOperationFence(withdrawKey);
-    executeDomainOperation({
-      operationType: "conversation.question.withdraw",
-      idempotencyKey: withdrawKey,
-      expectedRevision: withdrawFence.revision,
-      expectedAuthorityEpoch: withdrawFence.authorityEpoch,
-      actorType: "system",
-      ...identity,
-      payload: { milestoneId, toolCallId, questionIds: opened.map((question) => question.questionId) },
-    }, (context) => ({
-      events: opened.map(({ questionId }, index) => {
-        withdrawOpenQuestion(context, questionId);
-        return {
-          eventType: "conversation.question.withdrawn",
-          entityType: "milestone",
-          entityId: milestoneId,
-          payload: { questionId, toolCallId, promptId: storable[index]!.promptId, reason },
-          destinations: ["projection"],
-        };
-      }),
-      projections,
-    }));
     return {
       stored: [],
       skipped: [
         ...skipped,
-        ...stored.map((id) => ({ id, reason: `the answer was not stored and the question is withdrawn: ${reason}` })),
+        ...stored.map((id) => ({ id, reason: `the answer was not stored and the question stays open: ${reason}` })),
       ],
     };
   }

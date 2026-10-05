@@ -8,7 +8,9 @@ import {
   recordAnsweredQuestionRound,
   type QuestionRoundQuestion,
 } from "../conversation-domain-operation.ts";
-import { _setDomainOperationFaultForTest } from "../db/domain-operation.ts";
+import { _setDomainOperationFaultForTest, noteSessionRead, runInToolSession } from "../db/domain-operation.ts";
+import { pruneArtifactRows } from "../db/writers/artifact-row-prune.ts";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.ts";
 import { _getAdapter, closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
 import { registerMilestones } from "../milestone-registration.ts";
 
@@ -312,7 +314,7 @@ test("a round with a blank tool call id is stored", (t) => {
   assert.deepEqual(rows("SELECT question_status FROM workflow_open_questions"), [{ question_status: "answered" }]);
 });
 
-test("an answer that cannot be stored withdraws its question and the round is reported, also on a second call", (t) => {
+test("an answer that cannot be stored leaves its question open and reported, and the next call stores the answer", (t) => {
   openProject(t);
   t.after(() => _setDomainOperationFaultForTest(null));
   const round = {
@@ -321,45 +323,34 @@ test("an answer that cannot be stored withdraws its question and the round is re
     questions: [SCOPE],
     answers: { scope: { selected: "Nothing" } },
   };
-  const reported = {
+
+  _setDomainOperationFaultForTest("after-mutation", "conversation.question.answer");
+  assert.deepEqual(recordAnsweredQuestionRound(round), {
     stored: [],
     skipped: [{
       id: "scope",
-      reason: "the answer was not stored and the question is withdrawn: domain operation fault: after-mutation",
+      reason: "the answer was not stored and the question stays open: domain operation fault: after-mutation",
     }],
-  };
-
-  _setDomainOperationFaultForTest("after-mutation", "conversation.question.answer");
-  assert.deepEqual(recordAnsweredQuestionRound(round), reported);
+  });
 
   assert.deepEqual(
     rows("SELECT question_status, accepted_answer_id FROM workflow_open_questions"),
-    [{ question_status: "withdrawn", accepted_answer_id: null }],
-    "the question does not stay open with no answer",
+    [{ question_status: "open", accepted_answer_id: null }],
   );
   assert.equal(count("workflow_answers"), 0);
   assert.deepEqual(
-    rows(`
-      SELECT operation.operation_type, event.event_type
-      FROM workflow_operations operation
-      JOIN workflow_domain_events event ON event.operation_id = operation.operation_id
-      WHERE operation.operation_type LIKE 'conversation.%'
-      ORDER BY operation.resulting_revision
-    `),
-    [
-      { operation_type: "conversation.question.ask", event_type: "conversation.question.asked" },
-      { operation_type: "conversation.question.withdraw", event_type: "conversation.question.withdrawn" },
-    ],
-    "the withdrawal is a Domain Operation",
+    rows("SELECT operation_type FROM workflow_operations WHERE operation_type LIKE 'conversation.%'"),
+    [{ operation_type: "conversation.question.ask" }],
+    "a failed answer adds no third operation",
   );
 
   _setDomainOperationFaultForTest(null);
-  const second = recordAnsweredQuestionRound(round);
-
-  assert.deepEqual(second.stored, [], "a question with no accepted Answer is never reported as stored");
-  assert.deepEqual(second.skipped.map((entry) => entry.id), ["scope"]);
+  assert.deepEqual(recordAnsweredQuestionRound(round), { stored: ["scope"], skipped: [] });
   assert.equal(count("workflow_open_questions"), 1);
-  assert.equal(count("workflow_answers"), 0);
+  assert.deepEqual(
+    rows(ANSWERED_ROUND_SQL).map((row) => [row["question_status"], row["verbatim_response"]]),
+    [["answered", "Nothing"]],
+  );
 });
 
 test("a round whose ask was committed with no answer gets its answer on the next call", (t) => {
@@ -386,4 +377,46 @@ test("a round whose ask was committed with no answer gets its answer on the next
     rows(ANSWERED_ROUND_SQL).map((row) => [row["question_status"], row["verbatim_response"]]),
     [["answered", "Nothing"]],
   );
+});
+
+test("a stored round does not make the next write of a session that read before it stale", (t) => {
+  openProject(t);
+  const session = "round-after-read";
+  const revision = readDomainOperationFence().revision;
+  runInToolSession(session, () => noteSessionRead(revision));
+
+  recordAnsweredQuestionRound({
+    milestoneId: "M001",
+    toolCallId: "call-1",
+    questions: [SCOPE],
+    answers: { scope: { selected: "Nothing" } },
+  });
+  assert.equal(readDomainOperationFence().revision, revision + 2);
+
+  assert.equal(
+    runInToolSession(session, () => pruneArtifactRows({ name: "session-writer", actorType: "system" }, ["a.md"])),
+    1,
+  );
+  assert.equal(readDomainOperationFence().revision, revision + 3);
+});
+
+test("a stored round and one other operation after the read make the next write of the session stale", (t) => {
+  openProject(t);
+  const session = "round-and-writer-after-read";
+  const revision = readDomainOperationFence().revision;
+  runInToolSession(session, () => noteSessionRead(revision));
+
+  recordAnsweredQuestionRound({
+    milestoneId: "M001",
+    toolCallId: "call-1",
+    questions: [SCOPE],
+    answers: { scope: { selected: "Nothing" } },
+  });
+  pruneArtifactRows({ name: "other-writer", actorType: "system" }, ["b.md"]);
+
+  assert.throws(
+    () => runInToolSession(session, () => pruneArtifactRows({ name: "session-writer", actorType: "system" }, ["a.md"])),
+    /stale view: the project changed after this session last read it/,
+  );
+  assert.equal(readDomainOperationFence().revision, revision + 3);
 });
