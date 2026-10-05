@@ -45,7 +45,7 @@ import { executeTaskReopen } from "../tools/workflow-tool-executors.ts";
 import { registerWorkflowTools } from "../../../../../packages/mcp-server/src/workflow-tools.ts";
 import { handleReopenTask } from "../tools/reopen-task.ts";
 import { writeReactiveExecuteBlocker } from "../auto-recovery.ts";
-import { buildCustomEngineIterationData } from "../auto/workflow-custom-engine-iteration.ts";
+import { buildExecuteTaskPrompt } from "../auto-prompts.ts";
 import { shouldBlockAutoUnitToolCall } from "../auto-unit-tool-scope.ts";
 import { buildRunUatCanonicalToolNames } from "../tool-presentation-plan.ts";
 
@@ -425,27 +425,9 @@ test("agent recovery exhausts durably, resumes once, then passes host verificati
   assert.equal(resumed.status, "committed");
   assert.equal(readTaskRecoveryRoute(third.attemptId)?.resumeAuthorized, true);
 
-  const recoveryPrompt = (await buildCustomEngineIterationData({
-    step: {
-      unitType: "execute-task",
-      unitId: `M001/S01/${taskId}`,
-      prompt: "Continue the custom-engine Task.",
-    },
-    basePath,
-    canonicalProjectRoot: basePath,
-    currentMilestoneId: "M001",
-    deriveState: async () => ({
-      activeMilestone: { id: "M001", title: "Recovery" },
-      activeSlice: { id: "S01", title: "Convergence" },
-      activeTask: { id: taskId, title: "Task T01" },
-      phase: "executing",
-      recentDecisions: [],
-      blockers: [],
-      nextAction: "",
-      registry: [],
-    }),
-    logPostDerive: () => {},
-  })).prompt;
+  const recoveryPrompt = await buildExecuteTaskPrompt(
+    "M001", "S01", "Convergence", taskId, "Task T01", basePath,
+  );
   const dispatchId4 = insertClaimedDispatch(taskId, 4);
   const claim4 = claimTaskAttempt({
     invocation: invocation("convergence/claim/4"),
