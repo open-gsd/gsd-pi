@@ -34,7 +34,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { stringify, parse } from "yaml";
 
-import { CustomWorkflowEngine } from "../../custom-workflow-engine.ts";
+import { CustomWorkflowEngine, stepIdOfUnit } from "../../custom-workflow-engine.ts";
 import { CustomExecutionPolicy } from "../../custom-execution-policy.ts";
 import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../../gsd-db.ts";
 import { createRun, listRuns } from "../../run-manager.ts";
@@ -222,7 +222,7 @@ describe("e2e-workflow-pipeline", () => {
     assert.equal(d1.action, "dispatch", "Should dispatch gather step");
     if (d1.action !== "dispatch") throw new Error("unreachable");
 
-    assert.equal(d1.step.unitId, "e2e-pipeline/gather");
+    assert.equal(stepIdOfUnit(d1.step.unitId), "gather");
     assert.ok(
       d1.step.prompt.includes("my-project"),
       `Gather prompt should contain substituted param "my-project", got: "${d1.step.prompt}"`,
@@ -269,7 +269,7 @@ describe("e2e-workflow-pipeline", () => {
     if (d2.action !== "dispatch") throw new Error("unreachable");
 
     // First instance should be scan--001 for "security-audit"
-    assert.equal(d2.step.unitId, "e2e-pipeline/scan--001");
+    assert.equal(stepIdOfUnit(d2.step.unitId), "scan--001");
     assert.ok(
       d2.step.prompt.includes("security-audit"),
       `First scan instance prompt should contain "security-audit", got: "${d2.step.prompt}"`,
@@ -322,8 +322,8 @@ describe("e2e-workflow-pipeline", () => {
     assert.equal(d3a.action, "dispatch");
     if (d3a.action !== "dispatch") throw new Error("unreachable");
     assert.equal(
-      d3a.step.unitId,
-      "e2e-pipeline/scan--002",
+      stepIdOfUnit(d3a.step.unitId),
+      "scan--002",
       "Should dispatch scan--002 (analyze still blocked)",
     );
     assert.ok(d3a.step.prompt.includes("performance-review"));
@@ -334,7 +334,7 @@ describe("e2e-workflow-pipeline", () => {
     const d3b = await r3b;
     assert.equal(d3b.action, "dispatch");
     if (d3b.action !== "dispatch") throw new Error("unreachable");
-    assert.equal(d3b.step.unitId, "e2e-pipeline/scan--003");
+    assert.equal(stepIdOfUnit(d3b.step.unitId), "scan--003");
     assert.ok(d3b.step.prompt.includes("code-quality"));
 
     // Complete scan--003 — now analyze should be unblocked
@@ -352,7 +352,7 @@ describe("e2e-workflow-pipeline", () => {
     assert.equal(d4.action, "dispatch", "Should dispatch analyze step");
     if (d4.action !== "dispatch") throw new Error("unreachable");
 
-    assert.equal(d4.step.unitId, "e2e-pipeline/analyze");
+    assert.equal(stepIdOfUnit(d4.step.unitId), "analyze");
 
     // Context injection: the analyze prompt should include content from scan's produces
     // scan produces output/scan-result.txt and context_from references "scan"
@@ -396,7 +396,7 @@ describe("e2e-workflow-pipeline", () => {
     assert.equal(d5.action, "dispatch", "Should dispatch report step");
     if (d5.action !== "dispatch") throw new Error("unreachable");
 
-    assert.equal(d5.step.unitId, "e2e-pipeline/report");
+    assert.equal(stepIdOfUnit(d5.step.unitId), "report");
 
     // Context injection: report prompt should include content from analyze's produces
     assert.ok(
