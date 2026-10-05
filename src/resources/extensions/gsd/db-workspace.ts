@@ -137,8 +137,9 @@ export type WorkflowDatabaseOpenResult =
 
 export interface OpenWorkflowDatabaseOptions {
   /**
-   * Explicit import/bootstrap only (/gsd recover, /gsd migrate): start an
-   * empty database although the project already holds workflow history.
+   * Explicit import/bootstrap only (/gsd recover, /gsd migrate, /gsd db
+   * start-empty): start an empty database although the project already holds
+   * workflow history.
    */
   createEmptyAuthority?: boolean;
   /**
