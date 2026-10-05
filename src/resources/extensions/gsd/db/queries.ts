@@ -794,7 +794,9 @@ export function findUnappliedEscalationOverride(
 ): { taskId: string; resolveOperationId: string } | null {
   if (!getDbOrNull()!) return null;
   // The pending override is the latest response to a Task's escalation that
-  // has no claim event. An open question is not claimable: the user has not
+  // has no claim event. An older build recorded the claim in
+  // escalation_override_applied_at, so a stamp that is not older than the
+  // response is also a claim. An open question is not claimable: the user has not
   // responded, so a claim would lose the override (#ADR-011 Phase 2
   // peer-review Bug 2).
   const row = getDbOrNull()!.prepare(
@@ -809,6 +811,8 @@ export function findUnappliedEscalationOverride(
       WHERE tasks.milestone_id = :mid AND tasks.slice_id = :sid
         AND ${TASK_HAS_ESCALATION_SQL}
         AND NOT ${TASK_HAS_OPEN_ESCALATION_SQL}
+        AND (tasks.escalation_override_applied_at IS NULL
+          OR tasks.escalation_override_applied_at < resolved.created_at)
         AND NOT EXISTS (
           SELECT 1 FROM workflow_domain_events later
           WHERE later.project_id = resolved.project_id

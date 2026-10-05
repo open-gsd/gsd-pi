@@ -1403,7 +1403,7 @@ export async function createMcpServer(
   // -----------------------------------------------------------------------
   server.tool(
     'gsd_resolve_blocker',
-    'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir: resolve the open escalation stored in the project database (this works after a server restart). For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
+    'Resolve a pending blocker. With sessionId: answer the UI request that the session waits on. With projectDir: resolve the open escalation stored in the project database (this works after a server restart); sessionId is then not used. For an escalation the response is "<choice> [rationale]"; choice is an option id, "accept" (the recommendation), or "reject-blocker".',
     {
       sessionId: z.string().optional().describe('Session ID returned from gsd_execute'),
       projectDir: z.string().optional().describe('Absolute path to the project directory. Resolves the open escalation in the project database.'),
@@ -1415,18 +1415,15 @@ export async function createMcpServer(
         sessionId?: string; projectDir?: string; questionId?: string; response: string;
       };
       try {
-        const session = sessionId ? sessionManager.getSession(sessionId) : undefined;
-        if (sessionId && session?.pendingBlocker) {
+        if (!projectDir) {
+          if (!sessionId) return errorContent('Either sessionId or projectDir must be provided');
+          if (!sessionManager.getSession(sessionId)) {
+            return errorContent(`Session not found: ${sessionId}. Pass projectDir to resolve a blocker that the project database holds.`);
+          }
           await sessionManager.resolveBlocker(sessionId, response);
           return jsonContent({ resolved: true });
         }
-        const dir = projectDir ?? session?.projectDir;
-        if (!dir) {
-          return errorContent(sessionId
-            ? `Session not found: ${sessionId}. Pass projectDir to resolve a blocker that the project database holds.`
-            : 'Either sessionId or projectDir must be provided');
-        }
-        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(dir), response, questionId, extra);
+        const result = await resolvePersistedBlockerViaBridge(validateProjectDir(projectDir), response, questionId, extra);
         if (result.status !== 'resolved' && result.status !== 'rejected-to-blocker') {
           return errorContent(result.message);
         }

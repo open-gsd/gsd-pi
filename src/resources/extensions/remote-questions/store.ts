@@ -6,13 +6,12 @@
  */
 
 import {
-  findUnansweredRemoteQuestionPrompt,
   readLatestRemoteQuestionPrompt,
   readRemoteQuestionPrompt,
   writeRemoteQuestionPrompt,
   type RemoteQuestionPromptRow,
 } from "../gsd/db/writers/remote-question-prompts.js";
-import type { DispatchedPromptRecord, RemoteChannel, RemotePrompt, RemotePromptRecord, RemotePromptRef, RemoteAnswer, RemotePromptStatus, RemoteQuestion } from "./types.js";
+import type { RemoteChannel, RemotePrompt, RemotePromptRecord, RemotePromptRef, RemoteAnswer, RemotePromptStatus, RemoteQuestion } from "./types.js";
 
 function rowToRecord(row: RemoteQuestionPromptRow): RemotePromptRecord {
   return {
@@ -75,17 +74,6 @@ export function readPromptRecord(id: string): RemotePromptRecord | null {
 export function readLatestPromptRecord(): RemotePromptRecord | null {
   const row = readLatestRemoteQuestionPrompt();
   return row ? rowToRecord(row) : null;
-}
-
-/**
- * The prompt with these questions that is in the channel and that the user has
- * not answered yet, or null. It is in the channel, so it has a `ref`.
- */
-export function findUnansweredPromptRecord(
-  channel: RemoteChannel, questions: RemoteQuestion[],
-): DispatchedPromptRecord | null {
-  const row = findUnansweredRemoteQuestionPrompt(channel, JSON.stringify(questions), Date.now());
-  return row ? rowToRecord(row) as DispatchedPromptRecord : null;
 }
 
 export function updatePromptRecord(

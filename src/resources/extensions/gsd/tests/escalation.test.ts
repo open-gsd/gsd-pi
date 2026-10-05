@@ -325,8 +325,8 @@ test("ADR-046: the override claim is one task.escalation.override.claim operatio
   }));
   resolveEscalation(base, "M001", "S01", "T08", "A", "pick A");
 
-  // A stale legacy claim marker does not hide the response.
-  setAppliedAt("2026-01-01T00:00:00.000Z");
+  // A legacy claim marker from before the response does not hide the response.
+  setAppliedAt("2000-01-01T00:00:00.000Z");
   assert.equal(claimOverrideForInjection("M001", "S01")?.sourceTaskId, "T08", "first claim wins");
   assert.equal(operations("task.escalation.override.claim"), 1);
 
@@ -336,6 +336,27 @@ test("ADR-046: the override claim is one task.escalation.override.claim operatio
   assert.equal(claimOverrideForInjection("M001", "S01"), null, "second claim must fail — override already applied");
   assert.equal(operations("task.escalation.override.claim"), 1);
   assert.equal(getTask("M001", "S01", "T08")?.escalation_override_applied_at, null, "the claim does not write the task column");
+});
+
+test("ADR-046: an override that an older build claimed in the task column is not delivered again", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedCompletedTask(base, "T08u");
+  openEscalation(base, buildEscalationArtifact({
+    taskId: "T08u", sliceId: "S01", milestoneId: "M001",
+    question: "Q", options: sampleOptions, recommendation: "A", recommendationRationale: "r",
+    continueWithDefault: false,
+  }));
+  resolveEscalation(base, "M001", "S01", "T08u", "A", "pick A");
+
+  // The older build stamped the column at the claim and wrote no claim event.
+  _getAdapter()!.prepare(
+    "UPDATE tasks SET escalation_override_applied_at = :value WHERE id = 'T08u'",
+  ).run({ ":value": new Date(Date.now() + 1000).toISOString() });
+
+  assert.equal(findUnappliedEscalationOverride("M001", "S01"), null);
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "the override must not be injected a second time");
+  assert.equal(operations("task.escalation.override.claim"), 0);
 });
 
 test("ADR-046: a claimed override stays claimed across a database reopen", (t) => {

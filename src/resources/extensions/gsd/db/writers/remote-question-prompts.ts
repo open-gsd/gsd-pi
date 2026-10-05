@@ -72,24 +72,3 @@ export function readLatestRemoteQuestionPrompt(): RemoteQuestionPromptRow | null
   ).get() as RemoteQuestionPromptRow | undefined;
   return row ?? null;
 }
-
-/**
- * The newest prompt with these questions that is in the channel, has no answer
- * and has not timed out: the prompt a new ask of the same questions resumes.
- */
-export function findUnansweredRemoteQuestionPrompt(
-  channel: string, questionsJson: string, now: number,
-): RemoteQuestionPromptRow | null {
-  if (!isDbAvailable()) return null;
-  const row = _getAdapter()!.prepare(`
-    SELECT * FROM remote_question_prompts
-    WHERE status = 'pending'
-      AND channel = :channel
-      AND questions_json = :questions_json
-      AND ref_json IS NOT NULL
-      AND timeout_at > :now
-    ORDER BY created_at DESC, id DESC
-    LIMIT 1
-  `).get({ ":channel": channel, ":questions_json": questionsJson, ":now": now }) as RemoteQuestionPromptRow | undefined;
-  return row ?? null;
-}

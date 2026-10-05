@@ -307,7 +307,7 @@ FOREIGN KEY (milestone_id, slice_id) → slices(milestone_id, id)
 
 - Indexes: `idx_tasks_active` (milestone_id, slice_id, status), `idx_tasks_escalation_pending`
 - Status values: `pending`, `in_progress`, `complete`, `skipped`, `blocked` (legacy/imported `done` and `closed` are treated as complete aliases; `insertTask` stamps `completed_at` for `complete`/`done`/`closed`, but not `skipped`)
-- The `escalation_*` columns hold only an escalation from before the database stored escalations as Open Questions. A new escalation does not set them: its open question is the pause, and the `task.escalation.override_claimed` event (the `task.escalation.override.claim` Domain Operation) records that a prompt received the response. The columns are still read for a Task that has no escalation question, so that a pre-database pause or response is not lost. They are not retired.
+- The `escalation_*` columns hold only an escalation from before the database stored escalations as Open Questions. A new escalation does not set them: its open question is the pause, and the `task.escalation.override_claimed` event (the `task.escalation.override.claim` Domain Operation) records that a prompt received the response. A non-null `escalation_override_applied_at` that is not older than the response is a claim from a build before that event, and it also counts as delivered; no build writes the column now. The columns are still read for a Task that has no escalation question, so that a pre-database pause or response is not lost. They are not retired.
 
 ---
 
@@ -909,10 +909,9 @@ last_poll_at      INTEGER
 last_error        TEXT
 ```
 
-- Index: `idx_remote_question_prompts_pending` (channel, questions_json) WHERE status = 'pending'.
 - DDL owner: `db-remote-question-prompt-schema.ts`. Access: `db/writers/remote-question-prompts.ts`, used by `remote-questions/store.ts`.
 - One row for each question prompt sent to a remote channel. It is delivery state of a transport, written outside Domain Operations. It replaces the `~/.gsd/runtime/remote-questions/<id>.json` files; nothing writes or reads those files now.
-- Resume: a row that is `pending` with a `ref_json` and a `timeout_at` in the future is a prompt the user has not answered. When the same questions are asked again on the same channel (for example after a restart), that message is polled again and no second message is sent.
+- A prompt is not resumed: each ask sends a new message and writes a new row, also when a `pending` row has the same questions.
 - With no project database open, a prompt is not stored.
 
 ---

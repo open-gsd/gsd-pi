@@ -11,9 +11,7 @@ export function hasRemoteQuestionPromptSchema(db: DbAdapter): boolean {
 
 /**
  * One row for each prompt sent to Slack, Discord or Telegram. `ref_json` is
- * the message in the channel. A row that is 'pending' with a ref is a prompt
- * the user has not answered yet: a later ask of the same questions polls that
- * message again and does not send a second one. Idempotent.
+ * the message in the channel. Idempotent.
  */
 export function createRemoteQuestionPromptSchema(db: DbAdapter): void {
   db.exec(`
@@ -32,8 +30,5 @@ export function createRemoteQuestionPromptSchema(db: DbAdapter): void {
       last_poll_at INTEGER,
       last_error TEXT
     );
-
-    CREATE INDEX IF NOT EXISTS idx_remote_question_prompts_pending
-      ON remote_question_prompts(channel, questions_json) WHERE status = 'pending';
   `);
 }

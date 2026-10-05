@@ -211,6 +211,23 @@ test("gsd_resolve_blocker does not resolve the escalation for a request with no 
   assertEscalationStillOpen(projectDir);
 });
 
+test("gsd_resolve_blocker with only the sessionId of a live session that has no pending blocker does not resolve the escalation", async (t) => {
+  const projectDir = seedProjectWithOpenEscalation(t);
+  const sessionManager = new SessionManager();
+  (sessionManager as any).sessions.set(projectDir, { sessionId: "live-session", projectDir, pendingBlocker: null });
+  const { server } = await createMcpServer(sessionManager, { includeWorkflowTools: false });
+  const tool = (server as any)._registeredTools.gsd_resolve_blocker;
+
+  const result: ToolResult = await tool.handler({ sessionId: "live-session", response: "accept" }, {
+    _meta: { "io.opengsd/idempotency-key": `resolve-blocker-test:${++callSequence}` },
+  });
+  assert.equal(result.isError, true);
+  assert.match(result.content[0]!.text, /No pending blocker for session live-session/);
+
+  openDatabase(join(projectDir, ".gsd", "gsd.db"));
+  assert.equal(readTaskEscalation("M001", "S01", "T01")?.respondedAt, undefined);
+});
+
 test("gsd_resolve_blocker with an unknown session and no projectDir names the database path", async () => {
   const resolveBlocker = await resolveBlockerToolAfterRestart();
 
