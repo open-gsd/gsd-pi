@@ -946,7 +946,9 @@ function requireMatchingImportForwardRepair(
 
 // Revision fencing: each transport session keeps, per project, the revision
 // that its last read tool returned. The next operation of that session must
-// still see that revision. A session with no read uses the current revision.
+// still see that revision, or a later one reached only through
+// NON_INTERFERING_OPERATION_TYPES. A session with no read uses the current
+// revision.
 const sessionReadRevisions = new Map<string, number>();
 
 // Operation types that change no state a session read: a session whose read
