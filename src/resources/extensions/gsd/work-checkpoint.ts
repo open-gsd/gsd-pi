@@ -171,23 +171,58 @@ function rowToCheckpoint(row: Record<string, unknown> | undefined): WorkCheckpoi
   };
 }
 
+// A checkpoint is the resume state of its item only while it is the newest
+// fact about that item: the item is open, and no later Domain Operation changed
+// the item, a slice or task below it, or an artifact of it.
+const CURRENT_CHECKPOINT_FILTER = `
+  AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled')
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_item_lifecycles item
+    WHERE item.project_id = checkpoint.project_id
+      AND item.milestone_id = lifecycle.milestone_id
+      AND (lifecycle.slice_id IS NULL OR item.slice_id = lifecycle.slice_id)
+      AND (lifecycle.task_id IS NULL OR item.task_id = lifecycle.task_id)
+      AND item.last_project_revision > checkpoint.project_revision
+  )
+  AND NOT EXISTS (
+    SELECT 1 FROM workflow_domain_events event
+    WHERE event.project_id = checkpoint.project_id
+      AND event.project_revision > checkpoint.project_revision
+      AND (
+        event.entity_id = :entity
+        OR substr(event.entity_id, 1, length(:entity) + 1) = :entity || '/'
+        OR EXISTS (
+          SELECT 1 FROM artifacts artifact
+          WHERE artifact.path = event.entity_id
+            AND artifact.milestone_id = lifecycle.milestone_id
+            AND (lifecycle.slice_id IS NULL OR artifact.slice_id = lifecycle.slice_id)
+            AND (lifecycle.task_id IS NULL OR artifact.task_id = lifecycle.task_id)
+        )
+      )
+  )
+`;
+
 /**
  * The head resume checkpoint of one work item, or null when it has none or no
- * database is open. With `openItemOnly`, a completed or cancelled item has none.
+ * database is open. With `currentOnly`, a checkpoint of a closed item or one
+ * that a later change of the item superseded is not returned.
  */
 export function readWorkCheckpoint(
   scope: WorkCheckpointScope,
-  options: { openItemOnly?: boolean } = {},
+  options: { currentOnly?: boolean } = {},
 ): WorkCheckpoint | null {
   const db = getDbOrNull();
   if (!db) return null;
   return rowToCheckpoint(db.prepare(`
     ${CHECKPOINT_SELECT}
     WHERE checkpoint.scope_key = :scope_key
-      ${options.openItemOnly ? "AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled')" : ""}
+      ${options.currentOnly ? CURRENT_CHECKPOINT_FILTER : ""}
     ORDER BY checkpoint.sequence DESC
     LIMIT 1
-  `).get({ ":scope_key": scopeKey(scope) }));
+  `).get({
+    ":scope_key": scopeKey(scope),
+    ...(options.currentOnly ? { ":entity": scopeEntity(scope) } : {}),
+  }));
 }
 
 /** The newest resume checkpoint of a slice or of any of its tasks. The slice CONTINUE file renders this row. */
@@ -238,11 +273,12 @@ export function buildResumeSection(milestoneId: string, sliceId: string, taskId:
  * The "Resume State" of the active unit, for /gsd resume-work: the head
  * checkpoint of the active task, else of the active slice, else of the active
  * milestone. Only the own checkpoint of that one item counts, and only while
- * the item is open: a completed or cancelled item has no resume state.
+ * it is the newest fact about the item: a closed item, or an item that changed
+ * after the checkpoint was saved, has no resume state.
  */
 export function buildActiveResumeSection(active: Partial<WorkCheckpointScope>): string {
   const checkpoint = active.milestoneId
-    ? readWorkCheckpoint({ milestoneId: active.milestoneId, sliceId: active.sliceId, taskId: active.taskId }, { openItemOnly: true })
+    ? readWorkCheckpoint({ milestoneId: active.milestoneId, sliceId: active.sliceId, taskId: active.taskId }, { currentOnly: true })
     : null;
   return resumeSection(
     checkpoint,

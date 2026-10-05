@@ -8,6 +8,7 @@ import { test, type TestContext } from "node:test";
 
 import { buildExecuteTaskPrompt } from "../auto-prompts.ts";
 import { registerHooks } from "../bootstrap/register-hooks.ts";
+import { markDepthVerified } from "../bootstrap/write-gate.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { handleResumeWork } from "../commands-gsd-core.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
@@ -26,7 +27,7 @@ import { showSmartEntry } from "../guided-flow.ts";
 import { renderSliceFilesFromDb } from "../markdown-renderer.ts";
 import { clearPathCache } from "../paths.ts";
 import { drainProjectionWork } from "../projection-worker.ts";
-import { executeCheckpointSave } from "../tools/workflow-tool-executors.ts";
+import { executeCheckpointSave, executeSummarySave } from "../tools/workflow-tool-executors.ts";
 import { buildActiveResumeSection, buildResumeSection, readWorkCheckpoint, saveWorkCheckpoint } from "../work-checkpoint.ts";
 import { saveContextArtifact } from "./helpers/saved-context.ts";
 import { cleanup, makeTempRepo } from "./test-utils.ts";
@@ -286,6 +287,49 @@ test("the active resume state is the own checkpoint of the active slice or miles
   // Another milestone does not get the checkpoint of the closed one.
   assert.match(buildActiveResumeSection({ milestoneId: "M002" }), /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
   assert.equal(rows("SELECT 1 FROM workflow_work_checkpoints").length, 3);
+});
+
+test("/gsd resume-work does not show a queue-it checkpoint after the CONTEXT of the milestone is saved, and shows a checkpoint saved after that", async (t) => {
+  const base = realpathSync(makeTempRepo("gsd-work-checkpoint-readiness-"));
+  t.after(() => {
+    closeDatabase();
+    invalidateAllCaches();
+    cleanup(base);
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M003", title: "Queued milestone", status: "active" });
+  transition("adopt-m003", (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M003", lifecycleStatus: "ready" });
+  });
+  const resumePrompt = async (): Promise<string> => {
+    const sent: Array<{ content: string }> = [];
+    invalidateAllCaches();
+    await handleResumeWork("", { cwd: base, ui: { notify() {} } } as any, { sendMessage: (message: any) => sent.push(message) } as any);
+    assert.equal(sent.length, 1);
+    return sent[0]!.content;
+  };
+
+  saveWorkCheckpoint({
+    milestoneId: "M003",
+    kind: "handoff",
+    confirmedContext: "M003 is queued without discussion.",
+    nextAction: "Discuss M003 from scratch before planning.",
+  });
+  assert.match(await resumePrompt(), /Source: Work Checkpoint of M003 saved [^\n]+\n- Completed: M003 is queued without discussion\./);
+
+  markDepthVerified("M003", base);
+  const saved = await executeSummarySave({ milestone_id: "M003", artifact_type: "CONTEXT", content: "# M003: Queued milestone\n\nDiscussed.\n" }, base);
+  assert.notEqual(saved.isError, true, JSON.stringify(saved.content));
+
+  const afterContext = await resumePrompt();
+  assert.match(afterContext, /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  assert.doesNotMatch(afterContext, /Discuss M003 from scratch/);
+  // The superseded row is kept: it is database content.
+  assert.equal(rows("SELECT 1 FROM workflow_work_checkpoints").length, 1);
+
+  saveWorkCheckpoint({ milestoneId: "M003", kind: "handoff", confirmedContext: "M003 is discussed.", nextAction: "Plan M003." });
+  assert.match(await resumePrompt(), /Source: Work Checkpoint of M003 saved [^\n]+\n- Completed: M003 is discussed\.\n- Next action: Plan M003\./);
 });
 
 test("a checkpoint is the resume state of its own task only, and the newest one is the head", (t) => {
