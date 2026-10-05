@@ -1122,19 +1122,19 @@ async function ensureMilestoneShell(basePath: string, milestoneId: string): Prom
  * CONTEXT-DRAFT. Both are database artifact rows: the next round is built from
  * the row, and the files are rendered from it. A file with no row (a triage
  * seed, or a discussion started before the rows existed) is adopted into the
- * row by the first round.
+ * row by the first round. Returns false when there is no database to write to.
  */
 async function saveDiscussionQuestionRound(
   basePath: string,
   milestoneId: string,
   questions: StructuredQuestion[],
   details: any,
-): Promise<void> {
+): Promise<boolean> {
   await ensureMilestoneShell(basePath, milestoneId);
   const { ensureDbOpen } = await import("./dynamic-tools.js");
   if (!(await ensureDbOpen(basePath))) {
     safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the GSD database is unavailable`);
-    return;
+    return false;
   }
   const { getArtifact } = await import("../gsd-db.js");
   const { saveArtifactToDbByScope } = await import("../db-writer.js");
@@ -1167,14 +1167,22 @@ async function saveDiscussionQuestionRound(
       ].join("\n");
     return `${draftHeader.trimEnd()}\n\n## Captured Question Round — ${timestamp}\n\n${exchange}`;
   });
+  return true;
 }
 
 /**
- * Capture an answered ask_user_questions round of a milestone discussion.
+ * Capture an answered ask_user_questions round of a milestone discussion: the
+ * exchange text in the DISCUSSION log and CONTEXT-DRAFT, and each question and
+ * its answer as Open Question, interaction and Answer rows.
  * Called from tool_execution_end, so it also runs under external engines,
  * which never fire tool_result.
  */
-async function captureAnsweredQuestionRound(basePath: string, inputQuestions: unknown, result: unknown): Promise<void> {
+async function captureAnsweredQuestionRound(
+  basePath: string,
+  toolCallId: string,
+  inputQuestions: unknown,
+  result: unknown,
+): Promise<void> {
   const details = resolveAskUserQuestionsGateDetails({
     details: (result as { details?: unknown } | undefined)?.details,
     result,
@@ -1189,7 +1197,17 @@ async function captureAnsweredQuestionRound(basePath: string, inputQuestions: un
     safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the result has answers but no questions`);
     return;
   }
-  await saveDiscussionQuestionRound(basePath, milestoneId, questions, details);
+  if (!(await saveDiscussionQuestionRound(basePath, milestoneId, questions, details))) return;
+  const { recordAnsweredQuestionRound } = await import("../conversation-domain-operation.js");
+  const { skipped } = recordAnsweredQuestionRound({
+    milestoneId,
+    toolCallId,
+    questions,
+    answers: details.response.answers ?? {},
+  });
+  for (const { id, reason } of skipped) {
+    safetyLogWarning("guided", `question "${id}" of ${milestoneId} is not stored as an Open Question: ${reason}`);
+  }
 }
 
 function withDepthGateDisplayReason<T extends { block: boolean; reason?: string; displayReason?: string }>(
@@ -2277,7 +2295,7 @@ export function registerHooks(
     askUserQuestionsInputByCallId.delete(event.toolCallId);
     if (toolName === "ask_user_questions" && !event.isError) {
       // A failed capture must not skip the error classification below.
-      await captureAnsweredQuestionRound(contextBasePath(ctx), inputQuestions, event.result).catch((err) =>
+      await captureAnsweredQuestionRound(contextBasePath(ctx), event.toolCallId, inputQuestions, event.result).catch((err) =>
         safetyLogWarning("guided", `question round capture failed: ${err instanceof Error ? err.message : String(err)}`));
     }
     // #2883/#4974: Capture deterministic invocation/policy errors

@@ -12,6 +12,7 @@ import {
 import { _getAdapter, closeDatabase, getMilestone, openDatabase } from "../gsd-db.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import {
+  applyWriteGateSessionBoundary,
   childWriteGateAdapter,
   getPendingGate,
   loadWriteGateSnapshot,
@@ -389,6 +390,42 @@ test("an answered question round is captured into the database under an external
   assert.equal(readFileSync(draftPath, "utf-8"), artifactContent("CONTEXT-DRAFT"), "the draft file is a render of the row");
   assert.equal(readFileSync(discussionPath, "utf-8"), artifactContent("DISCUSSION"), "the log file is a render of the row");
 
+  // Each question and its answer is also an Open Question on the Milestone
+  // lifecycle with a presented interaction and an accepted Answer. The
+  // cancelled round above stored nothing.
+  assert.deepEqual(
+    _getAdapter()!.prepare(`
+      SELECT lifecycle.milestone_id, question.question_text, question.question_status,
+             interaction.interaction_kind, answer.response_kind, selected.label AS selected_label
+      FROM workflow_open_questions question
+      JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = question.lifecycle_id
+      JOIN workflow_interactions interaction ON interaction.question_id = question.question_id
+      LEFT JOIN workflow_answers answer ON answer.answer_id = question.accepted_answer_id
+      LEFT JOIN workflow_interaction_options selected
+        ON selected.interaction_id = answer.interaction_id AND selected.option_id = answer.selected_option_id
+      ORDER BY question.question_text
+    `).all().map((row) => ({ ...row })),
+    [
+      {
+        milestone_id: "M004",
+        question_text: "What are you picturing for M004?",
+        question_status: "answered",
+        interaction_kind: "choice",
+        response_kind: "answer",
+        selected_label: "Planning metadata (Recommended)",
+      },
+      {
+        milestone_id: "M004",
+        question_text: "Which boundary should I plan around?",
+        question_status: "answered",
+        interaction_kind: "choice",
+        response_kind: "answer",
+        selected_label: "No new dependencies (Recommended)",
+      },
+    ],
+    "the round is stored as question, interaction and answer rows",
+  );
+
   const row = getMilestone("M004");
   assert.equal(row?.status, "queued", "new milestone shell should be registered in the DB");
   assert.deepEqual(
@@ -457,6 +494,100 @@ test("an answered question round is captured into the database under an external
   await externalRound({ answers: { storage: { answers: ["Server"] } } }, {});
   assert.equal(artifactContent("CONTEXT-DRAFT"), before.draft, "a round with no questions does not change the draft");
   assert.equal(artifactContent("DISCUSSION"), before.log, "a round with no questions does not change the log");
+});
+
+test("a confirmed depth question survives a restart: the CONTEXT save is allowed and the consent answer row exists", async (t) => {
+  const dir = makeTempDir("depth-answer-row");
+  const originalCwd = process.cwd();
+  process.chdir(dir);
+  clearDiscussionFlowState(dir);
+  clearPendingAutoStart(dir);
+
+  t.after(() => {
+    try {
+      clearDiscussionFlowState(dir);
+      clearPendingAutoStart(dir);
+      closeDatabase();
+    } finally {
+      process.chdir(originalCwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  assert.equal(openDatabase(join(dir, ".gsd", "gsd.db")), true);
+  const { handlers, pi } = makeHookHarness();
+  const ctx = { cwd: dir, ui: { notify: () => undefined } } as any;
+  registerHooks(pi, []);
+  setPendingAutoStart(dir, {
+    basePath: dir,
+    milestoneId: "M006",
+    ctx,
+    pi: { sendMessage: () => undefined } as any,
+  });
+
+  const confirm = "Yes, you got it (Recommended)";
+  const questions = [{
+    id: "depth_verification_M006_confirm",
+    header: "Depth Check",
+    question: "Did I capture the depth right?",
+    options: [
+      { label: confirm, description: "The summary matches what you want." },
+      { label: "Not quite", description: "Let me clarify." },
+    ],
+  }];
+  const event = { toolCallId: "call-depth", toolName: "ask_user_questions" };
+  const result = {
+    content: [{ type: "text", text: "answered" }],
+    details: {
+      questions,
+      cancelled: false,
+      response: { answers: { depth_verification_M006_confirm: { selected: confirm } } },
+    },
+  };
+  for (const handler of handlers.get("tool_execution_start") ?? []) {
+    await handler({ ...event, args: { questions } }, ctx);
+  }
+  assert.equal(shouldBlockContextArtifactSave("CONTEXT", "M006", null, dir).block, true, "the gate blocks until the answer");
+  for (const handler of handlers.get("tool_result") ?? []) {
+    await handler({ ...event, input: { questions }, details: result.details }, ctx);
+  }
+  for (const handler of handlers.get("tool_execution_end") ?? []) {
+    await handler({ ...event, isError: false, result }, ctx);
+  }
+
+  // The process that took the answer is gone: no discussion state in memory,
+  // no open database. The next session start applies this boundary.
+  clearPendingAutoStart(dir);
+  closeDatabase();
+  applyWriteGateSessionBoundary("start", dir);
+
+  assert.equal(
+    shouldBlockContextArtifactSave("CONTEXT", "M006", null, dir).block,
+    false,
+    "the CONTEXT save is allowed after the restart",
+  );
+  assert.deepEqual(
+    _getAdapter()!.prepare(`
+      SELECT lifecycle.milestone_id, question.question_text, question.question_status,
+             interaction.interaction_kind, answer.response_kind, answer.verbatim_response,
+             answer.answer_disposition
+      FROM workflow_answers answer
+      JOIN workflow_open_questions question ON question.accepted_answer_id = answer.answer_id
+      JOIN workflow_interactions interaction ON interaction.interaction_id = answer.interaction_id
+      JOIN workflow_item_lifecycles lifecycle ON lifecycle.lifecycle_id = question.lifecycle_id
+    `).all().map((row) => ({ ...row })),
+    [{
+      milestone_id: "M006",
+      question_text: "Did I capture the depth right?",
+      question_status: "answered",
+      interaction_kind: "consent",
+      response_kind: "consent",
+      verbatim_response: confirm,
+      answer_disposition: "accepted",
+    }],
+    "the depth question and the user's consent are database rows",
+  );
 });
 
 test("the first captured round keeps a draft and a discussion log that have no database row", async (t) => {
