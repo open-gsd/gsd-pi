@@ -1381,6 +1381,13 @@ function withMigrationImportPreview<T>(
         decisions.set(id, {
           seq: Number(existing?.["seq"] ?? nextDecisionSequence++),
           ...decision,
+          // The register render re-emits the stored supersede as a trailing
+          // "(amends D###)" cell suffix. parseDecisionsTable already carried
+          // that relation into superseded_by; strip the suffix so the staged
+          // manifest lifecycle truth matches the register file candidate (see
+          // decisionValue in legacy-import-preview-gsd-registries) and the
+          // single Application stores clean text with the supersede as data.
+          decision: decision.decision.replace(/\s*\(amends\s+D\d+\)$/i, ""),
           source: "migration",
         });
       }
