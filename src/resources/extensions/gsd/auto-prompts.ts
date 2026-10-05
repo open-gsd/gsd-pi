@@ -663,15 +663,15 @@ export interface Narrative {
   /** Null when the database has no saved row with content, or is unavailable. */
   content: string | null;
   relPath: string;
-  /** True when `content` is the carrier column of the item row, not the artifact row. */
-  fromCarrier?: boolean;
+  /** True when an artifact row is saved: `relPath` is then the path of a rendered projection file. */
+  saved?: boolean;
 }
 
 /** With no row, `targetRelPath` gives the path where the projection file is rendered. */
 function toNarrative(row: { path: string; full_content: string } | null, targetRelPath: () => string): Narrative {
   return row
-    ? { content: row.full_content, relPath: `.gsd/${row.path}` }
-    : { content: null, relPath: targetRelPath() };
+    ? { content: row.full_content, relPath: `.gsd/${row.path}`, saved: true }
+    : { content: null, relPath: targetRelPath(), saved: false };
 }
 
 /**
@@ -692,7 +692,7 @@ export function milestoneNarrative(base: string, mid: string, type: string): Nar
  * writes it later, and it stays after a reopen.
  */
 function carrierFirst(narrative: Narrative, carrier: string | undefined): Narrative {
-  return carrier?.trim() ? { ...narrative, content: carrier, fromCarrier: true } : narrative;
+  return carrier?.trim() ? { ...narrative, content: carrier } : narrative;
 }
 
 /**
@@ -1496,8 +1496,9 @@ function oneLine(text: string): string {
 // ─── Section Builders ──────────────────────────────────────────────────────
 
 /**
- * Carry-forward lines for Task SUMMARY paths (`.gsd/`-relative). The text of
- * each summary is read from its artifact row, never from the file.
+ * Carry-forward lines for the SUMMARY narrative of done Tasks. The text of
+ * each summary follows `carrierFirst` (the Task carrier, then the artifact
+ * row); the file is never read.
  */
 export async function buildCarryForwardSection(priorSummaries: TaskSummaryNarrative[]): Promise<string> {
   if (priorSummaries.length === 0) {
@@ -2730,7 +2731,7 @@ async function resolveExecuteTaskPlan(input: {
   taskId: string;
   slicePlanContent: string | null;
 }): Promise<{ content: string | null; relativePath: string; source: string }> {
-  const { content: savedPlan, relPath: relativePath, fromCarrier } = taskNarrative(
+  const { content: savedPlan, relPath: relativePath, saved } = taskNarrative(
     input.basePath,
     input.milestoneId,
     input.sliceId,
@@ -2741,9 +2742,9 @@ async function resolveExecuteTaskPlan(input: {
     return {
       content: savedPlan,
       relativePath,
-      source: fromCarrier
-        ? `durable task planning state for ${input.milestoneId}/${input.sliceId}/${input.taskId}`
-        : `\`${relativePath}\``,
+      source: saved
+        ? `\`${relativePath}\``
+        : `durable task planning state for ${input.milestoneId}/${input.sliceId}/${input.taskId}`,
     };
   }
 

@@ -42,6 +42,7 @@ import { invalidateAllCaches } from "../cache.ts";
 import {
   openDatabase,
   closeDatabase,
+  insertArtifact,
   insertGateRow,
   insertMilestone,
   upsertMilestonePlanning,
@@ -735,6 +736,37 @@ test("execute-task prompt prefers durable inline task planning state when no tas
   assert.match(prompt, /Source: durable task planning state for M001\/S01\/T02/);
   assert.match(prompt, /Implement the durable inline contract/);
   assert.doesNotMatch(prompt, /Task plan not found at dispatch time/);
+});
+
+test("execute-task prompt names the projection path as the source when the task plan row is saved, with the text of the carrier", async (t) => {
+  const base = makeFixtureBase();
+  t.after(() => cleanup(base));
+  invalidateAllCaches();
+
+  seed(base, "M001");
+  insertTask({
+    id: "T02",
+    sliceId: "S01",
+    milestoneId: "M001",
+    title: "Durable task",
+    status: "pending",
+    planning: { fullPlanMd: "# T02: Durable task\n\nCARRIER-PLAN-TEXT\n" },
+  });
+  insertArtifact({
+    path: "milestones/M001/slices/S01/tasks/T02-PLAN.md",
+    artifact_type: "PLAN",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: "T02",
+    full_content: "# T02: Durable task\n\nARTIFACT-ROW-PLAN-TEXT\n",
+  });
+
+  const prompt = await buildExecuteTaskPrompt("M001", "S01", "First", "T02", "Durable task", base);
+
+  assert.match(prompt, /Source: `\.gsd\/milestones\/M001\/slices\/S01\/tasks\/T02-PLAN\.md`/);
+  assert.doesNotMatch(prompt, /durable task planning state/);
+  assert.match(prompt, /CARRIER-PLAN-TEXT/);
+  assert.doesNotMatch(prompt, /ARTIFACT-ROW-PLAN-TEXT/);
 });
 
 test("reactive execute-task dispatch resolves inline slice task plans", async (t) => {
