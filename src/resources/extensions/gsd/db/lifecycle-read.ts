@@ -14,6 +14,7 @@
 // vocabulary themselves; docs/dev/state-db-cutover-milestone-decision.md
 // (D012) lists them.
 
+import type { DbAdapter } from "../db-adapter.js";
 import { getDb } from "./engine.js";
 import { compareLifecycleShadow } from "./lifecycle-shadow-comparison.js";
 import {
@@ -82,10 +83,13 @@ export interface TaskRead extends TaskRow {
  * The one place that chooses the read source. An Authority Epoch above 0 means
  * the Cutover has run: every answer of this module then comes from the
  * canonical lifecycle rows. Before that every answer comes from the legacy
- * status rows.
+ * status rows. `db` is a connection other than the open one.
  */
-function cutoverHasRun(): boolean {
-  return (getProjectAuthorityRow()?.authorityEpoch ?? 0) > 0;
+function cutoverHasRun(db?: DbAdapter): boolean {
+  const authorityEpoch = db
+    ? db.prepare("SELECT authority_epoch FROM project_authority WHERE singleton = 1").get()?.["authority_epoch"]
+    : getProjectAuthorityRow()?.authorityEpoch;
+  return Number(authorityEpoch ?? 0) > 0;
 }
 
 type ItemKind = "milestone" | "slice" | "task";
@@ -112,9 +116,14 @@ const HIERARCHY_SQL = {
  * The lifecycle of every row of one hierarchy table, keyed by item path
  * (`M001`, `M001/S01`, `M001/S01/T01`). Read only after the Cutover.
  */
-function readLifecycleItems(kind: ItemKind, milestoneId?: string, sliceId?: string): LifecycleItems {
+function readLifecycleItems(
+  kind: ItemKind,
+  milestoneId?: string,
+  sliceId?: string,
+  db: DbAdapter = getDb(),
+): LifecycleItems {
   const sql = HIERARCHY_SQL[kind];
-  const rows = getDb().prepare(`
+  const rows = db.prepare(`
     SELECT ${sql.milestone} AS milestone_id, ${sql.slice} AS slice_id, ${sql.task} AS task_id,
            hierarchy.status AS legacy_status, lifecycle.lifecycle_status,
            EXISTS (
@@ -252,6 +261,18 @@ export function readMilestone(milestoneId: string): MilestoneRead | null {
   const row = getMilestone(milestoneId);
   if (!row) return null;
   return toMilestoneRead(row, cutoverHasRun() ? readLifecycleItems("milestone", milestoneId) : null);
+}
+
+/**
+ * Whether the Milestone is done in the project database behind `db`, a
+ * connection other than the open one (the parallel merge reads the project
+ * database this way). The same answer as `readMilestone(...).done`.
+ */
+export function readMilestoneDoneIn(db: DbAdapter, milestoneId: string): boolean {
+  const status = db.prepare("SELECT status FROM milestones WHERE id = :id").get({ ":id": milestoneId })?.["status"];
+  if (typeof status !== "string") return false;
+  if (cutoverHasRun(db)) return isComplete(readLifecycleItems("milestone", milestoneId, undefined, db).get(milestoneId));
+  return isClosedStatus(status) && !isDiscardedMilestoneStatus(status);
 }
 
 /** The Slices of one Milestone in workflow order (sequence, then id). */

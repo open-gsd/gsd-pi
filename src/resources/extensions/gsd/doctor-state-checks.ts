@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, lstatSync, readdirSync, rmSync } from "node:fs";
 import { join, relative } from "node:path";
 
 import { loadFile, parseSummary, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
-import { getActiveRequirements, getMilestone, getMilestoneSlices, getPlanMilestoneRecoveryBlock, getSliceTasks } from "./gsd-db.js";
+import { getActiveRequirements, getMilestone, getPlanMilestoneRecoveryBlock } from "./gsd-db.js";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, legacyMilestonesDir, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, relMilestonePath } from "./paths.js";
 import { findMilestoneIds } from "./milestone-ids.js";
 import { deriveState } from "./state.js";
-import { isClosedStatus, isInactiveStatus, isSkippedForDispatch } from "./status-guards.js";
+import { isSkippedForDispatch } from "./status-guards.js";
 
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import type { Requirement, RoadmapSliceEntry } from "./types.js";
@@ -160,7 +161,10 @@ export async function checkGsdStateHealth(
 
     const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
     const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
+    // The legacy row: the missing-ROADMAP branch below reads the same rows as
+    // the ROADMAP renderer (isRoadmapRenderable).
     const dbMilestone = getMilestone(milestoneId);
+    const milestoneRead = readMilestone(milestoneId);
 
     // #2510: a recorded plan-milestone-recovery gate means milestone planning
     // failed fail-closed and auto-mode is gated on a real plan being persisted.
@@ -169,9 +173,9 @@ export async function checkGsdStateHealth(
     // derive: the gate only blocks while the milestone has zero slices (a
     // persisted plan supersedes it), and only for live milestones.
     if (
-      dbMilestone !== null
-      && !isSkippedForDispatch(dbMilestone.status)
-      && getMilestoneSlices(milestoneId).length === 0
+      milestoneRead !== null
+      && !isSkippedForDispatch(milestoneRead.status)
+      && readMilestoneSlices(milestoneId).length === 0
     ) {
       const planningBlocker = getPlanMilestoneRecoveryBlock(milestoneId);
       if (planningBlocker) {
@@ -229,12 +233,13 @@ export async function checkGsdStateHealth(
     }
     if (!milestonePath) continue;
 
-    // Slices come from the DB (ADR-017): the roadmap projection is display only.
+    // Slices come from the read interface (ADR-017, ADR-046): the roadmap
+    // projection is display only.
     type NormSlice = RoadmapSliceEntry & { pending?: boolean; skipped?: boolean };
-    const slices: NormSlice[] = getMilestoneSlices(milestoneId).map(s => ({
+    const slices: NormSlice[] = readMilestoneSlices(milestoneId).map(s => ({
       id: s.id,
       title: s.title,
-      done: isInactiveStatus(s.status),
+      done: s.done,
       pending: s.status === "pending",
       skipped: s.status === "skipped",
       risk: (s.risk || "medium") as RoadmapSliceEntry["risk"],
@@ -399,9 +404,9 @@ export async function checkGsdStateHealth(
 
       // Plan tasks come from the DB (ADR-017): the PLAN projection is display only.
       let plan: { tasks: Array<{ id: string; done: boolean; title: string; estimate?: string }> } | null = null;
-      const dbTasks = getSliceTasks(milestoneId, slice.id);
+      const dbTasks = readSliceTasks(milestoneId, slice.id);
       if (dbTasks.length > 0) {
-        plan = { tasks: dbTasks.map(t => ({ id: t.id, done: isClosedStatus(t.status), title: t.title, estimate: t.estimate || undefined })) };
+        plan = { tasks: dbTasks.map(t => ({ id: t.id, done: t.done, title: t.title, estimate: t.estimate || undefined })) };
       }
       if (!plan) {
         if (!slice.done) {

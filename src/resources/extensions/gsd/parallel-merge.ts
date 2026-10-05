@@ -7,6 +7,7 @@
 
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { readMilestoneDoneIn } from "./db/lifecycle-read.js";
 import { openWorkflowDatabaseIsolated } from "./db-workspace.js";
 import { resolveGsdPathContract } from "./paths.js";
 import { worktreePathFor, worktreesDirs } from "./worktree-placement.js";
@@ -40,7 +41,7 @@ export type MergeOrder = "sequential" | "by-completion";
 /**
  * Check whether a milestone is complete by querying the canonical project DB.
  * Uses an isolated connection, so the global DB handle is not displaced.
- * Returns true when milestones.status = 'complete' in project gsd.db.
+ * The read interface (db/lifecycle-read.ts) answers: the same rule as dispatch.
  */
 export function isMilestoneCompleteInProjectDb(basePath: string, mid: string): boolean {
   const workRoot = worktreePathFor(basePath, mid);
@@ -50,8 +51,7 @@ export function isMilestoneCompleteInProjectDb(basePath: string, mid: string): b
   const db = openWorkflowDatabaseIsolated(dbPath);
   if (!db) return false;
   try {
-    const row = db.prepare("SELECT status FROM milestones WHERE id = :mid").get({ ":mid": mid });
-    return row?.["status"] === "complete";
+    return readMilestoneDoneIn(db, mid);
   } catch (e) {
     logWarning("parallel", `milestone completion check failed for ${mid}: ${(e as Error).message}`);
     return false;
@@ -61,7 +61,7 @@ export function isMilestoneCompleteInProjectDb(basePath: string, mid: string): b
 }
 
 /**
- * Discover milestone IDs with status='complete' in the canonical DB,
+ * Discover milestone IDs that are complete in the canonical DB,
  * using worktree directories only to enumerate active parallel workers.
  */
 function discoverDbCompletedMilestones(basePath: string): Set<string> {
@@ -88,7 +88,7 @@ function discoverDbCompletedMilestones(basePath: string): Set<string> {
  *
  * When basePath is provided, also checks the canonical project DB as the
  * source of truth. Workers with stale orchestrator state (e.g. "error")
- * are included if their project DB row shows status='complete'.
+ * are included if the project DB shows them complete.
  * See: https://github.com/open-gsd/gsd-pi/issues/2812
  */
 export function determineMergeOrder(

@@ -37,6 +37,7 @@ import {
   handleValidateMilestone,
   type ValidateMilestoneParams,
 } from "../tools/validate-milestone.ts";
+import { cutOver } from "./helpers/authority-cutover.ts";
 import { discardProjectionEvidence } from "./projection-evidence-helpers.ts";
 
 function db() {
@@ -435,4 +436,48 @@ test("superseded completion preserves a byte-identical summary owned by a newer 
   // DB, which adds the state-version stamp; the content is the newer one.
   assert.equal(stripProjectionStamp(readFileSync(completion.summaryPath, "utf8")), newerSummary);
   assert.equal(getMilestone("M001")?.status, "complete");
+});
+
+test("after the Cutover a superseded completion keeps the summary of a Milestone that the lifecycle row closes", async (t) => {
+  const basePath = mkdtempSync(join(tmpdir(), "gsd-complete-milestone-cutover-closed-"));
+  t.after(() => {
+    _setProjectionFlushAfterRenderForTest(null);
+    clearPathCache();
+    clearParseCache();
+    closeDatabase();
+    rmSync(basePath, { recursive: true, force: true });
+  });
+  await seedAdoptedMilestone(basePath);
+  cutOver();
+
+  let deliveredSummary = "";
+  _setProjectionFlushAfterRenderForTest(() => {
+    const summaryPath = join(basePath, ".gsd", "milestones", "M001", "M001-SUMMARY.md");
+    deliveredSummary = readFileSync(summaryPath, "utf8");
+    reopenMilestone({
+      milestoneId: "M001",
+      reason: "A newer completion supersedes the first completion delivery.",
+      invocation: invocation("milestone-reopen/cutover-closed"),
+    });
+    // The newer completion closes the lifecycle row only: the legacy row
+    // stays active.
+    executeAtFence("test.milestone-reopen.newer-start", "fixture/cutover-closed/start", (context) => {
+      adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "in_progress" });
+    });
+    executeAtFence("milestone.complete", "fixture/cutover-closed/complete", (context) => {
+      adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "completed" });
+    });
+    writeFileSync(summaryPath, deliveredSummary);
+  });
+
+  const completion = await handleCompleteMilestone(
+    completionParams(),
+    basePath,
+    invocation("milestone-complete/cutover-closed"),
+  );
+
+  assert.ok(!("error" in completion));
+  assert.equal(completion.superseded, true);
+  assert.equal(getMilestone("M001")?.status, "active");
+  assert.equal(readFileSync(completion.summaryPath, "utf8"), deliveredSummary);
 });

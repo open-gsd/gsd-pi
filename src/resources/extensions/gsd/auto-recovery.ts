@@ -21,7 +21,6 @@ import {
   insertGateRun,
   getMilestone,
   immediateTransaction,
-  getCompletedMilestoneTaskFileHints,
   getMilestoneCommitAttributionShas,
   recordMilestoneCommitAttribution,
 } from "./gsd-db.js";

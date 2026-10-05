@@ -522,7 +522,9 @@ async function prepareHookRetry(
     if (!db) {
       throw new Error(`Hook retry Task ${mid}/${sid}/${tid} cannot be prepared: database unavailable`);
     }
-    const task = getTask(mid, sid, tid);
+    // The status label of the read interface: after the Cutover it names the
+    // lifecycle status, so a legacy row that disagrees does not answer.
+    const task = readTask(mid, sid, tid);
     if (!task) throw new Error(`Hook retry Task ${mid}/${sid}/${tid} is missing`);
     const lifecycle = db.prepare(`
       SELECT lifecycle_status, last_operation_id

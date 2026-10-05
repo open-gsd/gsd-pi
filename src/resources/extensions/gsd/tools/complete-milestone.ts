@@ -15,14 +15,13 @@ import { existsSync } from "node:fs";
 import {
   transaction,
   getMilestone,
-  getMilestoneSlices,
-  getSliceTasks,
   getLatestAssessmentByScope,
   updateMilestoneStatus,
 } from "../gsd-db.js";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "../db/lifecycle-read.js";
 import { clearPathCache, resolveMilestoneFile, targetMilestoneFile } from "../paths.js";
 import { resolveCanonicalMilestoneRoot } from "../worktree-manager.js";
-import { isClosedStatus, isDeferredStatus } from "../status-guards.js";
+import { isDeferredStatus } from "../status-guards.js";
 import { saveFile, clearParseCache, loadFile } from "../files.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import { invalidateStateCache } from "../state.js";
@@ -148,7 +147,7 @@ async function repairSupersededSummary(
   // A canonically complete head without a matching durable event is sabotage or
   // an imported compatibility state. Preserve its bytes rather than deleting a
   // projection we cannot safely attribute to this delivery.
-  if (isClosedStatus(getMilestone(milestoneId)?.status ?? "")) return;
+  if (readMilestone(milestoneId)?.closed) return;
   await removeOwnedProjection(summaryPath, deliveredContent);
 }
 
@@ -333,12 +332,12 @@ export async function handleCompleteMilestone(
       return;
     }
     // State machine preconditions (inside txn for atomicity)
-    const milestone = getMilestone(params.milestoneId);
+    const milestone = readMilestone(params.milestoneId);
     if (!milestone) {
       guardError = `milestone not found: ${params.milestoneId}`;
       return;
     }
-    if (isClosedStatus(milestone.status)) {
+    if (milestone.closed) {
       alreadyComplete = true;
       return;
     }
@@ -352,13 +351,13 @@ export async function handleCompleteMilestone(
     }
 
     // Verify all slices are complete
-    const slices = getMilestoneSlices(params.milestoneId);
+    const slices = readMilestoneSlices(params.milestoneId);
     if (slices.length === 0) {
       guardError = `no slices found for milestone ${params.milestoneId}`;
       return;
     }
 
-    const incompleteSlices = slices.filter(s => !isClosedStatus(s.status) && !isDeferredStatus(s.status));
+    const incompleteSlices = slices.filter(s => !s.done);
     if (incompleteSlices.length > 0) {
       const incompleteIds = incompleteSlices.map(s => `${s.id} (status: ${s.status})`).join(", ");
       guardError = `incomplete slices: ${incompleteIds}`;
@@ -368,8 +367,8 @@ export async function handleCompleteMilestone(
     // Deep check: verify all tasks in all slices are complete
     for (const slice of slices) {
       if (isDeferredStatus(slice.status)) continue;
-      const tasks = getSliceTasks(params.milestoneId, slice.id);
-      const incompleteTasks = tasks.filter(t => !isClosedStatus(t.status));
+      const tasks = readSliceTasks(params.milestoneId, slice.id);
+      const incompleteTasks = tasks.filter(t => !t.done);
       if (incompleteTasks.length > 0) {
         const ids = incompleteTasks.map(t => `${t.id} (status: ${t.status})`).join(", ");
         guardError = `slice ${slice.id} has incomplete tasks: ${ids}`;

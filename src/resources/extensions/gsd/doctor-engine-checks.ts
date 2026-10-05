@@ -34,8 +34,8 @@ import {
   resolveSliceFile,
   resolveTaskFile,
 } from "./paths.js";
-import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from "./status-guards.js";
-import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
+import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
+import { readMilestones, readSlice, readTask, type MilestoneRead } from "./db/lifecycle-read.js";
 import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
 import { importFileOverrides, unimportedFileOverrides, type FileOverride } from "./overrides.js";
 import { importFileCaptures, unimportedFileCaptures } from "./captures.js";
@@ -208,7 +208,6 @@ function reportUnpublishedSucceededAttempts(
         WHERE successor.previous_kernel_checkpoint_id = checkpoint.kernel_checkpoint_id
       )
       AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled', 'blocker-accepted')
-      AND COALESCE(tasks.status, '') NOT IN ('complete', 'cancelled', 'blocker-accepted')
   `).all() as unknown as Array<{
     attempt_id: string;
     lifecycle_status: string;
@@ -219,6 +218,9 @@ function reportUnpublishedSucceededAttempts(
   }>;
 
   for (const row of stranded) {
+    // The read interface answers whether the Task is terminal: from the
+    // legacy row before the Cutover, from the lifecycle row after it.
+    if (readTask(row.milestone_id, row.slice_id, row.task_id)?.done) continue;
     const unitId = `${row.milestone_id}/${row.slice_id}/${row.task_id}`;
     issues.push({
       severity: "warning",
@@ -327,6 +329,11 @@ function reportCheckboxDbStatusDivergence(
     file: relativeFile(basePath, filePath),
     fixable: false,
   });
+}
+
+/** Every Milestone of the read interface (db/lifecycle-read.ts) by id. */
+function readMilestonesById(): Map<string, MilestoneRead> {
+  return new Map(readMilestones().map((milestone) => [milestone.id, milestone]));
 }
 
 function bareDuplicateMilestoneId(milestoneId: string): string | null {
@@ -668,8 +675,8 @@ export function createValidationSourceDriftDoctorIssue(
 }
 
 export function reportMilestoneValidationSourceDrift(basePath: string, issues: DoctorIssue[]): void {
-  for (const milestone of getAllMilestones()) {
-    if (!isClosedStatus(milestone.status) || !isMilestoneLifecycleAdopted(milestone.id)) continue;
+  for (const milestone of readMilestones()) {
+    if (!milestone.closed || !isMilestoneLifecycleAdopted(milestone.id)) continue;
     const sourceRoot = resolveCanonicalMilestoneRoot(basePath, milestone.id);
     const preferences = loadEffectiveGSDPreferences(sourceRoot)?.preferences;
     const source = captureMilestoneVerificationSourceRevision(sourceRoot, preferences);
@@ -1088,16 +1095,15 @@ export async function checkEngineHealth(
       try {
         const reopened = adapter
           .prepare(
-            `SELECT m.id, m.status, ud.started_at, ud.ended_at
+            `SELECT m.id, ud.started_at, ud.ended_at
              FROM milestones m
              JOIN unit_dispatches ud ON ud.milestone_id = m.id
-             WHERE m.status NOT IN (${TERMINAL_STATUS_SQL})
-               AND ud.unit_type = 'complete-milestone'
+             WHERE ud.unit_type = 'complete-milestone'
                AND ud.unit_id = m.id
                AND ud.status = 'completed'
              ORDER BY m.id, COALESCE(ud.ended_at, ud.started_at) DESC, ud.id DESC`,
           )
-          .all() as Array<{ id: string; status: string; started_at: string | null; ended_at: string | null }>;
+          .all() as Array<{ id: string; started_at: string | null; ended_at: string | null }>;
 
         // #2398: the dispatch row alone is not completion proof — require a
         // covering milestone.completed event (mirrors the drift detector gate
@@ -1105,9 +1111,12 @@ export async function checkEngineHealth(
         // completed dispatch newest-first so a later receiptless row cannot
         // hide an earlier event-backed completion; at most one issue per
         // milestone.
+        const milestoneReads = readMilestonesById();
         const flagged = new Set<string>();
         for (const row of reopened) {
           if (flagged.has(row.id)) continue;
+          const milestone = milestoneReads.get(row.id);
+          if (!milestone || milestone.closed) continue;
           const completedAt = row.ended_at ?? row.started_at ?? null;
           if (!completedEventCoversDispatch(row.id, row.started_at)) continue;
           const reopenAt = latestExplicitReopenAt(row.id);
@@ -1118,7 +1127,7 @@ export async function checkEngineHealth(
             code: "completed_milestone_reopened",
             scope: "milestone",
             unitId: row.id,
-            message: `Milestone ${row.id} has completed complete-milestone dispatch history but DB status is ${row.status}. Explicitly reopen or recover before planning it again.`,
+            message: `Milestone ${row.id} has completed complete-milestone dispatch history but DB status is ${milestone.status}. Explicitly reopen or recover before planning it again.`,
             fixable: false,
           });
         }
@@ -1139,8 +1148,8 @@ export async function checkEngineHealth(
           .all() as ArtifactRow[];
 
         const discardedMilestoneIds = new Set(
-          getAllMilestones()
-            .filter((milestone) => isDiscardedMilestoneStatus(milestone.status))
+          readMilestones()
+            .filter((milestone) => milestone.discarded)
             .map((milestone) => milestone.id),
         );
         const staleRows: ArtifactRow[] = [];
@@ -1215,16 +1224,9 @@ export async function checkEngineHealth(
           .prepare(
             `SELECT a.path, a.artifact_type, a.milestone_id, a.slice_id, a.task_id,
                     a.full_content, a.imported_at,
-                    m.status AS milestone_status,
-                    s.status AS slice_status,
-                    t.status AS task_status, t.full_summary_md AS task_full_summary_md,
                     (SELECT COUNT(*) FROM tasks tt WHERE tt.milestone_id = a.milestone_id AND tt.slice_id = a.slice_id) AS task_count
              FROM artifacts a
-             JOIN milestones m ON m.id = a.milestone_id
-             LEFT JOIN slices s ON s.milestone_id = a.milestone_id AND s.id = a.slice_id
-             LEFT JOIN tasks t ON t.milestone_id = a.milestone_id AND t.slice_id = a.slice_id AND t.id = a.task_id
-             WHERE a.artifact_type = 'SUMMARY'
-               AND m.status NOT IN (${TERMINAL_STATUS_SQL})`,
+             WHERE a.artifact_type = 'SUMMARY'`,
           )
           .all() as Array<{
             path: string;
@@ -1234,23 +1236,25 @@ export async function checkEngineHealth(
             task_id: string | null;
             full_content: string;
             imported_at: string | null;
-            slice_status: string | null;
-            task_status: string | null;
-            task_full_summary_md: string | null;
             task_count: number;
           }>;
 
+        const milestoneReads = readMilestonesById();
         const seen = new Set<string>();
         for (const row of rows) {
+          const milestone = milestoneReads.get(row.milestone_id);
+          if (!milestone || milestone.closed) continue;
           if (!artifactExistsOnDisk(basePath, row.path, row)) continue;
           const reopenAt = latestExplicitReopenAt(row.milestone_id);
           if (!isAfter(row.imported_at, reopenAt)) continue;
-          const isSliceSummary = row.slice_id && !row.task_id && row.slice_status && !isInactiveStatus(row.slice_status);
-          const isTaskSummary = row.slice_id && row.task_id && (!row.task_status || !isClosedStatus(row.task_status));
+          const slice = row.slice_id ? readSlice(row.milestone_id, row.slice_id) : null;
+          const task = row.slice_id && row.task_id ? readTask(row.milestone_id, row.slice_id, row.task_id) : null;
+          const isSliceSummary = row.slice_id && !row.task_id && slice && !slice.done;
+          const isTaskSummary = row.slice_id && row.task_id && !task?.done;
           const isTaskArtifactWithoutDbTasks = row.slice_id && row.task_id && Number(row.task_count) === 0;
           if (
             isTaskSummary &&
-            row.task_status &&
+            task &&
             row.slice_id &&
             row.task_id &&
             isCanonicalStagedTaskSummaryProjection(basePath, {
@@ -1263,8 +1267,8 @@ export async function checkEngineHealth(
               milestoneId: row.milestone_id,
               sliceId: row.slice_id,
               taskId: row.task_id,
-              status: row.task_status,
-              fullSummaryMd: row.task_full_summary_md ?? "",
+              status: task.status,
+              fullSummaryMd: task.full_summary_md ?? "",
             })
           ) {
             continue;

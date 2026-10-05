@@ -62,6 +62,11 @@ export function readMilestone(milestoneId) {
   return row ? toMilestoneRead(row, cutoverHasRun() ? readLifecycleItems() : null) : null;
 }
 
+export function readMilestoneDoneIn(db, milestoneId) {
+  const status = db.prepare("SELECT status FROM milestones WHERE id = :id").get({ ":id": milestoneId })?.status;
+  return cutoverHasRun(db) ? readLifecycleItems(db).length > 0 : isClosedStatus(status);
+}
+
 export function readMilestoneSlices(milestoneId) {
   const items = cutoverHasRun() ? readLifecycleItems() : null;
   return getMilestoneSlices(milestoneId).map((row) => toSliceRead(row, items));

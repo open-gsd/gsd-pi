@@ -39,6 +39,7 @@ import {
 } from "../task-execution-domain-operation.js";
 import { reopenTask } from "../task-lifecycle-domain-operation.js";
 import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 import {
   recordFailureAndSelectRecovery,
   resumeTaskRecovery,
@@ -935,6 +936,32 @@ test("#2417: doctor reports a settled succeeded verify-stage Attempt on a non-te
   assert.equal(stranded.length, 1);
   assert.equal(stranded[0].unitId, "M001/S01/T01");
   assert.match(stranded[0].message, new RegExp(attemptId));
+});
+
+test("after the Cutover doctor reports a stranded succeeded Attempt of a Task that only the legacy row closes", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath } = createFixture();
+  await stageTaskCompletion(stageInput(basePath));
+  // Only the legacy row closes the Task. Its lifecycle row stays open.
+  db().exec("UPDATE tasks SET status = 'complete' WHERE id = 'T01'");
+  const adopted = new Set(
+    db().prepare("SELECT item_kind FROM workflow_item_lifecycles").all().map((item) => item["item_kind"]),
+  );
+  seedLifecycles("stranded-attempt", [
+    { itemKind: "milestone" as const, milestoneId: "M001", lifecycleStatus: "ready" as const },
+    { itemKind: "slice" as const, milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" as const },
+  ].filter((lifecycle) => !adopted.has(lifecycle.itemKind)));
+  const stranded = async () => {
+    const issues: DoctorIssue[] = [];
+    await checkEngineHealth(basePath, issues, []);
+    return issues.filter((issue) => issue.code === "unpublished_succeeded_attempt").map((issue) => issue.unitId);
+  };
+
+  assert.deepEqual(await stranded(), [], "before the Cutover the legacy row answers that the Task is terminal");
+
+  cutOver();
+
+  assert.deepEqual(await stranded(), ["M001/S01/T01"]);
 });
 
 test("#1677: inside a worktree the classifier falls back to the project-root copy", async () => {

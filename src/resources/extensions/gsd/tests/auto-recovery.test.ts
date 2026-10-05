@@ -26,6 +26,7 @@ import { clearParseCache } from "../files.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { writeIntegrationBranch } from "../git-service.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 
 const tmpDirs: string[] = [];
 
@@ -1265,6 +1266,46 @@ test("hasImplementationArtifacts backfills untagged main implementation commits 
       "present",
       "completed task file hints should repair prior untagged implementation commits on main",
     );
+    assert.deepEqual(getMilestoneCommitAttributionShas("M001"), [commitSha]);
+  } finally {
+    cleanup(base);
+  }
+});
+
+test("after the Cutover hasImplementationArtifacts takes the completed tasks of the file hints from the lifecycle rows", () => {
+  const base = makeGitBase();
+  try {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Slice One", status: "pending", risk: "low", depends: [] });
+    // The Task is legacy pending and canonical completed.
+    insertTask({
+      id: "T01",
+      sliceId: "S01",
+      milestoneId: "M001",
+      title: "Task One",
+      status: "pending",
+      keyFiles: ["app.js"],
+      planning: { files: ["app.js"] },
+    });
+    seedLifecycles("implementation-evidence", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+      { itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01", lifecycleStatus: "completed" },
+    ]);
+
+    writeFileSync(join(base, "app.js"), "document.body.dataset.ready = 'true';\n");
+    execFileSync("git", ["add", "app.js"], { cwd: base, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "feat: add the app"], { cwd: base, stdio: "ignore" });
+    const commitSha = execFileSync("git", ["rev-parse", "HEAD"], { cwd: base, encoding: "utf-8" }).trim();
+
+    assert.equal(hasImplementationArtifacts(base, "M001"), "unknown", "the legacy rows have no completed task");
+    assert.deepEqual(getMilestoneCommitAttributionShas("M001"), []);
+
+    cutOver();
+
+    assert.equal(hasImplementationArtifacts(base, "M001"), "present");
     assert.deepEqual(getMilestoneCommitAttributionShas("M001"), [commitSha]);
   } finally {
     cleanup(base);

@@ -30,6 +30,7 @@ const READ_INTERFACE_EPOCH_READER = "./queries.js#getProjectAuthorityRow";
 const READ_INTERFACE_ENTRIES = [
   "readMilestones",
   "readMilestone",
+  "readMilestoneDoneIn",
   "readMilestoneSlices",
   "readClosedSliceIds",
   "readSlice",
