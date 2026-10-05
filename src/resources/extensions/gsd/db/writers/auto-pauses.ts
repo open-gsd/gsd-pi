@@ -28,6 +28,27 @@ interface AutoPauseRow {
   milestone_lock: string | null;
   pause_reason: string | null;
   paused_at: string;
+  blocker_id: string | null;
+}
+
+/** The blocker row the open pause of a worker's scope opened, or null. */
+export function readOpenAutoPauseBlockerId(scope: string = sidecarQueueScope()): string | null {
+  if (!isDbAvailable()) return null;
+  const row = _getAdapter()!.prepare(
+    `SELECT blocker_id FROM auto_pauses WHERE scope = :scope AND closed_at IS NULL`,
+  ).get({ ":scope": scope }) as { blocker_id: string | null } | undefined;
+  return row?.blocker_id ?? null;
+}
+
+/** Record the workflow_blockers row a human pause opened on its pause row. */
+export function setAutoPauseBlockerId(blockerId: string): void {
+  if (!isDbAvailable()) return;
+  transaction(() => {
+    _getAdapter()!.prepare(
+      `UPDATE auto_pauses SET blocker_id = :blocker_id
+       WHERE scope = :scope AND closed_at IS NULL`,
+    ).run({ ":blocker_id": blockerId, ":scope": sidecarQueueScope() });
+  });
 }
 
 /** The open pause of this worker's scope, or null when it has none. */

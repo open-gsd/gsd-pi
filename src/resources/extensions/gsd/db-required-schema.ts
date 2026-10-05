@@ -48,6 +48,10 @@ import {
   hasAutoPauseSchema,
 } from "./db-auto-pause-schema.js";
 import {
+  createAutoPauseBlockerColumn,
+  hasAutoPauseBlockerColumn,
+} from "./db-auto-pause-blocker-schema.js";
+import {
   createProjectMilestoneSequenceSchema,
   hasProjectMilestoneSequenceSchema,
 } from "./db-project-milestone-sequence-schema.js";
@@ -123,6 +127,11 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "auto-pauses",
     isPresent: hasAutoPauseSchema,
     create: createAutoPauseSchema,
+  },
+  {
+    id: "auto-pause-blocker-link",
+    isPresent: hasAutoPauseBlockerColumn,
+    create: createAutoPauseBlockerColumn,
   },
   {
     id: "project-milestone-sequence",

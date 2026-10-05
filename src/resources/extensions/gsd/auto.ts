@@ -20,6 +20,7 @@ import type {
   SessionMessageEntry,
 } from "@gsd/pi-coding-agent";
 import { setBeforeAgentStartContext } from "@gsd/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 
 import { deriveState, invalidateStateCache } from "./state.js";
 import {
@@ -367,6 +368,14 @@ import {
   stopNoticeDisplayReason,
 } from "./stop-notice.js";
 import { emitWorkflowOutcomeEvent } from "./workflow-outcome-event.js";
+import { classifyFailure } from "./recovery-classification.js";
+import {
+  findPauseLifecycleId,
+  isHumanPauseBlockerKind,
+  openPauseBlockerRow,
+  resolvePauseBlockerRow,
+} from "./pause-blocker-domain-operation.js";
+import { readOpenAutoPauseBlockerId, setAutoPauseBlockerId } from "./db/writers/auto-pauses.js";
 import { abortActiveUnitTurn } from "./auto/unit-turn-abort.js";
 
 // ── ENCAPSULATION INVARIANT ─────────────────────────────────────────────────
@@ -2392,6 +2401,24 @@ export async function pauseAuto(
   // Persist the pause so resume survives /exit (#1383). It is the open
   // auto_pauses row of this worker's scope; the fresh-start bootstrap below
   // reads the same row.
+  // A machine_fixable pause routes through the Recovery Classifier (ADR-046):
+  // the classifier owns the route, so the row records the classified failure
+  // kind, the action and the remediation, and a resume re-enters the kernel
+  // advance with that route named on the row instead of re-diagnosing prose.
+  // The seven human blocker kinds pause for a person unchanged.
+  let pauseReasonText = _errorContext?.message;
+  if (blockerKind === "machine_fixable") {
+    const classification = classifyFailure({
+      error: _errorContext?.message ?? "machine-fixable failure",
+      unitType: s.currentUnit?.type,
+      unitId: s.currentUnit?.id,
+    });
+    pauseReasonText = [
+      `recovery:${classification.failureKind}/${classification.action}`,
+      classification.reason,
+      classification.remediation,
+    ].filter(Boolean).join(" | ");
+  }
   try {
     s.pausedDispatchId = activeUnitDispatchId();
     const pausedWorktreePath = resolvePausedAutoWorktreePath({
@@ -2401,6 +2428,9 @@ export async function pauseAuto(
       isolationMode: getIsolationMode(s.originalBasePath || s.basePath),
       baseIsAutoWorktree: isInAutoWorktree(s.basePath),
     });
+    // The pause this row replaces had opened a workflow_blockers row for its
+    // human blocker; the new pause closes that row (ADR-046).
+    const previousBlockerId = readOpenAutoPauseBlockerId();
     openAutoPause({
       blockerKind,
       dispatchId: s.pausedDispatchId,
@@ -2416,8 +2446,47 @@ export async function pauseAuto(
       activeRunDir: s.activeRunDir,
       autoStartTime: s.autoStartTime,
       milestoneLock: s.sessionMilestoneLock ?? undefined,
-      pauseReason: _errorContext?.message,
+      pauseReason: pauseReasonText,
     });
+    if (previousBlockerId) {
+      try {
+        resolvePauseBlockerRow({
+          blockerId: previousBlockerId,
+          disposition: "resolved",
+          resolution: "closed by a newer pause of the same worker scope",
+          idempotencyKey: `pause-blocker-resolve-superseded:${previousBlockerId}`,
+        });
+      } catch (err) {
+        logWarning("engine", `pause blocker resolve failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    // A human blocker is human-only work (ADR-046): the pause opens a
+    // workflow_blockers row for the paused item. A pause of an item without a
+    // lifecycle row, and every machine_fixable or user_request pause, records
+    // the pause row alone.
+    if (isHumanPauseBlockerKind(blockerKind)) {
+      try {
+        const lifecycleId = findPauseLifecycleId({
+          milestoneId: s.currentMilestoneId,
+          unitType: s.currentUnit?.type,
+          unitId: s.currentUnit?.id,
+        });
+        if (lifecycleId) {
+          const { blockerId } = openPauseBlockerRow({
+            lifecycleId,
+            blockerKind,
+            description: pauseReasonText ?? `${blockerKind} pause`,
+            requestedAction: s.stepMode ? "Run /gsd next after resolving the blocker." : "Run /gsd auto after resolving the blocker.",
+            idempotencyKey: `pause-blocker-open:${randomUUID()}`,
+          });
+          setAutoPauseBlockerId(blockerId);
+        }
+      } catch (err) {
+        // The pause row is the source of truth; a blocker row that cannot open
+        // never blocks the pause itself.
+        logWarning("engine", `pause blocker open failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   } catch (err) {
     // Non-fatal — resume will still work via full bootstrap, just without worktree context
     logWarning("engine", `paused-session DB write failed: ${err instanceof Error ? err.message : String(err)}`, { file: "auto.ts" });
