@@ -93,6 +93,74 @@ test("#1643: terminal (closed) paused milestone still routes to discard(terminal
   assert.deepEqual(route, { route: "discard", reason: "terminal" });
 });
 
+// ─── (d) the recorded Recovery Classifier route of a machine_fixable pause ──
+
+test("a machine_fixable pause whose recorded route is retry routes to machine-retry", () => {
+  const route = routePausedSessionResume({
+    milestoneExists: true,
+    summaryIsTerminal: false,
+    pausedMilestoneId: "M016-5b17xo",
+    activeMilestoneId: "M016-5b17xo",
+    machineAction: "retry",
+  });
+  assert.deepEqual(route, { route: "machine-retry" });
+});
+
+test("a recorded escalate route stays a human restore", () => {
+  const route = routePausedSessionResume({
+    milestoneExists: true,
+    summaryIsTerminal: false,
+    pausedMilestoneId: "M016-5b17xo",
+    activeMilestoneId: "M016-5b17xo",
+    machineAction: "escalate",
+  });
+  assert.deepEqual(route, { route: "restore" });
+});
+
+test("no recorded route (a human pause or an older row) stays a human restore", () => {
+  const route = routePausedSessionResume({
+    milestoneExists: true,
+    summaryIsTerminal: false,
+    pausedMilestoneId: "M016-5b17xo",
+    activeMilestoneId: "M016-5b17xo",
+    machineAction: null,
+  });
+  assert.deepEqual(route, { route: "restore" });
+});
+
+test("the machine retry does not outrank the stale-pin exits", () => {
+  assert.deepEqual(
+    routePausedSessionResume({
+      milestoneExists: false,
+      summaryIsTerminal: false,
+      pausedMilestoneId: "M016-5b17xo",
+      activeMilestoneId: null,
+      machineAction: "retry",
+    }),
+    { route: "discard", reason: "missing" },
+  );
+  assert.deepEqual(
+    routePausedSessionResume({
+      milestoneExists: true,
+      summaryIsTerminal: true,
+      pausedMilestoneId: "M016-5b17xo",
+      activeMilestoneId: null,
+      machineAction: "retry",
+    }),
+    { route: "discard", reason: "terminal" },
+  );
+  assert.deepEqual(
+    routePausedSessionResume({
+      milestoneExists: true,
+      summaryIsTerminal: false,
+      pausedMilestoneId: "M016-5b17xo",
+      activeMilestoneId: "M018-6b0xxe",
+      machineAction: "retry",
+    }),
+    { route: "adopt-active", activeMilestoneId: "M018-6b0xxe" },
+  );
+});
+
 // ─── Wiring: the resume path in auto.ts consumes the route ──────────────────
 // Source-shape assertions follow the precedent set in
 // interrupted-session-auto.test.ts ("source only resumes paused-session..."):
@@ -105,6 +173,7 @@ test("#1643: auto.ts resume path wires adopt-active — clears stale row, adopts
     fs.readFile(new URL("../auto.ts", import.meta.url), "utf-8"),
   );
   assert.ok(source.includes("const resumeRoute = routePausedSessionResume({"));
+  assert.ok(source.includes("machineAction: recordedMachinePauseAction(meta),"));
   assert.ok(source.includes("activeMilestoneId: freshStartAssessment.state?.activeMilestone?.id ?? null"));
   assert.ok(source.includes('clearPausedSession("paused-session DB cleanup failed (milestone superseded)")'));
   assert.ok(source.includes("s.currentMilestoneId = resumeRoute.activeMilestoneId;"));

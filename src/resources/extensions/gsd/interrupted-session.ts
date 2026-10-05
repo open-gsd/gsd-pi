@@ -30,6 +30,24 @@ export type InterruptedSessionClassification =
   | "recoverable"
   | "stale";
 
+/** The Recovery Classifier action a machine_fixable pause recorded on its row. */
+export type RecordedMachinePauseAction = "retry" | "escalate" | "stop";
+
+/**
+ * The action a machine_fixable pause's Recovery Classifier route recorded —
+ * the `recovery:<failure-kind>/<action>` prefix of the pause reason (ADR-046).
+ * Null for a human pause, a pause without a recorded route (an older row), or
+ * a recorded action outside the classifier's vocabulary: all of them stay
+ * human pauses.
+ */
+export function recordedMachinePauseAction(
+  meta: Pick<PausedSessionMetadata, "blockerKind" | "pauseReason"> | null | undefined,
+): RecordedMachinePauseAction | null {
+  if (meta?.blockerKind !== "machine_fixable") return null;
+  const match = /^recovery:[a-z0-9-]+\/(retry|escalate|stop)(?:\s|\||$)/.exec(meta.pauseReason ?? "");
+  return match ? (match[1] as RecordedMachinePauseAction) : null;
+}
+
 export interface PausedSessionMetadata {
   milestoneId?: string;
   worktreePath?: string | null;

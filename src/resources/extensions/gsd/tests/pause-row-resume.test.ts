@@ -337,6 +337,65 @@ test("restart after a kill in the verify stage reads the stage from the dispatch
   assert.equal(assessment.recoveryPrompt, null);
 });
 
+test("a machine_fixable retry pause advances without replaying the turn for a person", async (t) => {
+  const base = makeProject(t);
+  const sessionFile = writeSessionFile(base);
+  openAutoPause({
+    blockerKind: "machine_fixable",
+    milestoneId: "M001",
+    pauseReason:
+      "recovery:tool-unavailable/retry | Tool unavailable for plan-slice M001/S01: workflow server down | retry the unit",
+    sessionFile,
+  });
+
+  // The restart: a new process has no session memory.
+  autoSession.reset();
+  refuseSessionLock(t);
+  const notifications: string[] = [];
+  const { ctx, pi } = makeStartAutoHost(notifications);
+
+  await startAuto(ctx, pi, base, false);
+
+  assert.ok(
+    notifications.some((message) => message.includes("machine-classified retryable")),
+    `the recorded retry resumes without operator action; got: ${notifications.join(" | ")}`,
+  );
+  assert.ok(
+    notifications.every((message) => !message.includes("Resuming paused session for M001")),
+    "the person-facing paused-session resume does not run",
+  );
+  assert.equal(autoSession.currentMilestoneId, "M001", "the milestone pin restores so the advance re-runs the unit");
+  assert.equal(autoSession.pausedSessionFile, null, "the interrupted turn is not replayed for a person");
+  assert.equal(autoSession.pausedDispatchId, null);
+});
+
+test("a machine_fixable escalate pause restores the paused session for a person", async (t) => {
+  const base = makeProject(t);
+  const sessionFile = writeSessionFile(base);
+  openAutoPause({
+    blockerKind: "machine_fixable",
+    milestoneId: "M001",
+    pauseReason:
+      "recovery:verification-drift/escalate | Verification drift for plan-slice M001/S01: drift | escalate to a person",
+    sessionFile,
+  });
+
+  // The restart: a new process has no session memory.
+  autoSession.reset();
+  refuseSessionLock(t);
+  const notifications: string[] = [];
+  const { ctx, pi } = makeStartAutoHost(notifications);
+
+  await startAuto(ctx, pi, base, false);
+
+  assert.ok(
+    notifications.some((message) => message.includes("Resuming paused session for M001")),
+    `a recorded escalate stays a human pause; got: ${notifications.join(" | ")}`,
+  );
+  assert.equal(autoSession.currentMilestoneId, "M001");
+  assert.equal(autoSession.pausedSessionFile, sessionFile, "the interrupted turn is restored for the person's replay");
+});
+
 test("restart resumes a pause that had no active unit from the pause row", async (t) => {
   const base = makeProject(t);
   autoSession.active = true;

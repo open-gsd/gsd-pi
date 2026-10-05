@@ -35,6 +35,7 @@ import {
   clearPausedSession as closePausedSession,
   closeStaleScopedPauses,
   readPausedSessionMetadata,
+  recordedMachinePauseAction,
   type InterruptedSessionAssessment,
 } from "./interrupted-session.js";
 import { openAutoPause } from "./db/writers/auto-pauses.js";
@@ -648,12 +649,21 @@ function handlePausedSessionResumeRecovery(
  * pause row. Per ADR-047 the guard stays; this makes the
  * exit reachable by never restoring a superseded pin in the first place.
  *
+ * `machineAction` is the Recovery Classifier route the open pause row recorded
+ * (ADR-046). A machine-classified `retry` pause is consumed by the machine:
+ * the advance re-runs the unit from its stored budgets and retries without a
+ * person, so the route is `machine-retry` instead of a human restore. Every
+ * other action — and every human blocker kind — restores the paused session
+ * for a person as before. A superseded pin still adopts the active milestone
+ * first: the stale-pin exit outranks the retry.
+ *
  * Id comparison uses the dispatch guard's own normalization
  * (`milestoneIdsDispatchCompatible`, #1317) so bare-vs-suffixed aliases of the
  * same milestone never count as superseded.
  */
 export type PausedSessionResumeRoute =
   | { route: "restore" }
+  | { route: "machine-retry" }
   | { route: "discard"; reason: "missing" | "terminal" }
   | { route: "adopt-active"; activeMilestoneId: string };
 
@@ -662,6 +672,8 @@ export function routePausedSessionResume(args: {
   summaryIsTerminal: boolean;
   pausedMilestoneId: string;
   activeMilestoneId: string | null | undefined;
+  /** The action the machine_fixable pause row recorded, when it did. */
+  machineAction?: "retry" | "escalate" | "stop" | null;
 }): PausedSessionResumeRoute {
   if (!args.milestoneExists) return { route: "discard", reason: "missing" };
   if (args.summaryIsTerminal) return { route: "discard", reason: "terminal" };
@@ -671,6 +683,7 @@ export function routePausedSessionResume(args: {
   ) {
     return { route: "adopt-active", activeMilestoneId: args.activeMilestoneId };
   }
+  if (args.machineAction === "retry") return { route: "machine-retry" };
   return { route: "restore" };
 }
 
@@ -3035,6 +3048,9 @@ export async function startAuto(
             summaryIsTerminal,
             pausedMilestoneId: meta.milestoneId,
             activeMilestoneId: freshStartAssessment.state?.activeMilestone?.id ?? null,
+            // The Recovery Classifier route the machine_fixable pause recorded
+            // (ADR-046): a retry is consumed by the machine, not by a person.
+            machineAction: recordedMachinePauseAction(meta),
           });
           if (resumeRoute.route === "discard") {
             clearPausedSession("paused-session DB cleanup failed (milestone gone/complete)");
@@ -3053,6 +3069,27 @@ export async function startAuto(
             s.milestoneLeaseToken = null;
             ctx.ui.notify(
               `Paused milestone ${meta.milestoneId} was superseded — ${resumeRoute.activeMilestoneId} is now the project's active milestone. Adopting ${resumeRoute.activeMilestoneId}; ${meta.milestoneId} remains open for later dispatch.`,
+              "info",
+            );
+          } else if (resumeRoute.route === "machine-retry") {
+            // The recorded Recovery Classifier route continues by machine
+            // decision (ADR-046): the advance re-runs the unit from its stored
+            // budgets and retries, so the interrupted turn is not replayed for
+            // a person — no paused-session file or tool-call recovery.
+            s.currentMilestoneId = meta.milestoneId;
+            s.originalBasePath = meta.originalBasePath || base;
+            s.stepMode = meta.stepMode ?? requestedStepMode;
+            s.autoStartTime = meta.autoStartTime || Date.now();
+            s.sessionMilestoneLock = meta.milestoneLock ?? null;
+            s.paused = true;
+            rebuildScope(
+              meta.worktreePath && existsSync(meta.worktreePath)
+                ? meta.worktreePath
+                : (s.originalBasePath || base),
+              s.currentMilestoneId,
+            );
+            ctx.ui.notify(
+              `Paused session for ${meta.milestoneId} was machine-classified retryable — resuming without operator action.`,
               "info",
             );
           } else {
