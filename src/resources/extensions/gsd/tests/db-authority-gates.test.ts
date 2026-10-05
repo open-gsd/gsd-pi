@@ -7,7 +7,7 @@
 //
 //   Gate                       Expected-fail checks and the package that makes them pass
 //   G1 files deleted           none
-//   G2 files poisoned          no projection reads P23
+//   G2 files poisoned          none
 //   G3 canonical wins          P23
 //   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save task SUMMARY P12
 //   G5 render failure          handler writes no projection P12
@@ -171,7 +171,7 @@ describe("G2: files-poisoned run", () => {
     assert.deepEqual(poisoned.artifacts, control.artifacts, "artifact verification ignores file content");
     assert.deepEqual(snapshotWorkflowTables(), tablesBefore, "decision reads write no workflow row");
     assert.equal(poisoned.prompt, control.prompt, "the prompt takes its narrative from artifact rows");
-    expectedFail("P23", () => assert.deepEqual(projectionReads, []));
+    assert.deepEqual(projectionReads, [], "a decision reads no projection file");
 
     await reconcileBeforeDispatch(base);
     assert.deepEqual(snapshotWorkflowTables(), tablesBefore, "reconciliation writes no workflow row from a file");
