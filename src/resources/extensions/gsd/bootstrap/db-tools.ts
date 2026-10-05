@@ -148,6 +148,7 @@ type DecisionRowLike = {
 	revisable?: unknown;
 	source?: unknown;
 	superseded_by?: unknown;
+	impacts?: unknown;
 };
 
 function decisionField(value: unknown): string {
@@ -159,6 +160,28 @@ function decisionField(value: unknown): string {
 // values for full-row fidelity.
 function decisionListField(value: unknown): string {
 	return decisionField(value).replace(/\s+/g, " ").trim();
+}
+
+function decisionImpactRows(decision: DecisionRowLike): Array<Record<string, unknown>> {
+	return Array.isArray(decision.impacts)
+		? decision.impacts.filter(
+				(impact): impact is Record<string, unknown> =>
+					impact !== null && typeof impact === "object",
+			)
+		: [];
+}
+
+function decisionImpactTarget(impact: Record<string, unknown>): string {
+	const triple = [impact.milestone_id, impact.slice_id, impact.task_id]
+		.filter((value) => value !== null && value !== undefined)
+		.map((value) => String(value))
+		.join("/");
+	return triple || decisionField(impact.target_scope);
+}
+
+function formatDecisionImpact(impact: Record<string, unknown>): string {
+	const note = decisionListField(impact.payload);
+	return `Impact: ${decisionField(impact.impact_kind) || "?"} ${decisionImpactTarget(impact)}${note ? ` — ${note}` : ""}`;
 }
 
 function formatDecisionGetContent(decision: DecisionRowLike): string {
@@ -174,6 +197,7 @@ function formatDecisionGetContent(decision: DecisionRowLike): string {
 		...(source ? [`Source: ${source}`] : []),
 		`Revisable: ${field(decision.revisable, "-")}`,
 		`Superseded by: ${field(decision.superseded_by, "none")}`,
+		...decisionImpactRows(decision).map(formatDecisionImpact),
 	].join("\n");
 }
 
@@ -182,10 +206,14 @@ function formatDecisionListLine(decision: DecisionRowLike): string {
 	const excerpt = rationale.length > DECISION_LIST_RATIONALE_EXCERPT_CHARS
 		? `${rationale.slice(0, DECISION_LIST_RATIONALE_EXCERPT_CHARS)}…`
 		: rationale;
+	const impactRows = decisionImpactRows(decision);
 	const segments = [
 		`${decisionListField(decision.id) || "?"} [${decisionListField(decision.scope) || "-"}] ${decisionListField(decision.decision) || "-"}`,
 		decisionListField(decision.choice) ? `choice: ${decisionListField(decision.choice)}` : "",
 		excerpt ? `rationale: ${excerpt}` : "",
+		impactRows.length > 0
+			? `impacts: ${impactRows.map((impact) => `${decisionListField(impact.impact_kind)} ${decisionImpactTarget(impact)}`).join("; ")}`
+			: "",
 	].filter(Boolean);
 	const supersededBy = decisionListField(decision.superseded_by);
 	return `- ${segments.join(" | ")}${supersededBy ? ` (superseded by ${supersededBy})` : ""}`;
@@ -262,6 +290,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					when_context: params.when_context,
 					made_by: params.made_by,
 					supersedes: params.supersedes,
+					impacts: params.impacts,
 				},
 				basePath,
 				piPlanningInvocation("gsd_decision_save", toolCallId),
@@ -296,8 +325,9 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_decision_save when recording an architectural, pattern, library, or observability decision.",
 			"Decision IDs are auto-assigned (D001, D002, ...) — never guess or provide an ID.",
-			"All fields except revisable, when_context, made_by, and supersedes are required.",
+			"All fields except revisable, when_context, made_by, supersedes, and impacts are required.",
 			"To reverse or replace an earlier decision, set supersedes to its ID. Only an active decision can be superseded.",
+			"Impacts are optional; each needs kind (revalidates/supersedes/blocks) and a target: milestone_id (optionally slice_id/task_id) or free-text scope.",
 			"The tool writes to the DB and regenerates .gsd/DECISIONS.md automatically.",
 			"Set made_by to 'human' when the user explicitly directed the decision, 'agent' when the LLM chose autonomously (default), or 'collaborative' when it was discussed and agreed together.",
 		],
@@ -330,6 +360,38 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					description:
 						"ID of the active decision that this decision replaces (e.g. 'D003'). The old decision is marked superseded.",
 				}),
+			),
+			impacts: Type.Optional(
+				Type.Array(
+					Type.Object({
+						kind: StringEnum(["revalidates", "supersedes", "blocks"], {
+							description:
+								"Impact kind: 'revalidates' marks scope work that must be revisited, 'supersedes' names the decision this replaces, 'blocks' marks scope work that cannot proceed.",
+						}),
+						milestone_id: Type.Optional(
+							Type.String({ description: "Target milestone ID (e.g. 'M001')." }),
+						),
+						slice_id: Type.Optional(
+							Type.String({ description: "Target slice ID; requires milestone_id." }),
+						),
+						task_id: Type.Optional(
+							Type.String({ description: "Target task ID; requires milestone_id and slice_id." }),
+						),
+						scope: Type.Optional(
+							Type.String({
+								description:
+									"Free scope text for targets that have no unit ID. Give milestone_id/slice_id/task_id or scope.",
+							}),
+						),
+						note: Type.Optional(
+							Type.String({ description: "Why this impact holds." }),
+						),
+					}),
+					{
+						description:
+							"Optional downstream impacts recorded with the decision. Omit or pass [] for none. Each needs a target: milestone_id (optionally slice_id/task_id) or free-text scope.",
+					},
+				),
 			),
 		}),
 		execute: decisionSaveExecute,

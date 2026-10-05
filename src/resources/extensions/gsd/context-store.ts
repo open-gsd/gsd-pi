@@ -6,7 +6,7 @@
 
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import type { DbAdapter } from "./db-adapter.js";
-import type { Decision, DecisionMadeBy, Requirement } from "./types.js";
+import type { Decision, DecisionMadeBy, DecisionStatementImpact, Requirement } from "./types.js";
 
 // ─── Query Functions ───────────────────────────────────────────────────────
 
@@ -789,6 +789,46 @@ export function queryRequirementsWithLimit(
 }
 
 /**
+ * Statement impacts of the given decisions, in saved order (decision, ordinal).
+ * Written only by the decision.save Domain Operation into
+ * workflow_decision_statement_impacts. Throws on query errors.
+ */
+export function getDecisionStatementImpacts(
+	decisionIds: readonly string[],
+ 	adapter?: DbAdapter,
+): Map<string, DecisionStatementImpact[]> {
+	const impacts = new Map<string, DecisionStatementImpact[]>();
+	if (decisionIds.length === 0) return impacts;
+	const db = resolveReadAdapter(adapter);
+	const placeholders = decisionIds.map((_, index) => `:id${index}`).join(", ");
+	const params: Record<string, unknown> = {};
+	decisionIds.forEach((id, index) => { params[`:id${index}`] = id; });
+	const rows = db.prepare(
+		`SELECT decision_id, impact_ordinal, impact_kind, milestone_id, slice_id, task_id,
+			target_scope, payload
+   FROM workflow_decision_statement_impacts
+   WHERE decision_id IN (${placeholders})
+   ORDER BY decision_id, impact_ordinal`,
+	).all(params) as Array<Record<string, unknown>>;
+	for (const row of rows) {
+		const decisionId = String(row["decision_id"]);
+		const list = impacts.get(decisionId) ?? [];
+		list.push({
+			decision_id: decisionId,
+			impact_ordinal: Number(row["impact_ordinal"]),
+			impact_kind: row["impact_kind"] as DecisionStatementImpact["impact_kind"],
+			milestone_id: row["milestone_id"] === null ? null : String(row["milestone_id"]),
+			slice_id: row["slice_id"] === null ? null : String(row["slice_id"]),
+			task_id: row["task_id"] === null ? null : String(row["task_id"]),
+			target_scope: row["target_scope"] === null ? null : String(row["target_scope"]),
+			payload: String(row["payload"] ?? ""),
+		});
+		impacts.set(decisionId, list);
+	}
+	return impacts;
+}
+
+/**
  * Query active decisions with SQL-level LIMIT applied.
  * Throws if query fails.
  */
@@ -832,7 +872,7 @@ export function queryDecisionsWithLimit(
 		Record<string, unknown>
 	>;
 
-	return rows.map((row) => {
+	const decisions = rows.map((row) => {
 		const sf = JSON.parse(row["structured_fields"] as string);
 		return {
 			seq: row["seq"] as number,
@@ -847,6 +887,15 @@ export function queryDecisionsWithLimit(
 			source: sf.source ?? "discussion",
 			superseded_by: sf.superseded_by ?? null,
 		};
+	});
+	const impacts = getDecisionStatementImpacts(
+		decisions.map((decision) => decision.id),
+		db,
+	);
+	// Rows without recorded impacts keep the exact legacy shape.
+	return decisions.map((decision) => {
+		const impactRows = impacts.get(decision.id);
+		return impactRows ? { ...decision, impacts: impactRows } : decision;
 	});
 }
 
@@ -912,7 +961,7 @@ export function getDecisionByIdStrict(
 	const sf = JSON.parse(rows[0]!["structured_fields"] as string);
 	if (sf.deleted === true) return null;
 
-	return {
+	const decision: Decision = {
 		seq: rows[0]!["seq"] as number,
 		id: sf.sourceDecisionId,
 		scope: sf.scope ?? "",
@@ -925,4 +974,6 @@ export function getDecisionByIdStrict(
 		source: sf.source ?? "discussion",
 		superseded_by: sf.superseded_by ?? null,
 	};
+	const impactRows = getDecisionStatementImpacts([decision.id], db).get(decision.id);
+	return impactRows ? { ...decision, impacts: impactRows } : decision;
 }
