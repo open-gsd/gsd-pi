@@ -134,6 +134,8 @@ const ROOT_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /^KNOWLEDGE\.md$/i, tool: "capture_thought" },
   { name: /^CAPTURES\.md$/i, tool: "/gsd capture (new capture), gsd_capture_resolve or gsd_capture_complete" },
   { name: /^QUEUE\.md$/i, tool: "gsd_milestone_reorder, gsd_milestone_park or gsd_milestone_discard" },
+  { name: /^QUEUE-ORDER\.json$/i, tool: "gsd_milestone_reorder" },
+  { name: /^OVERRIDES\.md$/i, tool: "/gsd steer (the user registers the override)" },
   { name: /^ROADMAP\.md$/i, tool: "gsd_plan_milestone or gsd_reassess_roadmap" },
 ];
 
@@ -170,6 +172,19 @@ function projectionSaveTool(filePath: string): string | null {
     : top === "milestones" || top === "phases" ? HIERARCHY_PROJECTION_SAVE_TOOLS : [];
   const name = logical[logical.length - 1];
   return kinds.find((kind) => kind.name.test(name))?.tool ?? null;
+}
+
+/**
+ * The save tool that renders a managed projection file NAME, or null when the
+ * name is not a managed projection kind. Shared with the prompt lint
+ * (tests/prompt-projection-lint.test.ts) so the lint and the write guard read
+ * one block list.
+ */
+export function managedProjectionSaveToolByName(fileName: string): string | null {
+  const name = fileName.replaceAll("\\", "/").split("/").pop() ?? fileName;
+  return ROOT_PROJECTION_SAVE_TOOLS.find((kind) => kind.name.test(name))?.tool
+    ?? HIERARCHY_PROJECTION_SAVE_TOOLS.find((kind) => kind.name.test(name))?.tool
+    ?? null;
 }
 
 function projectionWriteError(filePath: string, tool: string): string {
