@@ -6,6 +6,7 @@ import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 import {
   hostWriteGateAdapter,
@@ -33,6 +34,14 @@ import {
 } from "../../../src/resources/extensions/gsd/gsd-db.ts";
 import { createMcpServer } from "./server.ts";
 import { SessionManager } from "./session-manager.ts";
+
+// The server reads the gate through the module instance that this file seeds.
+// A second instance (the built dist copy) keeps its own database connection,
+// which this file cannot close before it removes the project directory.
+process.env.GSD_WORKFLOW_WRITE_GATE_MODULE ??= fileURLToPath(new URL(
+  `../../../src/resources/extensions/gsd/bootstrap/write-gate.${import.meta.url.includes("/dist-test/") ? "js" : "ts"}`,
+  import.meta.url,
+));
 
 /** A project whose database holds one open escalation on M001/S01/T01. The database is closed. */
 function seedProjectWithOpenEscalation(t: { after(fn: () => void): void }): string {
