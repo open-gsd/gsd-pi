@@ -210,3 +210,19 @@ test("a database that belongs to another checkout → inactive, and the reason i
   assert.equal(result.paused, false, "the pause of the other checkout is not this project's pause");
   assert.match(stderr, /checkout-unbound: .*\/gsd db bind/s);
 });
+
+test("a database file that cannot be opened → inactive, and the reason is written to stderr", async (t) => {
+  const fixture = makeTempFixture();
+  t.after(() => fixture.cleanup());
+  mkdirSync(join(fixture.projectCwd, ".gsd"), { recursive: true });
+  writeFileSync(join(fixture.projectCwd, ".gsd", "gsd.db"), "not a sqlite database");
+
+  const stderrWrite = t.mock.method(process.stderr, "write", () => true);
+  const result = await collect(fixture.projectCwd);
+  const stderr = stderrWrite.mock.calls.map((call) => String(call.arguments[0])).join("");
+  stderrWrite.mock.restore();
+
+  assert.equal(result.active, false);
+  assert.equal(result.paused, false);
+  assert.match(stderr, /auto dashboard: project database unavailable: /);
+});

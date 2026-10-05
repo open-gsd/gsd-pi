@@ -119,14 +119,15 @@ export function recordOutcome(
 
 /**
  * Record user feedback for the last completed unit.
+ * Returns false when the rating was not stored in the database.
  */
 export function recordFeedback(
   unitType: string,
   unitId: string,
   tier: ComplexityTier,
   rating: "over" | "under" | "ok",
-): void {
-  if (!history) return;
+): boolean {
+  if (!history) return false;
 
   history.feedback.push({
     unitType,
@@ -161,7 +162,7 @@ export function recordFeedback(
   // "ok" = no adjustment needed
 
   history.updatedAt = new Date().toISOString();
-  saveHistory(history);
+  return saveHistory(history);
 }
 
 /**
@@ -192,9 +193,9 @@ export function getAdaptiveTierAdjustment(
 /**
  * Clear all routing history (user-triggered reset).
  */
-export function clearRoutingHistory(): void {
+export function clearRoutingHistory(): boolean {
   history = createEmptyHistory();
-  saveHistory(history);
+  return saveHistory(history);
 }
 
 /**
@@ -276,13 +277,15 @@ function loadHistory(): RoutingHistoryData {
   return isRoutingHistoryData(stored) ? stored : createEmptyHistory();
 }
 
-function saveHistory(data: RoutingHistoryData): void {
+function saveHistory(data: RoutingHistoryData): boolean {
   // Without a database the history lives for this process only.
-  if (!isDbAvailable()) return;
+  if (!isDbAvailable()) return false;
   try {
     setRuntimeKv("global", "", HISTORY_KV_KEY, data);
+    return true;
   } catch (err) {
     // Learning data only: a failed write must not stop the unit that reports its outcome.
     logWarning("db", `routing history not stored: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
   }
 }

@@ -123,7 +123,7 @@ export function showHelp(ctx: ExtensionCommandContext, args = ""): void {
     "  /gsd undo           Revert last completed unit  [--force]",
     "  /gsd undo-task      Reset a specific task's completion state  [DB + markdown]",
     "  /gsd reset-slice    Reset a slice and all its tasks  [DB + markdown]",
-    "  /gsd rate           Rate last unit's model tier  [over|ok|under]",
+    "  /gsd rate           Rate last unit's model tier  [over|ok|under|reset]",
     "  /gsd rethink        Conversational project reorganization — reorder, park, discard, add milestones",
     "  /gsd park [id]      Park a milestone — skip without deleting  [reason]",
     "  /gsd unpark [id]    Reactivate a parked milestone",

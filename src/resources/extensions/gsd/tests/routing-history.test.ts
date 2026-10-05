@@ -302,3 +302,45 @@ test("a refused database write does not stop the unit that reports its outcome",
   assert.doesNotThrow(() => recordOutcome("execute-task", "light", false));
   assert.equal(getRoutingHistory()!.patterns["execute-task"].light.fail, 1, "the outcome still counts in this session");
 });
+
+function refuseDatabaseWrites(dir: string): void {
+  const replacement = getDatabaseReplacementPaths(join(dir, ".gsd", "gsd.db"));
+  mkdirSync(replacement.recoveryDirectory);
+  writeFileSync(replacement.activeIntentPath, "{}");
+}
+
+function rate(args: string, dir: string): Promise<Array<{ message: string; level: string }>> {
+  const notices: Array<{ message: string; level: string }> = [];
+  const ctx = { ui: { notify: (message: string, level: string) => { notices.push({ message, level }); } } };
+  return handleRate(args, ctx as any, dir).then(() => notices);
+}
+
+test("/gsd rate reset reports an error when the database refuses the write", async (t) => {
+  const dir = makeTmpDir();
+  t.after(() => cleanup(dir));
+  initRoutingHistory();
+  for (let i = 0; i < 3; i++) recordOutcome("execute-task", "light", false);
+  refuseDatabaseWrites(dir);
+
+  const notices = await rate("reset", dir);
+
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].level, "error");
+  assert.match(notices[0].message, /not cleared/);
+});
+
+test("/gsd rate under reports an error when the database refuses the write", async (t) => {
+  const dir = makeTmpDir();
+  t.after(() => cleanup(dir));
+  writeFileSync(
+    join(dir, ".gsd", "metrics.json"),
+    JSON.stringify({ version: 1, projectStartedAt: 0, units: [{ type: "execute-task", id: "M001/S01/T01", tier: "light" }] }),
+  );
+  refuseDatabaseWrites(dir);
+
+  const notices = await rate("under", dir);
+
+  assert.equal(notices.length, 1);
+  assert.equal(notices[0].level, "error");
+  assert.match(notices[0].message, /not recorded/);
+});

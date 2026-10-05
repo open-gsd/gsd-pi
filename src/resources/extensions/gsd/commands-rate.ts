@@ -23,7 +23,10 @@ export async function handleRate(
       ctx.ui.notify("Routing history not cleared: the project database could not be opened.", "error");
       return;
     }
-    clearRoutingHistory();
+    if (!clearRoutingHistory()) {
+      ctx.ui.notify("Routing history not cleared: the project database refused the write.", "error");
+      return;
+    }
     ctx.ui.notify("Routing history cleared. Adaptive routing starts again from no data.", "info");
     return;
   }
@@ -63,7 +66,10 @@ export async function handleRate(
     return;
   }
   initRoutingHistory();
-  recordFeedback(lastUnit.type, lastUnit.id, tier, rating as "over" | "under" | "ok");
+  if (!recordFeedback(lastUnit.type, lastUnit.id, tier, rating as "over" | "under" | "ok")) {
+    ctx.ui.notify("Rating not recorded: the project database refused the write.", "error");
+    return;
+  }
 
   ctx.ui.notify(
     `Recorded "${rating}" for ${lastUnit.type}/${lastUnit.id} at tier ${tier}.`,

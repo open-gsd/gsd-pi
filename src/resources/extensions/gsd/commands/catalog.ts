@@ -44,7 +44,7 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "undo", desc: "Revert last completed unit" },
   { cmd: "undo-task", desc: "Reset a specific task's completion state (DB + markdown)" },
   { cmd: "reset-slice", desc: "Reset a slice and all its tasks (DB + markdown)" },
-  { cmd: "rate", desc: "Rate last unit's model tier (over/ok/under) — improves adaptive routing" },
+  { cmd: "rate", desc: "Rate last unit's model tier (over/ok/under) or reset the routing history — improves adaptive routing" },
   { cmd: "skip", desc: "Prevent a unit from auto-mode dispatch" },
   { cmd: "report", desc: "Generate all HTML reports and open the reports index" },
   { cmd: "export", desc: "Alias for /gsd report" },
