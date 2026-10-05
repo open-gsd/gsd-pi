@@ -13,7 +13,7 @@ import {
   _getAdapter,
   readTransaction,
 } from "../gsd-db.js";
-import { readProgressCounts, type ProgressCounts } from "../db/lifecycle-read.js";
+import { readOpenBlockers, readProgressCounts, type OpenBlockerRow, type ProgressCounts } from "../db/lifecycle-read.js";
 import type { ProjectProgressReadMetadata } from "@opengsd/contracts";
 import type { GSDState } from "../types.js";
 
@@ -39,6 +39,12 @@ export interface DbProgressResult {
   tasks: { total: number; done: number; pending: number };
   requirements: { active: number; validated: number; deferred: number; outOfScope: number } | null;
   blockers: string[];
+  /**
+   * The open canonical blocker rows at the revision of this read — the same
+   * rows the project snapshot returns, so progress and snapshot give equal
+   * blockers at one revision. The projection fallback never sets it.
+   */
+  blockerRows?: OpenBlockerRow[];
   nextAction: string;
   readMetadata?: ProjectProgressReadMetadata;
 }
@@ -93,6 +99,7 @@ function stabilityTokensMatch(
 function buildProgressResult(
   state: GSDState,
   counts: ProgressCounts,
+  blockerRows: OpenBlockerRow[],
 ): DbProgressResult {
   return {
     activeMilestone: toRef(state.activeMilestone),
@@ -110,6 +117,7 @@ function buildProgressResult(
           }
         : null,
     blockers: [...state.blockers],
+    blockerRows: [...blockerRows],
     nextAction: state.nextAction,
     readMetadata: { ...DB_READ_METADATA },
   };
@@ -129,7 +137,14 @@ async function readProgressFromDbInternal(
   for (let attempt = 1; ; attempt++) {
     const before = readProgressStabilityToken();
     const state = await deriveState(basePath);
-    const progress = buildProgressResult(state, readTransaction(readProgressCounts));
+    // The counts and the canonical blocker rows come out of one read
+    // transaction, so a progress result and a snapshot at the same revision
+    // give the same counts and the same blockers.
+    const { counts, blockerRows } = readTransaction(() => ({
+      counts: readProgressCounts(),
+      blockerRows: readOpenBlockers(),
+    }));
+    const progress = buildProgressResult(state, counts, blockerRows);
     const details = includeHierarchyDetails ? getProgressHierarchyDetails() : undefined;
     const result: DbProgressResult | DbProjectProgressResult = details
       ? {

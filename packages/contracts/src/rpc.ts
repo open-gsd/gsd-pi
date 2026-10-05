@@ -114,6 +114,13 @@ export interface ProjectProgress {
 	tasks: { total: number; done: number; pending: number };
 	requirements: { active: number; validated: number; deferred: number; outOfScope: number } | null;
 	blockers: string[];
+	/**
+	 * The open canonical blocker rows at the revision of this read — the same
+	 * rows `ProjectSnapshot.blockers` returns, so the two outputs can give
+	 * equal blockers at one revision. Absent in a projection read and in a
+	 * producer older than the field.
+	 */
+	blockerRows?: ProjectSnapshotBlocker[];
 	nextAction: string;
 	milestoneDetails?: Array<{
 		id: string;
