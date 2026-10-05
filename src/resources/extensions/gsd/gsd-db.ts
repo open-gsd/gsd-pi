@@ -84,7 +84,7 @@ export type { ArtifactRow, MilestoneRow } from "./db-milestone-artifact-rows.js"
 export type { ActiveTaskSummary, IdStatusSummary, TaskStatusCounts } from "./db-lightweight-query-rows.js";
 export type { SliceRow, TaskRow } from "./db-task-slice-rows.js";
 
-import { TASK_HAS_ESCALATION_SQL, TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
+import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
 import { applyStatusTransition } from "./db/writers/status.js";
 export { projectCanonicalStatusToLegacy } from "./db/writers/status.js";
 import {
@@ -846,40 +846,10 @@ export function setSliceUatMd(milestoneId: string, sliceId: string, uatMd: strin
 // ─── ADR-011 Phase 2 escalation helpers ──────────────────────────────────
 
 /**
- * Set pause-on-escalation state on a task. Mutually exclusive with awaiting_review.
- * A new escalation has a new answer to deliver, so the override claim is reset.
+ * Clear the pause flags of an escalation from before the database stored
+ * escalations. A new escalation does not set these flags: its open question
+ * is the pause.
  */
-export function setTaskEscalationPending(
-  milestoneId: string, sliceId: string, taskId: string,
-): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `UPDATE tasks
-       SET escalation_pending = 1,
-           escalation_awaiting_review = 0,
-           escalation_override_applied_at = NULL
-     WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-  ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
-}
-
-/**
- * Set awaiting-review state (the escalation requires explicit user review). Mutually exclusive with pending.
- * A new escalation has a new answer to deliver, so the override claim is reset.
- */
-export function setTaskEscalationAwaitingReview(
-  milestoneId: string, sliceId: string, taskId: string,
-): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `UPDATE tasks
-       SET escalation_awaiting_review = 1,
-           escalation_pending = 0,
-           escalation_override_applied_at = NULL
-     WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-  ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
-}
-
-/** Clear escalation-pending and awaiting-review flags once the user has resolved it. */
 export function clearTaskEscalationFlags(
   milestoneId: string, sliceId: string, taskId: string,
 ): void {
@@ -891,31 +861,6 @@ export function clearTaskEscalationFlags(
      WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
 }
-
-/**
- * Atomically claim a resolved escalation override for injection into a downstream
- * task's prompt. Returns true if this caller claimed it (must inject), false if
- * another caller already claimed it (must skip).
- */
-export function claimEscalationOverride(
-  milestoneId: string, sliceId: string, sourceTaskId: string,
-): boolean {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  return immediateTransaction(() => {
-    const now = new Date().toISOString();
-    const result = getDbOrNull()!.prepare(
-      `UPDATE tasks
-         SET escalation_override_applied_at = :now
-       WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid
-         AND escalation_override_applied_at IS NULL
-         AND ${TASK_HAS_ESCALATION_SQL}`,
-    ).run({ ":now": now, ":mid": milestoneId, ":sid": sliceId, ":tid": sourceTaskId });
-    // node:sqlite surfaces `changes` on the run result.
-    const changes = (result as { changes?: number }).changes ?? 0;
-    return changes > 0;
-  });
-}
-
 
 /** Set the blocker_source provenance field (used when rejecting an escalation). */
 export function setTaskBlockerSource(
@@ -1716,14 +1661,15 @@ export function setProjectRootBinding(root: string): void {
 
 /**
  * Stamp the `replan_triggered_at` column on a slice. Used by triage-resolution
- * when a user capture requests a replan so the dispatcher can detect the
- * trigger via DB in addition to the on-disk REPLAN-TRIGGER.md marker.
+ * when a user capture requests a replan. The column is the replan trigger that
+ * the dispatcher reads. Returns false when the slice has no row.
  */
-export function setSliceReplanTriggeredAt(milestoneId: string, sliceId: string, ts: string): void {
+export function setSliceReplanTriggeredAt(milestoneId: string, sliceId: string, ts: string): boolean {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
+  const updated = transaction(() => getDbOrNull()!.prepare(
     "UPDATE slices SET replan_triggered_at = :ts WHERE milestone_id = :mid AND id = :sid",
   ).run({ ":ts": ts, ":mid": milestoneId, ":sid": sliceId }));
+  return Number((updated as { changes?: number }).changes ?? 0) === 1;
 }
 
 /**

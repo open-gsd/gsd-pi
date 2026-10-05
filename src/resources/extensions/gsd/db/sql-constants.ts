@@ -123,3 +123,6 @@ export const TASK_HAS_ESCALATION_SQL = `(${taskEscalationExistsSql("!= 'withdraw
 
 /** True when the Task has an open escalation question. This is the pause. */
 export const TASK_HAS_OPEN_ESCALATION_SQL = taskEscalationExistsSql("= 'open'");
+
+/** Event that records the delivery of an escalation response to the next task's prompt. */
+export const TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT = "task.escalation.override_claimed";

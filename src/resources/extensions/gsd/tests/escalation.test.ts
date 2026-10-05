@@ -17,7 +17,6 @@ import {
   insertTask,
   updateTaskStatus,
   getTask,
-  claimEscalationOverride,
   findUnappliedEscalationOverride,
   listEscalationArtifacts,
   SCHEMA_VERSION,
@@ -175,10 +174,11 @@ test("ADR-011 P2: an escalation is stored as an Open Question with a choice inte
   assert.equal(roundTrip?.respondedAt, undefined);
   assert.deepEqual(roundTrip?.options, [sampleOptions[1], sampleOptions[0]]);
 
-  // DB flag flipped to pending (continueWithDefault=false).
+  // The open question is the pause. The task pause flags are not written.
   const row = getTask("M001", "S01", "T03");
-  assert.equal(row?.escalation_pending, 1);
+  assert.equal(row?.escalation_pending, 0);
   assert.equal(row?.escalation_awaiting_review, 0);
+  assert.equal(detectPendingEscalation([row!]), "T03");
 
   assert.deepEqual(
     fileNamesUnder(join(base, ".gsd")).filter((name) => name.includes("ESCALATION")),
@@ -187,7 +187,7 @@ test("ADR-011 P2: an escalation is stored as an Open Question with a choice inte
   );
 });
 
-test("ADR-011 P2: continueWithDefault=true sets awaiting_review (NOT pending)", (t) => {
+test("ADR-011 P2: continueWithDefault=true is stored with the question, not in the task flags", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   seedCompletedTask(base, "T04");
@@ -203,8 +203,10 @@ test("ADR-011 P2: continueWithDefault=true sets awaiting_review (NOT pending)", 
   openEscalation(base, art);
 
   const row = getTask("M001", "S01", "T04");
-  assert.equal(row?.escalation_pending, 0, "fire-and-correct must NOT set escalation_pending");
-  assert.equal(row?.escalation_awaiting_review, 1);
+  assert.equal(row?.escalation_pending, 0);
+  assert.equal(row?.escalation_awaiting_review, 0, "the task pause flags are not written");
+  assert.equal(readTaskEscalation("M001", "S01", "T04")?.continueWithDefault, true);
+  assert.equal(detectPendingEscalation([row!]), "T04", "the open question pauses until the user responds");
 });
 
 test("ADR-011 P2: detectPendingEscalation pauses on unresolved awaiting_review escalations", (t) => {
@@ -304,14 +306,17 @@ test("ADR-011 P2: resolveEscalation(invalid-choice) returns error + leaves state
 
   // State must NOT have changed.
   const row = getTask("M001", "S01", "T07");
-  assert.equal(row?.escalation_pending, 1, "flag must still be pending after invalid choice");
+  assert.equal(detectPendingEscalation([row!]), "T07", "the escalation must still pause after an invalid choice");
   assert.equal(countRows("workflow_answers"), 0, "an invalid choice stores no answer");
 });
 
-test("ADR-011 P2: claimEscalationOverride is atomic — only one claimer wins the race", (t) => {
+test("ADR-046: the override claim is one task.escalation.override.claim operation, and the task column does not decide it", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   seedCompletedTask(base, "T08");
+  const setAppliedAt = (value: string | null) => _getAdapter()!.prepare(
+    "UPDATE tasks SET escalation_override_applied_at = :value WHERE id = 'T08'",
+  ).run({ ":value": value });
 
   openEscalation(base, buildEscalationArtifact({
     taskId: "T08", sliceId: "S01", milestoneId: "M001",
@@ -320,10 +325,34 @@ test("ADR-011 P2: claimEscalationOverride is atomic — only one claimer wins th
   }));
   resolveEscalation(base, "M001", "S01", "T08", "A", "pick A");
 
-  const first = claimEscalationOverride("M001", "S01", "T08");
-  const second = claimEscalationOverride("M001", "S01", "T08");
-  assert.equal(first, true, "first claim wins");
-  assert.equal(second, false, "second claim must fail — override already applied");
+  // A stale legacy claim marker does not hide the response.
+  setAppliedAt("2026-01-01T00:00:00.000Z");
+  assert.equal(claimOverrideForInjection("M001", "S01")?.sourceTaskId, "T08", "first claim wins");
+  assert.equal(operations("task.escalation.override.claim"), 1);
+
+  // A cleared legacy claim marker does not release the response again.
+  setAppliedAt(null);
+  assert.equal(findUnappliedEscalationOverride("M001", "S01"), null);
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "second claim must fail — override already applied");
+  assert.equal(operations("task.escalation.override.claim"), 1);
+  assert.equal(getTask("M001", "S01", "T08")?.escalation_override_applied_at, null, "the claim does not write the task column");
+});
+
+test("ADR-046: a claimed override stays claimed across a database reopen", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  seedCompletedTask(base, "T08r");
+  openEscalation(base, buildEscalationArtifact({
+    taskId: "T08r", sliceId: "S01", milestoneId: "M001",
+    question: "Q", options: sampleOptions, recommendation: "A", recommendationRationale: "r",
+    continueWithDefault: false,
+  }));
+  resolveEscalation(base, "M001", "S01", "T08r", "B", "");
+  assert.equal(claimOverrideForInjection("M001", "S01")?.sourceTaskId, "T08r");
+
+  closeDatabase();
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  assert.equal(claimOverrideForInjection("M001", "S01"), null, "the claim event is the record of delivery");
 });
 
 test("ADR-011 P2: claimOverrideForInjection returns null when flag ON but no unapplied override", (t) => {
@@ -357,8 +386,7 @@ test("ADR-011 P2: claim does NOT fire on unresolved awaiting_review — resoluti
   const premature = claimOverrideForInjection("M001", "S01");
   assert.equal(premature, null, "awaiting_review without respondedAt must not be claimed");
 
-  const midState = getTask("M001", "S01", "T09a");
-  assert.equal(midState?.escalation_override_applied_at, null, "applied_at must still be null");
+  assert.equal(operations("task.escalation.override.claim"), 0, "nothing must be claimed yet");
 
   // User now resolves.
   resolveEscalation(base, "M001", "S01", "T09a", "B", "actually B is better");
@@ -614,7 +642,6 @@ test("ADR-011 P3 #21: blocker takes priority over escalation when both flags coe
 
   // Pre-condition: escalation is active, blocker is not.
   let row = getTask("M001", "S01", "T40");
-  assert.equal(row?.escalation_pending, 1);
   assert.equal(row?.blocker_discovered, false);
   assert.equal(detectPendingEscalation([row!]), "T40");
 
@@ -781,8 +808,7 @@ test("ADR-011 P3 #24: continueWithDefault requires explicit response before over
 
   // T80 is awaiting_review (not pending), but scheduler detection still
   // pauses until the user explicitly responds.
-  assert.equal(getTask("M001", "S01", "T80")?.escalation_awaiting_review, 1);
-  assert.equal(getTask("M001", "S01", "T80")?.escalation_pending, 0);
+  assert.equal(readTaskEscalation("M001", "S01", "T80")?.continueWithDefault, true);
   assert.equal(detectPendingEscalation([getTask("M001", "S01", "T80")!]), "T80");
 
   // Prompt injection must still wait for a response.
@@ -794,9 +820,9 @@ test("ADR-011 P3 #24: continueWithDefault requires explicit response before over
 
   // The response window remains open across N tasks — still no override applied.
   assert.equal(
-    getTask("M001", "S01", "T80")?.escalation_override_applied_at,
-    null,
-    "applied_at must stay null throughout the response window",
+    operations("task.escalation.override.claim"),
+    0,
+    "nothing is claimed throughout the response window",
   );
 
   // Phase 2 — user responds with a different option than the recommendation.

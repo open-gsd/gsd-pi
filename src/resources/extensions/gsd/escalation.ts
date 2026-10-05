@@ -5,21 +5,18 @@
 // An escalation is an Open Question on the Task lifecycle with a presented
 // choice interaction (ADR-046). The database rows are the only record: the
 // question, options, recommendation, and the user's answer. An open question
-// is the pause, and an answered question that no prompt has claimed is the
-// pending override. The legacy task pause flags are a written mirror. They are
-// read only for a Task that has no question row: an escalation from before the
-// database stored them, which still pauses. Its T##-ESCALATION.json file is
-// read once, to store the question in the database. Scoped to execute-task only.
+// is the pause, and a response with no claim event is the pending override.
+// The legacy task pause flags are not written. They are read only for a Task
+// that has no question row: an escalation from before the database stored
+// them, which still pauses. Its T##-ESCALATION.json file is read once, to
+// store the question in the database. Scoped to execute-task only.
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import type { EscalationArtifact, EscalationOption } from "./types.js";
 import {
-  setTaskEscalationPending,
-  setTaskEscalationAwaitingReview,
   clearTaskEscalationFlags,
-  claimEscalationOverride,
   findUnappliedEscalationOverride,
   setTaskBlockerSource,
   listEscalationArtifacts,
@@ -28,7 +25,11 @@ import {
 import type { TaskRow } from "./db-task-slice-rows.js";
 import { executeDomainOperation } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
-import { TASK_ESCALATION_OPENED_EVENT, TASK_ESCALATION_RESOLVED_EVENT } from "./db/sql-constants.js";
+import {
+  TASK_ESCALATION_OPENED_EVENT,
+  TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT,
+  TASK_ESCALATION_RESOLVED_EVENT,
+} from "./db/sql-constants.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 import {
   answerTaskEscalationQuestion,
@@ -159,11 +160,6 @@ export function openTaskEscalation(
       recommendation: artifact.recommendation,
       recommendationRationale: artifact.recommendationRationale,
     });
-    if (artifact.continueWithDefault) {
-      setTaskEscalationAwaitingReview(milestoneId, sliceId, taskId);
-    } else {
-      setTaskEscalationPending(milestoneId, sliceId, taskId);
-    }
     return {
       events: [{
         eventType: TASK_ESCALATION_OPENED_EVENT,
@@ -628,10 +624,45 @@ function applyEscalationResponse(
 // ─── Carry-forward lookup ─────────────────────────────────────────────────
 
 /**
- * If this slice has a resolved-but-unapplied escalation override, atomically
- * claim it (via DB UPDATE) and return the markdown block to prepend to the
- * next task's prompt. Returns null when there's no unapplied override OR
- * when another caller claimed it first (idempotent).
+ * Record, in one task.escalation.override.claim Domain Operation, that the
+ * response stored by `resolveOperationId` is delivered to a prompt. Each
+ * response is claimed once: returns false when another caller claimed it first.
+ */
+function claimEscalationOverride(
+  milestoneId: string, sliceId: string, taskId: string, resolveOperationId: string,
+): boolean {
+  const idempotencyKey = `escalation:claim:${resolveOperationId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  if (fence.replay) return false;
+  return executeDomainOperation({
+    operationType: "task.escalation.override.claim",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "system",
+    sourceTransport: "internal",
+    payload: { milestoneId, sliceId, taskId, resolveOperationId },
+  }, () => ({
+    events: [{
+      eventType: TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT,
+      entityType: "task",
+      entityId: `${milestoneId}/${sliceId}/${taskId}`,
+      payload: { resolveOperationId },
+      destinations: ["projection"],
+    }],
+    projections: [{
+      projectionKey: `escalation/${milestoneId}/${sliceId}/${taskId}`.toLowerCase(),
+      projectionKind: "state",
+      rendererVersion: "1",
+    }],
+  })).status === "committed";
+}
+
+/**
+ * If this slice has a resolved-but-unapplied escalation override, claim it
+ * and return the markdown block to prepend to the next task's prompt. Returns
+ * null when there's no unapplied override OR when another caller claimed it
+ * first (idempotent).
  */
 export function claimOverrideForInjection(
   milestoneId: string, sliceId: string,
@@ -640,7 +671,7 @@ export function claimOverrideForInjection(
   if (!unapplied) return null;
   const escalation = readTaskEscalation(milestoneId, sliceId, unapplied.taskId);
   if (!escalation?.respondedAt || !escalation.userChoice) return null;
-  const claimed = claimEscalationOverride(milestoneId, sliceId, unapplied.taskId);
+  const claimed = claimEscalationOverride(milestoneId, sliceId, unapplied.taskId, unapplied.resolveOperationId);
   if (!claimed) return null; // lost the race
   return {
     injectionBlock: formatOverrideBlock(escalation),

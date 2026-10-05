@@ -2028,8 +2028,8 @@ test("#2348: the legacy refusal still records the escalation question for a reco
     `), {
       question_text: "Should execution pause for the hard blocker?",
       question_status: "open",
-      escalation_pending: 1,
-    }, "the escalation question must survive the projection refusal");
+      escalation_pending: 0,
+    }, "the escalation question must survive the projection refusal, and it is the pause: the task flag is not written");
     assert.equal(
       Number(row("SELECT COUNT(*) AS count FROM artifacts WHERE artifact_type = 'SUMMARY'").count),
       0,
