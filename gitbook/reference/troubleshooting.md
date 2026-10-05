@@ -251,8 +251,8 @@ Then `/gsd auto` to restart from current state.
 
 ### Reset routing history
 
-```bash
-rm .gsd/routing-history.json
+```
+/gsd rate reset
 ```
 
 ### Refresh rendered state

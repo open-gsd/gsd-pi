@@ -32,7 +32,7 @@
 | `/gsd update` | Update GSD to the latest version |
 | `/gsd knowledge` | Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild. |
 | `/gsd fast` | Toggle service tier for supported models |
-| `/gsd rate` | Rate last unit's model tier (over/ok/under) |
+| `/gsd rate` | Rate last unit's model tier (over/ok/under) or reset the routing history |
 | `/gsd changelog` | Show release notes |
 | `/gsd logs` | Browse activity and debug logs |
 | `/gsd remote` | Control remote auto-mode |
