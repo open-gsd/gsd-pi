@@ -74,9 +74,14 @@ dispatch() {
 
   for _ in {1..20}; do
     sleep 3
-    run_id="$(gh run list --repo "$HARNESS_REPO" --workflow "$WORKFLOW_FILE" --limit 20 \
+    # Pass the expected title and dispatch time as DATA via the environment
+    # ($ENV in gh's gojq) instead of interpolating them into the jq program:
+    # a valid branch name may contain a double quote, which would otherwise
+    # break the filter on every poll.
+    run_id="$(EXPECTED_TITLE="$expected_title" DISPATCH_STARTED="$dispatch_started" \
+      gh run list --repo "$HARNESS_REPO" --workflow "$WORKFLOW_FILE" --limit 20 \
       --json databaseId,displayTitle,createdAt \
-      --jq "[.[] | select(.displayTitle == \"${expected_title}\" and .createdAt >= \"${dispatch_started}\")] | sort_by(.createdAt) | last | .databaseId // \"none\"" \
+      --jq '[.[] | select(.displayTitle == $ENV.EXPECTED_TITLE and .createdAt >= $ENV.DISPATCH_STARTED)] | sort_by(.createdAt) | last | .databaseId // "none"' \
       2>/dev/null || echo none)"
     if [[ "$run_id" != "none" && -n "$run_id" ]]; then
       run_url="$(gh run view "$run_id" --repo "$HARNESS_REPO" --json url --jq '.url')"

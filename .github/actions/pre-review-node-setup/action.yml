@@ -20,7 +20,13 @@ runs:
       uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe502f
       with:
         node-version: ${{ inputs.node-version }}
-        cache: pnpm
+        # Deliberately NO `cache: pnpm` here. This action only runs in the
+        # pre-review workflow, which checks out an externally supplied
+        # repository+SHA and executes its install scripts. setup-node's pnpm
+        # cache is keyed only by OS/arch/package-manager/lockfile hash and is
+        # saved after a successful job, so a poisoned untrusted install could
+        # write a store that regular merge-authority CI later restores under
+        # the same key. Pre-review runs accept the slower cold install.
     - name: Install dependencies
       shell: bash
       env:
