@@ -272,36 +272,49 @@ function isEmptyDatabaseBesideProjections(projectGsd: string): boolean {
 }
 
 /**
- * Store the operator's explicit choice to start from the open database as it
- * is, although `.gsd` holds projections it did not produce (/gsd db
- * start-empty). It is one Domain Operation, so the choice is durable. Returns
- * false and stores nothing when the open would not refuse the database: a
- * needless operation would close the Restore Window of an import.
+ * Start from an empty database on purpose, although `.gsd` holds workflow
+ * history that this database did not produce (/gsd db start-empty). The choice
+ * is one Domain Operation, so it is durable. Returns the open result, or null
+ * when the normal open does not refuse the project. Then it stores nothing and
+ * creates no database: a needless operation would close the Restore Window of
+ * an import.
  */
-export function recordStartEmptyChoice(basePath: string): boolean {
-  if (!isEmptyDatabaseBesideProjections(resolveWorkflowDatabaseLocation(basePath).projectGsd)) return false;
-  const idempotencyKey = "project/start-empty";
-  const fence = readDomainOperationFence(idempotencyKey);
-  executeDomainOperation({
-    operationType: START_EMPTY_OPERATION,
-    idempotencyKey,
-    expectedRevision: fence.revision,
-    expectedAuthorityEpoch: fence.authorityEpoch,
-    actorType: "operator",
-    sourceTransport: "internal",
-    payload: {},
-  }, () => ({
-    events: [{
-      eventType: "project.started_empty",
-      entityType: "project",
-      entityId: fence.projectId,
+export function startEmptyWorkflowDatabase(basePath: string): WorkflowDatabaseOpenResult | null {
+  const location = resolveWorkflowDatabaseLocation(basePath);
+  // Decide the refusal before the forced open: that open creates an absent
+  // database, and a database with content no longer shows the lost authority.
+  const lostAuthority = hasWorkflowHistoryWithoutDatabase(location);
+  if (!lostAuthority && !existsSync(location.projectDb)) return null;
+  const wasOpen = isDbAvailable();
+  const result = openWorkflowDatabase(basePath, { createEmptyAuthority: true });
+  if (!result.ok) return result;
+  try {
+    if (!lostAuthority && !isEmptyDatabaseBesideProjections(location.projectGsd)) return null;
+    const idempotencyKey = "project/start-empty";
+    const fence = readDomainOperationFence(idempotencyKey);
+    executeDomainOperation({
+      operationType: START_EMPTY_OPERATION,
+      idempotencyKey,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "operator",
+      sourceTransport: "internal",
       payload: {},
-      destinations: ["db"],
-    }],
-    // The choice changes no hierarchy file; STATE.md is its projection.
-    projections: [{ projectionKey: "state", projectionKind: "state", rendererVersion: "1" }],
-  }));
-  return true;
+    }, () => ({
+      events: [{
+        eventType: "project.started_empty",
+        entityType: "project",
+        entityId: fence.projectId,
+        payload: {},
+        destinations: ["db"],
+      }],
+      // The choice changes no hierarchy file; STATE.md is its projection.
+      projections: [{ projectionKey: "state", projectionKind: "state", rendererVersion: "1" }],
+    }));
+    return result;
+  } finally {
+    if (!wasOpen) closeDatabase();
+  }
 }
 
 function authorityMissingError(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): GSDError {

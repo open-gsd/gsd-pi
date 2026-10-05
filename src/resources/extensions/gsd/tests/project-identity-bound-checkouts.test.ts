@@ -400,6 +400,50 @@ for (const projections of ["a planned milestone", "root projections only"] as co
   }
 });
 
+for (const history of ["a milestone directory with CONTEXT only", "a migration backup only"] as const) test(`/gsd db start-empty stores the choice when the database is absent beside ${history}`, () => {
+  const base = tempDir("gsd-start-empty-absent-");
+  const dbPath = join(base, ".gsd", "gsd.db");
+  if (history === "a migration backup only") {
+    mkdirSync(join(base, ".gsd"));
+    writeFileSync(join(base, ".gsd", "gsd.db.backup-v30"), "backup");
+  } else {
+    mkdirSync(join(base, ".gsd", "phases", "01-foo"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "phases", "01-foo", "01-CONTEXT.md"), "# M001: Discussion\n");
+  }
+  const refused = openWorkflowDatabase(base);
+  assert.equal(refused.ok, false);
+  assert.match(refused.error?.message ?? "", /authority-missing: .*\/gsd db start-empty/s);
+  assert.equal(existsSync(dbPath), false);
+
+  const { ctx, notes } = makeCtx();
+  handleDbStartEmpty(ctx, base);
+  assert.match(notes.at(-1)?.message ?? "", /now starts without the earlier workflow history/, JSON.stringify(notes));
+  assert.equal(isWorkflowDatabaseOpen(), false);
+
+  const { db } = openSqliteReadOnly(dbPath);
+  try {
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'project.start_empty'").get()?.["count"],
+      1,
+      "the refusal is lifted only with the stored choice",
+    );
+  } finally {
+    db.close();
+  }
+  assert.equal(openWorkflowDatabase(base).reason, "opened-existing");
+});
+
+test("/gsd db start-empty creates no database in a project with nothing to refuse", () => {
+  const base = tempDir("gsd-start-empty-fresh-");
+  mkdirSync(join(base, ".gsd"));
+
+  const { ctx, notes } = makeCtx();
+  handleDbStartEmpty(ctx, base);
+
+  assert.match(notes.at(-1)?.message ?? "", /no choice was stored/, JSON.stringify(notes));
+  assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false);
+});
+
 /** A schema-only database (as an older GSD created it) beside one planned milestone. */
 function emptyDatabaseBesideRoadmap(prefix: string): { base: string; dbPath: string } {
   const base = tempDir(prefix);

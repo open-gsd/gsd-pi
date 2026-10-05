@@ -29,8 +29,8 @@ import {
   loadVerifiedRecoverApplication,
   openWorkflowDatabase,
   prepareVerifiedRecoverApplication,
-  recordStartEmptyChoice,
   resolvePreparedVerifiedRecoverApplication,
+  startEmptyWorkflowDatabase,
   type PreparedVerifiedRecoverApplication,
 } from "./db-workspace.js";
 import {
@@ -1812,23 +1812,16 @@ export function handleDbBind(ctx: ExtensionCommandContext, basePath: string): vo
  * admits it. No file is moved or deleted.
  */
 export function handleDbStartEmpty(ctx: ExtensionCommandContext, basePath: string): void {
-  const wasOpen = isWorkflowDatabaseOpen();
-  const result = openWorkflowDatabase(basePath, { createEmptyAuthority: true });
-  if (!result.ok) {
-    ctx.ui.notify(`gsd db start-empty: ${result.error?.message ?? result.reason}`, "error");
-    return;
-  }
-  let stored: boolean;
-  try {
-    stored = recordStartEmptyChoice(basePath);
-  } finally {
-    if (!wasOpen) closeWorkflowDatabase();
-  }
-  if (!stored) {
+  const result = startEmptyWorkflowDatabase(basePath);
+  if (!result) {
     ctx.ui.notify(
-      `gsd db start-empty: ${result.location.projectDb} is not refused as an empty database, so no choice was stored.`,
+      "gsd db start-empty: GSD does not refuse this project for a missing or empty database, so no choice was stored.",
       "info",
     );
+    return;
+  }
+  if (!result.ok) {
+    ctx.ui.notify(`gsd db start-empty: ${result.error?.message ?? result.reason}`, "error");
     return;
   }
   ctx.ui.notify(
