@@ -131,7 +131,13 @@ test("/gsd migrate --preview=<hash> applies the Preview that the first run print
 
   assert.match(second.notes.at(-1)?.message ?? "", /Migration complete/u, JSON.stringify(second.notes));
   assert.equal(milestoneCount(), 1);
-  assert.equal(importApplicationCount(), 1);
+  assert.deepEqual(
+    _getAdapter()!.prepare(
+      "SELECT operation.trace_id FROM workflow_import_applications JOIN workflow_operations operation USING (operation_id)",
+    ).all(),
+    [{ trace_id: approval.slice("--preview=".length) }],
+    "the one Import Application records the approved Preview hash",
+  );
   assert.ok(projectionFiles(base).some((path) => path.endsWith("-ROADMAP.md")));
   assert.equal(existsSync(join(base, ".gsd-backups")), false, "a target with no .gsd has nothing to back up");
 
@@ -174,18 +180,30 @@ test("/gsd migrate that applies nothing closes the database it opened beside pla
     "",
   ].join("\n"));
   assert.equal(openWorkflowDatabase(base).reason, "authority-missing", "the fixture has projections and no database");
+  const before = readdirSync(base, { recursive: true }).sort();
 
   // Preview only.
   const first = makeCtx();
   await handleMigrate(base, first.ctx, pi);
   assert.match(first.notes.at(-1)?.message ?? "", /Preview hash: sha256:[0-9a-f]{64}/u, JSON.stringify(first.notes));
+  assert.deepEqual(readdirSync(base, { recursive: true }).sort(), before, "a Preview creates no database in the target .gsd");
+  assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false);
+  assert.equal(isWorkflowDatabaseOpen(), false);
   assert.equal(openWorkflowDatabase(base).reason, "authority-missing", "a Preview does not admit the empty database");
 
   // A refused hash.
   const second = makeCtx();
   await handleMigrate(`--preview=sha256:${"0".repeat(64)} ${JSON.stringify(base)}`, second.ctx, pi);
   assert.match(second.notes.at(-1)?.message ?? "", /is not the current Preview/u, JSON.stringify(second.notes));
+  assert.deepEqual(readdirSync(base, { recursive: true }).sort(), before, "a refused approval creates no database");
   assert.equal(openWorkflowDatabase(base).reason, "authority-missing", "a refused approval does not admit the empty database");
+
+  // The approval of the Preview that the first run printed applies on the new database.
+  const approval = /--preview=sha256:[0-9a-f]{64}/u.exec(first.notes.at(-1)?.message ?? "")?.[0];
+  const third = makeCtx();
+  await handleMigrate(`${approval} ${JSON.stringify(base)}`, third.ctx, pi);
+  assert.match(third.notes.at(-1)?.message ?? "", /Migration complete/u, JSON.stringify(third.notes));
+  assert.equal(importApplicationCount(), 1);
 });
 
 test("the migration write refuses a Preview hash that is not the sealed Preview before the Import Application", async (t) => {

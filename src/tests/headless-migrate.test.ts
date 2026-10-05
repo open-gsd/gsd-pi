@@ -116,9 +116,11 @@ test("gsd headless migrate previews a project with no .gsd and applies the appro
   assert.equal(detectProjectState(base).state, "v2-gsd");
   assert.equal(openWorkflowDatabase(base).ok, true);
   assert.deepEqual(
-    _getAdapter()!.prepare("SELECT preview_hash FROM workflow_import_applications").all(),
-    [{ preview_hash: approval.slice("--preview=".length) }],
-    "the Import Application is the approved Preview",
+    _getAdapter()!.prepare(
+      "SELECT operation.trace_id FROM workflow_import_applications JOIN workflow_operations operation USING (operation_id)",
+    ).all(),
+    [{ trace_id: approval.slice("--preview=".length) }],
+    "the one Import Application records the approved Preview hash",
   );
   assert.deepEqual(_getAdapter()!.prepare("SELECT id FROM milestones").all(), [{ id: "M001" }]);
 });

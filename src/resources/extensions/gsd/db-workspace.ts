@@ -1405,9 +1405,14 @@ function migrationApprovalHash(preview: LegacyImportPreviewArtifact): string {
   return hashLegacyImportValue(approved as unknown as LegacyImportValue);
 }
 
-/** The approval hash of a migration Import Application that the open database holds. */
+/**
+ * The approval hash of a migration Import Application that the open database
+ * holds. The apply records it as the trace id of the operation; an Application
+ * of an earlier build has no trace id, so its hash comes from its Preview.
+ */
 export function appliedMigrationApprovalHash(operationId: string): string {
-  return migrationApprovalHash(inspectLegacyImportApplicationEvidence(operationId).preview);
+  const application = inspectLegacyImportApplicationEvidence(operationId);
+  return application.traceId ?? migrationApprovalHash(application.preview);
 }
 
 /**
@@ -1444,6 +1449,8 @@ export function applyVerifiedMigrationApplication(
         sourceTransport: "internal",
         actorType: "system",
         actorId: "gsd-migrate",
+        // The audit record of what the operator approved.
+        traceId: migrationApprovalHash(evidence.preview),
       },
       previewInput: evidence.previewInput,
       preview: evidence.preview,
