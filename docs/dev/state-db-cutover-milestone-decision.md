@@ -550,6 +550,42 @@ D012 is a decision. It is not the cutover:
     progress.
   - A read that cannot query `project_authority` fails. It does not answer
     from either source.
+- Since 2026-10-05 the read interface answers two more questions: the open
+  canonical blockers (`readOpenBlockers`) and the open canonical questions
+  (`readOpenQuestions`). Canonical storage has no legacy row, so the Authority
+  Epoch does not choose a source for them: the answer is the same at every
+  Epoch. The project snapshot, the display read of the blockers outside
+  recovery, asks them through the interface and not at the query module. The
+  gate lists both as entries of the interface. Behavior tests:
+  `tests/lifecycle-read-questions.test.ts`.
+- Since 2026-10-05 a queued shell is a canonical answer of the interface, not
+  a status label. `queuedShell` of `MilestoneRead` is true when the Milestone
+  lifecycle row is `ready` with no CONTEXT artifact row and no Slice rows;
+  before the Cutover the legacy status `queued` answers, and there is no new
+  lifecycle status. The Milestone readiness class of `state/derive/from-db.ts`
+  routes to the field; readers that do not ask the interface (the web project
+  picker, the headless readiness) keep the legacy label. Behavior tests: the
+  queued-shell tests of `tests/lifecycle-read-cutover.test.ts`.
+- Since 2026-10-05 the SELECTs on the canonical lifecycle tables that decision
+  and report code asked at its own SQL live in `db/lifecycle-queries.ts`: the
+  completion identity of the execute-task hook (`rule-registry.ts`), the hook
+  retry of `auto-post-unit.ts`, the undo reads, the milestone terminal check
+  of `tools/reopen-slice.ts`, the escalation reads of `escalation.ts` and
+  `escalation-resolution.ts`, the discard row loop of `milestone-actions.ts`,
+  the reopen diagnosis (`reopen-reason.ts`), the task-settle reads, the
+  doctor engine checks, the drift execution history, and the recovery action
+  lookup. No behavior changed. The reads inside the Domain Operation modules
+  are not moved: they run on the writer connection inside the Domain
+  Operation, and moving them is separate work.
+- Since 2026-10-05 `ProjectProgress` (`@opengsd/contracts`) has the optional
+  `blockerRows` field: the open canonical blocker rows at the revision of the
+  read, the same rows the project snapshot returns, so `gsd_progress` and
+  `gsd_project_snapshot` can give equal blockers at one revision. The change
+  is additive only: nothing was removed or retyped, the derived blockers of
+  `deriveState` stay, and the projection fallback does not set the field. The
+  DB progress reader takes the rows in the same read transaction as its
+  counts. Behavior test: the blocker-rows test of
+  `tests/progress-from-db.test.ts`.
 - The gate check `read-interface-epoch-authority` is the inverse of the former
   `read-interface-legacy-authority` check. It fails when the read interface
   does not read the Authority Epoch, reads it in more than one function, does
