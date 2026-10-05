@@ -9,7 +9,7 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -21,7 +21,7 @@ import {
   insertTask,
   _getAdapter,
 } from "../gsd-db.ts";
-import { getAutoWorker, markWorkerStopping, registerAutoWorker } from "../db/auto-workers.ts";
+import { getAutoWorker, markWorkerStopping, findStaleWorkerForProject, registerAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { getLatestForUnit, markRunning, recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { setRuntimeKv, getRuntimeKv } from "../db/runtime-kv.ts";
@@ -560,6 +560,123 @@ test("clearLock settles a stale worker's orphaned running Attempt before releasi
     `SELECT status FROM milestone_leases WHERE fencing_token = :ft`,
   ).get({ ":ft": lease.token }) as { status: string } | undefined;
   assert.equal(leaseRow?.status, "released");
+});
+
+test("clearLock settles attempts and releases the lease on a legacy-lock PID match", (t) => {
+  // Regression coverage for the legacy-lock PID path (Copilot review on
+  // #2441): when the worker row is NOT stale-detected (live pid, fresh
+  // heartbeat) but a legacy auto.lock file names that worker's pid,
+  // clearLock() must still settle the worker's orphaned running Attempt
+  // before force-releasing its milestone lease — the earlier test only
+  // reaches the findStaleWorkerForProject branch.
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "T", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "S", status: "active" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
+  const projectRoot = normalizeRealPath(base);
+  const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+  const claim = recordDispatchClaim({
+    traceId: "t1",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T02",
+    unitType: "execute-task",
+    unitId: "M001/S01/T02",
+  });
+  assert.equal(claim.ok, true);
+  if (!claim.ok) return;
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.task.ready",
+    idempotencyKey: "fixture/crash-recovery/legacy-lock-task-ready",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { taskId: "T02" },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T02",
+      lifecycleStatus: "ready",
+    });
+    return {
+      events: [{
+        eventType: "test.task.ready",
+        entityType: "task",
+        entityId: "M001/S01/T02",
+        payload: { taskId: "T02" },
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: "test/m001/s01/t02/legacy-lock",
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  const attempt = claimTaskAttempt({
+    invocation: {
+      idempotencyKey: "fixture/crash-recovery/legacy-lock-attempt-claim",
+      sourceTransport: "internal",
+      actorType: "agent",
+      actorId: workerId,
+    },
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T02" },
+    workerId,
+    milestoneLeaseToken: lease.token,
+    coordinationDispatchId: claim.dispatchId,
+  });
+
+  // Keep the worker alive-looking — live pid (the test runner's parent) and a
+  // fresh heartbeat — so findStaleWorkerForProject() does NOT flag it and the
+  // stale-worker branch is skipped. The legacy lock file names the same pid,
+  // which is what routes clearLock() into the legacy-lock PID branch.
+  setWorkerPid(workerId, process.ppid);
+  writeFileSync(
+    join(base, ".gsd", "auto.lock"),
+    JSON.stringify({
+      pid: process.ppid,
+      startedAt: new Date().toISOString(),
+      unitType: "execute-task",
+      unitId: "M001/S01/T02",
+      unitStartedAt: new Date().toISOString(),
+      sessionFile: null,
+    }),
+  );
+
+  assert.equal(
+    findStaleWorkerForProject(projectRoot),
+    null,
+    "live worker is not stale-detected before clearLock",
+  );
+  assert.equal(readCrashLock(base)?.pid, process.ppid, "legacy lock file is in play");
+
+  clearLock(base);
+
+  assert.equal(getAutoWorker(workerId)?.status, "stopping");
+  const legacyAttemptRow = _getAdapter()!.prepare(`
+    SELECT attempt.attempt_state, attempt.settle_outcome
+    FROM workflow_execution_attempts attempt
+    WHERE attempt.attempt_id = :attempt_id
+  `).get({ ":attempt_id": attempt.attemptId }) as {
+    attempt_state: string;
+    settle_outcome: string | null;
+  } | undefined;
+  assert.deepEqual(legacyAttemptRow, { attempt_state: "settled", settle_outcome: "interrupted" });
+  const legacyLeaseRow = _getAdapter()!.prepare(
+    `SELECT status FROM milestone_leases WHERE fencing_token = :ft`,
+  ).get({ ":ft": lease.token }) as { status: string } | undefined;
+  assert.equal(legacyLeaseRow?.status, "released");
 });
 
 test("clearLock marks stale worker stopping and releases held milestone lease", (t) => {
