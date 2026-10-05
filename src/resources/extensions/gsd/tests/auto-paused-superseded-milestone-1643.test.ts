@@ -19,7 +19,7 @@ import { routePausedSessionResume } from "../auto.ts";
 
 test("#1643: paused milestone open but superseded by a different active milestone routes to adopt-active", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M018-6b0xxe",
@@ -29,7 +29,7 @@ test("#1643: paused milestone open but superseded by a different active mileston
 
 test("#1643: adopt-active is skipped when derived state has no active milestone (restore as before)", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: null,
@@ -41,7 +41,7 @@ test("#1643: adopt-active is skipped when derived state has no active milestone 
 
 test("#1643: paused milestone identical to active milestone routes to restore", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M016-5b17xo",
@@ -53,7 +53,7 @@ test("#1643: paused milestone identical to active milestone routes to restore", 
 // false-mismatch — the same normalization the dispatch guard applies.
 test("#1643/#1317: bare paused id vs suffixed active id of the same milestone routes to restore", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016",
     activeMilestoneId: "M016-5b17xo",
@@ -63,7 +63,7 @@ test("#1643/#1317: bare paused id vs suffixed active id of the same milestone ro
 
 test("#1643/#1317: suffixed paused id vs bare active id of the same milestone routes to restore", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M016",
@@ -71,11 +71,11 @@ test("#1643/#1317: suffixed paused id vs bare active id of the same milestone ro
   assert.deepEqual(route, { route: "restore" });
 });
 
-// ─── (c) closed / missing-dir paused milestone → existing behavior unchanged ─
+// ─── (c) closed / missing paused milestone → existing behavior unchanged ─
 
-test("#1643: missing milestone dir still routes to discard(missing), even when superseded", () => {
+test("#1643: a milestone with no row still routes to discard(missing), even when superseded", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: false,
+    milestoneExists: false,
     summaryIsTerminal: false,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M018-6b0xxe",
@@ -85,7 +85,7 @@ test("#1643: missing milestone dir still routes to discard(missing), even when s
 
 test("#1643: terminal (closed) paused milestone still routes to discard(terminal), even when superseded", () => {
   const route = routePausedSessionResume({
-    milestoneDirExists: true,
+    milestoneExists: true,
     summaryIsTerminal: true,
     pausedMilestoneId: "M016-5b17xo",
     activeMilestoneId: "M018-6b0xxe",

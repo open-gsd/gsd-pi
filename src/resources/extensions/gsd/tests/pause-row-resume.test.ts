@@ -36,7 +36,6 @@ import { _setProperLockfileForTests } from "../session-lock.ts";
 function makeProject(t: TestContext): string {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-pause-row-")));
   const previousCwd = process.cwd();
-  // Resume routing still asks for a milestone directory that holds content.
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
   writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md"), "# Milestone\n", "utf-8");
   openDatabase(join(base, ".gsd", "gsd.db"));
@@ -373,6 +372,31 @@ test("restart resumes a pause that had no active unit from the pause row", async
   };
   assert.equal(_handlePausedSessionResumeRecoveryForTest(base, state).skippedReplay, true);
   assert.equal(state.pendingCrashRecovery, null);
+});
+
+test("restart resumes a pause of a milestone that has a row and no directory", async (t) => {
+  const base = makeProject(t);
+  autoSession.active = true;
+  autoSession.basePath = base;
+  autoSession.originalBasePath = base;
+  autoSession.currentMilestoneId = "M001";
+  process.chdir(base);
+  await pauseAuto(undefined, undefined, "ambiguous_intent");
+  rmSync(join(base, ".gsd", "milestones"), { recursive: true, force: true });
+
+  // The restart: a new process has no session memory.
+  autoSession.reset();
+  refuseSessionLock(t);
+  const notifications: string[] = [];
+  const { ctx, pi } = makeStartAutoHost(notifications);
+
+  await startAuto(ctx, pi, base, false);
+
+  assert.ok(
+    notifications.some((message) => message.includes("Resuming paused session for M001")),
+    `the milestone row decides that the milestone exists; got: ${notifications.join(" | ")}`,
+  );
+  assert.equal(autoSession.currentMilestoneId, "M001");
 });
 
 test("restart resumes the named run of a custom-engine pause from the pause row", async (t) => {

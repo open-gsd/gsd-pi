@@ -122,7 +122,7 @@ Rules for the stage checkpoint (`unit_dispatch_stages (dispatch_id, stage, updat
 - **Read.** A resume asks one question of the rows: does the unit still have execution to continue? The answer is yes when the stage of the dispatch row is `execute` (`isDispatchExecutionOpen`) and the result rows of the unit do not exist. The row status does not decide this: the loop settles the row of a unit that paused in pre-verification. Only then the session file of the unit is read, to build the tool-call replay text for the next prompt. The pause path (`handlePausedSessionResumeRecovery`) takes the unit from the dispatch link of the pause row. The crash path (`assessInterruptedSession`) takes it from the newest dispatch row of the dead worker.
 - A live process and a restarted process use the same rule: `pauseAuto` keeps the dispatch link in the session and writes the same value to the row.
 
-A restart continues a non-task unit at the `verify` stage (see the Lifecycle Kernel amendment below). Not changed: in the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing still asks for a milestone directory with content before it restores the milestone of the pause.
+A restart continues a non-task unit at the `verify` stage (see the Lifecycle Kernel amendment below). Not changed: in the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing asks for the milestone row before it restores the milestone of the pause; a milestone directory is not needed.
 
 ## Amendment 2026-10-04: a custom workflow step is claimed as a dispatch row
 

@@ -648,12 +648,12 @@ export type PausedSessionResumeRoute =
   | { route: "adopt-active"; activeMilestoneId: string };
 
 export function routePausedSessionResume(args: {
-  milestoneDirExists: boolean;
+  milestoneExists: boolean;
   summaryIsTerminal: boolean;
   pausedMilestoneId: string;
   activeMilestoneId: string | null | undefined;
 }): PausedSessionResumeRoute {
-  if (!args.milestoneDirExists) return { route: "discard", reason: "missing" };
+  if (!args.milestoneExists) return { route: "discard", reason: "missing" };
   if (args.summaryIsTerminal) return { route: "discard", reason: "terminal" };
   if (
     args.activeMilestoneId
@@ -2912,7 +2912,6 @@ export async function startAuto(
           // Validate the milestone still exists and isn't already complete (#1664).
           // DB status is the only authority; with no DB the milestone is not
           // treated as terminal and the open failure is reported (ADR-046).
-          const mDir = resolveMilestonePath(base, meta.milestoneId);
           let summaryIsTerminal = false;
           let dbAvailable = isDbAvailable();
           let milestoneRow = dbAvailable ? readMilestone(meta.milestoneId) : null;
@@ -2936,7 +2935,9 @@ export async function startAuto(
           // terminal pin and, instead of merely starting fresh on a superseded
           // pin, adopts the project's current active milestone.
           const resumeRoute = routePausedSessionResume({
-            milestoneDirExists: !!mDir,
+            // The milestone row is the authority. With no database nothing is
+            // known, so the pause is kept.
+            milestoneExists: !dbAvailable || milestoneRow != null,
             summaryIsTerminal,
             pausedMilestoneId: meta.milestoneId,
             activeMilestoneId: freshStartAssessment.state?.activeMilestone?.id ?? null,
