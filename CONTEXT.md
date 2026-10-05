@@ -254,20 +254,20 @@ is above 0, and from legacy rows at epoch 0. The epoch advances only with
 dispatch, and dependency decisions still read legacy rows. `gate:lifecycle-shadow-no-cutover` pins
 both epochs. Since 2026-10-04 the dispatch, eligibility, queue, closeout,
 recovery, post-unit and verification sites, the preconditions of the planning
-and completion commands, the stale-branch cleanup and the default doctor scope
-read through the interface. These decision sites still read legacy rows
-directly, each for a reason that puts it in other work: the prompt builders
-that choose prompt content (P23e), the hook retry of a Task and the row loop
-of the discard operation (their own SQL, P23f), and three legacy-only paths
-that are deleted with the legacy path (the legacy Milestone completion, the
-write guard of a staged Task completion, and the escalations from before the
-database stored them). The drift checks and the doctor checks that compare
-rows with projection files also read legacy rows, and they have no such
-reason: they must read the same rows as the renderers, so the owner must
-decide whether both move together. The read cutover is not complete while
-they are open, and the automatic Cutover must not become the default before
-that decision. The sites that only render or display a status stay on legacy
-rows. The decision document names each site of the four groups.
+and completion commands, the discard operation, the hook retry of a Task, the
+stale-branch cleanup, the parallel merge order, the drift checks that block
+dispatch, the default doctor scope and the doctor checks that decide from a
+status read through the interface. These sites still read legacy rows directly, each for a reason
+that puts it in other work: the prompt builders that choose prompt content
+(P23e), and three legacy-only paths that are deleted with the legacy path
+(the write guard of a staged Task completion, the escalations from before the
+database stored them, and the legacy Milestone reopen). The checks that
+compare a projection file with the rows that its renderer reads (ROADMAP
+drift, stale render, the checkbox and missing-ROADMAP checks of doctor) read
+legacy rows, as the renderers do. They run in the Projection Worker or in
+doctor, they do not block dispatch, and they move to the lifecycle rows with
+the renderers. The sites that only render or display a status stay on legacy
+rows. The decision document names each site of the groups.
 The decision, the
 Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
 are recorded in
