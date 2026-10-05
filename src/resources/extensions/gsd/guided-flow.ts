@@ -16,7 +16,8 @@ import {
   isInteractiveCommandContext,
 } from "./command-feedback.js";
 import { loadFile } from "./files.js";
-import { isDbAvailable, getMilestone, getMilestoneSlices, hasSavedArtifact, insertMilestone } from "./gsd-db.js";
+import { isDbAvailable, getMilestoneSlices, hasSavedArtifact, insertMilestone } from "./gsd-db.js";
+import { readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
 import {
   buildCompleteSlicePrompt,
@@ -1176,7 +1177,7 @@ type DiscussNormSlice = { id: string; done: boolean; title: string };
 /** Slices of the milestone from the DB. The ROADMAP projection is never parsed for them. */
 async function loadDiscussNormSlices(_basePath: string, mid: string): Promise<DiscussNormSlice[]> {
   if (!isDbAvailable()) return [];
-  return getMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete", title: s.title }));
+  return readMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete", title: s.title }));
 }
 
 export const _loadDiscussNormSlicesForTest = loadDiscussNormSlices;
@@ -2163,7 +2164,7 @@ export async function showSmartEntry(
       const manifestExists = existsSync(join(gsdRoot(basePath), "DISCUSSION-MANIFEST.json"));
       const milestoneHasContext = hasSavedArtifact(entry.milestoneId, null, "CONTEXT");
       const milestoneHasDraft = hasSavedArtifact(entry.milestoneId, null, "CONTEXT-DRAFT");
-      const milestoneRow = isDbAvailable() ? getMilestone(entry.milestoneId) : null;
+      const milestoneRow = isDbAvailable() ? readMilestone(entry.milestoneId) : null;
       const discussPlanComplete = !!milestoneRow && milestoneRow.status !== "queued" &&
         getMilestoneSlices(entry.milestoneId).length > 0;
       if (discussPlanComplete) {

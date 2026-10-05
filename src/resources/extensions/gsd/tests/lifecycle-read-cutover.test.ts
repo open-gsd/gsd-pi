@@ -44,6 +44,7 @@ import {
 } from "../db/writers/lifecycle-commands.ts";
 import { getPriorSliceCompletionBlocker } from "../dispatch-guard.ts";
 import { selectDoctorScope } from "../doctor.ts";
+import { _loadDiscussNormSlicesForTest } from "../guided-flow.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -1134,4 +1135,17 @@ test("after the Cutover the doctor scope is the first milestone with a canonical
   cutOver();
 
   assert.equal(await selectDoctorScope(base), "M001");
+});
+
+test("after the Cutover the discuss flow takes the complete slices from the lifecycle rows", async () => {
+  const base = seedDisagreement();
+  const complete = async () =>
+    (await _loadDiscussNormSlicesForTest(base, "M002")).filter((entry) => entry.done).map((entry) => entry.id);
+
+  // S01 is legacy complete and canonical ready. S02 is legacy pending and canonical completed.
+  assert.deepEqual(await complete(), ["S01"]);
+
+  cutOver();
+
+  assert.deepEqual(await complete(), ["S02"]);
 });

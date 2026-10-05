@@ -3,8 +3,9 @@
 // and dependency decisions (ADR-046). deriveState, the dispatch guard,
 // resolveDispatch, the already-closed dispatch check, the queue commands, the
 // auto start and stop completion checks, the closeout, recovery, post-unit and
-// verification checks, the status response, progress and the project snapshot
-// ask their status questions here.
+// verification checks, the preconditions of the planning and completion
+// commands, the status response, progress and the project snapshot ask their
+// status questions here.
 // The project Authority Epoch chooses the read source, in `cutoverHasRun`
 // only: canonical lifecycle rows and Waivers after the Cutover, legacy status
 // rows (D005) before it. The choice is per Project, never per item.

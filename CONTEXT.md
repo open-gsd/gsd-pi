@@ -238,14 +238,21 @@ is above 0, and from legacy rows at epoch 0. The epoch advances only with
 `GSD_AUTHORITY_CUTOVER=1` (see above), so by default public status responses,
 dispatch, and dependency decisions still read legacy rows. `gate:lifecycle-shadow-no-cutover` pins
 both epochs. Since 2026-10-04 the dispatch, eligibility, queue, closeout,
-recovery, post-unit and verification sites read through the interface. Some
-decision sites still read legacy rows directly: the preconditions of the
-planning and completion commands, the discard operation, the hook retry of a
-Task, the stale-branch cleanup, three prompt builders, and the doctor and
-drift checks. They must be routed, or deleted with the legacy path, before the
-automatic Cutover becomes the default. The sites that only render or display a
-status stay on legacy rows. The decision document names each site of the
-three groups.
+recovery, post-unit and verification sites, the preconditions of the planning
+and completion commands, the stale-branch cleanup and the default doctor scope
+read through the interface. These decision sites still read legacy rows
+directly, each for a reason that puts it in other work: the prompt builders
+that choose prompt content (P23e), the hook retry of a Task and the row loop
+of the discard operation (their own SQL, P23f), and three legacy-only paths
+that are deleted with the legacy path (the legacy Milestone completion, the
+write guard of a staged Task completion, and the escalations from before the
+database stored them). The drift checks and the doctor checks that compare
+rows with projection files also read legacy rows, and they have no such
+reason: they must read the same rows as the renderers, so the owner must
+decide whether both move together. The read cutover is not complete while
+they are open, and the automatic Cutover must not become the default before
+that decision. The sites that only render or display a status stay on legacy
+rows. The decision document names each site of the four groups.
 The decision, the
 Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
 are recorded in
