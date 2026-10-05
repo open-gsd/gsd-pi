@@ -11,9 +11,8 @@ export function hasAutoPauseSchema(db: DbAdapter): boolean {
 
 /**
  * A pause is state of the worker, not of a unit: auto-mode can pause with no
- * active unit, and a custom-engine step has no dispatch row. So the pause has
- * its own row, with a link to the dispatch row of the unit that was active
- * when there is one. One row is open for each worker scope; a resume or a
+ * active unit. So the pause has its own row, with a link to the dispatch row
+ * of the unit that was active when there is one. One row is open for each worker scope; a resume or a
  * discard closes it and the row stays. Idempotent.
  */
 export function createAutoPauseSchema(db: DbAdapter): void {

@@ -6,7 +6,7 @@
 // the same unit; the newest row of the unit that holds the kind is the count,
 // and a reset writes 0 on the newest row.
 //
-// A unit that runs with no dispatch row (custom-engine steps, no database) has
+// A unit that runs with no dispatch row (no database) has
 // no durable identity. Its count stays in the caller's `unclaimed` map and
 // lasts for the process only.
 //

@@ -103,7 +103,7 @@ This finishes the retry part of part 4 and the verification budgets of part 1. I
 
 This is part 2. Before this amendment the pause was a JSON value in `runtime_kv` (key `paused_session`), and that table is for soft state only. The value decided resume routing.
 
-Decision (2026-10-04): a pause is state of the worker, not of a unit. Auto-mode can pause with no active unit, and a custom-engine step that is not a Task has no dispatch row. So the pause does not live on the dispatch row. It is a row in `auto_pauses` (`db/writers/auto-pauses.ts`).
+Decision (2026-10-04): a pause is state of the worker, not of a unit. Auto-mode can pause with no active unit. So the pause does not live on the dispatch row. It is a row in `auto_pauses` (`db/writers/auto-pauses.ts`).
 
 Rules for the pause row:
 
@@ -122,7 +122,7 @@ Rules for the stage checkpoint (`unit_dispatch_stages (dispatch_id, stage, updat
 - **Read.** A resume asks one question of the rows: does the unit still have execution to continue? The answer is yes when the stage of the dispatch row is `execute` (`isDispatchExecutionOpen`) and the result rows of the unit do not exist. The row status does not decide this: the loop settles the row of a unit that paused in pre-verification. Only then the session file of the unit is read, to build the tool-call replay text for the next prompt. The pause path (`handlePausedSessionResumeRecovery`) takes the unit from the dispatch link of the pause row. The crash path (`assessInterruptedSession`) takes it from the newest dispatch row of the dead worker.
 - A live process and a restarted process use the same rule: `pauseAuto` keeps the dispatch link in the session and writes the same value to the row.
 
-Not changed: a restart does not continue a unit at the `verify`, `route` or `closeout` stage. It selects the next unit from state, as before. Continuing at the stored stage is part of the Lifecycle Kernel work. The custom-engine step that is not a Task has no dispatch row and so no stage. In the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing still asks for a milestone directory with content before it restores the milestone of the pause.
+Not changed: a restart does not continue a unit at the `verify`, `route` or `closeout` stage. It selects the next unit from state, as before. Continuing at the stored stage is part of the Lifecycle Kernel work. In the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing still asks for a milestone directory with content before it restores the milestone of the pause.
 
 ## Amendment 2026-10-04: a custom workflow step is claimed as a dispatch row
 
