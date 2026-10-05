@@ -8,7 +8,9 @@ import assert from "node:assert/strict";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
+import { resolveDispatch } from "../auto-dispatch.ts";
 import { postUnitPreVerification } from "../auto-post-unit.ts";
+import { deriveState } from "../state.ts";
 import { AutoSession } from "../auto/session.ts";
 import { MAX_ARTIFACT_VERIFICATION_RETRIES } from "../auto-post-unit.ts";
 import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.ts";
@@ -279,4 +281,36 @@ test("a failed artifact verification survives a restart: context, count and exha
     notifications.some((message) => message.includes("Retrying (attempt 1/3).")),
     `expected a first-attempt notification, got: ${notifications.join("\n")}`,
   );
+});
+
+test("a restart after a failed artifact verification selects the same unit again from state", async () => {
+  base = makeTempRepo("gsd-artifact-retry-reselect-");
+  seedSlice(base, { T01: "complete" });
+  claimTestDispatch(base, {
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "complete-slice",
+    unitId: "M001/S01",
+  });
+  const s = completeSliceSession(base);
+  assert.equal(await postUnitPreVerification(makePostUnitContext(base, s, []), opts), "retry");
+
+  // The restart: a new session, and the next unit comes from the database.
+  invalidateAllCaches();
+  const restarted = new AutoSession();
+  restarted.basePath = base;
+  const state = await deriveState(base);
+  const next = await resolveDispatch({
+    basePath: base,
+    mid: "M001",
+    midTitle: "Milestone",
+    state,
+    prefs: undefined,
+    session: restarted,
+  });
+
+  assert.equal(next.action, "dispatch");
+  assert.equal(next.action === "dispatch" && next.unitType, "complete-slice");
+  assert.equal(next.action === "dispatch" && next.unitId, "M001/S01");
+  assert.ok(readStoredUnitRetry("complete-slice", "M001/S01"), "the failure context of the next run is on the dispatch row");
 });
