@@ -31,7 +31,13 @@ import { showSmartEntry } from "../guided-flow.ts";
 import { renderSliceFilesFromDb } from "../markdown-renderer.ts";
 import { clearPathCache } from "../paths.ts";
 import { drainProjectionWork } from "../projection-worker.ts";
-import { executeCheckpointSave, executeSummarySave } from "../tools/workflow-tool-executors.ts";
+import { internalPlanningInvocation } from "../planning-invocation.ts";
+import {
+  executeCheckpointSave,
+  executePlanMilestone,
+  executeReplanTask,
+  executeSummarySave,
+} from "../tools/workflow-tool-executors.ts";
 import { buildActiveResumeSection, buildResumeSection, readWorkCheckpoint, saveWorkCheckpoint } from "../work-checkpoint.ts";
 import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
 import { saveContextArtifact } from "./helpers/saved-context.ts";
@@ -313,6 +319,79 @@ test("/gsd resume-work shows a handoff saved on a planned task before its first 
     [{ lifecycle_status: "in_progress" }],
   );
   assert.match(await resumeWorkPrompt(base), T01_HANDOFF_SHOWN);
+});
+
+test("/gsd resume-work does not show the handoff of an open task that was re-planned after the save", async (t) => {
+  const base = makeProject(t);
+  saveWorkCheckpoint(HANDOFF);
+  assert.match(await resumeWorkPrompt(base), T01_HANDOFF_SHOWN);
+
+  const replanned = await executeReplanTask({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    title: "First task, re-planned",
+    description: "Take another approach to the parser.",
+    estimate: "30m",
+    files: ["src/parser.ts"],
+    verify: "node --test parser.test.ts",
+    inputs: ["src/parser.ts"],
+    expectedOutput: ["src/parser.ts"],
+    reworkBriefRef: "RB-001",
+  }, base, internalPlanningInvocation());
+  assert.notEqual(replanned.isError, true, JSON.stringify(replanned.content));
+
+  // The task is still open and no artifact was saved: only the re-plan event supersedes.
+  assert.deepEqual(
+    rows("SELECT lifecycle_status FROM workflow_item_lifecycles WHERE task_id = 'T01'"),
+    [{ lifecycle_status: "ready" }],
+  );
+  assert.deepEqual(
+    rows("SELECT event_type FROM workflow_domain_events WHERE event_type IN ('workflow.task.replanned', 'artifact.saved')"),
+    [{ event_type: "workflow.task.replanned" }],
+  );
+  const afterReplan = await resumeWorkPrompt(base);
+  assert.match(afterReplan, /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  assert.doesNotMatch(afterReplan, /Parser rewritten|Add expiresAt/);
+  // The superseded row is kept: it is database content.
+  assert.equal(readWorkCheckpoint({ milestoneId: "M001", sliceId: "S01", taskId: "T01" })?.kind, "handoff");
+});
+
+test("a queue-it checkpoint of a milestone is not its resume state after the milestone is planned", async (t) => {
+  const base = makeProject(t);
+  saveWorkCheckpoint({
+    milestoneId: "M001",
+    kind: "handoff",
+    confirmedContext: "M001 is queued without discussion.",
+    nextAction: "Discuss M001 from scratch before planning.",
+  });
+  assert.match(buildActiveResumeSection({ milestoneId: "M001" }), /- Completed: M001 is queued without discussion\./);
+
+  const planned = await executePlanMilestone({
+    milestoneId: "M001",
+    title: "Milestone",
+    vision: "Ship the parser.",
+    slices: [{
+      sliceId: "S01",
+      title: "Slice",
+      risk: "medium",
+      depends: [],
+      demo: "demo",
+      goal: "goal",
+      successCriteria: "done",
+      proofLevel: "integration",
+      integrationClosure: "closed",
+      observabilityImpact: "covered",
+    }],
+  }, base, internalPlanningInvocation());
+  assert.notEqual(planned.isError, true, JSON.stringify(planned.content));
+
+  assert.deepEqual(
+    rows("SELECT lifecycle_status FROM workflow_item_lifecycles WHERE item_kind = 'milestone'").map((row) => row["lifecycle_status"] === "completed" || row["lifecycle_status"] === "cancelled"),
+    [false],
+  );
+  assert.match(buildActiveResumeSection({ milestoneId: "M001" }), /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  assert.equal(readWorkCheckpoint({ milestoneId: "M001" })?.suggestedNextAction, "Discuss M001 from scratch before planning.");
 });
 
 test("/gsd resume-work does not show the checkpoint of a completed task as the resume state of the next task", async (t) => {
