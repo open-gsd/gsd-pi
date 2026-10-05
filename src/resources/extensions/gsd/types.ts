@@ -566,6 +566,18 @@ export interface HookStatusEntry {
 
 export type DecisionMadeBy = "human" | "agent" | "collaborative";
 
+/** One row of workflow_decision_statement_impacts (written by decision.save). */
+export interface DecisionStatementImpact {
+  decision_id: string; // D### of the statement decision that declares the impact
+  impact_ordinal: number; // 1-based position within the saving call
+  impact_kind: "revalidates" | "supersedes" | "blocks";
+  milestone_id: string | null;
+  slice_id: string | null;
+  task_id: string | null;
+  target_scope: string | null; // free scope text; for supersedes the D### amended
+  payload: string;
+}
+
 export interface Decision {
   seq: number; // auto-increment primary key
   id: string; // e.g. "D001"
@@ -578,6 +590,10 @@ export interface Decision {
   made_by: DecisionMadeBy; // who made the decision: human, agent, or collaborative
   source?: string; // ADR-011 P2: origin — "discussion" (default) | "planning" | "escalation"
   superseded_by: string | null; // ID of superseding decision, or null
+  /** D### this decision amends, derived from the stored supersede — never from file text. */
+  amends?: string | null;
+  /** Statement impacts of this decision, when read through the decision tools. */
+  impacts?: DecisionStatementImpact[];
 }
 
 export interface Requirement {
