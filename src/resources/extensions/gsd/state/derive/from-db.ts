@@ -176,6 +176,7 @@ async function buildRegistryAndFindActive(
       id: m.id,
       status: m.status,
       dependsOn: m.depends_on,
+      queuedShell: m.queuedShell,
       done,
       parked,
       sliceCount: slicesByMilestone.get(m.id)?.length ?? 0,

@@ -18,6 +18,7 @@ import { getDb } from "./engine.js";
 import { compareLifecycleShadow } from "./lifecycle-shadow-comparison.js";
 import {
   getAllMilestones,
+  getContextArtifactMilestoneIds,
   getHierarchyCompletionCounts,
   getInFlightSliceCount,
   getMilestone,
@@ -26,6 +27,7 @@ import {
   getOpenBlockers,
   getOpenQuestions,
   getProjectAuthorityRow,
+  getSliceCountsByMilestoneId,
   getSliceStatusSummary,
   getSliceTaskCounts,
   getSliceTasks,
@@ -59,6 +61,14 @@ export interface MilestoneRead extends MilestoneRow {
    * vocabulary; null when the legacy status is not in the map.
    */
   readonly lifecycleStatus: string | null;
+  /**
+   * A queued shell: the Milestone row is ready and no planning is behind it —
+   * no CONTEXT artifact row and no Slice rows. The lifecycle vocabulary has no
+   * word for queued, so this field answers the readiness class directly:
+   * after the Cutover the lifecycle status `ready` decides, before it the
+   * legacy status `queued` does.
+   */
+  readonly queuedShell: boolean;
 }
 
 export interface SliceRead extends SliceRow {
@@ -193,7 +203,34 @@ function isCancelled(item: LifecycleItem | undefined): boolean {
   return item?.lifecycleStatus === "cancelled";
 }
 
-function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): MilestoneRead {
+/**
+ * The queued-shell inputs of one read: which read source answers, which
+ * Milestones have a CONTEXT artifact row, and how many Slices each has.
+ */
+interface ShellContext {
+  cutover: boolean;
+  contextIds: Set<string>;
+  sliceCounts: Map<string, number>;
+}
+
+function readShellContext(cutover: boolean): ShellContext {
+  return {
+    cutover,
+    contextIds: getContextArtifactMilestoneIds(),
+    sliceCounts: getSliceCountsByMilestoneId(),
+  };
+}
+
+function isQueuedShell(row: MilestoneRow, item: LifecycleItem | undefined, shell: ShellContext): boolean {
+  const ready = shell.cutover
+    ? item?.lifecycleStatus === "ready"
+    : row.status === "queued";
+  return ready
+    && !shell.contextIds.has(row.id)
+    && (shell.sliceCounts.get(row.id) ?? 0) === 0;
+}
+
+function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null, shell: ShellContext): MilestoneRead {
   if (items) {
     const item = items.get(row.id);
     const done = isComplete(item);
@@ -206,6 +243,7 @@ function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): Miles
       parked: item?.lifecycleStatus === "paused",
       discarded,
       lifecycleStatus: item?.lifecycleStatus ?? "pending",
+      queuedShell: isQueuedShell(row, item, shell),
     };
   }
   const closed = isClosedStatus(row.status);
@@ -217,6 +255,7 @@ function toMilestoneRead(row: MilestoneRow, items: LifecycleItems | null): Miles
     parked: row.status === "parked",
     discarded,
     lifecycleStatus: normalizeLegacyLifecycleStatus(row.status),
+    queuedShell: isQueuedShell(row, undefined, shell),
   };
 }
 
@@ -239,8 +278,10 @@ function toSliceRead(row: SliceRow, items: LifecycleItems | null): SliceRead {
 
 /** Every Milestone in workflow order (sequence, then id). Includes discarded tombstones. */
 export function readMilestones(): MilestoneRead[] {
-  const items = cutoverHasRun() ? readLifecycleItems("milestone") : null;
-  return getAllMilestones().map((row) => toMilestoneRead(row, items));
+  const cutover = cutoverHasRun();
+  const items = cutover ? readLifecycleItems("milestone") : null;
+  const shell = readShellContext(cutover);
+  return getAllMilestones().map((row) => toMilestoneRead(row, items, shell));
 }
 
 /**
@@ -255,7 +296,8 @@ export function readListedMilestoneIds(): string[] {
 export function readMilestone(milestoneId: string): MilestoneRead | null {
   const row = getMilestone(milestoneId);
   if (!row) return null;
-  return toMilestoneRead(row, cutoverHasRun() ? readLifecycleItems("milestone", milestoneId) : null);
+  const cutover = cutoverHasRun();
+  return toMilestoneRead(row, cutover ? readLifecycleItems("milestone", milestoneId) : null, readShellContext(cutover));
 }
 
 /** The Slices of one Milestone in workflow order (sequence, then id). */

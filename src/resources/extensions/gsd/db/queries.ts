@@ -1006,6 +1006,25 @@ export function getMilestoneSlices(milestoneId: string): SliceRow[] {
   return rows.map(rowToSlice);
 }
 
+/** The ids of the Milestones that have a CONTEXT artifact row (a saved context). */
+export function getContextArtifactMilestoneIds(): Set<string> {
+  if (!getDbOrNull()) return new Set();
+  const rows = getDbOrNull()!.prepare(
+    "SELECT DISTINCT milestone_id FROM artifacts" +
+    " WHERE artifact_type = 'CONTEXT' AND slice_id IS NULL AND task_id IS NULL AND milestone_id IS NOT NULL",
+  ).all();
+  return new Set(rows.map((row) => String(row["milestone_id"])));
+}
+
+/** The number of Slices of every Milestone that has them. */
+export function getSliceCountsByMilestoneId(): Map<string, number> {
+  if (!getDbOrNull()) return new Map();
+  const rows = getDbOrNull()!.prepare(
+    "SELECT milestone_id, COUNT(*) AS count FROM slices GROUP BY milestone_id",
+  ).all();
+  return new Map(rows.map((row) => [String(row["milestone_id"]), Number(row["count"])]));
+}
+
 export interface ParallelMonitorSliceProgress {
   id: string;
   status: string;
