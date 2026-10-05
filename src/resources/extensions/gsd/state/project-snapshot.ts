@@ -9,19 +9,23 @@ import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
 import { noteSessionRead } from "../db/domain-operation.js";
 import {
   _getAdapter,
-  getOpenBlockers,
-  getOpenQuestions,
   getProjectAuthorityRow,
   getProjectAuthorityVersion,
   getSchemaVersion,
   getVerificationSummary,
   isDbAvailable,
   readTransaction,
-  type OpenBlockerRow,
-  type OpenQuestionRow,
   type VerificationSummaryCounts,
 } from "../gsd-db.js";
-import { readMilestones, readProgressCounts, type ProgressCounts } from "../db/lifecycle-read.js";
+import {
+  readMilestones,
+  readOpenBlockers,
+  readOpenQuestions,
+  readProgressCounts,
+  type OpenBlockerRow,
+  type OpenQuestionRow,
+  type ProgressCounts,
+} from "../db/lifecycle-read.js";
 import {
   closeWorkflowDatabase as closeDatabase,
   getWorkflowDatabasePath as getDbPath,
@@ -159,8 +163,10 @@ function readSnapshotDb(): SnapshotDbRead {
       truncated,
     };
 
-    const blockers = getOpenBlockers();
-    const openQuestions = getOpenQuestions();
+    // The display read of the canonical blockers and questions goes through
+    // the read interface, not the query module directly.
+    const blockers = readOpenBlockers();
+    const openQuestions = readOpenQuestions();
 
     return {
       authority,

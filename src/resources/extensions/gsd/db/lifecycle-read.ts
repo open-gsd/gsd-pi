@@ -23,12 +23,16 @@ import {
   getMilestone,
   getMilestoneSlices,
   getMilestoneStatusCounts,
+  getOpenBlockers,
+  getOpenQuestions,
   getProjectAuthorityRow,
   getSliceStatusSummary,
   getSliceTaskCounts,
   getSliceTasks,
   getSlicesByMilestoneIds,
   type MilestoneStatusCounts,
+  type OpenBlockerRow,
+  type OpenQuestionRow,
 } from "./queries.js";
 import {
   isClosedStatus,
@@ -360,6 +364,23 @@ function readLifecycleProgressCounts(): ProgressCounts {
     else tasks.pending++;
   }
   return { milestones, slices, tasks };
+}
+
+export type { OpenBlockerRow, OpenQuestionRow } from "./queries.js";
+
+/**
+ * The open canonical blockers, oldest first. Canonical storage has no legacy
+ * row, so the Authority Epoch does not choose a source for this question: the
+ * answer is the same before and after the Cutover. Display readers outside
+ * recovery ask it here (the project snapshot), not at their own SQL.
+ */
+export function readOpenBlockers(): OpenBlockerRow[] {
+  return getOpenBlockers();
+}
+
+/** The open canonical questions, creation order. Answered like `readOpenBlockers`. */
+export function readOpenQuestions(): OpenQuestionRow[] {
+  return getOpenQuestions();
 }
 
 /**

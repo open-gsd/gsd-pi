@@ -38,6 +38,8 @@ const READ_INTERFACE_ENTRIES = [
   "readTask",
   "readMilestoneStatus",
   "readProgressCounts",
+  "readOpenBlockers",
+  "readOpenQuestions",
   "toMilestoneRead",
   "toSliceRead",
 ];
@@ -52,6 +54,12 @@ const READ_INTERFACE_LEGACY_READERS = [
   "./queries.js#getHierarchyCompletionCounts",
   "./queries.js#getMilestoneStatusCounts",
   "./queries.js#getInFlightSliceCount",
+];
+// The canonical blockers and questions have no legacy row: the interface
+// answers them from the canonical rows at every Authority Epoch.
+const READ_INTERFACE_CANONICAL_QUESTION_READERS = [
+  "./queries.js#getOpenBlockers",
+  "./queries.js#getOpenQuestions",
 ];
 
 const DECISION_IMPORT_POLICY = Object.freeze({
@@ -124,6 +132,7 @@ const DECISION_IMPORT_POLICY = Object.freeze({
     approved: new Set([
       READ_INTERFACE_EPOCH_READER,
       ...READ_INTERFACE_LEGACY_READERS,
+      ...READ_INTERFACE_CANONICAL_QUESTION_READERS,
       "./engine.js#getDb",
       "./lifecycle-shadow-comparison.js#compareLifecycleShadow",
       "../status-guards.js#isClosedStatus",
