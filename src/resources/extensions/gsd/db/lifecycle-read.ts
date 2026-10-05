@@ -10,8 +10,8 @@
 // The project Authority Epoch chooses the read source, in `cutoverHasRun`
 // only: canonical lifecycle rows and Waivers after the Cutover, legacy status
 // rows (D005) before it. The choice is per Project, never per item.
-// Some decision sites still read legacy rows directly and apply the status
-// vocabulary themselves; docs/dev/state-db-cutover-milestone-decision.md
+// The sites that only render or display a status, and the legacy-only paths,
+// still read legacy rows directly; docs/dev/state-db-cutover-milestone-decision.md
 // (D012) lists them.
 
 import type { DbAdapter } from "../db-adapter.js";

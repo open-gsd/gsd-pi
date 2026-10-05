@@ -1,8 +1,8 @@
 // Project/App: gsd-pi
 // File Purpose: Behavior tests for the read cutover of the drift checks, the
-// doctor checks, the discard operation and the parallel merge. On a Project
-// whose Authority Epoch has advanced they follow the canonical lifecycle rows
-// when legacy rows disagree.
+// doctor checks, the discard operation, the parallel merge and the
+// prompt-content decision sites. On a Project whose Authority Epoch has
+// advanced they follow the canonical lifecycle rows when legacy rows disagree.
 
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
+import { buildCompleteMilestonePrompt, buildRewriteDocsPrompt, buildValidateMilestonePrompt } from "../auto-prompts.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import { checkGsdStateHealth } from "../doctor-state-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
@@ -22,9 +23,11 @@ import {
   insertTask,
   openDatabase,
 } from "../gsd-db.ts";
+import { buildDiscussSlicePrompt } from "../guided-flow.ts";
 import { discardMilestone } from "../milestone-actions.ts";
 import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.ts";
 import { isMilestoneCompleteInProjectDb } from "../parallel-merge.ts";
+import { handleRethink } from "../rethink.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { detectArtifactDbDrift } from "../state-reconciliation/drift/artifact-db.ts";
 import { cutOver, seedLifecycles, type Lifecycle } from "./helpers/authority-cutover.ts";
@@ -326,4 +329,213 @@ test("after the Cutover the parallel merge takes the complete milestone from the
   cutOver();
 
   assert.deepEqual(complete(), ["M001"]);
+});
+
+// ─── Prompt-content decision sites ───────────────────────────────────────────
+
+/**
+ * One active Milestone whose Slices disagree in both directions, each with a
+ * saved SUMMARY row and file: S01 is legacy pending and canonical cancelled
+ * (only the lifecycle row skips it), S02 is legacy skipped and canonical
+ * in_progress (only the legacy row skips it), S03 is legacy pending and
+ * canonical completed (only the lifecycle row completes it), S04 is legacy
+ * complete and canonical in_progress (only the legacy row completes it), and
+ * S05 is the Slice under discussion.
+ */
+function seedPromptDisagreement(): string {
+  const base = makeProject();
+  insertMilestone({ id: "M001", title: "Prompt slices", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Canonical cancelled", status: "pending", depends: [], sequence: 1 });
+  insertSlice({ id: "S02", milestoneId: "M001", title: "Canonical open", status: "skipped", depends: [], sequence: 2 });
+  insertSlice({ id: "S03", milestoneId: "M001", title: "Canonical completed", status: "pending", depends: [], sequence: 3 });
+  insertSlice({ id: "S04", milestoneId: "M001", title: "Canonical open", status: "complete", depends: [], sequence: 4 });
+  insertSlice({ id: "S05", milestoneId: "M001", title: "Under discussion", status: "active", depends: [], sequence: 5 });
+  seedLifecycles("prompt-slices", [
+    milestone("M001", "ready"),
+    slice("M001", "S01", "cancelled"),
+    slice("M001", "S02", "in_progress"),
+    slice("M001", "S03", "completed"),
+    slice("M001", "S04", "in_progress"),
+    slice("M001", "S05", "in_progress"),
+  ]);
+  for (const sid of ["S01", "S02", "S03", "S04"]) {
+    const path = `milestones/M001/slices/${sid}/${sid}-SUMMARY.md`;
+    const file = join(base, ".gsd", path);
+    const content = [
+      "---",
+      `id: ${sid}`,
+      "parent: M001",
+      "milestone: M001",
+      "---",
+      "",
+      `# ${sid}`,
+      "",
+      `SUMMARY-OF-${sid}`,
+      "",
+    ].join("\n");
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, content);
+    insertArtifact({
+      path,
+      artifact_type: "SUMMARY",
+      milestone_id: "M001",
+      slice_id: sid,
+      task_id: null,
+      full_content: content,
+    });
+  }
+  invalidateStateCache();
+  return base;
+}
+
+test("after the Cutover the complete-milestone and validate-milestone prompts take their slice summaries from the lifecycle rows", async () => {
+  const base = seedPromptDisagreement();
+  const summarized = async (build: () => Promise<string>) => {
+    const prompt = await build();
+    return ["S01", "S02", "S03", "S04", "S05"].filter((sid) => prompt.includes(`### ${sid} Summary (excerpt)`));
+  };
+
+  // The legacy rows: every Slice but the skipped S02 is listed.
+  assert.deepEqual(
+    await summarized(() => buildCompleteMilestonePrompt("M001", "Prompt slices", base)),
+    ["S01", "S03", "S04", "S05"],
+  );
+  assert.deepEqual(
+    await summarized(() => buildValidateMilestonePrompt("M001", "Prompt slices", base)),
+    ["S01", "S03", "S04", "S05"],
+  );
+
+  cutOver();
+
+  // The lifecycle rows: the cancelled S01 is not listed, and the S02 that
+  // only the legacy row skips is.
+  assert.deepEqual(
+    await summarized(() => buildCompleteMilestonePrompt("M001", "Prompt slices", base)),
+    ["S02", "S03", "S04", "S05"],
+  );
+  assert.deepEqual(
+    await summarized(() => buildValidateMilestonePrompt("M001", "Prompt slices", base)),
+    ["S02", "S03", "S04", "S05"],
+  );
+});
+
+test("after the Cutover the slice-discussion prompt inlines the summaries of the Slices that the lifecycle rows complete", async () => {
+  const base = seedPromptDisagreement();
+  const completed = async () => {
+    const prompt = await buildDiscussSlicePrompt("M001", "S05", "Under discussion", base);
+    return ["S01", "S02", "S03", "S04"].filter((sid) => prompt.includes(`### ${sid} Summary (completed)`));
+  };
+
+  // The legacy rows: only the complete S04 is inlined.
+  assert.deepEqual(await completed(), ["S04"]);
+
+  cutOver();
+
+  // The lifecycle rows: the completed S03 is inlined; S02 and S04 are open.
+  assert.deepEqual(await completed(), ["S03"]);
+});
+
+/**
+ * An open Milestone whose Task rows disagree: T01 is legacy complete and
+ * canonical ready, T02 is legacy pending and canonical completed. The Slice
+ * plan and the Task plans are on disk.
+ */
+function seedTaskDisagreement(): string {
+  const base = makeProject();
+  insertMilestone({ id: "M001", title: "Open tasks", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Open", status: "active", depends: [], sequence: 1 });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Canonical open", status: "complete" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Canonical completed", status: "pending" });
+  seedLifecycles("rewrite-docs", [
+    milestone("M001", "ready"),
+    slice("M001", "S01", "in_progress"),
+    task("M001", "S01", "T01", "ready"),
+    task("M001", "S01", "T02", "completed"),
+  ]);
+  const sliceDirectory = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+  mkdirSync(join(sliceDirectory, "tasks"), { recursive: true });
+  writeFileSync(join(sliceDirectory, "S01-PLAN.md"), "# S01\n");
+  writeFileSync(join(sliceDirectory, "tasks", "T01-PLAN.md"), "# T01\n");
+  writeFileSync(join(sliceDirectory, "tasks", "T02-PLAN.md"), "# T02\n");
+  invalidateStateCache();
+  return base;
+}
+
+test("after the Cutover the rewrite-docs prompt lists the open Tasks of the lifecycle rows", async () => {
+  const base = seedTaskDisagreement();
+  const listed = async () => {
+    const prompt = await buildRewriteDocsPrompt("M001", "Open tasks", { id: "S01", title: "S01" }, base, []);
+    return {
+      canonicalOpen: /T01-PLAN\.md/.test(prompt),
+      legacyOpen: /T02-PLAN\.md/.test(prompt),
+    };
+  };
+
+  // The legacy rows: T01 is complete, T02 is open.
+  assert.deepEqual(await listed(), { canonicalOpen: false, legacyOpen: true });
+
+  cutOver();
+
+  // The lifecycle rows: T01 is ready and T02 is completed.
+  assert.deepEqual(await listed(), { canonicalOpen: true, legacyOpen: false });
+});
+
+/** A command context that records its notifications, and a session that records the prompts it gets. */
+function rethinkSession() {
+  const notifications: string[] = [];
+  const prompts: string[] = [];
+  const ctx = {
+    ui: {
+      notify: (message: string) => { notifications.push(message); },
+      setStatus: () => {},
+    },
+  } as never;
+  const pi = {
+    sendMessage: (message: { content: string }) => { prompts.push(message.content); },
+  } as never;
+  return { ctx, pi, notifications, prompts };
+}
+
+/**
+ * An open Milestone whose Slice rows disagree: S01 is legacy complete and
+ * canonical in_progress, S02 is legacy pending and canonical completed, S03
+ * is legacy pending and canonical cancelled.
+ */
+function seedRethinkDisagreement(): string {
+  const base = makeProject();
+  insertMilestone({ id: "M001", title: "Rethink slices", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Canonical open", status: "complete", depends: [], sequence: 1 });
+  insertSlice({ id: "S02", milestoneId: "M001", title: "Canonical completed", status: "pending", depends: [], sequence: 2 });
+  insertSlice({ id: "S03", milestoneId: "M001", title: "Canonical cancelled", status: "pending", depends: [], sequence: 3 });
+  seedLifecycles("rethink-counts", [
+    milestone("M001", "ready"),
+    slice("M001", "S01", "in_progress"),
+    slice("M001", "S02", "completed"),
+    slice("M001", "S03", "cancelled"),
+  ]);
+  invalidateStateCache();
+  return base;
+}
+
+test("after the Cutover the rethink prompt takes its Slice counts from the lifecycle rows", async (t) => {
+  const base = seedRethinkDisagreement();
+  const previousCwd = process.cwd();
+  t.after(() => process.chdir(previousCwd));
+  process.chdir(base);
+  const sliceCell = async () => {
+    const { ctx, pi, prompts } = rethinkSession();
+    await handleRethink("", ctx, pi);
+    assert.equal(prompts.length, 1);
+    const row = prompts[0]!.split("\n").find((line) => line.startsWith("| 1 | M001 |"));
+    assert.ok(row, `the rethink prompt lists M001:\n${prompts[0]}`);
+    return row!.split("|")[6]!.trim();
+  };
+
+  // The legacy rows: S01 is complete, S02 and S03 are pending.
+  assert.equal(await sliceCell(), "1/3 complete");
+
+  cutOver();
+
+  // The lifecycle rows: S02 is completed and S03 is cancelled; S01 is open.
+  assert.equal(await sliceCell(), "1/3 complete, 1 skipped");
 });
