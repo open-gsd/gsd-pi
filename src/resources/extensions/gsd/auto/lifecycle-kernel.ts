@@ -4,7 +4,9 @@
 //
 // advance() selects the next unit from database rows, in this order:
 //   1. the dispatch row of a unit that a killed process left in the verify
-//      stage: the unit continues at that stage and does not run again;
+//      stage: the unit continues at that stage and does not run again. A unit
+//      whose post-verification already queued follow-on work, or started a
+//      post-unit hook, is not continued: the queue has that work;
 //   2. the oldest queued row of the sidecar queue;
 //   3. the unit the Auto Orchestration module selects. Its dispatch rules read
 //      the stored retry rows and the lifecycle rows, and it claims the
@@ -20,6 +22,7 @@ import { dequeueSidecarItem, type SidecarDequeuePayload } from "./workflow-sidec
 import { shouldUseCustomEnginePath } from "./workflow-kernel.js";
 import { listQueuedSidecarItems, type QueuedSidecarItem } from "../db/unit-dispatch-sidecars.js";
 import { getInterruptedVerifyDispatch } from "../db/unit-dispatches.js";
+import { getActiveHook } from "../post-unit-hooks.js";
 import { scheduleSidecarQueue } from "../uok/execution-graph.js";
 import { debugLog } from "../debug-logger.js";
 import { logWarning } from "../workflow-logger.js";
@@ -61,7 +64,16 @@ export async function kernelAdvance(
       s.currentMilestoneId,
       process.env.GSD_SLICE_LOCK ?? null,
     );
-    if (interrupted) {
+    // The hook state row holds a hook that the post-verification of the unit
+    // started. The start path queued it again when its queue row was missing,
+    // and that row has no link to the dispatch row. A second post-verification
+    // of the unit would dispatch the hook again.
+    const activeHook = getActiveHook();
+    const hookStarted = interrupted != null
+      && activeHook != null
+      && activeHook.triggerUnitType === interrupted.unit_type
+      && activeHook.triggerUnitId === interrupted.unit_id;
+    if (interrupted && !hookStarted) {
       return {
         kind: "stage",
         stage: "verify",

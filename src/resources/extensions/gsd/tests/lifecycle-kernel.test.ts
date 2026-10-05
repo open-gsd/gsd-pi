@@ -3,13 +3,15 @@
 
 import test, { type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { AutoAdvanceResult, AutoOrchestrationModule } from "../auto/contracts.ts";
 import { kernelAdvance, kernelResume, kernelStart, kernelStop } from "../auto/lifecycle-kernel.ts";
 import { AutoSession } from "../auto/session.ts";
+import { postUnitPostVerification, type PostUnitContext } from "../auto-post-unit.ts";
+import { invalidateAllCaches } from "../cache.ts";
 import { clearStaleWorkerLock } from "../crash-recovery.ts";
 import {
   _getAdapter,
@@ -29,7 +31,14 @@ import {
   setDispatchStage,
   type DispatchStage,
 } from "../db/unit-dispatches.ts";
-import { enqueueSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
+import { enqueueSidecarItem, settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
+import { _clearGsdRootCache } from "../paths.ts";
+import {
+  reconcileRestoredGateBlock,
+  reconcileRestoredHookDispatch,
+  resetHookState,
+  restoreHookState,
+} from "../post-unit-hooks.ts";
 import type { GSDState } from "../types.ts";
 
 const STATE = {
@@ -183,6 +192,139 @@ test("a unit killed in verify is history once another unit of the milestone was 
 
   assert.equal(result.kind, "advanced");
   assert.deepEqual(calls, ["advance"]);
+});
+
+const BLOCKING_PLAN_SLICE_HOOK = `---
+post_unit_hooks:
+  - name: slice-plan-review
+    after:
+      - plan-slice
+    criticality: blocking
+    artifact: SLICE-REVIEW.md
+    max_cycles: 2
+    enabled: true
+    prompt: Review the slice plan and write a frontmatter verdict.
+---
+`;
+
+/** A project whose plan-slice unit has a blocking post-unit hook. */
+function makeHookProject(t: TestContext): string {
+  const originalCwd = process.cwd();
+  const base = makeProject(t);
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), BLOCKING_PLAN_SLICE_HOOK, "utf-8");
+  process.chdir(base);
+  invalidateAllCaches();
+  _clearGsdRootCache();
+  resetHookState();
+  t.after(() => {
+    process.chdir(originalCwd);
+    resetHookState();
+    invalidateAllCaches();
+    _clearGsdRootCache();
+  });
+  return base;
+}
+
+function makePostUnitContext(
+  base: string,
+  unit: { unitType: string; unitId: string },
+  buildSnapshotOpts: PostUnitContext["buildSnapshotOpts"] = () => ({}),
+): PostUnitContext {
+  const s = new AutoSession();
+  s.basePath = base;
+  s.active = true;
+  s.currentMilestoneId = "M001";
+  s.currentUnit = { type: unit.unitType, id: unit.unitId, startedAt: Date.now() };
+  return {
+    s,
+    ctx: {
+      ui: { notify: () => {}, setStatus: () => {}, setWidget: () => {}, setFooter: () => {} },
+      model: { id: "test-model" },
+    } as any,
+    pi: { sendMessage: async () => {}, setModel: async () => true } as any,
+    buildSnapshotOpts,
+    lockBase: () => base,
+    stopAuto: async () => {},
+    pauseAuto: async () => {},
+    updateProgressWidget: () => {},
+  };
+}
+
+/**
+ * The next start after a kill: the crash sweep, the hook state of the database
+ * row, and one loop iteration. The loop runs post-verification for a unit that
+ * the kernel continues at the verify stage.
+ */
+async function restartAndAdvance(base: string, workerId: string) {
+  killAndRestart(base, workerId);
+  resetHookState();
+  restoreHookState(base);
+  reconcileRestoredHookDispatch(base);
+  reconcileRestoredGateBlock(base);
+  const { s, calls } = makeSession();
+  const result = await advance(s);
+  if (result.kind === "stage") {
+    await postUnitPostVerification(makePostUnitContext(base, result.unit));
+  }
+  return { result, calls };
+}
+
+const PLAN_SLICE = { unitType: "plan-slice", unitId: "M001/S01" };
+
+test("a unit killed after its post-verification queued a hook is not continued, and the hook is queued once", async (t) => {
+  const base = makeHookProject(t);
+  const unit = claimUnit(base, PLAN_SLICE.unitType, PLAN_SLICE.unitId);
+  setDispatchStage(unit.dispatchId, "verify");
+  assert.equal(await postUnitPostVerification(makePostUnitContext(base, PLAN_SLICE)), "continue");
+  assert.equal(listQueuedSidecarItems().length, 1);
+
+  const { result } = await restartAndAdvance(base, unit.workerId);
+
+  assert.deepEqual(
+    listQueuedSidecarItems().map(item => ({ unitType: item.unitType, unitId: item.unitId })),
+    [{ unitType: "hook/slice-plan-review", unitId: "M001/S01" }],
+  );
+  assert.equal(result.kind, "sidecar", "the queued hook runs; the unit that queued it is history");
+});
+
+test("a unit killed after its hook state was stored and before the hook was queued is not continued, and the hook is queued once", async (t) => {
+  const base = makeHookProject(t);
+  const unit = claimUnit(base, PLAN_SLICE.unitType, PLAN_SLICE.unitId);
+  setDispatchStage(unit.dispatchId, "verify");
+  // Post-verification stores the hook state, then builds the close-out
+  // snapshot, then queues the hook. The process dies at the second step.
+  await assert.rejects(
+    postUnitPostVerification(makePostUnitContext(base, PLAN_SLICE, () => { throw new Error("killed"); })),
+    /killed/,
+  );
+  assert.equal(listQueuedSidecarItems().length, 0);
+
+  const { result } = await restartAndAdvance(base, unit.workerId);
+
+  assert.deepEqual(
+    listQueuedSidecarItems().map(item => ({ unitType: item.unitType, unitId: item.unitId })),
+    [{ unitType: "hook/slice-plan-review", unitId: "M001/S01" }],
+  );
+  assert.equal(result.kind, "sidecar", "the hook of the stored hook state runs; its trigger unit is history");
+});
+
+test("a unit killed in verify after it queued a triage is not continued", async (t) => {
+  const base = makeProject(t);
+  const unit = claimUnit(base, PLAN_SLICE.unitType, PLAN_SLICE.unitId);
+  setDispatchStage(unit.dispatchId, "verify");
+  enqueueSidecarItem(
+    { kind: "triage", unitType: "triage-captures", unitId: "M001/S01/triage", prompt: "triage" },
+    { type: PLAN_SLICE.unitType, id: PLAN_SLICE.unitId },
+  );
+  killAndRestart(base, unit.workerId);
+  const { s } = makeSession();
+
+  const first = await advance(s);
+  assert.equal(first.kind, "sidecar");
+
+  // The triage ran and its row is closed. The unit that queued it stays history.
+  settleSidecarItem(first.kind === "sidecar" ? first.item.id : 0);
+  assert.equal((await advance(s)).kind, "advanced");
 });
 
 test("a unit killed in verify in another milestone is not continued", async (t) => {

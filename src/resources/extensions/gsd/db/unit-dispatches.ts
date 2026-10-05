@@ -685,11 +685,13 @@ export function isDispatchExecutionOpen(dispatchId: number): boolean {
  * (ADR-048). The crash sweep of the next start, or the signal handler of the
  * process, canceled the row; a pause or a stop is not a kill and stores another
  * exit reason. The row is the newest dispatch of its scope, so work that ran
- * after it makes it history. Three unit kinds are not returned:
+ * after it makes it history. Four unit kinds are not returned:
  * - execute-task: its Attempt holds the stage, and state derivation selects
  *   the Task again;
  * - custom-step: the custom engine selects the step again from its run;
- * - a unit with an open sidecar row: the queue runs that row again.
+ * - a unit with an open sidecar row: the queue runs that row again;
+ * - a unit whose row has a linked sidecar row: its post-verification queued
+ *   follow-on work before the kill, and a second run would queue it again.
  * `sliceId` is the slice lock of a slice-parallel worker, or null.
  */
 export function getInterruptedVerifyDispatch(
@@ -715,6 +717,10 @@ export function getInterruptedVerifyDispatch(
          WHERE q.unit_type = d.unit_type
            AND q.unit_id = d.unit_id
            AND q.status IN ('held', 'queued')
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM unit_dispatch_sidecars q
+         WHERE q.trigger_dispatch_id = d.id
        )`,
   ).get({ ":milestone_id": milestoneId, ":slice_id": sliceId }) as UnitDispatchRow | undefined;
   return row ?? null;
