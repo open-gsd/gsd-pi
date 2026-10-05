@@ -184,6 +184,8 @@ export const PLANNING_ARTIFACT_SUFFIXES: readonly string[] = [
   "SUMMARY",
   "RESEARCH",
   "UI-SPEC",
+  "AI-SPEC",
+  "SPEC",
   "VALIDATION",
   "ASSESSMENT",
   "UAT",

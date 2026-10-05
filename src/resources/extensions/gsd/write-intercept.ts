@@ -151,6 +151,9 @@ const HIERARCHY_PROJECTION_SAVE_TOOLS: ProjectionSaveTool[] = [
   { name: /-CONTEXT-DRAFT\.md$/i, tool: 'gsd_summary_save with artifact_type "CONTEXT-DRAFT"' },
   { name: /-RESEARCH\.md$/i, tool: 'gsd_summary_save with artifact_type "RESEARCH"' },
   { name: /-UI-SPEC\.md$/i, tool: 'gsd_summary_save with artifact_type "UI-SPEC"' },
+  { name: /-AI-SPEC\.md$/i, tool: 'gsd_summary_save with artifact_type "AI-SPEC"' },
+  // After -UI-SPEC and -AI-SPEC: the plain suffix also matches their file names.
+  { name: /-SPEC\.md$/i, tool: 'gsd_summary_save with artifact_type "SPEC"' },
   { name: /-PARKED\.md$/i, tool: "gsd_milestone_park or gsd_milestone_unpark" },
   { name: /(^|-)CONTINUE\.md$/i, tool: "gsd_checkpoint_save" },
 ];

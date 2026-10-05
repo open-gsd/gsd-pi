@@ -67,6 +67,8 @@ const PROJECTIONS: Array<[path: string, tool: RegExp]> = [
   [".gsd/milestones/M001/slices/S01/S01-UAT.md", /gsd_slice_complete/],
   [".gsd/milestones/M001/slices/S01/S01-ASSESSMENT.md", /gsd_uat_result_save/],
   [".gsd/milestones/M001/slices/S01/S01-UI-SPEC.md", /gsd_summary_save/],
+  [".gsd/milestones/M001/M001-SPEC.md", /gsd_summary_save/],
+  [".gsd/milestones/M001/slices/S01/S01-AI-SPEC.md", /gsd_summary_save/],
   [".gsd/milestones/M001/slices/S01/tasks/T01-PLAN.md", /gsd_plan_task/],
   [".gsd/milestones/M001/slices/S01/tasks/T01-SUMMARY.md", /gsd_task_complete/],
   [".gsd/phases/01-auth/01-CONTEXT.md", /gsd_summary_save/],

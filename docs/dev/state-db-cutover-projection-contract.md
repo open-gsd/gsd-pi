@@ -34,18 +34,26 @@ database — a rendered view, not a record.
   remain outside its supported parsing. Regression cases live in
   `src/resources/extensions/gsd/tests/block-db-writes.test.ts`.
   The same module refuses a direct Write, Edit or shell write to a managed
-  projection that has a save tool (PROJECT, REQUIREMENTS, DECISIONS,
-  KNOWLEDGE, QUEUE, ROADMAP, PLAN, REPLAN, SUMMARY, VALIDATION, ASSESSMENT,
-  UAT, CONTEXT, CONTEXT-DRAFT, RESEARCH, UI-SPEC, PARKED) and names that tool.
-  It covers only the paths the renderers own: the root kinds at the `.gsd`
+  projection that has a save tool (root renders: PROJECT, REQUIREMENTS,
+  DECISIONS, KNOWLEDGE, CAPTURES, QUEUE, QUEUE-ORDER.json, OVERRIDES.md,
+  ROADMAP; hierarchy kinds below `.gsd/milestones` and `.gsd/phases`: ROADMAP,
+  PLAN, REPLAN, SUMMARY, VALIDATION, ASSESSMENT, UAT, CONTEXT, CONTEXT-DRAFT,
+  RESEARCH, UI-SPEC, AI-SPEC, SPEC, PARKED, CONTINUE) and names that tool
+  (`/gsd steer` for OVERRIDES.md: the user registers the override). It covers
+  only the paths the renderers own: the root kinds at the `.gsd`
   root and the other kinds below `.gsd/milestones` and `.gsd/phases`. A file
   with such a name in another directory (for example a `/gsd milestone-summary`
   report in `.gsd/summaries`) is a document the agent writes directly.
   The shell check sees only a path written with its `.gsd` directory. The
-  guard runs on the native engine and, through a PreToolUse hook, on
-  claude-code-cli; cursor-cli has no pre-execution hook. A managed file with
-  no save tool yet (LEARNINGS, SECRETS, VERIFICATION-FAILED, CONTINUE) stays
-  writable. Cases live in `tests/projection-write-guard.test.ts`.
+  guard runs on the native engine (the planning tools policy consults the
+  same block list, so a planning unit cannot allow a guarded write) and,
+  through a PreToolUse hook, on claude-code-cli. cursor-agent pre-executes
+  its tools and its protocol has no pre-execution hook, so a block is not
+  possible there; the cursor adapter instead marks an executed write to a
+  managed projection as a refused tool result naming the save tool
+  (detect-and-report). A managed file with no save tool yet (LEARNINGS,
+  SECRETS, VERIFICATION-FAILED) stays writable. Cases live in
+  `tests/projection-write-guard.test.ts`.
 - **Readers MUST NOT treat projections as authority.** Reading a projection is
   legitimate for display, for external integrations that only need a snapshot,
   and for drift detection (which compares projection against DB *by design*).
