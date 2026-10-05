@@ -610,15 +610,17 @@ D012 is a decision. It is not the cutover:
   (`db-lifecycle-coverage-schema.ts`). After the Cutover every hierarchy row
   has a lifecycle row, and a branch for a row with no lifecycle row does not
   run.
-- These sites still read legacy rows directly (2026-10-04). Each has a reason
-  that puts it in other work. On a cut-over Project the first two follow the
-  legacy row when the rows disagree; the last two serve legacy data only:
+- These sites still read legacy rows directly (2026-10-04). The first one is
+  not routed yet. The other three are deleted with the legacy path. On a
+  cut-over Project the first two follow the legacy row when the rows
+  disagree; the last two serve legacy data only:
   - `auto-prompts.ts`: the Slices whose summaries the `complete-milestone` and
     `validate-milestone` prompts inline, and the open Tasks that the
     `rewrite-docs` prompt lists. `guided-flow.ts`: the complete Slices whose
     summaries the slice-discussion prompt inlines. `rethink.ts`: the Slice
     counts in the rethink prompt. They choose prompt content. The prompt
-    content is separate work (P23e).
+    narrative cutover (#2630) took the text of these prompts from the
+    database and did not change these status reads.
   - `db/writers/task-execution.ts` and `stageTaskCompletion` in
     `task-completion-compatibility-adapter.ts`: a staged completion refuses a
     Task whose legacy row is `complete`, `done` or `closed`. The check is a
@@ -663,7 +665,7 @@ D012 is a decision. It is not the cutover:
     the checkbox render after `tools/plan-slice.ts` and
     `tools/replan-slice.ts`, and the SUMMARY file removal in
     `tools/complete-milestone.ts`: they render projections.
-  - `auto-dashboard.ts`, `dashboard-overlay.ts`, `parallel-monitor-overlay.ts`
+  - `parallel-monitor-overlay.ts`
     (with `getParallelMonitorSliceProgress` and the completion list of
     `db/queries.ts`), `visualizer-data.ts`, `visualizer-views.ts`,
     `export.ts`, `export-html.ts` and `commands/handlers/core.ts`: they draw

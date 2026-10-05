@@ -257,9 +257,9 @@ recovery, post-unit and verification sites, the preconditions of the planning
 and completion commands, the discard operation, the hook retry of a Task, the
 stale-branch cleanup, the parallel merge order, the drift checks that block
 dispatch, the default doctor scope and the doctor checks that decide from a
-status read through the interface. These sites still read legacy rows directly, each for a reason
-that puts it in other work: the prompt builders that choose prompt content
-(P23e), and three legacy-only paths that are deleted with the legacy path
+status read through the interface. These sites still read legacy rows directly:
+the status reads of the prompt builders that choose prompt content (not
+routed yet), and three legacy-only paths that are deleted with the legacy path
 (the write guard of a staged Task completion, the escalations from before the
 database stored them, and the legacy Milestone reopen). The checks that
 compare a projection file with the rows that its renderer reads (ROADMAP
