@@ -32,7 +32,7 @@ export interface AcceptedAnswerWriteInput {
   normalizedInterpretation: string;
 }
 
-export function distinctTimestamp(previousTimestamp: string): string {
+function distinctTimestamp(previousTimestamp: string): string {
   return new Date(Math.max(Date.now(), Date.parse(previousTimestamp) + 1)).toISOString();
 }
 
@@ -195,4 +195,35 @@ export function insertAcceptedAnswer(
     ...provenance,
   });
   return { answerId };
+}
+
+/** Withdraw one question that is still open. */
+export function withdrawOpenQuestion(
+  context: Readonly<DomainOperationContext>,
+  questionId: string,
+): void {
+  requireActiveDomainOperationContext(context);
+  const open = getDb().prepare(`
+    SELECT updated_at FROM workflow_open_questions
+    WHERE question_id = :question_id
+      AND project_id = :project_id
+      AND question_status = 'open'
+  `).get({
+    ":question_id": questionId,
+    ":project_id": context.projectId,
+  }) as Record<string, unknown> | undefined;
+  if (!open) throw new Error("only an open question can be withdrawn");
+  getDb().prepare(`
+    UPDATE workflow_open_questions
+    SET question_status = 'withdrawn', state_version = state_version + 1,
+        updated_at = :updated_at,
+        last_operation_id = :operation_id,
+        last_project_revision = :project_revision,
+        last_authority_epoch = :authority_epoch
+    WHERE question_id = :question_id
+  `).run({
+    ":updated_at": distinctTimestamp(String(open["updated_at"])),
+    ":question_id": questionId,
+    ...provenanceOf(context),
+  });
 }

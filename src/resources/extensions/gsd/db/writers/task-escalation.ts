@@ -3,7 +3,7 @@
 
 import type { DomainOperationContext } from "../domain-operation.js";
 import { getDb } from "../engine.js";
-import { distinctTimestamp, insertAcceptedAnswer, insertPresentedQuestion } from "./conversation.js";
+import { insertAcceptedAnswer, insertPresentedQuestion, withdrawOpenQuestion } from "./conversation.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export interface TaskEscalationOptionInput {
@@ -69,7 +69,7 @@ function withdrawOpenQuestions(
   lifecycleId: string,
 ): string[] {
   const open = getDb().prepare(`
-    SELECT question_id, updated_at FROM workflow_open_questions
+    SELECT question_id FROM workflow_open_questions
     WHERE project_id = :project_id
       AND lifecycle_id = :lifecycle_id
       AND question_status = 'open'
@@ -77,24 +77,9 @@ function withdrawOpenQuestions(
     ":project_id": context.projectId,
     ":lifecycle_id": lifecycleId,
   }) as Array<Record<string, unknown>>;
-  const withdraw = getDb().prepare(`
-    UPDATE workflow_open_questions
-    SET question_status = 'withdrawn', state_version = state_version + 1,
-        updated_at = :updated_at,
-        last_operation_id = :operation_id,
-        last_project_revision = :project_revision,
-        last_authority_epoch = :authority_epoch
-    WHERE question_id = :question_id
-  `);
   return open.map((row) => {
     const questionId = String(row["question_id"]);
-    withdraw.run({
-      ":updated_at": distinctTimestamp(String(row["updated_at"])),
-      ":operation_id": context.operationId,
-      ":project_revision": context.resultingRevision,
-      ":authority_epoch": context.resultingAuthorityEpoch,
-      ":question_id": questionId,
-    });
+    withdrawOpenQuestion(context, questionId);
     return questionId;
   });
 }

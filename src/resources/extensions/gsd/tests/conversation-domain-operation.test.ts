@@ -8,6 +8,7 @@ import {
   recordAnsweredQuestionRound,
   type QuestionRoundQuestion,
 } from "../conversation-domain-operation.ts";
+import { _setDomainOperationFaultForTest } from "../db/domain-operation.ts";
 import { _getAdapter, closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
 import { registerMilestones } from "../milestone-registration.ts";
 
@@ -244,10 +245,145 @@ test("the same tool call recorded twice stores the round once", (t) => {
     answers: { scope: { selected: "Nothing" } },
   };
 
-  recordAnsweredQuestionRound(round);
-  recordAnsweredQuestionRound(round);
+  const first = recordAnsweredQuestionRound(round);
+  const second = recordAnsweredQuestionRound(round);
 
+  assert.deepEqual(first, { stored: ["scope"], skipped: [] });
+  assert.deepEqual(second, first);
   assert.equal(count("workflow_open_questions"), 1);
   assert.equal(count("workflow_answers"), 1);
   assert.deepEqual(rows("SELECT question_status FROM workflow_open_questions"), [{ question_status: "answered" }]);
+});
+
+test("a provider that reuses one tool call id for every round has every round stored", (t) => {
+  openProject(t);
+  // Ollama numbers tool calls per message, so each round has this id.
+  const toolCallId = "ollama_tc_0";
+
+  const declined = recordAnsweredQuestionRound({
+    milestoneId: "M001",
+    toolCallId,
+    questions: [DEPTH_GATE],
+    answers: { [DEPTH_GATE.id!]: { selected: "Not quite" } },
+  });
+  const confirmed = recordAnsweredQuestionRound({
+    milestoneId: "M001",
+    toolCallId,
+    questions: [DEPTH_GATE],
+    answers: { [DEPTH_GATE.id!]: { selected: "Yes, you got it (Recommended)" } },
+  });
+  const otherQuestion = recordAnsweredQuestionRound({
+    milestoneId: "M001",
+    toolCallId,
+    questions: [SCOPE],
+    answers: { scope: { selected: "Nothing" } },
+  });
+
+  assert.deepEqual(declined, { stored: [DEPTH_GATE.id], skipped: [] });
+  assert.deepEqual(confirmed, { stored: [DEPTH_GATE.id], skipped: [] });
+  assert.deepEqual(otherQuestion, { stored: ["scope"], skipped: [] });
+  assert.deepEqual(
+    rows(`
+      SELECT question.question_text, question.question_status, answer.response_kind, answer.selected_option_id
+      FROM workflow_open_questions question
+      LEFT JOIN workflow_answers answer ON answer.answer_id = question.accepted_answer_id
+      ORDER BY question.created_project_revision
+    `),
+    [
+      { question_text: DEPTH_GATE.question, question_status: "answered", response_kind: "answer", selected_option_id: "option-2" },
+      { question_text: DEPTH_GATE.question, question_status: "answered", response_kind: "consent", selected_option_id: "option-1" },
+      { question_text: SCOPE.question, question_status: "answered", response_kind: "answer", selected_option_id: "option-2" },
+    ],
+    "the decline, the consent and the later question each have an accepted Answer",
+  );
+});
+
+test("a round with a blank tool call id is stored", (t) => {
+  openProject(t);
+
+  const result = recordAnsweredQuestionRound({
+    milestoneId: "M001",
+    toolCallId: "",
+    questions: [SCOPE],
+    answers: { scope: { selected: "Nothing" } },
+  });
+
+  assert.deepEqual(result, { stored: ["scope"], skipped: [] });
+  assert.deepEqual(rows("SELECT question_status FROM workflow_open_questions"), [{ question_status: "answered" }]);
+});
+
+test("an answer that cannot be stored withdraws its question and the round is reported, also on a second call", (t) => {
+  openProject(t);
+  t.after(() => _setDomainOperationFaultForTest(null));
+  const round = {
+    milestoneId: "M001",
+    toolCallId: "call-1",
+    questions: [SCOPE],
+    answers: { scope: { selected: "Nothing" } },
+  };
+  const reported = {
+    stored: [],
+    skipped: [{
+      id: "scope",
+      reason: "the answer was not stored and the question is withdrawn: domain operation fault: after-mutation",
+    }],
+  };
+
+  _setDomainOperationFaultForTest("after-mutation", "conversation.question.answer");
+  assert.deepEqual(recordAnsweredQuestionRound(round), reported);
+
+  assert.deepEqual(
+    rows("SELECT question_status, accepted_answer_id FROM workflow_open_questions"),
+    [{ question_status: "withdrawn", accepted_answer_id: null }],
+    "the question does not stay open with no answer",
+  );
+  assert.equal(count("workflow_answers"), 0);
+  assert.deepEqual(
+    rows(`
+      SELECT operation.operation_type, event.event_type
+      FROM workflow_operations operation
+      JOIN workflow_domain_events event ON event.operation_id = operation.operation_id
+      WHERE operation.operation_type LIKE 'conversation.%'
+      ORDER BY operation.resulting_revision
+    `),
+    [
+      { operation_type: "conversation.question.ask", event_type: "conversation.question.asked" },
+      { operation_type: "conversation.question.withdraw", event_type: "conversation.question.withdrawn" },
+    ],
+    "the withdrawal is a Domain Operation",
+  );
+
+  _setDomainOperationFaultForTest(null);
+  const second = recordAnsweredQuestionRound(round);
+
+  assert.deepEqual(second.stored, [], "a question with no accepted Answer is never reported as stored");
+  assert.deepEqual(second.skipped.map((entry) => entry.id), ["scope"]);
+  assert.equal(count("workflow_open_questions"), 1);
+  assert.equal(count("workflow_answers"), 0);
+});
+
+test("a round whose ask was committed with no answer gets its answer on the next call", (t) => {
+  openProject(t);
+  t.after(() => _setDomainOperationFaultForTest(null));
+  const round = {
+    milestoneId: "M001",
+    toolCallId: "call-1",
+    questions: [SCOPE],
+    answers: { scope: { selected: "Nothing" } },
+  };
+
+  // The process stops between the two operations: the ask is committed, the answer never runs.
+  _setDomainOperationFaultForTest("after-commit", "conversation.question.ask");
+  assert.throws(() => recordAnsweredQuestionRound(round), /domain operation fault: after-commit/);
+  assert.deepEqual(rows("SELECT question_status FROM workflow_open_questions"), [{ question_status: "open" }]);
+
+  _setDomainOperationFaultForTest(null);
+  const result = recordAnsweredQuestionRound(round);
+
+  assert.deepEqual(result, { stored: ["scope"], skipped: [] });
+  assert.equal(count("workflow_open_questions"), 1);
+  assert.deepEqual(
+    rows(ANSWERED_ROUND_SQL).map((row) => [row["question_status"], row["verbatim_response"]]),
+    [["answered", "Nothing"]],
+  );
 });
