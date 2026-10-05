@@ -15,14 +15,12 @@ import { existsSync } from "node:fs";
 import { basename, isAbsolute, join, relative } from "node:path";
 
 import type { CompleteTaskParams, EscalationArtifact } from "../types.js";
-import { isClosedStatus } from "../status-guards.js";
+import { readMilestone, readSlice, readTask } from "../db/lifecycle-read.js";
 import {
   transaction,
   insertTask,
   insertVerificationEvidence,
   getMilestone,
-  getSlice,
-  getTask,
   getUnresolvedBlockingReworkFindingsForTask,
   applyReworkResolutions,
 } from "../gsd-db.js";
@@ -518,19 +516,19 @@ export async function handleCompleteTask(
 
   transaction(() => {
     // State machine preconditions (inside txn for atomicity).
-    const milestone = getMilestone(params.milestoneId);
-    if (milestone && isClosedStatus(milestone.status)) {
+    const milestone = readMilestone(params.milestoneId);
+    if (milestone?.closed) {
       guardError = `cannot complete task in a closed milestone: ${params.milestoneId} (status: ${milestone.status})`;
       return;
     }
 
-    const slice = getSlice(params.milestoneId, params.sliceId);
-    if (slice && isClosedStatus(slice.status)) {
+    const slice = readSlice(params.milestoneId, params.sliceId);
+    if (slice?.closed) {
       guardError = `cannot complete task in a closed slice: ${params.sliceId} (status: ${slice.status})`;
       return;
     }
 
-    const existingTask = getTask(params.milestoneId, params.sliceId, params.taskId);
+    const existingTask = readTask(params.milestoneId, params.sliceId, params.taskId);
     // This writer opens no Domain Operation, so it cannot give a new row its
     // lifecycle row. Planning creates the Task row.
     if (!existingTask) {
@@ -563,7 +561,7 @@ export async function handleCompleteTask(
       return;
     }
 
-    if (isClosedStatus(existingTask.status)) {
+    if (existingTask.done) {
       // Stale-turn path: a timed-out turn that was superseded by recovery
       // can still reach this code when its LLM call eventually returns and
       // invokes gsd_complete_task. Returning an error would produce noisy

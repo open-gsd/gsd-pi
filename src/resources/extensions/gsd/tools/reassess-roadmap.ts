@@ -11,7 +11,8 @@ import {
 } from "../paths.js";
 import { deriveCompatProjectionKey } from "../compat/compat-marker.js";
 import { clearParseCache } from "../files.js";
-import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
+import { readMilestone, readMilestoneSlices, readSlice, readSliceTasks } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { removeProjectionFileSync } from "../atomic-write.js";
 import {
@@ -19,7 +20,6 @@ import {
   adoptOrTransitionLifecycle,
   getMilestone,
   getMilestoneSlices,
-  getSlice,
   getSliceTasks,
   insertSlice,
   normalizeLegacyLifecycleStatus,
@@ -338,11 +338,11 @@ export async function handleReassessRoadmap(
         ];
       },
       mutate(context) {
-        const milestone = getMilestone(params.milestoneId);
+        const milestone = readMilestone(params.milestoneId);
         if (!milestone) {
           throw new PlanningGuardError(`milestone not found: ${params.milestoneId}`);
         }
-        if (isClosedStatus(milestone.status) && !isMetadataOnlyCorrection) {
+        if (milestone.closed && !isMetadataOnlyCorrection) {
           throw new PlanningGuardError(`cannot reassess a closed milestone: ${params.milestoneId} (status: ${milestone.status})`);
         }
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
@@ -357,11 +357,11 @@ export async function handleReassessRoadmap(
           throw new PlanningGuardError(`cannot reassess a closed milestone: ${params.milestoneId} (canonical status: ${milestoneLifecycle.lifecycleStatus})`);
         }
 
-        const completedSlice = getSlice(params.milestoneId, params.completedSliceId);
+        const completedSlice = readSlice(params.milestoneId, params.completedSliceId);
         if (!completedSlice) {
           throw new PlanningGuardError(`completedSliceId not found: ${params.milestoneId}/${params.completedSliceId}`);
         }
-        if (!isClosedStatus(completedSlice.status)) {
+        if (!completedSlice.closed) {
           throw new PlanningGuardError(`completedSliceId ${params.completedSliceId} is not complete (status: ${completedSlice.status}) — reassess can only be called after a slice finishes`);
         }
         const completedSliceLifecycle = adoptLifecycleIfMissing(context, {
@@ -374,11 +374,12 @@ export async function handleReassessRoadmap(
           throw new PlanningGuardError(`completedSliceId ${params.completedSliceId} is canonically cancelled and is not a valid completed slice`);
         }
 
-        const existingSlices = getMilestoneSlices(params.milestoneId);
+        const existingSlices = readMilestoneSlices(params.milestoneId);
         const existingSliceById = new Map(existingSlices.map((slice) => [slice.id, slice]));
         const completedSliceIds = new Set<string>();
         for (const slice of existingSlices) {
-          if (slice.status !== "skipped" && isClosedStatus(slice.status)) completedSliceIds.add(slice.id);
+          // After the Cutover a deferred Slice is closed (cancelled); it is still not a completed one.
+          if (slice.status !== "skipped" && slice.status !== "deferred" && slice.closed) completedSliceIds.add(slice.id);
         }
 
         for (const correction of params.metadataCorrections?.completedSlices ?? []) {
@@ -450,7 +451,7 @@ export async function handleReassessRoadmap(
           if (lifecycle.lifecycleStatus === "completed") {
             throw new PlanningGuardError(`cannot remove completed slice ${removedId}`);
           }
-          for (const task of getSliceTasks(params.milestoneId, removedId)) {
+          for (const task of readSliceTasks(params.milestoneId, removedId)) {
             const legacyTaskLifecycleStatus = normalizeLegacyLifecycleStatus(task.status);
             const observedTaskLifecycleStatus = adoptionLifecycleStatus(`task ${params.milestoneId}/${removedId}/${task.id}`, task.status);
             const taskLifecycle = adoptLifecycleIfMissing(context, {

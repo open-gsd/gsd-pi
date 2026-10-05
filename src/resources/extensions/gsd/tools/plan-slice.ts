@@ -1,13 +1,12 @@
 import { resolve } from "node:path";
 import { clearParseCache } from "../files.js";
 import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { readMilestone, readSlice, readSliceTasks } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import {
   adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
-  getMilestone,
-  getSlice,
   getSliceTasks,
   insertTask,
   projectCanonicalStatusToLegacy,
@@ -497,11 +496,11 @@ export async function handlePlanSlice(
           : []),
       ],
       mutate(context) {
-        const parentMilestone = getMilestone(params.milestoneId);
+        const parentMilestone = readMilestone(params.milestoneId);
         if (!parentMilestone) {
           throw new PlanningGuardError(`milestone not found: ${params.milestoneId}`);
         }
-        if (isClosedStatus(parentMilestone.status)) {
+        if (parentMilestone.closed) {
           throw new PlanningGuardError(`cannot plan slice in a closed milestone: ${params.milestoneId} (status: ${parentMilestone.status})`);
         }
         const milestoneLifecycle = adoptLifecycleIfMissing(context, {
@@ -515,11 +514,11 @@ export async function handlePlanSlice(
           );
         }
 
-        const parentSlice = getSlice(params.milestoneId, params.sliceId);
+        const parentSlice = readSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
         }
-        if (isClosedStatus(parentSlice.status)) {
+        if (parentSlice.closed) {
           throw new PlanningGuardError(`cannot re-plan slice ${params.sliceId}: it is already complete — use gsd_slice_reopen first`);
         }
         const sliceLifecycle = adoptLifecycleIfMissing(context, {
@@ -535,7 +534,7 @@ export async function handlePlanSlice(
         }
 
         const newTaskIds = new Set(taskPayload.map((task) => task.taskId));
-        const existingTasks = getSliceTasks(params.milestoneId, params.sliceId);
+        const existingTasks = readSliceTasks(params.milestoneId, params.sliceId);
         // #2217 scope guard: only a re-dispatch over a slice whose task rows
         // are ALL still pending reconciles in place. First-run planning (no
         // existing rows) and replans that touch non-pending rows keep the
@@ -604,7 +603,7 @@ export async function handlePlanSlice(
         const omittedTasks = hasTaskPayload
           ? existingTasks.filter((task) => !matchedRowIds.has(task.id))
           : [];
-        const completedOmission = omittedTasks.find((task) => isClosedStatus(task.status) && task.status !== "skipped");
+        const completedOmission = omittedTasks.find((task) => task.done && task.status !== "skipped");
         if (completedOmission) {
           throw new PlanningGuardError(`cannot remove completed task ${completedOmission.id}`);
         }

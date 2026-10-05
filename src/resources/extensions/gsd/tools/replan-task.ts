@@ -1,13 +1,12 @@
 import { clearParseCache } from "../files.js";
 import {
-  getSlice,
-  getTask,
   insertReplanHistory,
   upsertTaskPlanning,
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
 import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
-import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
+import { readSlice, readTask } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { assertVerifyIsShellCheckable, validateVerificationCommand } from "../verification-gate.js";
 import { normalizeVerifyCommandForVenv } from "../python-resolver.js";
@@ -175,11 +174,11 @@ export async function handleReplanTask(
         { itemKind: "task", milestoneId: params.milestoneId, sliceId: params.sliceId, taskId: params.taskId },
       ],
       mutate(context) {
-        const parentSlice = getSlice(params.milestoneId, params.sliceId);
+        const parentSlice = readSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
         }
-        if (isClosedStatus(parentSlice.status)) {
+        if (parentSlice.closed) {
           throw new PlanningGuardError(`cannot replan a task in a closed slice: ${params.sliceId} (status: ${parentSlice.status})`);
         }
         const parentLifecycle = adoptLifecycleIfMissing(context, {
@@ -194,11 +193,11 @@ export async function handleReplanTask(
           );
         }
 
-        const task = getTask(params.milestoneId, params.sliceId, params.taskId);
+        const task = readTask(params.milestoneId, params.sliceId, params.taskId);
         if (!task) {
           throw new PlanningGuardError(`task not found: ${params.milestoneId}/${params.sliceId}/${params.taskId}`);
         }
-        if (isClosedStatus(task.status)) {
+        if (task.done) {
           throw new PlanningGuardError(`cannot replan completed task ${params.taskId} — use gsd_task_reopen first`);
         }
         const lifecycle = adoptLifecycleIfMissing(context, {

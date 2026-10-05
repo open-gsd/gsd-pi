@@ -90,7 +90,8 @@ export async function handleCleanupBranches(ctx: ExtensionCommandContext, basePa
   let deletedStaleMilestones = 0;
   try {
     const { listWorktrees } = await import("./worktree-manager.js");
-    const { isDbAvailable, getMilestone } = await import("./gsd-db.js");
+    const { isDbAvailable } = await import("./gsd-db.js");
+    const { readMilestone } = await import("./db/lifecycle-read.js");
 
     const attachedBranches = new Set(
       listWorktrees(basePath).map((wt) => wt.branch),
@@ -101,9 +102,7 @@ export async function handleCleanupBranches(ctx: ExtensionCommandContext, basePa
       const milestoneId = branch.replace(/^milestone\//, "");
 
       if (!isDbAvailable()) continue;
-      const dbRow = getMilestone(milestoneId);
-      if (!dbRow) continue;
-      if (dbRow.status !== "complete" && dbRow.status !== "done") continue;
+      if (!readMilestone(milestoneId)?.done) continue;
       // Milestone is complete per DB — proceed to delete branch
       try {
         nativeBranchDelete(basePath, branch, true);

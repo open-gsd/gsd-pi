@@ -2,10 +2,7 @@ import { clearParseCache } from "../files.js";
 import {
   adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
-  getMilestone,
-  getSlice,
   getSliceTasks,
-  getTask,
   getLatestWorkflowDomainEvent,
   insertTask,
   upsertTaskPlanning,
@@ -14,7 +11,8 @@ import {
 } from "../gsd-db.js";
 import { invalidateStateCache } from "../state.js";
 import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
-import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus } from "../status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "../status-guards.js";
+import { readMilestone, readSlice, readSliceTasks, readTask } from "../db/lifecycle-read.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 import { renderPlanFromDb, renderSliceReplan } from "../markdown-renderer.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
@@ -89,7 +87,7 @@ function readBlockerAcceptedProvenance(
   sliceId: string,
   taskId: string,
 ): Record<string, string> | null {
-  const blockerTask = getTask(milestoneId, sliceId, taskId);
+  const blockerTask = readTask(milestoneId, sliceId, taskId);
   if (!blockerTask || blockerTask.status !== "blocker-accepted") return null;
   const event = getLatestWorkflowDomainEvent(
     "task.blocker.accepted",
@@ -277,18 +275,18 @@ export async function handleReplanSlice(
       ],
       mutate(context) {
         // Verify parent slice exists and has not been canonically cancelled.
-        const parentSlice = getSlice(params.milestoneId, params.sliceId);
+        const parentSlice = readSlice(params.milestoneId, params.sliceId);
         if (!parentSlice) {
           throw new PlanningGuardError(`missing parent slice: ${params.milestoneId}/${params.sliceId}`);
         }
         // #2313: adopt the parent Milestone lifecycle too, aligned with
         // plan-slice — replanning must not leave the authority chain
         // partially canonicalized.
-        const parentMilestone = getMilestone(params.milestoneId);
+        const parentMilestone = readMilestone(params.milestoneId);
         if (!parentMilestone) {
           throw new PlanningGuardError(`missing parent milestone: ${params.milestoneId}`);
         }
-        if (isClosedStatus(parentMilestone.status)) {
+        if (parentMilestone.closed) {
           throw new PlanningGuardError(
             `cannot replan a slice in a closed milestone: ${params.milestoneId} (status: ${parentMilestone.status})`,
           );
@@ -318,12 +316,12 @@ export async function handleReplanSlice(
         if (sliceLifecycle.lifecycleStatus === "completed") {
           throw new PlanningGuardError(`cannot replan completed slice ${params.sliceId} — use gsd_slice_reopen first`);
         }
-        if (isClosedStatus(parentSlice.status)) {
+        if (parentSlice.closed) {
           throw new PlanningGuardError(`cannot replan a closed slice: ${params.sliceId} (status: ${parentSlice.status})`);
         }
 
         // Verify blocker task exists and is complete
-        const blockerTask = getTask(params.milestoneId, params.sliceId, params.blockerTaskId);
+        const blockerTask = readTask(params.milestoneId, params.sliceId, params.blockerTaskId);
         if (!blockerTask) {
           throw new PlanningGuardError(`blockerTaskId not found: ${params.milestoneId}/${params.sliceId}/${params.blockerTaskId}`);
         }
@@ -341,16 +339,16 @@ export async function handleReplanSlice(
         }
         // #2202: a `blocker-accepted` Task counts as the closed blocker for the
         // replan gate; `skipped`/`cancelled` remain rejected.
-        if (!isClosedStatus(blockerTask.status) || blockerTask.status === "skipped") {
+        if (!blockerTask.done || blockerTask.status === "skipped") {
           throw new PlanningGuardError(`blockerTaskId ${params.blockerTaskId} is not complete (status: ${blockerTask.status}) — the blocker task must be finished before a replan is triggered`);
         }
 
         // Structural enforcement — reject modifications/removal of completed tasks
-        const existingTasks = getSliceTasks(params.milestoneId, params.sliceId);
+        const existingTasks = readSliceTasks(params.milestoneId, params.sliceId);
         const existingTaskById = new Map(existingTasks.map((task) => [task.id, task]));
         const completedTaskIds = new Set(
           existingTasks
-            .filter((task) => isClosedStatus(task.status) && task.status !== "skipped" && task.status !== "deferred" && task.status !== "cancelled")
+            .filter((task) => task.done && task.status !== "skipped" && task.status !== "deferred" && task.status !== "cancelled")
             .map((task) => task.id),
         );
 

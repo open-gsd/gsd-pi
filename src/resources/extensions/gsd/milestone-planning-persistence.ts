@@ -5,7 +5,6 @@ import type { CanonicalLifecycleStatus } from "./db/writers/lifecycle-commands.j
 import { clearParseCache } from "./files.js";
 import {
   adoptLifecycleIfMissing,
-  getMilestone,
   getMilestoneSlices,
   getSlice,
   insertMilestone,
@@ -27,7 +26,8 @@ import { flushWorkflowProjections } from "./projection-flush.js";
 import { writeManifestAndFlush } from "./workflow-manifest.js";
 import { appendEvent } from "./workflow-events.js";
 import { logWarning } from "./workflow-logger.js";
-import { UnknownLegacyStatusError, adoptionLifecycleStatus, isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
+import { UnknownLegacyStatusError, adoptionLifecycleStatus } from "./status-guards.js";
+import { readMilestone } from "./db/lifecycle-read.js";
 
 export interface PersistMilestonePlanSlice {
   sliceId: string;
@@ -83,8 +83,8 @@ function validatePlanPromotion(
     return `cannot plan milestone ${params.milestoneId} with terminal status ${params.status}`;
   }
 
-  const existingMilestone = getMilestone(params.milestoneId);
-  if (existingMilestone && isClosedStatus(existingMilestone.status)) {
+  const existingMilestone = readMilestone(params.milestoneId);
+  if (existingMilestone?.closed) {
     return `cannot re-plan milestone ${params.milestoneId}: it is already complete`;
   }
   if (existingMilestone) {
@@ -136,14 +136,14 @@ function validatePlanPromotion(
   // Validate depends_on: all dependencies must exist and be complete
   if (params.dependsOn && params.dependsOn.length > 0) {
     for (const depId of params.dependsOn) {
-      const dep = getMilestone(depId);
+      const dep = readMilestone(depId);
       if (!dep) {
         return `depends_on references unknown milestone: ${depId}`;
       }
-      if (isDiscardedMilestoneStatus(dep.status)) {
+      if (dep.discarded) {
         return `depends_on milestone ${depId} was discarded and can never be complete; remove it from depends_on`;
       }
-      if (!isClosedStatus(dep.status)) {
+      if (!dep.closed) {
         return `depends_on milestone ${depId} is not yet complete (status: ${dep.status})`;
       }
     }
