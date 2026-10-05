@@ -7,7 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import { openWorkflowDatabase } from "../db-workspace.ts";
+import { handleRecover } from "../commands-maintenance.ts";
+import { getWorkflowDatabasePath, isWorkflowDatabaseOpen, openWorkflowDatabase } from "../db-workspace.ts";
 import { detectProjectState } from "../detection.ts";
 import { _getAdapter, closeDatabase } from "../gsd-db.ts";
 import { handleMigrate, parseMigrationRecoveryArgs } from "../migrate/command.ts";
@@ -92,6 +93,7 @@ function projectionFiles(base: string): string[] {
 test("/gsd migrate without --preview prints the Preview hash and leaves the project a v1 project", async (t) => {
   const base = makePlanningProject(t);
   const { ctx, notes } = makeCtx();
+  const before = readdirSync(base, { recursive: true }).sort();
 
   await handleMigrate(base, ctx, pi);
 
@@ -99,16 +101,17 @@ test("/gsd migrate without --preview prints the Preview hash and leaves the proj
   assert.equal(preview?.kind, "warning", preview?.message);
   assert.match(preview?.message ?? "", /Preview hash: sha256:[0-9a-f]{64}/u);
   assert.match(preview?.message ?? "", /create milestone:M001/u);
-  assert.match(preview?.message ?? "", /Nothing was imported\..* To apply this exact Preview, run: \/gsd migrate --preview=sha256:[0-9a-f]{64} /u);
+  assert.match(preview?.message ?? "", /Nothing was imported\. To apply this exact Preview, run: \/gsd migrate --preview=sha256:[0-9a-f]{64} /u);
   assert.equal(detectProjectState(base).state, "v1-planning", "the guided flow still offers the migration");
   assert.deepEqual(
-    readdirSync(base).sort(),
-    [".gsd-migrate-pending", ".planning"],
-    "no .gsd, no backup and no staging directory is left; the Preview base database waits beside the project",
+    readdirSync(base, { recursive: true }).sort(),
+    before,
+    "the target is as it was: no .gsd, no database, no backup and no staging directory",
   );
-  assert.match(preview?.message ?? "", /\.gsd-migrate-pending; delete that directory/u, "the notice names the database it keeps");
+  assert.deepEqual(readdirSync(base), [".planning"]);
+  assert.equal(isWorkflowDatabaseOpen(), false, "the temporary Preview database is closed");
 
-  // A second Preview is sealed on the same database, so the hash does not change.
+  // The approval hash does not hold the identity of the temporary database, so it does not change.
   const again = makeCtx();
   await handleMigrate(base, again.ctx, pi);
   const hash = /Preview hash: (sha256:[0-9a-f]{64})/u;
@@ -128,13 +131,8 @@ test("/gsd migrate --preview=<hash> applies the Preview that the first run print
 
   assert.match(second.notes.at(-1)?.message ?? "", /Migration complete/u, JSON.stringify(second.notes));
   assert.equal(milestoneCount(), 1);
-  assert.deepEqual(
-    _getAdapter()!.prepare("SELECT preview_hash FROM workflow_import_applications").all(),
-    [{ preview_hash: approval.slice("--preview=".length) }],
-    "the Import Application is the approved Preview",
-  );
+  assert.equal(importApplicationCount(), 1);
   assert.ok(projectionFiles(base).some((path) => path.endsWith("-ROADMAP.md")));
-  assert.equal(existsSync(join(base, ".gsd-migrate-pending")), false, "the Preview base database is the project database now");
   assert.equal(existsSync(join(base, ".gsd-backups")), false, "a target with no .gsd has nothing to back up");
 
   // The same approval replays the retained migration and applies no second import.
@@ -211,10 +209,69 @@ test("the migration write refuses a Preview hash that is not the sealed Preview 
     plan.sourcePath, plan.targetRoot, plan.project, plan.preview, undefined, [], sealed.previewHash,
   );
   assert.equal(milestoneCount(), 1);
+  assert.equal(importApplicationCount(), 1);
+});
+
+test("/gsd migrate Preview leaves the database of the session open", async (t) => {
+  const base = makePlanningProject(t);
+  mkdirSync(join(base, ".gsd"));
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  const sessionDatabase = getWorkflowDatabasePath();
+  assert.ok(sessionDatabase);
+
+  // Preview only.
+  const first = makeCtx();
+  await handleMigrate(base, first.ctx, pi);
+  assert.match(first.notes.at(-1)?.message ?? "", /Preview hash: sha256:[0-9a-f]{64}/u, JSON.stringify(first.notes));
+  assert.equal(isWorkflowDatabaseOpen(), true);
+  assert.equal(getWorkflowDatabasePath(), sessionDatabase);
+
+  // A refused hash.
+  const second = makeCtx();
+  await handleMigrate(`--preview=sha256:${"0".repeat(64)} ${JSON.stringify(base)}`, second.ctx, pi);
+  assert.match(second.notes.at(-1)?.message ?? "", /is not the current Preview/u, JSON.stringify(second.notes));
+  assert.equal(isWorkflowDatabaseOpen(), true);
+  assert.equal(getWorkflowDatabasePath(), sessionDatabase);
+  assert.equal(milestoneCount(), 0);
+});
+
+test("/gsd recover after /gsd migrate keeps one artifact row for each milestone CONTEXT and RESEARCH", async (t) => {
+  const base = makePlanningProject(t);
+  mkdirSync(join(base, ".planning", "research"));
+  writeFileSync(join(base, ".planning", "research", "SUMMARY.md"), "# Research\n\nWhat the codebase does today.\n");
+  const first = makeCtx();
+  await handleMigrate(base, first.ctx, pi);
+  const approval = /--preview=sha256:[0-9a-f]{64}/u.exec(first.notes.at(-1)?.message ?? "")?.[0];
+  assert.ok(approval, first.notes.at(-1)?.message);
+  const migrated = makeCtx();
+  await handleMigrate(`${approval} ${JSON.stringify(base)}`, migrated.ctx, pi);
+  assert.match(migrated.notes.at(-1)?.message ?? "", /Migration complete/u, JSON.stringify(migrated.notes));
+  const narrativeRows = () => _getAdapter()!.prepare(
+    "SELECT path, full_content FROM artifacts WHERE artifact_type IN ('CONTEXT', 'RESEARCH') AND slice_id IS NULL ORDER BY path",
+  ).all();
+  const before = narrativeRows();
   assert.deepEqual(
-    _getAdapter()!.prepare("SELECT preview_hash FROM workflow_import_applications").all(),
-    [{ preview_hash: sealed.previewHash }],
+    before.map((row) => row["path"]),
+    [".gsd/milestones/M001/M001-CONTEXT.md", ".gsd/milestones/M001/M001-RESEARCH.md"],
+    "the fixture has the two documents under the key that migrate stores",
   );
+
+  // The generated slice plan needs the reviewed choice that keeps it preserved.
+  const unresolved = makeCtx();
+  await handleRecover(unresolved.ctx as never, base);
+  const choices = (unresolved.notes.at(-1)?.message ?? "").match(/--choice=sha256:[0-9a-f]{64}\.preserved/gu)?.join(" ") ?? "";
+
+  const preview = makeCtx();
+  await handleRecover(preview.ctx as never, base, choices);
+  const text = preview.notes.at(-1)?.message ?? "";
+  assert.doesNotMatch(text, /artifact:\S*M001-(?:CONTEXT|RESEARCH)\.md/u, "the Preview changes no CONTEXT or RESEARCH row");
+  const recoverApproval = /--preview=sha256:[0-9a-f]{64}/u.exec(text)?.[0];
+  assert.ok(recoverApproval, text);
+
+  const applied = makeCtx();
+  await handleRecover(applied.ctx as never, base, `${recoverApproval} ${choices}`);
+  assert.equal(applied.notes.at(-1)?.kind, "success", applied.notes.at(-1)?.message);
+  assert.deepEqual(narrativeRows(), before);
 });
 
 test("migration arguments accept one well-formed --preview hash only", () => {

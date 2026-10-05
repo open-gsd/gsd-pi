@@ -31,7 +31,7 @@ import {
   legacyImportBaseSnapshotAtVersion,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
-import { classifyLegacyImportChanges } from "./legacy-import-preview-classifier.js";
+import { classifyLegacyImportChanges, legacyImportNarrativeFileRowId } from "./legacy-import-preview-classifier.js";
 import { composeLegacyImportInterpretation } from "./legacy-import-preview-composition.js";
 import {
   collectLegacyImportDatabaseTargetEvidence,
@@ -446,11 +446,18 @@ export function createLegacyImportPreview(
   return createLegacyImportPreviewInternal(input, {}, knowledgeFileRows);
 }
 
-/** The knowledge ids whose KNOWLEDGE.md row text a sealed Preview writes over the database row. */
+/**
+ * The ids whose file text a sealed Preview writes over the database row: a
+ * KNOWLEDGE.md row (K/P/L###) or a milestone CONTEXT or RESEARCH document.
+ */
 export function legacyImportKnowledgeFileRows(artifact: LegacyImportPreviewArtifact): string[] {
-  return artifact.preview.changes
-    .filter((change) => change.action === "update" && change.target.kind === "knowledge")
-    .map((change) => change.target.key);
+  return artifact.preview.changes.flatMap((change) => {
+    if (change.action !== "update") return [];
+    if (change.target.kind === "knowledge") return [change.target.key];
+    return change.reason_code === "milestone-narrative-artifact"
+      ? [legacyImportNarrativeFileRowId(change.normalized)]
+      : [];
+  });
 }
 
 /** Test-only timing hooks for public-boundary race sabotage. */

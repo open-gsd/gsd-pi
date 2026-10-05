@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import { readCrashLock, isLockProcessAlive } from "../crash-recovery.js";
-import { closeWorkflowDatabase } from "../db-workspace.js";
+import { openWorkflowDatabasePathOrNull, restoreWorkflowDatabase } from "../db-workspace.js";
 import { findStaleScopedPauses, readPausedSessionMetadata } from "../interrupted-session.js";
 import { listOpenAutoPauseScopes } from "../db/writers/auto-pauses.js";
 import { sidecarQueueScope } from "../db/unit-dispatch-sidecars.js";
@@ -184,6 +184,7 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
     );
   }
 
+  const openBefore = openWorkflowDatabasePathOrNull();
   const opened = await ensureDbOpen(targetRoot, { createEmptyAuthority: true });
   if (!opened) return;
 
@@ -214,6 +215,6 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
       );
     }
   } finally {
-    closeWorkflowDatabase();
+    restoreWorkflowDatabase(openBefore);
   }
 }

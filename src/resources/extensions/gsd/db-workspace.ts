@@ -2,7 +2,7 @@
 // File Purpose: Workspace-facing Interface for opening and maintaining the workflow database.
 
 import { createHash } from "node:crypto";
-import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 import { syncDirectoryEntry } from "@gsd/native/directory-sync";
@@ -185,15 +185,6 @@ export function resolveWorkflowDatabaseLocation(basePath: string): WorkflowDatab
  */
 export function resolveProjectRootDbPath(basePath: string): string {
   return resolveWorkflowDatabaseLocation(basePath).projectDb;
-}
-
-/** Move a database file with its sidecars when it exists; the target is replaced. */
-export function moveDatabaseFiles(from: string, to: string): void {
-  if (!existsSync(from)) return;
-  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-    rmSync(`${to}${suffix}`, { force: true });
-    if (existsSync(`${from}${suffix}`)) renameSync(`${from}${suffix}`, `${to}${suffix}`);
-  }
 }
 
 /**
@@ -476,6 +467,21 @@ export function closeWorkflowDatabase(): void {
   closeDatabase();
 }
 
+/** The path of the open database, or null: the state that `restoreWorkflowDatabase` gives back. */
+export function openWorkflowDatabasePathOrNull(): string | null {
+  return isDbAvailable() ? getDbPath() : null;
+}
+
+/**
+ * Give the process handle back to the database that was open before a command
+ * opened one for its own use. `before` is null when no database was open, so
+ * the handle of the command is closed.
+ */
+export function restoreWorkflowDatabase(before: string | null): void {
+  if (before === null) closeDatabase();
+  else if (getDbPath() !== before) openWorkflowDatabasePath(before);
+}
+
 export function closeWorkflowDatabaseByWorkspace(workspace: GsdWorkspace): void {
   closeDatabaseByWorkspace(workspace);
 }
@@ -695,10 +701,17 @@ function prepareVerifiedImportEvidence(
 }
 
 function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string {
-  const counts = preview.preview.counts;
   return [
     `Import Preview ${preview.preview.preview_id}`,
     `Preview hash: ${preview.preview_hash}`,
+    ...importPreviewTextLines(preview),
+  ].join("\n");
+}
+
+/** The sources, mappings, diagnoses and choices of a Preview, below the hash that the operator approves. */
+function importPreviewTextLines(preview: LegacyImportPreviewArtifact): string[] {
+  const counts = preview.preview.counts;
+  return [
     `Source set: ${preview.preview.source_set_hash}`,
     `Change set: ${preview.preview.change_set_hash}`,
     `Changes: ${counts.create} create, ${counts.update} update, ${counts.delete} delete, ${counts.preserve} preserve`,
@@ -730,7 +743,13 @@ function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string 
       .map((id) => (
         `To write the KNOWLEDGE.md text of ${id} over its database row: ${formatLegacyImportKnowledgeFileRowChoice(id)}`
       )),
-  ].join("\n");
+    ...preview.preview.diagnoses
+      .filter((diagnosis) => diagnosis.code === "artifact-row-conflict")
+      .flatMap((diagnosis) => /^(\S+) file text /u.exec(diagnosis.message)?.[1] ?? [])
+      .map((id) => (
+        `To write the file text of ${id} over its database row: ${formatLegacyImportKnowledgeFileRowChoice(id)}`
+      )),
+  ];
 }
 
 const RECOVER_ROOT_FILES = ["DECISIONS", "REQUIREMENTS", "KNOWLEDGE", "PROJECT", "QUEUE"] as const;
@@ -786,7 +805,7 @@ export function prepareVerifiedRecoverApplication(
   const unused = knowledgeFileRows.filter((id) => !applied.has(id));
   if (unused.length > 0) {
     throw new Error(
-      `--choice names a KNOWLEDGE.md row that does not differ from an active database row: ${unused.join(", ")}`,
+      `--choice names a file row that does not differ from an active database row: ${unused.join(", ")}`,
     );
   }
   return evidence;
@@ -1365,10 +1384,30 @@ export function previewVerifiedMigrationApplication(
   sourceGsdRoot: string,
   artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
 ): { previewHash: string; authorizationText: string } {
-  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, ({ preview }) => ({
-    previewHash: preview.preview_hash,
-    authorizationText: recoverAuthorizationText(preview),
-  }));
+  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, ({ preview }) => {
+    const previewHash = migrationApprovalHash(preview);
+    return {
+      previewHash,
+      authorizationText: [`Preview hash: ${previewHash}`, ...importPreviewTextLines(preview)].join("\n"),
+    };
+  });
+}
+
+/**
+ * The hash that the operator approves for `/gsd migrate`: the sealed Preview
+ * without its identity. The identity holds the random id of the database. A
+ * target with no database gets its Preview from a temporary database, and the
+ * approved run creates the project database, so the approval must not hold
+ * that id. The base revision, the sources and every change stay in the hash.
+ */
+function migrationApprovalHash(preview: LegacyImportPreviewArtifact): string {
+  const { preview_id: _previewId, ...approved } = preview.preview;
+  return hashLegacyImportValue(approved as unknown as LegacyImportValue);
+}
+
+/** The approval hash of a migration Import Application that the open database holds. */
+export function appliedMigrationApprovalHash(operationId: string): string {
+  return migrationApprovalHash(inspectLegacyImportApplicationEvidence(operationId).preview);
 }
 
 /**
@@ -1385,9 +1424,9 @@ export function applyVerifiedMigrationApplication(
   approvedPreviewHash?: string,
 ): VerifiedMigrationCounts {
   return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, (sealed) => {
-    if (approvedPreviewHash !== undefined && sealed.preview.preview_hash !== approvedPreviewHash) {
+    if (approvedPreviewHash !== undefined && migrationApprovalHash(sealed.preview) !== approvedPreviewHash) {
       throw new Error(
-        `gsd migrate Preview ${sealed.preview.preview_hash} is not the approved Preview ${approvedPreviewHash}; `
+        `gsd migrate Preview ${migrationApprovalHash(sealed.preview)} is not the approved Preview ${approvedPreviewHash}; `
         + "nothing was imported. Run /gsd migrate again to see the current Preview.",
       );
     }

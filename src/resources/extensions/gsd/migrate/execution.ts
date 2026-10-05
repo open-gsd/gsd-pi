@@ -3,15 +3,19 @@
 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import {
+  appliedMigrationApprovalHash,
   applyVerifiedMigrationApplication,
-  closeWorkflowDatabase,
-  moveDatabaseFiles,
+  openWorkflowDatabase,
+  openWorkflowDatabasePathOrNull,
   previewVerifiedMigrationApplication,
+  resolveProjectRootDbPath,
+  restoreWorkflowDatabase,
   loadVerifiedRecoverApplication,
   loadVerifiedMigrationApplication,
   loadVerifiedMigrationApplicationByPreviewId,
 } from "../db-workspace.js";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { withDatabaseMaintenanceOwner } from "../database-maintenance-fence.js";
 import { immediateTransaction, withDatabaseMaintenanceClaim } from "../db/engine.js";
@@ -239,7 +243,7 @@ function runForwardRepair(
       .join(" ");
     throw new Error(
       `migration Forward Repair for Application ${imported.application.operationId} requires explicit reviewed choice:\n${details}\n`
-      + `Recommended resume: /gsd migrate --preview=${imported.application.previewHash} ${recommended} ${JSON.stringify(sourcePath)}\n`
+      + `Recommended resume: /gsd migrate --preview=${appliedMigrationApprovalHash(imported.application.operationId)} ${recommended} ${JSON.stringify(sourcePath)}\n`
       + "To select an alternative, replace that target's flag with its displayed preserve or restore flag.",
     );
   }
@@ -322,13 +326,6 @@ async function completeMigrationPublication(
   const sourceRoot = evidence.projectionRoot;
   const sourcePaths = record.logicalPaths.map((logicalPath) => join(sourceRoot, logicalPath));
   if (!claimed) {
-    // The approved Preview of a target that had no .gsd is sealed on the parked database.
-    const projectDb = join(record.targetRoot, ".gsd", "gsd.db");
-    const parked = migrationPreviewPendingRoot(record.targetRoot);
-    if (!existsSync(projectDb) && existsSync(parked)) {
-      moveDatabaseFiles(join(parked, "gsd.db"), projectDb);
-      rmSync(parked, { recursive: true, force: true });
-    }
     const opened = await ensureDbOpen(record.targetRoot, { createEmptyAuthority: true });
     if (!opened) throw new Error(`failed to open or create the GSD database at ${record.targetRoot}`);
     return withDatabaseMaintenanceClaim(() => (
@@ -358,9 +355,12 @@ async function completeMigrationPublication(
       record.artifactHashes,
       approvedPreviewHash,
     );
-  } else if (approvedPreviewHash !== undefined && imported.application.previewHash !== approvedPreviewHash) {
+  } else if (
+    approvedPreviewHash !== undefined
+    && appliedMigrationApprovalHash(imported.application.operationId) !== approvedPreviewHash
+  ) {
     throw new Error(
-      `this migration was applied under Preview ${imported.application.previewHash}, `
+      `this migration was applied under Preview ${appliedMigrationApprovalHash(imported.application.operationId)}, `
       + `not the approved Preview ${approvedPreviewHash}`,
     );
   }
@@ -608,21 +608,13 @@ export function sweepStaleMigrationStaging(targetRoot: string, now: number = Dat
 }
 
 /**
- * Where the Preview base database of a target with no .gsd waits for the
- * approval. It is not .gsd, so the project stays a v1 project until the
- * migration is applied.
- */
-export function migrationPreviewPendingRoot(targetRoot: string): string {
-  return join(targetRoot, ".gsd-migrate-pending");
-}
-
-/**
  * The Import Preview that `executeMigrationWrite` applies for this source, with
- * the hash the operator approves. It stages the projection in a temporary
- * directory and opens the database; it writes no projection, no backup and no
- * row, and it closes the database that it opened. A migration that already
- * holds an Import Application returns the hash of that Application, so the
- * same approval resumes it.
+ * the hash the operator approves. It writes no projection, no backup and no
+ * row, and it leaves the target as it was: a target with no database gets its
+ * Preview from an empty database in the OS temporary directory. The database
+ * that was open before the call stays open; a handle that this call opened is
+ * closed. A migration that already holds an Import Application returns the
+ * approval hash of that Application, so the same approval resumes it.
  */
 export async function previewMigrationWrite(
   sourcePath: string,
@@ -631,49 +623,50 @@ export async function previewMigrationWrite(
 ): Promise<{ previewHash: string; authorizationText: string }> {
   const projectionRootIdentity = proveMigrationProjectionRoot(targetRoot);
   const stagingRoot = mkdtempSync(join(targetRoot, MIGRATION_STAGING_DIR_PREFIX));
-  const targetGsd = join(targetRoot, ".gsd");
-  const parked = migrationPreviewPendingRoot(targetRoot);
-  let createdGsd = false;
-  let openedForPreview = false;
+  const openBefore = openWorkflowDatabasePathOrNull();
+  let previewBase = targetRoot;
+  let temporaryBase: string | null = null;
   try {
     const staged = await writeGSDDirectory(project, stagingRoot);
     const stagedGsd = join(stagingRoot, ".gsd");
-    const retained = findMigrationPublication(
-      sourcePath,
-      targetRoot,
-      migrationPublicationRequestHash(sourcePath, stagedGsd),
-      projectionRootIdentity,
-    );
-    if (retained?.legacyPreviewHash) {
-      return {
-        previewHash: retained.legacyPreviewHash,
-        authorizationText: `A migration of this source already holds the Import Application of Preview ${retained.legacyPreviewHash}.`,
-      };
+    if (existsSync(resolveProjectRootDbPath(targetRoot))) {
+      const opened = await ensureDbOpen(targetRoot, { createEmptyAuthority: true });
+      if (!opened) throw new Error(`failed to open the GSD database at ${targetRoot}`);
+      const retained = findMigrationPublication(
+        sourcePath,
+        targetRoot,
+        migrationPublicationRequestHash(sourcePath, stagedGsd),
+        projectionRootIdentity,
+      );
+      const applied = retained?.legacyPreviewId
+        ? loadVerifiedMigrationApplicationByPreviewId(retained.legacyPreviewId, retained.logicalPaths, retained.artifactHashes)
+        : null;
+      if (applied) {
+        const previewHash = appliedMigrationApprovalHash(applied.application.operationId);
+        return {
+          previewHash,
+          authorizationText: `A migration of this source already holds the Import Application of Preview ${previewHash}.`,
+        };
+      }
+    } else {
+      // Explicit import: an empty database is the base of the Preview.
+      temporaryBase = mkdtempSync(join(tmpdir(), "gsd-migrate-preview-"));
+      mkdirSync(join(temporaryBase, ".gsd"));
+      const opened = openWorkflowDatabase(temporaryBase, { createEmptyAuthority: true });
+      if (!opened.ok) throw new Error(`failed to create the temporary Preview database for ${targetRoot}`);
+      previewBase = temporaryBase;
     }
-    // Explicit import: an empty database is the base of the Preview. A target
-    // with no .gsd reuses its parked database, so the sealed hash stays valid.
-    if (!existsSync(targetGsd)) {
-      if (existsSync(parked)) renameSync(parked, targetGsd);
-      else mkdirSync(targetGsd);
-      createdGsd = true;
-    }
-    openedForPreview = await ensureDbOpen(targetRoot, { createEmptyAuthority: true });
-    if (!openedForPreview) throw new Error(`failed to open or create the GSD database at ${targetRoot}`);
     const { logicalPaths, artifactHashes } = stagedMigrationProjection(stagedGsd, staged);
     return previewVerifiedMigrationApplication(
-      targetRoot,
+      previewBase,
       logicalPaths.map((logicalPath) => join(stagedGsd, logicalPath)),
       stagedGsd,
       artifactHashes,
     );
   } finally {
+    restoreWorkflowDatabase(openBefore);
     rmSync(stagingRoot, { recursive: true, force: true });
-    // A Preview applies nothing. The import open admitted an empty database
-    // beside projections, so the handle is closed and later entry points judge
-    // it again. A .gsd that this run created is parked, so project detection
-    // does not change.
-    if (openedForPreview) closeWorkflowDatabase();
-    if (createdGsd) renameSync(targetGsd, parked);
+    if (temporaryBase !== null) rmSync(temporaryBase, { recursive: true, force: true });
   }
 }
 

@@ -1658,7 +1658,7 @@ describe('gsd-recover', async () => {
     assert.deepEqual(_getAdapter()!.prepare('SELECT * FROM artifacts').all(), before);
   });
 
-  test('recover shows a changed milestone CONTEXT.md as an update and writes it only after approval', async (t) => {
+  test('recover keeps the database row of a changed milestone CONTEXT.md and writes the file text only by explicit choice', async (t) => {
     const base = createFixtureBase();
     t.after(() => {
       closeDatabase();
@@ -1679,18 +1679,67 @@ describe('gsd-recover', async () => {
       "SELECT full_content FROM artifacts WHERE path = 'milestones/M001/M001-CONTEXT.md'",
     ).get()?.['full_content'];
 
+    const saved = '# M001 context\n\nSaved by the discussion.\n';
+
+    // A plain Preview keeps the database row and names the choice.
     const first = makeCtx();
     await handleRecover(first.ctx, base);
     const preview = first.notes.at(-1)?.message ?? '';
-    assert.match(preview, /update artifact:milestones\/M001\/M001-CONTEXT\.md/);
-    assert.equal(content(), '# M001 context\n\nSaved by the discussion.\n', 'the Preview writes nothing');
-    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(preview)?.[0];
+    assert.doesNotMatch(preview, /update artifact:/);
+    assert.match(preview, /"code":"artifact-row-conflict"/);
+    assert.match(preview, /To write the file text of M001-CONTEXT over its database row: --choice=M001-CONTEXT\.use-file/);
+
+    // A choice for a document that does not differ is refused.
+    const unused = makeCtx();
+    await handleRecover(unused.ctx, base, '--choice=M001-RESEARCH.use-file');
+    assert.equal(unused.notes.at(-1)?.kind, 'error', unused.notes.at(-1)?.message);
+    assert.match(unused.notes.at(-1)?.message ?? '', /does not differ from an active database row: M001-RESEARCH/);
+
+    // The choice seals a Preview that updates the row; the approval needs the choice again.
+    const chosen = makeCtx();
+    await handleRecover(chosen.ctx, base, '--choice=M001-CONTEXT.use-file');
+    const chosenPreview = chosen.notes.at(-1)?.message ?? '';
+    assert.match(chosenPreview, /update artifact:milestones\/M001\/M001-CONTEXT\.md/);
+    assert.equal(content(), saved, 'the Preview writes nothing');
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(chosenPreview)?.[0];
     assert.ok(approval, 'no diagnosis blocks the Preview');
 
     const second = makeCtx();
-    await handleRecover(second.ctx, base, approval);
+    await handleRecover(second.ctx, base, `${approval} --choice=M001-CONTEXT.use-file`);
     assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
     assert.equal(content(), edited);
+  });
+
+  test('recover applies a plain approval without the changed milestone CONTEXT.md text', async (t) => {
+    const base = createFixtureBase();
+    t.after(() => {
+      closeDatabase();
+      cleanup(base);
+    });
+    writeFile(base, 'milestones/M001/M001-ROADMAP.md', ROADMAP_M001);
+    openDatabase(join(base, '.gsd', 'gsd.db'));
+    insertMilestone({ id: 'M001', title: 'Recovery Test', status: 'active' });
+    const saved = '# M001 context\n\nSaved by the discussion.\n';
+    await saveArtifactToDb({
+      path: 'milestones/M001/M001-CONTEXT.md',
+      artifact_type: 'CONTEXT',
+      content: saved,
+      milestone_id: 'M001',
+    }, base);
+    writeFile(base, 'milestones/M001/M001-CONTEXT.md', '# M001 context\n\nEdited in the file.\n');
+
+    const first = makeCtx();
+    await handleRecover(first.ctx, base);
+    const approval = /--preview=(sha256:[0-9a-f]{64})/u.exec(first.notes.at(-1)?.message ?? '')?.[0];
+    assert.ok(approval, first.notes.at(-1)?.message);
+    const second = makeCtx();
+    await handleRecover(second.ctx, base, approval);
+
+    assert.equal(second.notes.at(-1)?.kind, 'success', second.notes.at(-1)?.message);
+    assert.deepEqual(
+      _getAdapter()!.prepare('SELECT path, full_content FROM artifacts').all(),
+      [{ path: 'milestones/M001/M001-CONTEXT.md', full_content: saved }],
+    );
   });
 
   test('recover on a hand-written REQUIREMENTS.md imports wrapped values and ignores unknown lines', async () => {
