@@ -3,7 +3,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { discoverExtensionEntryPaths } from "../src/core/extension-discovery.ts";
 import { discoverAndLoadExtensions } from "../src/core/extensions/loader.ts";
+import { DefaultPackageManager } from "../src/core/package-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -75,6 +78,43 @@ describe("extensions discovery", () => {
 		expect(result.errors).toHaveLength(0);
 		expect(result.extensions).toHaveLength(1);
 		expect(path.basename(result.extensions[0].path)).toBe("real.js");
+	});
+
+	it("discoverExtensionEntryPaths skips .d.ts files (shared discovery guard)", () => {
+		// The loader test above only exercises extensions/loader.ts; this pins the
+		// independently implemented guard in core/extension-discovery.ts.
+		fs.writeFileSync(path.join(extensionsDir, "real.ts"), extensionCode);
+		fs.writeFileSync(path.join(extensionsDir, "real.d.ts"), "export declare function helper(): void;\n");
+		fs.writeFileSync(path.join(extensionsDir, "stray.d.ts"), "export declare function orphan(): void;\n");
+
+		const discovered = discoverExtensionEntryPaths(extensionsDir);
+
+		expect(discovered.map((p) => path.basename(p))).toEqual(["real.ts"]);
+	});
+
+	it("DefaultPackageManager.resolve() skips .d.ts files in auto-collected extensions", async () => {
+		// Pins the third independently implemented guard in
+		// core/package-manager.ts (collectAutoExtensionEntries), reached through
+		// the public DefaultPackageManager.resolve() path.
+		const agentDir = path.join(tempDir, "agent");
+		const userExtensionsDir = path.join(agentDir, "extensions");
+		fs.mkdirSync(userExtensionsDir, { recursive: true });
+		fs.writeFileSync(path.join(userExtensionsDir, "real.js"), extensionCode);
+		fs.writeFileSync(path.join(userExtensionsDir, "real.d.ts"), "export declare function helper(): void;\n");
+		fs.writeFileSync(path.join(userExtensionsDir, "stray.d.ts"), "export declare function orphan(): void;\n");
+
+		const packageManager = new DefaultPackageManager({
+			cwd: tempDir,
+			agentDir,
+			settingsManager: SettingsManager.inMemory(),
+		});
+
+		const resolved = await packageManager.resolve();
+		const extensionNames = resolved.extensions.map((e) => path.basename(e.path));
+
+		expect(extensionNames).toContain("real.js");
+		expect(extensionNames).not.toContain("real.d.ts");
+		expect(extensionNames).not.toContain("stray.d.ts");
 	});
 
 	it("discovers subdirectory with index.ts", async () => {
