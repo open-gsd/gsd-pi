@@ -11,6 +11,18 @@ import type { AsyncJobManager, Job } from "./job-manager.js";
 
 const DEFAULT_TIMEOUT_SECONDS = 120;
 
+// Marker prefix for full-output serves. GSD's provider payload policy
+// display-truncates every tool result in the outgoing payload (800 chars by
+// default — see truncateResponsesInputResultItems in
+// src/resources/extensions/gsd/context-masker.ts). Without this marker a full
+// output served here would be re-truncated before the model ever sees it,
+// while the job's `deliveredTruncated` flag is already cleared — the tail
+// would be permanently unreachable ("nothing new to report" on re-await).
+// context-masker.ts recognizes this exact prefix and passes the block through
+// untruncated. Keep synchronized with FULL_TOOL_RESULT_MARKER there — bundled
+// extensions do not import each other (see the bg-shell/worktree-root note).
+const FULL_OUTPUT_MARKER = "<!-- async-jobs:full-output -->";
+
 const schema = Type.Object({
 	jobs: Type.Optional(
 		Type.Array(Type.String(), {
@@ -170,6 +182,11 @@ export function createAwaitTool(getManager: () => AsyncJobManager): ToolDefiniti
  * await_job for full output". Such a job is rendered in full here, once, and
  * the flag is then cleared so subsequent awaits acknowledge it tersely (the
  * full text is now in context).
+ *
+ * Full serves carry FULL_OUTPUT_MARKER so GSD's provider-payload display
+ * truncation (800-char default) does not silently re-truncate them in the
+ * outgoing payload — clearing `deliveredTruncated` is only sound when the
+ * served text actually reaches the model intact.
  */
 function renderCompleted(jobs: Job[]): string {
 	if (jobs.length === 0) return "No completed jobs.";
@@ -181,7 +198,7 @@ function renderCompleted(jobs: Job[]): string {
 	for (const j of fresh) j.deliveredTruncated = false;
 
 	const sections: string[] = [];
-	if (fresh.length > 0) sections.push(formatResults(fresh));
+	if (fresh.length > 0) sections.push(`${FULL_OUTPUT_MARKER}\n${formatResults(fresh)}`);
 	if (alreadyDelivered.length > 0) {
 		const names = alreadyDelivered
 			.map((j) => `${j.id} (${j.label})`)

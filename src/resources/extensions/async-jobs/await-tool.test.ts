@@ -6,6 +6,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { AsyncJobManager } from "./job-manager.ts";
 import { createAwaitTool } from "./await-tool.ts";
+import { truncateResponsesInputResultItems } from "../gsd/context-masker.ts";
+
+// Mirrored from await-tool.ts (the two bundled extensions share this literal
+// by contract; see the keep-synchronized note there).
+const FULL_OUTPUT_MARKER = "<!-- async-jobs:full-output -->";
 
 function getTextFromResult(result: { content: Array<{ type: string; text?: string }> }): string {
 	return result.content.map((c) => c.text ?? "").join("\n");
@@ -316,6 +321,42 @@ test("await_job still renders full output for a job consumed within the same tur
 	manager.shutdown();
 });
 
+test("recovered full output survives GSD provider-payload display truncation", async () => {
+	// Regression through payload shaping (review follow-up): checking only
+	// tool.execute() misses that before_provider_request re-truncates every
+	// function_call_output to 800 chars by default
+	// (gsd/provider-payload-policy.ts -> truncateResponsesInputResultItems).
+	// The recovered output must reach the model intact; the cleared
+	// `deliveredTruncated` flag is only sound when it does.
+	const manager = new AsyncJobManager();
+	const tool = createAwaitTool(() => manager);
+
+	const longOutput = `PAYLOAD_SURVIVAL_OUTPUT_${"y".repeat(5000)}`;
+	const jobId = manager.register("bash", "payload-survival-job", async () => longOutput);
+	const job = manager.getJob(jobId)!;
+	await job.promise;
+	await new Promise((r) => setTimeout(r, 100));
+	job.deliveredTruncated = true;
+
+	const result = await tool.execute("tc_payload", { jobs: [jobId] }, noopSignal, () => {}, undefined as never);
+	const servedText = getTextFromResult(result);
+	assert.ok(servedText.includes(longOutput), "tool serves the full output");
+
+	// Shape the tool result the way the Responses payload does, then apply the
+	// display-truncation stage of the provider payload policy.
+	const items = [
+		{ type: "function_call_output", call_id: "tc_payload", output: servedText },
+	];
+	const shaped = truncateResponsesInputResultItems(items as any, 800);
+	assert.equal(
+		shaped[0].output,
+		servedText,
+		"recovered full output must survive provider-payload display truncation",
+	);
+
+	manager.shutdown();
+});
+
 test("unawaited jobs still get follow-up delivery (#2248)", async () => {
 	const followUps: string[] = [];
 	const manager = new AsyncJobManager({
@@ -373,6 +414,10 @@ test("await_job serves full output once when the delivered follow-up was truncat
 		`await_job must serve the full output when the delivered follow-up was truncated, got:\n${firstText}`,
 	);
 	assert.doesNotMatch(firstText, /nothing new to report/);
+	assert.ok(
+		firstText.startsWith(FULL_OUTPUT_MARKER),
+		"full-output serve must carry the payload-policy exemption marker",
+	);
 
 	// The full output is now in context, so a subsequent await must not reprint it.
 	const second = await tool.execute("tc_trunc2", { jobs: [jobId] }, noopSignal, () => {}, undefined as never);

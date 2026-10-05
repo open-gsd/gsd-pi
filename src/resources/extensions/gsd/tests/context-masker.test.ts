@@ -6,6 +6,7 @@ import {
   createResponsesInputObservationMask,
   filterSupersededContextInjections,
   filterSupersededResponsesContextInjections,
+  FULL_TOOL_RESULT_MARKER,
   truncateContextResultMessages,
   truncateResponsesInputResultItems,
 } from "../context-masker.js";
@@ -370,4 +371,56 @@ test("filterSupersededResponsesContextInjections returns the array unchanged whe
   const items = [{ role: "user", content: [{ type: "input_text", text: "hi" }] }];
   const result = filterSupersededResponsesContextInjections(items as any);
   assert.equal(result, items);
+});
+
+// Full-output exemption (async-jobs await_job recovery): a block carrying
+// FULL_TOOL_RESULT_MARKER is a deliberately served complete output whose
+// delivery bookkeeping (deliveredTruncated flag) was already cleared — silently
+// truncating it here would make the tail permanently unreachable for the model.
+test("truncateResponsesInputResultItems spares marked full-output function_call_output items", () => {
+  const fullOutput = FULL_TOOL_RESULT_MARKER + "\n" + "x".repeat(5000);
+  const items = [
+    { type: "function_call_output", call_id: "call_marked", output: [{ type: "output_text", text: fullOutput }] },
+    { type: "function_call_output", call_id: "call_plain", output: "y".repeat(5000) },
+  ];
+  const result = truncateResponsesInputResultItems(items as any, 800);
+
+  const markedOutput = (result[0].output as any)[0].text as string;
+  assert.equal(markedOutput, fullOutput, "marked full output must survive display truncation intact");
+  const plainOutput = result[1].output as string;
+  assert.match(plainOutput, /…\[truncated\]/);
+  assert.ok(plainOutput.length < 900, "unmarked output still truncates to the display budget");
+});
+
+test("truncateResponsesInputResultItems spares marked string-form output", () => {
+  const fullOutput = FULL_TOOL_RESULT_MARKER + "\n" + "z".repeat(5000);
+  const items = [{ type: "function_call_output", call_id: "call_str", output: fullOutput }];
+  const result = truncateResponsesInputResultItems(items as any, 800);
+  assert.equal(result[0].output, fullOutput);
+});
+
+test("marked full-output block does not consume the per-message truncation budget", () => {
+  const items = [
+    {
+      type: "function_call_output",
+      call_id: "call_mixed",
+      output: [
+        { type: "output_text", text: FULL_TOOL_RESULT_MARKER + "\n" + "x".repeat(5000) },
+        { type: "output_text", text: "short tail" },
+      ],
+    },
+  ];
+  const result = truncateResponsesInputResultItems(items as any, 800);
+  const blocks = result[0].output as any[];
+  assert.equal(blocks[0].text.length, FULL_TOOL_RESULT_MARKER.length + 1 + 5000);
+  assert.equal(blocks[1].text, "short tail", "neighboring block keeps its own full budget");
+});
+
+test("truncateContextResultMessages spares marked full-output toolResult messages", () => {
+  const fullOutput = FULL_TOOL_RESULT_MARKER + "\n" + "x".repeat(5000);
+  const messages = [toolResult(fullOutput), toolResult("y".repeat(5000))];
+  const result = truncateContextResultMessages(messages as any, 800);
+
+  assert.equal((result[0].content as any)[0].text, fullOutput);
+  assert.match((result[1].content as any)[0].text, /…\[truncated\]/);
 });
