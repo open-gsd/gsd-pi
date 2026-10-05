@@ -20,6 +20,7 @@ import type {
 	ExtensionWidgetOptions,
 	GsdProgressState,
 } from "@gsd/pi-coding-agent/core/extensions/index.js";
+import { parseWorkflowOutcomeCustomMessage } from "@opengsd/contracts";
 import { InteractiveMode } from "../interactive/interactive-mode.js";
 import { type Theme, theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { createDefaultCommandContextActions } from "../shared/command-context-actions.js";
@@ -554,6 +555,18 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				}
 				currentRunId = null;
 			}
+
+			// workflow_outcome: the GSD extension reports the run's typed
+			// terminal state on a custom message (ADR-046). Re-emit it as the
+			// contract's v2 event; the raw message event still flows below.
+			if (event.type === "message_end") {
+				const outcome = parseWorkflowOutcomeCustomMessage(
+					event as unknown as Parameters<typeof parseWorkflowOutcomeCustomMessage>[0],
+				);
+				if (outcome && (!eventFilter || eventFilter.has("workflow_outcome"))) {
+					output(outcome);
+				}
+			}
 		}
 
 		// Apply event filter (v2 only, applies to agent session events only)
@@ -970,7 +983,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 						protocolVersion: 2,
 						sessionId: session.sessionId,
 						capabilities: {
-							events: ["execution_complete", "cost_update"],
+							events: ["execution_complete", "cost_update", "workflow_outcome"],
 							commands: ["init", "shutdown", "subscribe"],
 						},
 					};

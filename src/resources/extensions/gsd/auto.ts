@@ -363,8 +363,10 @@ import { normalizeRealPath } from "./paths.js";
 import {
   formatStopNoticePrefix,
   isBlockedStopReason,
+  isNonBlockingPauseNotice,
   stopNoticeDisplayReason,
 } from "./stop-notice.js";
+import { emitWorkflowOutcomeEvent } from "./workflow-outcome-event.js";
 import { abortActiveUnitTurn } from "./auto/unit-turn-abort.js";
 
 // ── ENCAPSULATION INVARIANT ─────────────────────────────────────────────────
@@ -2079,6 +2081,17 @@ export async function stopAuto(
       debugLog("stop-cleanup-ledger", { error: e instanceof Error ? e.message : String(e) });
     }
 
+    // The typed outcome event: hosts read the run's terminal state from it and
+    // keep the notification-text classification as a fallback (ADR-046). A
+    // blocked stop keeps exit 10; every other stop ends the run like a plain
+    // stop (exit 0), the same rule the text classifier applies.
+    emitWorkflowOutcomeEvent(pi, {
+      status: isBlockedStopReason(reason) ? "blocked" : "completed",
+      reason: displayReason || reason || undefined,
+      unitType: s.currentUnit?.type,
+      unitId: s.currentUnit?.id,
+    });
+
     if (installCompletionWidget && ctx && options.completionWidget) {
       const ledger = getLedger();
       const units = filterUnitsForMilestone(ledger?.units ?? [], completionMilestoneId);
@@ -2411,6 +2424,8 @@ export async function pauseAuto(
   }
 
   const pausedUnitLabel = currentUnitLabel();
+  const pausedUnitType = s.currentUnit?.type;
+  const pausedUnitId = s.currentUnit?.id;
 
   // Close out the current unit so its runtime record doesn't stay at "dispatched"
   if (s.currentUnit && ctx) {
@@ -2486,6 +2501,17 @@ export async function pauseAuto(
     pauseMessage,
     lifecycle.notifyLevel,
   );
+
+  // The typed outcome event: hosts read the run's terminal state from it and
+  // keep the notification-text classification as a fallback (ADR-046). A
+  // non-blocking pause does not need operator intervention, so it is not
+  // blocked — the same rule the text classifier applies.
+  emitWorkflowOutcomeEvent(_pi, {
+    status: isNonBlockingPauseNotice(pauseMessage.toLowerCase()) ? "completed" : "blocked",
+    reason: _errorContext?.message ?? lifecycle.notifyPrefix,
+    unitType: pausedUnitType,
+    unitId: pausedUnitId,
+  });
 }
 
 /**
