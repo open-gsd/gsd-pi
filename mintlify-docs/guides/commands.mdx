@@ -61,7 +61,7 @@ Quick-task right-sizing flags are composable. Use `--discuss` to surface design 
 | `/gsd skill-health` | Skill lifecycle dashboard |
 | `/gsd hooks` | Show configured post-unit and pre-dispatch hooks |
 | `/gsd run-hook` | Manually trigger a specific hook |
-| `/gsd migrate` | Migrate a v1 `.planning` directory to `.gsd` format |
+| `/gsd migrate` | Preview a v1 `.planning` migration to DB-backed `.gsd`; apply it with `--preview=<sha256>` |
 | `/gsd recover` | Preview a legacy markdown import, then approve its exact hash through a verified, backed-up Import Application |
 | `/gsd recover <recoveryActionId>` | Resume one repaired, terminal Task recovery abort after supplying repair and verification evidence |
 | `/gsd rebuild markdown` | Rebuild markdown projections from the canonical database; stale completion projections are quarantined, not imported |

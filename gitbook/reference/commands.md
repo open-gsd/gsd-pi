@@ -52,7 +52,7 @@
 | `/gsd setup` | Global setup status |
 | `/gsd skill-health` | Skill lifecycle dashboard |
 | `/gsd hooks` | Show configured hooks |
-| `/gsd migrate` | Migrate v1 `.planning` to DB-backed `.gsd` with backup and audit |
+| `/gsd migrate` | Preview a v1 `.planning` migration to DB-backed `.gsd`; apply it with `--preview=<sha256>` |
 | `/gsd recover` | See the [authoritative commands reference](../../docs/user-docs/commands.md) for the evidence-bound Preview, verified Import Application, and recovery contract |
 | `/gsd rebuild markdown` | Rebuild markdown projections from the canonical database; stale completion projections are quarantined, not imported |
 | `/gsd codebase [generate\|update\|stats]` | Manage `.gsd/CODEBASE.md`; parent workspaces include declared child repositories under repo-labeled sections |
