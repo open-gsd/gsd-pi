@@ -97,6 +97,10 @@ export async function failClosedOnFinalizeTimeout(
 /**
  * Phase 5: Post-unit finalize — pre/post verification, UAT pause, step-wizard.
  * Returns break/continue/next to control the outer loop.
+ *
+ * `resumeStage` is the stage a killed process stored for the unit (ADR-048).
+ * At `verify` the pre-verification of the unit passed before the kill, so it
+ * does not run again.
  */
 export async function runFinalize(
   ic: IterationContext,
@@ -105,6 +109,7 @@ export async function runFinalize(
   sidecarItem?: SidecarItem,
   publishVerifiedTask?: () => Promise<void>,
   onExecuteWorkComplete?: () => void,
+  resumeStage?: "verify",
 ): Promise<PhaseResult> {
   const { ctx, pi, s, deps } = ic;
   const { pauseAfterUatDispatch } = iterData;
@@ -156,11 +161,13 @@ export async function runFinalize(
   };
   clearCurrentPhase();
   setBeforeAgentStartContext(undefined);
-  const preResultGuard = await withTimeout(
-    deps.postUnitPreVerification(postUnitCtx, preVerificationOpts),
-    FINALIZE_PRE_TIMEOUT_MS,
-    "postUnitPreVerification",
-  );
+  const preResultGuard = resumeStage === "verify"
+    ? { value: "continue" as const, timedOut: false as const }
+    : await withTimeout(
+      deps.postUnitPreVerification(postUnitCtx, preVerificationOpts),
+      FINALIZE_PRE_TIMEOUT_MS,
+      "postUnitPreVerification",
+    );
 
   if (preResultGuard.timedOut) {
     return failClosedOnFinalizeTimeout(

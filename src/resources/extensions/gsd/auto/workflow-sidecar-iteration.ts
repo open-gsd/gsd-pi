@@ -1,12 +1,12 @@
 // Project/App: gsd-pi
-// File Purpose: Sidecar iteration-data adapter for auto-mode loop.
+// File Purpose: Iteration-data adapter for a unit the auto-mode loop takes from a row (a sidecar item, or a unit that continues at a stored stage).
 
 import type { GSDState } from "../types.js";
 import type { SidecarItem } from "./session.js";
 import type { IterationData } from "./types.js";
 
 export interface BuildSidecarIterationDataInput {
-  sidecarItem: SidecarItem;
+  sidecarItem: Pick<SidecarItem, "unitType" | "unitId" | "prompt">;
   basePath: string;
   canonicalProjectRoot: string;
   deriveState: (basePath: string) => Promise<GSDState>;

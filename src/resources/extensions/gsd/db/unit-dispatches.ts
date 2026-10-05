@@ -680,6 +680,46 @@ export function isDispatchExecutionOpen(dispatchId: number): boolean {
   return getDispatchById(dispatchId) !== null && getDispatchStage(dispatchId) === "execute";
 }
 
+/**
+ * The dispatch row of a unit that a killed process left in the verify stage
+ * (ADR-048). The crash sweep of the next start, or the signal handler of the
+ * process, canceled the row; a pause or a stop is not a kill and stores another
+ * exit reason. The row is the newest dispatch of its scope, so work that ran
+ * after it makes it history. Three unit kinds are not returned:
+ * - execute-task: its Attempt holds the stage, and state derivation selects
+ *   the Task again;
+ * - custom-step: the custom engine selects the step again from its run;
+ * - a unit with an open sidecar row: the queue runs that row again.
+ * `sliceId` is the slice lock of a slice-parallel worker, or null.
+ */
+export function getInterruptedVerifyDispatch(
+  milestoneId: string,
+  sliceId: string | null,
+): UnitDispatchRow | null {
+  if (!isDbAvailable()) return null;
+  const row = _getAdapter()!.prepare(
+    `SELECT d.* FROM unit_dispatches d
+     JOIN unit_dispatch_stages st ON st.dispatch_id = d.id
+     WHERE st.stage = 'verify'
+       AND d.milestone_id = :milestone_id
+       AND d.status = 'canceled'
+       AND d.exit_reason IN ('crash-recovered', 'signal-exit')
+       AND d.unit_type NOT IN ('execute-task', 'custom-step')
+       AND d.id = (
+         SELECT MAX(n.id) FROM unit_dispatches n
+         WHERE n.milestone_id = :milestone_id
+           AND (:slice_id IS NULL OR n.slice_id = :slice_id)
+       )
+       AND NOT EXISTS (
+         SELECT 1 FROM unit_dispatch_sidecars q
+         WHERE q.unit_type = d.unit_type
+           AND q.unit_id = d.unit_id
+           AND q.status IN ('held', 'queued')
+       )`,
+  ).get({ ":milestone_id": milestoneId, ":slice_id": sliceId }) as UnitDispatchRow | undefined;
+  return row ?? null;
+}
+
 /** Delete the stored retry decisions of every dispatch row of the unit. */
 export function deleteUnitDispatchRetries(unitType: string, unitId: string): void {
   transaction(() => {

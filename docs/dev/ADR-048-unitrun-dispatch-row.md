@@ -59,7 +59,7 @@ Rules:
 - **Hooks.** The `hook_state` row in the database still holds the active hook and the gate block. On start and resume the hook reconcile queues the restored hook only when no queued row for that hook exists, so a row that survived a kill is not queued twice.
 - **Quick tasks.** Triage stores each quick task as a `held` row. A capture that already has a `held` or `queued` row is not added again. The capture is marked executed after its row becomes `queued`, so a kill between the two steps cannot lose the task. When the row becomes `queued` its unit id takes the milestone the session runs at that time, so a session that moves to the next milestone runs the quick tasks it holds as units of that milestone.
 
-Not changed: the auto loop still takes queued rows before `advance()`. Selecting them inside `advance()` is part of the Lifecycle Kernel work.
+Changed by the Lifecycle Kernel amendment below: the kernel `advance()` selects the queued rows.
 
 ## Amendment 2026-10-04: the planner retry after a failed pre-execution check is a row on the dispatch row
 
@@ -122,7 +122,7 @@ Rules for the stage checkpoint (`unit_dispatch_stages (dispatch_id, stage, updat
 - **Read.** A resume asks one question of the rows: does the unit still have execution to continue? The answer is yes when the stage of the dispatch row is `execute` (`isDispatchExecutionOpen`) and the result rows of the unit do not exist. The row status does not decide this: the loop settles the row of a unit that paused in pre-verification. Only then the session file of the unit is read, to build the tool-call replay text for the next prompt. The pause path (`handlePausedSessionResumeRecovery`) takes the unit from the dispatch link of the pause row. The crash path (`assessInterruptedSession`) takes it from the newest dispatch row of the dead worker.
 - A live process and a restarted process use the same rule: `pauseAuto` keeps the dispatch link in the session and writes the same value to the row.
 
-Not changed: a restart does not continue a unit at the `verify`, `route` or `closeout` stage. It selects the next unit from state, as before. Continuing at the stored stage is part of the Lifecycle Kernel work. In the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing still asks for a milestone directory with content before it restores the milestone of the pause.
+A restart continues a non-task unit at the `verify` stage (see the Lifecycle Kernel amendment below). Not changed: in the crash path, the count of tool calls in the session file is still one of the two signals that classify an interrupted session as recoverable. Resume routing still asks for a milestone directory with content before it restores the milestone of the pause.
 
 ## Amendment 2026-10-04: a custom workflow step is claimed as a dispatch row
 
@@ -141,6 +141,23 @@ Not changed:
 - The custom loop path is still a separate branch of the auto loop. It shares guards, the unit phase and the dispatch ledger with the standard path.
 - `/gsd workflow approve` completes a step with no dispatch row, because no unit runs. It does not check for a live claim of the step.
 - A step has no expected artifact in the unit registry and no Tool Contract in the unit manifest, so the artifact check and the Worktree Safety check of the standard path do not run for it. The verification policy of the step is its check, and its result is the evidence row that completion requires (ADR-046). A run has no worktree: a step runs in the project root.
+
+## Amendment 2026-10-04: the Lifecycle Kernel module selects the next unit from rows
+
+This is part 4. `auto/lifecycle-kernel.ts` is the Lifecycle Kernel module. It has four entry points: `kernelStart`, `kernelAdvance`, `kernelResume` and `kernelStop`. `auto.ts` and the auto loop call these and do not call the Auto Orchestration module directly. `auto/workflow-kernel.ts` stays the pure policy layer below it.
+
+`kernelAdvance` selects the next unit in this order:
+
+1. **A unit that a killed process left in the `verify` stage.** The row is `canceled` with exit reason `crash-recovered` (the crash sweep of the next start) or `signal-exit` (the signal handler). It is the newest dispatch row of the milestone of the session (of the slice, for a slice-parallel worker), so work that ran after it makes it history. The loop claims a new dispatch row for the unit, writes `verify` on it, does not run the unit and does not run pre-verification again, and continues at the verification gate. Budgets and stored retries are read by unit, so the new row keeps them. Not selected: `execute-task` (its Attempt holds the stage, and state derivation selects the Task again), `custom-step` (the engine selects the step again), and a unit with an open sidecar row (the queue runs that row again). A pause or a stop is not a kill.
+2. **The oldest `queued` row of the sidecar queue.**
+3. **The step of a custom engine**, selected by the engine from the step rows of its run (the kernel returns `engine`).
+4. **The unit the Auto Orchestration module selects** from the lifecycle rows and the stored retry rows. It claims the `unit_dispatches` row.
+
+The selection runs after the session-lock check. A process that lost the lock selects nothing, so a queued sidecar row stays `queued` for the process that holds the lock. Before this amendment the loop took the row before the lock check and closed it without running it.
+
+A unit killed in `route` or `closeout` finished its work and its verification. It is not selected again; the next unit comes from state. Its dispatch row stays `canceled` with the stage, which records where the process died.
+
+Not changed: `kernelStart`, `kernelResume` and `kernelStop` pass to the Auto Orchestration module. Resume routing from the pause row is still in `auto.ts` and `interrupted-session.ts`.
 
 ## Rejected alternatives
 

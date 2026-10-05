@@ -298,6 +298,7 @@ import { runAutoLoopWithUok } from "./uok/kernel.js";
 import { resolveUokFlags } from "./uok/flags.js";
 import { validateDirectory } from "./validate-directory.js";
 import { createAutoOrchestrator } from "./auto/orchestrator.js";
+import { kernelResume, kernelStart, kernelStop } from "./auto/lifecycle-kernel.js";
 import type { AutoAdvanceResult, AutoOrchestrationModule } from "./auto/contracts.js";
 import {
   repairAutoWorktreeSafetyFailure,
@@ -2269,7 +2270,7 @@ export async function stopAuto(
     if (pi) clearToolBaseline(pi);
 
     try {
-      await s.orchestration?.stop(reason ?? "stop");
+      await kernelStop(s, reason ?? "stop");
     } catch (err) {
       debugLog("stop-orchestration-stop", { error: err instanceof Error ? err.message : String(err) });
     }
@@ -2457,7 +2458,7 @@ export async function pauseAuto(
   deregisterSigtermHandler();
 
   try {
-    await s.orchestration?.stop("pause");
+    await kernelStop(s, "pause");
   } catch (err) {
     debugLog("pause-orchestration-stop", { error: err instanceof Error ? err.message : String(err) });
   }
@@ -3201,7 +3202,7 @@ export async function startAuto(
     pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: s.stepMode ? "Step-mode resumed." : "Auto-mode resumed.", level: "progress" });
 
     try {
-      const resumeResult = await s.orchestration?.resume();
+      const resumeResult = await kernelResume(s);
       if (resumeResult?.kind === "blocked" && resumeResult.action === "stop") {
         notifyResumeBlocked(ctx, resumeResult);
         await cleanupAfterLoopExit(ctx);
@@ -3299,7 +3300,7 @@ export async function startAuto(
   pi.events.emit(CMUX_CHANNELS.LOG, { preferences: loadEffectiveGSDPreferences(s.basePath || undefined)?.preferences, message: requestedStepMode ? "Step-mode started." : "Auto-mode started.", level: "progress" });
 
   try {
-    await s.orchestration?.start({ basePath: s.basePath, trigger: "auto-loop" });
+    await kernelStart(s, { basePath: s.basePath, trigger: "auto-loop" });
   } catch (err) {
     debugLog("start-orchestration-start", { error: err instanceof Error ? err.message : String(err) });
   }

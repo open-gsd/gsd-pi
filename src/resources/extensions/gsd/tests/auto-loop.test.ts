@@ -43,7 +43,8 @@ import { isBlockedStopReason, stopNoticeKind } from "../stop-notice.js";
 import { mapStatusToExitCode } from "../../../../headless-events.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.js";
 import { claimMilestoneLease, getMilestoneLease, milestoneLeaseTtlSeconds } from "../db/milestone-leases.js";
-import { getDispatchStage, getLatestForUnit, isDispatchExecutionOpen, recordDispatchClaim, markCanceled } from "../db/unit-dispatches.js";
+import { getDispatchStage, getLatestForUnit, isDispatchExecutionOpen, recordDispatchClaim, markCanceled, setDispatchStage } from "../db/unit-dispatches.js";
+import { clearStaleWorkerLock } from "../crash-recovery.js";
 import { setRuntimeKv, getRuntimeKv } from "../db/runtime-kv.js";
 import { SourceObservationStore } from "../source-observations.js";
 import { autoCommitCurrentBranch } from "../worktree.js";
@@ -2985,11 +2986,12 @@ test("autoLoop passes structured session-lock failure details to the handler", a
   );
 });
 
-// Regression for #5308: the iteration prelude must dequeue sidecar items
-// (popping the queue and emitting the `sidecar-dequeue` journal event) BEFORE
-// validateSessionLock + break-on-invalid. Inverting that order silently drops
-// queued sidecar work on lock-loss. Covers first-iteration and mid-session.
-test("autoLoop dequeues sidecar item before session-lock break (first iteration, #5308)", async (t) => {
+// The Lifecycle Kernel selects a queued sidecar row after the session-lock
+// check (ADR-048). A process that lost the lock runs nothing, so the row stays
+// queued for the process that holds the lock. #5308 was the in-memory queue:
+// that queue died with the process, so it was popped and journaled first.
+// Covers first-iteration and mid-session.
+test("autoLoop leaves a queued sidecar row for the lock holder on session-lock loss (first iteration)", async (t) => {
   _resetPendingResolve();
 
   const ctx = makeMockCtx();
@@ -3024,21 +3026,21 @@ test("autoLoop dequeues sidecar item before session-lock break (first iteration,
 
   assert.equal(
     listQueuedSidecarItems().length,
-    0,
-    "sidecar item must be popped on lock-loss iteration (pre-#5308 ordering)",
+    1,
+    "the sidecar row stays queued when this process lost the session lock",
   );
   assert.ok(
-    journalEvents.includes("sidecar-dequeue"),
-    "sidecar-dequeue journal event must be emitted before session-lock break",
+    !journalEvents.includes("sidecar-dequeue"),
+    "a process that lost the lock selects no sidecar row",
   );
   assert.ok(
     deps.callLog.includes("handleLostSessionLock"),
-    "session lock handler must still fire after sidecar dequeue",
+    "session lock handler must fire",
   );
   assert.ok(!deps.callLog.includes("deriveState"), "lock loss should stop before deriving state");
 });
 
-test("autoLoop dequeues sidecar item before session-lock break (mid-session, #5308)", async (t) => {
+test("autoLoop leaves a queued sidecar row for the lock holder on session-lock loss (mid-session)", async (t) => {
   _resetPendingResolve();
 
   const ctx = makeMockCtx();
@@ -3091,12 +3093,12 @@ test("autoLoop dequeues sidecar item before session-lock break (mid-session, #53
   assert.ok(lockCheckCount >= 2, "lock validator must run on iteration 2");
   assert.equal(
     listQueuedSidecarItems().length,
-    0,
-    "queued sidecar item must be popped on the lock-loss iteration",
+    1,
+    "the sidecar row stays queued on the lock-loss iteration",
   );
   assert.ok(
-    journalEvents.includes("sidecar-dequeue"),
-    "sidecar-dequeue journal event must be emitted before session-lock break",
+    !journalEvents.includes("sidecar-dequeue"),
+    "a process that lost the lock selects no sidecar row",
   );
   assert.ok(
     deps.callLog.includes("handleLostSessionLock"),
@@ -7991,4 +7993,93 @@ test("a pause in verification after pre-verification passed leaves the unit in t
 
   assert.equal(getDispatchStage(dispatchId), "verify");
   assert.equal(isDispatchExecutionOpen(dispatchId), false, "the resume does not replay");
+});
+
+test("restart after a kill in the verify stage continues the unit at verification with its stored budget", async (t) => {
+  _resetPendingResolve();
+
+  const ctx = makeMockCtx();
+  ctx.ui.setStatus = () => {};
+  const pi = makeMockPi();
+  const s = makeLoopSession({ currentMilestoneId: "M001" });
+  openLoopDatabase(t, s);
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "active" });
+  const unit = { unitType: "plan-slice", unitId: "M001/S01" };
+  const budget = { ...unit, kind: "zero-tool" } as const;
+
+  // The process that was killed: it ran the planner, spent one retry of a
+  // budget, passed pre-verification, and died in the verification gate.
+  const deadWorkerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const deadLease = claimMilestoneLease(deadWorkerId, "M001");
+  if (!deadLease.ok) throw new Error("expected test lease");
+  const killed = recordDispatchClaim({
+    traceId: "flow-killed",
+    workerId: deadWorkerId,
+    milestoneLeaseToken: deadLease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: unit.unitType,
+    unitId: unit.unitId,
+  });
+  if (!killed.ok) throw new Error(`expected dispatch claim: ${killed.error}`);
+  spendUnitBudget(new Map(), budget);
+  setDispatchStage(killed.dispatchId, "verify");
+  _getAdapter()!.prepare(
+    "UPDATE workers SET pid = 99999, last_heartbeat_at = '1970-01-01T00:00:00.000Z' WHERE worker_id = :worker_id",
+  ).run({ ":worker_id": deadWorkerId });
+
+  // The next start: the crash sweep cancels the row, and a new worker runs the loop.
+  clearStaleWorkerLock(s.basePath);
+  const workerId = registerAutoWorker({ projectRootRealpath: s.basePath });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease for the restarted worker");
+  (s as any).workerId = workerId;
+  (s as any).milestoneLeaseToken = lease.token;
+
+  const phases: string[] = [];
+  s.orchestration = {
+    start: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    advance: async () => {
+      phases.push("select-from-state");
+      s.active = false;
+      return { kind: "stopped" as const, reason: "test wind-down" };
+    },
+    settle: async () => {},
+    completeActiveUnit: async () => {},
+    retryActiveUnit: async () => {},
+    abandonActiveUnit: async () => {},
+    resume: async () => ({ kind: "stopped" as const, reason: "unused" }),
+    stop: async (reason: string) => ({ kind: "stopped" as const, reason }),
+    getStatus: () => ({ phase: "running" as const, transitionCount: 0 }),
+  } satisfies AutoOrchestrationModule;
+  const deps = makeMockDeps({
+    postUnitPreVerification: async () => {
+      phases.push("pre-verification");
+      return "continue" as const;
+    },
+    runPostUnitVerification: async (vctx) => {
+      phases.push(`verification:${vctx.s.currentUnit?.type} ${vctx.s.currentUnit?.id}`);
+      return "continue" as const;
+    },
+    postUnitPostVerification: async () => {
+      phases.push("post-verification");
+      return "continue" as const;
+    },
+  });
+
+  await autoLoop(ctx, pi, s, deps);
+
+  assert.deepEqual(
+    phases,
+    ["verification:plan-slice M001/S01", "post-verification", "select-from-state"],
+    "the unit continues at the verification gate; pre-verification passed before the kill",
+  );
+  assert.equal(pi.calls.length, 0, "the planner does not run again");
+  const continued = getLatestForUnit(unit.unitId)!;
+  assert.notEqual(continued.id, killed.dispatchId, "the continuation is a new dispatch row");
+  assert.equal(continued.status, "completed");
+  assert.equal(continued.attempt_n, 2);
+  assert.equal(getDispatchStage(continued.id), "closeout");
+  assert.equal(readUnitBudget(new Map(), budget), 1, "the budget the killed process spent is still spent");
 });
