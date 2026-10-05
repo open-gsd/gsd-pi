@@ -11,7 +11,11 @@ import { registerHooks } from "../bootstrap/register-hooks.ts";
 import { markDepthVerified } from "../bootstrap/write-gate.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { handleResumeWork } from "../commands-gsd-core.ts";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import { claimMilestoneLease } from "../db/milestone-leases.ts";
+import { recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
+import { internalExecutionInvocation } from "../execution-invocation.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -29,6 +33,7 @@ import { clearPathCache } from "../paths.ts";
 import { drainProjectionWork } from "../projection-worker.ts";
 import { executeCheckpointSave, executeSummarySave } from "../tools/workflow-tool-executors.ts";
 import { buildActiveResumeSection, buildResumeSection, readWorkCheckpoint, saveWorkCheckpoint } from "../work-checkpoint.ts";
+import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
 import { saveContextArtifact } from "./helpers/saved-context.ts";
 import { cleanup, makeTempRepo } from "./test-utils.ts";
 
@@ -240,6 +245,52 @@ test("/gsd resume-work takes the handoff from the checkpoint row of the active u
   assert.match(fromTask, /Source: Work Checkpoint of M001\/S01\/T01 saved [^\n]+\n- Completed: Parser rewritten; two fixture tests still fail\./);
   assert.match(fromTask, /- Next action: Add expiresAt to fixtures\/sessions\.ts and run the tests again\./);
   assert.equal(existsSync(join(base, CONTINUE_FILE)), false);
+});
+
+test("/gsd resume-work shows the handoff of a task after its Attempt is settled as interrupted", async (t) => {
+  const base = makeProject(t);
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+  const dispatch = recordDispatchClaim({
+    traceId: "checkpoint-handoff-dispatch",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    unitType: "execute-task",
+    unitId: "M001/S01/T01",
+  });
+  assert.equal(dispatch.ok, true);
+  if (!dispatch.ok) return;
+  const claim = claimTaskAttempt({
+    invocation: internalExecutionInvocation("test:checkpoint-handoff:claim"),
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    workerId,
+    milestoneLeaseToken: lease.token,
+    coordinationDispatchId: dispatch.dispatchId,
+  });
+
+  saveWorkCheckpoint(HANDOFF);
+  const settled = settleTaskAttempt({
+    invocation: internalExecutionInvocation("test:checkpoint-handoff:settle"),
+    attemptId: claim.attemptId,
+    outcome: "interrupted",
+    failureClass: "stale-worker",
+    summary: "The unit ended before the task was complete.",
+    output: {},
+  });
+  assert.equal(settled.status, "committed");
+
+  const sent: Array<{ content: string }> = [];
+  invalidateAllCaches();
+  await handleResumeWork("", { cwd: base, ui: { notify() {} } } as any, { sendMessage: (message: any) => sent.push(message) } as any);
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.content, /Source: Work Checkpoint of M001\/S01\/T01 saved [^\n]+\n- Completed: Parser rewritten; two fixture tests still fail\./);
+  assert.match(sent[0]!.content, /- Next action: Add expiresAt to fixtures\/sessions\.ts and run the tests again\./);
 });
 
 test("/gsd resume-work does not show the checkpoint of a completed task as the resume state of the next task", async (t) => {
