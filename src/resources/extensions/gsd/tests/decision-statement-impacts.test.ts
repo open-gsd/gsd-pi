@@ -339,3 +339,44 @@ test("gsd_decision_save records impacts; decision get and list surface them", as
   const listedText = textContent(listed);
   assert.match(listedText, /impacts: revalidates M001; blocks auth/);
 });
+
+test("a pre-feature database keeps gsd_decision_get and gsd_decision_list working read-only", async (t) => {
+  const base = makeTmpBase(t);
+  const { id } = await saveDecisionToDb(decision("cookies"), base);
+  // A database whose last writer predates the statement-impact feature has no
+  // workflow_decision_statement_impacts table, and the isolated read-only
+  // connections the decision tools read through never create one.
+  _getAdapter()!.exec("DROP TABLE workflow_decision_statement_impacts");
+  closeDatabase();
+
+  const got = await nativeTool("gsd_decision_get").execute(
+    `call-get-prefeature-${id}`,
+    { id },
+    undefined,
+    undefined,
+    { cwd: base },
+  );
+  const gotDetails = (got.structuredContent ?? got.details) as Record<string, unknown>;
+  assert.equal(gotDetails.error, undefined, "the point read must not fail");
+  const gotDecision = gotDetails.decision as Record<string, unknown> | undefined;
+  assert.ok(gotDecision, "the decision is returned");
+  assert.equal(gotDecision!["impacts"], undefined, "no impacts key on the legacy shape");
+  assert.doesNotMatch(textContent(got), /no such table/);
+
+  const listed = await nativeTool("gsd_decision_list").execute(
+    "call-list-prefeature-1",
+    { includeSuperseded: true },
+    undefined,
+    undefined,
+    { cwd: base },
+  );
+  const listedDetails = (listed.structuredContent ?? listed.details) as Record<string, unknown>;
+  assert.equal(listedDetails.error, undefined, "the list read must not fail");
+  assert.equal(listedDetails.count, 1);
+  const row = (listedDetails.decisions as Array<Record<string, unknown>>).find(
+    (decision) => decision["id"] === id,
+  );
+  assert.ok(row, "the decision is listed");
+  assert.equal(row!["impacts"], undefined, "no impacts key on the legacy shape");
+  assert.doesNotMatch(textContent(listed), /no such table/);
+});

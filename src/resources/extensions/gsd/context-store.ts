@@ -6,6 +6,7 @@
 
 import { _getAdapter, isDbAvailable } from "./gsd-db.js";
 import type { DbAdapter } from "./db-adapter.js";
+import { hasDecisionStatementImpactSchema } from "./db-decision-statement-impact-schema.js";
 import type { Decision, DecisionMadeBy, DecisionStatementImpact, Requirement } from "./types.js";
 
 // ─── Query Functions ───────────────────────────────────────────────────────
@@ -791,7 +792,9 @@ export function queryRequirementsWithLimit(
 /**
  * Statement impacts of the given decisions, in saved order (decision, ordinal).
  * Written only by the decision.save Domain Operation into
- * workflow_decision_statement_impacts. Throws on query errors.
+ * workflow_decision_statement_impacts. Throws on query errors. Databases whose
+ * last writer predates the feature table (isolated read-only connections never
+ * create it) read as the empty map so decisions keep the legacy shape.
  */
 export function getDecisionStatementImpacts(
 	decisionIds: readonly string[],
@@ -800,6 +803,7 @@ export function getDecisionStatementImpacts(
 	const impacts = new Map<string, DecisionStatementImpact[]>();
 	if (decisionIds.length === 0) return impacts;
 	const db = resolveReadAdapter(adapter);
+	if (!hasDecisionStatementImpactSchema(db)) return impacts;
 	const placeholders = decisionIds.map((_, index) => `:id${index}`).join(", ");
 	const params: Record<string, unknown> = {};
 	decisionIds.forEach((id, index) => { params[`:id${index}`] = id; });
