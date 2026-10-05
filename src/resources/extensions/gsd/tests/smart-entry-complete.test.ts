@@ -85,7 +85,13 @@ test("showSmartEntry takes the first-Milestone decision from the database: a mil
   const notifications: string[] = [];
   const statuses: string[] = [];
   const messages: unknown[] = [];
+  // The dispatch reads the workflow file. Do not depend on the one in the home directory.
+  const originalWorkflowPath = process.env.GSD_WORKFLOW_PATH;
+  process.env.GSD_WORKFLOW_PATH = join(base, "GSD-WORKFLOW.md");
+  writeFileSync(process.env.GSD_WORKFLOW_PATH, "# Workflow\n");
   t.after(() => {
+    if (originalWorkflowPath === undefined) delete process.env.GSD_WORKFLOW_PATH;
+    else process.env.GSD_WORKFLOW_PATH = originalWorkflowPath;
     clearPendingAutoStart(base);
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
