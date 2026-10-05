@@ -571,6 +571,23 @@ D012 is a decision. It is not the cutover:
   overlay (`dashboard-overlay.ts`) take the Slices, the Tasks and their done
   flags from the read interface. A Slice or Task that needs no further work
   counts as done; before, only the raw statuses `complete` and `done` counted.
+- Since 2026-10-05 the remaining prompt-content decision sites also ask the
+  read interface; the prompt narrative cutover (#2630) had left their status
+  reads on legacy rows. The Slices whose summaries the `complete-milestone`
+  and `validate-milestone` prompts of `auto-prompts.ts` inline, the complete
+  Slices whose summaries the slice-discussion prompt of `guided-flow.ts`
+  inlines, and the Slice counts of the rethink prompt (`rethink.ts`) take the
+  Slices from `readMilestoneSlices`; the open Tasks that the `rewrite-docs`
+  prompt of `auto-prompts.ts` lists take the Tasks from `readSliceTasks`.
+  Each site applies its own status vocabulary to the status label of the
+  interface, so before the Cutover the answers do not change. After the
+  Cutover the label follows the lifecycle rows: a Slice that only the legacy
+  row skips leaves the complete-milestone and validate-milestone lists and a
+  Slice that only the lifecycle row skips joins them, the slice discussion
+  inlines the summaries of the Slices that the lifecycle rows complete, the
+  rewrite-docs prompt lists the Tasks that the lifecycle rows leave open, and
+  the rethink counts count the lifecycle rows. Behavior tests:
+  `tests/lifecycle-read-cutover-decision-sites.test.ts`.
 - Step 2 is done in the read interface (2026-10-04). The project Authority
   Epoch chooses the read source, in one function (`cutoverHasRun`) and per
   Project, never per item:
@@ -610,17 +627,11 @@ D012 is a decision. It is not the cutover:
   (`db-lifecycle-coverage-schema.ts`). After the Cutover every hierarchy row
   has a lifecycle row, and a branch for a row with no lifecycle row does not
   run.
-- These sites still read legacy rows directly (2026-10-04). The first one is
-  not routed yet. The other three are deleted with the legacy path. On a
-  cut-over Project the first two follow the legacy row when the rows
-  disagree; the last two serve legacy data only:
-  - `auto-prompts.ts`: the Slices whose summaries the `complete-milestone` and
-    `validate-milestone` prompts inline, and the open Tasks that the
-    `rewrite-docs` prompt lists. `guided-flow.ts`: the complete Slices whose
-    summaries the slice-discussion prompt inlines. `rethink.ts`: the Slice
-    counts in the rethink prompt. They choose prompt content. The prompt
-    narrative cutover (#2630) took the text of these prompts from the
-    database and did not change these status reads.
+- These sites still read legacy rows directly (2026-10-05). No decision site
+  is left among them: every site that decides from a status read asks the read
+  interface. All of these are deleted with the legacy path. On a cut-over
+  Project the first follows the legacy row; the other two serve legacy data
+  only:
   - `db/writers/task-execution.ts` and `stageTaskCompletion` in
     `task-completion-compatibility-adapter.ts`: a staged completion refuses a
     Task whose legacy row is `complete`, `done` or `closed`. The check is a
