@@ -598,7 +598,6 @@ export function listUnpublishedSucceededAttempts(db: DbAdapter): Array<{
         WHERE successor.previous_kernel_checkpoint_id = checkpoint.kernel_checkpoint_id
       )
       AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled', 'blocker-accepted')
-      AND COALESCE(tasks.status, '') NOT IN ('complete', 'cancelled', 'blocker-accepted')
   `).all() as Array<{
     attempt_id: string;
     lifecycle_status: string;
