@@ -405,9 +405,9 @@
       "role": "coverage",
       "source_count": 2,
       "file_set_hash": "sha256:bc8b7237cffa90bf98b8eba08d6138c543ad9a68dc8ea3e5446b725db8fcc086",
-      "oracle_hash": "sha256:81c100fdc7f8e02d907bce781d2a3b275f6b1142c5fc174aac425bc6d71454e8",
+      "oracle_hash": "sha256:1bfad287f6667882bec55a6191684ed307c4db55ec1e136dd0419004aebac7cf",
       "source_set_hash": "sha256:e54a5e612ecf1065a508f3e9c9efac596fb5a3c7756bd984a88183587701ecb6",
-      "change_set_hash": "sha256:a1dadeaf15c01c2aa25e2cf1793dfd8f51a805ba1c6cdfcd9e47fe1bb7f3ef42",
+      "change_set_hash": "sha256:efc3eabbf5f8b86cf7cc1363ca32eaca07d39f459398dd770b908860c1e003ef",
       "diagnosis_count": 6,
       "resolution_count": 6,
       "counts": {
@@ -424,9 +424,9 @@
       "role": "coverage",
       "source_count": 2,
       "file_set_hash": "sha256:14c6ff7d5164283ed15e0d22ec7cc2ffa2280c5ac35203613d2e3689f4b176d2",
-      "oracle_hash": "sha256:94b6bdf171ca597ae944d92d3877ad7150849a9152df8d35299408953c2ee6ee",
+      "oracle_hash": "sha256:fc422ca40be560a6cdb9ab1305830c836fa11117877636d6150107704d11c8fc",
       "source_set_hash": "sha256:45ebecc543741bfcf6047eb6c194bac2ca0647746acf687474025bc5441d6f11",
-      "change_set_hash": "sha256:341b929c4c062281ea9eb7544e017463475f4d552f6bab24cc224411b8f2b532",
+      "change_set_hash": "sha256:7166518fb8a05b4bf3f8304be1ce10774148e64ecd76f590d0d3f4928ee951da",
       "diagnosis_count": 6,
       "resolution_count": 6,
       "counts": {

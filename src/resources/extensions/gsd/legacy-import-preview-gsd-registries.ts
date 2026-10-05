@@ -82,7 +82,11 @@ function decisionValue(row: DecisionRow, madeBy: "agent" | "human", supersededBy
     id: id.value,
     when_context: whenContext.value,
     scope: scope.value,
-    decision: decision.value,
+    // The register render re-emits the stored supersede as a trailing
+    // "(amends D###)" cell suffix. Strip that suffix so the candidate
+    // compares equal to the stored decision text; the relationship itself
+    // travels in the superseded_by map built below.
+    decision: decision.value.replace(/\s*\(amends\s+D\d+\)$/i, ""),
     choice: choice.value,
     rationale: rationale.value,
     revisable: revisable.value,
