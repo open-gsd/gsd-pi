@@ -577,6 +577,20 @@ D012 is a decision. It is not the cutover:
   lookup. No behavior changed. The reads inside the Domain Operation modules
   are not moved: they run on the writer connection inside the Domain
   Operation, and moving them is separate work.
+  **Amended 2026-10-05:** the prior-closeout read of `tools/complete-slice.ts`
+  is moved too, as `getSliceCompletedEventPayloadRow` (the payload of the
+  newest `slice.completed` event of one Slice, preferring the event of the
+  retrying invocation's idempotency key). No behavior changed. What still
+  asks its own SQL outside `db/lifecycle-queries.ts`, with the reason each
+  stays: the reads inside the Domain Operation modules (15
+  `*-domain-operation.ts` files) run on the writer connection inside the
+  Domain Operation transaction, and moving them changes the write-path seam,
+  so they need their own package; the lease check of `task-settle.ts` reads
+  `milestone_leases`, the runtime coordination table that
+  `db/milestone-leases.ts` owns, not a canonical lifecycle row; the
+  completed-units read of `undo.ts` (`unit_dispatches`) and the
+  `artifacts`/`quality_gates`/`assessments` reads of `auto-post-unit.ts` read
+  coordination and validation tables, not canonical lifecycle rows.
 - Since 2026-10-05 `ProjectProgress` (`@opengsd/contracts`) has the optional
   `blockerRows` field: the open canonical blocker rows at the revision of the
   read, the same rows the project snapshot returns, so `gsd_progress` and
