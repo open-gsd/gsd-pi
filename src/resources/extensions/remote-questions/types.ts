@@ -98,5 +98,5 @@ export interface ChannelAdapter {
   validate(): Promise<void>;
   sendPrompt(prompt: RemotePrompt): Promise<RemoteDispatchResult>;
   pollAnswer(prompt: RemotePrompt, ref: RemotePromptRef): Promise<RemoteAnswer | null>;
-  acknowledgeAnswer?(ref: RemotePromptRef): Promise<void>;
+  acknowledgeAnswer?(ref: RemotePromptRef, prompt: RemotePrompt): Promise<void>;
 }

@@ -42,56 +42,48 @@ interface SlackFixture {
   polled: string[];
 }
 
-/** A Slack channel behind a fetch mock, a temp GSD home that configures it, and an open project database. */
-function slackFixture(t: TestContext): SlackFixture {
+const TOKEN_ENV = { slack: "SLACK_BOT_TOKEN", telegram: "TELEGRAM_BOT_TOKEN" } as const;
+
+/**
+ * A remote channel behind a fetch mock, a temp GSD home that configures it, and
+ * an open project database. `respond` gives the JSON body of each API call.
+ */
+function channelFixture(
+  t: TestContext,
+  channel: keyof typeof TOKEN_ENV,
+  channelId: string,
+  respond: (href: string, requestBody: string) => unknown,
+): { home: string; dbPath: string } {
   const home = mkdtempSync(join(tmpdir(), "gsd-remote-prompt-home-"));
   const base = mkdtempSync(join(tmpdir(), "gsd-remote-prompt-base-"));
   mkdirSync(join(base, ".gsd"));
-  const fixture: SlackFixture = {
-    home, dbPath: join(base, ".gsd", "gsd.db"), answered: new Set(), posted: [], polled: [],
-  };
+  const dbPath = join(base, ".gsd", "gsd.db");
 
   const saved = {
     home: process.env.GSD_HOME,
-    token: process.env.SLACK_BOT_TOKEN,
+    token: process.env[TOKEN_ENV[channel]],
     disabled: process.env.GSD_DISABLE_REMOTE_QUESTIONS,
   };
   process.env.GSD_HOME = home;
-  process.env.SLACK_BOT_TOKEN = ["xoxb", "test"].join("-");
+  process.env[TOKEN_ENV[channel]] = ["xoxb", "test"].join("-");
   delete process.env.GSD_DISABLE_REMOTE_QUESTIONS;
-  saveRemoteQuestionsConfig("slack", CHANNEL_ID);
+  saveRemoteQuestionsConfig(channel, channelId);
 
-  const json = (body: unknown) => ({
-    ok: true,
-    status: 200,
-    async json() { return body; },
-    async text() { return JSON.stringify(body); },
-  }) as Response;
-  const fetchMock = mock.method(globalThis, "fetch", async (url: string | URL) => {
-    const href = String(url);
-    if (href.includes("/auth.test")) return json({ ok: true, user_id: "bot-1" });
-    if (href.includes("/chat.postMessage")) {
-      const ts = `${fixture.posted.length + 1}00.000`;
-      fixture.posted.push(ts);
-      return json({ ok: true, ts, channel: CHANNEL_ID });
-    }
-    if (href.includes("/reactions.get")) {
-      const ts = new URL(href).searchParams.get("timestamp") ?? "";
-      fixture.polled.push(ts);
-      return json({
-        ok: true,
-        message: { reactions: fixture.answered.has(ts) ? [{ name: "two", count: 1, users: ["human-1"] }] : [] },
-      });
-    }
-    if (href.includes("/conversations.replies")) return json({ ok: true, messages: [] });
-    return json({ ok: true });
+  const fetchMock = mock.method(globalThis, "fetch", async (url: string | URL, init?: RequestInit) => {
+    const body = respond(String(url), String(init?.body ?? ""));
+    return {
+      ok: true,
+      status: 200,
+      async json() { return body; },
+      async text() { return JSON.stringify(body); },
+    } as Response;
   });
 
   t.after(() => {
     fetchMock.mock.restore();
     if (isDbAvailable()) closeDatabase();
     for (const [key, value] of [
-      ["GSD_HOME", saved.home], ["SLACK_BOT_TOKEN", saved.token], ["GSD_DISABLE_REMOTE_QUESTIONS", saved.disabled],
+      ["GSD_HOME", saved.home], [TOKEN_ENV[channel], saved.token], ["GSD_DISABLE_REMOTE_QUESTIONS", saved.disabled],
     ] as const) {
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
@@ -100,24 +92,51 @@ function slackFixture(t: TestContext): SlackFixture {
     rmSync(base, { recursive: true, force: true });
   });
 
-  openDatabase(fixture.dbPath);
-  return fixture;
+  openDatabase(dbPath);
+  return { home, dbPath };
+}
+
+/** A Slack channel behind a fetch mock, a temp GSD home that configures it, and an open project database. */
+function slackFixture(t: TestContext): SlackFixture {
+  const fixture: SlackFixture = { home: "", dbPath: "", answered: new Set(), posted: [], polled: [] };
+  return Object.assign(fixture, channelFixture(t, "slack", CHANNEL_ID, (href) => {
+    if (href.includes("/auth.test")) return { ok: true, user_id: "bot-1" };
+    if (href.includes("/chat.postMessage")) {
+      const ts = `${fixture.posted.length + 1}00.000`;
+      fixture.posted.push(ts);
+      return { ok: true, ts, channel: CHANNEL_ID };
+    }
+    if (href.includes("/reactions.get")) {
+      const ts = new URL(href).searchParams.get("timestamp") ?? "";
+      fixture.polled.push(ts);
+      return {
+        ok: true,
+        message: { reactions: fixture.answered.has(ts) ? [{ name: "two", count: 1, users: ["human-1"] }] : [] },
+      };
+    }
+    if (href.includes("/conversations.replies")) return { ok: true, messages: [] };
+    return { ok: true };
+  }));
 }
 
 /** The state a stopped process leaves: a prompt in the channel that waits for its answer. */
-function seedUnansweredPrompt(id: string, messageTs: string, timeoutAt: number): void {
+function seedUnansweredPrompt(
+  id: string,
+  messageId: string,
+  timeoutAt: number,
+  channel: keyof typeof TOKEN_ENV = "slack",
+  channelId: string = CHANNEL_ID,
+): void {
   writePromptRecord(createPromptRecord({
     id,
-    channel: "slack",
+    channel,
     createdAt: Date.now() - 1000,
     timeoutAt,
     pollIntervalMs: 5000,
     context: { source: "ask_user_questions" },
     questions: QUESTIONS.map((question) => ({ ...question, allowMultiple: false })),
   }));
-  const ref: RemotePromptRef = {
-    id, channel: "slack", messageId: messageTs, threadTs: messageTs, channelId: CHANNEL_ID,
-  };
+  const ref: RemotePromptRef = { id, channel, messageId, threadTs: messageId, channelId };
   markPromptDispatched(id, ref);
 }
 
@@ -167,6 +186,50 @@ test("a prompt that waits in the channel is polled again after a restart, and no
   assert.equal(record?.status, "answered");
   assert.deepEqual(record?.response, { answers: { q1: { answers: ["JSON array"] } } });
   assert.equal(promptRows().length, 1, "no second prompt row");
+});
+
+test("a Telegram prompt that is resumed after a restart keeps its question text when the answer is acknowledged", async (t) => {
+  const chatId = "123456789";
+  const sent: string[] = [];
+  const edits: Array<{ message_id: number; text: string }> = [];
+  const telegram = channelFixture(t, "telegram", chatId, (href, requestBody) => {
+    if (href.endsWith("/getMe")) return { ok: true, result: { id: 999 } };
+    if (href.endsWith("/sendMessage")) {
+      sent.push(requestBody);
+      return { ok: true, result: { message_id: 43 } };
+    }
+    if (href.endsWith("/getUpdates")) {
+      // The user pressed the button of the second option on the stored message.
+      return {
+        ok: true,
+        result: [{
+          update_id: 1,
+          callback_query: {
+            id: "callback-1",
+            data: "prompt-before-restart:1",
+            from: { id: 5 },
+            message: { message_id: 42, chat: { id: Number(chatId) } },
+          },
+        }],
+      };
+    }
+    if (href.endsWith("/editMessageText")) edits.push(JSON.parse(requestBody));
+    return { ok: true, result: true };
+  });
+  seedUnansweredPrompt("prompt-before-restart", "42", Date.now() + 60_000, "telegram", chatId);
+
+  // Restart: only the database carries the prompt.
+  closeDatabase();
+  openDatabase(telegram.dbPath);
+
+  const result = await tryRemoteQuestions(QUESTIONS);
+
+  assert.deepEqual(sent, [], "the user must not get the question a second time");
+  assert.deepEqual(JSON.parse(result!.content[0]!.text), { answers: { q1: { answers: ["JSON array"] } } });
+  assert.equal(edits.length, 1, "the stored message is edited one time");
+  assert.equal(edits[0]!.message_id, 42);
+  assert.match(edits[0]!.text, /Which store\?/, "the acknowledged message still shows the question");
+  assert.match(edits[0]!.text, /✅ Answered$/);
 });
 
 test("an unanswered prompt past its timeout, or with other questions, is not resumed: a new message is sent", async (t) => {

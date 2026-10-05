@@ -168,7 +168,7 @@ export async function tryRemoteQuestions(
 
   // Best-effort acknowledgement gives remote users a visible receipt signal.
   try {
-    await adapter.acknowledgeAnswer?.(ref);
+    await adapter.acknowledgeAnswer?.(ref, prompt);
   } catch { /* best-effort */ }
 
   return {

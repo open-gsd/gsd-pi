@@ -13,7 +13,6 @@ export class TelegramAdapter implements ChannelAdapter {
   readonly name = "telegram" as const;
   private botUserId: number | null = null;
   private lastUpdateId = 0;
-  private lastSentText = "";
   private readonly token: string;
   private readonly chatId: string;
   private readonly basePath: string;
@@ -32,7 +31,6 @@ export class TelegramAdapter implements ChannelAdapter {
 
   async sendPrompt(prompt: RemotePrompt): Promise<RemoteDispatchResult> {
     const payload = formatForTelegram(prompt);
-    this.lastSentText = payload.text;
 
     const params: Record<string, unknown> = {
       chat_id: this.chatId,
@@ -182,14 +180,16 @@ export class TelegramAdapter implements ChannelAdapter {
 
   /**
    * Acknowledge receipt by editing the original message to append a checkmark.
+   * The message text is built from the prompt, so a prompt that this process
+   * did not send (a resumed one) keeps its question.
    * Best-effort — failures are silently ignored.
    */
-  async acknowledgeAnswer(ref: RemotePromptRef): Promise<void> {
+  async acknowledgeAnswer(ref: RemotePromptRef, prompt: RemotePrompt): Promise<void> {
     try {
       await this.telegramApi("editMessageText", {
         chat_id: ref.channelId,
         message_id: parseInt(ref.messageId, 10),
-        text: this.lastSentText + "\n\n✅ Answered",
+        text: formatForTelegram(prompt).text + "\n\n✅ Answered",
         parse_mode: "HTML",
       });
     } catch {
