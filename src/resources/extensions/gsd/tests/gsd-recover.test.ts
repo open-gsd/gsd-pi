@@ -26,6 +26,7 @@ import {
 import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { deriveStateFromDb, invalidateStateCache } from '../state.ts';
 import { handleRecover } from '../commands-maintenance.ts';
+import { handleTaskRecoveryResume } from '../commands-task-recovery.ts';
 import { generateDecisionsMd, generateRequirementsMd, saveArtifactToDb, saveDecisionToDb, saveRequirementToDb } from '../db-writer.ts';
 import { hasSavedArtifact } from '../db/queries.ts';
 import { getAllDecisionsFromMemories } from '../context-store.ts';
@@ -2345,6 +2346,30 @@ describe('gsd-recover', async () => {
       assert.equal(notes.at(-1)?.kind, 'error', notes.at(-1)?.message);
       assert.match(notes.at(-1)?.message ?? '', /row choice for P001 was not applied/u);
       assert.equal(databaseText(), 'Retry with jitter');
+    }
+  });
+
+  test('strips copy-pasted trailing punctuation from the recoveryActionId', async () => {
+    // Auto-mode abort notifications embed the id in prose ("... Resume it with
+    // /gsd recover <id>."), so operators frequently paste the trailing
+    // sentence punctuation along with it. The handler strips common trailing
+    // punctuation before validating and looking up the id, so the eligibility
+    // error must name the STRIPPED id rather than the punctuated paste.
+    const base = createFixtureBase();
+    try {
+      // Pre-create a valid project DB so the handler reaches the eligibility
+      // lookup instead of the ensureDbOpen failure path.
+      openDatabase(join(base, '.gsd', 'gsd.db'));
+      closeDatabase();
+
+      const { ctx, notes } = makeCtx();
+      await handleTaskRecoveryResume('ra-does-not-exist).', ctx, base);
+      const message = notes.map((n) => n.message).join('\n');
+      assert.match(message, /ra-does-not-exist/u);
+      assert.doesNotMatch(message, /ra-does-not-exist\)\./u);
+    } finally {
+      closeDatabase();
+      cleanup(base);
     }
   });
 });
