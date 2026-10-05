@@ -4,12 +4,12 @@
 // blocker for the paused item, and the resolution of the pause resolves it.
 // A machine_fixable or user_request pause opens no blocker.
 
-import { randomUUID } from "node:crypto";
 import {
   executeDomainOperation,
   type DomainJsonValue,
 } from "./db/domain-operation.js";
 import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { insertOpenPauseBlocker, resolveOpenPauseBlocker } from "./db/writers/pause-blockers.js";
 import { getDb } from "./gsd-db.js";
 import type { AutoPauseBlockerKind } from "./recovery-policy.js";
 
@@ -97,7 +97,7 @@ export function openPauseBlockerRow(input: {
   if (!isHumanPauseBlockerKind(input.blockerKind)) {
     throw new Error(`${input.blockerKind} is not a human blocker kind and opens no workflow_blockers row`);
   }
-  const blockerId = randomUUID();
+  let blockerId = "";
   executeDomainOperation(
     pauseBlockerRequest("pause.blocker.open", input.idempotencyKey, {
       lifecycleId: input.lifecycleId,
@@ -106,28 +106,13 @@ export function openPauseBlockerRow(input: {
       requestedAction: input.requestedAction,
     }),
     (context) => {
-      getDb().prepare(`
-        INSERT INTO workflow_blockers (
-          blocker_id, project_id, lifecycle_id, blocker_kind, resolution_owner,
-          blocker_status, description, requested_action, resolution, opened_at,
-          opened_operation_id, opened_project_revision, opened_authority_epoch
-        ) VALUES (
-          :blocker_id, :project_id, :lifecycle_id, :blocker_kind, 'user',
-          'open', :description, :requested_action, '', :opened_at,
-          :operation_id, :project_revision, :authority_epoch
-        )
-      `).run({
-        ":blocker_id": blockerId,
-        ":project_id": context.projectId,
-        ":lifecycle_id": input.lifecycleId,
-        ":blocker_kind": input.blockerKind,
-        ":description": input.description.trim(),
-        ":requested_action": input.requestedAction.trim(),
-        ":opened_at": new Date().toISOString(),
-        ":operation_id": context.operationId,
-        ":project_revision": context.resultingRevision,
-        ":authority_epoch": context.resultingAuthorityEpoch,
+      const opened = insertOpenPauseBlocker(context, {
+        lifecycleId: input.lifecycleId,
+        blockerKind: input.blockerKind,
+        description: input.description,
+        requestedAction: input.requestedAction,
       });
+      blockerId = opened.blockerId;
       return {
         events: [{
           eventType: "pause.blocker.opened",
@@ -167,28 +152,12 @@ export function resolvePauseBlockerRow(input: {
       resolution: input.resolution,
     }),
     (context) => {
-      const result = getDb().prepare(`
-        UPDATE workflow_blockers
-        SET blocker_status = :status,
-            resolution = :resolution,
-            resolved_at = :resolved_at,
-            resolved_operation_id = :operation_id,
-            resolved_project_revision = :project_revision,
-            resolved_authority_epoch = :authority_epoch
-        WHERE blocker_id = :blocker_id
-          AND project_id = :project_id
-          AND blocker_status = 'open'
-      `).run({
-        ":status": input.disposition,
-        ":resolution": input.resolution.trim(),
-        ":resolved_at": new Date().toISOString(),
-        ":operation_id": context.operationId,
-        ":project_revision": context.resultingRevision,
-        ":authority_epoch": context.resultingAuthorityEpoch,
-        ":blocker_id": input.blockerId,
-        ":project_id": context.projectId,
+      const settled = resolveOpenPauseBlocker(context, {
+        blockerId: input.blockerId,
+        disposition: input.disposition,
+        resolution: input.resolution,
       });
-      resolved = Number((result as { changes?: unknown }).changes ?? 0) > 0;
+      resolved = settled.resolved;
       return {
         events: [{
           eventType: "pause.blocker.resolved",
