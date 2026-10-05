@@ -74,13 +74,48 @@ function safeStderr(msg: string): void {
  *  ~/.gsd/crash/*.log entries (60 of the last 67) — a real user-facing crash
  *  storm, not a rare edge case. Treat write-EIO as the same recoverable
  *  pipe-closed condition as EPIPE/write-EOF instead of letting it kill the
- *  process. */
+ *  process.
+ *
+ *  Unlike EPIPE — which only pipes and sockets produce — `EIO` on `write` can
+ *  also come from filesystem or device writes (failing disk, removed media),
+ *  where continuing after a failed write risks silent data loss. This handler
+ *  sees EVERY uncaught exception and unhandled rejection in the process, not
+ *  just stdout writes, so the write-EIO cases (both the coded form and the
+ *  message-only fallback) are only recoverable with evidence the failing write
+ *  targeted the process output stream; unrelated write failures stay fatal. */
+
+/** Evidence that an EIO-write error came from the process output stream
+ *  (stdout/stderr pipe or TTY), not from a filesystem or device write. */
+function isOutputStreamWriteError(err: Error): boolean {
+  const stack = err.stack ?? "";
+  // Filesystem/device write completions surface through node:internal/fs —
+  // genuine data-loss failures that must stay fatal.
+  if (/node:internal\/fs|FSReqCallback|node:fs/.test(stack)) return false;
+  // Pipe/TTY write completions surface through WriteWrap in
+  // node:internal/stream_base_commons — the observed production signature of a
+  // detached stdout pipe on macOS:
+  //   Error: write EIO
+  //       at WriteWrap.onWriteComplete [as oncomplete] (node:internal/stream_base_commons:87:19)
+  if (/stream_base_commons|WriteWrap|process\.std(out|err)/.test(stack)) return true;
+  // No usable stack frames: fall back to the output streams' own state — a
+  // known-closed/broken stdout or stderr corroborates pipe-closed.
+  const out = process.stdout as NodeJS.WriteStream & { errored?: unknown };
+  const errStream = process.stderr as NodeJS.WriteStream & { errored?: unknown };
+  return Boolean(
+    out.destroyed || out.writableEnded || out.errored ||
+    errStream.destroyed || errStream.writableEnded || errStream.errored,
+  );
+}
+
 function isPipeClosedError(err: Error): boolean {
   const errno = (err as NodeJS.ErrnoException).code;
   if (errno === "EPIPE") return true;
-  if (errno === "EIO" && (err as NodeJS.ErrnoException).syscall === "write") return true;
+  if (errno === "EIO" && (err as NodeJS.ErrnoException).syscall === "write") {
+    return isOutputStreamWriteError(err);
+  }
   const message = err.message;
-  return message === "write EOF" || message === "read EOF" || message === "write EIO";
+  if (message === "write EIO") return isOutputStreamWriteError(err);
+  return message === "write EOF" || message === "read EOF";
 }
 
 export function handleRecoverableExtensionProcessError(err: Error): boolean {

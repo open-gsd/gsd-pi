@@ -115,6 +115,15 @@ test("handleRecoverableExtensionProcessError leaves non-read EIO unhandled", () 
 // render layer (isStdoutClosedError in packages/pi-tui/src/terminal.ts), but
 // any instance that escapes to this top-level guard must be treated as the
 // same recoverable pipe-closed condition as EPIPE, not left to crash.
+//
+// Scoping (review follow-up): unlike EPIPE, write-EIO can also come from
+// filesystem/device writes, and this guard sees EVERY uncaught error in the
+// process — so the write-EIO cases below require stdout write-boundary
+// evidence (the observed WriteWrap/stream_base_commons production signature,
+// or a known-closed output stream), and leave fs/device write failures fatal.
+const STDOUT_WRITE_EIO_STACK =
+  "Error: write EIO\n    at WriteWrap.onWriteComplete [as oncomplete] (node:internal/stream_base_commons:87:19)";
+
 test("handleRecoverableExtensionProcessError swallows write EIO (macOS closed-stdout-pipe crash storm)", () => {
   let stderr = "";
   const originalWrite = process.stderr.write.bind(process.stderr);
@@ -128,6 +137,7 @@ test("handleRecoverableExtensionProcessError swallows write EIO (macOS closed-st
       Object.assign(new Error("write EIO"), {
         code: "EIO",
         syscall: "write",
+        stack: STDOUT_WRITE_EIO_STACK,
       }),
     );
     assert.equal(handled, true);
@@ -135,6 +145,71 @@ test("handleRecoverableExtensionProcessError swallows write EIO (macOS closed-st
   } finally {
     process.stderr.write = originalWrite;
   }
+});
+
+test("handleRecoverableExtensionProcessError swallows message-only 'write EIO' with stdout-boundary stack", () => {
+  let stderr = "";
+  const originalWrite = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof process.stderr.write;
+
+  try {
+    // Message-only fallback (no `code`): same stdout-boundary evidence required.
+    const err = new Error("write EIO");
+    err.stack = STDOUT_WRITE_EIO_STACK;
+    const handled = handleRecoverableExtensionProcessError(err);
+    assert.equal(handled, true);
+    assert.match(stderr, /swallowed write EIO/);
+  } finally {
+    process.stderr.write = originalWrite;
+  }
+});
+
+test("handleRecoverableExtensionProcessError swallows write EIO when an output stream is already closed", () => {
+  // Fallback evidence path: no stdout-boundary frames in the stack, but the
+  // output stream itself is known-closed/broken.
+  // `destroyed` is a prototype accessor on Writable; shadow it with an own
+  // property for the duration of the test, then delete to restore.
+  Object.defineProperty(process.stdout, "destroyed", { value: true, configurable: true });
+
+  try {
+    const handled = handleRecoverableExtensionProcessError(
+      Object.assign(new Error("write EIO"), {
+        code: "EIO",
+        syscall: "write",
+        stack: "Error: write EIO\n    at somewhereElse (node:internal/some_module:1:1)",
+      }),
+    );
+    assert.equal(handled, true);
+  } finally {
+    delete (process.stdout as unknown as { destroyed?: boolean }).destroyed;
+  }
+});
+
+test("handleRecoverableExtensionProcessError leaves filesystem write EIO unhandled", () => {
+  // A genuine filesystem/device write failure (failing disk, removed media)
+  // must NOT be swallowed: continuing after a failed write risks silent data
+  // loss. fs write completions surface through node:internal/fs frames.
+  const handled = handleRecoverableExtensionProcessError(
+    Object.assign(new Error("write EIO"), {
+      code: "EIO",
+      syscall: "write",
+      stack:
+        "Error: write EIO\n    at WriteStream.onwriteError (node:internal/fs/streams:123:19)\n    at FSReqCallback.oncomplete (node:fs:200:5)",
+    }),
+  );
+  assert.equal(handled, false);
+});
+
+test("handleRecoverableExtensionProcessError leaves message-only 'write EIO' without boundary evidence unhandled", () => {
+  // No `code`, no stdout-boundary stack, healthy output streams: there is no
+  // evidence this is the macOS closed-pipe condition, so it stays fatal.
+  const err = new Error("write EIO");
+  err.stack = "Error: write EIO\n    at doThing (/opt/some/extension.js:10:5)";
+  const handled = handleRecoverableExtensionProcessError(err);
+  assert.equal(handled, false);
 });
 
 test("handleRecoverableExtensionProcessError leaves unrelated errors unhandled", () => {
