@@ -1302,6 +1302,36 @@ test("#2427: an abandoned staged SUMMARY with genuinely different DB intent stil
   );
 });
 
+test("after the Cutover the abandoned staged SUMMARY repair takes the in-progress Task from the lifecycle row", async () => {
+  const { stageTaskCompletion } = await subject();
+  const { basePath, attemptId } = createFixture();
+  const staged = await stageTaskCompletion(stageInput(basePath));
+  interruptedRetryFixture(basePath, attemptId);
+  const state = reconciliationState();
+  const drift = detectArtifactDbDrift(state, { basePath, state }).find((record) =>
+    record.kind === "artifact-db-status-divergence" && record.taskId === "T01"
+  );
+  assert.ok(drift && drift.kind === "artifact-db-status-divergence");
+  // Only the lifecycle row says that the Task is in progress.
+  db().exec("UPDATE tasks SET status = 'pending' WHERE id = 'T01'");
+  seedLifecycles("abandoned-staged-summary", [
+    { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+    { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "ready" },
+  ]);
+
+  assert.match(
+    describeArtifactDbDriftBlocker(drift, { basePath, state }) ?? "",
+    /Artifact\/DB status drift/,
+    "before the Cutover the legacy row answers that the Task is pending",
+  );
+
+  cutOver();
+
+  assert.equal(describeArtifactDbDriftBlocker(drift, { basePath, state }), null);
+  await repairArtifactDbDrift(drift, { basePath, state });
+  assert.equal(existsSync(staged.summaryPath), false, "the repair moves the abandoned projection to quarantine");
+});
+
 test("staging normalizes a pending legacy Task and clears its stale completion timestamp", async () => {
   const { stageTaskCompletion } = await subject();
   const { basePath } = createFixture();

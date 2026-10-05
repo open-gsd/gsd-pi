@@ -457,10 +457,9 @@ D012 is a decision. It is not the cutover:
     hierarchy row with no lifecycle row (`db-lifecycle-coverage-schema.ts`),
     so it does not run, and it has no test after the Cutover. The same holds
     for the hook retry of a Task with no lifecycle row.
-  - These routed lines have no test of their own after the Cutover: the live
-    Milestone of the `planning_blocked` check, the closed Milestones of the
-    validation source check, and the abandoned staged SUMMARY check of
-    `artifact-db.ts`.
+  - The doctor check `db_done_task_no_summary` is deleted. Its query named a
+    `summary` column that the `tasks` table does not have, so the query
+    failed and the check never reported.
   - The superseded completion test proves one direction only: the SUMMARY
     file of a Milestone that only the lifecycle row closes is kept. When only
     the legacy row is complete, the file is still there after the completion
@@ -470,8 +469,10 @@ D012 is a decision. It is not the cutover:
   `tests/lifecycle-read-cutover-decision-sites.test.ts`, and beside the
   tests of the same site in `tests/complete-milestone-projection-stale.test.ts`,
   `tests/post-unit-retry-on-orchestrator-bridge.test.ts`,
-  `tests/auto-recovery.test.ts` and
-  `tests/task-completion-compatibility-adapter.test.ts`. A
+  `tests/auto-recovery.test.ts`,
+  `tests/task-completion-compatibility-adapter.test.ts`,
+  `tests/doctor-planning-blocked-2510.test.ts` and
+  `tests/adopted-milestone-validation-waiver.test.ts`. A
   cut-over Project cannot reach three of the routed lines, so they have no
   test after the Cutover: the closed check of a Milestone with no lifecycle
   row in `milestone-closeout.ts` (`isCompletedMilestoneTerminal`) and in

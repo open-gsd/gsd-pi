@@ -994,29 +994,6 @@ export async function checkEngineHealth(
         // Non-fatal — orphaned slice check failed
       }
 
-      // c. Tasks marked complete without summaries
-      try {
-        const doneTasks = adapter
-          .prepare(
-            `SELECT id, slice_id, milestone_id FROM tasks
-             WHERE status = 'done' AND (summary IS NULL OR summary = '')`,
-          )
-          .all() as Array<{ id: string; slice_id: string; milestone_id: string }>;
-
-        for (const row of doneTasks) {
-          issues.push({
-            severity: "warning",
-            code: "db_done_task_no_summary",
-            scope: "task",
-            unitId: `${row.milestone_id}/${row.slice_id}/${row.id}`,
-            message: `Task ${row.id} is marked done but has no summary in the database`,
-            fixable: false,
-          });
-        }
-      } catch {
-        // Non-fatal — done-task-no-summary check failed
-      }
-
       // d. Duplicate entity IDs (safety check)
       try {
         const dupMilestones = adapter

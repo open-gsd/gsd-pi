@@ -28,6 +28,7 @@ import { checkGsdStateHealth } from "../doctor-state-checks.ts";
 import { postUnitPreVerification } from "../auto-post-unit.ts";
 import { AutoSession } from "../auto/session.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
+import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
 
 const GSD_EXEC_HARD_BLOCK =
   'HARD BLOCK: Tool Contract failure for unit "plan-milestone" — GSD lifecycle tool "gsd_exec" is not permitted; allowed GSD tools: gsd_milestone_status, gsd_plan_milestone, gsd_plan_slice, gsd_plan_task, gsd_decision_save, gsd_requirement_update.';
@@ -187,6 +188,28 @@ test("#2510: a closed milestone with a stale recovery gate is not reported as pl
     0,
     "historical gates must not reappear on closed milestones",
   );
+});
+
+test("after the Cutover planning_blocked takes the live milestone from the lifecycle row", async (t) => {
+  const base = makeBase("gsd-2510-cutover-");
+  t.after(() => cleanup(base));
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  // Only the legacy row closes the Milestone. Its lifecycle row is open.
+  seedUnplannedMilestone("M001", "complete");
+  seedLifecycles("planning-blocked", [{ itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" }]);
+  seedPlanningRecoveryGate("M001");
+  const blocked = async () => {
+    const issues: DoctorIssue[] = [];
+    await checkGsdStateHealth(base, issues, [], { fix: false, shouldFix: () => false });
+    return issues.filter((i) => i.code === "planning_blocked").map((i) => i.unitId);
+  };
+
+  assert.deepEqual(await blocked(), [], "before the Cutover the legacy row answers that the Milestone is closed");
+
+  cutOver();
+
+  assert.deepEqual(await blocked(), ["M001"]);
 });
 
 test("#2510: a successful plan supersedes the recovery gate — doctor reports missing_roadmap as fixable again", async (t) => {

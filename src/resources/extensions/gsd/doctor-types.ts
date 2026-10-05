@@ -86,7 +86,6 @@ export type DoctorIssueCode =
   // Engine health checks (Phase 4)
   | "db_orphaned_task"
   | "db_orphaned_slice"
-  | "db_done_task_no_summary"
   | "artifact_file_missing"
   | "artifact_user_content_missing"
   | "artifact_db_status_divergence"
