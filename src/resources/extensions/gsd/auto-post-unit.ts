@@ -518,43 +518,27 @@ async function prepareHookRetry(
     if (!retryKey) {
       throw new Error(`Hook retry Task ${mid}/${sid}/${tid} has no canonical completion identity`);
     }
-    const db = _getAdapter();
-    if (!db) {
+    if (!_getAdapter()) {
       throw new Error(`Hook retry Task ${mid}/${sid}/${tid} cannot be prepared: database unavailable`);
     }
     const task = getTask(mid, sid, tid);
     if (!task) throw new Error(`Hook retry Task ${mid}/${sid}/${tid} is missing`);
-    const lifecycle = db.prepare(`
-      SELECT lifecycle_status, last_operation_id
-      FROM workflow_item_lifecycles
-      WHERE item_kind = 'task'
-        AND milestone_id = :milestone_id
-        AND slice_id = :slice_id
-        AND task_id = :task_id
-    `).get({
-      ":milestone_id": mid,
-      ":slice_id": sid,
-      ":task_id": tid,
-    });
-    const preparedOperation = db.prepare(`
-      SELECT operation_id
-      FROM workflow_operations
-      WHERE idempotency_key = :idempotency_key
-    `).get({ ":idempotency_key": retryKey });
+    const lifecycle = getTaskLifecycleHead(mid, sid, tid);
+    const preparedOperationId = getOperationIdByIdempotencyKey(retryKey);
     const alreadyPrepared = task.status === "pending"
-      && lifecycle?.["lifecycle_status"] === "ready"
-      && typeof preparedOperation?.["operation_id"] === "string"
-      && lifecycle["last_operation_id"] === preparedOperation["operation_id"];
+      && lifecycle?.lifecycle_status === "ready"
+      && preparedOperationId !== null
+      && lifecycle.last_operation_id === preparedOperationId;
     let reviewedCompletionIsCurrent = false;
     let currentCompletionIdentityIsKnown = false;
     if (trigger.completionOperationId) {
       currentCompletionIdentityIsKnown = task.status === "complete"
-        && lifecycle?.["lifecycle_status"] === "completed"
-        && typeof lifecycle["last_operation_id"] === "string"
-        && lifecycle["last_operation_id"].length > 0;
+        && lifecycle?.lifecycle_status === "completed"
+        && typeof lifecycle?.last_operation_id === "string"
+        && lifecycle.last_operation_id.length > 0;
       reviewedCompletionIsCurrent = task.status === "complete"
-        && lifecycle?.["lifecycle_status"] === "completed"
-        && lifecycle["last_operation_id"] === trigger.completionOperationId;
+        && lifecycle?.lifecycle_status === "completed"
+        && lifecycle.last_operation_id === trigger.completionOperationId;
     } else if (trigger.legacyCompletedAt) {
       currentCompletionIdentityIsKnown = task.status === "complete"
         && !lifecycle
@@ -869,6 +853,7 @@ import {
   type AutoOutcomeSurfaceSnapshot,
 } from "./auto-dashboard.js";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { getOperationIdByIdempotencyKey, getTaskLifecycleHead } from "./db/lifecycle-queries.js";
 import { basename, join, relative } from "node:path";
 import { _resetHasChangesCache } from "./native-git-bridge.js";
 import { autoCommitCurrentBranch } from "./worktree.js";

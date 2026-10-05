@@ -19,7 +19,7 @@ import {
   projectCanonicalStatusToLegacy,
 } from "./gsd-db.js";
 import { readMilestone } from "./db/lifecycle-read.js";
-import { getDb } from "./db/engine.js";
+import { getDiscardRows } from "./db/lifecycle-queries.js";
 import type { DomainOperationContext } from "./db/domain-operation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import {
@@ -224,34 +224,8 @@ export async function unparkMilestone(
 
 // ─── Discard ───────────────────────────────────────────────────────────────
 
-interface DiscardRow {
-  slice_id: string | null;
-  task_id: string | null;
-  status: string;
-  lifecycle_status: string | null;
-}
-
-function loadDiscardRows(milestoneId: string): DiscardRow[] {
-  const lifecycleJoin = (kind: string, slice: string, task: string) => `
-    LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = '${kind}'
-     AND lifecycle.milestone_id = :milestone_id
-     AND lifecycle.slice_id IS ${slice}
-     AND lifecycle.task_id IS ${task}`;
-  return getDb().prepare(`
-    SELECT task.slice_id, task.id AS task_id, task.status, lifecycle.lifecycle_status
-    FROM tasks task ${lifecycleJoin("task", "task.slice_id", "task.id")}
-    WHERE task.milestone_id = :milestone_id
-    UNION ALL
-    SELECT slice.id, NULL, slice.status, lifecycle.lifecycle_status
-    FROM slices slice ${lifecycleJoin("slice", "slice.id", "NULL")}
-    WHERE slice.milestone_id = :milestone_id
-    UNION ALL
-    SELECT NULL, NULL, milestone.status, lifecycle.lifecycle_status
-    FROM milestones milestone ${lifecycleJoin("milestone", "NULL", "NULL")}
-    WHERE milestone.id = :milestone_id
-  `).all({ ":milestone_id": milestoneId }) as unknown as DiscardRow[];
-}
+/** Every hierarchy row the discard of one Milestone cancels (the read lives in db/lifecycle-queries.ts). */
+const loadDiscardRows = getDiscardRows;
 
 /**
  * Tombstone the milestone: every open task, slice and the milestone itself

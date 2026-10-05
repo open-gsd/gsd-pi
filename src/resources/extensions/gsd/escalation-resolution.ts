@@ -8,8 +8,8 @@
 
 import type { EscalationOption } from "./types.js";
 import { saveDecisionToDb } from "./db-writer.js";
-import { getDb } from "./db/engine.js";
 import { TASK_ESCALATION_OPENED_EVENT } from "./db/sql-constants.js";
+import { listOpenTaskEscalationQuestionRows } from "./db/lifecycle-queries.js";
 import { readTaskEscalation, resolveEscalation, type ResolveEscalationResult } from "./escalation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import { emitUokAuditEvent, buildAuditEnvelope } from "./uok/audit.js";
@@ -28,23 +28,7 @@ export interface OpenEscalation extends EscalationTaskRef {
 
 /** Every open escalation question of the project, oldest first. */
 export function listOpenEscalations(): OpenEscalation[] {
-  const rows = getDb().prepare(`
-    SELECT question.question_id, question.question_text,
-           lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
-    FROM workflow_open_questions question
-    JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.lifecycle_id = question.lifecycle_id
-     AND lifecycle.project_id = question.project_id
-    WHERE question.question_status = 'open'
-      AND lifecycle.item_kind = 'task'
-      AND EXISTS (
-        SELECT 1 FROM workflow_domain_events opened
-        WHERE opened.project_id = question.project_id
-          AND opened.event_type = :opened_event
-          AND json_extract(opened.payload_json, '$.questionId') = question.question_id
-      )
-    ORDER BY question.created_project_revision, question.question_id
-  `).all({ ":opened_event": TASK_ESCALATION_OPENED_EVENT });
+  const rows = listOpenTaskEscalationQuestionRows(TASK_ESCALATION_OPENED_EVENT);
   return rows.map((row) => ({
     questionId: String(row["question_id"]),
     question: String(row["question_text"]),

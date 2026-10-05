@@ -35,6 +35,7 @@ import {
 import { readUnitRuntimeRecord, type UnitRuntimePhase } from "./unit-runtime.js";
 import { extractFrontmatterVerdict } from "./verdict-parser.js";
 import { getDbOrNull } from "./db/engine.js";
+import { getTaskCompletionIdentity, type TaskCompletionIdentityRow } from "./db/lifecycle-queries.js";
 
 // ─── Artifact Path Resolution ──────────────────────────────────────────────
 
@@ -194,47 +195,31 @@ function captureTaskCompletionIdentity(trigger: HookTriggerRef): Pick<
   if (!db) {
     throw new Error(`Cannot dispatch execute-task hook for ${trigger.triggerUnitId}: database unavailable`);
   }
-  let row: Record<string, unknown> | undefined;
+  let row: TaskCompletionIdentityRow | null;
   try {
-    row = db.prepare(`
-      SELECT task.status, task.completed_at,
-             lifecycle.lifecycle_status, lifecycle.last_operation_id
-      FROM tasks task
-      LEFT JOIN workflow_item_lifecycles lifecycle
-        ON lifecycle.item_kind = 'task'
-       AND lifecycle.milestone_id = task.milestone_id
-       AND lifecycle.slice_id = task.slice_id
-       AND lifecycle.task_id = task.id
-      WHERE task.milestone_id = :milestone_id
-        AND task.slice_id = :slice_id
-        AND task.id = :task_id
-    `).get({
-      ":milestone_id": milestone,
-      ":slice_id": slice,
-      ":task_id": task,
-    }) as Record<string, unknown> | undefined;
+    row = getTaskCompletionIdentity(milestone, slice, task);
   } catch (error) {
     throw new Error(
       `Cannot dispatch execute-task hook for ${trigger.triggerUnitId}: completion identity query failed`,
       { cause: error },
     );
   }
-  if (!row || row["status"] !== "complete") {
+  if (!row || row.status !== "complete") {
     return null;
   }
   if (
-    row["lifecycle_status"] === "completed"
-    && typeof row["last_operation_id"] === "string"
-    && row["last_operation_id"].length > 0
+    row.lifecycle_status === "completed"
+    && typeof row.last_operation_id === "string"
+    && row.last_operation_id.length > 0
   ) {
-    return { completionOperationId: row["last_operation_id"] };
+    return { completionOperationId: row.last_operation_id };
   }
   if (
-    !row["lifecycle_status"]
-    && typeof row["completed_at"] === "string"
-    && row["completed_at"].length > 0
+    !row.lifecycle_status
+    && typeof row.completed_at === "string"
+    && row.completed_at.length > 0
   ) {
-    return { legacyCompletedAt: row["completed_at"] };
+    return { legacyCompletedAt: row.completed_at };
   }
   throw new Error(
     `Cannot dispatch execute-task hook for ${trigger.triggerUnitId}: Task has no canonical completion identity`,

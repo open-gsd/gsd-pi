@@ -36,6 +36,11 @@ import {
 } from "./paths.js";
 import { isClosedStatus, isDiscardedMilestoneStatus, isInactiveStatus } from "./status-guards.js";
 import { TERMINAL_STATUS_SQL } from "./db/sql-constants.js";
+import {
+  listOrphanableRunningAttempts,
+  listUnpublishedSucceededAttempts,
+  type DoctorRunningAttemptRow,
+} from "./db/lifecycle-queries.js";
 import { readProjectionWorkBacklog, repairProjectionWork } from "./projection-worker.js";
 import { importFileOverrides, unimportedFileOverrides, type FileOverride } from "./overrides.js";
 import { importFileCaptures, unimportedFileCaptures } from "./captures.js";
@@ -70,14 +75,7 @@ import {
 
 const USER_AUTHORED_ARTIFACT_TYPES = new Set(["CONTEXT", "RESEARCH"]);
 
-interface RunningAttemptRow {
-  attempt_id: string;
-  worker_id: string | null;
-  milestone_lease_token: number | null;
-  milestone_id: string;
-  slice_id: string;
-  task_id: string;
-}
+type RunningAttemptRow = DoctorRunningAttemptRow;
 
 /**
  * A running Attempt is orphaned when no live process can settle it: its
@@ -90,16 +88,7 @@ function reportOrphanedRunningAttempts(
   basePath: string,
   issues: DoctorIssue[],
 ): void {
-  const running = adapter.prepare(`
-    SELECT attempt.attempt_id, attempt.worker_id, attempt.milestone_lease_token,
-           lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
-    FROM workflow_execution_attempts attempt
-    JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.lifecycle_id = attempt.lifecycle_id
-     AND lifecycle.project_id = attempt.project_id
-    WHERE attempt.attempt_state = 'running'
-      AND lifecycle.item_kind = 'task'
-  `).all() as unknown as RunningAttemptRow[];
+  const running = listOrphanableRunningAttempts(adapter);
   if (running.length === 0) return;
 
   let projectRoot = basePath;
@@ -174,49 +163,7 @@ function reportUnpublishedSucceededAttempts(
   adapter: ReturnType<typeof _getAdapter> & object,
   issues: DoctorIssue[],
 ): void {
-  const stranded = adapter.prepare(`
-    SELECT attempt.attempt_id, lifecycle.lifecycle_status,
-           COALESCE(tasks.status, '') AS legacy_status,
-           lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
-    FROM workflow_execution_attempts attempt
-    JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.lifecycle_id = attempt.lifecycle_id
-     AND lifecycle.project_id = attempt.project_id
-    JOIN workflow_attempt_results result
-      ON result.attempt_id = attempt.attempt_id
-     AND result.lifecycle_id = attempt.lifecycle_id
-     AND result.project_id = attempt.project_id
-    JOIN workflow_kernel_checkpoints checkpoint
-      ON checkpoint.attempt_id = attempt.attempt_id
-     AND checkpoint.project_id = attempt.project_id
-    LEFT JOIN tasks
-      ON tasks.milestone_id = lifecycle.milestone_id
-     AND tasks.slice_id = lifecycle.slice_id
-     AND tasks.id = lifecycle.task_id
-    WHERE lifecycle.item_kind = 'task'
-      AND attempt.attempt_state = 'settled'
-      AND result.outcome = 'succeeded'
-      AND checkpoint.next_stage = 'verify'
-      AND attempt.attempt_number = (
-        SELECT MAX(latest.attempt_number)
-        FROM workflow_execution_attempts latest
-        WHERE latest.lifecycle_id = attempt.lifecycle_id
-          AND latest.project_id = attempt.project_id
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM workflow_kernel_checkpoints successor
-        WHERE successor.previous_kernel_checkpoint_id = checkpoint.kernel_checkpoint_id
-      )
-      AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled', 'blocker-accepted')
-      AND COALESCE(tasks.status, '') NOT IN ('complete', 'cancelled', 'blocker-accepted')
-  `).all() as unknown as Array<{
-    attempt_id: string;
-    lifecycle_status: string;
-    legacy_status: string;
-    milestone_id: string;
-    slice_id: string;
-    task_id: string;
-  }>;
+  const stranded = listUnpublishedSucceededAttempts(adapter);
 
   for (const row of stranded) {
     const unitId = `${row.milestone_id}/${row.slice_id}/${row.task_id}`;

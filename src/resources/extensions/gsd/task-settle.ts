@@ -7,6 +7,17 @@
 
 import { executeDomainOperation } from "./db/domain-operation.js";
 import { getDb } from "./db/engine.js";
+import {
+  getAttemptResultCreatedAt,
+  getPassingProofAttemptId,
+  getTaskLegacyAndLifecycleStatus,
+  getTaskRouteHead,
+  hasTaskLifecycleRow,
+  listRunningTaskAttempts,
+  listVerificationPauseEventRows,
+  type RunningTaskAttemptRow,
+  type TaskRouteHeadRow,
+} from "./db/lifecycle-queries.js";
 import { isAutoWorkerLive } from "./db/auto-workers.js";
 import {
   claimMilestoneLease,
@@ -86,11 +97,7 @@ export interface TaskSettleOptions {
   legacyJournalBasePath?: string;
 }
 
-interface RunningAttemptRow {
-  attempt_id: string;
-  worker_id: string | null;
-  milestone_lease_token: number | null;
-}
+type RunningAttemptRow = RunningTaskAttemptRow;
 
 interface TaskLifecycleState {
   legacyStatus: string;
@@ -102,23 +109,7 @@ function unitId(task: TaskSettleTask): string {
 }
 
 function readRunningAttempts(task: TaskSettleTask): RunningAttemptRow[] {
-  return getDb().prepare(`
-    SELECT attempt.attempt_id, attempt.worker_id, attempt.milestone_lease_token
-    FROM workflow_item_lifecycles lifecycle
-    JOIN workflow_execution_attempts attempt
-      ON attempt.lifecycle_id = lifecycle.lifecycle_id
-     AND attempt.project_id = lifecycle.project_id
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-      AND attempt.attempt_state = 'running'
-    ORDER BY attempt.attempt_number DESC
-  `).all({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) as unknown as RunningAttemptRow[];
+  return listRunningTaskAttempts(task.milestoneId, task.sliceId, task.taskId);
 }
 
 function readLeaseHeld(row: RunningAttemptRow, milestoneId: string): boolean {
@@ -164,19 +155,7 @@ function claimRecoveryLease(
 }
 
 function requireSingleRunningAttempt(task: TaskSettleTask): RunningAttemptRow | null {
-  const lifecycle = getDb().prepare(`
-    SELECT 1 AS present
-    FROM workflow_item_lifecycles
-    WHERE item_kind = 'task'
-      AND milestone_id = :milestone_id
-      AND slice_id = :slice_id
-      AND task_id = :task_id
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  });
-  if (!lifecycle) {
+  if (!hasTaskLifecycleRow(task.milestoneId, task.sliceId, task.taskId)) {
     throw new Error(
       `gsd_task_settle: unknown Task ${task.milestoneId}/${task.sliceId}/${task.taskId}`,
     );
@@ -193,76 +172,20 @@ function requireSingleRunningAttempt(task: TaskSettleTask): RunningAttemptRow | 
 }
 
 function readTaskLifecycleState(task: TaskSettleTask): TaskLifecycleState {
-  const state = getDb().prepare(`
-    SELECT task.status AS task_status, lifecycle.lifecycle_status
-    FROM tasks task
-    LEFT JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'task'
-     AND lifecycle.milestone_id = task.milestone_id
-     AND lifecycle.slice_id = task.slice_id
-     AND lifecycle.task_id = task.id
-    WHERE task.milestone_id = :milestone_id
-      AND task.slice_id = :slice_id
-      AND task.id = :task_id
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) as Record<string, unknown> | undefined;
+  const state = getTaskLegacyAndLifecycleStatus(task.milestoneId, task.sliceId, task.taskId);
   if (!state) {
     throw new Error(`gsd_task_settle: unknown Task ${unitId(task)}`);
   }
   return {
-    legacyStatus: String(state["task_status"]),
-    lifecycleStatus: state["lifecycle_status"]
-      ? String(state["lifecycle_status"]) as CanonicalLifecycleStatus
+    legacyStatus: String(state.task_status),
+    lifecycleStatus: state.lifecycle_status
+      ? String(state.lifecycle_status) as CanonicalLifecycleStatus
       : null,
   };
 }
 
 function readPassingProofAttempt(task: TaskSettleTask): string | null {
-  const row = getDb().prepare(`
-    SELECT attempt.attempt_id
-    FROM workflow_item_lifecycles lifecycle
-    JOIN workflow_execution_attempts attempt
-      ON attempt.lifecycle_id = lifecycle.lifecycle_id
-     AND attempt.project_id = lifecycle.project_id
-     AND attempt.attempt_state = 'settled'
-    JOIN workflow_attempt_results result
-      ON result.attempt_id = attempt.attempt_id
-     AND result.lifecycle_id = lifecycle.lifecycle_id
-     AND result.outcome = 'succeeded'
-    JOIN workflow_acceptance_criteria criterion
-      ON criterion.lifecycle_id = lifecycle.lifecycle_id
-     AND criterion.criterion_key = 'host-technical-verification'
-     AND NOT EXISTS (
-       SELECT 1 FROM workflow_acceptance_criteria successor
-       WHERE successor.supersedes_criterion_id = criterion.criterion_id
-     )
-    JOIN workflow_technical_verdicts verdict
-      ON verdict.criterion_id = criterion.criterion_id
-     AND verdict.attempt_id = attempt.attempt_id
-     AND verdict.verdict = 'pass'
-     AND NOT EXISTS (
-       SELECT 1 FROM workflow_technical_verdicts successor
-       WHERE successor.supersedes_verdict_id = verdict.verdict_id
-     )
-    JOIN workflow_verification_evidence evidence
-      ON evidence.verdict_id = verdict.verdict_id
-     AND evidence.attempt_id = attempt.attempt_id
-     AND evidence.observation = 'passed'
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-    ORDER BY attempt.attempt_number DESC
-    LIMIT 1
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) as { attempt_id?: string } | undefined;
-  return row?.attempt_id ? String(row.attempt_id) : null;
+  return getPassingProofAttemptId(task.milestoneId, task.sliceId, task.taskId);
 }
 
 function planCompletionProof(
@@ -355,17 +278,7 @@ function readVerificationPauseReceipt(
   attemptId: string | undefined,
 ): VerificationPauseReceipt | null {
   if (!attemptId) return null;
-  const rows = getDb().prepare(`
-    SELECT created_at, payload_json
-    FROM workflow_domain_events
-    WHERE event_type = :event_type
-      AND entity_type = 'task'
-      AND entity_id = :entity_id
-    ORDER BY project_revision DESC, event_index DESC
-  `).all({
-    ":event_type": VERIFICATION_PAUSED_EVENT,
-    ":entity_id": unitId(task),
-  }) as Array<{ created_at: string; payload_json: string }>;
+  const rows = listVerificationPauseEventRows(unitId(task), VERIFICATION_PAUSED_EVENT);
   for (const row of rows) {
     const payload = JSON.parse(row.payload_json) as { attemptId?: unknown };
     if (payload.attemptId === attemptId) return { ts: String(row.created_at), attemptId };
@@ -381,10 +294,8 @@ function readLegacyJournalPauseReceipt(
   task: TaskSettleTask,
   attemptId: string,
 ): VerificationPauseReceipt | null {
-  const result = getDb().prepare(`
-    SELECT created_at FROM workflow_attempt_results WHERE attempt_id = :attempt_id
-  `).get({ ":attempt_id": attemptId }) as { created_at?: string } | undefined;
-  const settledMs = result?.created_at ? Date.parse(String(result.created_at)) : NaN;
+  const settledAt = getAttemptResultCreatedAt(attemptId);
+  const settledMs = settledAt ? Date.parse(settledAt) : NaN;
   if (Number.isNaN(settledMs)) return null;
   const unit = unitId(task);
   const latest = [
@@ -838,33 +749,10 @@ export interface TaskBlockerAcceptedApplyResult {
   routeConsumed: boolean;
 }
 
-interface RouteHeadRow {
-  kernel_checkpoint_id: string;
-  lifecycle_id: string;
-  attempt_id: string;
-  next_stage: string;
-}
+type RouteHeadRow = TaskRouteHeadRow;
 
 function readRouteHead(task: TaskSettleTask): RouteHeadRow | null {
-  return (getDb().prepare(`
-    SELECT head.kernel_checkpoint_id, head.lifecycle_id, head.attempt_id, head.next_stage
-    FROM workflow_kernel_checkpoints head
-    JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.lifecycle_id = head.lifecycle_id
-     AND lifecycle.project_id = head.project_id
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-      AND NOT EXISTS (
-        SELECT 1 FROM workflow_kernel_checkpoints successor
-        WHERE successor.previous_kernel_checkpoint_id = head.kernel_checkpoint_id
-      )
-  `).get({
-    ":milestone_id": task.milestoneId,
-    ":slice_id": task.sliceId,
-    ":task_id": task.taskId,
-  }) ?? null) as RouteHeadRow | null;
+  return getTaskRouteHead(task.milestoneId, task.sliceId, task.taskId);
 }
 
 /**

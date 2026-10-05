@@ -24,7 +24,12 @@ import {
 } from "./gsd-db.js";
 import type { TaskRow } from "./db-task-slice-rows.js";
 import { executeDomainOperation } from "./db/domain-operation.js";
-import { getDb } from "./db/engine.js";
+import {
+  getLatestLegacyResolutionPayload,
+  getTaskEscalationQuestionRow,
+  hasTaskLifecycleRow,
+  listInteractionOptions,
+} from "./db/lifecycle-queries.js";
 import {
   TASK_ESCALATION_OPENED_EVENT,
   TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT,
@@ -105,17 +110,7 @@ export function buildEscalationArtifact(params: {
 export function taskHasCanonicalLifecycle(
   milestoneId: string, sliceId: string, taskId: string,
 ): boolean {
-  return getDb().prepare(`
-    SELECT 1 FROM workflow_item_lifecycles
-    WHERE item_kind = 'task'
-      AND milestone_id = :milestone_id
-      AND slice_id = :slice_id
-      AND task_id = :task_id
-  `).get({
-    ":milestone_id": milestoneId,
-    ":slice_id": sliceId,
-    ":task_id": taskId,
-  }) !== undefined;
+  return hasTaskLifecycleRow(milestoneId, sliceId, taskId);
 }
 
 /**
@@ -220,74 +215,26 @@ export function readTaskEscalation(
 function readLegacyResolution(
   milestoneId: string, sliceId: string, taskId: string,
 ): EscalationArtifact | null {
-  const row = getDb().prepare(`
-    SELECT json_extract(event.payload_json, '$.legacy') AS legacy
-    FROM project_authority authority
-    CROSS JOIN workflow_domain_events event
-      ON event.project_id = authority.project_id
-     AND event.entity_type = 'task'
-     AND event.entity_id = :entity_id
-     AND event.event_type = :resolved_event
-     AND json_extract(event.payload_json, '$.legacy') IS NOT NULL
-    ORDER BY event.project_revision DESC
-    LIMIT 1
-  `).get({
-    ":entity_id": `${milestoneId}/${sliceId}/${taskId}`,
-    ":resolved_event": TASK_ESCALATION_RESOLVED_EVENT,
-  }) as Record<string, unknown> | undefined;
-  return row ? JSON.parse(String(row["legacy"])) as EscalationArtifact : null;
+  const legacy = getLatestLegacyResolutionPayload(
+    `${milestoneId}/${sliceId}/${taskId}`,
+    TASK_ESCALATION_RESOLVED_EVENT,
+  );
+  return legacy ? JSON.parse(legacy) as EscalationArtifact : null;
 }
 
 function readTaskEscalationQuestion(
   milestoneId: string, sliceId: string, taskId: string,
 ): TaskEscalationQuestion | null {
-  const row = getDb().prepare(`
-    SELECT question.question_id, question.question_text, question.created_at,
-           interaction.interaction_id, interaction.recommended_option_id,
-           interaction.recommendation_rationale,
-           json_extract(opened.payload_json, '$.continueWithDefault') AS continue_with_default,
-           answer.verbatim_response, answer.created_at AS responded_at,
-           json_extract(resolved.payload_json, '$.rationale') AS user_rationale
-    FROM workflow_item_lifecycles lifecycle
-    JOIN workflow_open_questions question
-      ON question.lifecycle_id = lifecycle.lifecycle_id
-     AND question.project_id = lifecycle.project_id
-    CROSS JOIN workflow_domain_events opened
-      ON opened.project_id = lifecycle.project_id
-     AND opened.entity_type = 'task'
-     AND opened.entity_id = lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id
-     AND opened.event_type = :opened_event
-     AND json_extract(opened.payload_json, '$.questionId') = question.question_id
-    JOIN workflow_interactions interaction
-      ON interaction.question_id = question.question_id
-     AND interaction.project_id = question.project_id
-     AND interaction.sequence = 1
-    LEFT JOIN workflow_answers answer
-      ON answer.answer_id = question.accepted_answer_id
-    LEFT JOIN workflow_domain_events resolved
-      ON resolved.event_type = :resolved_event
-     AND resolved.operation_id = answer.operation_id
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-      AND question.question_status != 'withdrawn'
-    ORDER BY question.created_project_revision DESC
-    LIMIT 1
-  `).get({
-    ":opened_event": TASK_ESCALATION_OPENED_EVENT,
-    ":resolved_event": TASK_ESCALATION_RESOLVED_EVENT,
-    ":milestone_id": milestoneId,
-    ":slice_id": sliceId,
-    ":task_id": taskId,
-  }) as Record<string, unknown> | undefined;
+  const row = getTaskEscalationQuestionRow({
+    milestoneId,
+    sliceId,
+    taskId,
+    openedEvent: TASK_ESCALATION_OPENED_EVENT,
+    resolvedEvent: TASK_ESCALATION_RESOLVED_EVENT,
+  });
   if (!row) return null;
   const interactionId = String(row["interaction_id"]);
-  const options = getDb().prepare(`
-    SELECT option_id, label, description FROM workflow_interaction_options
-    WHERE interaction_id = :interaction_id
-    ORDER BY ordinal
-  `).all({ ":interaction_id": interactionId }) as Array<Record<string, unknown>>;
+  const options = listInteractionOptions(interactionId);
   const responded = typeof row["verbatim_response"] === "string";
   return {
     questionId: String(row["question_id"]),

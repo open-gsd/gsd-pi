@@ -23,8 +23,8 @@
 import {
   getSliceRunUatAssessment,
   getSliceTasks,
-  getDb,
 } from "../gsd-db.js";
+import { getMilestoneCanonicalLifecycleStatus } from "../db/lifecycle-queries.js";
 import {
   isCurrentSliceReopenOperation,
   reopenSlice,
@@ -89,17 +89,7 @@ export function _setReopenSliceCleanupInterleaveForTest(hook: (() => void) | nul
  */
 function milestoneCanonicalTerminal(milestoneId: string): boolean {
   try {
-    const row = getDb().prepare(`
-      SELECT lifecycle.lifecycle_status AS status
-      FROM milestones milestone
-      LEFT JOIN workflow_item_lifecycles lifecycle
-        ON lifecycle.project_id = (SELECT project_id FROM project_authority WHERE singleton = 1)
-       AND lifecycle.item_kind = 'milestone'
-       AND lifecycle.milestone_id = milestone.id
-       AND lifecycle.slice_id IS NULL
-      WHERE milestone.id = :milestone_id
-    `).get({ ":milestone_id": milestoneId }) as Record<string, unknown> | undefined;
-    const status = row?.["status"];
+    const status = getMilestoneCanonicalLifecycleStatus(milestoneId);
     return status === "completed" || status === "cancelled";
   } catch {
     return false;

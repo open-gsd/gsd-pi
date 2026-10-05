@@ -31,6 +31,7 @@ import { isClosedStatus } from "../../status-guards.js";
 import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
+import { hasTaskExecutionOrReopenHistory } from "../../db/lifecycle-queries.js";
 import type { GSDState } from "../../types.js";
 import {
   completedEventCoversDispatch,
@@ -154,39 +155,7 @@ function taskHasExecutionOrReopenHistory(
   taskId: string,
 ): boolean {
   if (!isDbAvailable()) return false;
-  const row = _getAdapter()!.prepare(`
-    SELECT 1 AS present
-    FROM workflow_item_lifecycles lifecycle
-    WHERE lifecycle.item_kind = 'task'
-      AND lifecycle.milestone_id = :milestone_id
-      AND lifecycle.slice_id = :slice_id
-      AND lifecycle.task_id = :task_id
-      AND (
-        EXISTS (
-          SELECT 1 FROM workflow_execution_attempts attempt
-          WHERE attempt.lifecycle_id = lifecycle.lifecycle_id
-            AND attempt.project_id = lifecycle.project_id
-        )
-        OR (
-          lifecycle.lifecycle_status = 'ready'
-          AND EXISTS (
-            SELECT 1 FROM workflow_domain_events reopened
-            WHERE reopened.project_id = lifecycle.project_id
-              AND reopened.operation_id = lifecycle.last_operation_id
-              AND reopened.event_type = 'task.reopened'
-              AND reopened.entity_type = 'task'
-              AND reopened.entity_id = :entity_id
-          )
-        )
-      )
-    LIMIT 1
-  `).get({
-    ":milestone_id": milestoneId,
-    ":slice_id": sliceId,
-    ":task_id": taskId,
-    ":entity_id": `${milestoneId}/${sliceId}/${taskId}`,
-  });
-  return row !== undefined;
+  return hasTaskExecutionOrReopenHistory(milestoneId, sliceId, taskId);
 }
 
 function isAbandonedStagedTaskSummary(
