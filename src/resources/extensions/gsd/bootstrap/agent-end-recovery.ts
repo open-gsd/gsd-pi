@@ -38,7 +38,7 @@ import { applyThinkingLevelForModel, resolveModelId } from "../auto-model-select
 import { resolveProjectRoot } from "../worktree.js";
 import { clearDiscussionFlowState } from "./write-gate.js";
 import { scheduleFallbackContinuation } from "./fallback-continuation.js";
-import { clearGuidedUnitContext, getGuidedUnitContext, type GuidedUnitContext } from "../guided-unit-context.js";
+import { clearGuidedUnitContext, getGuidedUnitContext, settleGuidedKernelClaim, type GuidedUnitContext } from "../guided-unit-context.js";
 import { resumeAutoAfterProviderDelay } from "./provider-error-resume.js";
 import {
   classifyError,
@@ -559,6 +559,9 @@ export async function handleAgentEnd(
   const basePath = resolveAgentEndBasePath();
   const lastMsg = event.messages[event.messages.length - 1];
   const guidedUnit = basePath ? getGuidedUnitContext(basePath) ?? getGuidedUnitContext() : getGuidedUnitContext();
+  // The guided unit's kernel claim (ADR-048 one-unit bound) is settled here,
+  // before the discuss-to-auto handoff below can claim the milestone lease.
+  settleGuidedKernelClaim(guidedUnit?.basePath ?? basePath);
   clearGuidedUnitContext(guidedUnit?.basePath ?? basePath);
 
   try {

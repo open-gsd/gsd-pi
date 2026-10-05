@@ -163,7 +163,16 @@ Not changed:
 
 - `kernelStart`, `kernelResume` and `kernelStop` pass to the Auto Orchestration module. Resume routing from the pause row is still in `auto.ts` and `interrupted-session.ts`.
 - The other calls of the Auto Orchestration module did not move to the kernel. The auto loop calls `completeActiveUnit`, `retryActiveUnit`, `abandonActiveUnit` and `getStatus`. `auto.ts` calls `recheckWedge`. `auto-post-unit.ts` calls `retryActiveUnit`.
-- Only the auto loop writes dispatch rows. The guided flow, `/gsd dispatch` and a workflow tool that is called outside auto-mode change lifecycle rows with no dispatch row, so their work does not make a canceled `verify` row history. After such work the next `/gsd auto` still continues the unit at `verify`: its verification gate, its post-unit hooks and its pre-execution check run again, also when the slice of the unit is complete. This is open until the guided flow and `/gsd dispatch` claim a dispatch row through the kernel advance.
+- Only the auto loop writes dispatch rows. The guided flow, `/gsd dispatch` and a workflow tool that is called outside auto-mode change lifecycle rows with no dispatch row, so their work does not make a canceled `verify` row history. After such work the next `/gsd auto` still continues the unit at `verify`: its verification gate, its post-unit hooks and its pre-execution check run again, also when the slice of the unit is complete. This is open until the guided flow and `/gsd dispatch` claim a dispatch row through the kernel advance. (Closed for the guided flow and `/gsd dispatch` by the amendment below; a workflow tool outside auto-mode still writes no dispatch row.)
+
+## Amendment 2026-10-05: the guided flow and `/gsd dispatch` claim their unit through the one-unit bound
+
+The gap above is closed. `lifecycle-kernel.ts` has a one-unit bound of the kernel advance for callers outside the auto loop: `kernelClaimUnit` and `kernelSettleUnitClaim`.
+
+- **Claim.** Before the unit's turn runs, the caller claims the unit: a `dispatch-` worker row, the milestone lease, and the `unit_dispatches` row (marked `running`, except `execute-task`, which stays `claimed` as in the loop). The rules are the loop's rules: a live worker that holds the unit or the milestone lease refuses the claim, and the caller does not dispatch; the active row of a dead worker is taken over. A unit of a milestone that has no row yet, of a virtual milestone (`PROJECT`), or a dispatch with the database unavailable claims nothing and dispatches as before — the same units the loop claims nothing for.
+- **Settle.** When the unit's turn ends, the row settles (`completed`, or `failed` when the send threw) and the lease and worker row are released. The guided flow settles in the agent-end handler before the discuss-to-auto handoff claims the lease, so the handoff cannot meet its own claim; both turn-end paths are safe to run twice.
+- **Effect.** The claimed row is the newest dispatch row of its milestone scope, so an older interrupted `verify` row stops being selected: non-auto work that follows a crash no longer makes the next `/gsd auto` re-run the unit's verification gates. A unit that is still open after its interactive turn is dispatched again by state derivation under a fresh claim; the takeover of the settled unit's row records the old attempt.
+- Not changed: a workflow tool outside auto-mode still writes no dispatch row; restart continuation, crash-path classification and the pause row rules are unchanged.
 
 ## Rejected alternatives
 

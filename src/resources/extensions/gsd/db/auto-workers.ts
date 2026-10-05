@@ -56,11 +56,17 @@ export interface AutoWorkerRow {
  */
 export function registerAutoWorker(opts: {
   projectRootRealpath: string;
+  /**
+   * Worker id prefix. Auto-mode loops register "auto" workers; a caller that
+   * dispatches one unit outside the loop (the kernel's interactive claim)
+   * registers under its own prefix so the two never read as the same kind.
+   */
+  prefix?: string;
 }): string {
   if (!isDbAvailable()) {
     throw new Error("registerAutoWorker: DB unavailable");
   }
-  const workerId = `auto-${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`;
+  const workerId = `${opts.prefix ?? "auto"}-${hostname()}-${process.pid}-${randomUUID().slice(0, 8)}`;
   const now = new Date().toISOString();
 
   transaction(() => {

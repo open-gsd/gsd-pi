@@ -7,6 +7,7 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@gsd/pi-coding-agent";
+import { randomUUID } from "node:crypto";
 
 import { deriveState } from "./state.js";
 import { heldProjectionChangesBeforeDispatch } from "./state-reconciliation.js";
@@ -35,6 +36,8 @@ import { pauseAuto } from "./auto.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { getUnitWorkflowDispatchReadinessErrorForModel } from "./tool-contract.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
+import { kernelClaimUnit, kernelSettleUnitClaim } from "./auto/lifecycle-kernel.js";
+import { normalizeRealPath } from "./paths.js";
 
 export function parseDirectDispatchPhase(raw: string): { phase: string; milestoneId?: string } {
   const tokens = raw.trim().split(/\s+/).filter(Boolean);
@@ -304,6 +307,26 @@ export async function dispatchDirectPhase(
     ctx.ui.notify("Session creation cancelled.", "warning");
     return;
   }
+
+  // The one-unit bound (ADR-048): the dispatched unit is claimed through the
+  // kernel — milestone lease and dispatch row — so the interactive work has a
+  // kernel record and makes an older interrupted `verify` row of the milestone
+  // history. A refusal names the live worker that holds the unit or milestone.
+  const [, claimSliceId = null, claimTaskId = null] = unitId.split("/");
+  const claim = kernelClaimUnit({
+    projectRoot: normalizeRealPath(dispatchBase),
+    milestoneId: mid,
+    sliceId: claimSliceId,
+    taskId: claimTaskId,
+    unitType,
+    unitId,
+    traceId: `dispatch-${randomUUID().slice(0, 8)}`,
+  });
+  if (claim.kind === "refused") {
+    ctx.ui.notify(`Cannot dispatch ${unitType} ${unitId}: ${claim.reason}.`, "warning");
+    return;
+  }
+
   // Inject the configured response language into the dispatched prompt content
   // — the new session's system prompt does not carry the preferences block, so
   // the language setting would otherwise never reach the unit (#1210).
@@ -311,8 +334,18 @@ export async function dispatchDirectPhase(
     loadEffectiveGSDPreferences(dispatchBase)?.preferences,
   );
   const dispatchContent = languageDirective ? `${languageDirective}\n\n${prompt}` : prompt;
-  pi.sendMessage(
-    { customType: "gsd-dispatch", content: dispatchContent, display: false },
-    { triggerTurn: true },
-  );
+  try {
+    await pi.sendMessage(
+      { customType: "gsd-dispatch", content: dispatchContent, display: false },
+      { triggerTurn: true },
+    );
+  } catch (err) {
+    if (claim.kind === "claimed") {
+      kernelSettleUnitClaim(claim, "failed", err instanceof Error ? err.message : String(err));
+    }
+    throw err;
+  }
+  if (claim.kind === "claimed") {
+    kernelSettleUnitClaim(claim, "completed", "interactive-dispatch");
+  }
 }

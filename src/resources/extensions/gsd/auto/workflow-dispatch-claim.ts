@@ -15,7 +15,8 @@ export type DispatchLeaseOutcome =
   | { kind: "blocked"; reason: string; holderWorkerId?: string }
   | { kind: "failed"; reason: string };
 
-const VIRTUAL_MILESTONE_IDS = new Set(["PROJECT"]);
+/** Milestone ids that hold no rows: their units claim no lease. */
+export const VIRTUAL_MILESTONE_IDS = new Set(["PROJECT"]);
 
 type ClaimMilestoneLeaseResult =
   | { ok: true; token: number; expiresAt: string }

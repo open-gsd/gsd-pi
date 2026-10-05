@@ -49,7 +49,10 @@ import {
   gsdRoot, milestonesDir, legacyMilestonesDir,
   resolveSliceFile, resolveGsdRootFile, relGsdRootFile,
   relMilestoneFile, relSliceFile, relSlicePath,
+  normalizeRealPath,
 } from "./paths.js";
+import { kernelClaimUnit, kernelSettleUnitClaim, type KernelUnitClaim } from "./auto/lifecycle-kernel.js";
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { removeProjectionTreeSync } from "./atomic-write.js";
@@ -294,7 +297,10 @@ async function dispatchDiscussForNextMilestoneWithBacklog(
     },
   );
   const prompt = backlogContext ? `${basePrompt}\n\n${backlogContext}` : basePrompt;
-  await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", { basePath });
+  await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", {
+    basePath,
+    claim: { milestoneId: nextId, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: nextId },
+  });
 }
 
 export async function launchNextMilestoneDiscuss(
@@ -621,6 +627,19 @@ type UIContext = ExtensionContext;
 
 interface DispatchWorkflowOptions {
   basePath?: string;
+  /**
+   * The one-unit bound (ADR-048): the unit this dispatch runs is claimed
+   * through the Lifecycle Kernel — milestone lease and dispatch row — before
+   * the turn starts, and the row is settled when the turn ends. A refusal
+   * names the live worker that holds the unit or the milestone.
+   */
+  claim?: {
+    milestoneId: string;
+    sliceId: string | null;
+    taskId: string | null;
+    unitType: string;
+    unitId: string;
+  };
   deps?: {
     loadPreferences?: typeof loadEffectiveGSDPreferences;
     selectModel?: typeof selectAndApplyModel;
@@ -818,6 +837,26 @@ async function dispatchWorkflow(
   // restore so the narrowed surface does not leak into future dispatches.
   let savedTools: ReturnType<typeof scopeGsdWorkflowToolsForDispatch> = null;
 
+  // The one-unit bound (ADR-048): claim the unit through the kernel before the
+  // turn runs. A refusal stops the dispatch; a claim is settled when the turn
+  // ends, below.
+  let claimed: Extract<KernelUnitClaim, { kind: "claimed" }> | null = null;
+  if (resolvedOptions.claim) {
+    const claim = kernelClaimUnit({
+      projectRoot: normalizeRealPath(projectRoot),
+      traceId: `guided-${randomUUID().slice(0, 8)}`,
+      ...resolvedOptions.claim,
+    });
+    if (claim.kind === "refused") {
+      ctx?.ui.notify(
+        `Cannot dispatch ${resolvedOptions.claim.unitType} ${resolvedOptions.claim.unitId}: ${claim.reason}.`,
+        "warning",
+      );
+      return;
+    }
+    if (claim.kind === "claimed") claimed = claim;
+  }
+
   try {
     const currentTools = pi.getActiveTools();
     savedTools = {
@@ -851,7 +890,19 @@ async function dispatchWorkflow(
     const workflowPath = process.env.GSD_WORKFLOW_PATH ?? join(gsdHome(), "agent", "GSD-WORKFLOW.md");
     const workflow = readFileSync(workflowPath, "utf-8");
 
-    if (unitType) setGuidedUnitContext(projectRoot, unitType);
+    if (unitType) {
+      const guidedContext = setGuidedUnitContext(projectRoot, unitType);
+      // The agent-end handler settles the claim before the discuss-to-auto
+      // handoff runs, whichever of the two turn-end paths resolves first.
+      if (claimed) {
+        guidedContext.kernelClaim = {
+          dispatchId: claimed.dispatchId,
+          workerId: claimed.workerId,
+          milestoneId: claimed.milestoneId,
+          leaseToken: claimed.leaseToken,
+        };
+      }
+    }
     try {
       await pi.sendMessage(
         {
@@ -863,8 +914,24 @@ async function dispatchWorkflow(
       );
     } catch (err) {
       clearGuidedUnitContext(projectRoot);
+      if (claimed) {
+        kernelSettleUnitClaim(claimed, "failed", err instanceof Error ? err.message : String(err));
+        claimed = null;
+      }
       throw err;
     }
+    if (claimed) {
+      kernelSettleUnitClaim(claimed, "completed", "guided-flow");
+      claimed = null;
+    }
+  } catch (err) {
+    // A failure before the turn started (tool scoping, workflow doc read)
+    // still settles the claim: the row never stays active silently.
+    if (claimed) {
+      kernelSettleUnitClaim(claimed, "failed", err instanceof Error ? err.message : String(err));
+      claimed = null;
+    }
+    throw err;
   } finally {
     // Restore full tool/skill surface after the turn completes. Awaiting
     // sendMessage ensures scoped skills stay in _baseSystemPrompt through
@@ -1090,7 +1157,10 @@ async function dispatchNewMilestoneDiscuss(
         ?? `New project, milestone ${nextId}. Do NOT read or explore .gsd/ — it's empty scaffolding.`,
       basePath,
     );
-    await dispatchWorkflow(pi, prompt, "gsd-run", ctx, "discuss-milestone", { basePath });
+    await dispatchWorkflow(pi, prompt, "gsd-run", ctx, "discuss-milestone", {
+      basePath,
+      claim: { milestoneId: nextId, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: nextId },
+    });
     return;
   }
 
@@ -1107,7 +1177,10 @@ async function dispatchNewMilestoneDiscuss(
     },
   );
   if (preparationContext) prompt += preparationContext;
-  await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", { basePath });
+  await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", {
+    basePath,
+    claim: { milestoneId: nextId, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: nextId },
+  });
 }
 
 /**
@@ -1182,7 +1255,10 @@ export async function showHeadlessMilestoneCreation(
   // model/tool routing to skip discuss-flow tool scoping and
   // `checkAutoStartAfterDiscuss` guardrails that rely on the
   // "discuss-"-prefixed unitType.
-  await dispatchWorkflow(pi, prompt, "gsd-run", ctx, "discuss-milestone", { basePath });
+  await dispatchWorkflow(pi, prompt, "gsd-run", ctx, "discuss-milestone", {
+    basePath,
+    claim: { milestoneId: nextId, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: nextId },
+  });
 }
 
 
@@ -1371,7 +1447,16 @@ export async function showDiscuss(
         rediscuss: hasSavedArtifact(targetMilestone.id, sid, "CONTEXT"),
         structuredQuestionsAvailable: sqAvail,
       });
-      await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-slice", { basePath: discussBasePath });
+      await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-slice", {
+        basePath: discussBasePath,
+        claim: {
+          milestoneId: targetMilestone.id,
+          sliceId: sid,
+          taskId: null,
+          unitType: "discuss-slice",
+          unitId: `${targetMilestone.id}/${sid}`,
+        },
+      });
       return;
     }
 
@@ -1449,7 +1534,10 @@ export async function showDiscuss(
         },
       );
       setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: mid, step: true });
-      await dispatchWorkflow(pi, seed, "gsd-discuss", ctx, "discuss-milestone", { basePath });
+      await dispatchWorkflow(pi, seed, "gsd-discuss", ctx, "discuss-milestone", {
+        basePath,
+        claim: { milestoneId: mid, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: mid },
+      });
     } else if (choice === "discuss_fresh") {
       const structuredQuestionsAvailable = getStructuredQuestionsAvailability(pi, ctx);
       const prompt = await buildDiscussMilestonePrompt(
@@ -1464,7 +1552,10 @@ export async function showDiscuss(
         },
       );
       setPendingAutoStart(basePath, { ctx, pi, basePath, milestoneId: mid, step: true });
-      await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", { basePath });
+      await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", {
+        basePath,
+        claim: { milestoneId: mid, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: mid },
+      });
     } else if (choice === "skip_milestone") {
       const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
       await ensureDbOpen(basePath);
@@ -1610,7 +1701,16 @@ export async function showDiscuss(
       rediscuss: isRediscuss,
       structuredQuestionsAvailable: sqAvail,
     });
-    await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-slice", { basePath: discussBasePath });
+    await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-slice", {
+      basePath: discussBasePath,
+      claim: {
+        milestoneId: mid,
+        sliceId: chosen.id,
+        taskId: null,
+        unitType: "discuss-slice",
+        unitId: `${mid}/${chosen.id}`,
+      },
+    });
 
     // Wait for the discuss session to finish, then loop back to the picker
     await ctx.waitForIdle();
@@ -1733,7 +1833,10 @@ async function dispatchDiscussForMilestone(
       fastPathInstruction,
     },
   );
-  await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", { basePath });
+  await dispatchWorkflow(pi, prompt, "gsd-discuss", ctx, "discuss-milestone", {
+    basePath,
+    claim: { milestoneId: mid, sliceId: null, taskId: null, unitType: "discuss-milestone", unitId: mid },
+  });
 }
 
 // ─── Smart Entry Point ────────────────────────────────────────────────────────

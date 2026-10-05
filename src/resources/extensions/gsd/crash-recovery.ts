@@ -97,15 +97,18 @@ function findActiveWorkerForCurrentProcess(
 ): AutoWorkerRow | null {
   if (!isDbAvailable()) return null;
   const workers = getAllAutoWorkers();
-  for (const worker of workers) {
-    if (
-      worker.pid === process.pid
-      && worker.project_root_realpath === projectRootRealpath
-    ) {
-      return worker;
-    }
-  }
-  return null;
+  // One process can hold rows of two kinds after an interactive dispatch
+  // claimed a unit here: the dispatch worker row (retired `stopping` at settle)
+  // and the auto worker row. The active row is this process's live worker; an
+  // older retired row of the same pid must not shadow it.
+  return workers.find((worker) =>
+    worker.pid === process.pid
+    && worker.project_root_realpath === projectRootRealpath
+    && worker.status === "active"
+  ) ?? workers.find((worker) =>
+    worker.pid === process.pid
+    && worker.project_root_realpath === projectRootRealpath
+  ) ?? null;
 }
 
 /**
