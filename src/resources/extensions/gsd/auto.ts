@@ -2103,17 +2103,6 @@ export async function stopAuto(
       debugLog("stop-cleanup-ledger", { error: e instanceof Error ? e.message : String(e) });
     }
 
-    // The typed outcome event: hosts read the run's terminal state from it and
-    // keep the notification-text classification as a fallback (ADR-046). A
-    // blocked stop keeps exit 10; every other stop ends the run like a plain
-    // stop (exit 0), the same rule the text classifier applies.
-    emitWorkflowOutcomeEvent(pi, {
-      status: isBlockedStopReason(reason) ? "blocked" : "completed",
-      reason: displayReason || reason || undefined,
-      unitType: s.currentUnit?.type,
-      unitId: s.currentUnit?.id,
-    });
-
     if (installCompletionWidget && ctx && options.completionWidget) {
       const ledger = getLedger();
       const units = filterUnitsForMilestone(ledger?.units ?? [], completionMilestoneId);
@@ -2252,6 +2241,21 @@ export async function stopAuto(
     } catch (e) {
       debugLog("stop-cleanup-pending-resolve", { error: e instanceof Error ? e.message : String(e) });
     }
+
+    // The typed outcome event: hosts read the run's terminal state from it and
+    // keep the notification-text classification as a fallback (ADR-046). A
+    // blocked stop keeps exit 10; every other stop ends the run like a plain
+    // stop (exit 0), the same rule the text classifier applies.
+    // Emitted last, after every notification surface above (the Step 8 ledger
+    // notice and the headless completion notice): the headless host resolves
+    // the run on this event and stops reading the stream, so a notify sent
+    // after it never reaches the run's output.
+    emitWorkflowOutcomeEvent(pi, {
+      status: isBlockedStopReason(reason) ? "blocked" : "completed",
+      reason: displayReason || reason || undefined,
+      unitType: s.currentUnit?.type,
+      unitId: s.currentUnit?.id,
+    });
   } finally {
     // ── Critical invariants: these MUST execute regardless of errors ──
     // Browser teardown — prevent orphaned Chrome processes across retries (#1733)
