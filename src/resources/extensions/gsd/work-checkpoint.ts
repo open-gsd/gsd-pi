@@ -171,23 +171,49 @@ function rowToCheckpoint(row: Record<string, unknown> | undefined): WorkCheckpoi
   };
 }
 
+/**
+ * The event types that change the work of a milestone, slice or task. A
+ * checkpoint saved before one of these events on its own item is superseded.
+ * Every other event (Attempt, verification, recovery, dispatch) is bookkeeping.
+ */
+const WORK_CHANGE_EVENT_TYPES = [
+  "workflow.milestone.planned",
+  "workflow.roadmap.reassessed",
+  "workflow.slice.planned",
+  "workflow.slice.replanned",
+  "workflow.task.planned",
+  "workflow.task.replanned",
+  "milestone.completed",
+  "slice.completed",
+  "task.completion.published",
+  "milestone.discarded",
+  "slice.cancelled",
+  "task.cancelled",
+  "milestone.reopened",
+  "slice.reopened",
+  "task.reopened",
+] as const;
+
 // A checkpoint is the resume state of its item only while the item is open and
-// its work did not change after the save: no later lifecycle status transition
-// of the item, and no later artifact save in the scope of the item. Attempt and
-// dispatch bookkeeping does not change the work.
+// its work did not change after the save: no later work-change event of the
+// item, and no later artifact save in the scope of the item.
 const CURRENT_CHECKPOINT_FILTER = `
   AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled')
-  AND lifecycle.last_project_revision <= checkpoint.project_revision
   AND NOT EXISTS (
-    SELECT 1
-    FROM workflow_domain_events event
-    JOIN artifacts artifact ON artifact.path = event.entity_id
+    SELECT 1 FROM workflow_domain_events event
     WHERE event.project_id = checkpoint.project_id
-      AND event.event_type = 'artifact.saved'
       AND event.project_revision > checkpoint.project_revision
-      AND artifact.milestone_id = lifecycle.milestone_id
-      AND artifact.slice_id IS lifecycle.slice_id
-      AND artifact.task_id IS lifecycle.task_id
+      AND (
+        (event.entity_id = :entity
+          AND event.event_type IN (${WORK_CHANGE_EVENT_TYPES.map((type) => `'${type}'`).join(", ")}))
+        OR (event.event_type = 'artifact.saved' AND EXISTS (
+          SELECT 1 FROM artifacts artifact
+          WHERE artifact.path = event.entity_id
+            AND artifact.milestone_id = lifecycle.milestone_id
+            AND artifact.slice_id IS lifecycle.slice_id
+            AND artifact.task_id IS lifecycle.task_id
+        ))
+      )
   )
 `;
 
@@ -208,7 +234,10 @@ export function readWorkCheckpoint(
       ${options.currentOnly ? CURRENT_CHECKPOINT_FILTER : ""}
     ORDER BY checkpoint.sequence DESC
     LIMIT 1
-  `).get({ ":scope_key": scopeKey(scope) }));
+  `).get({
+    ":scope_key": scopeKey(scope),
+    ...(options.currentOnly ? { ":entity": scopeEntity(scope) } : {}),
+  }));
 }
 
 /** The newest resume checkpoint of a slice or of any of its tasks. The slice CONTINUE file renders this row. */
@@ -259,8 +288,8 @@ export function buildResumeSection(milestoneId: string, sliceId: string, taskId:
  * The "Resume State" of the active unit, for /gsd resume-work: the head
  * checkpoint of the active task, else of the active slice, else of the active
  * milestone. Only the own checkpoint of that one item counts, and only while
- * the item is open and its work did not change after the save (a lifecycle
- * status transition or an artifact save in its scope).
+ * the item is open and its work did not change after the save (a work-change
+ * event of the item or an artifact save in its scope).
  */
 export function buildActiveResumeSection(active: Partial<WorkCheckpointScope>): string {
   const checkpoint = active.milestoneId

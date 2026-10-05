@@ -247,14 +247,14 @@ test("/gsd resume-work takes the handoff from the checkpoint row of the active u
   assert.equal(existsSync(join(base, CONTINUE_FILE)), false);
 });
 
-test("/gsd resume-work shows the handoff of a task after its Attempt is settled as interrupted", async (t) => {
-  const base = makeProject(t);
+/** Claim the first Attempt of T01 the way an auto-mode execute-task unit does. */
+function claimFirstAttempt(base: string, key: string): string {
   const workerId = registerAutoWorker({ projectRootRealpath: base });
   const lease = claimMilestoneLease(workerId, "M001");
   assert.equal(lease.ok, true);
-  if (!lease.ok) return;
+  if (!lease.ok) throw new Error("no milestone lease");
   const dispatch = recordDispatchClaim({
-    traceId: "checkpoint-handoff-dispatch",
+    traceId: `${key}-dispatch`,
     workerId,
     milestoneLeaseToken: lease.token,
     milestoneId: "M001",
@@ -264,19 +264,34 @@ test("/gsd resume-work shows the handoff of a task after its Attempt is settled 
     unitId: "M001/S01/T01",
   });
   assert.equal(dispatch.ok, true);
-  if (!dispatch.ok) return;
-  const claim = claimTaskAttempt({
-    invocation: internalExecutionInvocation("test:checkpoint-handoff:claim"),
+  if (!dispatch.ok) throw new Error("no dispatch claim");
+  return claimTaskAttempt({
+    invocation: internalExecutionInvocation(`test:${key}:claim`),
     task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
     workerId,
     milestoneLeaseToken: lease.token,
     coordinationDispatchId: dispatch.dispatchId,
-  });
+  }).attemptId;
+}
+
+async function resumeWorkPrompt(base: string): Promise<string> {
+  const sent: Array<{ content: string }> = [];
+  invalidateAllCaches();
+  await handleResumeWork("", { cwd: base, ui: { notify() {} } } as any, { sendMessage: (message: any) => sent.push(message) } as any);
+  assert.equal(sent.length, 1);
+  return sent[0]!.content;
+}
+
+const T01_HANDOFF_SHOWN = /Source: Work Checkpoint of M001\/S01\/T01 saved [^\n]+\n- Completed: Parser rewritten; two fixture tests still fail\.[\s\S]*- Next action: Add expiresAt to fixtures\/sessions\.ts and run the tests again\./;
+
+test("/gsd resume-work shows the handoff of a task after its Attempt is settled as interrupted", async (t) => {
+  const base = makeProject(t);
+  const attemptId = claimFirstAttempt(base, "checkpoint-handoff");
 
   saveWorkCheckpoint(HANDOFF);
   const settled = settleTaskAttempt({
     invocation: internalExecutionInvocation("test:checkpoint-handoff:settle"),
-    attemptId: claim.attemptId,
+    attemptId,
     outcome: "interrupted",
     failureClass: "stale-worker",
     summary: "The unit ended before the task was complete.",
@@ -284,13 +299,20 @@ test("/gsd resume-work shows the handoff of a task after its Attempt is settled 
   });
   assert.equal(settled.status, "committed");
 
-  const sent: Array<{ content: string }> = [];
-  invalidateAllCaches();
-  await handleResumeWork("", { cwd: base, ui: { notify() {} } } as any, { sendMessage: (message: any) => sent.push(message) } as any);
+  assert.match(await resumeWorkPrompt(base), T01_HANDOFF_SHOWN);
+});
 
-  assert.equal(sent.length, 1);
-  assert.match(sent[0]!.content, /Source: Work Checkpoint of M001\/S01\/T01 saved [^\n]+\n- Completed: Parser rewritten; two fixture tests still fail\./);
-  assert.match(sent[0]!.content, /- Next action: Add expiresAt to fixtures\/sessions\.ts and run the tests again\./);
+test("/gsd resume-work shows a handoff saved on a planned task before its first Attempt claim", async (t) => {
+  const base = makeProject(t);
+  saveWorkCheckpoint(HANDOFF);
+
+  claimFirstAttempt(base, "checkpoint-before-claim");
+
+  assert.deepEqual(
+    rows("SELECT lifecycle_status FROM workflow_item_lifecycles WHERE task_id = 'T01'"),
+    [{ lifecycle_status: "in_progress" }],
+  );
+  assert.match(await resumeWorkPrompt(base), T01_HANDOFF_SHOWN);
 });
 
 test("/gsd resume-work does not show the checkpoint of a completed task as the resume state of the next task", async (t) => {
