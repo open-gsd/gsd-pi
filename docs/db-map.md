@@ -912,7 +912,7 @@ last_error        TEXT
 - DDL owner: `db-remote-question-prompt-schema.ts`. Access: `db/writers/remote-question-prompts.ts`, used by `remote-questions/store.ts`.
 - One row for each question prompt sent to a remote channel. It is delivery state of a transport, written outside Domain Operations. It replaces the `~/.gsd/runtime/remote-questions/<id>.json` files; nothing writes or reads those files now.
 - A prompt is not resumed: each ask sends a new message and writes a new row, also when a `pending` row has the same questions.
-- With no project database open, a prompt is not stored.
+- With no project database open, a prompt is not stored. A row write that fails is logged and not thrown, so the answer still reaches the caller.
 
 ---
 
