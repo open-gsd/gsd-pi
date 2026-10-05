@@ -4,12 +4,14 @@
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import {
   applyVerifiedMigrationApplication,
+  closeWorkflowDatabase,
+  moveDatabaseFiles,
   previewVerifiedMigrationApplication,
   loadVerifiedRecoverApplication,
   loadVerifiedMigrationApplication,
   loadVerifiedMigrationApplicationByPreviewId,
 } from "../db-workspace.js";
-import { lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { withDatabaseMaintenanceOwner } from "../database-maintenance-fence.js";
 import { immediateTransaction, withDatabaseMaintenanceClaim } from "../db/engine.js";
@@ -320,6 +322,13 @@ async function completeMigrationPublication(
   const sourceRoot = evidence.projectionRoot;
   const sourcePaths = record.logicalPaths.map((logicalPath) => join(sourceRoot, logicalPath));
   if (!claimed) {
+    // The approved Preview of a target that had no .gsd is sealed on the parked database.
+    const projectDb = join(record.targetRoot, ".gsd", "gsd.db");
+    const parked = migrationPreviewPendingRoot(record.targetRoot);
+    if (!existsSync(projectDb) && existsSync(parked)) {
+      moveDatabaseFiles(join(parked, "gsd.db"), projectDb);
+      rmSync(parked, { recursive: true, force: true });
+    }
     const opened = await ensureDbOpen(record.targetRoot, { createEmptyAuthority: true });
     if (!opened) throw new Error(`failed to open or create the GSD database at ${record.targetRoot}`);
     return withDatabaseMaintenanceClaim(() => (
@@ -599,11 +608,21 @@ export function sweepStaleMigrationStaging(targetRoot: string, now: number = Dat
 }
 
 /**
+ * Where the Preview base database of a target with no .gsd waits for the
+ * approval. It is not .gsd, so the project stays a v1 project until the
+ * migration is applied.
+ */
+export function migrationPreviewPendingRoot(targetRoot: string): string {
+  return join(targetRoot, ".gsd-migrate-pending");
+}
+
+/**
  * The Import Preview that `executeMigrationWrite` applies for this source, with
  * the hash the operator approves. It stages the projection in a temporary
  * directory and opens the database; it writes no projection, no backup and no
- * row. A migration that already holds an Import Application returns the hash
- * of that Application, so the same approval resumes it.
+ * row, and it closes the database that it opened. A migration that already
+ * holds an Import Application returns the hash of that Application, so the
+ * same approval resumes it.
  */
 export async function previewMigrationWrite(
   sourcePath: string,
@@ -612,6 +631,10 @@ export async function previewMigrationWrite(
 ): Promise<{ previewHash: string; authorizationText: string }> {
   const projectionRootIdentity = proveMigrationProjectionRoot(targetRoot);
   const stagingRoot = mkdtempSync(join(targetRoot, MIGRATION_STAGING_DIR_PREFIX));
+  const targetGsd = join(targetRoot, ".gsd");
+  const parked = migrationPreviewPendingRoot(targetRoot);
+  let createdGsd = false;
+  let openedForPreview = false;
   try {
     const staged = await writeGSDDirectory(project, stagingRoot);
     const stagedGsd = join(stagingRoot, ".gsd");
@@ -627,12 +650,15 @@ export async function previewMigrationWrite(
         authorizationText: `A migration of this source already holds the Import Application of Preview ${retained.legacyPreviewHash}.`,
       };
     }
-    // Explicit import: an empty database is the base of the Preview. A new
-    // target gets its .gsd directory and that database, and nothing else.
-    mkdirSync(join(targetRoot, ".gsd"), { recursive: true });
-    if (!await ensureDbOpen(targetRoot, { createEmptyAuthority: true })) {
-      throw new Error(`failed to open or create the GSD database at ${targetRoot}`);
+    // Explicit import: an empty database is the base of the Preview. A target
+    // with no .gsd reuses its parked database, so the sealed hash stays valid.
+    if (!existsSync(targetGsd)) {
+      if (existsSync(parked)) renameSync(parked, targetGsd);
+      else mkdirSync(targetGsd);
+      createdGsd = true;
     }
+    openedForPreview = await ensureDbOpen(targetRoot, { createEmptyAuthority: true });
+    if (!openedForPreview) throw new Error(`failed to open or create the GSD database at ${targetRoot}`);
     const { logicalPaths, artifactHashes } = stagedMigrationProjection(stagedGsd, staged);
     return previewVerifiedMigrationApplication(
       targetRoot,
@@ -642,6 +668,12 @@ export async function previewMigrationWrite(
     );
   } finally {
     rmSync(stagingRoot, { recursive: true, force: true });
+    // A Preview applies nothing. The import open admitted an empty database
+    // beside projections, so the handle is closed and later entry points judge
+    // it again. A .gsd that this run created is parked, so project detection
+    // does not change.
+    if (openedForPreview) closeWorkflowDatabase();
+    if (createdGsd) renameSync(targetGsd, parked);
   }
 }
 

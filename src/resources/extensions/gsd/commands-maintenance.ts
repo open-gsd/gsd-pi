@@ -27,6 +27,7 @@ import {
   getWorkflowDatabasePath,
   isWorkflowDatabaseOpen,
   loadVerifiedRecoverApplication,
+  moveDatabaseFiles,
   openWorkflowDatabase,
   prepareVerifiedRecoverApplication,
   resolvePreparedVerifiedRecoverApplication,
@@ -950,15 +951,6 @@ export async function handleRecover(
       closeWorkflowDatabase();
       if (createdDbPath !== null) moveDatabaseFiles(createdDbPath, `${createdDbPath}.recover-pending`);
     }
-  }
-}
-
-/** Move a database file with its sidecars when it exists; the target is replaced. */
-function moveDatabaseFiles(from: string, to: string): void {
-  if (!existsSync(from)) return;
-  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-    rmSync(`${to}${suffix}`, { force: true });
-    if (existsSync(`${from}${suffix}`)) renameSync(`${from}${suffix}`, `${to}${suffix}`);
   }
 }
 

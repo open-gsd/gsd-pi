@@ -11,12 +11,14 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
+import { existsSync } from "node:fs";
 import { gsdRoot } from "../paths.js";
 import { showNextAction } from "../../shared/tui.js";
 import { requiresInteractiveMenu } from "../command-feedback.js";
 import {
   executeMigrationWrite,
   migrationFailureMessage,
+  migrationPreviewPendingRoot,
   previewMigrationWrite,
   type MigrationExecutionResult,
 } from "./execution.js";
@@ -161,8 +163,12 @@ export async function handleMigrate(
   const flags = recovery.choices.length === 0 ? "" : ` ${args.match(/--forward-choice=\S+/gu)!.join(" ")}`;
   const approval = `/gsd migrate --preview=${sealed.previewHash}${flags} ${JSON.stringify(sourcePath)}`;
   if (recovery.approvedPreviewHash === undefined) {
+    const parked = migrationPreviewPendingRoot(targetRoot);
+    const kept = existsSync(parked)
+      ? ` The empty database that this Preview is sealed on is kept in ${parked}; delete that directory to discard the Preview.`
+      : "";
     ctx.ui.notify(
-      [...lines, "", sealed.authorizationText, "", `Nothing was written. To apply this exact Preview, run: ${approval}`].join("\n"),
+      [...lines, "", sealed.authorizationText, "", `Nothing was imported.${kept} To apply this exact Preview, run: ${approval}`].join("\n"),
       "warning",
     );
     return;

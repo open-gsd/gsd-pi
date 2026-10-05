@@ -2,7 +2,7 @@
 // File Purpose: Workspace-facing Interface for opening and maintaining the workflow database.
 
 import { createHash } from "node:crypto";
-import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 
 import { syncDirectoryEntry } from "@gsd/native/directory-sync";
@@ -185,6 +185,15 @@ export function resolveWorkflowDatabaseLocation(basePath: string): WorkflowDatab
  */
 export function resolveProjectRootDbPath(basePath: string): string {
   return resolveWorkflowDatabaseLocation(basePath).projectDb;
+}
+
+/** Move a database file with its sidecars when it exists; the target is replaced. */
+export function moveDatabaseFiles(from: string, to: string): void {
+  if (!existsSync(from)) return;
+  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
+    rmSync(`${to}${suffix}`, { force: true });
+    if (existsSync(`${from}${suffix}`)) renameSync(`${from}${suffix}`, `${to}${suffix}`);
+  }
 }
 
 /**

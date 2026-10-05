@@ -13,9 +13,13 @@ If you have projects with `.planning` directories from Git Ship Done v1 (now con
 
 # Apply the exact Preview that the first run printed
 /gsd migrate --preview=sha256:<hash> ~/projects/my-old-project
+
+# The same two steps with no TUI (CI, scripts); the output goes to stderr
+gsd headless migrate
+gsd headless migrate --preview=sha256:<hash>
 ```
 
-The first run writes no projection, no backup and no database record. It prints the Import Preview with its hash and the command that applies it. A target with no `.gsd` gets the `.gsd` directory and an empty database, because the Preview is sealed against the database. The second run applies the migration only when the Preview still has the approved hash. When the source or the database changed, it applies nothing and prints the current Preview command. Neither run needs an interactive menu.
+The first run writes no projection, no backup and no database record. It prints the Import Preview with its hash and the command that applies it. The Preview is sealed against a database, so a target with no `.gsd` gets an empty database in `.gsd-migrate-pending/` beside the project. The project stays a v1 project, and `/gsd` still offers the migration. Delete `.gsd-migrate-pending/` to discard the Preview. The second run applies the migration only when the Preview still has the approved hash. When the source or the database changed, it applies nothing and prints the current Preview command. Neither run needs an interactive menu.
 
 ## What Gets Migrated
 
