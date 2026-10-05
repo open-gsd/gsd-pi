@@ -492,8 +492,8 @@ D012 is a decision. It is not the cutover:
   task planning state".
   Behavior tests:
   `tests/prompt-narrative-gate-g1.test.ts` (Gate G1 for these prompts: the
-  files deleted, and the files changed). The G2 prompt check of
-  `tests/db-authority-gates.test.ts` is enforced.
+  files deleted, and the files changed). The G2 prompt check and the G2
+  projection read check of `tests/db-authority-gates.test.ts` are enforced.
 - A SUMMARY follows the item row, not the artifact row alone. A Slice or Task
   that is not done has no SUMMARY narrative: a reopen removes the file and
   keeps the artifact row. One precedence rule applies to all narrative that
