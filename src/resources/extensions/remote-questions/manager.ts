@@ -3,13 +3,13 @@
  */
 
 import { randomUUID } from "node:crypto";
-import type { ChannelAdapter, RemotePrompt, RemoteQuestion, RemoteAnswer } from "./types.js";
+import type { ChannelAdapter, RemotePrompt, RemotePromptRef, RemoteQuestion, RemoteAnswer } from "./types.js";
 import type { RoundResult } from "../shared/interview-ui.js";
 import { resolveRemoteConfig, type ResolvedConfig } from "./config.js";
 import { DiscordAdapter } from "./discord-adapter.js";
 import { SlackAdapter } from "./slack-adapter.js";
 import { TelegramAdapter } from "./telegram-adapter.js";
-import { createPromptRecord, writePromptRecord, markPromptAnswered, markPromptDispatched, markPromptStatus, updatePromptRecord } from "./store.js";
+import { createPromptRecord, findUnansweredPromptRecord, writePromptRecord, markPromptAnswered, markPromptDispatched, markPromptStatus, updatePromptRecord } from "./store.js";
 import { sanitizeError } from "../shared/sanitize.js";
 
 const COMMAND_POLLING_INTERVAL_MS = 5000;
@@ -106,8 +106,16 @@ export async function tryRemoteQuestions(
   const config = resolveRemoteConfig();
   if (!config) return null;
 
-  const prompt = createPrompt(questions, config);
-  writePromptRecord(createPromptRecord(prompt));
+  const fresh = createPrompt(questions, config);
+  // A prompt with the same questions can be in the channel with no answer: the
+  // process stopped while it waited. That prompt is polled again, so the user
+  // does not get a second message and an answer given meanwhile is not lost.
+  const unanswered = findUnansweredPromptRecord(config.channel, fresh.questions);
+  const resumed = unanswered?.ref.channelId === config.channelId ? unanswered : null;
+  const prompt: RemotePrompt = resumed
+    ? { ...fresh, id: resumed.id, createdAt: resumed.createdAt, timeoutAt: resumed.timeoutAt }
+    : fresh;
+  if (!resumed) writePromptRecord(createPromptRecord(prompt));
 
   const adapter = createAdapter(config, basePath ?? process.cwd());
   try {
@@ -117,16 +125,20 @@ export async function tryRemoteQuestions(
     return errorResult(`Remote auth failed (${config.channel}): ${(err as Error).message}`, config.channel);
   }
 
-  let dispatch;
-  try {
-    dispatch = await adapter.sendPrompt(prompt);
-    markPromptDispatched(prompt.id, dispatch.ref);
-  } catch (err) {
-    markPromptStatus(prompt.id, "failed", sanitizeError(String((err as Error).message)));
-    return errorResult(`Failed to send questions via ${config.channel}: ${(err as Error).message}`, config.channel);
+  let ref: RemotePromptRef;
+  if (resumed) {
+    ref = resumed.ref;
+  } else {
+    try {
+      ref = (await adapter.sendPrompt(prompt)).ref;
+      markPromptDispatched(prompt.id, ref);
+    } catch (err) {
+      markPromptStatus(prompt.id, "failed", sanitizeError(String((err as Error).message)));
+      return errorResult(`Failed to send questions via ${config.channel}: ${(err as Error).message}`, config.channel);
+    }
   }
 
-  const answer = await pollUntilDone(adapter, prompt, dispatch.ref, signal);
+  const answer = await pollUntilDone(adapter, prompt, ref, signal);
   if (!answer) {
     markPromptStatus(prompt.id, signal?.aborted ? "cancelled" : "timed_out");
     return {
@@ -137,7 +149,7 @@ export async function tryRemoteQuestions(
           channel: config.channel,
           prompt_id: prompt.id,
           timeout_minutes: config.timeoutMs / 60000,
-          thread_url: dispatch.ref.threadUrl ?? null,
+          thread_url: ref.threadUrl ?? null,
           message: `User did not respond within ${config.timeoutMs / 60000} minutes.`,
         }),
       }],
@@ -146,7 +158,7 @@ export async function tryRemoteQuestions(
         channel: config.channel,
         timed_out: true,
         promptId: prompt.id,
-        threadUrl: dispatch.ref.threadUrl ?? null,
+        threadUrl: ref.threadUrl ?? null,
         status: signal?.aborted ? "cancelled" : "timed_out",
       },
     };
@@ -156,7 +168,7 @@ export async function tryRemoteQuestions(
 
   // Best-effort acknowledgement gives remote users a visible receipt signal.
   try {
-    await adapter.acknowledgeAnswer?.(dispatch.ref);
+    await adapter.acknowledgeAnswer?.(ref);
   } catch { /* best-effort */ }
 
   return {
@@ -166,7 +178,7 @@ export async function tryRemoteQuestions(
       channel: config.channel,
       timed_out: false,
       promptId: prompt.id,
-      threadUrl: dispatch.ref.threadUrl ?? null,
+      threadUrl: ref.threadUrl ?? null,
       questions,
       response: toRoundResultResponse(answer),
       status: "answered",
@@ -198,7 +210,8 @@ function createPrompt(questions: QuestionInput[], config: ResolvedConfig): Remot
       id: q.id,
       header: q.header,
       question: q.question,
-      options: q.options,
+      // The stored questions are compared as text, so the key order is fixed.
+      options: q.options.map((option) => ({ label: option.label, description: option.description })),
       allowMultiple: q.allowMultiple ?? false,
     })),
   };
@@ -213,7 +226,7 @@ function createAdapter(config: ResolvedConfig, basePath: string): ChannelAdapter
 async function pollUntilDone(
   adapter: ChannelAdapter,
   prompt: RemotePrompt,
-  ref: import("./types.js").RemotePromptRef,
+  ref: RemotePromptRef,
   signal?: AbortSignal,
 ): Promise<RemoteAnswer | null> {
   let retryCount = 0;

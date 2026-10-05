@@ -1,18 +1,36 @@
 /**
  * Remote Questions — durable prompt store
+ *
+ * A prompt record is a row of the project database (remote_question_prompts).
+ * With no project database open, nothing is stored.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { gsdHome } from "../gsd/gsd-home.js";
-import type { RemotePrompt, RemotePromptRecord, RemotePromptRef, RemoteAnswer, RemotePromptStatus } from "./types.js";
+import {
+  findUnansweredRemoteQuestionPrompt,
+  readLatestRemoteQuestionPrompt,
+  readRemoteQuestionPrompt,
+  writeRemoteQuestionPrompt,
+  type RemoteQuestionPromptRow,
+} from "../gsd/db/writers/remote-question-prompts.js";
+import type { DispatchedPromptRecord, RemoteChannel, RemotePrompt, RemotePromptRecord, RemotePromptRef, RemoteAnswer, RemotePromptStatus, RemoteQuestion } from "./types.js";
 
-function runtimeDir(): string {
-  return join(gsdHome(), "runtime", "remote-questions");
-}
-
-function recordPath(id: string): string {
-  return join(runtimeDir(), `${id}.json`);
+function rowToRecord(row: RemoteQuestionPromptRow): RemotePromptRecord {
+  return {
+    version: 1,
+    id: row.id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    status: row.status as RemotePromptStatus,
+    channel: row.channel as RemoteChannel,
+    timeoutAt: row.timeout_at,
+    pollIntervalMs: row.poll_interval_ms,
+    questions: JSON.parse(row.questions_json) as RemoteQuestion[],
+    ...(row.ref_json ? { ref: JSON.parse(row.ref_json) as RemotePromptRef } : {}),
+    ...(row.response_json ? { response: JSON.parse(row.response_json) as RemoteAnswer } : {}),
+    ...(row.last_poll_at !== null ? { lastPollAt: row.last_poll_at } : {}),
+    ...(row.last_error !== null ? { lastError: row.last_error } : {}),
+    ...(row.context_source !== null ? { context: { source: row.context_source } } : {}),
+  } as RemotePromptRecord;
 }
 
 export function createPromptRecord(prompt: RemotePrompt): RemotePromptRecord {
@@ -31,18 +49,43 @@ export function createPromptRecord(prompt: RemotePrompt): RemotePromptRecord {
 }
 
 export function writePromptRecord(record: RemotePromptRecord): void {
-  mkdirSync(runtimeDir(), { recursive: true });
-  writeFileSync(recordPath(record.id), JSON.stringify(record, null, 2) + "\n", "utf-8");
+  writeRemoteQuestionPrompt({
+    id: record.id,
+    channel: record.channel,
+    status: record.status,
+    questions_json: JSON.stringify(record.questions),
+    ref_json: record.ref ? JSON.stringify(record.ref) : null,
+    response_json: record.response ? JSON.stringify(record.response) : null,
+    context_source: record.context?.source ?? null,
+    created_at: record.createdAt,
+    updated_at: record.updatedAt,
+    timeout_at: record.timeoutAt,
+    poll_interval_ms: record.pollIntervalMs,
+    last_poll_at: record.lastPollAt ?? null,
+    last_error: record.lastError ?? null,
+  });
 }
 
 export function readPromptRecord(id: string): RemotePromptRecord | null {
-  const path = recordPath(id);
-  if (!existsSync(path)) return null;
-  try {
-    return JSON.parse(readFileSync(path, "utf-8")) as RemotePromptRecord;
-  } catch {
-    return null;
-  }
+  const row = readRemoteQuestionPrompt(id);
+  return row ? rowToRecord(row) : null;
+}
+
+/** The prompt record that changed last, or null when the project has none. */
+export function readLatestPromptRecord(): RemotePromptRecord | null {
+  const row = readLatestRemoteQuestionPrompt();
+  return row ? rowToRecord(row) : null;
+}
+
+/**
+ * The prompt with these questions that is in the channel and that the user has
+ * not answered yet, or null. It is in the channel, so it has a `ref`.
+ */
+export function findUnansweredPromptRecord(
+  channel: RemoteChannel, questions: RemoteQuestion[],
+): DispatchedPromptRecord | null {
+  const row = findUnansweredRemoteQuestionPrompt(channel, JSON.stringify(questions), Date.now());
+  return row ? rowToRecord(row) as DispatchedPromptRecord : null;
 }
 
 export function updatePromptRecord(

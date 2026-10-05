@@ -754,8 +754,10 @@ the runtime-control feature, the
 [`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
 feature, the
 [custom workflow run](#custom-workflow-run-tables-non-versioned) feature, the
-[`unit_metrics`](#unit_metrics-non-versioned) feature and the
+[`unit_metrics`](#unit_metrics-non-versioned) feature, the
 [`project_milestone_sequence`](#project_milestone_sequence-non-versioned)
+feature and the
+[`remote_question_prompts`](#remote_question_prompts-non-versioned)
 feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
@@ -884,6 +886,32 @@ FOREIGN KEY dispatch_id → unit_dispatches(id)
 - Index: `idx_auto_pauses_open_scope` UNIQUE (scope) WHERE closed_at IS NULL — one open pause for each worker scope.
 - DDL owner: `db-auto-pause-schema.ts`. Access: `db/writers/auto-pauses.ts`.
 - This row replaces the `paused_session` key in `runtime_kv`. Rules: see the third 2026-10-04 amendment in [ADR-048](dev/ADR-048-unitrun-dispatch-row.md).
+
+---
+
+#### `remote_question_prompts` (non-versioned)
+
+```
+id                TEXT PRIMARY KEY
+channel           TEXT NOT NULL      ← 'slack' | 'discord' | 'telegram'
+status            TEXT NOT NULL      ← 'pending' | 'answered' | 'timed_out' | 'failed' | 'cancelled'
+questions_json    TEXT NOT NULL      ← the questions that were asked
+ref_json          TEXT               ← the message in the channel; NULL until the prompt is sent
+response_json     TEXT               ← the answer of the user
+context_source    TEXT
+created_at        INTEGER NOT NULL   ← epoch milliseconds, as are the other times
+updated_at        INTEGER NOT NULL
+timeout_at        INTEGER NOT NULL
+poll_interval_ms  INTEGER NOT NULL
+last_poll_at      INTEGER
+last_error        TEXT
+```
+
+- Index: `idx_remote_question_prompts_pending` (channel, questions_json) WHERE status = 'pending'.
+- DDL owner: `db-remote-question-prompt-schema.ts`. Access: `db/writers/remote-question-prompts.ts`, used by `remote-questions/store.ts`.
+- One row for each question prompt sent to a remote channel. It is delivery state of a transport, written outside Domain Operations. It replaces the `~/.gsd/runtime/remote-questions/<id>.json` files; nothing writes or reads those files now.
+- Resume: a row that is `pending` with a `ref_json` and a `timeout_at` in the future is a prompt the user has not answered. When the same questions are asked again on the same channel (for example after a restart), that message is polled again and no second message is sent.
+- With no project database open, a prompt is not stored.
 
 ---
 
