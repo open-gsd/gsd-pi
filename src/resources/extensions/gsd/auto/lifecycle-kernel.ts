@@ -212,7 +212,10 @@ export function kernelClaimUnit(input: KernelUnitClaimInput): KernelUnitClaim {
   const releaseClaim = () => {
     try {
       releaseMilestoneLease(workerId, input.milestoneId, lease.token);
-    } catch { /* the lease lapses with its TTL */ }
+    } catch (err) {
+      // The lease lapses with its TTL; the refusal path still must not throw.
+      logWarning("dispatch", `interactive claim lease release failed for ${input.milestoneId}: ${err instanceof Error ? err.message : String(err)}`);
+    }
     markWorkerStopping(workerId);
   };
 
@@ -320,8 +323,14 @@ export function kernelSettleUnitClaim(
   }
   try {
     releaseMilestoneLease(claim.workerId, claim.milestoneId, claim.leaseToken);
-  } catch { /* the lease lapses with its TTL */ }
+  } catch (err) {
+    // The lease lapses with its TTL; the settle above already closed the row.
+    logWarning("dispatch", `interactive claim lease release failed for ${claim.milestoneId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
   try {
     markWorkerStopping(claim.workerId);
-  } catch { /* the crash sweep marks the row later */ }
+  } catch (err) {
+    // The crash sweep marks the row later; the settle itself must not throw.
+    logWarning("dispatch", `interactive claim worker stop failed for ${claim.workerId}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
