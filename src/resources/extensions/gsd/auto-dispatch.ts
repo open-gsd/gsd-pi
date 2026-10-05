@@ -32,6 +32,7 @@ import {
 } from "./gsd-db.js";
 import { readClosedSliceIds, readMilestone, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { readTaskLifecycleStatus } from "./task-execution-domain-operation.js";
+import { selectOpenRemediationTasks } from "./db/workflow-remediation-links.js";
 import { getUatRetryAttempts, incrementUatRetryAttempts } from "./db/writers/runtime-control.js";
 import { isAcceptableUatVerdict } from "./verdict-parser.js";
 
@@ -1263,6 +1264,34 @@ export const DISPATCH_RULES: DispatchRule[] = [
           tid,
           state.activeTask.title,
           basePath,
+        ),
+      };
+    },
+  },
+  {
+    // ADR-046: a machine-fixable failure creates or reuses a linked Remediation
+    // Task. While a remediation link of the milestone has an open target Task,
+    // the kernel selects that Task before the ordinary state-derived unit: the
+    // failed item waits for the link's required outcome, and unrelated ready
+    // branches continue after it.
+    name: "executing → remediation-task (linked Remediation Task)",
+    match: async ({ state, mid, basePath, sessionContextWindow, modelRegistry, sessionProvider }) => {
+      if (state.phase !== "executing") return null;
+      if (!isDbAvailable()) return null;
+      const remediation = selectOpenRemediationTasks(mid)[0];
+      if (!remediation) return null;
+      return {
+        action: "dispatch",
+        unitType: "execute-task",
+        unitId: `${remediation.milestoneId}/${remediation.sliceId}/${remediation.taskId}`,
+        prompt: await buildExecuteTaskPrompt(
+          remediation.milestoneId,
+          remediation.sliceId,
+          remediation.sliceTitle,
+          remediation.taskId,
+          remediation.taskTitle,
+          basePath,
+          { sessionContextWindow, modelRegistry, sessionProvider },
         ),
       };
     },

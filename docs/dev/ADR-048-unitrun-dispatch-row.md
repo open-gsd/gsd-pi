@@ -174,6 +174,10 @@ The gap above is closed. `lifecycle-kernel.ts` has a one-unit bound of the kerne
 - **Effect.** The claimed row is the newest dispatch row of its milestone scope, so an older interrupted `verify` row stops being selected: non-auto work that follows a crash no longer makes the next `/gsd auto` re-run the unit's verification gates. A unit that is still open after its interactive turn is dispatched again by state derivation under a fresh claim; the takeover of the settled unit's row records the old attempt.
 - Not changed: a workflow tool outside auto-mode still writes no dispatch row; restart continuation, crash-path classification and the pause row rules are unchanged.
 
+## Amendment 2026-10-05: the advance selects a linked Remediation Task
+
+`workflow_remediation_links` was schema-only: no dispatch rule read it. The kernel advance's selection now has the rule `executing → remediation-task (linked Remediation Task)` (ADR-046: a machine-fixable failure creates a linked Remediation Task). While a `remediation` link of the milestone has an open target Task (the target lifecycle is neither completed nor cancelled and the task row is not closed), the rule selects that Task before the reactive-execute and execute-task rules, as an ordinary `execute-task` unit. A `rework` link targets its own source item and is never selected. When the target Task completes, the rule stops matching and the ordinary state-derived unit runs. A closed target Task can hold no new link: the schema refuses it.
+
 ## Rejected alternatives
 
 - Freeze 1.15.x — leaves field users wedged.
