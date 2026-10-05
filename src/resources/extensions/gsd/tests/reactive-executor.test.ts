@@ -495,8 +495,14 @@ test("unitId batch encoding round-trips correctly", () => {
 
 // ─── Dependency-Based Carry-Forward ───────────────────────────────────────
 
-/** Save the SUMMARY artifact row of one Task. The summary paths come from these rows, not from a directory listing. */
+/**
+ * Record one Task as complete and save its SUMMARY artifact row. The summary
+ * paths come from the rows of the done Tasks, not from a directory listing.
+ */
 function saveTaskSummaryRow(path: string, sliceId: string, taskId: string): void {
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ milestoneId: "M001", id: sliceId, title: sliceId, status: "in_progress", risk: "low", depends: [] });
+  insertTask({ milestoneId: "M001", sliceId, id: taskId, title: taskId, status: "complete" });
   insertArtifact({
     path,
     artifact_type: "SUMMARY",

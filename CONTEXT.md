@@ -184,6 +184,10 @@ What shipped:
   reservation and for doctor and drift checks.
   `docs/dev/state-db-cutover-milestone-decision.md` lists the readers and the
   prompt inputs that are still read from files.
+- A SUMMARY is prompt narrative only while its Slice or Task is done. The
+  SUMMARY text of a done Slice is the summary that the completion stored on
+  the Slice row. A CONTEXT-DRAFT is a discussion seed only while the
+  Milestone has no saved CONTEXT.
 - Steer overrides (`/gsd steer`) are `override.*` events of Domain Operations.
   OVERRIDES.md is a one-way render of them: dispatch, prompts and artifact
   verification read only the database. A file block that no database override

@@ -490,6 +490,17 @@ D012 is a decision. It is not the cutover:
   `tests/prompt-narrative-gate-g1.test.ts` (Gate G1 for these prompts: the
   files deleted, and the files changed). The G2 prompt check of
   `tests/db-authority-gates.test.ts` is enforced.
+- A SUMMARY follows the item row, not the artifact row alone. A Slice or Task
+  that is not done has no SUMMARY narrative: a reopen removes the file and
+  keeps the artifact row. The SUMMARY text of a done Slice is the
+  `full_summary_md` carrier that the completion operation writes. Its
+  artifact row is written later, by a projection drain; the row gives the
+  text only when the carrier is empty (an imported summary). A CONTEXT-DRAFT
+  row is a discussion seed only while the Milestone has no saved CONTEXT:
+  saving the final CONTEXT removes the draft file and keeps the draft row.
+  Behavior tests: `tests/prompt-summary-narrative.test.ts` (the real
+  completion and reopen handlers) and the draft seed tests of
+  `tests/discuss-routing-fixes.test.ts`.
 - These prompt inputs are still read from files: VALIDATION, slice
   ASSESSMENT, CONTINUE, RUNTIME.md, QUEUE.md, the DECISIONS.md register of
   the discuss prompts, and the file lists of the rewrite-docs prompt. The

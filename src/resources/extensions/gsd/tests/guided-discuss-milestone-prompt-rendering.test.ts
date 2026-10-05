@@ -163,3 +163,33 @@ test("guided milestone prompt builder caps prior draft seed before interpolation
     rmSync(base, { recursive: true, force: true });
   }
 });
+
+test("guided milestone prompt builder takes no seed from a draft row left after the final CONTEXT", async () => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-guided-milestone-stale-draft-"));
+  const previousGsdHome = process.env.GSD_HOME;
+  process.env.GSD_HOME = join(base, ".gsd-home");
+
+  try {
+    const currentDir = join(base, ".gsd", "milestones", "M001");
+    mkdirSync(currentDir, { recursive: true });
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    // gsd_summary_save(CONTEXT) removes the draft file and keeps the draft row.
+    writeFileSync(join(currentDir, "M001-CONTEXT-DRAFT.md"), "# Draft\n\nOLD-DRAFT-SIGNAL", "utf-8");
+    writeFileSync(join(currentDir, "M001-CONTEXT.md"), "# Context\n\nFINAL-CONTEXT-SIGNAL", "utf-8");
+    saveMilestoneFilesAsArtifacts(base);
+
+    const prompt = await buildDiscussMilestonePrompt("M001", "Draft Resume", base, "true", {
+      includeContextMode: false,
+    });
+
+    assert.match(prompt, /FINAL-CONTEXT-SIGNAL/);
+    assert.doesNotMatch(prompt, /## Prior Discussion \(Draft Seed\)/);
+    assert.doesNotMatch(prompt, /OLD-DRAFT-SIGNAL/);
+  } finally {
+    closeDatabase();
+    if (previousGsdHome === undefined) delete process.env.GSD_HOME;
+    else process.env.GSD_HOME = previousGsdHome;
+    rmSync(base, { recursive: true, force: true });
+  }
+});

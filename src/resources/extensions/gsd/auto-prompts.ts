@@ -46,7 +46,7 @@ import {
   getTask,
   isDbAvailable,
 } from "./gsd-db.js";
-import { readListedMilestoneIds, readMilestoneSlices } from "./db/lifecycle-read.js";
+import { readListedMilestoneIds, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import {
   GATE_REGISTRY,
   assertGateCoverage,
@@ -684,9 +684,28 @@ export function milestoneNarrative(base: string, mid: string, type: string): Nar
   return toNarrative(getScopedArtifact(mid, null, null, type), () => relMilestoneFile(base, mid, type));
 }
 
-/** `milestoneNarrative` for a Slice. */
+/**
+ * `milestoneNarrative` for a Slice. A SUMMARY follows the Slice row: only a
+ * done Slice has one, and its text is the carrier that the completion
+ * operation writes (`full_summary_md`). The artifact row is written later, by
+ * a projection drain, and stays after a reopen. It gives the text only for a
+ * done Slice with no carrier (an imported summary).
+ */
 export function sliceNarrative(base: string, mid: string, sid: string, type: string): Narrative {
-  return toNarrative(getScopedArtifact(mid, sid, null, type), () => relSliceFile(base, mid, sid, type));
+  const narrative = toNarrative(getScopedArtifact(mid, sid, null, type), () => relSliceFile(base, mid, sid, type));
+  if (type !== "SUMMARY") return narrative;
+  const slice = readMilestoneSlices(mid).find((row) => row.id === sid);
+  return { ...narrative, content: slice?.done ? slice.full_summary_md || narrative.content : null };
+}
+
+/**
+ * The saved SUMMARY rows of the done Tasks of a Slice, in Task id order. A
+ * reopened Task keeps its SUMMARY row, so the Task row decides: a Task that
+ * is not done has no SUMMARY narrative.
+ */
+function doneTaskSummaries(mid: string, sid: string) {
+  const done = new Set(readSliceTasks(mid, sid).filter((task) => task.done).map((task) => task.id));
+  return getSliceTaskArtifacts(mid, sid, "SUMMARY").filter((row) => done.has(row.task_id!));
 }
 
 /** `milestoneNarrative` for a Task. */
@@ -1522,7 +1541,7 @@ function taskNumber(taskId: string): number {
 }
 
 /**
- * Projection paths (`.gsd/`-relative) of the saved SUMMARY rows of the Tasks
+ * Projection paths (`.gsd/`-relative) of the saved SUMMARY rows of the done Tasks
  * that come before `currentTid` in the Slice. The rows are read from the
  * database; the tasks directory is not listed.
  */
@@ -1530,7 +1549,7 @@ export async function getPriorTaskSummaryPaths(
   mid: string, sid: string, currentTid: string,
 ): Promise<string[]> {
   const currentNum = taskNumber(currentTid);
-  return getSliceTaskArtifacts(mid, sid, "SUMMARY")
+  return doneTaskSummaries(mid, sid)
     .filter((row) => taskNumber(row.task_id!) < currentNum)
     .map((row) => `.gsd/${row.path}`);
 }
@@ -1555,7 +1574,7 @@ export async function getDependencyTaskSummaryPaths(
   }
 
   const depSet = new Set(dependsOn.map((d) => d.toUpperCase()));
-  return getSliceTaskArtifacts(mid, sid, "SUMMARY")
+  return doneTaskSummaries(mid, sid)
     .filter((row) => depSet.has(row.task_id!.toUpperCase()))
     .map((row) => `.gsd/${row.path}`);
 }
@@ -1748,10 +1767,11 @@ export async function buildDiscussMilestonePrompt(
     ? prependContextModeToBlock("discuss-milestone", base, basePrompt)
     : basePrompt;
 
-  // If a CONTEXT-DRAFT was saved, append it as seed material
+  // If a CONTEXT-DRAFT was saved, append it as seed material. The draft row
+  // stays after the final CONTEXT is saved, so it counts only without one.
   const { content: draftContent, relPath: draftRelPath } = milestoneNarrative(base, mid, "CONTEXT-DRAFT");
 
-  if (includeDraftSeed && draftContent) {
+  if (includeDraftSeed && draftContent && !milestoneNarrative(base, mid, "CONTEXT").content) {
     const draftSeed = `### Prior Discussion Draft\nSource: \`${draftRelPath}\`\n\n${draftContent.trim()}`;
     const cappedDraftSeed = capPreamble(draftSeed);
     const truncationNote = cappedDraftSeed !== draftSeed
@@ -3095,7 +3115,7 @@ export async function buildCompleteSlicePrompt(
         }
       case "prior-task-summaries": {
         const blocks: string[] = [];
-        for (const row of getSliceTaskArtifacts(mid, sid, "SUMMARY")) {
+        for (const row of doneTaskSummaries(mid, sid)) {
           blocks.push(await buildTaskSummaryExcerpt(row.full_content, `.gsd/${row.path}`, row.task_id!));
         }
         const body = blocks.length > 0 ? blocks.join("\n\n---\n\n") : null;
@@ -3681,7 +3701,7 @@ export async function buildReplanSlicePrompt(
 
   // Find the blocker task summary — the completed task with blocker_discovered: true
   let blockerTaskId = "";
-  for (const row of getSliceTaskArtifacts(mid, sid, "SUMMARY")) {
+  for (const row of doneTaskSummaries(mid, sid)) {
     const summary = parseSummary(row.full_content);
     if (summary.frontmatter.blocker_discovered) {
       blockerTaskId = summary.frontmatter.id || row.task_id!;

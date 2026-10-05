@@ -216,6 +216,47 @@ describe("showDiscuss targeted milestone guardrails (#1320)", () => {
   });
 });
 
+describe("showDiscuss milestone draft seed", () => {
+  const milestones = [{ id: "M001", title: "Draft milestone", status: "active" }];
+
+  function saveMilestoneArtifact(artifactType: string, content: string): void {
+    insertArtifact({
+      path: `milestones/M001/M001-${artifactType}.md`,
+      artifact_type: artifactType,
+      milestone_id: "M001",
+      slice_id: null,
+      task_id: null,
+      full_content: content,
+    });
+  }
+
+  test("a saved draft with no final CONTEXT seeds the discussion on the fast path", async () => {
+    const result = await runDiscussTargetFixture("M001", milestones, undefined, () => {
+      saveMilestoneArtifact("CONTEXT-DRAFT", "# Draft\n\nOLD-DRAFT-SIGNAL");
+    });
+
+    assert.equal(result.sent.length, 1);
+    const prompt = String(result.sent[0]?.content);
+    assert.match(prompt, /Fast path active/);
+    assert.match(prompt, /## Prior Discussion \(Draft Seed\)/);
+    assert.match(prompt, /OLD-DRAFT-SIGNAL/);
+  });
+
+  test("a draft row left after the final CONTEXT is no seed and no fast path", async () => {
+    // gsd_summary_save(CONTEXT) removes the draft file and keeps the draft row.
+    const result = await runDiscussTargetFixture("M001", milestones, undefined, () => {
+      saveMilestoneArtifact("CONTEXT-DRAFT", "# Draft\n\nOLD-DRAFT-SIGNAL");
+      saveMilestoneArtifact("CONTEXT", "# Context\n\nFinal context.");
+    });
+
+    assert.equal(result.sent.length, 1);
+    const prompt = String(result.sent[0]?.content);
+    assert.doesNotMatch(prompt, /Fast path active/);
+    assert.doesNotMatch(prompt, /## Prior Discussion \(Draft Seed\)/);
+    assert.doesNotMatch(prompt, /OLD-DRAFT-SIGNAL/);
+  });
+});
+
 describe("loadDiscussNormSlices reads the DB slice rows only", () => {
   test("a ROADMAP file with slices lists nothing when the DB has no slice rows", async () => {
     const base = mkdtempSync(join(tmpdir(), "gsd-discuss-slices-"));

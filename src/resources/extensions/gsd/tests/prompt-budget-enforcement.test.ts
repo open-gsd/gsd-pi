@@ -21,6 +21,7 @@ import {
   insertArtifact,
   insertMilestone,
   insertSlice,
+  insertTask,
   isDbAvailable,
   openDatabase,
 } from "../gsd-db.js";
@@ -724,6 +725,10 @@ describe("prompt-budget: reactive-execute builder", () => {
       writeFileSync(join(taskDir, "T02-SUMMARY.md"), hugeSummary);
       openDatabase(":memory:");
       saveMilestoneFilesAsArtifacts(base);
+      // Only a done Task has SUMMARY narrative.
+      insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+      insertSlice({ milestoneId: "M001", id: "S01", title: "Slice", status: "in_progress", risk: "low", depends: [] });
+      for (const id of ["T01", "T02"]) insertTask({ milestoneId: "M001", sliceId: "S01", id, title: id, status: "complete" });
 
       const prompt = await buildReactiveExecutePrompt("M001", "Milestone", "S01", "Slice", ["T03"], base, undefined, {
         sessionContextWindow: 32_000,

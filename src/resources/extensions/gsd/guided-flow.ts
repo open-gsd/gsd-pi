@@ -1708,7 +1708,9 @@ async function dispatchDiscussForMilestone(
   milestoneTitle: string,
   opts: { fastPath?: boolean } = {},
 ): Promise<void> {
-  const hasSeed = hasSavedArtifact(mid, null, "CONTEXT-DRAFT") || !!opts.fastPath;
+  // The draft row stays after the final CONTEXT is saved, so it counts only without one.
+  const hasDraft = !hasSavedArtifact(mid, null, "CONTEXT") && hasSavedArtifact(mid, null, "CONTEXT-DRAFT");
+  const hasSeed = hasDraft || !!opts.fastPath;
   const fastPathInstruction = hasSeed
     ? [
         "> **Fast path active — scope provided.**",
