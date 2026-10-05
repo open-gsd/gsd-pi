@@ -2,11 +2,15 @@
 // File Purpose: gsd_resolve_blocker resolves the pending blocker that the project database holds, with no session (after a server restart).
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
+import {
+  hostWriteGateAdapter,
+  setQueuePhaseActive,
+} from "../../../src/resources/extensions/gsd/bootstrap/write-gate.ts";
 import { executeDomainOperation } from "../../../src/resources/extensions/gsd/db/domain-operation.ts";
 import {
   adoptOrTransitionLifecycle,
@@ -95,21 +99,14 @@ async function resolveBlockerToolAfterRestart() {
   });
 }
 
-/** The write-gate state that the extension host leaves for the workflow MCP server. */
+/** The write-gate rows that the extension host leaves in the project database. The database is closed. */
 function writeWriteGateSnapshot(
   projectDir: string,
   snapshot: { activeQueuePhase?: boolean; pendingGateId?: string },
 ): void {
-  mkdirSync(join(projectDir, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(
-    join(projectDir, ".gsd", "runtime", "write-gate-state.json"),
-    JSON.stringify({
-      verifiedDepthMilestones: [],
-      activeQueuePhase: snapshot.activeQueuePhase ?? false,
-      pendingGateId: snapshot.pendingGateId ?? null,
-    }),
-    "utf-8",
-  );
+  if (snapshot.pendingGateId) hostWriteGateAdapter.setPending(snapshot.pendingGateId, projectDir);
+  if (snapshot.activeQueuePhase) setQueuePhaseActive(true, projectDir);
+  closeDatabase();
 }
 
 function assertEscalationStillOpen(projectDir: string): void {
