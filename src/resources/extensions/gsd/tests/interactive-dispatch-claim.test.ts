@@ -3,7 +3,7 @@
 // the guided flow and /gsd dispatch claim the unit they dispatch through
 // kernelClaimUnit, and the claim makes an interrupted verify row history.
 
-import test, { type TestContext } from "node:test";
+import test, { mock, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
   kernelClaimUnit,
   kernelSettleUnitClaim,
+  runInteractiveClaimTurn,
 } from "../auto/lifecycle-kernel.ts";
 import { clearStaleWorkerLock } from "../crash-recovery.ts";
 import {
@@ -25,6 +26,7 @@ import {
 import {
   claimMilestoneLease,
   getMilestoneLease,
+  milestoneLeaseTtlSeconds,
 } from "../db/milestone-leases.ts";
 import { getAutoWorker, registerAutoWorker } from "../db/auto-workers.ts";
 import {
@@ -176,6 +178,106 @@ test("an interactive claim takes over the active row of a dead worker whose leas
     `SELECT exit_reason FROM unit_dispatches WHERE id = :id`,
   ).get({ ":id": dead.dispatchId }) as { exit_reason: string };
   assert.equal(canceled.exit_reason, "stale-dispatch-lease-takeover");
+});
+
+/** Force the milestone lease into the past: the wall clock has overtaken the TTL. */
+function lapseLease(): void {
+  _getAdapter()!.prepare(
+    `UPDATE milestone_leases SET expires_at = '1970-01-01T00:00:00.000Z' WHERE milestone_id = 'M001'`,
+  ).run();
+}
+
+test("a live interactive claim survives a lease TTL elapse while its turn runs", async (t) => {
+  const base = makeProject(t);
+  const claim = claimInteractive(base);
+  if (claim.kind !== "claimed") throw new Error("expected a claim");
+  assert.equal(getDispatchById(claim.dispatchId)?.status, "running");
+
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    await runInteractiveClaimTurn(claim, async () => {
+      lapseLease();
+
+      // One heartbeat interval: the worker heartbeats and renews the lease.
+      mock.timers.tick(milestoneLeaseTtlSeconds() * 500);
+
+      const renewed = getMilestoneLease("M001");
+      assert.equal(renewed?.status, "held");
+      assert.equal(renewed?.worker_id, claim.workerId, "the claim still holds the lease");
+      assert.ok(
+        renewed && renewed.expires_at > new Date().toISOString(),
+        "the heartbeat renewed the lapsed lease past the TTL",
+      );
+    });
+  } finally {
+    mock.timers.reset();
+  }
+
+  const row = getDispatchById(claim.dispatchId);
+  assert.equal(row?.status, "running", "the live row was not canceled while its turn ran");
+});
+
+test("a live claim is not taken over after its turn outlives the TTL; a dead worker's claim still is", async (t) => {
+  const base = makeProject(t);
+  const live = claimInteractive(base);
+  if (live.kind !== "claimed") throw new Error("expected a claim");
+
+  // The turn outlives the lease TTL; the heartbeat renews it before it ends.
+  mock.timers.enable({ apis: ["setInterval"] });
+  try {
+    await runInteractiveClaimTurn(live, async () => {
+      lapseLease();
+      mock.timers.tick(milestoneLeaseTtlSeconds() * 500);
+    });
+  } finally {
+    mock.timers.reset();
+  }
+
+  // A competing session claims the unit. The holder is placed on another host
+  // so the same-process re-entrance of the lease does not apply — the claim
+  // meets the lease exactly as another session would.
+  _getAdapter()!.prepare(
+    `UPDATE workers SET host = 'other-host' WHERE worker_id = :worker_id`,
+  ).run({ ":worker_id": live.workerId });
+
+  const competing = claimInteractive(base);
+  assert.equal(competing.kind, "refused", "the renewed lease refuses the takeover");
+  if (competing.kind === "refused") {
+    assert.match(competing.reason, /held by worker/);
+  }
+  assert.equal(getDispatchById(live.dispatchId)?.status, "running", "the live row is not canceled as stale");
+
+  // The contrast: when that worker dies and its lease lapses anyway, the same
+  // competing claim takes the row over as stale.
+  _getAdapter()!.prepare(
+    `UPDATE workers SET host = 'other-host', pid = 99999, last_heartbeat_at = '1970-01-01T00:00:00.000Z'
+     WHERE worker_id = :worker_id`,
+  ).run({ ":worker_id": live.workerId });
+  lapseLease();
+
+  const takeover = claimInteractive(base);
+  assert.equal(takeover.kind, "claimed");
+  const canceled = _getAdapter()!.prepare(
+    `SELECT status, exit_reason FROM unit_dispatches WHERE id = :id`,
+  ).get({ ":id": live.dispatchId }) as { status: string; exit_reason: string };
+  assert.equal(canceled.status, "canceled");
+  assert.equal(canceled.exit_reason, "stale-dispatch-lease-takeover");
+});
+
+test("the dispatch sites run the claimed turn under the interactive heartbeat", async () => {
+  const read = async (path: string): Promise<string> =>
+    import("node:fs/promises").then((fs) => fs.readFile(new URL(path, import.meta.url), "utf-8"));
+
+  const direct = await read("../auto-direct-dispatch.ts");
+  assert.ok(
+    direct.includes("await runInteractiveClaimTurn(claim, send)"),
+    "/gsd dispatch wraps the turn in the interactive heartbeat",
+  );
+  const guided = await read("../guided-flow.ts");
+  assert.ok(
+    guided.includes("await runInteractiveClaimTurn(claimed, send)"),
+    "the guided flow wraps the turn in the interactive heartbeat",
+  );
 });
 
 test("a settle completes the row, releases the lease and retires the worker", (t) => {

@@ -33,10 +33,16 @@ import {
 } from "../db/unit-dispatches.js";
 import { isDbAvailable } from "../gsd-db.js";
 import { getMilestone } from "../db/queries.js";
-import { claimMilestoneLease, releaseMilestoneLease } from "../db/milestone-leases.js";
-import { markWorkerStopping, registerAutoWorker } from "../db/auto-workers.js";
+import {
+  claimMilestoneLease,
+  milestoneLeaseTtlSeconds,
+  refreshMilestoneLease,
+  releaseMilestoneLease,
+} from "../db/milestone-leases.js";
+import { heartbeatAutoWorker, markWorkerStopping, registerAutoWorker } from "../db/auto-workers.js";
 import { getActiveHook } from "../post-unit-hooks.js";
 import { scheduleSidecarQueue } from "../uok/execution-graph.js";
+import { runWithWorkerHeartbeat } from "./workflow-worker-heartbeat.js";
 import { debugLog } from "../debug-logger.js";
 import { logWarning } from "../workflow-logger.js";
 
@@ -246,6 +252,48 @@ export function kernelClaimUnit(input: KernelUnitClaimInput): KernelUnitClaim {
     workerId,
   });
   return { kind: "claimed", dispatchId: claim.dispatchId, workerId, milestoneId: input.milestoneId, leaseToken: lease.token };
+}
+
+/**
+ * The interval the auto loop heartbeats at: half the lease TTL, so a renewal
+ * always lands before the lease lapses.
+ */
+const INTERACTIVE_HEARTBEAT_INTERVAL_MS = milestoneLeaseTtlSeconds() * 500;
+
+/**
+ * Run the claimed interactive unit's turn with the claim's worker heartbeat
+ * and milestone-lease renewal. Without this, a turn longer than the lease TTL
+ * (60s) lets another session's auto take the lease and cancel the live
+ * `unit_dispatches` row as stale while the turn still runs. The same wrapper
+ * guards every auto-loop unit phase; the heartbeat stops when the turn
+ * settles.
+ */
+export function runInteractiveClaimTurn<T>(
+  claim: Extract<KernelUnitClaim, { kind: "claimed" }>,
+  run: () => Promise<T>,
+): Promise<T> {
+  return runWithWorkerHeartbeat(
+    {
+      workerId: claim.workerId,
+      currentMilestoneId: claim.milestoneId,
+      milestoneLeaseToken: claim.leaseToken,
+    },
+    {
+      heartbeatAutoWorker,
+      refreshMilestoneLease,
+      logHeartbeatFailure: (err) => debugLog("lifecycleKernel", {
+        phase: "heartbeat-failed",
+        workerId: claim.workerId,
+        error: err instanceof Error ? err.message : String(err),
+      }),
+      logLeaseRefreshMiss: (details) => debugLog("lifecycleKernel", {
+        phase: "lease-refresh-missed",
+        ...details,
+      }),
+    },
+    INTERACTIVE_HEARTBEAT_INTERVAL_MS,
+    run,
+  );
 }
 
 /**

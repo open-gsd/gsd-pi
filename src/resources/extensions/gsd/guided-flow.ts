@@ -51,7 +51,7 @@ import {
   relMilestoneFile, relSliceFile, relSlicePath,
   normalizeRealPath,
 } from "./paths.js";
-import { kernelClaimUnit, kernelSettleUnitClaim, type KernelUnitClaim } from "./auto/lifecycle-kernel.js";
+import { kernelClaimUnit, kernelSettleUnitClaim, runInteractiveClaimTurn, type KernelUnitClaim } from "./auto/lifecycle-kernel.js";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { readFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
@@ -122,7 +122,7 @@ import {
   restorePendingAutoStart,
   setPendingAutoStart,
 } from "./pending-auto-start.js";
-import { clearGuidedUnitContext, setGuidedUnitContext } from "./guided-unit-context.js";
+import { clearGuidedUnitContext, getGuidedUnitContext, setGuidedUnitContext } from "./guided-unit-context.js";
 import { checkAutoStartAfterDiscuss, scheduleAutoStartAfterIdle } from "./discussion-handoff.js";
 import { buildResumeSection, readWorkCheckpoint } from "./work-checkpoint.js";
 import { resolveSubagentRoleForProvider } from "./subagent-role-resolver.js";
@@ -904,14 +904,23 @@ async function dispatchWorkflow(
       }
     }
     try {
-      await pi.sendMessage(
-        {
-          customType,
-          content: buildWorkflowDispatchContent({ workflow, workflowPath, task: note }),
-          display: false,
-        },
-        { triggerTurn: true },
-      );
+      // The turn runs under the claim's worker heartbeat and lease renewal, so
+      // a turn longer than the lease TTL cannot lose the claim to another
+      // session's stale-takeover while it runs (the one-unit bound).
+      const send = () =>
+        pi.sendMessage(
+          {
+            customType,
+            content: buildWorkflowDispatchContent({ workflow, workflowPath, task: note }),
+            display: false,
+          },
+          { triggerTurn: true },
+        );
+      if (claimed) {
+        await runInteractiveClaimTurn(claimed, send);
+      } else {
+        await send();
+      }
     } catch (err) {
       clearGuidedUnitContext(projectRoot);
       if (claimed) {
@@ -921,8 +930,15 @@ async function dispatchWorkflow(
       throw err;
     }
     if (claimed) {
-      kernelSettleUnitClaim(claimed, "completed", "guided-flow");
+      const settledClaim = claimed;
+      kernelSettleUnitClaim(settledClaim, "completed", "guided-flow");
       claimed = null;
+      // Detach the claim from the unit context: the local settle above owns
+      // it, so the agent-end handler cannot settle the same claim again.
+      const guidedContext = getGuidedUnitContext(projectRoot);
+      if (guidedContext?.kernelClaim?.dispatchId === settledClaim.dispatchId) {
+        delete guidedContext.kernelClaim;
+      }
     }
   } catch (err) {
     // A failure before the turn started (tool scoping, workflow doc read)

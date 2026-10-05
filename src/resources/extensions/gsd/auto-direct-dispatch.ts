@@ -36,7 +36,7 @@ import { pauseAuto } from "./auto.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { getUnitWorkflowDispatchReadinessErrorForModel } from "./tool-contract.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
-import { kernelClaimUnit, kernelSettleUnitClaim } from "./auto/lifecycle-kernel.js";
+import { kernelClaimUnit, kernelSettleUnitClaim, runInteractiveClaimTurn } from "./auto/lifecycle-kernel.js";
 import { normalizeRealPath } from "./paths.js";
 
 export function parseDirectDispatchPhase(raw: string): { phase: string; milestoneId?: string } {
@@ -335,10 +335,19 @@ export async function dispatchDirectPhase(
   );
   const dispatchContent = languageDirective ? `${languageDirective}\n\n${prompt}` : prompt;
   try {
-    await pi.sendMessage(
-      { customType: "gsd-dispatch", content: dispatchContent, display: false },
-      { triggerTurn: true },
-    );
+    // The turn runs under the claim's worker heartbeat and lease renewal, so a
+    // turn longer than the lease TTL cannot lose the claim to another
+    // session's stale-takeover while it runs (the one-unit bound).
+    const send = () =>
+      pi.sendMessage(
+        { customType: "gsd-dispatch", content: dispatchContent, display: false },
+        { triggerTurn: true },
+      );
+    if (claim.kind === "claimed") {
+      await runInteractiveClaimTurn(claim, send);
+    } else {
+      await send();
+    }
   } catch (err) {
     if (claim.kind === "claimed") {
       kernelSettleUnitClaim(claim, "failed", err instanceof Error ? err.message : String(err));
