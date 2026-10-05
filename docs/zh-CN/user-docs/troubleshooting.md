@@ -333,8 +333,8 @@ rm .gsd/completed-units.json
 
 如果自适应模型路由给出了糟糕的结果，可以清空路由历史：
 
-```bash
-rm .gsd/routing-history.json
+```
+/gsd rate reset
 ```
 
 ### 完整重建状态

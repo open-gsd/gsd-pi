@@ -20,6 +20,7 @@ import { deriveState, deriveStateFromDb, invalidateStateCache } from "../state.t
 import { reconcileBeforeDispatch } from "../state-reconciliation.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import type { DispatchContext } from "../auto-dispatch.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 function makeFixtureBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-adr011-"));
@@ -478,6 +479,7 @@ test("ADR-011 P3 #19: refine-slice prompt incorporates prior slice findings + sk
     join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-SUMMARY.md"),
     s01Findings,
   );
+  saveMilestoneFilesAsArtifacts(base);
 
   writePreferences(base, "phases:\n  progressive_planning: true");
   process.chdir(base);

@@ -77,7 +77,7 @@ The `budget` profile + dynamic routing provides maximum cost savings.
 
 ## Adaptive Learning
 
-GSD tracks routing outcomes in `.gsd/routing-history.json`. If a tier's failure rate exceeds 20% for a given task type, future classifications are bumped up.
+GSD tracks routing outcomes in the project database. If a tier's failure rate exceeds 20% for a given task type, future classifications are bumped up.
 
 Use `/gsd rate` to submit feedback:
 

@@ -11,7 +11,7 @@ import { notifyPreferenceDiagnostics } from "../../preferences-diagnostics.js";
 import { setSessionModelOverride } from "../../session-model-override.js";
 import { normalizeRealPath } from "../../paths.js";
 import { guardRemoteSession, projectRoot } from "../context.js";
-import { findMilestoneIds } from "../../milestone-ids.js";
+import { readListedMilestoneIds } from "../../db/lifecycle-read.js";
 
 async function hasUnresolvedCloseoutBlocker(ctx: ExtensionCommandContext, basePath: string): Promise<boolean> {
   const { ensureDbOpen } = await import("../../bootstrap/dynamic-tools.js");
@@ -94,7 +94,7 @@ export function parseWedgeAckArgs(input: string): { wedgeId: string | null; usag
 /**
  * Extract a milestone ID (e.g. M016 or M001-a3b4c5) from the command string.
  * Returns the matched ID and the remaining string with the ID removed.
- * The milestone ID pattern matches the format used by findMilestoneIds: M\d+ with
+ * The milestone ID pattern matches the Milestone id format: M\d+ with
  * an optional -[a-z0-9]{6} suffix for unique milestone IDs.
  */
 export function parseMilestoneTarget(input: string): { milestoneId: string | null; rest: string } {
@@ -122,7 +122,7 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
 
     // Validate the milestone target exists and is not already complete.
     if (milestoneId) {
-      const allIds = findMilestoneIds(basePath);
+      const allIds = readListedMilestoneIds();
       if (!allIds.includes(milestoneId)) {
         ctx.ui.notify(`Milestone ${milestoneId} does not exist. Available: ${allIds.join(", ") || "(none)"}`, "error");
         return true;
@@ -152,7 +152,7 @@ export async function handleAutoCommand(trimmed: string, ctx: ExtensionCommandCo
 
     // Validate the milestone target exists and is not already complete.
     if (milestoneId) {
-      const allIds = findMilestoneIds(basePath);
+      const allIds = readListedMilestoneIds();
       if (!allIds.includes(milestoneId)) {
         ctx.ui.notify(`Milestone ${milestoneId} does not exist. Available: ${allIds.join(", ") || "(none)"}`, "error");
         return true;

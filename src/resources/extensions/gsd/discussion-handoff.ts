@@ -2,11 +2,9 @@
 // File Purpose: Owns the guided-discuss to auto-mode handoff.
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
-import { join } from "node:path";
 import { startAutoDetached } from "./auto.js";
 import { extractDepthVerificationMilestoneId, getPendingGate } from "./bootstrap/write-gate.js";
-import { getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
+import { getAllMilestones, getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
 import { registerMilestones } from "./milestone-registration.js";
 import { getMilestoneScopedArtifacts } from "./db/queries.js";
 import {
@@ -17,6 +15,8 @@ import { clearPathCache, resolveMilestoneFile } from "./paths.js";
 import { _getPendingAutoStart, deletePendingAutoStart, type PendingAutoStartEntry } from "./pending-auto-start.js";
 import { logWarning } from "./workflow-logger.js";
 import { removeProjectionFileSync } from "./atomic-write.js";
+import { isClosedStatus, isDiscardedMilestoneStatus } from "./status-guards.js";
+import { readWorkCheckpoint } from "./work-checkpoint.js";
 
 type AutoStartOptions = Parameters<typeof startAutoDetached>[4];
 type AutoStartLauncher = typeof startAutoDetached;
@@ -133,26 +133,25 @@ function hasBlockingDepthGate(entry: PendingAutoStartEntry): boolean {
   return pendingMilestoneId === entry.milestoneId || PROJECT_DEPTH_GATE_IDS.has(pendingGateId);
 }
 
-function discussionManifestPath(entry: PendingAutoStartEntry): string {
-  return join(entry.scope.workspace.contract.projectGsd, "DISCUSSION-MANIFEST.json");
-}
-
-function discussionManifestIsComplete(entry: PendingAutoStartEntry): boolean {
-  const manifestPath = discussionManifestPath(entry);
-  if (!existsSync(manifestPath)) return true;
-
-  try {
-    const manifest = JSON.parse(readFileSync(manifestPath, "utf-8"));
-    const total = typeof manifest.total === "number" ? manifest.total : 0;
-    const completed = typeof manifest.gates_completed === "number" ? manifest.gates_completed : 0;
-
-    if (total > 1 && completed < total) {
-      return false;
-    }
-  } catch (e) {
-    logWarning("guided", `discussion manifest verification failed: ${(e as Error).message}`);
-  }
-  return true;
+/**
+ * Milestones that this discussion registered and that have no readiness
+ * decision row: no CONTEXT or CONTEXT-DRAFT artifact, no planned slice, and no
+ * Work Checkpoint (the record of "queue it for later").
+ */
+function milestonesWithoutReadinessDecision(entry: PendingAutoStartEntry): string[] {
+  const discussionStart = new Date(entry.createdAt).toISOString();
+  return getAllMilestones()
+    .filter((milestone) =>
+      milestone.id !== entry.milestoneId &&
+      milestone.created_at >= discussionStart &&
+      !isClosedStatus(milestone.status) &&
+      !isDiscardedMilestoneStatus(milestone.status))
+    .filter((milestone) =>
+      !getMilestoneScopedArtifacts(milestone.id).some((artifact) =>
+        artifact.artifact_type === "CONTEXT" || artifact.artifact_type === "CONTEXT-DRAFT") &&
+      getMilestoneSlices(milestone.id).length === 0 &&
+      !readWorkCheckpoint({ milestoneId: milestone.id }))
+    .map((milestone) => milestone.id);
 }
 
 function cleanupAcceptedHandoffArtifacts(entry: PendingAutoStartEntry): void {
@@ -162,15 +161,6 @@ function cleanupAcceptedHandoffArtifacts(entry: PendingAutoStartEntry): void {
     if (draftFile) removeProjectionFileSync(draftFile);
   } catch (e) {
     logWarning("guided", `CONTEXT-DRAFT.md unlink failed: ${(e as Error).message}`);
-  }
-
-  const manifestPath = discussionManifestPath(entry);
-  if (existsSync(manifestPath)) {
-    try {
-      unlinkSync(manifestPath);
-    } catch (e) {
-      logWarning("guided", `manifest unlink failed: ${(e as Error).message}`);
-    }
   }
 }
 
@@ -215,7 +205,15 @@ export function checkAutoStartAfterDiscuss(lookupBasePath?: string): boolean {
     return false;
   }
 
-  if (!discussionManifestIsComplete(entry)) return false;
+  const undecided = milestonesWithoutReadinessDecision(entry);
+  if (undecided.length > 0) {
+    ctx.ui.notify(
+      `Auto-mode starts after a readiness decision is recorded for ${undecided.join(", ")}: ` +
+      `save CONTEXT or CONTEXT-DRAFT with gsd_summary_save, or record "queue it" with gsd_checkpoint_save.`,
+      "info",
+    );
+    return false;
+  }
 
   cleanupAcceptedHandoffArtifacts(entry);
   deletePendingAutoStart(basePath);

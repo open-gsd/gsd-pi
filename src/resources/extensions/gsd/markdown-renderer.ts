@@ -57,6 +57,11 @@ import { clearParseCache, registerCacheClearCallback } from "./files.js";
 import { parseProjectionRoadmap } from "./schemas/parsers.js";
 import { stripIdPrefix } from "./strip-id-prefix.js";
 import { renderMilestoneParkedMarker } from "./milestone-park-projection.js";
+import {
+  readLatestSliceWorkCheckpoint,
+  readWorkCheckpoint,
+  renderWorkCheckpointMarkdown,
+} from "./work-checkpoint.js";
 import { invalidateStateCache } from "./state.js";
 import { clearPathCache, milestonesDir, legacyMilestonesDir, isLegacyMilestonesLayout, resolveMilestonePath, relSliceFile, canonicalPhaseDirName } from "./paths.js";
 import {
@@ -888,6 +893,7 @@ function structuredMilestoneArtifactTypes(milestoneId: string): Set<string> {
   const types = new Set(["ROADMAP"]);
   if (getLatestAssessmentByScope(milestoneId, "roadmap")) types.add("ROADMAP-ASSESSMENT");
   if (getLatestAssessmentByScope(milestoneId, "milestone-validation")) types.add("VALIDATION");
+  if (readWorkCheckpoint({ milestoneId })) types.add("CONTINUE");
   return types;
 }
 
@@ -915,12 +921,15 @@ function sliceArtifactWrites(basePath: string, milestoneId: string, sliceId: str
   const slice = getSlice(milestoneId, sliceId);
   const sliceComplete = toStatus(slice?.status ?? "") === "complete";
   const replanned = latestSliceReplan(milestoneId, sliceId) !== null;
+  const checkpointed = readLatestSliceWorkCheckpoint(milestoneId, sliceId) !== null;
   return getSliceScopedArtifacts(milestoneId, sliceId)
     .filter((artifact) => {
       const artifactType = artifact.artifact_type.toUpperCase();
       if (!artifact.full_content.trim()) return false;
       // The replan event is the structured source of REPLAN; its row is not replayed.
       if (artifactType === "REPLAN" && replanned) return false;
+      // The Work Checkpoint row is the structured source of CONTINUE (renderWorkCheckpoint).
+      if (artifactType === "CONTINUE" && checkpointed) return false;
       if ((artifactType === "SUMMARY" || artifactType === "UAT") && !sliceComplete) return false;
       // The slice row is the structured source of SUMMARY and UAT (renderSliceSummary).
       // A replay can also resolve to the milestone SUMMARY file: for S01 of M001,
@@ -1003,6 +1012,35 @@ export async function renderMilestoneSummary(
     artifact_type: "SUMMARY",
     milestone_id: milestoneId,
   }, basePath);
+  return true;
+}
+
+/**
+ * Render the CONTINUE file of a milestone or a slice from its Work Checkpoint
+ * row: the head checkpoint of the milestone, or the newest checkpoint of the
+ * slice and its tasks. The file is a one-way render; resume reads the row.
+ * Returns false when no checkpoint exists.
+ */
+export async function renderWorkCheckpoint(
+  basePath: string,
+  milestoneId: string,
+  sliceId?: string,
+): Promise<boolean> {
+  const checkpoint = sliceId
+    ? readLatestSliceWorkCheckpoint(milestoneId, sliceId)
+    : readWorkCheckpoint({ milestoneId });
+  if (!checkpoint) return false;
+  const title = getMilestone(milestoneId)?.title;
+  const absPath = sliceId
+    ? join(basePath, relSliceFile(basePath, milestoneId, sliceId, "CONTINUE", title))
+    : targetMilestoneFile(basePath, milestoneId, "CONTINUE", title);
+  createProjectionDirectorySync(dirname(absPath));
+  await writeProjectionFile(
+    basePath,
+    absPath,
+    stampProjectionContent(renderWorkCheckpointMarkdown(checkpoint)),
+    projectionEntities({ milestone_id: milestoneId, slice_id: sliceId }),
+  );
   return true;
 }
 
@@ -1351,6 +1389,7 @@ async function renderMilestoneFiles(
   await renderStep(result, `validation ${milestoneId}`, async () => renderMilestoneValidation(basePath, milestoneId));
   await renderStep(result, `milestone artifacts ${milestoneId}`, () => renderMilestoneArtifactsFromDb(basePath, milestoneId));
   await renderStep(result, `milestone summary ${milestoneId}`, () => renderMilestoneSummary(basePath, milestoneId));
+  await renderStep(result, `checkpoint ${milestoneId}`, () => renderWorkCheckpoint(basePath, milestoneId));
 }
 
 async function renderSliceFiles(
@@ -1367,6 +1406,7 @@ async function renderSliceFiles(
   await renderStep(result, `replan ${milestoneId}/${sliceId}`, async () =>
     (await renderSliceReplan(basePath, milestoneId, sliceId)) !== null);
   await renderStep(result, `slice summary ${milestoneId}/${sliceId}`, () => renderSliceSummary(basePath, milestoneId, sliceId));
+  await renderStep(result, `checkpoint ${milestoneId}/${sliceId}`, () => renderWorkCheckpoint(basePath, milestoneId, sliceId));
 }
 
 async function renderMilestoneRows(

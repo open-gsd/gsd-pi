@@ -444,6 +444,87 @@ D012 is a decision. It is not the cutover:
   lifecycle vocabulary has no word for queued. `auto/orchestrator.ts`,
   `guided-flow-queue.ts` and `guided-flow.ts` apply the status vocabulary to
   the registry of `deriveState`, which reads the interface.
+- Since 2026-10-04 every reader that decides or reports takes the Milestone
+  universe from `readListedMilestoneIds` of the read interface: the listed
+  rows in workflow order, with no discarded Milestone. These readers do not
+  scan the milestone directories:
+  - `commands/handlers/auto.ts`: the target check of `/gsd auto <id>` and
+    `/gsd next <id>`. A directory with no row is not a target, and a row with
+    no directory is one.
+  - `guided-flow.ts`: the first-Milestone decision of the `/gsd` entry and the
+    greenfield decision of a new Milestone discussion. A Milestone row with no
+    directory is a Milestone; before, such a project got the new-project
+    prompt.
+  - `guided-flow-queue.ts` (`/gsd queue`) and `rethink.ts` (`/gsd rethink`):
+    the "no milestones" check and the Milestone list of the prompt.
+  - `auto-start.ts`: the queue pre-flight message.
+  - `auto-prompts.ts`: the prior Milestone summaries of the discuss-milestone
+    and plan-milestone prompts.
+- A scan of the milestone directories (`findMilestoneIds`) stays only where
+  the directories are the subject:
+  - Id reservation, so that a directory with no row keeps its id:
+    `guided-flow.ts` (each call of `nextMilestoneIdReserved`),
+    `commands-backlog.ts`, `tools/milestone-hierarchy.ts`, and the next-id hint
+    in the `/gsd queue` add prompt (`guided-flow-queue.ts`). The reservation
+    adds the database ids to the scan.
+  - The `/gsd` entry check for a milestone directory that has entries and no
+    recognized Milestone (#456, `guided-flow.ts`).
+  - Doctor and drift checks, which compare the directories with the rows:
+    `doctor-runtime-checks.ts` (orphan directories),
+    `doctor-state-checks.ts` (only when the registry is empty),
+    `state-reconciliation/drift/artifact-db.ts`,
+    `state-reconciliation/drift/roadmap.ts`,
+    `state-reconciliation/drift/project-md.ts`, and
+    `migration-auto-check.ts` (markdown hierarchy scan).
+  - `workspace-index.ts`: only when no database is open. With a database it
+    reads the rows.
+- Since 2026-10-04 the prompt builders of `auto-prompts.ts`, the
+  discuss-slice prompt (`guided-flow.ts`) and the queue context
+  (`guided-flow-queue.ts`) take ROADMAP, CONTEXT, CONTEXT-DRAFT, RESEARCH,
+  PLAN and SUMMARY text from artifact rows (`getScopedArtifact`: Milestone,
+  Slice or Task, and artifact type). They do not read the projection file.
+  A file with no artifact row is not narrative: the prompt shows the same
+  "not found" note as for a missing file. The Task SUMMARY list of a Slice
+  comes from the rows; the tasks directory is not listed. The source path in
+  the prompt is the path of the artifact row. With no artifact row it is the
+  path where the projection file is rendered; for the Task plan of the
+  execute-task and reactive-execute prompts it is then the text "durable
+  task planning state".
+  Behavior tests:
+  `tests/prompt-narrative-gate-g1.test.ts` (Gate G1 for these prompts: the
+  files deleted, and the files changed). The G2 prompt check and the G2
+  projection read check of `tests/db-authority-gates.test.ts` are enforced.
+- A SUMMARY follows the item row, not the artifact row alone. A Slice or Task
+  that is not done has no SUMMARY narrative: a reopen removes the file and
+  keeps the artifact row. One precedence rule applies to all narrative that
+  has a carrier column (`tasks.full_plan_md`, `tasks.full_summary_md`,
+  `slices.full_summary_md`): the carrier is the first source, because the
+  Domain Operation writes it in the transaction of the lifecycle change and
+  a reopen or a re-plan clears or replaces it. The artifact row is the
+  second source: a projection drain writes it later, and it gives the text
+  only when the carrier is empty (an imported summary). So a Task that
+  `gsd_task_complete` just committed gives its summary to the next prompt
+  before its projection is rendered, and the recovery re-plan prompt has the
+  Task plan from the carrier. Narrative with no carrier (ROADMAP, CONTEXT,
+  CONTEXT-DRAFT, RESEARCH, Slice PLAN) comes from the artifact row. A CONTEXT-DRAFT
+  row is a discussion seed only while the Milestone has no saved CONTEXT:
+  saving the final CONTEXT removes the draft file and keeps the draft row.
+  Behavior tests: `tests/prompt-summary-narrative.test.ts` (the real
+  completion and reopen handlers) and the draft seed tests of
+  `tests/discuss-routing-fixes.test.ts`.
+- These prompt inputs are still read from files: VALIDATION, slice
+  ASSESSMENT, CONTINUE, RUNTIME.md, QUEUE.md, the DECISIONS.md register of
+  the discuss prompts, and the file lists of the rewrite-docs prompt. The
+  root file entries of the source file list (PROJECT, REQUIREMENTS, DECISIONS,
+  QUEUE) are listed when the file exists. Display paths of an artifact with no
+  row, and directory paths, come from the directory layout on disk; Gate G1
+  for prompts therefore deletes the files and keeps the directories.
+  `bootstrap/system-context.ts`, `preparation.ts` and the task graph of
+  `reactive-graph.ts` also read PLAN and SUMMARY files.
+- Since 2026-10-04 the progress widget (`auto-dashboard.ts`) and the dashboard
+  overlay (`dashboard-overlay.ts`) take the Slices, the Tasks and their done
+  flags from the read interface. A Slice or Task that needs no further work
+  counts as done; before, only the raw statuses `complete` and `done` counted.
 - Step 2 is done in the read interface (2026-10-04). The project Authority
   Epoch chooses the read source, in one function (`cutoverHasRun`) and per
   Project, never per item:

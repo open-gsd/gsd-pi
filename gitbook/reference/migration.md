@@ -12,6 +12,8 @@ If you have projects with `.planning` directories from Git Ship Done v1 (now con
 /gsd migrate ~/projects/my-old-project
 ```
 
+The first run prints the Import Preview with its hash and writes nothing. To apply it, run the `/gsd migrate --preview=sha256:<hash>` command that it prints. `gsd headless migrate` is the form with no TUI. See the [authoritative migration contract](../../docs/user-docs/migration.md#running-the-migration).
+
 ## What Gets Migrated
 
 The migration tool:
@@ -26,7 +28,7 @@ The migration tool:
 - Consolidates research files into the new structure and archives the full legacy `.planning` source under `.gsd/migration/legacy/`
 - Records `.gsd/migration/MIGRATION.md` and `.gsd/migration/manifest.json` audit artifacts
 - Shows a preview before writing anything, including requirement status totals (validated, active, deferred, out of scope) and legacy-input counts (milestone phase dirs, decision files, seed files)
-- Optionally runs a read-only review for quality assurance
+- In the interactive TUI, optionally runs a read-only review of the output
 
 ## Supported Formats
 

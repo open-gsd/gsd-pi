@@ -427,6 +427,14 @@ async function runHeadlessOnce(options: HeadlessOptions, restartCount: number): 
     writeFileSync(join(runtimeDir, 'headless-context.md'), contextContent, 'utf-8')
   }
 
+  // Migrate: preview or apply a v1 .planning migration, with no RPC child
+  // needed. A v1 project has no .gsd/ yet, so this runs before the .gsd/ check.
+  if (options.command === 'migrate') {
+    const { handleMigrate } = await import('./headless-migrate.js')
+    const result = await handleMigrate(options.commandArgs)
+    process.exit(result.exitCode)
+  }
+
   // Validate .gsd/ directory (skip for new-milestone since we just bootstrapped it)
   const gsdDir = join(process.cwd(), '.gsd')
   if (!isNewMilestone && !existsSync(gsdDir)) {

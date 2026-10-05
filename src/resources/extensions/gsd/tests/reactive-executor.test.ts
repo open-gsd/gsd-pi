@@ -11,7 +11,7 @@ import {
   chooseNonConflictingSubset,
 } from "../reactive-graph.ts";
 import { validatePreferences } from "../preferences-validation.ts";
-import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, insertArtifact, insertMilestone, insertSlice, insertTask } from "../gsd-db.ts";
 import { parseUnitId } from "../unit-id.ts";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import { handlePlanSlice } from "../tools/plan-slice.ts";
@@ -495,98 +495,101 @@ test("unitId batch encoding round-trips correctly", () => {
 
 // ─── Dependency-Based Carry-Forward ───────────────────────────────────────
 
-test("getDependencyTaskSummaryPaths returns only dependency summaries", async () => {
-  const { getDependencyTaskSummaryPaths } = await import("../auto-prompts.ts");
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-depcarry-"));
-  try {
-    const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    // T01, T02, T03 all have summaries
-    writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01\n");
-    writeFileSync(join(tasksDir, "T02-SUMMARY.md"), "---\nid: T02\n---\n# T02\n");
-    writeFileSync(join(tasksDir, "T03-SUMMARY.md"), "---\nid: T03\n---\n# T03\n");
+/**
+ * Record one Task as complete and save its SUMMARY artifact row. The summary
+ * paths come from the rows of the done Tasks, not from a directory listing.
+ */
+function saveTaskSummaryRow(path: string, sliceId: string, taskId: string): void {
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ milestoneId: "M001", id: sliceId, title: sliceId, status: "in_progress", risk: "low", depends: [] });
+  insertTask({ milestoneId: "M001", sliceId, id: taskId, title: taskId, status: "complete" });
+  insertArtifact({
+    path,
+    artifact_type: "SUMMARY",
+    milestone_id: "M001",
+    slice_id: sliceId,
+    task_id: taskId,
+    full_content: `---\nid: ${taskId}\n---\n# ${sliceId} ${taskId}\n`,
+  });
+}
 
-    // T04 depends only on T01 and T03 — should NOT get T02
-    const paths = await getDependencyTaskSummaryPaths("M001", "S01", "T04", ["T01", "T03"], repo);
-    assert.equal(paths.length, 2, "Should get exactly 2 dependency summaries");
-    assert.ok(paths.some((p) => p.includes("T01-SUMMARY")), "Should include T01");
-    assert.ok(paths.some((p) => p.includes("T03-SUMMARY")), "Should include T03");
-    assert.ok(!paths.some((p) => p.includes("T02-SUMMARY")), "Should NOT include T02");
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
+test("getDependencyTaskSummaries returns only dependency summaries", async (t) => {
+  const { getDependencyTaskSummaries } = await import("../auto-prompts.ts");
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  // T01, T02, T03 all have summaries
+  for (const tid of ["T01", "T02", "T03"]) {
+    saveTaskSummaryRow(`milestones/M001/slices/S01/tasks/${tid}-SUMMARY.md`, "S01", tid);
   }
+
+  // T04 depends only on T01 and T03 — should NOT get T02
+  const paths = (await getDependencyTaskSummaries("/project", "M001", "S01", "T04", ["T01", "T03"])).map((summary) => summary.relPath);
+  assert.deepEqual(paths, [
+    ".gsd/milestones/M001/slices/S01/tasks/T01-SUMMARY.md",
+    ".gsd/milestones/M001/slices/S01/tasks/T03-SUMMARY.md",
+  ]);
 });
 
-test("getDependencyTaskSummaryPaths falls back to order-based for root tasks", async () => {
-  const { getDependencyTaskSummaryPaths } = await import("../auto-prompts.ts");
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-depcarry-root-"));
-  try {
-    const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01\n");
+test("getDependencyTaskSummaries falls back to order-based for root tasks", async (t) => {
+  const { getDependencyTaskSummaries } = await import("../auto-prompts.ts");
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  saveTaskSummaryRow("milestones/M001/slices/S01/tasks/T01-SUMMARY.md", "S01", "T01");
+  saveTaskSummaryRow("milestones/M001/slices/S01/tasks/T03-SUMMARY.md", "S01", "T03");
 
-    // T02 has no dependencies (root task) — should fall back to order-based
-    const paths = await getDependencyTaskSummaryPaths("M001", "S01", "T02", [], repo);
-    assert.equal(paths.length, 1, "Root task should get order-based prior summaries");
-    assert.ok(paths[0].includes("T01-SUMMARY"), "Should include T01 via order fallback");
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
+  // T02 has no dependencies (root task) — should fall back to order-based
+  const paths = (await getDependencyTaskSummaries("/project", "M001", "S01", "T02", [])).map((summary) => summary.relPath);
+  assert.deepEqual(paths, [".gsd/milestones/M001/slices/S01/tasks/T01-SUMMARY.md"]);
 });
 
-test("getDependencyTaskSummaryPaths handles missing dependency summaries gracefully", async () => {
-  const { getDependencyTaskSummaryPaths } = await import("../auto-prompts.ts");
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-depcarry-missing-"));
-  try {
-    const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
-    mkdirSync(tasksDir, { recursive: true });
-    // Only T01 has a summary, T02 does not
-    writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01\n");
+test("getDependencyTaskSummaries handles missing dependency summaries gracefully", async (t) => {
+  const { getDependencyTaskSummaries } = await import("../auto-prompts.ts");
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  // Only T01 has a summary, T02 does not
+  saveTaskSummaryRow("milestones/M001/slices/S01/tasks/T01-SUMMARY.md", "S01", "T01");
 
-    // T03 depends on T01 and T02, but T02 summary doesn't exist
-    const paths = await getDependencyTaskSummaryPaths("M001", "S01", "T03", ["T01", "T02"], repo);
-    assert.equal(paths.length, 1, "Should only return existing dependency summaries");
-    assert.ok(paths[0].includes("T01-SUMMARY"), "Should include T01 (exists)");
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
+  // T03 depends on T01 and T02, but T02 has no saved summary
+  const paths = (await getDependencyTaskSummaries("/project", "M001", "S01", "T03", ["T01", "T02"])).map((summary) => summary.relPath);
+  assert.deepEqual(paths, [".gsd/milestones/M001/slices/S01/tasks/T01-SUMMARY.md"]);
 });
 
-test("#1343: getPriorTaskSummaryPaths excludes sibling-slice summaries in flat-phase", async () => {
-  const { getPriorTaskSummaryPaths } = await import("../auto-prompts.ts");
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-flat-prior-"));
-  try {
-    // Flat-phase: slices S01 and S02 share the phase dir and overlap task ids.
-    const phaseDir = join(repo, ".gsd", "phases", "01-test");
-    mkdirSync(phaseDir, { recursive: true });
-    writeFileSync(join(phaseDir, "S01-T01-SUMMARY.md"), "---\nid: T01\n---\n# S01 T01\n");
-    writeFileSync(join(phaseDir, "S02-T01-SUMMARY.md"), "---\nid: T01\n---\n# S02 T01\n");
-
-    // S02/T02 prior summaries must not pull the sibling S01-T01 summary.
-    const paths = await getPriorTaskSummaryPaths("M001", "S02", "T02", repo);
-    assert.equal(paths.length, 1, "Should only return the current slice's prior summary");
-    assert.ok(paths[0].includes("S02-T01-SUMMARY"), "Should include S02's T01");
-    assert.ok(!paths.some((p) => p.includes("S01-T01-SUMMARY")), "Should NOT include sibling S01's T01");
-  } finally {
+test("task summary paths come from artifact rows: a SUMMARY file with no row is not listed", async (t) => {
+  const { getPriorTaskSummaries } = await import("../auto-prompts.ts");
+  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-prior-rows-"));
+  t.after(() => {
+    closeDatabase();
     rmSync(repo, { recursive: true, force: true });
-  }
+  });
+  const tasksDir = join(repo, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+  mkdirSync(tasksDir, { recursive: true });
+  writeFileSync(join(tasksDir, "T01-SUMMARY.md"), "---\nid: T01\n---\n# T01\n");
+  openDatabase(join(repo, ".gsd", "gsd.db"));
+
+  assert.deepEqual(await getPriorTaskSummaries(repo, "M001", "S01", "T02"), []);
 });
 
-test("#1343: getDependencyTaskSummaryPaths excludes sibling-slice summaries in flat-phase", async () => {
-  const { getDependencyTaskSummaryPaths } = await import("../auto-prompts.ts");
-  const repo = mkdtempSync(join(tmpdir(), "gsd-reactive-flat-dep-"));
-  try {
-    const phaseDir = join(repo, ".gsd", "phases", "01-test");
-    mkdirSync(phaseDir, { recursive: true });
-    writeFileSync(join(phaseDir, "S01-T01-SUMMARY.md"), "---\nid: T01\n---\n# S01 T01\n");
-    writeFileSync(join(phaseDir, "S02-T01-SUMMARY.md"), "---\nid: T01\n---\n# S02 T01\n");
+test("#1343: getPriorTaskSummaries excludes sibling-slice summaries in flat-phase", async (t) => {
+  const { getPriorTaskSummaries } = await import("../auto-prompts.ts");
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  // Flat-phase: slices S01 and S02 share the phase dir and overlap task ids.
+  saveTaskSummaryRow("phases/01-test/S01-T01-SUMMARY.md", "S01", "T01");
+  saveTaskSummaryRow("phases/01-test/S02-T01-SUMMARY.md", "S02", "T01");
 
-    // S02/T02 depends on T01 — must resolve S02's T01, not the sibling S01's.
-    const paths = await getDependencyTaskSummaryPaths("M001", "S02", "T02", ["T01"], repo);
-    assert.equal(paths.length, 1, "Should only return the current slice's dependency summary");
-    assert.ok(paths[0].includes("S02-T01-SUMMARY"), "Should include S02's T01");
-    assert.ok(!paths.some((p) => p.includes("S01-T01-SUMMARY")), "Should NOT include sibling S01's T01");
-  } finally {
-    rmSync(repo, { recursive: true, force: true });
-  }
+  // S02/T02 prior summaries must not pull the sibling S01-T01 summary.
+  const paths = (await getPriorTaskSummaries("/project", "M001", "S02", "T02")).map((summary) => summary.relPath);
+  assert.deepEqual(paths, [".gsd/phases/01-test/S02-T01-SUMMARY.md"]);
+});
+
+test("#1343: getDependencyTaskSummaries excludes sibling-slice summaries in flat-phase", async (t) => {
+  const { getDependencyTaskSummaries } = await import("../auto-prompts.ts");
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  saveTaskSummaryRow("phases/01-test/S01-T01-SUMMARY.md", "S01", "T01");
+  saveTaskSummaryRow("phases/01-test/S02-T01-SUMMARY.md", "S02", "T01");
+
+  // S02/T02 depends on T01 — must resolve S02's T01, not the sibling S01's.
+  const paths = (await getDependencyTaskSummaries("/project", "M001", "S02", "T02", ["T01"])).map((summary) => summary.relPath);
+  assert.deepEqual(paths, [".gsd/phases/01-test/S02-T01-SUMMARY.md"]);
 });

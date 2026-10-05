@@ -21,7 +21,12 @@ export const promptGoldenUnits = [
     // Tool Surface guidance and related prompt additions have grown this prompt;
     // the baseline is adjusted so the gate still tracks shrinkage from the
     // original oversized prompts while allowing today's ~8586-char fixture.
-    phase2StartChars: 14320,
+    // Re-baseline (14320 -> 14379): the work checkpoint is now a database row.
+    // The Tool Surface block advertises `gsd_checkpoint_save` (+23 chars) and
+    // the empty Resume State line names the Work Checkpoint, not the continue
+    // file (+12 chars). Measured 8625 chars in CI; 35 / 0.6 = 59 keeps the
+    // headroom unchanged.
+    phase2StartChars: 14379,
     requiredMarkers: [
       "UNIT: Execute Task T01",
       "Inlined Task Plan",

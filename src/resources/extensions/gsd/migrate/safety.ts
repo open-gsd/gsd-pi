@@ -7,7 +7,7 @@ import { homedir } from "node:os";
 
 import { ensureDbOpen } from "../bootstrap/dynamic-tools.js";
 import { readCrashLock, isLockProcessAlive } from "../crash-recovery.js";
-import { closeWorkflowDatabase } from "../db-workspace.js";
+import { openWorkflowDatabasePathOrNull, resolveProjectRootDbPath, restoreWorkflowDatabase } from "../db-workspace.js";
 import { findStaleScopedPauses, readPausedSessionMetadata } from "../interrupted-session.js";
 import { listOpenAutoPauseScopes } from "../db/writers/auto-pauses.js";
 import { sidecarQueueScope } from "../db/unit-dispatch-sidecars.js";
@@ -184,8 +184,10 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
     );
   }
 
-  const opened = await ensureDbOpen(targetRoot, { createEmptyAuthority: true });
-  if (!opened) return;
+  // A target with no database has no pause row to read, and this check creates none.
+  const hasDatabase = existsSync(resolveProjectRootDbPath(targetRoot));
+  const openBefore = openWorkflowDatabasePathOrNull();
+  if (hasDatabase && !(await ensureDbOpen(targetRoot, { createEmptyAuthority: true }))) return;
 
   try {
     const lock = readCrashLock(targetRoot);
@@ -195,8 +197,8 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
       );
     }
 
-    const pausedScopes = listOpenAutoPauseScopes();
-    if (pausedScopes.length === 0 && readPausedSessionMetadata(targetRoot)) {
+    const pausedScopes = hasDatabase ? listOpenAutoPauseScopes() : [];
+    if (hasDatabase && pausedScopes.length === 0 && readPausedSessionMetadata(targetRoot)) {
       pausedScopes.push(sidecarQueueScope());
     }
     if (pausedScopes.length > 0) {
@@ -214,6 +216,6 @@ export async function assertMigrationTargetAvailable(targetRoot: string): Promis
       );
     }
   } finally {
-    closeWorkflowDatabase();
+    if (hasDatabase) restoreWorkflowDatabase(openBefore);
   }
 }

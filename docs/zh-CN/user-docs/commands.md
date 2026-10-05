@@ -34,7 +34,7 @@
 | `/gsd update` | 在会话内更新 GSD；`--models` 可刷新 models 和定价且无需重启 |
 | `/gsd knowledge` | 添加持久化项目知识。Rules、patterns 和 lessons 都作为带 K/P/L 编号的 memories 保存；每次捕获后以及重建时，`KNOWLEDGE.md` 会从数据库重新渲染。 |
 | `/gsd fast` | 为支持的模型切换 service tier（优先级 API 路由） |
-| `/gsd rate` | 评价上一个单元所用模型层级（over / ok / under），帮助改进自适应路由 |
+| `/gsd rate` | 评价上一个单元所用模型层级（over / ok / under）或重置路由历史（reset），帮助改进自适应路由 |
 | `/gsd changelog` | 查看分类后的发行说明 |
 | `/gsd logs` | 浏览活动日志、调试日志和指标 |
 | `/gsd remote` | 控制远程自动模式 |

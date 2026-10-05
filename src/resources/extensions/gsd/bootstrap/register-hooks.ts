@@ -12,13 +12,13 @@ import { ALWAYS_PRESERVED_SHIM_TOOL_NAMES } from "@gsd/pi-ai";
 import type { GSDEcosystemBeforeAgentStartHandler } from "../ecosystem/gsd-extension-api.js";
 import { updateSnapshot } from "../ecosystem/gsd-extension-api.js";
 
-import { canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath } from "../paths.js";
+import { canonicalPhaseDirName, clearPathCache, milestonesDir, legacyMilestonesDir, relMilestoneFile, resolveMilestoneFile, resolveMilestonePath } from "../paths.js";
 import { applyAskUserQuestionsGateResult, applyWriteGateSessionBoundary, formatPendingAskUserQuestionsGateMessage, formatTimedOutAskUserQuestionsGateMessage, hostWriteGateAdapter, isApprovalGateVerifiedInSnapshot, isDepthConfirmationAnswer, isMilestoneDepthVerifiedInSnapshot, isQueuePhaseActive, loadWriteGateSnapshot, shouldBlockContextWrite, shouldBlockPlanningUnit, shouldBlockQueueExecution, shouldBlockWorktreeBash, shouldBlockWorktreeWrite, isGateQuestionId, getPendingGate, shouldBlockPendingGate, shouldBlockPendingGateBash, extractDepthVerificationMilestoneId, type WriteGateSnapshot } from "./write-gate.js";
 import { canonicalToolName } from "../engine-hook-contract.js";
 import { resolveManifest } from "../unit-context-manifest.js";
 import { getIsolationMode, resolveEffectiveUnitIsolationMode } from "../preferences.js";
 import { blockedWriteReason, blockedBashWriteReason } from "../write-intercept.js";
-import { loadFile, saveFile, formatContinue } from "../files.js";
+import { loadFile } from "../files.js";
 import {
   autoSession,
   clearAutoCompletionStopInProgress,
@@ -1122,19 +1122,19 @@ async function ensureMilestoneShell(basePath: string, milestoneId: string): Prom
  * CONTEXT-DRAFT. Both are database artifact rows: the next round is built from
  * the row, and the files are rendered from it. A file with no row (a triage
  * seed, or a discussion started before the rows existed) is adopted into the
- * row by the first round.
+ * row by the first round. Returns false when there is no database to write to.
  */
 async function saveDiscussionQuestionRound(
   basePath: string,
   milestoneId: string,
   questions: StructuredQuestion[],
   details: any,
-): Promise<void> {
+): Promise<boolean> {
   await ensureMilestoneShell(basePath, milestoneId);
   const { ensureDbOpen } = await import("./dynamic-tools.js");
   if (!(await ensureDbOpen(basePath))) {
     safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the GSD database is unavailable`);
-    return;
+    return false;
   }
   const { getArtifact } = await import("../gsd-db.js");
   const { saveArtifactToDbByScope } = await import("../db-writer.js");
@@ -1167,14 +1167,22 @@ async function saveDiscussionQuestionRound(
       ].join("\n");
     return `${draftHeader.trimEnd()}\n\n## Captured Question Round — ${timestamp}\n\n${exchange}`;
   });
+  return true;
 }
 
 /**
- * Capture an answered ask_user_questions round of a milestone discussion.
+ * Capture an answered ask_user_questions round of a milestone discussion: the
+ * exchange text in the DISCUSSION log and CONTEXT-DRAFT, and each question and
+ * its answer as Open Question, interaction and Answer rows.
  * Called from tool_execution_end, so it also runs under external engines,
  * which never fire tool_result.
  */
-async function captureAnsweredQuestionRound(basePath: string, inputQuestions: unknown, result: unknown): Promise<void> {
+async function captureAnsweredQuestionRound(
+  basePath: string,
+  toolCallId: string,
+  inputQuestions: unknown,
+  result: unknown,
+): Promise<void> {
   const details = resolveAskUserQuestionsGateDetails({
     details: (result as { details?: unknown } | undefined)?.details,
     result,
@@ -1189,7 +1197,17 @@ async function captureAnsweredQuestionRound(basePath: string, inputQuestions: un
     safetyLogWarning("guided", `question round for ${milestoneId} was not captured: the result has answers but no questions`);
     return;
   }
-  await saveDiscussionQuestionRound(basePath, milestoneId, questions, details);
+  if (!(await saveDiscussionQuestionRound(basePath, milestoneId, questions, details))) return;
+  const { recordAnsweredQuestionRound } = await import("../conversation-domain-operation.js");
+  const { skipped } = recordAnsweredQuestionRound({
+    milestoneId,
+    toolCallId,
+    questions,
+    answers: details.response.answers ?? {},
+  });
+  for (const { id, reason } of skipped) {
+    safetyLogWarning("guided", `question "${id}" of ${milestoneId} is not stored as an Open Question: ${reason}`);
+  }
 }
 
 function withDepthGateDisplayReason<T extends { block: boolean; reason?: string; displayReason?: string }>(
@@ -1638,41 +1656,41 @@ export function registerHooks(
     // that would be lost on compaction (#4258).
     // if (state.phase !== "executing") return;
 
-    const sliceDir = resolveSlicePath(basePath, state.activeMilestone.id, state.activeSlice.id);
-    if (!sliceDir) return;
+    const { readWorkCheckpoint, saveWorkCheckpoint } = await import("../work-checkpoint.js");
+    const scope = {
+      milestoneId: state.activeMilestone.id,
+      sliceId: state.activeSlice.id,
+      taskId: state.activeTask?.id,
+    };
+    // An earlier checkpoint of this unit (for example an agent handoff) says
+    // more than this one can; it stays the head.
+    if (readWorkCheckpoint(scope)) return;
 
-    const existingFile = resolveSliceFile(basePath, state.activeMilestone.id, state.activeSlice.id, "CONTINUE");
-    if (existingFile && await loadFile(existingFile)) return;
-    const legacyContinue = join(sliceDir, "continue.md");
-    if (await loadFile(legacyContinue)) return;
-
-    const continuePath = join(sliceDir, `${state.activeSlice.id}-CONTINUE.md`);
     const taskId = state.activeTask?.id ?? "none";
     const taskTitle = state.activeTask?.title ?? "";
     const phaseLabel = state.phase.replace(/-/g, " ");
 
-    await saveFile(continuePath, formatContinue({
-      frontmatter: {
-        milestone: state.activeMilestone.id,
-        slice: state.activeSlice.id,
-        task: taskId,
-        step: 0,
-        totalSteps: 0,
-        status: "compacted" as const,
-        savedAt: new Date().toISOString(),
-      },
-      completedWork: state.activeTask
-        ? `Task ${taskId} (${taskTitle}) was in progress when compaction occurred.`
-        : `Slice ${state.activeSlice.id} was in ${phaseLabel} phase when compaction occurred.`,
-      remainingWork: state.activeTask
-        ? "Check the task plan for remaining steps."
-        : "Continue this slice from the latest planning/research/discussion artifacts.",
-      decisions: "Check task summary files for prior decisions.",
-      context: "Session was auto-compacted by Pi. Resume with /gsd.",
-      nextAction: state.activeTask
-        ? `Resume task ${taskId}: ${taskTitle}.`
-        : `Resume ${phaseLabel} work for slice ${state.activeSlice.id}.`,
-    }));
+    try {
+      saveWorkCheckpoint({
+        ...scope,
+        kind: "pause",
+        confirmedContext: state.activeTask
+          ? `Task ${taskId} (${taskTitle}) was in progress when the session was auto-compacted.`
+          : `Slice ${state.activeSlice.id} was in ${phaseLabel} phase when the session was auto-compacted.`,
+        unresolved: state.activeTask
+          ? "Check the task plan for remaining steps."
+          : "Continue this slice from the latest planning/research/discussion artifacts.",
+        nextAction: state.activeTask
+          ? `Resume task ${taskId}: ${taskTitle}.`
+          : `Resume ${phaseLabel} work for slice ${state.activeSlice.id}.`,
+      });
+      const { renderWorkCheckpoint } = await import("../markdown-renderer.js");
+      await renderWorkCheckpoint(basePath, scope.milestoneId, scope.sliceId);
+    } catch (err) {
+      // Compaction must go on. The row is the resume state; without it the
+      // next session starts from the task plan.
+      safetyLogWarning("bootstrap", `compaction checkpoint was not saved: ${(err as Error).message}`);
+    }
   });
 
   pi.on("message_update", async (event, ctx: ExtensionContext) => {
@@ -2277,7 +2295,7 @@ export function registerHooks(
     askUserQuestionsInputByCallId.delete(event.toolCallId);
     if (toolName === "ask_user_questions" && !event.isError) {
       // A failed capture must not skip the error classification below.
-      await captureAnsweredQuestionRound(contextBasePath(ctx), inputQuestions, event.result).catch((err) =>
+      await captureAnsweredQuestionRound(contextBasePath(ctx), event.toolCallId, inputQuestions, event.result).catch((err) =>
         safetyLogWarning("guided", `question round capture failed: ${err instanceof Error ? err.message : String(err)}`));
     }
     // #2883/#4974: Capture deterministic invocation/policy errors

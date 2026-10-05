@@ -16,6 +16,8 @@ import {
   buildReplanSlicePrompt,
   buildResearchSlicePrompt,
 } from "../auto-prompts.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 function makeSliceContextFixture(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-slice-context-"));
@@ -52,6 +54,9 @@ function makeSliceContextFixture(): string {
     ].join("\n"),
     "utf-8",
   );
+  // Prompt builders read narrative from artifact rows.
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  saveMilestoneFilesAsArtifacts(base);
   return base;
 }
 
@@ -72,6 +77,7 @@ describe("slice CONTEXT.md injection into prompt builders (#3452)", () => {
         assert.match(prompt, /Slice Context/);
         assert.match(prompt, /SLICE-CONTEXT-3452/);
       } finally {
+        closeDatabase();
         rmSync(base, { recursive: true, force: true });
       }
     });

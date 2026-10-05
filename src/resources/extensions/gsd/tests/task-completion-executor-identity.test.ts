@@ -497,7 +497,11 @@ test("a canonical escalation is stored as an Open Question, pauses the slice, an
     row("SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'task.escalation.open'").count,
     1,
   );
-  assert.equal(row("SELECT escalation_pending FROM tasks WHERE id = 'T01'").escalation_pending, 1);
+  assert.equal(
+    row("SELECT escalation_pending FROM tasks WHERE id = 'T01'").escalation_pending,
+    0,
+    "the open question is the pause; the task flag is not written",
+  );
   assert.equal(detectPendingEscalation(getSliceTasks("M001", "S01")), "T01");
 
   // A retry of the same tool call replays: no second question.

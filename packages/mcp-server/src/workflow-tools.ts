@@ -57,6 +57,24 @@ interface GsdMcpBridge {
   saveRequirementToDb: (...args: any[]) => any;
   updateRequirementInDb: (...args: any[]) => any;
   queryJournal: (...args: any[]) => any;
+  resolvePendingEscalation: (
+    projectDir: string,
+    response: string,
+    invocation: ExecutionInvocation,
+    questionId?: string,
+  ) => Promise<PersistedBlockerResolution>;
+}
+
+/** The outcome of answering the open escalation question in the project database. */
+export interface PersistedBlockerResolution {
+  status: "resolved" | "not-found" | "already-resolved" | "invalid-choice" | "rejected-to-blocker";
+  message: string;
+  questionId: string;
+  milestoneId: string;
+  sliceId: string;
+  taskId: string;
+  decisionId?: string;
+  decisionError?: string;
 }
 
 type WorkflowDatabaseOpenResult =
@@ -218,6 +236,20 @@ type WorkflowToolExecutors = {
         requiredFix: string;
         verificationCommands: string[];
       }>;
+    },
+    basePath: string,
+    invocation: PlanningInvocation,
+  ) => Promise<unknown>;
+  executeCheckpointSave: (
+    params: {
+      milestoneId: string;
+      sliceId?: string;
+      taskId?: string;
+      kind: "pause" | "handoff";
+      confirmedContext: string;
+      unresolved?: string;
+      evidence?: string;
+      nextAction: string;
     },
     basePath: string,
     invocation: PlanningInvocation,
@@ -817,6 +849,7 @@ function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors
     "executeReplanSlice",
     "executeReplanTask",
     "executeReworkBriefSave",
+    "executeCheckpointSave",
     "executeSliceComplete",
     "executeCompleteMilestone",
     "executeValidateMilestone",
@@ -1374,6 +1407,31 @@ async function readDbViaBridge<T>(
   });
 }
 
+/**
+ * Resolve the pending blocker that the project database holds
+ * (gsd_resolve_blocker): the open escalation question, through its answer
+ * Domain Operation. It needs no session, so it works after a server restart.
+ * It is a workflow mutation: the write gate applies, and the answer records
+ * the MCP caller, not the user.
+ */
+export async function resolvePersistedBlockerViaBridge(
+  projectDir: string,
+  response: string,
+  questionId?: string,
+  extra?: WorkflowMcpRequestExtra,
+): Promise<PersistedBlockerResolution> {
+  await enforceWorkflowWriteGate("gsd_resolve_blocker", projectDir);
+  const invocation = mcpExecutionInvocation("gsd_resolve_blocker", extra);
+  return runSerializedWorkflowOperation(async () => {
+    const bridge = await importBridgeModule();
+    const opened = bridge.openExistingWorkflowDatabase(projectDir);
+    if (!opened.ok) {
+      throw opened.error ?? new Error(`No pending blocker: the project database is not available (${opened.reason}).`);
+    }
+    return bridge.resolvePendingEscalation(projectDir, response, invocation, questionId);
+  });
+}
+
 /** Progress payload from the project database (gsd_progress). */
 export async function readProjectProgressViaBridge(projectDir: string): Promise<unknown | null> {
   return readDbViaBridge(projectDir, (bridge) => bridge.readProgressFromDb(projectDir));
@@ -1768,6 +1826,19 @@ async function handleReworkBriefSave(
   const { projectDir: _projectDir, ...params } = args;
   return adaptExecutorResult(
     await runSerializedWorkflowOperation(() => executeReworkBriefSave(params, projectDir, invocation)),
+  );
+}
+
+async function handleCheckpointSave(
+  projectDir: string,
+  args: z.infer<typeof checkpointSaveSchema>,
+  invocation: PlanningInvocation,
+): Promise<unknown> {
+  await enforceWorkflowWriteGate("gsd_checkpoint_save", projectDir, args.milestoneId);
+  const { executeCheckpointSave } = await getWorkflowToolExecutors();
+  const { projectDir: _projectDir, ...params } = args;
+  return adaptExecutorResult(
+    await runSerializedWorkflowOperation(() => executeCheckpointSave(params, projectDir, invocation)),
   );
 }
 
@@ -2392,6 +2463,19 @@ const reworkBriefSaveParams = {
   findings: z.array(reworkFindingSchema).min(1).describe("Structured rework findings for this task"),
 };
 const reworkBriefSaveSchema = z.object(reworkBriefSaveParams);
+
+const checkpointSaveParams = {
+  projectDir: projectDirParam,
+  milestoneId: nonEmptyString("milestoneId").describe("Milestone ID (e.g. M001)"),
+  sliceId: z.string().optional().describe("Slice ID (e.g. S01); omit for a milestone checkpoint"),
+  taskId: z.string().optional().describe("Task ID (e.g. T01); pass it when a task is in progress"),
+  kind: z.enum(["pause", "handoff"]).describe("pause: work stops and the same work resumes; handoff: another session or a later phase picks the work up"),
+  confirmedContext: nonEmptyString("confirmedContext").describe("What is done and confirmed, with evidence"),
+  unresolved: z.string().optional().describe("Remaining work, open questions, and what not to do"),
+  evidence: z.string().optional().describe("Commands, files and results that support the confirmed context"),
+  nextAction: nonEmptyString("nextAction").describe("The one concrete action the next session takes first"),
+};
+const checkpointSaveSchema = z.object(checkpointSaveParams);
 
 const sliceCompleteParams = {
   projectDir: projectDirParam,
@@ -3438,6 +3522,20 @@ export function registerWorkflowTools(
         parsed.projectDir,
         parsed,
         mcpPlanningInvocation("gsd_rework_brief_save", extra),
+      );
+    },
+  );
+
+  server.tool(
+    "gsd_checkpoint_save",
+    "Save a Work Checkpoint row (pause or handoff) for a milestone, slice or task. The row is the resume state; CONTINUE.md is rendered from it.",
+    checkpointSaveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const parsed = parseWorkflowArgs(checkpointSaveSchema, args);
+      return handleCheckpointSave(
+        parsed.projectDir,
+        parsed,
+        mcpPlanningInvocation("gsd_checkpoint_save", extra),
       );
     },
   );

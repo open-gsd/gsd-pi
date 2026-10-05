@@ -47,7 +47,7 @@
 | `/gsd eval-review <sliceId>` | Audit a slice's AI evaluation strategy and write a scored `<sliceId>-EVAL-REVIEW.md`. Flags: `--force` overwrites; `--show` prints the existing audit. See [eval-review](eval-review.md). |
 | `/gsd extract-learnings <MID>` | Extract structured Decisions, Lessons, Patterns, and Surprises from a completed milestone — writes `<MID>-LEARNINGS.md` audit trail, persists durable knowledge through the memory/decision stores, and renders each captured Pattern and Lesson into `.gsd/KNOWLEDGE.md`. Runs automatically at milestone completion. |
 | `/gsd fast` | Toggle service tier for supported models (prioritized API routing) |
-| `/gsd rate` | Rate last unit's model tier (over/ok/under) — improves adaptive routing |
+| `/gsd rate` | Rate last unit's model tier (over/ok/under) or reset the routing history — improves adaptive routing |
 | `/gsd changelog` | Show categorized release notes |
 | `/gsd logs` | Browse activity logs, debug logs, and metrics |
 | `/gsd remote` | Control remote auto-mode |
@@ -104,7 +104,7 @@ After writing the file, GSD attempts to open it in a browser using the local pla
 | `/gsd skill-health --stale N` | Show skills unused for N+ days |
 | `/gsd hooks` | Show configured post-unit and pre-dispatch hooks |
 | `/gsd run-hook` | Manually trigger a specific hook |
-| `/gsd migrate` | Migrate a v1 `.planning` directory to `.gsd` format |
+| `/gsd migrate` | Preview the migration of a v1 `.planning` directory to `.gsd` format, then approve the exact hash shown with `/gsd migrate --preview=<sha256>` |
 | `/gsd recover` | Preview an explicit legacy markdown import, then approve the exact hash shown with `/gsd recover --preview=<sha256>` |
 | `/gsd recover <recoveryActionId>` | Resume one repaired Task recovery abort or remediation after supplying repair and verification evidence |
 | `/gsd rebuild markdown` | Preserve externally edited modeled projections under `.gsd/quarantine/projections/`, then rebuild from the canonical database without importing markdown |

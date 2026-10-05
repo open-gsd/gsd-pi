@@ -262,6 +262,7 @@ FOREIGN KEY milestone_id → milestones(id)
 
 - Index: `idx_slices_active` (milestone_id, status)
 - Status values: `pending`, `in_progress`, `complete`, `skipped` (legacy/imported `done` and `closed` are treated as closed aliases by `status-guards.ts`)
+- `replan_triggered_at` is the replan trigger that the state derivation reads. A capture that asks for a replan stamps it in one `slice.replan.trigger` Domain Operation (`triage-resolution.ts`). `S##-REPLAN-TRIGGER.md` is a render of the column; nothing reads the file.
 
 ---
 
@@ -306,6 +307,7 @@ FOREIGN KEY (milestone_id, slice_id) → slices(milestone_id, id)
 
 - Indexes: `idx_tasks_active` (milestone_id, slice_id, status), `idx_tasks_escalation_pending`
 - Status values: `pending`, `in_progress`, `complete`, `skipped`, `blocked` (legacy/imported `done` and `closed` are treated as complete aliases; `insertTask` stamps `completed_at` for `complete`/`done`/`closed`, but not `skipped`)
+- The `escalation_*` columns hold only an escalation from before the database stored escalations as Open Questions. A new escalation does not set them: its open question is the pause, and the `task.escalation.override_claimed` event (the `task.escalation.override.claim` Domain Operation) records that a prompt received the response. A non-null `escalation_override_applied_at` that is not older than the response is a claim from a build before that event, and it also counts as delivered; no build writes the column now. The columns are still read for a Task that has no escalation question, so that a pre-database pause or response is not lost. They are not retired.
 
 ---
 
@@ -754,8 +756,10 @@ the runtime-control feature, the
 [`milestone_integration_branches`](#milestone_integration_branches-non-versioned)
 feature, the
 [custom workflow run](#custom-workflow-run-tables-non-versioned) feature, the
-[`unit_metrics`](#unit_metrics-non-versioned) feature and the
+[`unit_metrics`](#unit_metrics-non-versioned) feature, the
 [`project_milestone_sequence`](#project_milestone_sequence-non-versioned)
+feature and the
+[`remote_question_prompts`](#remote_question_prompts-non-versioned)
 feature below;
 `db-liveness-backstop-schema.ts` owns the liveness table and open-wedge-index
 DDL. Startup repair and `/gsd doctor` query the same registry, so missing
@@ -887,6 +891,31 @@ FOREIGN KEY dispatch_id → unit_dispatches(id)
 
 ---
 
+#### `remote_question_prompts` (non-versioned)
+
+```
+id                TEXT PRIMARY KEY
+channel           TEXT NOT NULL      ← 'slack' | 'discord' | 'telegram'
+status            TEXT NOT NULL      ← 'pending' | 'answered' | 'timed_out' | 'failed' | 'cancelled'
+questions_json    TEXT NOT NULL      ← the questions that were asked
+ref_json          TEXT               ← the message in the channel; NULL until the prompt is sent
+response_json     TEXT               ← the answer of the user
+context_source    TEXT
+created_at        INTEGER NOT NULL   ← epoch milliseconds, as are the other times
+updated_at        INTEGER NOT NULL
+timeout_at        INTEGER NOT NULL
+poll_interval_ms  INTEGER NOT NULL
+last_poll_at      INTEGER
+last_error        TEXT
+```
+
+- DDL owner: `db-remote-question-prompt-schema.ts`. Access: `db/writers/remote-question-prompts.ts`, used by `remote-questions/store.ts`.
+- One row for each question prompt sent to a remote channel. It is delivery state of a transport, written outside Domain Operations. It replaces the `~/.gsd/runtime/remote-questions/<id>.json` files; nothing writes or reads those files now.
+- A prompt is not resumed: each ask sends a new message and writes a new row, also when a `pending` row has the same questions.
+- With no project database open, a prompt is not stored. A row write that fails is logged and not thrown, so the answer still reaches the caller.
+
+---
+
 #### Runtime control rows (non-versioned)
 
 `db-runtime-control-schema.ts` owns the DDL. `db/writers/runtime-control.ts` is
@@ -991,6 +1020,35 @@ PRIMARY KEY (gate_kind, gate_id)
   tool runs. A gate write records nothing and logs a warning.
 - Only a project with no database keeps the gate in process memory. The first
   gate call after the database exists moves that state into the rows.
+
+##### `discussion_handoffs`
+
+The pending discuss-to-auto handoff: one row per project root while a guided
+discussion waits to start auto-mode. It replaces the session-only pending
+auto-start map as the durable record, and the agent-written
+`.gsd/DISCUSSION-MANIFEST.json` gate file, which is no longer read or written.
+
+```
+base_path    TEXT PRIMARY KEY   ← project root that the discussion was dispatched from
+milestone_id TEXT NOT NULL      ← primary milestone of the discussion
+step         INTEGER            ← 1 | 0; NULL when the caller did not set the flag
+start_auto   INTEGER            ← 1 | 0; NULL when the caller did not set the flag
+session_id   TEXT               ← the conversation that holds the interview
+created_at   INTEGER NOT NULL   ← discussion start (epoch ms)
+```
+
+- Written by `setPendingAutoStart` (`pending-auto-start.ts`) when a discussion
+  is dispatched. The in-memory map holds the same entry bound to the live
+  session handles.
+- After a restart, `/gsd` binds the row to the current command
+  (`restorePendingAutoStart`) when `session_id` is the current conversation. A
+  row of another conversation is deleted.
+- Deleted when the handoff is accepted and auto-mode starts, and when the
+  pending entry is cleared: a stale discussion, `/clear` or `/new`, or a ready
+  signal that was rejected too many times.
+- The handoff gate reads rows only: each milestone that the discussion
+  registered needs a CONTEXT or CONTEXT-DRAFT `artifacts` row, a planned slice,
+  or a milestone-scope Work Checkpoint (the record of "queue it for later").
 
 ##### `exec_runs`
 
@@ -1748,6 +1806,28 @@ authority_epoch        INTEGER NOT NULL
   head for the same project, scope, and lifecycle with the next sequence and
   causally newer provenance. Updates and deletes fail.
 - Index: `idx_workflow_checkpoints_scope` (project_id, scope_key, sequence)
+- Two scope chains exist. The `task:` chain belongs to task recovery
+  (`gsd_task_recovery_resume`). The `continue:<milestone>[/<slice>[/<task>]]`
+  chain is the resume state: the `checkpoint.save` Domain Operation
+  (`work-checkpoint.ts`) appends to it for `gsd_checkpoint_save` (`pause` or
+  `handoff`) and for the pause checkpoint that session compaction saves for the
+  active task.
+- The head of a `continue:` chain selects the resume path: the Resume State of
+  the execute-task and guided-resume-task prompts, the Resume choice of `/gsd`,
+  and the handoff of `/gsd resume-work`. `CONTINUE.md` is a one-way render of
+  the row (`renderWorkCheckpoint`); no reader takes resume state from
+  `CONTINUE.md`, `continue.md` or `HANDOFF.md`, and the write intercept refuses
+  an agent write to a `CONTINUE.md` under `.gsd/milestones` or `.gsd/phases`.
+- `/gsd resume-work` reads the head of one item only: the active task, else the
+  active slice, else the active milestone. It does not use the checkpoint of
+  another item. The head is shown only while its item is not `completed` or
+  `cancelled` and the work of the item did not change after the save. A later
+  domain event of the same item with a type in `WORK_CHANGE_EVENT_TYPES`
+  (`work-checkpoint.ts`: planned, replanned, completed, cancelled, discarded,
+  reopened) or a later `artifact.saved` event in the scope of the item
+  supersedes it. Attempt, verification, recovery and dispatch events do not. A
+  superseded row is hidden, not deleted. The other readers do not apply this
+  filter.
 
 Index `idx_workflow_questions_open` supports open-Question lookup by project,
 lifecycle, and status.
@@ -2594,6 +2674,7 @@ error names the row and `/gsd db adopt`.
 | `gsd_skip_slice` | project_authority, workflow operations/lifecycles, slices, tasks, running Attempts and dispatches | project_authority, workflow operations/events/outbox/Projection Work, Slice/Task lifecycles, Slice-scoped Waiver, workflow execution Attempts, immutable Attempt Results, Kernel checkpoints, slices, tasks, dispatches | readable state projections after commit |
 | `gsd_task_reopen` | tasks, slices, milestones | tasks | deletes S##-T##-SUMMARY.md and legacy T##-SUMMARY.md |
 | `gsd_task_recovery_resume` | project_authority, workflow_operations, workflow_item_lifecycles, workflow_execution_attempts, workflow_failure_observations, workflow_recovery_actions, workflow_blockers, workflow_domain_events, workflow_work_checkpoints | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_work_checkpoints | — |
+| `gsd_checkpoint_save` | project_authority, workflow_operations, workflow_item_lifecycles, workflow_work_checkpoints | project_authority, workflow_operations, workflow_domain_events, workflow_outbox, workflow_projection_work, workflow_work_checkpoints (one `checkpoint.save` operation) | CONTINUE.md of the slice or milestone (render of the head checkpoint) |
 | `gsd_slice_reopen` | project_authority, workflow operations/lifecycles, workflow_waivers, slices, tasks, immutable execution history | project_authority, workflow operations/events/outbox/Projection Work, Slice/Task lifecycles, workflow_waivers, slices, tasks, quality_gates; removes the stale evidence of the Slice (verification_evidence, run-uat assessments and their artifacts, the UAT gate, uat_retry_counters), keeps the removed rows in the reopen event payload, and sets `attempt_ref` of its `uat_exec` exec_runs to NULL | repairs/removes Slice, UAT, Task SUMMARY, PLAN, ROADMAP, and STATE projections after commit |
 | `gsd_milestone_reopen` | project_authority, workflow operations/lifecycles, Waivers and Requirement Dispositions, milestones, slices, tasks, active Attempts, dependent Milestones | project_authority, workflow operations/events/outbox/Projection Work, Milestone/Slice/Task lifecycles, Waiver dispositions, milestones, slices, tasks, quality_gates; removes the milestone-validation assessment and, for each reopened Slice, the same stale evidence as `gsd_slice_reopen`, and keeps the removed rows in the reopen event payload | fenced removal or repair of Milestone, Slice, UAT, Task, PLAN, ROADMAP, and STATE projections after commit |
 | `gsd_milestone_park`, `gsd_milestone_unpark` | project_authority, workflow operations/lifecycles, milestones | project_authority, workflow operations/events/Projection Work, Milestone lifecycle, milestones.status | PARKED.md rendered or removed after commit; STATE.md |
@@ -2660,6 +2741,8 @@ Task-bearing calls to `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, and
 `gsd_rework_brief_save` persists structured findings for a task. MCP callers may omit `projectDir`; the server defaults it to the current project/worktree root. Required fields are `milestoneId`, `sliceId`, `taskId`, and non-empty `findings`. Each finding requires `findingId`, `severity` (`blocking` or `advisory`), `description`, `requiredFix`, and `verificationCommands`; optional fields are `status`, `evidence`, and `decisionRef`.
 
 `gsd_task_complete` treats the task summary and slice plan projection as retryable delivery work after authoritative completion commits. In flat-phase layout it writes `S##-T##-SUMMARY.md` at the phase root so duplicate task IDs in different slices cannot collide; readers still accept legacy flat `T##-SUMMARY.md` summaries. If writing the task summary or re-rendering `NN-MM-PLAN.md` fails after the database transaction commits, the tool returns a visible projection error while leaving the committed task completion, Attempt Result, verification evidence, and lifecycle state intact for projection repair on retry. It also rejects completion when the task has pending blocking rework findings. To complete such a task, the caller must include `reworkResolution` entries with `findingId`, `status: "resolved"`, and non-empty `evidence`, or `status: "deferred-with-override"` with non-empty `evidence` and a `decisionRef`.
+
+`gsd_checkpoint_save` saves a `pause` or `handoff` Work Checkpoint for a milestone, slice, or task that has a lifecycle row; a unit with no lifecycle row is refused and nothing is written. Required fields are `milestoneId`, `kind`, `confirmedContext`, and `nextAction`; `sliceId`, `taskId`, `unresolved`, and `evidence` are optional, and `taskId` needs `sliceId`. The row extends the `continue:` chain of the work item and is the resume state. The tool then renders `CONTINUE.md`; when the render fails the tool still succeeds and reports that the row is the resume state.
 
 `gsd_task_recovery_resume` appends a correction Work Checkpoint and `task.recovery.resumed` event for the exact current agent-owned abort or remediation after receiving a nonblank repair summary and non-empty structured evidence. The predecessor Attempt, its Result, the Recovery Action, and recovery budget remain unchanged. The event authorizes only the immediate lineage successor Attempt; stale or duplicate actions, open blockers, and actions superseded by a later Attempt fail closed.
 

@@ -9,7 +9,7 @@
 //     `auto-prompts.ts` where the per-artifact-key resolver lives.
 //   - Caller-supplied resolver means the composer can be unit-tested with
 //     trivial mocks; production wiring in `auto-prompts.ts` dispatches to
-//     the existing `inlineFile` / `inline*FromDb` helpers.
+//     the existing `inlineNarrative` / `inline*FromDb` helpers.
 //   - Null-returning resolvers are skipped silently: they model the
 //     "artifact is optional / missing / not applicable to this milestone"
 //     case. The composer never errors on a missing artifact.

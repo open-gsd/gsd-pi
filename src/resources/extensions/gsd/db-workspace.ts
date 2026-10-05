@@ -555,6 +555,21 @@ export function closeWorkflowDatabase(): void {
   closeDatabase();
 }
 
+/** The path of the open database, or null: the state that `restoreWorkflowDatabase` gives back. */
+export function openWorkflowDatabasePathOrNull(): string | null {
+  return isDbAvailable() ? getDbPath() : null;
+}
+
+/**
+ * Give the process handle back to the database that was open before a command
+ * opened one for its own use. `before` is null when no database was open, so
+ * the handle of the command is closed.
+ */
+export function restoreWorkflowDatabase(before: string | null): void {
+  if (before === null) closeDatabase();
+  else if (getDbPath() !== before) openWorkflowDatabasePath(before);
+}
+
 export function closeWorkflowDatabaseByWorkspace(workspace: GsdWorkspace): void {
   closeDatabaseByWorkspace(workspace);
 }
@@ -774,10 +789,17 @@ function prepareVerifiedImportEvidence(
 }
 
 function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string {
-  const counts = preview.preview.counts;
   return [
     `Import Preview ${preview.preview.preview_id}`,
     `Preview hash: ${preview.preview_hash}`,
+    ...importPreviewTextLines(preview),
+  ].join("\n");
+}
+
+/** The sources, mappings, diagnoses and choices of a Preview, below the hash that the operator approves. */
+function importPreviewTextLines(preview: LegacyImportPreviewArtifact): string[] {
+  const counts = preview.preview.counts;
+  return [
     `Source set: ${preview.preview.source_set_hash}`,
     `Change set: ${preview.preview.change_set_hash}`,
     `Changes: ${counts.create} create, ${counts.update} update, ${counts.delete} delete, ${counts.preserve} preserve`,
@@ -809,7 +831,13 @@ function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string 
       .map((id) => (
         `To write the KNOWLEDGE.md text of ${id} over its database row: ${formatLegacyImportKnowledgeFileRowChoice(id)}`
       )),
-  ].join("\n");
+    ...preview.preview.diagnoses
+      .filter((diagnosis) => diagnosis.code === "artifact-row-conflict")
+      .flatMap((diagnosis) => /^(\S+) file text /u.exec(diagnosis.message)?.[1] ?? [])
+      .map((id) => (
+        `To write the file text of ${id} over its database row: ${formatLegacyImportKnowledgeFileRowChoice(id)}`
+      )),
+  ];
 }
 
 const RECOVER_ROOT_FILES = ["DECISIONS", "REQUIREMENTS", "KNOWLEDGE", "PROJECT", "QUEUE"] as const;
@@ -865,7 +893,7 @@ export function prepareVerifiedRecoverApplication(
   const unused = knowledgeFileRows.filter((id) => !applied.has(id));
   if (unused.length > 0) {
     throw new Error(
-      `--choice names a KNOWLEDGE.md row that does not differ from an active database row: ${unused.join(", ")}`,
+      `--choice names a file row that does not differ from an active database row: ${unused.join(", ")}`,
     );
   }
   return evidence;
@@ -1285,13 +1313,23 @@ export function applyOrResumeVerifiedRecoverApplication(
     ?? applyVerifiedRecoverApplication(basePath, approvedPreviewHash);
 }
 
-export function applyVerifiedMigrationApplication(
+/**
+ * Seal the Import Preview of a generated migration projection against the open
+ * database and pass it to `use`. The Preview holds no path of the temporary
+ * copy, so the same sources on the same database revision give the same hash.
+ */
+function withMigrationImportPreview<T>(
   basePath: string,
   sourcePaths: readonly string[],
-  sourceGsdRoot: string = gsdRoot(basePath),
-  beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
-  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
-): VerifiedMigrationCounts {
+  sourceGsdRoot: string,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[],
+  use: (sealed: {
+    created: Pick<PreparedVerifiedRecoverApplication, "basePath" | "previewInput" | "preview">;
+    preview: LegacyImportPreviewArtifact;
+    logicalPaths: readonly string[];
+    expectedArtifacts: readonly VerifiedMigrationArtifactEvidence[];
+  }) => T,
+): T {
   const location = resolveWorkflowDatabaseLocation(basePath);
   if (sourcePaths.length === 0) throw new Error("gsd migrate requires generated source files");
   const generatedGsd = realpathSync(sourceGsdRoot);
@@ -1418,8 +1456,75 @@ export function applyVerifiedMigrationApplication(
           : []
       )),
     );
+    return use({ created, preview: resolved, logicalPaths, expectedArtifacts });
+  } finally {
+    rmSync(stagingRoot, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The Import Preview that `/gsd migrate` asks the operator to approve. It
+ * writes nothing: no backup, no Import Application.
+ */
+export function previewVerifiedMigrationApplication(
+  basePath: string,
+  sourcePaths: readonly string[],
+  sourceGsdRoot: string,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
+): { previewHash: string; authorizationText: string } {
+  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, ({ preview }) => {
+    const previewHash = migrationApprovalHash(preview);
+    return {
+      previewHash,
+      authorizationText: [`Preview hash: ${previewHash}`, ...importPreviewTextLines(preview)].join("\n"),
+    };
+  });
+}
+
+/**
+ * The hash that the operator approves for `/gsd migrate`: the sealed Preview
+ * without its identity. The identity holds the random id of the database. A
+ * target with no database gets its Preview from a temporary database, and the
+ * approved run creates the project database, so the approval must not hold
+ * that id. The base revision, the sources and every change stay in the hash.
+ */
+function migrationApprovalHash(preview: LegacyImportPreviewArtifact): string {
+  const { preview_id: _previewId, ...approved } = preview.preview;
+  return hashLegacyImportValue(approved as unknown as LegacyImportValue);
+}
+
+/**
+ * The approval hash of a migration Import Application that the open database
+ * holds. The apply records it as the trace id of the operation; an Application
+ * of an earlier build has no trace id, so its hash comes from its Preview.
+ */
+export function appliedMigrationApprovalHash(operationId: string): string {
+  const application = inspectLegacyImportApplicationEvidence(operationId);
+  return application.traceId ?? migrationApprovalHash(application.preview);
+}
+
+/**
+ * Apply the Import Preview of a generated migration projection. When the
+ * caller gives the Preview hash that the operator approved, a Preview with
+ * another hash is refused before the backup and the Import Application.
+ */
+export function applyVerifiedMigrationApplication(
+  basePath: string,
+  sourcePaths: readonly string[],
+  sourceGsdRoot: string = gsdRoot(basePath),
+  beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
+  approvedPreviewHash?: string,
+): VerifiedMigrationCounts {
+  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, (sealed) => {
+    if (approvedPreviewHash !== undefined && migrationApprovalHash(sealed.preview) !== approvedPreviewHash) {
+      throw new Error(
+        `gsd migrate Preview ${migrationApprovalHash(sealed.preview)} is not the approved Preview ${approvedPreviewHash}; `
+        + "nothing was imported. Run /gsd migrate again to see the current Preview.",
+      );
+    }
     const evidence = prepareVerifiedImportEvidence(
-      { ...created, preview: resolved },
+      { ...sealed.created, preview: sealed.preview },
       "pre-migrate-import",
     );
     beforeApply?.({
@@ -1432,16 +1537,16 @@ export function applyVerifiedMigrationApplication(
         sourceTransport: "internal",
         actorType: "system",
         actorId: "gsd-migrate",
+        // The audit record of what the operator approved.
+        traceId: migrationApprovalHash(evidence.preview),
       },
       previewInput: evidence.previewInput,
       preview: evidence.preview,
       backup: evidence.backup,
     });
     const application = inspectLegacyImportApplicationEvidence(receipt.operationId);
-    return verifiedMigrationCounts(application, logicalPaths, expectedArtifacts);
-  } finally {
-    rmSync(stagingRoot, { recursive: true, force: true });
-  }
+    return verifiedMigrationCounts(application, sealed.logicalPaths, sealed.expectedArtifacts);
+  });
 }
 
 function verifiedMigrationCounts(

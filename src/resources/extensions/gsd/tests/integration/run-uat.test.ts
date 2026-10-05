@@ -878,12 +878,9 @@ test('(w2) run-uat prompt promotes harness from slice context when UAT only name
         '- Open the app at the localhost URL printed by the server.',
       ].join('\n');
       writeSliceFile(base, 'M007', 'S01', 'UAT', uatContent);
-      writeSliceFile(
-        base,
-        'M007',
-        'S01',
-        'SUMMARY',
-        [
+      // The prompt reads the slice summary from the slice row, not from a file.
+      seedSliceRows('M007', [{ id: 'S01', title: 'Only slice', status: 'complete' }]);
+      storeSliceSummary('M007', 'S01', [
           '# S01 Summary',
           '',
           'Verification: `npm run test:uat` passed with clean browser diagnostics.',

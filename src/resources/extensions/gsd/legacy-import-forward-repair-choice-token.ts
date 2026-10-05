@@ -16,9 +16,10 @@ export function parseLegacyImportPreviewChoices(args: string): LegacyImportPrevi
   }));
 }
 
-// A knowledge row choice names one KNOWLEDGE.md row (K/P/L###) whose file
-// text replaces the differing database row.
-const KNOWLEDGE_FILE_ROW_CHOICE_PATTERN = /(?:^|\s)--choice=([KPL]\d+)\.use-file(?=\s|$)/gu;
+// A file row choice names one KNOWLEDGE.md row (K/P/L###) or one milestone
+// CONTEXT or RESEARCH document (M###-CONTEXT) whose file text replaces the
+// differing database row.
+const KNOWLEDGE_FILE_ROW_CHOICE_PATTERN = /(?:^|\s)--choice=([KPL]\d+|M\d+(?:-[a-z0-9]+)?-(?:CONTEXT|RESEARCH))\.use-file(?=\s|$)/gu;
 
 export function formatLegacyImportKnowledgeFileRowChoice(knowledgeId: string): string {
   return `--choice=${knowledgeId}.use-file`;

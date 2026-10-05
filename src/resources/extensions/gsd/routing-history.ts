@@ -1,11 +1,12 @@
 // GSD Extension — Routing History (Adaptive Learning)
 // Tracks success/failure per tier per unit-type pattern to improve
-// classification accuracy over time.
+// classification accuracy over time. The history is one runtime_kv row in the
+// project database; no file is read or written.
 
-import { join } from "node:path";
-import { gsdRoot } from "./paths.js";
 import type { ComplexityTier } from "./types.js";
-import { loadJsonFile, saveJsonFile } from "./json-persistence.js";
+import { getRuntimeKv, setRuntimeKv } from "./db/runtime-kv.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { logWarning } from "./workflow-logger.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,7 +41,7 @@ export interface FeedbackEntry {
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const HISTORY_FILE = "routing-history.json";
+const HISTORY_KV_KEY = "routing_history";
 const ROLLING_WINDOW = 50;        // only consider last N entries per pattern
 const FAILURE_THRESHOLD = 0.20;   // >20% failure rate triggers tier bump
 const FEEDBACK_WEIGHT = 2;        // feedback signals count 2x vs automatic
@@ -48,16 +49,14 @@ const FEEDBACK_WEIGHT = 2;        // feedback signals count 2x vs automatic
 // ─── In-Memory State ─────────────────────────────────────────────────────────
 
 let history: RoutingHistoryData | null = null;
-let historyBasePath = "";
 
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /**
- * Initialize routing history for a project.
+ * Initialize routing history from the open project database.
  */
-export function initRoutingHistory(base: string): void {
-  historyBasePath = base;
-  history = loadHistory(base);
+export function initRoutingHistory(): void {
+  history = loadHistory();
 }
 
 /**
@@ -65,7 +64,6 @@ export function initRoutingHistory(base: string): void {
  */
 export function resetRoutingHistory(): void {
   history = null;
-  historyBasePath = "";
 }
 
 /**
@@ -116,19 +114,20 @@ export function recordOutcome(
   }
 
   history.updatedAt = new Date().toISOString();
-  saveHistory(historyBasePath, history);
+  saveHistory(history);
 }
 
 /**
  * Record user feedback for the last completed unit.
+ * Returns false when the rating was not stored in the database.
  */
 export function recordFeedback(
   unitType: string,
   unitId: string,
   tier: ComplexityTier,
   rating: "over" | "under" | "ok",
-): void {
-  if (!history) return;
+): boolean {
+  if (!history) return false;
 
   history.feedback.push({
     unitType,
@@ -163,7 +162,7 @@ export function recordFeedback(
   // "ok" = no adjustment needed
 
   history.updatedAt = new Date().toISOString();
-  saveHistory(historyBasePath, history);
+  return saveHistory(history);
 }
 
 /**
@@ -194,9 +193,9 @@ export function getAdaptiveTierAdjustment(
 /**
  * Clear all routing history (user-triggered reset).
  */
-export function clearRoutingHistory(base: string): void {
+export function clearRoutingHistory(): boolean {
   history = createEmptyHistory();
-  saveHistory(base, history);
+  return saveHistory(history);
 }
 
 /**
@@ -263,10 +262,6 @@ function createEmptyHistory(): RoutingHistoryData {
   };
 }
 
-function historyPath(base: string): string {
-  return join(gsdRoot(base), HISTORY_FILE);
-}
-
 function isRoutingHistoryData(data: unknown): data is RoutingHistoryData {
   return (
     typeof data === "object" &&
@@ -277,10 +272,20 @@ function isRoutingHistoryData(data: unknown): data is RoutingHistoryData {
   );
 }
 
-function loadHistory(base: string): RoutingHistoryData {
-  return loadJsonFile(historyPath(base), isRoutingHistoryData, createEmptyHistory);
+function loadHistory(): RoutingHistoryData {
+  const stored = getRuntimeKv("global", "", HISTORY_KV_KEY);
+  return isRoutingHistoryData(stored) ? stored : createEmptyHistory();
 }
 
-function saveHistory(base: string, data: RoutingHistoryData): void {
-  saveJsonFile(historyPath(base), data);
+function saveHistory(data: RoutingHistoryData): boolean {
+  // Without a database the history lives for this process only.
+  if (!isDbAvailable()) return false;
+  try {
+    setRuntimeKv("global", "", HISTORY_KV_KEY, data);
+    return true;
+  } catch (err) {
+    // Learning data only: a failed write must not stop the unit that reports its outcome.
+    logWarning("db", `routing history not stored: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
 }

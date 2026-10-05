@@ -417,6 +417,21 @@ export function migrationPublicationRequestHash(sourcePath: string, stagedGsd: s
   });
 }
 
+/** The files and the saved artifacts of a staged projection, as a publication record holds them. */
+export function stagedMigrationProjection(stagedGsd: string, staged: WrittenFiles): {
+  logicalPaths: string[];
+  artifactHashes: PublicationFileHash[];
+} {
+  const files = treeHashes(stagedGsd).filter((entry) => entry.kind !== "directory");
+  const artifacts = new Set((staged.artifactPaths ?? []).map((path) => (
+    relative(stagedGsd, path).replaceAll("\\", "/")
+  )));
+  return {
+    logicalPaths: files.map((entry) => entry.logicalPath),
+    artifactHashes: files.filter((entry) => artifacts.has(entry.logicalPath)),
+  };
+}
+
 export function prepareMigrationPublication(input: {
   sourcePath: string;
   targetRoot: string;

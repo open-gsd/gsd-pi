@@ -176,6 +176,18 @@ What shipped:
   `/gsd recover` imports the file's Rule, Pattern and Lesson rows through an
   Import Preview, which also lists the content it does not import. Knowledge
   readers read the database, not the file.
+- Prompt builders take ROADMAP, CONTEXT, RESEARCH, PLAN and SUMMARY text of a
+  Milestone, Slice or Task from the database, not from the projection files.
+  A file with no database content is not prompt narrative. The Milestone list of
+  a command or a prompt comes from the Milestone rows; a milestone directory
+  with no row is not a Milestone. The directories are scanned only for id
+  reservation and for doctor and drift checks.
+  `docs/dev/state-db-cutover-milestone-decision.md` lists the readers, the
+  prompt inputs that are still read from files, and the order of the two
+  database sources (the Slice or Task row, then the artifact row).
+- A SUMMARY is prompt narrative only while its Slice or Task is done. A
+  CONTEXT-DRAFT is a discussion seed only while the Milestone has no saved
+  CONTEXT.
 - Steer overrides (`/gsd steer`) are `override.*` events of Domain Operations.
   OVERRIDES.md is a one-way render of them: dispatch, prompts and artifact
   verification read only the database. A file block that no database override

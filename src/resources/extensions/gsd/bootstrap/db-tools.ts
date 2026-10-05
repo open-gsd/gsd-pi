@@ -2350,6 +2350,66 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
 	registerWorkflowTool(pi, reworkBriefSaveTool);
 
+	// ─── gsd_checkpoint_save ───────────────────────────────────────────────
+
+	const checkpointSaveExecute = async (
+		toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeCheckpointSave } = await loadWorkflowExecutors();
+		return executeCheckpointSave(
+			params,
+			resolveWorkflowToolBasePath(_ctx, params),
+			piPlanningInvocation("gsd_checkpoint_save", toolCallId),
+		);
+	};
+
+	const checkpointSaveTool = {
+		name: "gsd_checkpoint_save",
+		label: "Save Work Checkpoint",
+		description:
+			"Save a Work Checkpoint row for a milestone, slice or task when work stops before it is complete. The row is the resume state; CONTINUE.md is rendered from it and is never read back.",
+		promptSnippet: "Save the resume state of unfinished work",
+		promptGuidelines: [
+			"Use gsd_checkpoint_save when you pause or hand off unfinished work. Do not write CONTINUE.md, continue.md or HANDOFF.md.",
+			"Pass taskId when a task is in progress: the next session of that task gets the checkpoint in its Resume State.",
+			"nextAction is one concrete action, not a goal.",
+		],
+		parameters: Type.Object({
+			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
+			sliceId: Type.Optional(
+				Type.String({ description: "Slice ID (e.g. S01); omit for a milestone checkpoint" }),
+			),
+			taskId: Type.Optional(
+				Type.String({ description: "Task ID (e.g. T01); pass it when a task is in progress" }),
+			),
+			kind: StringEnum(["pause", "handoff"], {
+				description:
+					"pause: work stops and the same work resumes; handoff: another session or a later phase picks the work up",
+			}),
+			confirmedContext: Type.String({
+				description: "What is done and confirmed, with evidence",
+			}),
+			unresolved: Type.Optional(
+				Type.String({ description: "Remaining work, open questions, and what not to do" }),
+			),
+			evidence: Type.Optional(
+				Type.String({
+					description: "Commands, files and results that support the confirmed context",
+				}),
+			),
+			nextAction: Type.String({
+				description: "The one concrete action the next session takes first",
+			}),
+		}),
+		execute: checkpointSaveExecute,
+	};
+
+	registerWorkflowTool(pi, checkpointSaveTool);
+
 	// ─── gsd_reassess_roadmap (gsd_roadmap_reassess alias) ─────────────────
 
 	const reassessRoadmapExecute = async (

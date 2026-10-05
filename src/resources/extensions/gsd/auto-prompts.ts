@@ -9,7 +9,8 @@
  * utility.
  */
 
-import { loadFile, parseContinue, parseSummary, formatOverridesSection, parseTaskPlanFile } from "./files.js";
+import { loadFile, parseSummary, formatOverridesSection, parseTaskPlanFile } from "./files.js";
+import { buildResumeSection } from "./work-checkpoint.js";
 import { loadActiveOverrides } from "./overrides.js";
 import type { Override } from "./files.js";
 import { extractVerdict } from "./verdict-parser.js";
@@ -17,18 +18,17 @@ import { readKnowledgeMarkdown } from "./knowledge-projection.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
 import {
   resolveMilestoneFile, resolveSliceFile, resolveSlicePath,
-  resolveTasksDir, resolveTaskFiles, resolveTaskFile,
-  taskIdFromTaskFileName,
+  resolveTasksDir, resolveTaskFile,
   relMilestoneFile, relSliceFile, relSlicePath, relMilestonePath,
   relTaskFile, resolveGsdRootFile, relGsdRootFile, resolveRuntimeFile, targetMilestoneFile,
-  normalizeRealPath,
+  normalizeRealPath, gsdProjectionRoot,
 } from "./paths.js";
 import { resolveInlineLevel, loadEffectiveGSDPreferences, renderLanguageDirectiveForPrompt } from "./preferences.js";
 import { createRepositoryRegistryFromPreferences } from "./repository-registry.js";
 import { isContextModeEnabled } from "./preferences-types.js";
 import type { GSDState, InlineLevel } from "./types.js";
 import type { GSDPreferences } from "./preferences.js";
-import { join, basename, relative, sep } from "node:path";
+import { join, relative, sep } from "node:path";
 import { existsSync } from "node:fs";
 import { computeBudgets, resolveExecutorContextWindow, truncateAtSectionBoundary, type MinimalModelRegistry } from "./context-budget.js";
 import type { TokenProvider } from "./token-counter.js";
@@ -39,11 +39,11 @@ import {
   getPendingGates,
   getPendingGatesForTurn,
   getRoadmapAssessmentForSlice,
+  getScopedArtifact,
   getSlice,
-  getTask,
   isDbAvailable,
 } from "./gsd-db.js";
-import { readMilestoneSlices } from "./db/lifecycle-read.js";
+import { readListedMilestoneIds, readMilestoneSlices, readSliceTasks, type TaskRead } from "./db/lifecycle-read.js";
 import {
   GATE_REGISTRY,
   assertGateCoverage,
@@ -64,7 +64,6 @@ import {
   type ExcerptResolver,
 } from "./unit-context-composer.js";
 import { resolveManifest, type ArtifactKey } from "./unit-context-manifest.js";
-import { resolveSliceResearchLocation } from "./auto-artifact-paths.js";
 import { compileUnitContextContract, type UnitPromptContextContract } from "./tool-contract.js";
 import { readCompactionSnapshot } from "./compaction-snapshot.js";
 import { logWarning } from "./workflow-logger.js";
@@ -73,7 +72,6 @@ import { buildExtractionStepsBlock } from "./commands-extract-learnings.js";
 import { classifyProject, type ProjectClassification } from "./detection.js";
 import { debugLog } from "./debug-logger.js";
 import { buildSkillActivationBlock, buildSkillDiscoveryVars } from "./skill-activation.js";
-import { findMilestoneIds } from "./milestone-ids.js";
 import { buildRunUatPresentationForType, RUN_UAT_TOOL_PRESENTATION_PLAN_ID } from "./tool-presentation-plan.js";
 import { classifyUatContentForRun } from "./uat-policy.js";
 import { checkNeedsRunUat as resolveNeedsRunUat, type UatDispatchCandidate } from "./uat-dispatch.js";
@@ -516,15 +514,16 @@ function renderExecuteTaskOnDemandContext(
   if (!artifacts.includes("slice-research")) {
     return { text: "", skipReason: "not declared by contract" };
   }
-  const research = resolveSliceResearchLocation(base, mid, sid);
-  if (!research.absolutePath || !research.relativePath) {
+  // Research is available when its artifact row is saved; the file is not checked.
+  const research = sliceNarrative(base, mid, sid, "RESEARCH");
+  if (!research.content) {
     return { text: "", skipReason: "missing" };
   }
   return {
     text: [
       "## On-demand Context",
       "",
-      `Slice research is available at \`${research.relativePath}\`. Read it only if the inlined task plan, slice plan excerpt, and carry-forward context do not explain a required implementation detail.`,
+      `Slice research is available at \`${research.relPath}\`. Read it only if the inlined task plan, slice plan excerpt, and carry-forward context do not explain a required implementation detail.`,
     ].join("\n"),
     skipReason: null,
   };
@@ -640,27 +639,17 @@ export function buildSourceFilePaths(
     paths.push(`- **Queue**: \`${displayPath(queuePath, relGsdRootFile("QUEUE"))}\``);
   }
 
-  const contextPath = resolveMilestoneFile(base, mid, "CONTEXT");
-  if (contextPath) {
-    paths.push(`- **Milestone Context**: \`${displayPath(contextPath, relMilestoneFile(base, mid, "CONTEXT"))}\``);
-  }
-
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  if (roadmapPath) {
-    paths.push(`- **Roadmap**: \`${displayPath(roadmapPath, relMilestoneFile(base, mid, "ROADMAP"))}\``);
-  }
-
-  if (sid) {
-    const researchPath = resolveSliceFile(base, mid, sid, "RESEARCH");
-    if (researchPath) {
-      paths.push(`- **Slice Research**: \`${displayPath(researchPath, relSliceFile(base, mid, sid, "RESEARCH"))}\``);
-    }
-  } else {
-    const researchPath = resolveMilestoneFile(base, mid, "RESEARCH");
-    if (researchPath) {
-      paths.push(`- **Milestone Research**: \`${displayPath(researchPath, relMilestoneFile(base, mid, "RESEARCH"))}\``);
-    }
-  }
+  // A Milestone or Slice artifact is listed when its row is saved in the
+  // database; the path is the path of its projection file.
+  const projectionRoot = gsdProjectionRoot(base);
+  const pushSaved = (label: string, type: string, sliceId: string | null): void => {
+    const row = getScopedArtifact(mid, sliceId, null, type);
+    if (row) paths.push(`- **${label}**: \`${displayPath(join(projectionRoot, row.path), `.gsd/${row.path}`)}\``);
+  };
+  pushSaved("Milestone Context", "CONTEXT", null);
+  pushSaved("Roadmap", "ROADMAP", null);
+  if (sid) pushSaved("Slice Research", "RESEARCH", sid);
+  else pushSaved("Milestone Research", "RESEARCH", null);
 
   return paths.length > 0
     ? paths.join("\n")
@@ -669,20 +658,99 @@ export function buildSourceFilePaths(
 
 // ─── Inline Helpers ───────────────────────────────────────────────────────
 
+/** Narrative text of one artifact and the display path of its projection file. */
+export interface Narrative {
+  /** Null when the database has no saved row with content, or is unavailable. */
+  content: string | null;
+  relPath: string;
+  /** True when an artifact row is saved: `relPath` is then the path of a rendered projection file. */
+  saved?: boolean;
+}
+
+/** With no row, `targetRelPath` gives the path where the projection file is rendered. */
+function toNarrative(row: { path: string; full_content: string } | null, targetRelPath: () => string): Narrative {
+  return row
+    ? { content: row.full_content, relPath: `.gsd/${row.path}`, saved: true }
+    : { content: null, relPath: targetRelPath(), saved: false };
+}
+
 /**
- * Load a file and format it for inlining into a prompt.
- * Returns the content wrapped with a source path header, or a fallback
- * message if the file doesn't exist. This eliminates tool calls — the LLM
- * gets the content directly instead of "Read this file:".
+ * Narrative (ROADMAP, CONTEXT, RESEARCH, PLAN, SUMMARY) of a Milestone, read
+ * from its artifact row. The projection file is never read: it is not
+ * workflow authority (ADR-046).
  */
-export async function inlineFile(
-  absPath: string | null, relPath: string, label: string,
-): Promise<string> {
-  const content = absPath ? await loadFile(absPath) : null;
-  if (!content) {
-    return `### ${label}\nSource: \`${relPath}\`\n\n_(not found — file does not exist yet)_`;
-  }
-  return `### ${label}\nSource: \`${relPath}\`\n\n${content.trim()}`;
+export function milestoneNarrative(base: string, mid: string, type: string): Narrative {
+  return toNarrative(getScopedArtifact(mid, null, null, type), () => relMilestoneFile(base, mid, type));
+}
+
+/**
+ * The one precedence rule for narrative that has a carrier column
+ * (`tasks.full_plan_md`, `tasks.full_summary_md`, `slices.full_summary_md`).
+ * The carrier is the first source: the Domain Operation writes it in the
+ * transaction of the lifecycle change, and a reopen or a re-plan clears or
+ * replaces it. The artifact row is the second source: a projection drain
+ * writes it later, and it stays after a reopen.
+ */
+function carrierFirst(narrative: Narrative, carrier: string | undefined): Narrative {
+  return carrier?.trim() ? { ...narrative, content: carrier } : narrative;
+}
+
+/**
+ * A SUMMARY follows the item row: an item that is not done has no SUMMARY
+ * narrative, although its artifact row stays after a reopen.
+ */
+function summaryOfItem(narrative: Narrative, item: { done: boolean; full_summary_md: string } | undefined): Narrative {
+  return item?.done ? carrierFirst(narrative, item.full_summary_md) : { ...narrative, content: null };
+}
+
+/** `milestoneNarrative` for a Slice. A SUMMARY follows `carrierFirst` and `summaryOfItem`. */
+export function sliceNarrative(base: string, mid: string, sid: string, type: string): Narrative {
+  const narrative = toNarrative(getScopedArtifact(mid, sid, null, type), () => relSliceFile(base, mid, sid, type));
+  if (type !== "SUMMARY") return narrative;
+  return summaryOfItem(narrative, readMilestoneSlices(mid).find((row) => row.id === sid));
+}
+
+/** PLAN or SUMMARY of a Task: `milestoneNarrative` with `carrierFirst` and `summaryOfItem`. */
+function taskNarrative(
+  base: string, mid: string, sid: string, tid: string, type: "PLAN" | "SUMMARY",
+  task: TaskRead | undefined = readSliceTasks(mid, sid).find((row) => row.id === tid),
+): Narrative {
+  const narrative = toNarrative(getScopedArtifact(mid, sid, tid, type), () => relTaskFile(base, mid, sid, tid, type));
+  return type === "PLAN" ? carrierFirst(narrative, task?.full_plan_md) : summaryOfItem(narrative, task);
+}
+
+/** The SUMMARY of one done Task: its text and the display path of its projection file. */
+export interface TaskSummaryNarrative {
+  taskId: string;
+  content: string;
+  relPath: string;
+}
+
+/** The SUMMARY narrative of the done Tasks of a Slice, in Task id order. */
+function doneTaskSummaries(base: string, mid: string, sid: string): TaskSummaryNarrative[] {
+  return readSliceTasks(mid, sid)
+    .filter((task) => task.done)
+    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .flatMap((task) => {
+      const { content, relPath } = taskNarrative(base, mid, sid, task.id, "SUMMARY", task);
+      return content ? [{ taskId: task.id, content, relPath }] : [];
+    });
+}
+
+/**
+ * Format narrative for inlining into a prompt, or a not-found note when the
+ * database has none. This eliminates tool calls — the LLM gets the content
+ * directly instead of "Read this file:".
+ */
+function inlineNarrative(narrative: Narrative, label: string): string {
+  return inlineNarrativeOptional(narrative, label)
+    ?? `### ${label}\nSource: \`${narrative.relPath}\`\n\n_(not found — file does not exist yet)_`;
+}
+
+/** `inlineNarrative` that returns null when the database has no narrative. */
+export function inlineNarrativeOptional(narrative: Narrative, label: string): string | null {
+  if (!narrative.content) return null;
+  return `### ${label}\nSource: \`${narrative.relPath}\`\n\n${narrative.content.trim()}`;
 }
 
 /**
@@ -913,13 +981,12 @@ function inlineCompactTemplate(name: "plan" | "task-summary" | "slice-summary", 
  * evidence; follow-up PR can extend or parameterize.
  *
  * If parsing fails (unrecognizable frontmatter, missing id, etc.) the
- * function falls back to `inlineFile` so the closer loses no information.
+ * function falls back to the full summary text so the closer loses no information.
  */
 export async function buildSliceSummaryExcerpt(
-  absPath: string | null, relPath: string, sid: string,
+  content: string | null, relPath: string, sid: string,
 ): Promise<string> {
   const header = `### ${sid} Summary (excerpt)\nSource: \`${relPath}\``;
-  const content = absPath ? await loadFile(absPath) : null;
   if (!content) {
     return `${header}\n\n_(not found — file does not exist yet)_`;
   }
@@ -1009,11 +1076,10 @@ export async function buildSliceAssessmentExcerpt(
 }
 
 export async function buildTaskSummaryExcerpt(
-  absPath: string | null, relPath: string, tid: string, options?: { blocker?: boolean },
+  content: string | null, relPath: string, tid: string, options?: { blocker?: boolean },
 ): Promise<string> {
   const label = options?.blocker ? "Blocker Task Summary" : "Task Summary";
   const header = `### ${label}: ${tid} (excerpt)\nSource: \`${relPath}\``;
-  const content = absPath ? await loadFile(absPath) : null;
   if (!content) {
     return `${header}\n\n_(not found — file does not exist yet)_`;
   }
@@ -1110,9 +1176,7 @@ export async function inlineDependencySummaries(
   for (const dep of depends) {
     if (seen.has(dep)) continue;
     seen.add(dep);
-    const summaryFile = resolveSliceFile(base, mid, dep, "SUMMARY");
-    const summaryContent = summaryFile ? await loadFile(summaryFile) : null;
-    const relPath = relSliceFile(base, mid, dep, "SUMMARY");
+    const { content: summaryContent, relPath } = sliceNarrative(base, mid, dep, "SUMMARY");
     if (summaryContent) {
       sections.push(`#### ${dep} Summary\nSource: \`${relPath}\`\n\n${summaryContent.trim()}`);
     } else {
@@ -1395,11 +1459,7 @@ export async function inlineRoadmapExcerpt(
   mid: string,
   sid: string,
 ): Promise<string | null> {
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  if (!roadmapPath || !existsSync(roadmapPath)) return null;
-
-  const roadmapRel = relMilestoneFile(base, mid, "ROADMAP");
-  const content = await loadFile(roadmapPath);
+  const { content, relPath: roadmapRel } = milestoneNarrative(base, mid, "ROADMAP");
   if (!content) return null;
 
   // Import formatRoadmapExcerpt from context-store
@@ -1435,47 +1495,17 @@ function oneLine(text: string): string {
 
 // ─── Section Builders ──────────────────────────────────────────────────────
 
-export function buildResumeSection(
-  continueContent: string | null,
-  legacyContinueContent: string | null,
-  continueRelPath: string,
-  legacyContinueRelPath: string | null,
-): string {
-  const resolvedContent = continueContent ?? legacyContinueContent;
-  const resolvedRelPath = continueContent ? continueRelPath : legacyContinueRelPath;
-
-  if (!resolvedContent || !resolvedRelPath) {
-    return ["## Resume State", "- No continue file present. Start from the top of the task plan."].join("\n");
-  }
-
-  const cont = parseContinue(resolvedContent);
-  const lines = [
-    "## Resume State",
-    `Source: \`${resolvedRelPath}\``,
-    `- Status: ${cont.frontmatter.status || "in_progress"}`,
-  ];
-
-  if (cont.frontmatter.step && cont.frontmatter.totalSteps) {
-    lines.push(`- Progress: step ${cont.frontmatter.step} of ${cont.frontmatter.totalSteps}`);
-  }
-  if (cont.completedWork) lines.push(`- Completed: ${oneLine(cont.completedWork)}`);
-  if (cont.remainingWork) lines.push(`- Remaining: ${oneLine(cont.remainingWork)}`);
-  if (cont.decisions) lines.push(`- Decisions: ${oneLine(cont.decisions)}`);
-  if (cont.nextAction) lines.push(`- Next action: ${oneLine(cont.nextAction)}`);
-
-  return lines.join("\n");
-}
-
-export async function buildCarryForwardSection(priorSummaryPaths: string[], base: string): Promise<string> {
-  if (priorSummaryPaths.length === 0) {
+/**
+ * Carry-forward lines for the SUMMARY narrative of done Tasks. The text of
+ * each summary follows `carrierFirst` (the Task carrier, then the artifact
+ * row); the file is never read.
+ */
+export async function buildCarryForwardSection(priorSummaries: TaskSummaryNarrative[]): Promise<string> {
+  if (priorSummaries.length === 0) {
     return ["## Carry-Forward Context", "- No prior task summaries in this slice."].join("\n");
   }
 
-  const items = await Promise.all(priorSummaryPaths.map(async (relPath) => {
-    const absPath = join(base, relPath);
-    const content = await loadFile(absPath);
-    if (!content) return `- \`${relPath}\``;
-
+  const items = priorSummaries.map(({ content, relPath }) => {
     const summary = parseSummary(content);
     const provided = summary.frontmatter.provides.slice(0, 2).join("; ");
     const decisions = summary.frontmatter.key_decisions.slice(0, 2).join("; ");
@@ -1492,7 +1522,7 @@ export async function buildCarryForwardSection(priorSummaryPaths: string[], base
     if (diagnostics) parts.push(`diagnostics: ${oneLine(diagnostics)}`);
 
     return `- \`${relPath}\` — ${parts.join(" | ")}`;
-  }));
+  });
 
   return ["## Carry-Forward Context", ...items].join("\n");
 }
@@ -1527,52 +1557,24 @@ export function extractSliceExecutionExcerpt(content: string | null, relPath: st
 
 // ─── Prior Task Summaries ──────────────────────────────────────────────────
 
-/** Resolve where task SUMMARY files live (legacy tasks/ subdir or flat-phase phase dir). */
-function resolveTaskSummariesLocation(
-  base: string, mid: string, sid: string,
-): { dir: string; relPrefix: string } | null {
-  const slicePath = resolveSlicePath(base, mid, sid);
-  if (!slicePath) return null;
-  const tDir = resolveTasksDir(base, mid, sid);
-  const sRel = relSlicePath(base, mid, sid);
-  if (tDir) return { dir: tDir, relPrefix: `${sRel}/tasks` };
-  return { dir: slicePath, relPrefix: sRel };
-}
-
-function summaryFileBelongsToSlice(
-  fileName: string,
-  base: string,
-  mid: string,
-  sid: string,
-): boolean {
-  const tid = taskIdFromTaskFileName(fileName, "SUMMARY");
-  if (!tid) return false;
-  const resolved = resolveTaskFile(base, mid, sid, tid, "SUMMARY");
-  return resolved !== null && basename(resolved) === fileName;
-}
-
-export async function getPriorTaskSummaryPaths(
-  mid: string, sid: string, currentTid: string, base: string,
-): Promise<string[]> {
-  const loc = resolveTaskSummariesLocation(base, mid, sid);
-  if (!loc) return [];
-
-  const summaryFiles = resolveTaskFiles(loc.dir, "SUMMARY");
-  const currentNum = parseInt(currentTid.replace(/^T/, ""), 10);
-
-  return summaryFiles
-    .filter(f => {
-      if (!summaryFileBelongsToSlice(f, base, mid, sid)) return false;
-      const tid = taskIdFromTaskFileName(f, "SUMMARY");
-      if (!tid) return false;
-      const num = parseInt(tid.replace(/^T/, ""), 10);
-      return num < currentNum;
-    })
-    .map(f => `${loc.relPrefix}/${f}`);
+/** Number of a Task id (`T03` → 3), for order comparisons. */
+function taskNumber(taskId: string): number {
+  return parseInt(taskId.replace(/^T/, ""), 10);
 }
 
 /**
- * Get carry-forward summary paths scoped to a task's derived dependencies.
+ * The SUMMARY narrative of the done Tasks that come before `currentTid` in
+ * the Slice. It is read from the database; the tasks directory is not listed.
+ */
+export async function getPriorTaskSummaries(
+  base: string, mid: string, sid: string, currentTid: string,
+): Promise<TaskSummaryNarrative[]> {
+  const currentNum = taskNumber(currentTid);
+  return doneTaskSummaries(base, mid, sid).filter((summary) => taskNumber(summary.taskId) < currentNum);
+}
+
+/**
+ * Get carry-forward summaries scoped to a task's derived dependencies.
  *
  * Instead of all prior tasks (order-based), returns only summaries for task
  * IDs in `dependsOn`. Used by reactive-execute to give each subagent only
@@ -1581,29 +1583,17 @@ export async function getPriorTaskSummaryPaths(
  * Falls back to order-based when dependsOn is empty (root tasks still get
  * any available prior summaries for continuity).
  */
-export async function getDependencyTaskSummaryPaths(
-  mid: string, sid: string, currentTid: string,
-  dependsOn: string[], base: string,
-): Promise<string[]> {
+export async function getDependencyTaskSummaries(
+  base: string, mid: string, sid: string, currentTid: string,
+  dependsOn: string[],
+): Promise<TaskSummaryNarrative[]> {
   // If no dependencies, fall back to order-based for root tasks
   if (dependsOn.length === 0) {
-    return getPriorTaskSummaryPaths(mid, sid, currentTid, base);
+    return getPriorTaskSummaries(base, mid, sid, currentTid);
   }
 
-  const loc = resolveTaskSummariesLocation(base, mid, sid);
-  if (!loc) return [];
-
-  const summaryFiles = resolveTaskFiles(loc.dir, "SUMMARY");
   const depSet = new Set(dependsOn.map((d) => d.toUpperCase()));
-
-  return summaryFiles
-    .filter((f) => {
-      if (!summaryFileBelongsToSlice(f, base, mid, sid)) return false;
-      const tid = taskIdFromTaskFileName(f, "SUMMARY");
-      if (!tid) return false;
-      return depSet.has(tid);
-    })
-    .map((f) => `${loc.relPrefix}/${f}`);
+  return doneTaskSummaries(base, mid, sid).filter((summary) => depSet.has(summary.taskId.toUpperCase()));
 }
 
 // ─── Adaptive Replanning Checks ────────────────────────────────────────────
@@ -1714,25 +1704,13 @@ export interface DiscussMilestonePromptOptions {
 export async function buildDiscussMilestoneInlinedContext(mid: string, base: string): Promise<string> {
   const inlined: string[] = [];
 
-  const roadmapInline = await inlineFileOptional(
-    resolveMilestoneFile(base, mid, "ROADMAP"),
-    relMilestoneFile(base, mid, "ROADMAP"),
-    "Milestone Roadmap",
-  );
+  const roadmapInline = inlineNarrativeOptional(milestoneNarrative(base, mid, "ROADMAP"), "Milestone Roadmap");
   if (roadmapInline) inlined.push(roadmapInline);
 
-  const contextInline = await inlineFileOptional(
-    resolveMilestoneFile(base, mid, "CONTEXT"),
-    relMilestoneFile(base, mid, "CONTEXT"),
-    "Milestone Context",
-  );
+  const contextInline = inlineNarrativeOptional(milestoneNarrative(base, mid, "CONTEXT"), "Milestone Context");
   if (contextInline) inlined.push(contextInline);
 
-  const researchInline = await inlineFileOptional(
-    resolveMilestoneFile(base, mid, "RESEARCH"),
-    relMilestoneFile(base, mid, "RESEARCH"),
-    "Milestone Research",
-  );
+  const researchInline = inlineNarrativeOptional(milestoneNarrative(base, mid, "RESEARCH"), "Milestone Research");
   if (researchInline) inlined.push(researchInline);
 
   const decisionsPath = resolveGsdRootFile(base, "DECISIONS");
@@ -1743,13 +1721,13 @@ export async function buildDiscussMilestoneInlinedContext(mid: string, base: str
     }
   }
 
-  const milestoneIds = findMilestoneIds(base);
+  // The Milestones before this one come from database rows, in workflow order.
+  const milestoneIds = readListedMilestoneIds();
   const currentIndex = milestoneIds.indexOf(mid);
   const priorMilestoneIds = currentIndex >= 0 ? milestoneIds.slice(0, currentIndex) : milestoneIds;
   for (const priorMid of priorMilestoneIds) {
-    const summaryInline = await inlineFileOptional(
-      resolveMilestoneFile(base, priorMid, "SUMMARY"),
-      relMilestoneFile(base, priorMid, "SUMMARY"),
+    const summaryInline = inlineNarrativeOptional(
+      milestoneNarrative(base, priorMid, "SUMMARY"),
       `${priorMid} Prior Milestone Summary`,
     );
     if (summaryInline) inlined.push(summaryInline);
@@ -1776,8 +1754,7 @@ export async function buildDiscussMilestonePrompt(
   const contextTemplate = inlineTemplate("context", "Context");
 
   if (headless) {
-    const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-    const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
+    const roadmapContent = milestoneNarrative(base, mid, "ROADMAP").content;
     const prompt = loadPrompt("discuss-headless", {
       seedContext: roadmapContent ?? "",
       inlinedTemplates: contextTemplate,
@@ -1807,12 +1784,11 @@ export async function buildDiscussMilestonePrompt(
     ? prependContextModeToBlock("discuss-milestone", base, basePrompt)
     : basePrompt;
 
-  // If a CONTEXT-DRAFT.md exists, append it as seed material
-  const draftPath = resolveMilestoneFile(base, mid, "CONTEXT-DRAFT");
-  const draftContent = draftPath ? await loadFile(draftPath) : null;
+  // If a CONTEXT-DRAFT was saved, append it as seed material. The draft row
+  // stays after the final CONTEXT is saved, so it counts only without one.
+  const { content: draftContent, relPath: draftRelPath } = milestoneNarrative(base, mid, "CONTEXT-DRAFT");
 
-  if (includeDraftSeed && draftContent) {
-    const draftRelPath = relMilestoneFile(base, mid, "CONTEXT-DRAFT");
+  if (includeDraftSeed && draftContent && !milestoneNarrative(base, mid, "CONTEXT").content) {
     const draftSeed = `### Prior Discussion Draft\nSource: \`${draftRelPath}\`\n\n${draftContent.trim()}`;
     const cappedDraftSeed = capPreamble(draftSeed);
     const truncationNote = cappedDraftSeed !== draftSeed
@@ -1949,9 +1925,7 @@ async function buildResearchCodebaseSnapshot(base: string): Promise<string | nul
  * durable signals. Returns null when there is nothing to resume.
  */
 async function buildResearchResumeBlock(base: string, mid: string): Promise<string | null> {
-  const researchPath = resolveMilestoneFile(base, mid, "RESEARCH");
-  const researchRel = relMilestoneFile(base, mid, "RESEARCH");
-  const partial = await inlineFileOptional(researchPath, researchRel, "Prior Partial Research");
+  const partial = inlineNarrativeOptional(milestoneNarrative(base, mid, "RESEARCH"), "Prior Partial Research");
   const anchor = readPhaseAnchor(base, mid, "research-milestone");
   if (!partial && !anchor) return null;
   const lines: string[] = [
@@ -1974,9 +1948,7 @@ export async function buildResearchMilestonePrompt(mid: string, midTitle: string
   const resolveArtifact: ArtifactResolver = async (key) => {
     switch (key) {
       case "milestone-context": {
-        const p = resolveMilestoneFile(base, mid, "CONTEXT");
-        const r = relMilestoneFile(base, mid, "CONTEXT");
-        const body = await inlineFile(p, r, "Milestone Context");
+        const body = inlineNarrative(milestoneNarrative(base, mid, "CONTEXT"), "Milestone Context");
         trackPromptContext(contextTelemetry, "milestone-context", "inline", body);
         return body;
       }
@@ -2118,11 +2090,21 @@ export async function buildPlanMilestonePrompt(
     `Source: \`${displayProjectPath(resolveGsdRootFile(projectBase, key))}\``,
   ) ?? null;
   const inlineLevel = level ?? resolveInlineLevel();
-  const contextPath = milestoneScope.contextFile();
-  const contextRel = displayProjectPath(contextPath);
-  const researchPath = resolveMilestoneFile(projectBase, mid, "RESEARCH");
-  const researchTarget = researchPath ?? targetMilestoneFile(projectBase, mid, "RESEARCH", midTitle);
-  const researchRel = displayProjectPath(researchTarget);
+  // Narrative comes from artifact rows; the display path is the path of the
+  // projection file of the row, relative to the prompt base.
+  const projectionRoot = gsdProjectionRoot(projectBase);
+  const contextRow = getScopedArtifact(mid, null, null, "CONTEXT");
+  const context: Narrative = {
+    content: contextRow?.full_content ?? null,
+    relPath: displayProjectPath(contextRow ? join(projectionRoot, contextRow.path) : milestoneScope.contextFile()),
+  };
+  const researchRow = getScopedArtifact(mid, null, null, "RESEARCH");
+  const research: Narrative = {
+    content: researchRow?.full_content ?? null,
+    relPath: displayProjectPath(researchRow
+      ? join(projectionRoot, researchRow.path)
+      : targetMilestoneFile(projectBase, mid, "RESEARCH", midTitle)),
+  };
 
   const inlined: string[] = [];
   const contextTelemetry: PromptContextTelemetryEntry[] = [];
@@ -2141,15 +2123,19 @@ export async function buildPlanMilestonePrompt(
 
   pushTracked("project-classification", formatProjectClassificationForPlanning(classifyProject(base)));
 
-  pushTracked("milestone-context", await inlineFile(contextPath, contextRel, "Milestone Context"));
-  const researchInline = await inlineFileOptional(researchPath, researchRel, "Milestone Research");
+  pushTracked("milestone-context", inlineNarrative(context, "Milestone Context"));
+  const researchInline = inlineNarrativeOptional(research, "Milestone Research");
   if (researchInline) {
     pushTracked("milestone-research", researchInline);
   } else {
     trackPromptContext(contextTelemetry, "milestone-research", "skipped", null, "missing");
   }
-  const { inlinePriorMilestoneSummary } = await import("./files.js");
-  const priorSummaryInline = await inlinePriorMilestoneSummary(mid, projectBase);
+  // The SUMMARY of the Milestone before this one in workflow order (database rows).
+  const listedMilestoneIds = readListedMilestoneIds();
+  const priorMilestoneId = listedMilestoneIds[listedMilestoneIds.indexOf(mid) - 1];
+  const priorSummaryInline = priorMilestoneId
+    ? inlineNarrativeOptional(milestoneNarrative(projectBase, priorMilestoneId, "SUMMARY"), "Prior Milestone Summary")
+    : null;
   if (priorSummaryInline) {
     pushTracked("prior-milestone-summary", priorSummaryInline);
   } else {
@@ -2269,8 +2255,8 @@ export async function buildPlanMilestonePrompt(
     projectGsdPath: displayProjectPath(milestoneScope.workspace.contract.projectGsd),
     milestoneId: mid, milestoneTitle: midTitle,
     milestonePath: displayProjectPath(milestoneScope.milestoneDir()),
-    contextPath: contextRel,
-    researchPath: researchRel,
+    contextPath: context.relPath,
+    researchPath: research.relPath,
     outputPath: displayProjectPath(roadmapPath),
     secretsOutputPath: displayProjectPath(secretsOutputPath),
     inlinedContext,
@@ -2290,15 +2276,9 @@ export async function buildResearchSlicePrompt(
   mid: string, _midTitle: string, sid: string, sTitle: string, base: string,
   options?: { contextModeRenderMode?: ContextModeRenderMode; sessionProvider?: string },
 ): Promise<string> {
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  const roadmapRel = relMilestoneFile(base, mid, "ROADMAP");
-  const contextPath = resolveMilestoneFile(base, mid, "CONTEXT");
-  const contextRel = relMilestoneFile(base, mid, "CONTEXT");
-  const milestoneResearchPath = resolveMilestoneFile(base, mid, "RESEARCH");
-  const milestoneResearchRel = relMilestoneFile(base, mid, "RESEARCH");
-
-  const sliceContextPath = resolveSliceFile(base, mid, sid, "CONTEXT");
-  const sliceContextRel = relSliceFile(base, mid, sid, "CONTEXT");
+  const roadmap = milestoneNarrative(base, mid, "ROADMAP");
+  const context = milestoneNarrative(base, mid, "CONTEXT");
+  const milestoneResearch = milestoneNarrative(base, mid, "RESEARCH");
 
   const inlined: string[] = [];
   const contextTelemetry: PromptContextTelemetryEntry[] = [];
@@ -2310,26 +2290,26 @@ export async function buildResearchSlicePrompt(
     trackPromptContext(contextTelemetry, "roadmap", "excerpt", roadmapExcerptRS);
   } else {
     // Fall back to full roadmap if excerpt fails
-    const roadmapInline = await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap");
+    const roadmapInline = inlineNarrative(roadmap, "Milestone Roadmap");
     inlined.push(roadmapInline);
     trackPromptContext(contextTelemetry, "roadmap", "inline", roadmapInline, "excerpt unavailable");
   }
 
-  const contextInline = await inlineFileOptional(contextPath, contextRel, "Milestone Context");
+  const contextInline = inlineNarrativeOptional(context, "Milestone Context");
   if (contextInline) {
     inlined.push(contextInline);
     trackPromptContext(contextTelemetry, "milestone-context", "inline", contextInline);
   } else {
     trackPromptContext(contextTelemetry, "milestone-context", "skipped", null, "missing");
   }
-  const sliceCtxInline = await inlineFileOptional(sliceContextPath, sliceContextRel, "Slice Context (from discussion)");
+  const sliceCtxInline = inlineNarrativeOptional(sliceNarrative(base, mid, sid, "CONTEXT"), "Slice Context (from discussion)");
   if (sliceCtxInline) {
     inlined.push(sliceCtxInline);
     trackPromptContext(contextTelemetry, "slice-context", "inline", sliceCtxInline);
   } else {
     trackPromptContext(contextTelemetry, "slice-context", "skipped", null, "missing");
   }
-  const researchInline = await inlineFileOptional(milestoneResearchPath, milestoneResearchRel, "Milestone Research");
+  const researchInline = inlineNarrativeOptional(milestoneResearch, "Milestone Research");
   if (researchInline) {
     inlined.push(researchInline);
     trackPromptContext(contextTelemetry, "milestone-research", "inline", researchInline);
@@ -2422,9 +2402,9 @@ export async function buildResearchSlicePrompt(
     workingDirectory: base,
     milestoneId: mid, sliceId: sid, sliceTitle: sTitle,
     slicePath: relSlicePath(base, mid, sid),
-    roadmapPath: roadmapRel,
-    contextPath: contextRel,
-    milestoneResearchPath: milestoneResearchRel,
+    roadmapPath: roadmap.relPath,
+    contextPath: context.relPath,
+    milestoneResearchPath: milestoneResearch.relPath,
     outputPath: join(base, outputRelPath),
     inlinedContext,
     dependencySummaries: depContent,
@@ -2470,12 +2450,8 @@ async function renderSlicePrompt(options: {
     sessionContextWindow, modelRegistry, sessionProvider,
   } = options;
 
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  const roadmapRel = relMilestoneFile(base, mid, "ROADMAP");
-  const researchPath = resolveSliceFile(base, mid, sid, "RESEARCH");
-  const researchRel = relSliceFile(base, mid, sid, "RESEARCH");
-  const sliceContextPath = resolveSliceFile(base, mid, sid, "CONTEXT");
-  const sliceContextRel = relSliceFile(base, mid, sid, "CONTEXT");
+  const roadmap = milestoneNarrative(base, mid, "ROADMAP");
+  const research = sliceNarrative(base, mid, sid, "RESEARCH");
 
   const inlined: string[] = [...prependBlocks];
   const contextTelemetry: PromptContextTelemetryEntry[] = [];
@@ -2499,19 +2475,19 @@ async function renderSlicePrompt(options: {
     inlined.push(roadmapExcerpt);
     trackPromptContext(contextTelemetry, "roadmap", "excerpt", roadmapExcerpt);
   } else {
-    const body = await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap");
+    const body = inlineNarrative(roadmap, "Milestone Roadmap");
     inlined.push(body);
     trackPromptContext(contextTelemetry, "roadmap", "inline", body, "excerpt unavailable");
   }
 
-  const sliceCtxInline = await inlineFileOptional(sliceContextPath, sliceContextRel, "Slice Context (from discussion)");
+  const sliceCtxInline = inlineNarrativeOptional(sliceNarrative(base, mid, sid, "CONTEXT"), "Slice Context (from discussion)");
   if (sliceCtxInline) {
     inlined.push(sliceCtxInline);
     trackPromptContext(contextTelemetry, "slice-context", "inline", sliceCtxInline);
   } else {
     trackPromptContext(contextTelemetry, "slice-context", "skipped", null, "missing");
   }
-  const researchInline = await inlineFileOptional(researchPath, researchRel, "Slice Research");
+  const researchInline = inlineNarrativeOptional(research, "Slice Research");
   if (researchInline) {
     inlined.push(researchInline);
     trackPromptContext(contextTelemetry, "slice-research", "inline", researchInline);
@@ -2616,8 +2592,8 @@ async function renderSlicePrompt(options: {
     workingDirectory: base,
     milestoneId: mid, sliceId: sid, sliceTitle: sTitle,
     slicePath: relSlicePath(base, mid, sid),
-    roadmapPath: roadmapRel,
-    researchPath: researchRel,
+    roadmapPath: roadmap.relPath,
+    researchPath: research.relPath,
     outputPath: join(base, outputRelPath),
     inlinedContext,
     dependencySummaries: depContent,
@@ -2713,8 +2689,8 @@ export async function buildRefineSlicePrompt(
 /** Options for customizing execute-task prompt construction. */
 export interface ExecuteTaskPromptOptions {
   level?: InlineLevel;
-  /** Override carry-forward paths (dependency-based instead of order-based). */
-  carryForwardPaths?: string[];
+  /** Override carry-forward summaries (dependency-based instead of order-based). */
+  carryForward?: TaskSummaryNarrative[];
   /** Session model context window in tokens, forwarded to the budget engine. */
   sessionContextWindow?: number;
   /** Model registry forwarded to the budget engine for executor-model lookup. */
@@ -2755,32 +2731,20 @@ async function resolveExecuteTaskPlan(input: {
   taskId: string;
   slicePlanContent: string | null;
 }): Promise<{ content: string | null; relativePath: string; source: string }> {
-  const relativePath = relTaskFile(
+  const { content: savedPlan, relPath: relativePath, saved } = taskNarrative(
     input.basePath,
     input.milestoneId,
     input.sliceId,
     input.taskId,
     "PLAN",
   );
-  const standalonePath = resolveTaskFile(
-    input.basePath,
-    input.milestoneId,
-    input.sliceId,
-    input.taskId,
-    "PLAN",
-  );
-  if (standalonePath) {
-    return { content: await loadFile(standalonePath), relativePath, source: `\`${relativePath}\`` };
-  }
-
-  const durablePlan = isDbAvailable()
-    ? getTask(input.milestoneId, input.sliceId, input.taskId)?.full_plan_md.trim() || null
-    : null;
-  if (durablePlan) {
+  if (savedPlan) {
     return {
-      content: durablePlan,
+      content: savedPlan,
       relativePath,
-      source: `durable task planning state for ${input.milestoneId}/${input.sliceId}/${input.taskId}`,
+      source: saved
+        ? `\`${relativePath}\``
+        : `durable task planning state for ${input.milestoneId}/${input.sliceId}/${input.taskId}`,
     };
   }
 
@@ -2818,11 +2782,10 @@ export async function buildTaskRecoveryReplanPrompt(
   if (recovery?.action !== "replan" || recovery.replanCompleted) {
     throw new Error(`Task recovery replan is not pending for ${mid}/${sid}/${tid}`);
   }
-  const taskPlanPath = resolveTaskFile(base, mid, sid, tid, "PLAN");
-  const taskPlanRelPath = relTaskFile(base, mid, sid, tid, "PLAN");
-  const taskPlanInline = taskPlanPath
-    ? (await loadFile(taskPlanPath))?.trim() || "_(current Task plan is empty)_"
-    : "_(current Task plan projection is missing; rebuild it from durable planning state and recovery evidence)_";
+  const taskPlan = taskNarrative(base, mid, sid, tid, "PLAN");
+  const taskPlanRelPath = taskPlan.relPath;
+  const taskPlanInline = taskPlan.content?.trim()
+    || "_(current Task plan projection is missing; rebuild it from durable planning state and recovery evidence)_";
   return loadPrompt("replan-task", {
     workingDirectory: base,
     milestoneId: mid,
@@ -2850,13 +2813,13 @@ export async function buildExecuteTaskPrompt(
   // Inject phase handoff anchor from planning phase (if available)
   const planAnchor = readPhaseAnchor(base, mid, "plan-slice");
 
-  const priorSummaries = opts.carryForwardPaths ?? await getPriorTaskSummaryPaths(mid, sid, tid, base);
+  const priorSummaries = opts.carryForward ?? await getPriorTaskSummaries(base, mid, sid, tid);
   const priorLines = priorSummaries.length > 0
-    ? priorSummaries.map(p => `- \`${p}\``).join("\n")
+    ? priorSummaries.map(p => `- \`${p.relPath}\``).join("\n")
     : "- (no prior tasks)";
 
-  const slicePlanPath = resolveSliceFile(base, mid, sid, "PLAN");
-  const slicePlanContent = slicePlanPath ? await loadFile(slicePlanPath) : null;
+  const slicePlan = sliceNarrative(base, mid, sid, "PLAN");
+  const slicePlanContent = slicePlan.content;
   const taskPlan = await resolveExecuteTaskPlan({
     basePath: base,
     milestoneId: mid,
@@ -2879,29 +2842,18 @@ export async function buildExecuteTaskPrompt(
     ].join("\n");
   trackPromptContext(contextTelemetry, "task-plan", taskPlanContent ? "inline" : "on-demand", taskPlanContext, taskPlanContent ? undefined : "missing at dispatch");
 
-  const slicePlanContext = extractSliceExecutionExcerpt(slicePlanContent, relSliceFile(base, mid, sid, "PLAN"));
+  const slicePlanContext = extractSliceExecutionExcerpt(slicePlanContent, slicePlan.relPath);
   trackPromptContext(contextTelemetry, "slice-plan", slicePlanContext ? "excerpt" : "skipped", slicePlanContext, slicePlanContext ? undefined : "missing");
 
-  // Check for continue file (new naming or legacy)
-  const continueFile = resolveSliceFile(base, mid, sid, "CONTINUE");
-  const legacyContinueDir = resolveSlicePath(base, mid, sid);
-  const legacyContinuePath = legacyContinueDir ? join(legacyContinueDir, "continue.md") : null;
-  const continueContent = continueFile ? await loadFile(continueFile) : null;
-  const legacyContinueContent = !continueContent && legacyContinuePath ? await loadFile(legacyContinuePath) : null;
-  const continueRelPath = relSliceFile(base, mid, sid, "CONTINUE");
-  const resumeSection = buildResumeSection(
-    continueContent,
-    legacyContinueContent,
-    continueRelPath,
-    legacyContinuePath ? `${relSlicePath(base, mid, sid)}/continue.md` : null,
-  );
+  // The head Work Checkpoint row of the task is the resume state.
+  const resumeSection = buildResumeSection(mid, sid, tid);
   trackPromptContext(contextTelemetry, "resume-section", resumeSection.trim() ? "inline" : "skipped", resumeSection, resumeSection.trim() ? undefined : "missing");
 
   // For minimal inline level, only carry forward the most recent prior summary
   const effectivePriorSummaries = inlineLevel === "minimal" && priorSummaries.length > 1
     ? priorSummaries.slice(-1)
     : priorSummaries;
-  const carryForwardSection = await buildCarryForwardSection(effectivePriorSummaries, base);
+  const carryForwardSection = await buildCarryForwardSection(effectivePriorSummaries);
 
   // Inline project knowledge from the database if any (smart-chunked for relevance)
   const knowledgeET = await readKnowledgeForPrompt(base);
@@ -3149,23 +3101,17 @@ export async function buildCompleteSlicePrompt(
   const resolveArtifact: ArtifactResolver = async (key) => {
     switch (key) {
       case "roadmap": {
-        const p = resolveMilestoneFile(base, mid, "ROADMAP");
-        const r = relMilestoneFile(base, mid, "ROADMAP");
-        const body = await inlineFile(p, r, "Milestone Roadmap");
+        const body = inlineNarrative(milestoneNarrative(base, mid, "ROADMAP"), "Milestone Roadmap");
         trackPromptContext(contextTelemetry, "roadmap", "inline", body);
         return body;
       }
       case "slice-context": {
-        const p = resolveSliceFile(base, mid, sid, "CONTEXT");
-        const r = relSliceFile(base, mid, sid, "CONTEXT");
-        const body = await inlineFileOptional(p, r, "Slice Context (from discussion)");
+        const body = inlineNarrativeOptional(sliceNarrative(base, mid, sid, "CONTEXT"), "Slice Context (from discussion)");
         trackPromptContext(contextTelemetry, "slice-context", body ? "inline" : "skipped", body, body ? undefined : "missing");
         return body;
       }
       case "slice-plan": {
-        const p = resolveSliceFile(base, mid, sid, "PLAN");
-        const r = relSliceFile(base, mid, sid, "PLAN");
-        const body = await inlineFile(p, r, "Slice Plan");
+        const body = inlineNarrative(sliceNarrative(base, mid, sid, "PLAN"), "Slice Plan");
         trackPromptContext(contextTelemetry, "slice-plan", "inline", body);
         return body;
       }
@@ -3180,20 +3126,9 @@ export async function buildCompleteSlicePrompt(
           return body;
         }
       case "prior-task-summaries": {
-        const loc = resolveTaskSummariesLocation(base, mid, sid);
-        if (!loc) {
-          trackPromptContext(contextTelemetry, "prior-task-summaries", "skipped", null, "missing tasks dir");
-          return null;
-        }
-        const summaryFiles = resolveTaskFiles(loc.dir, "SUMMARY")
-          .filter((file) => summaryFileBelongsToSlice(file, base, mid, sid))
-          .sort();
         const blocks: string[] = [];
-        for (const file of summaryFiles) {
-          const absPath = join(loc.dir, file);
-          const relPath = `${loc.relPrefix}/${file}`;
-          const taskId = taskIdFromTaskFileName(file, "SUMMARY") ?? file.replace(/-SUMMARY\.md$/i, "");
-          blocks.push(await buildTaskSummaryExcerpt(absPath, relPath, taskId));
+        for (const summary of doneTaskSummaries(base, mid, sid)) {
+          blocks.push(await buildTaskSummaryExcerpt(summary.content, summary.relPath, summary.taskId));
         }
         const body = blocks.length > 0 ? blocks.join("\n\n---\n\n") : null;
         trackPromptContext(contextTelemetry, "prior-task-summaries", body ? "excerpt" : "skipped", body, body ? undefined : "missing");
@@ -3329,15 +3264,15 @@ export async function buildCompleteMilestonePrompt(
   mid: string, midTitle: string, base: string, level?: InlineLevel,
 ): Promise<string> {
   const inlineLevel = level ?? resolveInlineLevel();
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  const roadmapRel = relMilestoneFile(base, mid, "ROADMAP");
   const validationPath = resolveMilestoneFile(base, mid, "VALIDATION");
   const validationRel = relMilestoneFile(base, mid, "VALIDATION");
   const validationContent = validationPath ? await loadFile(validationPath) : null;
 
   const inlined: string[] = [];
   const contextTelemetry: PromptContextTelemetryEntry[] = [];
-  const roadmapInline = await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap");
+  const roadmap = milestoneNarrative(base, mid, "ROADMAP");
+  const roadmapRel = roadmap.relPath;
+  const roadmapInline = inlineNarrative(roadmap, "Milestone Roadmap");
   inlined.push(roadmapInline);
   trackPromptContext(contextTelemetry, "roadmap", "inline", roadmapInline);
 
@@ -3357,12 +3292,11 @@ export async function buildCompleteMilestonePrompt(
   for (const sid of sliceIds) {
     if (seenSlices.has(sid)) continue;
     seenSlices.add(sid);
-    const summaryPath = resolveSliceFile(base, mid, sid, "SUMMARY");
-    const summaryRel = relSliceFile(base, mid, sid, "SUMMARY");
+    const { content: summaryContent, relPath: summaryRel } = sliceNarrative(base, mid, sid, "SUMMARY");
     summaryRelPaths.push(summaryRel);
     // Compact excerpt instead of full inline (#4780). Closer Reads the
     // full file on-demand when synthesizing LEARNINGS narrative.
-    const summaryExcerpt = await buildSliceSummaryExcerpt(summaryPath, summaryRel, sid);
+    const summaryExcerpt = await buildSliceSummaryExcerpt(summaryContent, summaryRel, sid);
     inlined.push(summaryExcerpt);
     trackPromptContext(contextTelemetry, "slice-summary", "excerpt", summaryExcerpt);
   }
@@ -3430,15 +3364,15 @@ export async function buildCompleteMilestonePrompt(
     inlined.push(knowledgeInlineCM);
     trackPromptContext(contextTelemetry, "knowledge", "inline", knowledgeInlineCM);
   }
-  const contextPath = resolveMilestoneFile(base, mid, "CONTEXT");
-  const contextRel = relMilestoneFile(base, mid, "CONTEXT");
+  const context = milestoneNarrative(base, mid, "CONTEXT");
+  const contextRel = context.relPath;
   const contextInline = inlineLevel === "full"
-    ? await inlineFileOptional(contextPath, contextRel, "Milestone Context")
+    ? inlineNarrativeOptional(context, "Milestone Context")
     : null;
   if (contextInline) {
     inlined.push(contextInline);
     trackPromptContext(contextTelemetry, "milestone-context", "inline", contextInline);
-  } else if (contextPath) {
+  } else if (context.content) {
     const contextOnDemand = onDemandMilestoneContextBlock(contextRel, "the roadmap, validation artifact, and slice summaries do not explain the milestone's intent clearly enough");
     inlined.push(contextOnDemand);
     trackPromptContext(contextTelemetry, "milestone-context", "on-demand", contextOnDemand);
@@ -3501,12 +3435,9 @@ export async function buildValidateMilestonePrompt(
   mid: string, midTitle: string, base: string, level?: InlineLevel,
 ): Promise<string> {
   const inlineLevel = level ?? resolveInlineLevel();
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  const roadmapRel = relMilestoneFile(base, mid, "ROADMAP");
-
   const inlined: string[] = [];
   const contextTelemetry: PromptContextTelemetryEntry[] = [];
-  const roadmapInline = await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap");
+  const roadmapInline = inlineNarrative(milestoneNarrative(base, mid, "ROADMAP"), "Milestone Roadmap");
   inlined.push(roadmapInline);
   trackPromptContext(contextTelemetry, "roadmap", "inline", roadmapInline);
 
@@ -3560,9 +3491,8 @@ export async function buildValidateMilestonePrompt(
   for (const sid of valSliceIds) {
     if (seenValSlices.has(sid)) continue;
     seenValSlices.add(sid);
-    const summaryPath = resolveSliceFile(base, mid, sid, "SUMMARY");
-    const summaryRel = relSliceFile(base, mid, sid, "SUMMARY");
-    const summaryExcerpt = await buildSliceSummaryExcerpt(summaryPath, summaryRel, sid);
+    const { content: summaryContent, relPath: summaryRel } = sliceNarrative(base, mid, sid, "SUMMARY");
+    const summaryExcerpt = await buildSliceSummaryExcerpt(summaryContent, summaryRel, sid);
     inlined.push(summaryExcerpt);
     onDemandValidationPaths.push(summaryRel);
     trackPromptContext(contextTelemetry, "slice-summary", "excerpt", summaryExcerpt);
@@ -3594,9 +3524,7 @@ export async function buildValidateMilestonePrompt(
   // Aggregate unresolved follow-ups and known limitations across slices
   const outstandingItems: string[] = [];
   for (const sid of valSliceIds) {
-    const summaryPath = resolveSliceFile(base, mid, sid, "SUMMARY");
-    if (!summaryPath) continue;
-    const content = await loadFile(summaryPath);
+    const content = sliceNarrative(base, mid, sid, "SUMMARY").content;
     if (!content) continue;
     const summary = parseSummary(content);
     if (summary.followUps) outstandingItems.push(`- **${sid} Follow-ups:** ${summary.followUps.trim()}`);
@@ -3706,15 +3634,15 @@ export async function buildValidateMilestonePrompt(
     inlined.push(knowledgeInline);
     trackPromptContext(contextTelemetry, "knowledge", "inline", knowledgeInline);
   }
-  const contextPath = resolveMilestoneFile(base, mid, "CONTEXT");
-  const contextRel = relMilestoneFile(base, mid, "CONTEXT");
+  const context = milestoneNarrative(base, mid, "CONTEXT");
+  const contextRel = context.relPath;
   const contextInline = inlineLevel === "full"
-    ? await inlineFileOptional(contextPath, contextRel, "Milestone Context")
+    ? inlineNarrativeOptional(context, "Milestone Context")
     : null;
   if (contextInline) {
     inlined.push(contextInline);
     trackPromptContext(contextTelemetry, "milestone-context", "inline", contextInline);
-  } else if (contextPath) {
+  } else if (context.content) {
     const contextOnDemand = onDemandMilestoneContextBlock(contextRel, "the roadmap and slice artifacts do not explain the intended outcome clearly enough");
     inlined.push(contextOnDemand);
     trackPromptContext(contextTelemetry, "milestone-context", "on-demand", contextOnDemand);
@@ -3774,36 +3702,22 @@ export async function buildValidateMilestonePrompt(
 export async function buildReplanSlicePrompt(
   mid: string, midTitle: string, sid: string, sTitle: string, base: string,
 ): Promise<string> {
-  const roadmapPath = resolveMilestoneFile(base, mid, "ROADMAP");
-  const roadmapRel = relMilestoneFile(base, mid, "ROADMAP");
-  const slicePlanPath = resolveSliceFile(base, mid, sid, "PLAN");
-  const slicePlanRel = relSliceFile(base, mid, sid, "PLAN");
-  const sliceContextPath = resolveSliceFile(base, mid, sid, "CONTEXT");
-  const sliceContextRel = relSliceFile(base, mid, sid, "CONTEXT");
+  const slicePlan = sliceNarrative(base, mid, sid, "PLAN");
+  const slicePlanRel = slicePlan.relPath;
 
   const inlined: string[] = [];
-  inlined.push(await inlineFile(roadmapPath, roadmapRel, "Milestone Roadmap"));
-  const sliceCtxInline = await inlineFileOptional(sliceContextPath, sliceContextRel, "Slice Context (from discussion)");
+  inlined.push(inlineNarrative(milestoneNarrative(base, mid, "ROADMAP"), "Milestone Roadmap"));
+  const sliceCtxInline = inlineNarrativeOptional(sliceNarrative(base, mid, sid, "CONTEXT"), "Slice Context (from discussion)");
   if (sliceCtxInline) inlined.push(sliceCtxInline);
-  inlined.push(await inlineFile(slicePlanPath, slicePlanRel, "Current Slice Plan"));
+  inlined.push(inlineNarrative(slicePlan, "Current Slice Plan"));
 
   // Find the blocker task summary — the completed task with blocker_discovered: true
   let blockerTaskId = "";
-  const summaryLoc = resolveTaskSummariesLocation(base, mid, sid);
-  if (summaryLoc) {
-    const summaryFiles = resolveTaskFiles(summaryLoc.dir, "SUMMARY")
-      .filter((file) => summaryFileBelongsToSlice(file, base, mid, sid))
-      .sort();
-    for (const file of summaryFiles) {
-      const absPath = join(summaryLoc.dir, file);
-      const content = await loadFile(absPath);
-      if (!content) continue;
-      const summary = parseSummary(content);
-      const relPath = `${summaryLoc.relPrefix}/${file}`;
-      if (summary.frontmatter.blocker_discovered) {
-        blockerTaskId = summary.frontmatter.id || taskIdFromTaskFileName(file, "SUMMARY") || file.replace(/-SUMMARY\.md$/i, "");
-        inlined.push(await buildTaskSummaryExcerpt(absPath, relPath, blockerTaskId, { blocker: true }));
-      }
+  for (const done of doneTaskSummaries(base, mid, sid)) {
+    const summary = parseSummary(done.content);
+    if (summary.frontmatter.blocker_discovered) {
+      blockerTaskId = summary.frontmatter.id || done.taskId;
+      inlined.push(await buildTaskSummaryExcerpt(done.content, done.relPath, blockerTaskId, { blocker: true }));
     }
   }
 
@@ -3869,7 +3783,7 @@ export async function buildRunUatPrompt(
     switch (key) {
       case "slice-uat": {
         // Use the in-memory snapshot the caller already loaded (#4925 review).
-        // Re-reading from disk via inlineFile(p, uatPath, ...) would risk
+        // Re-reading the UAT here would risk
         // drift between the inlined body and uatType (computed from
         // uatContent below) if the file changes mid-dispatch.
         const trimmed = uatContent.trim();
@@ -3897,13 +3811,12 @@ export async function buildRunUatPrompt(
   const resolveExcerpt: ExcerptResolver = async (key) => {
     switch (key) {
       case "slice-summary": {
-        const p = resolveSliceFile(base, mid, sliceId, "SUMMARY");
-        const r = relSliceFile(base, mid, sliceId, "SUMMARY");
-        if (!p) {
+        const summary = sliceNarrative(base, mid, sliceId, "SUMMARY");
+        if (!summary.content) {
           trackPromptContext(contextTelemetry, "slice-summary", "skipped", null, "missing");
           return null;
         }
-        const body = await buildSliceSummaryExcerpt(p, r, sliceId);
+        const body = await buildSliceSummaryExcerpt(summary.content, summary.relPath, sliceId);
         trackPromptContext(contextTelemetry, "slice-summary", "excerpt", body);
         return body;
       }
@@ -3994,16 +3907,12 @@ export async function buildReassessRoadmapPrompt(
   const resolveArtifact: ArtifactResolver = async (key) => {
     switch (key) {
       case "roadmap": {
-        const p = resolveMilestoneFile(base, mid, "ROADMAP");
-        const r = relMilestoneFile(base, mid, "ROADMAP");
-        const body = await inlineFile(p, r, "Current Roadmap");
+        const body = inlineNarrative(milestoneNarrative(base, mid, "ROADMAP"), "Current Roadmap");
         trackPromptContext(contextTelemetry, "roadmap", "inline", body);
         return body;
       }
       case "slice-context": {
-        const p = resolveSliceFile(base, mid, completedSliceId, "CONTEXT");
-        const r = relSliceFile(base, mid, completedSliceId, "CONTEXT");
-        const body = await inlineFileOptional(p, r, "Slice Context (from discussion)");
+        const body = inlineNarrativeOptional(sliceNarrative(base, mid, completedSliceId, "CONTEXT"), "Slice Context (from discussion)");
         trackPromptContext(contextTelemetry, "slice-context", body ? "inline" : "skipped", body, body ? undefined : "missing");
         return body;
       }
@@ -4023,9 +3932,8 @@ export async function buildReassessRoadmapPrompt(
   const resolveExcerpt: ExcerptResolver = async (key) => {
     switch (key) {
       case "slice-summary": {
-        const p = resolveSliceFile(base, mid, completedSliceId, "SUMMARY");
-        const r = relSliceFile(base, mid, completedSliceId, "SUMMARY");
-        const body = await buildSliceSummaryExcerpt(p, r, completedSliceId);
+        const summary = sliceNarrative(base, mid, completedSliceId, "SUMMARY");
+        const body = await buildSliceSummaryExcerpt(summary.content, summary.relPath, completedSliceId);
         trackPromptContext(contextTelemetry, "slice-summary", "excerpt", body);
         return body;
       }
@@ -4195,17 +4103,17 @@ export async function buildReactiveExecutePrompt(
   );
   const contextTelemetry: PromptContextTelemetryEntry[] = [];
   trackPromptContext(contextTelemetry, "graph-context", "inline", graphContext);
-  const slicePlanPath = resolveSliceFile(base, mid, sid, "PLAN");
-  const slicePlanContent = slicePlanPath ? await loadFile(slicePlanPath) : null;
+  const slicePlan = sliceNarrative(base, mid, sid, "PLAN");
+  const slicePlanContent = slicePlan.content;
 
   for (const tid of readyTaskIds) {
     const node = graph.find((n) => n.id === tid);
     const tTitle = node?.title ?? tid;
     readyTaskListLines.push(`- **${tid}: ${tTitle}**`);
 
-    // Build dependency-scoped carry-forward paths for this task
-    const depPaths = await getDependencyTaskSummaryPaths(
-      mid, sid, tid, node?.dependsOn ?? [], base,
+    // Build dependency-scoped carry-forward summaries for this task
+    const depSummaries = await getDependencyTaskSummaries(
+      base, mid, sid, tid, node?.dependsOn ?? [],
     );
 
     const taskPlan = await resolveExecuteTaskPlan({
@@ -4227,7 +4135,7 @@ export async function buildReactiveExecutePrompt(
           "## Inlined Task Plan (authoritative local execution contract)",
           `Task plan not found at dispatch time. Read ${taskPlan.source} before executing.`,
         ].join("\n");
-    const carryForwardSection = await buildCarryForwardSection(depPaths, base);
+    const carryForwardSection = await buildCarryForwardSection(depSummaries);
     const finalCarryForwardSection = carryForwardSection.length > perSubagentCarryForwardBudget
       ? truncateAtSectionBoundary(carryForwardSection, perSubagentCarryForwardBudget).content
       : carryForwardSection;
@@ -4426,8 +4334,7 @@ export async function buildGateEvaluatePrompt(
   assertGateCoverage(pending, "gate-evaluate", { requireAll: false });
 
   // Load the slice plan for context
-  const planFile = resolveSliceFile(base, mid, sid, "PLAN");
-  const planContent = planFile ? (await loadFile(planFile)) ?? "(plan file empty)" : "(plan file not found)";
+  const planContent = sliceNarrative(base, mid, sid, "PLAN").content ?? "(plan file not found)";
 
   // Build per-gate subagent prompts from the pending rows. Because the
   // registry has already validated every row, `getGateDefinition` cannot

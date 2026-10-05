@@ -2,10 +2,9 @@
  * GSD Crash Recovery (Phase C pt 2 — DB-backed)
  *
  * Detects interrupted auto-mode sessions via the DB-backed workers +
- * unit_dispatches + runtime_kv tables. The auto.lock file is gone; the
- * `LockData` shape is preserved for backward compatibility with callers
- * (auto.ts, doctor checks, interrupted-session.ts), but the contents are
- * now synthesized from:
+ * unit_dispatches + runtime_kv tables. The `LockData` shape is preserved for
+ * callers (auto.ts, doctor checks, interrupted-session.ts); for a crashed
+ * session its contents are synthesized from:
  *
  *   - workers.pid / .started_at / .last_heartbeat_at  → liveness + age
  *   - unit_dispatches.unit_type / .unit_id / .started_at  → what was running
@@ -13,8 +12,12 @@
  *
  * "Crashed" is detected via workers.status='active' + heartbeat past TTL,
  * cross-checked with the OS PID via isLockProcessAlive(). When the DB is
- * unavailable (fresh project before init), all readers return null and
- * the lock writers log a warning and skip their DB half.
+ * unavailable (fresh project before init), no crash is reported and the lock
+ * writers log a warning and skip their DB half.
+ *
+ * The session lock file (.gsd/auto.lock, see session-lock.ts) is still
+ * written. It is never a crash record. readCrashLock reads it only to point
+ * at a session whose process is alive now.
  *
  * emitCrashRecoveredUnitEnd is independent of the lock mechanism: it records
  * the unit-end outcome on the unit runtime row and emits the journal event.
@@ -178,16 +181,14 @@ function workerToLockData(basePath: string, worker: AutoWorkerRow): LockData {
 /**
  * Write or update the lock state for the current auto-mode session.
  *
- * Phase C pt 2: the only persistent state this function adds beyond what
- * the workers + unit_dispatches tables already track is the pi session
- * JSONL path, which lands in runtime_kv (worker scope, key
- * "session_file"). The pid/startedAt/unitType/unitId/unitStartedAt are
- * recorded by registerAutoWorker / heartbeatAutoWorker / recordDispatchClaim
- * already.
+ * The only database state this function adds beyond what the workers +
+ * unit_dispatches tables already track is the pi session JSONL path, which
+ * lands in runtime_kv (worker scope, key "session_file"). The
+ * pid/startedAt/unitType/unitId/unitStartedAt are recorded by
+ * registerAutoWorker / heartbeatAutoWorker / recordDispatchClaim already.
  *
- * basePath is unused by the new implementation (kept as a parameter for
- * back-compat with the 15+ call sites) — the worker is identified by
- * pid + project_root_realpath in the workers table.
+ * It also refreshes the session lock file with the current unit, so another
+ * terminal and the external readers see what the live session runs.
  */
 export function writeLock(
   basePath: string,
@@ -230,11 +231,10 @@ export function writeLock(
 }
 
 /**
- * Phase C pt 2: clearLock no longer deletes a file. The cleanup path
- * (markWorkerStopping in stopAuto) flips the workers row to 'stopping'.
- * This function additionally drops the session_file runtime_kv row for
- * the current worker so a follow-up crash detection doesn't pick up a
- * stale session-file pointer.
+ * Release the lock state of this project: remove the session lock file,
+ * retire a dead holder's worker row and its leases, and drop the
+ * session_file runtime_kv row so a follow-up crash detection doesn't pick up
+ * a stale session-file pointer.
  */
 export function clearLock(basePath: string): void {
   const legacyLock = readLegacyLock(basePath);
@@ -284,11 +284,10 @@ export function clearLock(basePath: string): void {
 /**
  * Clear a stale DB-backed worker lock after readCrashLock/findStaleWorkerForProject
  * has identified a dead worker. Unlike clearLock(), this targets the stale
- * worker row instead of the current process's active worker.
+ * worker row instead of the current process's active worker. It does not
+ * touch the session lock file: a live session may own that file.
  */
 export function clearStaleWorkerLock(basePath: string): void {
-  clearLegacyLockFile(basePath);
-
   if (!isDbAvailable()) {
     logWarning("recovery", "stale worker row not cleared: workflow DB is unavailable");
     return;
@@ -311,12 +310,15 @@ export function clearStaleWorkerLock(basePath: string): void {
 }
 
 /**
- * Detect a previous crashed auto-mode session.
+ * Detect a previous crashed auto-mode session, or a session that runs now.
  *
- * Phase C pt 2: synthesized from workers (status='active' + lapsed
- * heartbeat) + unit_dispatches (most recent for that worker) +
- * runtime_kv (session_file). Returns null when no stale worker exists
- * or the DB is unavailable.
+ * A crash is synthesized from workers (status='active' + lapsed heartbeat) +
+ * unit_dispatches (most recent for that worker) + runtime_kv (session_file).
+ * The database alone decides a crash: a lock file whose process is dead is
+ * not a crash record, with or without an open database.
+ *
+ * With no crashed worker, the session lock file is returned when its process
+ * is alive, so the callers can see and stop a session in another terminal.
  */
 export function readCrashLock(basePath: string): LockData | null {
   if (isDbAvailable()) {
@@ -325,10 +327,11 @@ export function readCrashLock(basePath: string): LockData | null {
       const stale = findStaleWorkerForProject(projectRoot);
       if (stale) return workerToLockData(basePath, stale);
     } catch {
-      // Fall through to the legacy lock-file compatibility path.
+      // No crash record can be read. Only a live session is reported below.
     }
   }
-  return readLegacyLock(basePath);
+  const sessionLock = readLegacyLock(basePath);
+  return sessionLock && isLockProcessAlive(sessionLock) ? sessionLock : null;
 }
 
 /**
