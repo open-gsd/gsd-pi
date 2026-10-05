@@ -27,7 +27,7 @@ import { renderSliceFilesFromDb } from "../markdown-renderer.ts";
 import { clearPathCache } from "../paths.ts";
 import { drainProjectionWork } from "../projection-worker.ts";
 import { executeCheckpointSave } from "../tools/workflow-tool-executors.ts";
-import { buildResumeSection, readWorkCheckpoint, saveWorkCheckpoint } from "../work-checkpoint.ts";
+import { buildActiveResumeSection, buildResumeSection, readWorkCheckpoint, saveWorkCheckpoint } from "../work-checkpoint.ts";
 import { saveContextArtifact } from "./helpers/saved-context.ts";
 import { cleanup, makeTempRepo } from "./test-utils.ts";
 
@@ -77,6 +77,26 @@ function makeProject(t: TestContext): string {
     };
   });
   return base;
+}
+
+/** Run one lifecycle change in a Domain Operation. */
+function transition(key: string, change: (context: Parameters<Parameters<typeof executeDomainOperation>[1]>[0]) => void): void {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.transition",
+    idempotencyKey: `test/${key}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    change(context);
+    return {
+      events: [{ eventType: "test.transitioned", entityType: "milestone", entityId: "M001", payload: {}, destinations: ["test"] }],
+      projections: [{ projectionKey: `test/${key}`, projectionKind: "test", rendererVersion: "1" }],
+    };
+  });
 }
 
 const HANDOFF = {
@@ -203,23 +223,69 @@ test("/gsd resume-work takes the handoff from the checkpoint row of the active u
   assert.doesNotMatch(fromFiles, /FILE-ONLY-STATE|LEGACY-FILE-STATE|MILESTONE-FILE-STATE/);
   assert.match(fromFiles, /Do not read a `CONTINUE\.md`, `continue\.md`, or `HANDOFF\.md` file/);
 
-  // Rows with no file: milestone scope, then slice scope, then the active task.
+  // Rows with no file. The active unit is task T01: a checkpoint of its slice or
+  // milestone is not its resume state.
   rmSync(join(base, CONTINUE_FILE));
   rmSync(join(base, SLICE_DIR, "continue.md"));
   rmSync(milestoneFile);
   saveWorkCheckpoint({ milestoneId: "M001", kind: "handoff", confirmedContext: "Milestone handoff.", nextAction: "Plan the next slice." });
-  assert.match(await resumePrompt(), /Source: Work Checkpoint of M001 saved [^\n]+\n- Completed: Milestone handoff\.\n- Next action: Plan the next slice\./);
-
   saveWorkCheckpoint({ milestoneId: "M001", sliceId: "S01", kind: "handoff", confirmedContext: "Paused between tasks.", nextAction: "Start T02." });
-  const fromSlice = await resumePrompt();
-  assert.match(fromSlice, /Source: Work Checkpoint of M001\/S01 saved [^\n]+\n- Completed: Paused between tasks\.\n- Next action: Start T02\./);
-  assert.doesNotMatch(fromSlice, /Milestone handoff\./);
+  const fromOtherScopes = await resumePrompt();
+  assert.match(fromOtherScopes, /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  assert.doesNotMatch(fromOtherScopes, /Milestone handoff\.|Paused between tasks\./);
 
   saveWorkCheckpoint(HANDOFF);
   const fromTask = await resumePrompt();
   assert.match(fromTask, /Source: Work Checkpoint of M001\/S01\/T01 saved [^\n]+\n- Completed: Parser rewritten; two fixture tests still fail\./);
   assert.match(fromTask, /- Next action: Add expiresAt to fixtures\/sessions\.ts and run the tests again\./);
   assert.equal(existsSync(join(base, CONTINUE_FILE)), false);
+});
+
+test("/gsd resume-work does not show the checkpoint of a completed task as the resume state of the next task", async (t) => {
+  const base = makeProject(t);
+  saveWorkCheckpoint(HANDOFF);
+  const t01 = { itemKind: "task" as const, milestoneId: "M001", sliceId: "S01", taskId: "T01" };
+  transition("start-t01", (context) => {
+    adoptOrTransitionLifecycle(context, { ...t01, lifecycleStatus: "in_progress" });
+  });
+  transition("complete-t01", (context) => {
+    adoptOrTransitionLifecycle(context, { ...t01, lifecycleStatus: "completed" });
+    _getAdapter()!.prepare("UPDATE tasks SET status = 'complete' WHERE id = 'T01'").run();
+  });
+
+  const sent: Array<{ content: string }> = [];
+  invalidateAllCaches();
+  await handleResumeWork("", { cwd: base, ui: { notify() {} } } as any, { sendMessage: (message: any) => sent.push(message) } as any);
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0]!.content, /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  assert.doesNotMatch(sent[0]!.content, /Work Checkpoint of M001\/S01\/T01|Parser rewritten|Add expiresAt/);
+  // The row is kept: it is database content.
+  assert.equal(readWorkCheckpoint({ milestoneId: "M001", sliceId: "S01", taskId: "T01" })?.kind, "handoff");
+});
+
+test("the active resume state is the own checkpoint of the active slice or milestone, and only while that item is open", (t) => {
+  makeProject(t);
+  saveWorkCheckpoint(HANDOFF);
+  saveWorkCheckpoint({ milestoneId: "M001", sliceId: "S01", kind: "handoff", confirmedContext: "Paused between tasks.", nextAction: "Start T02." });
+  saveWorkCheckpoint({ milestoneId: "M001", kind: "handoff", confirmedContext: "Queued without discussion.", nextAction: "Discuss M001 from scratch before planning." });
+
+  assert.match(
+    buildActiveResumeSection({ milestoneId: "M001", sliceId: "S01" }),
+    /Source: Work Checkpoint of M001\/S01 saved [^\n]+\n- Completed: Paused between tasks\.\n- Next action: Start T02\./,
+  );
+  assert.match(
+    buildActiveResumeSection({ milestoneId: "M001" }),
+    /Source: Work Checkpoint of M001 saved [^\n]+\n- Completed: Queued without discussion\./,
+  );
+
+  transition("cancel-m001", (context) => {
+    adoptOrTransitionLifecycle(context, { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "cancelled" });
+  });
+  assert.match(buildActiveResumeSection({ milestoneId: "M001" }), /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  // Another milestone does not get the checkpoint of the closed one.
+  assert.match(buildActiveResumeSection({ milestoneId: "M002" }), /## Resume State\n- No Work Checkpoint saved for the active task, slice or milestone\./);
+  assert.equal(rows("SELECT 1 FROM workflow_work_checkpoints").length, 3);
 });
 
 test("a checkpoint is the resume state of its own task only, and the newest one is the head", (t) => {

@@ -18,6 +18,7 @@ import {
 } from "../bootstrap/register-hooks.ts";
 import { shouldBlockAutoUnitToolCall } from "../auto-unit-tool-scope.ts";
 import { UNIT_TOOL_CONTRACTS } from "../unit-tool-contracts.ts";
+import { loadPrompt } from "../prompt-loader.ts";
 import { uatTypeIncludesBrowser } from "../uat-policy.ts";
 
 const promptsDir = join(process.cwd(), "src/resources/extensions/gsd/prompts");
@@ -402,9 +403,16 @@ test("queue prompt requires waiting for user response between rounds", () => {
   assert.doesNotMatch(prompt, /treat that as permission to continue/i);
 });
 
-test("guided-resume-task prompt takes recovery state from the Work Checkpoint and saves a new one on a second stop", () => {
-  const prompt = readPrompt("guided-resume-task");
-  assert.match(prompt, /\{\{resumeState\}\}/);
+test("the emitted guided-resume-task prompt carries the Work Checkpoint and tells the agent to save a new one on a second stop", () => {
+  const prompt = loadPrompt("guided-resume-task", {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    skillActivation: "Load the relevant skills.",
+    resumeState: "## Resume State\n- Next action: Run the suite.",
+  });
+  assert.match(prompt, /Resume interrupted work on task T01 in slice S01 of milestone M001\./);
+  assert.match(prompt, /\n\n## Resume State\n- Next action: Run the suite\.$/);
   assert.match(prompt, /save a new one with `gsd_checkpoint_save`/i);
   assert.match(prompt, /Do not write a `CONTINUE\.md` or `continue\.md` file/i);
 });

@@ -171,13 +171,20 @@ function rowToCheckpoint(row: Record<string, unknown> | undefined): WorkCheckpoi
   };
 }
 
-/** The head resume checkpoint of one work item, or null when it has none or no database is open. */
-export function readWorkCheckpoint(scope: WorkCheckpointScope): WorkCheckpoint | null {
+/**
+ * The head resume checkpoint of one work item, or null when it has none or no
+ * database is open. With `openItemOnly`, a completed or cancelled item has none.
+ */
+export function readWorkCheckpoint(
+  scope: WorkCheckpointScope,
+  options: { openItemOnly?: boolean } = {},
+): WorkCheckpoint | null {
   const db = getDbOrNull();
   if (!db) return null;
   return rowToCheckpoint(db.prepare(`
     ${CHECKPOINT_SELECT}
     WHERE checkpoint.scope_key = :scope_key
+      ${options.openItemOnly ? "AND lifecycle.lifecycle_status NOT IN ('completed', 'cancelled')" : ""}
     ORDER BY checkpoint.sequence DESC
     LIMIT 1
   `).get({ ":scope_key": scopeKey(scope) }));
@@ -229,15 +236,14 @@ export function buildResumeSection(milestoneId: string, sliceId: string, taskId:
 
 /**
  * The "Resume State" of the active unit, for /gsd resume-work: the head
- * checkpoint of the active task, else the newest one of the active slice and
- * its tasks, else the head one of the active milestone.
+ * checkpoint of the active task, else of the active slice, else of the active
+ * milestone. Only the own checkpoint of that one item counts, and only while
+ * the item is open: a completed or cancelled item has no resume state.
  */
 export function buildActiveResumeSection(active: Partial<WorkCheckpointScope>): string {
-  const { milestoneId, sliceId, taskId } = active;
-  const checkpoint = !milestoneId ? null
-    : (sliceId && taskId ? readWorkCheckpoint({ milestoneId, sliceId, taskId }) : null)
-      ?? (sliceId ? readLatestSliceWorkCheckpoint(milestoneId, sliceId) : null)
-      ?? readWorkCheckpoint({ milestoneId });
+  const checkpoint = active.milestoneId
+    ? readWorkCheckpoint({ milestoneId: active.milestoneId, sliceId: active.sliceId, taskId: active.taskId }, { openItemOnly: true })
+    : null;
   return resumeSection(
     checkpoint,
     "No Work Checkpoint saved for the active task, slice or milestone. Take the next step from the canonical state.",
