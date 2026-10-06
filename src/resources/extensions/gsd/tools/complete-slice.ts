@@ -20,7 +20,8 @@ import { checkOwnership, sliceUnitKey } from "../unit-ownership.js";
 import { loadFile, saveFile, clearParseCache } from "../files.js";
 import { classifyUatContent, escalatesArtifactUatToBrowser } from "../uat-policy.js";
 import { invalidateStateCache } from "../state.js";
-import { renderMilestoneShellProjections } from "../workflow-projections.js";
+import { renderStateProjection, renderTopLevelQueueFromDb } from "../workflow-projections.js";
+import { renderRoadmapToDisk } from "../markdown-renderer.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
 import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
@@ -456,7 +457,14 @@ export async function handleCompleteSlice(
       superseded = true;
       projectionStale = true;
     } else {
-      const rendered = await renderMilestoneShellProjections(artifactBasePath, params.milestoneId);
+      // P35: the shell render's ROADMAP store writes a workflow table outside
+      // the completion operation. Render the ROADMAP file to disk without the
+      // artifacts store — the operation enqueued the slice-lifecycle
+      // projection work whose drain stores the row — plus the store-free root
+      // projections.
+      await renderRoadmapToDisk(artifactBasePath, params.milestoneId);
+      renderTopLevelQueueFromDb(artifactBasePath);
+      const rendered = await renderStateProjection(artifactBasePath);
       projectionStale ||= rendered.stale;
       if (!isCurrent()) {
         superseded = true;

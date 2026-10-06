@@ -768,6 +768,29 @@ export async function renderRoadmapFromDb(
   return { roadmapPath: absPath, content: stamped };
 }
 
+/**
+ * Render the milestone ROADMAP to disk WITHOUT writing the artifacts table
+ * (P35): a completion operation already enqueued the projection work whose
+ * drain stores the row. A tool handler rendering between the operation and
+ * the drain must not write a workflow table outside it.
+ */
+export async function renderRoadmapToDisk(
+  basePath: string,
+  milestoneId: string,
+): Promise<boolean> {
+  const milestone = getMilestone(milestoneId);
+  if (!milestone) return false;
+  const slices = getMilestoneSlices(milestoneId).filter(
+    (slice) => !isHiddenFromRoadmap(slice.status),
+  );
+  if (isUnplanned(milestone, slices)) return false;
+  const absPath = targetMilestoneFile(basePath, milestoneId, "ROADMAP", milestone.title);
+  const content = renderRoadmapMarkdown(milestone, slices);
+  const stamped = stampProjectionContent(content);
+  await writeProjectionFile(basePath, absPath, stamped, [milestoneId]);
+  return true;
+}
+
 // ─── Roadmap Checkbox Rendering ───────────────────────────────────────────
 
 /**
