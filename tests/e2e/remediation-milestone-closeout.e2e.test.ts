@@ -435,6 +435,19 @@ describe("remediation milestone closeout e2e (fake LLM)", () => {
 		assert.equal(scalar(db, "SELECT COUNT(*) AS value FROM tasks WHERE milestone_id = :mid AND status = 'complete'", { mid: "M001" }), "2");
 		assert.equal(scalar(db, "SELECT status AS value FROM assessments WHERE milestone_id = :mid AND scope = 'milestone-validation'", { mid: "M001" }), "pass");
 		assert.equal(scalar(db, "SELECT status AS value FROM assessments WHERE milestone_id = :mid AND scope = 'roadmap'", { mid: "M001" }), "roadmap-adjusted");
+		// P35: the closeout wrote canonical authority rows, not just legacy projections.
+		assert.equal(
+			scalar(db, "SELECT COUNT(*) AS value FROM workflow_item_lifecycles l JOIN project_authority a ON a.project_id = l.project_id AND a.singleton = 1 WHERE l.item_kind = 'milestone' AND l.milestone_id = :mid AND l.lifecycle_status = 'completed'", { mid: "M001" }),
+			"1",
+		);
+		assert.equal(
+			scalar(db, "SELECT COUNT(*) AS value FROM workflow_operations WHERE operation_type = 'milestone.complete'"),
+			"1",
+		);
+		assert.equal(
+			scalar(db, "SELECT COUNT(*) AS value FROM workflow_operations WHERE operation_type = 'milestone.validate'"),
+			"1",
+		);
 		assert.equal(
 			scalar(
 				db,

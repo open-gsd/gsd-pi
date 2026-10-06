@@ -9,7 +9,8 @@
 //   G1 files deleted           none
 //   G2 files poisoned          none
 //   G3 canonical wins          P23
-//   G4 operation-only writes   gsd_slice_complete P35, gsd_summary_save task SUMMARY P12
+//   G4 operation-only writes   gsd_summary_save task SUMMARY P12
+//                              (gsd_slice_complete is operation-only since P35)
 //   G5 render failure          handler writes no projection P12
 //   G6 evidence before unlock  slice P24, milestone P27
 //   G7 epoch fence             none

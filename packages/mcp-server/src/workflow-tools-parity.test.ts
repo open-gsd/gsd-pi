@@ -1081,7 +1081,7 @@ const OPERATION_ONLY_CASES: ReadonlyArray<{
   seed?: (base: string) => void;
   prepare?: (base: string) => Promise<unknown>;
 }> = [
-  { tool: "gsd_slice_complete", args: SLICE_LIFECYCLE_CASES[0].args, passesWith: "P35" },
+  { tool: "gsd_slice_complete", args: SLICE_LIFECYCLE_CASES[0].args, passesWith: null },
   {
     tool: "gsd_decision_save",
     args: { ...DECISION_SAVE_ARGS, when_context: "parity matrix", made_by: "agent" },
