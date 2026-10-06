@@ -171,7 +171,7 @@ const _worktreeProjection = new WorktreeStateProjection();
 
 /** Maximum verification retry attempts before escalating to blocker placeholder (#2653). */
 const MAX_VERIFICATION_RETRIES = 3;
-const MAX_GIT_COMMIT_REMEDIATION_RETRIES = 2;
+export const MAX_GIT_COMMIT_REMEDIATION_RETRIES = 2;
 /** Keep failure toasts short while still showing concrete examples. */
 const MAX_NOTIFICATION_DETAILS = 3;
 const NOTIFICATION_BULLET = "•";
@@ -605,7 +605,7 @@ export function resolveVerificationFailureMarkerPath(
   }
 }
 
-async function buildTaskCommitContextForUnit(
+export async function buildTaskCommitContextForUnit(
   basePath: string,
   unitId: string,
 ): Promise<TaskCommitContext | undefined> {
@@ -859,6 +859,7 @@ import { getOperationIdByIdempotencyKey, getTaskLifecycleHead } from "./db/lifec
 import { basename, join, relative } from "node:path";
 import { _resetHasChangesCache } from "./native-git-bridge.js";
 import { autoCommitCurrentBranch } from "./worktree.js";
+import { isTaskSourceCommitSettled } from "./auto/task-source-commit.js";
 
 // ─── Rogue File Detection ──────────────────────────────────────────────────
 
@@ -2646,7 +2647,13 @@ export async function postUnitPostVerification(pctx: PostUnitContext): Promise<"
   if (s.currentUnit) {
     if (shouldDeferCloseoutGitAction(s.currentUnit.type)) {
       const headBeforeCloseout = readCommittedHeadSha(s.basePath);
-      const gitActionResult = await runCloseoutGitAction(pctx, s.currentUnit, { softFailure: true });
+      // ADR-050: a Task whose source commit settled before publication
+      // (Closeout Effect ordinal 1, receipt recorded) skips the legacy
+      // post-publication commit; the recapture, audit and sync below still
+      // run against the committed tree.
+      const gitActionResult = isTaskSourceCommitSettled(s.basePath, s.currentUnit.id)
+        ? "continue"
+        : await runCloseoutGitAction(pctx, s.currentUnit, { softFailure: true });
       if (gitActionResult === "dispatched") {
         return "stopped";
       }
