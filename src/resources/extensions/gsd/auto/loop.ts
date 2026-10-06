@@ -12,7 +12,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@gsd/pi-coding-agent";
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { AutoSession } from "./session.js";
 import type { AutoTerminalOutcome } from "./contracts.js";
@@ -30,7 +30,8 @@ import {
 import { _clearCurrentResolve } from "./resolve.js";
 import { runGuards } from "./phases.js";
 import { runFinalize } from "./finalize.js";
-import { handlePendingHookOutcome, resolveVerificationFailureMarkerPath } from "../auto-post-unit.js";
+import { handlePendingHookOutcome } from "../auto-post-unit.js";
+import { readStoredCloseoutRefusal } from "../db/unit-dispatch-retries.js";
 import {
   resetSessionTimeoutState,
   restoreTaskHostVerificationContext,
@@ -145,15 +146,15 @@ import { readTerminalTaskRecoveryAbort } from "../artifact-verification.js";
 import { IS_DISPATCH_OWNER_DEAD, IS_RUN_DISPATCH_OWNER_GONE, RECLAIM_DEAD_DISPATCH_OWNER } from "./unit-run.js";
 
 /**
- * Path of the `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker
- * for the unit when one exists on disk — a deliberate closeout refusal
- * (#2046). Flagged on the finalize input so the kernel stops instead of
- * identical-input retrying. Unknown unit types resolve to no marker and keep
- * the retry default.
+ * The closeout refusal recorded on the unit's newest dispatch row, when one
+ * exists — a deliberate closeout refusal (#2046). Flagged on the finalize
+ * input so the kernel stops instead of identical-input retrying. The refusal
+ * is the dispatch row; the `*VERIFICATION-FAILED` report on disk is a render
+ * that the pre-verification ingest probes once. Unknown unit types have no
+ * refusal row and keep the retry default.
  */
-function resolvePresentVerificationFailureMarker(unitType: string, unitId: string, basePath: string): string | null {
-  const markerPath = resolveVerificationFailureMarkerPath(unitType, unitId, basePath);
-  return markerPath !== null && existsSync(markerPath) ? markerPath : null;
+function resolvePresentVerificationFailureMarker(unitType: string, unitId: string, _basePath: string): string | null {
+  return readStoredCloseoutRefusal(unitType, unitId);
 }
 
 function resolveCompletionStopFromState(
@@ -1994,7 +1995,7 @@ export async function autoLoop(
           // The unit deliberately declined closeout: stopping here must be
           // legible to the operator, not a silent exit after a "retry" report.
           ctx.ui.notify(
-            `${iterData.unitType} ${iterData.unitId} declined closeout${refusalMarkerPath ? ` (see ${relative(s.basePath, refusalMarkerPath)})` : ""}. Stopping instead of retrying — an identical-input retry cannot change a refusal.`,
+            `${iterData.unitType} ${iterData.unitId} declined closeout${refusalMarkerPath ? ` (see ${refusalMarkerPath})` : ""}. Stopping instead of retrying — an identical-input retry cannot change a refusal.`,
             "error",
           );
         }

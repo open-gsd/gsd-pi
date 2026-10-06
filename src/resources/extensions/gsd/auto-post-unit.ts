@@ -120,7 +120,7 @@ import {
   verificationBudget,
 } from "./auto/verification-retry-state.js";
 import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
-import { readStoredUnitRetry, releaseCommitRepairRetry, releaseUnitRetry } from "./db/unit-dispatch-retries.js";
+import { readStoredUnitRetry, releaseCommitRepairRetry, releaseUnitRetry, storeCloseoutRefusal } from "./db/unit-dispatch-retries.js";
 import { getLedger } from "./metrics.js";
 import { getUnitCostSpikeAction, resolveUnitCostSpikeMultiplier } from "./auto-budget.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
@@ -2440,7 +2440,15 @@ export async function postUnitPreVerification(pctx: PostUnitContext, opts?: PreV
           const verificationBudgetRef = verificationBudget(s.currentUnit.type, s.currentUnit.id);
           const verificationFailureMarker = resolveVerificationFailureMarkerPath(s.currentUnit.type, s.currentUnit.id, s.basePath);
           if (verificationFailureMarker && existsSync(verificationFailureMarker)) {
+            // The report on disk is the agent's refusal channel; this probe is
+            // the one ingest. The refusal a decision reads is the dispatch
+            // row, stored after the retry state clears so it survives.
             clearVerificationRetry(s, s.currentUnit.type, s.currentUnit.id);
+            storeCloseoutRefusal(
+              s.currentUnit.type,
+              s.currentUnit.id,
+              relative(s.basePath, verificationFailureMarker),
+            );
             debugLog("postUnit", {
               phase: "artifact-verify-failure-marker-detected",
               unitType: s.currentUnit.type,

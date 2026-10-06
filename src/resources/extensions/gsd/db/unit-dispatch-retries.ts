@@ -151,3 +151,38 @@ export function releaseVerificationRetry(unitType: string, unitId: string): void
 export function releaseCommitRepairRetry(unitType: string, unitId: string): void {
   if (isDbAvailable()) deleteUnitCommitRepairRetries(unitType, unitId);
 }
+
+// ── Closeout refusal (#2046) ──────────────────────────────────────────────
+//
+// A unit that deliberately declines closeout writes its `*VERIFICATION-FAILED`
+// report. The report on disk is the agent's channel and a render for the
+// operator; the refusal a decision reads is the row this module stores on the
+// unit's newest dispatch. A verification gate that clears the retry state of
+// the unit releases the refusal with it, so a close-out that passes clears it.
+
+/** Signature prefix of a stored closeout refusal. */
+export const CLOSEOUT_REFUSAL_SIGNATURE_PREFIX = "closeout-refusal:";
+
+/**
+ * Store the deliberate closeout refusal of the unit on its newest dispatch
+ * row (#2046). The relative report path rides on the signature so the
+ * operator notice names the report without reading the file again.
+ */
+export function storeCloseoutRefusal(unitType: string, unitId: string, markerRelPath: string): void {
+  storeUnitRetry(unitType, {
+    unitId,
+    failureContext: `${unitType} ${unitId} declined closeout (see ${markerRelPath})`,
+    signature: `${CLOSEOUT_REFUSAL_SIGNATURE_PREFIX}${markerRelPath}`,
+    attempt: 1,
+  });
+}
+
+/**
+ * The relative report path of the closeout refusal the unit's newest dispatch
+ * row holds, or null when it has none. The report file on disk is not read.
+ */
+export function readStoredCloseoutRefusal(unitType: string, unitId: string): string | null {
+  const retry = readStoredUnitRetry(unitType, unitId);
+  if (!retry?.signature?.startsWith(CLOSEOUT_REFUSAL_SIGNATURE_PREFIX)) return null;
+  return retry.signature.slice(CLOSEOUT_REFUSAL_SIGNATURE_PREFIX.length);
+}
