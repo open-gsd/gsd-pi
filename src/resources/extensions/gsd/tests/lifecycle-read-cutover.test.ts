@@ -81,7 +81,7 @@ import { getEligibleSlicesFromRows } from "../slice-parallel-eligibility.ts";
 import { deriveState, invalidateStateCache, isGhostMilestone } from "../state.ts";
 import { readProgressFromDb } from "../state/progress-from-db.ts";
 import { readProjectSnapshotFromDb } from "../state/project-snapshot.ts";
-import { handleCompleteTask } from "../tools/complete-task.ts";
+import { resolveTaskCompletionAuthority } from "../task-completion-compatibility-adapter.ts";
 import { handlePlanSlice } from "../tools/plan-slice.ts";
 import { handlePlanTask } from "../tools/plan-task.ts";
 import { handleReassessRoadmap } from "../tools/reassess-roadmap.ts";
@@ -1253,24 +1253,23 @@ test("after the Cutover reassess-roadmap takes the closed milestone and the comp
   assert.equal(readSlice("M002", "S01")?.title, "Changed after the Cutover");
 });
 
-test("after the Cutover a blocker report takes the closed milestone, slice and task from the lifecycle rows", async () => {
+test("after the Cutover a blocker report is refused by the canonical completion authority", async () => {
   const base = seedPlanningDisagreement();
-  const report = () => handleCompleteTask({
+  const report = () => resolveTaskCompletionAuthority({
     milestoneId: "M002",
     sliceId: "S01",
     taskId: "T01",
-    oneLiner: "Found a blocker",
-    narrative: "The task cannot continue.",
-    verification: "Not run.",
-    blockerDiscovered: true,
-  }, base);
+  });
 
-  assert.match(errorOf(await report()) ?? "", /cannot complete task in a closed milestone: M002 \(status: complete\)/);
+  // The authority refuses before the Cutover: a blocker report is not a
+  // completion, and no running Attempt exists to close.
+  assert.throws(report, /no running Attempt to close/);
 
   cutOver();
 
-  // M002 and S01 are canonical ready. T01 is legacy pending and canonical completed.
-  assert.match(errorOf(await report()) ?? "", /task T01 is already complete/);
+  // M002 and S01 are canonical ready. T01 is legacy pending and canonical
+  // completed: still no running Attempt, still no legacy write path.
+  assert.throws(report, /no running Attempt to close/);
 });
 
 test("after the Cutover plan-milestone takes the closed milestone and its dependencies from the lifecycle rows", async () => {

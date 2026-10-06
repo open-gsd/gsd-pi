@@ -65,7 +65,6 @@ import { join } from "node:path";
 import type { CompleteMilestoneParams } from "./complete-milestone.js";
 import { handleCompleteMilestone } from "./complete-milestone.js";
 import {
-  handleCompleteTask,
   normalizeReworkResolution,
   resolveTaskSummaryPath,
   satisfiesBlockingReworkFinding,
@@ -1107,9 +1106,7 @@ export async function executeTaskComplete(
       sliceId: params.sliceId,
       taskId: params.taskId,
     };
-    const authority = resolveTaskCompletionAuthority(task, invocation?.idempotencyKey, {
-      blockerReport: params.blockerDiscovered === true,
-    });
+    const authority = resolveTaskCompletionAuthority(task, invocation?.idempotencyKey);
     if (authority === "canonical") {
       if (!invocation) {
         throw new Error("Canonical Task completion requires private invocation identity");
@@ -1142,8 +1139,7 @@ export async function executeTaskComplete(
           );
         }
       }
-      // Mirror the legacy blocking rework gate (handleCompleteTask) onto the
-      // canonical path (#2231): an unresolved blocking finding rejects the
+      // Blocking rework gate on the canonical path (#2231): an unresolved blocking finding rejects the
       // closeout unless covered by a satisfying reworkResolution.
       const reworkResolutions = normalizeReworkResolution(params);
       const resolvedFindingIds = new Set(
@@ -1271,58 +1267,8 @@ export async function executeTaskComplete(
         },
       };
     }
+    throw new Error("gsd_task_complete resolved no Task completion authority");
 
-    const result = await handleCompleteTask(coerced as any, basePath);
-    if ("error" in result) {
-      return {
-        content: [{ type: "text", text: `Error completing task: ${result.error}` }],
-        details: { operation: "complete_task", error: result.error },
-      isError: true,
-      };
-    }
-    const projectionNotice = result.stale
-      ? "The readable status update is pending repair."
-      : null;
-    if (result.escalation) {
-      const recommended = result.escalation.options.find((option) => option.id === result.escalation?.recommendation);
-      const optionIds = result.escalation.options.map((option) => option.id).join("|");
-      return {
-        content: [{
-          type: "text",
-          text: [
-            `Task completed with escalation decision required: ${result.escalation.question}`,
-            `Recommendation: ${result.escalation.recommendation}${recommended ? ` (${recommended.label})` : ""} — ${result.escalation.recommendationRationale}`,
-            `Resolve with: /gsd escalate resolve ${result.taskId} <${optionIds}|accept|reject-blocker> [rationale...]`,
-            ...(projectionNotice ? [projectionNotice] : []),
-          ].join("\n"),
-        }],
-        details: {
-          operation: "complete_task",
-          taskId: result.taskId,
-          sliceId: result.sliceId,
-          milestoneId: result.milestoneId,
-          summaryPath: result.summaryPath,
-          escalation: result.escalation,
-          ...(result.stale ? { stale: true } : {}),
-          ...(result.duplicate ? { duplicate: true } : {}),
-        },
-      };
-    }
-    return {
-      content: [{
-        type: "text",
-        text: `Completed task ${result.taskId} (${result.sliceId}/${result.milestoneId})${projectionNotice ? `. ${projectionNotice}` : ""}`,
-      }],
-      details: {
-        operation: "complete_task",
-        taskId: result.taskId,
-        sliceId: result.sliceId,
-        milestoneId: result.milestoneId,
-        summaryPath: result.summaryPath,
-        ...(result.stale ? { stale: true } : {}),
-        ...(result.duplicate ? { duplicate: true } : {}),
-      },
-    };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     logError("tool", `complete_task tool failed: ${msg}`, { tool: "gsd_task_complete", error: String(err) });

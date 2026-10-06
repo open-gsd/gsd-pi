@@ -51,7 +51,8 @@ import {
 } from "../../gsd-db.ts";
 
 // ── Tool handlers ─────────────────────────────────────────────────────────
-import { handleCompleteTask } from "../../tools/complete-task.ts";
+import { resolveTaskSummaryPath } from "../../tools/complete-task.ts";
+import { renderSummaryContent } from "../../workflow-projections.ts";
 import {
   handleCompleteSlice as handleCompleteSliceWithInvocation,
 } from "../../tools/complete-slice.ts";
@@ -253,6 +254,46 @@ function makeCompleteTaskParams(taskId: string): any {
   };
 }
 
+/**
+ * Stamp a completed Task row and render the projections the completion
+ * pipeline (stage/publish) owns, so downstream requirement checks observe the
+ * same durable state without routing this proof through an Attempt.
+ */
+async function completeTaskFixture(base: string, taskId: string): Promise<{ summaryPath: string }> {
+  const params = makeCompleteTaskParams(taskId);
+  const adapter = _getAdapter()!;
+  adapter.prepare(`
+    UPDATE tasks SET status = 'complete', completed_at = :now, one_liner = :ol, narrative = :n,
+      verification_result = :v, deviations = :dev, known_issues = :ki
+    WHERE milestone_id = :m AND slice_id = :s AND id = :t
+  `).run({
+    ":now": new Date().toISOString(),
+    ":ol": params.oneLiner,
+    ":n": params.narrative,
+    ":v": params.verification,
+    ":dev": params.deviations ?? "None.",
+    ":ki": params.knownIssues ?? "None.",
+    ":m": params.milestoneId,
+    ":s": params.sliceId,
+    ":t": params.taskId,
+  });
+  const taskRow = getTask(params.milestoneId, params.sliceId, params.taskId)!;
+  const summaryMd = renderSummaryContent(taskRow, params.sliceId, params.milestoneId);
+  adapter.prepare(
+    `UPDATE tasks SET full_summary_md = :md WHERE milestone_id = :m AND slice_id = :s AND id = :t`,
+  ).run({
+    ":md": summaryMd,
+    ":m": params.milestoneId,
+    ":s": params.sliceId,
+    ":t": params.taskId,
+  });
+  const summaryPath = resolveTaskSummaryPath(base, params.milestoneId, params.sliceId, params.taskId);
+  const { writeFileSync } = await import("node:fs");
+  writeFileSync(summaryPath, summaryMd, "utf-8");
+  await renderPlanCheckboxes(base, params.milestoneId, params.sliceId);
+  return { summaryPath };
+}
+
 function makeCompleteSliceParams(): any {
   return {
     sliceId: "S01",
@@ -324,12 +365,10 @@ test("full lifecycle: migration through completion through doctor", async (t) =>
     assert.ok(t2Before, "T02 should exist in DB after migration");
     assert.equal(t2Before!.status, "pending", "T02 should be pending after migration");
 
-    // ── (c) Complete T01 and T02 via handleCompleteTask (R001) ───────
-    const r1 = await handleCompleteTask(makeCompleteTaskParams("T01"), base);
-    assert.ok(!("error" in r1), `T01 completion should succeed: ${JSON.stringify(r1)}`);
-
-    const r2 = await handleCompleteTask(makeCompleteTaskParams("T02"), base);
-    assert.ok(!("error" in r2), `T02 completion should succeed: ${JSON.stringify(r2)}`);
+    // ── (c) Complete T01 and T02 (R001). The durable Attempt pipeline owns
+    // completion; this proof stamps the projection work it leaves behind. ──
+    const r1 = await completeTaskFixture(base, "T01");
+    const r2 = await completeTaskFixture(base, "T02");
     seedSliceCompletionAuthority({
       milestoneId: "M001",
       sliceId: "S01",
@@ -441,8 +480,8 @@ test("recovery: DB loss → migrateFromMarkdown restores state, stale render det
   // Set up a completed state first
     openDatabase(dbPath);
     migrateHierarchyToDb(base);
-    await handleCompleteTask(makeCompleteTaskParams("T01"), base);
-    await handleCompleteTask(makeCompleteTaskParams("T02"), base);
+    await completeTaskFixture(base, "T01");
+    await completeTaskFixture(base, "T02");
     invalidateAllCaches();
     await handleCompleteSlice(makeCompleteSliceParams(), base);
 
@@ -535,8 +574,8 @@ test("undo task reopens canonical task state and re-renders markdown", async (t)
   // Build up completed state
     openDatabase(dbPath);
     migrateHierarchyToDb(base);
-    await handleCompleteTask(makeCompleteTaskParams("T01"), base);
-    await handleCompleteTask(makeCompleteTaskParams("T02"), base);
+    await completeTaskFixture(base, "T01");
+    await completeTaskFixture(base, "T02");
     seedSliceCompletionAuthority({
       milestoneId: "M001",
       sliceId: "S01",
@@ -598,8 +637,8 @@ test("reset slice reopens canonical task state and re-renders markdown", async (
 
     openDatabase(dbPath);
     migrateHierarchyToDb(base);
-    await handleCompleteTask(makeCompleteTaskParams("T01"), base);
-    await handleCompleteTask(makeCompleteTaskParams("T02"), base);
+    await completeTaskFixture(base, "T01");
+    await completeTaskFixture(base, "T02");
     seedSliceCompletionAuthority({
       milestoneId: "M001",
       sliceId: "S01",

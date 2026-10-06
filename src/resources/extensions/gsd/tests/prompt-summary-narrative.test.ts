@@ -22,6 +22,7 @@ import {
 import { invalidateAllCaches } from "../cache.ts";
 import { internalExecutionInvocation } from "../execution-invocation.ts";
 import {
+  _getAdapter,
   closeDatabase,
   getScopedArtifact,
   insertMilestone,
@@ -33,7 +34,6 @@ import {
 import { renderTaskSummary } from "../markdown-renderer.ts";
 import { flushWorkflowProjections } from "../projection-flush.ts";
 import { handleCompleteSlice } from "../tools/complete-slice.ts";
-import { handleCompleteTask } from "../tools/complete-task.ts";
 import { handleReopenSlice } from "../tools/reopen-slice.ts";
 import { handleReopenTask } from "../tools/reopen-task.ts";
 import type { CompleteSliceParams } from "../types.ts";
@@ -177,25 +177,18 @@ test("a completed Task gives its SUMMARY to the next prompts when its projection
   const base = makeProject();
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Receipt", status: "pending" });
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T03", title: "Refund", status: "pending" });
-  // A directory at the path of the SUMMARY file: the completion commits and its projection render fails.
+  // The durable pipeline commits the completion; its SUMMARY projection render
+  // fails (a directory sits at the file path). The committed row is what the
+  // prompts read.
   mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T02-SUMMARY.md"), { recursive: true });
-
-  const completed = await handleCompleteTask({
-    milestoneId: "M001",
-    sliceId: "S01",
-    taskId: "T02",
-    oneLiner: "COMMITTED-TASK-MARKER",
-    narrative: "The receipt was built.",
-    verification: "The tests pass.",
-    deviations: "None.",
-    knownIssues: "None.",
-    keyFiles: ["src/receipt.ts"],
-    keyDecisions: [],
-    blockerDiscovered: false,
-    verificationEvidence: [{ command: "pnpm test receipt", exitCode: 0, verdict: "pass", durationMs: 25 }],
-  }, base);
-  assert.ok(!("error" in completed), `unexpected error: ${"error" in completed ? completed.error : ""}`);
-  assert.equal(getScopedArtifact("M001", "S01", "T02", "SUMMARY"), null, "the SUMMARY artifact row is not written");
+  setTaskSummaryMd(
+    "M001", "S01", "T02",
+    "---\nid: T02\n---\n\n# T02: Receipt\n\n**COMMITTED-TASK-MARKER**\n\nThe receipt was built.\n",
+  );
+  _getAdapter()!.prepare(`
+    UPDATE tasks SET status = 'complete', completed_at = :now
+    WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T02'
+  `).run({ ":now": new Date().toISOString() });
 
   invalidateAllCaches();
   assert.deepEqual(
