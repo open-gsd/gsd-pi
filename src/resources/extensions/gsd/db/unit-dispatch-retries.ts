@@ -167,6 +167,10 @@ export const CLOSEOUT_REFUSAL_SIGNATURE_PREFIX = "closeout-refusal:";
  * Store the deliberate closeout refusal of the unit on its newest dispatch
  * row (#2046). The relative report path rides on the signature so the
  * operator notice names the report without reading the file again.
+ *
+ * The retry row is a single slot per dispatch: storing the refusal clobbers
+ * any retry state the newest dispatch already holds, and a retry another
+ * check stores on that dispatch later clobbers the refusal.
  */
 export function storeCloseoutRefusal(unitType: string, unitId: string, markerRelPath: string): void {
   storeUnitRetry(unitType, {

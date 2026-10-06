@@ -34,6 +34,7 @@ import {
 } from "./paths.js";
 import { readUnitRuntimeRecord, type UnitRuntimePhase } from "./unit-runtime.js";
 import { getHookGateVerdict } from "./db/hook-verdicts.js";
+import { deleteHookGateVerdict } from "./db/writers/hook-verdicts.js";
 import { getDbOrNull } from "./db/engine.js";
 import { getTaskCompletionIdentity, type TaskCompletionIdentityRow } from "./db/lifecycle-queries.js";
 
@@ -549,6 +550,13 @@ export class RuleRegistry {
       completionOperationId,
       legacyCompletedAt,
     };
+
+    // The verdict belongs to one attempt: dispatching the hook invalidates
+    // the previous attempt's row, so a hook that never records its verdict
+    // (crash, tool error, omitted call) cannot decide this gate on a stale
+    // row — a stale pass would skip the gate and a stale needs-rework would
+    // route rework.
+    deleteHookGateVerdict(config.name, triggerUnitId);
 
     return this._buildHookDispatch(config, triggerUnitId);
   }

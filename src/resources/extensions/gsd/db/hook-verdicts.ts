@@ -10,10 +10,11 @@ import { getDbOrNull } from "./engine.js";
 /**
  * Deterministic row key of one hook gate verdict. It is derived from the hook
  * name and the trigger unit id alone, so the row is addressable without the
- * filesystem and the artifact layout cannot move it.
+ * filesystem and the artifact layout cannot move it. The hook name is
+ * percent-encoded so a slash in it cannot collide with the unit id segment.
  */
 export function hookGateVerdictPath(hookName: string, unitId: string): string {
-  return `hook-verdicts/${hookName}/${unitId}.md`;
+  return `hook-verdicts/${encodeURIComponent(hookName)}/${unitId}.md`;
 }
 
 /**

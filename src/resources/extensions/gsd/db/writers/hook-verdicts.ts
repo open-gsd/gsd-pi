@@ -3,7 +3,7 @@
 // (P18d). Owns the write SQL of the hook-gate assessment rows;
 // db/hook-verdicts.ts reads them.
 
-import { getDb, transaction } from "../engine.js";
+import { getDb, isDbAvailable, transaction } from "../engine.js";
 import { hookGateVerdictPath } from "../hook-verdicts.js";
 
 /**
@@ -32,4 +32,18 @@ export function upsertHookGateVerdict(entry: {
     ":rationale": entry.rationale,
     ":created_at": new Date().toISOString(),
   }));
+}
+
+/**
+ * Delete the verdict row of one (hook, trigger unit). Dispatching the hook
+ * calls this: the verdict belongs to one attempt, so a re-dispatched hook
+ * that never records its verdict (crash, tool error, omitted call) cannot
+ * decide its gate on the previous attempt's row — a stale pass would skip
+ * the gate and a stale needs-rework would route rework.
+ */
+export function deleteHookGateVerdict(hookName: string, unitId: string): void {
+  if (!isDbAvailable()) return;
+  transaction(() => getDb().prepare(
+    `DELETE FROM assessments WHERE path = :path AND scope = 'hook-gate'`,
+  ).run({ ":path": hookGateVerdictPath(hookName, unitId) }));
 }
