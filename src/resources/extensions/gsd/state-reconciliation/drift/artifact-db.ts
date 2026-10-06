@@ -38,7 +38,7 @@ import { isClosedStatus } from "../../status-guards.js";
 import { findMilestoneIds } from "../../milestone-ids.js";
 import { removeProjectionTreeSync } from "../../atomic-write.js";
 import { invalidateStateCache } from "../../state.js";
-import { hasTaskExecutionOrReopenHistory } from "../../db/lifecycle-queries.js";
+import { hasTaskExecutionOrReopenHistory, hasSliceReopenHistory } from "../../db/lifecycle-queries.js";
 import type { GSDState } from "../../types.js";
 import {
   completedEventCoversDispatch,
@@ -163,6 +163,38 @@ function taskHasExecutionOrReopenHistory(
 ): boolean {
   if (!isDbAvailable()) return false;
   return hasTaskExecutionOrReopenHistory(milestoneId, sliceId, taskId);
+}
+
+/**
+ * Disk-existence check for a slice-level SUMMARY artifact row: the recorded
+ * path, or the currently-resolved slice projection path. Mirrors the
+ * task-level stagedTaskSummaryExistsOnDisk above.
+ */
+function sliceSummaryExistsOnDisk(
+  basePath: string,
+  milestoneId: string,
+  sliceId: string,
+  rowPath: string,
+): boolean {
+  const candidates = [
+    isAbsolute(rowPath) ? rowPath : resolve(basePath, rowPath),
+    resolveSliceFile(basePath, milestoneId, sliceId, "SUMMARY"),
+  ];
+  return candidates.some((candidate) => candidate !== null && existsSync(candidate));
+}
+
+/**
+ * Whether a slice-level SUMMARY row has authoritative history proving that it
+ * is dead bookkeeping: the slice's current lifecycle head is an explicit
+ * reopen. A completed-then-reopened slice keeps its orphaned SUMMARY artifact
+ * row (the reopen clears slices.full_summary_md and quarantines the file but
+ * does not delete the artifacts row), and that row must not wedge re-execution.
+ * A slice that legitimately re-completes re-writes its SUMMARY to disk, so the
+ * disk-absence gate in the caller keeps a genuine completion-claim flaggable.
+ */
+function sliceHasReopenHistory(milestoneId: string, sliceId: string): boolean {
+  if (!isDbAvailable()) return false;
+  return hasSliceReopenHistory(milestoneId, sliceId);
 }
 
 function isAbandonedStagedTaskSummary(
@@ -383,6 +415,19 @@ function detectArtifactDbStatusDriftForMilestone(
     if (row.artifact_type !== "SUMMARY" || !row.slice_id || row.task_id) continue;
     const slice = bySlice.get(row.slice_id);
     if (!slice || slice.closed) continue;
+    // A missing-file slice-level SUMMARY row whose lifecycle head is an
+    // explicit reopen is dead bookkeeping, mirroring the task-level
+    // #1771/#1983 exemption: the reopen cleared the summary carrier and
+    // quarantined the file, so the orphaned artifacts row must not wedge the
+    // reopened slice's re-execution. A slice that legitimately re-completes
+    // re-writes its SUMMARY to disk, so the disk-absence gate keeps a genuine
+    // completion-claim flaggable.
+    if (
+      sliceHasReopenHistory(milestoneId, row.slice_id) &&
+      !sliceSummaryExistsOnDisk(basePath, milestoneId, row.slice_id, row.path)
+    ) {
+      continue;
+    }
     addUniqueDrift(drifts, seen, {
       kind: "artifact-db-status-divergence",
       milestoneId,

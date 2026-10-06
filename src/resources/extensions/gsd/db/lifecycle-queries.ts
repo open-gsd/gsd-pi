@@ -653,6 +653,27 @@ export function hasTaskExecutionOrReopenHistory(
 }
 
 /**
+ * state-reconciliation/drift/artifact-db.ts — whether a Slice's current
+ * lifecycle head is an explicit reopen. Mirrors
+ * hasTaskExecutionOrReopenHistory's reopen branch at the slice level: a
+ * completed-then-reopened slice keeps its orphaned SUMMARY artifact row (the
+ * reopen clears slices.full_summary_md and quarantines the file but does not
+ * delete the artifacts row), and that row must not wedge the reopened
+ * slice's re-execution.
+ */
+export function hasSliceReopenHistory(milestoneId: string, sliceId: string): boolean {
+  const row = getDb().prepare(`
+    SELECT 1 AS present
+    FROM workflow_domain_events reopened
+    WHERE reopened.event_type = 'slice.reopened'
+      AND reopened.entity_type = 'slice'
+      AND reopened.entity_id = :entity_id
+    LIMIT 1
+  `).get({ ":entity_id": `${milestoneId}/${sliceId}` });
+  return row !== undefined;
+}
+
+/**
  * bootstrap/dynamic-tools.ts — the Milestone a recovery action belongs to.
  * The caller owns the connection: the tool resolves it for an arbitrary
  * project root through an isolated database, not the open project database.
