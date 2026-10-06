@@ -335,7 +335,6 @@ function runGit(root: string, args: string[]): void {
 async function validate(root: string, key: string) {
   const result = await handleValidateMilestone(validationParams, root, {
     invocation: invocation(key),
-    skipBrowserEvidenceGate: true,
   });
   assert.ok(!("error" in result), `validation failed: ${"error" in result ? result.error : ""}`);
   return result;
@@ -648,7 +647,6 @@ test("validation rolls back late faults and replays after a lost response and DB
     "milestone.validate",
     () => handleValidateMilestone(validationParams, fixture.root, {
       invocation: invocation(key),
-      skipBrowserEvidenceGate: true,
     }),
     (result) => Boolean((result as { duplicate?: boolean }).duplicate),
   );

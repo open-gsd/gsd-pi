@@ -279,7 +279,6 @@ async function prepareCompletedFixture(): Promise<string> {
   const basePath = makeBase();
   const validated = await handleValidateMilestone(validation, basePath, {
     invocation: invocation("fixture/milestone-reopen/validate"),
-    skipBrowserEvidenceGate: true,
   });
   assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
   completeMilestone({

@@ -159,7 +159,6 @@ async function seedAdoptedMilestone(basePath: string): Promise<void> {
   });
   const validation = await handleValidateMilestone(validationParams, basePath, {
     invocation: invocation("fixture/milestone/validate"),
-    skipBrowserEvidenceGate: true,
   });
   assert.ok(!("error" in validation), `validation fixture failed: ${"error" in validation ? validation.error : ""}`);
 }

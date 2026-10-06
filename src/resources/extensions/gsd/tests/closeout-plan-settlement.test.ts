@@ -148,7 +148,7 @@ async function recordValidation(basePath: string, validation: ValidationFixture)
       verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
       verdictRationale: passed ? "All current database evidence passes." : "A regression was found.",
       ...(passed ? {} : { remediationPlan: "Repair and revalidate." }),
-    }, basePath, { invocation: invocation("fixture/validate"), skipBrowserEvidenceGate: true });
+    }, basePath, { invocation: invocation("fixture/validate") });
     assert.ok(!("error" in validated), `validation fixture failed: ${"error" in validated ? validated.error : ""}`);
   }
   if (validation === "waived" || validation === "failed-then-waived") {
@@ -1117,7 +1117,7 @@ test("with isolation none and the worktree removed, the root completes only on a
     requirementCoverage: "Covered",
     verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
     verdictRationale: "The source at the project root passes.",
-  }, repo, { invocation: invocation("fixture/validate-root"), skipBrowserEvidenceGate: true });
+  }, repo, { invocation: invocation("fixture/validate-root") });
   assert.ok(!("error" in validated), `validation failed: ${"error" in validated ? validated.error : ""}`);
   const completed = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-root"));
 
@@ -1152,7 +1152,7 @@ test("after a conflict resolved by hand, a new validation lets the tool complete
     requirementCoverage: "Covered",
     verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
     verdictRationale: "The resolved merge passes.",
-  }, repo, { invocation: invocation("fixture/validate-resolved"), skipBrowserEvidenceGate: true });
+  }, repo, { invocation: invocation("fixture/validate-resolved") });
   assert.ok(!("error" in validated), `validation failed: ${"error" in validated ? validated.error : ""}`);
   const completed = await handleCompleteMilestone(completionParams, repo, invocation("tool/complete-resolved"));
 

@@ -10,7 +10,6 @@ import { resolveGsdPathContract, resolveSliceFile } from "./paths.js";
 import {
   browserTimelineHasNavigateAndAssert,
   compactTextParts,
-  hasBrowserEvidenceText,
   hasPassedStructuredBrowserUatEvidenceText,
   hasBrowserRequiredText,
 } from "./browser-evidence.js";
@@ -113,12 +112,6 @@ function persistedBrowserEvidencePasses(basePath: string, evidenceText: string):
     referencedBrowserTimelinePasses(basePath, evidenceText);
 }
 
-export function hasRuntimeExecutableUatEvidenceText(text: string): boolean {
-  if (!/\buatType:\s*runtime-executable\b/i.test(text)) return false;
-  if (!/\bverdict:\s*PASS\b/i.test(text)) return false;
-  return /^\|\s*[^|\n]+\s*\|\s*runtime\s*\|\s*PASS\s*\|[^|\n]*\bgsd_uat_exec\b/mi.test(text);
-}
-
 async function loadSliceEvidencePairs(
   params: MilestoneValidationEvidenceParams,
   basePath: string,
@@ -210,59 +203,4 @@ export async function structuredBrowserEvidenceRejection(
     `.artifacts/browser JSON files: ${countBrowserArtifactFiles(basePath)}.`,
     `Supplied browser/runtime verificationEvidence: ${browserOrRuntime.length} (${unbound} qualifying but unbound, ${disqualified} disqualified by class, observation, or gsd_uat_exec).`,
   ].join(" ");
-}
-
-export async function browserEvidenceGateRequiresAttention(
-  params: MilestoneValidationEvidenceParams,
-  basePath: string,
-  options?: { structuredOnly?: boolean },
-): Promise<boolean> {
-  if (params.verdict !== "pass") return false;
-  if (!browserEvidenceRequired(params)) return false;
-  if (options?.structuredOnly) {
-    return (await structuredBrowserEvidenceRejection(params, basePath)) !== null;
-  }
-  const sliceEvidencePairs = await loadSliceEvidencePairs(params, basePath);
-
-
-  const browserRequiringSlices = sliceEvidencePairs.filter((slice) =>
-    hasBrowserRequiredText(slice.sliceRequirementText),
-  );
-  const runtimeBypasses =
-    browserRequiringSlices.length > 0
-      ? browserRequiringSlices.every((slice) => hasRuntimeExecutableUatEvidenceText(slice.evidenceText))
-      : sliceEvidencePairs.some((slice) => hasRuntimeExecutableUatEvidenceText(slice.evidenceText));
-  if (runtimeBypasses) return false;
-
-  const structuredBrowserPasses =
-    browserRequiringSlices.length > 0
-      ? browserRequiringSlices.every((slice) =>
-          persistedBrowserEvidencePasses(basePath, slice.evidenceText)
-        )
-      : sliceEvidencePairs.some((slice) =>
-          persistedBrowserEvidencePasses(basePath, slice.evidenceText)
-        );
-  if (structuredBrowserPasses) return false;
-
-  const persistedEvidence = sliceEvidencePairs.map((slice) => slice.evidenceText).join("\n\n");
-  const validationEvidence = compactTextParts([
-    params.successCriteriaChecklist,
-    params.verificationClasses,
-    params.verdictRationale,
-    params.remediationPlan,
-  ]);
-  return !hasBrowserEvidenceText(`${persistedEvidence}\n\n${validationEvidence}`);
-}
-
-export function applyBrowserEvidenceGate<T extends MilestoneValidationEvidenceParams>(
-  params: T,
-): Omit<T, "verdict" | "verdictRationale"> & { verdict: "needs-attention"; verdictRationale: string } {
-  const note = "Browser evidence gate: Browser-observable acceptance criteria were detected, but no persisted ASSESSMENT or validation evidence recorded browser actions with assertions. Downgraded from pass to needs-attention.";
-  return {
-    ...params,
-    verdict: "needs-attention",
-    verdictRationale: params.verdictRationale.trim()
-      ? `${params.verdictRationale.trim()}\n\n${note}`
-      : note,
-  };
 }

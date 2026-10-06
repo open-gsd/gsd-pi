@@ -267,7 +267,6 @@ async function prepareFixture(
   mutate?.(basePath);
   const result = await handleValidateMilestone(validation, basePath, {
     invocation: invocation("fixture/milestone-completion/validate"),
-    skipBrowserEvidenceGate: true,
   });
   assert.ok(!("error" in result), `validation fixture failed: ${"error" in result ? result.error : ""}`);
   return basePath;
@@ -741,7 +740,6 @@ test("Milestone validation and completion refuse legacy-complete descendants tha
 
   const validated = await handleValidateMilestone(validation, basePath, {
     invocation: invocation("milestone-validate/public/legacy-descendants"),
-    skipBrowserEvidenceGate: true,
   });
   assert.ok("error" in validated, "validation must refuse an unadopted descendant");
   assert.match(validated.error, /unresolved canonical lifecycle shadows: M001\/S00\/T00, M001\/S00\./);

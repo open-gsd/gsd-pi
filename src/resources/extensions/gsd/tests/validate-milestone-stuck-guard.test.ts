@@ -211,7 +211,7 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
   beforeEach(() => setupTestEnvironment());
   afterEach(() => cleanupTestEnvironment());
 
-  test("pauses when verdict=needs-remediation and all slices are closed", async () => {
+  test("retries when verdict=needs-remediation and all slices are closed", async () => {
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
     insertSlice({ id: "S02", milestoneId: "M001", title: "Slice 2", status: "done" });
@@ -224,15 +224,14 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
-    assert.equal(result, "pause");
-    assert.equal(pauseAutoMock.mock.callCount(), 1);
-    assert.equal(ctx.ui.notify.mock.callCount(), 1);
-    const notifyArgs = ctx.ui.notify.mock.calls[0].arguments;
-    assert.match(notifyArgs[0], /needs-remediation/);
-    assert.equal(notifyArgs[1], "error");
+    // Remediation stays agent-owned for every milestone: the loop retries
+    // until the agent queues remediation slices.
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
+    assert.match(s.pendingVerificationRetry?.failureContext ?? "", /gsd_reassess_roadmap/i);
   });
 
-  test("pauses when verdict=needs-attention", async () => {
+  test("retries the first needs-attention occurrence for any milestone", async () => {
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Slice 1", status: "complete" });
     writeValidationFile("needs-attention");
@@ -244,12 +243,11 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
-    assert.equal(result, "pause");
-    assert.equal(pauseAutoMock.mock.callCount(), 1);
-    assert.equal(ctx.ui.notify.mock.callCount(), 1);
-    const notifyArgs = ctx.ui.notify.mock.calls[0].arguments;
-    assert.match(notifyArgs[0], /needs-attention/);
-    assert.equal(notifyArgs[1], "error");
+    // The bounded objective re-validation applies to every milestone; the
+    // human pause happens only when the verdict recurs (covered below).
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
+    assert.match(s.pendingVerificationRetry?.failureContext ?? "", /objective evidence/i);
   });
 
   test("retries adopted objective needs-attention without pausing for a user", async () => {
@@ -396,8 +394,8 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
-    assert.equal(result, "pause");
-    assert.equal(pauseAutoMock.mock.callCount(), 1);
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
   });
 
   test("does not count a deferred slice as queued remediation work", async () => {
@@ -413,8 +411,8 @@ describe("validate-milestone stuck-loop guard (#4094)", () => {
 
     const result = await runPostUnitVerification({ s, ctx, pi } as VerificationContext, pauseAutoMock);
 
-    assert.equal(result, "pause");
-    assert.equal(pauseAutoMock.mock.callCount(), 1);
+    assert.equal(result, "retry");
+    assert.equal(pauseAutoMock.mock.callCount(), 0);
   });
 
   test("continues when verdict=needs-remediation but a queued remediation slice exists", async () => {

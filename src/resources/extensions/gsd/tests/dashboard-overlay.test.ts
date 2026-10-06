@@ -190,7 +190,7 @@ test("GSDDashboardOverlay reloads milestone progress after a DB-backed completio
     requirementCoverage: "Covered",
     verificationClasses: "| Class | Evidence | Verdict |\n| --- | --- | --- |\n| Contract | focused test | PASS |",
     verdictRationale: "All current database evidence passes.",
-  }, basePath, { invocation: invocation("fixture/dashboard/validate"), skipBrowserEvidenceGate: true });
+  }, basePath, { invocation: invocation("fixture/dashboard/validate") });
   assert.ok(!("error" in validated), `validation failed: ${"error" in validated ? validated.error : ""}`);
   completeMilestone({
     invocation: invocation("fixture/dashboard/complete"),

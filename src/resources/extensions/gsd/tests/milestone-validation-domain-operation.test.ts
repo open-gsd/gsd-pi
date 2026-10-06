@@ -161,7 +161,6 @@ const validValidation: ValidateMilestoneParams = {
 function validationOptions(idempotencyKey: string): ValidationOptionsWithInvocation {
   return {
     invocation: invocation(idempotencyKey),
-    skipBrowserEvidenceGate: true,
   };
 }
 
@@ -295,21 +294,6 @@ test("adopted validation commits the assessment and gates inside the milestone.v
     Number(row(`SELECT COUNT(*) AS count FROM quality_gates WHERE milestone_id = 'M001'`).count) > 0,
     "milestone validation gates must commit with the operation",
   );
-});
-
-test("unadopted validation keeps legacy compatibility even with transport identity", async () => {
-  const basePath = makeBase("", false);
-  const result = await handleValidateMilestone(
-    validValidation,
-    basePath,
-    validationOptions("milestone-validate/public/unadopted"),
-  );
-
-  assert.ok(!("error" in result));
-  assert.equal(result.operationId, undefined);
-  assert.equal(row(`SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'milestone.validate'`).count, 0);
-  assert.equal(row(`SELECT COUNT(*) AS count FROM assessments WHERE scope = 'milestone-validation'`).count, 1);
-  assert.match(readFileSync(result.validationPath, "utf8"), /verdict: pass/);
 });
 
 test("historical validation replay cannot replace the current compatibility projection", async () => {

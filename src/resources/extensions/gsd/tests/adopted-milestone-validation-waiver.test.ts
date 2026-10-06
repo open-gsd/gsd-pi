@@ -166,7 +166,6 @@ async function recordPassingValidation(basePath: string, idempotencyKey: string)
       sourceTransport: "internal",
       actorType: "agent",
     },
-    skipBrowserEvidenceGate: true,
   });
   assert.ok(!("error" in result), "canonical passing validation should be recorded");
 }
@@ -390,7 +389,6 @@ test("a newer failing canonical validation blocks instead of resurrecting an old
       sourceTransport: "internal",
       actorType: "agent",
     },
-    skipBrowserEvidenceGate: true,
   });
   assert.ok(!("error" in validation));
 

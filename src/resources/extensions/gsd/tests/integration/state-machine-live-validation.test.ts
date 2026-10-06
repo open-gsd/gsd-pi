@@ -518,7 +518,6 @@ describe("state-machine-live-validation", () => {
         verdictRationale: "All current database evidence passes.",
       }, base, {
         invocation: internalExecutionInvocation("test/state-machine/validate-milestone/step-8"),
-        skipBrowserEvidenceGate: true,
       });
       assert.ok(!("error" in validation), `validation: ${"error" in validation ? validation.error : ""}`);
 
