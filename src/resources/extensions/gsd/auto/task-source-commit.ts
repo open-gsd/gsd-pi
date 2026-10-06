@@ -22,6 +22,7 @@ import { writeTurnGitTransaction } from "../uok/gitops.js";
 import { getSlice, getTask, isDbAvailable } from "../gsd-db.js";
 import { parseUnitId } from "../unit-id.js";
 import { debugLog } from "../debug-logger.js";
+import { logWarning } from "../workflow-logger.js";
 
 /** A deterministic commit failure the stored git-commit repair retry owns. */
 export class TaskSourceCommitRefusedError extends Error {
@@ -53,7 +54,14 @@ export function isTaskSourceCommitSettled(basePath: string, unitId: string): boo
   if (!milestoneId || !sliceId || !taskId) return false;
   try {
     return settledTaskSourceCommitReceipt({ milestoneId, sliceId, taskId }) !== null;
-  } catch {
+  } catch (error) {
+    // Safe degrade: the legacy post-verification commit still owns the Task.
+    // The failure is surfaced, never swallowed silently.
+    logWarning(
+      "dispatch",
+      `task source commit settle check failed for ${unitId}: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
     return false;
   }
 }
