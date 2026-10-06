@@ -45,7 +45,11 @@ describe("assertMilestoneDbReadyForMerge", () => {
         calls.push(`prove:${milestoneId}`);
         return { ok: true };
       },
-      readMilestoneMergeObservation: () => ({ kind: "unadopted" }),
+      readMilestoneMergeObservation: () => ({
+        kind: "completed",
+        legacyStatus: "complete",
+        canonicalStatus: "completed",
+      }),
     });
 
     assertMilestoneDbReadyForMerge({
@@ -159,7 +163,7 @@ describe("assertMilestoneDbReadyForMerge", () => {
     );
   });
 
-  test("surfaces closeout proof failures when the project DB is the only DB", () => {
+  test("blocks the merge of an unadopted milestone with the adoption instruction", () => {
     _setMergeDbReadyDepsForTests({
       isDbAvailable: () => true,
       resolveGsdPathContract: () => ({
@@ -169,6 +173,36 @@ describe("assertMilestoneDbReadyForMerge", () => {
       getWorkflowDatabasePath: () => "/repo/.gsd/gsd.db",
       hasWorktreeLocalDb: () => false,
       readMilestoneMergeObservation: () => ({ kind: "unadopted" }),
+      proveMilestoneCloseout: () => ({ ok: true }),
+    });
+
+    assert.throws(
+      () => assertMilestoneDbReadyForMerge({
+        milestoneId: "M002",
+        projectRoot: "/repo",
+        worktreeCwd: "/repo/.gsd-worktrees/M002",
+      }),
+      (err: unknown) => err instanceof GSDError
+        && /no canonical lifecycle row/.test(err.message)
+        && /\/gsd db adopt --apply/.test(err.message)
+        && /Recovery reason: closeout-consistency-blocked/.test(err.message),
+    );
+  });
+
+  test("surfaces closeout proof failures when the project DB is the only DB", () => {
+    _setMergeDbReadyDepsForTests({
+      isDbAvailable: () => true,
+      resolveGsdPathContract: () => ({
+        projectDb: "/repo/.gsd/gsd.db",
+        worktreeGsd: "/repo/.gsd-worktrees/M002/.gsd",
+      } as never),
+      getWorkflowDatabasePath: () => "/repo/.gsd/gsd.db",
+      hasWorktreeLocalDb: () => false,
+      readMilestoneMergeObservation: () => ({
+        kind: "completed",
+        legacyStatus: "complete",
+        canonicalStatus: "completed",
+      }),
       proveMilestoneCloseout: () => ({
         ok: false,
         reason: "consistency-blocked",

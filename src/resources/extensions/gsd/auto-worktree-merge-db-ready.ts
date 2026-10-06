@@ -122,7 +122,7 @@ function assertCloseoutProof(milestoneId: string): void {
  */
 function assertAdoptedMilestoneCloseoutReady(milestoneId: string): void {
   const observation = deps.readMilestoneMergeObservation(milestoneId);
-  if (observation.kind === "unadopted" || observation.kind === "completed") {
+  if (observation.kind === "completed") {
     return;
   }
   if (observation.kind === "not-completed" && deps.isMilestoneCloseoutPrepared(milestoneId)) {
@@ -132,6 +132,14 @@ function assertAdoptedMilestoneCloseoutReady(milestoneId: string): void {
     throw new GSDError(
       GSD_GIT_ERROR,
       `Milestone ${milestoneId} merge blocked: project DB verification is unavailable. ` +
+      `Recovery reason: ${CLOSEOUT_CONSISTENCY_BLOCKED_REASON}.`,
+    );
+  }
+  if (observation.kind === "unadopted") {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Milestone ${milestoneId} merge blocked: the milestone has no canonical lifecycle row. ` +
+      `Adopt the project with /gsd db adopt --apply, then retry. ` +
       `Recovery reason: ${CLOSEOUT_CONSISTENCY_BLOCKED_REASON}.`,
     );
   }
