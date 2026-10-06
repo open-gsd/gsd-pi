@@ -964,8 +964,12 @@ describe('derive-state-db', async () => {
       assert.deepStrictEqual(dbState.activeMilestone?.id, 'M001', 'needs-attention-db: activeMilestone is M001');
       assert.deepStrictEqual(dbState.registry[0]?.status, 'active', 'needs-attention-db: milestone stays active, not parked');
       assert.ok(
-        dbState.blockers.some(b => b.includes('needs-attention') && b.includes('/gsd park M001')),
-        'needs-attention-db: blocker explains explicit park or override paths',
+        dbState.blockers.some(b => b.includes('needs-attention') && b.includes('/gsd validate-milestone')),
+        'needs-attention-db: blocker names the canonical re-validation path',
+      );
+      assert.ok(
+        dbState.blockers.every(b => !b.includes('/gsd verdict')),
+        'needs-attention-db: no removed verdict override is offered',
       );
 
       closeDatabase();

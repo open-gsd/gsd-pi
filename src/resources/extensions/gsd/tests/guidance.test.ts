@@ -113,10 +113,10 @@ describe("milestone blocker guidance", () => {
     assert.match(text, /\/gsd validate-milestone/);
   });
 
-  test("canonical blockers do not recommend the legacy verdict override", () => {
+  test("blockers do not recommend the removed verdict override", () => {
     for (const text of [
-      needsAttentionBlockerGuidance("M007", false),
-      needsRemediationBlockerGuidance("M007", false),
+      needsAttentionBlockerGuidance("M007"),
+      needsRemediationBlockerGuidance("M007"),
     ]) {
       assert.doesNotMatch(text, /\/gsd verdict/);
       assert.match(text, /current structured evidence|reassess/i);

@@ -123,7 +123,7 @@ test("dispatcher blocks bare /gsd while milestone validation needs attention", a
     assert.equal(messages[0].display, true);
     assert.match(messages[0].content, /\/gsd cannot run/);
     assert.match(messages[0].content, /\/gsd validate-milestone/);
-    assert.match(messages[0].content, /\/gsd verdict pass --rationale/);
+    assert.doesNotMatch(messages[0].content, /\/gsd verdict/);
     assert.ok(widgets.some(([key, value]) => key === "gsd-outcome" && value === undefined));
     assert.ok(widgets.some(([key, value]) => key === "gsd-progress" && value === undefined));
     assert.ok(statuses.some(([key, value]) => key === "gsd-step" && value === undefined));
