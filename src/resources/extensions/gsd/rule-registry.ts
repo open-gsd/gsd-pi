@@ -21,7 +21,7 @@ import type {
   PostUnitHookOutcomeVerdict,
 } from "./types.js";
 import { resolvePostUnitHooks, resolvePreDispatchHooks } from "./preferences.js";
-import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { parseUnitId } from "./unit-id.js";
 import { readHookStateJson, writeHookStateJson } from "./db/writers/runtime-control.js";
@@ -33,7 +33,7 @@ import {
   targetSliceFile,
 } from "./paths.js";
 import { readUnitRuntimeRecord, type UnitRuntimePhase } from "./unit-runtime.js";
-import { extractFrontmatterVerdict } from "./verdict-parser.js";
+import { getHookGateVerdict } from "./db/hook-verdicts.js";
 import { getDbOrNull } from "./db/engine.js";
 import { getTaskCompletionIdentity, type TaskCompletionIdentityRow } from "./db/lifecycle-queries.js";
 
@@ -566,6 +566,11 @@ export class RuleRegistry {
 
     prompt += "\n\n**Browser tool safety:** Do NOT use `browser_wait_for` with `condition: \"network_idle\"` — it hangs indefinitely when dev servers keep persistent connections (Vite HMR, WebSocket). Use `selector_visible`, `text_visible`, or `delay` instead.";
 
+    // Host-added verdict instruction (owner default: the gate outcome arrives
+    // as a tool call that writes a database row). The artifact file the hook
+    // writes is a report for the operator; the workflow reads the verdict row.
+    prompt += `\n\n**Recording your verdict:** When you are done, record this gate's verdict with the \`gsd_hook_verdict_save\` tool — hookName: "${config.name}", unitId: "${triggerUnitId}", verdict: one of pass | advisory | needs-rework | needs-remediation | needs-attention, and a short rationale. The workflow reads the recorded verdict row, not your artifact file.`;
+
     return {
       hookName: config.name,
       prompt,
@@ -890,56 +895,30 @@ export class RuleRegistry {
   private _readGateOutcome(
     config: PostUnitHookConfig,
     trigger: HookTriggerRef,
-    basePath: string,
+    _basePath: string,
   ): GateOutcome {
     if (!config.artifact) {
       return { reason: "blocking gate has no configured artifact" };
     }
-    const artifactPath = resolveHookArtifactPath(basePath, trigger.triggerUnitId, config.artifact);
-    if (!existsSync(artifactPath)) {
+    // The gate outcome arrives as a tool call that writes a database row
+    // (owner default). The verdict row is the only gate verdict; the hook's
+    // artifact file is a render for the operator and is not read.
+    const recorded = getHookGateVerdict(config.name, trigger.triggerUnitId);
+    if (!recorded) {
       return {
         artifact: config.artifact,
-        artifactPath,
-        reason: `missing required gate artifact ${config.artifact}`,
+        reason: `no recorded verdict for gate ${config.name} — the hook must record its verdict with gsd_hook_verdict_save`,
       };
     }
-    let content = "";
-    try {
-      content = readFileSync(artifactPath, "utf-8");
-    } catch (e) {
-      return {
-        artifact: config.artifact,
-        artifactPath,
-        reason: `could not read gate artifact ${config.artifact}: ${(e as Error).message}`,
-      };
-    }
-
-    const rawVerdict = extractFrontmatterVerdict(content);
-    if (!rawVerdict) {
-      return {
-        artifact: config.artifact,
-        artifactPath,
-        reason: `gate artifact ${config.artifact} is missing frontmatter verdict`,
-      };
-    }
-    if (rawVerdict === "failed") {
-      return {
-        artifact: config.artifact,
-        artifactPath,
-        verdict: "failed",
-        reason: `gate artifact ${config.artifact} reported verdict=failed`,
-      };
-    }
+    const rawVerdict = recorded.verdict;
     if (!HOOK_OUTCOME_VERDICTS.has(rawVerdict as PostUnitHookOutcomeVerdict)) {
       return {
         artifact: config.artifact,
-        artifactPath,
-        reason: `gate artifact ${config.artifact} has unsupported verdict=${rawVerdict}`,
+        reason: `gate ${config.name} recorded unsupported verdict=${rawVerdict}`,
       };
     }
     return {
       artifact: config.artifact,
-      artifactPath,
       verdict: rawVerdict as PostUnitHookOutcomeVerdict,
     };
   }

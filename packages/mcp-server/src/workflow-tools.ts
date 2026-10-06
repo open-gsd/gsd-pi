@@ -395,6 +395,16 @@ type WorkflowToolExecutors = {
     basePath: string,
     invocation: ExecutionInvocation,
   ) => Promise<unknown>;
+  executeHookVerdictSave: (
+    params: {
+      hookName: string;
+      unitId: string;
+      verdict: string;
+      rationale: string;
+    },
+    basePath: string,
+    invocation: ExecutionInvocation,
+  ) => Promise<unknown>;
   executeUatResultSave: (
     params: {
       milestoneId: string;
@@ -855,6 +865,7 @@ function isWorkflowToolExecutors(value: unknown): value is WorkflowToolExecutors
     "executeValidateMilestone",
     "executeReassessRoadmap",
     "executeSaveGateResult",
+    "executeHookVerdictSave",
     "executeSummarySave",
     "executeUatResultSave",
     "executeTaskComplete",
@@ -2026,6 +2037,18 @@ async function handleSaveGateResult(
   );
 }
 
+async function handleHookVerdictSave(
+  projectDir: string,
+  args: z.infer<typeof hookVerdictSaveSchema>,
+  invocation: ExecutionInvocation,
+): Promise<unknown> {
+  const { executeHookVerdictSave } = await getWorkflowToolExecutors();
+  const { projectDir: _projectDir, ...params } = args;
+  return adaptExecutorResult(
+    await runSerializedWorkflowOperation(() => executeHookVerdictSave(params, projectDir, invocation)),
+  );
+}
+
 // projectDir is optional. When omitted, the server uses process.cwd(). This
 // prevents the agent from burning tokens reasoning about which absolute path
 // to pass (git root vs worktree vs symlink-resolved external state layout) —
@@ -2390,6 +2413,15 @@ const saveGateResultParams = {
   findings: z.string().optional().describe("Detailed markdown findings"),
 };
 const saveGateResultSchema = z.object(saveGateResultParams);
+
+const hookVerdictSaveParams = {
+  projectDir: projectDirParam,
+  hookName: nonEmptyString("hookName").describe("Configured post_unit_hooks entry name"),
+  unitId: nonEmptyString("unitId").describe("Trigger unit id, e.g. M001/S01/T01 or M001"),
+  verdict: z.enum(["pass", "advisory", "needs-rework", "needs-remediation", "needs-attention"]).describe("Hook gate verdict"),
+  rationale: nonEmptyString("rationale").describe("Why the hook reached the verdict"),
+};
+const hookVerdictSaveSchema = z.object(hookVerdictSaveParams);
 
 const saveGateResultIncomingParams = {
   projectDir: projectDirParam,
@@ -3743,6 +3775,17 @@ export function registerWorkflowTools(
         parsed,
         mcpWorkflowExecutionInvocation("gsd_save_gate_result", extra),
       );
+    },
+  );
+
+  server.tool(
+    "gsd_hook_verdict_save",
+    "Record a post-unit hook gate verdict in the GSD database. The workflow reads this recorded verdict; the artifact file is a report for the operator.",
+    hookVerdictSaveParams,
+    async (args: Record<string, unknown>, extra?: WorkflowMcpRequestExtra) => {
+      const parsed = parseWorkflowArgs(hookVerdictSaveSchema, args);
+      const invocation = mcpWorkflowExecutionInvocation("gsd_hook_verdict_save", extra);
+      return handleHookVerdictSave(parsed.projectDir, parsed, invocation);
     },
   );
 

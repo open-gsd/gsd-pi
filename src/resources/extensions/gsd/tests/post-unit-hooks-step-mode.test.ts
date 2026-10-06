@@ -39,6 +39,7 @@ import {
   insertTask,
   openDatabase,
 } from "../gsd-db.ts";
+import { upsertHookGateVerdict } from "../db/writers/hook-verdicts.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
 import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
@@ -55,6 +56,20 @@ function queuedItems() {
 /** Stand-in for the auto loop: it runs each queued item and closes its row. */
 function drainQueue(): void {
   for (const item of queuedItems()) settleSidecarItem(item.id);
+}
+
+/** Seed the verdict row a hook records with gsd_hook_verdict_save. */
+function recordGateVerdict(hookName: string, unitId: string, verdict: string): void {
+  const [milestone, slice, task] = unitId.split("/");
+  upsertHookGateVerdict({
+    hookName,
+    unitId,
+    milestoneId: milestone ?? "",
+    sliceId: slice ?? null,
+    taskId: task ?? null,
+    verdict,
+    rationale: `recorded ${verdict} in test`,
+  });
 }
 
 function writePreferences(basePath: string, hookYaml: string): void {
@@ -237,6 +252,7 @@ test("after the blocking hook records a passing verdict, step-mode selection pro
       "---\nverdict: pass\n---\n\nPlan reviewed. No blocking findings.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     session.currentUnit = { type: "hook/slice-plan-review", id: "M001/S01", startedAt: Date.now() };
 
     const result = await postUnitPostVerification(pctx);
@@ -366,6 +382,7 @@ test("failed gate block persists and resume re-dispatches the blocked hook befor
       "---\nverdict: pass\n---\n\nPlan reviewed. No blocking findings.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     resumed.currentUnit = { type: "hook/slice-plan-review", id: "M001/S01", startedAt: Date.now() };
     const { pctx } = createPctx(base, resumed);
     assert.equal(await postUnitPostVerification(pctx), "step-wizard");
@@ -410,6 +427,7 @@ test("resume with an already-passing gate artifact holds no dispatch and clears 
       "---\nverdict: pass\n---\n\nPlan reviewed manually during the pause.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     resetHookState();
     restoreHookState(base);
     const resumed = new AutoSession();
@@ -456,6 +474,7 @@ test("step mode runs only the blocking hook from a mixed advisory+blocking queue
       "---\nverdict: pass\n---\n\nPlan reviewed. No blocking findings.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     session.currentUnit = { type: "hook/slice-plan-review", id: "M001/S01", startedAt: Date.now() };
     assert.equal(await postUnitPostVerification(pctx), "step-wizard");
     assert.equal(queuedItems().length, 0, "advisory hook remains skipped after the gate passes");
@@ -550,6 +569,7 @@ test("resume after gate A blocks still runs queued gate B once A passes", async 
       "---\nverdict: pass\n---\n\nGate A passed.\n",
       "utf-8",
     );
+    recordGateVerdict("gate-a", "M001/S01", "pass");
     resumed.currentUnit = { type: "hook/gate-a", id: "M001/S01", startedAt: Date.now() };
     const { pctx } = createPctx(base, resumed);
     assert.equal(await postUnitPostVerification(pctx), "continue");
@@ -563,6 +583,7 @@ test("resume after gate A blocks still runs queued gate B once A passes", async 
       "---\nverdict: pass\n---\n\nGate B passed.\n",
       "utf-8",
     );
+    recordGateVerdict("gate-b", "M001/S01", "pass");
     resumed.currentUnit = { type: "hook/gate-b", id: "M001/S01", startedAt: Date.now() };
     assert.equal(await postUnitPostVerification(pctx), "step-wizard");
     assert.equal(queuedItems().length, 0);
@@ -598,6 +619,7 @@ test("resume re-arms an execute-task gate with completion identity and schedules
       "---\nverdict: needs-attention\n---\n\nNeeds human attention.\n",
       "utf-8",
     );
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-attention");
     assert.equal(checkPostUnitHooks("hook/review-gate", "M001/S01/T01", base), null);
     persistHookState(base);
 
@@ -623,6 +645,7 @@ test("resume re-arms an execute-task gate with completion identity and schedules
       "---\nverdict: needs-rework\n---\n\nRework requested.\n",
       "utf-8",
     );
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-rework");
     resumed.currentUnit = { type: "hook/review-gate", id: "M001/S01/T01", startedAt: Date.now() };
     const retryActiveUnit = mock.fn(async (_unit: { unitType: string; unitId: string }) => {});
     resumed.orchestration = {
@@ -671,10 +694,12 @@ test("resume holds selection when a resolved gate has a blocked sibling", async 
   assert.ok(checkPostUnitHooks("plan-slice", "M001/S01", base));
   for (const artifact of ["GATE-A.md", "GATE-B.md"]) {
     writeFileSync(resolveHookArtifactPath(base, "M001/S01", artifact), "---\nverdict: needs-attention\n---\n");
+    recordGateVerdict(artifact.slice(0, -".md".length).toLowerCase(), "M001/S01", "needs-attention");
   }
   assert.equal(checkPostUnitHooks("hook/gate-a", "M001/S01", base), null);
   persistHookState(base);
   writeFileSync(resolveHookArtifactPath(base, "M001/S01", "GATE-A.md"), "---\nverdict: pass\n---\n");
+  recordGateVerdict("gate-a", "M001/S01", "pass");
   resetHookState();
   restoreHookState(base);
   const resumed = new AutoSession();
@@ -715,12 +740,15 @@ for (const queuedSibling of [false, true]) {
     seedCompletedTaskLifecycle("gsd-step-gate-rework-op");
 
     writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "REVIEW.md"), "---\nverdict: needs-attention\n---\n");
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-attention");
     if (queuedSibling) {
       assert.ok(checkPostUnitHooks("execute-task", "M001/S01/T01", base));
       writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "FIRST.md"), "---\nverdict: needs-attention\n---\n");
+      recordGateVerdict("first-gate", "M001/S01/T01", "needs-attention");
       assert.equal(checkPostUnitHooks("hook/first-gate", "M001/S01/T01", base), null);
       persistHookState(base);
       writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "FIRST.md"), "---\nverdict: pass\n---\n");
+      recordGateVerdict("first-gate", "M001/S01/T01", "pass");
       resetHookState();
       restoreHookState(base);
       // This dispatch is not part of the assertion.
@@ -750,6 +778,7 @@ for (const queuedSibling of [false, true]) {
       "---\nverdict: needs-rework\n---\n\nRework requested.\n",
       "utf-8",
     );
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-rework");
     resumed.currentUnit = { type: "hook/review-gate", id: "M001/S01/T01", startedAt: Date.now() };
     const retryActiveUnit = mock.fn(async (_unit: { unitType: string; unitId: string }) => {});
     resumed.orchestration = {

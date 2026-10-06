@@ -29,6 +29,7 @@ import {
   insertTask,
   openDatabase,
 } from "../gsd-db.ts";
+import { upsertHookGateVerdict } from "../db/writers/hook-verdicts.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import {
   adoptOrTransitionLifecycle,
@@ -758,6 +759,15 @@ test("post-unit blocking gate pauses auto-mode on needs-attention verdict", asyn
 
     const artifactPath = resolveHookArtifactPath(base, "M001/S01/T01", "REVIEW-DEBATE.md");
     writeFileSync(artifactPath, "---\nverdict: needs-attention\n---\n\nManual review required.\n", "utf-8");
+    upsertHookGateVerdict({
+      hookName: "review-arbiter",
+      unitId: "M001/S01/T01",
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      verdict: "needs-attention",
+      rationale: "Manual review required.",
+    });
 
     const pauseAuto = mock.fn(async () => {});
     const s = new AutoSession();

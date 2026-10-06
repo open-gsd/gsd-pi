@@ -24,19 +24,25 @@ import {
   triggerHookManually,
 } from "../post-unit-hooks.ts";
 import { invalidateAllCaches } from "../cache.ts";
-import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
 import { readHookStateJson, writeHookStateJson } from "../db/writers/runtime-control.ts";
 import { hookStateScope } from "../rule-registry.ts";
 import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
 import { enqueueSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
+import { upsertHookGateVerdict } from "../db/writers/hook-verdicts.ts";
 
 // ─── Fixture Helpers ───────────────────────────────────────────────────────
 
 function createFixtureBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-hook-test-"));
   mkdirSync(join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
-  // Hook state is persisted in the database, keyed by the base path.
+  // Hook state and gate verdict rows live in the database. Each fixture gets
+  // its own database: opening the same :memory: path would reuse the previous
+  // fixture's rows, and verdict rows are what a gate reads.
+  closeDatabase();
   openDatabase(":memory:");
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
   return base;
 }
 
@@ -45,6 +51,23 @@ after(() => closeDatabase());
 function writeHookPreferences(base: string, hookYaml: string): void {
   writeFileSync(join(base, ".gsd", "PREFERENCES.md"), `---\npost_unit_hooks:\n${hookYaml}\n---\n`, "utf-8");
   invalidateAllCaches();
+}
+
+/** Seed the verdict row a hook records with gsd_hook_verdict_save. */
+function recordGateVerdict(hookName: string, unitId: string, verdict: string): void {
+  const { milestone, slice, task } = (() => {
+    const parts = unitId.split("/");
+    return { milestone: parts[0] ?? "", slice: parts[1] ?? null, task: parts[2] ?? null };
+  })();
+  upsertHookGateVerdict({
+    hookName,
+    unitId,
+    milestoneId: milestone,
+    sliceId: slice,
+    taskId: task,
+    verdict,
+    rationale: `recorded ${verdict} in test`,
+  });
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -144,7 +167,7 @@ test('Advisory hook keeps artifact idempotency without verdict frontmatter', () 
   }
 });
 
-test('Blocking hook skips only after passing frontmatter verdict', () => {
+test('Blocking hook skips only after a passing recorded verdict', () => {
   resetHookState();
   const base = createFixtureBase();
   try {
@@ -160,9 +183,10 @@ test('Blocking hook skips only after passing frontmatter verdict', () => {
       "---\nverdict: pass\n---\n\nNo blocking findings.\n",
       "utf-8",
     );
+    recordGateVerdict("security-review", "M001/S01/T01", "pass");
 
     const result = checkPostUnitHooks("plan-slice", "M001/S01/T01", base);
-    assert.deepStrictEqual(result, null, "passing gate artifact is idempotent");
+    assert.deepStrictEqual(result, null, "passing recorded verdict is idempotent");
     assert.deepStrictEqual(consumeGateBlock(), null, "passing gate does not block");
   } finally {
     resetHookState();
@@ -171,7 +195,7 @@ test('Blocking hook skips only after passing frontmatter verdict', () => {
   }
 });
 
-test('Blocking hook reruns invalid artifact once then blocks at cycle budget', () => {
+test('Blocking hook reruns an unrecorded verdict once then blocks at cycle budget', () => {
   resetHookState();
   const base = createFixtureBase();
   try {
@@ -185,7 +209,7 @@ test('Blocking hook reruns invalid artifact once then blocks at cycle budget', (
     writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "SECURITY-REVIEW.md"), "partial output", "utf-8");
 
     const dispatch = checkPostUnitHooks("plan-slice", "M001/S01/T01", base);
-    assert.ok(dispatch, "invalid gate artifact dispatches the blocking hook");
+    assert.ok(dispatch, "an unrecorded gate verdict dispatches the blocking hook");
     assert.equal(dispatch.unitType, "hook/security-review");
 
     const afterHook = checkPostUnitHooks("hook/security-review", "M001/S01/T01", base);
@@ -193,7 +217,7 @@ test('Blocking hook reruns invalid artifact once then blocks at cycle budget', (
     const block = consumeGateBlock();
     assert.ok(block, "gate block is recorded");
     assert.equal(block.hookName, "security-review");
-    assert.match(block.reason, /missing frontmatter verdict/);
+    assert.match(block.reason, /no recorded verdict for gate security-review/);
   } finally {
     resetHookState();
     invalidateAllCaches();
@@ -490,6 +514,7 @@ test('Blocking hook needs-rework verdict requests trigger unit retry', () => {
       "---\nverdict: needs-rework\n---\n\nRework required.\n",
       "utf-8",
     );
+    recordGateVerdict("review-arbiter", "M001/S01/T01", "needs-rework");
 
     const afterHook = checkPostUnitHooks("hook/review-arbiter", "M001/S01/T01", base);
     assert.deepStrictEqual(afterHook, null, "needs-rework routes via retry signal");

@@ -130,7 +130,9 @@ import { logError, logWarning } from "../workflow-logger.js";
 import { invalidateStateCache } from "../state.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { renderStateProjection } from "../workflow-projections.js";
-import { loadEffectiveGSDPreferences } from "../preferences.js";
+import { loadEffectiveGSDPreferences, resolvePostUnitHooks } from "../preferences.js";
+import { parseUnitId } from "../unit-id.js";
+import { upsertHookGateVerdict } from "../db/writers/hook-verdicts.js";
 import { parseProject } from "../schemas/parsers.js";
 import { autoSession, getAutoRuntimeSnapshot, isAutoActive } from "../auto-runtime-state.js";
 import { renderPlanCheckboxes, renderPlanFromDb, renderWorkCheckpoint, writeTaskSummaryProjection } from "../markdown-renderer.js";
@@ -2928,4 +2930,101 @@ export async function executeMilestoneStatus(
       isError: true,
     };
   }
+}
+
+/** The verdict a post-unit hook gate records for its trigger unit (P18d). */
+export interface HookVerdictSaveParams {
+  hookName: string;
+  unitId: string;
+  verdict: string;
+  rationale: string;
+}
+
+/** The verdict vocabulary of a post-unit hook gate. */
+const HOOK_VERDICT_SAVE_VALUES = ["pass", "advisory", "needs-rework", "needs-remediation", "needs-attention"] as const;
+
+/**
+ * Save the verdict of a post-unit hook gate. The verdict is a database row
+ * (owner default: the gate outcome arrives as a tool call); the hook's
+ * artifact file is a render for the operator and decides nothing. The rule
+ * registry reads the row through db/hook-verdicts.ts.
+ */
+export async function executeHookVerdictSave(
+  params: HookVerdictSaveParams,
+  basePath: string = process.cwd(),
+  invocation: PlanningInvocation = internalPlanningInvocation(),
+): Promise<ToolExecutionResult> {
+  const harnessAbort = blockIfHarnessAbortedUnit("hook_verdict_save", basePath);
+  if (harnessAbort) return harnessAbort;
+
+  const dbAvailable = await ensureDbOpen(basePath);
+  if (!dbAvailable) return errorResult("hook_verdict_save", "GSD database is not available.", "db_unavailable");
+
+  const configuredHook = resolvePostUnitHooks(basePath).find(hook => hook.name === params.hookName);
+  if (!configuredHook) {
+    return errorResult(
+      "hook_verdict_save",
+      `Unknown hook "${params.hookName}". It must be a configured post_unit_hooks entry.`,
+      "unknown_hook",
+    );
+  }
+  if (!HOOK_VERDICT_SAVE_VALUES.includes(params.verdict as typeof HOOK_VERDICT_SAVE_VALUES[number])) {
+    return errorResult(
+      "hook_verdict_save",
+      `Invalid verdict "${params.verdict}". Must be one of: ${HOOK_VERDICT_SAVE_VALUES.join(", ")}`,
+      "invalid_verdict",
+    );
+  }
+  const rationale = params.rationale?.trim();
+  if (!rationale) {
+    return errorResult("hook_verdict_save", "A rationale is required.", "missing_rationale");
+  }
+  const { milestone, slice } = parseUnitId(params.unitId);
+  if (!milestone) {
+    return errorResult(
+      "hook_verdict_save",
+      `Invalid unitId "${params.unitId}". Expected a GSD unit id such as M001/S01/T01.`,
+      "invalid_unit_id",
+    );
+  }
+
+  try {
+    executeRecordDomainOperation({
+      operationType: "hook-verdict.save",
+      invocation,
+      payload: { ...params, rationale },
+      eventType: "hook-verdict.saved",
+      entityType: "hook-gate",
+      projectionKeys: [slice ? `planning/${milestone}/${slice}`.toLowerCase() : `planning/${milestone}`.toLowerCase()],
+      mutate: () => {
+        upsertHookGateVerdict({
+          hookName: params.hookName,
+          unitId: params.unitId,
+          milestoneId: milestone,
+          sliceId: slice ?? null,
+          taskId: parseUnitId(params.unitId).task ?? null,
+          verdict: params.verdict,
+          rationale,
+        });
+        return {
+          entityId: `${params.hookName}/${params.unitId}`,
+          result: { hookName: params.hookName, unitId: params.unitId, verdict: params.verdict },
+        };
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logError("tool", `gsd_hook_verdict_save database write failed: ${msg}`, { tool: "gsd_hook_verdict_save", error: String(err) });
+    return errorResult("hook_verdict_save", `Error saving hook verdict: ${msg}`, msg);
+  }
+
+  return {
+    content: [{ type: "text", text: `Hook ${params.hookName} verdict saved for ${params.unitId}: verdict=${params.verdict}` }],
+    details: {
+      operation: "hook_verdict_save",
+      hookName: params.hookName,
+      unitId: params.unitId,
+      verdict: params.verdict,
+    },
+  };
 }

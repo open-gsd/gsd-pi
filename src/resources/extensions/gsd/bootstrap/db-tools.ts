@@ -3183,6 +3183,72 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
 	registerWorkflowTool(pi, saveGateResultTool);
 
+	// ─── gsd_hook_verdict_save ─────────────────────────────────────────────
+	//
+	// A blocking post-unit hook records its gate verdict with this call. The
+	// verdict is a database row the rule registry reads; the hook's artifact
+	// file is a report for the operator and decides nothing (P18d).
+
+	const hookVerdictSaveExecute = async (
+		toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeHookVerdictSave } = await loadWorkflowExecutors();
+		return executeHookVerdictSave(
+			params,
+			resolveWorkflowToolBasePath(_ctx, params),
+			piExecutionInvocation("gsd_hook_verdict_save", toolCallId),
+		);
+	};
+
+	const hookVerdictSaveTool = {
+		name: "gsd_hook_verdict_save",
+		label: "Save Hook Verdict",
+		description:
+			"Record the verdict of a post-unit hook gate (a blocking hook that ran after a unit) in the GSD database. " +
+			"The workflow reads this recorded verdict; the artifact file you wrote is a report for the operator.",
+		promptSnippet: "Record a post-unit hook gate verdict",
+		promptGuidelines: [
+			"Call gsd_hook_verdict_save once when the hook finishes.",
+			"hookName must be the name of the configured post_unit_hooks entry you ran.",
+			"unitId must be the trigger unit id the hook ran for.",
+			"verdict must be: pass, advisory, needs-rework, needs-remediation, or needs-attention.",
+			"rationale should state what the hook checked and why it reached the verdict.",
+		],
+		parameters: Type.Object({
+			hookName: Type.String({ description: "Configured hook name (post_unit_hooks entry)" }),
+			unitId: Type.String({ description: "Trigger unit id, e.g. M001/S01/T01 or M001" }),
+			verdict: Type.String({ description: "pass, advisory, needs-rework, needs-remediation, or needs-attention" }),
+			rationale: Type.String({ description: "Why the hook reached the verdict" }),
+		}),
+		execute: hookVerdictSaveExecute,
+		renderCall(args: any, theme: any) {
+			let text = theme.fg("toolTitle", theme.bold("hook_verdict_save "));
+			text += theme.fg("accent", args.hookName ?? "");
+			text += theme.fg("dim", ` → ${args.verdict ?? ""}`);
+			return new Text(text, 0, 0);
+		},
+		renderResult(result: any, _options: any, theme: any) {
+			const d = readDetails(result);
+			if (result.isError || d?.error) {
+				const rawMsg = d?.error ?? result.content?.[0]?.text ?? "unknown";
+				const msg = String(rawMsg).replace(/^\s*Error:\s*/i, "");
+				return new Text(theme.fg("error", `Error: ${msg}`), 0, 0);
+			}
+			if (!d?.hookName || !d?.verdict) {
+				const text = result.content?.[0]?.text ?? "Hook verdict saved";
+				return new Text(theme.fg("success", text), 0, 0);
+			}
+			const color = d.verdict === "pass" || d.verdict === "advisory" ? "success" : "warning";
+			return new Text(theme.fg(color, `${d.hookName}: ${d.verdict}`), 0, 0);
+		},
+	};
+
+	registerWorkflowTool(pi, hookVerdictSaveTool);
+
 	// ─── gsd_requirement_list ────────────────────────────────────────────────
 	//
 	// Read-only: lists requirements from the canonical `requirements` table.
