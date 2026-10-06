@@ -48,6 +48,8 @@ interface SeedOpts {
 
 function seedMilestone(base: string, mid: string, opts: SeedOpts): void {
   openDatabase(join(base, ".gsd", "gsd.db"));
+  // Epoch-0 import shape: the raw insert stamps status; the planning upsert
+  // carries no status because the generic status writer refuses unadopted rows.
   insertMilestone({
     id: mid,
     title: opts.title,
@@ -56,7 +58,6 @@ function seedMilestone(base: string, mid: string, opts: SeedOpts): void {
   });
   upsertMilestonePlanning(mid, {
     title: opts.title,
-    status: "active",
     vision: opts.vision,
     successCriteria: opts.successCriteria,
     keyRisks: [],
@@ -289,6 +290,8 @@ test("#4781 phase 2: validate-milestone skip path does not persist gates without
   t.after(() => cleanup(base));
 
   openDatabase(join(base, ".gsd", "gsd.db"));
+  // Epoch-0 import shape: raw insert stamps status; no status through the
+  // planning upsert (the generic status writer refuses unadopted rows).
   insertMilestone({
     id: "M001",
     title: TRIVIAL_INPUT.title,
@@ -297,7 +300,6 @@ test("#4781 phase 2: validate-milestone skip path does not persist gates without
   });
   upsertMilestonePlanning("M001", {
     title: TRIVIAL_INPUT.title,
-    status: "active",
     vision: TRIVIAL_INPUT.vision,
     successCriteria: TRIVIAL_INPUT.successCriteria,
     keyRisks: [],

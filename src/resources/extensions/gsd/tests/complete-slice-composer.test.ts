@@ -32,10 +32,11 @@ function cleanup(base: string): void {
 
 function seed(base: string, mid: string): void {
   openDatabase(join(base, ".gsd", "gsd.db"));
+  // Epoch-0 import shape: the raw insert stamps status; the planning upsert
+  // carries no status because the generic status writer refuses unadopted rows.
   insertMilestone({ id: mid, title: "Composer Test", status: "active", depends_on: [] });
   upsertMilestonePlanning(mid, {
     title: "Composer Test",
-    status: "active",
     vision: "Validate complete-slice migration",
     successCriteria: ["Prompt compiles"],
     keyRisks: [],
