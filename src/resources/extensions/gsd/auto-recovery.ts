@@ -29,7 +29,6 @@ import { invalidateStateCache, isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
 import { readIntegrationBranch } from "./git-service.js";
-import { readMilestone } from "./db/lifecycle-read.js";
 import {
   resolveSlicePath,
   resolveSliceFile,
@@ -66,7 +65,6 @@ import {
   readTerminalTaskRecoveryAbort,
   resolveArtifactVerificationBase,
 } from "./artifact-verification.js";
-import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
 import { compareLifecycleShadow } from "./db/lifecycle-shadow-comparison.js";
 import { readCurrentMilestoneCompletionReceipt } from "./milestone-lifecycle-domain-operation.js";
 
@@ -268,10 +266,7 @@ export function refreshRecoveryDbForArtifact(
           message: `Stuck recovery found complete-milestone ${unitId} artifacts, but no matching DB milestone row exists after refresh.`,
         };
       }
-      if (isMilestoneLifecycleAdopted(mid)) {
-        return adoptedMilestoneRecoveryResult(mid, milestone.status);
-      }
-      return readMilestone(mid)?.closed ? { ok: true } : null;
+      return adoptedMilestoneRecoveryResult(mid, milestone.status);
     });
     if (observedResult) return observedResult;
 

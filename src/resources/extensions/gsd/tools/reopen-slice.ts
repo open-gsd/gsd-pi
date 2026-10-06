@@ -31,7 +31,6 @@ import {
   SliceLifecycleValidationError,
 } from "../slice-lifecycle-domain-operation.js";
 import { repairSliceShadowsForReopen } from "../lifecycle-shadow-repair-domain-operation.js";
-import { isMilestoneLifecycleAdopted } from "../db/milestone-closeout-readiness.js";
 import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { invalidateStateCache } from "../state.js";
@@ -117,10 +116,9 @@ export async function handleReopenSlice(
   const hadUatVerdict = getSliceRunUatAssessment(params.milestoneId, params.sliceId) !== null;
   // Converge drifted descendants before the reopen's terminal-parity checks
   // (#2440). Evidence-gated: unverifiable drift fails here, listed, instead of
-  // aborting inside the Domain Operation. Legacy (non-adopted) hierarchies —
-  // including the #1205 desync escape — have no canonical authority to repair
-  // against and keep their cascade path.
-  if (isMilestoneLifecycleAdopted(params.milestoneId) && !milestoneCanonicalTerminal(params.milestoneId)) {
+  // aborting inside the Domain Operation. A canonically terminal milestone
+  // keeps refusing without a repair ahead of that refusal.
+  if (!milestoneCanonicalTerminal(params.milestoneId)) {
     // A replayed invocation skips the repair — its stored receipt must be
     // returned as-is, not preceded by fresh mutations against newer state.
     if (!readDomainOperationFence(invocation.idempotencyKey).replay) {

@@ -27,6 +27,8 @@ import { invalidateAllCaches } from "../cache.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { writeIntegrationBranch } from "../git-service.ts";
 import { cutOver, seedLifecycles } from "./helpers/authority-cutover.ts";
+import { handleValidateMilestone } from "../tools/validate-milestone.ts";
+import { handleCompleteMilestone } from "../tools/complete-milestone.ts";
 
 const tmpDirs: string[] = [];
 
@@ -659,11 +661,13 @@ test("refreshRecoveryDbForArtifact never completes an open milestone from comple
 
   const result = refreshRecoveryDbForArtifact("complete-milestone", "M001", base);
 
+  // The recovery path consults only the canonical completion receipt; an open
+  // milestone has none, so the artifacts never complete it.
   assert.deepEqual(result, {
     ok: false,
     fatal: true,
     reason: "complete-milestone-canonical-command-required",
-    message: "Stuck recovery cannot complete Milestone M001 from artifacts; dispatch the normal completion command.",
+    message: "Stuck recovery cannot complete adopted Milestone M001 from artifacts; retry the original completion invocation or dispatch the normal completion command.",
   });
   assert.equal(getMilestone("M001")?.status, "active");
 });
@@ -1030,6 +1034,42 @@ function makeGitBase(): string {
 
 function shellQuote(value: string): string {
   return `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Take the open adopted M001 through the real canonical validation and
+ * completion tools so the closeout proof has a receipt to read.
+ */
+async function recordCanonicalValidationAndCompletion(base: string, key: string): Promise<void> {
+  const validation = await handleValidateMilestone({
+    milestoneId: "M001",
+    verdict: "pass",
+    remediationRound: 0,
+    successCriteriaChecklist: "- [x] Complete",
+    sliceDeliveryAudit: "Delivered",
+    crossSliceIntegration: "Passed",
+    requirementCoverage: "Covered",
+    verdictRationale: "Everything passes.",
+  }, base, {
+    invocation: {
+      idempotencyKey: `auto-recovery/${key}/validate`,
+      sourceTransport: "internal",
+      actorType: "agent",
+    },
+  });
+  assert.ok(!("error" in validation), `canonical validation should record: ${JSON.stringify(validation)}`);
+  const completion = await handleCompleteMilestone({
+    milestoneId: "M001",
+    title: "Milestone One",
+    oneLiner: "Done end to end.",
+    narrative: "All slices landed and validation passed.",
+    verificationPassed: true,
+  }, base, {
+    idempotencyKey: `auto-recovery/${key}/complete`,
+    sourceTransport: "internal",
+    actorType: "agent",
+  });
+  assert.ok(!("error" in completion), `canonical completion should settle: ${JSON.stringify(completion)}`);
 }
 
 function withLoggedGitCommands<T>(base: string, action: () => T): { result: T; commands: string[] } {
@@ -1704,7 +1744,7 @@ test("verifyExpectedArtifact complete-milestone fails with only .gsd/ files (#17
   }
 });
 
-test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)", () => {
+test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)", async () => {
   const base = makeGitBase();
   try {
     // Create feature branch with implementation files AND milestone summary
@@ -1716,20 +1756,18 @@ test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)",
     execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "feat: implementation"], { cwd: base, stdio: "ignore" });
 
-    // Closeout is DB-authoritative (ADR-017): the closeout proof must clear
-    // before implementation evidence is consulted at all. The invariant under
-    // test is still "real implementation files are honored" — this fixture
-    // simply had no DB to prove closeout against.
+    // Closeout is DB-authoritative (ADR-017): the canonical closeout proof
+    // must clear before implementation evidence is consulted at all. The
+    // invariant under test is still "real implementation files are honored".
+    writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
     openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "verdict: pass",
-    });
+    seedLifecycles("auto-recovery/impl-files", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+    await recordCanonicalValidationAndCompletion(base, "auto-recovery/impl-files");
 
     const result = verifyExpectedArtifact("complete-milestone", "M001", base);
     assert.equal(result, true, "complete-milestone should pass verification with implementation files");
@@ -1738,7 +1776,7 @@ test("verifyExpectedArtifact complete-milestone passes with impl files (#1703)",
   }
 });
 
-test("verifyExpectedArtifact complete-milestone passes on main retry with milestone implementation commits (#4699)", () => {
+test("verifyExpectedArtifact complete-milestone passes on main retry with milestone implementation commits (#4699)", async () => {
   const base = makeGitBase();
   try {
     mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
@@ -1750,19 +1788,19 @@ test("verifyExpectedArtifact complete-milestone passes on main retry with milest
     execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "feat: implementation already on main\n\nGSD-Task: S01/T01"], { cwd: base, stdio: "ignore" });
 
-    // Closeout is DB-authoritative (ADR-017) — seed the closed milestone so the
-    // proof clears and the assertion still isolates its real subject: a
-    // self-diff between HEAD and main must not by itself fail verification.
+    // Closeout is DB-authoritative (ADR-017) — take the milestone through the
+    // canonical closeout so the proof clears and the assertion still isolates
+    // its real subject: a self-diff between HEAD and main must not by itself
+    // fail verification.
+    writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
     openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "verdict: pass",
-    });
+    seedLifecycles("auto-recovery/self-diff", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+    await recordCanonicalValidationAndCompletion(base, "auto-recovery/self-diff");
 
     const result = verifyExpectedArtifact("complete-milestone", "M001", base);
     assert.equal(result, true, "complete-milestone should not fail solely because HEAD vs main is a self-diff");
@@ -1792,7 +1830,7 @@ test("verifyExpectedArtifact complete-milestone fails when DB milestone is not c
   }
 });
 
-test("verifyExpectedArtifact complete-milestone passes when DB milestone is complete (#4658)", () => {
+test("verifyExpectedArtifact complete-milestone passes when DB milestone is complete (#4658)", async () => {
   const base = makeGitBase();
   try {
     execFileSync("git", ["checkout", "-b", "feat/ms-db-complete"], { cwd: base, stdio: "ignore" });
@@ -1803,16 +1841,15 @@ test("verifyExpectedArtifact complete-milestone passes when DB milestone is comp
     execFileSync("git", ["add", "."], { cwd: base, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "feat: implementation complete"], { cwd: base, stdio: "ignore" });
 
+    writeFileSync(join(base, ".git", "info", "exclude"), ".gsd/\n");
     openDatabase(join(base, ".gsd", "gsd.db"));
-    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
     insertSlice({ id: "S01", milestoneId: "M001", title: "Done Slice", status: "complete" });
-    insertAssessment({
-      path: "milestones/M001/M001-VALIDATION.md",
-      milestoneId: "M001",
-      status: "pass",
-      scope: "milestone-validation",
-      fullContent: "verdict: pass",
-    });
+    seedLifecycles("auto-recovery/db-complete", [
+      { itemKind: "milestone", milestoneId: "M001", lifecycleStatus: "ready" },
+      { itemKind: "slice", milestoneId: "M001", sliceId: "S01", lifecycleStatus: "completed" },
+    ]);
+    await recordCanonicalValidationAndCompletion(base, "auto-recovery/db-complete");
 
     const result = verifyExpectedArtifact("complete-milestone", "M001", base);
     assert.equal(result, true, "complete-milestone should pass when DB status is complete");

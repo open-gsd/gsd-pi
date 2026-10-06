@@ -369,6 +369,7 @@ test("dead legacy writers, importers and readers are not exported", async () => 
   const removed: Array<[string, string[]]> = [
     ["../gsd-db.js", [
       "reopenMilestoneStatus",
+      "updateMilestoneStatus",
       "deleteTask",
       "deleteSlice",
       "syncSliceDependencies",

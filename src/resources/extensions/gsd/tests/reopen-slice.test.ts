@@ -28,6 +28,7 @@ import { relSliceFile, targetSliceFile } from '../paths.ts';
 import { internalExecutionInvocation } from '../execution-invocation.ts';
 import { readUnitBudget, spendUnitBudget } from '../db/unit-dispatch-budgets.ts';
 import { claimTestDispatch } from './helpers/unit-dispatch.ts';
+import { seedLifecycles, type Lifecycle } from './helpers/authority-cutover.ts';
 import {
   handleReopenSlice as handleReopenSliceWithInvocation,
   type ReopenSliceParams,
@@ -62,6 +63,57 @@ function seedCompleteSlice(): void {
   insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', title: 'Task Two', status: 'complete' });
 }
 
+/**
+ * Adopt the fixture rows so the reopen's shadow repair finds no drift: each
+ * canonical row mirrors the row's legacy status.
+ */
+function adoptFixture(key: string): void {
+  const rows: Lifecycle[] = [
+    ..._getAdapter()!.prepare("SELECT id, status FROM milestones WHERE id = 'M001'").all()
+      .map((row: Record<string, unknown>) => ({
+        itemKind: 'milestone' as const,
+        milestoneId: String(row.id),
+        lifecycleStatus: legacyToCanonical(String(row.status)),
+      })),
+    ..._getAdapter()!.prepare("SELECT id, status FROM slices WHERE milestone_id = 'M001' ORDER BY id").all()
+      .map((row: Record<string, unknown>) => ({
+        itemKind: 'slice' as const,
+        milestoneId: 'M001',
+        sliceId: String(row.id),
+        lifecycleStatus: legacyToCanonical(String(row.status)),
+      })),
+    ..._getAdapter()!.prepare("SELECT slice_id, id, status FROM tasks WHERE milestone_id = 'M001' ORDER BY slice_id, id").all()
+      .map((row: Record<string, unknown>) => ({
+        itemKind: 'task' as const,
+        milestoneId: 'M001',
+        sliceId: String(row.slice_id),
+        taskId: String(row.id),
+        lifecycleStatus: legacyToCanonical(String(row.status)),
+      })),
+  ];
+  seedLifecycles(`reopen-slice/${key}`, rows);
+}
+
+function legacyToCanonical(status: string): Lifecycle['lifecycleStatus'] {
+  switch (status) {
+    case 'pending': return 'pending';
+    case 'active':
+    case 'in_progress': return 'in_progress';
+    case 'planned':
+    case 'ready':
+    case 'queued': return 'ready';
+    case 'complete':
+    case 'completed':
+    case 'done':
+    case 'closed': return 'completed';
+    case 'skipped':
+    case 'cancelled': return 'cancelled';
+    case 'deferred':
+    case 'parked': return 'paused';
+    default: return 'ready';
+  }
+}
+
 // ─── Success path ────────────────────────────────────────────────────────
 
 test('handleReopenSlice: releases the exhausted mark of the slice units, and of no other slice', async (t) => {
@@ -70,6 +122,7 @@ test('handleReopenSlice: releases the exhausted mark of the slice units, and of 
   openDatabase(join(base, '.gsd', 'gsd.db'));
   seedCompleteSlice();
   insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Other Slice', status: 'pending' });
+  adoptFixture('exhausted');
   const exhausted = (unitId: string) => ({ unitType: 'complete-slice', unitId, kind: 'exhausted' }) as const;
   for (const sliceId of ['S01', 'S02']) {
     claimTestDispatch(base, {
@@ -93,6 +146,7 @@ test('handleReopenSlice: resets a complete slice to in_progress and all tasks to
   openDatabase(join(base, '.gsd', 'gsd.db'));
   try {
     seedCompleteSlice();
+    adoptFixture('reset');
 
     const result = await handleReopenSlice({
       milestoneId: 'M001',
@@ -121,6 +175,7 @@ test('handleReopenSlice: the old UAT verdict and the old claimed evidence do not
   t.after(() => cleanup(base));
   openDatabase(join(base, '.gsd', 'gsd.db'));
   seedCompleteSlice();
+  adoptFixture('uat');
   insertVerificationEvidence({
     taskId: 'T01', sliceId: 'S01', milestoneId: 'M001',
     command: 'npm test', exitCode: 0, verdict: 'pass', durationMs: 5,
@@ -177,6 +232,7 @@ test('handleReopenSlice: works with a single task', async () => {
     insertMilestone({ id: 'M001', title: 'Test', status: 'active' });
     insertSlice({ id: 'S01', milestoneId: 'M001', status: 'complete' });
     insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', status: 'complete' });
+    adoptFixture('single');
 
     const result = await handleReopenSlice({ milestoneId: 'M001', sliceId: 'S01' }, base);
 
@@ -220,6 +276,7 @@ test('handleReopenSlice: rejects slice in a closed milestone', async () => {
     insertMilestone({ id: 'M001', title: 'Done', status: 'complete' });
     insertSlice({ id: 'S01', milestoneId: 'M001', status: 'complete' });
     insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', status: 'complete' });
+    adoptFixture('closed-milestone');
 
     const result = await handleReopenSlice({ milestoneId: 'M001', sliceId: 'S01' }, base);
     assert.ok('error' in result);
@@ -229,12 +286,14 @@ test('handleReopenSlice: rejects slice in a closed milestone', async () => {
   }
 });
 
-test('handleReopenSlice: recovers a desynced slice (open status, completed tasks) — #1205', async () => {
+test('handleReopenSlice: refuses the unadopted #1205 desync loudly instead of escaping', async () => {
   const base = makeTmpBase();
   openDatabase(join(base, '.gsd', 'gsd.db'));
   try {
     // Desync signature: slice left "pending" by a UAT→planning fallback while
-    // its tasks stayed "complete" from the first execution pass.
+    // its tasks stayed "complete" from the first execution pass. Without
+    // canonical lifecycle rows the shadow repair refuses — adopt the project,
+    // then reopen.
     insertMilestone({ id: 'M001', title: 'Active', status: 'active' });
     insertSlice({ id: 'S01', milestoneId: 'M001', status: 'pending' });
     insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', status: 'complete' });
@@ -242,13 +301,13 @@ test('handleReopenSlice: recovers a desynced slice (open status, completed tasks
 
     const result = await handleReopenSlice({ milestoneId: 'M001', sliceId: 'S01' }, base);
 
-    assert.ok(!('error' in result), `unexpected error: ${'error' in result ? result.error : ''}`);
-    assert.equal(result.tasksReset, 2, 'both completed tasks should be reset');
-
+    assert.ok('error' in result, 'an unadopted desync must be refused loudly');
+    if ('error' in result) {
+      assert.match(result.error, /unresolved canonical lifecycle shadows/);
+      assert.match(result.error, /M001\/S01/);
+    }
     const slice = getSlice('M001', 'S01');
-    assert.equal(slice!.status, 'in_progress', 'slice should be reopened to in_progress');
-    const tasks = getSliceTasks('M001', 'S01');
-    assert.ok(tasks.every(t => t.status === 'pending'), 'all tasks should be reset to pending');
+    assert.equal(slice!.status, 'pending', 'the desynced slice must stay untouched');
   } finally {
     cleanup(base);
   }
@@ -265,6 +324,7 @@ test('handleReopenSlice: rejects an in-flight slice with mixed task progress and
     insertSlice({ id: 'S01', milestoneId: 'M001', status: 'in_progress' });
     insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', status: 'complete' });
     insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', status: 'in_progress' });
+    adoptFixture('in-flight');
 
     const result = await handleReopenSlice({ milestoneId: 'M001', sliceId: 'S01' }, base);
 
