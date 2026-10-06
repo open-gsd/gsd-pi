@@ -54,7 +54,7 @@ import { parseProjectionPlan } from "./schemas/parsers.js";
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { isCanonicalStagedTaskSummaryProjection } from "./task-summary-projection-classification.js";
-import { isMilestoneLifecycleAdopted, readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
+import { readMilestoneCloseoutAuthorization } from "./db/milestone-closeout-readiness.js";
 import { isDeadLocalAutoWorker } from "./db/auto-workers.js";
 import { countUnadoptedHierarchyRows, previewLifecycleBackfill } from "./lifecycle-backfill-domain-operation.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
@@ -624,7 +624,7 @@ export function createValidationSourceDriftDoctorIssue(
 
 export function reportMilestoneValidationSourceDrift(basePath: string, issues: DoctorIssue[]): void {
   for (const milestone of readMilestones()) {
-    if (!milestone.closed || !isMilestoneLifecycleAdopted(milestone.id)) continue;
+    if (!milestone.closed) continue;
     const sourceRoot = resolveCanonicalMilestoneRoot(basePath, milestone.id);
     const preferences = loadEffectiveGSDPreferences(sourceRoot)?.preferences;
     const source = captureMilestoneVerificationSourceRevision(sourceRoot, preferences);
@@ -659,7 +659,6 @@ export function reportMilestoneValidationSourceDrift(basePath: string, issues: D
 export function reportMilestoneLifecycleShadowDrift(issues: DoctorIssue[]): void {
   if (!isDbAvailable()) return;
   for (const milestone of getAllMilestones()) {
-    if (!isMilestoneLifecycleAdopted(milestone.id)) continue;
     const snapshot = getMilestoneLifecycleShadowSnapshot(milestone.id);
     if (snapshot.queryError) continue;
     for (const item of snapshot.items) {
