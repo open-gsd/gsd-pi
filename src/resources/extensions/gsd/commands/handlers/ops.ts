@@ -298,11 +298,6 @@ Examples:
     await dispatchDirectPhase(ctx, pi, phase, basePath);
     return true;
   }
-  if (trimmed === "verdict" || trimmed.startsWith("verdict ")) {
-    const { handleVerdict } = await import("../../commands-verdict.js");
-    await handleVerdict(trimmed.replace(/^verdict\s*/, "").trim(), ctx, projectRoot());
-    return true;
-  }
   if (trimmed === "notifications" || trimmed.startsWith("notifications ")) {
     const { handleNotificationsCommand } = await import("./notifications-handler.js");
     await handleNotificationsCommand(trimmed.replace(/^notifications\s*/, "").trim(), ctx, pi);

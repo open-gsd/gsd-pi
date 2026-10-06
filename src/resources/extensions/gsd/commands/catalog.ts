@@ -19,7 +19,7 @@ export interface GsdCommandDefinition {
 type CompletionMap = Record<string, readonly GsdCommandDefinition[]>;
 
 export const GSD_COMMAND_DESCRIPTION =
-  "GSD — Git Ship Done: /gsd help|start|templates|next|auto|stop|pause|status|widget|visualize|brief|report|queue|quick|discuss|capture|triage|dispatch|verdict|history|undo|undo-task|reset-slice|rate|skip|export|cleanup|closeout|recover|rebuild|db|model|mode|prefs|config|keys|hooks|run-hook|skill-health|doctor|debug|logs|forensics|changelog|migrate|remote|steer|knowledge|memory|new-milestone|new-project|parallel|cmux|park|unpark|discard|init|setup|onboarding|inspect|extensions|update|upgrade|fast|mcp|rethink|workflow|codebase|notifications|ship|do|usage|context|session-report|backlog|pr-branch|add-tests|scan|language|worktree|eval-review";
+  "GSD — Git Ship Done: /gsd help|start|templates|next|auto|stop|pause|status|widget|visualize|brief|report|queue|quick|discuss|capture|triage|dispatch|history|undo|undo-task|reset-slice|rate|skip|export|cleanup|closeout|recover|rebuild|db|model|mode|prefs|config|keys|hooks|run-hook|skill-health|doctor|debug|logs|forensics|changelog|migrate|remote|steer|knowledge|memory|new-milestone|new-project|parallel|cmux|park|unpark|discard|init|setup|onboarding|inspect|extensions|update|upgrade|fast|mcp|rethink|workflow|codebase|notifications|ship|do|usage|context|session-report|backlog|pr-branch|add-tests|scan|language|worktree|eval-review";
 
 export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "help", desc: "Categorized command reference with descriptions" },
@@ -38,7 +38,6 @@ export const TOP_LEVEL_SUBCOMMANDS: readonly GsdCommandDefinition[] = [
   { cmd: "changelog", desc: "Show categorized release notes" },
   { cmd: "triage", desc: "Manually trigger triage of pending captures" },
   { cmd: "dispatch", desc: "Dispatch a specific phase directly" },
-  { cmd: "verdict", desc: "Override an unadopted compatibility milestone validation verdict" },
   { cmd: "uat-answer", desc: "Answer an open subjective UAT question (accept or reject); only you can record it" },
   { cmd: "history", desc: "View execution history" },
   { cmd: "undo", desc: "Revert last completed unit" },
@@ -314,11 +313,6 @@ const NESTED_COMPLETIONS: CompletionMap = {
     { cmd: "reassess", desc: "Reassess current progress" },
     { cmd: "uat", desc: "Run user acceptance testing" },
     { cmd: "replan", desc: "Replan the current slice" },
-  ],
-  verdict: [
-    { cmd: "pass", desc: "Override an unadopted verdict to pass" },
-    { cmd: "needs-attention", desc: "Override an unadopted verdict to needs-attention (requires --rationale)" },
-    { cmd: "needs-remediation", desc: "Override an unadopted verdict to needs-remediation (requires --rationale)" },
   ],
   rate: [
     { cmd: "over", desc: "Model was overqualified for this task" },
