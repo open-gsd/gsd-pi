@@ -1898,6 +1898,7 @@ export const executeCompleteMilestone = (params, projectDir, invocation) =>
 export const executeValidateMilestone = captureMilestoneValidation;
 export const executeReassessRoadmap = noop;
 export const executeSaveGateResult = noop;
+export const executeHookVerdictSave = noop;
 export const executeSummarySave = noop;
 export const executeUatResultSave = noop;
 export const executeSliceReopen = (params, projectDir, invocation) =>
@@ -2390,6 +2391,7 @@ export const executeMilestoneReopen = noop;
 export const executeValidateMilestone = noop;
 export const executeReassessRoadmap = noop;
 export const executeSaveGateResult = noop;
+export const executeHookVerdictSave = noop;
 export const executeSummarySave = noop;
 export const executeUatResultSave = noop;
 export const executePlanMilestone = noop;
