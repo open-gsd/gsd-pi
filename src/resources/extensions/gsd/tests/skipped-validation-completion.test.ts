@@ -45,8 +45,7 @@ function seedMilestone(base: string): void {
   });
   upsertMilestonePlanning("M001", {
     title: "Preference-skipped validation milestone",
-    status: "active",
-    vision: "Ship a small implementation with a documented validation skip.",
+        vision: "Ship a small implementation with a documented validation skip.",
     successCriteria: ["Completion remains unblocked when validation was intentionally skipped."],
     keyRisks: [],
     proofStrategy: [],

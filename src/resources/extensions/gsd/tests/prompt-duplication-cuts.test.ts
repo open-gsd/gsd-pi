@@ -50,8 +50,7 @@ function seedDb(base: string, taskStatus = "complete"): void {
   insertMilestone({ id: "M001", title: "Prompt Cuts", status: "active", depends_on: [] });
   upsertMilestonePlanning("M001", {
     title: "Prompt Cuts",
-    status: "active",
-    vision: "Reduce duplicate prompt reads.",
+        vision: "Reduce duplicate prompt reads.",
     successCriteria: ["Prompt builders render compact context."],
     keyRisks: [],
     proofStrategy: [],

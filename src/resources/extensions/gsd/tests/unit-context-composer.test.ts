@@ -573,8 +573,7 @@ function seed(base: string, mid: string): void {
   insertMilestone({ id: mid, title: "Test", status: "active", depends_on: [] });
   upsertMilestonePlanning(mid, {
     title: "Test",
-    status: "active",
-    vision: "Ship it",
+        vision: "Ship it",
     successCriteria: ["It ships"],
     keyRisks: [],
     proofStrategy: [],

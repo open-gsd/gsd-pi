@@ -34,8 +34,7 @@ function seed(base: string, mid: string): void {
   insertMilestone({ id: mid, title: "Research Test", status: "active", depends_on: [] });
   upsertMilestonePlanning(mid, {
     title: "Research Test",
-    status: "active",
-    vision: "Research composer migration",
+        vision: "Research composer migration",
     successCriteria: ["Prompt compiles"],
     keyRisks: [],
     proofStrategy: [],
