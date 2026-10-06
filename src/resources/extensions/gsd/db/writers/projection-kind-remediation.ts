@@ -6,11 +6,14 @@
 // across a kind change, forbids starting a second chain for a key, and the
 // identity/delete triggers make kind immutable and rows undeletable — so a
 // wrong-kind head has no in-band repair path. SQLite has no trigger-disable
-// pragma either, so this writer transactionally drops the UPDATE-guard
-// triggers, rewrites the wrong kinds to the canonical lifecycle kinds, and
-// recreates the triggers verbatim via the owning schema module.
+// pragma either, so this writer drops the UPDATE-guard triggers, rewrites the
+// wrong kinds to the canonical lifecycle kinds, and recreates the triggers
+// verbatim via the owning schema module, all inside one Domain Operation so
+// the repair has an operation row and a revision.
 
-import { getDbOrNull, transaction } from "../engine.js";
+import { executeDomainOperation } from "../domain-operation.js";
+import { getDbOrNull } from "../engine.js";
+import { readDomainOperationFence } from "./lifecycle-commands.js";
 import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "../../db-projection-import-kernel-closeout-foundation-schema.js";
 import {
   LIFECYCLE_PROJECTION_KEY_PREFIX,
@@ -77,7 +80,16 @@ export function repairWrongKindLifecycleProjections(): WrongKindLifecycleProject
   if (heads.length === 0) return [];
   const db = getDbOrNull();
   if (!db) return [];
-  transaction(() => {
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "projection.kind.repair",
+    idempotencyKey: `doctor/projection-kind-repair/${fence.revision}`,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "operator",
+    sourceTransport: "internal",
+    payload: { projectionKeys: heads.map((head) => head.projectionKey) },
+  }, () => {
     for (const trigger of PROJECTION_UPDATE_GUARD_TRIGGERS) {
       db.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
     }
@@ -92,6 +104,22 @@ export function repairWrongKindLifecycleProjections(): WrongKindLifecycleProject
     // Recreate the dropped triggers byte-identical to the schema authority
     // (everything else in the module is CREATE ... IF NOT EXISTS and no-ops).
     createProjectionImportKernelCloseoutFoundationSchemaV35(db);
+    return {
+      events: heads.map((head) => ({
+        eventType: "projection.kind.repaired",
+        entityType: "projection",
+        entityId: head.projectionKey,
+        payload: { from: head.projectionKind, to: head.expectedKind },
+        destinations: ["db"],
+      })),
+      // Each repaired chain gets a new head under its canonical kind, so the
+      // Projection Worker renders the key again.
+      projections: heads.map((head) => ({
+        projectionKey: head.projectionKey,
+        projectionKind: head.expectedKind,
+        rendererVersion: "1",
+      })),
+    };
   });
   return heads;
 }

@@ -19,7 +19,7 @@ test("rpc contract version is stable and public", () => {
 
 test("rpc command constants cover the public v2 handshake and core commands", () => {
 	assert.deepEqual(
-		["init", "prompt", "get_state", "get_project_progress", "get_project_snapshot", "bash", "get_session_stats", "shutdown"].filter(
+		["init", "prompt", "get_state", "get_project_progress", "get_project_snapshot", "workflow_command", "bash", "get_session_stats", "shutdown"].filter(
 			(command) => !RPC_COMMAND_TYPES.includes(command as (typeof RPC_COMMAND_TYPES)[number])
 		),
 		[]
@@ -28,7 +28,7 @@ test("rpc command constants cover the public v2 handshake and core commands", ()
 
 test("rpc constants include provider-agnostic thinking and event values", () => {
 	assert.deepEqual([...RPC_THINKING_LEVELS], ["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
-	assert.deepEqual([...RPC_V2_EVENT_TYPES], ["execution_complete", "cost_update"]);
+	assert.deepEqual([...RPC_V2_EVENT_TYPES], ["execution_complete", "cost_update", "workflow_outcome"]);
 });
 
 test("extension UI methods include interactive and display update requests", () => {

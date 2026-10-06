@@ -71,7 +71,6 @@ git:
   main_branch: main           # primary branch name
   merge_strategy: squash      # "squash" or "merge"
   isolation: none             # "none" (default), "worktree", or "branch"
-  commit_docs: true           # commit .gsd/ artifacts to git
   manage_gitignore: true      # let GSD manage .gitignore
   auto_pr: false              # create PR on milestone completion
   pr_target_branch: develop   # PR target branch
@@ -93,6 +92,7 @@ git:
 When `collapse_cadence: "slice"`, each slice's commits are squash-merged to main as soon as the slice passes validation. The milestone branch is then fast-forwarded to main so the next slice starts from a clean base.
 
 Benefits:
+
 - **Shorter orphan window** — if a session is interrupted, only the active slice's work is at risk, not the whole milestone.
 - **Incremental conflicts** — merge conflicts surface per slice rather than all at once at milestone end.
 - **Parallel-friendly** — multiple milestones can safely merge their validated slices to main without waiting for the slowest one.
@@ -152,17 +152,6 @@ cp "$SOURCE_DIR/.env" "$WORKTREE_DIR/.env"
 ln -sf "$SOURCE_DIR/assets" "$WORKTREE_DIR/assets"
 ```
 
-## Keeping `.gsd/` Local
-
-For teams where only some members use GSD:
-
-```yaml
-git:
-  commit_docs: false
-```
-
-This adds `.gsd/` to `.gitignore` entirely. You get structured planning without affecting teammates who don't use GSD.
-
 ## Commit Format
 
 Commits use conventional commit format with GSD metadata:
@@ -195,7 +184,7 @@ Inside an active GSD TUI session, use `/gsd worktree` (or `/gsd wt`) for worktre
 
 `list` shows each worktree's branch, path, diff stats, commit count, and whether it is clean, unmerged, or has uncommitted changes. `merge` brings a worktree back into the detected main branch and removes it afterward; if the worktree has dirty files, GSD tries to auto-commit them before merging. `clean` removes only merged or empty worktrees and keeps anything with pending changes. `remove` refuses to discard unmerged or uncommitted work unless you pass `--force`.
 
-Before merge or automatic teardown, GSD reconciles legacy worktree rows without replacing hierarchy identities. If the worktree contains canonical operations or lifecycle state missing from or newer than the project database, merge/cleanup stops and preserves the worktree for recovery. A newer project lifecycle head also protects its status, completion summaries, verification results, and blocker/escalation evidence from older worktree state.
+Worktrees share the project database. For a worktree that holds a `gsd.db` of its own, see the [Git Strategy guide](../../docs/user-docs/git-strategy.md#automatic-auto-mode).
 
 When forced removal finds uncommitted work, GSD treats the worktree contents as recoverable data instead of deleting them. It moves the checkout to `.gsd/quarantine/worktrees/<name>-<timestamp>/`, writes `.gsd-quarantine.json` with the original path, branch, and `git status --porcelain` output, removes the quarantined `.git` pointer, and keeps the milestone branch. Inspect, copy, or merge any salvageable files from the quarantine before deleting it. If quarantine cannot be created, GSD leaves the original worktree in place.
 

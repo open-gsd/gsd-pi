@@ -1,5 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: Observe external .planning edits and retain the opt-in legacy drift handler.
+// File Purpose: Observe external .planning edits.
 // Detects sha drift between the compat marker's planning projections/passthrough
 // entries and current .planning/ files.
 //
@@ -12,15 +12,13 @@ import { join } from "node:path";
 import {
   computeProjectionSha,
   readCompatMarker,
-  writeCompatMarker,
 } from "../../compat/compat-marker.js";
 import {
   isPlanningPassthroughRelPath,
   walkPlanningRelPaths,
 } from "../../compat/planning-compat.js";
 import { logWarning } from "../../workflow-logger.js";
-import type { GSDState } from "../../types.js";
-import type { DriftContext, DriftHandler, DriftRecord } from "../types.js";
+import type { DriftRecord } from "../types.js";
 
 type ExternalPlanningEditDrift = Extract<
   DriftRecord,
@@ -120,42 +118,3 @@ export async function observeExternalPlanningEdits(
     ...(hasBaselines ? detectUnseededPlanningFiles(basePath, projections, passthrough) : []),
   ];
 }
-
-function externalPlanningEditBlocker(record: ExternalPlanningEditDrift): string | null {
-  if (record.passthrough) return null;
-  return [
-    `External modeled edit detected in \`.planning/${record.projectionPath}\`.`,
-    "The database is authoritative, so GSD paused before transforming or importing this projection.",
-    "Recommended: run `/gsd rebuild markdown` to restore database-backed projections.",
-    "If `.planning` should become the source, use `/gsd migrate` to review and confirm its explicit Preview/Application.",
-  ].join(" ");
-}
-
-function repairExternalPlanningEdit(
-  record: ExternalPlanningEditDrift,
-  ctx: DriftContext,
-): void {
-  // Passthrough: never re-import (no DB model). Just refresh the sha.
-  if (record.passthrough) {
-    const marker = readCompatMarker(ctx.basePath);
-    marker.planning!.passthrough[record.projectionPath] = {
-      sha: record.actualSha,
-      entities: record.entities,
-    };
-    marker.lastProjectedAt = new Date().toISOString();
-    writeCompatMarker(ctx.basePath, marker);
-    return;
-  }
-
-  throw new Error(
-    `Invariant violation: modeled projection repair must remain blocked for .planning/${record.projectionPath}`,
-  );
-}
-
-export const externalPlanningEditHandler: DriftHandler<ExternalPlanningEditDrift> = {
-  kind: "external-planning-edit",
-  detect: (_state: GSDState, ctx: DriftContext) =>
-    observeExternalPlanningEdits(ctx.basePath, ctx.dryRun),
-  blocker: externalPlanningEditBlocker,
-  repair: repairExternalPlanningEdit,
-};

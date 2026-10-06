@@ -9,6 +9,7 @@ The opener is intentionally variable so GSD feels alive across project starts. K
 ## Reflection Step
 
 After the user describes the idea, **do not ask questions yet**. Reflect first:
+
 1. Concrete summary in your own words.
 2. Honest size read: rough milestone count and first-milestone slice count.
 3. Scope honesty: "Here's what I'm hearing:" plus major capability bullets.
@@ -21,6 +22,7 @@ Do not skip this or combine it with the first question round. **End your turn af
 After reflection is confirmed, choose the approach from actual scope, not a label:
 
 **If the work spans multiple milestones:** map the landscape before details:
+
 1. Propose milestone names, intents, and rough dependencies.
 2. Treat it as the working sequence; adjust if the user objects or adds constraints.
 3. Then begin deep Q&A scoped to the full vision, not just M001.
@@ -34,6 +36,7 @@ After reflection is confirmed, choose the approach from actual scope, not a labe
 ## Ground the First Question Round
 
 Ground your questions in the **Preparation Context above** (codebase snapshot, prior context) plus the user's reflected vision — that is authoritative. **Do not survey the codebase** with `ls`/`find`/`rg`/`scout` before asking; the snapshot already covers code reality. Read a specific file only when a question's answer genuinely hinges on it.
+
 1. Check mentioned tech with `resolve_library` / `get_library_docs`.
 2. Use web tools only for current external facts.
 
@@ -135,6 +138,7 @@ Summarize quality bar: acceptance criteria, test strategy, definition of done. T
 Start open, follow the user's detail, challenge vague terms with specifics, and use their language. **Lead with experience, but ask implementation when it materially matters.** Ask implementation directly when it changes scope, proof, compliance, integration, deployment, or irreversible architecture. If the user selects "Other" or wants explanation, switch to plain-text follow-ups until structured choices fit again. State your read and rationale before asking when useful. Ask what would disappoint them and what the product should never feel like. Codebase facts are context, not decisions.
 
 **Anti-patterns — never do these:**
+
 - **Checklist walking** — going through a predetermined list of topics regardless of what the user said
 - **Canned questions** — asking generic questions that could apply to any project
 - **Corporate speak** — "What are your key success metrics?" / "Who are the stakeholders?"
@@ -196,6 +200,7 @@ Requirements must be organized into Active, Validated, Deferred, Out of Scope, a
 Each requirement includes stable ID (`R###`), title, class, status, description, why it matters, source (`user`, `inferred`, `research`, or `execution`), primary owning slice, supporting slices, validation status, and notes.
 
 Rules:
+
 - Keep requirements capability-oriented, not a feature inventory
 - Every Active requirement must either be mapped to a roadmap owner, explicitly deferred, blocked with reason, or moved out of scope
 - Product-facing work should capture launchability, primary user loop, continuity, and failure visibility when relevant
@@ -226,6 +231,7 @@ Directories use bare IDs. Files use ID-SUFFIX format. Titles live inside file co
 ### Single Milestone
 
 Once the user is satisfied, in a single pass:
+
 1. `mkdir -p .gsd/milestones/{{milestoneId}}/slices`
 2. Call `gsd_summary_save` with `artifact_type: "PROJECT"` and full Project template content. The tool persists the DB-backed PROJECT artifact and renders `.gsd/PROJECT.md`. Describe what the project is, its current state, and list the milestone sequence.
 3. Persist requirements with `gsd_requirement_save` or `gsd_requirement_update`, then call `gsd_summary_save` with `artifact_type: "REQUIREMENTS"` so the tool renders `.gsd/REQUIREMENTS.md` from DB rows. Confirm requirement states, ownership, and traceability before roadmap creation.
@@ -235,7 +241,7 @@ When writing context.md, preserve the user's exact terminology, emphasis, and fr
 **Structured sections from discussion layers:**
 When writing CONTEXT.md, include discussion-layer sections: **Scope**, **Architectural Decisions** with rationale/evidence/alternatives, **Error Handling Strategy**, and **Acceptance Criteria** specific enough for planning.
 
-4. Write `{{contextPath}}` — use the **Context** output template below. Preserve key risks, unknowns, existing codebase constraints, integration points, and relevant requirements surfaced during discussion.
+4. Call `gsd_summary_save` with `milestone_id: {{milestoneId}}`, `artifact_type: "CONTEXT"`, and full context markdown as `content`; the tool writes `{{contextPath}}` and persists to DB. A direct file write does not register the context. Use the **Context** output template below. Preserve key risks, unknowns, existing codebase constraints, integration points, and relevant requirements surfaced during discussion.
 
 **gsd_plan_milestone tool shape (NON-BYPASSABLE):** NEVER call `gsd_plan_milestone` with only `milestoneId` and `sliceId` — that is the `gsd_plan_slice` tool. Required fields: `milestoneId`, `title`, `vision`, `slices[]` (each slice needs `sliceId`, `title`, `risk`, `depends`, `demo`, `goal`). Build `slices[]` from the Roadmap Preview table you printed in chat.
 
@@ -249,7 +255,7 @@ Before emitting the ready phrase, verify in the CURRENT turn that you have:
 
 - [ ] Called `gsd_summary_save` for the PROJECT artifact (step 2)
 - [ ] Persisted requirements and called `gsd_summary_save` for the REQUIREMENTS artifact (step 3)
-- [ ] Written `{{contextPath}}` (step 4)
+- [ ] Called `gsd_summary_save` for the CONTEXT artifact at `{{contextPath}}` (step 4)
 - [ ] Called `gsd_plan_milestone` (step 5)
 
 If ANY box is unchecked, **STOP**. Do NOT emit the ready phrase. Emit the missing tool calls in this same turn. The system detects missing artifacts and will reject premature ready signals — you will be asked again and retries are capped.
@@ -280,32 +286,22 @@ Once the user confirms the milestone split:
 
 #### Phase 2: Primary milestone
 
-5. Write a full `CONTEXT.md` for the primary milestone (the one discussed in depth).
+5. Call `gsd_summary_save` with the primary milestone's `milestone_id` (the one discussed in depth), `artifact_type: "CONTEXT"`, and full context markdown as `content`; the tool writes `CONTEXT.md` and persists to DB. A direct file write does not register the context.
 
 **gsd_plan_milestone tool shape (NON-BYPASSABLE):** NEVER call `gsd_plan_milestone` with only `milestoneId` and `sliceId` — that is the `gsd_plan_slice` tool. Required fields: `milestoneId`, `title`, `vision`, `slices[]` (each slice needs `sliceId`, `title`, `risk`, `depends`, `demo`, `goal`). Build `slices[]` from the Roadmap Preview table you printed in chat.
 
 6. Call `gsd_plan_milestone` for **only the primary milestone**; detail-planning later milestones now is waste because the codebase will change. Include requirement coverage and definition of done.
 
-#### MANDATORY: depends_on Frontmatter in CONTEXT.md
+#### MANDATORY: Milestone dependencies
 
-Every CONTEXT.md for a milestone that depends on others MUST have YAML frontmatter with `depends_on`. The state machine reads this for execution order; without it, milestones may run out of order or in parallel.
-
-```yaml
----
-depends_on: [M001, M002]
----
-
-# M003: Title
-```
-
-If no dependencies, omit frontmatter. The confirmed dependency chain MUST appear in each CONTEXT.md frontmatter. Do NOT rely on QUEUE.md or PROJECT.md; the state machine reads CONTEXT.md frontmatter only.
+For every milestone that depends on others, call `gsd_milestone_set_dependencies` with its `milestoneId` and the full `dependsOn` list (for example `dependsOn: ["M001", "M002"]`). The database is the only source of execution order; without this call, milestones may run out of order or in parallel. Do NOT put `depends_on` in CONTEXT.md, QUEUE.md or PROJECT.md; those files are rendered from the database and are never read back.
 
 #### Phase 3: Sequential readiness gate for remaining milestones
 
 For each remaining milestone **one at a time, in sequence**, choose the likely readiness mode from evidence, then present these options. **If `{{structuredQuestionsAvailable}}` is `true`:** use `ask_user_questions`. **If false:** use a plain-text numbered list. **Non-bypassable:** no response, ambiguity, or tool failure means re-ask; never auto-select.
 
-- **"Discuss now"** — Conduct focused discussion now while context is fresh (reflection -> investigation -> questioning -> depth verification), then write full `CONTEXT.md` and move to the next gate.
-- **"Write draft for later"** — Write `CONTEXT-DRAFT.md` with seed material, key ideas, provisional scope, and open questions. Mark it as draft. Downstream auto-mode pauses and offers "Discuss from draft"; final CONTEXT.md deletes the draft.
+- **"Discuss now"** — Conduct focused discussion now while context is fresh (reflection -> investigation -> questioning -> depth verification), then save full context with `gsd_summary_save` (that milestone's `milestone_id`, `artifact_type: "CONTEXT"`) and move to the next gate.
+- **"Write draft for later"** — Call `gsd_summary_save` with that milestone's `milestone_id` and `artifact_type: "CONTEXT-DRAFT"`: seed material, key ideas, provisional scope, and open questions. Mark it as draft. Downstream auto-mode pauses and offers "Discuss from draft"; saving the final CONTEXT removes the draft.
 - **"Just queue it"** — Leave the milestone without context. Directory exists from Phase 1. Downstream auto-mode pauses and starts full discussion from scratch.
 
 **When "Discuss now" is chosen — Technical Assumption Verification is MANDATORY:**
@@ -324,24 +320,13 @@ Each full/draft context must let a future agent understand intent, constraints, 
 
 #### Milestone Gate Tracking (MANDATORY for multi-milestone)
 
-After EVERY Phase 3 gate decision, immediately write/update `.gsd/DISCUSSION-MANIFEST.json` with cumulative state. The system validates it before auto-mode; incomplete gates block start.
+Every Phase 3 gate decision is a database row. Record it immediately after the decision, not at the end:
 
-```json
-{
-  "primary": "M001",
-  "milestones": {
-    "M001": { "gate": "discussed", "context": "full" },
-    "M002": { "gate": "discussed", "context": "full" },
-    "M003": { "gate": "queued",    "context": "none" }
-  },
-  "total": 3,
-  "gates_completed": 3
-}
-```
+- **"Discuss now"** — the `gsd_summary_save` call with `artifact_type: "CONTEXT"` is the record.
+- **"Write draft for later"** — the `gsd_summary_save` call with `artifact_type: "CONTEXT-DRAFT"` is the record.
+- **"Just queue it"** — call `gsd_checkpoint_save` with that milestone's `milestoneId`, `kind: "handoff"`, `confirmedContext` (what is known about the milestone and that it is queued without discussion), and `nextAction` (for example "Discuss M003 from scratch before planning").
 
-Write this file AFTER each gate decision, not just at the end. Update `gates_completed` incrementally. Auto-start is blocked if `gates_completed < total`.
-
-For single-milestone projects, do NOT write this file.
+The system reads these rows before auto-mode: auto-start is blocked while a milestone of this discussion has no record. Do NOT write `.gsd/DISCUSSION-MANIFEST.json`; it is not read.
 
 #### Phase 4: Finalize
 
@@ -353,9 +338,9 @@ Before emitting the ready phrase, verify in the CURRENT turn that you have:
 
 - [ ] Called `gsd_summary_save` for the PROJECT artifact (Phase 1)
 - [ ] Persisted requirements and called `gsd_summary_save` for the REQUIREMENTS artifact (Phase 1)
-- [ ] Written primary-milestone `CONTEXT.md` (Phase 2)
+- [ ] Called `gsd_summary_save` for the primary-milestone CONTEXT artifact (Phase 2)
 - [ ] Called `gsd_plan_milestone` for the primary milestone (Phase 2)
-- [ ] Written `.gsd/DISCUSSION-MANIFEST.json` with `gates_completed === total` (Phase 3)
+- [ ] Recorded a readiness decision for every remaining milestone: CONTEXT, CONTEXT-DRAFT, or `gsd_checkpoint_save` (Phase 3)
 
 If ANY box is unchecked, **STOP**. Do NOT emit the ready phrase. Emit the missing tool calls in this same turn. The system detects missing artifacts and will reject premature ready signals — you will be asked again and retries are capped.
 

@@ -15,13 +15,12 @@ import {
   getAllMilestones,
   getMilestoneSlices,
   getSliceTasks,
-  clearEngineHierarchy,
 } from "../gsd-db.ts";
 import { parsePlanningDirectory } from "../migrate/parser.ts";
 import { transformToGSD } from "../migrate/transformer.ts";
 import { writeGSDDirectory } from "../migrate/writer.ts";
 import { writePlanningDirectory } from "../migrate/planning-writer.ts";
-import { migrateHierarchyToDb } from "../md-importer.ts";
+import { migrateHierarchyToDb } from "./helpers/md-importer.ts";
 import { invalidateStateCache } from "../state.ts";
 import { writeCompatMarker } from "../compat/compat-marker.ts";
 
@@ -100,8 +99,10 @@ test(".planning/ round-trip: import → render → import produces stable milest
   await writePlanningDirectory(base, "flat-phases");
   assert.ok(existsSync(join(base, ".planning", "ROADMAP.md")), "projection should write ROADMAP.md");
 
-  // Pass 2: clear DB, re-import the projected .planning/ → DB
-  clearEngineHierarchy();
+  // Pass 2: fresh DB, re-import the projected .planning/ → DB
+  closeDatabase();
+  for (const suffix of ["", "-wal", "-shm"]) rmSync(join(base, ".gsd", `gsd.db${suffix}`), { force: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
   await importPlanningToDb(base);
   const snap2 = snapshotHierarchy();
 
@@ -146,12 +147,11 @@ test(".planning/ round-trip: re-projecting is idempotent (stable .planning/ cont
     return out;
   };
   const readFileSyncNormalized = (p: string): string => {
+    // No timestamp is stripped: STATE.md carries a database time, not the
+    // wall clock, so a second projection of the same database is identical.
     return readFileSync(p, "utf-8")
       .replace(/\r\n/g, "\n")
-      .replace(/[ \t]+\n/g, "\n")
-      // STATE.md carries a write-time timestamp that legitimately differs
-      // between projections — strip it so idempotency is checked on content.
-      .replace(/last_updated: ".*"/g, 'last_updated: "<ts>"');
+      .replace(/[ \t]+\n/g, "\n");
   };
 
   await writePlanningDirectory(base, "flat-phases");

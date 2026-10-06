@@ -11,7 +11,7 @@ While auto-mode is running (or any time):
 /gsd capture "the auth flow should support OAuth, not just JWT"
 ```
 
-Captures are appended to `.gsd/CAPTURES.md` and triaged automatically between tasks.
+Captures are stored in the GSD database and triaged automatically between tasks. `.gsd/CAPTURES.md` is rendered from the database; edits to it are not read.
 
 ## How It Works
 
@@ -21,7 +21,7 @@ Captures are appended to `.gsd/CAPTURES.md` and triaged automatically between ta
 capture → triage → confirm → resolve → resume
 ```
 
-1. **Capture** — `/gsd capture "thought"` appends to `.gsd/CAPTURES.md` with a timestamp and unique ID
+1. **Capture** — `/gsd capture "thought"` records the thought in the GSD database with a timestamp and unique ID, and renders `.gsd/CAPTURES.md`
 2. **Triage** — at natural seams between tasks (in `handleAgentEnd`), GSD detects pending captures and classifies them
 3. **Confirm** — the user is shown the proposed resolution and confirms or adjusts
 4. **Resolve** — the resolution is applied (task injection, replan trigger, deferral, etc.)
@@ -42,6 +42,7 @@ Each capture is classified into one of five types:
 ### Automatic Triage
 
 Triage fires automatically between tasks during auto-mode. The triage prompt receives:
+
 - All pending captures
 - The current slice plan
 - The active roadmap
@@ -65,12 +66,15 @@ The progress widget shows a pending capture count badge when captures are waitin
 ## Context Injection
 
 Capture context is automatically injected into:
+
 - **Replan-slice prompts** — so the replan knows what triggered it
 - **Reassess-roadmap prompts** — so deferred captures influence roadmap decisions
 
 ## Worktree Awareness
 
-Captures always resolve to the **original project root's** `.gsd/CAPTURES.md`, not the worktree's local copy. This ensures captures from a steering terminal are visible to the auto-mode session running in a worktree.
+Captures are rows of the project database, which the project root and every worktree share. A capture from a steering terminal is visible to the auto-mode session running in a worktree. The render is always the **original project root's** `.gsd/CAPTURES.md`.
+
+A `CAPTURES.md` section that the database does not hold (written by an older release, by hand, or committed by a teammate) is not read. `/gsd doctor` reports it and `/gsd doctor --fix` imports it.
 
 ## Commands
 

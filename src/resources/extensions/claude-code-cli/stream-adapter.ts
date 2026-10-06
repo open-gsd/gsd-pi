@@ -29,6 +29,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { PartialMessageBuilder, ZERO_USAGE, mapUsage } from "./partial-builder.js";
 import { createLegacySkillGuardHook, isLegacySkillGuardDisabled } from "./legacy-skill-guard.js";
+import { PROJECTION_WRITE_GUARD_MATCHER, projectionWriteGuardHook } from "./projection-write-guard.js";
 import {
 	attachExternalResultsToToolBlocks,
 	buildFinalAssistantContent,
@@ -78,6 +79,9 @@ import {
 } from "../gsd/workflow-mcp-readiness-cache.js";
 import { getGuidedUnitContext } from "../gsd/guided-unit-context.js";
 import { autoSession, getActiveAutoUnitType, isAutoActive } from "../gsd/auto-runtime-state.js";
+// Surface host-native background tasks (Claude Code `Agent`/`Bash` fan-out) in
+// the worker registry so the GSD dashboard shows them (#2533, #2396).
+import { registerHostTaskWorker, releaseHostTaskBatch, updateWorker } from "../subagent/worker-registry.js";
 import {
 	beginMilestoneStatusObservationTurn,
 	classifyMilestoneStatusRuntimeMode,
@@ -523,7 +527,6 @@ const GSD_PHASE_PATTERNS: Array<[string, RegExp]> = [
 	["gate-evaluate", /\bUNIT:\s*Gate Evaluate\b/i],
 	["research-milestone", /\bUNIT:\s*Research Milestone\b/i],
 	["research-slice", /\bUNIT:\s*Research Slice\b/i],
-	["research-decision", /\bUNIT:\s*Research Decision\b/i],
 	["discuss-milestone", /\bUNIT:\s*Discuss Milestone\b/i],
 	["discuss-slice", /\bUNIT:\s*Discuss Slice\b/i],
 	["discuss-project", /\bUNIT:\s*Discuss Project\b/i],
@@ -1923,6 +1926,30 @@ function mapThinkingLevelToAnthropicEffort(level: ThinkingLevel | undefined, mod
 	}
 }
 
+const ANTHROPIC_EFFORTS = ["low", "medium", "high", "xhigh", "max"] as const;
+
+/**
+ * Model metadata the adapter consults in addition to id heuristics (#2437).
+ * Mirrors the pi-ai `Model` fields needed for adaptive-thinking decisions so
+ * this extension stays typecheck-stable even when the published @gsd/pi-ai
+ * barrel lags behind monorepo source exports.
+ */
+export interface ClaudeCodeModelMetadata {
+	compat?: { forceAdaptiveThinking?: boolean; strictRequestParams?: boolean } | undefined;
+	thinkingLevelMap?: Partial<Record<string, string | null>> | undefined;
+}
+
+/** Return the catalog effort for a thinking level when it is a valid Anthropic effort value. */
+function resolveCatalogEffort(
+	thinkingLevelMap: ClaudeCodeModelMetadata["thinkingLevelMap"],
+	level: ThinkingLevel,
+): "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+	const mapped = thinkingLevelMap?.[level];
+	return typeof mapped === "string" && (ANTHROPIC_EFFORTS as readonly string[]).includes(mapped)
+		? mapped as (typeof ANTHROPIC_EFFORTS)[number]
+		: undefined;
+}
+
 function parseAllowedMcpToolName(toolName: string): { server: string; tool: string } | undefined {
 	const match = /^mcp__(.+)__(\*|[^*]+)$/.exec(toolName);
 	return match?.[1] && match[2] ? { server: match[1], tool: match[2] } : undefined;
@@ -2182,6 +2209,7 @@ export function buildSdkOptions(
 	prompt: string,
 	overrides?: { permissionMode?: "bypassPermissions" | "acceptEdits" | "default" | "plan" },
 	extraOptions: Record<string, unknown> & { reasoning?: ThinkingLevel; gsdPhase?: string } = {},
+	modelMetadata?: ClaudeCodeModelMetadata,
 ): Record<string, unknown> {
 	const { reasoning, cwd, gsdPhase, env: extraEnv, stderr: extraStderr, ...sdkExtraOptions } = extraOptions;
 	const sdkCwd = typeof cwd === "string" && cwd.trim().length > 0 ? cwd : process.cwd();
@@ -2344,19 +2372,27 @@ export function buildSdkOptions(
 				...(workflowMcpTools.length === 0 && exactWorkflowMcpTools.length === 0 ? ["AskUserQuestion"] : []),
 				...allowedBrowserMcpTools,
 			];
-	const supportsAdaptive = modelSupportsAdaptiveThinking(modelId);
+	// #2437: catalog metadata is additive. A catalog compat flag can enable
+	// adaptive thinking for ids the heuristic does not know yet, and a catalog
+	// thinkingLevelMap entry wins over the legacy id-based effort map.
+	const supportsAdaptive = modelMetadata?.compat?.forceAdaptiveThinking === true
+		|| modelSupportsAdaptiveThinking(modelId);
 	const effort =
 		reasoning && supportsAdaptive
-			? mapThinkingLevelToAnthropicEffort(reasoning, modelId)
+			? (resolveCatalogEffort(modelMetadata?.thinkingLevelMap, reasoning)
+				?? mapThinkingLevelToAnthropicEffort(reasoning, modelId))
 			: undefined;
 
 	// Bug B: SDK requires thinking:{type:"adaptive"} alongside effort for adaptive thinking to activate.
 	// Bug C: SDK requires thinking:{type:"disabled"} to actually stop adaptive thinking when reasoning is off;
 	//        omitting the field leaves the SDK in its adaptive default (or persisted session state).
+	// #2500: strict-param models (Sonnet 5.5) 400 on {type:"disabled"} — their off
+	//        switch is {type:"between_tools"}, flagged via catalog compat.
+	const strictRequestParams = modelMetadata?.compat?.strictRequestParams === true;
 	const thinkingConfig = supportsAdaptive
 		? effort
 			? { thinking: { type: "adaptive" } }
-			: { thinking: { type: "disabled" } }
+			: { thinking: { type: strictRequestParams ? "between_tools" : "disabled" } }
 		: undefined;
 
 	// Interactive runs load user settings, so legacy gsd-core v1 skills installed
@@ -2380,9 +2416,12 @@ export function buildSdkOptions(
 		systemPrompt: { type: "preset", preset: "claude_code" },
 		disallowedTools,
 		...(allowedTools.length > 0 ? { allowedTools } : {}),
-		...(legacySkillGuardHook
-			? { hooks: { PreToolUse: [{ matcher: "Skill", hooks: [legacySkillGuardHook] }] } }
-			: {}),
+		hooks: {
+			PreToolUse: [
+				{ matcher: PROJECTION_WRITE_GUARD_MATCHER, hooks: [projectionWriteGuardHook] },
+				...(legacySkillGuardHook ? [{ matcher: "Skill", hooks: [legacySkillGuardHook] }] : []),
+			],
+		},
 		...(sdkMcpServers ? { mcpServers: sdkMcpServers } : {}),
 		...(strictMcpConfig ? { strictMcpConfig: true } : {}),
 		betas: (
@@ -2588,6 +2627,11 @@ async function pumpSdkMessages(
 						}
 					: {}),
 			},
+			// Catalog model metadata drives the additive thinking checks (#2437).
+			{
+				compat: model.compat as ClaudeCodeModelMetadata["compat"],
+				thinkingLevelMap: model.thinkingLevelMap,
+			},
 		);
 		const workflowMcpServerName = workflowMcpServerNameFromAllowedTools(sdkOpts.allowedTools);
 		const allowedTools = Array.isArray(sdkOpts.allowedTools) ? sdkOpts.allowedTools : [];
@@ -2694,6 +2738,26 @@ async function pumpSdkMessages(
 				}
 			}
 
+			// The agent loop keeps ONE partial message per GSD turn and applies every
+			// event at `contentIndex`, but each SDK assistant message gets a fresh
+			// PartialMessageBuilder whose indices restart at 0 (the synthetic-user
+			// boundary in the `user` case below nulls the builder). Unshifted, a
+			// later sub-message overwrote the earlier blocks of the same turn in
+			// that partial — text B landed on index 0 next to text A — and the TUI
+			// segment walker merged them into one box that it re-created on every
+			// delta, leaving a frozen copy per delta in the chat (#2538). Offset
+			// each builder's local indices past everything already emitted so the
+			// streamed partial only ever grows. The adapter's final-message
+			// assembly (`intermediateToolBlocks` / `pendingContent` /
+			// `buildFinalAssistantContent`) is untouched — only the indices on
+			// events pushed to the stream shift. Declared per pump (not per
+			// attempt) so a readiness retry continues after the previous attempt's
+			// content; the base also stays past `initialPartial.content`, where
+			// readiness-progress text blocks live.
+			let emittedContentCount = 0;
+			const nextContentIndexBase = (): number =>
+				Math.max(initialPartial.content.length, emittedContentCount);
+
 			sdkAttemptLoop:
 			for (let readinessAttempt = 0; ; readinessAttempt++) {
 				let {
@@ -2704,6 +2768,119 @@ async function pumpSdkMessages(
 					toolCompletionTargetsById,
 					emittedExternalToolResultIds,
 				} = createSdkAttemptMessageState();
+				let contentIndexBase = nextContentIndexBase();
+				// Per-call usage of the last main-loop assistant event, per attempt.
+				// The terminal `result.usage` is cumulative across the SDK's
+				// internal tool-use loop, while each assistant event carries the
+				// usage of its own API call — the last main-loop one reflects the
+				// live end-of-turn context (#2358, #2359). Reset per attempt so a
+				// readiness retry can never inherit the previous attempt's
+				// measurement.
+				let lastMainLoopAssistantUsage: SDKAssistantMessage["message"]["usage"] | null = null;
+				// Background tasks (run_in_background Agent/Bash) the CLI reported via
+				// `task_started` and has not yet closed with `task_notification`. While
+				// any are pending, the CLI keeps this process alive after `result` and
+				// runs each completion as a follow-up turn on this same stream, ending
+				// in another `result`. Returning at the first `result` orphaned that
+				// follow-up work (#2534): it ran unseen against the working tree and
+				// its output never reached the user.
+				const pendingBackgroundTasks = new Set<string>();
+				let deferredResult: SDKResultMessage | null = null;
+				let backgroundWaitStatusShown = false;
+				// The CLI re-sends `init` for every follow-up turn it runs after a
+				// background-task notification; the readiness gate (which can abort and
+				// re-run the whole prompt) applies to the first one only.
+				let sawInit = false;
+				// Whether a follow-up turn has started after a deferred result. If the
+				// stream then ends without that turn's own `result`, the turn was
+				// interrupted mid-follow-up and must not be reported as a clean
+				// completion.
+				let followUpTurnStarted = false;
+				// task_id → registry worker id for host-native background tasks, so
+				// the dashboard's Parallel Workers section shows native `Agent`/`Bash`
+				// fan-out children (#2533). One batch per SDK attempt: tasks never
+				// survive a readiness restart.
+				const nativeTaskWorkerIds = new Map<string, string>();
+				const nativeTaskBatchId = `cc-${Date.now().toString(36)}-${readinessAttempt}`;
+				const clearBackgroundWaitStatus = (): void => {
+					if (!backgroundWaitStatusShown) return;
+					backgroundWaitStatusShown = false;
+					uiContext?.setStatus?.("gsd-step", "");
+				};
+				// buildFinalAssistantContent lists every tool block before every
+				// text block (tools merged first, prose appended after), so the
+				// final message disagreed with the order the turn streamed in —
+				// and the TUI's message_end rebuild re-laid the turn as "all
+				// tools, then all prose", duplicating paragraphs that had already
+				// scrolled into the terminal's scrollback (#2540). Rank each block
+				// when it is first captured and restore that order after assembly.
+				const captureOrder = new WeakMap<object, number>();
+				let captureNext = 0;
+				const markCaptureOrder = <T extends object>(block: T): T => {
+					if (!captureOrder.has(block)) captureOrder.set(block, captureNext++);
+					return block;
+				};
+				// Blocks without a rank (scalar fallbacks created inside
+				// buildFinalAssistantContent) sort last, where they already were.
+				const assembleFinalContent = (
+					params: Parameters<typeof buildFinalAssistantContent>[0],
+				): AssistantMessage["content"] => {
+					for (const block of params.pendingContent ?? []) markCaptureOrder(block);
+					const rank = (block: object): number => captureOrder.get(block) ?? Number.MAX_SAFE_INTEGER;
+					return buildFinalAssistantContent(params).sort((a, b) => rank(a) - rank(b));
+				};
+				// Move the finished turn's builder content into the ordered accumulators
+				// (same boundary the synthetic `user` message uses) so a later turn
+				// cannot drop it.
+				const foldBuilderIntoIntermediate = (): void => {
+					if (!builder) return;
+					for (const [contentIndex, block] of builder.message.content.entries()) {
+						if (block.type === "text" && block.text) {
+							intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: block.text }));
+						} else if (block.type === "thinking" && block.thinking) {
+							intermediateTextBlocks.push(markCaptureOrder({ type: "thinking", thinking: block.thinking }));
+						} else if (block.type === "toolCall" || block.type === "serverToolUse") {
+							intermediateToolBlocks.push(markCaptureOrder(block));
+							toolCompletionTargetsById.set(block.id, { partial: builder.message, contentIndex });
+						}
+					}
+					builder = null;
+				};
+				// Shared terminal/deferred-EOF finalization so both paths get the same
+				// usage, live-context and fallback-text accounting.
+			const buildTurnFinalMessage = (result: SDKResultMessage): AssistantMessage => {
+				const finalContent = assembleFinalContent({
+						intermediateToolBlocks,
+						intermediateTextBlocks,
+						pendingContent: builder?.message.content,
+						toolResultsById,
+						lastThinkingContent,
+						lastTextContent,
+						fallbackResultText:
+							result.subtype === "success" && result.result ? result.result : undefined,
+					});
+					const usage = mapUsage(result.usage, result.total_cost_usd);
+					if (lastMainLoopAssistantUsage) {
+						// Live end-of-turn context from the SDK's final main-loop call.
+						// The terminal result usage is cumulative across the internal
+						// loop, so overflow detection and the context gauge prefer this
+						// per-call value when present (#2358, #2359).
+						usage.liveContextTokens =
+							lastMainLoopAssistantUsage.input_tokens +
+							(lastMainLoopAssistantUsage.cache_read_input_tokens ?? 0) +
+							(lastMainLoopAssistantUsage.cache_creation_input_tokens ?? 0);
+					}
+					return {
+						role: "assistant",
+						content: finalContent,
+						api: "anthropic-messages",
+						provider: "claude-code",
+						model: modelId,
+						usage,
+						stopReason: result.is_error ? "error" : "stop",
+						timestamp: Date.now(),
+					};
+				};
 				const controller = new AbortController();
 				const forwardAbort = (): void => controller.abort();
 				if (options?.signal) {
@@ -2747,49 +2924,109 @@ async function pumpSdkMessages(
 								subtype?: string;
 								tools?: string[];
 								mcp_servers?: { name: string; status: string }[];
+								task_id?: string;
+								task_type?: string;
+								description?: string;
+								status?: string;
 							};
-							if (init.subtype === "init") {
-								const readinessError = await resolveClaudeCodeToolSurfaceReadinessError({
-									unitType: gsdPhase,
-									workflowServerName: workflowMcpServerName,
-									projectRoot,
-									observation: { tools: init.tools ?? [], mcpServers: init.mcp_servers ?? [] },
-									allowPendingToolSearchHydration,
-								});
-								if (readinessError) {
-									const retryDelayMs = resolveClaudeCodeToolSurfaceReadinessRetryDelayMs(
-										readinessError,
-										readinessAttempt,
-										workflowMcpPreflightVerified,
-									);
-									if (retryDelayMs !== null && !options?.signal?.aborted) {
-										controller.abort();
-										const progressMessage = buildWorkflowMcpReadinessProgressMessage({
-											unitType: gsdPhase ?? "workflow unit",
-											workflowServerName: workflowMcpServerName ?? "workflow",
-											stage: "retry",
-											attempt: readinessAttempt + 1,
-											delayMs: retryDelayMs,
-										});
-										pushWorkflowMcpReadinessProgressEvent({
-											stream,
-											partial: initialPartial,
-											state: readinessProgressState,
-											message: progressMessage,
-										});
-										uiContext?.setStatus?.("gsd-step", progressMessage);
-										await delay(retryDelayMs, options?.signal);
-										uiContext?.setStatus?.("gsd-step", "");
-										continue sdkAttemptLoop;
+							if (init.subtype === "task_started" && typeof init.task_id === "string") {
+									pendingBackgroundTasks.add(init.task_id);
+									// Best-effort dashboard visibility for native fan-out
+									// children (#2533): a registry failure must never break
+									// the stream, and a duplicate start must not orphan the
+									// first row.
+									if (!nativeTaskWorkerIds.has(init.task_id)) {
+										try {
+											const description = typeof init.description === "string" && init.description.trim()
+												? init.description
+												: init.task_id;
+											const agentLabel = typeof init.task_type === "string" && init.task_type.trim()
+												? init.task_type
+												: "task";
+											nativeTaskWorkerIds.set(
+												init.task_id,
+												registerHostTaskWorker({
+													batchId: nativeTaskBatchId,
+													agent: agentLabel,
+													task: description,
+												}),
+											);
+										} catch (error) {
+											console.warn("[claude-code] worker registration for background task failed:", error);
+										}
 									}
-									controller.abort();
-									clearMilestoneStatusObservation();
-									stream.push({
-										type: "error",
-										reason: "error",
-										error: makeErrorMessage(modelId, readinessError),
+								} else if (init.subtype === "task_notification" && typeof init.task_id === "string") {
+									pendingBackgroundTasks.delete(init.task_id);
+									const nativeWorkerId = nativeTaskWorkerIds.get(init.task_id);
+									if (nativeWorkerId) {
+										try {
+											// The registry has no "stopped" state; a stopped task
+											// did not complete and is shown as failed (its row
+											// clears after the display window). Update before
+											// dropping the mapping so a failed update still leaves
+											// the row to the attempt-end cleanup.
+											updateWorker(nativeWorkerId, init.status === "completed" ? "completed" : "failed");
+											nativeTaskWorkerIds.delete(init.task_id);
+										} catch (error) {
+											console.warn("[claude-code] worker update for background task failed:", error);
+										}
+									}
+									if (deferredResult && backgroundWaitStatusShown) {
+										uiContext?.setStatus?.("gsd-step", pendingBackgroundTasks.size > 0
+											? `Waiting for ${pendingBackgroundTasks.size} background task(s) to finish (Esc stops them)`
+											: "Background tasks finished; continuing the turn");
+									}
+								}
+							if (init.subtype === "init") {
+								if (!sawInit) {
+									sawInit = true;
+									const readinessError = await resolveClaudeCodeToolSurfaceReadinessError({
+										unitType: gsdPhase,
+										workflowServerName: workflowMcpServerName,
+										projectRoot,
+										observation: { tools: init.tools ?? [], mcpServers: init.mcp_servers ?? [] },
+										allowPendingToolSearchHydration,
 									});
-									return;
+									if (readinessError) {
+										const retryDelayMs = resolveClaudeCodeToolSurfaceReadinessRetryDelayMs(
+											readinessError,
+											readinessAttempt,
+											workflowMcpPreflightVerified,
+										);
+										if (retryDelayMs !== null && !options?.signal?.aborted) {
+											controller.abort();
+											const progressMessage = buildWorkflowMcpReadinessProgressMessage({
+												unitType: gsdPhase ?? "workflow unit",
+												workflowServerName: workflowMcpServerName ?? "workflow",
+												stage: "retry",
+												attempt: readinessAttempt + 1,
+												delayMs: retryDelayMs,
+											});
+											pushWorkflowMcpReadinessProgressEvent({
+												stream,
+												partial: initialPartial,
+												state: readinessProgressState,
+												message: progressMessage,
+											});
+											uiContext?.setStatus?.("gsd-step", progressMessage);
+											await delay(retryDelayMs, options?.signal);
+											uiContext?.setStatus?.("gsd-step", "");
+											continue sdkAttemptLoop;
+										}
+										controller.abort();
+										clearMilestoneStatusObservation();
+										stream.push({
+											type: "error",
+											reason: "error",
+											error: makeErrorMessage(modelId, readinessError),
+										});
+										return;
+									}
+								} else if (deferredResult) {
+									// A follow-up turn started after a deferred result; if the
+									// stream ends before its own `result`, the turn is
+									// interrupted, not complete.
+									followUpTurnStarted = true;
 								}
 							}
 							break;
@@ -2801,20 +3038,47 @@ async function pumpSdkMessages(
 
 							const event = partial.event;
 
+							const priorBuilder = builder;
 							const result = handleClaudeCodePartialStreamEvent(builder, event, modelId);
 							builder = result.builder;
+							// A fresh builder (after a synthetic-user reset, or the first
+							// message_start of a retry attempt) restarts its local indices
+							// at 0 — rebase onto everything this pump already emitted (#2538).
+							if (builder && builder !== priorBuilder) {
+								contentIndexBase = nextContentIndexBase();
+							}
 							const assistantEvent = result.assistantEvent;
 							if (assistantEvent) {
-								stream.push(assistantEvent);
-								if (assistantEvent.type === "toolcall_start" && builder) {
-									const toolBlock = builder.message.content[assistantEvent.contentIndex];
-									if (toolBlock?.type === "toolCall") {
-										try {
-											await onExternalToolCall?.(toolBlock);
-										} catch (error) {
-											console.warn("[claude-code] onExternalToolCall callback failed:", error);
+								if ("contentIndex" in assistantEvent) {
+									const localContentIndex = assistantEvent.contentIndex;
+									const globalContentIndex = contentIndexBase + localContentIndex;
+									emittedContentCount = Math.max(emittedContentCount, globalContentIndex + 1);
+									// The `start` event's partial is the provider's live message:
+									// pi-agent-core builds each `toolcall_start` block from it
+									// (`providerPartialMessage.content[event.contentIndex]`), and
+									// native providers keep theirs populated. Mirror every streamed
+									// block here at the shifted index, or the lookup misses and
+									// every tool starts as `{ id: "", name: "" }` — rendered
+									// "unknown", and because all such rows share the empty id, the
+									// next tool reuses the previous pending row (#2539).
+									const streamedBlock = builder?.message.content[localContentIndex];
+									if (streamedBlock) {
+										initialPartial.content[globalContentIndex] = streamedBlock;
+									}
+									stream.push({ ...assistantEvent, contentIndex: globalContentIndex });
+									if (assistantEvent.type === "toolcall_start" && builder) {
+										// Local index — the block lives in the builder's own content.
+										const toolBlock = builder.message.content[localContentIndex];
+										if (toolBlock?.type === "toolCall") {
+											try {
+												await onExternalToolCall?.(toolBlock);
+											} catch (error) {
+												console.warn("[claude-code] onExternalToolCall callback failed:", error);
+											}
 										}
 									}
+								} else {
+									stream.push(assistantEvent);
 								}
 							}
 							break;
@@ -2832,6 +3096,13 @@ async function pumpSdkMessages(
 									lastThinkingContent = block.thinking;
 								}
 							}
+
+							// Subagent events carry their own (smaller) context; only
+							// main-loop events (parent_tool_use_id === null) see the
+							// conversation this turn's final usage must describe.
+							if (sdkAssistant.parent_tool_use_id === null) {
+								lastMainLoopAssistantUsage = sdkAssistant.message.usage;
+							}
 							break;
 						}
 
@@ -2846,16 +3117,19 @@ async function pumpSdkMessages(
 										// turn commits [prose][elicitation] segments across several
 										// synthetic-user boundaries, and overwriting a single
 										// scalar would drop every explanation but the last.
-										intermediateTextBlocks.push({ type: "text", text: block.text });
+										intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: block.text }));
 									} else if (block.type === "thinking" && block.thinking) {
 										lastThinkingContent = block.thinking;
-										intermediateTextBlocks.push({ type: "thinking", thinking: block.thinking });
+										intermediateTextBlocks.push(markCaptureOrder({ type: "thinking", thinking: block.thinking }));
 									} else if (block.type === "toolCall" || block.type === "serverToolUse") {
 										// Collect tool blocks for externalToolExecution rendering
-										intermediateToolBlocks.push(block);
+										intermediateToolBlocks.push(markCaptureOrder(block));
 										toolCompletionTargetsById.set(block.id, {
 											partial: builder.message,
-											contentIndex,
+											// Shifted index — the synthetic toolcall_end below must
+											// land on this tool's slot in the turn's single streamed
+											// partial, not in the sub-message's local one (#2538).
+											contentIndex: contentIndexBase + contentIndex,
 										});
 									}
 								}
@@ -2942,30 +3216,72 @@ async function pumpSdkMessages(
 							break;
 						}
 
-						// -- Result (terminal) --
+						// -- Result (terminal, unless background tasks are pending) --
 						case "result": {
 							const result = msg as SDKResultMessage;
-							const finalContent = buildFinalAssistantContent({
-								intermediateToolBlocks,
-								intermediateTextBlocks,
-								pendingContent: builder?.message.content,
-								toolResultsById,
-								lastThinkingContent,
-								lastTextContent,
-								fallbackResultText:
-									result.subtype === "success" && result.result ? result.result : undefined,
-							});
-
-							const finalMessage: AssistantMessage = {
-								role: "assistant",
-								content: finalContent,
-								api: "anthropic-messages",
-								provider: "claude-code",
-								model: modelId,
-								usage: mapUsage(result.usage, result.total_cost_usd),
-								stopReason: result.is_error ? "error" : "stop",
-								timestamp: Date.now(),
-							};
+							if (pendingBackgroundTasks.size > 0 && result.subtype === "success" && !result.is_error) {
+								// Not terminal: the CLI keeps the process alive and runs each
+								// pending background completion as a follow-up turn on this
+								// same stream, ending in another `result`. Keep the turn open
+								// and keep reading (#2534) so the follow-up work stays visible
+								// and its output reaches the user. Error results (is_error or
+								// an error subtype) must not wait: they end the turn and close
+								// the process below.
+								foldBuilderIntoIntermediate();
+								// The deferred turn's scalar mirrors (complete `assistant`
+								// messages that never built a partial) belong to this turn —
+								// capture them into the ordered accumulators (thinking before
+								// text, matching the turn's own block order), then reset them
+								// so the final assembly cannot re-append an earlier turn's
+								// text as the scalar fallback.
+								if (lastThinkingContent && !intermediateTextBlocks.some((block) => block.type === "thinking" && block.thinking === lastThinkingContent)) {
+									intermediateTextBlocks.push(markCaptureOrder({ type: "thinking", thinking: lastThinkingContent }));
+								}
+								if (lastTextContent && !intermediateTextBlocks.some((block) => block.type === "text" && block.text === lastTextContent)) {
+									intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: lastTextContent }));
+								}
+								lastTextContent = "";
+								lastThinkingContent = "";
+								if (
+									result.result
+									&& !intermediateTextBlocks.some((block) => block.type === "text" && block.text === result.result)
+								) {
+									intermediateTextBlocks.push(markCaptureOrder({ type: "text", text: result.result }));
+								}
+								deferredResult = result;
+								// The deferring turn finished cleanly; only a follow-up turn
+								// started AFTER this point and dying before its own result
+								// counts as an interruption.
+								followUpTurnStarted = false;
+								backgroundWaitStatusShown = true;
+								uiContext?.setStatus?.("gsd-step", `Waiting for ${pendingBackgroundTasks.size} background task(s) to finish (Esc stops them)`);
+								break;
+							}
+							clearBackgroundWaitStatus();
+							if (pendingBackgroundTasks.size > 0) {
+								// Error result with background tasks still running: terminate
+								// the process so they cannot keep mutating the working tree
+								// unobserved after this turn is reported (#2534).
+								try {
+									(queryResult as { close?: () => void }).close?.();
+								} catch (closeError) {
+									console.warn("[claude-code] query close after error result failed:", closeError);
+								}
+							}
+							const finalMessage = buildTurnFinalMessage(result);
+							if (deferredResult && result.subtype === "success" && result.result) {
+								// This turn's own final text must reach the user even when
+								// nothing streamed for it (buildFinalAssistantContent suppresses
+								// the scalar fallback once earlier content exists). Appended
+								// after assembly so it cannot duplicate or reorder pending or
+								// scalar content from the turn itself.
+								const alreadyPresent = finalMessage.content.some(
+									(block) => block.type === "text" && block.text === result.result,
+								);
+								if (!alreadyPresent) {
+									finalMessage.content.push({ type: "text", text: result.result });
+								}
+							}
 
 							clearMilestoneStatusObservation();
 							if (result.is_error) {
@@ -2983,6 +3299,44 @@ async function pumpSdkMessages(
 				}
 				} finally {
 					options?.signal?.removeEventListener("abort", forwardAbort);
+					clearBackgroundWaitStatus();
+					// Settle native-task dashboard rows that never received a
+					// notification (abort, stream end, error-result close, readiness
+					// restart) so no row is left running forever (#2533).
+					for (const [taskId, workerId] of nativeTaskWorkerIds) {
+						try {
+							updateWorker(workerId, "failed");
+						} catch (error) {
+							console.warn("[claude-code] worker cleanup for background task failed:", error);
+						}
+						nativeTaskWorkerIds.delete(taskId);
+					}
+					releaseHostTaskBatch(nativeTaskBatchId);
+				}
+
+				if (deferredResult && !followUpTurnStarted && !options?.signal?.aborted) {
+					// The process exited while a `result` was deferred and no follow-up
+					// turn had started (e.g. the CLI delivered the completion without
+					// needing another model turn, or killed the remaining background
+					// tasks on exit). Report what the turn did produce instead of a
+					// stream-exhausted error (#2534). A follow-up turn that started but
+					// never produced its own `result` stays an interruption and falls
+					// through to the exhaustion handler below.
+					const result = deferredResult;
+					const finalMessage = buildTurnFinalMessage(result);
+					if (pendingBackgroundTasks.size > 0) {
+						finalMessage.content.push({
+							type: "text",
+							text: `\n\n[claude-code] The session ended while ${pendingBackgroundTasks.size} background task(s) were still running; their results were not delivered.`,
+						});
+					}
+					clearMilestoneStatusObservation();
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: finalMessage,
+					});
+					return;
 				}
 
 				// The SDK stream ended without a terminal `result` message and

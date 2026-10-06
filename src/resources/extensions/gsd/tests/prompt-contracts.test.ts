@@ -18,6 +18,7 @@ import {
 } from "../bootstrap/register-hooks.ts";
 import { shouldBlockAutoUnitToolCall } from "../auto-unit-tool-scope.ts";
 import { UNIT_TOOL_CONTRACTS } from "../unit-tool-contracts.ts";
+import { loadPrompt } from "../prompt-loader.ts";
 import { uatTypeIncludesBrowser } from "../uat-policy.ts";
 
 const promptsDir = join(process.cwd(), "src/resources/extensions/gsd/prompts");
@@ -363,7 +364,6 @@ test("workflow preferences prompt writes defaults without interactive questions"
   assert.match(prompt, /commit_policy:\s*per-task/);
   assert.match(prompt, /branch_model:\s*single/);
   assert.match(prompt, /research:\s*skip/);
-  assert.match(prompt, /"decision": "skip"/);
   assert.doesNotMatch(prompt, /research:\s*research/);
   assert.doesNotMatch(prompt, /Ask all three questions/i);
   assert.doesNotMatch(prompt, /Ask all four questions/i);
@@ -374,7 +374,6 @@ test("project research prompt dispatches scout agents allowed by planning-dispat
   const prompt = readPrompt("guided-research-project");
   assert.match(prompt, /agent:\s*"\{\{scoutAgentType\}\}"/);
   assert.match(prompt, /Do not use `agent: "researcher"`/);
-  assert.match(prompt, /runtime clears the dispatch marker/i);
   assert.doesNotMatch(prompt, /Delete `\.gsd\/runtime\/research-project-inflight`/);
 });
 
@@ -397,16 +396,6 @@ test("guided project prompt writes root PROJECT artifact, not PROJECT milestone"
   assert.match(prompt, /depth_verification_project_confirm/);
 });
 
-test("guided research decision prompt keeps exact chat confirmation strings", () => {
-  const prompt = readPrompt("guided-research-decision");
-  assert.match(prompt, /^Research decision: research$/m);
-  assert.match(prompt, /^Research decision recorded\.$/m);
-  assert.match(prompt, /Skip \(Recommended\)/);
-  assert.match(prompt, /"source": "research-decision"/);
-  assert.match(prompt, /Do not change the required confirmation strings/i);
-  assert.doesNotMatch(prompt, /note the inference in the chat confirmation line/i);
-});
-
 test("queue prompt requires waiting for user response between rounds", () => {
   const prompt = readPrompt("queue");
   assert.match(prompt, /Never fabricate or simulate user input during this discussion/i);
@@ -414,11 +403,18 @@ test("queue prompt requires waiting for user response between rounds", () => {
   assert.doesNotMatch(prompt, /treat that as permission to continue/i);
 });
 
-test("guided-resume-task prompt preserves recovery state until work is superseded", () => {
-  const prompt = readPrompt("guided-resume-task");
-  assert.match(prompt, /Do \*\*not\*\* delete the continue file immediately/i);
-  assert.match(prompt, /successfully completed or you have written a newer summary\/continue artifact/i);
-  assert.doesNotMatch(prompt, /Delete the continue file after reading it/i);
+test("the emitted guided-resume-task prompt carries the Work Checkpoint and tells the agent to save a new one on a second stop", () => {
+  const prompt = loadPrompt("guided-resume-task", {
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    skillActivation: "Load the relevant skills.",
+    resumeState: "## Resume State\n- Next action: Run the suite.",
+  });
+  assert.match(prompt, /Resume interrupted work on task T01 in slice S01 of milestone M001\./);
+  assert.match(prompt, /\n\n## Resume State\n- Next action: Run the suite\.$/);
+  assert.match(prompt, /save a new one with `gsd_checkpoint_save`/i);
+  assert.match(prompt, /Do not write a `CONTINUE\.md` or `continue\.md` file/i);
 });
 
 // ─── Prompt migration: execute-task → gsd_complete_task ───────────────
@@ -772,6 +768,21 @@ test("parallel subagent prompts forbid serialized tasks arrays", () => {
       `${name} must show the concrete ${agent} task call shape`,
     );
   }
+});
+
+test("parallel-research-slices prompt requires synchronous dispatch (#2533)", () => {
+  const prompt = readPrompt("parallel-research-slices");
+  assert.match(prompt, /run_in_background: false/, "must require synchronous dispatch");
+  assert.match(
+    prompt,
+    /native `Agent` tool/,
+    "must cover hosts where the native Agent tool is the only dispatch path",
+  );
+  assert.match(
+    prompt,
+    /may NOT end until/,
+    "the turn must be fenced on every slice's artifact",
+  );
 });
 
 test("gate-evaluate prompt requires gate result findings field", () => {

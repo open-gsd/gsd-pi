@@ -1,242 +1,370 @@
-// ADR-013 Stage 2c — /gsd knowledge write-side redirect tests.
-//
-// Locks in four properties of captureKnowledgeEntry / nextKnowledgeId:
-//   1. Pattern entries write a memory row with category="pattern" and a
-//      sourceKnowledgeId marker — but do NOT touch KNOWLEDGE.md.
-//   2. Lesson entries write a memory row with category="gotcha" — same
-//      file-vs-memory split.
-//   3. Next-ID is monotonic across both surfaces: a P004 in the file plus a
-//      P007 in memories yields P008 next.
-//   4. The legacy appendKnowledge stays the canonical path for Rules
-//      (covered indirectly via no-memory side effect on type="rule").
+// Project/App: gsd-pi
+// File Purpose: Behavior gate for KNOWLEDGE capture: Rules, Patterns and Lessons are database rows,
+// written by one capture path (command, native tool, MCP tool), and KNOWLEDGE.md is rendered from
+// the database after every capture and in the full rebuild.
 
-import test from "node:test";
+import { afterEach, beforeEach, describe, test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import {
-  _getAdapter,
-  closeDatabase,
-  openDatabase,
-} from "../gsd-db.ts";
+import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
+
+import { registerMemoryTools } from "../bootstrap/memory-tools.ts";
+import { handleKnowledge } from "../commands-handlers.ts";
+import { withCommandCwd } from "../commands/context.ts";
+import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import { captureKnowledgeEntry, nextKnowledgeId } from "../knowledge-capture.ts";
 import { knowledgeMdPath } from "../knowledge-parser.ts";
+import { readKnowledgeMarkdown, renderKnowledgeProjection } from "../knowledge-projection.ts";
+import { applyMemoryActions, createMemory, enforceMemoryCap } from "../memory-store.ts";
+import { preserveProjectionChangesBeforeDispatch, rebuildMarkdownProjectionsFromDb } from "../projection-worker.ts";
+import { invalidateStateCache } from "../state.ts";
+import { executeMemoryCapture } from "../tools/memory-tools.ts";
 
-function makeTmpBase(): string {
-  const base = mkdtempSync(join(tmpdir(), "gsd-knowledge-capture-"));
-  mkdirSync(join(base, ".gsd"), { recursive: true });
-  openDatabase(join(base, ".gsd", "gsd.db"));
-  return base;
+interface KnowledgeRowSnapshot {
+  category: string;
+  content: string;
+  sourceKnowledgeId: string;
 }
 
-function cleanup(base: string): void {
-  try {
-    closeDatabase();
-  } catch {
-    /* noop */
-  }
-  try {
-    rmSync(base, { recursive: true, force: true });
-  } catch {
-    /* noop */
-  }
-}
-
-function readMemoriesWithMarker(prefix: "P" | "L"): Array<{ category: string; sf: Record<string, unknown> }> {
+function knowledgeRows(): KnowledgeRowSnapshot[] {
   const adapter = _getAdapter();
-  if (!adapter) return [];
+  assert.ok(adapter, "database must be open");
   const rows = adapter
-    .prepare(
-      "SELECT category, structured_fields FROM memories WHERE structured_fields LIKE :pattern ORDER BY seq",
-    )
-    .all({ ":pattern": `%"sourceKnowledgeId":"${prefix}%` }) as Array<{
-    category: string;
-    structured_fields: string;
-  }>;
-  return rows.map((r) => ({ category: r.category, sf: JSON.parse(r.structured_fields) }));
+    .prepare("SELECT category, content, structured_fields FROM memories WHERE superseded_by IS NULL ORDER BY seq")
+    .all() as Array<{ category: string; content: string; structured_fields: string | null }>;
+  return rows.map((row) => ({
+    category: row.category,
+    content: row.content,
+    sourceKnowledgeId: row.structured_fields ? String(JSON.parse(row.structured_fields).sourceKnowledgeId ?? "") : "",
+  }));
 }
 
-// ─── Pattern path ───────────────────────────────────────────────────────────
+function readKnowledge(base: string): string {
+  return readFileSync(knowledgeMdPath(base), "utf-8");
+}
 
-test("pattern entry creates a memory and assigns the next P### id", () => {
-  const base = makeTmpBase();
-  try {
-    const result = captureKnowledgeEntry(base, "pattern", "Repository pattern at the seam", "M001");
-    assert.equal(result.id, "P001", "first pattern on a fresh project should be P001");
-    assert.equal(result.written, true);
+/** Section body of one `## ` heading in KNOWLEDGE.md. */
+function section(content: string, heading: string): string {
+  const start = content.indexOf(`${heading}\n`);
+  assert.ok(start >= 0, `missing ${heading}`);
+  const next = content.indexOf("\n## ", start + 1);
+  return content.slice(start, next === -1 ? undefined : next);
+}
 
-    const memories = readMemoriesWithMarker("P");
-    assert.equal(memories.length, 1);
-    assert.equal(memories[0]?.category, "pattern");
-    assert.equal(memories[0]?.sf.sourceKnowledgeId, "P001");
-    assert.equal(memories[0]?.sf.pattern, "Repository pattern at the seam");
-    assert.equal(memories[0]?.sf.where, "");
-    assert.equal(memories[0]?.sf.notes, "");
-  } finally {
-    cleanup(base);
-  }
-});
+describe("knowledge capture", () => {
+  let base: string;
 
-test("pattern entry does NOT write to KNOWLEDGE.md (memory-only)", () => {
-  const base = makeTmpBase();
-  try {
-    captureKnowledgeEntry(base, "pattern", "Adapter at the seam", "project");
-    assert.equal(
-      existsSync(knowledgeMdPath(base)),
-      false,
-      "KNOWLEDGE.md should remain untouched — projection re-renders on next session start",
+  beforeEach(() => {
+    base = realpathSync(mkdtempSync(join(tmpdir(), "gsd-knowledge-capture-")));
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+  });
+
+  afterEach(() => {
+    if (isDbAvailable()) closeDatabase();
+    invalidateStateCache();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  test("a rule, a pattern and a lesson each write one DB row and show in KNOWLEDGE.md at once", () => {
+    const rule = captureKnowledgeEntry(base, "rule", "Always pin SQLite version", "M001");
+    const pattern = captureKnowledgeEntry(base, "pattern", "Repository pattern at the seam", "project");
+    const lesson = captureKnowledgeEntry(base, "lesson", "Cache poisoning via reused key", "M001/S01");
+
+    assert.deepEqual([rule.id, pattern.id, lesson.id], ["K001", "P001", "L001"]);
+    assert.deepEqual(knowledgeRows(), [
+      { category: "rule", content: "Always pin SQLite version", sourceKnowledgeId: "K001" },
+      { category: "pattern", content: "Repository pattern at the seam", sourceKnowledgeId: "P001" },
+      { category: "gotcha", content: "Cache poisoning via reused key", sourceKnowledgeId: "L001" },
+    ]);
+
+    const md = readKnowledge(base);
+    assert.match(section(md, "## Rules"), /\| K001 \| M001 \| Always pin SQLite version \| — \| manual \|/);
+    assert.match(section(md, "## Patterns"), /\| P001 \| Repository pattern at the seam \| — \| — \|/);
+    assert.match(section(md, "## Lessons Learned"), /\| L001 \| Cache poisoning via reused key \| — \| — \| M001\/S01 \|/);
+  });
+
+  test("/gsd knowledge rule writes a rule row (not a file append) and KNOWLEDGE.md shows it", async () => {
+    const notifications: Array<{ message: string; level: string }> = [];
+    const ctx = {
+      cwd: base,
+      ui: { notify: (message: string, level: string) => notifications.push({ message, level }) },
+    } as unknown as ExtensionCommandContext;
+
+    await withCommandCwd(base, () => handleKnowledge("rule Use real DB for integration tests", ctx));
+
+    assert.deepEqual(knowledgeRows(), [
+      { category: "rule", content: "Use real DB for integration tests", sourceKnowledgeId: "K001" },
+    ]);
+    assert.match(section(readKnowledge(base), "## Rules"), /\| K001 \| project \| Use real DB for integration tests \|/);
+    assert.deepEqual(notifications.at(-1), {
+      message: 'Saved rule K001 to KNOWLEDGE.md: "Use real DB for integration tests"',
+      level: "success",
+    });
+  });
+
+  test("native capture_thought rule, pattern and gotcha get K/P/L ids and render at once", async () => {
+    const tools: Array<{ name: string; execute: (...args: unknown[]) => Promise<{ isError?: boolean; details: Record<string, unknown> }> }> = [];
+    registerMemoryTools({ registerTool: (tool: (typeof tools)[number]) => tools.push(tool) } as never);
+    const captureThought = tools.find((tool) => tool.name === "capture_thought");
+    assert.ok(captureThought, "capture_thought must be registered");
+
+    for (const [category, content] of [
+      ["rule", "Never commit gsd.db"],
+      ["pattern", "Seam types at the vendor boundary"],
+      ["gotcha", "WAL file grows without checkpoint"],
+    ]) {
+      // One tool-call id is one operation, so each capture has its own id.
+      const result = await captureThought.execute(`call-${category}`, { category, content }, undefined, undefined, { cwd: base });
+      assert.equal(result.isError, undefined, `capture_thought ${category} must succeed`);
+    }
+
+    assert.deepEqual(
+      knowledgeRows().map((row) => [row.category, row.sourceKnowledgeId]),
+      [["rule", "K001"], ["pattern", "P001"], ["gotcha", "L001"]],
     );
-  } finally {
-    cleanup(base);
-  }
-});
+    const md = readKnowledge(base);
+    assert.match(section(md, "## Rules"), /\| K001 \| project \| Never commit gsd\.db \|/);
+    assert.match(section(md, "## Patterns"), /\| P001 \| Seam types at the vendor boundary \|/);
+    assert.match(section(md, "## Lessons Learned"), /\| L001 \| WAL file grows without checkpoint \|/);
+  });
 
-test("repeated pattern captures advance the ID monotonically", () => {
-  const base = makeTmpBase();
-  try {
-    const a = captureKnowledgeEntry(base, "pattern", "First", "project");
-    const b = captureKnowledgeEntry(base, "pattern", "Second", "project");
-    const c = captureKnowledgeEntry(base, "pattern", "Third", "project");
-    assert.deepEqual([a.id, b.id, c.id], ["P001", "P002", "P003"]);
-  } finally {
-    cleanup(base);
-  }
-});
+  test("capture_thought keeps non-knowledge categories out of KNOWLEDGE.md", () => {
+    const result = executeMemoryCapture({ category: "environment", content: "Node 22 is required" }, base);
+    assert.equal(result.isError, undefined);
+    assert.equal(knowledgeRows()[0]?.sourceKnowledgeId, "");
+    assert.equal(existsSync(knowledgeMdPath(base)), false);
+  });
 
-// ─── Lesson path ────────────────────────────────────────────────────────────
+  test("delete KNOWLEDGE.md and rebuild: the file equals the DB render, including Rules", async () => {
+    captureKnowledgeEntry(base, "rule", "Always pin SQLite version", "project");
+    captureKnowledgeEntry(base, "pattern", "Adapter at the seam", "project");
+    captureKnowledgeEntry(base, "lesson", "Stale cache after rename", "project");
+    const rendered = readKnowledge(base);
 
-test("lesson entry creates a memory with category=gotcha and L### id", () => {
-  const base = makeTmpBase();
-  try {
-    const result = captureKnowledgeEntry(base, "lesson", "Cache poisoning via reused key", "M001/S01");
-    assert.equal(result.id, "L001");
-    assert.equal(result.written, true);
+    unlinkSync(knowledgeMdPath(base));
+    const rebuild = await rebuildMarkdownProjectionsFromDb(base);
 
-    const memories = readMemoriesWithMarker("L");
-    assert.equal(memories.length, 1);
-    assert.equal(memories[0]?.category, "gotcha");
-    assert.equal(memories[0]?.sf.sourceKnowledgeId, "L001");
-    assert.equal(memories[0]?.sf.whatHappened, "Cache poisoning via reused key");
-    assert.equal(memories[0]?.sf.scopeText, "M001/S01");
-  } finally {
-    cleanup(base);
-  }
-});
+    assert.deepEqual(rebuild.errors, []);
+    assert.equal(readKnowledge(base), rendered);
+    assert.match(section(rendered, "## Rules"), /\| K001 \| project \| Always pin SQLite version \|/);
+  });
 
-// ─── Empty input ────────────────────────────────────────────────────────────
+  test("a hand edit of an imported row does not win: the next render restores the DB row", () => {
+    captureKnowledgeEntry(base, "rule", "Always pin SQLite version", "project");
+    writeFileSync(knowledgeMdPath(base), readKnowledge(base).replace("Always pin SQLite version", "Hand edited"), "utf-8");
 
-test("empty entry text does NOT create a memory but still assigns an id", () => {
-  const base = makeTmpBase();
-  try {
-    const result = captureKnowledgeEntry(base, "pattern", "   ", "project");
-    assert.equal(result.written, false);
-    assert.equal(readMemoriesWithMarker("P").length, 0);
-  } finally {
-    cleanup(base);
-  }
-});
+    captureKnowledgeEntry(base, "pattern", "Adapter at the seam", "project");
 
-// ─── nextKnowledgeId — cross-surface monotonicity ───────────────────────────
+    const rules = section(readKnowledge(base), "## Rules");
+    assert.match(rules, /\| K001 \| project \| Always pin SQLite version \|/);
+    assert.doesNotMatch(rules, /Hand edited/);
+  });
 
-test("nextKnowledgeId takes max of file and memory surfaces", () => {
-  const base = makeTmpBase();
-  try {
-    // Pre-existing patterns in KNOWLEDGE.md and one new pattern in memories.
-    // The legacy appendKnowledge format starts P at 001 — we simulate higher
-    // existing IDs to verify the take-max-then-+1 rule.
+  test("import bridge: file rows not in the DB are kept and reserve their ids", () => {
     writeFileSync(
       knowledgeMdPath(base),
-      `## Patterns
-
-| # | Pattern | Where | Notes |
-|---|---------|-------|-------|
-| P004 | Legacy pattern | services/ | preserved |
-`,
+      [
+        "## Rules",
+        "",
+        "| # | Scope | Rule | Why | Added |",
+        "|---|-------|------|-----|-------|",
+        "| K001 | project | Legacy file rule | history | 2026-01-01 |",
+        "",
+        "## Patterns",
+        "",
+        "| # | Pattern | Where | Notes |",
+        "|---|---------|-------|-------|",
+        "| P004 | Legacy pattern | services/ | preserved |",
+        "",
+      ].join("\n"),
       "utf-8",
     );
 
-    // Capture jumps the memory ID forward.
-    captureKnowledgeEntry(base, "pattern", "Memory-only pattern", "project");
-    captureKnowledgeEntry(base, "pattern", "Another memory-only pattern", "project");
-    captureKnowledgeEntry(base, "pattern", "And another", "project");
+    const rule = captureKnowledgeEntry(base, "rule", "New database rule", "project");
+    const pattern = captureKnowledgeEntry(base, "pattern", "New database pattern", "project");
 
-    // After: file has P004 (max=4); memories have P005, P006, P007 (max=7).
-    // Next must be P008.
-    assert.equal(nextKnowledgeId(base, "P"), "P008");
-  } finally {
-    cleanup(base);
+    assert.equal(rule.id, "K002", "unimported K001 keeps its id");
+    assert.equal(pattern.id, "P005", "unimported P004 keeps its id");
+    const md = readKnowledge(base);
+    assert.match(section(md, "## Rules"), /\| K001 \| project \| Legacy file rule \| history \| 2026-01-01 \|\n\| K002 \| project \| New database rule \|/);
+    assert.match(section(md, "## Patterns"), /\| P004 \| Legacy pattern \| services\/ \| preserved \|\n\| P005 \| New database pattern \|/);
+  });
+
+  test("import bridge: a custom intro and free-form Rules lines survive the render", () => {
+    writeFileSync(
+      knowledgeMdPath(base),
+      [
+        "# Project Knowledge",
+        "",
+        "Custom intro: read the vendor policy first.",
+        "",
+        "## Rules",
+        "",
+        "- Bullet rule: never touch vendor/",
+        "",
+        "| # | Scope | Rule | Why | Added |",
+        "|---|-------|------|-----|-------|",
+        "",
+      ].join("\n"),
+      "utf-8",
+    );
+
+    captureKnowledgeEntry(base, "rule", "New database rule", "project");
+    const first = readKnowledge(base);
+    captureKnowledgeEntry(base, "pattern", "Adapter at the seam", "project");
+    const md = readKnowledge(base);
+
+    assert.match(md, /^# Project Knowledge\n\nCustom intro: read the vendor policy first\.\n\n## Rules\n/);
+    const rules = section(md, "## Rules");
+    assert.match(rules, /\| K001 \| project \| New database rule \|/);
+    assert.equal(rules.split("- Bullet rule: never touch vendor/").length, 2, "free-form rule line is kept exactly once");
+    assert.equal(section(md, "## Rules"), section(first, "## Rules"), "a later render keeps the Rules section stable");
+  });
+
+  /** Hand-add a file-only Pattern row and an unmodeled section to the rendered file. */
+  function handEditKnowledge(): void {
+    writeFileSync(
+      knowledgeMdPath(base),
+      readKnowledge(base).replace(
+        /(\| # \| Pattern \| Where \| Notes \|\n\|[-|]+\|\n)/,
+        "$1| P050 | Hand-added pattern | src/ | from a teammate |\n",
+      ) + "\n## My Notes\n\nKeep this section.\n",
+      "utf-8",
+    );
   }
-});
 
-test("nextKnowledgeId works per-prefix without cross-talk", () => {
-  const base = makeTmpBase();
-  try {
-    captureKnowledgeEntry(base, "pattern", "P entry", "project");
-    captureKnowledgeEntry(base, "pattern", "P entry 2", "project");
-    captureKnowledgeEntry(base, "lesson", "L entry", "project");
+  /** The hand edit is in the file on disk and in what the readers return. */
+  function assertHandEditKept(): void {
+    for (const content of [readKnowledge(base), readKnowledgeMarkdown(base)]) {
+      assert.match(section(content, "## Patterns"), /\| P050 \| Hand-added pattern \| src\/ \| from a teammate \|/);
+      assert.match(content, /## My Notes\n\nKeep this section\./);
+    }
+  }
 
+  test("import bridge: a hand-added row and section survive the pre-dispatch check and a markdown rebuild", async () => {
+    captureKnowledgeEntry(base, "rule", "Always pin SQLite version", "project");
+    handEditKnowledge();
+
+    const observed = await preserveProjectionChangesBeforeDispatch(base);
+    assert.deepEqual(observed.preserved, [], "KNOWLEDGE.md is not moved to quarantine");
+    assertHandEditKept();
+
+    const rebuild = await rebuildMarkdownProjectionsFromDb(base);
+    assert.deepEqual(rebuild.errors, []);
+    assert.equal(rebuild.quarantined, 0, "the rebuild does not move KNOWLEDGE.md either");
+    assertHandEditKept();
+  });
+
+  test("import bridge: a changed git-tracked KNOWLEDGE.md does not stop dispatch", async () => {
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: base, stdio: "ignore" });
+    captureKnowledgeEntry(base, "rule", "Always pin SQLite version", "project");
+    writeFileSync(join(base, ".gitignore"), ".gsd/gsd.db*\n.gsd/.compat.json\n.gsd/quarantine/\n");
+    git("init", "-q", "-b", "main");
+    git("add", "-A");
+    git("-c", "user.email=test@test.com", "-c", "user.name=Test", "commit", "-q", "-m", "knowledge");
+    handEditKnowledge();
+
+    const observed = await preserveProjectionChangesBeforeDispatch(base);
+
+    assert.deepEqual(observed.held, [], "the render keeps the file-only content, so nothing is held");
+    assert.deepEqual(observed.preserved, []);
+    assertHandEditKept();
+  });
+
+  test("the memory cap never supersedes Rules, so they stay in KNOWLEDGE.md", () => {
+    for (const text of ["Rule one", "Rule two", "Rule three"]) {
+      captureKnowledgeEntry(base, "rule", text, "project");
+    }
+    for (let i = 0; i < 60; i++) {
+      createMemory({ category: "convention", content: `convention ${i}`, confidence: 0.9 });
+    }
+
+    enforceMemoryCap(50);
+    renderKnowledgeProjection(base);
+
+    const active = knowledgeRows();
+    assert.deepEqual(active.filter((row) => row.category === "rule").map((row) => row.sourceKnowledgeId), ["K001", "K002", "K003"]);
+    assert.equal(active.filter((row) => row.category !== "rule").length, 50, "the cap still applies to other memories");
+    const rules = section(readKnowledge(base), "## Rules");
+    for (const id of ["K001", "K002", "K003"]) assert.match(rules, new RegExp(`\\| ${id} \\| project \\| Rule `));
+  });
+
+  test("a memory UPDATE on a knowledge row changes its KNOWLEDGE.md row", () => {
+    const { memoryId } = captureKnowledgeEntry(base, "pattern", "Retry with backoff", "project");
+
+    applyMemoryActions([{ action: "UPDATE", id: memoryId, content: "Retry with jitter" }]);
+    renderKnowledgeProjection(base);
+
+    const patterns = section(readKnowledge(base), "## Patterns");
+    assert.match(patterns, /\| P001 \| Retry with jitter \|/);
+    assert.doesNotMatch(patterns, /Retry with backoff/);
+  });
+
+  test("with a closed DB the capture fails loud and writes nothing", () => {
+    closeDatabase();
+
+    assert.throws(() => captureKnowledgeEntry(base, "rule", "Should not land", "project"), /database is not available/);
+    const toolResult = executeMemoryCapture({ category: "rule", content: "Should not land" }, base);
+    assert.equal(toolResult.isError, true);
+    assert.equal(existsSync(knowledgeMdPath(base)), false);
+  });
+
+  test("repeated captures advance the id monotonically per prefix", () => {
+    const ids = [
+      captureKnowledgeEntry(base, "pattern", "First", "project").id,
+      captureKnowledgeEntry(base, "pattern", "Second", "project").id,
+      captureKnowledgeEntry(base, "lesson", "L entry", "project").id,
+    ];
+    assert.deepEqual(ids, ["P001", "P002", "L001"]);
     assert.equal(nextKnowledgeId(base, "P"), "P003");
     assert.equal(nextKnowledgeId(base, "L"), "L002");
-    // K has no entries on this project — first one should be K001.
     assert.equal(nextKnowledgeId(base, "K"), "K001");
-  } finally {
-    cleanup(base);
-  }
-});
+  });
 
-test("nextKnowledgeId pads to three digits even at the rollover", () => {
-  const base = makeTmpBase();
-  try {
-    writeFileSync(
-      knowledgeMdPath(base),
-      `## Patterns
+  test("a capture waits for another process that holds the write lock and takes the next id", async () => {
+    // The second process holds the write lock with an uncommitted K001 rule, then commits.
+    const child = spawn(process.execPath, ["--no-warnings", "-e", `
+      const { DatabaseSync } = require("node:sqlite");
+      const db = new DatabaseSync(process.argv[1]);
+      db.exec("PRAGMA busy_timeout = 5000");
+      db.exec("BEGIN IMMEDIATE");
+      const now = new Date().toISOString();
+      db.prepare("INSERT INTO memories (id, category, content, confidence, created_at, updated_at, structured_fields) VALUES (?, 'rule', 'Rule from the other process', 0.85, ?, ?, ?)")
+        .run("MEM-OTHER", now, now, JSON.stringify({ sourceKnowledgeTable: "rules", rule: "Rule from the other process", scopeText: "project", sourceKnowledgeId: "K001" }));
+      process.stdout.write("locked");
+      setTimeout(() => { db.exec("COMMIT"); db.close(); }, 300);
+    `, join(base, ".gsd", "gsd.db")], { stdio: ["ignore", "pipe", "inherit"] });
+    const exited = once(child, "exit");
+    await once(child.stdout, "data");
 
-| # | Pattern | Where | Notes |
-|---|---------|-------|-------|
-| P099 | high water mark | — | — |
-`,
-      "utf-8",
-    );
-    assert.equal(nextKnowledgeId(base, "P"), "P100");
-  } finally {
-    cleanup(base);
-  }
-});
+    const result = captureKnowledgeEntry(base, "rule", "Rule from this process", "project");
+    const [exitCode] = await exited;
 
-// ─── Sanity: file-side reads still see existing rows after capture ─────────
+    assert.equal(exitCode, 0);
+    assert.equal(result.id, "K002");
+    assert.deepEqual(knowledgeRows().map((row) => `${row.sourceKnowledgeId} ${row.content}`), [
+      "K001 Rule from the other process",
+      "K002 Rule from this process",
+    ]);
+    const rules = section(readKnowledge(base), "## Rules");
+    assert.match(rules, /Rule from the other process/);
+    assert.match(rules, /Rule from this process/);
+  });
 
-test("after pattern capture, KNOWLEDGE.md untouched but next id reflects memory state", () => {
-  const base = makeTmpBase();
-  try {
-    captureKnowledgeEntry(base, "pattern", "First", "project");
-    // KNOWLEDGE.md still absent.
-    assert.equal(existsSync(knowledgeMdPath(base)), false);
-    // Next-ID logic sees the new memory.
-    assert.equal(nextKnowledgeId(base, "P"), "P002");
-  } finally {
-    cleanup(base);
-  }
-});
+  test("deleting KNOWLEDGE.md does not reset ids: the DB holds them", () => {
+    captureKnowledgeEntry(base, "rule", "First rule", "project");
+    unlinkSync(knowledgeMdPath(base));
+    assert.equal(captureKnowledgeEntry(base, "rule", "Second rule", "project").id, "K002");
+  });
 
-test("rule writes still flow through appendKnowledge (file-canonical) — memory unchanged", async () => {
-  const base = makeTmpBase();
-  try {
-    // We invoke the legacy file path directly here; the command handler
-    // dispatch is verified separately at the integration level. The point
-    // of this test is to lock in that captureKnowledgeEntry is NOT the
-    // rule path — rules must go through appendKnowledge.
-    const { appendKnowledge } = await import("../files.ts");
-    await appendKnowledge(base, "rule", "Always pin SQLite version", "project");
-
-    const md = readFileSync(knowledgeMdPath(base), "utf-8");
-    assert.match(md, /\| K001 \| project \| Always pin SQLite version /);
-
-    // No pattern/lesson memories should exist as a side effect.
-    assert.equal(readMemoriesWithMarker("P").length, 0);
-    assert.equal(readMemoriesWithMarker("L").length, 0);
-  } finally {
-    cleanup(base);
-  }
+  test("empty entry text is rejected without a row", () => {
+    assert.throws(() => captureKnowledgeEntry(base, "pattern", "   ", "project"), /text is required/);
+    assert.deepEqual(knowledgeRows(), []);
+  });
 });

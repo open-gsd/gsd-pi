@@ -12,7 +12,7 @@ You are running the GSD **validate-phase** workflow — retroactively audit and 
 
 3. **Generate the missing tests.** For each gap that is safe to fill deterministically, write the test (matching the project's test framework and conventions). Run the test suite after adding tests. For gaps that need a human (UI, exploratory), record them as UAT items instead of auto-generating.
 
-4. **Update the validation record.** Write/append the slice's VALIDATION note (or `.gsd/` equivalent) with the coverage map before/after, the tests added, and the remaining human-UAT items.
+4. **Do not write a validation file.** VALIDATION files in `.gsd/` are rendered only by `gsd_validate_milestone`. Put the coverage map before/after, the tests added, and the remaining human-UAT items in the report.
 
 5. **Report.** Summarize: gaps found, tests added (passing), and remaining human-UAT items.
 

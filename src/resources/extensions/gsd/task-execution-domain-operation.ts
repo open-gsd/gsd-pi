@@ -498,6 +498,7 @@ export function settleTaskAttempt(input: SettleTaskAttemptInput): SettleTaskAtte
     const attempt = loadAttemptExecution(input.attemptId);
     if (input.stagedTaskCompletion) {
       writeStagedTaskCompletion(context, {
+        attemptId: input.attemptId,
         milestoneId: attempt.milestone_id,
         sliceId: attempt.slice_id,
         taskId: attempt.task_id,

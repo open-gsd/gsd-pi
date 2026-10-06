@@ -1,4 +1,5 @@
 import { isDbAvailable, upsertTurnGitTransaction } from "../gsd-db.js";
+import { logError } from "../workflow-logger.js";
 import type { TurnCloseoutRecord } from "./contracts.js";
 import { buildAuditEnvelope, emitUokAuditEvent } from "./audit.js";
 import { isUnifiedAuditEnabled } from "./audit-toggle.js";
@@ -20,7 +21,12 @@ interface GitTxArgs {
 }
 
 export function writeTurnGitTransaction(args: GitTxArgs): void {
-  if (!isDbAvailable()) return;
+  // Turn git records are telemetry: with no DB the record is refused and
+  // logged as an error, never dropped silently (ADR-046).
+  if (!isDbAvailable()) {
+    logError("db", `turn git record ${args.stage} for ${args.unitType} ${args.unitId} not recorded: workflow DB is unavailable`);
+    return;
+  }
   upsertTurnGitTransaction({
     traceId: args.traceId,
     turnId: args.turnId,

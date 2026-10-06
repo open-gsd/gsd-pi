@@ -4,15 +4,13 @@
  * Tests:
  * - "stop" and "backtrack" are valid classification types
  * - loadStopCaptures returns unexecuted stop+backtrack captures
- * - loadBacktrackCaptures returns only backtrack captures
- * - revertExecutorResolvedCaptures reverts silenced captures
- * - executeBacktrack writes trigger and regression markers
- * - readBacktrackTrigger parses trigger file
+ * - an executor edit of CAPTURES.md does not silence a capture
+ * - the stop guard reads only the database and writes no BACKTRACK-TRIGGER.md
  */
 
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { isClosedStatus } from "../status-guards.ts";
@@ -20,34 +18,32 @@ import {
   appendCapture,
   loadAllCaptures,
   loadStopCaptures,
-  loadBacktrackCaptures,
   markCaptureResolved,
-  revertExecutorResolvedCaptures,
   hasPendingCaptures,
 } from "../captures.ts";
-import {
-  executeBacktrack,
-  readBacktrackTrigger,
-} from "../triage-resolution.ts";
+import { runGuards } from "../auto/phases.ts";
+import type { IterationContext } from "../auto/types.ts";
+import { _getAdapter, closeDatabase, isDbAvailable, openDatabase } from "../gsd-db.ts";
 
+/** A temp project with an open in-memory database. The database is closed after each test. */
 function makeTempDir(prefix: string): string {
   const dir = join(
     tmpdir(),
     `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
   );
-  mkdirSync(dir, { recursive: true });
+  mkdirSync(join(dir, ".gsd"), { recursive: true });
+  assert.equal(openDatabase(":memory:"), true);
   return dir;
 }
 
-function setupGsdDir(tmp: string): void {
-  mkdirSync(join(tmp, ".gsd"), { recursive: true });
-}
+afterEach(() => {
+  if (isDbAvailable()) closeDatabase();
+});
 
 // ─── Classification Types ─────────────────────────────────────────────────────
 
 test("stop is a valid classification", () => {
   const tmp = makeTempDir("stop-class");
-  setupGsdDir(tmp);
   const id = appendCapture(tmp, "stop running immediately");
   markCaptureResolved(tmp, id, "stop", "Halt auto-mode", "User said stop", "M005");
   const all = loadAllCaptures(tmp);
@@ -58,7 +54,6 @@ test("stop is a valid classification", () => {
 
 test("backtrack is a valid classification", () => {
   const tmp = makeTempDir("bt-class");
-  setupGsdDir(tmp);
   const id = appendCapture(tmp, "restart from M003");
   markCaptureResolved(tmp, id, "backtrack", "Backtrack to M003", "User wants to restart", "M005");
   const all = loadAllCaptures(tmp);
@@ -71,7 +66,6 @@ test("backtrack is a valid classification", () => {
 
 test("loadStopCaptures returns unexecuted stop and backtrack captures", () => {
   const tmp = makeTempDir("load-stop");
-  setupGsdDir(tmp);
   const stopId = appendCapture(tmp, "halt execution");
   const btId = appendCapture(tmp, "go back to M003");
   const noteId = appendCapture(tmp, "just a note");
@@ -86,126 +80,94 @@ test("loadStopCaptures returns unexecuted stop and backtrack captures", () => {
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test("loadBacktrackCaptures returns only backtrack captures", () => {
-  const tmp = makeTempDir("load-bt");
-  setupGsdDir(tmp);
-  const stopId = appendCapture(tmp, "halt execution");
-  const btId = appendCapture(tmp, "go back to M003");
-  markCaptureResolved(tmp, stopId, "stop", "Halt", "User stop", "M005");
-  markCaptureResolved(tmp, btId, "backtrack", "Backtrack to M003", "User backtrack", "M005");
+// ─── Executor edits of CAPTURES.md ────────────────────────────────────────────
 
-  const bts = loadBacktrackCaptures(tmp);
-  assert.equal(bts.length, 1);
-  assert.equal(bts[0].classification, "backtrack");
-  rmSync(tmp, { recursive: true, force: true });
-});
+test("an executor that writes Status: resolved to CAPTURES.md does not silence the capture", () => {
+  const tmp = makeTempDir("silence-exec");
+  appendCapture(tmp, "stop everything");
 
-// ─── revertExecutorResolvedCaptures ───────────────────────────────────────────
-
-test("revertExecutorResolvedCaptures reverts captures resolved without classification", () => {
-  const tmp = makeTempDir("revert-exec");
-  setupGsdDir(tmp);
-  const id = appendCapture(tmp, "stop everything");
-
-  // Simulate an executor writing Status: resolved directly (no classification)
   const capPath = join(tmp, ".gsd", "CAPTURES.md");
-  let content = readFileSync(capPath, "utf-8");
-  content = content.replace("**Status:** pending", "**Status:** resolved");
-  writeFileSync(capPath, content, "utf-8");
+  writeFileSync(
+    capPath,
+    readFileSync(capPath, "utf-8").replace("**Status:** pending", "**Status:** resolved"),
+    "utf-8",
+  );
 
-  // Verify it's now "resolved" without classification
-  assert.equal(hasPendingCaptures(tmp), false);
-
-  // Revert should detect and fix it
-  const reverted = revertExecutorResolvedCaptures(tmp);
-  assert.equal(reverted, 1);
-
-  // Should be pending again
-  assert.equal(hasPendingCaptures(tmp), true);
+  assert.equal(hasPendingCaptures(tmp), true, "the capture is still pending for triage");
   rmSync(tmp, { recursive: true, force: true });
 });
 
-test("revertExecutorResolvedCaptures does NOT revert properly triaged captures", () => {
-  const tmp = makeTempDir("revert-skip");
-  setupGsdDir(tmp);
-  const id = appendCapture(tmp, "restart from M003");
-  markCaptureResolved(tmp, id, "backtrack", "Backtrack to M003", "User wants restart", "M005");
+// ─── Stop guard (runGuards) ───────────────────────────────────────────────────
 
-  // This capture was properly triaged — should NOT be reverted
-  const reverted = revertExecutorResolvedCaptures(tmp);
-  assert.equal(reverted, 0);
+function guardContext(basePath: string): { ic: IterationContext; pauses: number[] } {
+  const pauses: number[] = [];
+  const ic = {
+    ctx: { ui: { notify: () => {} } },
+    pi: {},
+    s: { basePath, originalBasePath: basePath },
+    deps: {
+      pauseAuto: async () => { pauses.push(1); },
+      sendDesktopNotification: () => {},
+      getManifestStatus: async () => null,
+    },
+    prefs: undefined,
+  } as unknown as IterationContext;
+  return { ic, pauses };
+}
+
+test("stop guard: a stop capture pauses auto with CAPTURES.md deleted", async () => {
+  const tmp = makeTempDir("guard-stop");
+  const id = appendCapture(tmp, "halt execution");
+  markCaptureResolved(tmp, id, "stop", "Halt", "User stop", "M005");
+  rmSync(join(tmp, ".gsd", "CAPTURES.md"));
+  const { ic, pauses } = guardContext(tmp);
+
+  const result = await runGuards(ic, "M005");
+
+  assert.deepEqual([result.action, result.action === "break" && result.reason], ["break", "user-stop"]);
+  assert.equal(pauses.length, 1);
+  assert.equal(loadAllCaptures(tmp)[0]!.executed, true);
+  assert.equal((await runGuards(ic, "M005")).action, "next", "the executed directive does not pause again");
   rmSync(tmp, { recursive: true, force: true });
 });
 
-// ─── executeBacktrack ─────────────────────────────────────────────────────────
+test("stop guard: an edited CAPTURES.md does not pause", async () => {
+  const tmp = makeTempDir("guard-edit");
+  appendCapture(tmp, "add a pause button");
+  const capPath = join(tmp, ".gsd", "CAPTURES.md");
+  const stopFields = "**Status:** resolved\n**Classification:** stop\n**Resolution:** halt\n**Rationale:** edited\n**Resolved:** 2026-03-13T09:05:00.000Z";
+  writeFileSync(capPath, [
+    readFileSync(capPath, "utf-8").replace("**Status:** pending", stopFields),
+    "### CAP-byhand01",
+    "**Text:** stop",
+    "**Captured:** 2026-03-13T09:00:00.000Z",
+    stopFields,
+    "",
+  ].join("\n"), "utf-8");
+  const { ic, pauses } = guardContext(tmp);
 
-test("executeBacktrack writes trigger and regression markers", () => {
-  const tmp = makeTempDir("exec-bt");
-  setupGsdDir(tmp);
+  const result = await runGuards(ic, "M005");
 
-  // Create target milestone directory with a content file so it is recognised as
-  // a content-bearing legacy milestone by dirIsContentBearingLegacyMilestone
-  // (a metadata-only dir would be ignored by resolveMilestonePath).
-  const m003Dir = join(tmp, ".gsd", "milestones", "M003");
-  mkdirSync(m003Dir, { recursive: true });
-  writeFileSync(join(m003Dir, "M003-CONTEXT.md"), "# M003\n");
-
-  const targetMid = executeBacktrack(tmp, "M005", {
-    id: "CAP-test123",
-    text: "restart from M003 — milestones after 2 failed",
-    timestamp: new Date().toISOString(),
-    status: "resolved",
-    classification: "backtrack",
-    resolution: "Backtrack to M003",
-    rationale: "User directive",
-  });
-
-  assert.equal(targetMid, "M003");
-
-  // Check trigger file exists
-  const triggerPath = join(tmp, ".gsd", "BACKTRACK-TRIGGER.md");
-  assert.ok(existsSync(triggerPath));
-  const triggerContent = readFileSync(triggerPath, "utf-8");
-  assert.ok(triggerContent.includes("M005"));
-  assert.ok(triggerContent.includes("M003"));
-
-  // Check regression marker exists on target milestone
-  const regressionPath = join(tmp, ".gsd", "milestones", "M003", "M003-REGRESSION.md");
-  assert.ok(existsSync(regressionPath));
-  const regressionContent = readFileSync(regressionPath, "utf-8");
-  assert.ok(regressionContent.includes("M005"));
+  assert.equal(result.action, "next");
+  assert.equal(pauses.length, 0);
   rmSync(tmp, { recursive: true, force: true });
 });
 
-// ─── readBacktrackTrigger ─────────────────────────────────────────────────────
+test("stop guard: a backtrack capture pauses and is recorded as executed, with no trigger file", async () => {
+  const tmp = makeTempDir("guard-backtrack");
+  const id = appendCapture(tmp, "M005 missed auth, go back");
+  markCaptureResolved(tmp, id, "backtrack", "Backtrack to M003", "User backtrack", "M005");
+  const { ic, pauses } = guardContext(tmp);
 
-test("readBacktrackTrigger parses trigger file", () => {
-  const tmp = makeTempDir("read-bt");
-  setupGsdDir(tmp);
-  mkdirSync(join(tmp, ".gsd", "milestones", "M003"), { recursive: true });
+  const result = await runGuards(ic, "M005");
 
-  executeBacktrack(tmp, "M005", {
-    id: "CAP-abc",
-    text: "go back to M003",
-    timestamp: new Date().toISOString(),
-    status: "resolved",
-    classification: "backtrack",
-    resolution: "Backtrack to M003",
-    rationale: "Regression",
-  });
-
-  const trigger = readBacktrackTrigger(tmp);
-  assert.ok(trigger);
-  assert.equal(trigger.target, "M003");
-  assert.equal(trigger.from, "M005");
-  rmSync(tmp, { recursive: true, force: true });
-});
-
-test("readBacktrackTrigger returns null when no trigger exists", () => {
-  const tmp = makeTempDir("no-bt");
-  setupGsdDir(tmp);
-  const trigger = readBacktrackTrigger(tmp);
-  assert.equal(trigger, null);
+  assert.deepEqual([result.action, result.action === "break" && result.reason], ["break", "user-backtrack"]);
+  assert.equal(pauses.length, 1);
+  const executed = _getAdapter()!.prepare(
+    "SELECT payload_json FROM workflow_domain_events WHERE event_type = 'capture.executed' AND entity_id = :id",
+  ).get({ ":id": id });
+  assert.deepEqual(JSON.parse(String(executed?.["payload_json"])), { captureId: id });
+  assert.equal(existsSync(join(tmp, ".gsd", "BACKTRACK-TRIGGER.md")), false);
   rmSync(tmp, { recursive: true, force: true });
 });
 

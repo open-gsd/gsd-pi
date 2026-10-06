@@ -44,11 +44,11 @@ Workflow Preferences -> Project Context -> Requirements -> Research Decision -> 
 | `.gsd/PREFERENCES.md`                                                     | `--deep` / `workflow-preferences` | Holds `planning_depth: deep` and captured workflow settings                         |
 | `.gsd/PROJECT.md`                                                         | `discuss-project`                 | Project vision, users, anti-goals, constraints, milestone sequence                  |
 | `.gsd/REQUIREMENTS.md`                                                    | `discuss-requirements`            | Capability contract with Active, Validated, Deferred, and Out of Scope requirements |
-| `.gsd/runtime/research-decision.json`                                     | `research-decision`               | Records whether to run project research or skip it                                  |
+| (database only)                                                           | `discuss-project` or `discuss-requirements` | Records `research` when you ask for project research; no recorded decision means `skip` |
 | `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, `PITFALLS.md` | `research-project`                | Optional four-way project research when the decision is `research`                  |
 | `.gsd/phases/<NN-slug>/<NN>-CONTEXT.md` and `<NN>-ROADMAP.md`             | `discuss-milestone` / `plan-milestone` | Milestone context and executable roadmap; `` `[sketch]` `` marks slices awaiting `refine-slice`. Legacy projects may still resolve to `.gsd/milestones/<MID>/<MID>-*.md` until migrated. |
 
-The research-decision unit only records the choice. If the decision is `research`, the next gate fans out four project research passes. Those outputs inform planning and requirement review; they do not silently create binding requirements.
+If the decision is `research`, the next gate fans out four project research passes. Those outputs inform planning and requirement review; they do not silently create binding requirements.
 
 ## Key properties
 
@@ -128,7 +128,7 @@ Plain `/gsd auto` cannot resume an open wedge, and a different wedge ID is refus
 
 ### Artifact verification retries
 
-After each unit, GSD verifies the expected artifact and retries missing artifacts with explicit failure context. `reactive-execute` batches use a terminal recovery after the retry cap: if dispatched tasks are still missing task summaries, GSD checks canonical flat-phase `S##-T##-SUMMARY.md` artifacts and accepts legacy `T##-SUMMARY.md` artifacts as a fallback, then writes `S##-REACTIVE-BLOCKER.md`, marks summary-present tasks complete, marks missing-summary tasks skipped, and advances. Review skipped tasks before relying on downstream artifacts.
+After each unit, GSD verifies that the unit recorded its result in the database and retries a unit with no recorded result. A file on disk does not prove completion. See the [authoritative artifact verification guide](../../docs/user-docs/auto-mode.md#artifact-verification-retries), which also covers the `reactive-execute` recovery block and `S##-REACTIVE-BLOCKER.md`.
 
 ### Consecutive dispatch blocker
 
@@ -155,9 +155,9 @@ auto_supervisor:
 
 ### Incremental memory
 
-GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. `KNOWLEDGE.md` keeps manual Rules as file-canonical entries, while Patterns and Lessons are captured as memories, backfilled from existing rows, and rendered into the file on session start.
+GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. Rules, Patterns and Lessons are memories rows written by `/gsd knowledge` or `capture_thought`; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
-At the start of each unit, GSD injects the manual Rules from project `KNOWLEDGE.md`; Patterns and Lessons reach the agent through the memory block. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
+At the start of each unit, GSD injects the project Rules, read from the database and not from the file; Patterns and Lessons reach the agent through the memory block. When the database is not available, the prompt shows a `Project Knowledge unavailable` block and GSD logs a warning; the file is not a fallback. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
 
 ### Verification enforcement
 
@@ -183,7 +183,7 @@ Generate manually with `/gsd export --html`, or for all milestones with `/gsd ex
 
 ### Reactive task execution
 
-Reactive task execution is enabled by default. GSD derives a dependency graph from IO annotations in task plans and, when at least three ready tasks are available by default, dispatches non-conflicting tasks in parallel via subagents.
+Reactive task execution is enabled by default. GSD derives a dependency graph from the planned inputs and expected output on the task rows in the database and, when at least three ready tasks are available by default, dispatches non-conflicting tasks in parallel via subagents. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch; it runs through the sequential executor.
 
 ```yaml
 reactive_execution:

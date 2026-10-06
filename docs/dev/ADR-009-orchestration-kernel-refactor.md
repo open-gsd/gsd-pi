@@ -352,11 +352,12 @@ The refactor is accepted when all conditions are true:
 ADR-009 closure is complete, with emergency fallback retained as a release safety valve.
 
 - Kernel-native dispatch is the default UOK runtime path.
-- Unit/hook/subagent/team-worker/verification/reprocess dispatch now routes through the scheduler contract facade.
+- Unit dispatch through the scheduler contract facade is superseded; see row 4 of the implementation plan matrix.
 - Legacy execution remains available only through explicit emergency fallback controls.
 - CI parity coverage includes explicit kernel-vs-legacy path assertions.
 
 Evidence is tracked in the implementation plan matrix:
+
 - [ADR-009-IMPLEMENTATION-PLAN.md](./ADR-009-IMPLEMENTATION-PLAN.md)
 
 ## Consequences

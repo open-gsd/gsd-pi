@@ -18,6 +18,7 @@ GSD preferences live in YAML frontmatter markdown files. You can configure them 
 | Project | `.gsd/PREFERENCES.md` | Current project only |
 
 **How they merge:**
+
 - **Scalar fields** (`budget_ceiling`, `token_profile`): project wins if defined
 - **Array fields** (`always_use_skills`, etc.): concatenated (global first, then project)
 - **Object fields** (`models`, `git`, `auto_supervisor`): shallow-merged, project overrides per-key
@@ -108,7 +109,7 @@ planning_depth: deep
 | `light` | Default. Uses the normal milestone discussion flow. |
 | `deep` | Runs workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, a research decision, and optional project research before milestone planning. |
 
-Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in `.gsd/runtime/research-decision.json`; choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
+Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in the database; ask for research during the project or requirements discussion, and no recorded decision means `skip`. Choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
 
 ### `planning_subagents`
 
@@ -245,7 +246,7 @@ phases:
 
 ### `reactive_execution`
 
-Automatic parallel task dispatch inside a slice. Reactive execution is enabled by default and only dispatches when task-plan IO annotations produce a non-ambiguous graph with enough ready, non-conflicting tasks.
+Automatic parallel task dispatch inside a slice. Reactive execution is enabled by default and only dispatches when the planned inputs and expected output on the task rows produce a non-ambiguous graph with enough ready, non-conflicting tasks. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch.
 
 ```yaml
 reactive_execution:
@@ -282,7 +283,6 @@ git:
   auto_push: false
   merge_strategy: squash
   isolation: none
-  commit_docs: true
   auto_pr: false
 ```
 
@@ -334,7 +334,7 @@ custom_instructions:
   - "Prefer functional patterns over classes"
 ```
 
-For project-specific durable guidance, use `.gsd/KNOWLEDGE.md` instead. Rules are read from the file; patterns and lessons are persisted to the `memories` table and projected back into `KNOWLEDGE.md` on the next session start.
+For project-specific durable guidance, use `.gsd/KNOWLEDGE.md` instead. Rules, patterns and lessons are persisted to the `memories` table by `/gsd knowledge` or `capture_thought`, and `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
 ### `context_pause_threshold`
 

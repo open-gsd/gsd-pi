@@ -15,7 +15,7 @@ import { join } from "node:path";
 import { _parseParkArgsForTest, handleWorkflowCommand } from "../commands/handlers/workflow.ts";
 import { withCommandCwd } from "../commands/context.ts";
 import { getParkedReason, isParked } from "../milestone-actions.ts";
-import { closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { closeDatabase, getMilestone, insertMilestone, isDbAvailable, openDatabase } from "../gsd-db.ts";
 import { invalidateStateCache } from "../state.ts";
 import { clearPathCache } from "../paths.ts";
 
@@ -108,8 +108,8 @@ describe("park dispatch via handleWorkflowCommand (#2257)", () => {
     );
 
     assert.equal(handled, true);
-    assert.ok(isParked(base, "M001"), "M001 is parked");
-    assert.equal(getParkedReason(base, "M001"), "waiting on vendor");
+    assert.ok(isParked("M001"), "M001 is parked");
+    assert.equal(getParkedReason("M001"), "waiting on vendor");
     assert.ok(
       ctx.notifications.some((n) => n.message === "Parked M001. Run /gsd unpark M001 to reactivate."),
       "expected success notification for M001",
@@ -129,11 +129,40 @@ describe("park dispatch via handleWorkflowCommand (#2257)", () => {
     );
 
     assert.equal(handled, true);
-    assert.ok(isParked(base, "M001"), "active milestone M001 is parked");
-    assert.equal(getParkedReason(base, "M001"), "Parked via /gsd park");
+    assert.ok(isParked("M001"), "active milestone M001 is parked");
+    assert.equal(getParkedReason("M001"), "Parked via /gsd park");
     assert.ok(
       !ctx.notifications.some((n) => /Could not park/.test(n.message)),
       "expected no could-not-park failure",
+    );
+  });
+
+  test("park, unpark and discard open the database in a cold session", async () => {
+    const base = makeFixture();
+    const ctx = {
+      ...makeCtx(),
+      cwd: base,
+      hasUI: true,
+    };
+    (ctx.ui as any).custom = async () => true;
+    const run = async (command: string) => {
+      closeDatabase();
+      assert.equal(isDbAvailable(), false);
+      assert.equal(await withCommandCwd(base, () => handleWorkflowCommand(command, ctx as any, {} as any)), true);
+    };
+
+    await run("park M001 waiting on vendor");
+    assert.equal(getMilestone("M001")?.status, "parked");
+    assert.equal(getParkedReason("M001"), "waiting on vendor");
+
+    await run("unpark M001");
+    assert.notEqual(getMilestone("M001")?.status, "parked");
+
+    await run("discard M001");
+    assert.ok(ctx.notifications.some((n) => n.message === "Discarded M001."));
+    assert.ok(
+      !ctx.notifications.some((n) => n.level === "error"),
+      ctx.notifications.map((n) => n.message).join("\n"),
     );
   });
 });

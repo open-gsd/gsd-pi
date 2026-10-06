@@ -7,6 +7,7 @@ import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync } 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -193,24 +194,22 @@ function seedContextModeFixture(base: string): void {
   );
 }
 
-function writeWriteGateSnapshot(
+/**
+ * Store gate rows in the project database as another process (the extension
+ * host) left them, then close it so the MCP tool opens it itself.
+ */
+function writeWriteGateRows(
   base: string,
-  snapshot: { verifiedDepthMilestones?: string[]; activeQueuePhase?: boolean; pendingGateId?: string | null },
+  gate: { activeQueuePhase?: boolean; pendingGateId?: string },
 ): void {
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(
-    join(base, ".gsd", "runtime", "write-gate-state.json"),
-    JSON.stringify(
-      {
-        verifiedDepthMilestones: snapshot.verifiedDepthMilestones ?? [],
-        activeQueuePhase: snapshot.activeQueuePhase ?? false,
-        pendingGateId: snapshot.pendingGateId ?? null,
-      },
-      null,
-      2,
-    ),
-    "utf-8",
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  const insert = _getAdapter()!.prepare(
+    "INSERT INTO write_gate_state (gate_kind, gate_id, writer, updated_at) VALUES (?, ?, 'host', ?)",
   );
+  const now = new Date().toISOString();
+  if (gate.pendingGateId) insert.run("pending", gate.pendingGateId, now);
+  if (gate.activeQueuePhase) insert.run("queue_phase", "active", now);
+  closeDatabase();
 }
 
 function makeMockServer() {
@@ -448,19 +447,23 @@ describe("workflow MCP tools", () => {
       "gsd_milestone_reopen",
       "gsd_reopen_milestone",
       "gsd_prepare_milestone_subjective_uat",
-      "gsd_answer_milestone_subjective_uat",
     ]) {
       const tool = server.tools.find((candidate) => candidate.name === name);
       assert.ok(tool, `${name} must be registered`);
       assert.ok(!("idempotencyKey" in tool.params), `${name} identity must remain private`);
       assert.ok(!("actorId" in tool.params), `${name} actor identity must remain private`);
     }
-    const answer = server.tools.find((candidate) =>
-      candidate.name === "gsd_answer_milestone_subjective_uat"
+  });
+
+  it("registers no tool that answers a subjective UAT question for the user", () => {
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+
+    assert.deepEqual(
+      server.tools.filter((candidate) => /answer/.test(candidate.name)).map((candidate) => candidate.name),
+      [],
+      "Human Acceptance comes only from the host command /gsd uat-answer",
     );
-    assert.ok(answer);
-    assert.ok("selectedOptionId" in answer.params);
-    assert.ok("verbatimResponse" in answer.params);
   });
 
   it("routes task recovery resume to the worktree owning the action", async () => {
@@ -518,7 +521,7 @@ describe("workflow MCP tools", () => {
         scope: "global",
         decision: "Expose checkpoint tool over MCP",
         choice: "register gsd_checkpoint_db",
-        rationale: "MCP clients need to flush WAL before staging gsd.db",
+        rationale: "MCP clients need to flush the WAL",
         revisable: "yes",
         made_by: "agent",
         superseded_by: null,
@@ -530,12 +533,93 @@ describe("workflow MCP tools", () => {
 
       const result = await tool.handler({ projectDir: base });
       const record = result as { content?: Array<{ text?: string }>; structuredContent?: Record<string, unknown> };
-      assert.equal(record.content?.[0]?.text, "WAL checkpoint complete. gsd.db is now up to date and safe to stage with git add.");
+      assert.equal(record.content?.[0]?.text, "WAL checkpoint complete. gsd.db is now up to date.");
+      assert.doesNotMatch(tool.description, /git add/, "the tool must not tell agents to stage gsd.db");
       assert.deepEqual(record.structuredContent, { operation: "checkpoint_db", status: "ok" });
 
       const walSizeAfter = existsSync(walPath) ? statSync(walPath).size : 0;
       assert.equal(walSizeAfter, 0, "WAL file should be truncated to 0 after MCP checkpoint");
     } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_capture_thought writes rule, pattern and gotcha rows with K/P/L ids and renders KNOWLEDGE.md in the child", async () => {
+    const base = makeTmpBase();
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const tool = server.tools.find((t) => t.name === "gsd_capture_thought");
+      assert.ok(tool, "gsd_capture_thought must be registered");
+      openDatabase(join(base, ".gsd", "gsd.db"));
+
+      for (const [category, content] of [
+        ["rule", "Never commit gsd.db"],
+        ["pattern", "Seam types at the vendor boundary"],
+        ["gotcha", "WAL file grows without checkpoint"],
+      ]) {
+        const result = await tool.handler({ projectDir: base, category, content }) as { isError?: boolean };
+        assert.notEqual(result.isError, true, `gsd_capture_thought ${category} must succeed`);
+      }
+
+      const rows = _getAdapter()!
+        .prepare("SELECT category, structured_fields FROM memories WHERE superseded_by IS NULL ORDER BY seq")
+        .all() as Array<{ category: string; structured_fields: string }>;
+      assert.deepEqual(
+        rows.map((row) => [row.category, JSON.parse(row.structured_fields).sourceKnowledgeId]),
+        [["rule", "K001"], ["pattern", "P001"], ["gotcha", "L001"]],
+      );
+      const md = readFileSync(join(base, ".gsd", "KNOWLEDGE.md"), "utf-8");
+      assert.match(md, /## Rules\n\n\| # \| Scope \| Rule \| Why \| Added \|\n\|---\|-------\|------\|-----\|-------\|\n\| K001 \| project \| Never commit gsd\.db \|/);
+      assert.match(md, /\| P001 \| Seam types at the vendor boundary \|/);
+      assert.match(md, /\| L001 \| WAL file grows without checkpoint \|/);
+    } finally {
+      cleanup(base);
+    }
+  });
+
+  it("gsd_checkpoint_db reports failure when a busy reader blocks the checkpoint", async () => {
+    const base = makeTmpBase();
+    const dbPath = join(base, ".gsd", "gsd.db");
+    let reader: DatabaseSync | undefined;
+    try {
+      const server = makeMockServer();
+      registerWorkflowTools(server as any);
+      const tool = server.tools.find((t) => t.name === "gsd_checkpoint_db");
+      assert.ok(tool, "gsd_checkpoint_db must be registered");
+
+      openDatabase(dbPath);
+      // A second connection holds a read snapshot, then the main connection
+      // writes. SQLite cannot checkpoint frames past the reader's snapshot.
+      reader = new DatabaseSync(dbPath, { readOnly: true });
+      reader.exec("BEGIN");
+      reader.prepare("SELECT COUNT(*) FROM decisions").get();
+      insertDecision({
+        id: "D001",
+        when_context: "test",
+        scope: "global",
+        decision: "Report an incomplete checkpoint",
+        choice: "return an error",
+        rationale: "A busy reader must not look like success",
+        revisable: "yes",
+        made_by: "agent",
+        superseded_by: null,
+      });
+      const walPath = `${dbPath}-wal`;
+      assert.ok(statSync(walPath).size > 0, "WAL file should be non-empty after a write");
+
+      const result = await tool.handler({ projectDir: base });
+      const record = result as {
+        content?: Array<{ text?: string }>;
+        structuredContent?: Record<string, unknown>;
+        isError?: boolean;
+      };
+      assert.equal(record.isError, true);
+      assert.match(record.content?.[0]?.text ?? "", /WAL checkpoint did not complete/);
+      assert.deepEqual(record.structuredContent, { operation: "checkpoint_db", error: "checkpoint_incomplete" });
+      assert.ok(statSync(walPath).size > 0, "a blocked checkpoint must leave the WAL in place");
+    } finally {
+      try { reader?.close(); } catch { /* Best-effort cleanup only. */ }
       cleanup(base);
     }
   });
@@ -943,7 +1027,7 @@ describe("workflow MCP tools", () => {
   it("gsd_exec is blocked by the MCP discussion-gate write gate", async () => {
     const base = makeTmpBase();
     try {
-      writeWriteGateSnapshot(base, { pendingGateId: "depth_verification_M001_confirm" });
+      writeWriteGateRows(base, { pendingGateId: "depth_verification_M001_confirm" });
       const server = makeMockServer();
       registerWorkflowTools(server as any);
       const tool = server.tools.find((t) => t.name === "gsd_exec");
@@ -1346,7 +1430,7 @@ describe("workflow MCP tools", () => {
         join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
         "# S01\n\n- [ ] **T01: Demo** `est:5m`\n",
       );
-      writeWriteGateSnapshot(base, { pendingGateId: "depth_verification_M001_confirm" });
+      writeWriteGateRows(base, { pendingGateId: "depth_verification_M001_confirm" });
 
       const server = makeMockServer();
       registerWorkflowTools(server as any);
@@ -1376,7 +1460,7 @@ describe("workflow MCP tools", () => {
         join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
         "# S01\n\n- [ ] **T01: Demo** `est:5m`\n",
       );
-      writeWriteGateSnapshot(base, { activeQueuePhase: true });
+      writeWriteGateRows(base, { activeQueuePhase: true });
 
       const server = makeMockServer();
       registerWorkflowTools(server as any);
@@ -1681,6 +1765,30 @@ describe("workflow MCP tools", () => {
         name: "gsd_milestone_reopen",
         params: { milestoneId: "M001", reason: "Must not execute." },
       },
+      {
+        name: "gsd_milestone_park",
+        params: { milestoneId: "M001", reason: "Must not execute." },
+      },
+      {
+        name: "gsd_milestone_unpark",
+        params: { milestoneId: "M001" },
+      },
+      {
+        name: "gsd_milestone_discard",
+        params: { milestoneId: "M001", reason: "Must not execute." },
+      },
+      {
+        name: "gsd_milestone_reorder",
+        params: { order: ["M001"] },
+      },
+      {
+        name: "gsd_milestone_set_dependencies",
+        params: { milestoneId: "M001", dependsOn: [] },
+      },
+      {
+        name: "gsd_research_decision_save",
+        params: { decision: "research" },
+      },
     ];
 
     for (const entry of cases) {
@@ -1774,6 +1882,7 @@ const captureMilestoneValidation = async (params, projectDir, options) => {
 };
 
 export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = ["SUMMARY", "UAT", "CONTEXT", "PLAN"];
+export const runInToolSession = (_sessionKey, run) => run();
 export const resolveMilestoneStatusObservationTokenState = () => "malformed";
 export const executeMilestoneStatus = noop;
 export const executePlanMilestone = noop;
@@ -1781,6 +1890,7 @@ export const executePlanSlice = noop;
 export const executeReplanSlice = noop;
 export const executeReplanTask = noop;
 export const executeReworkBriefSave = noop;
+export const executeCheckpointSave = noop;
 export const executeSliceComplete = (params, projectDir, invocation) =>
   captureSliceLifecycle("complete", params, projectDir, invocation);
 export const executeCompleteMilestone = (params, projectDir, invocation) =>
@@ -1788,6 +1898,7 @@ export const executeCompleteMilestone = (params, projectDir, invocation) =>
 export const executeValidateMilestone = captureMilestoneValidation;
 export const executeReassessRoadmap = noop;
 export const executeSaveGateResult = noop;
+export const executeHookVerdictSave = noop;
 export const executeSummarySave = noop;
 export const executeUatResultSave = noop;
 export const executeSliceReopen = (params, projectDir, invocation) =>
@@ -1796,6 +1907,15 @@ export const executeSkipSlice = (params, projectDir, invocation) =>
   captureSliceLifecycle("skip", params, projectDir, invocation);
 export const executeMilestoneReopen = (params, projectDir, invocation) =>
   captureMilestoneLifecycle("reopen", params, projectDir, invocation);
+export const executeMilestoneGenerateId = noop;
+export const executeMilestonePark = noop;
+export const executeMilestoneUnpark = noop;
+export const executeMilestoneDiscard = noop;
+export const executeMilestoneReorder = noop;
+export const executeMilestoneSetDependencies = noop;
+export const executeResearchDecisionSave = noop;
+export const executeCaptureResolve = noop;
+export const executeCaptureComplete = noop;
 
 export const executeTaskReopen = async (params, projectDir, invocation) => {
   const capturePath = process.env.GSD_TEST_TASK_REOPEN_CAPTURE_PATH;
@@ -1887,7 +2007,7 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
       assert.ok(reopenMilestoneTool, "milestone reopen tool should be registered");
       assert.ok(reopenMilestoneAlias, "milestone reopen alias should be registered");
 
-      // Mirrors the ADR-011 escalation schema: question + 2-4 options
+      // Mirrors the ADR-011 escalation schema: question + 2-3 options
       // (each with id/label/tradeoffs) + recommendation + rationale +
       // continueWithDefault flag.
       const escalationPayload = {
@@ -2218,6 +2338,120 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
       }
       cleanup(base);
     }
+  });
+
+  it("declares settleDisposition and forwards it to the shared settle executor (#2536)", async (t) => {
+    // #2536: the MCP gsd_task_settle schema did not declare settleDisposition,
+    // so zod stripped the key and the #2202 blocker → replan closeout was
+    // unreachable from MCP hosts. Locks in both halves of the contract: the
+    // schema advertises the field (host discoverability) and the handler
+    // forwards it verbatim to executeTaskSettle (which enforces the
+    // reconcileLifecycle mutual exclusion).
+    const base = makeTmpBase();
+    const capturePath = join(base, "captured-settle-args.json");
+    const mockModulePath = join(base, "mock-executors.mjs");
+    const prevModule = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const prevCapture = process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH;
+    t.after(() => {
+      if (prevModule === undefined) {
+        delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+      } else {
+        process.env.GSD_WORKFLOW_EXECUTORS_MODULE = prevModule;
+      }
+      if (prevCapture === undefined) {
+        delete process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH;
+      } else {
+        process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH = prevCapture;
+      }
+      cleanup(base);
+    });
+
+    const mockSource = `
+import { readFileSync, writeFileSync } from "node:fs";
+
+const noop = async () => ({ content: [{ type: "text", text: "noop" }] });
+
+export const executeTaskSettle = async (params, projectDir, invocation) => {
+  const capturePath = process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH;
+  if (capturePath) {
+    writeFileSync(capturePath, JSON.stringify({ params, projectDir, invocation }, null, 2));
+  }
+  return { content: [{ type: "text", text: "mock task settle" }] };
+};
+
+export const runInToolSession = (_sessionKey, run) => run();
+export const executeTaskComplete = noop;
+export const executeTaskReopen = noop;
+export const executeTaskRecoveryResume = noop;
+export const executeSliceComplete = noop;
+export const executeSliceReopen = noop;
+export const executeSkipSlice = noop;
+export const executeCompleteMilestone = noop;
+export const executeMilestoneReopen = noop;
+export const executeValidateMilestone = noop;
+export const executeReassessRoadmap = noop;
+export const executeSaveGateResult = noop;
+export const executeHookVerdictSave = noop;
+export const executeSummarySave = noop;
+export const executeUatResultSave = noop;
+export const executePlanMilestone = noop;
+export const executePlanSlice = noop;
+export const executeReplanSlice = noop;
+export const executeReplanTask = noop;
+export const executeReworkBriefSave = noop;
+export const executeCheckpointSave = noop;
+export const SUPPORTED_SUMMARY_ARTIFACT_TYPES = ["SUMMARY", "UAT", "CONTEXT", "PLAN"];
+export const resolveMilestoneStatusObservationTokenState = () => "malformed";
+export const executeMilestoneStatus = noop;
+export const executeMilestoneGenerateId = noop;
+export const executeMilestonePark = noop;
+export const executeMilestoneUnpark = noop;
+export const executeMilestoneDiscard = noop;
+export const executeMilestoneReorder = noop;
+export const executeMilestoneSetDependencies = noop;
+export const executeResearchDecisionSave = noop;
+export const executeCaptureResolve = noop;
+export const executeCaptureComplete = noop;
+`;
+    writeFileSync(mockModulePath, mockSource, "utf-8");
+    process.env.GSD_WORKFLOW_EXECUTORS_MODULE = mockModulePath;
+    process.env.GSD_TEST_TASK_SETTLE_CAPTURE_PATH = capturePath;
+
+    const { registerWorkflowTools: freshRegisterWorkflowTools } = await import(
+      cacheBustedWorkflowToolsImport("task-settle-disposition")
+    );
+    const server = makeMockServer();
+    freshRegisterWorkflowTools(server as any);
+    const settleTool = server.tools.find((candidate) => candidate.name === "gsd_task_settle");
+    assert.ok(settleTool, "task settle tool should be registered");
+    assert.ok(
+      "settleDisposition" in settleTool.params,
+      "MCP schema must declare settleDisposition so hosts can discover the #2202 closeout (#2536)",
+    );
+
+    await settleTool.handler({
+      projectDir: base,
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      reason: "blocker accepted at route stage",
+      apply: true,
+      settleDisposition: "blocker-accepted",
+    }, {
+      _meta: { "io.opengsd/idempotency-key": "stable-task-settle" },
+    });
+
+    assert.ok(existsSync(capturePath), "mock executor should have written captured args to disk");
+    const captured = JSON.parse(readFileSync(capturePath, "utf-8"));
+    assert.equal(
+      captured.params.settleDisposition,
+      "blocker-accepted",
+      "settleDisposition must reach the shared executor — zod must not strip it (#2536)",
+    );
+    assert.equal(captured.params.projectDir, undefined, "projectDir must not leak into executor params");
+    assert.equal(captured.params.milestoneId, "M001");
+    assert.equal(captured.params.taskId, "T01");
+    assert.equal(captured.projectDir, realpathSync(base));
   });
 
   it("gsd_complete_task alias delegates to gsd_task_complete behavior", async () => {
@@ -2885,6 +3119,58 @@ export const executeTaskComplete = async (params, projectDir, invocation) => {
       );
     } finally {
       cleanup(base);
+    }
+  });
+
+  it("gsd_plan_task and gsd_task_plan report a failed plan render as pending repair, not as an error", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+    const tool = (name: string) => server.tools.find((entry) => entry.name === name)!;
+
+    await tool("gsd_plan_milestone").handler({
+      projectDir: base,
+      milestoneId: "M011",
+      title: "Stale task plan",
+      vision: "A failed render after the commit is reported, not raised.",
+      slices: [
+        {
+          sliceId: "S11",
+          title: "Stale task plan",
+          risk: "medium",
+          depends: [],
+          demo: "The task plan is committed when the slice PLAN cannot be written.",
+          goal: "Report the stale readable plan to the MCP caller.",
+          successCriteria: "The tool text names the pending repair.",
+          proofLevel: "integration",
+          integrationClosure: "The inline MCP handler returns the committed task plan.",
+          observabilityImpact: "The MCP caller sees that the readable plan is stale.",
+        },
+      ],
+    });
+    // A directory at the PLAN path makes every write of the slice PLAN fail.
+    mkdirSync(join(base, ".gsd", "phases", "11-stale-task-plan", "11-11-PLAN.md"));
+
+    for (const [name, taskId] of [["gsd_plan_task", "T11"], ["gsd_task_plan", "T12"]] as const) {
+      const result = await tool(name).handler({
+        projectDir: base,
+        milestoneId: "M011",
+        sliceId: "S11",
+        taskId,
+        title: `Task ${taskId}`,
+        description: "Plan a task while the slice PLAN cannot be written.",
+        estimate: "5m",
+        files: ["packages/mcp-server/src/workflow-tools.ts"],
+        verify: "node --test",
+        inputs: ["M011-ROADMAP.md"],
+        expectedOutput: ["packages/mcp-server/src/workflow-tools.ts"],
+        requiredWorkflowTools: [],
+      });
+      assert.equal(
+        (result as any).content[0].text,
+        `Planned task ${taskId} (S11/M011). The readable plan update is pending repair.`,
+      );
     }
   });
 
@@ -3719,12 +4005,66 @@ describe("validateProjectDir", () => {
         structuredContent?: { count?: number; decisions?: Array<{ id?: string }> };
       };
       assert.match(result.content?.[0]?.text ?? "", /Found 1 decision/);
+      // #2445 — the model-visible content must carry the usable fields, not
+      // just the count (choice/rationale only in details never reach the model).
+      assert.match(
+        result.content?.[0]?.text ?? "",
+        /D001 \[global\] Mirror read payloads over MCP \| choice: structuredContent/,
+      );
+      assert.match(
+        result.content?.[0]?.text ?? "",
+        /rationale: the details field is dropped by the MCP transport/,
+      );
       assert.ok(result.structuredContent, "payload must ride on structuredContent");
       assert.equal(result.structuredContent.count, 1);
       assert.equal(result.structuredContent.decisions?.[0]?.id, "D001");
     } finally {
       cleanup(base);
     }
+  });
+
+  it("renders the full decision row into gsd_decision_get content (#2445)", async (t) => {
+    const base = makeTmpBase();
+    t.after(() => cleanup(base));
+    const server = makeMockServer();
+    registerWorkflowTools(server as any);
+    const tool = server.tools.find((entry) => entry.name === "gsd_decision_get");
+    assert.ok(tool, "gsd_decision_get must be registered");
+
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    createMemory({
+      category: "architecture",
+      content: "decision memory fixture",
+      scope: "global",
+      confidence: 0.85,
+      structuredFields: {
+        sourceDecisionId: "D001",
+        when_context: "slice planning",
+        scope: "global",
+        decision: "Mirror read payloads over MCP",
+        choice: "structuredContent",
+        rationale: "the details field is dropped by the MCP transport",
+        made_by: "agent",
+        revisable: "yes",
+        superseded_by: null,
+      },
+    });
+
+    const result = await tool.handler({ projectDir: base, id: "D001" }) as {
+      content?: Array<{ text?: string }>;
+      structuredContent?: { decision?: { id?: string } };
+    };
+    const text = result.content?.[0]?.text ?? "";
+    assert.match(text, /Decision D001: Mirror read payloads over MCP/);
+    assert.match(text, /Choice: structuredContent/);
+    assert.match(text, /Rationale: the details field is dropped by the MCP transport/);
+    assert.match(text, /Scope: global/);
+    assert.match(text, /When: slice planning/);
+    assert.match(text, /Made by: agent/);
+    assert.match(text, /Source: discussion/);
+    assert.match(text, /Revisable: yes/);
+    assert.match(text, /Superseded by: none/);
+    assert.equal(result.structuredContent?.decision?.id, "D001");
   });
 
   it("mirrors canonical read errors into structuredContent", async () => {

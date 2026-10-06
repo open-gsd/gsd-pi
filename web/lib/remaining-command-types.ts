@@ -4,6 +4,8 @@
 // Do NOT import from those modules directly — they use Node.js APIs
 // unavailable in the browser.
 
+import type { ProjectProgressReadMetadata } from "@opengsd/contracts"
+
 // ─── History (mirrors metrics.ts: TokenCounts, UnitMetrics, aggregates, ProjectTotals) ──
 
 export interface HistoryTokenCounts {
@@ -72,6 +74,8 @@ export interface HistoryData {
   byPhase: HistoryPhaseAggregate[]
   bySlice: HistorySliceAggregate[]
   byModel: HistoryModelAggregate[]
+  /** Set only when the units come from .gsd/metrics.json: the database is missing or holds no unit rows. */
+  readMetadata?: ProjectProgressReadMetadata
 }
 
 // ─── Inspect (mirrors commands.ts InspectData) ───────────────────────────────
@@ -81,6 +85,7 @@ export interface InspectData {
   counts: { decisions: number; requirements: number; artifacts: number }
   recentDecisions: Array<{ id: string; decision: string; choice: string }>
   recentRequirements: Array<{ id: string; status: string; description: string }>
+  readMetadata?: ProjectProgressReadMetadata
 }
 
 // ─── Hooks (mirrors types.ts HookStatusEntry) ───────────────────────────────
@@ -114,6 +119,8 @@ export interface UndoInfo {
   lastUnitKey: string | null
   completedCount: number
   commits: string[]
+  /** The exact changes undo makes for this unit, shown before the user confirms. */
+  effects: string[]
 }
 
 export interface UndoResult {

@@ -6,30 +6,34 @@
 
 import { deriveState, invalidateStateCache } from "./derive/index.js";
 import { ensureExistingWorkflowDbOpen } from "./derive/db-open.js";
+import { noteSessionRead } from "../db/domain-operation.js";
 import {
   _getAdapter,
-  getAllMilestones,
-  getHierarchyCompletionCounts,
-  getInFlightSliceCount,
-  getMilestoneStatusCounts,
-  getOpenBlockers,
-  getOpenQuestions,
   getProjectAuthorityRow,
   getProjectAuthorityVersion,
   getSchemaVersion,
   getVerificationSummary,
   isDbAvailable,
   readTransaction,
-  type OpenBlockerRow,
-  type OpenQuestionRow,
   type VerificationSummaryCounts,
 } from "../gsd-db.js";
+import {
+  readMilestones,
+  readOpenBlockers,
+  readOpenQuestions,
+  readProgressCounts,
+  type OpenBlockerRow,
+  type OpenQuestionRow,
+  type ProgressCounts,
+} from "../db/lifecycle-read.js";
 import {
   closeWorkflowDatabase as closeDatabase,
   getWorkflowDatabasePath as getDbPath,
   openWorkflowDatabasePath as openDatabase,
 } from "../db-workspace.js";
+import { normalizeCanonicalLifecycleStatus, type CanonicalLifecycleStatus } from "../status-guards.js";
 import type { GSDState } from "../types.js";
+import { LIFECYCLE_STATUS_VERSION } from "@opengsd/contracts";
 
 const MAX_REVISION_ATTEMPTS = 3;
 
@@ -52,17 +56,18 @@ export interface DbProjectSnapshotCurrent {
   nextAction: string;
 }
 
-export interface DbProjectSnapshotProgress {
-  milestones: { total: number; done: number; active: number; pending: number; parked: number };
-  slices: { total: number; done: number; active: number; pending: number };
-  tasks: { total: number; done: number; pending: number };
-}
+export type DbProjectSnapshotProgress = ProgressCounts;
 
 export interface DbProjectSnapshotMilestone {
   id: string;
   title: string;
+  /** Legacy status label. Kept for one contract version; `lifecycleStatus` replaces it. */
   status: string;
+  /** Status in the canonical lifecycle vocabulary (`lifecycleStatusVersion`); null when it is not known. */
+  lifecycleStatus: CanonicalLifecycleStatus | null;
   sequence: number;
+  /** Milestone Kind from the current milestone context; "delivery" when none is recorded. */
+  kind: string;
 }
 
 export interface DbProjectSnapshot {
@@ -74,6 +79,8 @@ export interface DbProjectSnapshot {
   openQuestions: OpenQuestionRow[];
   openQuestionsTruncated?: boolean;
   verification: VerificationSummaryCounts;
+  /** Version of the lifecycle status vocabulary that `milestones.items[].lifecycleStatus` uses. */
+  lifecycleStatusVersion: typeof LIFECYCLE_STATUS_VERSION;
   milestones: { items: DbProjectSnapshotMilestone[]; truncated: boolean };
   capturedAt: string;
 }
@@ -113,6 +120,19 @@ interface SnapshotDbRead {
   milestones: DbProjectSnapshot["milestones"];
 }
 
+/** Milestone Kind per milestone, from the head (not superseded) context row. */
+function readMilestoneKinds(): Map<string, string> {
+  const rows = _getAdapter()!.prepare(`
+    SELECT context.milestone_id, context.milestone_kind
+    FROM workflow_milestone_contexts context
+    WHERE NOT EXISTS (
+      SELECT 1 FROM workflow_milestone_contexts successor
+      WHERE successor.supersedes_context_id = context.context_id
+    )
+  `).all();
+  return new Map(rows.map((row) => [String(row["milestone_id"]), String(row["milestone_kind"])]));
+}
+
 function readSnapshotDb(): SnapshotDbRead {
   return readTransaction(() => {
     const authorityRow = getProjectAuthorityRow();
@@ -126,39 +146,27 @@ function readSnapshotDb(): SnapshotDbRead {
       authorityEpoch: authorityRow.authorityEpoch,
     };
 
-    const counts = getHierarchyCompletionCounts();
-    const milestoneCounts = getMilestoneStatusCounts();
-    const slicesActive = getInFlightSliceCount();
-    const slicesPending = counts.slicesTotal - counts.slices - slicesActive;
-    const progress: DbProjectSnapshotProgress = {
-      milestones: milestoneCounts,
-      slices: {
-        total: counts.slicesTotal,
-        done: counts.slices,
-        active: slicesActive,
-        pending: slicesPending,
-      },
-      tasks: {
-        total: counts.tasksTotal,
-        done: counts.tasks,
-        pending: counts.tasksTotal - counts.tasks,
-      },
-    };
+    const progress = readProgressCounts();
 
-    const all = getAllMilestones();
+    const all = readMilestones();
+    const kinds = readMilestoneKinds();
     const truncated = all.length > MAX_SNAPSHOT_MILESTONES;
     const milestones = {
       items: all.slice(0, MAX_SNAPSHOT_MILESTONES).map((m) => ({
         id: m.id,
         title: m.title,
         status: m.status,
+        lifecycleStatus: normalizeCanonicalLifecycleStatus(m.lifecycleStatus),
         sequence: m.sequence,
+        kind: kinds.get(m.id) ?? "delivery",
       })),
       truncated,
     };
 
-    const blockers = getOpenBlockers();
-    const openQuestions = getOpenQuestions();
+    // The display read of the canonical blockers and questions goes through
+    // the read interface, not the query module directly.
+    const blockers = readOpenBlockers();
+    const openQuestions = readOpenQuestions();
 
     return {
       authority,
@@ -195,9 +203,7 @@ function buildCurrent(state: GSDState): DbProjectSnapshotCurrent {
  * snapshot was assembled and the current section may tear relative to the
  * transactional sections under concurrent commits — the stability-retry loop
  * bounds but does not eliminate that (same contract as readProgressFromDb).
- * Reads never mutate: the queue-order projection sync stays a runtime
- * derive/dispatch repair, so the snapshot reports DB-authoritative order
- * as-is even when QUEUE-ORDER.json is newer.
+ * Milestone order comes from milestones.sequence, never from QUEUE-ORDER.json.
  */
 export async function readProjectSnapshotFromDb(
   basePath: string,
@@ -205,19 +211,21 @@ export async function readProjectSnapshotFromDb(
 ): Promise<DbProjectSnapshot | null> {
   const previousDbPath = opts.preserveGlobalDbHandle ? getDbPath() : null;
   try {
-    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath, { syncQueueOrder: false });
+    const openedRequestedDb = ensureExistingWorkflowDbOpen(basePath);
     if (!openedRequestedDb || !isDbAvailable()) return null;
 
     invalidateStateCache();
     for (let attempt = 1; ; attempt++) {
       const before = readStabilityToken();
       const dbRead = readSnapshotDb();
-      const state = await deriveState(basePath, { syncQueueOrder: false });
+      const state = await deriveState(basePath);
       const after = readStabilityToken();
 
       if (stabilityTokensMatch(before, after) || attempt === MAX_REVISION_ATTEMPTS) {
+        noteSessionRead(dbRead.authority.revision);
         return {
           ...dbRead,
+          lifecycleStatusVersion: LIFECYCLE_STATUS_VERSION,
           current: buildCurrent(state),
           capturedAt: new Date().toISOString(),
         };

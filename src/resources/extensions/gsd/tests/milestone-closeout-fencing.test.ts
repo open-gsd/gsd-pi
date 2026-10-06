@@ -27,7 +27,7 @@ import {
   updateMilestoneStatus,
   upsertMilestonePlanning,
 } from "../gsd-db.ts";
-import { migrateHierarchyToDb } from "../md-importer.ts";
+import { migrateHierarchyToDb } from "./helpers/md-importer.ts";
 import { executeSummarySave } from "../tools/workflow-tool-executors.ts";
 
 type CanonicalMilestoneStatus = "ready" | "completed";
@@ -96,6 +96,15 @@ function operationCount(): number {
   return Number(_getAdapter()!.prepare("SELECT COUNT(*) AS count FROM workflow_operations").get()?.["count"] ?? 0);
 }
 
+/** Types of the Domain Operations committed after the first `skip` operations. */
+function operationTypesAfter(skip: number): unknown[] {
+  return _getAdapter()!
+    .prepare("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision")
+    .all()
+    .slice(skip)
+    .map((row) => row["operation_type"]);
+}
+
 function useProjectDbForMerge(base: string): void {
   const dbPath = join(base, ".gsd", "gsd.db");
   _setMergeDbReadyDepsForTests({
@@ -105,7 +114,7 @@ function useProjectDbForMerge(base: string): void {
       worktreeGsd: join(base, ".gsd-worktrees", "M001", ".gsd"),
     } as never),
     getWorkflowDatabasePath: () => dbPath,
-    shouldReconcileWorktreeDb: () => false,
+    hasWorktreeLocalDb: () => false,
     proveMilestoneCloseout: () => ({ ok: true }),
   });
 }
@@ -214,7 +223,7 @@ test("generic legacy writers preserve canonical completion across terminal alias
       true,
     ));
     assert.equal(getMilestone("M001")?.status, "closed");
-    assert.equal(getMilestone("M001")?.completed_at, "2026-07-14T12:00:00.000Z");
+    assert.equal(getMilestone("M001")?.completed_at, null, "a generic write never backfills completed_at on an adopted row");
     assert.equal(lifecycleStatus(), "completed");
     assert.deepEqual(readDomainOperationFence(), fenceBefore);
     assert.equal(operationCount(), operationsBefore);
@@ -287,7 +296,7 @@ test("PROJECT milestone registration cannot close an adopted ready milestone", a
     assert.equal(result.details.milestoneSequenceSelfHealed, true);
     assert.equal(getMilestone(milestoneId)?.status, "active");
     assert.equal(lifecycleStatus(milestoneId), "ready");
-    assert.equal(operationCount(), operationsBefore);
+    assert.deepEqual(operationTypesAfter(operationsBefore), ["artifact.save"]);
     const project = getArtifact("PROJECT.md");
     assert.ok(project);
     assert.match(project.full_content, /- \[ \] M001-b1nole:/);
@@ -312,7 +321,7 @@ test("PROJECT milestone registration repairs an unchecked adopted completed mile
     assert.equal(result.details.milestoneSequenceSelfHealed, true);
     assert.equal(getMilestone("M001")?.status, "complete");
     assert.equal(lifecycleStatus(), "completed");
-    assert.equal(operationCount(), operationsBefore);
+    assert.deepEqual(operationTypesAfter(operationsBefore), ["artifact.save"]);
     const project = getArtifact("PROJECT.md");
     assert.ok(project);
     assert.match(project.full_content, /- \[x\] M001:/i);
@@ -362,7 +371,6 @@ test("PROJECT repair renders completed legacy aliases as checked", async () => {
   const base = makeBase("gsd-adopted-project-alias-");
   try {
     adoptMilestone("completed", "done");
-    const fenceBefore = readDomainOperationFence();
     const operationsBefore = operationCount();
 
     const result = await executeSummarySave({
@@ -374,8 +382,7 @@ test("PROJECT repair renders completed legacy aliases as checked", async () => {
     assert.equal(result.details.milestoneSequenceSelfHealed, true);
     assert.equal(getMilestone("M001")?.status, "done");
     assert.equal(lifecycleStatus(), "completed");
-    assert.deepEqual(readDomainOperationFence(), fenceBefore);
-    assert.equal(operationCount(), operationsBefore);
+    assert.deepEqual(operationTypesAfter(operationsBefore), ["artifact.save"]);
     const storedProject = getArtifact("PROJECT.md");
     assert.ok(storedProject);
     assert.match(storedProject.full_content, /- \[x\] M001:/i);
@@ -413,7 +420,7 @@ test("full Markdown import cannot close an adopted ready milestone", () => {
   }
 });
 
-test("closed-to-closed timestamp repair remains allowed", () => {
+test("a closed-to-closed generic write does not backfill completed_at on an adopted row", () => {
   const base = makeBase("gsd-adopted-closed-repair-");
   try {
     adoptMilestone("completed");
@@ -426,7 +433,7 @@ test("closed-to-closed timestamp repair remains allowed", () => {
       true,
     ));
     assert.equal(getMilestone("M001")?.status, "complete");
-    assert.equal(getMilestone("M001")?.completed_at, "2026-07-14T12:00:00.000Z");
+    assert.equal(getMilestone("M001")?.completed_at, null);
     assert.equal(lifecycleStatus(), "completed");
     assert.equal(operationCount(), operationsBefore);
   } finally {

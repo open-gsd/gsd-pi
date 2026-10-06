@@ -13,7 +13,6 @@ import {
 } from "../lifecycle-shadow-comparison.js";
 import { getDb } from "../engine.js";
 import {
-  adoptLifecycleIfMissing,
   adoptOrTransitionLifecycle,
   readLifecycleShadowComparison,
   requireActiveDomainOperationContext,
@@ -23,7 +22,12 @@ import {
   recordRequirementDisposition,
   terminateRecoveryWaiver,
 } from "./task-recovery.js";
-import { ensurePendingSliceQ8 } from "./slice-companion-state.js";
+import {
+  ensurePendingSliceQ8,
+  invalidateSliceEvidence,
+  removeInvalidatedRows,
+  type InvalidatedEvidence,
+} from "./slice-companion-state.js";
 
 export interface MilestoneCompletionHierarchyInput {
   milestoneId: string;
@@ -67,6 +71,8 @@ export interface MilestoneReopenHierarchyResult {
   reopenedTaskIds: string[];
   revokedWaiverIds: string[];
   supersedingDispositionIds: string[];
+  /** The rows the reopen removed: per Slice id, and under "milestone" the validation verdict. */
+  invalidatedEvidence: Record<string, InvalidatedEvidence>;
   shadows: LifecycleShadowRecord[];
 }
 
@@ -152,7 +158,7 @@ function changedRows(result: unknown): number {
 
 function requireMatchingShadow(row: HierarchyRow, identity: string): void {
   if (!row.lifecycleId || !row.lifecycleStatus) {
-    throw new MilestoneLifecycleValidationError(`${identity} is missing canonical lifecycle authority`);
+    throw new MilestoneLifecycleValidationError(`${identity} is missing canonical lifecycle authority; run /gsd db adopt --apply to adopt it`);
   }
   const comparison = compareLifecycleShadow(row.legacyStatus, row.lifecycleStatus);
   if (comparison.kind !== "match" && comparison.kind !== "semantic_match_exact_delta") {
@@ -307,7 +313,15 @@ function revokeCancellationWaivers(
           lifecycle.item_kind = 'task'
           AND lifecycle.slice_id IS NOT NULL
           AND lifecycle.task_id IS NOT NULL
-          AND waiver.scope = lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id || ' cancellation'
+          AND (
+            waiver.scope = lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id || ' cancellation'
+            OR (
+              -- #2432: the plan-reconciliation writer emits the task-scoped
+              -- "task:<M>/<S>/<T>" form; closeout must resolve it too.
+              waiver.scope = 'task:' || lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id
+              AND waiver.requirement_id = 'plan-omission:' || lifecycle.milestone_id || '/' || lifecycle.slice_id || '/' || lifecycle.task_id
+            )
+          )
         )
       )
     ORDER BY waiver.project_revision, waiver.waiver_id
@@ -351,16 +365,29 @@ function currentSliceCancellationAuthorization(
     JOIN workflow_operations operation
       ON operation.operation_id = waiver.operation_id
      AND operation.project_id = waiver.project_id
-     AND operation.operation_type = 'slice.cancel'
-    JOIN workflow_domain_events cancelled
+    LEFT JOIN workflow_domain_events cancelled
       ON cancelled.operation_id = waiver.operation_id
      AND cancelled.project_id = waiver.project_id
-     AND cancelled.event_type = 'slice.cancelled'
      AND cancelled.entity_type = 'slice'
      AND cancelled.entity_id = :entity_id
-     AND json_extract(cancelled.payload_json, '$.sliceLifecycleId') = waiver.lifecycle_id
      AND json_extract(cancelled.payload_json, '$.waiverId') = waiver.waiver_id
+     AND (
+       (
+         operation.operation_type = 'slice.cancel'
+         AND cancelled.event_type = 'slice.cancelled'
+         AND json_extract(cancelled.payload_json, '$.sliceLifecycleId') = waiver.lifecycle_id
+       ) OR (
+         -- Legacy-attested cancellation minted by the lifecycle backfill.
+         operation.operation_type = 'lifecycle.backfill'
+         AND cancelled.event_type = 'lifecycle.backfilled'
+         AND json_extract(cancelled.payload_json, '$.lifecycleId') = waiver.lifecycle_id
+       )
+     )
     WHERE waiver.project_id = :project_id
+      -- An Import Application and a Forward Repair record one event for the
+      -- whole operation, so their legacy-attested cancellation Waiver has no
+      -- per-Slice event.
+      AND (cancelled.event_id IS NOT NULL OR operation.operation_type IN ('import.apply', 'import.forward_repair'))
       AND waiver.lifecycle_id = :lifecycle_id
       AND waiver.waiver_status = 'active'
       AND waiver.requirement_id IS NULL
@@ -404,21 +431,43 @@ function currentTaskCancellationAuthorization(
     JOIN workflow_operations waiver_operation
       ON waiver_operation.operation_id = waiver.operation_id
      AND waiver_operation.project_id = waiver.project_id
-     AND waiver_operation.operation_type = 'task.waiver.grant'
-    JOIN workflow_requirement_dispositions disposition
+    LEFT JOIN workflow_requirement_dispositions disposition
       ON disposition.project_id = waiver.project_id
      AND disposition.requirement_id = waiver.requirement_id
      AND disposition.waiver_id = waiver.waiver_id
      AND disposition.disposition = 'waived'
-    JOIN workflow_operations disposition_operation
+    LEFT JOIN workflow_operations disposition_operation
       ON disposition_operation.operation_id = disposition.operation_id
      AND disposition_operation.project_id = disposition.project_id
-     AND disposition_operation.operation_type = 'task.disposition.record'
     WHERE waiver.project_id = :project_id
       AND waiver.lifecycle_id = :lifecycle_id
       AND waiver.waiver_status = 'active'
-      AND waiver.scope = :scope
       AND (waiver.expires_at IS NULL OR waiver.expires_at > :completed_at)
+      AND (
+        (
+          waiver.scope = :scope
+          -- task.cancel (/gsd skip) grants its own cancellation Waiver.
+          AND waiver_operation.operation_type IN ('task.waiver.grant', 'task.cancel')
+          AND disposition_operation.operation_type = 'task.disposition.record'
+        )
+        OR (
+          -- #2432: the plan-reconciliation writer's forms, pinned to its
+          -- requirement identity and writer provenance so an unrelated
+          -- recovery Waiver can neither authorize closeout nor survive reopen.
+          waiver.scope = :plan_reconciliation_scope
+          AND waiver.requirement_id = :plan_reconciliation_requirement
+          AND waiver_operation.operation_type IN ('workflow.slice.plan', 'workflow.slice.replan')
+          AND disposition_operation.operation_type = 'workflow.slice.plan.authorization'
+        )
+        OR (
+          -- Legacy-attested cancellation minted by the lifecycle backfill, by
+          -- an Import Application or by a Forward Repair: no requirement, so
+          -- no disposition can exist.
+          waiver.scope = :scope
+          AND waiver_operation.operation_type IN ('lifecycle.backfill', 'import.apply', 'import.forward_repair')
+          AND waiver.requirement_id IS NULL
+        )
+      )
       AND NOT EXISTS (
         SELECT 1
         FROM workflow_requirement_dispositions successor
@@ -429,6 +478,8 @@ function currentTaskCancellationAuthorization(
     ":project_id": context.projectId,
     ":lifecycle_id": row.lifecycleId,
     ":scope": `${milestoneId}/${sliceId}/${taskId} cancellation`,
+    ":plan_reconciliation_scope": `task:${milestoneId}/${sliceId}/${taskId}`,
+    ":plan_reconciliation_requirement": `plan-omission:${milestoneId}/${sliceId}/${taskId}`,
     ":completed_at": completedAt,
   }) as unknown as CancellationAuthorizationRow[];
   if (authorizations.length === 0) {
@@ -442,7 +493,7 @@ function currentTaskCancellationAuthorization(
     taskId,
     lifecycleId: row.lifecycleId!,
     waiverId: authorization.waiver_id,
-    dispositionId: authorization.disposition_id!,
+    dispositionId: authorization.disposition_id,
   }));
 }
 
@@ -562,19 +613,6 @@ export function completeMilestoneHierarchy(
     );
   }
 
-  // Closeout is the compatibility adoption path for work completed before
-  // canonical lifecycle authority existed. Existing lifecycles are preserved,
-  // and every non-completed or mismatched descendant still fails below.
-  for (const row of [...loadSlices(context, milestoneId), ...loadTasks(context, milestoneId)]) {
-    if (row.lifecycleId || normalizeLegacyLifecycleStatus(row.legacyStatus) !== "completed") continue;
-    adoptLifecycleIfMissing(context, {
-      itemKind: row.itemKind,
-      milestoneId,
-      ...(row.sliceId ? { sliceId: row.sliceId } : {}),
-      ...(row.taskId ? { taskId: row.taskId } : {}),
-      lifecycleStatus: "completed",
-    });
-  }
   const slices = loadSlices(context, milestoneId);
   if (slices.length === 0) {
     throw new MilestoneLifecycleValidationError(`no slices found for Milestone ${milestoneId}`);
@@ -696,6 +734,7 @@ export function reopenMilestoneHierarchy(
     : revokeCancellationWaivers(context, milestoneId, reason, reopenedAt);
   const reopenedTaskIds: string[] = [];
   const reopenedSliceIds: string[] = [];
+  const invalidatedEvidence: Record<string, InvalidatedEvidence> = {};
   if (!keepCompleted) {
   for (const task of tasks) {
     const taskId = task.taskId!;
@@ -751,9 +790,16 @@ export function reopenMilestoneHierarchy(
       throw new Error(`Milestone reopen must update Slice ${sliceId}`);
     }
     ensurePendingSliceQ8(context, { milestoneId, sliceId });
+    invalidatedEvidence[sliceId] = invalidateSliceEvidence(context, { milestoneId, sliceId });
     reopenedSliceIds.push(sliceId);
   }
   }
+  // A reopened Milestone must be validated again before it closes: the stored
+  // validation verdict judged the Milestone as it was.
+  invalidatedEvidence["milestone"] = removeInvalidatedRows(
+    [["assessments", "milestone_id = :milestone_id AND scope = 'milestone-validation'"]],
+    { ":milestone_id": milestoneId },
+  );
 
   const milestoneLifecycle = adoptOrTransitionLifecycle(context, {
     itemKind: "milestone",
@@ -796,6 +842,7 @@ export function reopenMilestoneHierarchy(
     reopenedSliceIds,
     reopenedTaskIds,
     ...waiverResult,
+    invalidatedEvidence,
     shadows,
   };
 }

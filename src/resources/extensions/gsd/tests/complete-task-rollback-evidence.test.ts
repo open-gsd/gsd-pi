@@ -12,10 +12,13 @@ import {
   _getAdapter,
   insertMilestone,
   insertSlice,
+  insertTask,
 } from "../gsd-db.js";
 import { clearPathCache } from "../paths.js";
 import { clearParseCache } from "../files.js";
 import { _setManagedMutationBoundaryForTest } from "../atomic-write.js";
+import { renderAllFromDb } from "../markdown-renderer.js";
+import { repairProjectionDrift } from "../projection-worker.js";
 
 function makeTmpBase(): string {
   const base = join(tmpdir(), `gsd-ct-rollback-${randomUUID()}`);
@@ -59,6 +62,7 @@ describe("complete-task projection failures preserve committed DB completion", (
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test task", status: "pending" });
 
     // Write a minimal slice plan so renderPlanCheckboxes doesn't error
     writeFileSync(
@@ -81,6 +85,7 @@ describe("complete-task projection failures preserve committed DB completion", (
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test task", status: "pending" });
 
     const planPath = join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md");
     writeFileSync(
@@ -117,6 +122,7 @@ describe("complete-task projection failures preserve committed DB completion", (
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001" });
     insertSlice({ id: "S01", milestoneId: "M001" });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Test task", status: "pending" });
 
     // Replace the tasks directory with a file so disk write fails (cross-platform)
     const tasksDir = join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
@@ -124,11 +130,8 @@ describe("complete-task projection failures preserve committed DB completion", (
     writeFileSync(tasksDir, "not-a-directory");
 
     const result = await handleCompleteTask(VALID_PARAMS, base);
-    assert.ok("error" in result, "expected stale projection error when projection write fails");
-    assert.ok(
-      (result as { error: string }).error.includes("completion remains committed"),
-      `error should report committed completion; got: ${"error" in result ? result.error : ""}`,
-    );
+    assert.ok(!("error" in result), "a projection write failure after commit is not a tool error");
+    assert.equal(result.stale, true, "the committed receipt carries the stale flag");
 
     const adapter = _getAdapter()!;
     const task = adapter.prepare(
@@ -141,5 +144,16 @@ describe("complete-task projection failures preserve committed DB completion", (
       `SELECT * FROM verification_evidence WHERE task_id = 'T01' AND slice_id = 'S01' AND milestone_id = 'M001'`,
     ).all();
     assert.equal(evidenceRows.length, 2, "verification evidence should remain committed for projection repair");
+
+    // This completion path enqueues no Projection Work, so the Projection
+    // Worker drift repair is what renders the stale file again.
+    rmSync(tasksDir);
+    const summaryPath = join(tasksDir, "T01-SUMMARY.md");
+    const repair = await repairProjectionDrift(base);
+    assert.deepEqual(repair.errors, []);
+    const repairedBytes = readFileSync(summaryPath, "utf-8");
+    rmSync(summaryPath);
+    assert.deepEqual((await renderAllFromDb(base)).errors, []);
+    assert.equal(repairedBytes, readFileSync(summaryPath, "utf-8"), "repair bytes equal a clean render");
   });
 });

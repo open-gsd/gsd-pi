@@ -47,6 +47,7 @@ To call this milestone complete, we must prove:
 **Rationale:** {{rationale}}
 
 **Alternatives Considered:**
+
 - {{alternative}} — {{whyNotChosen}}
 
 ---

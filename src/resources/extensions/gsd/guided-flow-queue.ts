@@ -14,21 +14,22 @@ import {
 } from "./command-feedback.js";
 import { setQueuePhaseActive } from "./index.js";
 import { loadFile } from "./files.js";
+import { milestoneNarrative } from "./auto-prompts.js";
 import { loadPrompt, inlineTemplate } from "./prompt-loader.js";
 import { deriveState } from "./state.js";
 import { invalidateAllCaches } from "./cache.js";
 import {
-  gsdRoot, resolveMilestoneFile, resolveSliceFile,
+  gsdRoot, resolveSliceFile,
   resolveGsdRootFile, relGsdRootFile, relSliceFile,
-  relMilestoneFile,
 } from "./paths.js";
-import { readFileSync, existsSync } from "node:fs";
-import { atomicWriteSync } from "./atomic-write.js";
+import { existsSync } from "node:fs";
 import { nativeAddPaths, nativeCommit } from "./native-git-bridge.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
-import { loadQueueOrder, sortByQueueOrder, saveQueueOrder } from "./queue-order.js";
+import { loadQueueOrder, sortByQueueOrder, reorderMilestones } from "./queue-order.js";
 import { findMilestoneIds, nextMilestoneId } from "./milestone-ids.js";
+import { readListedMilestoneIds } from "./db/lifecycle-read.js";
 import { isFutureMilestoneStatus } from "./status-guards.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 const QUEUE_ARTIFACT_EXCERPT_MAX_CHARS = 20_000;
 const QUEUE_EXISTING_MILESTONES_CONTEXT_MAX_CHARS = 120_000;
@@ -64,7 +65,7 @@ export async function showQueue(
   }
 
   const state = await deriveState(basePath);
-  const milestoneIds = findMilestoneIds(basePath);
+  const milestoneIds = readListedMilestoneIds();
 
   if (milestoneIds.length === 0) {
     ctx.ui.notify("No milestones exist yet. Run /gsd to create the first one.", "warning");
@@ -143,28 +144,25 @@ export async function handleQueueReorder(
     return;
   }
 
-  // Save the new order
-  saveQueueOrder(basePath, result.order);
-  invalidateAllCaches();
-
-  // Remove conflicting depends_on entries from CONTEXT.md files
-  if (result.depsToRemove.length > 0) {
-    removeDependsOnFromContextFiles(basePath, result.depsToRemove);
-  }
-
-  // Sync PROJECT.md milestone sequence table
-  syncProjectMdSequence(basePath, state.registry, result.order);
-
-  // Commit the change
-  const filesToAdd = [".gsd/QUEUE-ORDER.json", ".gsd/PROJECT.md"];
-  for (const r of result.depsToRemove) {
-    filesToAdd.push(`.gsd/milestones/${r.milestone}/${r.milestone}-CONTEXT.md`);
-  }
+  // One Domain Operation writes the order and drops the conflicting
+  // depends_on edges; QUEUE-ORDER.json is rendered from the committed order.
   try {
-    nativeAddPaths(basePath, filesToAdd);
+    for (const warning of reorderMilestones(basePath, result.order, result.depsToRemove).warnings) {
+      ctx.ui.notify(warning, "warning");
+    }
+  } catch (err) {
+    ctx.ui.notify(`Queue reorder failed: ${(err as Error).message}`, "error");
+    return;
+  }
+  invalidateAllCaches();
+  // The order decides the registry and the active milestone in STATE.md.
+  await renderStateProjection(basePath);
+
+  try {
+    nativeAddPaths(basePath, [".gsd/QUEUE-ORDER.json"]);
     nativeCommit(basePath, "docs: reorder queue");
   } catch {
-    // Commit may fail if nothing changed or git hooks block — non-fatal
+    // Commit may fail if nothing changed or hooks block — non-fatal
   }
 
   const depInfo = result.depsToRemove.length > 0
@@ -181,17 +179,15 @@ export async function showQueueAdd(
   basePath: string,
   state: Awaited<ReturnType<typeof deriveState>>,
 ): Promise<void> {
-  const milestoneIds = findMilestoneIds(basePath);
-
   // ── Build existing milestones context for the prompt ────────────────
-  const existingContext = await buildExistingMilestonesContext(basePath, milestoneIds, state);
+  const existingContext = await buildExistingMilestonesContext(basePath, readListedMilestoneIds(), state);
 
   // ── Determine next milestone ID ─────────────────────────────────────
   // Note: the LLM will use the gsd_milestone_generate_id tool to get IDs
   // at creation time, but we still mention the next ID in the preamble
   // for context about where the sequence is.
   const uniqueEnabled = !!loadEffectiveGSDPreferences()?.preferences?.unique_milestone_ids;
-  const nextId = nextMilestoneId(milestoneIds, uniqueEnabled);
+  const nextId = nextMilestoneId(findMilestoneIds(basePath), uniqueEnabled);
 
   // ── Build preamble ──────────────────────────────────────────────────
   const activePart = state.activeMilestone
@@ -280,39 +276,25 @@ export async function buildExistingMilestonesContext(
     const parts: string[] = [];
     parts.push(`### ${mid}: ${title}\n**Status:** ${status}`);
 
-    // Include context file — this is the primary content for understanding scope
-    const contextFile = resolveMilestoneFile(basePath, mid, "CONTEXT");
-    if (contextFile) {
-      const content = await loadFile(contextFile);
-      if (content) {
-        parts.push(
-          `\n**Context:**\n${summarizeArtifactForQueue(content, relMilestoneFile(basePath, mid, "CONTEXT"))}`,
-        );
-      }
+    // Include the saved context — this is the primary content for understanding scope.
+    // Narrative comes from artifact rows, never from the projection files.
+    const context = milestoneNarrative(basePath, mid, "CONTEXT");
+    if (context.content) {
+      parts.push(`\n**Context:**\n${summarizeArtifactForQueue(context.content, context.relPath)}`);
     } else {
-      // No full CONTEXT.md — check for CONTEXT-DRAFT.md (draft seed from prior discussion)
-      const draftFile = resolveMilestoneFile(basePath, mid, "CONTEXT-DRAFT");
-      if (draftFile) {
-        const draftContent = await loadFile(draftFile);
-        if (draftContent) {
-          parts.push(
-            `\n**Draft context available:**\n${summarizeArtifactForQueue(draftContent, relMilestoneFile(basePath, mid, "CONTEXT-DRAFT"))}`,
-          );
-        }
+      // No full CONTEXT — check for a CONTEXT-DRAFT (draft seed from prior discussion)
+      const draft = milestoneNarrative(basePath, mid, "CONTEXT-DRAFT");
+      if (draft.content) {
+        parts.push(`\n**Draft context available:**\n${summarizeArtifactForQueue(draft.content, draft.relPath)}`);
       }
     }
 
     // For active/pending/parked milestones, include the roadmap if it exists
     // (shows what's planned but not yet built)
     if (status === "active" || isFutureMilestoneStatus(status) || status === "parked") {
-      const roadmapFile = resolveMilestoneFile(basePath, mid, "ROADMAP");
-      if (roadmapFile) {
-        const content = await loadFile(roadmapFile);
-        if (content) {
-          parts.push(
-            `\n**Roadmap:**\n${summarizeArtifactForQueue(content, relMilestoneFile(basePath, mid, "ROADMAP"))}`,
-          );
-        }
+      const roadmap = milestoneNarrative(basePath, mid, "ROADMAP");
+      if (roadmap.content) {
+        parts.push(`\n**Roadmap:**\n${summarizeArtifactForQueue(roadmap.content, roadmap.relPath)}`);
       }
     }
 
@@ -403,138 +385,4 @@ function compactSectionForQueueBudget(section: string): string {
   }
 
   return compact.join("\n");
-}
-
-// ─── Internal Helpers ───────────────────────────────────────────────────────
-
-/**
- * Remove specific depends_on entries from milestone CONTEXT.md frontmatter.
- */
-function removeDependsOnFromContextFiles(
-  basePath: string,
-  depsToRemove: Array<{ milestone: string; dep: string }>,
-): void {
-  // Group removals by milestone
-  const byMilestone = new Map<string, string[]>();
-  for (const { milestone, dep } of depsToRemove) {
-    const existing = byMilestone.get(milestone) ?? [];
-    existing.push(dep);
-    byMilestone.set(milestone, existing);
-  }
-
-  for (const [mid, depsToRemoveForMid] of byMilestone) {
-    const contextFile = resolveMilestoneFile(basePath, mid, "CONTEXT");
-    if (!contextFile || !existsSync(contextFile)) continue;
-
-    const content = readFileSync(contextFile, "utf-8");
-
-    // Parse frontmatter
-    const trimmed = content.trimStart();
-    if (!trimmed.startsWith("---")) continue;
-    const afterFirst = trimmed.indexOf("\n");
-    if (afterFirst === -1) continue;
-    const rest = trimmed.slice(afterFirst + 1);
-    const endIdx = rest.indexOf("\n---");
-    if (endIdx === -1) continue;
-
-    const fmText = rest.slice(0, endIdx);
-    const body = rest.slice(endIdx + 4);
-
-    // Parse depends_on line(s)
-    const fmLines = fmText.split("\n");
-    const removeSet = new Set(depsToRemoveForMid.map(d => d.toUpperCase()));
-
-    // Handle inline format: depends_on: [M009, M010]
-    const inlineMatch = fmLines.findIndex(l => /^depends_on:\s*\[/.test(l));
-    if (inlineMatch >= 0) {
-      const line = fmLines[inlineMatch];
-      const inner = line.match(/\[([^\]]*)\]/);
-      if (inner) {
-        const remaining = inner[1]
-          .split(",")
-          .map(s => s.trim())
-          .filter(s => s && !removeSet.has(s.toUpperCase()));
-        if (remaining.length === 0) {
-          fmLines.splice(inlineMatch, 1);
-        } else {
-          fmLines[inlineMatch] = `depends_on: [${remaining.join(", ")}]`;
-        }
-      }
-    } else {
-      // Handle multi-line format
-      const keyIdx = fmLines.findIndex(l => /^depends_on:\s*$/.test(l));
-      if (keyIdx >= 0) {
-        let end = keyIdx + 1;
-        while (end < fmLines.length && /^\s+-\s/.test(fmLines[end])) {
-          const val = fmLines[end].replace(/^\s+-\s*/, "").trim().toUpperCase();
-          if (removeSet.has(val)) {
-            fmLines.splice(end, 1);
-          } else {
-            end++;
-          }
-        }
-        if (end === keyIdx + 1 || (end <= fmLines.length && !/^\s+-\s/.test(fmLines[keyIdx + 1] ?? ""))) {
-          fmLines.splice(keyIdx, 1);
-        }
-      }
-    }
-
-    // Rebuild file
-    const newFm = fmLines.filter(l => l !== undefined).join("\n");
-    const newContent = newFm.trim()
-      ? `---\n${newFm}\n---${body}`
-      : body.replace(/^\n+/, "");
-    atomicWriteSync(contextFile, newContent, "utf-8");
-  }
-}
-
-export const _removeDependsOnFromContextFilesForTest = removeDependsOnFromContextFiles;
-
-function syncProjectMdSequence(
-  basePath: string,
-  registry: Array<{ id: string; title: string; status: string }>,
-  newOrder: string[],
-): void {
-  const projectPath = resolveGsdRootFile(basePath, "PROJECT");
-  if (!projectPath || !existsSync(projectPath)) return;
-
-  const content = readFileSync(projectPath, "utf-8");
-  const lines = content.split("\n");
-
-  const headerIdx = lines.findIndex(l => /^##\s+Milestone Sequence/.test(l));
-  if (headerIdx < 0) return;
-
-  let tableStart = headerIdx + 1;
-  while (tableStart < lines.length && !lines[tableStart].startsWith("|")) tableStart++;
-  if (tableStart >= lines.length) return;
-
-  let tableEnd = tableStart + 1;
-  while (tableEnd < lines.length && lines[tableEnd].startsWith("|")) tableEnd++;
-
-  const registryMap = new Map(registry.map(m => [m.id, m]));
-  const completedSet = new Set(registry.filter(m => m.status === "complete").map(m => m.id));
-
-  const newRows: string[] = [];
-  for (const m of registry) {
-    if (m.status === "complete") {
-      newRows.push(`| ${m.id} | ${m.title} | ✅ Complete |`);
-    }
-  }
-  let isFirst = true;
-  for (const id of newOrder) {
-    if (completedSet.has(id)) continue;
-    const m = registryMap.get(id);
-    if (!m) continue;
-    const status = isFirst ? "📋 Next" : "📋 Queued";
-    newRows.push(`| ${m.id} | ${m.title} | ${status} |`);
-    isFirst = false;
-  }
-
-  const headerLine = lines[tableStart];
-  const separatorLine = lines[tableStart + 1];
-  const newTable = [headerLine, separatorLine, ...newRows];
-  lines.splice(tableStart, tableEnd - tableStart, ...newTable);
-  // Atomic write: tmp+rename avoids a torn PROJECT.md appearing dirty in
-  // another worktree's working tree during a concurrent /gsd auto merge.
-  atomicWriteSync(projectPath, lines.join("\n"), "utf-8");
 }

@@ -2,7 +2,7 @@
 // File Purpose: Executable contracts for evidence-backed atomic Slice completion.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -20,12 +20,14 @@ import {
   appendKernelCheckpoint,
 } from "../db/writers/lifecycle-commands.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
+import { applyLifecycleBackfill } from "../lifecycle-backfill-domain-operation.ts";
 import * as sliceLifecycle from "../slice-lifecycle-domain-operation.ts";
 import {
   claimTaskAttempt,
   settleTaskAttempt,
 } from "../task-execution-domain-operation.ts";
 import { recordTaskTechnicalVerdict } from "../task-verification-domain-operation.ts";
+import { applyImport, emptyPreview, forwardRepairRecreate, planFor } from "./helpers/legacy-import-writer-harness.ts";
 import {
   grantTaskWaiver,
   recordTaskRequirementDisposition,
@@ -192,10 +194,11 @@ function insertClaimedDispatch(taskId: string): number {
   return Number(row("SELECT MAX(id) AS id FROM unit_dispatches").id);
 }
 
-function makeBase(): void {
+function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-slice-completion-domain-"));
   tempDirs.add(base);
-  assert.equal(openDatabase(join(base, "gsd.db")), true);
+  mkdirSync(join(base, ".gsd"));
+  assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
   db().exec(`
     INSERT INTO milestones (id, title, status, created_at)
     VALUES ('M001', 'Slice lifecycle', 'planned', '2026-07-14T00:00:00.000Z');
@@ -236,6 +239,7 @@ function makeBase(): void {
       });
     }
   });
+  return base;
 }
 
 function claimTask(taskId = "T01"): string {
@@ -273,7 +277,7 @@ function finishTaskWithOptionalEvidence(includeVerdict: boolean, authorizeCancel
         endedAt: "2026-07-14T00:01:01.000Z",
         exitCode: 0,
         observation: "passed",
-        durableOutputRef: "db://fixture/T01/verification",
+        durableOutputRef: `db://host-verification/${attemptId}`,
         environment: { runner: "node-test", fixture: "slice-completion" },
       },
     });
@@ -447,9 +451,29 @@ test("Slice completion atomically publishes normalized closeout, Q8, lifecycle, 
   assert.equal(event.event_type, "slice.completed");
   assert.equal(event.entity_type, "slice");
   assert.equal(event.entity_id, "M001/S01");
-  const eventPayload = JSON.parse(String(event.payload_json)) as { closeout: unknown; completedAt: unknown };
+  const eventPayload = JSON.parse(String(event.payload_json)) as {
+    closeout: unknown;
+    completedAt: unknown;
+    testedSourceSetHash: unknown;
+  };
   assert.deepEqual(eventPayload.closeout, input.closeout);
   assert.equal(eventPayload.completedAt, result.completedAt);
+  // One hash binds the Slice to the tested source revision of each of its Tasks.
+  const sourceProofs = result.proofs as Parameters<typeof sliceLifecycle.testedSourceSetHash>[0];
+  assert.ok(sourceProofs.length > 0);
+  assert.equal(eventPayload.testedSourceSetHash, sliceLifecycle.testedSourceSetHash(sourceProofs));
+  assert.match(String(eventPayload.testedSourceSetHash), /^sha256:[0-9a-f]{64}$/);
+  assert.notEqual(
+    sliceLifecycle.testedSourceSetHash(sourceProofs.map((proof) => ({ ...proof, testedSourceRevision: "sha256:another-revision" }))),
+    eventPayload.testedSourceSetHash,
+    "a Task verified on another revision gives another source set hash",
+  );
+  const second = { ...sourceProofs[0]!, taskId: "T02", testedSourceRevision: "sha256:second-task" };
+  assert.equal(
+    sliceLifecycle.testedSourceSetHash([second, sourceProofs[0]!]),
+    sliceLifecycle.testedSourceSetHash([sourceProofs[0]!, second]),
+    "the hash does not depend on Task order",
+  );
   assert.deepEqual(row(`
     SELECT projection_key, projection_kind
     FROM workflow_projection_work WHERE enqueue_operation_id = '${String(result.operationId)}'
@@ -521,6 +545,220 @@ test("Slice completion rejects a cancelled child without a current authorized Wa
     /waiver|authorized|omission/i,
   );
   assert.deepEqual(durableSnapshot(), before, "unwaived-child rejection must leave exact zero residue");
+});
+
+test("Slice completion accepts the legacy-attested Waiver of a backfilled skipped child", () => {
+  const base = makeBase();
+  // T03 is an old row: legacy 'skipped', no lifecycle row and no Waiver.
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Skipped before lifecycle authority', 'skipped', 3)
+  `);
+  finishTaskWithOptionalEvidence(true);
+  assert.throws(
+    () => completeSlice(validInput("slice-complete/unadopted-skipped-child")),
+    /Task T03 is missing canonical lifecycle authority; run \/gsd db adopt --apply/,
+  );
+
+  applyLifecycleBackfill(base);
+  const result = completeSlice(validInput("slice-complete/backfilled-skipped-child"));
+
+  assert.equal(result.status, "committed");
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion accepts a child adopted as cancelled with no Waiver once the backfill grants it", () => {
+  const base = makeBase();
+  // T03 is adopted as cancelled with no Waiver, as an Import Application of an earlier build left it.
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Skipped in the legacy source', 'skipped', 3)
+  `);
+  executeAtFence("test.earlier-build-import", "fixture/slice-completion/earlier-build-import", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T03", lifecycleStatus: "cancelled",
+    });
+  });
+  finishTaskWithOptionalEvidence(true);
+  assert.throws(
+    () => completeSlice(validInput("slice-complete/earlier-build-cancelled-child")),
+    /waiver|authorized|omission/i,
+  );
+
+  assert.equal(applyLifecycleBackfill(base).waivers, 1);
+  const result = completeSlice(validInput("slice-complete/backfill-waived-cancelled-child"));
+
+  assert.equal(result.status, "committed");
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion accepts the legacy-attested Waiver of a skipped child adopted by an Import Application", () => {
+  makeBase();
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Skipped in the legacy source', 'skipped', 3)
+  `);
+  finishTaskWithOptionalEvidence(true);
+  const fence = readDomainOperationFence();
+  const artifact = emptyPreview(fence.revision, fence.authorityEpoch);
+  applyImport(artifact, planFor(artifact, [{
+    action: "adopt-lifecycle",
+    lifecycleAction: "create",
+    targetKind: "task-lifecycle",
+    targetKey: "M001/S01/T03",
+    itemKind: "task",
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T03",
+    lifecycleStatus: "cancelled",
+    changeIds: ["adopt-T03"],
+  }]));
+
+  const result = completeSlice(validInput("slice-complete/import-skipped-child"));
+
+  assert.equal(result.status, "committed");
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion accepts a completed child adopted by an Import Application as unverified legacy", () => {
+  makeBase();
+  // T03 is complete in the legacy source only: no Attempt, verdict or evidence.
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Completed in the legacy source', 'complete', 3)
+  `);
+  finishTaskWithOptionalEvidence(true);
+  const fence = readDomainOperationFence();
+  const artifact = emptyPreview(fence.revision, fence.authorityEpoch);
+  applyImport(artifact, planFor(artifact, [{
+    action: "adopt-lifecycle",
+    lifecycleAction: "create",
+    targetKind: "task-lifecycle",
+    targetKey: "M001/S01/T03",
+    itemKind: "task",
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T03",
+    lifecycleStatus: "completed",
+    changeIds: ["adopt-T03"],
+  }]));
+
+  const result = completeSlice(validInput("slice-complete/import-completed-child"));
+
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.completedTaskIds, ["T01", "T03"]);
+  // Only new work carries a completion proof.
+  assert.deepEqual((result.proofs as Array<{ taskId: string }>).map((proof) => proof.taskId), ["T01"]);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion accepts a skipped child and a completed child that a Forward Repair put back", () => {
+  makeBase();
+  finishTaskWithOptionalEvidence(true);
+  const task = (id: string, values: Record<string, string | number | null>) => ({
+    rowSet: "tasks" as const,
+    identity: { milestone_id: "M001", slice_id: "S01", id },
+    values: { milestone_id: "M001", slice_id: "S01", id, ...values },
+  });
+  forwardRepairRecreate([
+    task("T03", { title: "Skipped before the import", status: "skipped", sequence: 3 }),
+    task("T04", {
+      title: "Completed before the import",
+      status: "complete",
+      sequence: 4,
+      completed_at: "2026-07-13T00:00:00.000Z",
+      full_summary_md: "Task summary",
+      verification_result: "passed",
+    }),
+  ]);
+  assert.deepEqual(
+    db().prepare(`
+      SELECT lifecycle.task_id, lifecycle.lifecycle_status, operation.operation_type
+      FROM workflow_item_lifecycles lifecycle
+      JOIN workflow_operations operation ON operation.operation_id = lifecycle.last_operation_id
+      WHERE lifecycle.item_kind = 'task' AND lifecycle.task_id IN ('T03', 'T04')
+      ORDER BY lifecycle.task_id
+    `).all().map((entry) => ({ ...entry })),
+    [
+      { task_id: "T03", lifecycle_status: "cancelled", operation_type: "import.forward_repair" },
+      { task_id: "T04", lifecycle_status: "completed", operation_type: "import.forward_repair" },
+    ],
+    "the repair adopts each row it puts back in its own Domain Operation",
+  );
+
+  const result = completeSlice(validInput("slice-complete/forward-repair-recreated-children"));
+
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.completedTaskIds, ["T01", "T04"]);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion accepts a completed child adopted by the lifecycle backfill as unverified legacy", () => {
+  const base = makeBase();
+  // T03 is an old row: legacy 'complete' with completion evidence, no lifecycle row, Attempt or verdict.
+  db().exec(`
+    INSERT INTO tasks (
+      milestone_id, slice_id, id, title, status, sequence,
+      completed_at, full_summary_md, verification_result
+    ) VALUES (
+      'M001', 'S01', 'T03', 'Completed before lifecycle authority', 'complete', 3,
+      '2026-07-13T00:00:00.000Z', 'Task summary', 'passed'
+    )
+  `);
+  applyLifecycleBackfill(base);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'task' AND milestone_id = 'M001' AND slice_id = 'S01' AND task_id = 'T03'
+  `).lifecycle_status, "completed");
+  finishTaskWithOptionalEvidence(true);
+
+  const result = completeSlice(validInput("slice-complete/backfilled-completed-child"));
+
+  assert.equal(result.status, "committed");
+  assert.deepEqual(result.completedTaskIds, ["T01", "T03"]);
+  // Only new work carries a completion proof.
+  assert.deepEqual((result.proofs as Array<{ taskId: string }>).map((proof) => proof.taskId), ["T01"]);
+  assert.equal(row(`
+    SELECT lifecycle_status FROM workflow_item_lifecycles
+    WHERE item_kind = 'slice' AND milestone_id = 'M001' AND slice_id = 'S01'
+  `).lifecycle_status, "completed");
+});
+
+test("Slice completion rejects a completed child adopted with no evidence by an operation that is not an import or the backfill", () => {
+  makeBase();
+  db().exec(`
+    INSERT INTO tasks (milestone_id, slice_id, id, title, status, sequence)
+    VALUES ('M001', 'S01', 'T03', 'Completed with no evidence', 'complete', 3)
+  `);
+  // Same lifecycle row as a legacy adoption (completed at state version 0), but from another operation.
+  executeAtFence("test.unproven-adoption", "fixture/slice-completion/unproven-adoption", (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T03", lifecycleStatus: "completed",
+    });
+  });
+  finishTaskWithOptionalEvidence(true);
+  const before = durableSnapshot();
+
+  assert.throws(
+    () => completeSlice(validInput("slice-complete/unproven-adopted-child")),
+    /Task T03 lacks current passing Technical Verdict and verification evidence/,
+  );
+  assert.deepEqual(durableSnapshot(), before, "unproven-child rejection must leave exact zero residue");
 });
 
 test("Slice completion self-heals a missing Q8 gate (#1679)", () => {

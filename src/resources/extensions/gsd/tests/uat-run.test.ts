@@ -10,33 +10,47 @@ import {
   type UatResultSaveParams,
 } from "../uat-run.ts";
 import { buildRunUatPresentationForType } from "../tool-presentation-plan.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
+import { recordExecRun } from "../db/writers/exec-runs.ts";
 
 type EvidenceInput = UatEvidenceRef | { kind: string; ref: string };
 
+/** A project root with an open workflow database: exec evidence is its exec_runs rows. */
 function makeTmpBase(): string {
-  return mkdtempSync(join(tmpdir(), "gsd-uat-run-"));
+  const base = mkdtempSync(join(tmpdir(), "gsd-uat-run-"));
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  return base;
 }
 
 function cleanup(base: string): void {
+  closeDatabase();
   try { rmSync(base, { recursive: true, force: true }); } catch { /* swallow */ }
 }
 
+/** Record a gsd_uat_exec run of M001/S01 as the host does when the command ends. */
 function writeUatExecEvidence(
   base: string,
-  outcome: { exit_code?: number; signal?: string | null; timed_out?: boolean; aborted?: boolean },
+  outcome: { exit_code: number | null; signal: string | null; timed_out: boolean; aborted: boolean },
   id = "fresh-uat-evidence",
 ): string {
-  const execDir = join(base, ".gsd", "exec");
-  mkdirSync(execDir, { recursive: true });
-  writeFileSync(
-    join(execDir, `${id}.meta.json`),
-    JSON.stringify({
-      id,
-      ...outcome,
-      metadata: { kind: "uat_exec" },
-    }),
-    "utf-8",
-  );
+  recordExecRun({
+    kind: "uat_exec",
+    milestoneId: "M001",
+    sliceId: "S01",
+    checkId: "UAT-01",
+    id,
+    runtime: "bash",
+    command: "node check.js",
+    cwd: base,
+    exit_code: outcome.exit_code,
+    signal: outcome.signal,
+    timedOut: outcome.timed_out,
+    aborted: outcome.aborted,
+    started_at: new Date().toISOString(),
+    duration_ms: 1,
+    output_hash: "sha256:test",
+  });
   return id;
 }
 
@@ -245,12 +259,12 @@ test("prepareUatRun rejects a PASS check whose gsd_uat_exec evidence was aborted
   assert.match(result.error.message, /aborted=true/);
 });
 
-test("prepareUatRun rejects a PASS check whose gsd_uat_exec evidence is missing exit_code", (t) => {
+test("prepareUatRun rejects a PASS check whose gsd_uat_exec evidence has no exit code", (t) => {
   const base = makeTmpBase();
   t.after(() => cleanup(base));
   const evidenceId = writeUatExecEvidence(
     base,
-    { signal: null, timed_out: false, aborted: false },
+    { exit_code: null, signal: null, timed_out: false, aborted: false },
     "exit-code-less-uat-evidence",
   );
   const result = prepareUatRun(base, buildParams([
@@ -261,27 +275,7 @@ test("prepareUatRun rejects a PASS check whose gsd_uat_exec evidence is missing 
   if (result.ok) assert.fail("expected outcome-less evidence to be rejected");
   assert.equal(result.error.code, "invalid_evidence");
   assert.match(result.error.message, /check UAT-01/);
-  assert.match(result.error.message, /exit_code=undefined/);
-});
-
-test("prepareUatRun rejects a PASS check whose gsd_uat_exec evidence is missing signal and timed_out", (t) => {
-  const base = makeTmpBase();
-  t.after(() => cleanup(base));
-  const evidenceId = writeUatExecEvidence(
-    base,
-    { exit_code: 0 },
-    "partial-outcome-uat-evidence",
-  );
-  const result = prepareUatRun(base, buildParams([
-    { kind: "gsd_uat_exec", ref: evidenceId },
-  ]));
-
-  assert.equal(result.ok, false);
-  if (result.ok) assert.fail("expected outcome-less evidence to be rejected");
-  assert.equal(result.error.code, "invalid_evidence");
-  assert.match(result.error.message, /check UAT-01/);
-  assert.match(result.error.message, /signal=undefined/);
-  assert.match(result.error.message, /timed_out=undefined/);
+  assert.match(result.error.message, /exit_code=null/);
 });
 
 test("prepareUatRun accepts a PASS check whose gsd_uat_exec evidence recorded a successful execution", (t) => {

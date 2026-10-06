@@ -24,11 +24,8 @@ import {
 	resolveCtxCwd,
 	resolveTaskRecoveryResumeBasePath,
 	resolveWorkflowToolBasePath,
+	runInPiToolSession,
 } from "./dynamic-tools.js";
-import {
-	loadWriteGateSnapshot,
-	shouldBlockRootArtifactSaveInSnapshot,
-} from "./write-gate.js";
 
 async function loadWorkflowExecutors(): Promise<
 	typeof import("../tools/workflow-tool-executors.js")
@@ -82,7 +79,12 @@ function registerAlias(
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- toolDef shape matches ToolDefinition but varies by schema
-function registerWorkflowTool(pi: ExtensionAPI, toolDef: any): void {
+function registerWorkflowTool(pi: ExtensionAPI, definition: any): void {
+	const toolDef = {
+		...definition,
+		execute: (...args: any[]) =>
+			runInPiToolSession(args[4], () => definition.execute(...args)),
+	};
 	pi.registerTool(toolDef);
 	if (process.env.GSD_ADVERTISE_TOOL_ALIASES !== "1") return; // canonical-only model surface (see plan 035)
 	for (const alias of aliasesForWorkflowTool(toolDef.name)) {
@@ -90,29 +92,12 @@ function registerWorkflowTool(pi: ExtensionAPI, toolDef: any): void {
 	}
 }
 
-function requirementRootWriteGuard(
-	operation: string,
-	basePath: string,
-): {
-	content: Array<{ type: "text"; text: string }>;
-	details: Record<string, unknown>;
-	isError: true;
-} | null {
-	const guard = shouldBlockRootArtifactSaveInSnapshot(
-		loadWriteGateSnapshot(basePath),
-		"REQUIREMENTS",
-	);
-	if (!guard.block) return null;
-	return {
-		content: [
-			{
-				type: "text",
-				text: `Error ${operation} requirement: ${guard.reason ?? "requirements write blocked"}`,
-			},
-		],
-		details: { operation, error: "root_artifact_write_blocked" },
-		isError: true,
-	};
+function rootArtifactWriteBlock(
+	err: unknown,
+): { details: { error: "root_artifact_write_blocked" } } | null {
+	return (err as { code?: unknown } | null)?.code === "root_artifact_write_blocked"
+		? { details: { error: "root_artifact_write_blocked" } }
+		: null;
 }
 
 /**
@@ -142,6 +127,100 @@ function formatToolErrorText(result: any, details: any): string {
 	return typeof message === "string" && message.startsWith("Error")
 		? message
 		: `Error: ${message}`;
+}
+
+// #2445 — decision rows must be model-visible: ToolResultMessage carries
+// `content` only, so choice/rationale hidden in `details` never reach the
+// model. These formatters render the full row (get) and one compact line per
+// row (list). Kept textually identical to the MCP mirror in
+// packages/mcp-server/src/workflow-tools.ts (surface drift prevention);
+// canonical-read-tools.test.ts asserts both surfaces agree.
+const DECISION_LIST_RATIONALE_EXCERPT_CHARS = 120;
+
+type DecisionRowLike = {
+	id: unknown;
+	decision: unknown;
+	choice?: unknown;
+	rationale?: unknown;
+	scope?: unknown;
+	when_context?: unknown;
+	made_by?: unknown;
+	revisable?: unknown;
+	source?: unknown;
+	superseded_by?: unknown;
+	impacts?: unknown;
+};
+
+function decisionField(value: unknown): string {
+	return value === null || value === undefined ? "" : String(value);
+}
+
+// List lines must stay one physical line per row (#2445): collapse newlines
+// and whitespace runs that free-text fields can contain. get keeps original
+// values for full-row fidelity.
+function decisionListField(value: unknown): string {
+	return decisionField(value).replace(/\s+/g, " ").trim();
+}
+
+function decisionImpactRows(decision: DecisionRowLike): Array<Record<string, unknown>> {
+	return Array.isArray(decision.impacts)
+		? decision.impacts.filter(
+				(impact): impact is Record<string, unknown> =>
+					impact !== null && typeof impact === "object",
+			)
+		: [];
+}
+
+function decisionImpactTarget(impact: Record<string, unknown>): string {
+	const triple = [impact.milestone_id, impact.slice_id, impact.task_id]
+		.filter((value) => value !== null && value !== undefined)
+		.map((value) => String(value))
+		.join("/");
+	return triple || decisionField(impact.target_scope);
+}
+
+function formatDecisionImpact(impact: Record<string, unknown>): string {
+	const note = decisionListField(impact.payload);
+	return `Impact: ${decisionField(impact.impact_kind) || "?"} ${decisionImpactTarget(impact)}${note ? ` — ${note}` : ""}`;
+}
+
+function formatDecisionGetContent(decision: DecisionRowLike): string {
+	const field = (value: unknown, fallback: string): string => decisionField(value) || fallback;
+	const source = decisionField(decision.source);
+	return [
+		`Decision ${field(decision.id, "?")}: ${field(decision.decision, "-")}`,
+		`Choice: ${field(decision.choice, "-")}`,
+		`Rationale: ${field(decision.rationale, "-")}`,
+		`Scope: ${field(decision.scope, "-")}`,
+		`When: ${field(decision.when_context, "-")}`,
+		`Made by: ${field(decision.made_by, "-")}`,
+		...(source ? [`Source: ${source}`] : []),
+		`Revisable: ${field(decision.revisable, "-")}`,
+		`Superseded by: ${field(decision.superseded_by, "none")}`,
+		...decisionImpactRows(decision).map(formatDecisionImpact),
+	].join("\n");
+}
+
+function formatDecisionListLine(decision: DecisionRowLike): string {
+	const rationale = decisionListField(decision.rationale);
+	const excerpt = rationale.length > DECISION_LIST_RATIONALE_EXCERPT_CHARS
+		? `${rationale.slice(0, DECISION_LIST_RATIONALE_EXCERPT_CHARS)}…`
+		: rationale;
+	const impactRows = decisionImpactRows(decision);
+	const segments = [
+		`${decisionListField(decision.id) || "?"} [${decisionListField(decision.scope) || "-"}] ${decisionListField(decision.decision) || "-"}`,
+		decisionListField(decision.choice) ? `choice: ${decisionListField(decision.choice)}` : "",
+		excerpt ? `rationale: ${excerpt}` : "",
+		impactRows.length > 0
+			? `impacts: ${impactRows.map((impact) => `${decisionListField(impact.impact_kind)} ${decisionImpactTarget(impact)}`).join("; ")}`
+			: "",
+	].filter(Boolean);
+	const supersededBy = decisionListField(decision.superseded_by);
+	return `- ${segments.join(" | ")}${supersededBy ? ` (superseded by ${supersededBy})` : ""}`;
+}
+
+function formatDecisionListContent(decisions: DecisionRowLike[]): string {
+	return [`Found ${decisions.length} decision(s).`, ...decisions.map(formatDecisionListLine)].join("\n");
 }
 
 function withCanonicalReadAdapter<T>(
@@ -180,7 +259,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_decision_save (formerly gsd_save_decision) ─────────────────────
 
 	const decisionSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -210,8 +289,11 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					revisable: params.revisable,
 					when_context: params.when_context,
 					made_by: params.made_by,
+					supersedes: params.supersedes,
+					impacts: params.impacts,
 				},
 				basePath,
+				piPlanningInvocation("gsd_decision_save", toolCallId),
 			);
 			return {
 				content: [{ type: "text" as const, text: `Saved decision ${id}` }],
@@ -243,7 +325,9 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use gsd_decision_save when recording an architectural, pattern, library, or observability decision.",
 			"Decision IDs are auto-assigned (D001, D002, ...) — never guess or provide an ID.",
-			"All fields except revisable, when_context, and made_by are required.",
+			"All fields except revisable, when_context, made_by, supersedes, and impacts are required.",
+			"To reverse or replace an earlier decision, set supersedes to its ID. Only an active decision can be superseded.",
+			"Impacts are optional; each needs kind (revalidates/supersedes/blocks) and a target: milestone_id (optionally slice_id/task_id) or free-text scope.",
 			"The tool writes to the DB and regenerates .gsd/DECISIONS.md automatically.",
 			"Set made_by to 'human' when the user explicitly directed the decision, 'agent' when the LLM chose autonomously (default), or 'collaborative' when it was discussed and agreed together.",
 		],
@@ -270,6 +354,44 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					description:
 						"Who made this decision: 'human' (user directed), 'agent' (LLM decided autonomously), or 'collaborative' (discussed and agreed). Default: 'agent'",
 				}),
+			),
+			supersedes: Type.Optional(
+				Type.String({
+					description:
+						"ID of the active decision that this decision replaces (e.g. 'D003'). The old decision is marked superseded.",
+				}),
+			),
+			impacts: Type.Optional(
+				Type.Array(
+					Type.Object({
+						kind: StringEnum(["revalidates", "supersedes", "blocks"], {
+							description:
+								"Impact kind: 'revalidates' marks scope work that must be revisited, 'supersedes' names the decision this replaces, 'blocks' marks scope work that cannot proceed.",
+						}),
+						milestone_id: Type.Optional(
+							Type.String({ description: "Target milestone ID (e.g. 'M001')." }),
+						),
+						slice_id: Type.Optional(
+							Type.String({ description: "Target slice ID; requires milestone_id." }),
+						),
+						task_id: Type.Optional(
+							Type.String({ description: "Target task ID; requires milestone_id and slice_id." }),
+						),
+						scope: Type.Optional(
+							Type.String({
+								description:
+									"Free scope text for targets that have no unit ID. Give milestone_id/slice_id/task_id or scope.",
+							}),
+						),
+						note: Type.Optional(
+							Type.String({ description: "Why this impact holds." }),
+						),
+					}),
+					{
+						description:
+							"Optional downstream impacts recorded with the decision. Omit or pass [] for none. Each needs a target: milestone_id (optionally slice_id/task_id) or free-text scope.",
+					},
+				),
 			),
 		}),
 		execute: decisionSaveExecute,
@@ -300,15 +422,13 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_requirement_update (formerly gsd_update_requirement) ───────────
 
 	const requirementUpdateExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
 		_ctx: unknown,
 	) => {
 		const basePath = resolveCtxCwd(_ctx);
-		const gateBlock = requirementRootWriteGuard("update_requirement", basePath);
-		if (gateBlock) return gateBlock;
 		const dbAvailable = await ensureDbOpen(basePath);
 		if (!dbAvailable) {
 			return {
@@ -338,7 +458,12 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				updates.primary_owner = params.primary_owner;
 			if (params.supporting_slices !== undefined)
 				updates.supporting_slices = params.supporting_slices;
-			await updateRequirementInDb(params.id, updates, basePath);
+			await updateRequirementInDb(
+				params.id,
+				updates,
+				basePath,
+				piPlanningInvocation("gsd_requirement_update", toolCallId),
+			);
 			return {
 				content: [
 					{ type: "text" as const, text: `Updated requirement ${params.id}` },
@@ -347,6 +472,16 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			};
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
+			const gateBlock = rootArtifactWriteBlock(err);
+			if (gateBlock) {
+				return {
+					content: [
+						{ type: "text" as const, text: `Error updating requirement: ${msg}` },
+					],
+					details: { operation: "update_requirement", ...gateBlock.details } as any,
+					isError: true,
+				};
+			}
 			logError("tool", `gsd_requirement_update tool failed: ${msg}`, {
 				tool: "gsd_requirement_update",
 				error: String(err),
@@ -429,15 +564,13 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_requirement_save ─────────────────────────────────────────────
 
 	const requirementSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
 		_ctx: unknown,
 	) => {
 		const basePath = resolveCtxCwd(_ctx);
-		const gateBlock = requirementRootWriteGuard("save_requirement", basePath);
-		if (gateBlock) return gateBlock;
 		const dbAvailable = await ensureDbOpen(basePath);
 		if (!dbAvailable) {
 			return {
@@ -468,6 +601,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					notes: params.notes,
 				},
 				basePath,
+				piPlanningInvocation("gsd_requirement_save", toolCallId),
 			);
 			return {
 				content: [
@@ -477,6 +611,16 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			};
 		} catch (err) {
 			const msg = err instanceof Error ? err.message : String(err);
+			const gateBlock = rootArtifactWriteBlock(err);
+			if (gateBlock) {
+				return {
+					content: [
+						{ type: "text" as const, text: `Error saving requirement: ${msg}` },
+					],
+					details: { operation: "save_requirement", ...gateBlock.details } as any,
+					isError: true,
+				};
+			}
 			logError("tool", `gsd_requirement_save tool failed: ${msg}`, {
 				tool: "gsd_requirement_save",
 				error: String(err),
@@ -573,7 +717,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_summary_save (formerly gsd_save_summary) ──────────────────────
 
 	const summarySaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -584,6 +728,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			return await executeSummarySave(
 				params,
 				resolveWorkflowToolBasePath(_ctx, params),
+				piPlanningInvocation("gsd_summary_save", toolCallId),
 			);
 		} catch (err) {
 			return {
@@ -597,17 +742,17 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		name: "gsd_summary_save",
 		label: "Save Summary",
 		description:
-			"Save a summary, research, UI spec, context, assessment, or UAT artifact to the GSD database and write it to disk. " +
+			"Save a summary, research, UI spec, AI spec, spec, context, assessment, or UAT artifact to the GSD database and write it to disk. " +
 			"Computes the file path from milestone/slice/task IDs automatically. " +
 			"UAT artifacts are slice-scoped (milestone_id + slice_id, no task_id) and persist to the slice's UAT record, which re-renders the slice's UAT markdown after the slice completes.",
 		promptSnippet:
-			"Save a GSD artifact (summary/research/UI spec/context/assessment/UAT) to DB and disk",
+			"Save a GSD artifact (summary/research/UI spec/AI spec/spec/context/assessment/UAT) to DB and disk",
 		promptGuidelines: [
-			"Use gsd_summary_save to persist structured artifacts (SUMMARY, RESEARCH, UI-SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT).",
+			"Use gsd_summary_save to persist structured artifacts (SUMMARY, RESEARCH, UI-SPEC, AI-SPEC, SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT).",
 			"milestone_id is required for milestone/slice/task artifacts. Omit milestone_id only for root-level PROJECT/PROJECT-DRAFT/REQUIREMENTS/REQUIREMENTS-DRAFT.",
 			"The tool computes the relative path automatically: milestones/M001/M001-SUMMARY.md, milestones/M001/slices/S01/S01-SUMMARY.md, etc.",
 			"Root-level artifact paths are PROJECT.md, PROJECT-DRAFT.md, REQUIREMENTS.md, and REQUIREMENTS-DRAFT.md.",
-			"artifact_type must be one of: SUMMARY, RESEARCH, UI-SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT.",
+			"artifact_type must be one of: SUMMARY, RESEARCH, UI-SPEC, AI-SPEC, SPEC, CONTEXT, ASSESSMENT, CONTEXT-DRAFT, PROJECT, PROJECT-DRAFT, REQUIREMENTS, REQUIREMENTS-DRAFT, UAT.",
 			"UAT (despite the tool name) saves the slice's UAT acceptance document: pass milestone_id + slice_id and no task_id; it persists to the slice's UAT record, so corrections to a completed slice's UAT markdown survive projection flushes.",
 			"Use CONTEXT-DRAFT for incremental draft persistence; use CONTEXT for the final milestone context after depth verification.",
 			`Keep each content payload under ${SUMMARY_SAVE_CONTENT_MAX_LENGTH} characters; save large context incrementally with CONTEXT-DRAFT/PROJECT-DRAFT/REQUIREMENTS-DRAFT instead of one oversized call.`,
@@ -630,6 +775,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					"SUMMARY",
 					"RESEARCH",
 					"UI-SPEC",
+					"AI-SPEC",
+					"SPEC",
 					"CONTEXT",
 					"ASSESSMENT",
 					"CONTEXT-DRAFT",
@@ -676,7 +823,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_uat_result_save ─────────────────────────────────────────────────
 
 	const uatResultSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -686,6 +833,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		return executeUatResultSave(
 			params,
 			resolveWorkflowToolBasePath(_ctx, params),
+			piExecutionInvocation("gsd_uat_result_save", toolCallId),
 		);
 	};
 
@@ -848,101 +996,25 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_milestone_generate_id (formerly gsd_generate_milestone_id) ────
 
 	const milestoneGenerateIdExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		_params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
 		_ctx: unknown,
 	) => {
-		try {
-			const basePath = resolveCtxCwd(_ctx);
-			// Claim a reserved ID if the guided-flow already previewed one to the user.
-			// This guarantees the ID shown in the UI matches the one materialised on disk.
-			const {
-				claimReservedId,
-				findMilestoneIds,
-				getReservedMilestoneIds,
-				nextMilestoneId,
-			} = await import("../guided-flow.js");
-			const reserved = claimReservedId();
-			if (reserved) {
-				await ensureMilestoneDbRow(reserved, basePath);
-				return {
-					content: [{ type: "text" as const, text: reserved }],
-					details: {
-						operation: "generate_milestone_id",
-						id: reserved,
-						source: "reserved",
-					} as any,
-				};
-			}
-
-			await ensureDbOpen(basePath);
-			const { getAllMilestones } = await import("../gsd-db.js");
-			const existingIds = [
-				...findMilestoneIds(basePath),
-				...getAllMilestones().map((m) => m.id),
-			];
-			const uniqueEnabled =
-				!!loadEffectiveGSDPreferences(basePath)?.preferences
-					?.unique_milestone_ids;
-			const allIds = [
-				...new Set([...existingIds, ...getReservedMilestoneIds()]),
-			];
-			const newId = nextMilestoneId(allIds, uniqueEnabled);
-			await ensureMilestoneDbRow(newId, basePath);
-			return {
-				content: [{ type: "text" as const, text: newId }],
-				details: {
-					operation: "generate_milestone_id",
-					id: newId,
-					existingCount: existingIds.length,
-					uniqueEnabled,
-				} as any,
-			};
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : String(err);
-			return {
-				content: [
-					{
-						type: "text" as const,
-						text: `Error generating milestone ID: ${msg}`,
-					},
-				],
-				details: { operation: "generate_milestone_id", error: msg } as any,
-			};
-		}
+		const { executeMilestoneGenerateId } = await loadWorkflowExecutors();
+		return executeMilestoneGenerateId(
+			resolveCtxCwd(_ctx),
+			piExecutionInvocation("gsd_milestone_generate_id", toolCallId),
+		);
 	};
-
-	/**
-	 * Insert a minimal DB row for a milestone ID so it's visible to the state
-	 * machine. Uses INSERT OR IGNORE — safe to call even if gsd_plan_milestone
-	 * later writes the full row. Silently skips if the DB isn't available yet
-	 * (pre-migration).
-	 */
-	async function ensureMilestoneDbRow(
-		milestoneId: string,
-		basePath: string,
-	): Promise<void> {
-		const dbAvailable = await ensureDbOpen(basePath);
-		if (!dbAvailable) return;
-		try {
-			const { insertMilestone } = await import("../gsd-db.js");
-			insertMilestone({ id: milestoneId, status: "queued" });
-		} catch (e) {
-			logError(
-				"tool",
-				`insertMilestone failed for ${milestoneId}: ${(e as Error).message}`,
-			);
-		}
-	}
 
 	const milestoneGenerateIdTool = {
 		name: "gsd_milestone_generate_id",
 		label: "Generate Milestone ID",
 		description:
-			"Generate the next milestone ID for a new GSD milestone. " +
-			"Scans existing milestones on disk and respects the unique_milestone_ids preference. " +
+			"Generate the next milestone ID for a new GSD milestone and register its database row. " +
+			"Respects the unique_milestone_ids preference. " +
 			"Always use this tool when creating a new milestone — never invent milestone IDs manually.",
 		promptSnippet:
 			"Generate a valid milestone ID (respects unique_milestone_ids preference)",
@@ -970,9 +1042,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					0,
 				);
 			}
-			let text = theme.fg("success", `Generated ${d?.id ?? "ID"}`);
-			if (d?.source === "reserved") text += theme.fg("dim", " (reserved)");
-			return new Text(text, 0, 0);
+			return new Text(theme.fg("success", `Generated ${d?.id ?? "ID"}`), 0, 0);
 		},
 	};
 
@@ -1312,7 +1382,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text" as const,
-						text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})`,
+						text: `Planned task ${result.taskId} (${result.sliceId}/${result.milestoneId})${result.stale ? ". The readable plan update is pending repair." : ""}`,
 					},
 				],
 				details: {
@@ -1321,6 +1391,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					sliceId: result.sliceId,
 					taskId: result.taskId,
 					taskPlanPath: result.taskPlanPath,
+					...(result.stale ? { stale: true } : {}),
 				} as any,
 			};
 		} catch (err) {
@@ -1520,8 +1591,8 @@ export function registerDbTools(pi: ExtensionAPI): void {
 							}),
 							{
 								minItems: 2,
-								maxItems: 4,
-								description: "2–4 options the user can choose between.",
+								maxItems: 3,
+								description: "2–3 options the user can choose between.",
 							},
 						),
 						recommendation: Type.String({
@@ -1545,7 +1616,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				Type.Array(
 					Type.Object({
 						command: Type.String({
-							description: "Verification command that was run",
+							description: "Verification command that was run: the exact gsd_exec script",
 						}),
 						exitCode: Type.Number({ description: "Exit code of the command" }),
 						verdict: Type.String({
@@ -2055,11 +2126,16 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		promptSnippet: "Prepare a genuine subjective Milestone UAT decision",
 		promptGuidelines: [
 			"Use only when acceptance genuinely requires human judgment and cannot be decided by executable evidence.",
-			"After preparation, present the returned options to the user; do not fabricate or infer their answer.",
+			"After preparation, present the question to the user and stop. Only the user can answer, with /gsd uat-answer; you have no tool that records the answer.",
 		],
 		parameters: Type.Object({
 			milestoneId: Type.String({ minLength: 1 }),
-			criterionKey: Type.String({ minLength: 1 }),
+			criterionKey: Type.Optional(
+				Type.String({
+					minLength: 1,
+					description: "Criterion key to prepare. Required unless supersedesCriterionId is given; then the replacement inherits the superseded criterion's key and a passed key must match it.",
+				}),
+			),
 			description: Type.String({ minLength: 1 }),
 			focusedPrompt: Type.String({ minLength: 1 }),
 			recommendedDisposition: StringEnum(["accepted", "rejected"]),
@@ -2071,6 +2147,12 @@ export function registerDbTools(pi: ExtensionAPI): void {
 			),
 			requirementId: Type.Optional(Type.String({ minLength: 1 })),
 			required: Type.Optional(Type.Boolean()),
+			supersedesCriterionId: Type.Optional(
+				Type.String({
+					minLength: 1,
+					description: "Explicitly supersede this current subjective UAT criterion by ID; the replacement inherits its criterionKey and requirementId so validation requires the new question instead.",
+				}),
+			),
 		}),
 		execute: async (
 			toolCallId: string,
@@ -2088,65 +2170,6 @@ export function registerDbTools(pi: ExtensionAPI): void {
 					"gsd_prepare_milestone_subjective_uat",
 					toolCallId,
 				),
-			);
-		},
-	});
-
-	registerWorkflowTool(pi, {
-		name: "gsd_answer_milestone_subjective_uat",
-		label: "Answer Milestone Subjective UAT",
-		description:
-			"Record a user-selected answer to a prepared subjective Milestone UAT question using the authenticated Pi session identity.",
-		promptSnippet: "Record the user's actual subjective Milestone UAT answer",
-		promptGuidelines: [
-			"Call only after the user explicitly chooses one of the prepared options.",
-			"Pass the user's response verbatim; actor identity is derived from the active session and is not a tool argument.",
-		],
-		parameters: Type.Object({
-			criterionId: Type.String({ minLength: 1 }),
-			questionId: Type.String({ minLength: 1 }),
-			interactionId: Type.String({ minLength: 1 }),
-			selectedOptionId: Type.String({ minLength: 1 }),
-			verbatimResponse: Type.String({ minLength: 1 }),
-			rationale: Type.String({ minLength: 1 }),
-			testedSourceRevision: Type.String({ minLength: 1 }),
-		}),
-		execute: async (
-			toolCallId: string,
-			params: any,
-			_signal: AbortSignal | undefined,
-			_onUpdate: unknown,
-			_ctx: any,
-		) => {
-			const actorId = _ctx?.sessionManager?.getSessionId?.();
-			if (typeof actorId !== "string" || !actorId.trim()) {
-				return {
-					content: [
-						{
-							type: "text",
-							text: "Error answering subjective UAT: authenticated Pi session identity is unavailable",
-						},
-					],
-					details: {
-						operation: "answer_milestone_subjective_uat",
-						error: "user_identity_unavailable",
-					},
-					isError: true,
-				};
-			}
-			const { executeAnswerMilestoneSubjectiveUat } =
-				await loadWorkflowExecutors();
-			return executeAnswerMilestoneSubjectiveUat(
-				params,
-				resolveWorkflowToolBasePath(_ctx, params),
-				{
-					...piExecutionInvocation(
-						"gsd_answer_milestone_subjective_uat",
-						toolCallId,
-					),
-					actorType: "user",
-					actorId: actorId.trim(),
-				},
 			);
 		},
 	});
@@ -2319,7 +2342,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	// ─── gsd_rework_brief_save ─────────────────────────────────────────────
 
 	const reworkBriefSaveExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -2329,6 +2352,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		return executeReworkBriefSave(
 			params,
 			resolveWorkflowToolBasePath(_ctx, params),
+			piPlanningInvocation("gsd_rework_brief_save", toolCallId),
 		);
 	};
 
@@ -2389,6 +2413,66 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	};
 
 	registerWorkflowTool(pi, reworkBriefSaveTool);
+
+	// ─── gsd_checkpoint_save ───────────────────────────────────────────────
+
+	const checkpointSaveExecute = async (
+		toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeCheckpointSave } = await loadWorkflowExecutors();
+		return executeCheckpointSave(
+			params,
+			resolveWorkflowToolBasePath(_ctx, params),
+			piPlanningInvocation("gsd_checkpoint_save", toolCallId),
+		);
+	};
+
+	const checkpointSaveTool = {
+		name: "gsd_checkpoint_save",
+		label: "Save Work Checkpoint",
+		description:
+			"Save a Work Checkpoint row for a milestone, slice or task when work stops before it is complete. The row is the resume state; CONTINUE.md is rendered from it and is never read back.",
+		promptSnippet: "Save the resume state of unfinished work",
+		promptGuidelines: [
+			"Use gsd_checkpoint_save when you pause or hand off unfinished work. Do not write CONTINUE.md, continue.md or HANDOFF.md.",
+			"Pass taskId when a task is in progress: the next session of that task gets the checkpoint in its Resume State.",
+			"nextAction is one concrete action, not a goal.",
+		],
+		parameters: Type.Object({
+			milestoneId: Type.String({ description: "Milestone ID (e.g. M001)" }),
+			sliceId: Type.Optional(
+				Type.String({ description: "Slice ID (e.g. S01); omit for a milestone checkpoint" }),
+			),
+			taskId: Type.Optional(
+				Type.String({ description: "Task ID (e.g. T01); pass it when a task is in progress" }),
+			),
+			kind: StringEnum(["pause", "handoff"], {
+				description:
+					"pause: work stops and the same work resumes; handoff: another session or a later phase picks the work up",
+			}),
+			confirmedContext: Type.String({
+				description: "What is done and confirmed, with evidence",
+			}),
+			unresolved: Type.Optional(
+				Type.String({ description: "Remaining work, open questions, and what not to do" }),
+			),
+			evidence: Type.Optional(
+				Type.String({
+					description: "Commands, files and results that support the confirmed context",
+				}),
+			),
+			nextAction: Type.String({
+				description: "The one concrete action the next session takes first",
+			}),
+		}),
+		execute: checkpointSaveExecute,
+	};
+
+	registerWorkflowTool(pi, checkpointSaveTool);
 
 	// ─── gsd_reassess_roadmap (gsd_roadmap_reassess alias) ─────────────────
 
@@ -2813,10 +2897,208 @@ export function registerDbTools(pi: ExtensionAPI): void {
 
 	registerWorkflowTool(pi, reopenMilestoneTool);
 
+	// ─── Milestone hierarchy: park, unpark, discard, reorder, dependencies ──
+
+	type MilestoneHierarchyExecutor =
+		| "executeMilestonePark"
+		| "executeMilestoneUnpark"
+		| "executeMilestoneDiscard"
+		| "executeMilestoneReorder"
+		| "executeMilestoneSetDependencies"
+		| "executeResearchDecisionSave"
+		| "executeCaptureResolve"
+		| "executeCaptureComplete";
+
+	const milestoneHierarchyExecute =
+		(toolName: string, executor: MilestoneHierarchyExecutor) =>
+		async (
+			toolCallId: string,
+			params: any,
+			_signal: AbortSignal | undefined,
+			_onUpdate: unknown,
+			_ctx: unknown,
+		) => {
+			const executors = await loadWorkflowExecutors();
+			return executors[executor](
+				params,
+				resolveWorkflowToolBasePath(_ctx, params),
+				piExecutionInvocation(toolName, toolCallId),
+			);
+		};
+
+	const hierarchyMilestoneId = Type.String({
+		description: "Milestone ID (e.g. M003)",
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_park",
+		label: "Park Milestone",
+		description:
+			"Park a Milestone in one SQLite Domain Operation: it leaves the run, keeps all its work, and can be unparked later. The PARKED marker file is rendered from the database.",
+		promptSnippet: "Park a GSD Milestone (reversible)",
+		promptGuidelines: [
+			"Use gsd_milestone_park to shelve a milestone. Never create or edit a PARKED.md file; the database is the only source of park state.",
+			"A closed milestone cannot be parked.",
+		],
+		parameters: Type.Object({
+			milestoneId: hierarchyMilestoneId,
+			reason: Type.String({
+				minLength: 1,
+				description: "Why the milestone is parked",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_park",
+			"executeMilestonePark",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_unpark",
+		label: "Unpark Milestone",
+		description:
+			"Return a parked Milestone to the run in one SQLite Domain Operation. The PARKED marker file is removed after the commit.",
+		promptSnippet: "Unpark a parked GSD Milestone",
+		promptGuidelines: [
+			"Use gsd_milestone_unpark to reactivate a parked milestone. Never delete the PARKED.md file by hand.",
+		],
+		parameters: Type.Object({ milestoneId: hierarchyMilestoneId }),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_unpark",
+			"executeMilestoneUnpark",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_discard",
+		label: "Discard Milestone",
+		description:
+			"Discard a Milestone in one SQLite Domain Operation: the Milestone and its open Slices and Tasks are cancelled with a Waiver, its id is never reused, and its files, worktree and branch are removed after the commit. This cannot be undone.",
+		promptSnippet: "Discard a GSD Milestone permanently",
+		promptGuidelines: [
+			"Use gsd_milestone_discard only after the user explicitly confirmed the discard. Never delete a milestone directory by hand.",
+			"A complete milestone cannot be discarded. Prefer gsd_milestone_park when the milestone has completed work.",
+		],
+		parameters: Type.Object({
+			milestoneId: hierarchyMilestoneId,
+			reason: Type.String({
+				minLength: 1,
+				description: "Why the milestone is discarded (recorded in the Waiver)",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_discard",
+			"executeMilestoneDiscard",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_reorder",
+		label: "Reorder Milestones",
+		description:
+			"Set the execution order of the open Milestones in one SQLite Domain Operation. List every open Milestone in the wanted order; one that is not listed keeps its relative position after the listed ones. An order that puts a Milestone before one it depends on is refused. QUEUE-ORDER.json is rendered from the database.",
+		promptSnippet: "Set the execution order of open GSD Milestones",
+		promptGuidelines: [
+			"Use gsd_milestone_reorder to change the queue order. Never write QUEUE-ORDER.json by hand.",
+			"List every open milestone ID, first to run first; a milestone you do not list keeps its relative position after the listed ones. The tool refuses an order that puts a milestone before one it depends on; change the dependency first with gsd_milestone_set_dependencies.",
+		],
+		parameters: Type.Object({
+			order: Type.Array(Type.String(), {
+				minItems: 1,
+				description: "Open milestone IDs in execution order",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_reorder",
+			"executeMilestoneReorder",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_milestone_set_dependencies",
+		label: "Set Milestone Dependencies",
+		description:
+			"Replace the depends_on list of one open Milestone in one SQLite Domain Operation.",
+		promptSnippet: "Set which Milestones a GSD Milestone depends on",
+		promptGuidelines: [
+			"Use gsd_milestone_set_dependencies to change dependencies. Never edit depends_on in a CONTEXT.md file; the database is the only source.",
+			"dependsOn replaces the whole list; pass [] to remove all dependencies. Unknown or discarded milestones and dependency cycles are refused.",
+		],
+		parameters: Type.Object({
+			milestoneId: hierarchyMilestoneId,
+			dependsOn: Type.Array(Type.String(), {
+				description: "Milestone IDs that must be complete first",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_milestone_set_dependencies",
+			"executeMilestoneSetDependencies",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_research_decision_save",
+		label: "Save Research Decision",
+		description:
+			"Record the project research decision (research or skip) in one SQLite Domain Operation.",
+		promptSnippet: "Record whether to run project research before milestone planning",
+		promptGuidelines: [
+			"Use gsd_research_decision_save to record the user's answer to the project research question. Never write .gsd/runtime/research-decision.json; the database is the only source of the decision.",
+			"research runs the project research stage before milestone planning. skip goes straight to milestone work. No recorded decision means skip.",
+		],
+		parameters: Type.Object({
+			decision: StringEnum(["research", "skip"], {
+				description: "research or skip",
+			}),
+		}),
+		execute: milestoneHierarchyExecute(
+			"gsd_research_decision_save",
+			"executeResearchDecisionSave",
+		),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_capture_resolve",
+		label: "Resolve Capture",
+		description:
+			"Classify one user capture (triage) in one SQLite Domain Operation. CAPTURES.md is rendered from the database.",
+		promptSnippet: "Classify a user capture during triage",
+		promptGuidelines: [
+			"Use gsd_capture_resolve once per capture after the classification is confirmed. Never edit .gsd/CAPTURES.md; the database is the only source of capture state.",
+			"The tool only records the classification. It does not carry out the resolution.",
+		],
+		parameters: Type.Object({
+			captureId: Type.String({ minLength: 1, description: "Capture ID (e.g. CAP-1a2b3c4d)" }),
+			classification: StringEnum(
+				["quick-task", "inject", "defer", "replan", "note", "stop", "backtrack"],
+				{ description: "Confirmed classification" },
+			),
+			resolution: Type.String({ minLength: 1, description: "What will happen (for backtrack, name the target milestone ID)" }),
+			rationale: Type.String({ minLength: 1, description: "Why this classification" }),
+		}),
+		execute: milestoneHierarchyExecute("gsd_capture_resolve", "executeCaptureResolve"),
+	});
+
+	registerWorkflowTool(pi, {
+		name: "gsd_capture_complete",
+		label: "Complete Quick-Task Capture",
+		description:
+			"Record the outcome of a quick-task capture in one SQLite Domain Operation. The capture counts as executed only after this call.",
+		promptSnippet: "Record the outcome of a quick-task capture",
+		promptGuidelines: [
+			"Call gsd_capture_complete once when the quick task is done, or when the issue was already resolved and no change was needed.",
+		],
+		parameters: Type.Object({
+			captureId: Type.String({ minLength: 1, description: "Capture ID (e.g. CAP-1a2b3c4d)" }),
+			outcome: Type.String({ minLength: 1, description: "What was changed, or why no change was needed" }),
+		}),
+		execute: milestoneHierarchyExecute("gsd_capture_complete", "executeCaptureComplete"),
+	});
+
 	// ─── gsd_save_gate_result ──────────────────────────────────────────────
 
 	const saveGateResultExecute = async (
-		_toolCallId: string,
+		toolCallId: string,
 		params: any,
 		_signal: AbortSignal | undefined,
 		_onUpdate: unknown,
@@ -2826,6 +3108,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 		return executeSaveGateResult(
 			params,
 			resolveWorkflowToolBasePath(_ctx, params),
+			piExecutionInvocation("gsd_save_gate_result", toolCallId),
 		);
 	};
 
@@ -2899,6 +3182,72 @@ export function registerDbTools(pi: ExtensionAPI): void {
 	};
 
 	registerWorkflowTool(pi, saveGateResultTool);
+
+	// ─── gsd_hook_verdict_save ─────────────────────────────────────────────
+	//
+	// A blocking post-unit hook records its gate verdict with this call. The
+	// verdict is a database row the rule registry reads; the hook's artifact
+	// file is a report for the operator and decides nothing (P18d).
+
+	const hookVerdictSaveExecute = async (
+		toolCallId: string,
+		params: any,
+		_signal: AbortSignal | undefined,
+		_onUpdate: unknown,
+		_ctx: unknown,
+	) => {
+		const { executeHookVerdictSave } = await loadWorkflowExecutors();
+		return executeHookVerdictSave(
+			params,
+			resolveWorkflowToolBasePath(_ctx, params),
+			piExecutionInvocation("gsd_hook_verdict_save", toolCallId),
+		);
+	};
+
+	const hookVerdictSaveTool = {
+		name: "gsd_hook_verdict_save",
+		label: "Save Hook Verdict",
+		description:
+			"Record the verdict of a post-unit hook gate (a blocking hook that ran after a unit) in the GSD database. " +
+			"The workflow reads this recorded verdict; the artifact file you wrote is a report for the operator.",
+		promptSnippet: "Record a post-unit hook gate verdict",
+		promptGuidelines: [
+			"Call gsd_hook_verdict_save once when the hook finishes.",
+			"hookName must be the name of the configured post_unit_hooks entry you ran.",
+			"unitId must be the trigger unit id the hook ran for.",
+			"verdict must be: pass, advisory, needs-rework, needs-remediation, or needs-attention.",
+			"rationale should state what the hook checked and why it reached the verdict.",
+		],
+		parameters: Type.Object({
+			hookName: Type.String({ description: "Configured hook name (post_unit_hooks entry)" }),
+			unitId: Type.String({ description: "Trigger unit id, e.g. M001/S01/T01 or M001" }),
+			verdict: Type.String({ description: "pass, advisory, needs-rework, needs-remediation, or needs-attention" }),
+			rationale: Type.String({ description: "Why the hook reached the verdict" }),
+		}),
+		execute: hookVerdictSaveExecute,
+		renderCall(args: any, theme: any) {
+			let text = theme.fg("toolTitle", theme.bold("hook_verdict_save "));
+			text += theme.fg("accent", args.hookName ?? "");
+			text += theme.fg("dim", ` → ${args.verdict ?? ""}`);
+			return new Text(text, 0, 0);
+		},
+		renderResult(result: any, _options: any, theme: any) {
+			const d = readDetails(result);
+			if (result.isError || d?.error) {
+				const rawMsg = d?.error ?? result.content?.[0]?.text ?? "unknown";
+				const msg = String(rawMsg).replace(/^\s*Error:\s*/i, "");
+				return new Text(theme.fg("error", `Error: ${msg}`), 0, 0);
+			}
+			if (!d?.hookName || !d?.verdict) {
+				const text = result.content?.[0]?.text ?? "Hook verdict saved";
+				return new Text(theme.fg("success", text), 0, 0);
+			}
+			const color = d.verdict === "pass" || d.verdict === "advisory" ? "success" : "warning";
+			return new Text(theme.fg(color, `${d.hookName}: ${d.verdict}`), 0, 0);
+		},
+	};
+
+	registerWorkflowTool(pi, hookVerdictSaveTool);
 
 	// ─── gsd_requirement_list ────────────────────────────────────────────────
 	//
@@ -3239,7 +3588,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text" as const,
-						text: `Found ${results.length} decision(s).`,
+						text: formatDecisionListContent(results),
 					},
 				],
 				details: {
@@ -3536,7 +3885,7 @@ export function registerDbTools(pi: ExtensionAPI): void {
 				content: [
 					{
 						type: "text" as const,
-						text: `Decision ${decision.id}: ${decision.decision}`,
+						text: formatDecisionGetContent(decision),
 					},
 				],
 				details: {

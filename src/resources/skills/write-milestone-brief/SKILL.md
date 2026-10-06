@@ -1,6 +1,6 @@
 ---
 name: write-milestone-brief
-description: Synthesize the current conversation into a milestone brief (PRD). Writes to `M###-CONTEXT.md` by default, or files a GitHub issue only with explicit user confirmation. Use when asked to "turn this into a PRD", "draft a milestone brief", "capture this context", "write it up", or when enough has been discussed to commit the plan to paper. Does not interview — it synthesizes what is already known.
+description: Synthesize the current conversation into a milestone brief (PRD). Saves it as the milestone CONTEXT (`gsd_summary_save`) by default, or files a GitHub issue only with explicit user confirmation. Use when asked to "turn this into a PRD", "draft a milestone brief", "capture this context", "write it up", or when enough has been discussed to commit the plan to paper. Does not interview — it synthesizes what is already known.
 ---
 
 <objective>
@@ -11,6 +11,7 @@ Take everything established in the current conversation (plus repo reality) and 
 This skill runs at the end of a discussion phase, after enough grilling/design has happened that the plan has stabilized. It does NOT interview — use the `grill-me` skill for that. This skill collapses what is already on the page into a durable artifact.
 
 Typical invocation points:
+
 - User says "capture this" or "write it up" after a planning discussion
 - End of a `discuss` phase before moving to `plan`
 - User wants to hand the work off to another agent or a human teammate
@@ -30,7 +31,7 @@ Typical invocation points:
 
 Find the active milestone:
 
-1. Read `.gsd/STATE.md` — it names the active milestone.
+1. Call `gsd_project_snapshot` — it names the active milestone.
 2. If no milestone is active, ask the user whether this is a new milestone (create directory + files) or appending to an existing one.
 3. For a new milestone, use `gsd_milestone_new` or the `/gsd new-milestone` flow — do not create directories by hand.
 
@@ -69,9 +70,9 @@ Populate `M###-CONTEXT.md` using the template. Key sections:
 
 ## Step 5: Write it
 
-Use the `write` tool to create or overwrite `.gsd/milestones/<MID>/<MID>-CONTEXT.md`. Do not ask for approval of the file contents before writing — the user will see the rendered file and can edit directly.
+Call `gsd_summary_save` with the `milestone_id`, `artifact_type: "CONTEXT"` and the full brief as `content`. The tool stores the brief in the database and renders `.gsd/milestones/<MID>/<MID>-CONTEXT.md`; do not write the file. Do not ask for approval of the contents before saving — the user will see the rendered file and can ask for changes.
 
-Then append a one-line summary to `.gsd/DECISIONS.md` for any genuinely hard-to-reverse architectural decision: `- YYYY-MM-DD [MID]: <decision> — <one-line rationale>`.
+Then call `gsd_decision_save` for any genuinely hard-to-reverse architectural decision, with a one-line rationale.
 
 ## Step 6: Offer next steps
 
@@ -130,6 +131,6 @@ See `.gsd/milestones/<MID>/<MID>-CONTEXT.md` for the full brief.
 - [ ] Completion Class is honest — no "just unit tests" when the milestone demands live integration.
 - [ ] Every architectural decision has a rationale and named alternatives.
 - [ ] Open Questions captures genuinely unresolved items — not decisions the user already made.
-- [ ] `.gsd/DECISIONS.md` has a dated one-liner for any hard-to-reverse decision.
+- [ ] Any hard-to-reverse decision is saved with `gsd_decision_save`.
 
 </success_criteria>

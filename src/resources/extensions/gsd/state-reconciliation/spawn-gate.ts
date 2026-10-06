@@ -11,7 +11,14 @@ import {
   ReconciliationFailedError,
   type ReconciliationDeps,
 } from "./index.js";
-import { preserveProjectionChanges } from "../projection-worker.js";
+import { preserveProjectionEvidence } from "../projection-observation.js";
+import {
+  describeHeldProjectionChanges,
+  describePreservedProjectionChanges,
+  preserveProjectionChangesBeforeDispatch,
+  repairProjectionDrift,
+} from "../projection-worker.js";
+import { logWarning } from "../workflow-logger.js";
 
 export type SpawnGateResult =
   | { ok: true; reason?: string }
@@ -29,7 +36,10 @@ export interface SpawnGateDeps extends Partial<ReconciliationDeps> {
  * caller can surface it to the user without re-throwing.
  *
  * Other unexpected errors propagate; they are not part of the drift
- * taxonomy.
+ * taxonomy. Projection files are not workflow state: a changed, missing or
+ * unreadable projection is preserved, rendered again and reported, and never
+ * fails the gate. The one exception is a changed git-tracked projection, which
+ * is held for a user choice.
  */
 export async function reconcileBeforeSpawn(
   basePath: string,
@@ -39,7 +49,19 @@ export async function reconcileBeforeSpawn(
   const reconcileFn = reconcile ?? reconcileBeforeDispatch;
   const hasReconcileDeps = Object.keys(reconcileDeps).length > 0;
   try {
-    await preserveProjectionChanges(basePath);
+    const notes: string[] = [];
+    try {
+      const observation = await preserveProjectionChangesBeforeDispatch(basePath);
+      if (observation.held.length > 0) {
+        return { ok: false, reason: describeHeldProjectionChanges(basePath, observation.held) };
+      }
+      if (observation.preserved.length > 0) {
+        notes.push(describePreservedProjectionChanges(basePath, observation.preserved));
+      }
+      for (const error of observation.errors) logWarning("projection", `projection render failed: ${error}`);
+    } catch (error) {
+      logWarning("reconcile", `Projection observation failed: ${(error as Error).message}`);
+    }
     const result = await reconcileFn(
       basePath,
       hasReconcileDeps ? (reconcileDeps as ReconciliationDeps) : undefined,
@@ -50,18 +72,37 @@ export async function reconcileBeforeSpawn(
         reason: `Reconciliation blocker: ${result.blockers[0]}`,
       };
     }
-    const repairedKinds = result.repaired.map((d) => d.kind);
+    // After reconciliation, so the layout is settled before files are compared.
+    const drift = await repairProjectionDrift(basePath);
+    for (const error of drift.errors) logWarning("projection", `projection drift repair failed: ${error}`);
+    const repairedKinds = [...result.repaired, ...drift.repaired].map((d) => d.kind);
+    if (repairedKinds.length > 0) notes.unshift(`repaired before spawn: ${repairedKinds.join(", ")}`);
     return {
       ok: true,
-      reason:
-        repairedKinds.length > 0
-          ? `repaired before spawn: ${repairedKinds.join(", ")}`
-          : undefined,
+      reason: notes.length > 0 ? notes.join("\n") : undefined,
     };
   } catch (err) {
     if (err instanceof ReconciliationFailedError) {
       return { ok: false, reason: err.message };
     }
     throw err;
+  }
+}
+
+/**
+ * Read-only form of the pre-dispatch hold, for a dispatch that does not run
+ * reconciliation (guided flow and /gsd dispatch). Returns the "changed outside
+ * GSD" reason when a changed git-tracked projection must stop the dispatch,
+ * else null. Nothing is moved or rendered, so a hand edit of an untracked
+ * projection stays as it is.
+ */
+export async function heldProjectionChangesBeforeDispatch(basePath: string): Promise<string | null> {
+  try {
+    const { held } = await preserveProjectionEvidence(basePath, [], true, true);
+    return held.length > 0 ? describeHeldProjectionChanges(basePath, held) : null;
+  } catch (error) {
+    // Projection files are not workflow state: report the failure and go on.
+    logWarning("reconcile", `Projection observation failed: ${(error as Error).message}`);
+    return null;
   }
 }

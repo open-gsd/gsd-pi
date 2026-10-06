@@ -18,12 +18,14 @@ import {
   captureCurrentLegacyImportBaseSnapshot,
   captureLegacyImportBaseSnapshot,
   createLegacyImportBaseSnapshotSource,
+  legacyImportBaseSnapshotAtVersion,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
 import {
   canonicalLegacyImportJson,
   hashLegacyImportValue,
   isStrictLegacyImportData,
+  legacyImportBaseSnapshotForPreview,
 } from "./legacy-import-preview.js";
 import { inspectSqliteReadOnlySnapshot } from "./sqlite-readonly.js";
 import {
@@ -223,7 +225,7 @@ function inspectionEvidence(
     || application.backupProjectRevision !== backup.base_project_revision
     || application.backupAuthorityEpoch !== backup.base_authority_epoch
   ) fail("base", "LEGACY_IMPORT_FORWARD_REPAIR_BACKUP_MISMATCH", "Forward Repair backup does not match its Import Application");
-  const backupBase = captureBackupBase(backup);
+  const backupBase = legacyImportBaseSnapshotForPreview(application.preview, captureBackupBase(backup));
   try {
     verifyLegacyImportBackupArtifact({ backup, preview: application.preview, base: backupBase });
   } catch {
@@ -234,11 +236,13 @@ function inspectionEvidence(
 
 function compileFromEvidence(
   evidence: InspectionEvidence,
-  currentBase: LegacyImportBaseSnapshot,
+  capturedBase: LegacyImportBaseSnapshot,
   choices: readonly Readonly<LegacyImportForwardRepairChoice>[] = [],
   goal: LegacyImportForwardRepairGoal = "revert",
 ): LegacyImportForwardRepairPlan {
   const { application, backup, backupBase } = evidence;
+  // The repair compares rows at the snapshot schema version of the Application.
+  const currentBase = legacyImportBaseSnapshotAtVersion(capturedBase, backupBase.snapshot_schema_version);
   if (
     currentBase.authority.project_id !== application.projectId
     || currentBase.authority.project_root_realpath !== application.projectRootRealpath

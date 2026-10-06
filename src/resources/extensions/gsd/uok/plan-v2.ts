@@ -1,13 +1,12 @@
 // Project/App: gsd-pi
 // File Purpose: UOK plan v2 graph compilation from GSD workflow state.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type { GSDState, Phase } from "../types.js";
-import { gsdRoot, resolveMilestoneFile, resolveSliceFile } from "../paths.js";
-import { isDbAvailable, getMilestoneSlices, getTasksBySliceIds } from "../gsd-db.js";
-import type { SliceRow } from "../db-task-slice-rows.js";
+import { gsdRoot } from "../paths.js";
+import { isDbAvailable, getMilestoneSlices, getTasksBySliceIds, hasSavedArtifact } from "../gsd-db.js";
 import type { UokGraphNode } from "./contracts.js";
 
 const PLAN_V2_CLARIFY_ROUND_LIMIT = 3;
@@ -52,58 +51,12 @@ function graphBodyUnchanged(outPath: string, output: Record<string, unknown>): b
   }
 }
 
-function hasFileContent(path: string | null): boolean {
-  if (!path || !existsSync(path)) return false;
-  try {
-    return readFileSync(path, "utf-8").trim().length > 0;
-  } catch {
-    return false;
-  }
-}
-
-function getArtifactLookupBases(basePath: string): string[] {
-  const bases = [basePath];
-  const projectRoot = process.env.GSD_PROJECT_ROOT;
-  if (projectRoot && projectRoot.trim().length > 0 && projectRoot !== basePath) {
-    bases.push(projectRoot);
-  }
-  return bases;
-}
-
-function hasMilestoneFileContent(
-  basePath: string,
-  milestoneId: string,
-  suffix: string,
-): boolean {
-  const bases = getArtifactLookupBases(basePath);
-  for (const candidateBase of bases) {
-    if (hasFileContent(resolveMilestoneFile(candidateBase, milestoneId, suffix))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function hasFinalizedMilestoneContext(basePath: string, milestoneId: string): boolean {
-  return hasMilestoneFileContent(basePath, milestoneId, "CONTEXT");
-}
-
 export function isMissingFinalizedContextResult(result: PlanV2CompileResult): boolean {
   return !result.ok && result.finalizedContextIncluded === false;
 }
 
 export function isEmptyPlanV2GraphResult(result: PlanV2CompileResult): boolean {
   return !result.ok && result.emptyGraph === true;
-}
-
-function countSliceResearchArtifacts(basePath: string, milestoneId: string, slices: SliceRow[]): number {
-  let count = 0;
-  for (const slice of slices) {
-    if (hasFileContent(resolveSliceFile(basePath, milestoneId, slice.id, "RESEARCH"))) {
-      count += 1;
-    }
-  }
-  return count;
 }
 
 export function compileUnitGraphFromState(basePath: string, state: GSDState): PlanV2CompileResult {
@@ -114,15 +67,16 @@ export function compileUnitGraphFromState(basePath: string, state: GSDState): Pl
   const slices = getMilestoneSlices(mid).sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0));
   const nodes: UokGraphNode[] = [];
   const clarifyRoundLimit = PLAN_V2_CLARIFY_ROUND_LIMIT;
-  const draftContextIncluded = hasMilestoneFileContent(basePath, mid, "CONTEXT-DRAFT");
-  const finalizedContextIncluded = hasMilestoneFileContent(basePath, mid, "CONTEXT");
-  const researchSynthesized = hasMilestoneFileContent(basePath, mid, "RESEARCH")
-    || countSliceResearchArtifacts(basePath, mid, slices) > 0;
+  // Saved artifact rows decide; CONTEXT and RESEARCH files are projections.
+  const draftContextIncluded = hasSavedArtifact(mid, null, "CONTEXT-DRAFT");
+  const finalizedContextIncluded = hasSavedArtifact(mid, null, "CONTEXT");
+  const researchSynthesized = hasSavedArtifact(mid, null, "RESEARCH")
+    || slices.some((slice) => hasSavedArtifact(mid, slice.id, "RESEARCH"));
 
   if (isExecutionEntryPhase(state.phase) && !finalizedContextIncluded) {
     const reason = draftContextIncluded
-      ? "milestone context draft exists but finalized CONTEXT.md is missing"
-      : "missing milestone CONTEXT.md";
+      ? "milestone context draft exists but finalized CONTEXT is missing"
+      : "missing milestone CONTEXT";
     return {
       ok: false,
       reason,

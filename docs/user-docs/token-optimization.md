@@ -89,6 +89,7 @@ Each token profile maps to an **inline level** that controls how much context is
 Dispatch prompt builders accept an `inlineLevel` parameter. At each level, specific artifacts are gated:
 
 **Minimal level reductions:**
+
 - `buildExecuteTaskPrompt` — drops the decisions template, truncates prior summaries to the most recent one
 - `buildPlanMilestonePrompt` — drops `PROJECT.md`, `REQUIREMENTS.md`, decisions, and supplementary templates like `secrets-manifest`
 - `buildCompleteSlicePrompt` — drops requirements and UAT template inlining
@@ -174,7 +175,7 @@ This graduated approach preserves model quality for the most complex work while 
 
 ## Adaptive Learning (Routing History)
 
-GSD tracks the success and failure of each tier assignment over time and adjusts future classifications accordingly. This is opt-in — it happens automatically and persists in `.gsd/routing-history.json`.
+GSD tracks the success and failure of each tier assignment over time and adjusts future classifications accordingly. This is opt-in — it happens automatically and persists in the project database.
 
 ### How It Works
 
@@ -197,12 +198,10 @@ Feedback signals are weighted 2× compared to automatic outcomes. Requires dynam
 
 ### Data Management
 
-```bash
-# Routing history is stored per-project
-.gsd/routing-history.json
+Routing history is stored per-project in the project database (`.gsd/gsd.db`). A `.gsd/routing-history.json` file from an older version is not read.
 
-# Clear history to reset adaptive learning
-# (happens via the routing-history module API)
+```
+/gsd rate reset   # clear the history to reset adaptive learning
 ```
 
 The feedback array is capped at 200 entries. Per-pattern outcome counts use a rolling window of 50 to prevent stale data from dominating.
@@ -275,7 +274,7 @@ PREFERENCES.md
        │    ├─ task plan analysis (steps, files, signals)
        │    ├─ unit type defaults
        │    ├─ budget pressure adjustment
-       │    ├─ adaptive learning from routing-history.json
+       │    ├─ adaptive learning from routing history
        │    └─ capability scoring (when capability_routing: true)
        │         └─ 7-dimension model profiles × task requirement vectors
        └─ context_management

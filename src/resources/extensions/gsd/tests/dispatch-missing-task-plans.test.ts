@@ -1,12 +1,11 @@
 /**
- * Regression test for issue #909.
+ * Dispatch in the executing phase when plan projection files are missing
+ * (issues #909, #1520, #1640).
  *
- * When S##-PLAN.md exists (causing deriveState → phase:'executing') but the
- * individual task plan files (tasks/T01-PLAN.md, etc.) are absent, the dispatch
- * table must recover by re-running plan-slice — NOT hard-stop.
- *
- * Prior behaviour: action:"stop" → infinite loop on restart.
- * Fixed behaviour: action:"dispatch" unitType:"plan-slice".
+ * The active task comes from the database, so the plan exists there. A missing
+ * PLAN or task-plan file is projection work: dispatch re-renders the slice PLAN
+ * from the DB when it is absent and then dispatches execute-task. A missing
+ * file never stops dispatch and never sends the slice back to plan-slice.
  */
 
 import test from "node:test";
@@ -17,6 +16,7 @@ import { tmpdir } from "node:os";
 import { resolveDispatch } from "../auto-dispatch.ts";
 import type { DispatchContext } from "../auto-dispatch.ts";
 import type { AutoSession } from "../auto/session.ts";
+import { readUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
 import type { GSDState } from "../types.ts";
 import { enableDebug, disableDebug, getDebugLogPath } from "../debug-logger.ts";
 import {
@@ -224,117 +224,30 @@ test("dispatch: present task plan proceeds to execute-task normally", async (t) 
     `unitId should be M002/S03/T01, got: ${result.action === "dispatch" ? result.unitId : "(stop)"}`);
 });
 
-test("dispatch: missing legacy task plan recovery increments a per-slice retry counter", async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-1087-retry-"));
-  t.after(() => removeWorkflowTestDirectory(tmp));
-  scaffoldWorkflowDatabase(tmp, "M002", "S03", "T01");
-
-  scaffoldLegacyMilestoneContext(tmp, "M002");
-  scaffoldLegacySlicePlan(tmp, "M002", "S03");
-
-  const session = {
-    missingTaskPlanRetryCount: new Map<string, number>(),
-  };
-  const result = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
-
-  assert.equal(result.action, "dispatch");
-  assert.ok(result.action === "dispatch" && result.unitType === "plan-slice",
-    `unitType should be plan-slice, got: ${result.action === "dispatch" ? result.unitType : "(stop)"}`);
-  assert.ok(result.action === "dispatch" && result.unitId === "M002/S03",
-    `unitId should be M002/S03, got: ${result.action === "dispatch" ? result.unitId : "(stop)"}`);
-  assert.equal(session.missingTaskPlanRetryCount.get("M002/S03"), 1);
-});
-
-test("dispatch: missing legacy task plan recovery stops when retry counter is exhausted", async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-1087-stop-"));
-  t.after(() => removeWorkflowTestDirectory(tmp));
-  scaffoldWorkflowDatabase(tmp, "M002", "S03", "T01");
-
-  scaffoldLegacyMilestoneContext(tmp, "M002");
-  scaffoldLegacySlicePlan(tmp, "M002", "S03");
-
-  const session = {
-    missingTaskPlanRetryCount: new Map<string, number>([["M002/S03", 2]]),
-  };
-  const result = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
-
-  assert.equal(result.action, "stop");
-  assert.ok(result.action === "stop");
-  assert.equal(result.level, "error");
-  assert.match(result.reason, /Missing task-plan recovery failed 2 times for M002\/S03/);
-  assert.match(result.reason, /manual intervention required/);
-  assert.equal(session.missingTaskPlanRetryCount.has("M002/S03"), false);
-});
-
-test("dispatch: present legacy task plan clears missing-plan recovery retry counter", async (t) => {
+test("dispatch: a slice plan with no task plan file dispatches execute-task, not plan-slice", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-1087-clear-"));
   t.after(() => removeWorkflowTestDirectory(tmp));
   scaffoldWorkflowDatabase(tmp, "M002", "S03", "T01");
 
+  // Legacy slice plan with no tasks/T01-PLAN.md and no embedded tasks: the
+  // task row in the DB is the plan, so the missing file changes nothing.
   scaffoldLegacyMilestoneContext(tmp, "M002");
   scaffoldLegacySlicePlan(tmp, "M002", "S03");
-  scaffoldLegacyTaskPlan(tmp, "M002", "S03", "T01");
 
   const session = {
-    missingTaskPlanRetryCount: new Map<string, number>([["M002/S03", 1]]),
-    preExecRetryCount: new Map<string, number>([["M002/S03", 2]]),
+    unclaimedUnitBudgets: new Map<string, number>(),
   };
+  const preExecBudget = { unitType: "plan-slice", unitId: "M002/S03", kind: "pre-exec" } as const;
+  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
+  spendUnitBudget(session.unclaimedUnitBudgets, preExecBudget);
   const result = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
 
   assert.equal(result.action, "dispatch");
   assert.ok(result.action === "dispatch" && result.unitType === "execute-task",
     `unitType should be execute-task, got: ${result.action === "dispatch" ? result.unitType : "(stop)"}`);
-  assert.equal(session.missingTaskPlanRetryCount.has("M002/S03"), false);
-  assert.equal(session.preExecRetryCount.get("M002/S03"), 2,
-    "pre-exec retry counter must not be cleared when task plan is present");
-});
-
-test("dispatch: missing-task-plan recovery loop terminates even when the shared pre-exec key is reset between rounds (#1087)", async (t) => {
-  // The recovery rule re-dispatches plan-slice with unitId "${mid}/${sid}".
-  // That regenerated plan-slice carries the same currentUnit.id, and on a
-  // pre-execution pass the post-unit hook deletes that key from
-  // preExecRetryCount (auto-post-unit.ts). Missing per-task PLAN projection
-  // files do not fail pre-exec checks, so the regenerated plan-slice typically
-  // passes and that delete fires every cycle. If recovery shared
-  // preExecRetryCount, its counter would be wiped to 0 each round and the loop
-  // would never reach the cap. Here we simulate that reset between rounds and
-  // assert the dedicated counter still climbs to MAX and stops.
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-1087-loop-term-"));
-  t.after(() => removeWorkflowTestDirectory(tmp));
-  scaffoldWorkflowDatabase(tmp, "M002", "S03", "T01");
-
-  scaffoldLegacyMilestoneContext(tmp, "M002");
-  scaffoldLegacySlicePlan(tmp, "M002", "S03");
-
-  const session = {
-    missingTaskPlanRetryCount: new Map<string, number>(),
-    preExecRetryCount: new Map<string, number>(),
-  };
-
-  // Round 1: missing task plan → recover (counter 0 → 1).
-  const r1 = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
-  assert.ok(r1.action === "dispatch" && r1.unitType === "plan-slice",
-    `round 1 should re-dispatch plan-slice, got: ${r1.action === "dispatch" ? r1.unitType : "(stop)"}`);
-  assert.equal(session.missingTaskPlanRetryCount.get("M002/S03"), 1);
-
-  // The regenerated plan-slice passes its post-unit pre-exec check, deleting
-  // the shared "${mid}/${sid}" key from preExecRetryCount.
-  session.preExecRetryCount.delete("M002/S03");
-
-  // Round 2: still missing → recover (counter 1 → 2), unaffected by the reset.
-  const r2 = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
-  assert.ok(r2.action === "dispatch" && r2.unitType === "plan-slice",
-    `round 2 should re-dispatch plan-slice, got: ${r2.action === "dispatch" ? r2.unitType : "(stop)"}`);
-  assert.equal(session.missingTaskPlanRetryCount.get("M002/S03"), 2);
-
-  session.preExecRetryCount.delete("M002/S03");
-
-  // Round 3: cap reached → stop. The loop terminates despite the resets.
-  const r3 = await resolveDispatch(makeContextFor(tmp, "M002", "S03", "T01", session));
-  assert.equal(r3.action, "stop");
-  assert.ok(r3.action === "stop" && r3.level === "error");
-  assert.match(r3.reason, /Missing task-plan recovery failed 2 times for M002\/S03/);
-  assert.equal(session.missingTaskPlanRetryCount.has("M002/S03"), false);
+  assert.ok(result.action === "dispatch" && result.unitId === "M002/S03/T01");
+  assert.equal(readUnitBudget(session.unclaimedUnitBudgets, preExecBudget), 2,
+    "pre-exec budget must not be reset by dispatch");
 });
 
 test("dispatch: session milestone mismatch stops before missing-task-plan recovery", async (t) => {
@@ -576,7 +489,6 @@ test("dispatch: unprojected worktree re-renders the slice PLAN from the DB and p
     basePath: worktreeRoot,
     originalBasePath: tmp,
     currentMilestoneId: "M004",
-    missingTaskPlanRetryCount: new Map<string, number>(),
   };
   const result = await resolveDispatch(makeContextFor(tmp, "M004", "S02", "T01", session));
 
@@ -588,8 +500,6 @@ test("dispatch: unprojected worktree re-renders the slice PLAN from the DB and p
   const healedPlan = join(worktreeRoot, ".gsd", "phases", "04-test", "04-02-PLAN.md");
   assert.ok(existsSync(healedPlan), `healed PLAN should exist at ${healedPlan}`);
   assert.match(readFileSync(healedPlan, "utf-8"), /<tasks>/);
-  // No plan-slice retry budget was spent on a healable projection gap.
-  assert.equal(session.missingTaskPlanRetryCount.has("M004/S02"), false);
 });
 
 test("dispatch: fresh worktree with DB rows but no PLAN anywhere re-renders and proceeds — issue #1640", async (t) => {
@@ -611,7 +521,6 @@ test("dispatch: fresh worktree with DB rows but no PLAN anywhere re-renders and 
     basePath: worktreeRoot,
     originalBasePath: tmp,
     currentMilestoneId: "M004",
-    missingTaskPlanRetryCount: new Map<string, number>(),
   };
   const result = await resolveDispatch(makeContextFor(tmp, "M004", "S02", "T01", session));
 
@@ -622,57 +531,12 @@ test("dispatch: fresh worktree with DB rows but no PLAN anywhere re-renders and 
   assert.ok(result.action === "dispatch" && result.unitId === "M004/S02/T01");
   const healedPlan = join(worktreeRoot, ".gsd", "phases", "04-test", "04-02-PLAN.md");
   assert.ok(existsSync(healedPlan), `healed PLAN should exist at ${healedPlan}`);
-  assert.equal(session.missingTaskPlanRetryCount.has("M004/S02"), false);
 });
 
-test("dispatch: unprojected worktree stops loud when the DB lacks the slice rows — issues #1520/#1640", async (t) => {
-  // When the DB genuinely lacks the slice rows the heal cannot render, and the
-  // sanctioned exit must be truthful: report the render failure and name the
-  // command that actually restores projections (/gsd rebuild markdown), not a
-  // doctor run that only re-renders milestone shells.
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-1640-no-db-rows-"));
-  t.after(() => removeWorkflowTestDirectory(tmp));
-  if (isDbAvailable()) closeDatabase();
-  mkdirSync(join(tmp, ".gsd"), { recursive: true });
-  assert.equal(openDatabase(join(tmp, ".gsd", "gsd.db")), true);
-  insertMilestone({ id: "M004", title: "Test Milestone", status: "active" });
-  // No slice or task rows — the DB cannot render the PLAN.
-
-  scaffoldMilestoneContext(tmp, "M004");
-  scaffoldSlicePlan(tmp, "M004", "S02");
-
-  const worktreeRoot = join(tmp, ".gsd", "worktrees", "M004");
-  mkdirSync(worktreeRoot, { recursive: true });
-  scaffoldMilestoneContext(worktreeRoot, "M004");
-
-  const session = {
-    basePath: worktreeRoot,
-    originalBasePath: tmp,
-    currentMilestoneId: "M004",
-    missingTaskPlanRetryCount: new Map<string, number>(),
-  };
-  const result = await resolveDispatch(makeContextFor(tmp, "M004", "S02", "T01", session));
-
-  assert.equal(result.action, "stop",
-    `expected stop, got ${result.action}${result.action === "dispatch" ? `/${result.unitType}` : ""}`);
-  assert.ok(result.action === "stop");
-  assert.equal(result.level, "error");
-  assert.match(result.reason, /M004\/S02/);
-  assert.match(result.reason, /re-rendering it from the workflow database failed/);
-  assert.match(result.reason, /rebuild markdown/);
-  assert.doesNotMatch(result.reason, /Run \/gsd doctor/);
-  assert.doesNotMatch(result.reason, /Fix the task-plan files manually/);
-  // No plan-slice retry budget was spent on an unfixable-by-replan condition.
-  assert.equal(session.missingTaskPlanRetryCount.has("M004/S02"), false);
-});
-
-test("dispatch: worktree recovery still replans when the root slice plan lacks embedded tasks — #909 preserved", async (t) => {
-  // Boundary case: the slice plan exists in legacy form (no embedded tasks)
-  // at both the project root and the active worktree, and the per-task plan
-  // is genuinely absent. The #909 plan-slice recovery still applies — the
-  // projection-diagnosis stop must not swallow it. (A legacy worktree with
-  // no slice plan at all never reaches the recovery rule: the missing-context
-  // guard dispatches discuss-milestone first.)
+test("dispatch: a legacy slice plan with no task plan file in root and worktree dispatches execute-task", async (t) => {
+  // The slice plan exists in legacy form (no embedded tasks) at both the
+  // project root and the active worktree, and the per-task plan file is absent.
+  // The task row in the DB is the plan: dispatch must not re-plan the slice.
   const tmp = mkdtempSync(join(tmpdir(), "gsd-1520-legacy-replan-"));
   t.after(() => removeWorkflowTestDirectory(tmp));
   scaffoldWorkflowDatabase(tmp, "M004", "S02", "T01");
@@ -689,12 +553,10 @@ test("dispatch: worktree recovery still replans when the root slice plan lacks e
     basePath: worktreeRoot,
     originalBasePath: tmp,
     currentMilestoneId: "M004",
-    missingTaskPlanRetryCount: new Map<string, number>(),
   };
   const result = await resolveDispatch(makeContextFor(tmp, "M004", "S02", "T01", session));
 
   assert.equal(result.action, "dispatch");
-  assert.ok(result.action === "dispatch" && result.unitType === "plan-slice",
-    `unitType should be plan-slice, got: ${result.action === "dispatch" ? result.unitType : "(stop)"}`);
-  assert.equal(session.missingTaskPlanRetryCount.get("M004/S02"), 1);
+  assert.ok(result.action === "dispatch" && result.unitType === "execute-task",
+    `unitType should be execute-task, got: ${result.action === "dispatch" ? result.unitType : "(stop)"}`);
 });

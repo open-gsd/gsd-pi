@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 
 import { isReusableGhostMilestone } from "../state.ts";
 import { nextMilestoneIdReserved } from "../milestone-id-reservation.ts";
-import { clearReservedMilestoneIds, findMilestoneIds } from "../milestone-ids.ts";
+import { clearReservedMilestoneIds, findMilestoneIds, getReservedMilestoneIds } from "../milestone-ids.ts";
 import { invalidateAllCaches } from "../cache.ts";
 import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
@@ -34,6 +34,7 @@ describe("deferred milestone dir creation (#4996)", () => {
 
   it("(a) fresh project: milestones dir has no M001 entry before any discuss flow", () => {
     base = makeBase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
     const nextId = nextMilestoneIdReserved(findMilestoneIds(base), false, base);
     assert.equal(nextId, "M001");
 
@@ -44,12 +45,12 @@ describe("deferred milestone dir creation (#4996)", () => {
 
   it("(b) abandoned discuss flow leaves no orphan", () => {
     base = makeBase();
+    openDatabase(join(base, ".gsd", "gsd.db"));
     const nextId = nextMilestoneIdReserved(findMilestoneIds(base), false, base);
     assert.equal(nextId, "M001");
 
     const m001Dir = join(base, ".gsd", "milestones", "M001");
     assert.ok(!existsSync(m001Dir));
-    assert.equal(isReusableGhostMilestone(base, "M001"), false);
     assert.ok(!findMilestoneIds(base).includes("M001"));
   });
 
@@ -61,5 +62,17 @@ describe("deferred milestone dir creation (#4996)", () => {
     assert.equal(isReusableGhostMilestone(base, "M001"), true);
     assert.equal(nextMilestoneIdReserved(findMilestoneIds(base), false, base), "M001");
     assert.ok(!existsSync(join(base, ".gsd", "milestones", "M002")));
+  });
+
+  it("(d) no open DB: allocation throws instead of using disk directories", () => {
+    base = makeBase();
+    closeDatabase();
+    mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+
+    assert.throws(
+      () => nextMilestoneIdReserved(findMilestoneIds(base), false, base),
+      /Cannot allocate a milestone ID: workflow DB is unavailable/,
+    );
+    assert.equal(getReservedMilestoneIds().size, 0, "no ID is reserved when allocation is refused");
   });
 });

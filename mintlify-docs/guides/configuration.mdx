@@ -149,7 +149,7 @@ planning_depth: deep
 | `light` | Default. Uses the normal milestone discussion flow. |
 | `deep` | Runs workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, a research decision, and optional project research before milestone planning. |
 
-Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in `.gsd/runtime/research-decision.json`; choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
+Enable deep mode with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by adding the setting to `.gsd/PREFERENCES.md`. The research decision is recorded in the database; ask for research during the project or requirements discussion, and no recorded decision means `skip`. Choosing research writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
 
 ### `budget_ceiling`
 
@@ -173,7 +173,7 @@ auto_supervisor:
 
 ### `reactive_execution`
 
-Automatic parallel task dispatch inside a slice. It is enabled by default and only dispatches when task-plan IO annotations produce a non-ambiguous graph with enough ready, non-conflicting tasks.
+Automatic parallel task dispatch inside a slice. It is enabled by default and only dispatches when the planned inputs and expected output on the task rows produce a non-ambiguous graph with enough ready, non-conflicting tasks. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch.
 
 ```yaml
 reactive_execution:
@@ -335,7 +335,6 @@ git:
   auto_push: true
   merge_strategy: squash
   isolation: none
-  commit_docs: true
 
 skill_discovery: suggest
 always_use_skills:

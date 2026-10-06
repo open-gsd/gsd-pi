@@ -1,15 +1,16 @@
-import { existsSync, mkdirSync, lstatSync, readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, lstatSync, readdirSync, rmSync } from "node:fs";
+import { join, relative } from "node:path";
 
-import { loadFile, parseSummary, saveFile, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
-import { getMilestone, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
-import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, legacyMilestonesDir, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, resolveGsdRootFile, relMilestonePath } from "./paths.js";
+import { loadFile, parseSummary, parseTaskPlanMustHaves, countMustHavesMentionedInSummary } from "./files.js";
+import { getActiveRequirements, getMilestone, getPlanMilestoneRecoveryBlock } from "./gsd-db.js";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
+import { resolveMilestoneFile, resolveMilestonePath, resolveSliceFile, resolveSlicePath, resolveTaskFile, resolveTasksDir, legacyMilestonesDir, relMilestoneFile, relSliceFile, relTaskFile, relSlicePath, relGsdRootFile, relMilestonePath } from "./paths.js";
 import { findMilestoneIds } from "./milestone-ids.js";
 import { deriveState } from "./state.js";
-import { isClosedStatus } from "./status-guards.js";
+import { isSkippedForDispatch } from "./status-guards.js";
 
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
-import type { RoadmapSliceEntry } from "./types.js";
+import type { Requirement, RoadmapSliceEntry } from "./types.js";
 import { runProviderChecks } from "./doctor-providers.js";
 import { validateTitle } from "./validation.js";
 
@@ -18,18 +19,15 @@ function matchesScope(unitId: string, scope?: string): boolean {
   return unitId === scope || unitId.startsWith(`${scope}/`);
 }
 
-function auditRequirements(content: string | null): DoctorIssue[] {
-  if (!content) return [];
+/** Audit the requirement rows of the database. REQUIREMENTS.md is a projection and is not read. */
+function auditRequirements(requirements: readonly Requirement[]): DoctorIssue[] {
   const issues: DoctorIssue[] = [];
-  const blocks = content.split(/^###\s+/m).slice(1);
 
-  for (const block of blocks) {
-    const idMatch = block.match(/^(R\d+)/);
-    if (!idMatch) continue;
-    const requirementId = idMatch[1];
-    const status = block.match(/^-\s+Status:\s+(.+)$/m)?.[1]?.trim().toLowerCase() ?? "";
-    const owner = block.match(/^-\s+Primary owning slice:\s+(.+)$/m)?.[1]?.trim().toLowerCase() ?? "";
-    const notes = block.match(/^-\s+Notes:\s+(.+)$/m)?.[1]?.trim().toLowerCase() ?? "";
+  for (const requirement of requirements) {
+    const requirementId = requirement.id;
+    const status = requirement.status.trim().toLowerCase();
+    const owner = requirement.primary_owner.trim().toLowerCase();
+    const notes = requirement.notes.trim();
 
     if (status === "active" && (!owner || owner === "none" || owner === "none yet")) {
       // #4414: Downgrade to warning. A newly-created requirement has
@@ -96,9 +94,7 @@ export async function checkGsdStateHealth(
   },
 ): Promise<void> {
   const { fix, shouldFix, scope } = options;
-  const requirementsPath = resolveGsdRootFile(basePath, "REQUIREMENTS");
-  const requirementsContent = await loadFile(requirementsPath);
-  issues.push(...auditRequirements(requirementsContent));
+  issues.push(...auditRequirements(getActiveRequirements()));
 
   const state = await deriveState(basePath);
 
@@ -148,45 +144,58 @@ export async function checkGsdStateHealth(
     const milestonePath = resolveMilestonePath(basePath, milestoneId);
 
     // Validate milestone title for delimiter characters that break state documents.
+    // The title is a database value; an edit of the ROADMAP projection would
+    // not change it, so doctor only reports.
     const milestoneTitleIssue = validateTitle(milestone.title);
     if (milestoneTitleIssue) {
-      const roadmapFile = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
-      let wasFixed = false;
-      if (shouldFix("delimiter_in_title") && roadmapFile) {
-        try {
-          const raw = readFileSync(roadmapFile, "utf-8");
-          // Replace em/en dashes with " - " in the H1 title line only
-          const sanitized = raw.replace(/^(# .*)$/m, (line) =>
-            line.replace(/[\u2014\u2013]/g, "-"),
-          );
-          if (sanitized !== raw) {
-            await saveFile(roadmapFile, sanitized);
-            fixesApplied.push(`sanitized delimiter characters in ${milestoneId} title`);
-            wasFixed = true;
-          }
-        } catch { /* non-fatal — report the warning below */ }
-      }
-      if (!wasFixed) {
-        issues.push({
-          severity: "warning",
-          code: "delimiter_in_title",
-          scope: "milestone",
-          unitId: milestoneId,
-          message: `Milestone ${milestoneId} ${milestoneTitleIssue}. Rename the milestone to remove these characters to prevent state corruption.`,
-          file: relMilestoneFile(basePath, milestoneId, "ROADMAP"),
-          fixable: true,
-        });
-      }
+      issues.push({
+        severity: "warning",
+        code: "delimiter_in_title",
+        scope: "milestone",
+        unitId: milestoneId,
+        message: `Milestone ${milestoneId} ${milestoneTitleIssue}. Rename the milestone to remove these characters to prevent state corruption.`,
+        file: relMilestoneFile(basePath, milestoneId, "ROADMAP"),
+        fixable: false,
+      });
     }
 
     const roadmapPath = resolveMilestoneFile(basePath, milestoneId, "ROADMAP");
     const roadmapContent = roadmapPath ? await loadFile(roadmapPath) : null;
+    // The legacy row: the missing-ROADMAP branch below reads the same rows as
+    // the ROADMAP renderer (isRoadmapRenderable).
+    const dbMilestone = getMilestone(milestoneId);
+    const milestoneRead = readMilestone(milestoneId);
+
+    // #2510: a recorded plan-milestone-recovery gate means milestone planning
+    // failed fail-closed and auto-mode is gated on a real plan being persisted.
+    // Surface it as its own issue independent of ROADMAP presence: the missing-
+    // roadmap branch below does not describe a blocked plan. Eligibility mirrors
+    // derive: the gate only blocks while the milestone has zero slices (a
+    // persisted plan supersedes it), and only for live milestones.
+    if (
+      milestoneRead !== null
+      && !isSkippedForDispatch(milestoneRead.status)
+      && readMilestoneSlices(milestoneId).length === 0
+    ) {
+      const planningBlocker = getPlanMilestoneRecoveryBlock(milestoneId);
+      if (planningBlocker) {
+        issues.push({
+          severity: "error",
+          code: "planning_blocked",
+          scope: "milestone",
+          unitId: milestoneId,
+          message: `Milestone ${milestoneId} planning failed fail-closed and auto-mode is blocked until a plan is persisted: ${planningBlocker.reason} Re-run milestone planning (/gsd dispatch plan-milestone or gsd_plan_milestone); a successful plan supersedes the recovery gate.`,
+          fixable: false,
+        });
+        continue;
+      }
+    }
+
     if (!roadmapContent) {
       // #1634: a missing ROADMAP with intact DB planning data is projection
       // drift, not data loss — the DB is the authority. Repair by re-rendering,
       // sharing the same predicate and repair as the roadmap-missing drift
       // handler so doctor and reconciliation agree on what is fixable.
-      const dbMilestone = getMilestone(milestoneId);
       const { isRoadmapRenderable } = await import("./state-reconciliation/drift/roadmap.js");
       const renderable = dbMilestone !== null && isRoadmapRenderable(dbMilestone);
       if (renderable && fix && shouldFix("missing_roadmap")) {
@@ -199,26 +208,38 @@ export async function checkGsdStateHealth(
           }
         } catch { /* non-fatal — report the issue below */ }
       }
+      if (dbMilestone !== null && !renderable) {
+        // #2510: known-unplanned — the DB row exists but has no renderable plan
+        // (no slices, empty vision) and no recovery gate. This is the normal
+        // pre-planning state of a queued milestone; the roadmap-missing drift
+        // handler skips exactly these milestones, so a blocking non-fixable
+        // missing_roadmap here is a false positive.
+        continue;
+      }
       issues.push({
         severity: "error",
         code: "missing_roadmap",
         scope: "milestone",
         unitId: milestoneId,
-        message: renderable
+        // dbMilestone === null means the row is unknown (DB unavailable, or a
+        // filesystem-discovered milestone dir) — preserve the legacy diagnostic
+        // rather than assuming the milestone was never planned.
+        message: dbMilestone !== null
           ? `Milestone ${milestoneId} is missing its ROADMAP.md file. Its plan is intact in the DB — run /gsd sync (or gsd doctor --fix) to re-render it.`
           : `Milestone ${milestoneId} is missing its ROADMAP.md file.`,
-        fixable: renderable,
+        fixable: dbMilestone !== null,
       });
       continue;
     }
     if (!milestonePath) continue;
 
-    // Slices come from the DB (ADR-017): the roadmap projection is display only.
+    // Slices come from the read interface (ADR-017, ADR-046): the roadmap
+    // projection is display only.
     type NormSlice = RoadmapSliceEntry & { pending?: boolean; skipped?: boolean };
-    const slices: NormSlice[] = getMilestoneSlices(milestoneId).map(s => ({
+    const slices: NormSlice[] = readMilestoneSlices(milestoneId).map(s => ({
       id: s.id,
       title: s.title,
-      done: isClosedStatus(s.status),
+      done: s.done,
       pending: s.status === "pending",
       skipped: s.status === "skipped",
       risk: (s.risk || "medium") as RoadmapSliceEntry["risk"],
@@ -277,9 +298,6 @@ export async function checkGsdStateHealth(
       // Validate slice title for delimiter characters.
       const sliceTitleIssue = validateTitle(slice.title);
       if (sliceTitleIssue) {
-        // Slice titles live inside the roadmap H1/checkbox lines — the milestone-level
-        // fix above already sanitizes the roadmap file. For slices we only report, because
-        // the title comes from the checkbox text and requires careful regex to fix safely.
         issues.push({
           severity: "warning",
           code: "delimiter_in_title",
@@ -338,6 +356,29 @@ export async function checkGsdStateHealth(
       // slices/<SID>/ subdir), which makes tasksDir a single directory shared by
       // every slice in the milestone rather than this slice's own.
       const tasksDirIsShared = !!slicePath && !!milestonePath && slicePath === milestonePath;
+
+      // ── Leftover T##-REOPEN.json from a build that kept the reopen reason in a file ──
+      // The reopen reason is the task.reopened DB event; this file is never read.
+      for (const dir of new Set([tasksDir, slicePath])) {
+        if (!dir) continue;
+        let names: string[] = [];
+        try { names = readdirSync(dir); } catch { /* non-fatal */ }
+        for (const f of names) {
+          if (!f.endsWith("-REOPEN.json")) continue;
+          const reopenPath = join(dir, f);
+          const relReopenPath = relative(basePath, reopenPath);
+          if (issues.some(i => i.code === "orphan_reopen_reason_file" && i.file === relReopenPath)) continue;
+          const diskTaskId = f.replace(/-REOPEN\.json$/, "");
+          issues.push({ severity: "info", code: "orphan_reopen_reason_file", scope: "task",
+            unitId: `${unitId}/${diskTaskId}`,
+            message: `Task ${unitId}/${diskTaskId} has a leftover ${f} from an older build — the reopen reason is a database row now and this file is not read`,
+            file: relReopenPath, fixable: true });
+          if (shouldFix("orphan_reopen_reason_file")) {
+            rmSync(reopenPath, { force: true });
+            fixesApplied.push(`removed leftover ${f} for ${unitId}/${diskTaskId}`);
+          }
+        }
+      }
       if (!tasksDir) {
         // Pending slices haven't been planned yet — tasks/ is created on demand.
         // Skipped slices may legitimately never create tasks/.
@@ -363,9 +404,9 @@ export async function checkGsdStateHealth(
 
       // Plan tasks come from the DB (ADR-017): the PLAN projection is display only.
       let plan: { tasks: Array<{ id: string; done: boolean; title: string; estimate?: string }> } | null = null;
-      const dbTasks = getSliceTasks(milestoneId, slice.id);
+      const dbTasks = readSliceTasks(milestoneId, slice.id);
       if (dbTasks.length > 0) {
-        plan = { tasks: dbTasks.map(t => ({ id: t.id, done: t.status === "complete" || t.status === "done", title: t.title, estimate: t.estimate || undefined })) };
+        plan = { tasks: dbTasks.map(t => ({ id: t.id, done: t.done, title: t.title, estimate: t.estimate || undefined })) };
       }
       if (!plan) {
         if (!slice.done) {

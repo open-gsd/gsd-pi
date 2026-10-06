@@ -1,4 +1,6 @@
 import { saveReworkBrief, type ReworkBriefFindingInput } from "../gsd-db.js";
+import { internalPlanningInvocation, type PlanningInvocation } from "../planning-invocation.js";
+import { executeRecordDomainOperation } from "../record-domain-operation.js";
 import { isNonEmptyString, validateStringArray } from "../validation.js";
 
 export interface ReworkBriefSaveParams {
@@ -9,13 +11,13 @@ export interface ReworkBriefSaveParams {
   findings: ReworkBriefFindingInput[];
 }
 
-export interface ReworkBriefSaveResult {
+export type ReworkBriefSaveResult = {
   briefId: string;
   milestoneId: string;
   sliceId: string;
   taskId: string;
   findingCount: number;
-}
+};
 
 function validateFinding(finding: ReworkBriefFindingInput, index: number): ReworkBriefFindingInput {
   if (!isNonEmptyString(finding?.findingId)) throw new Error(`findings[${index}].findingId is required`);
@@ -66,8 +68,13 @@ function validateParams(params: ReworkBriefSaveParams): ReworkBriefSaveParams {
   };
 }
 
+/**
+ * Save a rework brief through the rework-brief.save Domain Operation. A replay
+ * with the same idempotency key writes nothing and returns the original result.
+ */
 export async function handleReworkBriefSave(
   rawParams: ReworkBriefSaveParams,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<ReworkBriefSaveResult | { error: string }> {
   let params: ReworkBriefSaveParams;
   try {
@@ -77,14 +84,27 @@ export async function handleReworkBriefSave(
   }
 
   try {
-    const { briefId } = saveReworkBrief(params);
-    return {
-      briefId,
-      milestoneId: params.milestoneId,
-      sliceId: params.sliceId,
-      taskId: params.taskId,
-      findingCount: params.findings.length,
-    };
+    return executeRecordDomainOperation<ReworkBriefSaveResult>({
+      operationType: "rework-brief.save",
+      invocation,
+      payload: params,
+      eventType: "rework-brief.saved",
+      entityType: "rework-brief",
+      projectionKeys: [`planning/${params.milestoneId}/${params.sliceId}/${params.taskId}`.toLowerCase()],
+      mutate: () => {
+        const { briefId } = saveReworkBrief(params);
+        return {
+          entityId: briefId,
+          result: {
+            briefId,
+            milestoneId: params.milestoneId,
+            sliceId: params.sliceId,
+            taskId: params.taskId,
+            findingCount: params.findings.length,
+          },
+        };
+      },
+    });
   } catch (err) {
     return { error: `db write failed: ${(err as Error).message}` };
   }

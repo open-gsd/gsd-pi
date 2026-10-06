@@ -77,10 +77,10 @@ afterEach(() => {
   tempDirs.clear();
 });
 
-test("parkMilestone parks an adopted milestone through canonical pause (#2126)", () => {
+test("parkMilestone parks an adopted milestone through canonical pause (#2126)", async () => {
   const basePath = createBase();
 
-  const parked = parkMilestone(basePath, "M001", "deprioritized");
+  const parked = await parkMilestone(basePath, "M001", "deprioritized");
 
   assert.ok(parked, "parkMilestone should succeed for adopted milestones");
   assert.equal(getMilestone("M001")?.status, "parked");
@@ -97,11 +97,11 @@ test("parkMilestone parks an adopted milestone through canonical pause (#2126)",
   );
 });
 
-test("unparkMilestone restores an adopted milestone from canonical pause (#2126)", () => {
+test("unparkMilestone restores an adopted milestone from canonical pause (#2126)", async () => {
   const basePath = createBase();
 
-  assert.ok(parkMilestone(basePath, "M001", "deprioritized"));
-  assert.ok(unparkMilestone(basePath, "M001"));
+  assert.ok(await parkMilestone(basePath, "M001", "deprioritized"));
+  assert.ok(await unparkMilestone(basePath, "M001"));
 
   assert.equal(getMilestone("M001")?.status, "active");
   assert.equal(

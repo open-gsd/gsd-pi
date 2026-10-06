@@ -2,8 +2,8 @@
 // File Purpose: Workspace-facing Interface for opening and maintaining the workflow database.
 
 import { createHash } from "node:crypto";
-import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { closeSync, cpSync, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
 
 import { syncDirectoryEntry } from "@gsd/native/directory-sync";
 
@@ -14,6 +14,7 @@ import {
   closeAllDatabases,
   closeDatabase,
   closeDatabaseByWorkspace,
+  executeDomainOperation,
   getDbPath,
   getDbStatus,
   getDbProvider,
@@ -26,6 +27,7 @@ import {
   openDatabaseByWorkspace,
   openIsolatedDatabase,
   refreshOpenDatabaseFromDisk,
+  setProjectRootBinding,
   vacuumDatabase,
   wasDbOpenAttempted,
 } from "./gsd-db.js";
@@ -53,15 +55,23 @@ import {
 import {
   createLegacyImportPreview,
   hashLegacyImportValue,
+  legacyImportBaseSnapshotForPreview,
+  legacyImportKnowledgeFileRows,
   revalidateLegacyImportPreview,
   resolveLegacyImportPreview,
   type LegacyImportPreviewArtifact,
   type LegacyImportPreviewCreateInput,
   type LegacyImportPreviewResolutionChoice,
 } from "./legacy-import-preview.js";
+import {
+  formatLegacyImportKnowledgeFileRowChoice,
+  formatLegacyImportPreviewChoice,
+} from "./legacy-import-forward-repair-choice-token.js";
 import { drillLegacyImportBackupRestore } from "./legacy-import-restore-drill.js";
 import { inspectSqliteReadOnlySnapshot } from "./sqlite-readonly.js";
 import { atomicWriteSync } from "./atomic-write.js";
+import { cutOverProjectAuthorityOnOpen } from "./authority-cutover-on-open.js";
+import { GSDError, GSD_STALE_STATE } from "./errors.js";
 import {
   assessLegacyImportRestore,
   type LegacyImportRestoreAssessment,
@@ -77,10 +87,12 @@ export {
   type LegacyImportLiveRestoreInput,
   type LegacyImportLiveRestoreResult,
 } from "./legacy-import-live-restore.js";
-import { resolveGsdPathContract, gsdRoot } from "./paths.js";
+import { resolveGsdPathContract, gsdRoot, normalizeRealPath } from "./paths.js";
 import { logWarning, setLogBasePath } from "./workflow-logger.js";
 import { parseDecisionsTable } from "./decision-markdown-parser.js";
 import { isSqliteBusyError } from "./sqlite-errors.js";
+import { nativeLsFiles } from "./native-git-bridge.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
 
 export interface WorkflowDatabaseLocation {
   projectRoot: string;
@@ -93,6 +105,8 @@ export type WorkflowDatabaseOpenReason =
   | "created-empty"
   | "missing-database"
   | "missing-gsd-dir"
+  | "authority-missing"
+  | "checkout-unbound"
   | "locked"
   | "open-failed"
   | "schema-too-new";
@@ -112,11 +126,34 @@ export type WorkflowDatabaseOpenResult =
   | {
       // Refuse-newer version skew: the typed engine error (with its exact
       // message) is ALWAYS attached so read seams can surface it loudly.
+      // "authority-missing": the project has workflow history on disk but no
+      // database; the error names the operator path.
+      // "checkout-unbound": the database is bound to another checkout root.
       ok: false;
-      reason: "schema-too-new";
+      reason: "schema-too-new" | "authority-missing" | "checkout-unbound";
       location: WorkflowDatabaseLocation;
       error: Error;
     };
+
+export interface OpenWorkflowDatabaseOptions {
+  /**
+   * Explicit import/bootstrap only (/gsd recover, /gsd migrate, /gsd db
+   * start-empty): start an empty database although the project already holds
+   * workflow history.
+   */
+  createEmptyAuthority?: boolean;
+  /**
+   * Explicit /gsd db bind only: make this checkout the one the database belongs
+   * to. The empty-database check does not run, so the caller must close the handle.
+   */
+  bindCheckout?: boolean;
+  /**
+   * Open without the automatic lifecycle backfill and Authority Epoch cutover.
+   * /gsd db restore-backup replaces the database it opens, so it must not
+   * change that database first.
+   */
+  skipAuthorityCutover?: boolean;
+}
 
 export type WorkflowDatabaseStatus = ReturnType<typeof getDbStatus>;
 export type WorkflowDatabaseProvider = ReturnType<typeof getDbProvider>;
@@ -154,9 +191,238 @@ export function resolveProjectRootDbPath(basePath: string): string {
   return resolveWorkflowDatabaseLocation(basePath).projectDb;
 }
 
+/**
+ * True when `.gsd` proves an earlier Workflow Authority existed: a milestone
+ * directory with content (current `phases/` or legacy `milestones/` layout),
+ * a git-tracked root projection that only database rows produce, or a
+ * migration backup. An absent or zero-byte
+ * gsd.db beside them is a lost authority, not a fresh project.
+ */
+function hasWorkflowHistoryWithoutDatabase(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): boolean {
+  try {
+    if (statSync(location.projectDb).size > 0) return false;
+  } catch {
+    // Absent database: fall through to the history check.
+  }
+  return milestoneProjectionEntries(location.projectGsd).length > 0
+    || dirEntries(dirname(location.projectDb)).some((entry) => entry.startsWith("gsd.db.backup-v"))
+    || hasTrackedRootProjection(location.projectGsd);
+}
+
+/**
+ * Root projections that GSD writes only from database rows. KNOWLEDGE.md is
+ * not one: a render with no rows writes its empty frame, and a render keeps
+ * the file rows that are not imported.
+ */
+const ROW_BACKED_ROOT_PROJECTIONS = ["PROJECT.md", "DECISIONS.md", "REQUIREMENTS.md"] as const;
+
+/**
+ * True when git tracks a root projection that only database rows produce: a
+ * clone of tracked `.gsd` (team mode) brings the file but not the rows.
+ */
+function hasTrackedRootProjection(projectGsd: string): boolean {
+  const present = ROW_BACKED_ROOT_PROJECTIONS.filter((name) => existsSync(join(projectGsd, name)));
+  if (present.length === 0) return false;
+  try {
+    return present.some((name) => nativeLsFiles(dirname(projectGsd), `${basename(projectGsd)}/${name}`).length > 0);
+  } catch {
+    // No repository or a git failure: the file is not a tracked team projection.
+    return false;
+  }
+}
+
+function dirEntries(dir: string): string[] {
+  try {
+    return readdirSync(dir);
+  } catch {
+    return [];
+  }
+}
+
+/** Entry names inside every milestone directory, in the `phases/` and legacy `milestones/` layouts. */
+function milestoneProjectionEntries(projectGsd: string): string[] {
+  return ["phases", "milestones"].flatMap((layout) => {
+    const container = join(projectGsd, layout);
+    return dirEntries(container).flatMap((milestone) => dirEntries(join(container, milestone)));
+  });
+}
+
+const START_EMPTY_OPERATION = "project.start_empty";
+
+function openDatabaseHas(sql: string): boolean {
+  return _getAdapter()?.prepare(sql).get() !== undefined;
+}
+
+/**
+ * True when the open database did not produce the projections beside it, such
+ * as a re-clone of tracked `.gsd` beside a schema-only gsd.db. Either it has no
+ * milestone rows but `.gsd` holds a planned milestone (a ROADMAP projection),
+ * or it has no workflow rows at all but git tracks a root projection that only
+ * rows produce. Only Import Application or the stored start-empty choice
+ * admits it. Discussion scratch (CONTEXT or CONTEXT-DRAFT without a ROADMAP)
+ * is not planned work.
+ */
+function isEmptyDatabaseBesideProjections(projectGsd: string): boolean {
+  if (openDatabaseHas("SELECT 1 FROM milestones LIMIT 1")) return false;
+  if (openDatabaseHas(`SELECT 1 FROM workflow_operations WHERE operation_type = '${START_EMPTY_OPERATION}' LIMIT 1`)) return false;
+  if (milestoneProjectionEntries(projectGsd).some((entry) => entry.endsWith("ROADMAP.md"))) return true;
+  return !openDatabaseHas(
+    "SELECT 1 FROM artifacts UNION ALL SELECT 1 FROM decisions UNION ALL SELECT 1 FROM memories " +
+    "UNION ALL SELECT 1 FROM requirements UNION ALL SELECT 1 FROM workflow_operations LIMIT 1",
+  ) && hasTrackedRootProjection(projectGsd);
+}
+
+/**
+ * Start from an empty database on purpose, although `.gsd` holds workflow
+ * history that this database did not produce (/gsd db start-empty). The choice
+ * is one Domain Operation, so it is durable. Returns the open result, or null
+ * when the normal open does not refuse the project. Then it stores nothing and
+ * creates no database: a needless operation would close the Restore Window of
+ * an import.
+ */
+export function startEmptyWorkflowDatabase(basePath: string): WorkflowDatabaseOpenResult | null {
+  const location = resolveWorkflowDatabaseLocation(basePath);
+  // Decide the refusal before the forced open: that open creates an absent
+  // database, and a database with content no longer shows the lost authority.
+  const lostAuthority = hasWorkflowHistoryWithoutDatabase(location);
+  if (!lostAuthority && !existsSync(location.projectDb)) return null;
+  const wasOpen = isDbAvailable();
+  const result = openWorkflowDatabase(basePath, { createEmptyAuthority: true });
+  if (!result.ok) return result;
+  try {
+    if (!lostAuthority && !isEmptyDatabaseBesideProjections(location.projectGsd)) return null;
+    const idempotencyKey = "project/start-empty";
+    const fence = readDomainOperationFence(idempotencyKey);
+    executeDomainOperation({
+      operationType: START_EMPTY_OPERATION,
+      idempotencyKey,
+      expectedRevision: fence.revision,
+      expectedAuthorityEpoch: fence.authorityEpoch,
+      actorType: "operator",
+      sourceTransport: "internal",
+      payload: {},
+    }, () => ({
+      events: [{
+        eventType: "project.started_empty",
+        entityType: "project",
+        entityId: fence.projectId,
+        payload: {},
+        destinations: ["db"],
+      }],
+      // The choice changes no hierarchy file; STATE.md is its projection.
+      projections: [{ projectionKey: "state", projectionKind: "state", rendererVersion: "1" }],
+    }));
+    return result;
+  } finally {
+    if (!wasOpen) closeDatabase();
+  }
+}
+
+function authorityMissingError(location: Pick<WorkflowDatabaseLocation, "projectGsd" | "projectDb">): GSDError {
+  return new GSDError(
+    GSD_STALE_STATE,
+    `authority-missing: ${location.projectGsd} holds workflow history but ${location.projectDb} is ` +
+    "missing or empty. No empty database was created. Restore a backup with /gsd db restore-backup, " +
+    "or import the markdown with /gsd recover. To start with an empty database on purpose, run /gsd db start-empty.",
+  );
+}
+
+/**
+ * Read-only form of the lost-authority refusal, for a command that must not
+ * create a database: throws authority-missing and opens nothing.
+ */
+export function assertWorkflowAuthorityNotLost(basePath: string): void {
+  const location = resolveWorkflowDatabaseLocation(basePath);
+  if (hasWorkflowHistoryWithoutDatabase(location)) throw authorityMissingError(location);
+}
+
+export function isAuthorityMissingError(err: unknown): boolean {
+  return err instanceof GSDError && err.message.startsWith("authority-missing:");
+}
+
+export function isCheckoutUnboundError(err: unknown): boolean {
+  return err instanceof GSDError && err.message.startsWith("checkout-unbound:");
+}
+
+/** The checkout root the open database is bound to; undefined when it cannot be read. */
+function readBoundCheckoutRoot(projectDb: string): unknown {
+  try {
+    return _getAdapter()?.prepare("SELECT project_root_realpath FROM project_authority WHERE singleton = 1").get()?.["project_root_realpath"];
+  } catch (err) {
+    // Schema init always creates project_authority; an unreadable row is a
+    // query failure the caller's own reads report, not a binding verdict.
+    logWarning("engine", `could not read the checkout binding of ${projectDb}: ${(err as Error).message}`);
+    return undefined;
+  }
+}
+
+/**
+ * One database belongs to one checkout. project_authority records the bound
+ * checkout root: the first open binds an unbound database, and an open from
+ * another root (a second clone that resolves to the same state directory, or a
+ * copied gsd.db) is refused until `/gsd db bind` moves the binding. Worktree
+ * opens are not checked: a worktree belongs to the checkout that created it.
+ * Returns the refusal, or null when the open may proceed.
+ */
+function enforceCheckoutBinding(basePath: string, projectDb: string, rebind: boolean): GSDError | null {
+  const contract = resolveGsdPathContract(basePath);
+  if (contract.isWorktree) return null;
+  const root = normalizeRealPath(contract.projectRoot);
+  const bound = readBoundCheckoutRoot(projectDb);
+  if (typeof bound !== "string" || bound === root) return null;
+  if (bound !== "" && !rebind) {
+    return new GSDError(
+      GSD_STALE_STATE,
+      `checkout-unbound: ${projectDb} belongs to the checkout at ${bound}, not ${root}. ` +
+      "GSD refused to open it so two checkouts never share one workflow database. " +
+      `If ${root} now owns this project (the old checkout was moved or deleted), run /gsd db bind here. ` +
+      "For a separate checkout, give it its own state directory with GSD_PROJECT_ID.",
+    );
+  }
+  try {
+    setProjectRootBinding(root);
+  } catch (err) {
+    if (rebind) throw err;
+    // A replacement-observation handle is read-only; a later normal open binds.
+    logWarning("engine", `could not bind ${projectDb} to ${root}: ${(err as Error).message}`);
+    return null;
+  }
+  try {
+    // Put the binding in the main file so a copy of gsd.db alone still carries it.
+    checkpointDatabase();
+  } catch {
+    // Best-effort: the binding is committed; the WAL holds it until the next checkpoint.
+  }
+  return null;
+}
+
+/**
+ * A path-only open has no checkout root to compare, so the open database must
+ * be the file its bound checkout resolves to. A copied or moved gsd.db is
+ * refused here too. Returns the refusal, or null when the open may proceed.
+ */
+function enforcePathBinding(projectDb: string): GSDError | null {
+  const bound = readBoundCheckoutRoot(projectDb);
+  if (typeof bound !== "string" || bound === "") return null;
+  if (normalizeRealPath(resolveGsdPathContract(bound).projectDb) === normalizeRealPath(projectDb)) return null;
+  return new GSDError(
+    GSD_STALE_STATE,
+    `checkout-unbound: ${projectDb} belongs to the checkout at ${bound}, which does not resolve to this file. ` +
+    "GSD refused to open it so two checkouts never share one workflow database. " +
+    "Run /gsd db bind in the checkout that now owns this database.",
+  );
+}
+
+/** True when the process-global handle is already open on this database file. */
+function isOpenAt(projectDb: string): boolean {
+  const openPath = isDbAvailable() ? getDbPath() : null;
+  return openPath !== null && normalizeRealPath(openPath) === normalizeRealPath(projectDb);
+}
+
 function openWorkflowDatabaseWithMode(
   basePath: string,
   createIfMissing: boolean,
+  options: OpenWorkflowDatabaseOptions = {},
 ): WorkflowDatabaseOpenResult {
   const location = resolveWorkflowDatabaseLocation(basePath);
   if (!existsSync(location.projectGsd)) {
@@ -167,6 +433,12 @@ function openWorkflowDatabaseWithMode(
   if (!createIfMissing && !existed) {
     return { ok: false, reason: "missing-database", location };
   }
+  if (!options.createEmptyAuthority && hasWorkflowHistoryWithoutDatabase(location)) {
+    return { ok: false, reason: "authority-missing", location, error: authorityMissingError(location) };
+  }
+  // A handle this process already admitted (an earlier open, or the explicit
+  // createEmptyAuthority import path) is not judged again.
+  const alreadyOpen = isOpenAt(location.projectDb);
   try {
     const opened = createIfMissing
       ? openDatabase(location.projectDb)
@@ -174,7 +446,22 @@ function openWorkflowDatabaseWithMode(
     if (!opened) {
       return { ok: false, reason: "open-failed", location };
     }
+    if (!options.createEmptyAuthority && !options.bindCheckout && !alreadyOpen && isEmptyDatabaseBesideProjections(location.projectGsd)) {
+      closeDatabase();
+      return { ok: false, reason: "authority-missing", location, error: authorityMissingError(location) };
+    }
+    const unbound = enforceCheckoutBinding(basePath, location.projectDb, options.bindCheckout === true);
+    if (unbound) {
+      closeDatabase();
+      return { ok: false, reason: "checkout-unbound", location, error: unbound };
+    }
     setLogBasePath(location.projectRoot);
+    // A database this open created has no earlier rows to adopt; its next
+    // open cuts it over. An import open (/gsd recover, /gsd migrate) seals an
+    // Import Preview on the current revision and epoch, so it must not move them.
+    if (existed && !alreadyOpen && !options.createEmptyAuthority && !options.skipAuthorityCutover) {
+      cutOverProjectAuthorityOnOpen(basePath);
+    }
     return {
       ok: true,
       reason: existed ? "opened-existing" : "created-empty",
@@ -212,16 +499,35 @@ function openWorkflowDatabaseWithMode(
   }
 }
 
-export function openWorkflowDatabase(basePath: string): WorkflowDatabaseOpenResult {
-  return openWorkflowDatabaseWithMode(basePath, true);
+export function openWorkflowDatabase(
+  basePath: string,
+  options: OpenWorkflowDatabaseOptions = {},
+): WorkflowDatabaseOpenResult {
+  return openWorkflowDatabaseWithMode(basePath, true, options);
 }
 
 export function openExistingWorkflowDatabase(basePath: string): WorkflowDatabaseOpenResult {
   return openWorkflowDatabaseWithMode(basePath, false);
 }
 
+/**
+ * Reopen seam for callers that hold only a database path. It runs the same
+ * empty-database refusal as the workspace open, and the binding check that a
+ * path allows. A handle this process already admitted is not judged again.
+ */
 export function openWorkflowDatabasePath(path: string): boolean {
-  return openDatabase(path);
+  if (path === ":memory:") return openDatabase(path);
+  const location = { projectGsd: dirname(path), projectDb: path };
+  if (hasWorkflowHistoryWithoutDatabase(location)) throw authorityMissingError(location);
+  const alreadyOpen = isOpenAt(path);
+  if (!openDatabase(path)) return false;
+  if (alreadyOpen) return true;
+  const refusal = isEmptyDatabaseBesideProjections(location.projectGsd)
+    ? authorityMissingError(location)
+    : enforcePathBinding(path);
+  if (!refusal) return true;
+  closeDatabase();
+  throw refusal;
 }
 
 /**
@@ -247,6 +553,21 @@ export function openWorkflowDatabaseByScope(scope: MilestoneScope): boolean {
 
 export function closeWorkflowDatabase(): void {
   closeDatabase();
+}
+
+/** The path of the open database, or null: the state that `restoreWorkflowDatabase` gives back. */
+export function openWorkflowDatabasePathOrNull(): string | null {
+  return isDbAvailable() ? getDbPath() : null;
+}
+
+/**
+ * Give the process handle back to the database that was open before a command
+ * opened one for its own use. `before` is null when no database was open, so
+ * the handle of the command is closed.
+ */
+export function restoreWorkflowDatabase(before: string | null): void {
+  if (before === null) closeDatabase();
+  else if (getDbPath() !== before) openWorkflowDatabasePath(before);
 }
 
 export function closeWorkflowDatabaseByWorkspace(workspace: GsdWorkspace): void {
@@ -281,10 +602,6 @@ export function refreshWorkflowDatabaseFromDisk(): boolean {
   return refreshOpenDatabaseFromDisk();
 }
 
-export function expectedWorkflowDbPathForBase(basePath: string): string {
-  return join(gsdRoot(basePath), "gsd.db");
-}
-
 export interface EnsureWorkflowDbOptions {
   /** When true, refresh from disk before reopening if already open on the correct path. */
   refresh?: boolean;
@@ -297,6 +614,7 @@ export function ensureWorkflowDbAtPath(dbPath: string | null): boolean {
   try {
     return openWorkflowDatabasePath(dbPath);
   } catch (err) {
+    if (isSchemaTooNewError(err) || isAuthorityMissingError(err) || isCheckoutUnboundError(err)) throw err;
     logWarning("reconcile", `ensureWorkflowDbAtPath could not reopen DB: ${(err as Error).message}`);
     return false;
   }
@@ -306,27 +624,35 @@ export function ensureWorkflowDbForBase(
   basePath: string,
   options: EnsureWorkflowDbOptions = {},
 ): boolean {
-  const dbPath = expectedWorkflowDbPathForBase(basePath);
+  const dbPath = resolveProjectRootDbPath(basePath);
   if (!existsSync(dbPath)) return false;
+  const openForBase = (): boolean => {
+    if (!openWorkflowDatabasePath(dbPath)) return false;
+    const unbound = enforceCheckoutBinding(basePath, dbPath, false);
+    if (!unbound) return true;
+    closeDatabase();
+    throw unbound;
+  };
 
   try {
     if (options.refresh) {
       if (isDbAvailable() && getWorkflowDatabasePath() === dbPath && refreshWorkflowDatabaseFromDisk()) {
         return true;
       }
-      return openWorkflowDatabasePath(dbPath);
+      return openForBase();
     }
 
     if (isDbAvailable() && getWorkflowDatabasePath() === dbPath) return true;
-    return openWorkflowDatabasePath(dbPath);
+    return openForBase();
   } catch (err) {
+    if (isSchemaTooNewError(err) || isAuthorityMissingError(err) || isCheckoutUnboundError(err)) throw err;
     logWarning("reconcile", `ensureWorkflowDbForBase could not reopen DB: ${(err as Error).message}`);
     return false;
   }
 }
 
-export function checkpointWorkflowDatabase(): void {
-  checkpointDatabase();
+export function checkpointWorkflowDatabase(): boolean {
+  return checkpointDatabase();
 }
 
 export function vacuumWorkflowDatabase(): void {
@@ -421,9 +747,10 @@ function requireVerifiedImportDatabase(basePath: string): void {
 function prepareVerifiedImportPreview(
   basePath: string,
   previewInput: LegacyImportPreviewCreateInput,
+  knowledgeFileRows: readonly string[] = [],
 ): Pick<PreparedVerifiedRecoverApplication, "basePath" | "previewInput" | "preview"> {
   requireVerifiedImportDatabase(basePath);
-  return { basePath, previewInput, preview: createLegacyImportPreview(previewInput) };
+  return { basePath, previewInput, preview: createLegacyImportPreview(previewInput, knowledgeFileRows) };
 }
 
 function revalidateVerifiedImportPreview(
@@ -462,15 +789,26 @@ function prepareVerifiedImportEvidence(
 }
 
 function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string {
-  const counts = preview.preview.counts;
   return [
     `Import Preview ${preview.preview.preview_id}`,
     `Preview hash: ${preview.preview_hash}`,
+    ...importPreviewTextLines(preview),
+  ].join("\n");
+}
+
+/** The sources, mappings, diagnoses and choices of a Preview, below the hash that the operator approves. */
+function importPreviewTextLines(preview: LegacyImportPreviewArtifact): string[] {
+  const counts = preview.preview.counts;
+  return [
     `Source set: ${preview.preview.source_set_hash}`,
     `Change set: ${preview.preview.change_set_hash}`,
     `Changes: ${counts.create} create, ${counts.update} update, ${counts.delete} delete, ${counts.preserve} preserve`,
     "Sources:",
     ...preview.preview.sources.map((source) => `  ${source.path} ${source.sha256} (${source.outcome})`),
+    "Not imported (the file stays on disk and gets no database row):",
+    ...preview.preview.sources
+      .filter((source) => source.outcome !== "mapped")
+      .map((source) => `  ${source.path} (${source.outcome})`),
     "Mappings:",
     ...preview.preview.changes.map((change) => (
       `  ${change.action} ${change.target.kind}:${change.target.key}`
@@ -485,10 +823,29 @@ function recoverAuthorizationText(preview: LegacyImportPreviewArtifact): string 
     ...preview.preview.diagnoses.map((diagnosis) => `  ${JSON.stringify(diagnosis)}`),
     "Resolutions:",
     ...preview.preview.resolutions.map((resolution) => `  ${JSON.stringify(resolution)}`),
-  ].join("\n");
+    // A knowledge-row-conflict keeps the database row. The file text is
+    // applied only by this explicit choice; a memory-id row has no choice.
+    ...preview.preview.diagnoses
+      .filter((diagnosis) => diagnosis.code === "knowledge-row-conflict")
+      .flatMap((diagnosis) => /^\s*\|\s*([KPL]\d+)\s*\|/u.exec(String(diagnosis.raw_value))?.[1] ?? [])
+      .map((id) => (
+        `To write the KNOWLEDGE.md text of ${id} over its database row: ${formatLegacyImportKnowledgeFileRowChoice(id)}`
+      )),
+    ...preview.preview.diagnoses
+      .filter((diagnosis) => diagnosis.code === "artifact-row-conflict")
+      .flatMap((diagnosis) => /^(\S+) file text /u.exec(diagnosis.message)?.[1] ?? [])
+      .map((id) => (
+        `To write the file text of ${id} over its database row: ${formatLegacyImportKnowledgeFileRowChoice(id)}`
+      )),
+  ];
 }
 
-function prepareVerifiedRecoverEvidence(basePath: string): PreparedVerifiedRecoverApplication {
+const RECOVER_ROOT_FILES = ["DECISIONS", "REQUIREMENTS", "KNOWLEDGE", "PROJECT", "QUEUE"] as const;
+
+function prepareVerifiedRecoverEvidence(
+  basePath: string,
+  knowledgeFileRows: readonly string[] = [],
+): PreparedVerifiedRecoverApplication {
   const location = resolveWorkflowDatabaseLocation(basePath);
   const evidence = prepareVerifiedImportPreview(basePath, {
     roots: [
@@ -506,13 +863,40 @@ function prepareVerifiedRecoverEvidence(basePath: string): PreparedVerifiedRecov
         logical_path: ".gsd/milestones",
         presence: "optional" as const,
       },
+      // Root registries and narrative. DECISIONS.md, REQUIREMENTS.md and the
+      // KNOWLEDGE.md Rule, Pattern and Lesson rows map to rows; the Preview
+      // lists the others as preserved and not imported.
+      ...RECOVER_ROOT_FILES.map((stem) => ({
+        id: `project-root-${stem.toLowerCase()}`,
+        kind: "project" as const,
+        physical_path: join(location.projectGsd, `${stem}.md`),
+        logical_path: `.gsd/${stem}.md`,
+        presence: "optional" as const,
+      })),
     ],
-  });
+  }, knowledgeFileRows);
   return { ...evidence, authorizationText: recoverAuthorizationText(evidence.preview) };
 }
 
-export function prepareVerifiedRecoverApplication(basePath: string): PreparedVerifiedRecoverApplication {
-  return prepareVerifiedRecoverEvidence(basePath);
+/**
+ * Prepare the sealed recover Preview. `knowledgeFileRows` names the
+ * KNOWLEDGE.md rows (K/P/L###) whose file text the operator chose over a
+ * differing database row. A chosen row that has no such conflict is refused,
+ * so a choice never passes without effect.
+ */
+export function prepareVerifiedRecoverApplication(
+  basePath: string,
+  knowledgeFileRows: readonly string[] = [],
+): PreparedVerifiedRecoverApplication {
+  const evidence = prepareVerifiedRecoverEvidence(basePath, knowledgeFileRows);
+  const applied = new Set(legacyImportKnowledgeFileRows(evidence.preview));
+  const unused = knowledgeFileRows.filter((id) => !applied.has(id));
+  if (unused.length > 0) {
+    throw new Error(
+      `--choice names a file row that does not differ from an active database row: ${unused.join(", ")}`,
+    );
+  }
+  return evidence;
 }
 
 export function resolvePreparedVerifiedRecoverApplication(
@@ -521,6 +905,35 @@ export function resolvePreparedVerifiedRecoverApplication(
 ): PreparedVerifiedRecoverApplication {
   const preview = resolveLegacyImportPreview(evidence.preview, choices);
   return { ...evidence, preview, authorizationText: recoverAuthorizationText(preview) };
+}
+
+/**
+ * The Preview diagnoses that block Import Application, one entry per
+ * diagnosis, each with the --choice token that resolves it when the operator
+ * may decide it. Empty when the Preview can be applied.
+ */
+export function formatUnresolvedRecoverDiagnoses(prepared: Readonly<PreparedVerifiedRecoverApplication>): string {
+  const preview = prepared.preview.preview;
+  const sourceById = new Map(preview.sources.map((source) => [source.source_id, source]));
+  const dispositionById = new Map(preview.resolutions.map((resolution) => (
+    [resolution.diagnosis_id, resolution.disposition] as const
+  )));
+  return preview.diagnoses
+    .filter((diagnosis) => {
+      const disposition = dispositionById.get(diagnosis.diagnosis_id);
+      return disposition === "requires-user" || disposition === "unsupported";
+    })
+    .map((diagnosis) => {
+      const source = sourceById.get(diagnosis.source_id);
+      const location = source
+        ? `${source.path}${diagnosis.locator.line === undefined ? "" : `:${diagnosis.locator.line}`}`
+        : diagnosis.source_id;
+      const choice = dispositionById.get(diagnosis.diagnosis_id) === "requires-user"
+        ? `\n    To keep this source preserved and not imported: ${formatLegacyImportPreviewChoice(diagnosis.diagnosis_id)}`
+        : "\n    No choice can resolve this; fix the source markdown.";
+      return `  [${diagnosis.code}] ${location}\n    ${diagnosis.message}${choice}`;
+    })
+    .join("\n");
 }
 
 export function prepareVerifiedRecoverBackup(basePath: string): LegacyImportVerifiedBackup {
@@ -744,10 +1157,13 @@ function verifiedRecoverResult(
   receipt: LegacyImportApplicationReceipt,
   preview: LegacyImportPreviewArtifact,
   backup: LegacyImportVerifiedBackup,
-  capturedBase = inspectSqliteReadOnlySnapshot(backup.backup_ref, (database) => captureLegacyImportBaseSnapshot({
-    readTransaction: (operation) => operation(),
-    source: createLegacyImportBaseSnapshotSource(database),
-  })),
+  capturedBase = legacyImportBaseSnapshotForPreview(
+    preview,
+    inspectSqliteReadOnlySnapshot(backup.backup_ref, (database) => captureLegacyImportBaseSnapshot({
+      readTransaction: (operation) => operation(),
+      source: createLegacyImportBaseSnapshotSource(database),
+    })),
+  ),
 ): VerifiedRecoverApplicationResult {
   verifyLegacyImportBackupArtifact({ backup, preview, base: capturedBase });
   const database = _getAdapter();
@@ -808,10 +1224,13 @@ export function loadVerifiedRecoverApplication(operationId: string): VerifiedRec
       retained.backup,
     );
   }
-  const base = inspectSqliteReadOnlySnapshot(application.backupRef, (backupDatabase) => captureLegacyImportBaseSnapshot({
-    readTransaction: (operation) => operation(),
-    source: createLegacyImportBaseSnapshotSource(backupDatabase),
-  }));
+  const base = legacyImportBaseSnapshotForPreview(
+    application.preview,
+    inspectSqliteReadOnlySnapshot(application.backupRef, (backupDatabase) => captureLegacyImportBaseSnapshot({
+      readTransaction: (operation) => operation(),
+      source: createLegacyImportBaseSnapshotSource(backupDatabase),
+    })),
+  );
   const backup = sealLegacyImportVerifiedBackup({
     preview: application.preview,
     base,
@@ -849,14 +1268,27 @@ export function loadVerifiedRecoverApplication(operationId: string): VerifiedRec
   return result;
 }
 
+/**
+ * The recover Application a plain `gsd recover` resumes: the one that is still
+ * the head of canonical history and has no restore or Forward Repair. Once a
+ * later Domain Operation commits, its Restore Window is closed and it is
+ * settled history: recover then makes a new Preview, and the old Application
+ * is reachable only through --application. Revisions are a strict sequence,
+ * so at most one Application matches.
+ */
 function retainedRecoverApplicationId(): string | null {
   const database = _getAdapter();
   if (!database) throw new Error("gsd recover lost its open project database");
-  const rows = database.prepare(`SELECT application.operation_id
+  const operationId = database.prepare(`SELECT application.operation_id
     FROM workflow_import_applications application
     JOIN workflow_operations operation USING (operation_id)
     WHERE operation.actor_id = 'gsd-recover'
       AND operation.idempotency_key GLOB 'legacy-import/recover/*'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_operations later
+        WHERE later.project_id = operation.project_id
+          AND later.resulting_revision > operation.resulting_revision
+      )
       AND NOT EXISTS (
         SELECT 1 FROM workflow_import_forward_repairs repair
         WHERE repair.application_operation_id = application.operation_id
@@ -864,12 +1296,7 @@ function retainedRecoverApplicationId(): string | null {
       AND NOT EXISTS (
         SELECT 1 FROM workflow_import_restores restore
         WHERE restore.application_operation_id = application.operation_id
-      )
-    ORDER BY operation.created_at, application.operation_id`).all();
-  if (rows.length > 1) {
-    throw new Error("multiple retained recover Applications require an explicit --application selection");
-  }
-  const operationId = rows[0]?.["operation_id"];
+      )`).get()?.["operation_id"];
   return typeof operationId === "string" ? operationId : retainedLegacyImportRestoreOperationId();
 }
 
@@ -886,13 +1313,23 @@ export function applyOrResumeVerifiedRecoverApplication(
     ?? applyVerifiedRecoverApplication(basePath, approvedPreviewHash);
 }
 
-export function applyVerifiedMigrationApplication(
+/**
+ * Seal the Import Preview of a generated migration projection against the open
+ * database and pass it to `use`. The Preview holds no path of the temporary
+ * copy, so the same sources on the same database revision give the same hash.
+ */
+function withMigrationImportPreview<T>(
   basePath: string,
   sourcePaths: readonly string[],
-  sourceGsdRoot: string = gsdRoot(basePath),
-  beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
-  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
-): VerifiedMigrationCounts {
+  sourceGsdRoot: string,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[],
+  use: (sealed: {
+    created: Pick<PreparedVerifiedRecoverApplication, "basePath" | "previewInput" | "preview">;
+    preview: LegacyImportPreviewArtifact;
+    logicalPaths: readonly string[];
+    expectedArtifacts: readonly VerifiedMigrationArtifactEvidence[];
+  }) => T,
+): T {
   const location = resolveWorkflowDatabaseLocation(basePath);
   if (sourcePaths.length === 0) throw new Error("gsd migrate requires generated source files");
   const generatedGsd = realpathSync(sourceGsdRoot);
@@ -944,6 +1381,13 @@ export function applyVerifiedMigrationApplication(
         decisions.set(id, {
           seq: Number(existing?.["seq"] ?? nextDecisionSequence++),
           ...decision,
+          // The register render re-emits the stored supersede as a trailing
+          // "(amends D###)" cell suffix. parseDecisionsTable already carried
+          // that relation into superseded_by; strip the suffix so the staged
+          // manifest lifecycle truth matches the register file candidate (see
+          // decisionValue in legacy-import-preview-gsd-registries) and the
+          // single Application stores clean text with the supersede as data.
+          decision: decision.decision.replace(/\s*\(amends\s+D\d+\)$/i, ""),
           source: "migration",
         });
       }
@@ -1019,8 +1463,75 @@ export function applyVerifiedMigrationApplication(
           : []
       )),
     );
+    return use({ created, preview: resolved, logicalPaths, expectedArtifacts });
+  } finally {
+    rmSync(stagingRoot, { recursive: true, force: true });
+  }
+}
+
+/**
+ * The Import Preview that `/gsd migrate` asks the operator to approve. It
+ * writes nothing: no backup, no Import Application.
+ */
+export function previewVerifiedMigrationApplication(
+  basePath: string,
+  sourcePaths: readonly string[],
+  sourceGsdRoot: string,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
+): { previewHash: string; authorizationText: string } {
+  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, ({ preview }) => {
+    const previewHash = migrationApprovalHash(preview);
+    return {
+      previewHash,
+      authorizationText: [`Preview hash: ${previewHash}`, ...importPreviewTextLines(preview)].join("\n"),
+    };
+  });
+}
+
+/**
+ * The hash that the operator approves for `/gsd migrate`: the sealed Preview
+ * without its identity. The identity holds the random id of the database. A
+ * target with no database gets its Preview from a temporary database, and the
+ * approved run creates the project database, so the approval must not hold
+ * that id. The base revision, the sources and every change stay in the hash.
+ */
+function migrationApprovalHash(preview: LegacyImportPreviewArtifact): string {
+  const { preview_id: _previewId, ...approved } = preview.preview;
+  return hashLegacyImportValue(approved as unknown as LegacyImportValue);
+}
+
+/**
+ * The approval hash of a migration Import Application that the open database
+ * holds. The apply records it as the trace id of the operation; an Application
+ * of an earlier build has no trace id, so its hash comes from its Preview.
+ */
+export function appliedMigrationApprovalHash(operationId: string): string {
+  const application = inspectLegacyImportApplicationEvidence(operationId);
+  return application.traceId ?? migrationApprovalHash(application.preview);
+}
+
+/**
+ * Apply the Import Preview of a generated migration projection. When the
+ * caller gives the Preview hash that the operator approved, a Preview with
+ * another hash is refused before the backup and the Import Application.
+ */
+export function applyVerifiedMigrationApplication(
+  basePath: string,
+  sourcePaths: readonly string[],
+  sourceGsdRoot: string = gsdRoot(basePath),
+  beforeApply?: (evidence: { previewId: string; previewHash: string }) => void,
+  artifactEvidence: readonly VerifiedMigrationArtifactEvidence[] = [],
+  approvedPreviewHash?: string,
+): VerifiedMigrationCounts {
+  return withMigrationImportPreview(basePath, sourcePaths, sourceGsdRoot, artifactEvidence, (sealed) => {
+    if (approvedPreviewHash !== undefined && migrationApprovalHash(sealed.preview) !== approvedPreviewHash) {
+      throw new Error(
+        `gsd migrate Preview ${migrationApprovalHash(sealed.preview)} is not the approved Preview ${approvedPreviewHash}; `
+        + "nothing was imported. Run /gsd migrate again to see the current Preview.",
+      );
+    }
     const evidence = prepareVerifiedImportEvidence(
-      { ...created, preview: resolved },
+      { ...sealed.created, preview: sealed.preview },
       "pre-migrate-import",
     );
     beforeApply?.({
@@ -1033,16 +1544,16 @@ export function applyVerifiedMigrationApplication(
         sourceTransport: "internal",
         actorType: "system",
         actorId: "gsd-migrate",
+        // The audit record of what the operator approved.
+        traceId: migrationApprovalHash(evidence.preview),
       },
       previewInput: evidence.previewInput,
       preview: evidence.preview,
       backup: evidence.backup,
     });
     const application = inspectLegacyImportApplicationEvidence(receipt.operationId);
-    return verifiedMigrationCounts(application, logicalPaths, expectedArtifacts);
-  } finally {
-    rmSync(stagingRoot, { recursive: true, force: true });
-  }
+    return verifiedMigrationCounts(application, sealed.logicalPaths, sealed.expectedArtifacts);
+  });
 }
 
 function verifiedMigrationCounts(

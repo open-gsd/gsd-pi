@@ -36,6 +36,12 @@ export default async function registerExtension(pi: ExtensionAPI) {
       }
       return readProjectSnapshotFromDb((input as { cwd: string }).cwd, { preserveGlobalDbHandle: true });
     });
+    // The host-only capability seam is named for reads. The typed workflow
+    // command is the one mutation it carries: the RPC `workflow_command`.
+    pi.registerRuntimeRead("workflow_command", async (input) => {
+      const { runWorkflowCommand } = await import("./workflow-command.js");
+      return runWorkflowCommand(input);
+    });
   }
 
   // Full setup (shortcuts, tools, hooks) in a separate try/catch so that

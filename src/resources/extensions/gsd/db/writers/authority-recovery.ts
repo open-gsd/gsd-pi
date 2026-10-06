@@ -15,7 +15,9 @@ import type {
 } from "../../legacy-import-forward-repair-plan.js";
 import { LEGACY_IMPORT_TARGET_ADAPTERS } from "../../legacy-import-preview-classifier-targets.js";
 import { canonicalLegacyImportJson, hashLegacyImportValue } from "../../legacy-import-preview.js";
+import { adoptInsertedHierarchyRows } from "../../lifecycle-backfill-domain-operation.js";
 import { synthesizeDecisionMemoryContent } from "../../memory-backfill.js";
+import { logWarning } from "../../workflow-logger.js";
 import { requireActiveDomainOperationContext } from "./lifecycle-commands.js";
 
 export interface AuthorityCutoverReceiptInput {
@@ -207,6 +209,12 @@ function whereClause(record: SqlRecord, params: Record<string, unknown>): string
   }).join(" AND ");
 }
 
+const HIERARCHY_ITEM_KINDS: Readonly<Record<string, string | undefined>> = {
+  milestones: "milestone",
+  slices: "slice",
+  tasks: "task",
+};
+
 type ForwardRepairRowMutation = Extract<LegacyImportForwardRepairMutation, {
   action: "create" | "update" | "delete";
 }>;
@@ -391,6 +399,34 @@ function applyDecisionMutation(
   if (changes(result) !== 1) throw new Error("Forward Repair decision memory restore was not exact");
 }
 
+function applyKnowledgeMutation(
+  mutation: Extract<LegacyImportForwardRepairMutation, { action: "restore-knowledge-memory" }>,
+  repairedAt: string,
+): void {
+  // The same row the base snapshot compared: the active row, else the newest
+  // superseded row.
+  const row = getDb().prepare(`SELECT id FROM memories
+    WHERE json_valid(structured_fields)
+      AND json_extract(structured_fields, '$.sourceKnowledgeId') = :knowledge_id
+    ORDER BY superseded_by IS NOT NULL, seq DESC
+    LIMIT 1`).get({ ":knowledge_id": mutation.knowledgeId });
+  if (typeof row?.["id"] !== "string") {
+    throw new Error("Forward Repair knowledge memory identity is not exact");
+  }
+  const result = getDb().prepare(`UPDATE memories
+    SET category = :category, content = :content, scope = :scope,
+        structured_fields = :structured_fields, updated_at = :updated_at
+    WHERE id = :id`).run({
+    ":category": mutation.category,
+    ":content": mutation.content,
+    ":scope": mutation.scope,
+    ":structured_fields": mutation.structuredFields,
+    ":updated_at": repairedAt,
+    ":id": row["id"],
+  });
+  if (changes(result) !== 1) throw new Error("Forward Repair knowledge memory restore was not exact");
+}
+
 function applyLifecycleMutation(
   context: Readonly<DomainOperationContext>,
   mutation: Extract<LegacyImportForwardRepairMutation, { action: "cancel-imported-lifecycle" }>,
@@ -476,19 +512,39 @@ export function applyImportForwardRepairPlan(
   // reverts created rows child-first after dependencies are restored;
   // requireSafeRepairDelete relies on children already being gone when a
   // parent delete is guarded and executed. Do not reorder.
+  const recreated = new Set<string>();
   for (const entry of [...plan.targets].reverse()) {
     const mutation = entry.mutation;
     if (!mutation) continue;
     if ("rowSet" in mutation) {
       applyRowMutation(mutation);
+      const kind = HIERARCHY_ITEM_KINDS[mutation.rowSet];
+      if (mutation.action === "create" && kind) {
+        const { milestone_id, slice_id, id } = mutation.identity;
+        recreated.add(`${kind} ${[milestone_id, slice_id, id].filter((part) => part != null).join("/")}`);
+      }
     } else if (mutation.action === "replace-slice-dependencies") {
       applyDependencyMutation(mutation);
     } else if (mutation.action === "cancel-imported-lifecycle") {
       applyLifecycleMutation(context, mutation, repairedAt);
     } else if (mutation.action === "create-cancelled-lifecycle") {
       createCancelledLifecycle(context, mutation, repairedAt);
+    } else if (mutation.action === "restore-knowledge-memory") {
+      applyKnowledgeMutation(mutation, repairedAt);
     } else {
       applyDecisionMutation(mutation, repairedAt);
+    }
+  }
+  // An Import Application deletes a hierarchy row only when it has no
+  // lifecycle row, so a row this repair puts back has none either.
+  if (recreated.size > 0) {
+    const { statusChanges } = adoptInsertedHierarchyRows(context, (row) => recreated.has(row));
+    if (statusChanges.length > 0) {
+      logWarning(
+        "db",
+        `Forward Repair adopted ${statusChanges.length} recreated row(s) with a changed legacy status:\n  ` +
+          statusChanges.join("\n  "),
+      );
     }
   }
 }

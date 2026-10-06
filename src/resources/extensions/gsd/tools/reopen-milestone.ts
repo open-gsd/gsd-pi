@@ -11,6 +11,7 @@
 import {
   getMilestone,
   getMilestoneSlices,
+  getSliceRunUatAssessment,
   getSliceTasks,
   reopenMilestoneCascade,
 } from "../gsd-db.js";
@@ -22,8 +23,10 @@ import {
 import { isMilestoneLifecycleAdopted } from "../db/milestone-closeout-readiness.js";
 import type { ExecutionInvocation } from "../execution-invocation.js";
 import { invalidateStateCache } from "../state.js";
+import { releaseExhaustedUnits } from "../db/unit-dispatch-budgets.js";
 import { flushWorkflowProjections } from "../projection-flush.js";
 import { writeManifestAndFlush } from "../workflow-manifest.js";
+import { recordLegacyMilestoneEvents } from "../milestone-reopen-events.js";
 import { appendEvent } from "../workflow-events.js";
 import { logWarning } from "../workflow-logger.js";
 import { debugLog } from "../debug-logger.js";
@@ -45,6 +48,8 @@ import {
   targetTaskFile,
 } from "../paths.js";
 import { removeProjectionIfCurrent } from "../projection-cleanup.js";
+import { repairMilestoneShadowsForReopen } from "../lifecycle-shadow-repair-domain-operation.js";
+import { readDomainOperationFence } from "../db/writers/lifecycle-commands.js";
 
 export interface ReopenMilestoneParams {
   milestoneId: string;
@@ -92,9 +97,44 @@ export async function handleReopenMilestone(
   let canonicalReceipt: MilestoneReopenReceipt | undefined;
   let slicesResetCount = 0;
   let tasksResetCount = 0;
+  // The canonical reopen deletes each run-uat verdict; its ASSESSMENT file goes with it.
+  const slicesWithUatVerdict = new Set(
+    adoptedLifecycle
+      ? getMilestoneSlices(params.milestoneId)
+        .filter((slice) => getSliceRunUatAssessment(params.milestoneId, slice.id) !== null)
+        .map((slice) => slice.id)
+      : [],
+  );
   if (adoptedLifecycle) {
     if (!invocation) {
       return { error: "adopted Milestone reopen requires canonical invocation identity" };
+    }
+    // Converge drifted descendants (legacy terminal while their canonical row
+    // stayed `ready`) before the reopen's terminal-parity checks (#2440). The
+    // evidence gate is unchanged: unverifiable drift fails the reopen here,
+    // listed, instead of aborting inside the Domain Operation. A replayed
+    // invocation skips the repair — its stored receipt must be returned as-is,
+    // not preceded by fresh mutations against newer state.
+    if (!readDomainOperationFence(invocation.idempotencyKey).replay) {
+      try {
+        const shadowRepair = repairMilestoneShadowsForReopen({
+          invocation,
+          milestoneId: params.milestoneId,
+        });
+        if (shadowRepair.unresolved.length > 0) {
+          return {
+            error: `Milestone ${params.milestoneId} has unresolved canonical lifecycle shadows: ${shadowRepair.unresolved.join(", ")}`,
+          };
+        }
+        if (shadowRepair.repaired.length > 0) {
+          logWarning(
+            "db",
+            `Repaired ${shadowRepair.repaired.length} evidence-backed lifecycle shadow(s) before reopening Milestone ${params.milestoneId}`,
+          );
+        }
+      } catch (error) {
+        return { error: error instanceof Error ? error.message : String(error) };
+      }
     }
     try {
       canonicalReceipt = reopenMilestone({
@@ -119,7 +159,10 @@ export async function handleReopenMilestone(
         case "milestone-not-found":
           return { error: `milestone not found: ${params.milestoneId}` };
         case "canonical-authority-present":
-          return { error: `refusing legacy reopen for partially adopted Milestone ${params.milestoneId}` };
+          return {
+            error: `refusing legacy reopen for partially adopted Milestone ${params.milestoneId}; ` +
+              "run /gsd db adopt --apply to adopt every lifecycle row, then reopen",
+          };
         case "milestone-not-closed":
           return { error: `milestone ${params.milestoneId} is not closed (status: ${outcome.status}) — nothing to reopen` };
       }
@@ -127,6 +170,9 @@ export async function handleReopenMilestone(
     slicesResetCount = outcome.slicesReset;
     tasksResetCount = outcome.tasksReset;
   }
+
+  // A reopened unit gets its verification retries again (ADR-048).
+  releaseExhaustedUnits(params.milestoneId);
 
   // ── Invalidate caches ────────────────────────────────────────────────────
   invalidateStateCache();
@@ -158,11 +204,12 @@ export async function handleReopenMilestone(
         return removeProjectionIfCurrent({ artifactPath, operationId, isCurrent });
       };
 
-      const milestoneSummaries = new Set([
-        resolveMilestoneFile(basePath, params.milestoneId, "SUMMARY"),
-        targetMilestoneFile(basePath, params.milestoneId, "SUMMARY", milestoneTitle),
-        ...(milestoneDir ? [join(milestoneDir, `${params.milestoneId}-SUMMARY.md`)] : []),
-      ].filter((path): path is string => Boolean(path)));
+      // The canonical reopen deletes the validation verdict; its VALIDATION file goes with it.
+      const milestoneSummaries = new Set(["SUMMARY", ...(adoptedLifecycle ? ["VALIDATION"] : [])].flatMap((suffix) => [
+        resolveMilestoneFile(basePath, params.milestoneId, suffix),
+        targetMilestoneFile(basePath, params.milestoneId, suffix, milestoneTitle),
+        ...(milestoneDir ? [join(milestoneDir, `${params.milestoneId}-${suffix}.md`)] : []),
+      ]).filter((path): path is string => Boolean(path)));
       for (const artifactPath of milestoneSummaries) {
         if (!remove(artifactPath)) {
           superseded = true;
@@ -175,7 +222,7 @@ export async function handleReopenMilestone(
       cleanup: for (const slice of slices) {
         if (superseded) break;
         const sliceDir = resolveSlicePath(basePath, params.milestoneId, slice.id);
-        for (const suffix of ["SUMMARY", "UAT"]) {
+        for (const suffix of ["SUMMARY", "UAT", ...(slicesWithUatVerdict.has(slice.id) ? ["ASSESSMENT"] : [])]) {
           const sliceArtifacts = new Set([
             resolveSliceFile(basePath, params.milestoneId, slice.id, suffix),
             targetSliceFile(basePath, params.milestoneId, slice.id, suffix, milestoneTitle),
@@ -253,6 +300,7 @@ export async function handleReopenMilestone(
       superseded ||= flushed.superseded;
       if (!superseded && isCurrent()) await writeManifestAndFlush(basePath);
       if (!canonicalReceipt) {
+        const reopenedAt = new Date().toISOString();
         appendEvent(basePath, {
           cmd: "reopen-milestone",
           params: {
@@ -261,11 +309,16 @@ export async function handleReopenMilestone(
             slicesReset: slicesResetCount,
             tasksReset: tasksResetCount,
           },
-          ts: new Date().toISOString(),
+          ts: reopenedAt,
           actor: "agent",
           actor_name: params.actorName,
           trigger_reason: params.triggerReason,
         });
+        // Drift detection reads the reopen from the database, never from the file ledger.
+        recordLegacyMilestoneEvents(
+          [{ kind: "reopened", milestoneId: params.milestoneId, occurredAt: reopenedAt }],
+          "agent",
+        );
       }
     }
   } catch (hookErr) {

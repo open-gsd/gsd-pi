@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,9 +10,12 @@ import {
   closeDatabase,
   insertMilestone,
   insertSlice,
+  insertTask,
   openDatabase,
+  setTaskSummaryMd,
 } from "../gsd-db.js";
 import { clearPathCache } from "../paths.js";
+import { rebuildMarkdownProjectionsFromDb } from "../projection-worker.js";
 import { handleCompleteTask } from "../tools/complete-task.js";
 import { discardProjectionEvidence } from "./projection-evidence-helpers.js";
 
@@ -53,6 +56,7 @@ test("complete-task reports shell projection staleness and same-task repair clea
   openDatabase(join(basePath, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Milestone" });
   insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
 
   mkdirSync(roadmapPath);
   const completed = await handleCompleteTask(PARAMS, basePath);
@@ -78,4 +82,38 @@ test("complete-task reports shell projection staleness and same-task repair clea
     "SELECT id FROM verification_evidence WHERE milestone_id = ? AND slice_id = ? AND task_id = ?",
   ).all("M001", "S01", "T01");
   assert.equal(evidence.length, 1, "same-task repair must not duplicate completion evidence");
+});
+
+test("complete-task repairs a missing SUMMARY with the stored summary, the bytes a rebuild writes", async (t) => {
+  const basePath = join(tmpdir(), `gsd-complete-task-summary-repair-${process.pid}-${Date.now()}`);
+  const sliceDir = join(basePath, ".gsd", "milestones", "M001", "slices", "S01");
+
+  t.after(() => {
+    clearPathCache();
+    clearParseCache();
+    try { closeDatabase(); } catch { /* best effort */ }
+    rmSync(basePath, { recursive: true, force: true });
+  });
+
+  mkdirSync(sliceDir, { recursive: true });
+  openDatabase(join(basePath, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Task", status: "pending" });
+
+  const completed = await handleCompleteTask(PARAMS, basePath);
+  assert.ok(!("error" in completed), `completion failed: ${"error" in completed ? completed.error : ""}`);
+  // A stored summary with no frontmatter, as an import stores it. A render
+  // from the task columns cannot produce this text.
+  setTaskSummaryMd("M001", "S01", "T01", "# T01: Imported summary\n\nText that only the stored summary holds.\n");
+
+  rmSync(completed.summaryPath);
+  const repair = await handleCompleteTask(PARAMS, basePath);
+  assert.ok(!("error" in repair), `repair failed: ${"error" in repair ? repair.error : ""}`);
+  assert.equal(repair.duplicate, true);
+  const repaired = readFileSync(repair.summaryPath, "utf-8");
+  assert.match(repaired, /Text that only the stored summary holds\./, "the repair writes the stored summary");
+
+  assert.deepEqual((await rebuildMarkdownProjectionsFromDb(basePath)).errors, []);
+  assert.equal(readFileSync(repair.summaryPath, "utf-8"), repaired, "a rebuild leaves the repaired bytes as they are");
 });

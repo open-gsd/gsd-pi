@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,6 +18,9 @@ import {
   type DomainOperationContext,
 } from "../db/domain-operation.ts";
 import { insertAuthorityCutoverReceipt } from "../db/writers/authority-recovery.ts";
+import { registerAutoWorker } from "../db/auto-workers.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
+import { normalizeRealPath } from "../paths.ts";
 import {
   _getAdapter,
   closeDatabase,
@@ -421,7 +424,7 @@ test("authority cutover rejects a future database schema and damaged replay line
     ":event_id": cutoverEvent.event_id,
     ":payload_json": JSON.stringify({
       ...cutoverPayload,
-      applicationIdentityHash: OTHER_HASH,
+      evidenceHash: OTHER_HASH,
     }),
   });
   expectCode(
@@ -430,39 +433,23 @@ test("authority cutover rejects a future database schema and damaged replay line
   );
 });
 
-test("malformed durable Application evidence is reported as not current", (t) => {
+test("authority cutover refuses while one hierarchy row has no lifecycle row", (t) => {
   openFixture(t);
-  seedApplication();
-  db().exec("DROP TRIGGER trg_workflow_domain_events_immutable_update");
-  const applicationEvent = row(`
-    SELECT event_id, payload_json FROM workflow_domain_events
-    WHERE event_type = 'legacy-import.applied'
-  `);
-  const payload = JSON.parse(String(applicationEvent.payload_json)) as Record<string, unknown>;
+  const evidence = seedApplication();
   db().prepare(`
-    UPDATE workflow_domain_events SET payload_json = :payload_json WHERE event_id = :event_id
-  `).run({
-    ":event_id": applicationEvent.event_id,
-    ":payload_json": JSON.stringify({ ...payload, applicationIdentityHash: "damaged" }),
-  });
-
-  expectCode(
-    () => inspectProjectAuthorityCutoverEvidence(),
-    "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT",
-  );
-});
-
-test("authority cutover rejects unrecorded row drift after Application", (t) => {
-  openFixture(t);
-  seedApplication();
-  db().prepare(`
-    INSERT INTO milestones (id, title, status) VALUES ('M001', 'unrecorded', 'active')
+    INSERT INTO milestones (id, title, status) VALUES ('M001', 'unadopted', 'active')
   `).run();
+  const before = durableSnapshot();
 
   expectCode(
     () => inspectProjectAuthorityCutoverEvidence(),
-    "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT",
+    "PROJECT_AUTHORITY_CUTOVER_COVERAGE_INCOMPLETE",
   );
+  expectCode(
+    () => cutoverProjectAuthority(input(evidence)),
+    "PROJECT_AUTHORITY_CUTOVER_COVERAGE_INCOMPLETE",
+  );
+  assert.deepEqual(durableSnapshot(), before);
 });
 
 test("authority cutover stale revision and epoch fail before mutation", (t) => {
@@ -480,7 +467,7 @@ test("authority cutover stale revision and epoch fail before mutation", (t) => {
   assert.deepEqual(durableSnapshot(), before);
 });
 
-test("later canonical work and active coordination close the cutover attempt without advancing epoch", (t) => {
+test("stale evidence and active coordination refuse the cutover; fresh evidence commits over any operation head", (t) => {
   openFixture(t);
   const evidence = seedApplication();
   executeDomainOperation({
@@ -504,9 +491,13 @@ test("later canonical work and active coordination close the cutover attempt wit
   const afterLaterWork = durableSnapshot();
   expectCode(
     () => cutoverProjectAuthority(input(evidence, { expectedRevision: 2 })),
-    "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT",
+    "PROJECT_AUTHORITY_CUTOVER_EVIDENCE_CHANGED",
   );
   assert.deepEqual(durableSnapshot(), afterLaterWork);
+  // The head is an ordinary Domain Operation, not an Import Application.
+  const receipt = cutoverProjectAuthority(input(inspectProjectAuthorityCutoverEvidence()));
+  assert.equal(receipt.priorRevision, 2);
+  assert.equal(receipt.resultingAuthorityEpoch, 1);
 
   closeDatabase();
   openFixture(t);
@@ -524,6 +515,24 @@ test("later canonical work and active coordination close the cutover attempt wit
   const beforeCoordination = durableSnapshot();
   expectCode(
     () => cutoverProjectAuthority(input(activeEvidence)),
+    "PROJECT_AUTHORITY_CUTOVER_COORDINATION_ACTIVE",
+  );
+  assert.deepEqual(durableSnapshot(), beforeCoordination);
+});
+
+test("requireCoordinationIdle sees an auto worker of the checkout the database is bound to", (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-authority-cutover-bound-"));
+  tempDirs.add(base);
+  mkdirSync(join(base, ".gsd"));
+  assert.equal(openWorkflowDatabase(base).ok, true);
+  t.after(closeDatabase);
+  const evidence = seedApplication();
+  assert.equal(evidence.projectRootRealpath, normalizeRealPath(base), "the open binds the checkout root");
+  // Registered the way auto mode registers its session worker.
+  registerAutoWorker({ projectRootRealpath: normalizeRealPath(base) });
+  const beforeCoordination = durableSnapshot();
+  expectCode(
+    () => cutoverProjectAuthority(input(evidence)),
     "PROJECT_AUTHORITY_CUTOVER_COORDINATION_ACTIVE",
   );
   assert.deepEqual(durableSnapshot(), beforeCoordination);

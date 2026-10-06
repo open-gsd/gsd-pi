@@ -5,7 +5,8 @@
 
 import type { ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import { loadLedgerFromDisk } from "./metrics.js";
-import { recordFeedback, initRoutingHistory } from "./routing-history.js";
+import { clearRoutingHistory, recordFeedback, initRoutingHistory } from "./routing-history.js";
+import { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 import type { ComplexityTier } from "./complexity-classifier.js";
 
 const VALID_RATINGS = new Set(["over", "under", "ok"]);
@@ -17,12 +18,26 @@ export async function handleRate(
 ): Promise<void> {
   const rating = args.trim().toLowerCase();
 
+  if (rating === "reset") {
+    if (!(await ensureDbOpen(basePath))) {
+      ctx.ui.notify("Routing history not cleared: the project database could not be opened.", "error");
+      return;
+    }
+    if (!clearRoutingHistory()) {
+      ctx.ui.notify("Routing history not cleared: the project database refused the write.", "error");
+      return;
+    }
+    ctx.ui.notify("Routing history cleared. Adaptive routing starts again from no data.", "info");
+    return;
+  }
+
   if (!rating || !VALID_RATINGS.has(rating)) {
     ctx.ui.notify(
-      "Usage: /gsd rate <over|ok|under>\n" +
+      "Usage: /gsd rate <over|ok|under|reset>\n" +
       "  over  — model was overpowered for that task (encourage cheaper)\n" +
       "  ok    — model was appropriate\n" +
-      "  under — model was too weak (encourage stronger)",
+      "  under — model was too weak (encourage stronger)\n" +
+      "  reset — clear the routing history",
       "info",
     );
     return;
@@ -45,8 +60,16 @@ export async function handleRate(
     return;
   }
 
-  initRoutingHistory(basePath);
-  recordFeedback(lastUnit.type, lastUnit.id, tier, rating as "over" | "under" | "ok");
+  // The rating is stored in the project database; without one it would be lost.
+  if (!(await ensureDbOpen(basePath))) {
+    ctx.ui.notify("Rating not recorded: the project database could not be opened.", "error");
+    return;
+  }
+  initRoutingHistory();
+  if (!recordFeedback(lastUnit.type, lastUnit.id, tier, rating as "over" | "under" | "ok")) {
+    ctx.ui.notify("Rating not recorded: the project database refused the write.", "error");
+    return;
+  }
 
   ctx.ui.notify(
     `Recorded "${rating}" for ${lastUnit.type}/${lastUnit.id} at tier ${tier}.`,

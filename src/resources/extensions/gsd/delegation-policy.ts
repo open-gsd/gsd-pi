@@ -28,7 +28,7 @@
 // classified here. The other 15 default-deny:
 //   complete-milestone, complete-slice, discuss-milestone, discuss-project,
 //   discuss-requirements, execute-task, execute-task-simple, gate-evaluate,
-//   reactive-execute, refine-slice, research-decision, research-milestone,
+//   reactive-execute, refine-slice, research-milestone,
 //   research-project, research-slice, rewrite-docs, run-uat
 //
 // Adding a `unitType` mapping (or a future `unitTypes: string[]`) to an

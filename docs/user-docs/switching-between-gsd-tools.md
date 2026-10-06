@@ -4,7 +4,7 @@ Both `@opengsd/gsd-core` and `@opengsd/gsd-pi` use the same `.gsd/` directory, b
 
 ## The shared contract
 
-gsd-core treats `.gsd/*.md` files as the source of truth. gsd-pi treats its SQLite database as canonical and uses those files only as projections. It never imports modeled markdown implicitly during startup or `/gsd sync`; use gsd-pi's planning and reopen tools for ordinary changes, or the verified `/gsd recover` Preview/Application flow when markdown is intentionally replacing missing or damaged database state.
+gsd-core treats `.gsd/*.md` files as the source of truth. gsd-pi treats its SQLite database as canonical and uses those files only as projections. It never imports modeled markdown, `QUEUE-ORDER.json` or a hand-written `CONTEXT.md` implicitly during startup, state derivation, dispatch or `/gsd sync`. `.gsd/KNOWLEDGE.md` is not imported at session start either: a row that exists only in the file stays in the file and in the render, and sessions still read it, but it does not become a database row. A milestone reopen or completion that only `.gsd/event-log.jsonl` holds (written by an older release) is not read: `/gsd doctor` reports it and `/gsd doctor --fix` imports it. Use gsd-pi's planning and reopen tools for ordinary changes, or the verified `/gsd recover` Preview/Application flow when markdown is intentionally replacing missing or damaged database state.
 
 ## Recommended workflow: commit before switching
 
@@ -26,7 +26,7 @@ When you open a project in gsd-pi, it runs a reconciliation pass that:
 3. Re-projects markdown from the DB while valid database-backed work continues.
 4. Updates `.gsd/.compat.json` after a successful projection.
 
-This is automatic. Projection drift does not become workflow authority or block otherwise valid work; review the preserved copy if you need to recover an external edit.
+This is automatic. Projection drift does not become workflow authority or block otherwise valid work. gsd-pi renders the database content again at once and shows a notice that names each preserved copy; review the copy if you need to recover an external edit. A projection that fails to render does not fail the tool that changed the database: the tool result says that the readable file is pending repair, and gsd-pi renders it again later.
 
 ## `/gsd sync` — mid-session switch
 

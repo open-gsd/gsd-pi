@@ -5,8 +5,7 @@
  * Lightweight task execution with GSD guarantees (atomic commits, state
  * tracking) but without the full milestone/slice ceremony.
  *
- * Quick tasks live in `.gsd/quick/` and are tracked in STATE.md's
- * "Quick Tasks Completed" table.
+ * Quick tasks live in `.gsd/quick/`.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";

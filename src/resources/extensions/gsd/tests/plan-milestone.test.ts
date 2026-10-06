@@ -10,7 +10,6 @@ import { tmpdir } from 'node:os';
 import {
   adoptOrTransitionLifecycle,
   closeDatabase,
-  deleteSlice,
   executeDomainOperation,
   getMilestone,
   getMilestoneSlices,
@@ -24,6 +23,7 @@ import { handlePlanMilestone as handlePlanMilestoneWithInvocation } from '../too
 import { internalPlanningInvocation } from '../planning-invocation.ts';
 import { parseProjectionRoadmap as parseRoadmap } from '../schemas/parsers.ts';
 import { canonicalPhaseDirName } from '../paths.ts';
+import { assertWorkerRendersStaleProjection } from './projection-render-failure-gate.ts';
 
 function expectedRoadmapPath(base: string, title: string, milestoneId = 'M001'): string {
   return join(base, '.gsd', 'phases', canonicalPhaseDirName(milestoneId, title), '01-ROADMAP.md');
@@ -210,7 +210,7 @@ test('handlePlanMilestone rejects delimiter characters in milestone and slice ti
   }
 });
 
-test('handlePlanMilestone surfaces render failures and does not clear parse-visible state on failure', async () => {
+test('handlePlanMilestone returns the committed plan with a stale flag when the render fails', async () => {
   const base = makeTmpBase();
   const dbPath = join(base, '.gsd', 'gsd.db');
   openDatabase(dbPath);
@@ -223,13 +223,13 @@ test('handlePlanMilestone surfaces render failures and does not clear parse-visi
     mkdirSync(fallbackRoadmapPath, { recursive: true });
 
     const result = await handlePlanMilestone({ ...validParams(), milestoneId: 'M999' }, base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
+    assert.equal(result.roadmapPath, '');
+    assert.ok(getMilestoneSlices('M999').length > 0, 'the plan is committed');
 
-    const existingRoadmapPath = join(base, '.gsd', 'phases', '01-test', '01-ROADMAP.md');
-    writeFileSync(existingRoadmapPath, '# M001: Cached roadmap\n\n**Vision:** old value\n\n## Slices\n\n', 'utf-8');
-    const cachedAfter = parseRoadmap(readFileSync(existingRoadmapPath, 'utf-8'));
-    assert.equal(cachedAfter.vision, 'old value');
+    rmSync(fallbackRoadmapPath, { recursive: true });
+    await assertWorkerRendersStaleProjection(base, fallbackRoadmapPath);
   } finally {
     cleanup(base);
   }

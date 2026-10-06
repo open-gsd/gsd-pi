@@ -21,7 +21,9 @@ import {
   insertSlice,
   insertTask,
   insertArtifact,
+  _getAdapter,
 } from "../gsd-db.ts";
+import { replaceProjectMilestoneSequence } from "../db/writers/project-milestone-sequence.ts";
 
 function createFixtureBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-stale-milestone-"));
@@ -50,15 +52,9 @@ function seedMilestoneArtifact(
   });
 }
 
+/** Store the Milestone Sequence rows that the save of this PROJECT document stores. */
 function seedProjectSequence(content: string): void {
-  insertArtifact({
-    path: "PROJECT.md",
-    artifact_type: "PROJECT",
-    milestone_id: null,
-    slice_id: null,
-    task_id: null,
-    full_content: content,
-  });
+  replaceProjectMilestoneSequence(_getAdapter()!, content);
 }
 
 describe("stale queued milestone selection (#3470)", () => {
@@ -311,6 +307,28 @@ describe("stale queued milestone selection (#3470)", () => {
     assert.equal(state.activeMilestone, null, "A queued shell absent from the PROJECT.md sequence must not be promoted");
     const m099Entry = state.registry.find((e: any) => e.id === "M099");
     assert.equal(m099Entry!.status, "pending", "Stray phantom should stay pending");
+  });
+
+  test("a Milestone Sequence line in the stored PROJECT text promotes nothing without a sequence row", async () => {
+    base = createFixtureBase();
+    openDatabase(":memory:");
+
+    // The artifact row is the document. The sequence rows decide, and no save
+    // stored one for M001: the text of the document is not parsed.
+    insertMilestone({ id: "M001", title: "Foundation", status: "queued" });
+    insertArtifact({
+      path: "PROJECT.md",
+      artifact_type: "PROJECT",
+      milestone_id: null,
+      slice_id: null,
+      task_id: null,
+      full_content: "# Project\n\n## Milestone Sequence\n\n- [ ] M001: Foundation - Establish the first runnable slice.\n",
+    });
+
+    invalidateStateCache();
+    const state = await deriveStateFromDb(base);
+
+    assert.equal(state.activeMilestone, null, "PROJECT text with no sequence row must not promote a queued shell");
   });
 
   test("phantom-only repo surfaces a doctor recovery path, not a misleading dep-block message (#1524)", async () => {

@@ -7,7 +7,7 @@
 
 import { describe, it, beforeEach } from "node:test";
 import assert from "node:assert/strict";
-import { validateConfiguredModel } from "../startup-model-validation.js";
+import { formatModelFallbackNotice, validateConfiguredModel } from "../startup-model-validation.js";
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -199,9 +199,99 @@ describe("validateConfiguredModel — regression #3534", () => {
 		]);
 		const settings = createMockSettings({ provider: "anthropic", model: "claude-opus-4-8" });
 
-		validateConfiguredModel(registry, settings);
+		const result = validateConfiguredModel(registry, settings);
 
 		assert.equal(settings._provider, "anthropic");
 		assert.equal(settings._model, "claude-opus-4-8");
+		assert.deepEqual(result, { action: "preserved", from: null, to: null });
+	});
+});
+
+describe("validateConfiguredModel — fallback notification (#2077)", () => {
+	it("reports fell-back with from/to when the configured model is replaced", () => {
+		const registry = createMockRegistry([
+			{ provider: "anthropic", id: "claude-opus-4-6" },
+		]);
+		const settings = createMockSettings({ provider: "anthropic", model: "nonexistent-model" });
+
+		const result = validateConfiguredModel(registry, settings);
+
+		assert.deepEqual(result, {
+			action: "fell-back",
+			from: "anthropic/nonexistent-model",
+			to: "anthropic/claude-opus-4-6",
+		});
+	});
+
+	it("reports preserved when the configured model is valid", () => {
+		const registry = createMockRegistry([
+			{ provider: "anthropic", id: "claude-opus-4-6" },
+		]);
+		const settings = createMockSettings({ provider: "anthropic", model: "claude-opus-4-6" });
+
+		const result = validateConfiguredModel(registry, settings);
+
+		assert.deepEqual(result, { action: "preserved", from: null, to: null });
+	});
+
+	it("reports preserved when the catalog-preserve path keeps temporarily-unavailable settings", () => {
+		const allModels = [
+			{ provider: "ccswitch-anthropic-k3", id: "kimi-k3" },
+			{ provider: "anthropic", id: "claude-opus-4-6" },
+		];
+		const registry = createMockRegistry(allModels, [], {
+			isProviderRequestReady: () => true,
+		});
+		const settings = createMockSettings({
+			provider: "ccswitch-anthropic-k3",
+			model: "kimi-k3",
+		});
+
+		const result = validateConfiguredModel(registry, settings);
+
+		assert.deepEqual(result, { action: "preserved", from: null, to: null });
+		assert.equal(settings._model, "kimi-k3");
+	});
+
+	it("does not rewrite settings when no fallback model exists", () => {
+		// Registry is empty — there is nothing to fall back to, so the
+		// configured default must stay in place rather than being blanked.
+		const registry = createMockRegistry([]);
+		const settings = createMockSettings({ provider: "anthropic", model: "claude-opus-4-6" });
+
+		const result = validateConfiguredModel(registry, settings);
+
+		assert.equal(settings._provider, "anthropic");
+		assert.equal(settings._model, "claude-opus-4-6");
+		assert.deepEqual(result, { action: "preserved", from: null, to: null });
+	});
+
+	it("formats a notice naming both models on the fell-back path", () => {
+		const notice = formatModelFallbackNotice({
+			action: "fell-back",
+			from: "ccswitch-anthropic-k3/kimi-k3",
+			to: "anthropic/claude-opus-4-6",
+		});
+
+		assert.ok(notice, "fell-back results must produce a user-facing notice");
+		assert.match(notice, /ccswitch-anthropic-k3\/kimi-k3/);
+		assert.match(notice, /anthropic\/claude-opus-4-6/);
+	});
+
+	it("formats no notice for preserved, initial-setup, or no-fallback results", () => {
+		assert.equal(
+			formatModelFallbackNotice({ action: "preserved", from: null, to: null }),
+			null,
+		);
+		// Nothing was configured before — writing a default is setup, not a downgrade.
+		assert.equal(
+			formatModelFallbackNotice({ action: "fell-back", from: null, to: "anthropic/claude-opus-4-6" }),
+			null,
+		);
+		// No fallback available — settings were not rewritten, nothing to announce.
+		assert.equal(
+			formatModelFallbackNotice({ action: "fell-back", from: "anthropic/claude-opus-4-6", to: null }),
+			null,
+		);
 	});
 });

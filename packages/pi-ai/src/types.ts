@@ -303,6 +303,13 @@ export interface Usage {
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
+	/**
+	 * Live prompt-side context of the final per-call API response, set only by
+	 * adapters whose terminal usage is cumulative across an internal loop
+	 * (claude-code). Consumers that approximate live context should prefer this
+	 * when it is present and > 0, and fall back to the derived totals otherwise.
+	 */
+	liveContextTokens?: number;
 	cost: {
 		input: number;
 		output: number;
@@ -533,6 +540,15 @@ export interface AnthropicMessagesCompat {
 	 * Default: false.
 	 */
 	forceAdaptiveThinking?: boolean;
+	/**
+	 * Whether the model rejects the legacy request surface with 400s:
+	 * `thinking: {type: "disabled"}` (the API requires
+	 * `{type: "between_tools"}` to turn thinking off), `temperature`,
+	 * `top_p` / `top_k`, and forced `tool_choice` (`any` / named tool).
+	 * Claude Sonnet 5.5 sets this in generated metadata (#2500).
+	 * Default: false.
+	 */
+	strictRequestParams?: boolean;
 }
 
 /**

@@ -14,7 +14,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { openDatabase, closeDatabase, getAllMilestones, getMilestoneSlices, getSliceTasks, repairTaskCompletionFromSummary } from "../gsd-db.ts";
-import { migrateHierarchyToDb } from "../md-importer.ts";
+import { migrateHierarchyToDb } from "./helpers/md-importer.ts";
 import { invalidateStateCache } from "../state.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));

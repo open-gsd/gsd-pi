@@ -1,7 +1,7 @@
 /**
  * Behavioural tests for /gsd discuss routing fixes:
  *   - pre-planning milestones route to milestone-level discuss
- *   - targeted slice path uses ROADMAP fallback when DB has no slices (#2892)
+ *   - the discussable slices come from the DB slice rows, never from ROADMAP.md
  *   - discuss target IDs are canonicalized (case normalization)
  */
 
@@ -17,7 +17,7 @@ import {
 } from "../guided-flow.ts";
 import { normalizeDiscussTarget } from "../milestone-ids.ts";
 import { _parseDiscussArgsForTest } from "../commands/handlers/workflow.ts";
-import { openDatabase, closeDatabase, isDbAvailable, insertMilestone } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, isDbAvailable, insertArtifact, insertMilestone, insertSlice } from "../gsd-db.ts";
 import { invalidateStateCache } from "../state.ts";
 import { clearGuidedUnitContext, getGuidedUnitContext } from "../guided-unit-context.ts";
 
@@ -84,6 +84,7 @@ async function runDiscussTargetFixture(
   target: string,
   milestones: Array<{ id: string; title?: string; status?: string }>,
   writeArtifacts?: (base: string) => void,
+  seedRows?: () => void,
 ) {
   const base = mkdtempSync(join(tmpdir(), "gsd-discuss-target-"));
   const notifications: Array<{ message: string; level?: string }> = [];
@@ -96,6 +97,7 @@ async function runDiscussTargetFixture(
     for (const milestone of milestones) {
       insertMilestone(milestone);
     }
+    seedRows?.();
 
     await showDiscuss(
       makeDiscussCtx(notifications) as any,
@@ -205,6 +207,7 @@ describe("showDiscuss targeted milestone guardrails (#1320)", () => {
           "utf-8",
         );
       },
+      () => insertSlice({ id: "S01", milestoneId: "M006-abc123", title: "Unique slice", status: "pending" }),
     );
 
     assert.equal(result.notifications.length, 0);
@@ -213,8 +216,49 @@ describe("showDiscuss targeted milestone guardrails (#1320)", () => {
   });
 });
 
-describe("loadDiscussNormSlices roadmap fallback (#2892)", () => {
-  test("falls back to ROADMAP when DB has no slice rows", async () => {
+describe("showDiscuss milestone draft seed", () => {
+  const milestones = [{ id: "M001", title: "Draft milestone", status: "active" }];
+
+  function saveMilestoneArtifact(artifactType: string, content: string): void {
+    insertArtifact({
+      path: `milestones/M001/M001-${artifactType}.md`,
+      artifact_type: artifactType,
+      milestone_id: "M001",
+      slice_id: null,
+      task_id: null,
+      full_content: content,
+    });
+  }
+
+  test("a saved draft with no final CONTEXT seeds the discussion on the fast path", async () => {
+    const result = await runDiscussTargetFixture("M001", milestones, undefined, () => {
+      saveMilestoneArtifact("CONTEXT-DRAFT", "# Draft\n\nOLD-DRAFT-SIGNAL");
+    });
+
+    assert.equal(result.sent.length, 1);
+    const prompt = String(result.sent[0]?.content);
+    assert.match(prompt, /Fast path active/);
+    assert.match(prompt, /## Prior Discussion \(Draft Seed\)/);
+    assert.match(prompt, /OLD-DRAFT-SIGNAL/);
+  });
+
+  test("a draft row left after the final CONTEXT is no seed and no fast path", async () => {
+    // gsd_summary_save(CONTEXT) removes the draft file and keeps the draft row.
+    const result = await runDiscussTargetFixture("M001", milestones, undefined, () => {
+      saveMilestoneArtifact("CONTEXT-DRAFT", "# Draft\n\nOLD-DRAFT-SIGNAL");
+      saveMilestoneArtifact("CONTEXT", "# Context\n\nFinal context.");
+    });
+
+    assert.equal(result.sent.length, 1);
+    const prompt = String(result.sent[0]?.content);
+    assert.doesNotMatch(prompt, /Fast path active/);
+    assert.doesNotMatch(prompt, /## Prior Discussion \(Draft Seed\)/);
+    assert.doesNotMatch(prompt, /OLD-DRAFT-SIGNAL/);
+  });
+});
+
+describe("loadDiscussNormSlices reads the DB slice rows only", () => {
+  test("a ROADMAP file with slices lists nothing when the DB has no slice rows", async () => {
     const base = mkdtempSync(join(tmpdir(), "gsd-discuss-slices-"));
     try {
       mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
@@ -230,6 +274,9 @@ describe("loadDiscussNormSlices roadmap fallback (#2892)", () => {
 `;
       writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), roadmap, "utf-8");
 
+      assert.deepEqual(await _loadDiscussNormSlicesForTest(base, "M001"), []);
+
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Core setup", status: "pending" });
       const slices = await _loadDiscussNormSlicesForTest(base, "M001");
       assert.equal(slices.length, 1);
       assert.equal(slices[0]?.id, "S01");
@@ -268,8 +315,8 @@ describe("showDiscuss pre-planning routing", () => {
   });
 });
 
-describe("showDiscuss targeted slice roadmap fallback", () => {
-  test("/gsd discuss M001/S01 resolves slice from ROADMAP when DB is empty", async () => {
+describe("showDiscuss targeted slice", () => {
+  test("/gsd discuss M001/S01 resolves the slice from its DB row", async () => {
     const base = mkdtempSync(join(tmpdir(), "gsd-discuss-target-slice-"));
     const notifications: Array<{ message: string; level?: string }> = [];
     const harness = makeDiscussPi();
@@ -278,6 +325,7 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       const dbPath = join(base, ".gsd", "gsd.db");
       assert.equal(openDatabase(dbPath), true);
       insertMilestone({ id: "M001", title: "Target slice milestone", status: "active" });
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Auth module", status: "pending" });
 
       const roadmap = `# M001 Roadmap
 
@@ -295,7 +343,7 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       );
 
       const notFound = notifications.find((n) => /not found in discussable slices/i.test(n.message));
-      assert.equal(notFound, undefined, "targeted slice must resolve from ROADMAP fallback");
+      assert.equal(notFound, undefined, "targeted slice must resolve from its DB row");
       assert.equal(harness.sent.length, 1, "targeted slice must dispatch discuss-slice");
       assert.match(String(harness.sent[0]?.content), /S01|Auth module|guided-discuss-slice/i);
     } finally {
@@ -315,6 +363,7 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       const dbPath = join(base, ".gsd", "gsd.db");
       assert.equal(openDatabase(dbPath), true);
       insertMilestone({ id: "M001", title: "Target slice milestone", status: "active" });
+      insertSlice({ id: "S01", milestoneId: "M001", title: "Auth module", status: "pending" });
 
       const rootRoadmap = `# M001 Roadmap
 
@@ -339,6 +388,15 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
         "utf-8",
       );
 
+      insertArtifact({
+        path: "milestones/M001/M001-ROADMAP.md",
+        artifact_type: "ROADMAP",
+        milestone_id: "M001",
+        slice_id: null,
+        task_id: null,
+        full_content: rootRoadmap.replace("ROOT-ROADMAP-CONTENT", "ROW-ROADMAP-CONTENT"),
+      });
+
       await showDiscuss(
         makeDiscussCtx(notifications) as any,
         harness.pi as any,
@@ -347,8 +405,11 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       );
 
       assert.equal(harness.sent.length, 1, "targeted slice must dispatch discuss-slice");
+      // The roadmap text is the artifact row of the project database. Neither
+      // the worktree file nor the project-root file is read.
       const content = String(harness.sent[0]?.content);
-      assert.match(content, /WORKTREE-ROADMAP-CONTENT/);
+      assert.match(content, /ROW-ROADMAP-CONTENT/);
+      assert.doesNotMatch(content, /WORKTREE-ROADMAP-CONTENT/);
       assert.doesNotMatch(content, /ROOT-ROADMAP-CONTENT/);
       assert.equal(
         getGuidedUnitContext(worktreeBase)?.unitType,
@@ -363,5 +424,39 @@ describe("showDiscuss targeted slice roadmap fallback", () => {
       clearGuidedUnitContext();
       rmSync(base, { recursive: true, force: true });
     }
+  });
+
+  test("/gsd discuss M001/S01 enters re-discuss mode from the saved CONTEXT row, never from a CONTEXT file", async () => {
+    const milestones = [{ id: "M001", title: "Target slice milestone", status: "active" }];
+    const seedSlice = () => insertSlice({ id: "S01", milestoneId: "M001", title: "Auth module", status: "pending" });
+
+    // The row is saved and no CONTEXT file exists.
+    const saved = await runDiscussTargetFixture("M001/S01", milestones, undefined, () => {
+      seedSlice();
+      insertArtifact({
+        path: "milestones/M001/slices/S01/S01-CONTEXT.md",
+        artifact_type: "CONTEXT",
+        milestone_id: "M001",
+        slice_id: "S01",
+        task_id: null,
+        full_content: "# S01 Context\n",
+      });
+    });
+    assert.equal(saved.sent.length, 1, "the slice with a saved CONTEXT row must dispatch discuss-slice");
+    assert.match(String(saved.sent[0]?.content), /## Re-discuss Mode/);
+
+    // A well-formed CONTEXT file exists and no row is saved.
+    const fileOnly = await runDiscussTargetFixture(
+      "M001/S01",
+      milestones,
+      (base) => {
+        const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+        mkdirSync(sliceDir, { recursive: true });
+        writeFileSync(join(sliceDir, "S01-CONTEXT.md"), "# S01 Context\n\nDecided on disk only.\n", "utf-8");
+      },
+      seedSlice,
+    );
+    assert.equal(fileOnly.sent.length, 1, "the slice with only a CONTEXT file must dispatch discuss-slice");
+    assert.doesNotMatch(String(fileOnly.sent[0]?.content), /## Re-discuss Mode/);
   });
 });

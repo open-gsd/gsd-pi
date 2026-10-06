@@ -165,6 +165,74 @@ function convertContentBlocks(content: (TextContent | ImageContent)[]):
 	return blocks;
 }
 
+const ERROR_TOOL_RESULT_IMAGE_PLACEHOLDER = "[image omitted from tool error]";
+
+/**
+ * Anthropic rejects tool_result content containing non-text blocks when
+ * is_error is true ("all content must be type `text` if `is_error` is true"),
+ * deterministically 400ing every turn once a poisoned result is persisted.
+ * Serialize a tool result accordingly: for error results carrying images, the
+ * tool_result content becomes text-only (each image replaced by a placeholder
+ * note) and the image blocks are returned separately so the caller can hoist
+ * them into sibling content after the whole consecutive tool_result run — the
+ * model still sees the image and tool_use/tool_result pairing stays intact.
+ * Everything else passes through convertContentBlocks unchanged.
+ */
+function splitErrorContentBlocks(
+	content: (TextContent | ImageContent)[],
+	isError: boolean,
+): {
+	content: string | Array<
+		| { type: "text"; text: string }
+		| {
+				type: "image";
+				source: {
+					type: "base64";
+					media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+					data: string;
+				};
+		  }
+	>;
+	hoistedImages: Array<{
+		type: "image";
+		source: {
+			type: "base64";
+			media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+			data: string;
+		};
+	}>;
+} {
+	const hasImages = content.some((c) => c.type === "image");
+	if (!isError || !hasImages) {
+		return { content: convertContentBlocks(content), hoistedImages: [] };
+	}
+	const hoistedImages: Array<{
+		type: "image";
+		source: {
+			type: "base64";
+			media_type: "image/jpeg" | "image/png" | "image/gif" | "image/webp";
+			data: string;
+		};
+	}> = [];
+	const parts: string[] = [];
+	for (const block of content) {
+		if (block.type === "image") {
+			hoistedImages.push({
+				type: "image",
+				source: {
+					type: "base64",
+					media_type: block.mimeType as "image/jpeg" | "image/png" | "image/gif" | "image/webp",
+					data: block.data,
+				},
+			});
+			parts.push(ERROR_TOOL_RESULT_IMAGE_PLACEHOLDER);
+		} else {
+			parts.push(sanitizeSurrogates(block.text));
+		}
+	}
+	return { content: parts.join("\n"), hoistedImages };
+}
+
 export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
@@ -174,7 +242,7 @@ const INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14";
 
 function getAnthropicCompat(
 	model: Model<"anthropic-messages">,
-): Required<Omit<AnthropicMessagesCompat, "forceAdaptiveThinking">> {
+): Required<Omit<AnthropicMessagesCompat, "forceAdaptiveThinking" | "strictRequestParams">> {
 	// Auto-detect session affinity and cache control support from provider
 	const isFireworks = model.provider === "fireworks";
 	const isCloudflareAiGatewayAnthropic =
@@ -979,7 +1047,8 @@ function buildParams(
 	}
 
 	// Temperature is incompatible with extended thinking (adaptive or budget-based).
-	if (options?.temperature !== undefined && !options?.thinkingEnabled) {
+	// Strict-param models (Sonnet 5.5, #2500) reject temperature outright.
+	if (options?.temperature !== undefined && !options?.thinkingEnabled && model.compat?.strictRequestParams !== true) {
 		params.temperature = options.temperature;
 	}
 
@@ -1021,7 +1090,12 @@ function buildParams(
 				};
 			}
 		} else if (options?.thinkingEnabled === false) {
-			params.thinking = { type: "disabled" };
+			// Strict-param models (Sonnet 5.5, #2500) 400 on {type: "disabled"};
+			// {type: "between_tools"} is their off switch. The SDK type union
+			// lags the API value, same as the xhigh effort workaround above.
+			params.thinking = model.compat?.strictRequestParams === true
+				? ({ type: "between_tools" } as unknown as NonNullable<MessageCreateParamsStreaming["thinking"]>)
+				: { type: "disabled" };
 		}
 	}
 
@@ -1033,10 +1107,18 @@ function buildParams(
 	}
 
 	if (options?.toolChoice) {
-		if (typeof options.toolChoice === "string") {
-			params.tool_choice = { type: options.toolChoice };
-		} else {
-			params.tool_choice = options.toolChoice;
+		// Strict-param models (Sonnet 5.5, #2500) 400 on forced tool choice
+		// ("any" / named tool); "auto" and "none" remain valid and pass through.
+		const isForcedToolChoice = typeof options.toolChoice === "string"
+			? options.toolChoice === "any"
+			: options.toolChoice.type === "tool";
+		const omitToolChoice = model.compat?.strictRequestParams === true && isForcedToolChoice;
+		if (!omitToolChoice) {
+			if (typeof options.toolChoice === "string") {
+				params.tool_choice = { type: options.toolChoice };
+			} else {
+				params.tool_choice = options.toolChoice;
+			}
 		}
 	}
 
@@ -1184,35 +1266,43 @@ function convertMessages(
 		} else if (msg.role === "toolResult") {
 			// Collect all consecutive toolResult messages, needed for z.ai Anthropic endpoint
 			const toolResults: ContentBlockParam[] = [];
+			// Images from error tool results, hoisted after the whole run below
+			// (Anthropic rejects image blocks inside is_error tool_result content)
+			const hoistedImages: ReturnType<typeof splitErrorContentBlocks>["hoistedImages"] = [];
 
 			// Add the current tool result
+			const currentSplit = splitErrorContentBlocks(msg.content, msg.isError);
 			toolResults.push({
 				type: "tool_result",
 				tool_use_id: msg.toolCallId,
-				content: convertContentBlocks(msg.content),
+				content: currentSplit.content,
 				is_error: msg.isError,
 			});
+			hoistedImages.push(...currentSplit.hoistedImages);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
+				const nextSplit = splitErrorContentBlocks(nextMsg.content, nextMsg.isError);
 				toolResults.push({
 					type: "tool_result",
 					tool_use_id: nextMsg.toolCallId,
-					content: convertContentBlocks(nextMsg.content),
+					content: nextSplit.content,
 					is_error: nextMsg.isError,
 				});
+				hoistedImages.push(...nextSplit.hoistedImages);
 				j++;
 			}
 
 			// Skip the messages we've already processed
 			i = j - 1;
 
-			// Add a single user message with all tool results
+			// Add a single user message with all tool results; hoisted error
+			// images follow the whole tool_result run so pairing is preserved
 			params.push({
 				role: "user",
-				content: toolResults,
+				content: hoistedImages.length > 0 ? [...toolResults, ...hoistedImages] : toolResults,
 			});
 		}
 	}

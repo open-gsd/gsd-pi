@@ -103,10 +103,11 @@ describe("models.generated.ts", () => {
 		expect(vertex.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
 		expect(vertex.compat).toMatchObject({ forceAdaptiveThinking: true });
 
-		for (const [id, name] of [
-			["anthropic.claude-opus-5-5", "Claude Opus 5.5"],
-			["us.anthropic.claude-opus-5-5", "Claude Opus 5.5 (US)"],
-			["global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Global)"],
+		// models.dev prices the US Bedrock region ~10% above the global regions.
+		for (const [id, name, cost] of [
+			["anthropic.claude-opus-5-5", "Claude Opus 5.5", { input: 4, output: 20 }],
+			["us.anthropic.claude-opus-5-5", "Claude Opus 5.5 (US)", { input: 4.4, output: 22 }],
+			["global.anthropic.claude-opus-5-5", "Claude Opus 5.5 (Global)", { input: 4, output: 20 }],
 		] as const) {
 			const bedrock = MODELS["amazon-bedrock"][id];
 			expect(bedrock).toBeDefined();
@@ -114,7 +115,7 @@ describe("models.generated.ts", () => {
 			expect(bedrock.name).toBe(name);
 			expect(bedrock.contextWindow).toBe(1_000_000);
 			expect(bedrock.maxTokens).toBe(128_000);
-			expect(bedrock.cost).toMatchObject({ input: 4, output: 20 });
+			expect(bedrock.cost).toMatchObject(cost);
 			expect(bedrock.thinkingLevelMap).toMatchObject({ xhigh: "xhigh" });
 		}
 	});

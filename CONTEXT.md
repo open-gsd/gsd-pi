@@ -83,20 +83,158 @@ completed.
 - **Runtime persistence**: lock state, transition journal, and any persisted execution state required for safe resume.
 - **DB snapshot persistence**: crash-safe persistence of a full SQLite image exported from `sql.js`, written as a same-directory temporary file and atomically renamed over the live database path.
 - **Worktree Lifecycle**: creation, entry, teardown, and merge of an auto-mode worktree, including `s.basePath` mutation, `process.chdir` discipline, milestone lease coordination, and guarded milestone-merge preflight/postflight stash ordering.
-- **Worktree State Projection**: directional flow of state files between the project root and the auto-worktree, where one side is authoritative per file class (e.g., project root is authoritative for `completed-units.json` after crash recovery; worktree is authoritative for in-flight artifacts).
+- **Worktree State Projection**: flow of projection files from the project root to the auto-worktree. The project database is the authority; no file flows from the worktree to the project root.
 - **Drift**: a state-shape mismatch between DB rows, disk artifacts, and in-memory state that has a known repair. Distinct from a `blocker`, which describes a terminal condition needing human attention or recovery escalation.
 - **Drift catalog**: the discriminated union of typed workflow-state repair records and Projection observation records; the State Reconciliation Module handles only the workflow-state subset.
 - **Tool Surface Readiness**: the Tool Contract module's runtime face — verification at SDK session init that the live tool surface (registered tools + MCP server statuses) covers the Unit's required workflow tools, aborting before the first model turn when the workflow server is terminal (`failed`/`needs-auth`/`disabled`), absent from the init surface, or still missing required tools (including while `pending`). A `pending` server with every required tool already on the init surface passes through. Stdio MCP probes (`testMcpServerConnection`, background warm) run with `GSD_MCP_PROBE=1` so they never register in or kill the live per-project PID registry entry that Claude Code owns. Complements the static pre-dispatch gate (`getWorkflowTransportSupportError`). See `docs/dev/ADR-036-tool-surface-readiness.md`.
 - **`tool-unavailable` (Recovery kind)**: the Recovery Classification failure kind for a tool call that raced the workflow MCP server's registration (`No such tool available` / a Tool Surface Readiness abort). Transient — action `retry` with bounded attempts and its own exit reason; distinct from `tool-schema`/`tool-contract`, which are deterministic stops. The system retries; the model must never improvise a fallback around a missing workflow tool.
 - **Workflow Bridge Warm-up**: the stdio MCP server's eager load + shape-check of the executor and write-gate bridges before connecting when workflow tools are enabled. A broken bridge fails the spawn with the actionable error (fail closed) instead of advertising tools that error on first call; a healthy spawn pre-pays the bridge import.
 
-## State layer (filesystem-state cutover shipped)
+## State layer (markdown fallback removed; Cutover on first open is opt-in)
 
-The live project-state path is **database-authoritative**. `.gsd/gsd.db` decides
-phase, registry, and progress. Markdown files under `.gsd/` (STATE.md, ROADMAP,
-PLAN, SUMMARY, CONTEXT, and the rest of the inventory) are stamped **read-only
-projections** of that database. They are not a fallback when the DB is missing:
-an unavailable DB fails closed.
+The 2026-08 state-DB milestone removed the markdown fallback for state
+derivation. It was not a **Cutover** in the glossary sense.
+
+The **Cutover** runs by itself (owner decision 2026-10-04,
+`authority-cutover-on-open.ts`). For now it is an opt-in canary (ADR-046
+migration step 6): it runs only with the environment variable
+`GSD_AUTHORITY_CUTOVER=1`. Without it, an open changes nothing and
+no production path advances the Authority Epoch. After the Cutover, database
+triggers refuse a hierarchy row with no lifecycle row, and a change of the
+legacy status of an adopted hierarchy row outside a Domain Operation
+(`db-lifecycle-coverage-schema.ts`). A process that holds a receipt of the
+Cutover refuses an older copy of the database file; a new process does not
+(ADR-046, step 5). A project that was cut over before those triggers existed
+can hold a row with no lifecycle row: its next open adopts the row with
+`lifecycle.backfill`, with or without the environment variable, and logs each
+legacy status that it changes. After the Cutover no production writer creates
+a hierarchy row with no lifecycle row: a Forward Repair adopts each row that
+it puts back, in its own Domain Operation, and an unknown legacy status
+refuses the repair; the legacy Task completion writer creates no row. At
+Authority Epoch 0 that is not true for two writers. A Forward Repair and a
+worktree database merge adopt a row only when the adoption keeps its legacy
+status. A row whose adoption would change its legacy status, or whose status
+is unknown, is written with no lifecycle row. The next automatic Cutover then
+stops with nothing changed and names the row: `/gsd db adopt` is the route for
+a status change, and a fix of the status is the route for an unknown status
+(see below). Authority Epoch 0 is the usual state for a Forward Repair, because
+the automatic Cutover waits while the operation head is an Import Application.
+The automatic Cutover becomes the default after the test fixtures that
+insert a hierarchy row with no lifecycle row into a cut-over database are
+migrated, and the end-to-end suites pass with the flag on. This section owns
+the contract of the automatic Cutover; other documents point here. The rest of
+this section describes an open with the flag on.
+
+The first open of an existing project database
+whose Authority Epoch is 0 writes a verified backup, runs `lifecycle.backfill`,
+and advances the Authority Epoch with `cutoverProjectAuthority`. The
+precondition is a lifecycle row for every milestone, slice and task, and idle
+coordination. A row with an unknown legacy status stops the run with nothing
+changed: the open logs the rows as an error and doctor reports
+`lifecycle_unmappable_status` (doctor reports it with the flag off too).
+Active coordination defers the run to a later
+open. A database that an open creates is cut over by its next open. An import
+open (`/gsd recover`, `/gsd migrate`) and `/gsd db restore-backup` do not run
+it: the first seals an Import Preview on the current revision and epoch, and
+the second replaces the database that it opens. After the Cutover,
+`/gsd db restore-backup` refuses a backup from the earlier epoch.
+
+The automatic run at Authority Epoch 0 does not change a legacy status. The backfill adopts a
+legacy completion as completed only with completion evidence (see
+`lifecycle-backfill-domain-operation.ts`); without evidence it makes the row
+open work again, and it cancels open work under a completed or cancelled
+parent. When the
+preview has such a row, the automatic run stops with nothing changed: the open
+logs the rows as an error and doctor reports `lifecycle_missing_shadow`. The
+route is the preview of `/gsd db adopt`, then `/gsd db adopt --apply`; the next
+open advances the Authority Epoch.
+
+While the operation head is an Import Application, its Restore Window is open
+and the automatic run does nothing. The next accepted work closes the window,
+and the open after that runs the Cutover.
+
+A file lock beside the database (`gsd.db.lock`) lets one process run the
+Cutover at a time. A process that opens the project during the run leaves it
+to the lock holder. The cutover operation is bound to Authority Epoch 0, so
+the epoch advances once.
+
+After the Cutover, the read interface `db/lifecycle-read.ts` answers from
+canonical lifecycle rows and Waivers. The ADR-046 program is not finished.
+
+What shipped:
+
+- `.gsd/gsd.db` decides phase, registry, and progress. These hierarchy reads
+  come from the legacy database rows, not from canonical lifecycle rows.
+- Markdown files under `.gsd/` are not a fallback when the DB is missing: an
+  unavailable DB fails closed.
+- Projections written through `markdown-renderer.ts` (ROADMAP, PLAN, SUMMARY,
+  and the other Milestone and Slice artifacts) carry the DB state-version
+  stamp. STATE.md, DECISIONS.md, and `.planning/` carry no stamp. KNOWLEDGE.md
+  is rendered from `memories` rows, but is not a pure projection yet: file rows
+  with no database row, and file content the render does not model, are kept in
+  the render. Session start never imports the file into the database.
+  `/gsd recover` imports the file's Rule, Pattern and Lesson rows through an
+  Import Preview, which also lists the content it does not import. Knowledge
+  readers read the database, not the file.
+- Prompt builders take ROADMAP, CONTEXT, RESEARCH, PLAN and SUMMARY text of a
+  Milestone, Slice or Task from the database, not from the projection files.
+  A file with no database content is not prompt narrative. The Milestone list of
+  a command or a prompt comes from the Milestone rows; a milestone directory
+  with no row is not a Milestone. The directories are scanned only for id
+  reservation and for doctor and drift checks.
+  `docs/dev/state-db-cutover-milestone-decision.md` lists the readers, the
+  prompt inputs that are still read from files, and the order of the two
+  database sources (the Slice or Task row, then the artifact row).
+- A SUMMARY is prompt narrative only while its Slice or Task is done. A
+  CONTEXT-DRAFT is a discussion seed only while the Milestone has no saved
+  CONTEXT.
+- Steer overrides (`/gsd steer`) are `override.*` events of Domain Operations.
+  OVERRIDES.md is a one-way render of them: dispatch, prompts and artifact
+  verification read only the database. A file block that no database override
+  holds (written by an older release, by hand, or committed by a teammate) is
+  not active. The render keeps it, doctor reports it as a warning, and
+  `/gsd doctor --fix` imports it with an `override.import` Domain Operation. A
+  block with an unknown scope is reported and is not imported.
+- Captures (`/gsd capture`) are `capture.*` events of Domain Operations.
+  CAPTURES.md is rendered from them and is never read as state: triage, the
+  stop and backtrack guard, the quick-task check, the web captures panel and
+  MCP `gsd_captures` read only the database. It is not a pure projection: the
+  render sets the field lines of each database capture's section and keeps
+  every other line of the file (free text, a note under a capture). The triage
+  agent records a classification with `gsd_capture_resolve`. A quick-task
+  capture is executed only when its agent calls `gsd_capture_complete`; the
+  host does not mark it before the unit runs. A backtrack directive pauses
+  auto-mode and its capture is recorded as executed; no BACKTRACK-TRIGGER.md or
+  REGRESSION.md file is written. A file section that no database capture holds
+  is not read. The render keeps it as it is, doctor reports it as a warning,
+  and `/gsd doctor --fix` imports it with a `capture.import` Domain Operation.
+- Backlog items (`/gsd backlog`) are `backlog.*` events of Domain Operations.
+  `/gsd backlog promote` runs one `backlog.promote` operation: the queued
+  milestone row and the promotion of the item commit together, and the item
+  records the milestone id. BACKLOG.md is rendered from the events, but
+  is not a pure projection: the render sets each database item's header line
+  and keeps every other line of the file (notes under an item, free text). A
+  ticked checkbox in the file promotes nothing. An item line that no database
+  item holds is not listed and cannot be promoted; doctor reports it and
+  `/gsd doctor --fix` imports it with a `backlog.import` Domain Operation.
+
+- A custom workflow run (`/gsd workflow run`) is `custom_workflow_runs` and
+  `custom_workflow_steps` rows written by `custom_workflow.*` Domain
+  Operations. `GRAPH.yaml`, `DEFINITION.yaml` and `PARAMS.json` in the run
+  directory are one-way renders: the engine writes them again after each step
+  and never reads them for a run that has rows. Each verification of a step is
+  an evidence row, and a step completes only from a row that passed or carries
+  a waiver rationale. A `human-review` or `prompt-verify` step pauses the run
+  until `/gsd workflow approve <name>/<timestamp> <step>` records the decision
+  of the operator as such a row. A step that auto-mode runs is claimed as a
+  `unit_dispatches` row with the unit id `<name>/<timestamp>/<stepId>`: a second
+  session cannot run it, and takes it over only when the worker that claimed
+  it is dead, stopped or crashed. The verification retry count of a step is on
+  its step row, written by a `custom_workflow.step.retry` Domain Operation. A
+  run directory from an older release has no rows: the engine imports it to
+  rows before its first read, and an import that is refused (an unknown step
+  status) fails loud and writes nothing. `/gsd workflow list` shows such a
+  directory as not imported.
 
 The frozen projection format, stamp, and reader contract live in
 [`docs/dev/state-db-cutover-projection-contract.md`](docs/dev/state-db-cutover-projection-contract.md).
@@ -104,9 +242,40 @@ External readers should treat that document as the reference, not on-disk
 markdown as authority.
 
 Downgrade recovery uses the explicit backup-restore command:
-`/gsd db restore-backup`. Canonical lifecycle *read* authority (public status
-responses and the D005 shadow surface) remains deferred under M003; that
-surface is still pinned by `gate:lifecycle-shadow-no-cutover`.
+`/gsd db restore-backup`.
+
+Decision D012 (2026-10-02) supersedes D005 for canonical lifecycle *read*
+authority. The owner confirmed it on 2026-10-02. Its project-database row is
+not written yet, so D012 is a provisional ID and that row is pending. The read cutover is
+implemented in the read interface `db/lifecycle-read.ts` only: it answers from
+canonical lifecycle rows and Waivers when the Authority Epoch of the Project
+is above 0, and from legacy rows at epoch 0. The epoch advances only with
+`GSD_AUTHORITY_CUTOVER=1` (see above), so by default public status responses,
+dispatch, and dependency decisions still read legacy rows. `gate:lifecycle-shadow-no-cutover` pins
+both epochs. Since 2026-10-04 the dispatch, eligibility, queue, closeout,
+recovery, post-unit and verification sites, the preconditions of the planning
+and completion commands, the discard operation, the hook retry of a Task, the
+stale-branch cleanup, the parallel merge order, the drift checks that block
+dispatch, the default doctor scope, the doctor checks that decide from a
+status and the prompt builders that choose prompt content read through the
+interface. These sites still read legacy rows directly: three legacy-only
+paths that are deleted with the legacy path (the write guard of a staged Task
+completion, the escalations from before the database stored them, and the
+legacy Milestone reopen). The checks that
+compare a projection file with the rows that its renderer reads (ROADMAP
+drift, stale render, the checkbox and missing-ROADMAP checks of doctor) read
+legacy rows, as the renderers do. They run in the Projection Worker or in
+doctor, they do not block dispatch, and they move to the lifecycle rows with
+the renderers. The sites that only render or display a status stay on legacy
+rows. No decision site reads legacy rows any more: the unrouted
+decision-site list of the decision document is empty. The read cutover must
+not be declared complete while a decision site still reads legacy rows, and
+the automatic Cutover must not become the default before that.
+The decision document names each site of the groups.
+The decision, the
+Compatibility Window start (v1.12.0, 2026-08-03), and the open Removal Gates
+are recorded in
+[`docs/dev/state-db-cutover-milestone-decision.md`](docs/dev/state-db-cutover-milestone-decision.md).
 
 ## Current pre-cutover architecture
 
@@ -126,10 +295,11 @@ surface is still pinned by `gate:lifecycle-shadow-no-cutover`.
 - **Notification adapter**: adapter behind the Notification seam.
 - **DB snapshot persistence module**: the deep module that owns `sql.js` snapshot write semantics, including temp-file naming, fsync, cleanup, and rename ordering.
 - **State Reconciliation module**: module that runs `reconcileBeforeDispatch` before any Dispatch decision or worker spawn. Surfaces terminal blocker messages with structured `ReconciliationBlockerDetail` evidence and machine-actionable `DriftRecord[]`. Owns workflow-state drift detectors and idempotent repairs; Projection observation is intentionally outside pre-dispatch reconciliation. Throws `ReconciliationFailedError` to Recovery Classification on persistent or repair-failed drift. See `docs/dev/ADR-017-state-reconciliation-drift-driven.md`.
-- **Projection Worker module**: module that owns full Projection rebuilds. It observes writer-owned hashes, quarantines exact external modeled bytes, renders from Database Authority, and advances current durable Projection Work through fenced delivery transitions. Projection errors remain visible and retryable without blocking otherwise valid workflow progression.
+- **Projection Worker module**: module that delivers durable Projection Work one row at a time and owns the full rebuild. A kind-to-renderer registry maps each row (projection kind and key) to the files it renders: the file set of the one milestone, slice, or task that the key names, or one root file. Each kind that production code enqueues has a renderer. A row whose milestone is not in the database, or was discarded, is obsolete: it renders no file and settles once with the hash of an empty file set. The worker claims a due row, renders those files at the project root, and settles the row as rendered with the hash of the files it wrote, or records the error with a retry time from the projection retry schedule; when the schedule is used up the row moves to `dead_letter`. A row with no registered renderer is never claimed and stays pending. From a worktree, the worker also renders the worktree copy and keeps a per-root receipt; a failed worktree render is kept in that receipt and retried on the same schedule. Doctor and `/gsd status` show pending, retrying, dead-lettered, and unrendered rows, for the project root and for the worktree copy. A mutation flush wakes the worker. The full rebuild renders the whole tree, then enqueues new work for each dead-lettered row and drains. Doctor repair does the same, and also enqueues the whole file set of each milestone with a missing file. Before each dispatch and spawn, the worker moves a projection file that was changed outside GSD to quarantine, renders the database content again at once, and reports each copy; it holds a changed git-tracked projection in place for a user choice. It then renders again each file that is missing or that differs from the database (`repairProjectionDrift`, the only place that detects projection drift). Projection errors remain visible and retryable without blocking otherwise valid workflow progression.
+- **Workflow outbox**: an audit link from each domain event to its destinations. It is not a delivery queue; `workflow_projection_work` is the only projection delivery queue.
 - **Worktree Safety module**: module that validates project root, worktree registration, lease ownership, and git health before a source-writing Unit runs.
 - **Worktree Lifecycle module**: module that owns worktree create/enter/teardown/merge verbs, `s.basePath` mutation, `process.chdir` discipline, and guarded milestone-merge preflight/postflight stash ordering. Sole owner of these mutations across single-loop and parallel callers.
-- **Worktree State Projection module**: module that owns the direction-and-rules of state file flow between project root and auto-worktree. Encodes the bug-hardened invariants (additive milestone copy, ASSESSMENT verdict overwrite, completed-units forward-sync, WAL/SHM cleanup) that `syncProjectRootToWorktree` and `syncStateToProjectRoot` carry today.
+- **Worktree State Projection module**: module that owns the direction-and-rules of state file flow between project root and auto-worktree. Files flow only from the project root to the worktree: root projections are refreshed from the project-root render on worktree entry and after every unit, and milestone files are copied additively. Nothing flows from the worktree to the project root.
 - **Worktree Placement module**: module (`worktree-placement.ts`) that owns WHERE a worktree physically lives — the forward direction (project root + name → path). Creation always targets the Canonical Worktree Container; resolution prefers an existing worktree's actual location. The reverse direction (path → project identity) is owned by `worktree-root.ts`'s `findWorktreeSegment`, the single marker-matching seam. See `docs/dev/ADR-031-worktree-placement.md`.
 - **Canonical Worktree Container**: `<projectRoot>/.gsd-worktrees/` — a real directory sibling of `.gsd` that never crosses the external-state symlink, so the working copy stays at the project root. Requires its own `.gitignore` entry (a blanket `.gsd` pattern does not cover it).
 - **Legacy Worktree Container**: `<projectRoot>/.gsd/worktrees/` — the pre-ADR-031 location, which crosses the `.gsd → ~/.gsd/projects/<hash>/` symlink and materialises worktrees in the home directory. Stays recognized for in-flight worktrees: scans, containment, and safety checks accept both containers; new worktrees are never created here.
@@ -158,7 +328,7 @@ surface is still pinned by `gate:lifecycle-shadow-no-cutover`.
 - **Single Writer**: the only code permitted to issue write SQL (`INSERT`/`UPDATE`/`DELETE`/`REPLACE`) and raw transaction control against `.gsd/gsd.db`. Enforced structurally by `tests/single-writer-invariant.test.ts`. Historically one file (`gsd-db.ts`); the decision in force re-scopes it from a file to a directory layer (`db/writers/`). `unit-ownership.ts` is intentionally outside the invariant (separate `unit-claims.db`).
 - **Single Writer Layer**: the `db/writers/` directory whose files collectively hold every write-SQL statement against the engine DB. The structural invariant is enforced on this directory, not on a single filename. Each file is one cohesive write subsystem (`cascades.ts`, `import-restore.ts`, `memory.ts`, `reconcile.ts`, `status.ts`); `status.ts` holds the `applyStatusTransition` chokepoint.
 - **Query Module**: the read-only seam (`db/queries.ts`) holding the `SELECT`-only functions. Separate from the Single Writer so read-only callers (forensics, dashboard, doctor) depend on a read seam, not the write surface. Reads through the shared engine handle; it never opens its own connection and contains no write SQL.
-- **Domain Write Operation**: an atomic, intent-named write exported by the Single Writer that owns its own `transaction()` and mutates the related rows of one logical change in a single commit (e.g. `reopenSliceCascade`, `resetSliceCascade`). Distinct from a write primitive (a single-row `insert`/`update`/`delete` wrapper). Callers state intent once instead of hand-rolling the transaction-plus-cascade; the atomicity rule lives in one place. The operation owns DB-row atomicity only — markdown re-projection, validation, and messaging remain in callers / `db-writer.ts`, per the projection-only invariant.
+- **Domain Write Operation**: an atomic, intent-named write exported by the Single Writer that owns its own `transaction()` and mutates the related rows of one logical change in a single commit (e.g. `reopenMilestoneCascade`). Distinct from a write primitive (a single-row `insert`/`update`/`delete` wrapper). Callers state intent once instead of hand-rolling the transaction-plus-cascade; the atomicity rule lives in one place. The operation owns DB-row atomicity only — markdown re-projection, validation, and messaging remain in callers / `db-writer.ts`, per the projection-only invariant.
 - **Hierarchy Status Cascade**: the recurring Domain Write Operation shape that transitions a milestone/slice/task subtree's status under one transaction (reopen, skip, complete, reset). Today re-derived independently in four callers and missing or mis-ordered in several others; the decision in force gives it a single home in the Single Writer Layer.
 - **Drift repair**: idempotent function that resolves one workflow-state `DriftRecord`. Repairs are owned by the State Reconciliation Module's `drift/` folder; Projection observation records are consumed by the Projection Worker instead. Owning modules retain raw primitives (DB writes, file IO) but not the detection-and-repair composition.
 - **Reconciliation pass**: one cycle of derive → detect drift → apply repairs → re-derive, performed by `reconcileBeforeDispatch`. Capped at 2 passes per call; loops only when the prior pass fully succeeded but new drift surfaces in the re-derive.
@@ -177,7 +347,7 @@ surface is still pinned by `gate:lifecycle-shadow-no-cutover`.
 
 - **Auto-mode Liveness Backstop**: the DB-persisted, interleaving-blind adjudicator for non-advancing auto-mode outcomes. It trips on the second identical guard/target/input hash, refuses re-entry until explicit `--resume-wedge` acknowledgment, and never repairs workflow state itself. It supersedes the deleted Dispatch History module and Rule 1 detector; see `docs/dev/ADR-047-auto-mode-liveness-backstop.md`.
 - **Consent Question**: a question put to the user whose lifecycle (classification → pause gating → answer validation → cancellation) is owned by the Consent Question module (`consent-question.ts`). Kinds: `gate | consent | decision | informational`; **fail policy is a property of the kind** (informational is the only fail-open kind). Empty/missing `selected` on any fail-closed kind evaluates to `waiting` — never `answered` (#528). Pause promotion is classification-based, not unit-type-allowlist-based (#682). Gate kinds delegate structural validation to the consent-verdict leaf (`consent-verdict.ts`), the single verdict engine shared with the write gate. See `docs/dev/ADR-039-consent-question-module.md`.
-- **Write-Gate State Adapter**: the seam (`WriteGateStateAdapter`) over write-gate state's two writers. Host adapter: in-memory + reconcile-on-read (verifications grow-only union; disk wins for pending/queue-phase; verified wins over pending). Child adapter: write-through, always-fresh read; selected via the child-spawn env. Snapshot writes are unconditional read-merge-write and carry a `writer` provenance tag (diagnostic only; the original epoch counter was write-only and removed); deferred approval gates are keyed per basePath. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md`.
+- **Write-Gate State Adapter**: the seam (`WriteGateStateAdapter`) over write-gate state's two writers, the extension host and the workflow MCP child. Write-gate state is rows of the project database (`write_gate_state`); both processes read them through one reader (`loadWriteGateSnapshot`) and change them in one write transaction. The adapters differ only in `setPending`: the host does not arm a verified gate (verified wins over pending), the child arms and revokes the verification; the child adapter is selected via the child-spawn env. Rows carry a `writer` provenance tag (diagnostic only); deferred approval gates are keyed per basePath in the host. A verified gate survives a restart and a resumed session. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md` and `docs/db-map.md`.
 - **Engine Hook Contract**: the typed declaration (`engine-hook-contract.ts`) of which tool lifecycle hooks fire on every engine (`tool_execution_start/end` — universal) versus native-only (`tool_call`/`tool_result` — skipped by the external engine's `externalResult` short-circuit). Also the normalizer seam: `canonicalToolName` (MCP prefix strip) vs `canonicalWorkflowToolName` (strip + workflow alias resolution). Cross-engine enforcement must ride universal hooks. See `docs/dev/ADR-041-engine-hook-contract.md`.
 - **Agent Turn**: one full agent response cycle — from the user's prompt through every tool round until `agent_end`. Distinct from a single tool round (one batch of tool calls and results) and from a multi-turn user task that spans several Agent Turns. The Tool Call Loop Guard's per-tool counters reset at Agent Turn boundaries.
 - **Tool Call Loop Guard**: native-engine protection against runaway tool repetition within one Agent Turn. Two independent checks: an identical-args streak (same tool + same arguments repeated) and a per-tool-name cap regardless of arguments. A blocked call returns a model-facing error without executing the tool. Distinct from Recovery Classification's `tool-unavailable` retry path, which handles missing workflow tools rather than repetition.
@@ -213,7 +383,7 @@ Dispatch remains responsible for selecting the next Unit from reconciled state. 
 
 - Worktree Safety should fail closed for source-writing Units under worktree isolation. A Unit whose Tool Contract permits writes outside `.gsd/**` must run in a proven milestone worktree root; it must not silently degrade to project-root source writes when the worktree is missing, empty, unregistered, on the wrong branch, or no longer lease-owned. Planning-only Units may continue to write `.gsd/**` artifacts at the project root.
 
-- State Reconciliation should be drift-driven. The Module surfaces terminal `blockers: string[]` and machine-actionable `DriftRecord[]`. Each pre-dispatch and pre-spawn site calls `reconcileBeforeDispatch` (strict closure). Drift catalog includes sketch-flag, merge-state, stale-render, stale-worker, unregistered-milestone, roadmap-divergence, missing-completion-timestamp. Repairs are idempotent. Re-derive is capped at 2 passes (loops only on cascading-drift success path). Persistent or repair-failed drift throws `ReconciliationFailedError` to Recovery Classification (kind `reconciliation-drift`).
+- State Reconciliation should be drift-driven. The Module surfaces terminal `blockers: string[]` and machine-actionable `DriftRecord[]`. Each pre-dispatch and pre-spawn site calls `reconcileBeforeDispatch` (strict closure). Drift catalog includes merge-state, stale-worker, unregistered-milestone, and the artifact-db kinds. Projection drift (stale-render, roadmap-missing, roadmap-divergence) is not in the catalog: the Projection Worker detects and repairs it and it never blocks. Repairs are idempotent. Re-derive is capped at 2 passes (loops only on cascading-drift success path). Persistent or repair-failed drift throws `ReconciliationFailedError` to Recovery Classification (kind `reconciliation-drift`).
 
   See `docs/dev/ADR-017-state-reconciliation-drift-driven.md`.
 
@@ -235,11 +405,13 @@ Dispatch remains responsible for selecting the next Unit from reconciled state. 
 
 - The Single Writer should expose **Domain Write Operations** for multi-row changes, keeping single-row primitives public (hybrid). The **Hierarchy Status Cascade** family lives in `db/writers/cascades.ts`, each operation owning its own `transaction()`. Operations own DB-row atomicity only; projection/validation/messaging stay in callers.
 
+  **Update (DB cutover).** `reopenSliceCascade`, `skipSliceCascade` and `resetSliceCascade` are deleted: their callers moved to Domain Operations and nothing called them. `md-importer` is now a test helper (`tests/helpers/md-importer.ts`). The notes below are the history.
+
   **Verified status (2026-06-09).** A first-pass exploratory catalog flagged several callers as non-atomic; direct inspection corrected most of them:
   - `resetSliceCascade` — **landed**. `undo`'s reset-slice was genuinely non-atomic (a per-task `updateTaskStatus` loop + a separate `updateSliceStatus`, each auto-committing); it now calls the atomic op.
   - `replan-slice`, `reassess-roadmap`, and `milestone-planning-persistence` now run through the authoritative Domain Operation boundary. Their legacy hierarchy writes, durable lifecycle adoption/transitions, event/outbox rows, Projection Work, and authority revision commit atomically; omitted adopted work is cancelled rather than deleted.
   - `state-reconciliation/drift/completion` `repairMissingCompletionTimestamp` — **single write per call** (mutually-exclusive milestone/slice/task branches), not a sequence. No fix needed.
-  - `auto-recovery` `writeBlockerPlaceholder` — **deliberately best-effort** (each write independently try/caught during context-exhaustion recovery); must NOT become all-or-nothing.
+  - `auto-recovery` `writeBlockerPlaceholder` — **deliberately best-effort** (each write independently try/caught during context-exhaustion recovery); must NOT become all-or-nothing. **Update (DB cutover).** The recovery gate row is the recorded block: the function returns null when that row is not written, so callers never treat a sidecar file alone as a recorded block.
   - `md-importer` `migrateHierarchyToDb` — genuinely unwrapped, but a one-shot migration whose writes are `INSERT OR IGNORE` / `ON CONFLICT` upserts, so a partial import self-corrects on re-run; a clean wrap is blocked by an interleaved `continue`. Low-priority follow-up.
   - **Locality fold (done).** The four hand-rolled-but-already-atomic cascades — `reopen-milestone`, `reopen-slice`, `skip-slice`, `complete-slice` — each independently re-derived the milestone/slice/task transaction-plus-cascade with guards inside the txn. They now call named ops (`reopenMilestoneCascade`, `reopenSliceCascade`, `skipSliceCascade`, `completeSliceCascade`) in `db/writers/cascades.ts`. Because their guards must stay inside the transaction, each op returns a **discriminated outcome** (structural guards in the writer; the caller maps the blocked reason to its verbatim user message). The cascade rule has one home; the four tools keep only projection/file-cleanup/event/cache logic.
   - **Open follow-ups:** (1) the `md-importer` per-milestone wrap (low priority, self-correcting); (2) `completeSliceCascade` reuses the complex `insertMilestone`/`insertSlice` primitives via a documented back-edge import from `gsd-db.ts` (hoisted bindings, runtime-only) — it dissolves when those hierarchy write primitives move into `db/writers/hierarchy.ts` (a further candidate-2 split not yet done).
@@ -283,7 +455,7 @@ Dispatch remains responsible for selecting the next Unit from reconciled state. 
 
 - Consent questions deepen behind the **Consent Question module**: per-kind fail policy at one policy point (`evaluateAskUserQuestionsRound`), classification-based pause promotion, unified cancellation. `user-input-boundary.ts` is gone; importers use `consent-question.ts` directly. See `docs/dev/ADR-039-consent-question-module.md`.
 
-- Write-gate state goes through the **Write-Gate State Adapter** seam (host reconcile-on-read / child write-through, read-merge-write snapshot persistence, per-basePath deferred gates). No file locking; temp+rename atomicity and the persistence opt-out are preserved. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md`.
+- Write-gate state goes through the **Write-Gate State Adapter** seam (database rows, one reader for host and child, per-basePath deferred gates). No snapshot file and no file lock: SQLite's write transaction serializes the two writers. See `docs/dev/ADR-040-write-gate-two-adapter-seam.md`.
 
 - Tool-hook guarantees are declared once in the **Engine Hook Contract**; decision reads of markdown projections are banned from dispatch/gate/completion paths (structural test `tests/parsers-legacy-importers.test.ts`; zero-importer / file-absence invariant after T020). Open follow-up from the contract work: nine `tool_call`-only guards have no universal-hook mirror and are silently dead under external engines — see ADR-041's consequences for the list. See `docs/dev/ADR-041-engine-hook-contract.md`.
 

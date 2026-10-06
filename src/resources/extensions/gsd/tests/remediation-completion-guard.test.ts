@@ -1,197 +1,106 @@
 /**
- * Regression tests for non-passing VALIDATION verdicts: completing-milestone
- * dispatch must block completion when VALIDATION needs remediation or attention.
+ * Regression tests for non-passing milestone validation verdicts:
+ * completing-milestone dispatch must block completion when the validation
+ * needs remediation or attention.
  *
  * Without this guard, needs-remediation + allSlicesDone causes a loop:
- * complete-milestone dispatched → agent refuses (correct) → no SUMMARY
+ * complete-milestone dispatched → agent refuses (correct) → no completion
  * → re-dispatch → repeat until the liveness backstop trips.
+ *
+ * The verdict is the `milestone-validation` assessment row. VALIDATION.md is a
+ * projection: its verdict line decides nothing.
  */
-import { test } from "node:test";
+import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { DISPATCH_RULES } from "../auto-dispatch.ts";
+import { DISPATCH_RULES, type DispatchAction } from "../auto-dispatch.ts";
+import { closeDatabase, insertAssessment, insertMilestone, openDatabase } from "../gsd-db.ts";
 
 /** Find the completing-milestone dispatch rule */
 const completingRule = DISPATCH_RULES.find(r => r.name === "completing-milestone → complete-milestone");
 
-test("completing-milestone dispatch rule exists", () => {
+let base: string;
+
+beforeEach(() => {
+  base = mkdtempSync(join(tmpdir(), "gsd-remediation-"));
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+});
+
+afterEach(() => {
+  closeDatabase();
+  rmSync(base, { recursive: true, force: true });
+});
+
+function recordValidation(verdict: string): void {
+  insertAssessment({
+    path: "milestones/M001/M001-VALIDATION.md",
+    milestoneId: "M001",
+    status: verdict,
+    scope: "milestone-validation",
+    fullContent: ["---", `verdict: ${verdict}`, "---", "", "# Validation Report"].join("\n"),
+  });
+}
+
+function writeValidationFile(verdict: string): void {
+  writeFileSync(
+    join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md"),
+    ["---", `verdict: ${verdict}`, "remediation_round: 0", "---", "", "# Validation Report"].join("\n"),
+  );
+}
+
+async function matchCompletingRule(): Promise<DispatchAction | null> {
   assert.ok(completingRule, "rule should exist in DISPATCH_RULES");
-});
+  return completingRule.match({
+    mid: "M001",
+    midTitle: "Test Milestone",
+    basePath: base,
+    state: { phase: "completing-milestone" } as any,
+    prefs: {} as any,
+    session: undefined,
+  });
+}
 
-test("completing-milestone blocks when VALIDATION verdict is needs-remediation (#2675)", async () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-remediation-"));
-  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+for (const verdict of ["needs-remediation", "needs-attention", "fail"]) {
+  test(`completing-milestone blocks when the recorded validation verdict is ${verdict} (#2675, #5747, #5920)`, async () => {
+    recordValidation(verdict);
 
-  try {
-    // Write a VALIDATION file with needs-remediation verdict
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md"),
-      [
-        "---",
-        "verdict: needs-remediation",
-        "remediation_round: 0",
-        "---",
-        "",
-        "# Validation Report",
-        "",
-        "3 success criteria failed. Remediation required.",
-      ].join("\n"),
-    );
-
-    const ctx = {
-      mid: "M001",
-      midTitle: "Test Milestone",
-      basePath: base,
-      state: { phase: "completing-milestone" } as any,
-      prefs: {} as any,
-      session: undefined,
-    };
-
-    const result = await completingRule!.match(ctx);
+    const result = await matchCompletingRule();
 
     assert.ok(result !== null, "rule should match");
-    assert.equal(result!.action, "stop", "should return stop action");
-    if (result!.action === "stop") {
-      assert.equal(result!.level, "warning", "should be warning level (pausable)");
-      assert.ok(
-        result!.reason.includes("needs-remediation"),
-        "reason should mention needs-remediation",
-      );
+    assert.equal(result.action, "stop", "should return stop action");
+    if (result.action === "stop") {
+      assert.equal(result.level, "warning", "should be warning level (pausable)");
+      assert.ok(result.reason.includes(`verdict is "${verdict}"`), `reason should name the ${verdict} verdict`);
     }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
+  });
+}
+
+test("a pass verdict edited into VALIDATION.md does not lift a recorded needs-remediation verdict", async () => {
+  recordValidation("needs-remediation");
+  writeValidationFile("pass");
+
+  const result = await matchCompletingRule();
+
+  assert.equal(result?.action, "stop");
+  assert.match(result?.action === "stop" ? result.reason : "", /needs-remediation/);
 });
 
-test("completing-milestone blocks when VALIDATION verdict is needs-attention (#5747)", async () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-attention-"));
-  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+test("a needs-remediation verdict in VALIDATION.md does not block a recorded pass verdict", async () => {
+  recordValidation("pass");
+  writeValidationFile("needs-remediation");
 
-  try {
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md"),
-      [
-        "---",
-        "verdict: needs-attention",
-        "remediation_round: 0",
-        "---",
-        "",
-        "# Validation Report",
-        "",
-        "Acceptance proof is incomplete and needs human attention.",
-      ].join("\n"),
+  const result = await matchCompletingRule();
+
+  assert.ok(result !== null, "rule should match");
+  if (result.action === "stop") {
+    assert.ok(
+      !result.reason.includes("needs-remediation"),
+      "the validation guard must read the recorded pass verdict, not the file",
     );
-
-    const ctx = {
-      mid: "M001",
-      midTitle: "Test Milestone",
-      basePath: base,
-      state: { phase: "completing-milestone" } as any,
-      prefs: {} as any,
-      session: undefined,
-    };
-
-    const result = await completingRule!.match(ctx);
-
-    assert.ok(result !== null, "rule should match");
-    assert.equal(result!.action, "stop", "should return stop action");
-    if (result!.action === "stop") {
-      assert.equal(result!.level, "warning", "should be warning level (pausable)");
-      assert.ok(
-        result!.reason.includes("needs-attention"),
-        "reason should mention needs-attention",
-      );
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("completing-milestone blocks when VALIDATION verdict is fail (#5920)", async () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-fail-verdict-"));
-  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
-
-  try {
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md"),
-      [
-        "---",
-        "verdict: fail",
-        "---",
-        "",
-        "# Validation Report",
-        "",
-        "Blocking failures remain unresolved.",
-      ].join("\n"),
-    );
-
-    const ctx = {
-      mid: "M001",
-      midTitle: "Test Milestone",
-      basePath: base,
-      state: { phase: "completing-milestone" } as any,
-      prefs: {} as any,
-      session: undefined,
-    };
-
-    const result = await completingRule!.match(ctx);
-
-    assert.ok(result !== null, "rule should match");
-    assert.equal(result!.action, "stop", "should return stop action");
-    if (result!.action === "stop") {
-      assert.equal(result!.level, "warning", "should be warning level (pausable)");
-      assert.ok(
-        result!.reason.includes('verdict is "fail"'),
-        "reason should mention fail verdict",
-      );
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
-});
-
-test("completing-milestone proceeds normally when VALIDATION verdict is pass (#2675 guard)", async () => {
-  const base = mkdtempSync(join(tmpdir(), "gsd-remediation-"));
-  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
-
-  try {
-    // Write a VALIDATION file with pass verdict
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md"),
-      [
-        "---",
-        "verdict: pass",
-        "---",
-        "",
-        "# Validation Report",
-        "",
-        "All criteria met.",
-      ].join("\n"),
-    );
-
-    const ctx = {
-      mid: "M001",
-      midTitle: "Test Milestone",
-      basePath: base,
-      state: { phase: "completing-milestone" } as any,
-      prefs: {} as any,
-      session: undefined,
-    };
-
-    const result = await completingRule!.match(ctx);
-
-    // Should NOT return a stop — should either dispatch or return stop for
-    // a different reason (e.g. missing SUMMARY files, no implementation)
-    if (result && result.action === "stop") {
-      assert.ok(
-        !result.reason.includes("needs-remediation"),
-        "pass verdict should NOT trigger the remediation guard",
-      );
-    }
-  } finally {
-    rmSync(base, { recursive: true, force: true });
   }
 });

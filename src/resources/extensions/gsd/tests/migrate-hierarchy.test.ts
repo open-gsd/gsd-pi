@@ -13,11 +13,8 @@ import {
   getMilestone,
   getMilestoneSlices,
   getSliceTasks,
-  getActiveMilestoneFromDb,
-  getActiveSliceFromDb,
-  getActiveTaskFromDb,
 } from '../gsd-db.ts';
-import { migrateHierarchyToDb } from '../md-importer.ts';
+import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { describe, test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -205,14 +202,6 @@ Depends on M001 completion.
       assert.deepStrictEqual(m002!.status, 'active', 'multi-ms: M002 is active');
       assert.deepStrictEqual(m002!.depends_on, ['M001'], 'multi-ms: M002 depends on M001');
 
-      // Active milestone should be M002
-      const active = getActiveMilestoneFromDb();
-      assert.deepStrictEqual(active?.id, 'M002', 'multi-ms: active milestone is M002');
-
-      // Active slice in M002 should be S01 (S02 depends on S01)
-      const activeSlice = getActiveSliceFromDb('M002');
-      assert.deepStrictEqual(activeSlice?.id, 'S01', 'multi-ms: active slice is S01');
-
       closeDatabase();
     } finally {
       closeDatabase();
@@ -261,10 +250,6 @@ test('migrate-hier: partially-completed slice', () => {
       assert.deepStrictEqual(tasks[0]!.status, 'complete', 'partial: T01 is complete');
       assert.deepStrictEqual(tasks[1]!.status, 'complete', 'partial: T02 is complete');
       assert.deepStrictEqual(tasks[2]!.status, 'pending', 'partial: T03 is pending');
-
-      // Active task should be T03
-      const activeTask = getActiveTaskFromDb('M001', 'S01');
-      assert.deepStrictEqual(activeTask?.id, 'T03', 'partial: active task is T03');
 
       closeDatabase();
     } finally {

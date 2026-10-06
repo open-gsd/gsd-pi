@@ -1,22 +1,16 @@
 // Project/App: gsd-pi
 // File Purpose: Single proof surface for milestone closeout readiness/finality.
 
-import { existsSync, readFileSync } from "node:fs";
-
 import {
   CLOSEOUT_CONSISTENCY_BLOCKED_REASON,
   checkCloseoutConsistencyGate,
   type CloseoutConsistencyFailureReason,
   type CloseoutConsistencyResult,
 } from "./closeout-consistency-gate.js";
-import { resolveExpectedArtifactPath } from "./auto-artifact-paths.js";
-import { classifyMilestoneSummaryContent } from "./milestone-summary-classifier.js";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
 
 export type CloseoutProofFailureReason =
   | CloseoutConsistencyFailureReason
-  | "summary-artifact-missing"
-  | "summary-artifact-failed"
   | "implementation-evidence-missing";
 
 export type ImplementationEvidenceRequirement = "present" | "not-absent";
@@ -33,7 +27,10 @@ export type CloseoutProofResult =
 export interface CloseoutProofOptions {
   refreshFromDisk?: boolean;
   allowOpenMilestone?: boolean;
-  summaryArtifactBasePath?: string;
+  /** Evaluate without the consistency gate's own writes. */
+  readOnly?: boolean;
+  /** Root of the tree the milestone ran in; the consistency gate reads it. */
+  artifactBasePath?: string;
   implementationEvidence?: {
     basePath: string;
     requirement: ImplementationEvidenceRequirement;
@@ -59,26 +56,6 @@ function fromConsistencyResult(result: CloseoutConsistencyResult): CloseoutProof
   };
 }
 
-function checkSummaryArtifact(milestoneId: string, basePath: string): CloseoutProofResult {
-  const summaryPath = resolveExpectedArtifactPath("complete-milestone", milestoneId, basePath);
-  if (!summaryPath || !existsSync(summaryPath)) {
-    return blocked(
-      "summary-artifact-missing",
-      `Closeout proof blocked for ${milestoneId}: milestone summary artifact is missing.`,
-    );
-  }
-
-  const summaryOutcome = classifyMilestoneSummaryContent(readFileSync(summaryPath, "utf-8"));
-  if (summaryOutcome === "failure") {
-    return blocked(
-      "summary-artifact-failed",
-      `Closeout proof blocked for ${milestoneId}: milestone summary records failed closeout.`,
-    );
-  }
-
-  return { ok: true };
-}
-
 function checkImplementationEvidence(
   milestoneId: string,
   basePath: string,
@@ -101,14 +78,10 @@ export function proveMilestoneCloseout(
   const consistency = checkCloseoutConsistencyGate(milestoneId, {
     refreshFromDisk: options.refreshFromDisk,
     allowOpenMilestone: options.allowOpenMilestone,
-    artifactBasePath: options.summaryArtifactBasePath,
+    readOnly: options.readOnly,
+    artifactBasePath: options.artifactBasePath,
   });
   if (!consistency.ok) return fromConsistencyResult(consistency);
-
-  if (options.summaryArtifactBasePath) {
-    const summary = checkSummaryArtifact(milestoneId, options.summaryArtifactBasePath);
-    if (!summary.ok) return summary;
-  }
 
   if (options.implementationEvidence) {
     const implementation = checkImplementationEvidence(
@@ -127,7 +100,7 @@ export function formatCloseoutProofBlock(result: CloseoutProofResult): string {
   if (result.reason === "validation-source-revision-mismatch") {
     return `${result.message} Recovery reason: ${result.recoveryReason}. Restore or remove unintended working-tree drift, or re-run milestone validation against the intended current content, then run /gsd auto.`;
   }
-  if (result.reason.startsWith("summary-") || result.reason.startsWith("implementation-")) {
+  if (result.reason.startsWith("implementation-")) {
     return `${result.message} Recovery reason: ${result.recoveryReason}. Resolve the closeout evidence and run /gsd auto to retry.`;
   }
   return `${result.message} Recovery reason: ${result.recoveryReason}. Resolve the canonical DB state and run /gsd auto to retry.`;

@@ -26,11 +26,12 @@ import {
   insertMilestone,
   _getAdapter,
 } from "../gsd-db.ts";
-import { registerAutoWorker } from "../db/auto-workers.ts";
+import { registerAutoWorker, getAutoWorker } from "../db/auto-workers.ts";
 import { claimMilestoneLease } from "../db/milestone-leases.ts";
 import { recordDispatchClaim } from "../db/unit-dispatches.ts";
 import { insertSlice, insertTask } from "../gsd-db.ts";
 import { setRuntimeKv } from "../db/runtime-kv.ts";
+import { openAutoPause } from "../db/writers/auto-pauses.ts";
 import { normalizeRealPath } from "../paths.ts";
 import type { GSDState } from "../types.ts";
 import { _synthesizePausedSessionRecoveryForTest } from "../auto.ts";
@@ -181,9 +182,8 @@ function writePausedSession(
   unitType?: string,
   unitId?: string,
 ): void {
-  // Phase C pt 2: paused-session.json migrated to runtime_kv
-  // (global scope, key PAUSED_SESSION_KV_KEY).
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
+  openAutoPause({
+    blockerKind: "user_request",
     milestoneId,
     originalBasePath: base,
     stepMode,
@@ -310,8 +310,7 @@ test("readPausedSessionMetadata preserves unitType and unitId through round-trip
 test("readPausedSessionMetadata handles legacy metadata without unitType/unitId", () => {
   const base = makeTmpBase();
   try {
-    // Phase C pt 2: write directly to runtime_kv (simulates older payload
-    // missing the now-canonical unitType/unitId fields).
+    // A pause that an older build stored in runtime_kv, with no unitType/unitId.
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
       milestoneId: "M001",
       originalBasePath: base,
@@ -328,7 +327,7 @@ test("readPausedSessionMetadata handles legacy metadata without unitType/unitId"
 test("readPausedSessionMetadata drops stale discuss-milestone pseudo PROJECT metadata", () => {
   const base = makeTmpBase();
   try {
-    // Phase C pt 2: write directly to runtime_kv (the file location is gone)
+    // A pause that an older build stored in runtime_kv.
     setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, {
       milestoneId: null,
       originalBasePath: base,
@@ -651,6 +650,31 @@ test("clearLock is safe when no lock exists", (t) => {
   t.after(() => cleanup(base));
 
   assert.doesNotThrow(() => clearLock(base));
+});
+
+test("#2532: clearLock does not mark the live process's own worker stopping via a legacy lock", (t) => {
+  // Step-mode exit path (#2532): writeLock leaves a legacy lock file whose
+  // pid is THIS process, and cleanupAfterLoopExit then calls clearLock. The
+  // legacy-lock branch must only mark DEAD holders stopping — marking our
+  // own live row 'stopping' kills the heartbeat and every status-gated path
+  // for the rest of the process. Mirrors the !isPidAlive guards on the
+  // markWorkerStoppingByPid call sites in session-lock.ts.
+  const base = makeTmpBase();
+  t.after(() => cleanup(base));
+
+  const projectRoot = normalizeRealPath(base);
+  const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+
+  // writeLock writes the legacy lock file with pid = process.pid.
+  writeLock(base, "plan-slice", "M001/S01");
+
+  clearLock(base);
+
+  assert.equal(
+    getAutoWorker(workerId)?.status,
+    "active",
+    "own live worker must stay active after its own clearLock",
+  );
 });
 
 // ─── isLockProcessAlive ──────────────────────────────────────────────────

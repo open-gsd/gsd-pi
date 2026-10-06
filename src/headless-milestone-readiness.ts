@@ -13,8 +13,6 @@
 // so the fallback only trusts readiness produced by the current planning command.
 // The notify-text signal remains a fast path; this is the deciding fallback.
 
-import { existsSync } from 'node:fs'
-import { join } from 'node:path'
 import {
   closeWorkflowDatabase,
   openExistingWorkflowDatabase,
@@ -22,15 +20,11 @@ import {
 import type { MilestoneRow } from './resources/extensions/gsd/db-milestone-artifact-rows.js'
 import {
   getAllMilestones,
+  getMilestoneScopedArtifacts,
   getMilestoneSlices,
   getSlicesByMilestoneIds,
 } from './resources/extensions/gsd/gsd-db.js'
 import { classifyMilestoneReadiness } from './resources/extensions/gsd/milestone-readiness.js'
-import {
-  buildMilestoneFileName,
-  resolveFile,
-  resolveMilestonePath,
-} from './resources/extensions/gsd/paths.js'
 import { isClosedStatus } from './resources/extensions/gsd/status-guards.js'
 
 export interface MilestoneExecutionSnapshot {
@@ -41,22 +35,13 @@ export interface MilestoneExecutionSnapshot {
   }>
 }
 
-function milestoneArtifactExistsInResolvedDir(
-  milestoneDir: string | null,
-  milestoneId: string,
-  suffix: string,
-): boolean {
-  if (!milestoneDir) return false
-  const flatPath = join(milestoneDir, buildMilestoneFileName(milestoneId, suffix))
-  return existsSync(flatPath) || resolveFile(milestoneDir, milestoneId, suffix) !== null
-}
-
 /**
- * Mirror `buildRegistryAndFindActive` active-milestone selection: defer queued-shell
+ * Mirror `selectActiveMilestone` (milestone-readiness.ts) selection: defer queued-shell
  * milestones (queued, no context, zero slices) so a later planned milestone is
- * treated as active instead of an older orphan shell (#1295).
+ * treated as active instead of an older orphan shell (#1295). Context comes from
+ * the artifact rows, as it does there; no CONTEXT file is read.
  */
-function findDerivedActiveMilestone(basePath: string): MilestoneRow | null {
+function findDerivedActiveMilestone(): MilestoneRow | null {
   const milestones = getAllMilestones()
   const completeMilestoneIds = new Set<string>()
   const parkedMilestoneIds = new Set<string>()
@@ -84,9 +69,9 @@ function findDerivedActiveMilestone(basePath: string): MilestoneRow | null {
     if (completeMilestoneIds.has(m.id)) continue
 
     const slices = slicesByMilestone.get(m.id) ?? []
-    const milestoneDir = resolveMilestonePath(basePath, m.id)
-    const hasContext = milestoneArtifactExistsInResolvedDir(milestoneDir, m.id, 'CONTEXT')
-    const hasDraftContext = !hasContext && milestoneArtifactExistsInResolvedDir(milestoneDir, m.id, 'CONTEXT-DRAFT')
+    const artifacts = getMilestoneScopedArtifacts(m.id)
+    const hasContext = artifacts.some((a) => a.artifact_type === 'CONTEXT')
+    const hasDraftContext = !hasContext && artifacts.some((a) => a.artifact_type === 'CONTEXT-DRAFT')
     const readiness = classifyMilestoneReadiness({
       status: m.status,
       hasContext,
@@ -168,7 +153,7 @@ function findExecutableMilestoneInDb(
   const opened = openExistingWorkflowDatabase(basePath)
   if (!opened.ok) return null
   try {
-    const active = findDerivedActiveMilestone(basePath)
+    const active = findDerivedActiveMilestone()
     if (active == null || getMilestoneSlices(active.id).length === 0) return null
 
     if (options.changedSince) {

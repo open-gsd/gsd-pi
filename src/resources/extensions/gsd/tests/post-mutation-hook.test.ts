@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
-import { openDatabase, closeDatabase } from '../gsd-db.ts';
+import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask } from '../gsd-db.ts';
 import { handleCompleteTask } from '../tools/complete-task.ts';
 import { readEvents } from '../workflow-events.ts';
 import { flushManifest, readManifest } from '../workflow-manifest.ts';
@@ -39,6 +39,13 @@ function createProject(basePath: string): void {
 `);
 }
 
+/** The legacy completion writer completes a Task row that planning created. */
+function seedTask(): void {
+  insertMilestone({ id: 'M001', title: 'Test Milestone' });
+  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
+}
+
 function makeCompleteTaskParams() {
   return {
     taskId: 'T01',
@@ -65,6 +72,7 @@ test('post-mutation-hook: event-log.jsonl exists after handleCompleteTask', asyn
   const dbPath = path.join(base, 'test.db');
   openDatabase(dbPath);
   createProject(base);
+  seedTask();
 
   try {
     const result = await handleCompleteTask(makeCompleteTaskParams(), base);
@@ -83,6 +91,7 @@ test('post-mutation-hook: event log contains complete-task event with correct pa
   const dbPath = path.join(base, 'test.db');
   openDatabase(dbPath);
   createProject(base);
+  seedTask();
 
   try {
     await handleCompleteTask(makeCompleteTaskParams(), base);
@@ -110,6 +119,7 @@ test('post-mutation-hook: state-manifest.json exists after handleCompleteTask', 
   const dbPath = path.join(base, 'test.db');
   openDatabase(dbPath);
   createProject(base);
+  seedTask();
 
   try {
     const result = await handleCompleteTask(makeCompleteTaskParams(), base);
@@ -129,6 +139,7 @@ test('post-mutation-hook: manifest has version 1 and includes completed task', a
   const dbPath = path.join(base, 'test.db');
   openDatabase(dbPath);
   createProject(base);
+  seedTask();
 
   try {
     await handleCompleteTask(makeCompleteTaskParams(), base);
@@ -157,6 +168,7 @@ test('post-mutation-hook: handler still returns success even if projections dir 
   const base = tempDir();
   const dbPath = path.join(base, 'test.db');
   openDatabase(dbPath);
+  seedTask();
 
   // Create tasks dir but NO plan file (projections will soft-fail)
   const tasksDir = path.join(base, '.gsd', 'milestones', 'M001', 'slices', 'S01', 'tasks');

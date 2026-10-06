@@ -6,26 +6,24 @@ import { dirname, join } from "node:path";
 
 import {
   getLatestAssessmentByScope,
-  getMilestone,
-  getMilestoneSlices,
   getPendingGates,
-  getSliceTasks,
   insertAssessment,
   isDbAvailable,
   transaction,
 } from "./gsd-db.js";
+import { readMilestone, readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import {
   getWorkflowDatabasePath,
   refreshWorkflowDatabaseFromDisk,
 } from "./db-workspace.js";
-import { isClosedStatus, isDeferredStatus } from "./status-guards.js";
+import { isDeferredStatus } from "./status-guards.js";
 import {
   closeQualityGatesFromEvidence,
   inspectQualityGatesFromEvidence,
   type QualityGateClosureOptions,
 } from "./quality-gate-closure.js";
 import { insertMilestoneValidationGates } from "./milestone-validation-gates.js";
-import { relMilestoneFile, resolveSliceFile } from "./paths.js";
+import { relMilestoneFile } from "./paths.js";
 import { invalidateAllCaches } from "./cache.js";
 import {
   isMilestoneLifecycleAdopted,
@@ -33,6 +31,7 @@ import {
   type MilestoneCloseoutAuthorization,
   type MilestoneCloseoutBlocker,
 } from "./db/milestone-closeout-readiness.js";
+import { isMilestoneCloseoutPrepared } from "./db/writers/closeout.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import {
   captureMilestoneVerificationSourceRevision,
@@ -41,7 +40,7 @@ import {
 } from "./verification-source-integrity.js";
 import { resolveRepositoryProjectRoot } from "./repository-registry.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
-import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
+import { renderMilestoneValidation } from "./markdown-renderer.js";
 
 export const CLOSEOUT_CONSISTENCY_BLOCKED_REASON = "closeout-consistency-blocked";
 
@@ -176,18 +175,14 @@ function artifactBasePathFromDb(): string | undefined {
     : resolveRepositoryProjectRoot(process.cwd());
 }
 
-function allSlicesHaveCloseoutSummaryEvidence(milestoneId: string, artifactBasePath: string): boolean {
-  const slices = getMilestoneSlices(milestoneId);
+/** Every slice and every task of the milestone is closed in the DB. No SUMMARY file is read. */
+function allSlicesAndTasksClosed(milestoneId: string): boolean {
+  const slices = readMilestoneSlices(milestoneId);
   if (slices.length === 0) return false;
 
-  return slices.every((slice) => {
-    if (!isClosedStatus(slice.status)) return false;
-    for (const task of getSliceTasks(milestoneId, slice.id)) {
-      if (!isClosedStatus(task.status)) return false;
-    }
-    const summaryPath = resolveSliceFile(artifactBasePath, milestoneId, slice.id, "SUMMARY");
-    return Boolean(summaryPath && existsSync(summaryPath));
-  });
+  return slices.every((slice) =>
+    slice.closed &&
+    readSliceTasks(milestoneId, slice.id).every((task) => task.done));
 }
 
 function renderCloseoutPassThroughValidation(milestoneId: string): string {
@@ -201,7 +196,7 @@ function renderCloseoutPassThroughValidation(milestoneId: string): string {
     "",
     "# Milestone Validation (skipped)",
     "",
-    `Milestone validation was recorded during closeout for ${milestoneId} because all slices already had SUMMARY evidence and no milestone-validation assessment was present.`,
+    `Milestone validation was recorded during closeout for ${milestoneId} because all slices and tasks were closed in the database and no milestone-validation assessment was present.`,
     "",
   ].join("\n");
 }
@@ -216,41 +211,34 @@ function recordCloseoutPassThroughValidationIfReady(
   const existing = getLatestAssessmentByScope(milestoneId, "milestone-validation");
   if (existing?.status === "pass") return true;
   if (existing) return false;
-  if (!allSlicesHaveCloseoutSummaryEvidence(milestoneId, basePath)) return false;
+  if (!allSlicesAndTasksClosed(milestoneId)) return false;
 
   const validationPath = join(basePath, relMilestoneFile(basePath, milestoneId, "VALIDATION"));
   const content = renderCloseoutPassThroughValidation(milestoneId);
-  atomicWriteSync(validationPath, content, "utf-8");
 
-  try {
-    transaction(() => {
-      insertAssessment({
-        path: validationPath,
-        milestoneId,
-        sliceId: null,
-        taskId: null,
-        status: "pass",
-        scope: "milestone-validation",
-        fullContent: content,
-      });
-      const gateSliceId = getMilestoneSlices(milestoneId)[0]?.id;
-      if (gateSliceId) {
-        insertMilestoneValidationGates(
-          milestoneId,
-          gateSliceId,
-          "pass",
-          new Date().toISOString(),
-        );
-      }
+  transaction(() => {
+    insertAssessment({
+      path: validationPath,
+      milestoneId,
+      sliceId: null,
+      taskId: null,
+      status: "pass",
+      scope: "milestone-validation",
+      fullContent: content,
     });
-  } catch (err) {
-    try {
-      removeProjectionFileSync(validationPath);
-    } catch {
-      // best effort cleanup
+    const gateSliceId = readMilestoneSlices(milestoneId)[0]?.id;
+    if (gateSliceId) {
+      insertMilestoneValidationGates(
+        milestoneId,
+        gateSliceId,
+        "pass",
+        new Date().toISOString(),
+      );
     }
-    throw err;
-  }
+  });
+  // The file is rendered from the committed row, by the renderer that the
+  // validate tool and the full rebuild use.
+  renderMilestoneValidation(basePath, milestoneId);
 
   invalidateAllCaches();
   return true;
@@ -274,14 +262,20 @@ export function checkCloseoutConsistencyGate(
     );
   }
 
-  const milestone = getMilestone(milestoneId);
+  const milestone = readMilestone(milestoneId);
   if (!milestone) {
     return blocked(
       "milestone-missing",
       `Closeout consistency blocked for ${milestoneId}: milestone is missing from canonical DB.`,
     );
   }
-  if (!isClosedStatus(milestone.status) && !options.allowOpenMilestone) {
+  // An open Milestone with a Closeout Plan is prepared: its completion
+  // requirements are proven and it completes when the host settles the plan.
+  if (
+    !milestone.closed &&
+    !options.allowOpenMilestone &&
+    !isMilestoneCloseoutPrepared(milestoneId)
+  ) {
     return blocked(
       "milestone-open",
       `Closeout consistency blocked for ${milestoneId}: canonical DB milestone status is "${milestone.status}".`,
@@ -289,7 +283,7 @@ export function checkCloseoutConsistencyGate(
   }
 
   const adoptedMilestone = isMilestoneLifecycleAdopted(milestoneId);
-  const validationRequired = adoptedMilestone || milestone.status !== "skipped";
+  const validationRequired = adoptedMilestone || !milestone.discarded;
   let validation = validationRequired && !adoptedMilestone
     ? getLatestAssessmentByScope(milestoneId, "milestone-validation")
     : null;
@@ -303,10 +297,10 @@ export function checkCloseoutConsistencyGate(
     if (options.readOnly) {
       // Preview: the pass-through recorder writes a VALIDATION projection and
       // assessment/gate rows. It only records when no assessment exists and
-      // every closed slice has SUMMARY evidence — mirror those read-only
+      // every slice and task is closed in the DB — mirror those read-only
       // preconditions and evaluate the rest of the gate as if recorded,
       // without writing (#2230).
-      if (!validation && artifactBasePath && allSlicesHaveCloseoutSummaryEvidence(milestoneId, artifactBasePath)) {
+      if (!validation && artifactBasePath && allSlicesAndTasksClosed(milestoneId)) {
         validation = { status: "pass" } as NonNullable<typeof validation>;
       }
     } else if (recordCloseoutPassThroughValidationIfReady(milestoneId, artifactBasePath)) {
@@ -402,7 +396,7 @@ export function checkCloseoutConsistencyGate(
       const validationStatus = validation?.status ?? "absent";
       const recovery =
         validationStatus === "absent"
-          ? ` Run \`/gsd validate-milestone ${milestoneId}\` to create the validation, or set \`phases.skip_milestone_validation: true\` in .gsd/PREFERENCES.md to skip it.`
+          ? ` Run \`/gsd dispatch validate ${milestoneId}\` to create the validation, or set \`phases.skip_milestone_validation: true\` in .gsd/PREFERENCES.md to skip it.`
           : "";
       return blocked(
         "validation-not-pass",
@@ -411,8 +405,8 @@ export function checkCloseoutConsistencyGate(
     }
   }
 
-  const slices = getMilestoneSlices(milestoneId);
-  if (slices.length === 0 && milestone.status !== "skipped") {
+  const slices = readMilestoneSlices(milestoneId);
+  if (slices.length === 0 && !milestone.discarded) {
     return blocked(
       "slice-missing",
       `Closeout consistency blocked for ${milestoneId}: no slices exist in canonical DB.`,
@@ -423,10 +417,7 @@ export function checkCloseoutConsistencyGate(
   if (validationRequired) {
     gateClosureOptions = canonicalAuthorization?.authorized
       ? { milestoneValidationAuthorization: canonicalAuthorization }
-      : {
-          artifactBasePath: options.artifactBasePath ?? artifactBasePathFromDb(),
-          milestoneValidationPassed: validation?.status === "pass",
-        };
+      : { milestoneValidationPassed: validation?.status === "pass" };
   }
   const plannedGateClosure = gateClosureOptions
     ? inspectQualityGatesFromEvidence(milestoneId, gateClosureOptions)
@@ -443,7 +434,7 @@ export function checkCloseoutConsistencyGate(
 
   for (const slice of slices) {
     if (isDeferredStatus(slice.status)) continue;
-    if (!isClosedStatus(slice.status)) {
+    if (!slice.closed) {
       return blocked(
         "slice-open",
         `Closeout consistency blocked for ${milestoneId}: slice ${slice.id} status is "${slice.status}".`,
@@ -451,9 +442,9 @@ export function checkCloseoutConsistencyGate(
     }
 
     const taskStatusById = new Map<string, string>();
-    for (const task of getSliceTasks(milestoneId, slice.id)) {
+    for (const task of readSliceTasks(milestoneId, slice.id)) {
       taskStatusById.set(task.id, task.status);
-      if (!isClosedStatus(task.status)) {
+      if (!task.done) {
         return blocked(
           "task-open",
           `Closeout consistency blocked for ${milestoneId}: task ${slice.id}/${task.id} status is "${task.status}".`,

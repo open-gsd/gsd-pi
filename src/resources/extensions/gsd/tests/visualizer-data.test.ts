@@ -11,7 +11,9 @@ import {
   loadVisualizerData,
   type VisualizerMilestone,
 } from "../visualizer-data.ts";
-import { _getAdapter, closeDatabase, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { appendCapture } from "../captures.ts";
+import { _getAdapter, closeDatabase, insertArtifact, insertMilestone, insertSlice, openDatabase } from "../gsd-db.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import { createMemory } from "../memory-store.ts";
 import { generateHtmlReport } from "../export-html.ts";
 import { resetMetrics, type UnitMetrics } from "../metrics.ts";
@@ -67,19 +69,8 @@ test("loadVisualizerData hydrates milestones, captures, stats, and health fields
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "M001: Visualizer", status: "active" });
     insertSlice({ milestoneId: "M001", id: "S01", title: "Build UI", status: "pending", sequence: 1 });
+    appendCapture(base, "Investigate visualizer state");
     closeDatabase();
-    writeFileSync(
-      join(base, ".gsd", "CAPTURES.md"),
-      [
-        "# Captures",
-        "",
-        "### CAP-visual",
-        "**Text:** Investigate visualizer state",
-        "**Captured:** 2026-01-01T00:00:00.000Z",
-        "**Status:** pending",
-        "",
-      ].join("\n"),
-    );
 
     const data = await loadVisualizerData(base);
 
@@ -136,6 +127,7 @@ test("loadVisualizerData scopes ETA rate to active milestone units", async () =>
     insertMilestone({ id: "M002", title: "Active", status: "active" });
     insertSlice({ milestoneId: "M002", id: "S01", title: "Done", status: "complete", sequence: 1 });
     insertSlice({ milestoneId: "M002", id: "S02", title: "Remaining", status: "pending", sequence: 2 });
+    addLegacyCompletionEvidence();
     closeDatabase();
 
     const units = [
@@ -226,6 +218,81 @@ test("loadVisualizerData opens the project DB for memory entries when none is op
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
+});
+
+test("loadVisualizerData reads knowledge from the database when KNOWLEDGE.md is stale", async () => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-visualizer-knowledge-db-"));
+  try {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    createMemory({
+      category: "rule",
+      content: "Rule from the database",
+      scope: "project",
+      structuredFields: { sourceKnowledgeId: "K001", rule: "Rule from the database", scopeText: "project" },
+    });
+    createMemory({
+      category: "pattern",
+      content: "Pattern from the database",
+      structuredFields: { sourceKnowledgeId: "P001", pattern: "Pattern from the database" },
+    });
+    createMemory({
+      category: "gotcha",
+      content: "Lesson from the database",
+      structuredFields: { sourceKnowledgeId: "L001", whatHappened: "Lesson from the database" },
+    });
+    closeDatabase();
+    // The file on disk is stale: it shows an old K001 and no pattern or lesson.
+    writeFileSync(
+      join(base, ".gsd", "KNOWLEDGE.md"),
+      "# Project Knowledge\n\n## Rules\n\n| # | Scope | Rule | Why | Added |\n|---|-------|------|-----|-------|\n| K001 | project | Stale file rule | — | — |\n",
+    );
+
+    const data = await loadVisualizerData(base);
+
+    assert.deepEqual(data.knowledge.rules, [{ id: "K001", scope: "project", content: "Rule from the database" }]);
+    assert.deepEqual(data.knowledge.patterns, [{ id: "P001", content: "Pattern from the database" }]);
+    assert.deepEqual(data.knowledge.lessons, [{ id: "L001", content: "Lesson from the database" }]);
+    assert.equal(data.knowledge.exists, true);
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("loadVisualizerData reads the discussion state from saved artifact rows, not from CONTEXT files", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-visualizer-discussion-db-"));
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  openDatabase(":memory:");
+  for (const id of ["M001", "M002", "M003"]) {
+    mkdirSync(join(base, ".gsd", "milestones", id), { recursive: true });
+    insertMilestone({ id, title: id, status: "queued" });
+  }
+  const save = (milestoneId: string, artifactType: string) => insertArtifact({
+    path: `milestones/${milestoneId}/${milestoneId}-${artifactType}.md`,
+    artifact_type: artifactType,
+    milestone_id: milestoneId,
+    slice_id: null,
+    task_id: null,
+    full_content: `# ${artifactType}\n`,
+  });
+  // The draft row of M001 stays after its final CONTEXT is saved; it no longer counts.
+  save("M001", "CONTEXT-DRAFT");
+  save("M001", "CONTEXT");
+  save("M002", "CONTEXT-DRAFT");
+  // M003 has CONTEXT files and no row.
+  writeFileSync(join(base, ".gsd", "milestones", "M003", "M003-CONTEXT.md"), "# Context\n");
+  writeFileSync(join(base, ".gsd", "milestones", "M003", "M003-CONTEXT-DRAFT.md"), "# Draft\n");
+
+  const data = await loadVisualizerData(base);
+
+  assert.deepEqual(
+    data.discussion.map((entry) => [entry.milestoneId, entry.state, entry.hasDraft, entry.lastUpdated !== null]),
+    [["M001", "discussed", false, true], ["M002", "draft", true, true], ["M003", "undiscussed", false, false]],
+  );
 });
 
 test("loadVisualizerData caps memory content for visualizer payloads", async () => {

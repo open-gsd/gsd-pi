@@ -14,6 +14,8 @@ import { execFileSync } from "node:child_process";
 
 import { DISPATCH_RULES, resolveDispatch, type DispatchContext } from "../auto-dispatch.ts";
 import { AutoSession } from "../auto/session.ts";
+import { releaseExhaustedUnits, spendUnitBudget } from "../db/unit-dispatch-budgets.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
 import {
   closeDatabase,
   getLatestAssessmentByScope,
@@ -117,21 +119,28 @@ describe("completing-milestone dispatch guard (#4324)", () => {
     assert.match(readFileSync(validationPath, "utf-8"), /skip_validation_reason: closeout-recovery/);
   });
 
-  test("resolveDispatch stops complete-milestone when unit is exhausted in-session (#5662)", async () => {
+  test("resolveDispatch stops an exhausted complete-milestone after a restart, until a reopen releases it (#5662)", async () => {
     base = makeBase();
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "M001", title: "Milestone One", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
+    // The unit ran in auto-mode and used all its artifact verification
+    // retries: its dispatch row holds the `exhausted` mark.
+    claimTestDispatch(base, { milestoneId: "M001", unitType: "complete-milestone", unitId: "M001" });
+    spendUnitBudget(new Map(), { unitType: "complete-milestone", unitId: "M001", kind: "exhausted" });
 
-    const ctx = buildDispatchCtx(base);
-    ctx.state.phase = "complete";
+    // A new session holds nothing about the unit, as after a restart.
+    const ctx = { ...buildDispatchCtx(base), session: new AutoSession() };
+    const stopped = await resolveDispatch(ctx);
 
-    const session = new AutoSession();
-    session.exhaustedVerificationUnits.add("complete-milestone:M001");
+    assert.equal(stopped.action, "stop");
+    assert.match(stopped.action === "stop" ? stopped.reason : "", /used all its verification retries/i);
 
-    const result = await resolveDispatch({ ...ctx, session });
+    releaseExhaustedUnits("M001");
+    const released = await resolveDispatch(ctx);
 
-    assert.equal(result.action, "stop");
-    assert.match(result.reason, /exhausted verification retries this session/i);
+    assert.equal(released.action, "dispatch");
+    assert.equal(released.action === "dispatch" ? released.unitType : null, "complete-milestone");
   });
 
   test("dispatches complete-milestone when only .gsd/ files exist in git history (#5097)", async () => {
@@ -321,35 +330,20 @@ describe("complete phase dispatch guard (#5683)", () => {
     assert.equal(result?.level, "warning");
     assert.match(result?.reason ?? "", /closeout-consistency-blocked/);
     assert.match(result?.reason ?? "", /latest milestone validation is "absent"/);
-    assert.match(result?.reason ?? "", /\/gsd validate-milestone M001/);
+    assert.match(result?.reason ?? "", /\/gsd dispatch validate M001/);
   });
 });
 
 describe("complete milestone context recovery guard (#5831)", () => {
   let base = "";
-  const executionEntryRule = DISPATCH_RULES.find(
-    (candidate) => candidate.name === "execution-entry phase (no context) → discuss-milestone",
-  );
   const prePlanningRule = DISPATCH_RULES.find(
     (candidate) => candidate.name === "pre-planning (no context) → discuss-milestone",
   );
-  assert.ok(executionEntryRule, "execution-entry missing-context rule should exist");
   assert.ok(prePlanningRule, "pre-planning missing-context rule should exist");
 
   afterEach(() => {
     if (base) rmSync(base, { recursive: true, force: true });
     base = "";
-  });
-
-  test("does not discuss a complete execution-entry milestone with no CONTEXT file", async () => {
-    base = makeBase();
-    const ctx = buildDispatchCtx(base);
-    ctx.state.registry = [{ id: "M001", title: "Milestone One", status: "complete" }];
-    ctx.state.phase = "completing-milestone";
-
-    const result = await executionEntryRule.match(ctx);
-
-    assert.equal(result, null);
   });
 
   test("does not discuss a complete pre-planning milestone with no CONTEXT file", async () => {

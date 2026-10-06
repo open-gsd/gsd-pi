@@ -19,7 +19,7 @@ import {
   updateSliceStatus,
   updateMilestoneStatus,
 } from '../gsd-db.ts';
-import { migrateHierarchyToDb } from '../md-importer.ts';
+import { migrateHierarchyToDb } from './helpers/md-importer.ts';
 import { describe, test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 

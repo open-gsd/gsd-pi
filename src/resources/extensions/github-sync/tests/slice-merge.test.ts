@@ -4,16 +4,26 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { delimiter, join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { runGitHubSync, _resetConfigCache } from "../sync.ts";
+import { bootstrapSync, runGitHubSync, _resetConfigCache } from "../sync.ts";
 import {
   _resetGhCache,
   _setGhAvailableForTest,
   _setGhRateLimitOkForTest,
 } from "../cli.ts";
+import {
+  _getAdapter,
+  closeDatabase,
+  insertMilestone,
+  insertSlice,
+  insertTask,
+  openDatabase,
+} from "../../gsd/gsd-db.ts";
 import { clearGSDPreferencesCache } from "../../gsd/preferences.ts";
 
 // Slice PRs must merge with the strategy the project chose via the
 // `git.merge_strategy` preference (#2279), not a hardcoded squash.
+// The database decides whether the slice is complete: a slice that is not
+// complete there is not merged, whatever the unit type or the files say.
 // These tests drive the real sync flow with a fake `gh` shim on PATH
 // that records every invocation, so the actual `gh pr merge` args are
 // asserted end-to-end.
@@ -91,27 +101,22 @@ describe("slice PR merge strategy (#2279)", () => {
     _resetGhCache();
     _resetConfigCache();
     clearGSDPreferencesCache();
+    closeDatabase();
     rmSync(tmpDir, { recursive: true, force: true });
     rmSync(ghShimDir, { recursive: true, force: true });
     rmSync(isolatedGsdHome, { recursive: true, force: true });
   });
 
   /** Seed prefs + mapping, run the complete-slice sync, return gh arg lines. */
-  async function runSliceMergeScenario(preferencesLines: string[]): Promise<string[]> {
+  function writePreferences(preferencesLines: string[]): void {
     writeFileSync(
       join(tmpDir, ".gsd", "PREFERENCES.md"),
       ["---", "version: 1", ...preferencesLines, "---"].join("\n"),
       "utf-8",
     );
-    writeFileSync(
-      join(tmpDir, ".gsd", "github-sync.json"),
-      JSON.stringify(mappingWithSlicePr(), null, 2),
-      "utf-8",
-    );
+  }
 
-    process.env.GSD_GH_LOG = ghLogPath;
-    await runGitHubSync(tmpDir, "complete-slice", "M001/S01");
-
+  function ghLines(): string[] {
     let raw = "";
     try {
       raw = readFileSync(ghLogPath, "utf-8");
@@ -120,6 +125,120 @@ describe("slice PR merge strategy (#2279)", () => {
     }
     return raw.split("\n").filter(Boolean);
   }
+
+  /** Seed prefs + mapping + the slice row, run the complete-slice sync, return gh arg lines. */
+  async function runSliceMergeScenario(preferencesLines: string[], sliceStatus = "complete"): Promise<string[]> {
+    writePreferences(preferencesLines);
+    writeFileSync(
+      join(tmpDir, ".gsd", "github-sync.json"),
+      JSON.stringify(mappingWithSlicePr(), null, 2),
+      "utf-8",
+    );
+    assert.equal(openDatabase(join(tmpDir, ".gsd", "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "Platform", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: sliceStatus, sequence: 1 });
+    _getAdapter()!.prepare(
+      "UPDATE slices SET full_summary_md = :summary WHERE milestone_id = 'M001' AND id = 'S01'",
+    ).run({
+      ":summary": ["---", "id: S01", "---", "", "# S01: Foundation", "", "**Summary from the database**", ""].join("\n"),
+    });
+
+    process.env.GSD_GH_LOG = ghLogPath;
+    await runGitHubSync(tmpDir, "complete-slice", "M001/S01");
+    return ghLines();
+  }
+
+  const SLICE_PR_PREFERENCES = ["github:", "  enabled: true", "  repo: owner/repo", "  slice_prs: true"];
+
+  it("does not merge or publish the PR of a slice that is not complete in the database", async () => {
+    // The SUMMARY projection exists, as after a complete-slice unit that wrote
+    // the file but did not complete the slice.
+    const sliceDir = join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01");
+    mkdirSync(sliceDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-SUMMARY.md"), "# S01: Foundation\n\n**Summary from the file**\n");
+
+    const lines = await runSliceMergeScenario(SLICE_PR_PREFERENCES, "in_progress");
+
+    assert.deepEqual(lines, [], `no gh call is expected, got: ${JSON.stringify(lines)}`);
+    const mapping = JSON.parse(readFileSync(join(tmpDir, ".gsd", "github-sync.json"), "utf-8"));
+    assert.equal(mapping.slices["M001/S01"].state, "open");
+  });
+
+  it("posts the summary stored on the slice row, not the SUMMARY.md file", async () => {
+    const sliceDir = join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01");
+    mkdirSync(sliceDir, { recursive: true });
+    writeFileSync(join(sliceDir, "S01-SUMMARY.md"), "# S01: Foundation\n\n**Summary from the file**\n");
+
+    const log = (await runSliceMergeScenario(SLICE_PR_PREFERENCES)).join("\n");
+
+    assert.match(log, /issue comment 42 /);
+    assert.match(log, /Summary from the database/);
+    assert.doesNotMatch(log, /Summary from the file/);
+  });
+
+  /** Seed prefs, a task issue mapping, the task row and a contradicting SUMMARY.md, then run the execute-task sync. */
+  async function runTaskCompleteScenario(taskStatus: string): Promise<string[]> {
+    writePreferences(["github:", "  enabled: true", "  repo: owner/repo"]);
+    writeFileSync(
+      join(tmpDir, ".gsd", "github-sync.json"),
+      JSON.stringify({
+        version: 1,
+        repo: "owner/repo",
+        milestones: {},
+        slices: {},
+        tasks: { "M001/S01/T01": { issueNumber: 7, lastSyncedAt: "2025-01-01T00:00:00Z", state: "open" } },
+      }),
+      "utf-8",
+    );
+    const taskDir = join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01", "tasks");
+    mkdirSync(taskDir, { recursive: true });
+    writeFileSync(join(taskDir, "T01-SUMMARY.md"), "# T01: Add the form\n\n**Summary from the file**\n");
+    assert.equal(openDatabase(join(tmpDir, ".gsd", "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "Platform", status: "active" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: "in_progress", sequence: 1 });
+    insertTask({
+      milestoneId: "M001",
+      sliceId: "S01",
+      id: "T01",
+      title: "Add the form",
+      status: taskStatus,
+      fullSummaryMd: ["---", "id: T01", "---", "", "# T01: Add the form", "", "**Summary from the database**", ""].join("\n"),
+    });
+
+    process.env.GSD_GH_LOG = ghLogPath;
+    await runGitHubSync(tmpDir, "execute-task", "M001/S01/T01");
+    return ghLines();
+  }
+
+  it("does not comment on the issue of a task that is not complete in the database", async () => {
+    // The SUMMARY projection exists, as after an execute-task unit that
+    // staged its result but did not pass host verification.
+    const lines = await runTaskCompleteScenario("pending");
+
+    assert.deepEqual(lines, [], `no gh call is expected, got: ${JSON.stringify(lines)}`);
+  });
+
+  it("posts the summary stored on the task row, not the SUMMARY.md file", async () => {
+    const log = (await runTaskCompleteScenario("complete")).join("\n");
+
+    assert.match(log, /issue comment 7 /);
+    assert.match(log, /Summary from the database/);
+    assert.doesNotMatch(log, /Summary from the file/);
+  });
+
+  it("bootstrap creates entities for database milestones and slices that have no directory", async () => {
+    writePreferences(["github:", "  enabled: true", "  repo: owner/repo"]);
+    assert.equal(openDatabase(join(tmpDir, ".gsd", "gsd.db")), true);
+    insertMilestone({ id: "M001", title: "Platform", status: "active" });
+    insertMilestone({ id: "M002", title: "Dropped", status: "cancelled" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Foundation", status: "pending", sequence: 1 });
+    process.env.GSD_GH_LOG = ghLogPath;
+
+    const counts = await bootstrapSync(tmpDir);
+
+    assert.deepEqual({ milestones: counts.milestones, slices: counts.slices }, { milestones: 1, slices: 1 });
+    assert.ok(ghLines().length > 0, "the sync called gh for the database milestone");
+  });
 
   it("merges with --merge when git.merge_strategy is merge", async () => {
     const lines = await runSliceMergeScenario([

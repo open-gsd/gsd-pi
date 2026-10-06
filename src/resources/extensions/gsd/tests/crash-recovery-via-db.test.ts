@@ -39,7 +39,7 @@ import {
   adoptOrTransitionLifecycle,
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.ts";
-import { claimTaskAttempt } from "../task-execution-domain-operation.ts";
+import { claimTaskAttempt, settleTaskAttempt } from "../task-execution-domain-operation.ts";
 
 function makeBase(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-crash-recovery-"));
@@ -154,6 +154,134 @@ test("readCrashLock includes the most recent dispatch as unitType/unitId", (t) =
   assert.ok(lock);
   assert.equal(lock!.unitType, "plan-slice");
   assert.equal(lock!.unitId, "M001/S01");
+});
+
+test("recordDispatchClaim rejects an expired held lease so the iteration re-arms its fencing token (#2443)", (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "T", status: "active" });
+  insertSlice({ milestoneId: "M001", id: "S01", title: "S", status: "active" });
+  insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "T", status: "pending" });
+  const projectRoot = normalizeRealPath(base);
+  const workerId = registerAutoWorker({ projectRootRealpath: projectRoot });
+  const lease = claimMilestoneLease(workerId, "M001");
+  assert.equal(lease.ok, true);
+  if (!lease.ok) return;
+  // Simulate the lease TTL lapsing during a long unit turn + finalize: the
+  // row stays status='held' but its expiry is in the past — exactly what the
+  // attempt fencing trigger refuses for later attempt state transitions.
+  _getAdapter()!.prepare(
+    `UPDATE milestone_leases SET expires_at = '2020-01-01T00:00:00.000Z' WHERE milestone_id = 'M001'`,
+  ).run();
+
+  const stale = recordDispatchClaim({
+    traceId: "t1", workerId, milestoneLeaseToken: lease.token,
+    milestoneId: "M001", unitType: "execute-task", unitId: "M001/S01/T01",
+  });
+  assert.equal(stale.ok, false, "an expired held lease must not pass the dispatch claim guard");
+  if (stale.ok) return;
+  assert.equal(stale.error, "stale_lease");
+
+  // The poisoning surface this fixes: under the expired generation the
+  // Attempt claim cannot even insert (attempt fencing trigger) — this is the
+  // abort that stranded the task at in_progress in #2443. Pre-fix the
+  // dispatch guard above happily created this stale dispatch row; insert it
+  // directly to pin the fencing behavior the guard now prevents reaching.
+  _getAdapter()!.prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, turn_id, worker_id, milestone_lease_token,
+      milestone_id, slice_id, task_id, unit_type, unit_id,
+      status, attempt_n, started_at
+    ) VALUES ('t1-stale', 'turn-stale', :worker_id, :token,
+      'M001', 'S01', 'T01', 'execute-task', 'M001/S01/T01', 'claimed', 1,
+      '2020-01-01T00:00:00.000Z')
+  `).run({ ":worker_id": workerId, ":token": lease.token });
+
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.task.ready",
+    idempotencyKey: "fixture/2443-task-ready",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: { taskId: "T01" },
+  }, (context) => {
+    adoptOrTransitionLifecycle(context, {
+      itemKind: "task",
+      milestoneId: "M001",
+      sliceId: "S01",
+      taskId: "T01",
+      lifecycleStatus: "ready",
+    });
+    return {
+      events: [{
+        eventType: "test.task.ready",
+        entityType: "task",
+        entityId: "M001/S01/T01",
+        payload: { taskId: "T01" },
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: "test/m001/s01/t01",
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  const staleDispatchId = Number(
+    (_getAdapter()!.prepare(
+      `SELECT id FROM unit_dispatches WHERE trace_id = 't1-stale'`,
+    ).get() as { id: number }).id,
+  );
+  assert.throws(
+    () => claimTaskAttempt({
+      invocation: { idempotencyKey: "fixture/2443/stale-claim", sourceTransport: "internal", actorType: "agent" },
+      task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+      workerId,
+      milestoneLeaseToken: lease.token,
+      coordinationDispatchId: staleDispatchId,
+    }),
+    /workflow attempt requires the current held lease/,
+    "an attempt claim under the expired generation must abort on the fencing trigger",
+  );
+
+  // The stale-lease recovery path re-claims the worker's own expired lease
+  // (fencing token bumps) and the dispatch claim then succeeds. The stale
+  // dispatch row is terminalized first — only one active dispatch per unit
+  // is allowed.
+  _getAdapter()!.prepare(`UPDATE unit_dispatches SET status = 'failed' WHERE trace_id = 't1-stale'`).run();
+  const rearmed = claimMilestoneLease(workerId, "M001");
+  assert.equal(rearmed.ok, true);
+  if (!rearmed.ok) return;
+  assert.equal(rearmed.token, lease.token + 1, "re-claiming our own expired lease bumps the fencing token");
+  const claimed = recordDispatchClaim({
+    traceId: "t2", workerId, milestoneLeaseToken: rearmed.token,
+    milestoneId: "M001", sliceId: "S01", taskId: "T01",
+    unitType: "execute-task", unitId: "M001/S01/T01",
+  });
+  assert.equal(claimed.ok, true, "the re-armed token must open the dispatch claim");
+  if (!claimed.ok) return;
+
+  // The recovery end-state: under the re-armed token the Attempt claim and
+  // its settlement pass the real fencing triggers.
+  const attempt = claimTaskAttempt({
+    invocation: { idempotencyKey: "fixture/2443/rearmed-claim", sourceTransport: "internal", actorType: "agent" },
+    task: { milestoneId: "M001", sliceId: "S01", taskId: "T01" },
+    workerId,
+    milestoneLeaseToken: rearmed.token,
+    coordinationDispatchId: Number(claimed.dispatchId),
+  });
+  const settled = settleTaskAttempt({
+    invocation: { idempotencyKey: "fixture/2443/rearmed-settle", sourceTransport: "internal", actorType: "agent" },
+    attemptId: attempt.attemptId,
+    outcome: "succeeded",
+    failureClass: "none",
+    summary: "re-armed generation settles cleanly",
+    output: {},
+  });
+  assert.ok(settled.resultId, "the re-armed attempt must settle without a fencing abort");
 });
 
 test("readCrashLock surfaces sessionFile from runtime_kv", (t) => {

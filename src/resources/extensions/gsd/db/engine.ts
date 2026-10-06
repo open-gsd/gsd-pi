@@ -93,6 +93,7 @@ import {
   applyMigrationV48TaskToolRequirements,
   applyMigrationV49MilestoneVerdictScope,
   applyMigrationV50BlockerAcceptedCloseout,
+  applyMigrationV51OutboxAuditLink,
 } from "../db-migration-steps.js";
 import {
   createCanonicalFoundationSchemaV31,
@@ -101,8 +102,13 @@ import {
 } from "../db-canonical-foundation-schema.js";
 import { createConversationFoundationSchemaV33 } from "../db-conversation-foundation-schema.js";
 import { rebuildWorkflowItemLifecyclesForBlockerAccepted } from "../db-blocker-accepted-closeout-schema.js";
+import { ensureLifecycleCoverageFence, hasLifecycleCoverageFence } from "../db-lifecycle-coverage-schema.js";
 import { createLifecycleFoundationSchemaV32 } from "../db-lifecycle-foundation-schema.js";
-import { createProjectionImportKernelCloseoutFoundationSchemaV35 } from "../db-projection-import-kernel-closeout-foundation-schema.js";
+import {
+  createProjectionImportKernelCloseoutFoundationSchemaV35,
+  ensureCloseoutPlanAttemptTrigger,
+  hasCloseoutPlanAttemptTrigger,
+} from "../db-projection-import-kernel-closeout-foundation-schema.js";
 import { createRecoveryEvidenceFoundationSchemaV34 } from "../db-recovery-evidence-foundation-schema.js";
 import {
   invalidateMemoriesFtsRebuildMarker,
@@ -163,7 +169,7 @@ const providerLoader = createSqliteProviderLoader({
   nodeVersion: process.versions.node,
   writeStderr: (message: string) => process.stderr.write(message),
 });
-export const SCHEMA_VERSION = 50;
+export const SCHEMA_VERSION = 51;
 
 /**
  * PRAGMA application_id stamped on every gsd.db at V46 so binaries and
@@ -213,10 +219,19 @@ function assessStartupRepair(db: DbAdapter): StartupRepairAssessment {
     FROM sqlite_master
     WHERE type = 'table' AND name = 'schema_version'
   `).get();
+  // Refuse a newer schema on the first read-only statement: no maintenance
+  // claim, journal-mode change or DDL may touch a database this binary
+  // cannot own.
+  if (schemaMetadata !== undefined) {
+    const currentVersion = getCurrentSchemaVersion(db);
+    if (currentVersion > SCHEMA_VERSION) throw new SchemaTooNewError(currentVersion, SCHEMA_VERSION);
+  }
   const fts = inspectMemoriesFtsStartupState(db);
   const required = schemaMetadata === undefined
     || getCurrentSchemaVersion(db) !== SCHEMA_VERSION
     || !hasCanonicalOutboxInvariantsV31(db)
+    || !hasLifecycleCoverageFence(db)
+    || !hasCloseoutPlanAttemptTrigger(db)
     || !hasVerificationEvidenceDedupIndex(db)
     || !hasRuntimeKvSchemaV25(db)
     || !hasRequiredSchemaObjects(db)
@@ -445,6 +460,8 @@ function initSchema(
 
   migrateSchema(db, dbPath, startupTransactionOpen, migrationBackupPrepared);
   ensureCanonicalOutboxInvariantsV31(db);
+  ensureLifecycleCoverageFence(db);
+  ensureCloseoutPlanAttemptTrigger(db);
   rebuildMemoriesFtsSchemaOnce(db, {
     force: forceMemoriesFtsRebuild,
     onRebuildFailed: (message) => logWarning("db", message),
@@ -827,6 +844,15 @@ function migrateSchema(
       applyMigrationV50BlockerAcceptedCloseout(db);
       stampStateCutoverPragmas(db, 50);
       recordSchemaVersion(db, 50);
+    }
+
+    if (currentVersion < 51) {
+      // V51 — the outbox is an audit link only: drop the delivery columns no
+      // code ever read or updated. workflow_projection_work is the only
+      // delivery queue.
+      applyMigrationV51OutboxAuditLink(db);
+      stampStateCutoverPragmas(db, 51);
+      recordSchemaVersion(db, 51);
     }
 
     if (_migrationFaultForTest) throw new Error("migration fault injected for test");
@@ -2299,11 +2325,58 @@ function runStartupRepair(adapter: DbAdapter, path: string, forceMemoriesFtsRebu
     } catch (error) {
       if (!shouldAttemptVacuumRecovery(true, error)) throw error;
       _startupRepairBoundaryForTest?.("before-vacuum", path);
+      // VACUUM rewrites every page. Keep the pre-repair bytes so a repair
+      // that loses rows stays recoverable; the copy is never auto-deleted.
+      const corruptCopyPath = `${path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+      copyFileSync(path, corruptCopyPath);
+      if (existsSync(`${path}-wal`)) copyFileSync(`${path}-wal`, `${corruptCopyPath}-wal`);
       adapter.exec("VACUUM");
       initialize();
-      logWarning("db", "recovered corrupt database via VACUUM");
+      const integrity = adapter.prepare("PRAGMA integrity_check").all();
+      if (integrity.length !== 1 || integrity[0]?.["integrity_check"] !== "ok") {
+        throw new GSDError(
+          GSD_STALE_STATE,
+          `gsd-db: Database is still corrupt after VACUUM (pre-repair copy: ${corruptCopyPath}). ` +
+          "Restore a verified backup with /gsd db restore-backup.",
+        );
+      }
+      logWarning("db", `recovered corrupt database via VACUUM; pre-repair copy kept at ${corruptCopyPath}`);
     }
   });
+}
+
+/** Highest Authority Epoch above 0 of the Domain Operation receipts this process holds, by Project. */
+const _receiptAuthorityEpochs = new Map<string, number>();
+
+export function noteAuthorityEpochReceipt(projectId: string, authorityEpoch: number): void {
+  if (authorityEpoch > (_receiptAuthorityEpochs.get(projectId) ?? 0)) {
+    _receiptAuthorityEpochs.set(projectId, authorityEpoch);
+  }
+}
+
+/**
+ * ADR-046 migration step 5: a Project cannot go back after the cutover. A
+ * database at a lower Authority Epoch than a receipt this process holds for
+ * the same Project is an older copy of the file, so the open fails closed.
+ */
+function assertAuthorityEpochNotBelowReceipt(db: DbAdapter, path: string): void {
+  if (_receiptAuthorityEpochs.size === 0) return;
+  const hasAuthority = db.prepare(`
+    SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'project_authority'
+  `).get();
+  if (hasAuthority === undefined) return;
+  const authority = db.prepare(`
+    SELECT project_id, authority_epoch FROM project_authority WHERE singleton = 1
+  `).get();
+  const receiptEpoch = _receiptAuthorityEpochs.get(String(authority?.["project_id"]));
+  const epoch = Number(authority?.["authority_epoch"]);
+  if (receiptEpoch === undefined || epoch >= receiptEpoch) return;
+  throw new GSDError(
+    GSD_STALE_STATE,
+    `gsd-db: ${path} is at Authority Epoch ${epoch}, lower than Authority Epoch ${receiptEpoch} of the last ` +
+    "Domain Operation receipt of this process. The file was replaced by an older copy. A Project cannot go " +
+    "back after the cutover: put the current database file back, or use Forward Repair (/gsd recover).",
+  );
 }
 
 function retainOrCloseFailedOpen(
@@ -2458,6 +2531,14 @@ function openDatabaseInternal(path: string, allowReplacementWrite: boolean, crea
       retainOrCloseFailedOpen(adapter, startupMaintenance, false, !runtimeAdapterOpened);
       throw error;
     }
+  }
+
+  try {
+    assertAuthorityEpochNotBelowReceipt(adapter, path);
+  } catch (error) {
+    _dbOpenState.recordError("open", error);
+    retainOrCloseFailedOpen(adapter, undefined, false);
+    throw error;
   }
 
   currentDb = adapter;
@@ -2635,6 +2716,8 @@ export function refreshOpenDatabaseFromDisk(): boolean {
     }
     return opened;
   } catch (e) {
+    // Version skew is never generic unavailability: refuse loudly.
+    if (isSchemaTooNewError(e)) throw e;
     logWarning("db", `database refresh failed: ${(e as Error).message}`);
     return false;
   }
@@ -2650,14 +2733,27 @@ export function vacuumDatabase(): void {
   });
 }
 
-/** Flush WAL into gsd.db so `git add .gsd/gsd.db` stages current state — safe while DB is open. */
-export function checkpointDatabase(): void {
-  if (!currentDb) return;
+/**
+ * Flush the WAL into gsd.db — safe while the DB is open. Returns true only
+ * when SQLite reports that the whole WAL was checkpointed. A busy reader, a
+ * skip inside an open transaction, or an error returns false.
+ */
+export function checkpointDatabase(): boolean {
+  if (!currentDb) return false;
+  let complete = false;
   runCoordinatedMaintenance((db) => {
     try {
-      db.exec('PRAGMA wal_checkpoint(TRUNCATE)');
+      const row = db.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+      const busy = Number(row?.["busy"] ?? -1);
+      const log = Number(row?.["log"] ?? Number.NaN);
+      const checkpointed = Number(row?.["checkpointed"] ?? Number.NaN);
+      complete = busy === 0 && checkpointed === log;
+      if (!complete) {
+        logWarning("db", `WAL checkpoint incomplete: busy=${busy} log=${log} checkpointed=${checkpointed}`);
+      }
     } catch (e) { logWarning("db", `WAL checkpoint failed: ${(e as Error).message}`); }
   });
+  return complete;
 }
 
 function runCoordinatedMaintenance(operation: (db: DbAdapter) => void): void {

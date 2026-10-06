@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { readFileSync, existsSync } from 'node:fs';
+import { KNOWLEDGE_ROW_ID_PATTERN } from '@opengsd/contracts';
 import { resolveGsdRoot, resolveRootFile } from './paths.js';
 
 // ---------------------------------------------------------------------------
@@ -21,11 +22,15 @@ export interface KnowledgeEntry {
 export interface KnowledgeResult {
   entries: KnowledgeEntry[];
   counts: { rules: number; patterns: number; lessons: number };
+  /** Set only on the file read: the database was not available, so the rows come from the KNOWLEDGE.md projection. */
+  readMetadata?: { source: 'projection'; authority: 'projection-fallback' };
 }
 
 // ---------------------------------------------------------------------------
 // Parser
 // ---------------------------------------------------------------------------
+
+const KNOWLEDGE_ROW_ID = new RegExp(`^${KNOWLEDGE_ROW_ID_PATTERN}$`, 'i');
 
 function parseTableRows(section: string, type: KnowledgeType): KnowledgeEntry[] {
   const entries: KnowledgeEntry[] = [];
@@ -39,7 +44,7 @@ function parseTableRows(section: string, type: KnowledgeType): KnowledgeEntry[] 
     if (cells[0].startsWith('#') || cells[0].startsWith('-')) continue;
 
     const id = cells[0];
-    if (!/^[KPL]\d+$/i.test(id)) continue;
+    if (!KNOWLEDGE_ROW_ID.test(id)) continue;
 
     if (type === 'rule' && cells.length >= 5) {
       entries.push({
@@ -89,15 +94,8 @@ function parseKnowledgeMarkdown(content: string): KnowledgeEntry[] {
 // Public API
 // ---------------------------------------------------------------------------
 
-export function readKnowledge(projectDir: string): KnowledgeResult {
-  const gsd = resolveGsdRoot(projectDir);
-  const knowledgePath = resolveRootFile(gsd, 'KNOWLEDGE.md');
-
-  if (!existsSync(knowledgePath)) {
-    return { entries: [], counts: { rules: 0, patterns: 0, lessons: 0 } };
-  }
-
-  const content = readFileSync(knowledgePath, 'utf-8');
+/** Parse KNOWLEDGE.md content (from the database bridge or the file) into a KnowledgeResult. */
+export function knowledgeResultFromMarkdown(content: string): KnowledgeResult {
   const entries = parseKnowledgeMarkdown(content);
 
   return {
@@ -107,5 +105,21 @@ export function readKnowledge(projectDir: string): KnowledgeResult {
       patterns: entries.filter((e) => e.type === 'pattern').length,
       lessons: entries.filter((e) => e.type === 'lesson').length,
     },
+  };
+}
+
+/**
+ * Display-only file read, used when the project database cannot be opened.
+ * The result is labelled as a projection fallback so the caller can tell it
+ * from a database read.
+ */
+export function readKnowledge(projectDir: string): KnowledgeResult {
+  const gsd = resolveGsdRoot(projectDir);
+  const knowledgePath = resolveRootFile(gsd, 'KNOWLEDGE.md');
+  const content = existsSync(knowledgePath) ? readFileSync(knowledgePath, 'utf-8') : '';
+
+  return {
+    ...knowledgeResultFromMarkdown(content),
+    readMetadata: { source: 'projection', authority: 'projection-fallback' },
   };
 }

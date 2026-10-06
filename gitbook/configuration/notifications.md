@@ -36,6 +36,7 @@ brew install terminal-notifier
 1. Check **System Settings → Notifications** for your terminal app
 2. Install `terminal-notifier` (recommended)
 3. Test with:
+
    ```bash
    terminal-notifier -title "GSD" -message "working!" -sound Glass
    ```

@@ -13,6 +13,7 @@ import {
   updateTaskStatus,
   getTask,
   getSlice,
+  getMilestone,
   getSliceTasks,
   insertVerificationEvidence,
   insertGateRow,
@@ -318,6 +319,7 @@ console.log('\n=== complete-task: handler happy path ===');
   // Seed milestone + slice + both tasks so projection renders T01 ([x]) and T02 ([ ])
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice', risk: 'high', depends: ['S00'], demo: 'basic functionality works', sequence: 1 });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
   insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', status: 'pending', title: 'Second task' });
 
   const params = makeValidParams();
@@ -471,6 +473,8 @@ console.log('\n=== complete-task: flat-phase duplicate task IDs are slice-qualif
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'First Slice', sequence: 1 });
   insertSlice({ id: 'S02', milestoneId: 'M001', title: 'Second Slice', sequence: 2 });
+  insertTask({ id: 'T03', sliceId: 'S01', milestoneId: 'M001', title: 'Shared task id', status: 'pending' });
+  insertTask({ id: 'T03', sliceId: 'S02', milestoneId: 'M001', title: 'Shared task id', status: 'pending' });
 
   const first = await handleCompleteTask({
     ...makeValidParams(),
@@ -526,15 +530,16 @@ console.log('\n=== complete-task: projection failure preserves DB completion ===
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   fs.unlinkSync(planPath);
   fs.mkdirSync(planPath, { recursive: true });
 
   const result = await handleCompleteTask(makeValidParams(), basePath);
 
-  assertTrue('error' in result, 'projection failure should return an error');
-  if ('error' in result) {
-    assertMatch(result.error, /projection write failed/, 'error should mention projection write failure');
+  assertTrue(!('error' in result), 'projection failure after commit should not return an error');
+  if (!('error' in result)) {
+    assertEq(result.stale, true, 'the committed receipt should carry the stale flag');
   }
 
   const task = getTask('M001', 'S01', 'T01');
@@ -569,6 +574,7 @@ console.log('\n=== complete-task: handler leaves completed sibling summaries unt
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice', risk: 'high', depends: [], demo: 'basic functionality works', sequence: 1 });
   insertTask({ id: 'T00', sliceId: 'S01', milestoneId: 'M001', status: 'complete', title: 'Already complete task', oneLiner: 'Previously completed' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
   insertTask({ id: 'T02', sliceId: 'S01', milestoneId: 'M001', status: 'pending', title: 'Second task' });
 
   const siblingSummaryPath = path.join(path.dirname(planPath), 'T00-SUMMARY.md');
@@ -637,10 +643,10 @@ console.log('\n=== complete-task: disabled hard-blocker escalation rejects befor
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// complete-task: hard-blocker escalation projection write failure
+// complete-task: an honored escalation needs a canonical Task lifecycle
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-task: escalation write failure preserves completion ===');
+console.log('\n=== complete-task: legacy escalation is rejected before completion ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
@@ -650,12 +656,8 @@ console.log('\n=== complete-task: escalation write failure preserves completion 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
 
-  // A directory at the artifact path makes the final atomic rename fail while
-  // leaving the earlier SUMMARY and PLAN writes available.
-  fs.mkdirSync(path.join(path.dirname(planPath), 'T01-ESCALATION.json'));
   const result = await withWorkingDirectory(basePath, () => handleCompleteTask({
     ...makeValidParams(),
-    blockerDiscovered: true,
     escalation: {
       question: 'Should execution pause for the hard blocker?',
       options: makeEscalationOptions(),
@@ -665,24 +667,19 @@ console.log('\n=== complete-task: escalation write failure preserves completion 
     },
   }, basePath));
 
-  assertTrue('error' in result, 'hard-blocker escalation write failure should return an error');
+  assertTrue('error' in result, 'an escalation on a Task without a canonical lifecycle should be rejected');
   if ('error' in result) {
-    assertMatch(result.error, /escalation write failed/, 'error should identify the escalation projection');
-    assertMatch(result.error, /completion remains committed/, 'error should report durable completion');
+    assertMatch(result.error, /escalation requires a canonical Task lifecycle for M001\/S01\/T01/, 'error should name the missing lifecycle');
   }
-  const task = getTask('M001', 'S01', 'T01');
-  assertEq(task?.status, 'complete', 'task completion should remain committed');
-  assertEq(task?.escalation_pending, 1, 'hard-blocker recovery intent should remain pending');
-  assertEq(task?.escalation_awaiting_review, 0, 'hard blocker should not be marked awaiting review');
-  assertMatch(task?.escalation_artifact_path ?? '', /T01-ESCALATION\.json$/, 'recovery intent should retain the artifact path');
+  assertEq(getTask('M001', 'S01', 'T01'), null, 'a rejected escalation should not create or complete the task');
   const evidence = _getAdapter()!.prepare(
     "SELECT COUNT(*) AS count FROM verification_evidence WHERE task_id = 'T01' AND slice_id = 'S01' AND milestone_id = 'M001'"
   ).get();
-  assertEq(evidence?.['count'], 1, 'verification evidence should remain committed');
-  const eventLogPath = path.join(basePath, '.gsd', 'event-log.jsonl');
-  const eventLog = fs.existsSync(eventLogPath) ? fs.readFileSync(eventLogPath, 'utf8') : '';
-  assertTrue(eventLog.length > 0, 'post-mutation event log should still be written');
-  assertMatch(eventLog, /"cmd":"complete-task"/, 'event log should record completion');
+  assertEq(evidence?.['count'], 0, 'a rejected escalation should not persist verification evidence');
+  assertTrue(
+    !fs.existsSync(path.join(path.dirname(planPath), 'T01-ESCALATION.json')),
+    'no escalation file should be written',
+  );
 
   cleanupDir(basePath);
   cleanup(dbPath);
@@ -808,6 +805,7 @@ console.log('\n=== complete-task: disabled soft escalation still completes ===')
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   const params = {
     ...makeValidParams(),
@@ -823,9 +821,6 @@ console.log('\n=== complete-task: disabled soft escalation still completes ===')
   const result = await withWorkingDirectory(basePath, () => handleCompleteTask(params, basePath));
 
   assertTrue(!('error' in result), 'soft escalation should still complete when escalation handling is disabled');
-  if (!('error' in result)) {
-    assertTrue(!result.escalation, 'disabled preference should not return escalation metadata');
-  }
 
   const task = getTask('M001', 'S01', 'T01');
   assertTrue(task !== null, 'task row should exist');
@@ -890,6 +885,7 @@ console.log('\n=== complete-task: handler idempotency ===');
   // Seed milestone + slice so state machine guards pass
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   const params = makeValidParams();
 
@@ -952,6 +948,7 @@ console.log('\n=== complete-task: handler with missing plan file ===');
   // Seed milestone + slice so state machine guards pass
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   const params = makeValidParams();
   const result = await handleCompleteTask(params, basePath);
@@ -982,6 +979,7 @@ console.log('\n=== complete-task: minimal params (no keyFiles, keyDecisions, ver
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   // Minimal params — only required fields, all optional enrichment fields omitted
   const minimalParams = {
@@ -1092,6 +1090,7 @@ console.log('\n=== complete-task: closes Q5/Q6/Q7 gates (pass vs omitted) ===');
 
   insertMilestone({ id: 'M001', title: 'Test Milestone' });
   insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
+  insertTask({ id: 'T01', sliceId: 'S01', milestoneId: 'M001', title: 'Test task', status: 'pending' });
 
   // Seed the three task-scoped gates as pending for T01.
   insertGateRow({ milestoneId: 'M001', sliceId: 'S01', gateId: 'Q5', scope: 'task', taskId: 'T01' });
@@ -1372,25 +1371,27 @@ console.log('\n=== complete-task: legacy completion preserves the planned task t
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// complete-task: legacy completion of an unplanned task keeps the one-liner as title
+// complete-task: legacy completion of a Task with no row is refused
 // ═══════════════════════════════════════════════════════════════════════════
 
-console.log('\n=== complete-task: legacy completion of an unplanned task keeps the one-liner as title ===');
+console.log('\n=== complete-task: legacy completion of a Task with no row is refused ===');
 {
   const dbPath = tempDbPath();
   openDatabase(dbPath);
 
   const { basePath } = createTempProject();
-  insertMilestone({ id: 'M001', title: 'Test Milestone' });
-  insertSlice({ id: 'S01', milestoneId: 'M001', title: 'Test Slice' });
 
   const result = await withWorkingDirectory(basePath, () => handleCompleteTask(makeValidParams(), basePath));
 
-  assertTrue(!('error' in result), 'completion of an unplanned task should still succeed');
-  const task = getTask('M001', 'S01', 'T01');
-  assertEq(task?.status, 'complete', 'unplanned task completion should insert a new row');
-  assertEq(task?.title, 'Added test functionality', 'a genuinely new row should take the one-liner as its title');
-  assertEq(task?.one_liner, 'Added test functionality', 'one_liner should match the one-liner');
+  assertTrue('error' in result, 'completion of a Task with no row should be refused');
+  if ('error' in result) {
+    assertMatch(result.error, /task M001\/S01\/T01 does not exist/, 'error should name the missing Task');
+  }
+  assertEq(getMilestone('M001'), null, 'the refused completion should insert no Milestone row');
+  assertEq(getSlice('M001', 'S01'), null, 'the refused completion should insert no Slice row');
+  assertEq(getTask('M001', 'S01', 'T01'), null, 'the refused completion should insert no Task row');
+  const evidence = _getAdapter()!.prepare('SELECT COUNT(*) AS count FROM verification_evidence').get();
+  assertEq(evidence?.['count'], 0, 'the refused completion should insert no verification evidence');
 
   cleanupDir(basePath);
   cleanup(dbPath);

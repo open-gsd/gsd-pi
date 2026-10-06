@@ -16,6 +16,7 @@ import {
   markToolStart,
 } from "../auto-tool-tracking.ts";
 import { clearGSDPreferencesCache } from "../preferences.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import { readUnitRuntimeRecord, writeUnitRuntimeRecord } from "../unit-runtime.ts";
 
 const SUPERVISOR_PREFS = [
@@ -42,6 +43,8 @@ function makeHarness(): Harness {
   process.env.GSD_HOME = home;
   writeFileSync(join(home, "preferences.md"), ["---", ...SUPERVISOR_PREFS, "---", ""].join("\n"));
   clearGSDPreferencesCache();
+  // The unit runtime record the watchdog reads is a database row.
+  openDatabase(":memory:");
 
   const notifications: string[] = [];
   const ctx = {
@@ -78,7 +81,7 @@ function makeHarness(): Harness {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: 0,
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     }),
     pauseAuto: async () => {},
   };
@@ -95,6 +98,7 @@ function cleanup(h: Harness): void {
   mock.timers.reset();
   clearInFlightTools();
   clearGSDPreferencesCache();
+  closeDatabase();
   if (h.previousGsdHome === undefined) delete process.env.GSD_HOME;
   else process.env.GSD_HOME = h.previousGsdHome;
   rmSync(h.home, { recursive: true, force: true });

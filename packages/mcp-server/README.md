@@ -92,12 +92,12 @@ The workflow MCP surface includes:
 - `gsd_replan_slice`
 - `gsd_replan_task`
 - `gsd_rework_brief_save`
+- `gsd_checkpoint_save`
 - `gsd_slice_complete`
 - `gsd_skip_slice`
 - `gsd_complete_milestone`
 - `gsd_validate_milestone`
 - `gsd_prepare_milestone_subjective_uat`
-- `gsd_answer_milestone_subjective_uat`
 - `gsd_reassess_roadmap`
 - `gsd_save_gate_result`
 - `gsd_summary_save`
@@ -106,6 +106,14 @@ The workflow MCP surface includes:
 - `gsd_task_recovery_resume`
 - `gsd_slice_reopen`
 - `gsd_milestone_reopen`
+- `gsd_milestone_park`
+- `gsd_milestone_unpark`
+- `gsd_milestone_discard`
+- `gsd_milestone_reorder`
+- `gsd_milestone_set_dependencies`
+- `gsd_research_decision_save`
+- `gsd_capture_resolve`
+- `gsd_capture_complete`
 - `gsd_milestone_status`
 - `gsd_checkpoint_db`
 - `gsd_journal_query`
@@ -120,13 +128,15 @@ When workflow bridges are enabled, the packaged MCP server advertises only the c
 
 These tools use the same GSD workflow handlers as the native in-process tool path wherever a shared handler exists.
 
-Durable workflow mutations are atomic and replay-safe where they cross the canonical lifecycle boundary. Planning mutations (`gsd_plan_milestone`, `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, `gsd_replan_task`, and `gsd_reassess_roadmap`), task execution completion (`gsd_task_complete` / `gsd_complete_task`), repaired recovery resumption (`gsd_task_recovery_resume`), and adopted-Milestone validation, subjective UAT, completion, or reopen (`gsd_validate_milestone`, `gsd_prepare_milestone_subjective_uat`, `gsd_answer_milestone_subjective_uat`, `gsd_complete_milestone`, and `gsd_milestone_reopen`) prefer a nonblank private `_meta["io.opengsd/idempotency-key"]` value. A retry must resend the same value across requests and server processes. Claude Code clients may instead rely on the private `_meta["claudecode/toolUseId"]` value that Claude Code preserves across its MCP session-recovery retry; the server places that value in a reserved transport namespace. An explicit OpenGSD key takes precedence, and a malformed explicit key fails closed instead of falling back. Requests without either replay-stable identity fail before mutation. Subjective UAT answers additionally require an authenticated MCP session identity. This metadata is not a tool parameter and does not change the public tool schema or response. Canonical names and compatibility aliases resolve to the same operation identity.
+Durable workflow mutations are atomic and replay-safe where they cross the canonical lifecycle boundary. Planning mutations (`gsd_plan_milestone`, `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, `gsd_replan_task`, and `gsd_reassess_roadmap`), decision saves (`gsd_decision_save` / `gsd_save_decision`), requirement saves and updates (`gsd_requirement_save`, `gsd_requirement_update` and their aliases), gate results (`gsd_save_gate_result`), rework briefs (`gsd_rework_brief_save`), memory captures (`gsd_capture_thought`), artifact saves (`gsd_summary_save` / `gsd_save_summary`), UAT results (`gsd_uat_result_save`), task execution completion (`gsd_task_complete` / `gsd_complete_task`), repaired recovery resumption (`gsd_task_recovery_resume`), adopted-Milestone validation, subjective UAT, completion, or reopen (`gsd_validate_milestone`, `gsd_prepare_milestone_subjective_uat`, `gsd_complete_milestone`, and `gsd_milestone_reopen`), and Milestone ID generation, park, unpark, discard, reorder, and dependency changes (`gsd_milestone_generate_id` / `gsd_generate_milestone_id`, `gsd_milestone_park`, `gsd_milestone_unpark`, `gsd_milestone_discard`, `gsd_milestone_reorder`, and `gsd_milestone_set_dependencies`) prefer a nonblank private `_meta["io.opengsd/idempotency-key"]` value. A retry must resend the same value across requests and server processes. Claude Code clients may instead rely on the private `_meta["claudecode/toolUseId"]` value that Claude Code preserves across its MCP session-recovery retry; the server places that value in a reserved transport namespace. An explicit OpenGSD key takes precedence, and a malformed explicit key fails closed instead of falling back. Requests without either replay-stable identity fail before mutation. A subjective UAT answer has no MCP tool: only the user records it, with `/gsd uat-answer` in the terminal UI. A session that `gsd_execute` starts refuses that command. This metadata is not a tool parameter and does not change the public tool schema or response. Canonical names and compatibility aliases resolve to the same operation identity.
+
+Workflow mutations are fenced against a stale view. The server keeps, per MCP session and project, the project revision that the last `gsd_milestone_status` or `gsd_project_snapshot` call returned. The next mutation of that session fails with `stale view: the project changed after this session last read it` when another writer moved the revision after that read. A stored `ask_user_questions` round moves the revision but changes no state that the session read, so it does not make the view stale. Read the status again, then retry. A session that has not read since its last write uses the current revision. The revision is server-side state, not a tool parameter, and a replay of a committed request is not checked.
 
 `gsd_task_recovery_resume` is a repair command exposed to `execute-task`, not an ordinary task-completion tool. It requires the exact current agent-owned `abort` or `remediate` `recoveryActionId`, a plain-language `repairSummary`, and non-empty structured `evidence`. It appends an immutable repair checkpoint and authorizes one lineage-linked Task Attempt; it does not delete the Recovery Action, reset its budget, mark the Task skipped, or authorize later Attempts.
 
 **Opt-in aliases (kept for backwards compatibility — prefer the canonical name above):** `gsd_save_decision`, `gsd_update_requirement`, `gsd_save_requirement`, `gsd_save_summary`, `gsd_generate_milestone_id`, `gsd_milestone_plan`, `gsd_slice_plan`, `gsd_task_plan`, `gsd_slice_replan`, `gsd_complete_task`, `gsd_complete_slice`, `gsd_milestone_validate`, `gsd_milestone_complete`, `gsd_roadmap_reassess`, `gsd_reopen_task`, `gsd_reopen_slice`, `gsd_reopen_milestone`.
 
-`gsd_decision_save` persists new decisions to the ADR-013 memory store, not to the legacy `decisions` table. If alias advertising is enabled, `gsd_save_decision` delegates to the same behavior. The assigned `D###` ID is recorded in `memories.structured_fields.sourceDecisionId`, and `.gsd/DECISIONS.md` is refreshed as a projection from memory-backed decisions. The legacy table may still be read by compatibility and inspection paths during the cutover window, but it is no longer a write target.
+`gsd_decision_save` persists new decisions to the ADR-013 memory store, not to the legacy `decisions` table. If alias advertising is enabled, `gsd_save_decision` delegates to the same behavior. The assigned `D###` ID is recorded in `memories.structured_fields.sourceDecisionId`, and `.gsd/DECISIONS.md` is refreshed as a projection from memory-backed decisions. To replace an earlier decision, set the optional `supersedes` field to its `D###` ID: the old decision is marked superseded in the same operation, and only an active decision can be superseded. The legacy table may still be read by compatibility and inspection paths during the cutover window, but it is no longer a write target.
 
 `gsd_summary_save` computes artifact paths from the supplied IDs. `milestone_id` is required for milestone-, slice-, and task-scoped artifact types (`SUMMARY`, `RESEARCH`, `CONTEXT`, `ASSESSMENT`, `CONTEXT-DRAFT`) and should be omitted only for root-level `PROJECT`, `PROJECT-DRAFT`, `REQUIREMENTS`, and `REQUIREMENTS-DRAFT` artifacts. The `content` field has a schema `maxLength` of 50,000 characters per save; callers that produce larger artifacts should save incrementally by writing a substantive draft, then re-save the enriched artifact as more detail is available. For final `REQUIREMENTS` saves, the tool renders content from active database requirement rows; callers must create those rows with `gsd_requirement_save` first.
 
@@ -139,6 +149,8 @@ Planning and replanning never physically delete adopted work. Tasks removed by `
 `gsd_rework_brief_save` persists structured rework findings for a task. `projectDir` is optional; required parameters are `milestoneId`, `sliceId`, `taskId`, and a non-empty `findings` array. Each finding requires `findingId`, `severity` (`blocking` or `advisory`), `description`, `requiredFix`, and `verificationCommands`; optional fields are `status`, `evidence`, and `decisionRef`.
 
 Blocking findings saved by `gsd_rework_brief_save` gate `gsd_task_complete`. To complete the task, the `gsd_task_complete` call must include a `reworkResolution` entry for each pending blocking `findingId` with `status: "resolved"` and non-empty `evidence`. Deferred findings must use `status: "deferred-with-override"` with non-empty `evidence` and a `decisionRef`.
+
+`gsd_checkpoint_save` saves a Work Checkpoint row for a milestone, slice or task. `projectDir` is optional; required parameters are `milestoneId`, `kind` (`pause` or `handoff`), `confirmedContext`, and `nextAction`; optional fields are `sliceId`, `taskId`, `unresolved`, and `evidence`. The row is the resume state: the next session reads it from the database. `CONTINUE.md` is rendered from the row and is never read back.
 
 For canonical auto-mode task execution, `gsd_task_complete` stages the executor result for the running Attempt instead of publishing task completion immediately. A successful call returns `details.attemptId`, `details.resultId`, `details.summaryPath`, and `details.nextStage`; `nextStage: "verify"` means the host must still run technical verification before completion is published, while `nextStage: "route"` means the executor reported a blocker or failed result that should be routed for recovery. After host verification records a passing Technical Verdict for the same source revision, auto mode publishes the task completion and refreshes the summary and plan projections. MCP clients should call this tool only for the active task Attempt they are executing; calls without a running or replay-matched canonical Attempt fail instead of falling back to legacy completion.
 
@@ -166,6 +178,8 @@ Configured workflow startup remains fail-closed: `gsd-mcp-server` loads the work
 
 The server also keeps a per-project PID registry at `$GSD_HOME/mcp-instances.json` (default `~/.gsd/mcp-instances.json`). On startup it terminates a previously registered `gsd-mcp-server` process for the same project when the saved PID still belongs to an MCP server, then records the current PID. On normal shutdown it removes only its own entry. Corrupt registry files are preserved as `.corrupt-<timestamp>` backups before a new registry is written.
 
+When the recorded holder is alive but cannot be verified as this project's server (its working directory or command line does not match the registered project root), startup is refused and the refusal names the holder's PID, working directory, and the `startedAt` timestamp recorded in the registry when the holder registered (not the OS process start time). The remedy: kill the holder if it is stale, or restart with `GSD_MCP_CLIENT_MANAGED=1` to skip the per-project registry.
+
 For stdio hosts that leave child processes behind, the server watches stdin activity. If stdin is idle for five minutes and the original parent process is gone, it cleans up sessions, unregisters its PID, and exits.
 
 ### `gsd_execute`
@@ -180,6 +194,8 @@ Start a GSD auto-mode session for a project directory.
 | `bare` | `boolean` | | Run in bare mode (skip user config) |
 
 **Returns:** `{ sessionId, status: "started" }`
+
+Session lifetime: a session started through `gsd_execute` lives inside the server process, which is connected to one MCP client — when that client's connection closes, the server shuts down and stops the session's process, so a run started this way may end before completing. The success result therefore carries `lifetime: "client-connection"` with that guidance (the tool description says the same), and auto runs that must outlive the connection should be started from a durable long-lived host (for example a TUI or the daemon) instead. `GSD_MCP_CLIENT_MANAGED=1` does not change this lifetime; it only omits the disclosure for clients that own the server's lifecycle themselves.
 
 ### `gsd_status`
 
@@ -247,37 +263,50 @@ Cancel the active session for a project directory when `sessionId` is unavailabl
 
 ### `gsd_query`
 
-Query GSD project state from the filesystem without an active session. Returns STATE.md, PROJECT.md, requirements, and milestone listing.
+Query GSD project state without an active session. Returns the state, project and requirements documents and the milestone listing.
+
+When the GSD runtime is available, the tool reads the workflow database: the documents are built from database rows and each milestone has its `title` and `status`. When the project has no openable database, the tool reads the `.gsd/` files and `readMetadata` says so. `gsd_roadmap`, `gsd_doctor` and the `gsd_graph` build follow the same rule and also return `readMetadata`.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `projectDir` | `string` | ✅ | Absolute path to the project directory |
-| `query` | `string` | ✅ | What to query (e.g. `"status"`, `"milestones"`) |
+| `query` | `string` | | Narrow the response: `"state"`/`"status"`, `"project"`, `"requirements"`, `"milestones"` or `"all"` (default) |
 
 **Returns:**
 
 ```json
 {
   "projectDir": "/path/to/project",
+  "query": "all",
   "state": "...",
   "project": "...",
   "requirements": "...",
   "milestones": [
-    { "id": "M001", "hasRoadmap": true, "hasSummary": false }
-  ]
+    { "id": "M001", "title": "Foundation", "status": "active", "hasRoadmap": true, "hasSummary": false }
+  ],
+  "readMetadata": { "source": "database", "authority": "db-authoritative" }
 }
 ```
 
+The projection fallback returns `readMetadata: { "source": "projection", "authority": "projection-fallback" }` and milestones without `title` and `status`.
+
 ### `gsd_resolve_blocker`
 
-Resolve a pending blocker in a session by sending a response to the blocked UI request.
+Resolve a pending blocker. There are two kinds:
+
+- A UI request that a live session waits on. Pass `sessionId`. This blocker exists only while the session runs.
+- An open escalation in the project database. Pass `projectDir`. This blocker is a database row, so the call needs no session and works after a server restart. `gsd_project_snapshot` lists it under `openQuestions`. The database is used only when `projectDir` is given: a call with only `sessionId` never resolves an escalation, and with both parameters `sessionId` is not used.
+
+To resolve an escalation is a workflow mutation. The server refuses it while a discussion gate waits for the user and in queue mode. The request must carry the replay-stable `_meta` identity of a workflow mutation (see [Workflow tools](#workflow-tools)). The answer and its decision record the MCP caller: transport `workflow-mcp`, actor `agent`, and `made_by: agent`. Only `/gsd escalate resolve` records a response from the user.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `sessionId` | `string` | ✅ | Session ID from `gsd_execute` |
-| `response` | `string` | ✅ | Response to send for the pending blocker |
+| `sessionId` | `string` | | Session ID from `gsd_execute` |
+| `projectDir` | `string` | | Absolute path to the project directory. Give `sessionId` or `projectDir` |
+| `questionId` | `string` | | The open question to resolve. Required only when more than one escalation is open |
+| `response` | `string` | ✅ | Response for the pending blocker. For an escalation: `<choice> [rationale]`, where choice is an option id, `accept`, or `reject-blocker` |
 
-**Returns:** `{ resolved: true }`
+**Returns:** `{ resolved: true }` for a session blocker. For an escalation: `{ resolved: true, source: "database", status, message, questionId, milestoneId, sliceId, taskId, decisionId }`.
 
 ## Environment Variables
 
@@ -287,6 +316,7 @@ Resolve a pending blocker in a session by sending a response to the blocked UI r
 | `GSD_WORKFLOW_EXECUTORS_MODULE` | Optional absolute path or `file:` URL for the shared GSD workflow executor module used by workflow mutation tools. |
 | `GSD_WORKFLOW_WRITE_GATE_MODULE` | Optional absolute path or `file:` URL for the shared write-gate module used by workflow mutation tools. |
 | `GSD_WORKFLOW_PROJECT_ROOT` | Canonical project root for workflow tools and the per-project MCP PID registry key. Defaults to the server's current working directory. |
+| `GSD_MCP_CLIENT_MANAGED` | Set to literal `1` to keep this server out of the per-project PID registry: startup skips the orphan sweep, registration, and unregister-on-shutdown. Use this when the MCP client manages server lifetimes itself and may run more than one server for the same project; it is also the way to start a second server for a project whose registry slot is held by another process. |
 | `GSD_MCP_ADVERTISE_ALIASES` | Set to literal `1` to include legacy workflow aliases in the packaged MCP server's `tools/list`. When workflow bridges are enabled, leaving it unset exposes canonical workflow names only. |
 | `GSD_MCP_HIDE_ALIASES` | Legacy force-hide switch. Set to literal `1` to keep packaged MCP aliases hidden even when `GSD_MCP_ADVERTISE_ALIASES=1`. |
 | `GSD_ADVERTISE_TOOL_ALIASES` | Set to literal `1` to register legacy workflow aliases on the native in-process GSD tool surface. This does not affect the packaged MCP server; use `GSD_MCP_ADVERTISE_ALIASES` for `gsd-mcp-server`. |

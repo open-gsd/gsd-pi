@@ -26,6 +26,7 @@ import {
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import type { DomainOperationContext } from "../db/domain-operation.ts";
 import { resolveDeepProjectSetupState } from "../deep-project-setup-policy.ts";
+import { isWorkflowPreferencesCaptured } from "../project-setup-facts.ts";
 import type { GSDPreferences } from "../preferences.ts";
 import { deriveState, invalidateStateCache } from "../state.ts";
 import { renderPlanFromDb } from "../markdown-renderer.ts";
@@ -417,9 +418,9 @@ function makeExecutingFixture(): string {
 
 function missingTaskPlanRuleMatch(basePath: string, preview: boolean) {
   const rule = DISPATCH_RULES.find((candidate) =>
-    candidate.name === "executing → execute-task (recover missing task plan → plan-slice)"
+    candidate.name === "executing → execute-task (render missing plan projection)"
   );
-  assert.ok(rule, "missing-task-plan recovery rule must exist");
+  assert.ok(rule, "missing-plan projection rule must exist");
   return rule.match({
     basePath,
     mid: "M001",
@@ -479,69 +480,58 @@ describe("dispatch preview purity: missing-task-plan PLAN projection (#2230)", (
   });
 });
 
-// ─── Deep project setup: self-heal purity (#2230) ──────────────────────────
+// ─── Deep project setup: workflow-preferences purity (#2230) ───────────────
 
 const deepPrefs = { planning_depth: "deep" } as GSDPreferences;
+const PREFS_RULE_NAME = "deep: pre-planning (no workflow prefs) → workflow-preferences";
+const UNCAPTURED_PREFS = "---\nplanning_depth: deep\n---\n";
 
-function makeDeepFixture(opts: { prefsCaptured: boolean; withMarker: boolean }): string {
-  const base = mkdtempSync(join(tmpdir(), "dispatch-preview-deep-"));
-  mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
-  writeFileSync(
-    join(base, ".gsd", "PREFERENCES.md"),
-    `---\nplanning_depth: deep${opts.prefsCaptured ? "\nworkflow_prefs_captured: true" : ""}\n---\n`,
-  );
-  writeFileSync(join(base, ".gsd", "PROJECT.md"), validProject);
-  writeFileSync(join(base, ".gsd", "REQUIREMENTS.md"), validRequirements);
-  if (opts.withMarker) {
-    writeFileSync(
-      join(base, ".gsd", "runtime", "research-decision.json"),
-      JSON.stringify({ decision: "skip", source: "workflow-preferences" }),
-    );
-  }
-  return base;
-}
+describe("dispatch preview purity: deep workflow preferences (#2230)", () => {
+  let base: string;
 
-describe("dispatch preview purity: deep setup self-heal (#2230)", () => {
-  const fixtures: string[] = [];
+  beforeEach(() => {
+    base = mkdtempSync(join(tmpdir(), "dispatch-preview-deep-"));
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), UNCAPTURED_PREFS);
+    assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
+  });
 
   afterEach(() => {
-    for (const dir of fixtures) rmSync(dir, { recursive: true, force: true });
-    fixtures.length = 0;
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
   });
 
-  test("preview does not self-heal workflow prefs; decision matches the real turn", () => {
-    fixtures.push(makeDeepFixture({ prefsCaptured: false, withMarker: true }));
-    const previewState = resolveDeepProjectSetupState(deepPrefs, fixtures[0], true);
-    const prefsAfterPreview = readFileSync(join(fixtures[0], ".gsd", "PREFERENCES.md"), "utf-8");
+  async function matchPrefsRule(preview: boolean) {
+    const rule = DISPATCH_RULES.find((candidate) => candidate.name === PREFS_RULE_NAME);
+    assert.ok(rule, "workflow-preferences rule must exist");
+    return rule.match({
+      basePath: base,
+      mid: "PROJECT",
+      midTitle: "Project setup",
+      state: {
+        phase: "pre-planning",
+        activeMilestone: null,
+        activeSlice: null,
+        activeTask: null,
+        recentDecisions: [],
+        blockers: [],
+        nextAction: "",
+        registry: [],
+      },
+      prefs: deepPrefs,
+      preview,
+    });
+  }
 
-    fixtures.push(makeDeepFixture({ prefsCaptured: false, withMarker: true }));
-    const realState = resolveDeepProjectSetupState(deepPrefs, fixtures[1], false);
-    const prefsAfterReal = readFileSync(join(fixtures[1], ".gsd", "PREFERENCES.md"), "utf-8");
+  test("preview neither writes the preference defaults nor records the stage; the real turn does both", async () => {
+    assert.equal(await matchPrefsRule(true), null);
+    assert.equal(readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8"), UNCAPTURED_PREFS);
+    assert.equal(isWorkflowPreferencesCaptured(), false, "preview must not record the stage");
+    assert.equal(resolveDeepProjectSetupState(deepPrefs, base).stage, "workflow-preferences");
 
-    assert.deepEqual(
-      { status: previewState.status, stage: previewState.stage, reason: previewState.reason },
-      { status: realState.status, stage: realState.stage, reason: realState.reason },
-      "preview decision must equal the real turn's",
-    );
-    assert.match(prefsAfterReal, /workflow_prefs_captured: true/, "real turn heals the prefs flag");
-    assert.doesNotMatch(prefsAfterPreview, /workflow_prefs_captured/, "preview must not heal the prefs flag");
-  });
-
-  test("preview does not write the default research marker; decision matches the real turn", () => {
-    fixtures.push(makeDeepFixture({ prefsCaptured: true, withMarker: false }));
-    const previewState = resolveDeepProjectSetupState(deepPrefs, fixtures[0], true);
-    const markerAfterPreview = existsSync(join(fixtures[0], ".gsd", "runtime", "research-decision.json"));
-
-    fixtures.push(makeDeepFixture({ prefsCaptured: true, withMarker: false }));
-    const realState = resolveDeepProjectSetupState(deepPrefs, fixtures[1], false);
-    const markerAfterReal = existsSync(join(fixtures[1], ".gsd", "runtime", "research-decision.json"));
-
-    assert.deepEqual(
-      { status: previewState.status, stage: previewState.stage, reason: previewState.reason },
-      { status: realState.status, stage: realState.stage, reason: realState.reason },
-      "preview decision must equal the real turn's",
-    );
-    assert.equal(markerAfterReal, true, "real turn writes the default skip marker");
-    assert.equal(markerAfterPreview, false, "preview must not write the default skip marker");
+    assert.equal(await matchPrefsRule(false), null);
+    assert.match(readFileSync(join(base, ".gsd", "PREFERENCES.md"), "utf-8"), /commit_policy: per-task/);
+    assert.equal(isWorkflowPreferencesCaptured(), true);
+    assert.equal(resolveDeepProjectSetupState(deepPrefs, base).stage, "project");
   });
 });

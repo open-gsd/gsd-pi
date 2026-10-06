@@ -13,8 +13,8 @@
 //   - `discuss-slice` and `execute-task-simple` had tool contracts and scope-Set
 //     membership but were absent from `KNOWN_UNIT_TYPES` → declared here as
 //     `kind: "variant"` (excluded from the derived `KNOWN_UNIT_TYPES`/`UnitType`).
-//   - `triage-captures` and `quick-task` had manifests but no tool contract and
-//     no phase routing → `toolContract: null`, `phaseChain: null`.
+//   - `triage-captures` and `quick-task` had manifests but no phase routing →
+//     `phaseChain: null`.
 // The parity test (tests/unit-registry.test.ts) pins every derived view to the
 // pre-registry values.
 //
@@ -151,6 +151,8 @@ export const UNIT_REGISTRY = {
         "gsd_requirement_update",
         "gsd_plan_milestone",
         "gsd_milestone_generate_id",
+        "gsd_milestone_set_dependencies",
+        "gsd_checkpoint_save",
       ],
       requiredWorkflowTools: [
         "ask_user_questions",
@@ -342,6 +344,7 @@ export const UNIT_REGISTRY = {
         "gsd_resume",
         "gsd_capture_thought",
         "gsd_decision_save",
+        "gsd_checkpoint_save",
       ],
       requiredWorkflowTools: [
         "gsd_task_complete",
@@ -374,6 +377,7 @@ export const UNIT_REGISTRY = {
         "gsd_resume",
         "gsd_capture_thought",
         "gsd_decision_save",
+        "gsd_checkpoint_save",
       ],
       requiredWorkflowTools: [
         "gsd_task_complete",
@@ -431,23 +435,35 @@ export const UNIT_REGISTRY = {
     phaseChain: ["validation", "planning"],
     promptTemplate: "rewrite-docs",
     toolContract: {
-      allowedGsdTools: ["gsd_summary_save", "gsd_decision_save"],
+      allowedGsdTools: [
+        "gsd_plan_slice",
+        "gsd_plan_task",
+        "gsd_requirement_update",
+        "gsd_summary_save",
+        "gsd_decision_save",
+      ],
       requiredWorkflowTools: [],
     },
   },
-  // Sidecar units (triage, quick-task) — manifests exist, but no scoped tool
-  // contract and no phase routing (today's behaviour, preserved explicitly).
+  // Sidecar units (triage, quick-task) — no phase routing. Each one has the
+  // one capture tool that records its outcome in the database.
   "triage-captures": {
     kind: "primary",
     scopeClass: "standard",
     phaseChain: null,
-    toolContract: null,
+    toolContract: {
+      allowedGsdTools: ["gsd_capture_resolve", "gsd_exec", "gsd_exec_search", "gsd_resume"],
+      requiredWorkflowTools: ["gsd_capture_resolve"],
+    },
   },
   "quick-task": {
     kind: "primary",
     scopeClass: "standard",
     phaseChain: null,
-    toolContract: null,
+    toolContract: {
+      allowedGsdTools: ["gsd_capture_complete", "gsd_exec", "gsd_exec_search", "gsd_resume"],
+      requiredWorkflowTools: ["gsd_capture_complete"],
+    },
   },
   // Deep planning mode (project-level) units
   "workflow-preferences": {
@@ -466,7 +482,7 @@ export const UNIT_REGISTRY = {
     phaseChain: ["discuss", "planning"],
     promptTemplate: "guided-discuss-project",
     toolContract: {
-      allowedGsdTools: ["gsd_summary_save", "gsd_decision_save", "gsd_requirement_save"],
+      allowedGsdTools: ["gsd_summary_save", "gsd_decision_save", "gsd_requirement_save", "gsd_research_decision_save"],
       requiredWorkflowTools: ["ask_user_questions", "gsd_summary_save"],
     },
   },
@@ -476,18 +492,8 @@ export const UNIT_REGISTRY = {
     phaseChain: ["discuss", "planning"],
     promptTemplate: "guided-discuss-requirements",
     toolContract: {
-      allowedGsdTools: ["gsd_requirement_save", "gsd_summary_save"],
+      allowedGsdTools: ["gsd_requirement_save", "gsd_summary_save", "gsd_research_decision_save"],
       requiredWorkflowTools: ["ask_user_questions", "gsd_requirement_save", "gsd_summary_save"],
-    },
-  },
-  "research-decision": {
-    kind: "primary",
-    scopeClass: "standard",
-    phaseChain: ["discuss", "planning"],
-    promptTemplate: "guided-research-decision",
-    toolContract: {
-      allowedGsdTools: ["gsd_summary_save"],
-      requiredWorkflowTools: ["ask_user_questions"],
     },
   },
   // research-project dispatches 4 parallel scout subagents (Task calls); each scout

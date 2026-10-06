@@ -29,6 +29,13 @@ import { completeMilestone } from "../milestone-lifecycle-domain-operation.ts";
 import { clearPathCache } from "../paths.ts";
 import { handleValidateMilestone } from "../tools/validate-milestone.ts";
 import { captureVerificationSourceSnapshot } from "../verification-source-integrity.ts";
+import {
+  getActiveWorkers,
+  registerHostTaskWorker,
+  registerWorker,
+  resetWorkerRegistry,
+  updateWorker,
+} from "../../subagent/worker-registry.ts";
 
 const fakeTheme = {
   fg: (_color: string, text: string) => text,
@@ -285,3 +292,143 @@ function makeUnit(id: string, cost: number): UnitMetrics {
     userMessages: 1,
   };
 }
+
+// ─── Parallel worker identity rows (#2396) ────────────────────────────────────
+
+const ansiRegex = /\x1b\[[0-9;]*m/g;
+
+test("parallel worker rows show each child's requested model and thinking (#2396)", (t) => {
+  resetWorkerRegistry();
+  t.after(() => resetWorkerRegistry());
+
+  const overlay = new GSDDashboardOverlay({ requestRender() {} }, fakeTheme as any, () => {});
+  t.after(() => overlay.dispose());
+
+  registerWorker("scout", "Explore the codebase", 0, 2, "batch-a", { model: "gpt-5.6-sol", thinking: "high" });
+  registerWorker("release-engineer", "Ship the release", 1, 2, "batch-a", { model: "gpt-5.6-luna", thinking: "medium" });
+
+  const lines = overlay.render(120);
+  const text = lines.join("\n");
+  assert.match(text, /scout · gpt-5.6-sol · high/, "first child shows its own model/thinking");
+  assert.match(text, /release-engineer · gpt-5.6-luna · medium/, "second child shows its own model/thinking");
+  assert.match(text, /running /, "running elapsed still shown");
+});
+
+test("completed and failed worker rows keep attribution with deterministic elapsed (#2396)", async (t) => {
+  resetWorkerRegistry();
+  t.after(() => resetWorkerRegistry());
+
+  const overlay = new GSDDashboardOverlay({ requestRender() {} }, fakeTheme as any, () => {});
+  t.after(() => overlay.dispose());
+
+  // Mixed batch: the workers section renders only while some worker runs.
+  const id1 = registerWorker("scout", "Done task", 0, 3, "batch-b", { model: "gpt-5.6-sol", thinking: "high" });
+  const id2 = registerWorker("release-engineer", "Failed task", 1, 3, "batch-b", { model: "gpt-5.6-luna", thinking: "medium" });
+  registerWorker("worker", "Still running", 2, 3, "batch-b");
+  updateWorker(id1, "completed");
+  updateWorker(id2, "failed");
+
+  // Pin timestamps: elapsed must come from startedAt/completedAt, not the wall clock.
+  const w1 = getActiveWorkers().find(w => w.id === id1)!;
+  const w2 = getActiveWorkers().find(w => w.id === id2)!;
+  w1.startedAt = 1000;
+  w1.completedAt = 101000; // 100s
+  w2.startedAt = 2000;
+  w2.completedAt = 20000; // 18s
+
+  const lines = overlay.render(120);
+  const text = lines.join("\n");
+  assert.match(text, /1m 40s/, "completed child shows completedAt-based elapsed");
+  assert.match(text, /failed after 18s/, "failed child shows failed-after elapsed");
+  // Deterministic: rebuilding (cache invalidated, wall clock advanced) shows the
+  // same durations because elapsed comes from startedAt/completedAt, not Date.now().
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  overlay.invalidate();
+  const again = overlay.render(120).join("\n");
+  assert.match(again, /1m 40s/, "completed elapsed does not drift after render");
+  assert.match(again, /failed after 18s/, "failed elapsed does not drift after render");
+});
+
+test("host task batch header counts expired terminal rows via batch stats (#2533)", (t) => {
+  resetWorkerRegistry();
+  t.after(() => resetWorkerRegistry());
+  const clock = t.mock.timers;
+  clock.enable({ apis: ["setTimeout"] });
+  t.after(() => clock.reset());
+
+  const overlay = new GSDDashboardOverlay({ requestRender() {} }, fakeTheme as any, () => {});
+  t.after(() => overlay.dispose());
+
+  const early = registerHostTaskWorker({ batchId: "cc-stats", agent: "local_agent", task: "Done early" });
+  registerHostTaskWorker({ batchId: "cc-stats", agent: "local_agent", task: "Still running" });
+  updateWorker(early, "completed");
+  clock.tick(5001); // the completed row ages out of the registry
+
+  const lines = overlay.render(120);
+  const text = lines.join("\n");
+  assert.match(text, /1\/2 done/, "the expired completion must keep its count in the header");
+  assert.match(text, /Still running/, "the running row still renders");
+});
+
+test("parallel worker rows render legacy workers without identity fields (#2396)", (t) => {  resetWorkerRegistry();
+  t.after(() => resetWorkerRegistry());
+
+  const overlay = new GSDDashboardOverlay({ requestRender() {} }, fakeTheme as any, () => {});
+  t.after(() => overlay.dispose());
+
+  registerWorker("scout", "Legacy task", 0, 1, "batch-c");
+
+  const lines = overlay.render(120);
+  const text = lines.join("\n");
+  assert.match(text, /scout/, "agent row still renders");
+  assert.match(text, /running /, "elapsed still renders without model/thinking");
+  assert.doesNotMatch(text, /· ·/, "no dangling separators");
+});
+
+test("parallel worker rows stay within terminal width with identity (#2396)", (t) => {
+  resetWorkerRegistry();
+  t.after(() => resetWorkerRegistry());
+
+  const overlay = new GSDDashboardOverlay({ requestRender() {} }, fakeTheme as any, () => {});
+  t.after(() => overlay.dispose());
+
+  registerWorker(
+    "scout",
+    "very long task description ".repeat(12),
+    0,
+    1,
+    "batch-d",
+    { model: "openrouter/auto · anthropic/claude-opus-4.7-with-a-very-long-name", thinking: "xhigh" },
+  );
+
+  const width = 60;
+  const lines = overlay.render(width);
+  assert.ok(lines.length > 0, "overlay rendered");
+  const text = lines.join("\n");
+  // Elapsed outranks the task preview: it must survive truncation.
+  assert.match(text, /running \d/, "elapsed stays visible at narrow width");
+  for (const line of lines) {
+    const visible = line.replace(ansiRegex, "");
+    assert.ok(
+      visible.length <= width,
+      `line exceeds width ${width}: ${JSON.stringify(visible)}`,
+    );
+  }
+
+  // Wide (CJK) agent names measured by display width, plus the preview separator,
+  // must not push elapsed out of the row.
+  registerWorker("調査担当調査担当", "very long task description ".repeat(8), 1, 2, "batch-d", {
+    model: "gpt-5.6-sol",
+    thinking: "high",
+  });
+  overlay.invalidate();
+  for (const w of [width, 80, 120]) {
+    const wideLines = overlay.render(w);
+    const wideText = wideLines.join("\n");
+    assert.match(wideText, /running \d/, `elapsed visible at width ${w} with CJK agent`);
+    for (const line of wideLines) {
+      const visible = line.replace(ansiRegex, "");
+      assert.ok(visible.length <= w, `line exceeds width ${w}: ${JSON.stringify(visible)}`);
+    }
+  }
+});

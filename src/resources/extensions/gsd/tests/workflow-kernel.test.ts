@@ -8,7 +8,6 @@ import {
   decideCooldownRecovery,
   decideCustomEngineRecovery,
   decideCustomEngineVerifyRetry,
-  decideDispatchNodeKind,
   decideDispatchClaim,
   decideEngineDispatch,
   decideEngineReconcile,
@@ -257,6 +256,46 @@ test("decideFinalizeResult strips per-attempt suffixes for stable repeat-error d
     action: "retry",
     ledgerErrorSummary: `finalize-retry: ${base}`,
   });
+});
+
+// ── #2046: refusal-vs-retry classification in finalize ──────────────────────
+//
+// A `*VERIFICATION-FAILED` / `*CLOSEOUT-VERIFICATION-FAILED` marker is a
+// deliberate closeout refusal: identical-input retry is a deterministic no-op
+// that only burns the retry budget until the ADR-047 backstop trips. A
+// refusal-flagged continue must stop (failureClass "refusal") instead of
+// retrying; the unflagged default keeps the retry behavior.
+
+test("decideFinalizeResult stops with failureClass refusal for refusal-flagged continues (#2046)", () => {
+  assert.deepEqual(
+    decideFinalizeResult({ action: "continue", refusal: true }),
+    { action: "stop", failureClass: "refusal", ledgerErrorSummary: "finalize-refusal", turnError: "finalize-break" },
+  );
+  // The failure detail is carried with a distinct "finalize-refusal" ledger
+  // prefix so forensics can tell this disposition from a retry wedge.
+  const withDetail = decideFinalizeResult({
+    action: "continue",
+    refusal: true,
+    failureDetail: "M1 CLOSEOUT declined: UAT requires human execution (attempt 2/3).",
+  });
+  assert.deepEqual(withDetail, {
+    action: "stop",
+    failureClass: "refusal",
+    ledgerErrorSummary: "finalize-refusal: M1 CLOSEOUT declined: UAT requires human execution",
+    turnError: "finalize-break",
+  });
+});
+
+test("decideFinalizeResult keeps identical-input retry for unflagged continues (#2046)", () => {
+  // Conservative default: no refusal flag → exactly the pre-#2046 behavior.
+  assert.deepEqual(
+    decideFinalizeResult({ action: "continue" }),
+    { action: "retry", ledgerErrorSummary: "finalize-retry" },
+  );
+  assert.deepEqual(
+    decideFinalizeResult({ action: "continue", failureDetail: "15-SUMMARY.md was not found on disk" }),
+    { action: "retry", ledgerErrorSummary: "finalize-retry: 15-SUMMARY.md was not found on disk" },
+  );
 });
 
 test("decideEngineReconcile maps terminal outcomes", () => {
@@ -649,25 +688,6 @@ test("decideModelPolicyBlocked returns pause notification and journal payload", 
       failureClass: "manual-attention",
     },
   );
-});
-
-test("decideDispatchNodeKind maps sidecar kinds before unit types", () => {
-  assert.equal(decideDispatchNodeKind("execute-task", "hook"), "hook");
-  assert.equal(decideDispatchNodeKind("execute-task", "triage"), "verification");
-  assert.equal(decideDispatchNodeKind("execute-task", "quick-task"), "team-worker");
-});
-
-test("decideDispatchNodeKind maps workflow unit types to scheduler node kinds", () => {
-  assert.equal(decideDispatchNodeKind("hook/pre-dispatch"), "hook");
-  assert.equal(decideDispatchNodeKind("reactive-execute"), "subagent");
-  assert.equal(decideDispatchNodeKind("gate-evaluate"), "verification");
-  assert.equal(decideDispatchNodeKind("validate-milestone"), "verification");
-  assert.equal(decideDispatchNodeKind("run-uat"), "verification");
-  assert.equal(decideDispatchNodeKind("complete-slice"), "verification");
-  assert.equal(decideDispatchNodeKind("replan-slice"), "reprocess");
-  assert.equal(decideDispatchNodeKind("replan-task"), "reprocess");
-  assert.equal(decideDispatchNodeKind("reassess-roadmap"), "reprocess");
-  assert.equal(decideDispatchNodeKind("execute-task"), "unit");
 });
 
 test("formatDispatchExceptionSummary preserves error and non-error messages", () => {

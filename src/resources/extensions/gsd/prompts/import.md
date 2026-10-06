@@ -18,7 +18,7 @@ You are running the GSD **import** workflow — ingest an external plan with con
 
 4. **Resolve.** For each conflict, propose a resolution (adopt source, keep ours, merge). In `--resolve auto`, apply the safe merges and flag the rest; in `--resolve interactive`, confirm each resolution with the user.
 
-5. **Import.** On approval, translate the source into gsd-pi artifacts: phases → milestones, requirements → CONTEXT/requirements, decisions → Decisions Register (`/gsd knowledge rule`), tasks → slice tasks. Prefer `/gsd migrate` machinery for whole `.planning/` imports.
+5. **Import.** On approval, translate the source into gsd-pi artifacts: phases → milestones (`gsd_plan_milestone`), requirements → `gsd_requirement_save`, decisions → `gsd_decision_save`, tasks → slice tasks (`gsd_plan_slice`). Do not write `.gsd/` files directly; the tools render them. Prefer `/gsd migrate` machinery for whole `.planning/` imports.
 
 Nothing is written until conflicts are resolved.
 

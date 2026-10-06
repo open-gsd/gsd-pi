@@ -11,7 +11,8 @@ import type {
   HookStatusEntry,
   PostUnitGateBlock,
 } from "./types.js";
-import type { SidecarItem } from "./auto/session.js";
+import { listQueuedSidecarItems } from "./db/unit-dispatch-sidecars.js";
+import { enqueueSidecarItem } from "./db/writers/unit-dispatch-sidecars.js";
 import {
   getOrCreateRegistry,
   resolveHookArtifactPath,
@@ -91,42 +92,40 @@ export function restoreHookState(basePath: string): void {
 
 /** Shared tail of the resume reconciles: enqueue a hook dispatch unless an
  *  equivalent item is already queued. */
-function enqueueHookDispatch(
-  dispatch: HookDispatchResult,
-  sidecarQueue: SidecarItem[],
-): void {
-  const alreadyQueued = sidecarQueue.some(
+function enqueueHookDispatch(dispatch: HookDispatchResult): void {
+  const alreadyQueued = listQueuedSidecarItems().some(
     item => item.kind === "hook" && item.unitType === dispatch.unitType,
   );
   if (alreadyQueued) return;
-  sidecarQueue.push({
-    kind: "hook",
-    unitType: dispatch.unitType,
-    unitId: dispatch.unitId,
-    prompt: dispatch.prompt,
-    model: dispatch.model,
-  });
+  enqueueSidecarItem(
+    {
+      kind: "hook",
+      unitType: dispatch.unitType,
+      unitId: dispatch.unitId,
+      prompt: dispatch.prompt,
+      model: dispatch.model,
+    },
+    null,
+  );
 }
 
 /**
  * Reconcile a restored `activeHook` against the session's sidecar queue.
  *
- * The registry persists `activeHook` to disk but the pending hook *dispatch*
- * lives only on the non-persisted `s.sidecarQueue`. After a pause/resume or
- * crash-recovery, `restoreHookState` re-hydrates `activeHook` while the dispatch
- * is gone, so the registry believes a hook is in-flight but nothing will ever
- * complete it — and the next unrelated unit's close-out is falsely charged
- * against the stale hook and blocked. Re-enqueue the missing dispatch so the
- * hook actually runs, restoring the invariant that a persisted `activeHook`
- * always has a live dispatch (#1246).
+ * The registry persists `activeHook` to the database. The pending hook *dispatch* is a
+ * queue row that is closed when the loop iteration that ran it ends, so a
+ * pause in the middle of a hook leaves `activeHook` set with no queued row.
+ * `restoreHookState` then re-hydrates `activeHook`, the registry believes a
+ * hook is in-flight but nothing will ever complete it — and the next unrelated
+ * unit's close-out is falsely charged against the stale hook and blocked.
+ * Re-enqueue the missing dispatch so the hook actually runs, restoring the
+ * invariant that a persisted `activeHook` always has a live dispatch (#1246).
+ * After a kill the row is still queued and nothing is added.
  */
-export function reconcileRestoredHookDispatch(
-  basePath: string,
-  sidecarQueue: SidecarItem[],
-): void {
+export function reconcileRestoredHookDispatch(basePath: string): void {
   const dispatch = getOrCreateRegistry().getPendingHookDispatch(basePath);
   if (!dispatch) return;
-  enqueueHookDispatch(dispatch, sidecarQueue);
+  enqueueHookDispatch(dispatch);
 }
 
 /**
@@ -139,13 +138,10 @@ export function reconcileRestoredHookDispatch(
  * selected; the registry re-arms it as in-flight so its completion is
  * re-assessed against the gate artifact.
  */
-export function reconcileRestoredGateBlock(
-  basePath: string,
-  sidecarQueue: SidecarItem[],
-): void {
+export function reconcileRestoredGateBlock(basePath: string): void {
   const dispatch = getOrCreateRegistry().reconcileRestoredGateBlock(basePath);
   if (!dispatch) return;
-  enqueueHookDispatch(dispatch, sidecarQueue);
+  enqueueHookDispatch(dispatch);
 }
 
 export function clearPersistedHookState(basePath: string): void {

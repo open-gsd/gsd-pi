@@ -1273,9 +1273,9 @@ test("lifecycle writers and pure comparison remain below handlers and orchestrat
     `lifecycle writer crossed its leaf boundary: ${writerImports.join(", ")}`,
   );
   assert.deepEqual(
-    importSpecifiers(comparisonPath),
+    importSpecifiers(comparisonPath).filter((specifier) => specifier !== "../status-guards.js"),
     [],
-    "the semantic comparator must remain a pure import-free leaf",
+    "the semantic comparator may import only the status vocabulary leaf",
   );
 
   const handlerFiles = [

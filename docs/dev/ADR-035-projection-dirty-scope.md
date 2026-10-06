@@ -5,7 +5,7 @@
 
 > **Disposition under [ADR-046](ADR-046-database-authoritative-workflow-lifecycle.md): Superseded before adoption.** The goal of deriving readable artifacts from authoritative writes remains valid. Process-local dirty scope and the synchronous flush seam are replaced by durable, revision-aware Projection Work stored with the domain mutation.
 
-**Status:** Proposed — adopt when the trigger condition fires (see "Trigger")
+**Status:** Superseded before adoption ([ADR-046](ADR-046-database-authoritative-workflow-lifecycle.md)). Was: Proposed — adopt when the trigger condition fires (see "Trigger")
 **Date:** 2026-06-10
 **Author:** GSD architecture review
 **Related:** ADR-017 (drift-driven reconciliation), ADR-030 (two-altitude state machine), CONTEXT.md "Domain Write Operation" scoping note (amended by this ADR if adopted)

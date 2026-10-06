@@ -15,16 +15,16 @@ function resolveTsLoaderPath(packageRoot: string): string {
 }
 
 /**
- * Loads all capture entries via a child process. The child imports the upstream
- * captures module, calls loadAllCaptures() and loadActionableCaptures(), and
- * writes a CapturesData JSON to stdout.
+ * Loads all capture entries from the workflow database, not from CAPTURES.md.
+ * A child process imports the GSD runtime bridge, opens the project database,
+ * and writes a CapturesData JSON to stdout. An unavailable database fails.
  */
 export async function collectCapturesData(projectCwdOverride?: string): Promise<CapturesData> {
   const config = resolveBridgeRuntimeConfig(undefined, projectCwdOverride)
   const { packageRoot, projectCwd } = config
 
   const resolveTsLoader = resolveTsLoaderPath(packageRoot)
-  const moduleResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/captures.ts")
+  const moduleResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/mcp-bridge.ts")
   const capturesModulePath = moduleResolution.modulePath
 
   if (!moduleResolution.useCompiledJs && (!existsSync(resolveTsLoader) || !existsSync(capturesModulePath))) {
@@ -39,6 +39,8 @@ export async function collectCapturesData(projectCwdOverride?: string): Promise<
   const script = [
     'const { pathToFileURL } = await import("node:url");',
     `const mod = await import(pathToFileURL(process.env.${CAPTURES_MODULE_ENV}).href);`,
+    'const opened = mod.openExistingWorkflowDatabase(process.env.GSD_CAPTURES_BASE);',
+    'if (!opened.ok) { process.stderr.write(`project database unavailable: ${opened.reason}`); process.exit(1); }',
     `const all = mod.loadAllCaptures(process.env.GSD_CAPTURES_BASE);`,
     'const pending = all.filter(c => c.status === "pending");',
     `const actionable = mod.loadActionableCaptures(process.env.GSD_CAPTURES_BASE);`,
@@ -87,15 +89,16 @@ export async function collectCapturesData(projectCwdOverride?: string): Promise<
 }
 
 /**
- * Resolves (triages) a single capture by calling markCaptureResolved() in a
- * child process. Returns { ok: true, captureId } on success.
+ * Resolves (triages) a single capture: a child process opens the project
+ * database and runs resolveCapture() (one capture.resolve Domain
+ * Operation). Returns { ok: true, captureId } on success.
  */
 export async function resolveCaptureAction(request: CaptureResolveRequest, projectCwdOverride?: string): Promise<CaptureResolveResult> {
   const config = resolveBridgeRuntimeConfig(undefined, projectCwdOverride)
   const { packageRoot, projectCwd } = config
 
   const resolveTsLoader = resolveTsLoaderPath(packageRoot)
-  const moduleResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/captures.ts")
+  const moduleResolution = resolveSubprocessModule(packageRoot, "resources/extensions/gsd/mcp-bridge.ts")
   const capturesModulePath = moduleResolution.modulePath
 
   if (!moduleResolution.useCompiledJs && (!existsSync(resolveTsLoader) || !existsSync(capturesModulePath))) {
@@ -115,7 +118,9 @@ export async function resolveCaptureAction(request: CaptureResolveRequest, proje
   const script = [
     'const { pathToFileURL } = await import("node:url");',
     `const mod = await import(pathToFileURL(process.env.${CAPTURES_MODULE_ENV}).href);`,
-    `mod.markCaptureResolved(process.env.GSD_CAPTURES_BASE, ${safeId}, ${safeClassification}, ${safeResolution}, ${safeRationale});`,
+    'const opened = mod.openExistingWorkflowDatabase(process.env.GSD_CAPTURES_BASE);',
+    'if (!opened.ok) { process.stderr.write(`project database unavailable: ${opened.reason}`); process.exit(1); }',
+    `await mod.resolveCapture(process.env.GSD_CAPTURES_BASE, ${safeId}, ${safeClassification}, ${safeResolution}, ${safeRationale});`,
     `process.stdout.write(JSON.stringify({ ok: true, captureId: ${safeId} }));`,
   ].join(" ")
 

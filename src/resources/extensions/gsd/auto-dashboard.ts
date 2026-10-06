@@ -25,7 +25,8 @@ import {
   resolveMilestoneFile,
   resolveSliceFile,
 } from "./paths.js";
-import { isDbAvailable, getMilestoneSlices, getSliceTasks } from "./gsd-db.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readMilestoneSlices, readSliceTasks } from "./db/lifecycle-read.js";
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { truncateToWidth, visibleWidth } from "@gsd/pi-tui";
@@ -419,11 +420,12 @@ let cachedSliceProgress: {
 
 export function updateSliceProgressCache(base: string, mid: string, activeSid?: string): void {
   try {
-    // Normalize slices: prefer DB, fall back to parser
+    // Slices and tasks, and which of them are done, come from the read
+    // interface (db/lifecycle-read.ts): the same answer as dispatch and progress.
     type NormSlice = { id: string; done: boolean; title: string };
     let normSlices: NormSlice[];
     if (isDbAvailable()) {
-      normSlices = getMilestoneSlices(mid).map(s => ({ id: s.id, done: s.status === "complete", title: s.title }));
+      normSlices = readMilestoneSlices(mid).map(s => ({ id: s.id, done: s.done, title: s.title }));
     } else {
       normSlices = [];
     }
@@ -433,13 +435,13 @@ export function updateSliceProgressCache(base: string, mid: string, activeSid?: 
     if (activeSid) {
       try {
         if (isDbAvailable()) {
-          const dbTasks = getSliceTasks(mid, activeSid);
+          const dbTasks = readSliceTasks(mid, activeSid);
           if (dbTasks.length > 0) {
             activeSliceTasks = {
-              done: dbTasks.filter(t => t.status === "complete" || t.status === "done").length,
+              done: dbTasks.filter(t => t.done).length,
               total: dbTasks.length,
             };
-            taskDetails = dbTasks.map(t => ({ id: t.id, title: t.title, done: t.status === "complete" || t.status === "done" }));
+            taskDetails = dbTasks.map(t => ({ id: t.id, title: t.title, done: t.done }));
           }
         }
       } catch (err) {
@@ -697,6 +699,8 @@ export interface WidgetStateAccessors {
   isSessionSwitching(): boolean;
   /** Fully-qualified dispatched model ID (provider/id) set after model selection + hook overrides (#2899). */
   getCurrentDispatchedModelId(): string | null;
+  /** Dynamic-routing tier classifying the active unit ("light"|"standard"|"heavy"), if any (#2395). */
+  getCurrentUnitRoutingTier(): string | null;
 }
 
 function clearAutoOutcomeWidget(ctx: ExtensionContext): void {
@@ -1080,6 +1084,13 @@ function buildGsdProgressPayload(
 
   const unitLabel = unitId || [mid?.id, slice?.id, task?.id].filter(Boolean).join("/");
 
+  // Only known tiers cross the payload boundary — an unrecognized tier string
+  // is omitted rather than leaking into the typed widget state (#2395).
+  const routingTier = accessors.getCurrentUnitRoutingTier();
+  const dynamicRoutingTier = routingTier === "light" || routingTier === "standard" || routingTier === "heavy"
+    ? routingTier
+    : undefined;
+
   return {
     phase,
     modeTag,
@@ -1091,6 +1102,7 @@ function buildGsdProgressPayload(
     elapsed,
     eta: etaShort,
     model: accessors.getCurrentDispatchedModelId() ?? undefined,
+    dynamicRoutingTier,
     healthSummary,
     path: accessors.getBasePath(),
     widgetMode: mode,

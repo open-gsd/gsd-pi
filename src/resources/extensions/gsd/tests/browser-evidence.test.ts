@@ -273,6 +273,82 @@ describe('hasBrowserRequiredText — database snapshot wording', () => {
   });
 });
 
+describe('hasBrowserRequiredText — LLM snapshot wording', () => {
+  // #2436 (#766 → #2081 follow-up): "prompt snapshot" — an LLM-runtime compound —
+  // satisfied none of the #2081 database guards, so server-only milestones whose
+  // acceptance text freezes a prompt payload before provider dispatch escalated to
+  // browser-required and verdict=pass became unreachable. An LLM word directly
+  // before `snapshot` (a compound) joins the exclusion guards.
+  test('LLM-runtime snapshot compounds are not browser requirements', () => {
+    assert.ok(
+      !hasBrowserRequiredText('persists a prompt snapshot as part of prompt_compose'),
+      'prompt snapshot must not escalate',
+    );
+    assert.ok(
+      !hasBrowserRequiredText('Prompt snapshots make provider/parser retries deterministic'),
+      'plural prompt snapshots must not escalate',
+    );
+    assert.ok(!hasBrowserRequiredText('template snapshot'), 'template snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('model snapshot'), 'model snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('conversation snapshot'), 'conversation snapshot must not escalate');
+    assert.ok(!hasBrowserRequiredText('config snapshot'), 'config snapshot must not escalate');
+  });
+
+  test('LLM words not forming the compound do not suppress a browser snapshot', () => {
+    // The LLM exclusion is adjacent-only: those words double as browser
+    // vocabulary, so a wider before-window would suppress real requirements.
+    // `state`/`context` are not excluded at all — "browser/DOM state snapshot"
+    // and "browser context snapshot" (Playwright) are genuine browser steps.
+    assert.ok(
+      hasBrowserRequiredText('Dismiss the prompt and take an accessibility snapshot.'),
+      'accessibility snapshot after dialog-prompt wording must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Change the page state and capture a browser snapshot.'),
+      'browser snapshot after page-state wording must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Switch models and compare the DOM snapshot.'),
+      'DOM snapshot after model wording must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Capture a browser state snapshot after login.'),
+      'browser state snapshot must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Take a DOM state snapshot after clicking Submit.'),
+      'DOM state snapshot must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Capture a browser context snapshot after clicking Submit.'),
+      'browser context snapshot must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Take a browser snapshot of the page state.'),
+      'browser snapshot of the page state must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Check the accessibility snapshot after the prompt opens.'),
+      'accessibility snapshot beside a dialog prompt must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('Compare the DOM snapshot after changing models.'),
+      'DOM snapshot beside model wording must escalate',
+    );
+    assert.ok(
+      hasBrowserRequiredText('the prompt snapshot must include a screenshot of the dashboard'),
+      'prompt snapshot with an independent screenshot signal must escalate',
+    );
+  });
+
+  test('a browser snapshot phrasing is still a browser requirement', () => {
+    assert.ok(
+      hasBrowserRequiredText('take a browser snapshot of the page'),
+      'browser snapshot of the page must escalate',
+    );
+  });
+});
+
 describe('hasBrowserRequiredText — negated browser mentions', () => {
   // Acceptance run 7: a slice that writes two text files declared
   // "UAT mode: artifact-driven" and explained why. complete-slice rejected it with

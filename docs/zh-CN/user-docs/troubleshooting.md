@@ -129,6 +129,7 @@ rm -rf "$(dirname .gsd)/.gsd.lock"
 **机制：** 在多数 `/gsd` 命令执行前，GSD 会探测项目根目录（以及存在时的活跃 milestone worktree）中的未合并路径、冲突标记（`git diff --check`）和残留的 merge/rebase 状态。它会自动修复安全路径（`.gsd/` 运行时文件与构建产物），在无未合并路径时中止陈旧的 merge 状态，若仍存在产品代码冲突则拦截。
 
 **解决：**
+
 - 手动解决源代码中的冲突后运行 `/gsd doctor`。
 - 冲突未清空前仍可使用：`/gsd doctor`、`/gsd closeout …`、`/gsd dispatch complete-milestone …`。
 - 待 `git status` 干净后重试原命令。
@@ -139,7 +140,7 @@ rm -rf "$(dirname .gsd)/.gsd.lock"
 
 **症状：** 自动模式或 `/gsd doctor` 报告某个 milestone 记录的 integration branch 已经不在 git 中。
 
-**这意味着什么：** 该 milestone 的 `.gsd/milestones/<MID>/<MID>-META.json` 里仍然记录着启动时的 branch，但该 branch 之后被重命名或删除了。
+**这意味着什么：** GSD 数据库中为该 milestone 记录的 integration branch（`<MID>-META.json` 只是这条记录的副本）仍然是启动时的 branch，但该 branch 之后被重命名或删除了。
 
 **当前行为：**
 
@@ -332,8 +333,8 @@ rm .gsd/completed-units.json
 
 如果自适应模型路由给出了糟糕的结果，可以清空路由历史：
 
-```bash
-rm .gsd/routing-history.json
+```
+/gsd rate reset
 ```
 
 ### 完整重建状态
@@ -427,6 +428,7 @@ lsp status
 ## Notifications
 
 <a id="notifications-not-appearing-on-macos"></a>
+
 ### macOS 上通知不显示
 
 **症状：** 偏好中已设置 `notifications.enabled: true`，但自动模式期间没有任何桌面通知（没有 milestone 完成提示、预算预警或错误通知），同时日志里也没有报错。

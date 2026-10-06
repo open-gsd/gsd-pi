@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import {
   openDatabase,
   closeDatabase,
+  insertArtifact,
   insertGateRow,
   markAllGatesOmitted,
   getGateResults,
@@ -101,21 +102,26 @@ describe("gate-state canonicalization (#4950)", () => {
     }
   });
 
-  test("closeQualityGatesFromEvidence repairs pending gate from durable section", () => {
-    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
-    mkdirSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
-    writeFileSync(
-      join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"),
-      [
-        "# S01",
-        "",
-        "## Threat Surface",
-        "",
-        "- Credential stuffing is rate-limited.",
-      ].join("\n"),
-    );
+  const THREAT_SURFACE_PLAN = [
+    "# S01",
+    "",
+    "## Threat Surface",
+    "",
+    "- Credential stuffing is rate-limited.",
+  ].join("\n");
 
-    const result = closeQualityGatesFromEvidence("M001", { artifactBasePath: tmpDir });
+  test("closeQualityGatesFromEvidence repairs pending gate from the section in the stored PLAN row", () => {
+    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
+    insertArtifact({
+      path: "milestones/M001/slices/S01/S01-PLAN.md",
+      artifact_type: "PLAN",
+      milestone_id: "M001",
+      slice_id: "S01",
+      task_id: null,
+      full_content: THREAT_SURFACE_PLAN,
+    });
+
+    const result = closeQualityGatesFromEvidence("M001");
 
     assert.deepEqual(result.unresolved, []);
     assert.deepEqual(result.repaired, [{ gateId: "Q3", sliceId: "S01", verdict: "pass" }]);
@@ -123,11 +129,21 @@ describe("gate-state canonicalization (#4950)", () => {
     assert.equal(getGateResults("M001", "S01")[0].verdict, "pass");
   });
 
+  test("closeQualityGatesFromEvidence does not close a gate from a heading in the PLAN.md file", () => {
+    insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
+    mkdirSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01"), { recursive: true });
+    writeFileSync(join(tmpDir, ".gsd", "milestones", "M001", "slices", "S01", "S01-PLAN.md"), THREAT_SURFACE_PLAN);
+
+    const result = closeQualityGatesFromEvidence("M001");
+
+    assert.deepEqual(result.repaired, []);
+    assert.equal(getPendingGates("M001", "S01").length, 1);
+  });
+
   test("closeQualityGatesFromEvidence omits stale pending gate after validation pass", () => {
     insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q4", scope: "slice" });
 
     const result = closeQualityGatesFromEvidence("M001", {
-      artifactBasePath: tmpDir,
       milestoneValidationPassed: true,
     });
 
@@ -139,7 +155,7 @@ describe("gate-state canonicalization (#4950)", () => {
   test("closeQualityGatesFromEvidence leaves pending gate unresolved without evidence", () => {
     insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
 
-    const result = closeQualityGatesFromEvidence("M001", { artifactBasePath: tmpDir });
+    const result = closeQualityGatesFromEvidence("M001");
 
     assert.deepEqual(result.repaired, []);
     assert.equal(result.unresolved.length, 1);

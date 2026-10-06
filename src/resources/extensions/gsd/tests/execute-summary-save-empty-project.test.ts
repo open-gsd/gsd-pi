@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { randomUUID } from "node:crypto";
 
-import { openDatabase, closeDatabase, getAllMilestones, getArtifact } from "../gsd-db.ts";
+import { openDatabase, closeDatabase, getAllMilestones, getArtifact, getMilestone, insertMilestone } from "../gsd-db.ts";
 import { parseProject } from "../schemas/parsers.ts";
 import { markApprovalGateVerified, clearDiscussionFlowState } from "../bootstrap/write-gate.ts";
 import { executeSummarySave } from "../tools/workflow-tool-executors.ts";
@@ -109,11 +109,31 @@ test("executeSummarySave registers milestones when PROJECT.md uses canonical em-
   assert.equal(getAllMilestones().length, 2);
 });
 
+test("executeSummarySave never completes a milestone from a checked box", async (t) => {
+  const base = setupBase(t);
+  insertMilestone({ id: "M001", title: "Foo", status: "active" });
+  const content = [
+    "# Project",
+    "",
+    "## Milestone Sequence",
+    "",
+    "- [x] M001: Foo — bar",
+    "- [x] M002: Baz — qux",
+    "",
+  ].join("\n");
+
+  const result = await inProjectDir(base, () => executeSummarySave({ artifact_type: "PROJECT", content }, base));
+
+  assert.notEqual(result.isError, true);
+  assert.equal(getMilestone("M001")?.status, "active", "an existing milestone keeps its status");
+  assert.equal(getMilestone("M002")?.status, "queued", "a new milestone is registered open");
+});
+
 test("executeSummarySave self-heals the Milestone Sequence when DB already has milestones but content parses zero", async (t) => {
   const base = setupBase(t);
 
-  // 1) First save registers M001 as complete; DB now holds the milestone with
-  //    authoritative status.
+  // 1) The DB holds M001 as complete; the first save only refreshes its title.
+  insertMilestone({ id: "M001", title: "Foo", status: "complete" });
   const canonical = [
     "# Project",
     "",

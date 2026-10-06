@@ -14,6 +14,7 @@ import {
   type TaskSettleTask,
 } from "./task-settle.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
 function parseTaskSettleArgs(args: string): {
   task: TaskSettleTask;
@@ -115,6 +116,7 @@ export async function handleTaskSettle(
         ctx.ui.notify(`gsd task settle: ${unit} is already closed as blocker-accepted — nothing to do.`, "info");
         return;
       }
+      await renderStateProjection(basePath);
       ctx.ui.notify(
         `Accepted blocker for ${unit}: Task closed as blocker-accepted; Attempt ${result.attemptId} and its ` +
         `failed Result remain history and the route head is consumed (no re-route). ` +
@@ -123,7 +125,11 @@ export async function handleTaskSettle(
       );
       return;
     }
-    const settleOptions = { reconcileLifecycle: parsed.reconcileLifecycle };
+    const settleOptions = {
+      reconcileLifecycle: parsed.reconcileLifecycle,
+      basePath,
+      legacyJournalBasePath: basePath,
+    };
     if (!parsed.apply) {
       const plan = planTaskSettle(parsed.task, parsed.reason, settleOptions);
       if (plan.rows.length === 0 && plan.lifecycleRows.length === 0 && !plan.publication) {
@@ -155,7 +161,8 @@ export async function handleTaskSettle(
       invocation: cliInvocation(),
       task: parsed.task,
       reason: parsed.reason,
-      basePath,
+      // settleOptions carries basePath for verified publication and for the
+      // one-time import of a pre-upgrade journal verification-pause receipt.
       ...settleOptions,
     });
     if (!result.settled && !result.reconciled && !result.published) {

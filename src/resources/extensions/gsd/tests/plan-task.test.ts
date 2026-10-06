@@ -8,6 +8,7 @@ import { openDatabase, closeDatabase, insertMilestone, insertSlice, insertTask, 
 import { handlePlanTask as handlePlanTaskWithInvocation, type PlanTaskParams } from '../tools/plan-task.ts';
 import { parseProjectionPlan as parsePlan } from '../schemas/parsers.ts';
 import { resolveVerificationRepositoryTargets } from '../verification-source-integrity.ts';
+import { assertWorkerRendersStaleProjection } from './projection-render-failure-gate.ts';
 
 let invocationSequence = 0;
 
@@ -274,7 +275,7 @@ test('handlePlanTask rejects missing parent slice', async () => {
   }
 });
 
-test('handlePlanTask surfaces render failures without changing parse-visible slice plan state', async () => {
+test('handlePlanTask returns the committed task plan with a stale flag when the render fails', async () => {
   const base = makeTmpBase();
   openDatabase(join(base, '.gsd', 'gsd.db'));
 
@@ -287,8 +288,12 @@ test('handlePlanTask surfaces render failures without changing parse-visible sli
     mkdirSync(slicePlanPath, { recursive: true });
 
     const result = await handlePlanTask(validParams(), base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
+    assert.equal(result.taskPlanPath, '');
+
+    rmSync(slicePlanPath, { recursive: true });
+    await assertWorkerRendersStaleProjection(base, slicePlanPath);
   } finally {
     cleanup(base);
   }
@@ -308,8 +313,8 @@ test('handlePlanTask commits sketch refinement even when the flat-phase projecti
     mkdirSync(join(base, '.gsd', 'phases', '01-test', '01-02-PLAN.md'), { recursive: true });
 
     const result = await handlePlanTask(validParams(), base);
-    assert.ok('error' in result);
-    assert.match(result.error, /render failed:/);
+    assert.ok(!('error' in result), 'a render failure after commit is not a tool error');
+    assert.equal(result.stale, true);
     assert.equal(getSlice('M001', 'S02')?.is_sketch, 0, 'planning authority must not be compensated after projection failure');
     assert.ok(getTask('M001', 'S02', 'T02'), 'the task itself is still persisted so the slice can re-sync on retry');
   } finally {

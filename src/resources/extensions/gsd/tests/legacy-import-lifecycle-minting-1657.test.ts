@@ -1,21 +1,28 @@
 // Project/App: gsd-pi
 // File Purpose: Regression proof (#1657/#1658) that an applied legacy import mints canonical
-// companion authority — lifecycle rows for every imported hierarchy row and a Q8 quality
-// gate for every imported slice.
+// companion authority — lifecycle rows for every imported hierarchy row and a pending Q8
+// quality gate for every open imported slice — and keeps a markdown completion as unverified legacy,
+// with a stored evidence marker from the lifecycle backfill.
 
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
+import { handleDbAdopt } from "../commands-maintenance.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
 import { prepareLegacyImportBackup } from "../legacy-import-backup.ts";
 import { applyLegacyImport } from "../legacy-import-application.ts";
+import { inspectLegacyImportApplicationEvidence } from "../legacy-import-application-evidence.ts";
+import { verifyLegacyImportApplicationResult } from "../legacy-import-application-result.ts";
 import { createLegacyImportPreview } from "../legacy-import-preview.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../legacy-import-preview-base.ts";
 import { type DbAdapter } from "../db-adapter.ts";
-import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { _getAdapter, closeDatabase, insertMilestone, openDatabase } from "../gsd-db.ts";
+import { completeSlice } from "../slice-lifecycle-domain-operation.ts";
+import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 import { createLegacyImportCorpusSourceRoots } from "./helpers/legacy-import-corpus.ts";
 
 const CORPUS_ROOT = fileURLToPath(new URL("./__fixtures__/legacy-import-corpus/v1/", import.meta.url));
@@ -39,7 +46,8 @@ afterEach(() => {
   tempDirectories.clear();
 });
 
-test("applied import mints lifecycle rows for every imported milestone, slice, and task (#1657)", () => {
+/** Apply the gsd-nested markdown corpus as one Import Application on an empty database. */
+function applyNestedCorpusImport(prepareSource: (source: string) => void = () => {}, databasePath?: string) {
   const workspace = mkdtempSync(join(tmpdir(), "gsd-legacy-lifecycle-minting-"));
   tempDirectories.add(workspace);
   const source = join(workspace, "source");
@@ -49,8 +57,9 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
     dereference: false,
     verbatimSymlinks: true,
   });
+  prepareSource(source);
   mkdirSync(destination);
-  assert.equal(openDatabase(join(workspace, "canonical.sqlite")), true);
+  assert.equal(openDatabase(databasePath ?? join(workspace, "canonical.sqlite")), true);
   const roots = createLegacyImportCorpusSourceRoots(source);
   const previewInput = { roots };
   const base = captureCurrentLegacyImportBaseSnapshot();
@@ -62,7 +71,7 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
     destination_directory: destination,
     label: "pre-application",
   });
-  applyLegacyImport({
+  return applyLegacyImport({
     invocation: {
       idempotencyKey: "legacy-import/lifecycle-minting-1657",
       sourceTransport: "internal",
@@ -75,6 +84,10 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
     preview,
     backup,
   });
+}
+
+test("applied import mints lifecycle rows for every imported milestone, slice, and task (#1657)", () => {
+  const receipt = applyNestedCorpusImport();
 
   // Every imported hierarchy row must carry canonical lifecycle authority —
   // execute-task and complete-slice hard-require workflow_item_lifecycles rows,
@@ -131,33 +144,270 @@ test("applied import mints lifecycle rows for every imported milestone, slice, a
   `);
   assert.deepEqual(mismatched, []);
 
-  // #1658: gsd_slice_complete requires exactly one Q8 quality gate per slice,
-  // so every imported slice must carry the row the canonical seam would have
-  // seeded — pending while the slice is open, complete (verdict "omitted",
-  // since the import carries no readiness evidence) once the slice closed.
-  const gatelessSlices = rows(`
-    SELECT slice.milestone_id, slice.id FROM slices slice
+  // #1658: every open imported slice carries the pending Q8 quality gate the
+  // canonical seam would have seeded. A slice imported as completed carries no
+  // gate row: the import has no readiness evidence, and a closed verdict that
+  // no evaluation produced would be fabricated.
+  const gateStates = rows(`
+    SELECT lifecycle.lifecycle_status, gate.status AS gate_status, COUNT(*) AS slices
+    FROM workflow_item_lifecycles lifecycle
     LEFT JOIN quality_gates gate
-      ON gate.milestone_id = slice.milestone_id AND gate.slice_id = slice.id
+      ON gate.milestone_id = lifecycle.milestone_id AND gate.slice_id = lifecycle.slice_id
      AND gate.gate_id = 'Q8' AND (gate.task_id = '' OR gate.task_id IS NULL)
-    WHERE gate.gate_id IS NULL
+    WHERE lifecycle.item_kind = 'slice'
+    GROUP BY lifecycle.lifecycle_status, gate.status
+    ORDER BY lifecycle.lifecycle_status
   `);
-  assert.deepEqual(gatelessSlices, []);
-  const wrongStateGates = rows(`
-    SELECT gate.milestone_id, gate.slice_id, gate.status, gate.verdict,
-           lifecycle.lifecycle_status
-    FROM quality_gates gate
-    JOIN workflow_item_lifecycles lifecycle
-      ON lifecycle.item_kind = 'slice'
-     AND lifecycle.milestone_id = gate.milestone_id
-     AND lifecycle.slice_id = gate.slice_id
-     AND lifecycle.task_id IS NULL
-    WHERE gate.gate_id = 'Q8' AND (gate.task_id = '' OR gate.task_id IS NULL)
-      AND CASE
-        WHEN lifecycle.lifecycle_status = 'completed'
-          THEN gate.status != 'complete' OR gate.verdict != 'omitted'
-        ELSE gate.status != 'pending'
-      END
+  assert.deepEqual(gateStates, [
+    { lifecycle_status: "completed", gate_status: null, slices: 2 },
+    { lifecycle_status: "ready", gate_status: "pending", slices: 5 },
+  ]);
+  assert.deepEqual(rows("SELECT * FROM gate_runs"), []);
+  // Restore and Forward Repair verify the retained Application against the
+  // live database; a completed slice with no gate row must still verify.
+  verifyLegacyImportApplicationResult(inspectLegacyImportApplicationEvidence(receipt.operationId));
+});
+
+test("an imported markdown completion stays completed as unverified legacy: adopted by the import operation, with no evidence row", () => {
+  const receipt = applyNestedCorpusImport();
+
+  // The markdown attests the completion and nothing else: the imported rows
+  // carry no completion timestamp and no verification result.
+  const completed = rows(`
+    SELECT lifecycle.item_kind, lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id,
+           hierarchy.status AS raw_status, hierarchy.completed_at, hierarchy.verification_result,
+           lifecycle.state_version, lifecycle.last_operation_id, operation.operation_type
+    FROM workflow_item_lifecycles lifecycle
+    JOIN workflow_operations operation ON operation.operation_id = lifecycle.last_operation_id
+    JOIN (
+      SELECT 'milestone' AS item_kind, id AS milestone_id, NULL AS slice_id, NULL AS task_id,
+             status, completed_at, '' AS verification_result FROM milestones
+      UNION ALL
+      SELECT 'slice', milestone_id, id, NULL, status, completed_at, '' FROM slices
+      UNION ALL
+      SELECT 'task', milestone_id, slice_id, id, status, completed_at, verification_result FROM tasks
+    ) hierarchy
+      ON hierarchy.item_kind = lifecycle.item_kind
+     AND hierarchy.milestone_id = lifecycle.milestone_id
+     AND hierarchy.slice_id IS lifecycle.slice_id
+     AND hierarchy.task_id IS lifecycle.task_id
+    WHERE lifecycle.lifecycle_status = 'completed'
+    ORDER BY lifecycle.item_kind, lifecycle.milestone_id, lifecycle.slice_id, lifecycle.task_id
   `);
-  assert.deepEqual(wrongStateGates, []);
+  // The mark of an unverified legacy completion is its provenance: completed
+  // at state version 0, adopted by the import.apply operation itself.
+  const unverifiedLegacy = (itemKind: string, milestoneId: string, taskId: string | null) => ({
+    item_kind: itemKind, milestone_id: milestoneId, slice_id: "S01", task_id: taskId,
+    raw_status: "complete", completed_at: null, verification_result: "",
+    state_version: 0, last_operation_id: receipt.operationId, operation_type: "import.apply",
+  });
+  assert.deepEqual(completed, [
+    unverifiedLegacy("slice", "M001", null),
+    unverifiedLegacy("slice", "M002", null),
+    unverifiedLegacy("task", "M001", "T01"),
+    unverifiedLegacy("task", "M002", "T01"),
+  ]);
+
+  // The import writes no Attempt, result, verdict, evidence or gate run for
+  // these completions. The next test proves that Slice closeout accepts one.
+  for (const table of [
+    "workflow_execution_attempts", "workflow_attempt_results", "workflow_technical_verdicts",
+    "workflow_verification_evidence", "verification_evidence", "gate_runs",
+  ]) {
+    assert.deepEqual(rows(`SELECT * FROM ${table}`), [], table);
+  }
+  // The sealed plan is unchanged: the retained Application still validates.
+  verifyLegacyImportApplicationResult(inspectLegacyImportApplicationEvidence(receipt.operationId));
+});
+
+/** The roadmap leaves M001/S02 unchecked; its plan attests T01 as done. */
+function attestS02TaskDone(source: string): void {
+  writeFileSync(
+    join(source, ".gsd", "milestones", "M001-foundation", "slices", "S02-api", "S02-PLAN.md"),
+    "# S02: API wiring\n\n- [x] T01 Connect the service boundary\n",
+  );
+}
+
+function completeImportedSliceS02() {
+  return completeSlice({
+    invocation: {
+      idempotencyKey: "slice-complete/imported-open-slice",
+      sourceTransport: "internal",
+      actorType: "agent",
+      actorId: "legacy-import-lifecycle-minting-test",
+      traceId: "imported-open-slice-trace",
+      turnId: "imported-open-slice-turn",
+    },
+    slice: { milestoneId: "M001", sliceId: "S02" },
+    closeout: {
+      sliceTitle: "API wiring",
+      oneLiner: "Closed the imported Slice.",
+      narrative: "The one Task was complete in the legacy source.",
+      verification: "None for the imported Task.",
+      uatContent: "",
+      operationalReadiness: "",
+      deviations: "None.",
+      knownLimitations: "None.",
+      followUps: "None.",
+      provides: [], requires: [], affects: [], keyFiles: [], keyDecisions: [],
+      patternsEstablished: [], observabilitySurfaces: [], drillDownPaths: [],
+      requirementsAdvanced: [], requirementsValidated: [], requirementsSurfaced: [],
+      requirementsInvalidated: [], filesModified: [],
+    },
+  });
+}
+
+test("a Slice imported open with a markdown-completed Task closes with no new evidence for that Task", () => {
+  applyNestedCorpusImport(attestS02TaskDone);
+  const lifecycleStatuses = () => rows(`
+    SELECT item_kind, lifecycle_status FROM workflow_item_lifecycles
+    WHERE milestone_id = 'M001' AND slice_id = 'S02' ORDER BY item_kind
+  `);
+  assert.deepEqual(lifecycleStatuses(), [
+    { item_kind: "slice", lifecycle_status: "ready" },
+    { item_kind: "task", lifecycle_status: "completed" },
+  ]);
+
+  const receipt = completeImportedSliceS02();
+
+  assert.equal(receipt.status, "committed");
+  assert.deepEqual(receipt.completedTaskIds, ["T01"]);
+  assert.deepEqual(receipt.proofs, []);
+  assert.deepEqual(lifecycleStatuses(), [
+    { item_kind: "slice", lifecycle_status: "completed" },
+    { item_kind: "task", lifecycle_status: "completed" },
+  ]);
+});
+
+/** A project root whose `.gsd/gsd.db` holds the applied gsd-nested import, with M001/S02 open and its T01 done. */
+function importIntoProjectDatabase(): { projectRoot: string; importOperationId: string } {
+  const projectRoot = mkdtempSync(join(tmpdir(), "gsd-legacy-evidence-marker-"));
+  tempDirectories.add(projectRoot);
+  mkdirSync(join(projectRoot, ".gsd"));
+  const receipt = applyNestedCorpusImport(attestS02TaskDone, join(projectRoot, ".gsd", "gsd.db"));
+  return { projectRoot, importOperationId: receipt.operationId };
+}
+
+/** Every stored `unverified-legacy` evidence marker, with the operation that stored it. */
+function evidenceMarkers(): Array<Record<string, unknown>> {
+  return rows(`
+    SELECT event.entity_type, event.entity_id,
+           json_extract(event.payload_json, '$.rawStatus') AS raw_status,
+           json_extract(event.payload_json, '$.lifecycleStatus') AS lifecycle_status,
+           json_extract(event.payload_json, '$.rule') AS rule,
+           operation.operation_type,
+           lifecycle.item_kind = event.entity_type AS bound
+    FROM workflow_domain_events event
+    JOIN workflow_operations operation ON operation.operation_id = event.operation_id
+    LEFT JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.lifecycle_id = json_extract(event.payload_json, '$.lifecycleId')
+    WHERE json_extract(event.payload_json, '$.evidence') = 'unverified-legacy'
+    ORDER BY event.entity_type, event.entity_id
+  `);
+}
+
+function importedCompletionMarker(entityType: string, entityId: string): Record<string, unknown> {
+  return {
+    entity_type: entityType, entity_id: entityId, raw_status: "complete", lifecycle_status: "completed",
+    rule: "import-adopted-completion", operation_type: "lifecycle.backfill", bound: 1,
+  };
+}
+
+const IMPORTED_COMPLETION_MARKERS = [
+  importedCompletionMarker("slice", "M001/S01"),
+  importedCompletionMarker("slice", "M002/S01"),
+  importedCompletionMarker("task", "M001/S01/T01"),
+  importedCompletionMarker("task", "M001/S02/T01"),
+  importedCompletionMarker("task", "M002/S01/T01"),
+];
+
+/** Each operation in commit order. The Restore Window of an import is open while `import.apply` is the last one. */
+function operationTypes(): unknown[] {
+  return rows("SELECT operation_type FROM workflow_operations ORDER BY resulting_revision")
+    .map((row) => row["operation_type"]);
+}
+
+function lifecycleRows(): Array<Record<string, unknown>> {
+  return rows(`
+    SELECT lifecycle_id, lifecycle_status, state_version, last_operation_id
+    FROM workflow_item_lifecycles ORDER BY lifecycle_id
+  `);
+}
+
+test("/gsd db adopt leaves the evidence markers and the open Restore Window of a fresh import alone", async () => {
+  const { projectRoot } = importIntoProjectDatabase();
+  const notes: string[] = [];
+  const ctx = { ui: { notify: (message: string) => notes.push(message) } };
+  // The import has one event for the whole Application: it stores no marker.
+  assert.deepEqual(evidenceMarkers(), []);
+  assert.deepEqual(operationTypes(), ["import.apply"]);
+
+  await handleDbAdopt(ctx as any, projectRoot);
+  await handleDbAdopt(ctx as any, projectRoot, "--apply");
+
+  for (const note of notes) {
+    assert.match(note, /5 imported completion\(s\) have no unverified-legacy evidence marker yet/);
+    assert.match(note, /wait until the Restore Window of the import closes/);
+    assert.match(note, /the import can still be restored/);
+  }
+  assert.equal(notes.length, 2);
+  assert.deepEqual(evidenceMarkers(), []);
+  assert.deepEqual(operationTypes(), ["import.apply"], "no operation closed the Restore Window");
+});
+
+test("/gsd db adopt --apply stores one unverified-legacy evidence marker for each imported completion, once the Restore Window is closed", async () => {
+  const { projectRoot } = importIntoProjectDatabase();
+  const notes: string[] = [];
+  const ctx = { ui: { notify: (message: string) => notes.push(message) } };
+  // Accepted work closes the Restore Window of the import.
+  assert.equal(completeImportedSliceS02().status, "committed");
+  const lifecyclesBefore = lifecycleRows();
+
+  await handleDbAdopt(ctx as any, projectRoot);
+  assert.match(notes[0]!, /5 imported completion\(s\) would get the unverified-legacy evidence marker/);
+  assert.match(notes[0]!, /import-adopted-completion: 5/);
+  assert.doesNotMatch(notes[0]!, /Restore Window/);
+  assert.deepEqual(evidenceMarkers(), [], "the preview writes nothing");
+
+  await handleDbAdopt(ctx as any, projectRoot, "--apply");
+  assert.match(notes[1]!, /adopted 0 row\(s\) .* 5 unverified-legacy evidence marker\(s\)/);
+  assert.deepEqual(evidenceMarkers(), IMPORTED_COMPLETION_MARKERS);
+  // The marker is an event only: no lifecycle row changes.
+  assert.deepEqual(lifecycleRows(), lifecyclesBefore);
+
+  // A second run finds every marker and writes nothing.
+  await handleDbAdopt(ctx as any, projectRoot, "--apply");
+  assert.match(notes[2]!, /every imported completion has its evidence marker/);
+  assert.equal(evidenceMarkers().length, 5);
+  assert.deepEqual(operationTypes(), ["import.apply", "slice.complete", "lifecycle.backfill"]);
+});
+
+test("/gsd db adopt --apply with a row that has no lifecycle row runs in an open Restore Window, and the preview says it closes it", async () => {
+  const { projectRoot } = importIntoProjectDatabase();
+  const notes: string[] = [];
+  const ctx = { ui: { notify: (message: string) => notes.push(message) } };
+  insertMilestone({ id: "M900", title: "Old work", status: "active" });
+
+  await handleDbAdopt(ctx as any, projectRoot);
+  assert.match(notes[0]!, /1 row\(s\) would be adopted/);
+  assert.match(notes[0]!, /--apply closes it: after that, the import cannot be restored/);
+  assert.deepEqual(operationTypes(), ["import.apply"]);
+
+  await handleDbAdopt(ctx as any, projectRoot, "--apply");
+  assert.match(notes[1]!, /adopted 1 row\(s\) .* 5 unverified-legacy evidence marker\(s\)/);
+  assert.deepEqual(operationTypes(), ["import.apply", "lifecycle.backfill"]);
+  assert.deepEqual(evidenceMarkers(), IMPORTED_COMPLETION_MARKERS);
+});
+
+test("the Authority Epoch cutover on open stores the evidence marker of each imported completion", (t) => {
+  const { projectRoot } = importIntoProjectDatabase();
+  // Accepted work closes the Restore Window of the import, so the next open can cut over.
+  assert.equal(completeImportedSliceS02().status, "committed");
+  closeDatabase();
+  t.after(setAuthorityCutoverFlag("1"));
+
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+
+  assert.deepEqual(rows("SELECT authority_epoch FROM project_authority"), [{ authority_epoch: 1 }]);
+  assert.deepEqual(evidenceMarkers(), IMPORTED_COMPLETION_MARKERS);
 });

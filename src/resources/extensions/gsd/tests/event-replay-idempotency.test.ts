@@ -13,7 +13,6 @@ import {
   insertVerificationEvidence,
   upsertDecision,
 } from "../gsd-db.ts";
-import { extractEntityKey } from "../workflow-reconcile.ts";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -121,20 +120,4 @@ describe("event-replay-idempotency", () => {
     // The final choice is "unstructured" per INSERT OR REPLACE semantics.
   });
 
-  test("unknown event commands in replayEvents are silently skipped — extractEntityKey returns null for unknown commands", () => {
-    // replayEvents uses a switch/default that silently skips unrecognised commands.
-    // We verify this via extractEntityKey which follows the same command set.
-    // A future_command not in the switch must return null (not throw).
-    const event = {
-      cmd: "future_command",
-      params: { foo: "bar" },
-      ts: new Date().toISOString(),
-      hash: "0000000000000000",
-      actor: "agent" as const,
-      session_id: "test-session",
-    };
-
-    const key = extractEntityKey(event);
-    assert.equal(key, null, "extractEntityKey should return null for unknown commands");
-  });
 });

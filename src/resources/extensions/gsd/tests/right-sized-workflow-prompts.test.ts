@@ -11,6 +11,7 @@ import { getUnitToolSurfaceContract } from "../unit-tool-contracts.ts";
 import {
   closeDatabase,
   insertMilestone,
+  insertRequirement,
   insertSlice,
   isDbAvailable,
   openDatabase,
@@ -149,6 +150,22 @@ test("plan-milestone standard prompt keeps project and decisions on-demand", asy
     ".gsd/PROJECT.md": "# Project\n\nPlan broad project body.\n",
     ".gsd/REQUIREMENTS.md": "# Requirements\n\nPlan requirement body.\n",
     ".gsd/DECISIONS.md": "# Decisions\n\nPlan decision body.\n",
+  });
+  // Requirements are inlined from the DB, never from REQUIREMENTS.md (ADR-046).
+  openDatabase(":memory:");
+  insertRequirement({
+    id: "R001",
+    class: "functional",
+    status: "active",
+    description: "Plan requirement body",
+    why: "",
+    source: "test",
+    primary_owner: "M001",
+    supporting_slices: "",
+    validation: "",
+    notes: "",
+    full_content: "",
+    superseded_by: null,
   });
   try {
     const prompt = await buildPlanMilestonePrompt("M001", "Update app", base, scopeMilestone(createWorkspace(base), "M001"), "standard");

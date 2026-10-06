@@ -8,8 +8,7 @@
 // printNonTtyErrorAndExit) and rejected piped invocations.
 //
 // Public headless recovery must use the same retained-backup Import
-// Application boundary as the interactive slash command. A few direct
-// Markdown-importer tests remain as low-level compatibility characterization.
+// Application boundary as the interactive slash command.
 //
 // The dispatcher branch itself (one if-block in headless.ts) is verified
 // by `npm run build:core`; the behavior-level guarantees live here.
@@ -22,23 +21,16 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, 
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { ensureDbOpen } from "../resources/extensions/gsd/bootstrap/dynamic-tools.ts";
+import { openWorkflowDatabase } from "../resources/extensions/gsd/db-workspace.ts";
 import {
-  isDbAvailable,
   closeDatabase,
-  clearEngineHierarchy,
-  transaction,
-  getAllMilestones,
-  getMilestoneSlices,
-  getSliceTasks,
   getMilestone,
   insertMilestone,
-  insertGateRow,
   _getAdapter,
 } from "../resources/extensions/gsd/gsd-db.ts";
-import { migrateHierarchyToDb } from "../resources/extensions/gsd/md-importer.ts";
-import { invalidateStateCache } from "../resources/extensions/gsd/state.ts";
+import { captureKnowledgeEntry } from "../resources/extensions/gsd/knowledge-capture.ts";
 import { captureCurrentLegacyImportBaseSnapshot } from "../resources/extensions/gsd/legacy-import-preview-base.ts";
+import { updateMemoryContent } from "../resources/extensions/gsd/memory-store.ts";
 import { createLegacyImportPreview } from "../resources/extensions/gsd/legacy-import-preview.ts";
 import { recordSchemaVersion } from "../resources/extensions/gsd/db-schema-metadata.ts";
 import { executeDomainOperation } from "../resources/extensions/gsd/db/domain-operation.ts";
@@ -51,6 +43,12 @@ after(() => {
   if (previousAgentDir === undefined) delete process.env.GSD_AGENT_DIR;
   else process.env.GSD_AGENT_DIR = previousAgentDir;
 });
+
+// Fixtures place markdown beside a missing gsd.db, so they open through the
+// explicit-import path that may start an empty authority.
+async function ensureDbOpen(base: string): Promise<boolean> {
+  return openWorkflowDatabase(base, { createEmptyAuthority: true }).ok;
+}
 
 function makeMarkdownFixture(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-headless-recover-"));
@@ -128,6 +126,13 @@ function recoverPreview(base: string) {
         logical_path: ".gsd/milestones",
         presence: "optional",
       },
+      ...(["DECISIONS", "REQUIREMENTS", "KNOWLEDGE", "PROJECT", "QUEUE"] as const).map((stem) => ({
+        id: `project-root-${stem.toLowerCase()}`,
+        kind: "project" as const,
+        physical_path: join(base, ".gsd", `${stem}.md`),
+        logical_path: `.gsd/${stem}.md`,
+        presence: "optional" as const,
+      })),
     ],
   });
 }
@@ -175,6 +180,8 @@ test("headless recover verifies backups from a populated synced extension", (t) 
   const previewHash = /^Preview hash: (sha256:[0-9a-f]{64})$/mu.exec(preview.stderr)?.[1];
   assert.equal(preview.status, 1, preview.stderr);
   assert.ok(previewHash, preview.stderr);
+  assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false, "an unapproved recover leaves the authority missing");
+  assert.ok(existsSync(join(base, ".gsd", "gsd.db.recover-pending")), "the empty database is parked for the approved run");
   assert.ok(
     ["ts", "js"].some(extension => existsSync(
       join(agentDir, "extensions", "gsd", `legacy-import-restore-drill.${extension}`),
@@ -187,99 +194,6 @@ test("headless recover verifies backups from a populated synced extension", (t) 
   assert.equal(recovered.status, 0, recovered.stderr);
   assert.match(recovered.stderr, /gsd-recover: recovered 4M\/7S\/5T hierarchy/u);
   assert.ok(existsSync(join(base, ".gsd", "gsd.db")));
-});
-
-test("legacy Markdown importer populates hierarchy in a direct compatibility fixture", async (t) => {
-  const base = makeMarkdownFixture();
-  t.after(() => {
-    try { closeDatabase(); } catch { /* may not be open */ }
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  const opened = await ensureDbOpen(base);
-  assert.ok(opened, "ensureDbOpen should succeed when .gsd/ exists");
-  assert.ok(isDbAvailable(), "DB should be open after ensureDbOpen");
-
-  const counts = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  assert.equal(counts.milestones, 1, "one milestone imported");
-  assert.equal(counts.slices, 1, "one slice imported");
-  assert.equal(counts.tasks, 1, "one task imported");
-
-  const milestones = getAllMilestones();
-  assert.equal(milestones.length, 1, "DB has the imported milestone");
-  assert.equal(milestones[0]!.id, "M001");
-
-  const slices = getMilestoneSlices("M001");
-  assert.equal(slices.length, 1, "milestone has the imported slice");
-  assert.equal(slices[0]!.id, "S01");
-  assert.equal(slices[0]!.status, "pending");
-
-  const tasks = getSliceTasks("M001", "S01");
-  assert.equal(tasks.length, 1, "slice has the imported task");
-  assert.equal(tasks[0]!.id, "T01");
-});
-
-test("legacy Markdown importer is stable across an explicit test-only reset", async (t) => {
-  const base = makeMarkdownFixture();
-  t.after(() => {
-    try { closeDatabase(); } catch { /* may not be open */ }
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  await ensureDbOpen(base);
-
-  const first = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  const second = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  assert.deepEqual(
-    second,
-    first,
-    "an explicit test-only reset must reproduce identical importer counts",
-  );
-  assert.equal(getAllMilestones().length, 1, "DB has exactly one milestone after the second pass");
-  assert.equal(getSliceTasks("M001", "S01").length, 1, "DB has exactly one task after the second pass");
-});
-
-test("test-only hierarchy clearing permits a subsequent legacy Markdown import", async (t) => {
-  const base = makeMarkdownFixture();
-  t.after(() => {
-    try { closeDatabase(); } catch { /* may not be open */ }
-    rmSync(base, { recursive: true, force: true });
-  });
-
-  await ensureDbOpen(base);
-
-  transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q3", scope: "slice" });
-  insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q5", scope: "task", taskId: "T01" });
-
-  const recovered = transaction(() => {
-    clearEngineHierarchy();
-    return migrateHierarchyToDb(base);
-  });
-  invalidateStateCache();
-
-  assert.deepEqual(recovered, { milestones: 1, slices: 1, tasks: 1 });
-  assert.equal(getSliceTasks("M001", "S01").length, 1, "DB has the imported task after gate-backed recovery");
 });
 
 test("headless recover: verified-backup failure aborts before destructive work", async (t) => {
@@ -327,7 +241,6 @@ test("headless recover: reports the drilled content-addressed backup used before
   }) as typeof process.stderr.write;
 
   const result = await handleHeadlessRecover(base, recoverPreviewApproval(base));
-
   assert.equal(result.exitCode, 0);
   assert.equal(await ensureDbOpen(base), true);
   assert.ok(getMilestone("M999"), "recovery preserves pre-existing authority after the gate");
@@ -377,6 +290,118 @@ test("headless recover no longer requires a data-loss override for non-destructi
   assert.equal(existsSync(join(base, ".gsd", "backups")), true);
   assert.ok(getMilestone("M999"), "non-destructive recover preserves authoritative DB rows");
   assert.ok(getMilestone("M001"), "non-destructive recover imports approved markdown rows");
+});
+
+test("headless recover resolves a requires-user diagnosis with the --choice token it prints", async (t) => {
+  const base = makeMarkdownFixture();
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  // A slice research note has no modeled owner: the Preview cannot decide it.
+  writeFileSync(
+    join(base, ".gsd", "milestones", "M001", "slices", "S01", "S01-RESEARCH.md"),
+    "# Research\n\nRetain these notes.\n",
+  );
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  const unresolved = await handleHeadlessRecover(base);
+  assert.equal(unresolved.exitCode, 1);
+  const choice = /--choice=sha256:[0-9a-f]{64}\.preserved/u.exec(stderr.join(""))?.[0];
+  assert.ok(choice, stderr.join(""));
+
+  stderr = [];
+  const unapproved = await handleHeadlessRecover(base, [choice]);
+  assert.equal(unapproved.exitCode, 1);
+  const resolvedHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(resolvedHash, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, [choice, `--preview=${resolvedHash}`]);
+  assert.equal(result.exitCode, 0, stderr.join(""));
+  assert.match(stderr.join(""), /gsd-recover: recovered 1M\/1S\/1T hierarchy/u);
+  assert.equal(await ensureDbOpen(base), true);
+  assert.ok(getMilestone("M001"));
+});
+
+test("headless recover writes a conflicting KNOWLEDGE.md row over its database row with the --choice token it prints", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-headless-recover-"));
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  assert.equal(await ensureDbOpen(base), true);
+  const pattern = captureKnowledgeEntry(base, "pattern", "Retry with backoff", "project");
+  // A memory UPDATE changes the database row. KNOWLEDGE.md keeps the old text.
+  assert.equal(updateMemoryContent(pattern.memoryId, "Retry with jitter"), true);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  assert.equal((await handleHeadlessRecover(base)).exitCode, 1);
+  const choice = /--choice=P001\.use-file/u.exec(stderr.join(""))?.[0];
+  assert.ok(choice, stderr.join(""));
+
+  stderr = [];
+  assert.equal((await handleHeadlessRecover(base, [choice])).exitCode, 1);
+  const choiceHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(choiceHash, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, [choice, `--preview=${choiceHash}`]);
+  assert.equal(result.exitCode, 0, stderr.join(""));
+  assert.equal(await ensureDbOpen(base), true);
+  assert.equal(
+    _getAdapter()!.prepare("SELECT content FROM memories WHERE id = :id").get({ ":id": pattern.memoryId })?.["content"],
+    "Retry with backoff",
+  );
+});
+
+test("headless recover refuses a knowledge row choice when it loads a retained Import Application", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-headless-recover-"));
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  assert.equal(await ensureDbOpen(base), true);
+  const pattern = captureKnowledgeEntry(base, "pattern", "Retry with backoff", "project");
+  assert.equal(updateMemoryContent(pattern.memoryId, "Retry with jitter"), true);
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  // The caller approves the plain conflict Preview first: the database row is kept.
+  assert.equal((await handleHeadlessRecover(base)).exitCode, 1);
+  const plainHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(plainHash, stderr.join(""));
+  assert.equal((await handleHeadlessRecover(base, [`--preview=${plainHash}`])).exitCode, 0, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, ["--choice=P001.use-file"]);
+  assert.equal(result.exitCode, 1, stderr.join(""));
+  assert.match(stderr.join(""), /row choice for P001 was not applied/u);
+  assert.doesNotMatch(stderr.join(""), /gsd-recover: recovered/u);
+  assert.equal(await ensureDbOpen(base), true);
+  assert.equal(
+    _getAdapter()!.prepare("SELECT content FROM memories WHERE id = :id").get({ ":id": pattern.memoryId })?.["content"],
+    "Retry with jitter",
+  );
 });
 
 test("headless recover uses the entrypoint-neutral retained-backup Import Application path", async (t) => {
@@ -577,6 +602,37 @@ test("headless recover fails loud on a malformed --choice token", async (t) => {
   assert.doesNotMatch(stderr.join(""), /gsd-recover: recovered/);
 });
 
+test("headless recover rejects a mistyped Preview --choice token before the import is applied", async (t) => {
+  const base = makeMarkdownFixture();
+  const previousWrite = process.stderr.write;
+  let stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  const unapproved = await handleHeadlessRecover(base);
+  assert.equal(unapproved.exitCode, 1);
+  const previewHash = /Preview hash: (sha256:[0-9a-f]{64})/u.exec(stderr.join(""))?.[1];
+  assert.ok(previewHash, stderr.join(""));
+
+  stderr = [];
+  const result = await handleHeadlessRecover(base, [
+    `--preview=${previewHash}`,
+    `--choice=sha256:${"a".repeat(63)}.preserved`,
+  ]);
+
+  assert.equal(result.exitCode, 1);
+  assert.match(stderr.join(""), /malformed --choice token/);
+  assert.equal(await ensureDbOpen(base), true);
+  assert.ok(!getMilestone("M001"), "the import must not be applied");
+});
+
 test("headless recover prints a terminal message for an already-restored Application", async (t) => {
   const base = makeCorpusFixture();
   const previousWrite = process.stderr.write;
@@ -747,7 +803,7 @@ test("headless recover choice-required prints full executable forward-repair com
 });
 
 const V51_MESSAGE =
-  "gsd.db schema is v51, newer than the v50 this gsd-pi supports. " +
+  "gsd.db schema is v52, newer than the v51 this gsd-pi supports. " +
   "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
 
 test("headless recover forwards the exact refuse-newer message for a newer-schema project", async (t) => {
@@ -761,7 +817,7 @@ test("headless recover forwards the exact refuse-newer message for a newer-schem
   });
 
   assert.equal(await ensureDbOpen(base), true);
-  recordSchemaVersion(_getAdapter()!, 51);
+  recordSchemaVersion(_getAdapter()!, 52);
   closeDatabase();
   process.stderr.write = ((chunk: string | Uint8Array) => {
     stderr.push(String(chunk));
@@ -779,5 +835,37 @@ test("headless recover forwards the exact refuse-newer message for a newer-schem
     stderr.join(""),
     /failed to open or create the GSD database/,
     "the generic open-failure message is replaced for the schema-too-new case",
+  );
+});
+
+test("headless recover tells the user to run /gsd db bind in a copied checkout", async (t) => {
+  const base = makeMarkdownFixture();
+  const copy = mkdtempSync(join(tmpdir(), "gsd-headless-recover-copy-"));
+  const previousWrite = process.stderr.write;
+  const stderr: string[] = [];
+  t.after(() => {
+    process.stderr.write = previousWrite;
+    try { closeDatabase(); } catch { /* may not be open */ }
+    rmSync(base, { recursive: true, force: true });
+    rmSync(copy, { recursive: true, force: true });
+  });
+
+  // The first open binds the database to `base`; the copy carries that binding.
+  assert.equal(await ensureDbOpen(base), true);
+  closeDatabase();
+  cpSync(join(base, ".gsd"), join(copy, ".gsd"), { recursive: true });
+  process.stderr.write = ((chunk: string | Uint8Array) => {
+    stderr.push(String(chunk));
+    return true;
+  }) as typeof process.stderr.write;
+
+  const result = await handleHeadlessRecover(copy);
+
+  assert.equal(result.exitCode, 1, "a database bound to another checkout is a recover failure");
+  assert.match(stderr.join(""), /checkout-unbound: .*run \/gsd db bind here/s);
+  assert.doesNotMatch(
+    stderr.join(""),
+    /failed to open or create the GSD database/,
+    "the generic open-failure message is replaced for the checkout-unbound case",
   );
 });

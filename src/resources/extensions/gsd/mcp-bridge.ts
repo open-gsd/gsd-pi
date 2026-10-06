@@ -6,8 +6,19 @@ export {
 } from "./bootstrap/write-gate.js";
 export { ensureDbOpen } from "./bootstrap/dynamic-tools.js";
 export { openExistingWorkflowDatabase } from "./db-workspace.js";
+export { hasLiveAutoWorkerForProject } from "./db/auto-workers.js";
+export { readStoredPausedSession } from "./interrupted-session.js";
 export { readProgressFromDb, readProjectProgressFromDb } from "./state/progress-from-db.js";
 export { readProjectSnapshotFromDb } from "./state/project-snapshot.js";
+export {
+  readProjectQueryFromDb,
+  readRoadmapFromDb,
+  runDoctorFromDb,
+} from "./state/external-reads-from-db.js";
+export { readKnowledgeMarkdown } from "./knowledge-projection.js";
+export { loadActionableCaptures, loadAllCaptures, resolveCapture } from "./captures.js";
+export { listUnitMetrics } from "./db/unit-metrics.js";
+export { aggregateByModel, aggregateByPhase, aggregateBySlice, getProjectTotals, loadLedgerFromDisk } from "./metrics.js";
 export {
   _getAdapter,
   checkpointDatabase,
@@ -24,19 +35,12 @@ export {
   openDatabase,
   upsertMilestonePlanning,
 } from "./gsd-db.js";
-export { invalidateStateCache, isReusableGhostMilestone } from "./state.js";
+export { invalidateStateCache } from "./state.js";
 export { loadEffectiveGSDPreferences } from "./preferences.js";
 export {
   saveDecisionToDb,
   saveRequirementToDb,
   updateRequirementInDb,
 } from "./db-writer.js";
-export { rebuildState } from "./doctor.js";
 export { queryJournal } from "./journal.js";
-export {
-  claimReservedId,
-  findMilestoneIds,
-  getReservedMilestoneIds,
-  milestoneIdSort,
-  nextMilestoneId,
-} from "./milestone-ids.js";
+export { resolvePendingEscalation } from "./escalation-resolution.js";

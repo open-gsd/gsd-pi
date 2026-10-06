@@ -9,6 +9,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, join, delimiter } from 'node:path';
 import { RpcClient } from '@opengsd/rpc-client';
+import { parseWorkflowOutcomeCustomMessage, type RpcWorkflowOutcomeEvent } from '@opengsd/contracts';
 import type { SdkAgentEvent, RpcInitResult, RpcCostUpdateEvent, RpcExtensionUIRequest } from '@opengsd/contracts';
 import type {
   ManagedSession,
@@ -421,6 +422,27 @@ export class SessionManager {
         session.cost.tokens.cacheRead = Math.max(session.cost.tokens.cacheRead, costEvent.tokens.cacheRead ?? 0);
         session.cost.tokens.cacheWrite = Math.max(session.cost.tokens.cacheWrite, costEvent.tokens.cacheWrite ?? 0);
       }
+    }
+
+    // Typed workflow outcome first (ADR-046): the extension reports the run's
+    // terminal state as a contract event. The notification-text classifiers
+    // below stay as the fallback for a run of an older extension.
+    const outcome = parseWorkflowOutcomeCustomMessage(event as Parameters<typeof parseWorkflowOutcomeCustomMessage>[0])
+      ?? (event.type === 'workflow_outcome' ? event as unknown as RpcWorkflowOutcomeEvent : null);
+    if (outcome) {
+      if (outcome.status === 'blocked') {
+        session.status = 'blocked';
+        session.pendingBlocker = {
+          id: `workflow-outcome-${outcome.status}`,
+          method: 'notify',
+          message: outcome.reason ?? 'workflow blocked',
+          event: { type: 'extension_ui_request', id: '', method: 'notify', message: outcome.reason ?? 'workflow blocked' },
+        };
+      } else {
+        session.status = 'completed';
+        session.unsubscribe?.();
+      }
+      return;
     }
 
     // Paused detection — pauseAuto() is resumable and must not leave the

@@ -208,7 +208,7 @@ Start from a clean worktree when possible. GSD can create task worktrees for iso
 
 GSD stores project state in `.gsd/`. Depending on your workflow, some generated markdown files may be useful to commit and review, while runtime/cache files should stay local.
 
-Local runtime/cache paths include `.gsd/gsd.db*`, `.gsd/state.json`, `.gsd/runtime/`, `.gsd-worktrees/`, and `.gsd-backups/`. GSD manages `.gitignore` for these paths by default. `.gsd/state.json` is the state contract projection used by external readers such as GSD Workbench; do not edit or commit it. `.gsd-backups/` stores migration snapshots, and stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the project has completed the flat-phase `.gsd/phases/` migration.
+Local runtime/cache paths include `.gsd/gsd.db*`, `.gsd/state.json`, `.gsd/runtime/`, `.gsd-worktrees/`, and `.gsd-backups/`. GSD manages `.gitignore` for these paths by default. `.gsd/state.json` is the state contract projection used by external readers such as GSD Workbench; do not edit or commit it. `.gsd-backups/` stores migration snapshots. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 When in doubt:
 

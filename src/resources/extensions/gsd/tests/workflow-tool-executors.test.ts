@@ -16,6 +16,8 @@ import {
   insertAssessment,
   insertGateRow,
   insertMilestone,
+  insertSlice,
+  insertTask,
   setSliceSummaryMd,
   upsertRequirement,
   getAllMilestones,
@@ -47,6 +49,7 @@ import {
   executeUatResultSave,
 } from "../tools/workflow-tool-executors.ts";
 import { internalExecutionInvocation, type ExecutionInvocation } from "../execution-invocation.ts";
+import { recordExecRun } from "../db/writers/exec-runs.ts";
 import { internalPlanningInvocation } from "../planning-invocation.ts";
 import { seedSliceCompletionAuthority } from "./slice-completion-fixture.ts";
 import {
@@ -146,6 +149,13 @@ function openTestDb(base: string): void {
   openDatabase(join(normalizeRealPath(base), ".gsd", "gsd.db"));
 }
 
+/** The legacy completion writer completes a Task row that exists. It creates none. */
+function seedLegacyTask(): void {
+  insertMilestone({ id: "M001", title: "Foundation", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending" });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "Demo", status: "pending" });
+}
+
 async function inProjectDir<T>(dir: string, fn: () => Promise<T>): Promise<T> {
   const originalCwd = process.cwd();
   try {
@@ -220,6 +230,38 @@ function seedSlice(milestoneId: string, sliceId: string, status: string): void {
   db.prepare(
     "INSERT OR REPLACE INTO slices (milestone_id, id, title, status, created_at) VALUES (?, ?, ?, ?, ?)",
   ).run(milestoneId, sliceId, `Slice ${sliceId}`, status, new Date().toISOString());
+}
+
+/** Record a gsd_exec / gsd_uat_exec run as the host does when the command ends. */
+function recordUatExecEvidence(run: {
+  id: string;
+  exit_code?: number | null;
+  signal?: string | null;
+  timed_out?: boolean;
+  aborted?: boolean;
+  metadata: { kind: string; milestoneId?: string; sliceId?: string; checkId?: string };
+}): void {
+  recordExecRun({
+    ...(run.metadata.kind === "uat_exec"
+      ? {
+        kind: "uat_exec",
+        milestoneId: run.metadata.milestoneId ?? "",
+        sliceId: run.metadata.sliceId ?? "",
+        checkId: run.metadata.checkId ?? "",
+      }
+      : { kind: "exec" }),
+    id: run.id,
+    runtime: "bash",
+    command: "node check.js",
+    cwd: process.cwd(),
+    exit_code: run.exit_code ?? 0,
+    signal: run.signal ?? null,
+    timedOut: run.timed_out ?? false,
+    aborted: run.aborted ?? false,
+    started_at: new Date().toISOString(),
+    duration_ms: 1,
+    output_hash: "sha256:test",
+  });
 }
 
 function seedCompletedTaskAuthority(input: {
@@ -333,7 +375,7 @@ test("executeSummarySave surfaces task summary projection failures", async (t) =
   assert.equal(getArtifact(artifactPath), null);
 });
 
-test("executeSummarySave surfaces task summary worktree mirror failures", async (t) => {
+test("executeSummarySave returns the saved task summary with a stale flag when the worktree mirror fails", async (t) => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
   t.after(() => {
@@ -357,8 +399,9 @@ test("executeSummarySave surfaces task summary worktree mirror failures", async 
     content: "# T01 Summary\n\nMirror failure must be visible.\n",
   }, worktree));
 
-  assert.equal(result.isError, true);
-  assert.match(result.content[0]!.text, /Error saving artifact/);
+  assert.notEqual(result.isError, true, "a failed worktree copy after the save is not a tool error");
+  assert.match(result.content[0]!.text, /Saved SUMMARY artifact/);
+  assert.equal(result.details.stale, true);
   assert.ok(getArtifact(artifactPath));
 });
 
@@ -544,6 +587,7 @@ test("executeTaskComplete coerces string verificationEvidence entries", async ()
   const base = makeTmpBase();
   try {
     openTestDb(base);
+    seedLegacyTask();
     const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
@@ -584,6 +628,7 @@ test("executeTaskComplete derives missing verification from evidence", async () 
   const base = makeTmpBase();
   try {
     openTestDb(base);
+    seedLegacyTask();
     const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
@@ -618,6 +663,7 @@ test("executeTaskComplete treats a malformed duplicate for an already-complete t
   const base = makeTmpBase();
   try {
     openTestDb(base);
+    seedLegacyTask();
     const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
     mkdirSync(planDir, { recursive: true });
     writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
@@ -652,62 +698,53 @@ test("executeTaskComplete treats a malformed duplicate for an already-complete t
   }
 });
 
-test("executeTaskComplete creates the legacy escalation directory and surfaces its metadata", async () => {
+test("executeTaskComplete rejects an escalation on a Task without a canonical lifecycle", async (t) => {
   const base = makeTmpBase();
-  try {
-    openTestDb(base);
-    writeFileSync(join(base, ".gsd", "PREFERENCES.md"), [
-      "---",
-      "version: 1",
-      "phases:",
-      "  mid_execution_escalation: true",
-      "---",
-    ].join("\n"));
-    const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
-    mkdirSync(planDir, { recursive: true });
-    writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
-
-    const result = await inProjectDir(base, () => executeTaskComplete({
-      milestoneId: "M001",
-      sliceId: "S01",
-      taskId: "T01",
-      oneLiner: "Completed task",
-      narrative: "Did the work but found an ambiguity.",
-      verification: "npm test",
-      escalation: {
-        question: "Should the cache use write-through or write-back?",
-        options: [
-          { id: "A", label: "Write-through", tradeoffs: "Simpler reads; slower writes." },
-          { id: "B", label: "Write-back", tradeoffs: "Faster writes; more flush complexity." },
-        ],
-        recommendation: "A",
-        recommendationRationale: "Current usage favors correctness over write latency.",
-        continueWithDefault: true,
-      },
-    }, base));
-
-    assert.equal(result.details.operation, "complete_task");
-    assert.match(
-      String(result.content[0]?.text),
-      /Task completed with escalation decision required: Should the cache use write-through or write-back\?/,
-    );
-    assert.match(String(result.content[0]?.text), /Resolve with: \/gsd escalate resolve T01/);
-    assert.equal((result.details.escalation as { question?: string }).question, "Should the cache use write-through or write-back?");
-
-    const db = _getAdapter();
-    assert.ok(db, "DB should be open");
-    const row = db!.prepare(
-      "SELECT escalation_pending, escalation_awaiting_review, escalation_artifact_path FROM tasks WHERE milestone_id = ? AND slice_id = ? AND id = ?",
-    ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
-    assert.equal(row?.escalation_pending, 0);
-    assert.equal(row?.escalation_awaiting_review, 1);
-    const expectedArtifactPath = join(normalizeRealPath(planDir), "tasks", "T01-ESCALATION.json");
-    assert.equal(row?.escalation_artifact_path, expectedArtifactPath);
-    assert.equal(existsSync(expectedArtifactPath), true);
-  } finally {
+  t.after(() => {
     closeDatabase();
     cleanup(base);
-  }
+  });
+  openTestDb(base);
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), [
+    "---",
+    "version: 1",
+    "phases:",
+    "  mid_execution_escalation: true",
+    "---",
+  ].join("\n"));
+  const planDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+  mkdirSync(planDir, { recursive: true });
+  writeFileSync(join(planDir, "S01-PLAN.md"), "# S01\n\n- [ ] **T01: Demo** `est:5m`\n");
+
+  const result = await inProjectDir(base, () => executeTaskComplete({
+    milestoneId: "M001",
+    sliceId: "S01",
+    taskId: "T01",
+    oneLiner: "Completed task",
+    narrative: "Did the work but found an ambiguity.",
+    verification: "npm test",
+    escalation: {
+      question: "Should the cache use write-through or write-back?",
+      options: [
+        { id: "A", label: "Write-through", tradeoffs: "Simpler reads; slower writes." },
+        { id: "B", label: "Write-back", tradeoffs: "Faster writes; more flush complexity." },
+      ],
+      recommendation: "A",
+      recommendationRationale: "Current usage favors correctness over write latency.",
+      continueWithDefault: true,
+    },
+  }, base));
+
+  assert.equal(result.isError, true);
+  assert.match(String(result.content[0]?.text), /escalation requires a canonical Task lifecycle for M001\/S01\/T01/);
+
+  const db = _getAdapter();
+  assert.ok(db, "DB should be open");
+  const row = db!.prepare(
+    "SELECT COUNT(*) AS count FROM tasks WHERE milestone_id = ? AND slice_id = ? AND id = ?",
+  ).get("M001", "S01", "T01") as Record<string, unknown> | undefined;
+  assert.equal(row?.count, 0, "the rejected escalation must not complete the task");
+  assert.equal(existsSync(join(planDir, "tasks", "T01-ESCALATION.json")), false);
 });
 
 test("executeTaskComplete surfaces stale readable status and duplicate repair metadata", async (t) => {
@@ -718,6 +755,7 @@ test("executeTaskComplete surfaces stale readable status and duplicate repair me
   });
 
   openTestDb(base);
+  seedLegacyTask();
   writeFileSync(join(base, ".gsd", "PREFERENCES.md"), [
     "---",
     "version: 1",
@@ -747,26 +785,6 @@ test("executeTaskComplete surfaces stale readable status and duplicate repair me
   assert.equal(ordinary.isError, undefined);
   assert.equal(ordinary.details.stale, true);
   assert.match(String(ordinary.content[0]?.text), /readable status update is pending repair/i);
-
-  const escalated = await inProjectDir(base, () => executeTaskComplete({
-    ...ordinaryParams,
-    taskId: "T02",
-    oneLiner: "Completed escalated task",
-    escalation: {
-      question: "Which publication route should be used?",
-      options: [
-        { id: "A", label: "Direct", tradeoffs: "Simple and immediate." },
-        { id: "B", label: "Queued", tradeoffs: "More durable but delayed." },
-      ],
-      recommendation: "A",
-      recommendationRationale: "The direct route is sufficient here.",
-      continueWithDefault: true,
-    },
-  }, base));
-
-  assert.equal(escalated.isError, undefined);
-  assert.equal(escalated.details.stale, true);
-  assert.match(String(escalated.content[0]?.text), /readable status update is pending repair/i);
 
   // The obstruction gate refuses to journal a write over the foreign ROADMAP.md
   // directory, so the retry converges once the obstruction is cleared
@@ -2021,7 +2039,6 @@ test("executePlanSlice omits the zero-task warning for metadata-only replans ove
 test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone worktree", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const browserTimelineDir = join(base, ".artifacts", "browser", "session");
   const evidenceId = "worktree-uat-evidence";
   const browserTimelinePath = join(browserTimelineDir, "s02-uat-browser-timeline.json");
@@ -2029,27 +2046,22 @@ test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone 
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S02", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
     mkdirSync(browserTimelineDir, { recursive: true });
     writeFileSync(browserTimelinePath, JSON.stringify({ summary: "browser timeline evidence" }), "utf-8");
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S02",
-          checkId: "UAT-01",
-          intent: "uat-runtime-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S02",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2131,7 +2143,6 @@ test("executeUatResultSave accepts gsd_uat_exec evidence written in a milestone 
 test("executeUatResultSave rejects a PASS verdict citing failed gsd_uat_exec evidence and leaves the UAT gate unwritten", async (t) => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-failed-exec-evidence";
   t.after(() => {
     closeDatabase();
@@ -2140,25 +2151,20 @@ test("executeUatResultSave rejects a PASS verdict citing failed gsd_uat_exec evi
   openTestDb(base);
   seedMilestone("M001", "Milestone One");
   seedSlice("M001", "S08", "complete");
-  mkdirSync(worktreeExecDir, { recursive: true });
-  writeFileSync(
-    join(worktreeExecDir, `${evidenceId}.meta.json`),
-    JSON.stringify({
-      id: evidenceId,
-      exit_code: 1,
-      signal: null,
-      timed_out: false,
-      aborted: false,
-      metadata: {
-        kind: "uat_exec",
-        milestoneId: "M001",
-        sliceId: "S08",
-        checkId: "UAT-01",
-        intent: "uat-runtime-check",
-      },
-    }),
-    "utf-8",
-  );
+  mkdirSync(worktree, { recursive: true });
+  recordUatExecEvidence({
+    id: evidenceId,
+    exit_code: 1,
+    signal: null,
+    timed_out: false,
+    aborted: false,
+    metadata: {
+      kind: "uat_exec",
+      milestoneId: "M001",
+      sliceId: "S08",
+      checkId: "UAT-01",
+    },
+  });
 
   const selectUatGate = _getAdapter()!.prepare(
     "SELECT verdict FROM quality_gates WHERE milestone_id = ? AND slice_id = ? AND gate_id = ?",
@@ -2221,28 +2227,22 @@ test("executeUatResultSave rejects a PASS verdict citing failed gsd_uat_exec evi
 test("executeUatResultSave leaves UAT pending after a harness-aborted turn", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "harness-aborted-uat-evidence";
   const startedAt = Date.now();
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S04", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S04",
-          checkId: "UAT-01",
-          intent: "uat-runtime-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S04",
+        checkId: "UAT-01",
+      },
+    });
     _getAdapter()!.prepare(
       `INSERT INTO quality_gates (milestone_id, slice_id, gate_id, scope, task_id, status)
        VALUES (?, ?, ?, ?, ?, ?)`,
@@ -2319,31 +2319,25 @@ test("executeUatResultSave leaves UAT pending after a harness-aborted turn", asy
 test("executeUatResultSave supplies canonical presentation and normalizes verdict casing", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-lowercase-verdict";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S03", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S03",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S03",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2380,31 +2374,25 @@ test("executeUatResultSave supplies canonical presentation and normalizes verdic
 test("executeUatResultSave supplies direct browser tools for browser-executable UAT", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-direct-browser-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S06", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S06",
-          checkId: "UAT-01",
-          intent: "uat-browser-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S06",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2445,31 +2433,25 @@ test("executeUatResultSave supplies direct browser tools for browser-executable 
 test("executeUatResultSave merges canonical plan ID and read-only tools when presentation lacks plan ID", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-no-plan-id-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S05", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S05",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S05",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2521,32 +2503,26 @@ test("executeUatResultSave merges canonical plan ID and read-only tools when pre
 test("executeUatResultSave surfaces the worktree validation path and notification for NEEDS-HUMAN checks", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-human-validation-evidence";
   try {
     openTestDb(base);
     initNotificationStore(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S07", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S07",
-          checkId: "UAT-01",
-          intent: "uat-runtime-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S07",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2608,31 +2584,25 @@ test("executeUatResultSave surfaces the worktree validation path and notificatio
 test("executeUatResultSave omits manual-validation guidance when no human checks remain", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "uat-no-human-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S08", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S08",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S08",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2669,21 +2639,16 @@ test("executeUatResultSave omits manual-validation guidance when no human checks
 test("executeUatResultSave rejects saved UAT without fresh UAT-owned evidence", async () => {
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   const evidenceId = "generic-exec-evidence";
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S04", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        metadata: { kind: "exec" },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      metadata: { kind: "exec" },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -2745,30 +2710,24 @@ test("executeUatResultSave rejects artifact-driven PASS with human follow-up che
   const base = makeTmpBase();
   const worktree = join(base, ".gsd", "worktrees", "M001");
   const evidenceId = "uat-artifact-nonautomatable";
-  const worktreeExecDir = join(worktree, ".gsd", "exec");
   try {
     openTestDb(base);
     seedMilestone("M001", "Milestone One");
     seedSlice("M001", "S01", "complete");
-    mkdirSync(worktreeExecDir, { recursive: true });
-    writeFileSync(
-      join(worktreeExecDir, `${evidenceId}.meta.json`),
-      JSON.stringify({
-        id: evidenceId,
-        exit_code: 0,
-        signal: null,
-        timed_out: false,
-        aborted: false,
-        metadata: {
-          kind: "uat_exec",
-          milestoneId: "M001",
-          sliceId: "S01",
-          checkId: "UAT-01",
-          intent: "uat-artifact-check",
-        },
-      }),
-      "utf-8",
-    );
+    mkdirSync(worktree, { recursive: true });
+    recordUatExecEvidence({
+      id: evidenceId,
+      exit_code: 0,
+      signal: null,
+      timed_out: false,
+      aborted: false,
+      metadata: {
+        kind: "uat_exec",
+        milestoneId: "M001",
+        sliceId: "S01",
+        checkId: "UAT-01",
+      },
+    });
 
     const result = await inProjectDir(worktree, () => executeUatResultSave({
       milestoneId: "M001",
@@ -3556,14 +3515,17 @@ test("executeReplanSlice rewrites pending tasks and renders replan artifacts", a
         },
       ],
     }, base));
-    await inProjectDir(base, () => executeTaskComplete({
-      milestoneId: "M006",
+    // A blocker Task that a legacy completion closed. The replan adopts it.
+    insertTask({
+      id: "T06",
       sliceId: "S06",
-      taskId: "T06",
+      milestoneId: "M006",
+      title: "Blocker task",
+      status: "complete",
       oneLiner: "Completed blocker task",
       narrative: "The blocker was identified and documented.",
-      verification: "node --test",
-    }, base));
+      verificationResult: "node --test",
+    });
 
     const result = await inProjectDir(base, () => executeReplanSlice({
       milestoneId: "M006",
@@ -3863,7 +3825,6 @@ test("executeSummarySave fails before persisting PROJECT when milestone registra
     assert.equal(result.details.error, "milestone_registration_threw");
     assert.match(String(result.details.registration_error), /simulated milestone registration failure/);
     assert.match(result.content[0].text, /milestone registration failed/);
-    assert.match(result.content[0].text, /idempotent/);
     assert.equal(existsSync(join(base, ".gsd", "PROJECT.md")), false);
     const artifact = originalPrepare("SELECT path FROM artifacts WHERE path = ?").get("PROJECT.md");
     assert.equal(artifact, undefined);
@@ -4137,20 +4098,19 @@ test("executeSummarySave leaves sibling CONTEXT-DRAFT intact for non-CONTEXT art
   }
 });
 
-test("executeSummarySave CONTEXT HARD BLOCK clears after write-gate state file is deleted (#4343)", async () => {
+test("executeSummarySave CONTEXT HARD BLOCK follows the gate row, not a write-gate state file", async () => {
   const base = makeTmpBase();
-  const originalEnv = process.env.GSD_PERSIST_WRITE_GATE_STATE;
-  process.env.GSD_PERSIST_WRITE_GATE_STATE = "1";
   try {
     openTestDb(base);
     clearDiscussionFlowState(base);
-
-    // First call: CONTEXT artifact without depth verification → HARD BLOCK
-    const blocked = await inProjectDir(base, () => executeSummarySave({
+    const saveContext = () => inProjectDir(base, () => executeSummarySave({
       milestone_id: "M001",
       artifact_type: "CONTEXT",
       content: "# Context\n\ncontent",
     }, base));
+
+    // CONTEXT artifact without depth verification → HARD BLOCK
+    const blocked = await saveContext();
     assert.equal(blocked.isError, true, "should be blocked without depth verification");
     assert.equal(
       blocked.details.displayReason,
@@ -4162,42 +4122,28 @@ test("executeSummarySave CONTEXT HARD BLOCK clears after write-gate state file i
       "blocked result should mention HARD BLOCK",
     );
 
-    // Verify the state file was written (persist mode is active)
+    // A state file of an older build claims the milestone is verified.
     const stateFilePath = join(base, ".gsd", "runtime", "write-gate-state.json");
-    // The state file may or may not exist at this point (block doesn't write state).
-    // Write a fake state file simulating stale persisted block state.
     mkdirSync(join(base, ".gsd", "runtime"), { recursive: true });
     writeFileSync(stateFilePath, JSON.stringify({
-      verifiedDepthMilestones: [],
+      verifiedDepthMilestones: ["M001"],
       activeQueuePhase: false,
-      pendingGateId: "depth_verification_M001",
+      pendingGateId: null,
     }));
+    assert.equal((await saveContext()).isError, true, "the state file does not unlock the save");
 
-    // User deletes the state file to reset the block
+    // Deleting the file was the old way to reset the gate. It changes nothing.
     unlinkSync(stateFilePath);
-    assert.ok(!existsSync(stateFilePath), "state file deleted");
+    assert.deepEqual(loadWriteGateSnapshot(base).verifiedDepthMilestones, []);
+    assert.equal((await saveContext()).isError, true);
 
-    // The snapshot loaded after deletion should be clean (no pending gate, no block)
-    const snapshot = loadWriteGateSnapshot(base);
-    assert.equal(snapshot.pendingGateId, null, "pendingGateId should be null after file deletion");
-    assert.deepEqual(snapshot.verifiedDepthMilestones, [], "verifiedDepthMilestones should be empty after file deletion");
-
-    // Depth-verify and re-attempt: should succeed after deletion clears stale state
+    // The depth verification row unlocks the save.
     markDepthVerified("M001", base);
 
-    const unblocked = await inProjectDir(base, () => executeSummarySave({
-      milestone_id: "M001",
-      artifact_type: "CONTEXT",
-      content: "# Context\n\nfinal content",
-    }, base));
+    const unblocked = await saveContext();
     assert.equal(unblocked.isError, undefined, "should not be blocked after depth verification");
     assert.equal(unblocked.details.operation, "save_summary");
   } finally {
-    if (originalEnv === undefined) {
-      delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-    } else {
-      process.env.GSD_PERSIST_WRITE_GATE_STATE = originalEnv;
-    }
     clearDiscussionFlowState(base);
     closeDatabase();
     cleanup(base);

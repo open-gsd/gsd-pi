@@ -10,7 +10,6 @@
  *                       delegated to the write-gate validators.
  *   - "consent"       — approval/confirmation questions ("ready to write?",
  *                       "is this correct?"). Fail-closed.
- *   - "decision"      — explicit user decisions (research vs skip). Fail-closed.
  *   - "informational" — anything that is not asking the user to consent or
  *                       decide. Fail-open.
  *
@@ -20,7 +19,7 @@
  * through as a real answer) by construction.
  *
  * shouldPauseForQuestion replaces the old unit-type allowlist: a classified
- * consent/decision question pauses regardless of unit type, including
+ * consent question pauses regardless of unit type, including
  * interactive mode where no unit is active. This fixes #682 (prose approval
  * questions outside the 4 allowlisted discuss units rendered as un-gated
  * prose menus) by construction.
@@ -38,7 +37,7 @@ import { isDestructiveConfirmGateId } from "./safety/destructive-confirmation.js
 
 // ── Taxonomy ────────────────────────────────────────────────────────────────
 
-export type QuestionKind = "gate" | "consent" | "decision" | "informational";
+export type QuestionKind = "gate" | "consent" | "informational";
 
 export type GateSubKind = "depth-verification" | "approval" | "destructive-confirm";
 
@@ -73,9 +72,6 @@ const APPROVAL_RIGHT_QUESTION_RE =
 const APPROVAL_CHANGE_QUESTION_RE =
   /\b(?:anything\s+else|anything|something)\s+to\s+(?:adjust|add|remove|reclassify)\b/i;
 
-const RESEARCH_DECISION_QUESTION_RE =
-  /\b(?:research|skip)\b/i;
-
 const ASK_USER_QUESTIONS_CANCELLED_RE =
   /ask_user_questions was cancelled before receiving a response/i;
 
@@ -101,10 +97,6 @@ export function hasApprovalQuestion(text: string): boolean {
     APPROVAL_RIGHT_QUESTION_RE,
     APPROVAL_CHANGE_QUESTION_RE,
   ]);
-}
-
-export function hasResearchDecisionQuestion(text: string): boolean {
-  return hasQuestionMatching(text, [RESEARCH_DECISION_QUESTION_RE]);
 }
 
 /**
@@ -188,8 +180,6 @@ export interface ClassifyQuestionInput {
   options?: Array<{ label?: string }> | undefined;
   /** Prose text, when classifying a streamed text boundary. */
   text?: string;
-  /** Active unit type, used to pick the prose detector for decisions. */
-  unitType?: string;
 }
 
 /**
@@ -197,8 +187,8 @@ export interface ClassifyQuestionInput {
  *
  * Structured questions with a recognized gate id are gates; every other
  * structured question is asking the user something, so it classifies as
- * consent (fail-closed). Prose classifies by the approval/decision detectors;
- * prose that matches neither is informational (fail-open).
+ * consent (fail-closed). Prose classifies by the approval detectors;
+ * prose that does not match is informational (fail-open).
  */
 export function classifyQuestion(input: ClassifyQuestionInput): ClassifiedQuestion {
   if (isDestructiveConfirmGateId(input.id)) {
@@ -215,9 +205,6 @@ export function classifyQuestion(input: ClassifyQuestionInput): ClassifiedQuesti
     return { kind: "consent" };
   }
   const text = input.text ?? "";
-  if (input.unitType === "research-decision" && hasResearchDecisionQuestion(text)) {
-    return { kind: "decision" };
-  }
   if (hasApprovalQuestion(text)) {
     return { kind: "consent" };
   }
@@ -242,7 +229,7 @@ export type ConsentAnswerDetails = VerdictAnswerDetails;
  *   same verdict engine write-gate's applyAskUserQuestionsGateResult consumes;
  *   confirm option → "verified", any other real selection → "declined",
  *   empty/missing → "waiting" (fail-closed).
- * - consent/decision: a non-empty selection or non-empty notes → "answered";
+ * - consent: a non-empty selection or non-empty notes → "answered";
  *   empty/missing → "waiting" (fail-closed; fixes #528).
  * - informational: always "answered" (fail-open).
  */
@@ -267,7 +254,7 @@ export function evaluateAnswer(options: {
   const answer = details.response?.answers?.[questionId];
 
   if (hasSelectedValue(answer?.selected)) return "answered";
-  // Notes-only is a real user utterance for consent/decision questions, but
+  // Notes-only is a real user utterance for consent questions, but
   // never for gates (handled above).
   if (hasNotesValue(answer?.notes)) return "answered";
   return "waiting";
@@ -345,7 +332,7 @@ function awaitingBoundary(messages: unknown[] | undefined): { forced: boolean; t
  * Decide whether the assistant should pause for a prose user question.
  *
  * Unlike the retired USER_APPROVAL_UNIT_TYPES allowlist, this pauses for any
- * classified consent/decision question regardless of unit type — including
+ * classified consent question regardless of unit type — including
  * interactive mode where no unit is active (#682).
  */
 export function shouldPauseForQuestion(
@@ -356,11 +343,11 @@ export function shouldPauseForQuestion(
   if (forced) return true;
   // Streaming hot path: this runs on every message_update for every unit type.
   // The classifiers only ever match question-mark-terminated fragments, so
-  // text without a "?" can never classify as consent/decision — bail before
+  // text without a "?" can never classify as consent — bail before
   // the multi-regex scan.
   if (!text || !text.includes("?")) return false;
-  const { kind } = classifyQuestion({ text, unitType });
-  return kind === "consent" || kind === "decision";
+  const { kind } = classifyQuestion({ text });
+  return kind === "consent";
 }
 
 // ── Awaiting-input boundaries (moved from user-input-boundary) ──────────────
@@ -390,7 +377,6 @@ export function approvalGateIdForUnit(
   if (!unitType) return null;
   if (unitType === "discuss-project") return "depth_verification_project_confirm";
   if (unitType === "discuss-requirements") return "depth_verification_requirements_confirm";
-  if (unitType === "research-decision") return "depth_verification_research_decision_confirm";
   if (unitType === "discuss-milestone") {
     const safeUnitId = typeof unitId === "string" && /^[A-Za-z0-9_-]+$/.test(unitId)
       ? unitId
@@ -406,18 +392,12 @@ const CHANGE_REQUEST_RESPONSE_RE =
 const APPROVAL_RESPONSE_RE =
   /^(?:y|yes|yeah|yep|approve|approved|confirm|confirmed|correct|right|looks\s+(?:good|right)|sounds\s+good|all\s+good|ok|okay|go\s+ahead|proceed|write\s+it|save\s+it|do\s+it)\b/i;
 
-const RESEARCH_DECISION_RESPONSE_RE =
-  /^(?:research|run\s+research|do\s+research|skip|skip\s+research|no\s+research)\b/i;
-
 export function isExplicitApprovalResponse(
   input: string | undefined,
   pendingGateId?: string | null,
 ): boolean {
   const text = input?.trim() ?? "";
   if (!text) return false;
-  if (pendingGateId?.includes("research_decision")) {
-    return RESEARCH_DECISION_RESPONSE_RE.test(text);
-  }
   if (CHANGE_REQUEST_RESPONSE_RE.test(text)) return false;
   return APPROVAL_RESPONSE_RE.test(text);
 }

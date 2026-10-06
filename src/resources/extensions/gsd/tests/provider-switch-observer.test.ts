@@ -12,6 +12,7 @@ import {
 } from "../../../../../packages/pi-ai/src/providers/transform-messages.ts";
 
 import { autoSession } from "../auto-runtime-state.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 import {
   initNotificationStore,
   readNotifications,
@@ -158,6 +159,8 @@ test("end-to-end: audit event is emitted when an auto trace is active", async ()
     installProviderSwitchObserver();
     autoSession.basePath = basePath;
     autoSession.currentTraceId = "trace-provider-switch-1";
+    // The audit event is a DB row; events.jsonl is only its projection (ADR-046).
+    openDatabase(":memory:");
 
     const targetModel = {
       id: "gpt-5",
@@ -206,6 +209,7 @@ test("end-to-end: audit event is emitted when an auto trace is active", async ()
     assert.ok("trace-provider-switch-1" in stats.byTrace, "trace-keyed bucket should be populated");
     assert.equal(stats.byTrace["trace-provider-switch-1"]?.switches, 1);
   } finally {
+    closeDatabase();
     cleanup();
   }
 });

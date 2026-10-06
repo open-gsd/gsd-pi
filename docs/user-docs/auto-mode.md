@@ -4,7 +4,7 @@ Auto mode is GSD's autonomous execution engine. Run `/gsd auto`, walk away, come
 
 ## How It Works
 
-Auto mode is a **state machine driven by the GSD database at the project root**. It derives the next unit of work from the authoritative SQLite state, creates a fresh agent session, injects a focused prompt with all relevant context pre-inlined, and lets the LLM execute. When the LLM finishes, auto mode persists the result to the database, refreshes markdown projections such as `STATE.md`, and dispatches the next unit.
+Auto mode is a **state machine driven by the GSD database at the project root**. It derives the next unit of work from the authoritative SQLite state, creates a fresh agent session, injects a focused prompt with all relevant context pre-inlined, and lets the LLM execute. When the LLM finishes, auto mode persists the result to the database, refreshes markdown projections such as `STATE.md`, and dispatches the next unit. `STATE.md` is fully derived and overwritten on each refresh: a hand edit to it is lost by design, with no copy kept.
 
 ### The Loop
 
@@ -42,7 +42,7 @@ When milestone history contains only `.gsd/` artifact changes (for example plann
 
 The SQLite database is the runtime source of truth for milestones, slices, tasks, requirements, summaries, and completion status. Durable decisions and project knowledge use the same database through the `memories` table: decisions are stored as `architecture` memories, and KNOWLEDGE patterns/lessons are stored as `pattern`/`gotcha` memories.
 
-Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and the Patterns/Lessons sections of `.gsd/KNOWLEDGE.md` are projected from memory rows; editing those projections does not override the database unless a command imports or saves the change through GSD. The Rules section of `KNOWLEDGE.md` remains manually authored and is preserved separately.
+Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and `.gsd/KNOWLEDGE.md` is projected from memory rows; editing those projections does not override the database unless a command imports or saves the change through GSD.
 
 Execute-task units use durable Attempt records. Before the worker starts, auto mode must hold a milestone lease and coordination dispatch, move the canonical task lifecycle to `in_progress`, create a running Attempt, and append an `execute` Kernel checkpoint. If an old worker is replaced by a newer lease, the old Attempt is settled as `interrupted` and the replacement Attempt links back to it as retry history.
 
@@ -62,7 +62,7 @@ An agent-owned recovery abort remains fail-closed after its retry budget is exha
 
 When closeout or post-unit review finds task-specific rework, GSD can persist a structured rework brief with `gsd_rework_brief_save`. Blocking findings in that brief prevent `gsd_task_complete` from accepting the task until each finding has a `reworkResolution` entry with the same `findingId`, `status: "resolved"`, and concrete evidence. A finding can be deferred only with `status: "deferred-with-override"`, concrete evidence, and a `decisionRef`. If the plan for a reopened pending task needs to change for that rework, `gsd_replan_task` updates that one task's title, description, estimate, files, verification command, inputs, and expected output without mutating sibling tasks.
 
-`.gsd/QUEUE-ORDER.json` is the special durable reorder contract for milestone queue order. Commands such as `/gsd rethink` and `/gsd phase` write it when an operator reorders milestones; when the runtime database is open, GSD mirrors that order into `milestones.sequence`. State derivation also replays an existing `QUEUE-ORDER.json` into the database before choosing the active milestone, which repairs stale DB sequence for prompt-driven reorder flows without making arbitrary markdown projections runtime authority.
+`.gsd/QUEUE-ORDER.json` is a render of the milestone queue order. The `/gsd queue` reorder and `/gsd rethink` save the new order in the database, and GSD then writes this file from it. A reorder that puts a milestone before one it depends on is refused. Editing the file by hand does not change the order: state derivation reads the order from the database only.
 
 In worktree mode, source-code execution remains rooted in the active worktree and the project-root database remains authoritative runtime state. Plan Milestone resolves canonical Project-state artifacts through the project root while expressing their paths relative to the worktree; it does not treat a worktree-local `.gsd/` as Project state. Other units may render non-authoritative projections under the active worktree-local `.gsd/`, but neither projection location is a runtime state fallback. If the database is unavailable, runtime state derivation refuses to silently rebuild from markdown. Use explicit recovery/import commands, or run `/gsd migrate` when markdown is the intended source.
 
@@ -93,7 +93,7 @@ Workflow Preferences -> Project Context -> Requirements -> Research Decision -> 
 | `.gsd/PREFERENCES.md` | `--deep` / `workflow-preferences` | Holds `planning_depth: deep` and captured workflow settings |
 | `.gsd/PROJECT.md` | `discuss-project` | Project vision, users, anti-goals, constraints, and rough milestone sequence |
 | `.gsd/REQUIREMENTS.md` | `discuss-requirements` | Capability contract using `R###` requirements grouped by Active, Validated, Deferred, and Out of Scope |
-| `.gsd/runtime/research-decision.json` | `research-decision` | Records `research` or `skip`; this unit only asks the question and writes the marker |
+| (database only) | `discuss-project` or `discuss-requirements` | Records `research` with `gsd_research_decision_save` when the user asks for project research. No recorded decision means `skip` |
 | `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, `PITFALLS.md` | `research-project`, only when the decision is `research` | Four scout-backed project research outputs for stack, feature norms, architecture, and pitfalls |
 | `.gsd/phases/<NN-slug>/<NN>-CONTEXT.md` and `<NN>-ROADMAP.md` | Normal milestone discussion/planning | Milestone-specific context and executable roadmap; `` `[sketch]` `` marks slices awaiting `refine-slice`. Legacy projects may still resolve to `.gsd/milestones/<MID>/<MID>-*.md` until migrated. |
 
@@ -130,7 +130,7 @@ Auto mode consumes the scheduled wakeup only for the same `basePath + unitType +
 
 ### Discovered Blockers at Verification
 
-When a task completion records a settled, failed `blocker-discovered` Attempt awaiting failure routing, the host verification gate pauses auto mode. The pause names the task and Attempt and includes the staged blocker summary when present. If the task has a readable, unresolved escalation artifact, the pause also displays its question, options, and recommendation. Use `/gsd escalate list` to inspect pending escalations.
+When a task completion records a settled, failed `blocker-discovered` Attempt awaiting failure routing, the host verification gate pauses auto mode. The pause names the task and Attempt and includes the staged blocker summary when present. If the task has an unresolved escalation, the pause also displays its question, options, and recommendation from the database. Use `/gsd escalate list` to inspect pending escalations. An escalation from before escalations were stored in the database still pauses auto mode. `/gsd escalate show <taskId>` prints its question and all its options from the legacy `T##-ESCALATION.json` file, and `/gsd escalate resolve <taskId> <choice>` records the response in the database and carries it into the next task. If the file is missing or not readable, only `accept` and `reject-blocker` are valid and the response is not carried into the next task. A legacy escalation that was resolved but not applied to the next task shows as `resolved, NOT applied` in `/gsd escalate list --all`; `/gsd doctor` reports it as a warning and `/gsd doctor --fix` stores the response in the database.
 
 This pause surfaces the blocker; it does not authorize a retry or change failure routing. Although the message suggests `/gsd auto` after resolving the blocker, the failed Attempt still awaits routing and the task remains `in_progress`. Resuming can route that historical failure to an abort, so resolving an escalation alone does not guarantee continuation. A later successful Attempt can pass verification normally. Other failed Attempts still fail the verification gate's succeeded-Attempt requirement.
 
@@ -220,9 +220,9 @@ No manual intervention needed for transient errors — the session pauses briefl
 
 ### Incremental Memory
 
-GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. `KNOWLEDGE.md` keeps manual Rules as file-canonical entries, while Patterns and Lessons are captured as memories, backfilled from existing rows, and rendered into the file on session start.
+GSD maintains durable project memory in the `memories` table and projects selected knowledge back into `.gsd/KNOWLEDGE.md` for review. Rules, Patterns and Lessons are memories rows written by `/gsd knowledge` or `capture_thought`; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild.
 
-At the start of each unit, GSD injects the manual Rules from project `KNOWLEDGE.md`; Patterns and Lessons reach the agent through the memory block. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
+At the start of each unit, GSD injects the project Rules, read from the database and not from the file; Patterns and Lessons reach the agent through the memory block. When the database is not available, the prompt shows a `Project Knowledge unavailable` block and GSD logs a warning; the file is not a fallback. Global `~/.gsd/agent/KNOWLEDGE.md` remains user-maintained and is injected unchanged.
 
 ### Context Pressure Monitor
 
@@ -258,19 +258,30 @@ Auto mode also retains a last-resort same-unit consecutive dispatch cap for ever
 
 ### Artifact Verification Retries
 
-After each unit, GSD verifies that the expected artifact exists on disk. If the artifact is missing, auto mode re-dispatches the unit with explicit failure context and records an `artifact-verification-retry` journal event.
+After each unit, GSD verifies that the unit recorded its result in the database: the saved artifact row, the planned slice or task rows, the verdict row, or the Attempt Result. Rendered files are projections of those rows. A file on disk does not prove that a unit is complete, and a missing file does not block a unit whose result is recorded. If the result is missing, auto mode re-dispatches the unit with explicit failure context and records an `artifact-verification-retry` journal event.
 
-`reactive-execute` batches are handled differently after the retry cap. If dispatched tasks are still missing task summary files, GSD writes a slice-level `S##-REACTIVE-BLOCKER.md` diagnostic that lists which summaries are present or missing. The blocker prevents the same slice from launching another reactive batch, but it is not lifecycle authority: task statuses stay under canonical database Attempt/recovery control, not summary-file presence.
+`reactive-execute` batches are handled differently after the retry cap. A batch task is settled when its task row is closed or its latest Attempt has a Result; a task summary file does not settle it. If dispatched tasks are still not settled, GSD records a recovery block for the slice in the database and writes a slice-level `S##-REACTIVE-BLOCKER.md` diagnostic that lists which task summary files are present or missing. The recorded block prevents the same slice from launching another reactive batch. The diagnostic file alone decides nothing, and it is not lifecycle authority: task statuses stay under canonical database Attempt/recovery control.
 
-For `run-uat`, existence alone is not sufficient: a pre-existing
-`S##-ASSESSMENT.md` only counts as completed when it contains a canonical
-verdict field (for example frontmatter `verdict: PASS | FAIL | PARTIAL`). If
-the file exists but has no verdict, artifact verification fails and `run-uat`
-is redispatched. During milestone closeout, a UAT-scoped non-passing verdict is
-also redispatched so closeout can recover with fresh UAT evidence; roadmap and
-backfill assessments do not suppress that UAT run.
+For `run-uat`, the result is the run-uat assessment row that `gsd_uat_result_save`
+records with its verdict (`PASS | FAIL | PARTIAL`). An `S##-ASSESSMENT.md` file
+does not count, with or without a `verdict` field: if the row is missing,
+artifact verification fails and `run-uat` is redispatched. During milestone
+closeout, a UAT-scoped non-passing verdict is also redispatched so closeout can
+recover with fresh UAT evidence; roadmap and backfill assessments do not
+suppress that UAT run.
 
-Artifact verification retries are capped at 3 attempts. If the expected artifact is still missing after those retries, GSD pauses auto mode with an "Artifact still missing..." error instead of relying on loop detection or an unbounded dispatch counter.
+A completed slice whose UAT must run does not release the slices that depend on
+it until a run-uat verdict is saved. Until then GSD dispatches `run-uat` for
+that slice and refuses to dispatch new work (research, planning, task
+execution) for a dependent slice ("dependency slice ... has no UAT verdict").
+A dependent slice whose tasks are already done is still completed first; the
+`run-uat` unit comes after that. A slice whose UAT is not dispatched
+(artifact-driven UAT with `uat_dispatch` off) releases its dependents when it
+completes.
+
+Artifact verification retries are capped at 3 attempts. If the result is still missing after those retries, GSD pauses auto mode with the "Artifact verification failed..." error instead of relying on loop detection or an unbounded dispatch counter.
+
+A unit that records no result is never treated as complete. When timeout recovery exhausts its attempts, or a tool rejects the unit with a deterministic policy error that a retry cannot fix, GSD pauses auto mode for every unit type. It records a manual-attention recovery block in the database (a task keeps its Attempt and recovery records instead) and writes a `-RECOVERY-BLOCKER.md` diagnostic sidecar next to the expected artifact. The sidecar never has the name of the unit's artifact, so it cannot pass for the result. The one exception is the aggregate parallel slice-research unit after timeout recovery: GSD records the block and falls back to per-slice research.
 
 ### Post-Mortem Investigation
 
@@ -303,6 +314,8 @@ Three timeout tiers prevent runaway sessions:
 | Idle | 10 min | Detects stalls, intervenes |
 | Hard | 30 min | Starts timeout recovery; pauses auto mode only if recovery cannot make durable progress |
 
+All three tiers supervise a unit that is in flight. `global_idle_timeout_minutes` (#2373) covers the opposite case: auto mode is active but **no unit is in flight at all** — an idle session that no per-unit watchdog observes. When the threshold passes, it emits one notification per idle period (naming the idle time and the active milestone). It is notification-only: nothing is dispatched, retried, repaired, or mutated, and the ADR-047 liveness backstop is unaffected. The default `0` disables it.
+
 Recovery steering nudges the LLM to finish durable output before timing out. When idle or hard timeout recovery is actively writing durable progress, the unit failsafe records fresh runtime progress in `.gsd/runtime/` and defers its final cancellation check for another short recheck window. This prevents auto mode from pausing while a recovered unit is finalizing, but future-dated or stale runtime timestamps are ignored so clock skew cannot keep the unit alive forever.
 
 Interactive prompts that block waiting for human input (such as `ask_user_questions` during discuss-phase/milestone, or secure value entry) are exempt from the idle and hard timeouts: while one is in flight, the watchdogs re-arm instead of firing, so a long human deliberation never cancels the prompt or aborts its turn. A genuinely hung non-interactive unit still hits the hard cap as usual.
@@ -323,6 +336,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 60   # optional: notify when no unit is in flight this long (default: 0 = off)
 ```
 
 ### Cost Tracking
@@ -351,7 +365,9 @@ Runnable checks that fail are eligible for bounded auto-fix retries — the agen
 
 If the shell cannot find an executable, GSD classifies the check as `command-not-found`. This includes exit code 127, `command not found` output, and Windows `is not recognized as an internal or external command` errors. The individual check remains `inconclusive` in verification evidence and does not consume an auto-fix retry.
 
-The verification verdict passes via task evidence when every non-zero check is `command-not-found`, no blocking runtime error is present, and the current task has qualifying structured `verificationEvidence` staged through `gsd_task_complete`. Evidence qualifies when at least one record exists and every record has exit code 0 and a verdict of `pass` or `passed` (case-insensitive, ignoring surrounding whitespace). A genuine failing check or blocking runtime error prevents this exception. Source-integrity and post-execution checks still apply.
+The verification verdict passes via task evidence when every non-zero check is `command-not-found`, no blocking runtime error is present, and the current task has qualifying structured `verificationEvidence` staged through `gsd_task_complete`. Evidence qualifies when at least one record exists, every record has a verdict of `pass` or `passed` (case-insensitive, ignoring surrounding whitespace), and the host recorded a `gsd_exec` run of every claimed command in the current Attempt that ended with exit 0. A record names its run by the exact `gsd_exec` script. A claim with no such host run is not evidence. A genuine failing check or blocking runtime error prevents this exception. Source-integrity and post-execution checks still apply.
+
+A verification result with no host-run check is never a pass. When the task plan `verify` field is prose and GSD finds no runnable command (no `verification_commands`, no package script, no test file) and no host-recorded evidence, the Technical Verdict is `inconclusive` and the task goes to recovery. This also applies to a web app task: slice UAT does not replace task verification. Give the task a runnable `verify` command, set `verification_commands`, or run the checks through `gsd_exec` and cite them in `verificationEvidence`.
 
 Otherwise, auto mode pauses and clears auto-fix retry state. Install the missing executable or correct the verification command, then resume auto mode.
 
@@ -516,7 +532,9 @@ When enabled, auto-mode automatically selects cheaper models for simple units (s
 
 ## Reactive Task Execution
 
-Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the IO annotations in task plans. When at least three ready tasks can be considered safely, tasks that do not conflict (no shared file reads/writes) are dispatched in parallel via subagents, while dependent tasks wait for their predecessors to complete.
+Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the planned inputs and expected output of each task. GSD reads them from the task rows in the database, not from PLAN files. When at least three ready tasks can be considered safely, tasks that do not conflict (no shared file reads/writes) are dispatched in parallel via subagents, while dependent tasks wait for their predecessors to complete.
+
+A task that has a lifecycle row is not put in a parallel batch. Every task that `gsd_plan_slice` plans has one. Only the running Attempt of the host can complete such a task, and a batch subagent has no Attempt, so these tasks run one at a time through the sequential executor.
 
 ```yaml
 reactive_execution:

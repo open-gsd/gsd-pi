@@ -50,6 +50,7 @@ interface WorkflowBridgeFixtureModule {
     sequence: number;
   }): void;
   openDatabase(path: string): boolean;
+  _getAdapter(): { prepare(sql: string): { run(params?: Record<string, unknown>): unknown } };
 }
 
 async function importWorkflowBridgeFixture(): Promise<WorkflowBridgeFixtureModule> {
@@ -998,8 +999,265 @@ describe('createMcpServer tool registration', () => {
     const result = await progressTool.handler({ projectDir });
     const progress = JSON.parse(result.content[0].text);
     assert.deepEqual(progress.activeMilestone, { id: 'M999', title: 'Projection Only' });
-    assert.equal(progress.phase, 'plan');
+    assert.equal(progress.phase, 'planning');
     assert.deepEqual(progress.readMetadata, { source: 'projection', authority: 'projection-fallback' });
+  });
+
+  it('registered gsd_knowledge returns database rows when KNOWLEDGE.md is stale', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-knowledge-handler-'));
+    const bridge = await importWorkflowBridgeFixture();
+    t.after(() => {
+      bridge.closeDatabase();
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+    mkdirSync(join(projectDir, '.gsd'));
+    writeFileSync(
+      join(projectDir, '.gsd', 'KNOWLEDGE.md'),
+      [
+        '# Project Knowledge',
+        '',
+        '## Rules',
+        '',
+        '| # | Scope | Rule | Why | Added |',
+        '|---|-------|------|-----|-------|',
+        '| K001 | project | Stale file rule | old | 2026-01-01 |',
+        '',
+      ].join('\n'),
+    );
+    assert.equal(bridge.openDatabase(join(projectDir, '.gsd', 'gsd.db')), true);
+    bridge._getAdapter().prepare(
+      `INSERT INTO memories (id, category, content, confidence, created_at, updated_at, hit_count, scope, tags, structured_fields)
+       VALUES ('MEM001', 'rule', 'Database rule', 0.85, '2026-02-01T00:00:00.000Z', '2026-02-01T00:00:00.000Z', 0, 'project', '[]', :sf)`,
+    ).run({
+      ':sf': JSON.stringify({ sourceKnowledgeId: 'K001', rule: 'Database rule', scopeText: 'project', why: 'new', added: '2026-02-01' }),
+    });
+    bridge.closeDatabase();
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const knowledgeTool = (server as any)._registeredTools?.gsd_knowledge;
+    assert.ok(knowledgeTool, 'gsd_knowledge should be registered');
+
+    const result = await knowledgeTool.handler({ projectDir });
+    const knowledge = JSON.parse(result.content[0].text);
+    assert.deepEqual(knowledge.counts, { rules: 1, patterns: 0, lessons: 0 });
+    assert.deepEqual(knowledge.entries, [
+      { id: 'K001', type: 'rule', scope: 'project', content: 'Database rule', addedAt: '2026-02-01' },
+    ]);
+    assert.equal(knowledge.readMetadata, undefined, 'a database read is not labelled as a fallback');
+  });
+
+  it('registered gsd_knowledge labels the file read as a projection fallback when the database is unavailable', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-knowledge-fallback-'));
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    mkdirSync(join(projectDir, '.gsd'));
+    writeFileSync(
+      join(projectDir, '.gsd', 'KNOWLEDGE.md'),
+      [
+        '# Project Knowledge',
+        '',
+        '## Rules',
+        '',
+        '| # | Scope | Rule | Why | Added |',
+        '|---|-------|------|-----|-------|',
+        '| K001 | project | File rule | why | 2026-01-01 |',
+        '',
+      ].join('\n'),
+    );
+
+    const previousExecutors = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const previousWriteGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    const previousBridgeDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+    t.after(() => {
+      restoreEnvironmentValue('GSD_WORKFLOW_EXECUTORS_MODULE', previousExecutors);
+      restoreEnvironmentValue('GSD_WORKFLOW_WRITE_GATE_MODULE', previousWriteGate);
+      restoreEnvironmentValue('GSD_WORKFLOW_BRIDGE_TEST_DISABLE', previousBridgeDisable);
+    });
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const knowledgeTool = (server as any)._registeredTools?.gsd_knowledge;
+    const result = await knowledgeTool.handler({ projectDir });
+    const knowledge = JSON.parse(result.content[0].text);
+
+    assert.deepEqual(knowledge.entries.map((entry: { id: string }) => entry.id), ['K001']);
+    assert.deepEqual(knowledge.readMetadata, { source: 'projection', authority: 'projection-fallback' });
+  });
+
+  it('registered gsd_captures returns database rows when CAPTURES.md is stale', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-captures-handler-'));
+    const bridge = await importWorkflowBridgeFixture();
+    const captures = await import(
+      new URL('../../../src/resources/extensions/gsd/captures.js', import.meta.url).href
+    ) as { appendCapture(basePath: string, text: string): string };
+    t.after(() => {
+      bridge.closeDatabase();
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+    mkdirSync(join(projectDir, '.gsd'));
+    assert.equal(bridge.openDatabase(join(projectDir, '.gsd', 'gsd.db')), true);
+    const id = captures.appendCapture(projectDir, 'Database capture');
+    bridge.closeDatabase();
+    // A hand edit: the pending capture marked resolved, and a section the database does not hold.
+    writeFileSync(
+      join(projectDir, '.gsd', 'CAPTURES.md'),
+      [
+        '# Captures',
+        '',
+        `### ${id}`,
+        '**Text:** Database capture',
+        '**Captured:** 2026-01-01T00:00:00.000Z',
+        '**Status:** resolved',
+        '**Classification:** stop',
+        '',
+        '### CAP-byhand01',
+        '**Text:** File-only capture',
+        '**Captured:** 2026-01-01T00:00:00.000Z',
+        '**Status:** pending',
+        '',
+      ].join('\n'),
+    );
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const capturesTool = (server as any)._registeredTools?.gsd_captures;
+    assert.ok(capturesTool, 'gsd_captures should be registered');
+
+    const result = await capturesTool.handler({ projectDir });
+    const read = JSON.parse(result.content[0].text);
+    assert.deepEqual(read.counts, { total: 1, pending: 1, resolved: 0, actionable: 0 });
+    assert.deepEqual(
+      read.captures.map((capture: { id: string; status: string; classification: string | null }) =>
+        [capture.id, capture.status, capture.classification]),
+      [[id, 'pending', null]],
+    );
+    assert.equal(read.readMetadata, undefined, 'a database read is not labelled as a fallback');
+  });
+
+  it('registered gsd_captures labels the file read as a projection fallback when the database is unavailable', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-captures-fallback-'));
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    mkdirSync(join(projectDir, '.gsd'));
+    writeFileSync(
+      join(projectDir, '.gsd', 'CAPTURES.md'),
+      ['# Captures', '', '### CAP-0000aaaa', '**Text:** File capture', '**Captured:** 2026-01-01T00:00:00.000Z', '**Status:** pending', ''].join('\n'),
+    );
+
+    const previousExecutors = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const previousWriteGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    const previousBridgeDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+    t.after(() => {
+      restoreEnvironmentValue('GSD_WORKFLOW_EXECUTORS_MODULE', previousExecutors);
+      restoreEnvironmentValue('GSD_WORKFLOW_WRITE_GATE_MODULE', previousWriteGate);
+      restoreEnvironmentValue('GSD_WORKFLOW_BRIDGE_TEST_DISABLE', previousBridgeDisable);
+    });
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const capturesTool = (server as any)._registeredTools?.gsd_captures;
+    const result = await capturesTool.handler({ projectDir });
+    const read = JSON.parse(result.content[0].text);
+
+    assert.deepEqual(read.captures.map((capture: { id: string }) => capture.id), ['CAP-0000aaaa']);
+    assert.deepEqual(read.readMetadata, { source: 'projection', authority: 'projection-fallback' });
+  });
+
+  it('registered gsd_history returns database rows when metrics.json is deleted or stale', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-handler-'));
+    const bridge = await importWorkflowBridgeFixture();
+    const unitMetrics = await import(
+      new URL('../../../src/resources/extensions/gsd/db/writers/unit-metrics.js', import.meta.url).href
+    ) as { recordUnitMetricsRows(units: unknown[]): void };
+    t.after(() => {
+      bridge.closeDatabase();
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+    mkdirSync(join(projectDir, '.gsd'));
+    assert.equal(bridge.openDatabase(join(projectDir, '.gsd', 'gsd.db')), true);
+    const unit = (id: string, startedAt: number, cost: number) => ({
+      type: 'execute-task', id, model: 'test-model', startedAt, finishedAt: startedAt + 1000,
+      tokens: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, total: 150 },
+      cost, toolCalls: 2, assistantMessages: 1, userMessages: 1, apiRequests: 1,
+    });
+    unitMetrics.recordUnitMetricsRows([unit('M001/S01/T01', 1000, 0.5), unit('M001/S01/T02', 5000, 0.25)]);
+    bridge.closeDatabase();
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const historyTool = (server as any)._registeredTools?.gsd_history;
+    assert.ok(historyTool, 'gsd_history should be registered');
+
+    const withoutFile = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+    assert.deepEqual(withoutFile.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T02', 'M001/S01/T01']);
+    assert.deepEqual([withoutFile.totals.units, withoutFile.totals.cost], [2, 0.75]);
+    assert.equal(withoutFile.readMetadata, undefined, 'a database read is not labelled as a fallback');
+
+    // A stale ledger file with a unit the database does not hold.
+    writeFileSync(
+      join(projectDir, '.gsd', 'metrics.json'),
+      JSON.stringify({ version: 1, projectStartedAt: 1, units: [unit('M009/S09/T09', 9000, 99)] }),
+    );
+    const withStaleFile = JSON.parse((await historyTool.handler({ projectDir, limit: 1 })).content[0].text);
+    assert.deepEqual(withStaleFile.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T02']);
+    assert.deepEqual([withStaleFile.totals.units, withStaleFile.totals.cost], [2, 0.75]);
+  });
+
+  it('registered gsd_history returns the metrics.json ledger with the fallback label when the database holds no unit rows', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-empty-db-'));
+    const bridge = await importWorkflowBridgeFixture();
+    t.after(() => {
+      bridge.closeDatabase();
+      rmSync(projectDir, { recursive: true, force: true });
+    });
+    mkdirSync(join(projectDir, '.gsd'));
+    assert.equal(bridge.openDatabase(join(projectDir, '.gsd', 'gsd.db')), true);
+    bridge.closeDatabase();
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const historyTool = (server as any)._registeredTools?.gsd_history;
+
+    const noLedger = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+    assert.deepEqual([noLedger.entries, noLedger.totals.units], [[], 0]);
+    assert.equal(noLedger.readMetadata, undefined, 'an empty database with no ledger is a database read');
+
+    writeFileSync(
+      join(projectDir, '.gsd', 'metrics.json'),
+      JSON.stringify({ version: 1, projectStartedAt: 1, units: [{ type: 'execute-task', id: 'M001/S01/T01', cost: 0.5 }] }),
+    );
+    const read = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+    assert.deepEqual(read.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T01']);
+    assert.deepEqual([read.totals.units, read.totals.cost], [1, 0.5]);
+    assert.deepEqual(read.readMetadata, { source: 'projection', authority: 'projection-fallback' });
+  });
+
+  it('registered gsd_history labels the file read as a projection fallback when the database is unavailable', async (t) => {
+    const projectDir = mkdtempSync(join(tmpdir(), 'gsd-history-fallback-'));
+    t.after(() => rmSync(projectDir, { recursive: true, force: true }));
+    mkdirSync(join(projectDir, '.gsd'));
+    writeFileSync(
+      join(projectDir, '.gsd', 'metrics.json'),
+      JSON.stringify({ version: 1, projectStartedAt: 1, units: [{ type: 'execute-task', id: 'M001/S01/T01', cost: 0.5 }] }),
+    );
+
+    const previousExecutors = process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    const previousWriteGate = process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    const previousBridgeDisable = process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE;
+    delete process.env.GSD_WORKFLOW_EXECUTORS_MODULE;
+    delete process.env.GSD_WORKFLOW_WRITE_GATE_MODULE;
+    process.env.GSD_WORKFLOW_BRIDGE_TEST_DISABLE = '1';
+    t.after(() => {
+      restoreEnvironmentValue('GSD_WORKFLOW_EXECUTORS_MODULE', previousExecutors);
+      restoreEnvironmentValue('GSD_WORKFLOW_WRITE_GATE_MODULE', previousWriteGate);
+      restoreEnvironmentValue('GSD_WORKFLOW_BRIDGE_TEST_DISABLE', previousBridgeDisable);
+    });
+
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const historyTool = (server as any)._registeredTools?.gsd_history;
+    const read = JSON.parse((await historyTool.handler({ projectDir })).content[0].text);
+
+    assert.deepEqual(read.entries.map((entry: { id: string }) => entry.id), ['M001/S01/T01']);
+    assert.deepEqual(read.readMetadata, { source: 'projection', authority: 'projection-fallback' });
   });
 
   // Flat-phase fixture mirroring the extension renderer's output:
@@ -1180,6 +1438,44 @@ describe('createMcpServer tool registration', () => {
     assert.equal(payload.sessionId, sessionId);
     assert.equal(payload.projectDir, resolve('/tmp/tool-status-infer'));
     assert.equal(payload.status, 'running');
+  });
+
+  it('gsd_execute discloses the client-connection session lifetime on a plain stdio connection', async () => {
+    // Regression for #2368: a session started through gsd_execute dies with the
+    // server's stdio connection, so both the tool description and the success
+    // result must say so instead of advertising a bare "started".
+    const { server } = await createMcpServer(sm, { includeWorkflowTools: false });
+    const executeTool = (server as any)._registeredTools?.gsd_execute;
+
+    assert.ok(executeTool, 'gsd_execute should be registered');
+    assert.match(executeTool.description, /client-connection/);
+    assert.match(executeTool.description, /durable long-lived host/);
+
+    const result = await executeTool.handler({ projectDir: '/tmp/tool-exec-lifetime' });
+    assert.equal(result.isError, undefined);
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.status, 'started');
+    assert.ok(typeof payload.sessionId === 'string' && payload.sessionId.length > 0);
+    assert.equal(payload.lifetime, 'client-connection');
+    assert.match(payload.lifetimeGuidance, /client connection closes/);
+    assert.match(payload.lifetimeGuidance, /durable long-lived host/);
+  });
+
+  it('gsd_execute omits the lifetime disclosure when the client manages the server', async () => {
+    const { server } = await createMcpServer(sm, {
+      includeWorkflowTools: false,
+      clientManaged: true,
+    });
+    const executeTool = (server as any)._registeredTools?.gsd_execute;
+
+    assert.ok(executeTool, 'gsd_execute should be registered');
+    assert.doesNotMatch(executeTool.description, /client-connection/);
+
+    const result = await executeTool.handler({ projectDir: '/tmp/tool-exec-managed' });
+    const payload = JSON.parse(result.content[0].text);
+    assert.equal(payload.status, 'started');
+    assert.equal(payload.lifetime, undefined);
+    assert.equal(payload.lifetimeGuidance, undefined);
   });
 
   it('creates gsd --mode mcp workflow adapter tools from the workflow MCP surface', async () => {

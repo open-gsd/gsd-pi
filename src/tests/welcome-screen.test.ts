@@ -4,12 +4,13 @@
 
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { GSD_PI_LOGO } from '../logo.ts'
-import { printWelcomeScreen } from '../welcome-screen.ts'
+import { _resetMilestoneLockForTest, primeMilestoneLock, printWelcomeScreen } from '../welcome-screen.ts'
+import { closeDatabase, insertMilestone, openDatabase } from '../resources/extensions/gsd/gsd-db.ts'
 
 function capture(opts: Parameters<typeof printWelcomeScreen>[0]): string {
   const chunks: string[] = []
@@ -204,3 +205,153 @@ test('command-center renders one GSD-Pi block logo with a full-width closing rul
   assert.equal(ruleLines.length, 1, 'expected exactly one closing rule line')
   assert.equal(ruleLines[0].trim().length, 249, `rule should be 249 chars wide, got ${ruleLines[0].trim().length}`)
 })
+
+// ── GSD_MILESTONE_LOCK (#2360) ────────────────────────────────────────────────
+
+// Projection names M001 while the session is locked to M002 — the stale
+// header scenario from the issue.
+const M001_STATE_MD = [
+  '**Active Milestone:** M001: Todo App legacy',
+  '**Phase:** evaluating-gates',
+  '**Active Slice:** S01: legacy slice',
+  '**Next Action:** legacy next action',
+].join('\n')
+
+type DbFixture = 'valid' | 'corrupt' | 'none'
+
+/**
+ * Create a tmp project dir (STATE.md naming M001, optional gsd.db), chdir
+ * into it, set GSD_MILESTONE_LOCK, and register cleanup. Returns the dir.
+ */
+function setupLockFixture(
+  t: { after: (fn: () => void) => void },
+  lockId: string,
+  db: DbFixture,
+  withStateMd = true,
+): string {
+  const tmp = mkdtempSync(join(tmpdir(), 'gsd-welcome-lock-'))
+  const gsdDir = join(tmp, '.gsd')
+  mkdirSync(gsdDir, { recursive: true })
+  if (withStateMd) writeFileSync(join(gsdDir, 'STATE.md'), M001_STATE_MD)
+  if (db === 'valid') {
+    // Real-schema DB so the locked-milestone SELECT is proven against the
+    // actual table shape, not a hand-rolled stand-in.
+    assert.equal(openDatabase(join(gsdDir, 'gsd.db')), true)
+    insertMilestone({ id: 'M001', title: 'M001: Todo App legacy' })
+    insertMilestone({ id: 'M002', title: 'M002: Payments platform' })
+    closeDatabase()
+  } else if (db === 'corrupt') {
+    writeFileSync(join(gsdDir, 'gsd.db'), 'this is not a sqlite database')
+  }
+
+  const origCwd = process.cwd()
+  const origLock = process.env.GSD_MILESTONE_LOCK
+  process.chdir(tmp)
+  process.env.GSD_MILESTONE_LOCK = lockId
+  _resetMilestoneLockForTest()
+
+  t.after(() => {
+    process.chdir(origCwd)
+    if (origLock === undefined) delete process.env.GSD_MILESTONE_LOCK
+    else process.env.GSD_MILESTONE_LOCK = origLock
+    _resetMilestoneLockForTest()
+    rmSync(tmp, { recursive: true, force: true })
+  })
+  return tmp
+}
+
+test('GSD_MILESTONE_LOCK overrides the stale STATE.md projection in the header', async (t) => {
+  setupLockFixture(t, 'M002', 'valid')
+  await primeMilestoneLock()
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M002/, 'header should announce the locked milestone')
+  assert.ok(out.includes('M002: Payments platform'), 'locked milestone title should render')
+  assert.doesNotMatch(out, /M001/, 'stale projection milestone must not appear')
+  assert.doesNotMatch(out, /evaluating-gates/, 'projection phase belongs to M001 and is suppressed')
+  assert.doesNotMatch(out, /legacy slice/, 'projection slice belongs to M001 and is suppressed')
+  assert.doesNotMatch(out, /legacy next action/, 'projection next action belongs to M001 and is suppressed')
+  assert.match(out, /\/gsd next/, 'command falls back to /gsd next without projection actions')
+})
+
+test('unknown GSD_MILESTONE_LOCK id falls open to the projection rendering', async (t) => {
+  setupLockFixture(t, 'M099', 'valid')
+  await primeMilestoneLock()
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M001/, 'header falls back to STATE.md when the lock id is unknown')
+  assert.match(out, /evaluating-gates/, 'projection phase renders on fallback')
+  assert.match(out, /legacy next action/, 'projection next action renders on fallback')
+})
+
+test('unreadable gsd.db falls open to the projection rendering', async (t) => {
+  setupLockFixture(t, 'M002', 'corrupt')
+  await primeMilestoneLock()
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M001/, 'header falls back to STATE.md when the DB cannot be opened')
+  assert.match(out, /legacy next action/, 'projection next action renders on fallback')
+})
+
+test('missing gsd.db falls open without creating it', async (t) => {
+  const tmp = setupLockFixture(t, 'M002', 'none')
+  await primeMilestoneLock()
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M001/, 'header falls back to STATE.md when no DB exists')
+  assert.equal(existsSync(join(tmp, '.gsd', 'gsd.db')), false, 'a failed lookup must not create gsd.db')
+})
+
+test('locked milestone renders even when STATE.md is absent', async (t) => {
+  setupLockFixture(t, 'M002', 'valid', false)
+  await primeMilestoneLock()
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M002/, 'the locked milestone renders without a projection file')
+  assert.doesNotMatch(out, /No active GSD project/, 'a resolved lock is not "no project"')
+})
+
+test('priming with no lock set leaves the projection rendering untouched', async (t) => {
+  setupLockFixture(t, '', 'none')
+  await primeMilestoneLock()
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M001/, 'without a lock the STATE.md projection renders')
+  assert.match(out, /legacy next action/, 'projection next action renders when unlocked')
+})
+
+// ── Database state supplied by the caller ────────────────────────────────────
+
+test('database state replaces a contradicting STATE.md projection', (t) => {
+  setupLockFixture(t, '', 'none')
+
+  const out = strip(capture({
+    version: '1.0.0',
+    width: 160,
+    state: { milestone: 'M002: Payments platform', phase: 'executing', slice: 'S01: Refund flow', nextAction: 'Execute T01' },
+  }))
+  assert.match(out, /Project\s+M002: Payments platform · executing · S01: Refund flow/)
+  assert.match(out, /Command\s+Execute T01/)
+  assert.doesNotMatch(out, /M001|evaluating-gates|legacy/, 'nothing from STATE.md is shown')
+})
+
+test('database state with no active milestone renders idle, not the STATE.md milestone', (t) => {
+  setupLockFixture(t, '', 'none')
+
+  const out = strip(capture({ version: '1.0.0', width: 140, state: { phase: 'complete' } }))
+  assert.match(out, /No active GSD project/)
+  assert.doesNotMatch(out, /M001|legacy/, 'nothing from STATE.md is shown')
+})
+
+test('the STATE.md fallback does not show a "None" slice', (t) => {
+  const tmp = setupLockFixture(t, '', 'none')
+  writeFileSync(
+    join(tmp, '.gsd', 'STATE.md'),
+    '**Active Milestone:** M001: Todo App\n**Active Slice:** None\n**Phase:** planning\n',
+  )
+
+  const out = strip(capture({ version: '1.0.0', width: 140 }))
+  assert.match(out, /Project\s+M001: Todo App · planning/)
+  assert.doesNotMatch(out, /None/, 'an empty active slice is not a status part')
+})
+

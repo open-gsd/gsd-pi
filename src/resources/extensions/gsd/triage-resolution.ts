@@ -4,16 +4,18 @@
  * Provides resolution executors for each capture classification type:
  *
  * - inject: appends a new task to the current slice plan
- * - replan: writes REPLAN-TRIGGER.md so next dispatchNextUnit enters replanning-slice
+ * - replan: stamps the slice's replan trigger in the database so next dispatchNextUnit enters replanning-slice
  * - defer/note: query helpers for loading deferred/replan captures
  *
  * Also provides detectFileOverlap() for surfacing downstream impact on quick tasks.
  */
 
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import { atomicWriteSync, removeProjectionFileSync } from "./atomic-write.js";
+import { atomicWriteSync } from "./atomic-write.js";
 import { join } from "node:path";
-import { createRequire } from "node:module";
+import { executeDomainOperation } from "./db/domain-operation.js";
+import { readDomainOperationFence } from "./db/writers/lifecycle-commands.js";
+import { getSlice, setSliceReplanTriggeredAt } from "./gsd-db.js";
 import { gsdRoot, milestonesDir, legacyMilestonesDir, resolveMilestonePath } from "./paths.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import type { Classification, CaptureEntry } from "./captures.js";
@@ -23,7 +25,6 @@ import {
   loadActionableCaptures,
   markCaptureResolved,
   markCaptureExecuted,
-  stampCaptureMilestone,
 } from "./captures.js";
 
 // ─── Resolution Executors ─────────────────────────────────────────────────────
@@ -79,9 +80,48 @@ export function executeInject(
 }
 
 /**
- * Trigger replanning by writing a REPLAN-TRIGGER.md marker file.
- * The existing state.ts derivation detects this and sets phase to "replanning-slice".
- * Returns true if the trigger was written successfully.
+ * Stamp the slice's replan trigger in one slice.replan.trigger Domain
+ * Operation and return the stored timestamp. A replay for the same capture
+ * writes nothing. Throws when no database is open or the slice has no row.
+ */
+function recordReplanTrigger(mid: string, sid: string, captureId: string): string {
+  const idempotencyKey = `slice.replan.trigger:${mid}/${sid}:${captureId}`;
+  const fence = readDomainOperationFence(idempotencyKey);
+  executeDomainOperation({
+    operationType: "slice.replan.trigger",
+    idempotencyKey,
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "system",
+    sourceTransport: "internal",
+    payload: { milestoneId: mid, sliceId: sid, captureId },
+  }, () => {
+    if (!setSliceReplanTriggeredAt(mid, sid, new Date().toISOString())) {
+      throw new Error(`replan trigger requires a slice row for ${mid}/${sid}`);
+    }
+    return {
+      events: [{
+        eventType: "slice.replan.triggered",
+        entityType: "slice",
+        entityId: `${mid}/${sid}`,
+        payload: { captureId },
+        destinations: ["projection"],
+      }],
+      projections: [{
+        projectionKey: `replan-trigger/${mid}/${sid}`.toLowerCase(),
+        projectionKind: "state",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  return getSlice(mid, sid)!.replan_triggered_at!;
+}
+
+/**
+ * Trigger replanning. The slice's replan trigger in the database is the
+ * trigger: the state derivation reads it and sets phase to "replanning-slice".
+ * REPLAN-TRIGGER.md is a render of that row for the user.
+ * Returns true if the trigger was stored.
  */
 export function executeReplan(
   basePath: string,
@@ -89,171 +129,30 @@ export function executeReplan(
   sid: string,
   capture: CaptureEntry,
 ): boolean {
+  let triggeredAt: string;
   try {
-    const triggerPath = join(
+    triggeredAt = recordReplanTrigger(mid, sid, capture.id);
+  } catch {
+    return false;
+  }
+  try {
+    atomicWriteSync(join(
       basePath, ".gsd", "milestones", mid, "slices", sid, `${sid}-REPLAN-TRIGGER.md`,
-    );
-    const ts = new Date().toISOString();
-    const content = [
+    ), [
       `# Replan Trigger`,
       ``,
       `**Source:** Capture ${capture.id}`,
       `**Capture:** ${capture.text}`,
       `**Rationale:** ${capture.rationale ?? "User-initiated replan via capture triage"}`,
-      `**Triggered:** ${ts}`,
+      `**Triggered:** ${triggeredAt}`,
       ``,
-      `This file was created by the triage pipeline. The next dispatch cycle`,
-      `will detect it and enter the replanning-slice phase.`,
-    ].join("\n");
-
-    atomicWriteSync(triggerPath, content, "utf-8");
-
-    // Also write replan_triggered_at column for DB-backed detection
-    try {
-      const req = createRequire(import.meta.url);
-      const { isDbAvailable, setSliceReplanTriggeredAt } = req("./gsd-db.js");
-      if (isDbAvailable()) {
-        setSliceReplanTriggeredAt(mid, sid, ts);
-      }
-    } catch {
-      // DB write is best-effort — disk file is the primary trigger for fallback path
-    }
-
-    return true;
+      `This file is a render of the replan trigger in the database. The next`,
+      `dispatch cycle reads the database and enters the replanning-slice phase.`,
+    ].join("\n"), "utf-8");
   } catch {
-    return false;
+    // The file is a render. The database row is the trigger.
   }
-}
-
-// ─── Backtrack (Milestone Regression) ────────────────────────────────────────
-
-/**
- * Execute a backtrack directive — user wants to abandon current milestone
- * and return to a previous one (milestone regression).
- *
- * Writes a BACKTRACK-TRIGGER.md marker at `.gsd/BACKTRACK-TRIGGER.md` with
- * the target milestone, reason, and timestamp. The state machine (deriveState)
- * detects this and transitions the project to the target milestone, resetting
- * its slices to allow re-planning.
- *
- * Returns the extracted target milestone ID, or null if extraction failed.
- */
-export function executeBacktrack(
-  basePath: string,
-  currentMilestoneId: string,
-  capture: CaptureEntry,
-): string | null {
-  try {
-    // Extract target milestone from capture text or resolution.
-    // Filter out the current milestone ID to avoid picking it as the backtrack target
-    // when the text mentions both current and target milestones (e.g. "backtrack from M004 to M003").
-    const sourceText = capture.resolution ?? capture.text;
-    const allMatches = [...sourceText.matchAll(/\b(M\d{3}(?:-[a-z0-9]{6})?)\b/g)]
-      .map(m => m[1])
-      .filter(id => id !== currentMilestoneId);
-    // Reject ambiguous multi-target strings — if more than one distinct target remains,
-    // don't guess; let the user clarify.
-    const uniqueTargets = [...new Set(allMatches)];
-    const targetMilestoneId = uniqueTargets.length === 1 ? uniqueTargets[0] : null;
-
-    const ts = new Date().toISOString();
-    const triggerPath = join(gsdRoot(basePath), "BACKTRACK-TRIGGER.md");
-    const content = [
-      `# Backtrack Trigger`,
-      ``,
-      `**Source:** Capture ${capture.id}`,
-      `**Capture:** ${capture.text}`,
-      `**Rationale:** ${capture.rationale ?? "User-initiated milestone backtrack"}`,
-      `**From:** ${currentMilestoneId}`,
-      `**Target:** ${targetMilestoneId ?? "(user to specify)"}`,
-      `**Triggered:** ${ts}`,
-      ``,
-      `Auto-mode was paused by this backtrack directive. The user directed`,
-      `that the current milestone (${currentMilestoneId}) be abandoned and work`,
-      `should return to ${targetMilestoneId ?? "a previous milestone"}.`,
-      ``,
-      `## Recovery Steps`,
-      ``,
-      `1. Review what went wrong in ${currentMilestoneId}`,
-      `2. Identify missing features/requirements from the target milestone`,
-      `3. Resume auto-mode — the state machine will re-enter discussion for the target`,
-    ].join("\n");
-
-    atomicWriteSync(triggerPath, content, "utf-8");
-
-    // If we have a valid target, also reset that milestone's completion status
-    // so deriveState() will re-enter it as the active milestone.
-    if (targetMilestoneId) {
-      try {
-        // Use resolveMilestonePath to locate the dir in either legacy or flat-phase layout.
-        const targetDir = resolveMilestonePath(basePath, targetMilestoneId);
-        if (targetDir && existsSync(targetDir)) {
-          // Write a regression marker so the state machine knows this milestone
-          // needs re-discussion, not just re-execution
-          const regressionPath = join(targetDir, `${targetMilestoneId}-REGRESSION.md`);
-          atomicWriteSync(regressionPath, [
-            `# Milestone Regression`,
-            ``,
-            `**From:** ${currentMilestoneId}`,
-            `**Reason:** ${capture.text}`,
-            `**Triggered:** ${ts}`,
-            ``,
-            `This milestone is being revisited because downstream milestone`,
-            `${currentMilestoneId} failed or missed critical features that should`,
-            `have been part of this milestone's scope.`,
-            ``,
-            `The discuss phase should re-evaluate requirements and identify gaps.`,
-          ].join("\n"), "utf-8");
-        }
-      } catch { /* best-effort */ }
-    }
-
-    return targetMilestoneId;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Read the backtrack trigger file if it exists.
- * Returns the parsed target milestone and metadata, or null.
- */
-export function readBacktrackTrigger(basePath: string): {
-  target: string | null;
-  from: string | null;
-  capture: string;
-  triggeredAt: string;
-} | null {
-  const triggerPath = join(gsdRoot(basePath), "BACKTRACK-TRIGGER.md");
-  if (!existsSync(triggerPath)) return null;
-
-  try {
-    const content = readFileSync(triggerPath, "utf-8");
-    const target = content.match(/\*\*Target:\*\*\s*(.+)/)?.[1]?.trim() ?? null;
-    const from = content.match(/\*\*From:\*\*\s*(.+)/)?.[1]?.trim() ?? null;
-    const capture = content.match(/\*\*Capture:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-    const triggeredAt = content.match(/\*\*Triggered:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-    return {
-      target: target === "(user to specify)" ? null : target,
-      from,
-      capture,
-      triggeredAt,
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Remove the backtrack trigger after it has been processed.
- */
-export function clearBacktrackTrigger(basePath: string): void {
-  const triggerPath = join(gsdRoot(basePath), "BACKTRACK-TRIGGER.md");
-  try {
-    if (existsSync(triggerPath)) {
-      removeProjectionFileSync(triggerPath);
-    }
-  } catch { /* best-effort */ }
+  return true;
 }
 
 // ─── File Overlap Detection ───────────────────────────────────────────────────
@@ -407,12 +306,15 @@ export function buildQuickTaskPrompt(capture: CaptureEntry): string {
     `1. **Verify the issue still exists.** Before making any changes, inspect the`,
     `   relevant code to confirm the problem described above is actually present in`,
     `   the current codebase. If the issue has already been fixed (e.g., by planned`,
-    `   milestone work), report "Already resolved — no changes needed." and stop.`,
+    `   milestone work), skip to step 6 and report "Already resolved — no changes needed."`,
     `2. Execute this task as a small, self-contained change.`,
     `3. Do NOT modify any \`.gsd/\` plan files — this is a one-off, not a planned task.`,
     `4. Commit your changes with a descriptive message.`,
     `5. Keep changes minimal and focused on the capture text.`,
-    `6. When done, say: "Quick task complete."`,
+    `6. Call \`gsd_capture_complete\` with \`captureId: "${capture.id}"\` and an \`outcome\` that says`,
+    `   what you changed, or why no change was needed. The quick task is recorded as`,
+    `   executed only by this call.`,
+    `7. When done, say: "Quick task complete."`,
   ].join("\n");
 }
 
@@ -441,12 +343,12 @@ export interface TriageExecutionResult {
 /**
  * Execute pending triage resolutions.
  *
- * Called after a triage-captures unit completes. Reads CAPTURES.md for
+ * Called after a triage-captures unit completes. Reads the database for
  * resolved captures that have actionable classifications (inject, replan,
  * quick-task) but haven't been executed yet, then:
  *
  * - inject: calls executeInject() to add a task to the current slice plan
- * - replan: calls executeReplan() to write the REPLAN-TRIGGER.md marker
+ * - replan: calls executeReplan() to stamp the slice's replan trigger
  * - quick-task: collects for dispatch (caller handles dispatching quick-task units)
  *
  * Each capture is marked as executed after its resolution action succeeds,
@@ -468,18 +370,6 @@ export function executeTriageResolutions(
   };
 
   const actionable = loadActionableCaptures(basePath, mid || undefined);
-
-  // Reconciliation: stamp actionable captures that are missing the Milestone field
-  // with the current milestone ID.  This covers captures resolved by the triage LLM
-  // before the prompt included the Milestone instruction, and acts as a safety net
-  // when the LLM omits the field (#2872).
-  if (mid) {
-    for (const capture of actionable) {
-      if (!capture.resolvedInMilestone) {
-        stampCaptureMilestone(basePath, capture.id, mid);
-      }
-    }
-  }
 
   // Also process deferred and milestone-class captures (#3542).
   // A defer/milestone capture's "action" is the triage decision itself —
@@ -577,7 +467,7 @@ export function executeTriageResolutions(
       result.actions.push(`Stop directive from ${cap.id}: "${cap.text}" — will pause on next dispatch`);
     } else if (cap.classification === "backtrack") {
       result.backtracks.push(cap);
-      result.actions.push(`Backtrack directive from ${cap.id}: "${cap.text}" — will trigger milestone regression on next dispatch`);
+      result.actions.push(`Backtrack directive from ${cap.id}: "${cap.text}" — auto-mode pauses on the next dispatch`);
     }
   }
 

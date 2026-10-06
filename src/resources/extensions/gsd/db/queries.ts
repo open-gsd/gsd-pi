@@ -7,16 +7,13 @@
 import { createHash } from "node:crypto";
 
 import { getDbOrNull, readTransaction } from "./engine.js";
-import { isClosedStatus } from "../status-guards.js";
 import { getGateIdsForTurn, type OwnerTurn } from "../gate-registry.js";
 import type { Decision, Requirement, GateRow, GateScope } from "../types.js";
 import {
   emptyTaskStatusCounts,
-  rowToActiveTaskSummary,
   rowToIdStatusSummary,
   rowToTaskStatusCounts,
   rowsToStringColumn,
-  type ActiveTaskSummary,
   type IdStatusSummary,
   type TaskStatusCounts,
 } from "../db-lightweight-query-rows.js";
@@ -30,7 +27,14 @@ import {
 import { rowToGate } from "../db-gate-rows.js";
 import { rowToArtifact, rowToMilestone, type ArtifactRow, type MilestoneRow } from "../db-milestone-artifact-rows.js";
 import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "../db-task-slice-rows.js";
-import { TERMINAL_STATUS_SQL } from "./sql-constants.js";
+import {
+  DISCARDED_MILESTONE_STATUS_SQL,
+  TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT,
+  TASK_ESCALATION_RESOLVED_EVENT,
+  TASK_HAS_ESCALATION_SQL,
+  TASK_HAS_OPEN_ESCALATION_SQL,
+  TERMINAL_STATUS_SQL,
+} from "./sql-constants.js";
 import {
   compareLifecycleShadow,
   normalizeCanonicalLifecycleStatus,
@@ -43,25 +47,6 @@ import {
   type LifecycleShadowObservationSnapshot,
 } from "../lifecycle-shadow-observation.js";
 
-
-function parseStringArrayColumn(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw.filter((entry): entry is string => typeof entry === "string");
-  if (typeof raw !== "string") return [];
-  const trimmed = raw.trim();
-  if (!trimmed) return [];
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (Array.isArray(parsed)) return parsed.filter((entry): entry is string => typeof entry === "string");
-    if (typeof parsed === "string") return [parsed];
-  } catch {
-    return trimmed.split(",");
-  }
-  return [];
-}
-
-function normalizeRepoPath(file: string): string {
-  return file.trim().replace(/\\/g, "/").replace(/^\.\/+/, "");
-}
 
 export interface HierarchyCompletionCounts {
   milestones: number;
@@ -281,7 +266,8 @@ export function getMilestoneStatusCounts(): MilestoneStatusCounts {
        COALESCE(SUM(CASE WHEN status IN (${TERMINAL_STATUS_SQL}) THEN 1 ELSE 0 END), 0) AS done,
        COALESCE(SUM(CASE WHEN status IN ('active', 'in_progress', 'in-progress') THEN 1 ELSE 0 END), 0) AS active,
        COALESCE(SUM(CASE WHEN status = 'parked' THEN 1 ELSE 0 END), 0) AS parked
-     FROM milestones`,
+     FROM milestones
+     WHERE status NOT IN (${DISCARDED_MILESTONE_STATUS_SQL})`,
   ).get();
   const total = numberColumn(row, "total");
   const done = numberColumn(row, "done");
@@ -358,20 +344,6 @@ export function getRequirementCounts(): {
   return rowsToRequirementCounts(rows);
 }
 
-/**
- * ADR-017 raw primitive: returns slice IDs in a milestone whose is_sketch flag
- * is still 1. The stale-sketch-flag drift handler at
- * `state-reconciliation/drift/sketch-flag.ts` composes this with PLAN.md
- * existence checks to detect drift, then writes via `setSliceSketchFlag`.
- */
-export function getSketchedSliceIds(milestoneId: string): string[] {
-  if (!getDbOrNull()!) return [];
-  const rows = getDbOrNull()!.prepare(
-    `SELECT id FROM slices WHERE milestone_id = :mid AND is_sketch = 1`,
-  ).all({ ":mid": milestoneId }) as Array<{ id: string }>;
-  return rows.map((r) => r.id);
-}
-
 export function getSlice(milestoneId: string, sliceId: string): SliceRow | null {
   if (!getDbOrNull()!) return null;
   const row = getDbOrNull()!.prepare("SELECT * FROM slices WHERE milestone_id = :mid AND id = :sid").get({ ":mid": milestoneId, ":sid": sliceId });
@@ -413,10 +385,11 @@ export interface LifecycleShadowRepairCandidate extends LifecycleShadowRepairIde
   reason: string | null;
   /**
    * Raw legacy verification_result for tasks (null for slices/milestones or
-   * when unrecorded). Distinguishes "never verified" bare legacy completions —
-   * completion's adoption territory when a canonically-completed sibling
-   * establishes the adoption pattern (#2070) — from rows with a recorded
-   * failed verification, which must never be silently repaired (#2002).
+   * when unrecorded). Distinguishes "never verified" bare legacy completions
+   * from rows with a recorded failed verification, which must never be
+   * silently repaired (#2002).
+   * Free-text verification narratives (#2313) count as adoptable evidence;
+   * only an explicit failure marker blocks repair.
    */
   legacyVerificationResult: string | null;
 }
@@ -460,8 +433,15 @@ interface RepairEvidenceFacts {
   digestFacts: unknown;
 }
 
-export function isPassingVerificationResult(verificationResult: string): boolean {
-  return verificationResult.trim().toLowerCase() === "passed";
+/**
+ * Only an explicit failure marker counts as a recorded failed verification
+ * (#2002). Legacy completion writes free-text verification narratives
+ * (tools/complete-task.ts persists params.verification verbatim), so any
+ * non-empty value that is not an explicit failure marker is adoptable
+ * evidence (#2313).
+ */
+export function isFailedVerificationResult(verificationResult: string): boolean {
+  return verificationResult.trim().toLowerCase() === "failed";
 }
 
 function taskCompletionFacts(row: Record<string, unknown>): RepairEvidenceFacts {
@@ -474,7 +454,8 @@ function taskCompletionFacts(row: Record<string, unknown>): RepairEvidenceFacts 
     supported:
       normalizeLegacyLifecycleStatus(typeof row["status"] === "string" ? row["status"] : null) === "completed" &&
       completedAt !== null &&
-      isPassingVerificationResult(verificationResult) &&
+      verificationResult.length > 0 &&
+      !isFailedVerificationResult(verificationResult) &&
       summary.length > 0,
     digestFacts: {
       status: row["status"] ?? null,
@@ -565,6 +546,7 @@ export function getLifecycleShadowRepairCandidate(
         AND milestone_id = :milestone_id
         AND slice_id IS :slice_id
         AND task_id IS :task_id
+        AND project_id = (SELECT project_id FROM project_authority WHERE singleton = 1)
     `).get({
       ":item_kind": identity.itemKind,
       ":milestone_id": identity.milestoneId,
@@ -671,11 +653,12 @@ export function getMilestoneLifecycleShadowSnapshot(
   let authorityEpoch = 0;
   try {
     const authority = db.prepare(`
-      SELECT revision, authority_epoch
+      SELECT project_id, revision, authority_epoch
       FROM project_authority WHERE singleton = 1
     `).get();
     projectRevision = numberColumn(authority, "revision");
     authorityEpoch = numberColumn(authority, "authority_epoch");
+    const projectId = typeof authority?.["project_id"] === "string" ? authority["project_id"] : null;
     const rows = db.prepare(`
       WITH hierarchy AS (
         SELECT
@@ -702,6 +685,7 @@ export function getMilestoneLifecycleShadowSnapshot(
         SELECT item_kind, milestone_id, slice_id, task_id
         FROM workflow_item_lifecycles
         WHERE milestone_id = :milestone_id
+          AND (:project_id IS NULL OR project_id = :project_id)
       )
       SELECT
         identity.item_kind,
@@ -719,6 +703,7 @@ export function getMilestoneLifecycleShadowSnapshot(
        AND hierarchy.task_id IS identity.task_id
       LEFT JOIN workflow_item_lifecycles lifecycle
         ON lifecycle.item_kind = identity.item_kind
+       AND (:project_id IS NULL OR lifecycle.project_id = :project_id)
        AND lifecycle.milestone_id = identity.milestone_id
        AND lifecycle.slice_id IS identity.slice_id
        AND lifecycle.task_id IS identity.task_id
@@ -726,7 +711,10 @@ export function getMilestoneLifecycleShadowSnapshot(
         CASE identity.item_kind WHEN 'milestone' THEN 0 WHEN 'slice' THEN 1 ELSE 2 END,
         identity.slice_id,
         identity.task_id
-    `).all({ ":milestone_id": milestoneId });
+    `).all({
+      ":milestone_id": milestoneId,
+      ":project_id": projectId,
+    });
 
     return {
       projectRevision,
@@ -757,59 +745,104 @@ export function getSliceTasks(milestoneId: string, sliceId: string): TaskRow[] {
   return rows.map(rowToTask);
 }
 
-export function getCompletedMilestoneTaskFileHints(milestoneId: string): string[] {
-  if (!getDbOrNull()!) return [];
-  const rows = getDbOrNull()!.prepare(
-    `SELECT files, key_files
-     FROM tasks
-     WHERE milestone_id = :mid AND status IN ('complete', 'done')`,
-  ).all({ ":mid": milestoneId }) as Array<Record<string, unknown>>;
-
-  const hints = new Set<string>();
-  for (const row of rows) {
-    for (const raw of [row["files"], row["key_files"]]) {
-      for (const file of parseStringArrayColumn(raw)) {
-        const normalized = normalizeRepoPath(file);
-        if (normalized) hints.add(normalized);
-      }
-    }
-  }
-  return [...hints];
-}
-
-/** Find the most recent resolved-but-unapplied escalation override in a slice. */
+/**
+ * Find the most recent resolved-but-unapplied escalation override in a slice.
+ * `resolveOperationId` is the operation that recorded the user's response.
+ */
 export function findUnappliedEscalationOverride(
   milestoneId: string, sliceId: string,
-): { taskId: string; artifactPath: string } | null {
+): { taskId: string; resolveOperationId: string } | null {
   if (!getDbOrNull()!) return null;
-  // Filter BOTH flags: escalation_pending=0 AND escalation_awaiting_review=0
-  // ensures we only claim overrides the user has explicitly resolved.
-  // Without the awaiting_review filter, continueWithDefault=true artifacts
-  // (not yet responded to) would be prematurely claimed, causing the override
-  // to be lost when the user later resolves (#ADR-011 Phase 2 peer-review Bug 2).
+  // The pending override is the latest response to a Task's escalation that
+  // has no claim event. An older build recorded the claim in
+  // escalation_override_applied_at, so a stamp that is not older than the
+  // response is also a claim. An open question is not claimable: the user has not
+  // responded, so a claim would lose the override (#ADR-011 Phase 2
+  // peer-review Bug 2).
   const row = getDbOrNull()!.prepare(
-    `SELECT id, escalation_artifact_path AS path
+    `SELECT tasks.id, resolved.operation_id
        FROM tasks
-      WHERE milestone_id = :mid AND slice_id = :sid
-        AND escalation_artifact_path IS NOT NULL
-        AND escalation_override_applied_at IS NULL
-        AND escalation_pending = 0
-        AND escalation_awaiting_review = 0
-      ORDER BY sequence DESC, id DESC
+       CROSS JOIN project_authority authority
+       JOIN workflow_domain_events resolved
+         ON resolved.project_id = authority.project_id
+        AND resolved.entity_type = 'task'
+        AND resolved.entity_id = tasks.milestone_id || '/' || tasks.slice_id || '/' || tasks.id
+        AND resolved.event_type = '${TASK_ESCALATION_RESOLVED_EVENT}'
+      WHERE tasks.milestone_id = :mid AND tasks.slice_id = :sid
+        AND ${TASK_HAS_ESCALATION_SQL}
+        AND NOT ${TASK_HAS_OPEN_ESCALATION_SQL}
+        AND (tasks.escalation_override_applied_at IS NULL
+          OR tasks.escalation_override_applied_at < resolved.created_at)
+        AND NOT EXISTS (
+          SELECT 1 FROM workflow_domain_events later
+          WHERE later.project_id = resolved.project_id
+            AND later.entity_type = 'task'
+            AND later.entity_id = resolved.entity_id
+            AND later.event_type = resolved.event_type
+            AND later.project_revision > resolved.project_revision
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM workflow_domain_events claimed
+          WHERE claimed.project_id = resolved.project_id
+            AND claimed.entity_type = 'task'
+            AND claimed.entity_id = resolved.entity_id
+            AND claimed.event_type = '${TASK_ESCALATION_OVERRIDE_CLAIMED_EVENT}'
+            AND json_extract(claimed.payload_json, '$.resolveOperationId') = resolved.operation_id
+        )
+      ORDER BY tasks.sequence DESC, tasks.id DESC
       LIMIT 1`,
   ).get({ ":mid": milestoneId, ":sid": sliceId }) as
-    | { id: string; path: string | null }
+    | { id: string; operation_id: string }
     | undefined;
-  if (!row || !row.path) return null;
-  return { taskId: row.id, artifactPath: row.path };
+  if (!row) return null;
+  return { taskId: row.id, resolveOperationId: row.operation_id };
 }
 
-/** List tasks with active escalation artifacts across a milestone (for /gsd escalate list). */
+/**
+ * SQL condition on a `tasks` row: an escalation from before the database stored
+ * them, which the user resolved and no prompt has claimed. Limited to a Task in
+ * an open slice of an open milestone that still has a next task to receive it.
+ */
+const UNAPPLIED_LEGACY_ESCALATION_SQL = `(
+  escalation_artifact_path IS NOT NULL
+  AND escalation_pending = 0
+  AND escalation_awaiting_review = 0
+  AND escalation_override_applied_at IS NULL
+  AND NOT ${TASK_HAS_ESCALATION_SQL}
+  AND EXISTS (
+    SELECT 1 FROM slices open_slice
+    JOIN milestones open_milestone ON open_milestone.id = open_slice.milestone_id
+    WHERE open_slice.milestone_id = tasks.milestone_id
+      AND open_slice.id = tasks.slice_id
+      AND open_slice.status NOT IN (${TERMINAL_STATUS_SQL})
+      AND open_milestone.status NOT IN (${TERMINAL_STATUS_SQL})
+  )
+  AND EXISTS (
+    SELECT 1 FROM tasks next_task
+    WHERE next_task.milestone_id = tasks.milestone_id
+      AND next_task.slice_id = tasks.slice_id
+      AND next_task.status NOT IN (${TERMINAL_STATUS_SQL})
+  )
+)`;
+
+/** List every Task whose resolved pre-database escalation is not applied (for doctor). */
+export function listUnappliedLegacyEscalations(): TaskRow[] {
+  if (!getDbOrNull()!) return [];
+  const rows = getDbOrNull()!.prepare(
+    `SELECT * FROM tasks WHERE ${UNAPPLIED_LEGACY_ESCALATION_SQL} ORDER BY milestone_id, slice_id, sequence, id`,
+  ).all();
+  return rows.map(rowToTask);
+}
+
+/** List tasks with escalations across a milestone (for /gsd escalate list). */
 export function listEscalationArtifacts(milestoneId: string, includeResolved: boolean = false): TaskRow[] {
   if (!getDbOrNull()!) return [];
+  // A pause flag with no question row is an escalation from before the
+  // database stored them. It stays listed so the user can resolve it.
+  const legacyPause = `((escalation_pending = 1 OR escalation_awaiting_review = 1) AND NOT ${TASK_HAS_ESCALATION_SQL})`;
   const filter = includeResolved
-    ? "escalation_artifact_path IS NOT NULL"
-    : "(escalation_pending = 1 OR escalation_awaiting_review = 1) AND escalation_artifact_path IS NOT NULL";
+    ? `(${TASK_HAS_ESCALATION_SQL} OR ${legacyPause} OR ${UNAPPLIED_LEGACY_ESCALATION_SQL})`
+    : `(${TASK_HAS_OPEN_ESCALATION_SQL} OR ${legacyPause})`;
   const rows = getDbOrNull()!.prepare(
     `SELECT * FROM tasks WHERE milestone_id = :mid AND ${filter} ORDER BY slice_id, sequence, id`,
   ).all({ ":mid": milestoneId });
@@ -876,50 +909,81 @@ export function getPlanMilestoneRecoveryBlock(milestoneId: string): PlanMileston
   };
 }
 
-export function getActiveMilestoneFromDb(): MilestoneRow | null {
-  if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare(
-    `SELECT * FROM milestones WHERE status NOT IN (${TERMINAL_STATUS_SQL}, 'parked') ORDER BY id LIMIT 1`,
-  ).get();
-  if (!row) return null;
-  return rowToMilestone(row);
+/**
+ * True when recovery of this unit type ended in a recorded manual-attention
+ * outcome for the unit id, or for any unit id below it (a reactive batch id
+ * sits below its slice). The row is written with the diagnostic blocker file;
+ * dispatch reads the row and never the file.
+ */
+export function hasUnitRecoveryBlock(unitType: string, unitId: string): boolean {
+  const db = getDbOrNull();
+  if (!db) return false;
+  const row = db.prepare(`
+    SELECT outcome
+    FROM gate_runs
+    WHERE gate_id = :gate_id
+      AND unit_type = :unit_type
+      AND (unit_id = :unit_id OR substr(unit_id, 1, length(:unit_id) + 1) = :unit_id || '/')
+    ORDER BY id DESC
+    LIMIT 1
+  `).get({ ":gate_id": `${unitType}-recovery`, ":unit_type": unitType, ":unit_id": unitId });
+  return row?.["outcome"] === "manual-attention";
 }
 
-export function getActiveSliceFromDb(milestoneId: string): SliceRow | null {
-  if (!getDbOrNull()!) return null;
-
-  // Single query: find the first non-complete slice whose dependencies are all satisfied.
-  // Uses json_each() to expand the JSON depends array and checks each dep is complete.
-  const row = getDbOrNull()!.prepare(
-    `SELECT s.* FROM slices s
-     WHERE s.milestone_id = :mid
-       AND s.status NOT IN (${TERMINAL_STATUS_SQL})
-       AND NOT EXISTS (
-         SELECT 1 FROM json_each(s.depends) AS dep
-         WHERE dep.value NOT IN (
-           SELECT id FROM slices WHERE milestone_id = :mid AND status IN (${TERMINAL_STATUS_SQL})
-         )
-       )
-     ORDER BY s.sequence, s.id
-     LIMIT 1`,
-  ).get({ ":mid": milestoneId });
-  if (!row) return null;
-  return rowToSlice(row);
+/** Highest attempt number of the saved UAT runs of a slice. 0 when the slice has none. */
+export function getLatestUatAttempt(milestoneId: string, sliceId: string): number {
+  const db = getDbOrNull();
+  if (!db) return 0;
+  const row = db.prepare(`
+    SELECT MAX(attempt) AS attempt
+    FROM gate_runs
+    WHERE gate_id = 'UAT'
+      AND gate_type = 'uat'
+      AND unit_type = 'run-uat'
+      AND milestone_id = :milestone_id
+      AND slice_id = :slice_id
+  `).get({ ":milestone_id": milestoneId, ":slice_id": sliceId });
+  return Number(row?.["attempt"] ?? 0);
 }
 
-export function getActiveTaskFromDb(milestoneId: string, sliceId: string): TaskRow | null {
-  if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare(
-    `SELECT * FROM tasks WHERE milestone_id = :mid AND slice_id = :sid AND status NOT IN (${TERMINAL_STATUS_SQL}) ORDER BY sequence, id LIMIT 1`,
-  ).get({ ":mid": milestoneId, ":sid": sliceId });
-  if (!row) return null;
-  return rowToTask(row);
+/** True when `runId` is a saved run-uat run of the slice. */
+export function isSavedUatRun(milestoneId: string, sliceId: string, runId: string): boolean {
+  const row = getDbOrNull()?.prepare(`
+    SELECT 1 AS present
+    FROM gate_runs
+    WHERE gate_id = 'UAT'
+      AND gate_type = 'uat'
+      AND unit_type = 'run-uat'
+      AND milestone_id = :milestone_id
+      AND slice_id = :slice_id
+      AND turn_id = :run_id
+  `).get({ ":milestone_id": milestoneId, ":slice_id": sliceId, ":run_id": runId });
+  return row !== undefined;
 }
 
 export function getMilestoneSlices(milestoneId: string): SliceRow[] {
   if (!getDbOrNull()!) return [];
   const rows = getDbOrNull()!.prepare("SELECT * FROM slices WHERE milestone_id = :mid ORDER BY sequence, id").all({ ":mid": milestoneId });
   return rows.map(rowToSlice);
+}
+
+/** The ids of the Milestones that have a CONTEXT artifact row (a saved context). */
+export function getContextArtifactMilestoneIds(): Set<string> {
+  if (!getDbOrNull()) return new Set();
+  const rows = getDbOrNull()!.prepare(
+    "SELECT DISTINCT milestone_id FROM artifacts" +
+    " WHERE artifact_type = 'CONTEXT' AND slice_id IS NULL AND task_id IS NULL AND milestone_id IS NOT NULL",
+  ).all();
+  return new Set(rows.map((row) => String(row["milestone_id"])));
+}
+
+/** The number of Slices of every Milestone that has them. */
+export function getSliceCountsByMilestoneId(): Map<string, number> {
+  if (!getDbOrNull()) return new Map();
+  const rows = getDbOrNull()!.prepare(
+    "SELECT milestone_id, COUNT(*) AS count FROM slices GROUP BY milestone_id",
+  ).all();
+  return new Map(rows.map((row) => [String(row["milestone_id"]), Number(row["count"])]));
 }
 
 export interface ParallelMonitorSliceProgress {
@@ -1178,42 +1242,6 @@ export function getProgressHierarchyDetails(): ProgressHierarchyDetails {
   };
 }
 
-/** Dispatch-eligibility shape consumed by decision-path callers (ADR-017). */
-export interface MilestoneSliceSummary {
-  id: string;
-  title: string;
-  /** Closed per the canonical status vocabulary (complete/done/skipped/closed/cancelled). */
-  done: boolean;
-  depends: string[];
-}
-
-/**
- * Consolidated DB read for dispatch/gate/completion decisions (ADR-017).
- * `done` uses the canonical closed-status predicate (`isClosedStatus`) — the
- * same vocabulary the SQL terminal-status fragment derives from. Decision
- * paths must consume this instead of parsing `.gsd/*.md` projections.
- * Rows keep `getMilestoneSlices` ordering (sequence, then id).
- */
-export function getMilestoneSliceSummaries(milestoneId: string): MilestoneSliceSummary[] {
-  return getMilestoneSlices(milestoneId).map((s) => ({
-    id: s.id,
-    title: s.title,
-    done: isClosedStatus(s.status),
-    depends: s.depends ?? [],
-  }));
-}
-
-/**
- * Ids of slices closed per the canonical status vocabulary (ADR-017), in
- * milestone order. Thin wrapper over `getMilestoneSliceSummaries` for the
- * common "which slices are done?" decision-path read.
- */
-export function getClosedSliceIds(milestoneId: string): string[] {
-  return getMilestoneSliceSummaries(milestoneId)
-    .filter((s) => s.done)
-    .map((s) => s.id);
-}
-
 export function getArtifact(path: string): ArtifactRow | null {
   if (!getDbOrNull()!) return null;
   const row = getDbOrNull()!.prepare("SELECT * FROM artifacts WHERE path = :path").get({ ":path": path });
@@ -1247,14 +1275,34 @@ export function getSliceScopedArtifacts(milestoneId: string, sliceId: string): A
   return rows.map(rowToArtifact);
 }
 
-/** Fast milestone status check — avoids deserializing JSON planning fields. */
-export function getActiveMilestoneIdFromDb(): IdStatusSummary | null {
+/**
+ * The saved artifact row of this type, with content, for a Milestone (sliceId
+ * and taskId null), a Slice (taskId null) or a Task. The newest row answers
+ * when a scope has more than one. Null when there is none.
+ */
+export function getScopedArtifact(
+  milestoneId: string, sliceId: string | null, taskId: string | null, artifactType: string,
+): ArtifactRow | null {
   if (!getDbOrNull()!) return null;
   const row = getDbOrNull()!.prepare(
-    `SELECT id, status FROM milestones WHERE status NOT IN (${TERMINAL_STATUS_SQL}, 'parked') ORDER BY id LIMIT 1`,
-  ).get();
-  if (!row) return null;
-  return rowToIdStatusSummary(row);
+    `SELECT * FROM artifacts
+      WHERE milestone_id = :mid AND slice_id IS :sid AND task_id IS :tid
+        AND artifact_type = :type AND TRIM(full_content) <> ''
+      ORDER BY imported_at DESC, path LIMIT 1`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId, ":type": artifactType });
+  return row ? rowToArtifact(row) : null;
+}
+
+/**
+ * True when the milestone (sliceId null) or the slice has a saved artifact row
+ * of this type with content. This is the evidence that a discuss or research
+ * unit saved its result; the rendered file is a projection and is not read.
+ */
+export function hasSavedArtifact(milestoneId: string, sliceId: string | null, artifactType: string): boolean {
+  const rows = sliceId
+    ? getSliceScopedArtifacts(milestoneId, sliceId)
+    : getMilestoneScopedArtifacts(milestoneId);
+  return rows.some((row) => row.artifact_type === artifactType && row.full_content.trim() !== "");
 }
 
 /** Fast slice status check — avoids deserializing JSON depends/planning fields. */
@@ -1263,16 +1311,6 @@ export function getSliceStatusSummary(milestoneId: string): IdStatusSummary[] {
   return getDbOrNull()!.prepare(
     "SELECT id, status FROM slices WHERE milestone_id = :mid ORDER BY sequence, id",
   ).all({ ":mid": milestoneId }).map(rowToIdStatusSummary);
-}
-
-/** Fast task status check — avoids deserializing JSON arrays and large text fields. */
-export function getActiveTaskIdFromDb(milestoneId: string, sliceId: string): ActiveTaskSummary | null {
-  if (!getDbOrNull()!) return null;
-  const row = getDbOrNull()!.prepare(
-    `SELECT id, status, title FROM tasks WHERE milestone_id = :mid AND slice_id = :sid AND status NOT IN (${TERMINAL_STATUS_SQL}) ORDER BY sequence, id LIMIT 1`,
-  ).get({ ":mid": milestoneId, ":sid": sliceId });
-  if (!row) return null;
-  return rowToActiveTaskSummary(row);
 }
 
 /** Count tasks by status for a slice — useful for progress reporting without full row load. */
@@ -1377,6 +1415,25 @@ export function getSliceRunUatAssessment(
   return { status: String(row["status"] ?? ""), fullContent: String(row["fullContent"] ?? "") };
 }
 
+/**
+ * Recorded timestamp of the slice's latest `run-uat` assessment row, or null
+ * when the DB is unavailable or the slice has no run-uat assessment. Used to
+ * order a slice's UAT verdict against a milestone validation receipt (#2347).
+ */
+export function getSliceRunUatAssessmentRecordedAt(
+  milestoneId: string,
+  sliceId: string,
+): string | null {
+  if (!getDbOrNull()!) return null;
+  const row = getDbOrNull()!.prepare(
+    `SELECT created_at FROM assessments
+      WHERE milestone_id = :mid AND slice_id = :sid AND scope = 'run-uat'
+      ORDER BY created_at DESC, ROWID DESC
+      LIMIT 1`,
+  ).get({ ":mid": milestoneId, ":sid": sliceId });
+  return typeof row?.["created_at"] === "string" ? row["created_at"] : null;
+}
+
 export function getLatestAssessmentByScope(
   milestoneId: string,
   scope: string,
@@ -1389,6 +1446,16 @@ export function getLatestAssessmentByScope(
       LIMIT 1`,
   ).get({ ":mid": milestoneId, ":scope": scope });
   return row ?? null;
+}
+
+/**
+ * True when a roadmap reassessment of this milestone was recorded at or after
+ * `sinceMs`. This row is the evidence that a unit ran `gsd_reassess_roadmap`;
+ * activity logs and ASSESSMENT files are not read.
+ */
+export function hasRoadmapAssessmentSince(milestoneId: string, sinceMs: number): boolean {
+  const recordedAt = Date.parse(String(getLatestAssessmentByScope(milestoneId, "roadmap")?.["created_at"] ?? ""));
+  return Number.isFinite(recordedAt) && recordedAt >= sinceMs;
 }
 
 /**

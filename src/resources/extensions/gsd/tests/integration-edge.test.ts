@@ -12,7 +12,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
 import { openDatabase, closeDatabase, isDbAvailable, _resetProvider } from '../gsd-db.ts';
-import { migrateFromMarkdown } from '../md-importer.ts';
+import { migrateFromMarkdown } from './helpers/md-importer.ts';
 import {
   queryDecisions,
   queryRequirements,

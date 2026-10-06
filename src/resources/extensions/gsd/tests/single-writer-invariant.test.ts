@@ -59,6 +59,8 @@ const SCHEMA_DB_WRITER_FILES = new Set([
   "db-canonical-foundation-schema.ts",
   "db-attempt-recovery-schema.ts",
   "db-conversation-foundation-schema.ts",
+  "db-decision-statement-impact-schema.ts",
+  "db-lifecycle-coverage-schema.ts",
   "db-lifecycle-foundation-schema.ts",
   "db-projection-import-kernel-closeout-foundation-schema.ts",
   "db-recovery-evidence-foundation-schema.ts",
@@ -339,13 +341,8 @@ test("gsd-db.ts exports the expected single-writer wrappers", async () => {
     "deleteDecisionById",
     "deleteRequirementById",
     "deleteArtifactByPath",
-    "clearEngineHierarchy",
-    "insertOrIgnoreSlice",
-    "insertOrIgnoreTask",
     "setSliceReplanTriggeredAt",
     "upsertQualityGate",
-    "restoreManifest",
-    "bulkInsertLegacyHierarchy",
     "readTransaction",
     "insertMemoryRow",
     "rewriteMemoryId",
@@ -363,6 +360,50 @@ test("gsd-db.ts exports the expected single-writer wrappers", async () => {
       typeof (db as Record<string, unknown>)[name] === "function",
       `gsd-db.ts must export ${name} as a function`,
     );
+  }
+});
+
+test("dead legacy writers, importers and readers are not exported", async () => {
+  // These had no production caller. An export that comes back is a bypass of
+  // the Domain Operation path, so each name must stay absent at runtime.
+  const removed: Array<[string, string[]]> = [
+    ["../gsd-db.js", [
+      "reopenMilestoneStatus",
+      "deleteTask",
+      "deleteSlice",
+      "syncSliceDependencies",
+      "clearEngineHierarchy",
+      "insertOrIgnoreSlice",
+      "insertOrIgnoreTask",
+      "bulkInsertLegacyHierarchy",
+      "restoreManifest",
+      "reopenSliceCascade",
+      "skipSliceCascade",
+      "resetSliceCascade",
+      "copyWorktreeDb",
+      "getActiveMilestoneFromDb",
+      "getActiveMilestoneIdFromDb",
+      "getActiveSliceFromDb",
+      "getActiveTaskFromDb",
+      "getActiveTaskIdFromDb",
+    ]],
+    ["../workflow-manifest.js", ["bootstrapFromManifest"]],
+    ["../auto-start.js", ["reconcileMergedMilestonesFromJournal"]],
+    ["../auto-recovery.js", ["hasAdoptedMilestoneHistory"]],
+    ["../reactive-graph.js", ["saveReactiveState", "loadReactiveState", "clearReactiveState"]],
+    ["../dispatch-guard.js", ["getConsecutiveDispatchBlocker"]],
+    ["../auto/phases.js", ["runPreDispatch", "runDispatch"]],
+    ["../auto/dispatch.js", ["runDispatch"]],
+    ["../mcp-bridge.js", ["rebuildState"]],
+    ["../state-reconciliation/drift/external-markdown-edit.js", ["externalMarkdownEditHandler"]],
+    ["../state-reconciliation/drift/external-planning-edit.js", ["externalPlanningEditHandler"]],
+  ];
+
+  for (const [specifier, names] of removed) {
+    const mod = await import(specifier) as Record<string, unknown>;
+    for (const name of names) {
+      assert.equal(name in mod, false, `${specifier} must not export ${name}`);
+    }
   }
 });
 

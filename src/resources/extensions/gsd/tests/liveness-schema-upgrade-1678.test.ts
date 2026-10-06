@@ -214,9 +214,15 @@ test("#1678: opening a pre-v1.14 v46 database bootstraps liveness schema without
     {
       ...rowsAfter,
       tasks: rowsAfter.tasks.map(({ required_workflow_tools: _requiredWorkflowTools, ...row }) => row),
+      verification_evidence: rowsAfter.verification_evidence.map(({ attempt_ref: _attemptRef, ...row }) => row),
     },
     rowsBefore,
     "startup repair must not rewrite workflow-owned rows",
+  );
+  assert.deepEqual(
+    rowsAfter.verification_evidence.map((row) => row.attempt_ref),
+    [""],
+    "the verification-evidence-attempt schema feature adds attempt_ref with the empty default",
   );
   assert.deepEqual(
     rowsAfter.tasks.map((row) => row.required_workflow_tools),
@@ -400,5 +406,18 @@ test("#1678: same-process doctor fix reports and repairs missing liveness schema
   );
   assert.deepEqual(schemaObjects(), expectedSchemaObjects());
   assert.deepEqual(getOpenWedge(basePath), { ok: true, wedge: null });
-  assert.deepEqual(snapshotWorkflowRows(), rowsBefore, "doctor repair must preserve workflow state and completion timestamps");
+  // Doctor repair also renders the missing ROADMAP and PLAN of the open
+  // milestone, which adds their artifact rows. The seeded rows must not change.
+  const rowsAfter = snapshotWorkflowRows();
+  const seededPaths = new Set(rowsBefore.artifacts.map((row) => row.path));
+  assert.deepEqual(
+    { ...rowsAfter, artifacts: rowsAfter.artifacts.filter((row) => seededPaths.has(row.path)) },
+    rowsBefore,
+    "doctor repair must preserve workflow state and completion timestamps",
+  );
+  assert.deepEqual(
+    rowsAfter.artifacts.filter((row) => !seededPaths.has(row.path)).map((row) => row.artifact_type).sort(),
+    ["PLAN", "ROADMAP"],
+    "the only new artifact rows are the files the milestone render writes",
+  );
 });

@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 
-import type { DomainOperationContext } from "../db/domain-operation.ts";
+import {
+  _setDomainOperationFaultForTest,
+  type DomainOperationContext,
+} from "../db/domain-operation.ts";
 import { adoptOrTransitionLifecycle } from "../db/writers/lifecycle-commands.ts";
 import { readMilestoneCloseoutReadiness } from "../db/milestone-closeout-readiness.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
@@ -191,6 +194,7 @@ function sourceRevision(basePath: string): string {
 }
 
 afterEach(() => {
+  _setDomainOperationFaultForTest(null);
   clearPathCache();
   clearParseCache();
   closeDatabase();
@@ -267,6 +271,29 @@ test("Milestone validation commits one immutable receipt and exact replay adds n
     row("SELECT COUNT(*) AS count FROM workflow_operations").count,
     Number(operationsBefore) + 1,
     "one accepted public command must create exactly one Domain Operation",
+  );
+});
+
+test("adopted validation commits the assessment and gates inside the milestone.validate operation", async () => {
+  const basePath = makeBase();
+  _setDomainOperationFaultForTest("after-commit", "milestone.validate");
+
+  await assert.rejects(
+    validate(basePath, "milestone-validate/public/atomic-carrier"),
+    /domain operation fault: after-commit/,
+  );
+
+  const operation = db().prepare(`
+    SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'milestone.validate'
+  `).get() as { count: number };
+  assert.equal(operation.count, 1, "the operation committed before the fault");
+  const assessment = db().prepare(`
+    SELECT status FROM assessments WHERE milestone_id = 'M001' AND scope = 'milestone-validation'
+  `).get() as { status: string } | undefined;
+  assert.equal(assessment?.status, "pass", "the legacy assessment must commit with the operation");
+  assert.ok(
+    Number(row(`SELECT COUNT(*) AS count FROM quality_gates WHERE milestone_id = 'M001'`).count) > 0,
+    "milestone validation gates must commit with the operation",
   );
 });
 
@@ -413,6 +440,131 @@ test("Milestone validation rejects an older acceptance while a newer UAT questio
   );
 });
 
+test("the unsatisfied subjective criterion error names key and bound revision (#2341)", async () => {
+  const basePath = makeBase();
+  const testedSourceRevision = sourceRevision(basePath);
+  const prepared = prepareMilestoneSubjectiveUat({
+    invocation: invocation("milestone-validate/subjective/enriched/prepare"),
+    milestoneId: "M001",
+    criterionKey: "guided-flow",
+    description: "The guided flow feels natural and clear.",
+    focusedPrompt: "Does the guided flow feel natural and clear?",
+    recommendedDisposition: "accepted",
+    recommendationRationale: "Automated checks passed.",
+    recommendationEvidence: "Current technical validation receipt.",
+    testedSourceRevision,
+  });
+  // Re-prepare the SAME criterion against a newer source revision: the
+  // unchanged description keeps the criterion identity (no new row), a second
+  // prepared event is recorded at the newer revision, and the error must name
+  // that newest preparation.
+  writeFileSync(join(basePath, "source.ts"), "export const source = 'changed before validation';\n");
+  const newerRevision = sourceRevision(basePath);
+  assert.notEqual(newerRevision, testedSourceRevision);
+  const newer = prepareMilestoneSubjectiveUat({
+    invocation: invocation("milestone-validate/subjective/enriched/prepare-newer"),
+    milestoneId: "M001",
+    criterionKey: "guided-flow",
+    description: "The guided flow feels natural and clear.",
+    focusedPrompt: "Does the guided flow feel natural and clear?",
+    recommendedDisposition: "accepted",
+    recommendationRationale: "Automated checks passed.",
+    recommendationEvidence: "Current technical validation receipt.",
+    testedSourceRevision: newerRevision,
+  });
+  assert.equal(newer.criterionId, prepared.criterionId, "unchanged description keeps the criterion identity");
+
+  await assert.rejects(
+    () => validate(basePath, "milestone-validate/public/enriched-error"),
+    (error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      assert.match(message, /accepted subjective UAT criterion/i);
+      assert.ok(message.includes(prepared.criterionId), "error must name the current blocking criterion");
+      assert.match(message, /criterionKey: "guided-flow"/);
+      assert.ok(message.includes(newerRevision), "error must carry the newest prepared revision");
+      assert.ok(!message.includes(testedSourceRevision), "the newest prepared revision wins");
+      assert.match(message, /supersed/i);
+      return true;
+    },
+  );
+});
+
+test("a prepared replacement supersedes the stale criterion by ID and validation passes (#2341)", async () => {
+  const basePath = makeBase();
+  const testedSourceRevision = sourceRevision(basePath);
+  const stale = prepareMilestoneSubjectiveUat({
+    invocation: invocation("milestone-validate/subjective/supersede/stale-prepare"),
+    milestoneId: "M001",
+    criterionKey: "guided-flow",
+    description: "The guided flow felt natural on the older revision.",
+    focusedPrompt: "Does the guided flow feel natural and clear?",
+    recommendedDisposition: "accepted",
+    recommendationRationale: "Automated checks passed.",
+    recommendationEvidence: "Older technical validation receipt.",
+    testedSourceRevision,
+  });
+  // The stale criterion is never answered — the reported #2341 blocker. The
+  // source then advances, so the replacement must be prepared and answered at
+  // the NEW current revision (the situation from the issue).
+  writeFileSync(join(basePath, "source.ts"), "export const source = 'changed before supersession';\n");
+  const replacementRevision = sourceRevision(basePath);
+  assert.notEqual(replacementRevision, testedSourceRevision);
+
+  const replacement = prepareMilestoneSubjectiveUat({
+    invocation: invocation("milestone-validate/subjective/supersede/prepare"),
+    milestoneId: "M001",
+    description: "The guided flow feels natural and clear on the current revision.",
+    focusedPrompt: "Does the guided flow still feel natural and clear?",
+    recommendedDisposition: "accepted",
+    recommendationRationale: "Automated checks passed on the current source.",
+    recommendationEvidence: "Current technical validation receipt.",
+    testedSourceRevision: replacementRevision,
+    supersedesCriterionId: stale.criterionId,
+  });
+  assert.notEqual(replacement.criterionId, stale.criterionId);
+  const replacementKey = db().prepare(
+    "SELECT criterion_key FROM workflow_acceptance_criteria WHERE criterion_id = ?",
+  ).get(replacement.criterionId)?.["criterion_key"];
+  assert.equal(replacementKey, "guided-flow", "the replacement inherits the superseded criterion key");
+  const staleRow = db().prepare(`
+    SELECT criterion.criterion_id
+    FROM workflow_acceptance_criteria criterion
+    JOIN workflow_acceptance_criteria successor
+      ON successor.supersedes_criterion_id = criterion.criterion_id
+    WHERE criterion.criterion_id = ?
+  `).get(stale.criterionId);
+  assert.ok(staleRow, "the stale criterion must be superseded by the replacement");
+
+  const accepted = replacement.options.find((option) => option.disposition === "accepted")!;
+  answerMilestoneSubjectiveUat({
+    invocation: {
+      ...invocation("milestone-validate/subjective/supersede/answer"),
+      actorType: "user",
+      actorId: "developer",
+    },
+    criterionId: replacement.criterionId,
+    questionId: replacement.questionId,
+    interactionId: replacement.interactionId,
+    selectedOptionId: accepted.optionId,
+    verbatimResponse: accepted.label,
+    rationale: "The user accepted the current-source guided experience.",
+    testedSourceRevision: replacementRevision,
+  });
+
+  const result = await validate(basePath, "milestone-validate/public/supersede-pass");
+  assert.ok(!("error" in result), `validation should pass after supersession: ${"error" in result ? result.error : ""}`);
+  const payload = JSON.parse(String(row(`
+    SELECT payload_json FROM workflow_domain_events
+    WHERE event_type = 'milestone.validation.recorded'
+    ORDER BY project_revision DESC LIMIT 1
+  `).payload_json)) as { criterionIds?: string[] };
+  assert.ok(
+    !(payload["criterionIds"] ?? []).includes(stale.criterionId),
+    "the superseded stale criterion must not be required",
+  );
+  assert.ok((payload["criterionIds"] ?? []).includes(replacement.criterionId));
+});
+
 test("Milestone validation rejects subjective acceptance from an older source", async () => {
   const basePath = makeBase();
   const testedSourceRevision = sourceRevision(basePath);
@@ -527,6 +679,7 @@ test("Milestone validation refuses legacy descendant repair without durable evid
 
   assert.ok("error" in result, "unsupported legacy authority must block validation");
   assert.match(result.error, /unresolved canonical lifecycle shadows/i);
+  assert.match(result.error, /\/gsd db adopt --apply/, "the refusal names the remedy for unadopted rows");
   assert.match(result.error, /M001\/S01\/T01/);
   assert.match(result.error, /M001\/S01/);
   assert.equal(Number(row(`

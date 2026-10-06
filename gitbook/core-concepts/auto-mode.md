@@ -38,9 +38,9 @@ If post-merge stash restore fails after a successful milestone merge, auto mode 
 
 ## State Authority
 
-The GSD database is the runtime source of truth for milestones, slices, tasks, requirements, summaries, and completion status. Durable decisions and project knowledge use the same database through the `memories` table: decisions are stored as `architecture` memories, and KNOWLEDGE patterns/lessons are stored as `pattern`/`gotcha` memories.
+The GSD database is the runtime source of truth for milestones, slices, tasks, requirements, summaries, and completion status. Durable decisions and project knowledge use the same database through the `memories` table: decisions are stored as `architecture` memories, and KNOWLEDGE rules/patterns/lessons are stored as `rule`/`pattern`/`gotcha` memories.
 
-Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and the Patterns/Lessons sections of `.gsd/KNOWLEDGE.md` are projected from memory rows; editing those projections does not override the database unless a GSD command imports or saves the change. The Rules section of `KNOWLEDGE.md` remains manually authored and is preserved separately.
+Markdown files in `.gsd/` are rendered projections for review, prompts, and git-friendly history. `.gsd/DECISIONS.md` is projected from architecture memories, and `.gsd/KNOWLEDGE.md` is projected from memory rows; editing those projections does not override the database unless a GSD command imports or saves the change.
 
 Milestone, slice, and task planning, task and slice replanning, and roadmap reassessment commit through replay-safe domain operations. Retries reuse the original durable result instead of applying hierarchy changes twice. Removed pending slices and tasks retain their identity as cancelled history and are omitted from active roadmap and plan projections; explicitly reopen them before reusing their IDs.
 
@@ -50,9 +50,8 @@ resume contracts are maintained in the authoritative
 
 In worktree mode, the project-root database remains authoritative. Project-root
 and worktree markdown projections are diagnostics, not state to sync back.
-Runtime state derivation does not silently rebuild from markdown when the
-database is unavailable. The legacy markdown fallback is only enabled with
-`GSD_ALLOW_MARKDOWN_DERIVE_FALLBACK=1` for tests and explicit recovery work.
+Runtime state derivation does not rebuild from markdown when the database is
+unavailable. There is no markdown fallback.
 
 ## Deep Planning Mode
 
@@ -73,10 +72,10 @@ Workflow Preferences -> Project Context -> Requirements -> Research Decision -> 
 | `.gsd/PREFERENCES.md` | `--deep` / `workflow-preferences` | Holds `planning_depth: deep` and captured workflow settings |
 | `.gsd/PROJECT.md` | `discuss-project` | Project vision, users, anti-goals, constraints, milestone sequence |
 | `.gsd/REQUIREMENTS.md` | `discuss-requirements` | Capability contract with Active, Validated, Deferred, and Out of Scope requirements |
-| `.gsd/runtime/research-decision.json` | `research-decision` | Records whether to run project research or skip it |
+| (database only) | `discuss-project` or `discuss-requirements` | Records `research` when you ask for project research; no recorded decision means `skip` |
 | `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, `PITFALLS.md` | `research-project` | Optional four-way project research when the decision is `research` |
 
-The research-decision unit only records the choice. If the decision is `research`, the next gate fans out four project research passes. Those outputs inform planning and requirement review; they do not silently create binding requirements.
+If the decision is `research`, the next gate fans out four project research passes. Those outputs inform planning and requirement review; they do not silently create binding requirements.
 
 ## Controlling Auto Mode
 
@@ -161,7 +160,7 @@ Recovery classification treats deterministic policy, tool-schema, stale-worker, 
 
 ## Reactive Task Execution
 
-Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from task-plan IO annotations. With default settings, it only attempts a reactive batch when at least three ready tasks are available and the graph is non-ambiguous. Non-conflicting tasks are dispatched in parallel via subagents; dependent tasks wait for their predecessors.
+Reactive task execution is enabled by default. During task execution, GSD derives a dependency graph from the planned inputs and expected output on the task rows in the database. With default settings, it only attempts a reactive batch when at least three ready tasks are available and the graph is non-ambiguous. Non-conflicting tasks are dispatched in parallel via subagents; dependent tasks wait for their predecessors. A task that has a lifecycle row is not put in a parallel batch; see the authoritative [Reactive Task Execution guide](../../docs/user-docs/auto-mode.md#reactive-task-execution).
 
 ```yaml
 reactive_execution:
@@ -261,7 +260,7 @@ See the authoritative [Auto Mode liveness and recovery guide](../../docs/user-do
 
 ## Artifact Verification Retries
 
-After each unit, GSD verifies the expected artifact and retries missing artifacts with explicit failure context. `reactive-execute` batches use a diagnostic blocker after the retry cap: if dispatched tasks are still missing task summaries, GSD writes `S##-REACTIVE-BLOCKER.md` with the summary-present and summary-missing lists. The blocker prevents another reactive batch for that slice, but it is not lifecycle authority; task statuses stay under canonical database Attempt/recovery control, not summary-file presence.
+After each unit, GSD verifies that the unit recorded its result in the database and retries a unit with no recorded result. A file on disk does not prove completion. See the authoritative [Artifact Verification Retries guide](../../docs/user-docs/auto-mode.md#artifact-verification-retries), which also covers the `reactive-execute` recovery block and `S##-REACTIVE-BLOCKER.md`.
 
 ## Cost Tracking
 
@@ -311,9 +310,11 @@ If auto mode has issues, GSD provides two diagnostic tools:
 - **Canonical-root redirects** — how often validation correctly routed to a worktree instead of stale project-root state.
 
 Two anomaly types surface from telemetry:
+
 - `worktree-orphan` — one per orphan reason-bucket
 - `worktree-unmerged-exit` — aggregate signal across the window
 
 For per-event detail (specific milestone IDs, timestamps, exit reasons) inspect `.gsd/journal/*.jsonl` directly. `auto-exit` events now include:
+
 - `reason`: normalized bucket for stable analytics (`pause`, `stop`, `blocked`, `merge-conflict`, `merge-failed`, `slice-merge-conflict`, `provider-error`, `session-failed`, `stream-aborted`, `unit-aborted`, `verification-exhausted`, `all-complete`, `no-active-milestone`, `other`)
 - `rawReason`: original free-form reason text before normalization, preserved for debugging and audit trails

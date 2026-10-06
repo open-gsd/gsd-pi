@@ -12,10 +12,10 @@ import { createRequire } from "node:module";
 import { join, resolve as resolvePath, sep, win32 as pathWin32 } from "node:path";
 import { homedir } from "node:os";
 import { deriveState } from "./state.js";
-import { gsdRoot } from "./paths.js";
+import { gsdRoot, resolveGsdPathContract } from "./paths.js";
 import { gsdHome } from "./gsd-home.js";
 import { appendCapture, hasPendingCaptures, loadPendingCaptures } from "./captures.js";
-import { appendOverride, appendKnowledge } from "./files.js";
+import { registerSteerOverride } from "./overrides.js";
 import {
   formatDoctorIssuesForPrompt,
   formatDoctorReport,
@@ -24,8 +24,7 @@ import {
   selectDoctorScope,
   filterDoctorIssues,
 } from "./doctor.js";
-import { isAutoActive, checkRemoteAutoSession } from "./auto.js";
-import { getAutoWorktreePath } from "./auto-worktree-path-resolution.js";
+import { isAutoActive } from "./auto.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { currentDirectoryRoot, projectRoot } from "./commands/context.js";
 import { loadPrompt } from "./prompt-loader.js";
@@ -264,14 +263,23 @@ export async function handleDoctor(args: string, ctx: ExtensionCommandContext, p
   const { jsonMode, dryRun, fixFlag, includeBuild, includeTests, mode, requestedScope } = parseDoctorArgs(args);
   const scope = await selectDoctorScope(projectRoot(), requestedScope);
   const effectiveScope = mode === "audit" ? requestedScope : scope;
-  const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
-  await ensureDbOpen(projectRoot());
+  const repairs = (mode === "fix" || mode === "heal" || fixFlag) && !dryRun;
+  // Only a repair run may create the database. A plain or dry run opens it when
+  // it exists, and still refuses a project whose database is lost.
+  if (repairs || existsSync(resolveGsdPathContract(projectRoot()).projectDb)) {
+    const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
+    await ensureDbOpen(projectRoot());
+  } else {
+    const { assertWorkflowAuthorityNotLost } = await import("./db-workspace.js");
+    assertWorkflowAuthorityNotLost(projectRoot());
+  }
   const report = await runGSDDoctor(projectRoot(), {
-    fix: mode === "fix" || mode === "heal" || dryRun || fixFlag,
+    fix: repairs || dryRun,
     dryRun,
     scope: effectiveScope,
     includeBuild,
     includeTests,
+    importFileOverrides: true,
   });
 
   if (jsonMode) {
@@ -336,7 +344,7 @@ export async function handleSkillHealth(args: string, ctx: ExtensionCommandConte
 
   if (decliningOnly) {
     if (report.decliningSkills.length === 0) {
-      ctx.ui.notify("No skills flagged for declining performance.", "info");
+      ctx.ui.notify("No skills flagged for review.", "info");
       return;
     }
     const filtered = {
@@ -374,11 +382,22 @@ export async function handleCapture(args: string, ctx: ExtensionCommandContext):
     mkdirSync(gsdDir, { recursive: true });
   }
 
+  // The capture is a database row; CAPTURES.md is its render.
+  const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
+  if (!(await ensureDbOpen(basePath))) {
+    ctx.ui.notify("Capture not saved: the GSD database is not available.", "error");
+    return;
+  }
   const id = appendCapture(basePath, text);
   ctx.ui.notify(`Captured: ${id} — "${text.length > 60 ? text.slice(0, 57) + "..." : text}"`, "info");
 }
 
 export async function handleTriage(ctx: ExtensionCommandContext, pi: ExtensionAPI, basePath: string): Promise<void> {
+  const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
+  if (!(await ensureDbOpen(basePath))) {
+    ctx.ui.notify("Cannot triage captures: the GSD database is not available.", "error");
+    return;
+  }
   if (!hasPendingCaptures(basePath)) {
     ctx.ui.notify("No pending captures to triage.", "info");
     return;
@@ -439,24 +458,12 @@ export async function handleTriage(ctx: ExtensionCommandContext, pi: ExtensionAP
 
 export async function handleSteer(change: string, ctx: ExtensionCommandContext, pi: ExtensionAPI): Promise<void> {
   const basePath = currentDirectoryRoot();
-  const state = await deriveState(basePath);
-  const mid = state.activeMilestone?.id ?? "none";
-  const sid = state.activeSlice?.id ?? "none";
-  const tid = state.activeTask?.id ?? "none";
-  const appliedAt = `${mid}/${sid}/${tid}`;
 
-  // Resolve the correct target path: only route to a worktree when auto-mode
-  // is actively running there (in-process or remote). A worktree directory may
-  // exist from a previous session without being the active runtime path —
-  // writing there without a live session would silently drop the override.
-  const autoRunning = isAutoActive() || checkRemoteAutoSession(basePath).running;
-  const wtPath = autoRunning && mid !== "none"
-    ? getAutoWorktreePath(basePath, mid)
-    : null;
-  const targetPath = wtPath ?? basePath;
-  await appendOverride(targetPath, change, appliedAt);
+  // The override is a database row shared by the project root and every
+  // worktree; OVERRIDES.md is its render.
+  await registerSteerOverride(basePath, change);
 
-  const overrideLoc = wtPath ? "worktree `.gsd/OVERRIDES.md`" : "`.gsd/OVERRIDES.md`";
+  const overrideLoc = "`.gsd/OVERRIDES.md`";
 
   if (isAutoActive()) {
     pi.sendMessage({
@@ -517,27 +524,26 @@ export async function handleKnowledge(args: string, ctx: ExtensionCommandContext
   const state = await deriveState(basePath);
   const scope = state.activeMilestone?.id
     ? `${state.activeMilestone.id}${state.activeSlice ? `/${state.activeSlice.id}` : ""}`
-    : "global";
+    : "project";
 
-  // ADR-013 Stage 2c: Patterns and Lessons land in the memories table; the
-  // next session-start projection render emits them back into KNOWLEDGE.md.
-  // Rules stay file-canonical per ADR-013 line 39 — Rules are not migrated.
-  if (type === "rule") {
-    await appendKnowledge(basePath, type, entryText, scope);
-    ctx.ui.notify(`Added rule to KNOWLEDGE.md: "${entryText}"`, "success");
-    return;
-  }
-
+  // Rules, Patterns and Lessons are database rows; the capture renders
+  // KNOWLEDGE.md from the database right after the write.
   const { captureKnowledgeEntry } = await import("./knowledge-capture.js");
-  const { id, written } = captureKnowledgeEntry(basePath, type, entryText, scope);
-  if (!written) {
-    ctx.ui.notify(`Could not persist ${type} — see logs for details.`, "error");
+  let result: ReturnType<typeof captureKnowledgeEntry>;
+  try {
+    result = captureKnowledgeEntry(basePath, type, entryText, scope);
+  } catch (e) {
+    ctx.ui.notify(`Could not save ${type}: ${(e as Error).message}`, "error");
     return;
   }
-  ctx.ui.notify(
-    `Captured ${type} ${id} to memories; KNOWLEDGE.md will render it on next session start.`,
-    "success",
-  );
+  if (result.projectionError) {
+    ctx.ui.notify(
+      `Saved ${type} ${result.id}, but KNOWLEDGE.md render failed: ${result.projectionError}`,
+      "warning",
+    );
+    return;
+  }
+  ctx.ui.notify(`Saved ${type} ${result.id} to KNOWLEDGE.md: "${entryText}"`, "success");
 }
 
 // ─── run-hook unit-ID validation (#2195) ─────────────────────────────────────

@@ -2,79 +2,35 @@
  * GSD Command — /gsd backlog
  *
  * Structured backlog management with 999.x numbering.
- * Items stored in .gsd/BACKLOG.md as markdown checklist.
- * Items can be promoted to active slices via add-slice.
+ * Items are database rows (see backlog.ts); `.gsd/BACKLOG.md` is their render.
+ * Promote registers a queued milestone for the item.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  addBacklogItem,
+  loadBacklogItems,
+  promoteBacklogItem,
+  removeBacklogItem,
+  unimportedFileBacklogItems,
+} from "./backlog.js";
+import { invalidateAllCaches } from "./cache.js";
+import { nextMilestoneIdReserved } from "./milestone-id-reservation.js";
+import { findMilestoneIds, releaseMilestoneId } from "./milestone-ids.js";
+import { loadEffectiveGSDPreferences } from "./preferences.js";
+import { renderStateProjection } from "./workflow-projections.js";
 
-import { gsdRoot } from "./paths.js";
-import { atomicWriteSync } from "./atomic-write.js";
-
-interface BacklogItem {
-  id: string;
-  title: string;
-  done: boolean;
-  note: string;
-}
-
-function backlogPath(basePath: string): string {
-  return join(gsdRoot(basePath), "BACKLOG.md");
-}
-
-function parseBacklog(basePath: string): BacklogItem[] {
-  const filePath = backlogPath(basePath);
-  if (!existsSync(filePath)) return [];
-
-  const content = readFileSync(filePath, "utf-8");
-  const items: BacklogItem[] = [];
-
-  for (const line of content.split("\n")) {
-    const match = line.match(/^- \[([ x])\] (999\.\d+) — (.+?)(?:\s*\((.+)\))?$/);
-    if (match) {
-      items.push({
-        id: match[2],
-        title: match[3].trim(),
-        done: match[1] === "x",
-        note: match[4] ?? "",
-      });
-    }
-  }
-
-  return items;
-}
-
-function writeBacklog(basePath: string, items: BacklogItem[]): void {
-  const filePath = backlogPath(basePath);
-  const lines = ["# Backlog\n"];
-  for (const item of items) {
-    const check = item.done ? "x" : " ";
-    const note = item.note ? ` (${item.note})` : "";
-    lines.push(`- [${check}] ${item.id} — ${item.title}${note}`);
-  }
-  lines.push(""); // trailing newline
-  atomicWriteSync(filePath, lines.join("\n"), "utf-8");
-}
-
-function nextBacklogId(items: BacklogItem[]): string {
-  let maxNum = 0;
-  for (const item of items) {
-    const match = item.id.match(/^999\.(\d+)$/);
-    if (match) {
-      const num = parseInt(match[1], 10);
-      if (num > maxNum) maxNum = num;
-    }
-  }
-  return `999.${maxNum + 1}`;
-}
+// ─── Command ──────────────────────────────────────────────────────────────
 
 async function listBacklog(basePath: string, ctx: ExtensionCommandContext): Promise<void> {
-  const items = parseBacklog(basePath);
+  const items = loadBacklogItems();
+  const unimported = unimportedFileBacklogItems(basePath).length;
+  const importHint = unimported > 0
+    ? `\n${unimported} item(s) in BACKLOG.md are not in the database. Run /gsd doctor --fix to import them.`
+    : "";
   if (items.length === 0) {
-    ctx.ui.notify("Backlog is empty. Add items with /gsd backlog add <title>", "info");
+    ctx.ui.notify(`Backlog is empty. Add items with /gsd backlog add <title>${importHint}`, "info");
     return;
   }
 
@@ -85,98 +41,100 @@ async function listBacklog(basePath: string, ctx: ExtensionCommandContext): Prom
     lines.push(`  ${status} ${item.id} — ${item.title}${note}`);
   }
   const pending = items.filter((i) => !i.done).length;
-  lines.push(`\n${pending} pending, ${items.length - pending} promoted/done`);
+  lines.push(`\n${pending} pending, ${items.length - pending} promoted/done${importHint}`);
   ctx.ui.notify(lines.join("\n"), "info");
 }
 
-async function addBacklogItem(basePath: string, title: string, ctx: ExtensionCommandContext): Promise<void> {
+async function handleAdd(basePath: string, title: string, ctx: ExtensionCommandContext): Promise<void> {
   if (!title) {
     ctx.ui.notify("Usage: /gsd backlog add <title>", "warning");
     return;
   }
 
-  const items = parseBacklog(basePath);
-  const id = nextBacklogId(items);
-  const date = new Date().toISOString().slice(0, 10);
-
-  items.push({ id, title: title.replace(/^['"]|['"]$/g, ""), done: false, note: `added ${date}` });
-  writeBacklog(basePath, items);
+  const id = addBacklogItem(basePath, title.replace(/^['"]|['"]$/g, ""));
 
   ctx.ui.notify(`Added ${id}: "${title}"`, "success");
 }
 
-async function promoteBacklogItem(
+async function handlePromote(
   basePath: string,
   itemId: string,
   ctx: ExtensionCommandContext,
-  pi: ExtensionAPI,
 ): Promise<void> {
   if (!itemId) {
     ctx.ui.notify("Usage: /gsd backlog promote <id>\nExample: /gsd backlog promote 999.1", "warning");
     return;
   }
 
-  const items = parseBacklog(basePath);
-  const item = items.find((i) => i.id === itemId);
-
+  const item = loadBacklogItems().find((entry) => entry.id === itemId);
   if (!item) {
     ctx.ui.notify(`Backlog item ${itemId} not found.`, "warning");
     return;
   }
-
   if (item.done) {
     ctx.ui.notify(`${itemId} is already promoted/done.`, "info");
     return;
   }
 
-  // Promote — currently requires single-writer engine (not yet available)
-  // Mark as promoted in backlog for now; slice creation will be available with the engine.
-  item.done = true;
-  item.note = `promoted ${new Date().toISOString().slice(0, 10)}`;
-  writeBacklog(basePath, items);
-  ctx.ui.notify(`Promoted ${itemId}: "${item.title}" — add it to the roadmap manually or wait for engine slice commands.`, "info");
+  // One backlog.promote Domain Operation registers a queued milestone for the
+  // item and records the promotion with the milestone id.
+  // The id is a new one: an id that another flow reserved (a new-milestone
+  // discussion that showed it to the user) is not taken. This command
+  // registers the id at once, so it does not stay reserved.
+  const uniqueEnabled = !!loadEffectiveGSDPreferences(basePath)?.preferences?.unique_milestone_ids;
+  const milestoneId = nextMilestoneIdReserved(findMilestoneIds(basePath), uniqueEnabled, basePath);
+  releaseMilestoneId(milestoneId);
+  promoteBacklogItem(basePath, item, milestoneId);
+  invalidateAllCaches();
+  await renderStateProjection(basePath);
+
+  ctx.ui.notify(`Promoted ${itemId}: "${item.title}" — queued as milestone ${milestoneId}.`, "info");
 }
 
-async function removeBacklogItem(basePath: string, itemId: string, ctx: ExtensionCommandContext): Promise<void> {
+async function handleRemove(basePath: string, itemId: string, ctx: ExtensionCommandContext): Promise<void> {
   if (!itemId) {
     ctx.ui.notify("Usage: /gsd backlog remove <id>", "warning");
     return;
   }
 
-  const items = parseBacklog(basePath);
-  const idx = items.findIndex((i) => i.id === itemId);
-
-  if (idx === -1) {
+  const item = loadBacklogItems().find((entry) => entry.id === itemId);
+  if (!item) {
     ctx.ui.notify(`Backlog item ${itemId} not found.`, "warning");
     return;
   }
 
-  const removed = items.splice(idx, 1)[0];
-  writeBacklog(basePath, items);
-  ctx.ui.notify(`Removed ${removed.id}: "${removed.title}"`, "success");
+  removeBacklogItem(basePath, itemId);
+  ctx.ui.notify(`Removed ${itemId}: "${item.title}"`, "success");
 }
 
 export async function handleBacklog(
   args: string,
   ctx: ExtensionCommandContext,
-  pi: ExtensionAPI,
+  _pi: ExtensionAPI,
 ): Promise<void> {
   const basePath = process.cwd();
   const parts = args.trim().split(/\s+/);
   const sub = parts[0] ?? "";
   const rest = parts.slice(1).join(" ");
 
+  // Backlog items are database rows; BACKLOG.md is their render.
+  const { ensureDbOpen } = await import("./bootstrap/dynamic-tools.js");
+  if (!(await ensureDbOpen(basePath))) {
+    ctx.ui.notify("Backlog is not available: the GSD database could not be opened.", "error");
+    return;
+  }
+
   switch (sub) {
     case "":
       return listBacklog(basePath, ctx);
     case "add":
-      return addBacklogItem(basePath, rest, ctx);
+      return handleAdd(basePath, rest, ctx);
     case "promote":
-      return promoteBacklogItem(basePath, rest.trim(), ctx, pi);
+      return handlePromote(basePath, rest.trim(), ctx);
     case "remove":
-      return removeBacklogItem(basePath, rest.trim(), ctx);
+      return handleRemove(basePath, rest.trim(), ctx);
     default:
       // Treat as implicit add
-      return addBacklogItem(basePath, args, ctx);
+      return handleAdd(basePath, args, ctx);
   }
 }

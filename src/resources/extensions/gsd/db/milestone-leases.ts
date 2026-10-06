@@ -16,6 +16,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   _getAdapter,
+  getDb,
   isDbAvailable,
   transaction,
   insertAuditEvent,
@@ -202,10 +203,9 @@ export function refreshMilestoneLease(
   milestoneId: string,
   fencingToken: number,
 ): boolean {
-  if (!isDbAvailable()) return false;
   const now = new Date();
   const expiresIso = ttlExpiry(now);
-  const db = _getAdapter()!;
+  const db = getDb();
   const result = transaction(() => {
     return db.prepare(
       `UPDATE milestone_leases
@@ -237,8 +237,7 @@ export function releaseMilestoneLease(
   milestoneId: string,
   fencingToken: number,
 ): boolean {
-  if (!isDbAvailable()) return false;
-  const db = _getAdapter()!;
+  const db = getDb();
   return transaction(() => {
     const result = db.prepare(
       `UPDATE milestone_leases
@@ -278,8 +277,7 @@ export function releaseMilestoneLease(
  * non-running process.
  */
 export function forceReleaseLeasesForWorker(workerId: string): number {
-  if (!isDbAvailable()) return 0;
-  const db = _getAdapter()!;
+  const db = getDb();
   let changes = 0;
   transaction(() => {
     const result = db.prepare(

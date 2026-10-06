@@ -41,7 +41,6 @@ import {
   _getAdapter,
   checkpointDatabase,
   closeDatabase,
-  copyWorktreeDb,
   getDatabaseReplacementPaths,
   getDecisionById,
   insertDecision,
@@ -56,12 +55,7 @@ import {
   heartbeatAutoWorker,
   registerAutoWorker,
 } from "../db/auto-workers.ts";
-import {
-  claimNextCommand,
-  completeCommand,
-  enqueueCommand,
-  getCommand,
-} from "../db/command-queue.ts";
+import { copyWorktreeDb } from "./helpers/worktree-db-fixture.ts";
 import {
   claimMilestoneLease,
   getMilestoneLease,
@@ -941,8 +935,6 @@ test("active replacement intent fences coordination mutations before they change
   assert.equal(lease.ok, true);
   if (!lease.ok) return;
 
-  const commandId = enqueueCommand({ targetWorker: workerId, command: "pause" });
-  assert.ok(claimNextCommand(workerId));
   setRuntimeKv("worker", workerId, "cursor", { line: 7 });
 
   const dispatchIds = ["S01", "S02", "S03"].map((sliceId) => {
@@ -967,7 +959,6 @@ test("active replacement intent fences coordination mutations before they change
 
   const fenced = /Database writes are fenced while replacement intent exists/;
   assert.throws(() => heartbeatAutoWorker(workerId), fenced);
-  assert.throws(() => completeCommand(commandId, workerId, { acknowledged: true }), fenced);
   assert.throws(
     () => refreshMilestoneLease(workerId, "M001", lease.token),
     fenced,
@@ -978,7 +969,6 @@ test("active replacement intent fences coordination mutations before they change
   assert.throws(() => markCanceled(dispatchIds[2]!, "replacement"), fenced);
 
   assert.equal(getAutoWorker(workerId)!.last_heartbeat_at, heartbeatBefore);
-  assert.equal(getCommand(commandId)!.completed_at, null);
   assert.equal(getMilestoneLease("M001")!.expires_at, leaseExpiryBefore);
   assert.deepEqual(getRuntimeKv("worker", workerId, "cursor"), { line: 7 });
   for (const sliceId of ["S01", "S02", "S03"]) {
@@ -1002,8 +992,9 @@ test("active replacement intent prevents worktree reconciliation from mutating m
 
   openDatabase(main.databasePath);
   createReplacementIntent(main.databasePath);
-  const result = reconcileWorktreeDb(main.databasePath, worktree.databasePath);
+  const { error, ...result } = reconcileWorktreeDb(main.databasePath, worktree.databasePath);
 
+  assert.match(error ?? "", /Database writes are fenced while replacement intent exists/);
   assert.deepEqual(result, {
     decisions: 0,
     requirements: 0,
@@ -1020,6 +1011,8 @@ test("active replacement intent prevents worktree reconciliation from mutating m
     gate_runs: 0,
     milestone_commit_attributions: 0,
     conflicts: [],
+    adoptionStatusChanges: [],
+    statusChanges: [],
   });
   assert.equal(getDecisionById("D002"), null);
   assert.deepEqual(

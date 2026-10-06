@@ -37,8 +37,12 @@ const PROJECTION_READ_METADATA: ProjectProgressReadMetadata = {
 };
 
 // ---------------------------------------------------------------------------
-// STATE.md parser
+// STATE.md parser — reads what renderStateContent writes
+// (src/resources/extensions/gsd/workflow-projections.ts)
 // ---------------------------------------------------------------------------
+
+/** Milestone ids carry an optional unique suffix: M001 or M001-ab12cd. */
+const MILESTONE_ID = 'M\\d+(?:-[a-z0-9]{6})?';
 
 function parseBoldField(content: string, label: string): string | null {
   const re = new RegExp(`\\*\\*${label}:\\*\\*\\s*(.+)`, 'i');
@@ -48,20 +52,10 @@ function parseBoldField(content: string, label: string): string | null {
 
 function parseActiveRef(value: string | null): { id: string; title: string } | null {
   if (!value || value.toLowerCase() === 'none' || value === '—') return null;
-  // "M001: Flight Simulator" or "M001"
-  const m = value.match(/^(M\d+|S\d+|T\d+):?\s*(.*)/);
+  // "M001: Flight Simulator", "M001-ab12cd: Flight Simulator" or "M001"
+  const m = value.match(new RegExp(`^(${MILESTONE_ID}|S\\d+|T\\d+):?\\s*(.*)`));
   if (m) return { id: m[1], title: m[2] || m[1] };
   return { id: value, title: value };
-}
-
-function parsePhase(value: string | null): string {
-  if (!value) return 'unknown';
-  const lower = value.toLowerCase().trim();
-  if (lower.includes('research') || lower.includes('discuss')) return 'research';
-  if (lower.includes('plan')) return 'plan';
-  if (lower.includes('execut')) return 'execute';
-  if (lower.includes('complete') || lower.includes('done')) return 'complete';
-  return lower;
 }
 
 function parseRequirementsLine(value: string | null): ProgressResult['requirements'] | null {
@@ -85,13 +79,16 @@ function parseBlockers(content: string): string[] {
   return section[1]
     .split('\n')
     .map((l) => l.replace(/^[-*]\s*/, '').trim())
-    .filter(Boolean);
+    // The renderer writes "- None" for an empty list.
+    .filter((l) => l && l !== 'None');
 }
 
 function parseNextAction(content: string): string {
   const section = content.match(/## Next Action\s*\n([\s\S]*?)(?=\n##|\n$|$)/i);
   if (!section) return '';
-  return section[1].trim().split('\n')[0] || '';
+  const first = section[1].trim().split('\n')[0] || '';
+  // The renderer writes "None" for an empty next action.
+  return first === 'None' ? '' : first;
 }
 
 // ---------------------------------------------------------------------------
@@ -105,7 +102,8 @@ function parseMilestoneRegistry(content: string): RegistryEntry[] {
   if (!section) return [];
   const entries: RegistryEntry[] = [];
   for (const line of section[1].split('\n')) {
-    const m = line.match(/[-*]\s*(☑|✅|🔄|⬜|⏸)\s*\*\*(M\d+):\*\*/);
+    // The renderer writes the parked glyph with a variation selector (U+FE0F).
+    const m = line.match(new RegExp(`[-*]\\s*(☑|✅|🔄|⬜|⏸)\\uFE0F?\\s*\\*\\*(${MILESTONE_ID}):\\*\\*`, 'u'));
     if (!m) continue;
     const [, icon, id] = m;
     let status: RegistryEntry['status'] = 'pending';
@@ -136,15 +134,21 @@ function countSlicesAndTasks(gsdRoot: string, milestoneIds: string[]): {
       const tasks = findTaskFiles(gsdRoot, mid, sid);
       taskTotal += tasks.length;
 
-      const allDone = tasks.length > 0 && tasks.every((t) => t.hasSummary);
-      const anyDone = tasks.some((t) => t.hasSummary);
+      // Flat-phase inventories carry the plan checkbox state in `done`
+      // (tasks are checkboxes inside the slice plan, not separate files).
+      // An explicit unchecked box means staged-not-verified: the writer
+      // writes the task summary before host verification.
+      const isDone = (t: { hasSummary: boolean; done?: boolean }) =>
+        t.done === true ? true : t.done === false ? false : t.hasSummary;
+      const allDone = tasks.length > 0 && tasks.every(isDone);
+      const anyDone = tasks.some(isDone);
 
       if (allDone) {
         sliceDone++;
         taskDone += tasks.length;
       } else {
         if (anyDone) sliceActive++;
-        taskDone += tasks.filter((t) => t.hasSummary).length;
+        taskDone += tasks.filter(isDone).length;
       }
     }
   }
@@ -199,8 +203,7 @@ export function readProgress(projectDir: string): ProgressResult {
   // Parse STATE.md fields
   result.activeMilestone = parseActiveRef(parseBoldField(content, 'Active Milestone'));
   result.activeSlice = parseActiveRef(parseBoldField(content, 'Active Slice'));
-  result.activeTask = parseActiveRef(parseBoldField(content, 'Active Task'));
-  result.phase = parsePhase(parseBoldField(content, 'Phase'));
+  result.phase = parseBoldField(content, 'Phase') ?? 'unknown';
   result.requirements = parseRequirementsLine(parseBoldField(content, 'Requirements Status'));
   result.blockers = parseBlockers(content);
   result.nextAction = parseNextAction(content);

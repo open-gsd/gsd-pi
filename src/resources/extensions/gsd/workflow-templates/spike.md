@@ -70,7 +70,7 @@ Use for: technology evaluation, architecture decisions, "should we X?" questions
    the `spike-wrap-up` skill to package them as a project-local skill at
    `.claude/skills/<name>/SKILL.md`. That skill will auto-load on future
    similar tasks via `skill-discovery.ts`. If the recommendation is
-   decision-only (no reusable guidance), suggest appending a one-liner to
-   `.gsd/DECISIONS.md` instead.
+   decision-only (no reusable guidance), suggest saving it with
+   `gsd_decision_save` instead.
 
 </process>

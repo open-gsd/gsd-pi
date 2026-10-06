@@ -321,3 +321,114 @@ test("evidence-collector: exit code falls back to .gsd/exec meta.json when resul
   const bash = getEvidence().filter((e): e is BashEvidence => e.kind === "bash");
   assert.equal(bash[0].exitCode, 7, "exit code must be recovered from meta.json");
 });
+
+// ─── #2513: gsd_exec_search is a read-only lookup, not an execution ─────────
+
+function execSearchResult(firstHitExitCode: number): unknown {
+  // The search result embeds PAST runs' outcomes — the first hit's exit_code
+  // and meta_path belong to an old run, never to this unit.
+  return {
+    content: [{
+      type: "text",
+      text: JSON.stringify({
+        operation: "gsd_exec_search",
+        matches: 1,
+        results: [{
+          id: "old-run-1",
+          runtime: "bash",
+          exit_code: firstHitExitCode,
+          timed_out: false,
+          duration_ms: 900,
+          purpose: "full jest suite",
+          meta_path: "/tmp/does-not-exist/.gsd/exec/old-run-1.meta.json",
+        }],
+      }),
+    }],
+  };
+}
+
+test("evidence-collector: read-only gsd_exec_search records no execution evidence (#2513)", () => {
+  assert.equal(isExecutionToolName("gsd_exec_search"), false);
+  assert.equal(isExecutionToolName("mcp__gsd-workflow__gsd_exec_search"), false);
+  // Real execution surfaces keep their classification (negative control).
+  assert.equal(isExecutionToolName("gsd_exec"), true);
+  assert.equal(isExecutionToolName("mcp__gsd-workflow__gsd_exec"), true);
+
+  resetEvidence();
+  recordToolCall("tc-search-1", "gsd_exec_search", { query: "jest" });
+  recordToolResult("tc-search-1", "gsd_exec_search", execSearchResult(1), false);
+
+  assert.equal(getEvidence().length, 0, "a search lookup must not become execution evidence");
+});
+
+test("evidence-collector: MCP-namespaced gsd_exec_search records no execution evidence (#2513)", () => {
+  resetEvidence();
+  recordToolCall("tc-search-2", "mcp__custom-workflow__gsd_exec_search", { query: "rg TODO" });
+  recordToolResult("tc-search-2", "mcp__custom-workflow__gsd_exec_search", execSearchResult(1), false);
+
+  assert.equal(getEvidence().length, 0, "an MCP search variant must not become execution evidence");
+});
+
+test("evidence-collector: a search result on a recorded entry resolves to the inconclusive sentinel, not a historical exit (#2513)", () => {
+  // Belt-and-braces: if a search-classified result ever lands on an evidence
+  // entry, its embedded exit_code belongs to an OLD run. It must never be
+  // recorded as this unit's observed exit.
+  resetEvidence();
+  recordToolCall("tc-slipped", "bash", { command: "placeholder" });
+  recordToolResult("tc-slipped", "gsd_exec_search", execSearchResult(1), false);
+
+  const entry = getEvidence().find((e) => e.toolCallId === "tc-slipped") as BashEvidence | undefined;
+  assert.ok(entry, "the underlying entry must still exist");
+  assert.equal(entry.exitCode, -2, "search results must resolve to the inconclusive sentinel");
+});
+
+test("evidence-collector: an execution tool's command is never taken from `query` (#2513)", () => {
+  // Only the read-only search took a `query`; a query string is not a command.
+  // If it somehow reached an execution tool, the entry must record no command
+  // body (blank commands can never match a claim in cross-ref).
+  resetEvidence();
+  recordToolCall("tc-query", "bash", { query: "jest" });
+
+  const bash = getEvidence().filter((e): e is BashEvidence => e.kind === "bash");
+  assert.equal(bash.length, 1);
+  assert.equal(bash[0].command, "", "query must not become a command body");
+});
+
+test("evidence-collector: MCP-named search result with only a historical meta_path also resolves to the sentinel (#2513)", () => {
+  // Covers the meta_path resolver: a search hit's meta file must never be read
+  // as this unit's observed exit, even under isError.
+  resetEvidence();
+  recordToolCall("tc-slipped-mcp", "bash", { command: "placeholder" });
+  recordToolResult(
+    "tc-slipped-mcp",
+    "mcp__gsd-workflow__gsd_exec_search",
+    { content: [{ type: "text", text: '{"operation":"gsd_exec_search","meta_path":"/tmp/does-not-exist/old.meta.json"}' }] },
+    true,
+  );
+
+  const entry = getEvidence().find((e) => e.toolCallId === "tc-slipped-mcp") as BashEvidence | undefined;
+  assert.ok(entry, "the underlying entry must still exist");
+  assert.equal(entry.exitCode, -2, "historical meta_path must not become the recorded exit");
+});
+
+test("evidence-xref: #2513 repro — a claimed pass containing the search query is not judged by a search entry", () => {
+  resetEvidence();
+  // 1. Read-only lookup whose first historical hit failed (query "jest",
+  //    old run exit_code 1).
+  recordToolCall("tc-search", "gsd_exec_search", { query: "jest" });
+  recordToolResult("tc-search", "gsd_exec_search", execSearchResult(1), false);
+  // 2. The genuine verification run: full jest suite via gsd_exec, exit 0.
+  recordToolCall("tc-verify", "gsd_exec", {
+    script: "npx jest",
+    purpose: "full suite poll",
+  });
+  recordToolResult("tc-verify", "gsd_exec", gsdExecResult(0), false);
+  // 3. Claim whose text merely contains the short query string.
+  const mismatches = crossReferenceEvidence(
+    [{ command: "poll detached npx jest (run 4, gsd_exec 17b40dcc)", exitCode: 0, verdict: "passed" }],
+    getEvidence(),
+  );
+
+  const errors = mismatches.filter((m) => m.severity === "error");
+  assert.deepEqual(errors, [], "a search lookup must never fabricate a failed execution");
+});

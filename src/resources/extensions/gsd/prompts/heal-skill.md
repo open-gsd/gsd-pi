@@ -17,7 +17,7 @@ Analyze the just-completed unit ({{unitId}}) for skill drift.
 
 4. **Assess drift severity**:
    - **None**: Agent followed skill correctly → write "No drift detected" to {{healArtifact}} and stop
-   - **Minor**: Agent found a better approach but skill isn't wrong → append a note to `.gsd/KNOWLEDGE.md` and stop
+   - **Minor**: Agent found a better approach but skill isn't wrong → record the note with `capture_thought` and stop
    - **Significant**: Skill has outdated or incorrect guidance → continue to step 5
 
 5. **If significant drift found**, append a heal suggestion to `.gsd/skill-review-queue.md`:
@@ -39,6 +39,7 @@ Analyze the just-completed unit ({{unitId}}) for skill drift.
 Then write a brief summary of the finding to {{healArtifact}}.
 
 **Critical rules:**
+
 - Do NOT modify any skill files directly. Only write to the review queue.
 - The SkillsBench research (Feb 2026) shows curated skills beat auto-generated ones by +16.2pp. Human review is what makes this valuable.
 - Keep the analysis focused — don't flag stylistic preferences, only genuine errors or outdated content.

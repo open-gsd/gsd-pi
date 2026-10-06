@@ -12,7 +12,7 @@ import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
 import { openDatabase, closeDatabase, getAllMilestones, getMilestoneSlices, getSliceTasks } from "../gsd-db.ts";
-import { migrateHierarchyToDb } from "../md-importer.ts";
+import { migrateHierarchyToDb } from "./helpers/md-importer.ts";
 import { renderAllFromDb } from "../markdown-renderer.ts";
 import { invalidateStateCache } from "../state.ts";
 

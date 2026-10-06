@@ -3,7 +3,7 @@
  * emit correct journal event sequences with flowId threading, rule provenance,
  * and causedBy references.
  *
- * These tests call the real runDispatch / runUnitPhase / runPreDispatch
+ * These tests call the real runUnitPhase and finalize phase
  * functions with mock LoopDeps that capture emitJournalEvent calls.
  */
 
@@ -30,11 +30,9 @@ function makeTestBase(prefix: string): string {
 import type { JournalEntry } from "../journal.js";
 import type { LoopDeps } from "../auto/loop-deps.js";
 import { WorktreeStateProjection } from "../worktree-state-projection.js";
-import type { IterationContext, LoopState, PreDispatchData, IterationData } from "../auto/types.js";
+import type { IterationContext, LoopState, IterationData } from "../auto/types.js";
 import type { SessionLockStatus } from "../session-lock.js";
-import { runDispatch } from "../auto/dispatch.js";
 import { runUnitPhase } from "../auto/unit-phase.js";
-import { runPreDispatch } from "../auto/pre-dispatch.js";
 import { runFinalize } from "../auto/finalize.js";
 import { readUnitRuntimeRecord } from "../unit-runtime.js";
 import { ModelPolicyDispatchBlockedError } from "../auto-model-selection.js";
@@ -48,6 +46,10 @@ import {
   openDatabase,
 } from "../gsd-db.js";
 import { SourceObservationStore } from "../source-observations.js";
+import { registerAutoWorker } from "../db/auto-workers.js";
+import { claimMilestoneLease } from "../db/milestone-leases.js";
+import { markCanceled, recordDispatchClaim } from "../db/unit-dispatches.js";
+import { storeUnitRetry } from "../db/unit-dispatch-retries.js";
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -109,7 +111,7 @@ function makeMockDeps(
       message: "restored",
     }),
     getLedger: () => ({ units: [] }),
-    getProjectTotals: () => ({ cost: 0 }),
+    getBudgetSpend: () => 0,
     formatCost: (c: number) => `$${c.toFixed(2)}`,
     getBudgetAlertLevel: () => 0,
     getNewBudgetAlertLevel: () => 0,
@@ -158,6 +160,7 @@ function makeMockDeps(
     rebuildState: async () => {},
     resolveModelId: (id: string, models: any[]) => models.find((m: any) => m.id === id),
     emitJournalEvent: capture.emitJournalEvent,
+    recordVerificationPause: () => {},
   };
 
   return { ...baseDeps, ...overrides };
@@ -212,14 +215,11 @@ function makeSession() {
     lastBudgetAlertLevel: 0,
     pendingVerificationRetry: null,
     pendingCrashRecovery: null,
-    pendingQuickTasks: [],
-    sidecarQueue: [],
     autoModeStartModel: null,
     unitDispatchCount: new Map<string, number>(),
     unitLifetimeDispatches: new Map<string, number>(),
-    unitRecoveryCount: new Map<string, number>(),
     verificationRetryCount: new Map<string, number>(),
-    zeroToolRetryCount: new Map<string, number>(),
+    unclaimedUnitBudgets: new Map<string, number>(),
     gitService: null,
     autoStartTime: Date.now(),
     cmdCtx: {
@@ -244,138 +244,6 @@ function makeSession() {
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
-
-test("runDispatch emits dispatch-match with correct rule and flowId", async () => {
-  const capture = createEventCapture();
-  const deps = makeMockDeps(capture, {
-    resolveDispatch: async () => ({
-      action: "dispatch" as const,
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "do the thing",
-      matchedRule: "slice-task-rule",
-    }),
-  });
-  const ic = makeIC(deps);
-  const preData: PreDispatchData = {
-    state: {
-      phase: "executing",
-      activeMilestone: { id: "M001", title: "Test", status: "active" },
-      activeSlice: { id: "S01", title: "Slice 1" },
-      activeTask: { id: "T01" },
-      registry: [{ id: "M001", status: "active" }],
-      blockers: [],
-    } as any,
-    mid: "M001",
-    midTitle: "Test Milestone",
-  };
-  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
-
-  const result = await runDispatch(ic, preData, loopState);
-
-  assert.equal(result.action, "next", "runDispatch should return next for dispatch action");
-
-  const matchEvents = capture.events.filter(e => e.eventType === "dispatch-match");
-  assert.equal(matchEvents.length, 1, "should emit exactly one dispatch-match event");
-
-  const ev = matchEvents[0];
-  assert.equal(ev.flowId, ic.flowId, "dispatch-match event should share the iteration flowId");
-  assert.equal(ev.rule, "slice-task-rule", "dispatch-match should carry the matched rule name");
-  assert.equal((ev.data as any).unitType, "execute-task");
-  assert.equal((ev.data as any).unitId, "M001/S01/T01");
-});
-
-test("runDispatch emits dispatch-stop when dispatch returns stop action", async () => {
-  const capture = createEventCapture();
-  const deps = makeMockDeps(capture, {
-    resolveDispatch: async () => ({
-      action: "stop" as const,
-      reason: "no eligible units",
-      level: "info" as const,
-      matchedRule: "<no-match>",
-    }),
-  });
-  const ic = makeIC(deps);
-  const preData: PreDispatchData = {
-    state: { phase: "executing", activeMilestone: { id: "M001" }, registry: [{ id: "M001", status: "active" }], blockers: [] } as any,
-    mid: "M001",
-    midTitle: "Test",
-  };
-  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
-
-  const result = await runDispatch(ic, preData, loopState);
-  assert.equal(result.action, "break");
-
-  const stopEvents = capture.events.filter(e => e.eventType === "dispatch-stop");
-  assert.equal(stopEvents.length, 1);
-  assert.equal(stopEvents[0].rule, "<no-match>");
-  assert.equal((stopEvents[0].data as any).reason, "no eligible units");
-  assert.equal(stopEvents[0].flowId, ic.flowId);
-});
-
-test("runDispatch checks prior-slice completion against the project root in worktree mode", async (t) => {
-  const capture = createEventCapture();
-  const guardCalls: Array<{ fn: string; args: unknown[] }> = [];
-  const projectRoot = makeTestBase("gsd-wt-prior-slice-");
-  const milestoneId = "M029-xoklo9";
-  const worktreeRoot = join(projectRoot, ".gsd", "worktrees", milestoneId);
-  execFileSync("git", ["worktree", "add", "-b", `auto/${milestoneId}`, worktreeRoot], { cwd: projectRoot, stdio: "ignore" });
-  t.after(() => rmSync(projectRoot, { recursive: true, force: true }));
-
-  const deps = makeMockDeps(capture, {
-    getIsolationMode: () => "worktree",
-    autoWorktreeBranch: (mid: string) => `auto/${mid}`,
-    getMainBranch: (basePath: string) => {
-      guardCalls.push({ fn: "getMainBranch", args: [basePath] });
-      return "main";
-    },
-    getPriorSliceCompletionBlocker: (
-      basePath: string,
-      mainBranch: string,
-      unitType: string,
-      unitId: string,
-    ) => {
-      guardCalls.push({
-        fn: "getPriorSliceCompletionBlocker",
-        args: [basePath, mainBranch, unitType, unitId],
-      });
-      return null;
-    },
-  });
-  const ic = makeIC(deps, {
-    s: {
-      ...makeSession(),
-      basePath: worktreeRoot,
-      originalBasePath: projectRoot,
-      canonicalProjectRoot: projectRoot,
-      currentMilestoneId: milestoneId,
-    } as any,
-  });
-  const preData: PreDispatchData = {
-    state: {
-      phase: "executing",
-      activeMilestone: { id: milestoneId, title: "Test", status: "active" },
-      activeSlice: { id: "S01", title: "Slice 1" },
-      registry: [{ id: milestoneId, status: "active" }],
-      blockers: [],
-    } as any,
-    mid: milestoneId,
-    midTitle: "Test Milestone",
-  };
-
-  const result = await runDispatch(ic, preData, {
-    consecutiveFinalizeTimeouts: 0,
-  });
-
-  assert.equal(result.action, "next", "dispatch must proceed under worktree isolation");
-  assert.deepEqual(guardCalls, [
-    { fn: "getMainBranch", args: [projectRoot] },
-    {
-      fn: "getPriorSliceCompletionBlocker",
-      args: [projectRoot, "main", "execute-task", "M001/S01/T01"],
-    },
-  ]);
-});
 
 test("runUnitPhase emits unit-start and unit-end with causedBy reference", async () => {
   const capture = createEventCapture();
@@ -480,8 +348,6 @@ test("runUnitPhase retries complete-slice tool errors with their failure context
     ic.s.pendingVerificationRetry?.failureContext,
     `gsd_slice_complete failed without writing the slice completion artifacts:\n\n${toolError}`,
   );
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitType, "complete-slice");
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitId, "M001/S01");
 
   const endEvents = capture.events.filter(e => e.eventType === "unit-end");
   assert.equal(endEvents.length, 1);
@@ -570,8 +436,6 @@ test("runUnitPhase fails a gate-evaluate unit whose scope has gates without pers
     failureContext.includes("gsd_save_gate_result"),
     "corrective message must instruct persisting via gsd_save_gate_result",
   );
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitType, "gate-evaluate");
-  assert.equal(ic.s.pendingVerificationRetryDispatch?.unitId, "M001/S01/gates+Q3,Q4");
 
   const endEvents = capture.events.filter(e => e.eventType === "unit-end");
   assert.equal(endEvents.length, 1);
@@ -890,6 +754,184 @@ test("runUnitPhase retry dispatch receives the missing-gate corrective context a
   try { closeDatabase(); } catch { /* already closed by t.after ordering */ }
 });
 
+test("runUnitPhase gives a restarted planner the retry context stored on its dispatch row", async (t) => {
+  const base = await setupGateEvaluateFixture(t, "gsd-stored-planner-retry-", { q3: "absent", q4: "absent" });
+  // The planner run that the pre-execution check refused, before the kill.
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claim = recordDispatchClaim({
+    traceId: "trace",
+    workerId,
+    milestoneLeaseToken: lease.token,
+    milestoneId: "M001",
+    sliceId: "S01",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+  });
+  if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+  storeUnitRetry("plan-slice", {
+    unitId: "M001/S01",
+    failureContext: "Task T01 reads missing-input.ts, which no task creates.",
+    attempt: 1,
+  });
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+  const sentPrompts: string[] = [];
+  // The restarted process: a session with no retry context in memory.
+  const ic = makeIC(makeMockDeps(capture), {
+    pi: {
+      sendMessage: (msg: { content?: unknown }) => {
+        sentPrompts.push(String(msg?.content ?? ""));
+      },
+      setModel: async () => true,
+      getThinkingLevel: () => "off",
+      setThinkingLevel: () => {},
+    } as any,
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+    prompt: "plan the slice",
+    finalPrompt: "plan the slice",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "executing",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+
+  const run = runUnitPhase(ic, iterData, { consecutiveFinalizeTimeouts: 0 });
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+  await run;
+
+  assert.equal(sentPrompts.length, 1, "the planner is dispatched once");
+  assert.ok(
+    sentPrompts[0].includes("VERIFICATION FAILED — AUTO-FIX ATTEMPT 1"),
+    "the planner prompt must carry the stored attempt number",
+  );
+  assert.ok(
+    sentPrompts[0].includes("missing-input.ts"),
+    "the planner prompt must carry the stored findings",
+  );
+  assert.ok(sentPrompts[0].includes("plan the slice"), "the planner prompt must keep the unit prompt");
+});
+
+test("runUnitPhase gives a re-planned unit a prompt with no failure context from before its retries ran out", async (t) => {
+  const base = await setupGateEvaluateFixture(t, "gsd-exhausted-retry-prompt-", { q3: "absent", q4: "absent" });
+  const { postUnitPreVerification, MAX_ARTIFACT_VERIFICATION_RETRIES } = await import("../auto-post-unit.ts");
+  const { releaseExhaustedUnits } = await import("../db/unit-dispatch-budgets.ts");
+  const { AutoSession } = await import("../auto/session.ts");
+  const workerId = registerAutoWorker({ projectRootRealpath: base });
+  const lease = claimMilestoneLease(workerId, "M001");
+  if (!lease.ok) throw new Error("expected test lease");
+  const claimDispatch = (): void => {
+    const claim = recordDispatchClaim({
+      traceId: "trace",
+      workerId,
+      milestoneLeaseToken: lease.token,
+      milestoneId: "M001",
+      sliceId: "S01",
+      unitType: "complete-slice",
+      unitId: "M001/S01",
+    });
+    if (!claim.ok) throw new Error(`expected dispatch claim: ${claim.error}`);
+    markCanceled(claim.dispatchId, "test: the unit runs again");
+  };
+
+  // Each run of complete-slice ends with no SUMMARY, until the retries run out.
+  let paused = false;
+  for (let run = 0; run <= MAX_ARTIFACT_VERIFICATION_RETRIES; run++) {
+    claimDispatch();
+    const closing = new AutoSession();
+    closing.active = true;
+    closing.basePath = base;
+    closing.currentUnit = { type: "complete-slice", id: "M001/S01", startedAt: Date.now() };
+    await postUnitPreVerification({
+      s: closing,
+      ctx: { ui: { notify: () => {} } } as any,
+      pi: {} as any,
+      buildSnapshotOpts: () => ({}) as any,
+      lockBase: () => base,
+      stopAuto: async () => {},
+      pauseAuto: async () => { paused = true; },
+      updateProgressWidget: () => {},
+    }, { skipSettleDelay: true, skipWorktreeSync: true });
+  }
+  assert.equal(paused, true, "the unit used all its retries");
+
+  // A person re-plans the slice, and auto-mode dispatches the unit again.
+  releaseExhaustedUnits("M001/S01");
+  claimDispatch();
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+  const sentPrompts: string[] = [];
+  const ic = makeIC(makeMockDeps(capture), {
+    pi: {
+      sendMessage: (msg: { content?: unknown }) => {
+        sentPrompts.push(String(msg?.content ?? ""));
+      },
+      setModel: async () => true,
+      getThinkingLevel: () => "off",
+      setThinkingLevel: () => {},
+    } as any,
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "complete-slice",
+    unitId: "M001/S01",
+    prompt: "complete the slice",
+    finalPrompt: "complete the slice",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "summarizing",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      activeSlice: { id: "S01", title: "Slice 1" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+
+  const run = runUnitPhase(ic, iterData, { consecutiveFinalizeTimeouts: 0 });
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+  await run;
+
+  assert.equal(sentPrompts.length, 1, "the unit is dispatched once");
+  assert.ok(
+    !sentPrompts[0].includes("AUTO-FIX ATTEMPT"),
+    `the prompt must not carry the attempt number from before the re-plan, got: ${sentPrompts[0].slice(0, 200)}`,
+  );
+  assert.ok(sentPrompts[0].includes("complete the slice"), "the prompt must keep the unit prompt");
+});
+
 test("runUnitPhase increments unitDispatchCount for repeated artifact-missing retries", async () => {
   const capture = createEventCapture();
   const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
@@ -923,6 +965,70 @@ test("runUnitPhase increments unitDispatchCount for repeated artifact-missing re
   resolveAgentEnd({ messages: [{ role: "assistant" }] });
   await secondRun;
   assert.equal(ic.s.unitDispatchCount.get("execute-task/M001/S01/T01"), 2);
+});
+
+test("runUnitPhase completes a rewrite-docs unit before the host resolves its override", async (t) => {
+  const { registerOverride } = await import("../overrides.ts");
+  const base = makeTestBase("gsd-rewrite-docs-complete-");
+  t.after(() => {
+    try { closeDatabase(); } catch { /* noop */ }
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active", depends_on: [] });
+  // Still active at unit end: the host resolves it later, in postUnitPreVerification.
+  registerOverride(base, "Use Postgres instead of SQLite", "M001/none/none");
+
+  const capture = createEventCapture();
+  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
+  _resetPendingResolve();
+
+  const outcomes: boolean[] = [];
+  const deps = makeMockDeps(capture, {
+    selectAndApplyModel: async () => ({ routing: { tier: "standard", modelDowngraded: false }, appliedModel: null }),
+    recordOutcome: (_unitType, _tier, success) => { outcomes.push(success); },
+  });
+  const ic = makeIC(deps, {
+    s: {
+      ...makeSession(),
+      basePath: base,
+      originalBasePath: base,
+      canonicalProjectRoot: base,
+    } as any,
+  });
+  const iterData: IterationData = {
+    unitType: "rewrite-docs",
+    unitId: "M001",
+    prompt: "apply the override",
+    finalPrompt: "apply the override",
+    pauseAfterUatDispatch: false,
+    state: {
+      phase: "executing",
+      activeMilestone: { id: "M001", title: "Test", status: "active" },
+      registry: [],
+      blockers: [],
+    } as any,
+    mid: "M001",
+    midTitle: "Test",
+    isRetry: false,
+    previousTier: undefined,
+  };
+  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
+
+  const unitPromise = runUnitPhase(ic, iterData, loopState);
+  await new Promise(r => setTimeout(r, 50));
+  resolveAgentEnd({ messages: [{ role: "assistant" }] });
+
+  const result = await unitPromise;
+  assert.equal(result.action, "next");
+
+  const endEvents = capture.events.filter(e => e.eventType === "unit-end");
+  assert.equal(endEvents.length, 1);
+  assert.equal((endEvents[0].data as any).status, "completed");
+  assert.equal((endEvents[0].data as any).artifactVerified, true);
+  assert.equal(ic.s.unitDispatchCount.has("rewrite-docs/M001"), false, "a later steer on the same unit id is not a retry");
+  assert.deepEqual(outcomes, [true], "the unit is not recorded as a routing failure");
 });
 
 test("runUnitPhase pre-dispatch model validation failures do not emit unit-start or dispatch runtime state", async (t) => {
@@ -966,357 +1072,6 @@ test("runUnitPhase pre-dispatch model validation failures do not emit unit-start
     null,
     "pre-dispatch validation failures must not persist a dispatched runtime record",
   );
-});
-
-test("all events from a mock iteration have monotonically increasing seq and same flowId", async () => {
-  const capture = createEventCapture();
-  const { resolveAgentEnd, _resetPendingResolve } = await import("../auto/resolve.js");
-  _resetPendingResolve();
-
-  const deps = makeMockDeps(capture, {
-    resolveDispatch: async () => ({
-      action: "dispatch" as const,
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "do the thing",
-      matchedRule: "my-rule",
-    }),
-  });
-  const ic = makeIC(deps);
-
-  // Phase 1: Dispatch
-  const preData: PreDispatchData = {
-    state: { phase: "executing", activeMilestone: { id: "M001", title: "T", status: "active" }, activeSlice: { id: "S01" }, activeTask: { id: "T01" }, registry: [{ id: "M001", status: "active" }], blockers: [] } as any,
-    mid: "M001",
-    midTitle: "Test",
-  };
-  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
-  const dispatchResult = await runDispatch(ic, preData, loopState);
-  assert.equal(dispatchResult.action, "next");
-
-  // Phase 2: Unit execution
-  const iterData = (dispatchResult as { action: "next"; data: IterationData }).data;
-  const unitPromise = runUnitPhase(ic, iterData, loopState);
-  await new Promise(r => setTimeout(r, 50));
-  resolveAgentEnd({ messages: [{ role: "assistant" }] });
-  await unitPromise;
-
-  // Verify all events share the same flowId
-  assert.ok(capture.events.length >= 3, `expected at least 3 events (dispatch-match, unit-start, unit-end), got ${capture.events.length}`);
-  const flowId = ic.flowId;
-  for (const ev of capture.events) {
-    assert.equal(ev.flowId, flowId, `all events must share flowId=${flowId}, found event ${ev.eventType} with flowId=${ev.flowId}`);
-  }
-
-  // Verify monotonically increasing seq numbers
-  for (let i = 1; i < capture.events.length; i++) {
-    assert.ok(
-      capture.events[i].seq > capture.events[i - 1].seq,
-      `seq must be monotonically increasing: event[${i - 1}].seq=${capture.events[i - 1].seq} (${capture.events[i - 1].eventType}) should be less than event[${i}].seq=${capture.events[i].seq} (${capture.events[i].eventType})`,
-    );
-  }
-});
-
-test("dispatch-match events include matchedRule field matching the rule name", async () => {
-  const capture = createEventCapture();
-  const RULE_NAME = "priority-execution-rule";
-  const deps = makeMockDeps(capture, {
-    resolveDispatch: async () => ({
-      action: "dispatch" as const,
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "test",
-      matchedRule: RULE_NAME,
-    }),
-  });
-  const ic = makeIC(deps);
-  const preData: PreDispatchData = {
-    state: { phase: "executing", activeMilestone: { id: "M001", title: "T", status: "active" }, activeSlice: { id: "S01" }, activeTask: { id: "T01" }, registry: [{ id: "M001", status: "active" }], blockers: [] } as any,
-    mid: "M001",
-    midTitle: "Test",
-  };
-
-  await runDispatch(ic, preData, { consecutiveFinalizeTimeouts: 0 });
-
-  const matchEvents = capture.events.filter(e => e.eventType === "dispatch-match");
-  assert.equal(matchEvents.length, 1);
-  assert.equal(matchEvents[0].rule, RULE_NAME, "dispatch-match event.rule must equal the matchedRule from dispatch result");
-});
-
-test("pre-dispatch-hook event is emitted when hooks fire", async () => {
-  const capture = createEventCapture();
-  const deps = makeMockDeps(capture, {
-    resolveDispatch: async () => ({
-      action: "dispatch" as const,
-      unitType: "execute-task",
-      unitId: "M001/S01/T01",
-      prompt: "test",
-      matchedRule: "some-rule",
-    }),
-    runPreDispatchHooks: () => ({
-      firedHooks: ["observability-check", "lint-gate"],
-      action: "proceed",
-    }),
-  });
-  const ic = makeIC(deps);
-  const preData: PreDispatchData = {
-    state: { phase: "executing", activeMilestone: { id: "M001", title: "T", status: "active" }, activeSlice: { id: "S01" }, activeTask: { id: "T01" }, registry: [{ id: "M001", status: "active" }], blockers: [] } as any,
-    mid: "M001",
-    midTitle: "Test",
-  };
-
-  await runDispatch(ic, preData, { consecutiveFinalizeTimeouts: 0 });
-
-  const hookEvents = capture.events.filter(e => e.eventType === "pre-dispatch-hook");
-  assert.equal(hookEvents.length, 1, "should emit one pre-dispatch-hook event");
-  assert.deepEqual((hookEvents[0].data as any).firedHooks, ["observability-check", "lint-gate"]);
-  assert.equal((hookEvents[0].data as any).action, "proceed");
-  assert.equal(hookEvents[0].flowId, ic.flowId);
-});
-
-test("terminal event is emitted on milestone-complete", async () => {
-  const capture = createEventCapture();
-  const deps = makeMockDeps(capture, {
-    deriveState: async () => ({
-      phase: "complete",
-      activeMilestone: { id: "M001", title: "Test", status: "complete" },
-      activeSlice: null,
-      activeTask: null,
-      registry: [{ id: "M001", status: "complete" }],
-      blockers: [],
-    }) as any,
-  });
-  const ic = makeIC(deps);
-  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
-
-  const result = await runPreDispatch(ic, loopState);
-  assert.equal(result.action, "break");
-
-  const terminalEvents = capture.events.filter(e => e.eventType === "terminal");
-  assert.equal(terminalEvents.length, 1, "should emit one terminal event");
-  assert.equal((terminalEvents[0].data as any).reason, "milestone-complete");
-  assert.equal(terminalEvents[0].flowId, ic.flowId);
-});
-
-test("terminal event is emitted on blocked state", async () => {
-  const capture = createEventCapture();
-  const deps = makeMockDeps(capture, {
-    deriveState: async () => ({
-      phase: "blocked",
-      activeMilestone: { id: "M001", title: "Test", status: "active" },
-      activeSlice: null,
-      activeTask: null,
-      registry: [{ id: "M001", status: "active" }],
-      blockers: ["Missing API key"],
-    }) as any,
-  });
-  const ic = makeIC(deps);
-  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
-
-  const result = await runPreDispatch(ic, loopState);
-  assert.equal(result.action, "break");
-
-  const terminalEvents = capture.events.filter(e => e.eventType === "terminal");
-  assert.equal(terminalEvents.length, 1);
-  assert.equal((terminalEvents[0].data as any).reason, "blocked");
-  assert.deepEqual((terminalEvents[0].data as any).blockers, ["Missing API key"]);
-});
-
-test("#4671: plan-v2 missing CONTEXT.md reaches dispatch recovery instead of pausing", async () => {
-  const basePath = makeTestBase("gsd-4671-predispatch-");
-  mkdirSync(join(basePath, ".gsd", "milestones", "M001", "slices", "S01", "tasks"), { recursive: true });
-  openDatabase(join(basePath, ".gsd", "gsd.db"));
-  try {
-    insertMilestone({ id: "M001", title: "Test", status: "active" });
-    insertSlice({
-      id: "S01",
-      milestoneId: "M001",
-      title: "Slice 1",
-      status: "in_progress",
-      sequence: 1,
-    });
-    insertTask({
-      id: "T01",
-      milestoneId: "M001",
-      sliceId: "S01",
-      title: "Task 1",
-      status: "pending",
-      keyFiles: ["src/task.ts"],
-      sequence: 1,
-    });
-
-    let pauseCalls = 0;
-    const capture = createEventCapture();
-    const deps = makeMockDeps(capture, {
-      pauseAuto: async () => { pauseCalls++; },
-      deriveState: async () => ({
-        phase: "executing",
-        activeMilestone: { id: "M001", title: "Test", status: "active" },
-        activeSlice: { id: "S01", title: "Slice 1" },
-        activeTask: { id: "T01", title: "Task 1" },
-        registry: [{ id: "M001", status: "active" }],
-        blockers: [],
-        recentDecisions: [],
-        nextAction: "dispatch",
-      }) as any,
-    });
-    const ic = makeIC(deps, {
-      prefs: { uok: { plan_v2: { enabled: true } } } as any,
-    });
-    ic.s.basePath = basePath;
-
-    const result = await runPreDispatch(ic, {
-      consecutiveFinalizeTimeouts: 0,
-    });
-
-    assert.equal(result.action, "next");
-    assert.equal(pauseCalls, 0, "missing CONTEXT.md should be handled by dispatch recovery, not plan gate pause");
-  } finally {
-    closeDatabase();
-    rmSync(basePath, { recursive: true, force: true });
-  }
-});
-
-test("plan-v2 empty graph rederives state before pausing", async () => {
-  const basePath = makeTestBase("gsd-plan-v2-empty-graph-");
-  mkdirSync(join(basePath, ".gsd", "milestones", "M001"), { recursive: true });
-  writeFileSync(
-    join(basePath, ".gsd", "milestones", "M001", "M001-CONTEXT.md"),
-    "# M001: Test\n\nFinalized context.\n",
-  );
-  openDatabase(join(basePath, ".gsd", "gsd.db"));
-  try {
-    let deriveCalls = 0;
-    let invalidateCalls = 0;
-    let pauseCalls = 0;
-    const capture = createEventCapture();
-    const deps = makeMockDeps(capture, {
-      pauseAuto: async () => { pauseCalls++; },
-      invalidateAllCaches: () => { invalidateCalls++; },
-      deriveState: async () => {
-        deriveCalls++;
-        if (deriveCalls === 1) {
-          return {
-            phase: "validating-milestone",
-            activeMilestone: { id: "M001", title: "Test", status: "active" },
-            activeSlice: null,
-            activeTask: null,
-            registry: [{ id: "M001", status: "active" }],
-            blockers: [],
-            recentDecisions: [],
-            nextAction: "Validate milestone M001.",
-          } as any;
-        }
-        return {
-          phase: "pre-planning",
-          activeMilestone: { id: "M001", title: "Test", status: "active" },
-          activeSlice: null,
-          activeTask: null,
-          registry: [{ id: "M001", status: "active" }],
-          blockers: [],
-          recentDecisions: [],
-          nextAction: "Plan milestone M001.",
-        } as any;
-      },
-    });
-    const ic = makeIC(deps, {
-      prefs: { uok: { plan_v2: { enabled: true } } } as any,
-    });
-    ic.s.basePath = basePath;
-
-    const result = await runPreDispatch(ic, {
-      consecutiveFinalizeTimeouts: 0,
-    });
-
-    assert.equal(result.action, "next");
-    assert.equal(deriveCalls, 2, "empty plan graph should trigger one state rederive");
-    assert.ok(invalidateCalls >= 1, "empty plan graph recovery should clear caches before rederive");
-    assert.equal(pauseCalls, 0, "recoverable empty graph should not pause auto-mode");
-  } finally {
-    closeDatabase();
-    rmSync(basePath, { recursive: true, force: true });
-  }
-});
-
-test("plan-v2 empty graph pauses after one failed rederive", async () => {
-  const basePath = makeTestBase("gsd-plan-v2-empty-graph-pause-");
-  mkdirSync(join(basePath, ".gsd", "milestones", "M001"), { recursive: true });
-  writeFileSync(
-    join(basePath, ".gsd", "milestones", "M001", "M001-CONTEXT.md"),
-    "# M001: Test\n\nFinalized context.\n",
-  );
-  openDatabase(join(basePath, ".gsd", "gsd.db"));
-  try {
-    let deriveCalls = 0;
-    let invalidateCalls = 0;
-    let pauseCalls = 0;
-    const capture = createEventCapture();
-    const deps = makeMockDeps(capture, {
-      pauseAuto: async () => { pauseCalls++; },
-      invalidateAllCaches: () => { invalidateCalls++; },
-      deriveState: async () => {
-        deriveCalls++;
-        return {
-          phase: "validating-milestone",
-          activeMilestone: { id: "M001", title: "Test", status: "active" },
-          activeSlice: null,
-          activeTask: null,
-          registry: [{ id: "M001", status: "active" }],
-          blockers: [],
-          recentDecisions: [],
-          nextAction: "Validate milestone M001.",
-        } as any;
-      },
-    });
-    const ic = makeIC(deps, {
-      prefs: { uok: { plan_v2: { enabled: true } } } as any,
-    });
-    ic.s.basePath = basePath;
-
-    const result = await runPreDispatch(ic, {
-      consecutiveFinalizeTimeouts: 0,
-    });
-
-    assert.equal(result.action, "break");
-    assert.equal(result.reason, "plan-v2-gate-failed");
-    assert.equal(deriveCalls, 2, "empty plan graph should only rederive once");
-    assert.ok(invalidateCalls >= 1, "empty plan graph recovery should clear caches before rederive");
-    assert.equal(pauseCalls, 1, "persistent empty graph should pause auto-mode");
-  } finally {
-    closeDatabase();
-    rmSync(basePath, { recursive: true, force: true });
-  }
-});
-
-test("milestone-transition event is emitted when milestone changes", async () => {
-  const capture = createEventCapture();
-  const deps = makeMockDeps(capture, {
-    deriveState: async () => ({
-      phase: "executing",
-      activeMilestone: { id: "M002", title: "Next Milestone", status: "active" },
-      activeSlice: { id: "S01" },
-      activeTask: { id: "T01" },
-      registry: [
-        { id: "M001", status: "complete" },
-        { id: "M002", status: "active" },
-      ],
-      blockers: [],
-    }) as any,
-  });
-  const ic = makeIC(deps, {
-    prefs: { uok: { plan_v2: { enabled: false } } } as any,
-  });
-  // Session says current milestone is M001, but state will return M002
-  ic.s.currentMilestoneId = "M001";
-  const loopState: LoopState = { consecutiveFinalizeTimeouts: 0 };
-
-  await runPreDispatch(ic, loopState);
-
-  const transitionEvents = capture.events.filter(e => e.eventType === "milestone-transition");
-  assert.equal(transitionEvents.length, 1, "should emit one milestone-transition event");
-  assert.equal((transitionEvents[0].data as any).from, "M001");
-  assert.equal((transitionEvents[0].data as any).to, "M002");
-  assert.equal(transitionEvents[0].flowId, ic.flowId);
 });
 
 test("unit-end event contains errorContext when unit is cancelled with structured error", async () => {
@@ -1418,10 +1173,13 @@ test("session-failed cancellations close out and emit unit-end before hard stop"
   assert.equal((endEvents[0].data as any).errorContext.category, "session-failed");
 });
 
-test("runFinalize pauses and emits unit-end when pre-verification times out", async () => {
+test("runFinalize pauses and emits unit-end when pre-verification times out", async (t) => {
   const capture = createEventCapture();
   let pauseCalls = 0;
   const basePath = makeTestBase("gsd-finalize-timeout-");
+  // The runtime record is a database row.
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
 
   const deps = makeMockDeps(capture, {
     pauseAuto: async () => { pauseCalls++; },
@@ -1472,6 +1230,11 @@ test("runFinalize pauses and emits unit-end when pre-verification times out", as
   assert.ok(runtime, "timed-out finalize should persist a runtime record");
   assert.equal(runtime?.phase, "finalize-timeout");
   assert.equal(runtime?.lastProgressKind, "finalize-pre-timeout");
+  assert.deepEqual(
+    runtime?.unitEnd,
+    { status: "timed-out-finalize", artifactVerified: false },
+    "the unit-end outcome is stored on the database row, not only in the journal",
+  );
 
   const endEvents = capture.events.filter((e) => e.eventType === "unit-end");
   assert.equal(endEvents.length, 1, "timed-out finalize should emit terminal unit-end");

@@ -513,7 +513,7 @@ export function managedStructuredProjectionPaths(targetRoot: string): string[] {
     }
   };
   visit(join(root, "milestones"));
-  for (const name of ["DECISIONS.md", "PROJECT.md", "QUEUE.md", "REQUIREMENTS.md", "ROADMAP.md", "STATE.md"]) {
+  for (const name of ["DECISIONS.md", "PROJECT.md", "QUEUE.md", "REQUIREMENTS.md", "ROADMAP.md"]) {
     const path = join(root, name);
     if (!existsSync(path)) continue;
     const stat = lstatSync(path);

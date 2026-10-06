@@ -1,6 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Atomic, revision-checked Domain Operation writer boundary.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 
 import {
@@ -17,12 +18,14 @@ import {
 } from "../legacy-import-preview.js";
 import type { LegacyImportForwardRepairPlan } from "../legacy-import-forward-repair-plan.js";
 import type { LegacyImportValue } from "../legacy-import-contract.js";
+import { describeLifecycleCoverageRefusal } from "../db-lifecycle-coverage-schema.js";
 import { isSqliteBusyError } from "../sqlite-errors.js";
 import {
   assertDatabaseReplacementReceiptIntent,
   getDb,
   immediateTransaction,
   isInTransaction,
+  noteAuthorityEpochReceipt,
   withDatabaseReplacementWriteBypass,
   type DatabaseReplacementReceiptCapability,
 } from "./engine.js";
@@ -941,6 +944,42 @@ function requireMatchingImportForwardRepair(
   }
 }
 
+// Revision fencing: each transport session keeps, per project, the revision
+// that its last read tool returned. The next operation of that session must
+// still see that revision, or a later one reached only through
+// NON_INTERFERING_OPERATION_TYPES. A session with no read uses the current
+// revision.
+const sessionReadRevisions = new Map<string, number>();
+
+// Operation types that change no state a session read: a session whose read
+// is older than only these operations is not stale.
+const NON_INTERFERING_OPERATION_TYPES: readonly string[] = [
+  "conversation.question.ask",
+  "conversation.question.answer",
+];
+const toolSession = new AsyncLocalStorage<string>();
+
+/** Run one tool call of a transport session. */
+export function runInToolSession<T>(sessionKey: string, run: () => T): T {
+  return toolSession.run(sessionKey, run);
+}
+
+function sessionReadKey(projectId: string): string | undefined {
+  const sessionKey = toolSession.getStore();
+  return sessionKey === undefined ? undefined : `${sessionKey}\n${projectId}`;
+}
+
+/**
+ * Record the project revision that a read tool returned to the session of the
+ * current tool call. Does nothing outside a tool session.
+ */
+export function noteSessionRead(revision: number): void {
+  if (toolSession.getStore() === undefined) return;
+  const authority = getDb().prepare("SELECT project_id FROM project_authority WHERE singleton = 1").get();
+  const key = authority ? sessionReadKey(String(authority["project_id"])) : undefined;
+  if (key !== undefined) sessionReadRevisions.set(key, revision);
+}
+
 function staleAuthority(request: DomainOperationRequestIdentity, authority: AuthorityRow): never {
   if (authority.revision !== request.expectedRevision) {
     throw new GSDError(
@@ -1009,6 +1048,28 @@ function executeDomainOperationCore(
       if (importForwardRepair) requireMatchingImportForwardRepair(existing, importForwardRepair);
       preCommit?.();
       return loadReceipt(existing, "replayed");
+    }
+
+    const readKey = sessionReadKey(authority.project_id);
+    const readRevision = readKey === undefined ? undefined : sessionReadRevisions.get(readKey);
+    if (
+      readRevision !== undefined && readRevision !== authority.revision &&
+      (readRevision > authority.revision || db.prepare(`
+        SELECT 1 FROM workflow_operations
+        WHERE project_id = :project_id AND resulting_revision > :read_revision
+          AND operation_type NOT IN (SELECT value FROM json_each(:non_interfering))
+        LIMIT 1
+      `).get({
+        ":project_id": authority.project_id,
+        ":read_revision": readRevision,
+        ":non_interfering": JSON.stringify(NON_INTERFERING_OPERATION_TYPES),
+      }) !== undefined)
+    ) {
+      throw new GSDError(
+        GSD_REVISION_CONFLICT,
+        `stale view: the project changed after this session last read it (read at revision ${readRevision}, ` +
+        `now ${authority.revision}). Read the project status again, then retry.`,
+      );
     }
 
     if (
@@ -1167,23 +1228,28 @@ function executeDomainOperationCore(
     if (importForwardRepair) requireMatchingImportForwardRepair(storedOperation, importForwardRepair);
     hitFault("before-cas", request.operationType);
 
-    const update = db.prepare(`
-      UPDATE project_authority
-      SET revision = :resulting_revision,
-          authority_epoch = :resulting_authority_epoch,
-          updated_at = :updated_at
-      WHERE singleton = 1
-        AND project_id = :project_id
-        AND revision = :expected_revision
-        AND authority_epoch = :expected_authority_epoch
-    `).run({
-      ":resulting_revision": resultingRevision,
-      ":resulting_authority_epoch": resultingAuthorityEpoch,
-      ":updated_at": now,
-      ":project_id": authority.project_id,
-      ":expected_revision": request.expectedRevision,
-      ":expected_authority_epoch": request.expectedAuthorityEpoch,
-    });
+    let update: unknown;
+    try {
+      update = db.prepare(`
+        UPDATE project_authority
+        SET revision = :resulting_revision,
+            authority_epoch = :resulting_authority_epoch,
+            updated_at = :updated_at
+        WHERE singleton = 1
+          AND project_id = :project_id
+          AND revision = :expected_revision
+          AND authority_epoch = :expected_authority_epoch
+      `).run({
+        ":resulting_revision": resultingRevision,
+        ":resulting_authority_epoch": resultingAuthorityEpoch,
+        ":updated_at": now,
+        ":project_id": authority.project_id,
+        ":expected_revision": request.expectedRevision,
+        ":expected_authority_epoch": request.expectedAuthorityEpoch,
+      });
+    } catch (error) {
+      throw describeLifecycleCoverageRefusal(db, error);
+    }
     const changes =
       typeof (update as { changes?: unknown }).changes === "number"
         ? (update as { changes: number }).changes
@@ -1195,6 +1261,14 @@ function executeDomainOperationCore(
     preCommit?.();
     return loadReceipt(storedOperation, "committed");
   });
+
+  noteAuthorityEpochReceipt(result.projectId, result.resultingAuthorityEpoch);
+
+  // The session's read is used up by its own committed write.
+  if (result.status === "committed") {
+    const readKey = sessionReadKey(result.projectId);
+    if (readKey !== undefined) sessionReadRevisions.delete(readKey);
+  }
 
   hitFault("after-commit", request.operationType);
   return result;
@@ -1271,7 +1345,7 @@ export function executeImportDomainOperation(
 /**
  * Private epoch-advancing seam for the strict project-authority cutover
  * aggregate. Public callers must use cutoverProjectAuthority, which validates
- * current Application evidence, Consent, coordination, and the durable receipt.
+ * current lifecycle coverage evidence, Consent, coordination, and the durable receipt.
  */
 export function _executeAuthorityCutoverDomainOperation(
   request: AuthorityCutoverDomainOperationRequest,

@@ -33,6 +33,7 @@ import {
   type ReassessRoadmapResult,
 } from "../tools/reassess-roadmap.ts";
 import { workflowEventLogPath } from "../workflow-event-ledger.ts";
+import { assertWorkerRendersStaleProjection } from "./projection-render-failure-gate.ts";
 
 const tempDirs = new Set<string>();
 
@@ -255,6 +256,21 @@ test("reassessment preserves its response and adopts added slices with progressi
   assert.equal(count("workflow_operations"), 2, "seed plus reassessment operations");
   assert.equal(count("workflow_domain_events"), 2);
   assert.equal(eventLines(base).filter((line) => line.includes('"cmd":"reassess-roadmap"')).length, 1);
+});
+
+test("reassessment returns the committed receipt with a stale flag when the render fails", async () => {
+  const { base } = fixture();
+  // A directory in the place of the roadmap makes the render fail (EISDIR).
+  const roadmapPath = join(base, ".gsd", "phases", "01-test-milestone", "01-ROADMAP.md");
+  mkdirSync(roadmapPath);
+
+  const result = await reassess(params(), base, invocation("reassess/render-failure"));
+  assert.ok(!("error" in result), "a render failure after commit is not a tool error");
+  assert.equal(result.stale, true);
+  assert.equal(getSlice("M001", "S03")?.title, "Ready follow-up", "the reassessment is committed");
+
+  rmSync(roadmapPath, { recursive: true });
+  await assertWorkerRendersStaleProjection(base, roadmapPath);
 });
 
 test("reassessment corrects milestone and completed-slice evidence metadata without changing completed structure", async () => {

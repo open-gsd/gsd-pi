@@ -5,12 +5,36 @@
 // gsd-pi's own writes from external edits whose exact bytes must be preserved.
 // gsd-core is oblivious to this file and ignores it.
 
+import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, renameSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, isAbsolute, relative, resolve } from "node:path";
-import { atomicWriteSync } from "../atomic-write.js";
+import { atomicWriteAsync, atomicWriteSync } from "../atomic-write.js";
 import { computeProjectionSha } from "../projection-content-hash.js";
+import { logWarning } from "../workflow-logger.js";
 import { isSafeProjectionKey, isValidCompatMarker } from "./compat-marker-validation.js";
 export { computeProjectionSha, normalizeForHash } from "../projection-content-hash.js";
+
+// Files a Projection Worker render wrote or confirmed, keyed by absolute path,
+// with the sha256 of the exact bytes on disk. Scoped to the async render call.
+const renderedProjectionFiles = new AsyncLocalStorage<Map<string, string>>();
+
+/** Note a projection file whose bytes are now on disk, for the render in progress. */
+export function noteRenderedProjectionFile(filePath: string, content: string): void {
+  renderedProjectionFiles.getStore()?.set(
+    resolve(filePath),
+    createHash("sha256").update(content).digest("hex"),
+  );
+}
+
+/** Run one render and return each projection file it wrote or confirmed, with that file's hash. */
+export async function collectRenderedProjectionFiles(
+  render: () => Promise<void>,
+): Promise<Map<string, string>> {
+  const files = new Map<string, string>();
+  await renderedProjectionFiles.run(files, render);
+  return files;
+}
 
 /** Current marker schema version. Bump on breaking format changes + migrate. */
 export const COMPAT_MARKER_SCHEMA = 2;
@@ -187,7 +211,27 @@ export function writeCompatMarker(basePath: string, marker: CompatMarker): void 
   atomicWriteSync(path, JSON.stringify(marker, null, 2));
 }
 
-export function recordCompatProjectionWrite(
+/** True when the file and its marker baseline already hold `content` for `entities`. */
+function projectionFileIsCurrent(
+  basePath: string,
+  filePath: string,
+  content: string,
+  entities: string[],
+): boolean {
+  try {
+    if (!readFileSync(filePath).equals(Buffer.from(content, "utf-8"))) return false;
+    const projectionPath = deriveCompatProjectionKey(filePath, [join(basePath, ".gsd")]);
+    const entry = readCompatMarker(basePath).projections[projectionPath];
+    return entry?.sha === computeProjectionSha(content)
+      && entry.entities.length === entities.length
+      && entities.every((entity, index) => entry.entities[index] === entity);
+  } catch {
+    // A file or marker that cannot be read is not proof: the write repairs it.
+    return false;
+  }
+}
+
+function recordProjectionBaseline(
   basePath: string,
   filePath: string,
   content: string,
@@ -197,14 +241,63 @@ export function recordCompatProjectionWrite(
   // Projection keys are resolved under .gsd; never persist one that escapes
   // that root.
   if (!isSafeProjectionKey(projectionPath)) return;
-  const marker = readCompatMarker(basePath);
-  marker.projections[projectionPath] = {
-    sha: computeProjectionSha(content),
-    entities,
-  };
-  marker.lastWriter = "gsd-pi";
-  marker.lastProjectedAt = new Date().toISOString();
-  writeCompatMarker(basePath, marker);
+  try {
+    const marker = readCompatMarker(basePath);
+    marker.projections[projectionPath] = {
+      sha: computeProjectionSha(content),
+      entities,
+    };
+    marker.lastWriter = "gsd-pi";
+    marker.lastProjectedAt = new Date().toISOString();
+    writeCompatMarker(basePath, marker);
+  } catch (error) {
+    // Marker I/O must never fail a projection write. The file has no baseline
+    // until the next render, which writes it again.
+    logWarning("projection", `compat marker write failed for ${projectionPath}: ${(error as Error).message}`);
+  }
+}
+
+/**
+ * The one write rule of a projection file. Write `content` and record its
+ * bytes as the marker baseline, so a later change of the file is seen as an
+ * external edit. Nothing is written when the file and its baseline already
+ * hold the content, so a rebuild with no database change rewrites no file.
+ * The file counts as a file of the render in progress in both cases.
+ *
+ * STATE.md is not written here: it is overwritten on every render and has no
+ * baseline.
+ *
+ * @returns true when the file was written
+ */
+export function writeProjectionFileSync(
+  basePath: string,
+  filePath: string,
+  content: string,
+  entities: string[],
+): boolean {
+  const current = projectionFileIsCurrent(basePath, filePath, content, entities);
+  if (!current) {
+    atomicWriteSync(filePath, content);
+    recordProjectionBaseline(basePath, filePath, content, entities);
+  }
+  noteRenderedProjectionFile(filePath, content);
+  return !current;
+}
+
+/** Async variant of writeProjectionFileSync, for renders that write many files. */
+export async function writeProjectionFile(
+  basePath: string,
+  filePath: string,
+  content: string,
+  entities: string[],
+): Promise<boolean> {
+  const current = projectionFileIsCurrent(basePath, filePath, content, entities);
+  if (!current) {
+    await atomicWriteAsync(filePath, content);
+    recordProjectionBaseline(basePath, filePath, content, entities);
+  }
+  noteRenderedProjectionFile(filePath, content);
+  return !current;
 }
 
 /**

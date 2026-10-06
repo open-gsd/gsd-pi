@@ -15,8 +15,10 @@ import { normalizeLegacyLifecycleStatus } from "./db/lifecycle-shadow-comparison
 import {
   adoptOrTransitionLifecycle,
   appendKernelCheckpoint,
+  grantCancellationWaiver,
   readDomainOperationFence,
   readLifecycleShadowComparison,
+  revokeActiveWaivers,
   settleAttemptWithResult,
   type CanonicalLifecycleStatus,
   type LifecycleShadowRecord,
@@ -24,12 +26,19 @@ import {
 import {
   appendRecoveryWorkCheckpoint,
   cancelLegacyTaskState,
+  currentDispositionHead,
+  recordRequirementDisposition,
   reopenLegacyTaskState,
 } from "./db/writers/task-recovery.js";
 import { terminalizeTaskExecutionDispatch } from "./db/writers/task-execution.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
 import { ensurePendingSliceQ8 } from "./db/writers/slice-companion-state.js";
 import { deleteVerificationEvidence } from "./gsd-db.js";
+import { recordTaskRequirementDisposition } from "./task-recovery-domain-operation.js";
+import {
+  TASK_SOURCE_COMMIT_EFFECT,
+  readLifecycleCloseoutPlan,
+} from "./db/writers/closeout.js";
 
 export interface TaskLifecycleIdentity {
   milestoneId: string;
@@ -120,6 +129,80 @@ function shadowPayload(shadow: LifecycleShadowRecord): DomainJsonValue {
 
 function checkpointScope(task: TaskLifecycleIdentity): string {
   return `task:${taskEntity(task)}`.toLowerCase();
+}
+
+// The canonical cancellation scope: slice closeout, milestone closeout and
+// milestone reopen all resolve "<M>/<S>/<T> cancellation".
+function taskCancellationWaiverScope(task: TaskLifecycleIdentity): string {
+  return `${taskEntity(task)} cancellation`;
+}
+
+/**
+ * Record why a cancelled Task no longer needs to run (no runtime "skipped"
+ * outcome). cancelTask follows up with the 'waived' requirement disposition
+ * that closeout requires; the schema forbids it in the Waiver's own operation.
+ */
+function grantTaskCancellationWaiver(
+  context: Readonly<DomainOperationContext>,
+  invocation: ExecutionInvocation,
+  lifecycleId: string,
+  task: TaskLifecycleIdentity,
+  rationale: string,
+): string {
+  const actorType = invocation.actorType === "user" ? "user" : "policy";
+  const actorId = invocation.actorId?.trim() || null;
+  if (actorType === "user" && !actorId) {
+    throw new Error("A user-authorized Task cancellation requires actor identity");
+  }
+  const requirementId = `task-cancellation:${taskEntity(task)}`;
+  return grantCancellationWaiver(context, {
+    lifecycleId,
+    scope: taskCancellationWaiverScope(task),
+    rationale,
+    grantedByActorType: actorType,
+    grantedByActorId: actorId,
+    requirement: {
+      id: requirementId,
+      description: `Cancellation of task ${taskEntity(task)} authorized by task.cancel`,
+      source: "task-cancel",
+    },
+  });
+}
+
+function revokeTaskCancellationWaivers(
+  context: Readonly<DomainOperationContext>,
+  lifecycleId: string,
+  task: TaskLifecycleIdentity,
+  reason: string,
+): void {
+  // The schema requires a revoked Waiver's current 'waived' disposition to be
+  // superseded in the same operation.
+  const dispositions = getDb().prepare(`
+    SELECT disposition.requirement_id, disposition.disposition_id
+    FROM workflow_waivers waiver
+    JOIN workflow_requirement_dispositions disposition
+      ON disposition.waiver_id = waiver.waiver_id
+     AND disposition.requirement_id = waiver.requirement_id
+     AND disposition.disposition = 'waived'
+    WHERE waiver.lifecycle_id = :lifecycle_id AND waiver.scope = :scope
+      AND waiver.waiver_status = 'active'
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_requirement_dispositions successor
+        WHERE successor.supersedes_disposition_id = disposition.disposition_id
+      )
+  `).all({
+    ":lifecycle_id": lifecycleId,
+    ":scope": taskCancellationWaiverScope(task),
+  }) as Array<Record<string, unknown>>;
+  for (const disposition of dispositions) {
+    recordRequirementDisposition(context, {
+      requirementId: String(disposition["requirement_id"]),
+      disposition: "unsatisfied",
+      supersedesDispositionId: String(disposition["disposition_id"]),
+      rationale: `Task ${taskEntity(task)} reopened: ${reason}`,
+    });
+  }
+  revokeActiveWaivers(context, lifecycleId, taskCancellationWaiverScope(task));
 }
 
 function mutation(
@@ -325,6 +408,13 @@ function loadReceipt(
  * closing the Kernel head (`route -> closeout -> settled`) so the next claim is
  * a fresh Attempt and no guard advertises a resume the lifecycle can no longer
  * satisfy.
+ *
+ * ADR-050: the `closeout` and `settled` stages of a succeeded Attempt mean a
+ * Closeout Plan settled — voiding such a head is refused while its
+ * source-commit effect has no Settlement Receipt, because silently discarding
+ * a publishable success would hide work. A dead lineage (an interrupted or
+ * failed Attempt — the cancelled-then-reopened Task) has no closeout to lie
+ * about and consumes its head as before.
  */
 function voidStaleRouteHead(
   context: Readonly<DomainOperationContext>,
@@ -341,6 +431,27 @@ function voidStaleRouteHead(
   `).get({ ":project_id": context.projectId, ":lifecycle_id": lifecycleId }) as
     { kernel_checkpoint_id: string; attempt_id: string; next_stage: string } | undefined;
   if (head?.next_stage !== "route") return;
+  const attemptOutcome = getDb().prepare(`
+    SELECT result.outcome
+    FROM workflow_execution_attempts attempt
+    JOIN workflow_attempt_results result
+      ON result.attempt_id = attempt.attempt_id
+     AND result.project_id = attempt.project_id
+     AND result.lifecycle_id = attempt.lifecycle_id
+    WHERE attempt.attempt_id = :attempt_id
+  `).get({ ":attempt_id": head.attempt_id }) as Record<string, unknown> | undefined;
+  if (String(attemptOutcome?.["outcome"] ?? "") === "succeeded") {
+    const plan = readLifecycleCloseoutPlan(context.projectId, lifecycleId);
+    const commitEffect = plan?.effects
+      .find((effect) => effect.effectKind === TASK_SOURCE_COMMIT_EFFECT);
+    if (!commitEffect?.receipt) {
+      throw new Error(
+        "Task reopen cannot void a route head whose Attempt succeeded without the Settlement " +
+        "Receipt of its Closeout Plan source commit; run `/gsd auto` to commit and publish the " +
+        "Task instead of discarding the verified work.",
+      );
+    }
+  }
   const closeout = appendKernelCheckpoint(context, {
     lifecycleId,
     attemptId: head.attempt_id,
@@ -359,12 +470,18 @@ export function reopenTask(input: {
   invocation: ExecutionInvocation;
   task: TaskLifecycleIdentity;
   reason: string;
+  /**
+   * The reason is a diagnosis for the executor: the next execute-task dispatch
+   * shows it until a new Attempt is claimed (see reopen-reason.ts).
+   */
+  injectReason?: boolean;
 }): TaskLifecycleReceipt {
   const reason = requireText(input.reason, "reason");
+  const inject: { injectReason?: true } = input.injectReason === true ? { injectReason: true } : {};
   const operation = executeDomainOperation(operationRequest(
     "task.reopen",
     input.invocation,
-    { task: taskPayload(input.task), reason },
+    { task: taskPayload(input.task), reason, ...inject },
   ), (context) => {
     const state = loadTaskState(input.task);
     requireOpenParents(state, "reopen");
@@ -388,6 +505,7 @@ export function reopenTask(input: {
       adoptedFromStatus: legacyStatus,
     });
     reopenLegacyTaskState(context, input.task);
+    revokeTaskCancellationWaivers(context, lifecycle.lifecycleId, input.task, reason);
     deleteVerificationEvidence(state.milestoneId, state.sliceId, state.taskId);
     ensurePendingSliceQ8(context, input.task);
     const checkpoint = appendRecoveryWorkCheckpoint(context, {
@@ -407,6 +525,7 @@ export function reopenTask(input: {
       lifecycleId: lifecycle.lifecycleId,
       workCheckpointId: checkpoint.checkpointId,
       reason,
+      ...inject,
       shadow: shadowPayload(shadow),
     });
   });
@@ -489,6 +608,13 @@ export function cancelTask(input: {
       });
     }
     cancelLegacyTaskState(context, input.task);
+    const waiverId = grantTaskCancellationWaiver(
+      context,
+      input.invocation,
+      lifecycle.lifecycleId,
+      input.task,
+      reason,
+    );
     const checkpoint = appendRecoveryWorkCheckpoint(context, {
       lifecycleId: lifecycle.lifecycleId,
       scopeKey: checkpointScope(input.task),
@@ -507,6 +633,7 @@ export function cancelTask(input: {
     return mutation("task.cancelled", input.task, {
       lifecycleId: lifecycle.lifecycleId,
       workCheckpointId: checkpoint.checkpointId,
+      waiverId,
       reason,
       interruptedAttemptId: running?.attemptId ?? null,
       resultId: resultId ?? null,
@@ -514,5 +641,37 @@ export function cancelTask(input: {
       shadow: shadowPayload(shadow),
     });
   });
+  recordTaskCancellationDisposition(input.invocation, operation.operationId, reason);
   return loadReceipt(operation, "cancelled", "skipped");
+}
+
+/**
+ * Closeout accepts a cancellation Waiver only with a current 'waived'
+ * disposition. Runs once per Waiver, so a replayed cancel adds nothing.
+ */
+function recordTaskCancellationDisposition(
+  invocation: ExecutionInvocation,
+  cancelOperationId: string,
+  rationale: string,
+): void {
+  const waiver = getDb().prepare(`
+    SELECT waiver.waiver_id, waiver.requirement_id
+    FROM workflow_waivers waiver
+    WHERE waiver.operation_id = :operation_id
+      AND NOT EXISTS (
+        SELECT 1 FROM workflow_requirement_dispositions disposition
+        WHERE disposition.waiver_id = waiver.waiver_id
+      )
+  `).get({ ":operation_id": cancelOperationId }) as Record<string, unknown> | undefined;
+  if (!waiver) return;
+  const requirementId = String(waiver["requirement_id"]);
+  const head = currentDispositionHead(requirementId);
+  recordTaskRequirementDisposition({
+    invocation: { ...invocation, idempotencyKey: `${invocation.idempotencyKey}/disposition` },
+    requirementId,
+    disposition: "waived",
+    waiverId: String(waiver["waiver_id"]),
+    ...(head ? { supersedesDispositionId: head } : {}),
+    rationale,
+  });
 }

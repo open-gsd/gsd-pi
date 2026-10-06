@@ -9,31 +9,28 @@
 // parseDecisionsTable() and parseRequirementsSections() with field fidelity.
 
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
-import { readFileSync, existsSync, statSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import type { Decision, Requirement } from './types.js';
 import { summarizeRequirementsCoverage } from './requirements-backlog.js';
-import { resolveGsdRootFile } from './paths.js';
-import { saveFile } from './files.js';
-import { recordCompatProjectionWrite } from './compat/compat-marker.js';
+import { gsdRoot, resolveGsdRootFile } from './paths.js';
+import { writeProjectionFile } from './compat/compat-marker.js';
 import { GSDError, GSD_STALE_STATE, GSD_IO_ERROR } from './errors.js';
 import { logWarning, logError } from './workflow-logger.js';
 import { invalidateStateCache } from './state.js';
+import { renderStateProjection } from './workflow-projections.js';
 import { clearPathCache } from './paths.js';
 import { clearParseCache } from './files.js';
 import type { MilestoneScope, GsdWorkspace } from './workspace.js';
 import { createWorkspace, scopeMilestone } from './workspace.js';
 import { createMemory } from './memory-store.js';
 import { synthesizeDecisionMemoryContent } from './memory-backfill.js';
-
-async function writeGsdProjection(
-  basePath: string,
-  filePath: string,
-  content: string,
-  entities: string[] = [],
-): Promise<void> {
-  await saveFile(filePath, content);
-  recordCompatProjectionWrite(basePath, filePath, content, entities);
-}
+import { executeRecordDomainOperation } from './record-domain-operation.js';
+import {
+  buildStatementImpactRows,
+  insertDecisionStatementImpacts,
+} from './db/writers/decision-statement-impacts.js';
+import { internalPlanningInvocation, type PlanningInvocation } from './planning-invocation.js';
+import { loadWriteGateSnapshot, shouldBlockRootArtifactSaveInSnapshot } from './bootstrap/write-gate.js';
 
 // ─── Freeform Detection ───────────────────────────────────────────────────
 
@@ -57,6 +54,29 @@ export function isDecisionsTableFormat(content: string): boolean {
 }
 
 /**
+ * Derive each decision's amends target from the stored supersede
+ * (superseded_by on the replaced row) — never by parsing '(amends D###)' file
+ * text. The DECISIONS.md render re-emits the target as the cell suffix the
+ * markdown parsers understand, so a rendered register round-trips.
+ */
+export function decisionsWithAmendsTargets(decisions: Decision[]): Decision[] {
+  const amends = new Map<string, string>();
+  for (const d of decisions) {
+    if (d.superseded_by) amends.set(d.superseded_by, d.id);
+  }
+  return decisions.map((d) => ({ ...d, amends: amends.get(d.id) ?? null }));
+}
+
+/** The Decision cell: stored text plus the '(amends D###)' suffix when the
+ * stored supersede carries a target the text does not already name. */
+function decisionCellText(d: Decision): string {
+  if (!d.amends) return d.decision;
+  const named = new RegExp(`\\(amends\\s+${d.amends}\\)`, "i");
+  if (named.test(d.decision)) return d.decision;
+  return `${d.decision} (amends ${d.amends})`;
+}
+
+/**
  * Generate a minimal decisions table section (header + rows) for appending
  * to a freeform DECISIONS.md file.
  */
@@ -75,12 +95,14 @@ function generateDecisionsAppendBlock(decisions: Decision[]): string {
       d.id,
       d.when_context,
       d.scope,
-      d.decision,
+      decisionCellText(d),
       d.choice,
       d.rationale,
       d.revisable,
       d.made_by ?? 'agent',
-    ].map(cell => (cell ?? '').replace(/\|/g, '\\|'));
+    ].map(cell => (cell ?? '')
+      .replace(/\|/g, '\\|')
+      .replace(/\r\n|\r|\n/g, '<br>'));
     lines.push(`| ${cells.join(' | ')} |`);
   }
 
@@ -114,12 +136,14 @@ export function generateDecisionsMd(decisions: Decision[]): string {
       d.id,
       d.when_context,
       d.scope,
-      d.decision,
+      decisionCellText(d),
       d.choice,
       d.rationale,
       d.revisable,
       d.made_by ?? 'agent',
-    ].map(cell => (cell ?? '').replace(/\|/g, '\\|'));
+    ].map(cell => (cell ?? '')
+      .replace(/\|/g, '\\|')
+      .replace(/\r\n|\r|\n/g, '<br>'));
 
     lines.push(`| ${cells.join(' | ')} |`);
   }
@@ -136,6 +160,11 @@ const STATUS_SECTION_MAP: Array<{ status: string; heading: string }> = [
   { status: 'deferred', heading: 'Deferred' },
   { status: 'out-of-scope', heading: 'Out of Scope' },
 ];
+
+/** Keep the later lines of a multi-line value inside its bullet. */
+function indentLaterLines(value: string): string {
+  return value.replace(/\n(?=[^\n])/g, '\n  ');
+}
 
 /**
  * Generate full REQUIREMENTS.md content from an array of Requirement objects.
@@ -172,13 +201,13 @@ export function generateRequirementsMd(requirements: Requirement[]): string {
       // Emit bullet fields — only those with content
       if (r.class) lines.push(`- Class: ${r.class}`);
       if (r.status) lines.push(`- Status: ${r.status}`);
-      if (r.description) lines.push(`- Description: ${r.description}`);
-      if (r.why) lines.push(`- Why it matters: ${r.why}`);
+      if (r.description) lines.push(`- Description: ${indentLaterLines(r.description)}`);
+      if (r.why) lines.push(`- Why it matters: ${indentLaterLines(r.why)}`);
       if (r.source) lines.push(`- Source: ${r.source}`);
       if (r.primary_owner) lines.push(`- Primary owning slice: ${r.primary_owner}`);
       if (r.supporting_slices) lines.push(`- Supporting slices: ${r.supporting_slices}`);
-      if (r.validation) lines.push(`- Validation: ${r.validation}`);
-      if (r.notes) lines.push(`- Notes: ${r.notes}`);
+      if (r.validation) lines.push(`- Validation: ${indentLaterLines(r.validation)}`);
+      if (r.notes) lines.push(`- Notes: ${indentLaterLines(r.notes)}`);
       lines.push('');
     }
   }
@@ -211,14 +240,6 @@ export function generateRequirementsMd(requirements: Requirement[]): string {
   lines.push(`- Unmapped active requirements: ${coverage.unmappedActive}`);
 
   return lines.join('\n') + '\n';
-}
-
-function isRootCanonicalArtifact(opts: SaveArtifactOpts): boolean {
-  if (opts.milestone_id || opts.slice_id || opts.task_id) return false;
-  return (
-    opts.artifact_type === 'PROJECT' ||
-    opts.artifact_type === 'REQUIREMENTS'
-  );
 }
 
 // ─── Next Decision ID ─────────────────────────────────────────────────────
@@ -353,23 +374,39 @@ export interface SaveRequirementFields {
 }
 
 /**
- * Save a new requirement to DB and regenerate REQUIREMENTS.md.
- * Auto-assigns the next ID via nextRequirementId().
- *
- * The ID computation and insert are wrapped in a single transaction
- * to prevent parallel race conditions (same pattern as saveDecisionToDb).
+ * A requirement write changes REQUIREMENTS.md, so it waits for a pending
+ * discussion gate. The check is here, in the writer both transports call, so
+ * the native tool and the workflow MCP tool enforce the same rule.
+ */
+function assertRequirementsWriteAllowed(basePath: string): void {
+  const guard = shouldBlockRootArtifactSaveInSnapshot(loadWriteGateSnapshot(basePath), 'REQUIREMENTS');
+  if (guard.block) throw new RootArtifactWriteBlockedError(guard.reason ?? 'requirements write blocked');
+}
+
+/** The write gate refused a root artifact write. Tool handlers report `code` as the error. */
+export class RootArtifactWriteBlockedError extends Error {
+  readonly code = 'root_artifact_write_blocked';
+}
+
+/**
+ * Save a new requirement through the requirement.save Domain Operation and
+ * regenerate REQUIREMENTS.md. The ID is allocated inside the operation, so a
+ * replay with the same idempotency key returns the original ID and writes
+ * nothing.
  *
  * Returns the assigned ID.
  */
 export async function saveRequirementToDb(
   fields: SaveRequirementFields,
   basePath: string,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<{ id: string }> {
+  assertRequirementsWriteAllowed(basePath);
   try {
     const db = await import('./gsd-db.js');
 
-    // Atomic ID assignment + insert inside a transaction.
-    const txResult = db.transaction(() => {
+    // ID assignment and insert commit in one Domain Operation.
+    const mutate = () => {
       const adapter = db._getAdapter();
       if (!adapter) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
 
@@ -409,42 +446,27 @@ export async function saveRequirementToDb(
       };
 
       db.upsertRequirement(requirement);
-      return { id: nextId };
+      return { entityId: nextId, result: { id: nextId } };
+    };
+    const { id } = executeRecordDomainOperation({
+      operationType: 'requirement.save',
+      invocation,
+      payload: fields,
+      eventType: 'requirement.saved',
+      entityType: 'requirement',
+      projectionKeys: ['planning/requirements'],
+      mutate,
     });
-    const { id } = txResult;
 
-    // Fetch all requirements for full file regeneration
-    const adapter = db._getAdapter();
-    let allRequirements: Requirement[] = [];
-    if (adapter) {
-      const rows = adapter.prepare('SELECT * FROM requirements ORDER BY id').all();
-      allRequirements = rows.map(row => ({
-        id: row['id'] as string,
-        class: row['class'] as string,
-        status: row['status'] as string,
-        description: row['description'] as string,
-        why: row['why'] as string,
-        source: row['source'] as string,
-        primary_owner: row['primary_owner'] as string,
-        supporting_slices: row['supporting_slices'] as string,
-        validation: row['validation'] as string,
-        notes: row['notes'] as string,
-        full_content: row['full_content'] as string,
-        superseded_by: (row['superseded_by'] as string) ?? null,
-      }));
-    }
-
-    const nonSuperseded = allRequirements.filter(r => r.superseded_by == null);
-    const md = generateRequirementsMd(nonSuperseded);
-    const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
     try {
-      await writeGsdProjection(basePath, filePath, md);
+      await regenerateRequirementsMarkdown(basePath);
     } catch (diskErr) {
       logWarning('projection', 'REQUIREMENTS.md projection write failed; DB requirement remains committed', { fn: 'saveRequirementToDb', id, error: String((diskErr as Error).message) });
     }
     invalidateStateCache();
     clearPathCache();
     clearParseCache();
+    await renderStateProjection(basePath);
 
     return { id };
   } catch (err) {
@@ -474,7 +496,7 @@ export async function readDecisionsProjectionIntent(
   basePath: string,
 ): Promise<DecisionsProjectionIntent | null> {
   const { getAllDecisionsFromMemories } = await import('./context-store.js');
-  const allDecisions: Decision[] = getAllDecisionsFromMemories();
+  const allDecisions: Decision[] = decisionsWithAmendsTargets(getAllDecisionsFromMemories());
   const path = resolveGsdRootFile(basePath, 'DECISIONS');
   const existingContent = existsSync(path) ? readFileSync(path, 'utf-8') : null;
   if (allDecisions.length === 0 && existingContent === null) return null;
@@ -506,7 +528,66 @@ export async function readDecisionsProjectionIntent(
 export async function regenerateDecisionsMarkdown(basePath: string): Promise<void> {
   const intent = await readDecisionsProjectionIntent(basePath);
   if (!intent) return;
-  await writeGsdProjection(basePath, intent.path, intent.content);
+  await writeProjectionFile(basePath, intent.path, intent.content, []);
+}
+
+/**
+ * Re-project root REQUIREMENTS.md from the requirement rows, with no
+ * requirement being added or changed. Writes nothing when there are no
+ * requirement rows and no file, and returns false.
+ */
+export async function regenerateRequirementsMarkdown(basePath: string): Promise<boolean> {
+  const db = await import('./gsd-db.js');
+  const rows = db._getAdapter()?.prepare('SELECT * FROM requirements ORDER BY id').all() ?? [];
+  const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
+  if (rows.length === 0 && !existsSync(filePath)) return false;
+  const requirements: Requirement[] = rows.map(row => ({
+    id: row['id'] as string,
+    class: row['class'] as string,
+    status: row['status'] as string,
+    description: row['description'] as string,
+    why: row['why'] as string,
+    source: row['source'] as string,
+    primary_owner: row['primary_owner'] as string,
+    supporting_slices: row['supporting_slices'] as string,
+    validation: row['validation'] as string,
+    notes: row['notes'] as string,
+    full_content: row['full_content'] as string,
+    superseded_by: (row['superseded_by'] as string) ?? null,
+  }));
+  await writeProjectionFile(
+    basePath,
+    filePath,
+    generateRequirementsMd(requirements.filter(r => r.superseded_by == null)),
+    [],
+  );
+  return true;
+}
+
+/**
+ * Re-project the root narrative artifacts (PROJECT.md and the root drafts)
+ * from their artifact rows. These types have no structured source: the row is
+ * the content. REQUIREMENTS.md is not replayed from its row; it is rendered
+ * from the requirement rows. Returns false when there is no such row.
+ */
+export async function regenerateRootArtifactsMarkdown(basePath: string): Promise<boolean> {
+  const db = await import('./gsd-db.js');
+  const rows = db._getAdapter()?.prepare(
+    `SELECT artifact_type, full_content FROM artifacts
+     WHERE milestone_id IS NULL
+       AND artifact_type IN ('PROJECT', 'PROJECT-DRAFT', 'REQUIREMENTS-DRAFT')
+       AND TRIM(full_content) != ''
+     ORDER BY artifact_type`,
+  ).all() ?? [];
+  for (const row of rows) {
+    await writeProjectionFile(
+      basePath,
+      join(gsdRoot(basePath), `${row['artifact_type'] as string}.md`),
+      row['full_content'] as string,
+      [],
+    );
+  }
+  return rows.length > 0;
 }
 
 // ─── Save Decision to DB + Regenerate Markdown ────────────────────────────
@@ -521,6 +602,45 @@ export interface SaveDecisionFields {
   made_by?: import('./types.js').DecisionMadeBy;
   /** ADR-011 Phase 2: origin of the decision — "discussion" (default), "planning", "escalation". */
   source?: string;
+  /** ID of the active decision that this decision replaces (e.g. "D003"). */
+  supersedes?: string;
+  /**
+   * Optional statement impacts written by the same decision.save Domain
+   * Operation, keyed on the saved D### id. Empty/omitted writes no rows.
+   */
+  impacts?: import('./db/writers/decision-statement-impacts.js').DecisionStatementImpactInput[];
+}
+
+/**
+ * Mark the decision `oldId` as replaced by `newId`. Only an active decision
+ * can be replaced, so every chain keeps exactly one active head.
+ */
+function supersedeActiveDecision(
+  db: typeof import('./gsd-db.js'),
+  oldId: string,
+  newId: string,
+): void {
+  const row = db._getAdapter()?.prepare(
+    `SELECT id, structured_fields FROM memories
+     WHERE category = 'architecture'
+       AND json_valid(structured_fields)
+       AND json_extract(structured_fields, '$.sourceDecisionId') = :id
+     ORDER BY seq DESC LIMIT 1`,
+  ).get({ ':id': oldId });
+  const fields = row ? JSON.parse(row['structured_fields'] as string) as Record<string, unknown> : null;
+  if (!row || !fields || fields['deleted'] === true) {
+    throw new Error(`Cannot supersede ${oldId}: no such decision.`);
+  }
+  if (fields['superseded_by']) {
+    throw new Error(
+      `Cannot supersede ${oldId}: it is already superseded by ${String(fields['superseded_by'])}. Supersede the active decision instead.`,
+    );
+  }
+  db.updateMemoryStructuredFieldsRow(
+    String(row['id']),
+    { ...fields, superseded_by: newId },
+    new Date().toISOString(),
+  );
 }
 
 type NormalizedSaveDecisionFields = Omit<
@@ -534,19 +654,19 @@ type NormalizedSaveDecisionFields = Omit<
 };
 
 /**
- * Save a new decision to DB and regenerate DECISIONS.md.
- * Auto-assigns the next ID via nextDecisionId().
+ * Save a new decision through the decision.save Domain Operation and
+ * regenerate DECISIONS.md. The ID is allocated inside the operation, so a
+ * replay with the same idempotency key returns the original ID and writes
+ * nothing. A failed write throws and leaves DECISIONS.md untouched.
  *
- * Concurrency: uses an async mutex (promise chain) to serialize the entire
- * operation — ID generation, DB upsert, file read, markdown regeneration,
- * and file write — preventing parallel callers from overwriting each other's
- * output (last-writer-wins race condition).
- *
- * Returns the assigned ID.
+ * Concurrency: uses an async mutex (promise chain) to serialize the
+ * projection regen and file write so parallel callers in one process do not
+ * overwrite each other's output (last-writer-wins race condition).
  */
 export async function saveDecisionToDb(
   fields: SaveDecisionFields,
   basePath: string,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<{ id: string }> {
   // Serialize via async mutex: each call waits for the previous one to
   // complete before starting, preventing interleaved DB + file writes.
@@ -580,55 +700,53 @@ export async function saveDecisionToDb(
     // Reversal: a code revert of this change restores the upsertDecision
     // call. Memory rows written between merge and revert stay durable; the
     // legacy table simply doesn't grow during the cutover window.
-    const id = nextDecisionIdAcrossSurfaces(adapter);
-
-    // The mirror-to-memories write is what persists the new decision. Must
-    // run before the projection regen — the regen sources from memories
-    // (Stage 2a) and would otherwise miss the just-saved decision. Pass
-    // the normalized field set so defaults (revisable, made_by, source)
-    // are recorded on the memory row.
-    const sliceRef = extractDeferredSliceRef(fields);
-    if (sliceRef) {
-      db.immediateTransaction(() => {
-        if (!db.getSlice(sliceRef.milestoneId, sliceRef.sliceId)) {
-          throw new Error(`Slice ${sliceRef.milestoneId}/${sliceRef.sliceId} does not exist`);
+    //
+    // The ID and the memory row commit in one Domain Operation. A failed
+    // memory write aborts the operation.
+    // Decision text never changes lifecycle status: a slice is cancelled
+    // only through its own Domain Operation (gsd_skip_slice).
+    const { decisionId: id } = executeRecordDomainOperation({
+      operationType: 'decision.save',
+      invocation,
+      payload: normalized,
+      eventType: 'decision.saved',
+      entityType: 'decision',
+      projectionKeys: ['decisions'],
+      mutate: (context) => {
+        const decisionId = nextDecisionIdAcrossSurfaces(adapter);
+        if (normalized.supersedes) {
+          supersedeActiveDecision(db, normalized.supersedes, decisionId);
         }
-        if (!persistDecisionToMemory(id, normalized)) {
-          throw new Error('Unable to persist deferral decision');
+        if (!persistDecisionToMemory(decisionId, normalized)) {
+          throw new Error(`Unable to persist decision ${decisionId}`);
         }
-        db.updateSliceStatus(sliceRef.milestoneId, sliceRef.sliceId, 'deferred');
-      });
-    } else {
-      mirrorDecisionToMemory(id, normalized);
-    }
+        const impactRows = buildStatementImpactRows(decisionId, normalized.impacts, normalized.supersedes);
+        insertDecisionStatementImpacts(context, impactRows);
+        return {
+          entityId: decisionId,
+          result: {
+            decisionId,
+            impacts: impactRows.map((row) => ({
+              decision_id: row.decision_id,
+              impact_ordinal: row.impact_ordinal,
+              impact_kind: row.impact_kind,
+              milestone_id: row.milestone_id,
+              slice_id: row.slice_id,
+              task_id: row.task_id,
+              target_scope: row.target_scope,
+              payload: row.payload,
+            })),
+          },
+        };
+      },
+    });
 
     // Fetch all decisions (including superseded for the full register).
-    // ADR-013 Stage 2a: source from the `memories` table. The Phase 5
-    // dual-write keeps memories in sync with each decision save; the backfill
+    // ADR-013 Stage 2a: source from the `memories` table; the backfill
     // (memory-backfill.ts) absorbs the historical chain and drift-heals
     // superseded_by on every session start.
     const { getAllDecisionsFromMemories } = await import('./context-store.js');
-    let allDecisions: Decision[] = getAllDecisionsFromMemories();
-    if (!allDecisions.some(d => d.id === id)) {
-      logWarning('projection', 'just-saved decision missing from memories after mirror; injecting fallback for projection', {
-        fn: 'saveDecisionToDb',
-        decisionId: id,
-      });
-      const nextSeq = allDecisions.reduce((max, d) => Math.max(max, d.seq ?? 0), 0) + 1;
-      const fallback: Decision = {
-        seq: nextSeq,
-        id,
-        when_context: normalized.when_context,
-        scope: normalized.scope,
-        decision: normalized.decision,
-        choice: normalized.choice,
-        rationale: normalized.rationale,
-        revisable: normalized.revisable,
-        made_by: normalized.made_by,
-        superseded_by: null,
-      };
-      allDecisions = [...allDecisions, fallback];
-    }
+    const allDecisions: Decision[] = decisionsWithAmendsTargets(getAllDecisionsFromMemories());
 
     const filePath = resolveGsdRootFile(basePath, 'DECISIONS');
 
@@ -656,7 +774,7 @@ export async function saveDecisionToDb(
     }
 
     try {
-      await writeGsdProjection(basePath, filePath, md);
+      await writeProjectionFile(basePath, filePath, md, []);
     } catch (diskErr) {
       logWarning('projection', 'DECISIONS.md projection write failed; DB decision remains committed', { fn: 'saveDecisionToDb', id, error: String((diskErr as Error).message) });
     }
@@ -665,6 +783,7 @@ export async function saveDecisionToDb(
     invalidateStateCache();
     clearPathCache();
     clearParseCache();
+    await renderStateProjection(basePath);
 
     return { id };
   } catch (err) {
@@ -701,115 +820,62 @@ function persistDecisionToMemory(
   }) !== null;
 }
 
-function mirrorDecisionToMemory(
-  id: string,
-  normalizedFields: NormalizedSaveDecisionFields,
-): void {
-  try {
-    persistDecisionToMemory(id, normalizedFields);
-  } catch (mirrorErr) {
-    logError('manifest', 'memory-store mirror write failed', {
-      fn: 'saveDecisionToDb',
-      decisionId: id,
-      error: String((mirrorErr as Error).message),
-    });
-  }
-}
-
-/**
- * Extract a milestone/slice reference from a deferral decision.
- *
- * Detects deferrals when the slice reference is part of the deferral phrase.
- *
- * Returns { milestoneId, sliceId } if found, null otherwise.
- */
-export function extractDeferredSliceRef(
-  fields: Pick<SaveDecisionFields, 'scope' | 'decision' | 'choice'>,
-): { milestoneId: string; sliceId: string } | null {
-  const defersSlicePattern =
-    /\bdefer(?:ral|red|ring|s)?\b\s+(?:(?:of|the)\s+)*(?:slice\s+)?\b(M\d{3,4})\/(S\d{2,3})\b/i;
-  const sliceIsDeferredPattern =
-    /\b(M\d{3,4})\/(S\d{2,3})\b\s+(?:is|was|will be|should be|can be)\s+defer(?:red|ring)?\b/i;
-
-  for (const text of [fields.choice, fields.decision, fields.scope]) {
-    const match = text.match(defersSlicePattern) ?? text.match(sliceIsDeferredPattern);
-    if (match) {
-      return { milestoneId: match[1].toUpperCase(), sliceId: match[2].toUpperCase() };
-    }
-  }
-
-  return null;
-}
-
 // ─── Update Requirement in DB + Regenerate Markdown ───────────────────────
 
 /**
- * Update a requirement in DB and regenerate REQUIREMENTS.md.
- * Fetches existing requirement, merges updates, upserts, then regenerates.
+ * Update a requirement through the requirement.update Domain Operation and
+ * regenerate REQUIREMENTS.md. The operation fetches the existing requirement,
+ * merges the updates and upserts. A replay writes nothing.
  */
 export async function updateRequirementInDb(
   id: string,
   updates: Partial<Requirement>,
   basePath: string,
+  invocation: PlanningInvocation = internalPlanningInvocation(),
 ): Promise<void> {
+  assertRequirementsWriteAllowed(basePath);
   try {
     const db = await import('./gsd-db.js');
 
-    const existing = db.getRequirementById(id);
+    executeRecordDomainOperation({
+      operationType: 'requirement.update',
+      invocation,
+      payload: { id, updates },
+      eventType: 'requirement.updated',
+      entityType: 'requirement',
+      projectionKeys: ['planning/requirements'],
+      mutate: () => {
+        const existing = db.getRequirementById(id);
 
-    const base: Requirement = existing ?? {
-      id,
-      class: '',
-      status: 'active',
-      description: '',
-      why: '',
-      source: '',
-      primary_owner: '',
-      supporting_slices: '',
-      validation: '',
-      notes: '',
-      full_content: '',
-      superseded_by: null,
-    };
+        const base: Requirement = existing ?? {
+          id,
+          class: '',
+          status: 'active',
+          description: '',
+          why: '',
+          source: '',
+          primary_owner: '',
+          supporting_slices: '',
+          validation: '',
+          notes: '',
+          full_content: '',
+          superseded_by: null,
+        };
 
-    // Merge updates into existing (or skeleton)
-    const merged: Requirement = {
-      ...base,
-      ...updates,
-      id: base.id, // ID cannot be changed
-    };
+        // Merge updates into existing (or skeleton)
+        const merged: Requirement = {
+          ...base,
+          ...updates,
+          id: base.id, // ID cannot be changed
+        };
 
-    db.upsertRequirement(merged);
+        db.upsertRequirement(merged);
+        return { entityId: id, result: { id } };
+      },
+    });
 
-    // Fetch ALL requirements (including superseded) for full file regeneration
-    const adapter = db._getAdapter();
-    let allRequirements: Requirement[] = [];
-    if (adapter) {
-      const rows = adapter.prepare('SELECT * FROM requirements ORDER BY id').all();
-      allRequirements = rows.map(row => ({
-        id: row['id'] as string,
-        class: row['class'] as string,
-        status: row['status'] as string,
-        description: row['description'] as string,
-        why: row['why'] as string,
-        source: row['source'] as string,
-        primary_owner: row['primary_owner'] as string,
-        supporting_slices: row['supporting_slices'] as string,
-        validation: row['validation'] as string,
-        notes: row['notes'] as string,
-        full_content: row['full_content'] as string,
-        superseded_by: (row['superseded_by'] as string) ?? null,
-      }));
-    }
-
-    // Filter to non-superseded for the markdown file
-    // (superseded requirements don't appear in section headings)
-    const nonSuperseded = allRequirements.filter(r => r.superseded_by == null);
-
-    const md = generateRequirementsMd(nonSuperseded);
-    const filePath = resolveGsdRootFile(basePath, 'REQUIREMENTS');
     try {
-      await writeGsdProjection(basePath, filePath, md);
+      await regenerateRequirementsMarkdown(basePath);
     } catch (diskErr) {
       logWarning('projection', 'REQUIREMENTS.md projection write failed; DB requirement update remains committed', { fn: 'updateRequirementInDb', id, error: String((diskErr as Error).message) });
     }
@@ -818,6 +884,7 @@ export async function updateRequirementInDb(
     invalidateStateCache();
     clearPathCache();
     clearParseCache();
+    await renderStateProjection(basePath);
   } catch (err) {
     logError('manifest', 'updateRequirementInDb failed', { fn: 'updateRequirementInDb', error: String((err as Error).message) });
     throw err;
@@ -836,6 +903,15 @@ export interface SaveArtifactOpts {
 }
 
 /**
+ * Commits the artifacts row of a save. A tool call passes a function that runs
+ * `insertRow` inside its Domain Operation, with the content when the operation
+ * decides it. The default writes the row alone.
+ */
+export type ArtifactRowStore = (insertRow: (content?: string) => void) => void;
+
+const storeArtifactRowAlone: ArtifactRowStore = (insertRow) => insertRow();
+
+/**
  * Save a root-level artifact (no milestone) to DB and write to disk,
  * routing path construction through workspace.contract.projectGsd directly.
  * Use this instead of saveArtifactToDbByScope when milestone_id is absent.
@@ -843,6 +919,7 @@ export interface SaveArtifactOpts {
 export async function saveArtifactToDbForWorkspace(
   workspace: GsdWorkspace,
   opts: SaveArtifactOpts,
+  storeRow: ArtifactRowStore = storeArtifactRowAlone,
 ): Promise<void> {
   try {
     const db = await import('./gsd-db.js');
@@ -864,32 +941,21 @@ export async function saveArtifactToDbForWorkspace(
       contentToPersist = generateRequirementsMd(activeRequirements);
     }
 
-    let skipDiskWrite = false;
-    if (!isRootCanonicalArtifact(opts) && existsSync(fullPath)) {
-      const existingSize = statSync(fullPath).size;
-      const newSize = Buffer.byteLength(contentToPersist, 'utf-8');
-      if (existingSize > 0 && newSize < existingSize * 0.5) {
-        logWarning('projection', `new content (${newSize}B) is <50% of existing projection (${existingSize}B), preserving disk file while DB remains authoritative`, { fn: 'saveArtifactToDbForWorkspace', path: opts.path });
-        skipDiskWrite = true;
-      }
-    }
-
-    db.insertArtifact({
+    storeRow((content = contentToPersist) => db.insertArtifact({
       path: opts.path,
       artifact_type: opts.artifact_type,
       milestone_id: null,
       slice_id: null,
       task_id: null,
-      full_content: contentToPersist,
-    });
+      full_content: content,
+    }));
 
-    if (!skipDiskWrite) {
-      try {
-        const basePath = dirname(gsdDir);
-        await writeGsdProjection(basePath, fullPath, contentToPersist);
-      } catch (diskErr) {
-        logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbForWorkspace', path: opts.path, error: String((diskErr as Error).message) });
-      }
+    try {
+      const basePath = dirname(gsdDir);
+      // A replayed call writes no row: the file follows the row that is stored.
+      await writeProjectionFile(basePath, fullPath, db.getArtifact(opts.path)?.full_content ?? contentToPersist, []);
+    } catch (diskErr) {
+      logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbForWorkspace', path: opts.path, error: String((diskErr as Error).message) });
     }
     invalidateStateCache();
     clearPathCache();
@@ -910,6 +976,7 @@ export async function saveArtifactToDbForWorkspace(
 export async function saveArtifactToDbByScope(
   scope: MilestoneScope,
   opts: SaveArtifactOpts,
+  storeRow: ArtifactRowStore = storeArtifactRowAlone,
 ): Promise<void> {
   // Guard: an empty milestoneId produces malformed paths (milestoneDir = join(gsd, "milestones", "")).
   // Callers that have no milestone should use saveArtifactToDbForWorkspace instead.
@@ -939,46 +1006,32 @@ export async function saveArtifactToDbByScope(
       contentToPersist = generateRequirementsMd(activeRequirements);
     }
 
-    // Shrinkage guard: if the projection file already exists and the new
-    // content is significantly smaller (<50%), preserve the richer file on
-    // disk, but keep the DB row authoritative with the caller-provided content.
-    // Root canonical artifacts are exempt (rendered from canonical DB state).
-    let skipDiskWrite = false;
-    if (!isRootCanonicalArtifact(opts) && existsSync(fullPath)) {
-      const existingSize = statSync(fullPath).size;
-      const newSize = Buffer.byteLength(contentToPersist, 'utf-8');
-      if (existingSize > 0 && newSize < existingSize * 0.5) {
-        logWarning('projection', `new content (${newSize}B) is <50% of existing projection (${existingSize}B), preserving disk file while DB remains authoritative`, { fn: 'saveArtifactToDbByScope', path: opts.path });
-        skipDiskWrite = true;
-      }
-    }
-
-    db.insertArtifact({
+    storeRow((content = contentToPersist) => db.insertArtifact({
       path: opts.path,
       artifact_type: opts.artifact_type,
       milestone_id: opts.milestone_id ?? null,
       slice_id: opts.slice_id ?? null,
       task_id: opts.task_id ?? null,
-      full_content: contentToPersist,
-    });
+      full_content: content,
+    }));
 
-    // Write the file to disk (only if we're not preserving a richer existing file)
-    if (!skipDiskWrite) {
-      try {
-        const basePath = dirname(gsdDir);
-        await writeGsdProjection(
-          basePath,
-          fullPath,
-          contentToPersist,
-          [
-            opts.milestone_id,
-            opts.slice_id && `${opts.milestone_id}/${opts.slice_id}`,
-            opts.task_id && `${opts.milestone_id}/${opts.slice_id}/${opts.task_id}`,
-          ].filter((entity): entity is string => Boolean(entity)),
-        );
-      } catch (diskErr) {
-        logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbByScope', path: opts.path, error: String((diskErr as Error).message) });
-      }
+    // The DB row is the authority, so the file always follows it (a replayed
+    // call writes no row). A file that changed outside GSD is kept by the
+    // projection mutation guard, not here.
+    try {
+      const basePath = dirname(gsdDir);
+      await writeProjectionFile(
+        basePath,
+        fullPath,
+        db.getArtifact(opts.path)?.full_content ?? contentToPersist,
+        [
+          opts.milestone_id,
+          opts.slice_id && `${opts.milestone_id}/${opts.slice_id}`,
+          opts.task_id && `${opts.milestone_id}/${opts.slice_id}/${opts.task_id}`,
+        ].filter((entity): entity is string => Boolean(entity)),
+      );
+    } catch (diskErr) {
+      logWarning('projection', 'artifact projection write failed; DB artifact remains committed', { fn: 'saveArtifactToDbByScope', path: opts.path, error: String((diskErr as Error).message) });
     }
     // Invalidate file-read caches so deriveState() sees the updated markdown.
     // Do NOT clear the artifacts table — we just wrote to it intentionally.
@@ -1003,11 +1056,12 @@ export async function saveArtifactToDbByScope(
 export async function saveArtifactToDb(
   opts: SaveArtifactOpts,
   basePath: string,
+  storeRow?: ArtifactRowStore,
 ): Promise<void> {
   const workspace = createWorkspace(basePath);
   const milestoneId = opts.milestone_id;
   if (milestoneId) {
-    return saveArtifactToDbByScope(scopeMilestone(workspace, milestoneId), opts);
+    return saveArtifactToDbByScope(scopeMilestone(workspace, milestoneId), opts, storeRow);
   }
-  return saveArtifactToDbForWorkspace(workspace, opts);
+  return saveArtifactToDbForWorkspace(workspace, opts, storeRow);
 }

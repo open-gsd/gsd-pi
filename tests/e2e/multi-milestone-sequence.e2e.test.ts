@@ -296,19 +296,8 @@ function buildTranscript(): string {
 			"",
 		].join("\n"),
 	}, "m002-context", { hasToolResultFor: "ask_user_questions" });
-	appendToolTurn(turns, "write", {
-		path: ".gsd/DISCUSSION-MANIFEST.json",
-		content: JSON.stringify({
-			primary: "M001",
-			milestones: {
-				M001: { gate: "discussed", context: "full" },
-				M002: { gate: "discussed", context: "full" },
-			},
-			total: 2,
-			gates_completed: 2,
-		}, null, 2) + "\n",
-	}, "discussion-manifest", { hasToolResultFor: "gsd_summary_save" });
-	appendTextTurn(turns, "Milestone M001 ready.", { hasToolResultFor: "write" });
+	// The CONTEXT saves above are the readiness records that the handoff gate reads.
+	appendTextTurn(turns, "Milestone M001 ready.", { hasToolResultFor: "gsd_summary_save" });
 
 	appendToolTurn(turns, "gsd_summary_save", {
 		milestone_id: "M001",
@@ -437,11 +426,6 @@ describe("multi-milestone sequence e2e (fake LLM)", () => {
 		const events = parseJsonEvents(result.stdoutClean);
 		const outcome = new WorkflowOutcomeProbe(project.dir, events);
 		const completedToolNames = toolNames(events);
-		const discussionManifestWrites = events.filter((event) =>
-			event.type === "tool_execution_end" &&
-			event.toolName === "write" &&
-			event.toolCallId === "discussion-manifest",
-		);
 
 		outcome.assertNoOperatorFailures();
 		outcome.assertNoToolErrors();
@@ -449,7 +433,6 @@ describe("multi-milestone sequence e2e (fake LLM)", () => {
 		assert.equal(completedToolNames.filter((toolName) => toolName === "gsd_plan_milestone").length, 1, "auto stops at M001 closeout before planning M002");
 		assert.equal(completedToolNames.filter((toolName) => toolName === "gsd_validate_milestone").length, 1, "auto validates only M001 before stopping");
 		assert.equal(completedToolNames.filter((toolName) => toolName === "gsd_complete_milestone").length, 1, "auto completes only M001 before stopping");
-		assert.equal(discussionManifestWrites.length, 1, "multi-milestone discussion manifest must be written before auto execution");
 		outcome.assertCompletionNotification(/milestone m001 complete/i);
 		assert.doesNotThrow(
 			() => execFileSync("node", ["--test", "test/answer.test.js"], { cwd: project.dir, stdio: "pipe" }),
@@ -481,6 +464,17 @@ describe("multi-milestone sequence e2e (fake LLM)", () => {
 		assert.equal(m002RoadmapExists, false, "M002 roadmap is not planned before the next command");
 
 		const db = outcome.openDb(t);
+		for (const milestoneId of ["M001", "M002"]) {
+			assert.equal(
+				scalar(
+					db,
+					"SELECT COUNT(*) AS value FROM artifacts WHERE milestone_id = :id AND slice_id IS NULL AND task_id IS NULL AND artifact_type = 'CONTEXT' AND TRIM(full_content) != ''",
+					{ id: milestoneId },
+				),
+				"1",
+				`${milestoneId} readiness decision must be a CONTEXT artifact row before auto execution`,
+			);
+		}
 		assert.equal(scalar(db, "SELECT COUNT(*) AS value FROM milestones WHERE status = 'complete'"), "1");
 		assert.equal(scalar(db, "SELECT status AS value FROM milestones WHERE id = :id", { id: "M001" }), "complete");
 		assert.notEqual(scalar(db, "SELECT status AS value FROM milestones WHERE id = :id", { id: "M002" }), "complete");

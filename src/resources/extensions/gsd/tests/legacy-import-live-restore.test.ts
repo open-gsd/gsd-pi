@@ -522,6 +522,17 @@ test("exact retry replays one durable restore without adding lineage", () => {
   `).get(), countsBefore);
 });
 
+test("restore replay still succeeds after the restored database is bound to its checkout", () => {
+  const prepared = preparedInput();
+  const committed = restoreLegacyImportLive(prepared.input);
+  assert.equal(prepared.input.backup.project_root_realpath, "", "the backup was taken while the database was unbound");
+  // The first workspace open after the restore binds the database to its checkout.
+  database().prepare("UPDATE project_authority SET project_root_realpath = '/bound/checkout'").run();
+  const replayed = restoreLegacyImportLive(structuredClone(prepared.input));
+  assert.equal(replayed.status, "replayed");
+  assert.equal(replayed.operationId, committed.operationId);
+});
+
 test("durable restore replay enforces the strict exact-keys contract", () => {
   const prepared = preparedInput();
   const committed = restoreLegacyImportLive(prepared.input);

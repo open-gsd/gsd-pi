@@ -4,24 +4,29 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { DISPATCH_RULES, getUatCount, incrementUatCount } from "../auto-dispatch.ts";
+import { DISPATCH_RULES } from "../auto-dispatch.ts";
+import {
+  getUatRetryAttempts as getUatCount,
+  incrementUatRetryAttempts as incrementUatCount,
+} from "../db/writers/runtime-control.ts";
 import {
   closeDatabase,
   insertMilestone,
   insertSlice,
   isDbAvailable,
   openDatabase,
+  setSliceUatMd,
 } from "../gsd-db.ts";
 
 /**
- * Seed the slice rows the run-uat dispatch gate reads. Post-cutover the gate
- * derives completed-slice candidates from DB rows only (`getMilestoneSlices`),
- * so the ROADMAP checkboxes this fixture writes are projection context; these
- * rows are the dispatch input.
+ * Seed the slice rows the run-uat dispatch gate reads. The gate derives
+ * completed-slice candidates and the UAT spec from DB rows only, so the
+ * ROADMAP checkboxes this fixture writes are projection context; these rows
+ * are the dispatch input. No UAT file is written.
  */
 function seedSliceRows(): void {
   openDatabase(":memory:");
@@ -36,6 +41,7 @@ function seedSliceRows(): void {
     depends: [],
     sequence: 1,
   });
+  setSliceUatMd("M001", "S01", "# UAT\n\nRun the checks. No verdict has been recorded yet.\n");
   insertSlice({
     milestoneId: "M001",
     id: "S02",
@@ -65,11 +71,6 @@ function makeUatProject(): string {
     ].join("\n"),
     "utf-8",
   );
-  writeFileSync(
-    join(milestone, "slices", "S01", "S01-UAT.md"),
-    "# UAT\n\nRun the checks. No verdict has been written yet.\n",
-    "utf-8",
-  );
   return base;
 }
 
@@ -92,17 +93,20 @@ test("run-uat dispatch stops after three attempts without a verdict", async () =
       const action = await rule.match(ctx as any);
       assert.equal(action?.action, "dispatch");
       assert.equal(action?.unitType, "run-uat");
-      assert.equal(getUatCount(basePath, "M001", "S01"), i);
+      assert.equal(getUatCount("M001", "S01"), i);
     }
+
+    // The cap is a database row. Deleting .gsd/runtime does not reset it.
+    rmSync(join(basePath, ".gsd", "runtime"), { recursive: true, force: true });
 
     const capped = await rule.match(ctx as any);
     assert.equal(capped?.action, "stop");
     assert.match(capped?.reason ?? "", /retry limit reached/);
-    assert.equal(getUatCount(basePath, "M001", "S01"), 3);
+    assert.equal(getUatCount("M001", "S01"), 3);
 
     const stillCapped = await rule.match(ctx as any);
     assert.equal(stillCapped?.action, "stop");
-    assert.equal(getUatCount(basePath, "M001", "S01"), 3);
+    assert.equal(getUatCount("M001", "S01"), 3);
   } finally {
     // The fixture seeds slice rows in an in-memory DB; close it so the next
     // test starts from a clean singleton.
@@ -111,25 +115,25 @@ test("run-uat dispatch stops after three attempts without a verdict", async () =
   }
 });
 
-test("run-uat counter persists across recycled worktree base paths", () => {
+test("run-uat counter is a database row and a counter file is not read", (t) => {
   const projectRoot = makeUatProject();
-  const worktreeA = join(projectRoot, ".gsd", "worktrees", "M001-a");
-  const worktreeB = join(projectRoot, ".gsd", "worktrees", "M001-b");
-  const canonicalCounter = join(projectRoot, ".gsd", "runtime", "uat-count-M001-S01.json");
-
-  mkdirSync(worktreeA, { recursive: true });
-  mkdirSync(worktreeB, { recursive: true });
-
-  try {
-    assert.equal(incrementUatCount(worktreeA, "M001", "S01"), 1);
-    assert.equal(incrementUatCount(worktreeB, "M001", "S01"), 2);
-    assert.equal(getUatCount(worktreeB, "M001", "S01"), 2);
-    assert.ok(existsSync(canonicalCounter), "counter should be stored under project-root .gsd/runtime");
-    assert.ok(
-      !existsSync(join(worktreeA, ".gsd", "runtime", "uat-count-M001-S01.json")),
-      "counter should not be stored under worktree-local .gsd/runtime",
-    );
-  } finally {
+  openDatabase(":memory:");
+  t.after(() => {
+    closeDatabase();
     rmSync(projectRoot, { recursive: true, force: true });
-  }
+  });
+
+  // A counter file left by an older build must not count as attempts.
+  mkdirSync(join(projectRoot, ".gsd", "runtime"), { recursive: true });
+  writeFileSync(
+    join(projectRoot, ".gsd", "runtime", "uat-count-M001-S01.json"),
+    JSON.stringify({ count: 3 }) + "\n",
+    "utf-8",
+  );
+
+  assert.equal(getUatCount("M001", "S01"), 0);
+  assert.equal(incrementUatCount("M001", "S01"), 1);
+  assert.equal(incrementUatCount("M001", "S01"), 2);
+  assert.equal(getUatCount("M001", "S01"), 2);
+  assert.equal(getUatCount("M001", "S02"), 0, "the counter is per slice");
 });

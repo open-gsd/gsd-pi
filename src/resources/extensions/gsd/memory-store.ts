@@ -13,13 +13,16 @@ import {
   updateMemoryContentRow,
   incrementMemoryHitCount,
   supersedeMemoryRow,
+  updateMemoryStructuredFieldsRow,
   markMemoryUnitProcessed,
+  CAP_AND_DECAY_ROWS_SQL,
   decayMemoriesBefore,
   supersedeLowestRankedMemories,
   deleteMemoryEmbedding,
   deleteMemoryRelationsFor,
 } from './gsd-db.js';
 import { createMemoryRelation, isValidRelation } from './memory-relations.js';
+import { KNOWLEDGE_CELL_FIELDS, KNOWLEDGE_TABLE_BY_CATEGORY } from './knowledge-parser.js';
 import { logWarning } from './workflow-logger.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -653,13 +656,22 @@ function doCreateMemory(
 }
 
 /**
- * Update a memory's content and optionally its confidence.
+ * Update a memory's content and optionally its confidence. A knowledge row
+ * (one with a K/P/L `sourceKnowledgeId`) renders its content cell from
+ * `structured_fields`, so that cell is set to the new content too.
  */
 export function updateMemoryContent(id: string, content: string, confidence?: number): boolean {
   if (!isDbAvailable()) return false;
 
   try {
-    updateMemoryContentRow(id, content, confidence, new Date().toISOString());
+    const now = new Date().toISOString();
+    updateMemoryContentRow(id, content, confidence, now);
+    const row = _getAdapter()?.prepare('SELECT category, structured_fields FROM memories WHERE id = :id').get({ ':id': id });
+    const fields = parseStructuredFields(row?.['structured_fields']);
+    const table = KNOWLEDGE_TABLE_BY_CATEGORY[String(row?.['category'])];
+    if (fields && table && typeof fields['sourceKnowledgeId'] === 'string') {
+      updateMemoryStructuredFieldsRow(id, { ...fields, [KNOWLEDGE_CELL_FIELDS[table].content]: content }, now);
+    }
     return true;
   } catch {
     return false;
@@ -753,7 +765,7 @@ export function decayStaleMemories(thresholdUnits = 20): string[] {
     const cutoff = row['processed_at'] as string;
     const affected = adapter.prepare(
       `SELECT id FROM memories
-       WHERE superseded_by IS NULL
+       WHERE ${CAP_AND_DECAY_ROWS_SQL}
          AND updated_at < :cutoff
          AND confidence > 0.1
          AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceDecisionId"%')`,
@@ -769,6 +781,9 @@ export function decayStaleMemories(thresholdUnits = 20): string[] {
 /**
  * Supersede lowest-ranked memories when count exceeds cap. Cascades to the
  * embedding and relation rows so those tables don't grow unboundedly.
+ * KNOWLEDGE Rules (category 'rule') are not counted and never superseded;
+ * decay skips them too. Patterns and Lessons are subject to both, and
+ * KNOWLEDGE.md is rendered again after they change.
  */
 export function enforceMemoryCap(max = 50): void {
   if (!isDbAvailable()) return;
@@ -777,7 +792,7 @@ export function enforceMemoryCap(max = 50): void {
 
   try {
     const countRow = adapter.prepare(
-      'SELECT count(*) as cnt FROM memories WHERE superseded_by IS NULL',
+      `SELECT count(*) as cnt FROM memories WHERE ${CAP_AND_DECAY_ROWS_SQL}`,
     ).get();
     const count = (countRow?.['cnt'] as number) ?? 0;
     if (count <= max) return;
@@ -786,7 +801,7 @@ export function enforceMemoryCap(max = 50): void {
     // Capture the about-to-be-superseded IDs first so we can cascade cleanup.
     const victims = adapter.prepare(
       `SELECT id FROM memories
-       WHERE superseded_by IS NULL
+       WHERE ${CAP_AND_DECAY_ROWS_SQL}
        ORDER BY (confidence * (1.0 + hit_count * 0.1)) ASC
        LIMIT :limit`,
     ).all({ ':limit': excess }).map((row) => row['id'] as string);

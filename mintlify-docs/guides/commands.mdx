@@ -36,9 +36,9 @@ description: "Every GSD command, keyboard shortcut, and CLI flag."
 | `/gsd export --html` | Generate self-contained HTML report |
 | `/gsd export --html --all` | Generate reports for all milestones |
 | `/gsd update` | Update GSD to the latest version in-session |
-| `/gsd knowledge` | Add persistent project knowledge. Rules append to `KNOWLEDGE.md`; patterns and lessons are captured as memories and projected back into `KNOWLEDGE.md`. |
+| `/gsd knowledge` | Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild. |
 | `/gsd fast` | Toggle service tier for supported models |
-| `/gsd rate` | Rate last unit's model tier (over/ok/under) |
+| `/gsd rate` | Rate last unit's model tier (over/ok/under) or reset the routing history |
 | `/gsd changelog` | Show categorized release notes |
 | `/gsd logs` | Browse activity logs, debug logs, and metrics |
 | `/gsd remote` | Control remote auto-mode |
@@ -61,11 +61,10 @@ Quick-task right-sizing flags are composable. Use `--discuss` to surface design 
 | `/gsd skill-health` | Skill lifecycle dashboard |
 | `/gsd hooks` | Show configured post-unit and pre-dispatch hooks |
 | `/gsd run-hook` | Manually trigger a specific hook |
-| `/gsd migrate` | Migrate a v1 `.planning` directory to `.gsd` format |
+| `/gsd migrate` | Preview a v1 `.planning` migration to DB-backed `.gsd`; apply it with `--preview=<sha256>` |
 | `/gsd recover` | Preview a legacy markdown import, then approve its exact hash through a verified, backed-up Import Application |
 | `/gsd recover <recoveryActionId>` | Resume one repaired, terminal Task recovery abort after supplying repair and verification evidence |
 | `/gsd rebuild markdown` | Rebuild markdown projections from the canonical database; stale completion projections are quarantined, not imported |
-| `/gsd rebuild database` | Reserved for DB-native rebuilds; does not import markdown projections |
 
 The argument changes the recovery domain. Bare `/gsd recover` and its option-led forms handle legacy markdown/database import. Use `/gsd recover <recoveryActionId>` only after repairing the defect behind a terminal Task recovery abort: GSD checks that the action is still eligible, prompts for a repair summary and concrete verification evidence, and authorizes one fresh retry. Rerun `/gsd auto` after it succeeds. The headless recovery command below supports only the database-import flow.
 

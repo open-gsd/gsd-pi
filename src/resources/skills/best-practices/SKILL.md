@@ -16,6 +16,7 @@ Modern web development standards based on Lighthouse best practices audits. Cove
 ### HTTPS everywhere
 
 **Enforce HTTPS:**
+
 ```html
 <!-- ❌ Mixed content -->
 <img src="http://example.com/image.jpg">
@@ -30,6 +31,7 @@ Modern web development standards based on Lighthouse best practices audits. Cove
 ```
 
 **HSTS Header:**
+
 ```
 Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
 ```
@@ -49,6 +51,7 @@ Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
 ```
 
 **CSP Header (recommended):**
+
 ```
 Content-Security-Policy: 
   default-src 'self';
@@ -62,6 +65,7 @@ Content-Security-Policy:
 ```
 
 **Using nonces for inline scripts:**
+
 ```html
 <script nonce="abc123">
   // This inline script is allowed
@@ -102,6 +106,7 @@ npm ls lodash
 ```
 
 **Keep dependencies updated:**
+
 ```json
 // package.json
 {
@@ -113,6 +118,7 @@ npm ls lodash
 ```
 
 **Known vulnerable patterns to avoid:**
+
 ```javascript
 // ❌ Prototype pollution vulnerable patterns
 Object.assign(target, userInput);
@@ -540,6 +546,7 @@ findNearbyButton.addEventListener('click', async () => {
 ## Audit checklist
 
 ### Security (critical)
+
 - [ ] HTTPS enabled, no mixed content
 - [ ] No vulnerable dependencies (`npm audit`)
 - [ ] CSP headers configured
@@ -547,6 +554,7 @@ findNearbyButton.addEventListener('click', async () => {
 - [ ] No exposed source maps
 
 ### Compatibility
+
 - [ ] Valid HTML5 doctype
 - [ ] Charset declared first in head
 - [ ] Viewport meta tag present
@@ -554,6 +562,7 @@ findNearbyButton.addEventListener('click', async () => {
 - [ ] Passive event listeners for scroll/touch
 
 ### Code quality
+
 - [ ] No console errors
 - [ ] Valid HTML (no duplicate IDs)
 - [ ] Semantic HTML elements used
@@ -561,6 +570,7 @@ findNearbyButton.addEventListener('click', async () => {
 - [ ] Memory cleanup in components
 
 ### UX
+
 - [ ] No intrusive interstitials
 - [ ] Permission requests in context
 - [ ] Clear error messages

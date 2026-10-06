@@ -22,7 +22,7 @@ import { join, dirname, delimiter } from "node:path";
 import { tmpdir } from "node:os";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, shellForCommand, normalizeCommandIdentity } from "../verification-gate.ts";
+import { discoverCommands, runVerificationGate, runVerificationGateForTargets, formatFailureContext, captureRuntimeErrors, runDependencyAudit, isLikelyCommand, validateVerificationCommand, assertVerifyIsShellCheckable, splitUnquotedLines, verificationChildEnvironment, resolveGitPosixToolsDirectory, resolveGitBashExecutable, resolveVerificationShell, looksLikeCmdCommand, looksLikePosixAuthoredCommand, shellForCommand, normalizeCommandIdentity, hostRecordedTaskEvidence } from "../verification-gate.ts";
 import { prependPathEntry } from "../../shared/rtk-shared.ts";
 import type { CaptureRuntimeErrorsOptions, DependencyAuditOptions } from "../verification-gate.ts";
 import { validatePreferences } from "../preferences.ts";
@@ -662,7 +662,62 @@ describe("verification-gate: execution", () => {
 
     assert.equal(result.passed, true);
     assert.equal(result.discoverySource, "task-plan-prose");
+    // The host-recorded runs are the checks; the unrelated preference command did not run.
+    assert.deepEqual(result.checks.map((check) => [check.command, check.exitCode]), [
+      ["gsd_exec node: artifact check", 0],
+      ["gsd_exec node: consolidated artifact verification", 0],
+    ]);
+  });
+
+  test("a prose Verify with no host-recorded evidence yields a result with no check", () => {
+    const result = runVerificationGate({
+      cwd: tmp,
+      taskPlanVerify: "Planning artifacts exist and contain all required sections",
+    });
+
+    assert.equal(result.discoverySource, "task-plan-prose");
     assert.deepEqual(result.checks, []);
+  });
+
+  describe("hostRecordedTaskEvidence", () => {
+    const claim = (command: string, verdict = "pass") => ({ command, exitCode: 0, verdict, durationMs: 1 });
+    const run = (id: string, command: string, succeeded = true) => ({ id, command, succeeded, durationMs: 40 });
+
+    test("a claim with no host run of this Attempt is not evidence", () => {
+      assert.deepEqual(hostRecordedTaskEvidence([claim("npm test")], []), []);
+    });
+
+    test("a claim is replaced by the host record of the same script", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("npm  test")], [run("run-1", "npm test")]),
+        [{ command: "npm test", exitCode: 0, verdict: "pass", durationMs: 40 }],
+      );
+    });
+
+    test("a claim that names a run id, not the script of the run, is not evidence", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("npm test (run run-1)")], [run("run-1", "true")]),
+        [],
+      );
+    });
+
+    test("the latest host run of a script decides: a later failure voids the claim", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("npm test")], [run("run-1", "npm test"), run("run-2", "npm test", false)]),
+        [],
+      );
+    });
+
+    test("one claimed command without a host run voids the whole set", () => {
+      assert.deepEqual(
+        hostRecordedTaskEvidence([claim("npm test"), claim("npm run lint")], [run("run-1", "npm test")]),
+        [],
+      );
+    });
+
+    test("a failing claim is not evidence even when the host run succeeded", () => {
+      assert.deepEqual(hostRecordedTaskEvidence([claim("npm test", "fail")], [run("run-1", "npm test")]), []);
+    });
   });
 
   test("verificationChildEnvironment preserves Windows Path casing when prepending venv (#2086)", () => {
@@ -745,6 +800,10 @@ describe("verification-gate: execution", () => {
       writeFileSync(join(system32, "bash.exe"), "");
 
       assert.equal(resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter) }), join(gitBin, "bash.exe"));
+      assert.equal(
+        resolveGitBashExecutable({ Path: [system32, gitCmd].join(delimiter), ProgramFiles: tmpDir, ProgramW6432: `${tmpDir}/` }),
+        join(gitBin, "bash.exe"),
+      );
       assert.equal(resolveGitBashExecutable({ ProgramFiles: tmpDir }), join(gitBin, "bash.exe"));
       assert.equal(resolveGitBashExecutable({ Path: system32 }), null);
     } finally {
@@ -767,7 +826,20 @@ describe("verification-gate: execution", () => {
       const gitBash = resolveVerificationShell({ ProgramFiles: tmpDir }, "win32");
       assert.equal(gitBash.kind, "git-bash");
       assert.equal(gitBash.bin, join(gitBin, "bash.exe"));
-      assert.deepEqual(gitBash.argsFor("echo hi"), ["-o", "pipefail", "-c", "echo hi", "verification-gate"]);
+      assert.deepEqual(gitBash.argsFor("echo hi"), [
+        "-o",
+        "pipefail",
+        "-c",
+        "echo hi",
+        "verification-gate",
+      ]);
+      assert.deepEqual(resolveVerificationShell({ ProgramFiles: tmpDir }, "win32").argsFor("printf '%s\\n' hi"), [
+        "-o",
+        "pipefail",
+        "-c",
+        "printf '%s\\n' hi",
+        "verification-gate",
+      ]);
 
       const cmd = resolveVerificationShell({ Path: tmpDir }, "win32");
       assert.equal(cmd.kind, "cmd");
@@ -780,7 +852,6 @@ describe("verification-gate: execution", () => {
   test("looksLikeCmdCommand keeps Windows-authored verify text on cmd and POSIX text off it (#2399)", () => {
     for (const cmd of [
       "D:\\proj\\.venv\\Scripts\\python.exe -m pytest",
-      "python -m pytest tests\\unit",
       ".\\node_modules\\.bin\\tsc.cmd --noEmit",
       'set "NODE_ENV=production" && npm test',
       "set NODE_ENV=production && npm test",
@@ -790,7 +861,6 @@ describe("verification-gate: execution", () => {
       "npm run build && copy dist\\out.txt out.txt",
       'if exist "dist\\index.js" (exit 0) else (exit 1)',
       'set "NODE_ENV=test" & node script.js',
-      "node --test tests\\*.test.js",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), true, cmd);
     }
@@ -808,10 +878,30 @@ describe("verification-gate: execution", () => {
       "test -f package.json && npm test -- --runInBand",
       '"D:\\my proj\\.venv\\Scripts\\python.exe" -m pytest',
       "app/pnpm.cmd --version",
+      "python -m pytest tests\\unit",
+      "node --test tests\\*.test.js",
       "python -c 'assert(False)'",
       "node -e \"process.exit(process.env.TYPE ? 0 : 1)\"",
     ]) {
       assert.equal(looksLikeCmdCommand(cmd), false, cmd);
+    }
+  });
+
+  test("looksLikePosixAuthoredCommand detects POSIX-only verify text (#2399)", () => {
+    for (const cmd of [
+      "test -f package.json && npm test -- --runInBand",
+      "grep -q 'foo|dir' package.json",
+      "set -e && npm test",
+      "command -v node >/dev/null 2>&1",
+    ]) {
+      assert.equal(looksLikePosixAuthoredCommand(cmd), true, cmd);
+    }
+    for (const cmd of [
+      "echo %CD% && dir src",
+      ".\\node_modules\\.bin\\tsc.cmd --noEmit",
+      "python -m pytest tests\\unit",
+    ]) {
+      assert.equal(looksLikePosixAuthoredCommand(cmd), false, cmd);
     }
   });
 
@@ -825,7 +915,7 @@ describe("verification-gate: execution", () => {
       const cmdOnly = resolveVerificationShell({ Path: tmpDir }, "win32");
 
       assert.equal(shellForCommand(gitBash, "test -f package.json").kind, "git-bash");
-      assert.equal(shellForCommand(gitBash, "python -m pytest tests\\unit").kind, "cmd");
+      assert.equal(shellForCommand(gitBash, "python -m pytest tests\\unit").kind, "git-bash");
       assert.equal(shellForCommand(posix, "python -m pytest tests\\unit").kind, "posix");
       assert.equal(shellForCommand(cmdOnly, "test -f package.json").kind, "cmd");
     } finally {
@@ -1433,6 +1523,84 @@ test("isLikelyCommand: lowercase prose without command evidence is rejected (iss
     isLikelyCommand("verifica che il file contiene tutti i nomi richiesti"),
     false,
   );
+});
+
+test("isLikelyCommand: CJK sentence punctuation after a known command is rejected (issue #2428)", () => {
+  // Real failing samples (#2428): a CJK planning sentence beginning with a
+  // known tool prefix executed verbatim and its exit-0 no-op was recorded as
+  // verdict pass. Flags/paths in the tail suppress the natural-language
+  // heuristic, so the unquoted sentence punctuation is the prose signal.
+  assert.equal(
+    isLikelyCommand("pnpm --filter web vitest run tests/database，並跑 local-supabase 資料庫層案例；確認 anon/authenticated/agent 角色皆無法寫入白名單。"),
+    false,
+  );
+  assert.equal(
+    isLikelyCommand("pnpm --filter web vitest run tests/auth tests/api tests/passkey；安全負向：未授權、已撤銷、資料庫故障、agent 憑證皆被拒絕。"),
+    false,
+  );
+});
+
+test("isLikelyCommand: quoted CJK data in a real command stays valid (issue #2428)", () => {
+  // Quoted segments are stripped before the punctuation test — genuine
+  // commands that search CJK text must keep validating as commands. Plain
+  // unquoted CJK words without sentence punctuation are also untouched.
+  assert.equal(isLikelyCommand("grep -r '驗證腳本' src"), true);
+  assert.equal(isLikelyCommand('rg -q "資料庫層案例；確認" tests'), true);
+  assert.equal(isLikelyCommand("grep 資料庫 src"), true);
+});
+
+test("validateVerificationCommand rejects CJK prose verify sentences (issue #2428)", () => {
+  const result = validateVerificationCommand("pnpm --filter web vitest run tests/database，並跑 local-supabase 資料庫層案例；確認白名單。");
+  assert.equal(result.ok, false);
+  if (!result.ok) assert.match(result.reason, /does not look like a runnable command/);
+});
+
+test("assertVerifyIsShellCheckable rejects CJK prose verify lines (issue #2428)", () => {
+  const prose = "pnpm --filter web vitest run tests/database，並跑 local-supabase 資料庫層案例；確認白名單。";
+  assert.throws(() => assertVerifyIsShellCheckable(prose), /verify must be a shell command, not prose/);
+  // Quoted CJK data and plain commands keep persisting.
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("grep -r '驗證腳本' src"));
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("pnpm -r test:unit"));
+});
+
+test("assertVerifyIsShellCheckable keeps multiline quoted CJK operands intact (issue #2428 review)", () => {
+  // A newline inside a quoted segment is shell data: splitting on raw
+  // newlines would misread the fragments as unterminated and falsely reject.
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("rg -q '第一行，\n第二行。' tests"));
+  // CRLF line separators between separate commands still split.
+  assert.doesNotThrow(() => assertVerifyIsShellCheckable("pnpm -r test:unit\r\nnode scripts/check.js"));
+});
+
+test("assertVerifyIsShellCheckable rejects the prose line of a mixed verify (issue #2428)", () => {
+  const mixed = "node scripts/check.js\npnpm --filter web vitest run tests/database，並跑 local-supabase 案例確認白名單。";
+  assert.throws(() => assertVerifyIsShellCheckable(mixed), /verify must be a shell command, not prose/);
+});
+
+test("isLikelyCommand: CJK punctuation matrix is rejected unquoted (issue #2428)", () => {
+  // Each class member independently marks prose: enumeration 、 clause ，
+  // sentence 。 fullwidth colon/semicolon/question/bang, closing quotes and
+  // paren, ideographic space, ellipsis, em-dash.
+  for (const [label, mark] of [
+    ["enumeration comma", "、"],
+    ["fullwidth comma", "，"],
+    ["ideographic full stop", "。"],
+    ["fullwidth colon", "："],
+    ["fullwidth semicolon", "；"],
+    ["fullwidth question mark", "？"],
+    ["fullwidth exclamation mark", "！"],
+    ["closing corner quote", "」"],
+    ["closing double quote", "』"],
+    ["closing paren", "）"],
+    ["ideographic space", "　"],
+    ["ellipsis", "…"],
+    ["em-dash", "—"],
+  ] as const) {
+    assert.equal(
+      isLikelyCommand(`pnpm --filter web vitest run tests${mark}並確認白名單`),
+      false,
+      `unquoted ${label} must read as prose`,
+    );
+  }
 });
 
 test("validateVerificationCommand allows exit-code echo diagnostic suffix", () => {

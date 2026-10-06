@@ -87,7 +87,6 @@ Workers and the coordinator communicate through DB-backed coordination tables in
 - **`workers`** — registry of active auto-mode workers with heartbeat TTL and shutdown/crash status
 - **`milestone_leases`** — one-worker-at-a-time milestone ownership with fencing tokens for safe takeover after expiry or release
 - **`unit_dispatches`** — dispatch ledger that records claim, running, completed, failed, stuck, canceled, and retry timing state per unit
-- **`command_queue`** — targeted or broadcast control commands claimed atomically by workers
 
 If a worker stops heartbeating, its lease can expire and another worker can safely take over the milestone. Dispatch claiming respects the ledger's `next_run_at` retry schedule; repeated non-advancing claim outcomes are adjudicated separately by the DB-persisted liveness backstop.
 
@@ -162,7 +161,7 @@ parallel:
 |---------|-------------|
 | `/gsd parallel start` | Analyze eligibility, confirm, and start workers |
 | `/gsd parallel status` | Show all workers with state, units completed, and cost |
-| `/gsd parallel stop` | Stop all workers (enqueues stop + sends SIGTERM) |
+| `/gsd parallel stop` | Stop all workers (sends stop signal + SIGTERM) |
 | `/gsd parallel stop M002` | Stop a specific milestone's worker |
 | `/gsd parallel pause` | Pause all workers (finish current unit, then wait) |
 | `/gsd parallel pause M002` | Pause a specific worker |
@@ -173,28 +172,28 @@ parallel:
 
 ## Command Lifecycle
 
-The coordinator communicates with workers through persisted runtime commands:
+The coordinator communicates with workers through `command_queue` rows in the project database. Each row is targeted at the worker's milestone. A signal file (`.gsd/parallel/<MID>.signal.json`) from an external orchestrator is still accepted for compatibility and is deprecated: the worker turns it into a `command_queue` row and removes the file:
 
 ```text
 Coordinator                    Worker
     │                            │
-    ├── enqueue("pause") ─────→  │
-    │                            ├── claimNextCommand()
+    ├── sendSignal("pause") ──→  │
+    │                            ├── consumeSignal()
     │                            ├── pauseAuto()
     │                            │   (finish current unit, wait)
     │                            │
-    ├── enqueue("resume") ────→  │
-    │                            ├── claimNextCommand()
+    ├── sendSignal("resume") ─→  │
+    │                            ├── consumeSignal()
     │                            ├── resume dispatch loop
     │                            │
-    ├── enqueue("stop") ──────→  │
+    ├── sendSignal("stop") ───→  │
     │   + SIGTERM ────────────→  │
-    │                            ├── claimNextCommand() or SIGTERM handler
+    │                            ├── consumeSignal() or SIGTERM handler
     │                            ├── stopAuto()
     │                            └── process exits
 ```
 
-Workers poll the command queue between units and the coordinator also sends `SIGTERM` for immediate response on stop. Heartbeats and lease refreshes happen continuously during the loop, so `parallel status` reflects DB state rather than sidecar JSON files.
+Workers take the oldest pending command between units and the coordinator also sends `SIGTERM` for immediate response on stop. Heartbeats and lease refreshes happen continuously during the loop, so `parallel status` reflects DB state rather than sidecar JSON files.
 
 ## Merge Reconciliation
 
@@ -207,7 +206,7 @@ When milestones complete, their worktree changes need to merge back to main.
 
 ### Conflict Handling
 
-1. Runtime coordination state (worker registry, leases, dispatches, cancellation requests, command queue) lives in the project-root SQLite runtime and is not merge-driven.
+1. Runtime coordination state (worker registry, leases, dispatches, cancellation requests) lives in the project-root SQLite runtime and is not merge-driven.
 2. Code conflicts — **stop and report**. The merge halts, showing which files conflict. Resolve manually and retry with `/gsd parallel merge <MID>`.
 
 ### Example
@@ -229,7 +228,7 @@ When milestones complete, their worktree changes need to merge back to main.
 When `budget_ceiling` is set, the coordinator tracks aggregate cost across all workers:
 
 - Cost is summed from each worker's session status
-- When the ceiling is reached, the coordinator enqueues stop commands for workers
+- When the ceiling is reached, the coordinator sends stop signals to workers
 - Each worker also respects the project-level `budget_ceiling` preference independently
 
 ## Health Monitoring
@@ -245,6 +244,7 @@ Run `/gsd doctor --fix` to clean up automatically.
 ### Stale Detection
 
 Sessions are considered stale when:
+
 - The worker PID is no longer running
 - The last heartbeat is older than the worker TTL
 - A milestone lease is released or expires without a matching active heartbeat
@@ -282,7 +282,7 @@ The coordinator runs stale detection during status refresh and either marks the 
 └── ...
 ```
 
-`.gsd/gsd.db*`, `.gsd/parallel/`, `.gsd/worktrees/`, `.gsd-worktrees/`, and `.gsd-backups/` are all local runtime artifacts and should remain gitignored. `.gsd-backups/` stores migration snapshots; stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the project has completed the flat-phase `.gsd/phases/` migration.
+`.gsd/gsd.db*`, `.gsd/parallel/`, `.gsd/worktrees/`, `.gsd-worktrees/`, and `.gsd-backups/` are all local runtime artifacts and should remain gitignored. `.gsd-backups/` stores migration snapshots. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
 ## Troubleshooting
 

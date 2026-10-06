@@ -5,11 +5,11 @@
   "importer_version": "v1-test",
   "base_project_revision": 0,
   "base_authority_epoch": 0,
-  "base_database_schema_version": 50,
-  "source_set_hash": "sha256:a7f5713ba6aff3f6aa8ee258d0743a1a3e58a6100235d55bb88e2de41da9c737",
-  "change_set_hash": "sha256:b598ab41be378fbb1915df3bb03a99509cb3bc318f4cc452d47b6b034a6f7836",
+  "base_database_schema_version": 51,
+  "source_set_hash": "sha256:b8343676d97bb42fb4a9f63fc899d18742aada54ae9be48f29dc71c0bb757085",
+  "change_set_hash": "sha256:073a8cbba41efbeab696b32b094d0e75e4957de8f0c4daae7b204bc4610ee076",
   "counts": {
-    "create": 0,
+    "create": 3,
     "update": 0,
     "delete": 0,
     "preserve": 3,
@@ -26,7 +26,7 @@
       "parser_id": "gsd-knowledge-graph",
       "parser_version": "1",
       "encoding": "utf-8",
-      "outcome": "preserved"
+      "outcome": "mapped"
     },
     {
       "source_id": "knowledge-malformed-snapshot",
@@ -74,6 +74,107 @@
     }
   ],
   "changes": [
+    {
+      "change_id": "change-create-knowledge-k001",
+      "action": "create",
+      "target": {
+        "kind": "knowledge",
+        "key": "K001"
+      },
+      "raw": {
+        "source_id": "knowledge-root",
+        "locator": {
+          "start_byte": 101,
+          "end_byte": 182,
+          "line": 7
+        },
+        "value": "| K001 | authority | Use database authority. | Prevent projection drift. | M001 |",
+        "sha256": "sha256:65292b728d035727961446e0639f3c4922f1d9b16a035c072ae0c8d81fcc46c3"
+      },
+      "normalized": {
+        "source_knowledge_id": "K001",
+        "table": "rules",
+        "cells": [
+          "authority",
+          "Use database authority.",
+          "Prevent projection drift.",
+          "M001"
+        ]
+      },
+      "provenance": {
+        "source_id": "knowledge-root",
+        "parser_id": "gsd-knowledge-graph",
+        "parser_version": "1"
+      },
+      "reason_code": "knowledge-row-mapped"
+    },
+    {
+      "change_id": "change-create-knowledge-l001",
+      "action": "create",
+      "target": {
+        "kind": "knowledge",
+        "key": "L001"
+      },
+      "raw": {
+        "source_id": "knowledge-root",
+        "locator": {
+          "start_byte": 465,
+          "end_byte": 556,
+          "line": 19
+        },
+        "value": "| L001 | A snapshot drifted | It was treated as truth | Preserve source evidence | import |",
+        "sha256": "sha256:e8239450aeb4f369079b0d5cfb7c6fecb8a7365c843d3002b87b8cc0576b5d67"
+      },
+      "normalized": {
+        "source_knowledge_id": "L001",
+        "table": "lessons",
+        "cells": [
+          "A snapshot drifted",
+          "It was treated as truth",
+          "Preserve source evidence",
+          "import"
+        ]
+      },
+      "provenance": {
+        "source_id": "knowledge-root",
+        "parser_id": "gsd-knowledge-graph",
+        "parser_version": "1"
+      },
+      "reason_code": "knowledge-row-mapped"
+    },
+    {
+      "change_id": "change-create-knowledge-p001",
+      "action": "create",
+      "target": {
+        "kind": "knowledge",
+        "key": "P001"
+      },
+      "raw": {
+        "source_id": "knowledge-root",
+        "locator": {
+          "start_byte": 261,
+          "end_byte": 346,
+          "line": 13
+        },
+        "value": "| P001 | Derived views are replaceable | projections | Rebuild only outside import. |",
+        "sha256": "sha256:97dd19dc5acaccb7aa60332f17e7584e6029b3cae7a4659b8306d936af4f7354"
+      },
+      "normalized": {
+        "source_knowledge_id": "P001",
+        "table": "patterns",
+        "cells": [
+          "Derived views are replaceable",
+          "projections",
+          "Rebuild only outside import."
+        ]
+      },
+      "provenance": {
+        "source_id": "knowledge-root",
+        "parser_id": "gsd-knowledge-graph",
+        "parser_version": "1"
+      },
+      "reason_code": "knowledge-row-mapped"
+    },
     {
       "change_id": "change-knowledge-derived-graph",
       "action": "preserve",

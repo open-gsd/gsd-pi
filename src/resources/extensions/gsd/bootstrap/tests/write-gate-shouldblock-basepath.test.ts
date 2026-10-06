@@ -2,7 +2,7 @@
 // shouldBlockContextWrite / shouldBlockPendingGate (R1).
 //
 // The underlying bug: readers defaulted to process.cwd() and so missed the
-// per-basePath state Map entry written by markDepthVerified(..., baseDirA)
+// per-basePath state written by markDepthVerified(..., baseDirA)
 // when cwd had drifted to baseDirB. With basePath threaded explicitly to
 // the readers, the depth-gate sees the verified state regardless of cwd.
 
@@ -37,22 +37,14 @@ after(() => {
 describe("write-gate shouldBlock readers respect explicit basePath", () => {
   let baseDirA: string;
   let baseDirB: string;
-  let prevPersist: string | undefined;
 
   before(() => {
     baseDirA = makeTempDir();
     baseDirB = makeTempDir();
-    prevPersist = process.env.GSD_PERSIST_WRITE_GATE_STATE;
-    process.env.GSD_PERSIST_WRITE_GATE_STATE = "1";
   });
 
   after(() => {
     process.chdir(originalCwd);
-    if (prevPersist === undefined) {
-      delete process.env.GSD_PERSIST_WRITE_GATE_STATE;
-    } else {
-      process.env.GSD_PERSIST_WRITE_GATE_STATE = prevPersist;
-    }
     rmSync(baseDirA, { recursive: true, force: true });
     rmSync(baseDirB, { recursive: true, force: true });
   });

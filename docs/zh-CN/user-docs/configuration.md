@@ -33,6 +33,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 0
 budget_ceiling: 50.00
 token_profile: balanced
 ---
@@ -95,6 +96,8 @@ GSD 会从以下项目本地路径读取 MCP client 配置：
 - 把你愿意提交到仓库的共享 MCP 配置放在 `.mcp.json`
 - 把仅本机使用、不希望共享的 MCP 配置放在 `.gsd/mcp.json`
 
+对于已有的 GSD 项目，GSD 也会在会话启动时自动准备仓库共享的 `.mcp.json`。这个自动准备不依赖当前选择的 model provider，但只会在项目根目录已经包含 `.gsd/` 时运行；非 GSD 仓库不会被改动。它会写入托管的 `gsd-workflow` 条目，并且在未设置 `GSD_BROWSER_MCP_ENABLED=0` 时写入托管的 `gsd-browser` 条目，供 Claude Code 等外部 MCP client 使用。
+
 ### 支持的 transport
 
 | Transport | 配置形状 | 适用场景 |
@@ -156,7 +159,7 @@ mcp_call(server="my-server", tool="<tool_name>", args={...})
 - 如果某个 server 依赖本机路径、个人服务或本地 secrets，更适合放在 `.gsd/mcp.json`
 - 对内置的 `gsd-workflow` server，如果是从 worktree 或 wrapper 启动，请把 `GSD_WORKFLOW_PROJECT_ROOT` 设为规范项目根目录。打包的 server 会用它定位 workflow 工具路径，并用它作为 `$GSD_HOME/mcp-instances.json` 中的单项目 stale-process registry key。
 - 打包的 `gsd-workflow` MCP server 默认只暴露 canonical workflow tool 名称。只有仍在调用旧 alias 名称的客户端才需要设置 `GSD_MCP_ADVERTISE_ALIASES=1`。原生进程内 GSD 工具使用 `GSD_ADVERTISE_TOOL_ALIASES=1`。
-- 自定义客户端调用 `gsd_plan_milestone`、`gsd_plan_slice`、`gsd_plan_task`、`gsd_replan_slice`、`gsd_replan_task`、`gsd_reassess_roadmap` 或 `gsd_task_recovery_resume` 时，必须发送非空的私有 `_meta["io.opengsd/idempotency-key"]`，并在重试时复用同一个值。它属于 transport metadata，不是公开 tool 参数；缺少该身份时会在 mutation 前失败。
+- 自定义客户端调用 `gsd_plan_milestone`、`gsd_plan_slice`、`gsd_plan_task`、`gsd_replan_slice`、`gsd_replan_task`、`gsd_reassess_roadmap`、`gsd_decision_save`（别名 `gsd_save_decision`）、`gsd_requirement_save`、`gsd_requirement_update`、`gsd_save_gate_result`、`gsd_rework_brief_save`、`gsd_capture_thought`、`gsd_summary_save`（别名 `gsd_save_summary`）、`gsd_uat_result_save` 或 `gsd_task_recovery_resume` 时，必须发送非空的私有 `_meta["io.opengsd/idempotency-key"]`，并在重试时复用同一个值。它属于 transport metadata，不是公开 tool 参数；缺少该身份时会在 mutation 前失败。
 - 需要 GSD workflow 工具的 Claude Code 会话是 fail-closed 的：如果启动时 `gsd-workflow` 不存在、仍为 pending、failed、disabled，或缺少必需工具，GSD 会在第一个 model turn 前中止该 unit 并重试，而不是允许工具调用落到不完整的 surface 上。
 
 ## 环境变量
@@ -291,7 +294,7 @@ phases:
 
 ### `reactive_execution`
 
-控制一个 slice 内部的自动并行 task 派发。该功能默认开启；只有当 task plan 的 IO 注解能生成不含歧义的依赖图，并且存在足够的 ready、互不冲突 tasks 时才会真正派发。
+控制一个 slice 内部的自动并行 task 派发。该功能默认开启；只有当 task 行中计划的输入和预期输出能生成不含歧义的依赖图，并且存在足够的 ready、互不冲突 tasks 时才会真正派发。
 
 ```yaml
 reactive_execution:
@@ -330,7 +333,10 @@ auto_supervisor:
   idle_timeout_minutes: 10    # 检测停滞
   hard_timeout_minutes: 30    # 暂停自动模式
   stalled_tool_timeout_minutes: 5  # 恢复在调用中卡死的 tool（默认：5）
+  global_idle_timeout_minutes: 0   # 无工作单元在运行达到该分钟数时发出通知（默认：0 = 关闭）
 ```
+
+`global_idle_timeout_minutes`（#2373）监视整个会话而非单个工作单元：当自动模式处于活动状态但没有工作单元在运行、且持续达到该分钟数时，每个空闲周期发出一次通知。仅通知——不派发、不重试、不修改任何状态。默认 `0` 表示关闭。
 
 `stalled_tool_timeout_minutes` 的工具豁免范围及超时限制，参见[英文配置指南](../../user-docs/configuration.md#auto_supervisor)。
 
@@ -463,7 +469,6 @@ git:
   main_branch: main           # 主分支名称
   merge_strategy: squash      # worktree 分支合并方式："squash" 或 "merge"
   isolation: none             # git isolation："none"（默认）、"worktree" 或 "branch"
-  commit_docs: true           # 是否把 .gsd/ 产物提交到 git（设为 false 时仅保留本地）
   manage_gitignore: true      # 设为 false 时，GSD 不再修改 .gitignore
   worktree_post_create: .gsd/hooks/post-worktree-create  # worktree 创建后执行的脚本
   auto_pr: false              # milestone 完成时自动创建 PR（要求 push_branches）
@@ -481,7 +486,6 @@ git:
 | `main_branch` | string | `"main"` | 主分支名称 |
 | `merge_strategy` | string | `"squash"` | worktree 分支合并方式：`"squash"`（合并为单个提交）或 `"merge"`（保留单独提交） |
 | `isolation` | string | `"none"` | 自动模式隔离方式：`"none"`（无隔离，直接提交到当前分支）、`"worktree"`（独立目录）或 `"branch"`（直接在项目根目录工作，适合子模块多的仓库）。`worktree` 要求有已提交的 `HEAD`；零提交仓库会临时按 `none` 运行，直到第一次提交存在 |
-| `commit_docs` | boolean | `true` | 是否把 `.gsd/` planning 产物提交到 git。设为 `false` 则仅保留本地 |
 | `manage_gitignore` | boolean | `true` | 设为 `false` 后，GSD 将完全不修改 `.gitignore`，不会添加基础规则，也不会做自愈 |
 | `worktree_post_create` | string | （无） | worktree 创建后执行的脚本。环境变量中会传入 `SOURCE_DIR` 和 `WORKTREE_DIR` |
 | `auto_pr` | boolean | `false` | milestone 完成时自动创建 pull request。要求 `auto_push: true` 且已安装认证 `gh` CLI |
@@ -702,7 +706,7 @@ custom_instructions:
   - "Prefer functional patterns over classes"
 ```
 
-如果是项目特有知识，请使用 GSD 的 knowledge 和 memory 机制。`.gsd/KNOWLEDGE.md` 是混合投影：手动维护的 Rules 保留在文件里，生成的 Patterns 和 Lessons 由 `memories` 表承载，并渲染回文件方便审阅。持久操作规则用 `/gsd knowledge rule <description>` 添加；agent 发现的模式和经验会作为 memories 保存，并自动参与 prompt 注入。
+如果是项目特有知识，请使用 GSD 的 knowledge 和 memory 机制。`.gsd/KNOWLEDGE.md` 由数据库渲染：Rules、Patterns 和 Lessons 都是 `memories` 表中的行，每次捕获后会渲染回文件方便审阅。持久操作规则用 `/gsd knowledge rule <description>` 添加；agent 发现的模式和经验会作为 memories 保存，并自动参与 prompt 注入。
 
 ### `RUNTIME.md`：运行时上下文
 
@@ -855,7 +859,6 @@ git:
   auto_push: true
   merge_strategy: squash
   isolation: none             # "none"（默认）、"worktree" 或 "branch"
-  commit_docs: true
 
 # Skills
 skill_discovery: suggest

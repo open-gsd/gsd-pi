@@ -1,7 +1,5 @@
 // Project/App: gsd-pi
-// File Purpose: Canonical quality-gate closure from durable DB and artifact evidence.
-
-import { existsSync, readFileSync } from "node:fs";
+// File Purpose: Canonical quality-gate closure from durable DB evidence.
 
 import { extractSection } from "./files.js";
 import { getGateDefinition } from "./gate-registry.js";
@@ -10,13 +8,14 @@ import {
   getMilestoneSlices,
   getPendingGates,
   getPendingGatesForTurn,
+  getSlice,
+  getSliceScopedArtifacts,
+  getTask,
   saveGateResult,
 } from "./gsd-db.js";
-import { resolveSliceFile, resolveTaskFile } from "./paths.js";
 import type { GateId, GateRow, GateVerdict } from "./types.js";
 
 export interface QualityGateClosureOptions {
-  artifactBasePath?: string;
   milestoneValidationPassed?: boolean;
   milestoneValidationAuthorization?: {
     kind: "validated" | "waived";
@@ -56,11 +55,6 @@ const GATE_SECTION_HEADINGS: Partial<Record<GateId, string[]>> = {
   Q8: ["Operational Readiness"],
 };
 
-function readFile(path: string | null): string | null {
-  if (!path || !existsSync(path)) return null;
-  return readFileSync(path, "utf-8");
-}
-
 function firstSection(content: string | null, gateId: GateId): string | null {
   if (!content) return null;
   for (const heading of GATE_SECTION_HEADINGS[gateId] ?? []) {
@@ -70,15 +64,21 @@ function firstSection(content: string | null, gateId: GateId): string | null {
   return null;
 }
 
-function evidenceArtifactContent(row: GateRow, basePath: string): string | null {
+/**
+ * Stored content that can carry the gate's section: the saved PLAN artifact
+ * row, the task summary column or the slice summary column. The rendered
+ * files are projections; a heading in a file closes no gate.
+ */
+function storedEvidenceContent(row: GateRow): string | null {
   const def = getGateDefinition(row.gate_id);
   switch (def?.ownerTurn) {
     case "gate-evaluate":
-      return readFile(resolveSliceFile(basePath, row.milestone_id, row.slice_id, "PLAN"));
+      return getSliceScopedArtifacts(row.milestone_id, row.slice_id)
+        .find((artifact) => artifact.artifact_type === "PLAN")?.full_content ?? null;
     case "execute-task":
-      return readFile(resolveTaskFile(basePath, row.milestone_id, row.slice_id, row.task_id, "SUMMARY"));
+      return getTask(row.milestone_id, row.slice_id, row.task_id)?.full_summary_md ?? null;
     case "complete-slice":
-      return readFile(resolveSliceFile(basePath, row.milestone_id, row.slice_id, "SUMMARY"));
+      return getSlice(row.milestone_id, row.slice_id)?.full_summary_md ?? null;
     default:
       return null;
   }
@@ -108,9 +108,7 @@ function closureEvidence(row: GateRow, options: QualityGateClosureOptions): Gate
     };
   }
 
-  if (!options.artifactBasePath) return null;
-
-  const section = firstSection(evidenceArtifactContent(row, options.artifactBasePath), row.gate_id);
+  const section = firstSection(storedEvidenceContent(row), row.gate_id);
   if (section) {
     return {
       verdict: "pass",

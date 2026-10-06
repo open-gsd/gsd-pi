@@ -289,6 +289,76 @@ test("streamViaCursorAgent turns NDJSON into assistant events with external tool
 	assert.equal(done.message.usage.output, 4);
 });
 
+// ---------------------------------------------------------------------------
+// Projection write guard — cursor-agent executes Write/Edit/Bash itself and
+// the stream-json protocol has no pre-execution hook, so the adapter cannot
+// block. The detect-and-report mirror marks the executed call's result with
+// the projection refusal and the save tool that owns the file.
+// ---------------------------------------------------------------------------
+
+async function streamToolLines(lines: string[]) {
+	const stream = streamViaCursorAgent(model, context, {
+		_cursorAgentRunnerForTest: async () => ({ stdout: `${lines.join("\n")}\n`, stderr: "", code: 0, signal: null }),
+	});
+	const events = [];
+	for await (const event of stream) events.push(event);
+	const done = events.find((event) => event.type === "done");
+	assert.ok(done && done.type === "done");
+	return done.message.content.filter((block) => block.type === "toolCall");
+}
+
+function resultText(result: unknown): string {
+	if (!result || typeof result !== "object" || !Array.isArray((result as { content?: unknown }).content)) return "";
+	return (result as { content: unknown[] }).content
+		.map((part) => typeof part === "object" && part !== null && typeof (part as { text?: unknown }).text === "string"
+			? (part as { text: string }).text
+			: "")
+		.join("");
+}
+
+test("cursor adapter reports a write to a managed projection as a refused tool result", async () => {
+	const toolCalls = await streamToolLines([
+		'{"type":"tool_call","id":"tool_w","name":"write","input":{"path":"/tmp/project/.gsd/STATE.md","content":"x"}}',
+		'{"type":"tool_result","tool_call_id":"tool_w","content":"ok","is_error":false}',
+	]);
+	assert.equal(toolCalls.length, 1);
+	const result = toolCalls[0].externalResult;
+	assert.ok(result && result.isError === true, "the executed write must be reported as an error");
+	assert.match(resultText(result), /gsd_task_complete/);
+	assert.match(resultText(result), /cursor-agent executed this tool before GSD could refuse it/);
+});
+
+test("cursor adapter names the save tool for an edit to a rendered projection and a bash write", async () => {
+	const editCalls = await streamToolLines([
+		'{"type":"tool_call","id":"tool_e","name":"Edit","input":{"file_path":"/tmp/project/.gsd/milestones/M001/M001-ROADMAP.md","old_string":"a","new_string":"b"}}',
+	]);
+	assert.equal(editCalls.length, 1);
+	const editResult = editCalls[0].externalResult;
+	assert.ok(editResult && editResult.isError === true);
+	assert.match(resultText(editResult), /gsd_plan_milestone/);
+
+	const bashCalls = await streamToolLines([
+		'{"type":"tool_call","id":"tool_b","name":"bash","input":{"command":"echo x >> .gsd/DECISIONS.md"}}',
+		'{"type":"tool_result","tool_call_id":"tool_b","content":"ok","is_error":false}',
+	]);
+	const bashResult = bashCalls[0].externalResult;
+	assert.ok(bashResult && bashResult.isError === true);
+	assert.match(resultText(bashResult), /gsd_decision_save/);
+});
+
+test("cursor adapter keeps the executed result for writes outside the managed projections", async () => {
+	const toolCalls = await streamToolLines([
+		'{"type":"tool_call","id":"tool_src","name":"write","input":{"path":"/tmp/project/src/app.ts","content":"x"}}',
+		'{"type":"tool_result","tool_call_id":"tool_src","content":"ok","is_error":false}',
+		'{"type":"tool_call","id":"tool_doc","name":"write","input":{"path":"/tmp/project/.gsd/milestones/M001/M001-LEARNINGS.md","content":"x"}}',
+		'{"type":"tool_result","tool_call_id":"tool_doc","content":"ok","is_error":false}',
+	]);
+	assert.equal(toolCalls.length, 2);
+	for (const call of toolCalls) {
+		assert.deepEqual(call.externalResult, { content: [{ type: "text", text: "ok" }], isError: false });
+	}
+});
+
 test("cursor adapter bridges a streamed gsd_task_complete envelope for local host execution (#1764)", async () => {
 	const lines = [
 		'{"type":"assistant","message":{"content":[{"type":"text","text":"Implemented and verified.\\n<gsd_tool_"}]}}',

@@ -103,9 +103,9 @@ GSD 会对 provider 错误分类，并在安全时自动恢复：
 
 ### 增量记忆
 
-GSD 会在 `memories` 表中维护项目持久记忆，并把其中一部分知识投影回 `.gsd/KNOWLEDGE.md` 方便审阅。`KNOWLEDGE.md` 中的 Rules 仍由文件本身保存；Patterns 和 Lessons 会作为 memories 捕获，从已有行回填，并在会话启动时重新渲染到文件中。
+GSD 会在 `memories` 表中维护项目持久记忆，并把其中一部分知识投影回 `.gsd/KNOWLEDGE.md` 方便审阅。Rules、Patterns 和 Lessons 都是由 `/gsd knowledge` 或 `capture_thought` 写入的 memories 行；每次捕获后以及重建时，`KNOWLEDGE.md` 会从数据库重新渲染。
 
-每个工作单元开始时，GSD 会从项目 `KNOWLEDGE.md` 注入手写 Rules；Patterns 和 Lessons 则通过 memory block 提供给 agent。全局的 `~/.gsd/agent/KNOWLEDGE.md` 仍由用户维护，并按原样注入。
+每个工作单元开始时，GSD 会注入从数据库（而不是文件）读取的项目 Rules；Patterns 和 Lessons 则通过 memory block 提供给 agent。数据库不可用时，prompt 会显示 `Project Knowledge unavailable` 块并记录警告；文件不会作为回退。全局的 `~/.gsd/agent/KNOWLEDGE.md` 仍由用户维护，并按原样注入。
 
 ### 上下文压力监视器
 
@@ -152,6 +152,7 @@ auto_supervisor:
   soft_timeout_minutes: 20
   idle_timeout_minutes: 10
   hard_timeout_minutes: 30
+  global_idle_timeout_minutes: 60   # 可选：无工作单元在运行达到该分钟数时发出通知（默认：0 = 关闭）
 ```
 
 ### 成本跟踪
@@ -316,7 +317,7 @@ Token profile 可以通过跳过某些阶段来降低成本：
 
 ## 响应式 Task 执行
 
-响应式 task 执行现在默认开启。执行 task 时，GSD 会从 task plan 中的 IO 注解推导依赖图。默认配置下，只有当至少 3 个 ready tasks 可以被安全评估时，互不冲突的 tasks（没有共享文件读写）才会通过 subagents 并行派发；存在依赖的 tasks 会等待前驱完成。
+响应式 task 执行现在默认开启。执行 task 时，GSD 会从数据库 task 行中计划的输入和预期输出推导依赖图，不读取 PLAN 文件。带有 lifecycle 行的 task（`gsd_plan_slice` 规划的每个 task 都有）不会进入并行批次，而是通过顺序执行器逐个运行。默认配置下，只有当至少 3 个 ready tasks 可以被安全评估时，互不冲突的 tasks（没有共享文件读写）才会通过 subagents 并行派发；存在依赖的 tasks 会等待前驱完成。
 
 ```yaml
 reactive_execution:

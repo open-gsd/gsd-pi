@@ -91,6 +91,7 @@ ssh://git@github.com/user/repo@v1
 - When reconciliation changes the checkout, pi resets and cleans the clone, then runs `npm install` if `package.json` exists.
 
 **SSH examples:**
+
 ```bash
 # git@host:path shorthand (requires git: prefix)
 pi install git:git@github.com:user/repo

@@ -133,7 +133,6 @@ mode: team    # 共享仓库：唯一 ID、推送分支、预合并检查
 | `git.pre_merge_check` | `false` | `true` |
 | `git.merge_strategy` | `"squash"` | `"squash"` |
 | `git.isolation` | `"none"` | `"none"` |
-| `git.commit_docs` | `true` | `true` |
 | `unique_milestone_ids` | `false` | `true` |
 
 Mode 默认值的优先级最低，任何显式偏好设置都会覆盖它们。例如，`mode: solo` 配合 `git.auto_push: false`，就表示除了自动推送以外，其它行为都沿用 solo 的默认配置。
@@ -153,7 +152,6 @@ git:
   pre_merge_check: false      # 合并前校验
   commit_type: feat           # 覆盖提交类型前缀
   main_branch: main           # 主分支名称
-  commit_docs: true           # 将 .gsd/ 提交到 git
   isolation: none             # "none"（默认）、"worktree" 或 "branch"
   auto_pr: false              # milestone 完成时自动创建 PR
   pr_target_branch: develop   # PR 目标分支（默认 main）
@@ -171,10 +169,6 @@ git:
 ```
 
 这样会把 milestone 分支推送到远程，并创建一个目标分支为 `develop`（或你指定的其它分支）的 PR。要求已安装并认证 `gh` CLI。详见 [git.auto_pr](./configuration.md#gitauto_pr)。
-
-### `commit_docs: false`
-
-当设置为 `false` 时，GSD 会把 `.gsd/` 添加到 `.gitignore`，所有规划产物只保留在本地。适合只有部分成员使用 GSD 的团队，或者公司要求仓库保持干净的场景。
 
 ## 自愈能力
 

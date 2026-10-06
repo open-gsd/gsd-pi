@@ -33,7 +33,7 @@ import { SCHEMA_VERSION, SchemaTooNewError } from "../resources/extensions/gsd/d
 import { readProgressFromDb } from "../resources/extensions/gsd/state/progress-from-db.ts";
 
 const V51_MESSAGE =
-  "gsd.db schema is v51, newer than the v50 this gsd-pi supports. " +
+  "gsd.db schema is v52, newer than the v51 this gsd-pi supports. " +
   "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
 
 // Real preflight probe: the same pieces the production jiti loader wires up,
@@ -88,7 +88,7 @@ test("gsd read progress --json on a newer-schema project exits non-zero with the
     assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
     const db = _getAdapter();
     assert.ok(db);
-    recordSchemaVersion(db, 51);
+    recordSchemaVersion(db, 52);
     closeDatabase();
 
     const run = await captureReadCli(readProgressArgv(base));
@@ -112,7 +112,7 @@ test("gsd read progress checks the project DB schema from a canonical milestone 
   assert.equal(openDatabase(join(base, ".gsd", "gsd.db")), true);
   const db = _getAdapter();
   assert.ok(db);
-  recordSchemaVersion(db, 51);
+  recordSchemaVersion(db, 52);
   closeDatabase();
 
   const run = await captureReadCli(readProgressArgv(worktree));

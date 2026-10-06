@@ -109,7 +109,7 @@ Diagnostics record the file path, scope (global/project), severity (error/warnin
 
 - `skill_rules`: situational rules with a human-readable `when` trigger and one or more of `use`, `prefer`, or `avoid`.
 
-- `custom_instructions`: extra durable instructions related to skill use. For operational project knowledge, use `.gsd/KNOWLEDGE.md` instead. Rules are file-canonical; patterns and lessons are persisted to the `memories` table and projected back into `KNOWLEDGE.md` on the next session start.
+- `custom_instructions`: extra durable instructions related to skill use. For operational project knowledge, use `.gsd/KNOWLEDGE.md` instead. Rules, patterns and lessons are saved to the `memories` table (`/gsd knowledge` or `capture_thought`), and `KNOWLEDGE.md` is rendered from them after each save.
 
 - `language`: preferred response language for all GSD interactions. Accepts any language name or code — `"Chinese"`, `"zh"`, `"German"`, `"de"`, `"日本語"`, etc. When set, GSD injects "Always respond in \<language\>" into every agent's system prompt, including after `/clear`. Quickest way to set it: `/gsd language <name>`. To clear: `/gsd language off`.
 
@@ -222,7 +222,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
 
 - `token_profile`: `"budget"`, `"balanced"`, `"quality"`, or `"burn-max"` — coordinates model selection, phase skipping, and context compression. `budget` skips research/reassessment and uses cheaper models; `balanced` (default) skips research/reassessment to reduce token burn; `quality` prefers higher-quality models; `burn-max` keeps full-context defaults, disables downgrade routing, and keeps phase skips off.
 
-- `planning_depth`: `"light"` or `"deep"` — controls project-level discovery before milestone planning. `"light"` is the default milestone discussion flow. `"deep"` runs workflow preferences, project discussion, requirements discussion, a research-decision gate, and optional project research before milestone planning. Enable it with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by setting `planning_depth: deep` in project-local `.gsd/PREFERENCES.md`. Global `~/.gsd/PREFERENCES.md` does not opt every fresh repo into deep mode. Deep mode writes `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, `.gsd/runtime/research-decision.json`, and, when research is approved, `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`.
+- `planning_depth`: `"light"` or `"deep"` — controls project-level discovery before milestone planning. `"light"` is the default milestone discussion flow. `"deep"` runs workflow preferences, project discussion, requirements discussion, and optional project research before milestone planning. Enable it with `/gsd new-project --deep`, `/gsd new-milestone --deep`, or by setting `planning_depth: deep` in project-local `.gsd/PREFERENCES.md`. Global `~/.gsd/PREFERENCES.md` does not opt every fresh repo into deep mode. Deep mode writes `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, and, when research is approved, `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`. The research decision is recorded in the database with `gsd_research_decision_save`; no decision means `skip`.
 
 - `phases`: fine-grained control over which phases run. Usually set by `token_profile`, but can be overridden. Keys:
   - `skip_research`: boolean — skip milestone-level research. Default: `false`.
@@ -230,7 +230,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `skip_reassess`: boolean — force-disable roadmap reassessment even if `reassess_after_slice` is enabled. Default: `false`.
   - `skip_slice_research`: boolean — skip per-slice research. Default: `false`.
 
-- `reactive_execution`: controls automatic parallel task dispatch inside a slice. Reactive execution is enabled by default when omitted; set `enabled: false` to opt out. With default-on behavior, GSD only attempts a reactive batch when at least three ready tasks are available and the task-plan IO graph is non-ambiguous. If you set `enabled: true` explicitly, GSD uses the earlier opt-in threshold of two ready tasks. Keys:
+- `reactive_execution`: controls automatic parallel task dispatch inside a slice. Reactive execution is enabled by default when omitted; set `enabled: false` to opt out. With default-on behavior, GSD only attempts a reactive batch when at least three ready tasks are available and the graph of planned task inputs and expected output (read from the task rows) is non-ambiguous. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch. If you set `enabled: true` explicitly, GSD uses the earlier opt-in threshold of two ready tasks. Keys:
   - `enabled`: boolean — set `false` to force sequential task execution. Default: `true`.
   - `max_parallel`: number — maximum tasks to dispatch in one batch, range `1`-`8`. Default: `2`.
   - `isolation_mode`: `"same-tree"` — currently the only supported value.
@@ -266,7 +266,7 @@ In `"parent"` mode, slice/task `targetRepositories` default to the declared chil
   - `budget_pressure`: boolean — downgrade model tier when budget is under pressure. Default: `true`.
   - `cross_provider`: boolean — allow routing across different providers. Default: `true`.
   - `hooks`: boolean — enable routing hooks. Default: `true`.
-  - `capability_routing`: boolean — enable capability-profile scoring for model selection within a tier. Requires `enabled: true`. Default: `false`.
+  - `capability_routing`: boolean — enable capability-profile scoring for model selection within a tier. Requires `enabled: true`. Default: `true`.
 
 - `disabled_model_providers`: string[] — provider IDs to hide from model selection and routing (for example `["google-gemini-cli"]`). This only affects model availability (`/model`, auto-model selection, routing); it does not disable tool auth flows like `google_search`.
 

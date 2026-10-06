@@ -53,7 +53,8 @@ export interface DecideVerificationVerdictOptions {
 
 const UNRESOLVED_COMMAND_PATTERNS = [
   /'([^']+)' is not recognized as an internal or external command/i,
-  /([^\s:'"]+): (?:command )?not found/i,
+  /(?:(?:[^\s:'"]+): (?:(?:line )?\d+: ))?(.+?): command not found/i,
+  /(?:(?:[^\s:'"]+): (?:(?:line )?\d+: ))?(.+?): not found/i,
 ];
 
 /** The specific tool a shell failed to resolve, so compound checks name the missing segment (#2087). */
@@ -61,13 +62,12 @@ export function unresolvedCommandToken(stderr: string | undefined): string | nul
   if (!stderr) return null;
   for (const pattern of UNRESOLVED_COMMAND_PATTERNS) {
     const match = pattern.exec(stderr);
-    if (match?.[1]) return match[1];
+    if (match?.[1]) return match[1].trim();
   }
   return null;
 }
 
 export function decideVerificationVerdict(
-  unitType: string,
   result: VerificationGateResult,
   options?: DecideVerificationVerdictOptions,
 ): VerificationVerdict {
@@ -122,20 +122,9 @@ export function decideVerificationVerdict(
     };
   }
 
-  if (unitType === "execute-task" && result.discoverySource === "task-plan-prose" && result.checks.length === 0) {
-    return {
-      passed: true,
-      reason: "passed",
-      retryable: false,
-      failureContext: "",
-    };
-  }
-
-  if (
-    unitType === "execute-task" &&
-    (result.discoverySource === "none" || result.discoverySource === "task-plan-unsafe") &&
-    result.checks.length === 0
-  ) {
+  // A host verdict needs a host-run check. A result with no check proves
+  // nothing, so it is never a pass (ADR-046), whatever the discovery source.
+  if (result.checks.length === 0) {
     return {
       passed: false,
       reason: "no-host-checks",

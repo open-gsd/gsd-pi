@@ -8,12 +8,13 @@ import { tierOrdinal } from "./complexity-classifier.js";
 import { incrementLegacyTelemetry } from "./legacy-telemetry.js";
 import { resolveModelEconomics } from "./model-cost-table.js";
 import type { ResolvedModelConfig } from "./preferences.js";
+import { fallbackModelId } from "./preferences-types.js";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export interface DynamicRoutingConfig {
   enabled?: boolean;
-  capability_routing?: boolean;    // default: false — enable capability profile scoring
+  capability_routing?: boolean;    // default: true — enable capability profile scoring (routes unless explicitly false)
   tier_models?: {
     light?: string;
     standard?: string;
@@ -179,6 +180,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "claude-sonnet-4-5": "standard",
   "claude-sonnet-4-6": "standard",
   "claude-sonnet-5": "standard",           // GA on GitHub Copilot, Anthropic, Vertex, Bedrock
+  "claude-sonnet-5-5": "standard",         // models.dev 2026-10 refresh: Sonnet 5.5 point release, same class as Sonnet 5
   "claude-sonnet-4-5-20250514": "standard",
   "claude-3-5-sonnet-latest": "standard",
   "gpt-4o": "standard",
@@ -210,6 +212,9 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "gpt-5-4": "heavy",
   "gpt-5-5": "heavy",
   "gpt-5-6-sol": "heavy",
+  "gpt-6-sol": "heavy",                    // models.dev 2026-10 refresh: Sol-line successor to gpt-5-6-sol, half the price
+  "gpt-6-1-sol": "heavy",                  // Sol-line point release, same class/price as gpt-6-sol
+  "gpt-6-luna": "light",                   // Luna-line successor to gpt-5-6-luna, ~20x cheaper than Sol
   "gpt-6-astra": "heavy",
   "o1": "heavy",
   "o3": "heavy",
@@ -217,6 +222,7 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
   "o4-mini-deep-research": "heavy",
   "grok-4-5": "heavy",
   "grok-4-6": "heavy",
+  "grok-4-7": "heavy",                     // models.dev 2026-10 refresh: Grok-line successor, same class/price as grok-4-6
   "kimi-k3": "heavy",
 };
 
@@ -225,12 +231,13 @@ export const MODEL_CAPABILITY_TIER: Record<string, ComplexityTier> = {
 // the same capability tier.
 
 const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
-  "claude-haiku-4-5": 0.0008,
+  "claude-haiku-4-5": 0.001,               // $1.00/M input; matches pi-ai catalog (#2500)
   "claude-3-5-haiku-latest": 0.0008,
   "claude-sonnet-4": 0.003,
   "claude-sonnet-4-5": 0.003,
   "claude-sonnet-4-6": 0.003,
-  "claude-sonnet-5": 0.003,                // $3.00/M input; matches Sonnet 4.x pricing
+  "claude-sonnet-5": 0.002,                // $2.00/M input; matches pi-ai catalog (#2500)
+  "claude-sonnet-5-5": 0.002,              // $2.00/M input; matches pi-ai catalog (#2500)
   "claude-sonnet-4-5-20250514": 0.003,
   "claude-opus-4-5": 0.005,
   "claude-opus-4-6": 0.005,
@@ -265,6 +272,9 @@ const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
   "gpt-5-6-sol": 0.005,
   "gpt-5-6-terra": 0.0025,
   "gpt-5-6-luna": 0.001,
+  "gpt-6-sol": 0.002,
+  "gpt-6-1-sol": 0.002,
+  "gpt-6-luna": 0.0001,
   "gpt-6-astra": 0.01,
   "o4-mini": 0.005,
   "o4-mini-deep-research": 0.005,
@@ -278,6 +288,7 @@ const MODEL_COST_PER_1K_INPUT: Record<string, number> = {
   "deepseek-chat": 0.00014,
   "grok-4-5": 0.002,
   "grok-4-6": 0.002,
+  "grok-4-7": 0.002,
   "kimi-k2-7-code": 0.00095,
   "kimi-k3": 0.003,
 };
@@ -301,6 +312,7 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   "claude-sonnet-4-5":            { coding: 85, debugging: 80, research: 75, reasoning: 80, speed: 60, longContext: 75, instruction: 85 },
   "claude-sonnet-4-6":            { coding: 85, debugging: 80, research: 75, reasoning: 80, speed: 60, longContext: 75, instruction: 85 },
   "claude-sonnet-5":              { coding: 90, debugging: 85, research: 80, reasoning: 87, speed: 55, longContext: 80, instruction: 88 },
+  "claude-sonnet-5-5":            { coding: 91, debugging: 86, research: 81, reasoning: 88, speed: 55, longContext: 80, instruction: 89 },
   "claude-sonnet-4-5-20250514":   { coding: 85, debugging: 80, research: 75, reasoning: 80, speed: 60, longContext: 75, instruction: 85 },
   "claude-3-5-sonnet-latest":     { coding: 82, debugging: 78, research: 72, reasoning: 78, speed: 62, longContext: 70, instruction: 82 },
   "claude-haiku-4-5":             { coding: 60, debugging: 50, research: 45, reasoning: 50, speed: 95, longContext: 50, instruction: 75 },
@@ -339,6 +351,10 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   "gpt-5-6-sol":                  { coding: 97, debugging: 94, research: 90, reasoning: 96, speed: 42, longContext: 91, instruction: 94 },
   "gpt-5-6-terra":                { coding: 96, debugging: 93, research: 89, reasoning: 95, speed: 48, longContext: 91, instruction: 93 },
   "gpt-5-6-luna":                 { coding: 92, debugging: 88, research: 84, reasoning: 91, speed: 72, longContext: 91, instruction: 90 },
+  // GPT-6 Sol/Luna are provisional until official eval results are available.
+  "gpt-6-sol":                    { coding: 97, debugging: 95, research: 91, reasoning: 97, speed: 42, longContext: 91, instruction: 95 },
+  "gpt-6-1-sol":                  { coding: 97, debugging: 95, research: 91, reasoning: 97, speed: 42, longContext: 91, instruction: 95 },
+  "gpt-6-luna":                   { coding: 93, debugging: 89, research: 85, reasoning: 92, speed: 72, longContext: 91, instruction: 90 },
   "gpt-6-astra":                  { coding: 98, debugging: 96, research: 93, reasoning: 98, speed: 40, longContext: 94, instruction: 96 },
 
   // ── OpenAI o-series (reasoning-first) ──────────────────────────────────────
@@ -369,6 +385,7 @@ export const MODEL_CAPABILITY_PROFILES: Record<string, ModelCapabilities> = {
   // work; notably faster and more token-efficient than peer heavy models.
   "grok-4-5":                     { coding: 95, debugging: 90, research: 82, reasoning: 93, speed: 55, longContext: 80, instruction: 90 },
   "grok-4-6":                     { coding: 96, debugging: 91, research: 83, reasoning: 94, speed: 55, longContext: 82, instruction: 91 },
+  "grok-4-7":                     { coding: 97, debugging: 92, research: 84, reasoning: 95, speed: 55, longContext: 82, instruction: 92 },
 };
 
 // ─── Base Task Requirements Data Table ───────────────────────────────────────
@@ -624,11 +641,12 @@ export function getEligibleModels(
 
 /**
  * Build a fallback chain for a selected model: [selectedModel, ...configuredFallbacks, configuredPrimary]
- * Deduplicates entries while preserving order.
+ * Deduplicates entries while preserving order. Object fallback entries
+ * contribute their model ID — routing decisions carry bare IDs (#1270).
  */
 function buildFallbackChain(selectedModelId: string, phaseConfig: ResolvedModelConfig): string[] {
   return [
-    ...phaseConfig.fallbacks.filter(f => f !== selectedModelId),
+    ...phaseConfig.fallbacks.map(fallbackModelId).filter(f => f !== selectedModelId),
     phaseConfig.primary,
   ].filter(f => f !== selectedModelId);
 }
@@ -687,7 +705,7 @@ export function resolveModelForComplexity(
   if (!phaseConfig || !routingConfig.enabled) {
     return {
       modelId: phaseConfig?.primary ?? "",
-      fallbacks: phaseConfig?.fallbacks ?? [],
+      fallbacks: (phaseConfig?.fallbacks ?? []).map(fallbackModelId),
       tier: classification.tier,
       wasDowngraded: false,
       reason: "dynamic routing disabled or no phase config",
@@ -707,7 +725,7 @@ export function resolveModelForComplexity(
     warnUnknownConfiguredModel(configuredPrimary);
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: `configured model "${configuredPrimary}" is not in the known tier map — honoring explicit config`,
@@ -723,7 +741,7 @@ export function resolveModelForComplexity(
     if (isModelAvailable(configuredPrimary, availableModelIds)) {
       return {
         modelId: configuredPrimary,
-        fallbacks: phaseConfig.fallbacks,
+        fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
         tier: requestedTier,
         wasDowngraded: false,
         reason: `tier ${requestedTier} >= configured ${configuredTier}`,
@@ -747,8 +765,8 @@ export function resolveModelForComplexity(
     return {
       modelId: crossProviderEquivalent ?? configuredPrimary,
       fallbacks: crossProviderEquivalent
-        ? [...phaseConfig.fallbacks.filter(f => f !== crossProviderEquivalent), configuredPrimary]
-        : phaseConfig.fallbacks,
+        ? [...phaseConfig.fallbacks.map(fallbackModelId).filter(f => f !== crossProviderEquivalent), configuredPrimary]
+        : phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: crossProviderEquivalent
@@ -766,7 +784,7 @@ export function resolveModelForComplexity(
     // No suitable model found — use configured primary
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: `no ${requestedTier}-tier model available`,
@@ -800,7 +818,7 @@ export function resolveModelForComplexity(
       }));
       return {
         modelId: configuredPrimary,
-        fallbacks: phaseConfig.fallbacks,
+        fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
         tier: requestedTier,
         wasDowngraded: false,
         reason: "no profiled candidate eligible for automatic routing — fail closed",
@@ -896,7 +914,7 @@ export function resolveModelForComplexity(
   if (!targetModelId) {
     return {
       modelId: configuredPrimary,
-      fallbacks: phaseConfig.fallbacks,
+      fallbacks: phaseConfig.fallbacks.map(fallbackModelId),
       tier: requestedTier,
       wasDowngraded: false,
       reason: "no profiled candidate eligible for automatic routing — fail closed",

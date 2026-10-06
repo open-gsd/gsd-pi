@@ -17,6 +17,7 @@ It checks file structure, roadmap ↔ slice ↔ task consistency, completion sta
 An old global `gsd-pi` install can shadow the new scoped package.
 
 **npm fix:**
+
 ```bash
 npm uninstall -g gsd-pi
 rm -f ~/.gsd/.update-check ~/.gsd/agent/managed-resources.json
@@ -24,6 +25,7 @@ npm install -g @opengsd/gsd-pi@latest
 ```
 
 **Move from old npm to pnpm:**
+
 ```bash
 npm uninstall -g gsd-pi @opengsd/gsd-pi
 rm -f ~/.gsd/.update-check ~/.gsd/agent/managed-resources.json
@@ -67,6 +69,7 @@ Do not delete `.gsd/gsd.db` to bypass this refusal. If `gsd --version` still sho
 pnpm global commands fail with `The configured global bin directory ... is not in PATH`.
 
 **Fix:**
+
 ```bash
 pnpm setup
 exec $SHELL -l
@@ -74,6 +77,7 @@ pnpm remove -g @opengsd/gsd-pi
 ```
 
 For a one-terminal workaround on macOS/Linux:
+
 ```bash
 export PATH="/path/from/pnpm-error:$PATH"
 pnpm remove -g @opengsd/gsd-pi
@@ -85,13 +89,13 @@ Replace the path with the exact global bin directory from your pnpm error messag
 
 The same unit dispatches repeatedly.
 
-**Fix:** Run `/gsd doctor` to repair state, then `/gsd auto`. If it persists, check that the expected artifact file exists on disk.
+**Fix:** Run `/gsd doctor` to repair state, then `/gsd auto`. If it persists, read the pause message: it names the result that the unit did not record in the database. A file on disk does not count as the result.
 
 ### Reactive execute writes `S##-REACTIVE-BLOCKER.md`
 
-A parallel `reactive-execute` batch exhausted artifact retries while one or more dispatched tasks were still missing task summaries. GSD writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks.
+A parallel `reactive-execute` batch exhausted artifact retries while one or more dispatched tasks were still open in the database with no Attempt Result. GSD records a recovery block for the slice and writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks.
 
-**Fix:** Inspect `S##-REACTIVE-BLOCKER.md` and `/gsd status`. The blocker prevents another reactive batch for that slice, but task statuses stay under canonical database Attempt/recovery control; use the appropriate explicit retry, reopen, or replan path for any remaining work.
+**Fix:** Inspect `S##-REACTIVE-BLOCKER.md` and `/gsd status`. The recorded block prevents another reactive batch for that slice, but task statuses stay under canonical database Attempt/recovery control; use the appropriate explicit retry, reopen, or replan path for any remaining work.
 
 ### Auto mode stops with "Loop detected"
 
@@ -112,6 +116,7 @@ npm's global bin directory isn't in `$PATH`.
 For pnpm installs, use `pnpm setup`, restart your shell, and retry the pnpm command.
 
 **Fix:**
+
 ```bash
 npm prefix -g
 # Add the bin dir to PATH:
@@ -120,6 +125,7 @@ source ~/.zshrc
 ```
 
 **Common causes:**
+
 - **Homebrew Node** — `/opt/homebrew/bin` missing from PATH
 - **Version manager (nvm, fnm, mise)** — global bin is version-specific
 - **oh-my-zsh** — `gitfast` plugin aliases `gsd` to `git svn dcommit`; check with `alias gsd`
@@ -172,6 +178,7 @@ Auto mode was paused, stopped, or crashed mid-milestone, and the work is still o
 **Fix:** As of GSD 2.78, `/gsd auto` bootstrap automatically detects this condition and surfaces a warning naming the branch, commit count, and worktree location. Run `/gsd auto` to re-enter the worktree and resume. If the worktree must be resolved manually, merge salvageable work with `/gsd worktree merge <MID>` or remove a stale worktree with `/gsd worktree remove <MID>`, then run `/gsd doctor fix`.
 
 **Diagnose:** Run `/gsd forensics` and look at the **Worktree Telemetry** section:
+
 - `Orphans detected > 0` with reason `in-progress-unmerged` confirms the condition
 - `Unmerged exits > 0` on the producer side confirms which exit type caused it
 
@@ -244,8 +251,8 @@ Then `/gsd auto` to restart from current state.
 
 ### Reset routing history
 
-```bash
-rm .gsd/routing-history.json
+```
+/gsd rate reset
 ```
 
 ### Refresh rendered state

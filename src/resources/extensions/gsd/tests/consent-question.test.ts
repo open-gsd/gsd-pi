@@ -48,17 +48,12 @@ test("classifyQuestion: gate ids, consent defaults, prose kinds", () => {
   assert.equal(classifyQuestion({ id: "free_text_q" }).kind, "consent");
   // Prose classification.
   assert.equal(classifyQuestion({ text: "Should I proceed with the write?" }).kind, "consent");
-  assert.equal(
-    classifyQuestion({ text: "Want me to research this or skip?", unitType: "research-decision" }).kind,
-    "decision",
-  );
   assert.equal(classifyQuestion({ text: "Here is the summary of changes." }).kind, "informational");
 });
 
 test("failPolicyForKind: only informational is fail-open", () => {
   assert.equal(failPolicyForKind("gate"), "closed");
   assert.equal(failPolicyForKind("consent"), "closed");
-  assert.equal(failPolicyForKind("decision"), "closed");
   assert.equal(failPolicyForKind("informational"), "open");
 });
 

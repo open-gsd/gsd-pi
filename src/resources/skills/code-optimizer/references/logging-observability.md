@@ -3,6 +3,7 @@
 ## Grep/Glob Patterns to Detect
 
 ### Excessive Logging
+
 ```
 console\.log\(                     (console.log in production code)
 console\.debug\(                   (console.debug in production)
@@ -13,6 +14,7 @@ console\.log\(JSON\.stringify\(    (serializing objects just to log)
 ```
 
 ### Expensive String Formatting in Logs
+
 ```
 # String interpolation/formatting when log level is disabled
 logger\.debug\(f"                  (Python f-string even when debug disabled)
@@ -23,6 +25,7 @@ JSON\.stringify\(.*log             (JSON stringify for logging)
 ```
 
 ### Missing Structured Logging
+
 ```
 console\.log\(["'].*:.*["']        (unstructured string logging)
 print\(.*["'].*:.*["']             (unstructured print logging)
@@ -30,6 +33,7 @@ logger\.\w+\(["'].*["'] %         (format string logging vs structured)
 ```
 
 ### Synchronous Logging
+
 ```
 fs\.writeFileSync.*log             (sync file write for logging)
 fs\.appendFileSync.*log            (sync file append for logging)
@@ -37,6 +41,7 @@ open\(.*log.*\)\.write\(          (Python: sync log file write)
 ```
 
 ### Missing Request/Trace IDs
+
 ```
 # API handlers without correlation IDs
 app\.(get|post)\(.*req.*res       (check if request ID is propagated)
@@ -44,6 +49,7 @@ app\.(get|post)\(.*req.*res       (check if request ID is propagated)
 ```
 
 ### Metrics Collection Overhead
+
 ```
 # Metrics in hot paths
 \.observe\(.*inside.*loop         (Prometheus observe in loop)

@@ -141,16 +141,11 @@ describe("getTaskVerificationEvidence: unknown exit codes", () => {
 
   test("one unknown exit_code no longer disqualifies an otherwise passing set (#2213)", () => {
     if (!isDbAvailable()) return;
-    insertVerificationEvidence({
-      taskId: TID,
-      sliceId: SID,
-      milestoneId: MID,
-      command: "pnpm test",
-      exitCode: 0,
-      verdict: "pass",
-      durationMs: 10,
-    });
-    insertRawEvidence({ command: "pnpm lint", exitCode: null, verdict: "pass", durationMs: null });
+    // Both rows share one created_at: the reader returns only the latest
+    // completion batch (#2259), so two wall-clock stamps would split the set.
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    insertRawEvidence({ command: "pnpm test", exitCode: 0, verdict: "pass", durationMs: 10, createdAt });
+    insertRawEvidence({ command: "pnpm lint", exitCode: null, verdict: "pass", durationMs: null, createdAt });
 
     const evidence = getTaskVerificationEvidence(MID, SID, TID);
 
@@ -290,9 +285,33 @@ describe("hasQualifyingTaskEvidence: lenient verdict matching (#2014)", () => {
     assert.equal(hasQualifyingTaskEvidence([record("", 1)]), false);
   });
 
+  test("commandless records remain distinct instead of collapsing to one latest row (#2338)", () => {
+    assert.equal(hasQualifyingTaskEvidence([
+      { command: "", exitCode: 1, verdict: "", durationMs: 10 },
+      { command: "", exitCode: 0, verdict: "", durationMs: 10 },
+    ]), false);
+  });
+
   test("one decorated failing record disqualifies an otherwise passing set", () => {
     assert.equal(
       hasQualifyingTaskEvidence([record("✅ pass"), record("❌ fail")]),
+      false,
+    );
+  });
+
+  test("an earlier FAIL row does not poison a set that ends passing (#2338)", () => {
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("FAIL - 12 passed, 1 failed"),
+        record("PASS - 13 passed, 28 assertions"),
+      ]),
+      true,
+    );
+    assert.equal(
+      hasQualifyingTaskEvidence([
+        record("PASS - 13 passed"),
+        record("FAIL - regression"),
+      ]),
       false,
     );
   });

@@ -23,6 +23,7 @@ import type { UnifiedRule } from "../rule-types.ts";
 import type { DispatchAction, DispatchContext } from "../auto-dispatch.ts";
 import { DISPATCH_RULES, getDispatchRuleNames } from "../auto-dispatch.ts";
 import type { GSDState } from "../types.ts";
+import { recordUnitEnd } from "../unit-runtime.ts";
 import {
   closeDatabase,
   insertMilestone,
@@ -232,10 +233,14 @@ describe("RuleRegistry", () => {
       retryArtifact: "NEEDS-REWORK.md",
     };
     try {
+      openDatabase(":memory:");
       const beforeRestart = new RuleRegistry([]);
       beforeRestart.retryPending = true;
       beforeRestart.retryTrigger = expected;
       beforeRestart.persistState(basePath);
+
+      // The retry lives in the database: deleting the file copy loses nothing.
+      rmSync(join(basePath, ".gsd", "hook-state.json"), { force: true });
 
       const afterRestart = new RuleRegistry([]);
       afterRestart.restoreState(basePath);
@@ -245,6 +250,7 @@ describe("RuleRegistry", () => {
       assert.deepEqual(afterRestart.consumeRetryTrigger(), expected);
       assert.equal(afterRestart.isRetryPending(), false);
     } finally {
+      closeDatabase();
       rmSync(basePath, { recursive: true, force: true });
     }
   });
@@ -570,6 +576,7 @@ describe("RuleRegistry", () => {
         "utf-8",
       );
       process.env.GSD_HOME = tempGsdHome;
+      openDatabase(join(projectRoot, ".gsd", "gsd.db"));
 
       const registry = new RuleRegistry([]);
       const firstHook = registry.evaluatePostUnit("plan-slice", unitId, projectRoot);
@@ -580,6 +587,13 @@ describe("RuleRegistry", () => {
         "partial review output",
         "utf-8",
       );
+      // The database row is the hook outcome. A journal line that says the
+      // opposite must not change it.
+      recordUnitEnd(projectRoot, "hook/review-arbiter", unitId, {
+        status: "cancelled",
+        artifactVerified: false,
+        error: "Provider error: Stream ended without finish_reason",
+      });
       emitJournalEvent(projectRoot, {
         ts: "2026-06-03T12:00:00.000Z",
         flowId: "flow-hook-failed",
@@ -588,12 +602,8 @@ describe("RuleRegistry", () => {
         data: {
           unitType: "hook/review-arbiter",
           unitId,
-          status: "cancelled",
-          artifactVerified: false,
-          errorContext: {
-            message: "Provider error: Stream ended without finish_reason",
-            category: "provider",
-          },
+          status: "completed",
+          artifactVerified: true,
         },
       });
 
@@ -609,6 +619,7 @@ describe("RuleRegistry", () => {
       assert.equal(resumedHook, null, "resumed hook evaluation must not skip failed hook artifact");
       assert.equal(resumedRegistry.consumeHookFailure()?.hookName, "review-arbiter");
     } finally {
+      closeDatabase();
       if (originalGsdHome === undefined) delete process.env.GSD_HOME;
       else process.env.GSD_HOME = originalGsdHome;
       rmSync(projectRoot, { recursive: true, force: true });

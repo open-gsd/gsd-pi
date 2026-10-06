@@ -4,7 +4,7 @@
 >
 > **When to read this:** At the start of any session working on GSD-managed work, or when loaded by `/gsd`.
 >
-> **After reading this, always read `.gsd/STATE.md` to find out what's next.**
+> **After reading this, always call `gsd_project_snapshot` to find out what's next.** It reads the project database. `.gsd/STATE.md` is a rendered copy of that status; do not use it as the source.
 > If the milestone has a `NN-CONTEXT.md`, read that too. If the active slice has an `NN-MM-CONTEXT.md`, read that as well — these files contain project-specific decisions, reference paths, and implementation guidance that this generic methodology doc does not.
 
 In a DB-backed gsd-pi project, these files are readable projections and context,
@@ -17,17 +17,17 @@ state.
 
 ## Quick Start: "What's next?"
 
-Read these files in order and act on what they say:
+Do these steps in order and act on what they say:
 
-1. **`.gsd/STATE.md`** — Where are we? What's the next action?
-2. **`.gsd/phases/<NN-slug>/<NN>-ROADMAP.md`** — What's the plan? Which slices are done? (`STATE.md` tells you which milestone is active)
+1. Call **`gsd_project_snapshot`** — Where are we? What's the next action?
+2. **`.gsd/phases/<NN-slug>/<NN>-ROADMAP.md`** — What's the plan? Which slices are done? (the snapshot tells you which milestone is active)
 3. **`.gsd/phases/<NN-slug>/<NN>-CONTEXT.md`** — Milestone-level project decisions, reference paths, constraints. Read this before doing implementation work.
 4. If a slice is active and has one, read **`<NN>-<MM>-CONTEXT.md`** — Slice-specific decisions and constraints.
 5. If a slice is active, read its **`<NN>-<MM>-PLAN.md`** — Which tasks exist? Which are done?
 6. If `.gsd/CODEBASE.md` exists, skim it for fast structural orientation before broad code exploration.
-7. If a task was interrupted, check for **`continue.md`** in the active slice directory — Resume from there.
+7. If a task was interrupted, its Work Checkpoint is in the database. The task prompt shows it as "Resume State"; `<NN>-<MM>-CONTINUE.md` is its readable render — Resume from there.
 
-Then do the thing `STATE.md` says to do next.
+Then do the next action that the snapshot reports.
 
 ---
 
@@ -49,7 +49,7 @@ All artifacts live in `.gsd/` at the project root:
 
 ```
 .gsd/
-  STATE.md                                  # Dashboard — always read first (derived cache; runtime, gitignored)
+  STATE.md                                  # Status projection rendered from the database — do not edit (runtime, gitignored)
   DECISIONS.md                              # Append-only decisions register
   CODEBASE.md                               # Generated codebase map cache (auto-refreshed by GSD)
   phases/
@@ -63,7 +63,7 @@ All artifacts live in `.gsd/` at the project root:
       01-01-RESEARCH.md                     # Optional: slice-level research
       01-01-SUMMARY.md                      # Slice summary (written on completion)
       01-01-UAT.md                          # Non-blocking human test script (written on completion)
-      01-01-CONTINUE.md                     # Ephemeral: resume point if interrupted
+      01-01-CONTINUE.md                     # Render of the latest Work Checkpoint (gsd_checkpoint_save)
 ```
 
 ---
@@ -122,6 +122,7 @@ Consumes from S01:
 ```
 
 The boundary map is a **planning artifact** — not runnable code. It:
+
 - Forces upfront thinking about slice boundaries before implementation
 - Gives downstream slices a concrete target to code against
 - Enables deterministic verification that slices actually connect
@@ -161,27 +162,6 @@ Task plan content lives inside the slice plan. There is no standalone task-level
 
 **Must-haves are what make verification mechanically checkable.** Truths are checked by running commands or reading output. Artifacts are checked by confirming files exist with real content. Key links are checked by confirming imports/references actually connect the pieces.
 
-### `STATE.md`
-
-```markdown
-# GSD State
-
-**Active Milestone:** M001 — Title
-**Active Slice:** S02 — Slice Title
-**Active Task:** T01 — Task Title
-**Phase:** Executing
-
-## Recent Decisions
-- Decision 1
-- Decision 2
-
-## Blockers
-- None (or list blockers)
-
-## Next Action
-Exact next thing to do.
-```
-
 ### `CONTEXT.md` / `S##-CONTEXT.md` (from discuss phase)
 
 ```markdown
@@ -220,6 +200,7 @@ Exact next thing to do.
 ```
 
 **Rules:**
+
 - **Append-only** — rows are never edited or removed. To reverse a decision, add a new row that supersedes it (reference the old ID).
 - **#** — Sequential ID (`D001`, `D002`, ...), never reused.
 - **When** — Where the decision was made: `M001`, `M001/S01`, or `M001/S01/T02`.
@@ -243,6 +224,7 @@ Work flows through these phases. Each phase produces a file.
 **When to skip:** When the user already knows exactly what they want, or told you to just go.
 
 **How to do it manually:**
+
 1. Read the roadmap to understand the scope.
 2. Identify 3-5 gray areas — implementation decisions the user cares about.
 3. Use `ask_user_questions` to discuss each area, one round at a time. Never fabricate user input; wait for the user's actual response before the next round.
@@ -257,6 +239,7 @@ Work flows through these phases. Each phase produces a file.
 **When to skip:** When the codebase is familiar and the work is straightforward.
 
 **How to do it manually:**
+
 1. Read `CONTEXT.md` and/or `S##-CONTEXT.md` if they exist — know what decisions are locked.
 2. Scout relevant code: `rg`, `find`, read key files.
 3. Use `resolve_library` / `get_library_docs` if needed.
@@ -300,6 +283,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 **Produces:** `<NN>-<MM>-PLAN.md` with task planning embedded in the slice plan.
 
 **For a milestone (roadmap):**
+
 1. Read `CONTEXT.md`, `M###-RESEARCH.md`, and `.gsd/DECISIONS.md` if they exist.
 2. Decompose the vision into 1-10 demoable vertical slices. Prefer one slice for tiny, single-file, or static work unless the request clearly spans independent capabilities.
 3. Order by risk (high-risk first to validate feasibility early).
@@ -307,6 +291,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 5. **Write the boundary map** — for each slice, specify what it produces (functions, types, interfaces, endpoints) and what it consumes from upstream slices. This forces interface thinking before implementation and enables deterministic verification that slices actually connect.
 
 **For a slice (task decomposition):**
+
 1. Read the slice's entry in `ROADMAP.md` **and its boundary map section** — know what interfaces this slice must produce and consume.
 2. Read `CONTEXT.md`, `S##-CONTEXT.md`, `M###-RESEARCH.md`, `S##-RESEARCH.md`, and `.gsd/DECISIONS.md` if they exist for this slice.
 3. Read summaries from dependency slices (check `depends:[]` in roadmap).
@@ -322,11 +307,12 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 **Produces:** Code changes + `[DONE:n]` markers.
 
 **How to do it manually:**
+
 1. Read the active slice's `<NN>-<MM>-PLAN.md` and use the selected task entry as the task plan.
 2. Read relevant summaries from prior tasks (for context on what's already built).
 3. Execute each step. Mark progress with `[DONE:n]` in responses.
 4. If you made an architectural, pattern, or library decision, append it to `.gsd/DECISIONS.md`.
-5. If interrupted or context is getting full, write `continue.md` (see below).
+5. If interrupted or context is getting full, save a Work Checkpoint (see "Continue-Here Protocol" below).
 
 ### Phase 5: Verify
 
@@ -334,6 +320,7 @@ The **Don't Hand-Roll** and **Common Pitfalls** sections prevent the most expens
 **Produces:** Pass/fail determination.
 
 **Verification ladder — use the strongest tier you can reach:**
+
 1. **Static:** Files exist, exports present, wiring connected, not stubs.
 2. **Command:** Tests pass, build succeeds, lint clean, blocked command works.
 3. **Behavioral:** Browser flows work, API responses correct.
@@ -376,6 +363,7 @@ When verification finds gaps, include a **Gaps** section with what's missing, im
 **Produces:** `S##-T##-SUMMARY.md` in flat-phase projects, and when slice completes, `S##-SUMMARY.md`. Legacy flat `T##-SUMMARY.md` task summaries are still readable.
 
 **Task summary format:**
+
 ```markdown
 ---
 id: T01
@@ -434,11 +422,13 @@ key_decisions: []
 **Purpose:** Mark work done and move to the next thing.
 
 **After a task completes:**
+
 1. Persist completion through the DB-backed Task completion path; it refreshes the `<NN>-<MM>-PLAN.md` checkbox projection.
 2. Check if there's a next task in the slice → execute it.
 3. If the slice is complete → run the Slice completion path.
 
 **After a slice completes:**
+
 1. Persist Slice completion through `gsd_slice_complete`; it records the authoritative state and renders `S##-SUMMARY.md`, `S##-UAT.md`, ROADMAP, and STATE projections.
 2. Continue to the next slice immediately. UAT can run after Slice completion; automatic Milestone closure requires current source-bound validation and any required UAT evidence.
 3. If UAT is missing or non-PASS at Milestone closeout, run `/gsd dispatch uat`, request a Slice-specific UAT rerun when needed, or create remediation work with `/gsd dispatch reassess`.
@@ -448,62 +438,51 @@ key_decisions: []
 
 ## Continue-Here Protocol
 
-**When to write `continue.md`:**
+**When to save a Work Checkpoint (`gsd_checkpoint_save`):**
+
 - You're about to lose context (compaction, session end, Ctrl+C).
 - The current task isn't done yet.
 - You want to pause and come back later.
 
+The checkpoint is a database row. Do not write `continue.md`, `CONTINUE.md` or `HANDOFF.md`: `CONTINUE.md` is rendered from the row and is never read back.
+
 **What to capture:**
-```markdown
----
-milestone: M001
-slice: S01
-task: T02
-step: 3
-total_steps: 7
-saved_at: 2026-03-07T15:30:00Z
----
 
-## Completed Work
-- What's already done in this task and prior tasks in the slice.
-
-## Remaining Work
-- What steps remain, with enough detail to resume.
-
-## Decisions Made
-- Key decisions and WHY (so next session doesn't re-debate).
-
-## Context
-The "vibe" — what you were thinking, what's tricky, what to watch out for.
-
-## Next Action
-The EXACT first thing to do when resuming. Not vague. Specific.
-```
+- `milestoneId`, `sliceId`, `taskId` — the unit you are in. Pass `taskId` when a task is in progress.
+- `kind` — `pause` (you resume the same work) or `handoff` (another session picks it up).
+- `confirmedContext` — what is already done in this task, and key decisions and WHY (so the next session doesn't re-debate).
+- `unresolved` — what steps remain, with enough detail to resume; what is tricky; what not to do.
+- `evidence` — commands, files and results that support the confirmed context.
+- `nextAction` — the EXACT first thing to do when resuming. Not vague. Specific.
 
 **How to resume:**
-1. Read `continue.md`.
-2. Delete `continue.md` (it's consumed, not permanent).
-3. Pick up from "Next Action".
+
+1. Read the "Resume State" section of the task prompt (the head checkpoint of the task).
+2. Pick up from "Next action".
+3. If you stop again before the task is complete, save a new checkpoint. Checkpoints are never deleted; the newest one is the resume state.
 
 ---
 
 ## State Management
 
-### `STATE.md` is a derived cache
+### `STATE.md` is a projection
 
-It is NOT the source of truth. It's a convenience dashboard.
+It is NOT the source of truth. GSD renders it from the database after every lifecycle tool call. Do not edit it, and do not read status from it: call `gsd_project_snapshot`.
 
 **Authority and review surfaces:**
+
 - The project database owns runtime hierarchy, lifecycle, validation, and queue state.
 - `ROADMAP.md` and `<NN>-<MM>-PLAN.md` project planned work and current checkbox status for review.
 - `S##-T##-SUMMARY.md` records the readable Task outcome in flat-phase projects (legacy `T##-SUMMARY.md` is still readable).
 - `S##-SUMMARY.md` and `M###-SUMMARY.md` project compressed Slice and Milestone outcomes.
 
-**Refresh `STATE.md` through the workflow** after every significant action so it projects:
-- Active milestone/slice/task
-- Recent decisions (last 3-5)
+`STATE.md` shows:
+
+- Active milestone and slice, and the phase
+- The milestone registry
+- Recent decisions
 - Blockers
-- Next action (most important — this is what a fresh session reads first)
+- Next action
 
 ### Reconciliation
 
@@ -515,7 +494,6 @@ guards.
 
 Other stale-file cleanup remains mechanical:
 
-- Continue file exists for completed task → delete continue file
 - State points to nonexistent slice/task → rebuild the STATE projection from the database
 
 ---
@@ -563,6 +541,7 @@ Execute-task closeout is fail-closed: the system writes verification evidence fi
 | Milestone squash | `{type}: <milestone title>` | Type inferred from title |
 
 The system reads the task summary after execution and builds a meaningful commit message:
+
 - **Subject**: `{type}: {one-liner}` — the one-liner from the summary frontmatter, sanitized to one line
 - **Type**: Inferred from the task title and one-liner (`feat`, `fix`, `test`, `refactor`, `docs`, `perf`, `chore`)
 - **Body**: Key files from the summary frontmatter (up to 8 files listed)
@@ -593,6 +572,7 @@ When planning or executing a task, load relevant prior context:
 6. If the dependency chain is too large, drop the oldest/least-relevant summaries first.
 
 **Aim for:**
+
 - ~5 provides per summary
 - ~10 key_files per summary
 - ~5 key_decisions per summary
@@ -615,22 +595,22 @@ This methodology doc is generic. Project-specific guidance belongs in the milest
 
 ## Checklist for a Fresh Session
 
-1. Read `.gsd/STATE.md` — what's the next action?
-2. Check for `continue.md` in the active slice — is there interrupted work?
-3. If resuming: read `continue.md`, delete it, pick up from "Next Action".
+1. Call `gsd_project_snapshot` — what's the next action?
+2. Check the "Resume State" of the task prompt (or the active slice's `CONTINUE.md` render) — is there interrupted work?
+3. If resuming: pick up from its "Next action".
 4. If starting fresh: read the active slice's `<NN>-<MM>-PLAN.md`, find the next incomplete task.
 5. If in a planning or research phase, read `.gsd/DECISIONS.md` — respect existing decisions.
 6. Read relevant summaries from prior tasks/slices for context.
 7. Do the work.
 8. Verify the must-haves.
 9. Write the summary.
-10. Mark done, update `STATE.md`, advance.
-11. If context is getting full or you're done for now: write `continue.md` if mid-task, or update `STATE.md` with next action if between tasks.
+10. Record completion through the GSD completion tool (`gsd_task_complete`, `gsd_slice_complete`), then advance.
+11. If context is getting full or you're done for now: call `gsd_checkpoint_save` if mid-task. Between tasks nothing more is needed; the database holds the next action.
 
 ## When Context Gets Large
 
 If you sense context pressure (many files read, long execution, lots of tool output):
 
-1. **If mid-task:** Write `continue.md` with exact resume state. Tell the user: "Context is getting full. I've saved progress to continue.md. Start a new session and run `/gsd` to pick up where you left off, or `/gsd auto` to resume in auto-execution mode."
-2. **If between tasks:** Just update `STATE.md` with the next action. No continue file needed — the next session will read STATE.md and pick up the next task cleanly.
+1. **If mid-task:** Call `gsd_checkpoint_save` with exact resume state. Tell the user: "Context is getting full. I've saved a checkpoint. Start a new session and run `/gsd` to pick up where you left off, or `/gsd auto` to resume in auto-execution mode."
+2. **If between tasks:** No checkpoint needed — completed work is in the database, and the next session reads the next action with `gsd_project_snapshot`.
 3. **Don't fight it.** The whole system is designed for this. A fresh session with the right files loaded is better than a stale session with degraded reasoning.

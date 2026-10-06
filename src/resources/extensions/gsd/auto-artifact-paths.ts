@@ -20,11 +20,10 @@ import {
   resolveSlicePath,
   resolveTasksDir,
   dirIsMetaOnlyLegacyMilestone,
-  normalizeRealPath,
 } from "./paths.js";
 import { milestoneIdToPhaseNum } from "./layout-policy.js";
 import { parseUnitId } from "./unit-id.js";
-import { basename, dirname, join, relative } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { existsSync } from "node:fs";
 
 function resolveMilestoneArtifactPath(
@@ -182,8 +181,6 @@ export function resolveExpectedArtifactPath(
       return join(gsdRoot(base), "PROJECT.md");
     case "discuss-requirements":
       return join(gsdRoot(base), "REQUIREMENTS.md");
-    case "research-decision":
-      return join(gsdRoot(base), "runtime", "research-decision.json");
     case "research-project":
       return join(gsdRoot(base), "research", "PROJECT-RESEARCH-BLOCKER.md");
     case "discuss-milestone": {
@@ -256,10 +253,10 @@ export function resolveExpectedArtifactPath(
       return resolveSliceArtifactPath(base, mid, sid!, "REPLAN");
     }
     case "triage-captures":
-      // Verified against CAPTURES.md state in verifyExpectedArtifact.
+      // Verified against the capture rows of the database in verifyExpectedArtifact.
       return null;
     case "quick-task":
-      // Verified against the capture's Executed field in CAPTURES.md.
+      // Verified against the capture's executed row in the database.
       return null;
     case "rewrite-docs":
       return null;
@@ -283,13 +280,11 @@ export function diagnoseExpectedArtifact(
   const { milestone: mid, slice: sid, task: tid } = parseUnitId(unitId);
   switch (unitType) {
     case "workflow-preferences":
-      return ".gsd/PREFERENCES.md with workflow_prefs_captured: true";
+      return "deep workflow preferences captured in the database";
     case "discuss-project":
-      return ".gsd/PROJECT.md (valid project context)";
+      return "a valid PROJECT artifact saved with gsd_summary_save";
     case "discuss-requirements":
-      return ".gsd/REQUIREMENTS.md (valid requirements registry)";
-    case "research-decision":
-      return ".gsd/runtime/research-decision.json with decision research|skip";
+      return "a valid REQUIREMENTS artifact saved with gsd_summary_save";
     case "research-project":
       return ".gsd/research/{STACK,FEATURES,ARCHITECTURE,PITFALLS}.md with at least one real research file; blocker-only outputs stop";
     case "discuss-milestone":
@@ -310,18 +305,18 @@ export function diagnoseExpectedArtifact(
     case "refine-slice":
       return `${relSliceFile(base, mid, sid!, "PLAN")} with embedded refined task plans`;
     case "execute-task": {
-      return `Task ${tid} marked [x] in ${relSliceFile(base, mid, sid!, "PLAN")} + summary written`;
+      return `Task ${tid} completed in the database through gsd_task_complete (the tool renders the summary and ${relSliceFile(base, mid, sid!, "PLAN")})`;
     }
     case "complete-slice":
-      return `Slice ${sid} marked [x] in ${relMilestoneFile(base, mid, "ROADMAP")} + summary + UAT written`;
+      return `Slice ${sid} completed in the database through gsd_slice_complete (the tool renders the summary, the UAT and ${relMilestoneFile(base, mid, "ROADMAP")})`;
     case "replan-slice":
       return `${relSliceFile(base, mid, sid!, "REPLAN")} + updated ${relSliceFile(base, mid, sid!, "PLAN")}`;
     case "triage-captures":
-      return ".gsd/CAPTURES.md with no pending captures";
+      return "No pending captures in the GSD database (each one classified through gsd_capture_resolve)";
     case "quick-task":
-      return `.gsd/CAPTURES.md capture ${sid ?? "<capture-id>"} marked executed`;
+      return `Capture ${sid ?? "<capture-id>"} recorded as executed in the GSD database through gsd_capture_complete`;
     case "rewrite-docs":
-      return "Active overrides resolved in .gsd/OVERRIDES.md + plan documents updated";
+      return "Active overrides resolved in the GSD database + plan documents updated";
     case "reassess-roadmap":
       return `${relMilestoneFile(base, mid, "ROADMAP-ASSESSMENT")} (roadmap reassessment)`;
     case "run-uat":
@@ -333,49 +328,4 @@ export function diagnoseExpectedArtifact(
     default:
       return null;
   }
-}
-
-export interface SliceResearchLocation {
-  /** Absolute path when research exists; null when missing. */
-  absolutePath: string | null;
-  /** Prompt-friendly relative path when research exists. */
-  relativePath: string | null;
-}
-
-/**
- * Resolve slice RESEARCH with worktree projection first, then canonical
- * project-root path. Shared by dispatch rules, execute-task prompts, and
- * artifact verification.
- */
-export function resolveSliceResearchLocation(
-  basePath: string,
-  mid: string,
-  sid: string,
-): SliceResearchLocation {
-  const projectedFile = resolveSliceFile(basePath, mid, sid, "RESEARCH");
-  if (projectedFile) {
-    return {
-      absolutePath: projectedFile,
-      relativePath: relSliceFile(basePath, mid, sid, "RESEARCH"),
-    };
-  }
-
-  const canonicalPath = resolveExpectedArtifactPath("research-slice", `${mid}/${sid}`, basePath);
-  if (canonicalPath && existsSync(canonicalPath)) {
-    return {
-      absolutePath: canonicalPath,
-      relativePath: relative(normalizeRealPath(basePath), canonicalPath),
-    };
-  }
-
-  return { absolutePath: null, relativePath: null };
-}
-
-/** Returns the absolute RESEARCH path when it exists, otherwise null. */
-export function resolveExistingSliceResearchPath(
-  basePath: string,
-  mid: string,
-  sid: string,
-): string | null {
-  return resolveSliceResearchLocation(basePath, mid, sid).absolutePath;
 }

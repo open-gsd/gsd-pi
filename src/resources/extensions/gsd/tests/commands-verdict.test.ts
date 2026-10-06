@@ -23,6 +23,7 @@ import {
   _getAdapter,
   executeDomainOperation,
   insertAssessment,
+  insertMilestone,
   readDomainOperationFence,
 } from "../gsd-db.ts";
 import { invalidateStateCache } from "../state.ts";
@@ -526,10 +527,16 @@ test("auto-dispatch needs-attention pause message references /gsd verdict", asyn
   const base = mkdtempSync(join(tmpdir(), "gsd-verdict-paused-"));
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
   try {
-    writeFileSync(
-      join(base, ".gsd", "milestones", "M001", "M001-VALIDATION.md"),
-      "---\nverdict: needs-attention\nremediation_round: 0\n---\n\n# Validation\nNeeds work.\n",
-    );
+    // The milestone-validation row is the verdict; no VALIDATION.md is written.
+    openTestDb(base);
+    insertMilestone({ id: "M001", title: "Test", status: "active" });
+    insertAssessment({
+      path: "milestones/M001/M001-VALIDATION.md",
+      milestoneId: "M001",
+      status: "needs-attention",
+      scope: "milestone-validation",
+      fullContent: "---\nverdict: needs-attention\nremediation_round: 0\n---\n\n# Validation\nNeeds work.\n",
+    });
 
     const result = await rule!.match({
       mid: "M001",
@@ -546,6 +553,7 @@ test("auto-dispatch needs-attention pause message references /gsd verdict", asyn
       assert.match(result!.reason, /\/gsd verdict/);
     }
   } finally {
+    closeDatabase();
     cleanup(base);
   }
 });

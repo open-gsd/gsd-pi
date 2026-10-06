@@ -6,15 +6,19 @@ import {
   reserveMilestoneId,
 } from "./milestone-ids.js";
 import { isReusableGhostMilestone } from "./state.js";
+import { GSDError, GSD_STALE_STATE } from "./errors.js";
 
 function getDatabaseMilestoneIds(): string[] {
-  if (!isDbAvailable()) return [];
+  if (!isDbAvailable()) {
+    throw new GSDError(GSD_STALE_STATE, "Cannot allocate a milestone ID: workflow DB is unavailable");
+  }
   return getAllMilestones().map((milestone) => milestone.id);
 }
 
 /**
  * Generate the next milestone ID, accounting for DB rows and in-process
- * reservations, and reserve it.
+ * reservations, and reserve it. Throws when no DB is open: disk directories
+ * alone are not an allocation authority (ADR-046).
  */
 export function nextMilestoneIdReserved(
   existingIds: string[],

@@ -97,7 +97,7 @@ test("writeBlockerPlaceholder logs a recovery warning when the plan-milestone bl
     );
 
     const warn = recoveryWarnings(logs).find((w) =>
-      /planning blocker persistence failed for plan-milestone recovery/u.test(w.message),
+      /recovery blocker persistence failed for plan-milestone M001/u.test(w.message),
     );
     assert.ok(warn, "a recovery warning must be logged when the durable blocker write throws");
   } finally {

@@ -12,6 +12,7 @@ Produce documentation that works for a reader landing cold. Not a summary of wha
 GSD already produces durable artifacts (`M###-CONTEXT.md`, `S##-SUMMARY.md`, `DECISIONS.md`, `KNOWLEDGE.md`), but those are scaffolded by templates. This skill is for free-form documentation: README changes, public docs, architectural proposals, RFCs, PR descriptions, runbooks, and anything that lives under `docs/`, `mintlify-docs/`, or `gitbook/` in this repo.
 
 Invocation points:
+
 - User asks to write or rewrite a piece of documentation
 - Before shipping a feature that adds user-facing behavior — docs need updates
 - After `write-milestone-brief` when the brief needs a public-facing summary for non-GSD consumers
@@ -54,7 +55,7 @@ One round of clarifying questions. Then proceed.
 ## Stage 4: Wire it in
 
 1. Link to the new doc from relevant entry points (README.md index, docs/ sidebar, mintlify-docs config, etc.).
-2. If it documents a decision, also append a one-line entry to `.gsd/DECISIONS.md` pointing at the doc.
+2. If it documents a decision, also call `gsd_decision_save` with a one-line entry that points at the doc.
 3. If it's a public-facing change, flag for the next release notes / CHANGELOG update.
 
 </process>

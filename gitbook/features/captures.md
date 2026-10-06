@@ -11,7 +11,7 @@ While auto mode is running (or any time):
 /gsd capture "the auth flow should support OAuth, not just JWT"
 ```
 
-Captures are appended to `.gsd/CAPTURES.md` and triaged automatically between tasks.
+Captures are stored in the GSD database and triaged automatically between tasks. `.gsd/CAPTURES.md` is rendered from the database; edits to it are not read.
 
 ## How It Works
 

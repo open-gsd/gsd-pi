@@ -20,6 +20,7 @@ import type {
 	ExtensionWidgetOptions,
 	GsdProgressState,
 } from "@gsd/pi-coding-agent/core/extensions/index.js";
+import { parseWorkflowOutcomeCustomMessage } from "@opengsd/contracts";
 import { InteractiveMode } from "../interactive/interactive-mode.js";
 import { type Theme, theme } from "@gsd/pi-coding-agent/theme/theme.js";
 import { createDefaultCommandContextActions } from "../shared/command-context-actions.js";
@@ -35,6 +36,7 @@ import type {
 	RpcResponse,
 	RpcSessionState,
 	RpcSlashCommand,
+	WorkflowCommandResult,
 } from "./rpc-types.js";
 
 // Re-export types for consumers
@@ -74,6 +76,22 @@ export async function invokeProjectSnapshotRead(
 	} catch (e) {
 		const message = e instanceof Error ? e.message : String(e);
 		return { id, type: "response", command: "get_project_snapshot", success: false, error: message };
+	}
+}
+
+/** Run a typed workflow command through the extension handler, with the session CWD. */
+export async function invokeWorkflowCommand(
+	handler: (input: unknown) => Promise<unknown>,
+	command: Extract<RpcCommand, { type: "workflow_command" }>,
+	cwd: string,
+): Promise<RpcResponse> {
+	const { id, name, args, idempotencyKey, expectedRevision } = command;
+	try {
+		const data = await handler({ cwd, name, args, idempotencyKey, expectedRevision });
+		return { id, type: "response", command: "workflow_command", success: true, data: data as WorkflowCommandResult };
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		return { id, type: "response", command: "workflow_command", success: false, error: message };
 	}
 }
 
@@ -537,6 +555,18 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				}
 				currentRunId = null;
 			}
+
+			// workflow_outcome: the GSD extension reports the run's typed
+			// terminal state on a custom message (ADR-046). Re-emit it as the
+			// contract's v2 event; the raw message event still flows below.
+			if (event.type === "message_end") {
+				const outcome = parseWorkflowOutcomeCustomMessage(
+					event as unknown as Parameters<typeof parseWorkflowOutcomeCustomMessage>[0],
+				);
+				if (outcome && (!eventFilter || eventFilter.has("workflow_outcome"))) {
+					output(outcome);
+				}
+			}
 		}
 
 		// Apply event filter (v2 only, applies to agent session events only)
@@ -651,6 +681,17 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					return error(id, "get_project_snapshot", "Project snapshot is unavailable");
 				}
 				return await invokeProjectSnapshotRead(handler, id, session.sessionManager.getCwd());
+			}
+
+			case "workflow_command": {
+				if (!extensionsReady) {
+					return error(id, "workflow_command", "Extensions are still loading");
+				}
+				const handler = session.extensionRunner?.getRuntimeReadHandler("workflow_command");
+				if (!handler) {
+					return error(id, "workflow_command", "Workflow commands are unavailable");
+				}
+				return await invokeWorkflowCommand(handler, command, session.sessionManager.getCwd());
 			}
 
 			// =================================================================
@@ -942,7 +983,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 						protocolVersion: 2,
 						sessionId: session.sessionId,
 						capabilities: {
-							events: ["execution_complete", "cost_update"],
+							events: ["execution_complete", "cost_update", "workflow_outcome"],
 							commands: ["init", "shutdown", "subscribe"],
 						},
 					};

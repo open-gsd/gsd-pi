@@ -419,6 +419,24 @@ export function captureMilestoneVerificationSourceRevision(
   return { ok: true, sourceRevision: source.snapshot.aggregateRevision };
 }
 
+/**
+ * The source revision to store on a host record, or null when it cannot be
+ * read (no git repository, invalid workspace configuration). The record is
+ * written with or without it.
+ */
+export function readSourceRevisionForRecord(
+  basePath: string,
+  preferences: GSDPreferences | undefined,
+): string | null {
+  try {
+    const source = captureMilestoneVerificationSourceRevision(basePath, preferences);
+    return source.ok ? source.sourceRevision : null;
+  } catch {
+    // An unreadable source is stored as "no revision"; it never fails the record.
+    return null;
+  }
+}
+
 export function verificationSourceChanged(
   before: VerificationSourceSnapshot,
   after: VerificationSourceSnapshot,

@@ -12,7 +12,7 @@ import {
 import { getDb } from "./db/engine.js";
 import {
   getLifecycleShadowRepairCandidate,
-  isPassingVerificationResult,
+  isFailedVerificationResult,
   type LifecycleShadowRepairCandidate,
   type LifecycleShadowRepairEvidence,
   type LifecycleShadowRepairIdentity,
@@ -141,7 +141,7 @@ function executeRepairStep(input: {
   invocation: ExecutionInvocation;
   item: LifecycleShadowRepairIdentity;
   step: RepairStep;
-  targetStatus: "in_progress" | "completed" | null;
+  targetStatus: "in_progress" | "completed" | "ready" | null;
   disposition: RepairDisposition;
   priorRepairOperationId?: string;
 }): RepairStepReceipt {
@@ -167,7 +167,12 @@ function executeRepairStep(input: {
     requireStableCandidate(expectedCandidate, candidate);
     let afterStatus = candidate.canonicalStatus;
     if (input.targetStatus !== null) {
-      if (!candidate.evidence) throw new Error("lifecycle shadow repair requires durable completion evidence");
+      // Only the open-Milestone authority adoption (#2313) targets `ready`;
+      // it claims no completion, so no durable completion evidence exists
+      // for it and none is required.
+      if (!candidate.evidence && input.targetStatus !== "ready") {
+        throw new Error("lifecycle shadow repair requires durable completion evidence");
+      }
       afterStatus = repairLifecycleShadowStep(context, {
         ...input.item,
         expectedBeforeStatus: candidate.canonicalStatus,
@@ -324,6 +329,21 @@ function milestoneRepairItems(milestoneId: string): LifecycleShadowRepairIdentit
   return [...taskItems, ...sliceItems];
 }
 
+function sliceRepairItems(milestoneId: string, sliceId: string): LifecycleShadowRepairIdentity[] {
+  const taskItems = getDb().prepare(`
+    SELECT id AS task_id
+    FROM tasks
+    WHERE milestone_id = :milestone_id AND slice_id = :slice_id
+    ORDER BY sequence, id
+  `).all({ ":milestone_id": milestoneId, ":slice_id": sliceId }).map((row) => ({
+    itemKind: "task" as const,
+    milestoneId,
+    sliceId,
+    taskId: String(row["task_id"]),
+  }));
+  return [...taskItems, { itemKind: "slice" as const, milestoneId, sliceId }];
+}
+
 function childRepairInvocation(
   invocation: ExecutionInvocation,
   item: LifecycleShadowRepairIdentity,
@@ -424,6 +444,68 @@ function executeMilestoneSingleStepRepairBatch(
 }
 
 /**
+ * Restores missing canonical Milestone lifecycle authority (#2313): a legacy
+ * Milestone that is still open (normalized pending/in_progress) but whose
+ * canonical row is missing is adopted as `ready`. This claims no completion —
+ * only the authority the completion guards require — so it is gated on the
+ * legacy status itself, not on descendant completion evidence, and it runs
+ * before the descendant pass so unresolved descendants surface as their own
+ * precise items instead of hiding behind the parent-authority gate.
+ * Existing canonical descendant rows are preserved untouched. Replay-safe:
+ * the step is fenced by its own idempotency key and no-ops once the canonical
+ * row exists.
+ */
+/**
+ * Restores missing canonical open-item lifecycle authority (#2313): a legacy
+ * Milestone or Slice that is still open (normalized pending/in_progress) but
+ * whose canonical row is missing is adopted as `ready`. This claims no
+ * completion — only the authority the completion guards require — so it is
+ * gated on the legacy status itself, not on descendant completion evidence,
+ * and it runs before the descendant pass so unresolved descendants surface as
+ * their own precise items instead of hiding behind the parent-authority gate.
+ * Existing canonical rows are preserved untouched. Replay-safe: each step is
+ * fenced by its own idempotency key and no-ops once the canonical row exists.
+ */
+function adoptMissingCanonicalOpenLifecycle(
+  invocation: ExecutionInvocation,
+  item: LifecycleShadowRepairIdentity,
+): boolean {
+  const candidate = getLifecycleShadowRepairCandidate(item);
+  if (!candidate || candidate.canonicalStatus !== null) return false;
+  if (
+    candidate.comparison.normalizedLegacyStatus !== "pending" &&
+    candidate.comparison.normalizedLegacyStatus !== "in_progress"
+  ) {
+    return false;
+  }
+  const receipt = singleStepReceipt({
+    invocation: childRepairInvocation(invocation, item, "adopt"),
+    item,
+    step: "adopt",
+    targetStatus: "ready",
+    disposition: "repaired",
+  });
+  return receipt.disposition === "repaired";
+}
+
+function missingCanonicalSliceItems(milestoneId: string): LifecycleShadowRepairIdentity[] {
+  const rows = getDb().prepare(`
+    SELECT slice.id AS slice_id
+    FROM slices slice
+    LEFT JOIN workflow_item_lifecycles lifecycle
+      ON lifecycle.item_kind = 'slice' AND lifecycle.milestone_id = slice.milestone_id
+     AND lifecycle.slice_id = slice.id AND lifecycle.task_id IS NULL
+    WHERE slice.milestone_id = :milestone_id AND lifecycle.lifecycle_id IS NULL
+    ORDER BY slice.sequence, slice.id
+  `).all({ ":milestone_id": milestoneId });
+  return rows.map((row) => ({
+    itemKind: "slice" as const,
+    milestoneId,
+    sliceId: String(row["slice_id"]),
+  }));
+}
+
+/**
  * Converges legacy-complete descendants before Milestone validation.
  *
  * This is deliberately narrow: only a candidate with durable legacy completion
@@ -436,16 +518,74 @@ function executeMilestoneSingleStepRepairBatch(
  * pass writes nothing and reports every in-scope descendant as unresolved.
  * Only when every in-scope descendant is independently repairable does any
  * write happen; single-step repairs then commit together in one shared
- * Domain Operation (see executeMilestoneSingleStepRepairBatch).
+ * Domain Operation (see executeMilestoneSingleStepRepairBatch). Missing
+ * canonical open-item authority (the Milestone and any legacy-open Slices)
+ * is restored beforehand by adoptMissingCanonicalOpenLifecycle — restoring
+ * authority is not a completion claim and does not join the descendant batch.
  */
 export function repairMilestoneLifecycleShadowsForward(input: {
   invocation: ExecutionInvocation;
   milestoneId: string;
 }): MilestoneLifecycleShadowRepairResult {
   const milestoneId = requireText(input.milestoneId, "milestoneId");
+  return planAndRepairShadows(input.invocation, milestoneId, milestoneRepairItems(milestoneId), {
+    gateOnMilestoneStatus: true,
+    adoptMissingOpenAuthority: true,
+  });
+}
 
+/**
+ * Reopen-scoped variant (#2440): identical planning and evidence gates, but a
+ * canonically terminal Milestone does not short-circuit the pass — reopen runs
+ * against a closed Milestone by definition, and its drifted descendants (legacy
+ * terminal while the canonical row stayed `ready`) must converge before the
+ * reopen's terminal-parity checks. The per-descendant evidence gate is
+ * unchanged: unverifiable descendants are reported unresolved, never written.
+ */
+export function repairMilestoneShadowsForReopen(input: {
+  invocation: ExecutionInvocation;
+  milestoneId: string;
+}): MilestoneLifecycleShadowRepairResult {
+  const milestoneId = requireText(input.milestoneId, "milestoneId");
+  return planAndRepairShadows(input.invocation, milestoneId, milestoneRepairItems(milestoneId), {
+    gateOnMilestoneStatus: false,
+    adoptMissingOpenAuthority: false,
+  });
+}
+
+/**
+ * Slice-scoped reopen variant (#2440): converges only the reopened Slice's own
+ * tasks and the Slice itself, leaves up. Drift elsewhere in the milestone is a
+ * Milestone-reopen concern, not a blocker for this Slice's redo.
+ */
+export function repairSliceShadowsForReopen(input: {
+  invocation: ExecutionInvocation;
+  milestoneId: string;
+  sliceId: string;
+}): MilestoneLifecycleShadowRepairResult {
+  const milestoneId = requireText(input.milestoneId, "milestoneId");
+  const sliceId = requireText(input.sliceId, "sliceId");
+  const items = sliceRepairItems(milestoneId, sliceId);
+  if (items.length <= 1) return { repaired: [], unresolved: [] };
+  return planAndRepairShadows(input.invocation, milestoneId, items, {
+    gateOnMilestoneStatus: false,
+    adoptMissingOpenAuthority: false,
+  });
+}
+
+function planAndRepairShadows(
+  invocation: ExecutionInvocation,
+  milestoneId: string,
+  repairItems: LifecycleShadowRepairIdentity[],
+  opts: {
+    gateOnMilestoneStatus: boolean;
+    /** #2313: restore missing canonical open Milestone/Slice authority first (forward repair only). */
+    adoptMissingOpenAuthority: boolean;
+  },
+): MilestoneLifecycleShadowRepairResult {
   const milestoneCandidate = getLifecycleShadowRepairCandidate({ itemKind: "milestone", milestoneId });
   if (
+    opts.gateOnMilestoneStatus &&
     milestoneCandidate &&
     (milestoneCandidate.canonicalStatus === "pending" ||
      milestoneCandidate.canonicalStatus === "completed" ||
@@ -454,16 +594,23 @@ export function repairMilestoneLifecycleShadowsForward(input: {
     return { repaired: [], unresolved: [] };
   }
 
-  // A canonically-completed sibling descendant proves the adoption pattern is
-  // established for this milestone (e.g. a partially-applied legacy import):
-  // bare legacy-complete stragglers are then swept in by milestone completion
-  // rather than blocking validation (#2070). Without that corroboration, an
-  // adopted milestone claiming readiness on unsubstantiated descendants is
-  // refused (#2002).
-  const repairItems = milestoneRepairItems(milestoneId);
-  const corroborated = repairItems.some(
-    (item) => getLifecycleShadowRepairCandidate(item)?.canonicalStatus === "completed",
-  );
+  const repaired: string[] = [];
+  // #2313: the forward repair restores missing canonical open-item authority
+  // before the descendant pass so unresolved descendants surface as their own
+  // precise items instead of hiding behind the parent-authority gate. Reopen
+  // variants (#2440) skip this pre-step: their repair is scoped to the drifted
+  // descendants the reopen targets, and a legacy-open missing row left unseen
+  // here is exactly what the forward repair adopts at the next completion.
+  if (opts.adoptMissingOpenAuthority) {
+    if (adoptMissingCanonicalOpenLifecycle(invocation, { itemKind: "milestone", milestoneId })) {
+      repaired.push(milestoneId);
+    }
+    for (const sliceItem of missingCanonicalSliceItems(milestoneId)) {
+      if (adoptMissingCanonicalOpenLifecycle(invocation, sliceItem)) {
+        repaired.push(entityId(sliceItem));
+      }
+    }
+  }
 
   const inScope: MilestoneRepairEntry[] = [];
   const unresolved: string[] = [];
@@ -479,17 +626,16 @@ export function repairMilestoneLifecycleShadowsForward(input: {
       item.itemKind === "task" &&
       typeof candidate.legacyVerificationResult === "string" &&
       candidate.legacyVerificationResult !== "" &&
-      !isPassingVerificationResult(candidate.legacyVerificationResult);
+      isFailedVerificationResult(candidate.legacyVerificationResult);
     if (failedVerification) {
       // Recorded failed verification must never be silently repaired (#2002).
       unresolved.push(identity);
       continue;
     }
-    if (corroborated && candidate.canonicalStatus === null) {
-      // Adoption pattern established: completion sweeps this straggler in.
-      continue;
-    }
     if (candidate.targetStatus !== "completed" || !candidate.evidence) {
+      // No completion adopts a legacy completion without durable evidence
+      // (#2002). A row with no canonical row is adopted only by the
+      // lifecycle.backfill Domain Operation (/gsd db adopt).
       unresolved.push(identity);
       continue;
     }
@@ -513,11 +659,9 @@ export function repairMilestoneLifecycleShadowsForward(input: {
 
   if (unresolved.length > 0) {
     for (const entry of inScope) unresolved.push(entityId(entry.item));
-    return { repaired: [], unresolved };
+    return { repaired, unresolved };
   }
-  if (inScope.length === 0) return { repaired: [], unresolved: [] };
-
-  const repaired: string[] = [];
+  if (inScope.length === 0) return { repaired, unresolved: [] };
 
   const taskEntries = inScope.filter((entry) => entry.item.itemKind === "task");
   const sliceEntries = inScope.filter((entry) => entry.item.itemKind === "slice");
@@ -528,12 +672,12 @@ export function repairMilestoneLifecycleShadowsForward(input: {
 
   for (const entry of twoPhaseTaskEntries) {
     let receipt = repairLifecycleShadowForward({
-      invocation: childRepairInvocation(input.invocation, entry.item, "advance"),
+      invocation: childRepairInvocation(invocation, entry.item, "advance"),
       item: entry.item,
     });
     if (receipt.disposition === "advanced") {
       receipt = repairLifecycleShadowForward({
-        invocation: childRepairInvocation(input.invocation, entry.item, "complete"),
+        invocation: childRepairInvocation(invocation, entry.item, "complete"),
         item: entry.item,
       });
     }
@@ -549,7 +693,7 @@ export function repairMilestoneLifecycleShadowsForward(input: {
 
   const singleStepEntries = [...singleStepTaskEntries, ...singleStepSliceEntries];
   if (singleStepEntries.length > 0) {
-    repaired.push(...executeMilestoneSingleStepRepairBatch(input.invocation, milestoneId, singleStepEntries));
+    repaired.push(...executeMilestoneSingleStepRepairBatch(invocation, milestoneId, singleStepEntries));
   }
 
   return { repaired, unresolved: [] };

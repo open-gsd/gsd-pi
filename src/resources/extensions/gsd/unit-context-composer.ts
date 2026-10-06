@@ -9,7 +9,7 @@
 //     `auto-prompts.ts` where the per-artifact-key resolver lives.
 //   - Caller-supplied resolver means the composer can be unit-tested with
 //     trivial mocks; production wiring in `auto-prompts.ts` dispatches to
-//     the existing `inlineFile` / `inline*FromDb` helpers.
+//     the existing `inlineNarrative` / `inline*FromDb` helpers.
 //   - Null-returning resolvers are skipped silently: they model the
 //     "artifact is optional / missing / not applicable to this milestone"
 //     case. The composer never errors on a missing artifact.
@@ -162,7 +162,7 @@ export const CONTEXT_MODE_GUIDANCE_BY_UNIT: Readonly<Record<string, string>> = {
   "gate-evaluate":
     "Use `subagent` to dispatch tester agents, then persist each gate with `gsd_save_gate_result`; rely on testers for verification evidence.",
   "rewrite-docs":
-    "Use the preloaded context and the documents under review as the source of truth, editing documentation with ordinary file tools, then persist outcomes with `gsd_summary_save` or `gsd_decision_save` as appropriate.",
+    "Use the preloaded context and the documents under review as input, then apply the override through `gsd_plan_task`, `gsd_plan_slice`, `gsd_requirement_update`, `gsd_decision_save` or `gsd_summary_save` as appropriate. Do not edit files under `.gsd/`; they are rendered from the database.",
 };
 
 // Per-unit guidance for the nested render mode (renderMode: "nested"), used when this
@@ -217,6 +217,15 @@ export interface ComposeToolSurfaceInstructionOptions {
   readonly sessionProvider?: string;
 }
 
+/**
+ * Synchronous-dispatch requirement for every unit that fans out subagents and
+ * must persist artifacts within the same turn (#2312 generalized per #2533).
+ * Phrased so it is satisfiable on hosts where the GSD `subagent` tool is not
+ * presented and the native `Agent` tool is the only dispatch path.
+ */
+const SYNCHRONOUS_SUBAGENT_DISPATCH =
+  "Dispatch synchronously: every subagent call MUST set `run_in_background: false` — backgrounded subagents finish after the turn ends, so their results never reach what this unit must persist. If only the native `Agent` tool is presented on this host, use it with `run_in_background: false`.";
+
 const TOOL_SURFACE_GUIDANCE_BY_UNIT: Record<string, string> = {
   "run-uat":
     "Do not call `gsd_exec`, `Bash`, `Write`, or `Edit` — they are unavailable in this unit. Run every automated check through `gsd_uat_exec` with the appropriate `intent`. For browser UAT modes, use `browser_*` tools when presented; if browser automation fails, record the failure honestly and use `gsd_uat_exec` for the best objective substitute.",
@@ -225,11 +234,11 @@ const TOOL_SURFACE_GUIDANCE_BY_UNIT: Record<string, string> = {
   "gate-evaluate":
     "Dispatch only **tester** subagents via the GSD `subagent` tool — never the native `Agent` tool and never with `run_in_background: true`. Wait for every subagent to finish, then persist each gate with `gsd_save_gate_result`. Do not use `ToolSearch` — it is not available.",
   "reactive-execute":
-    "Dispatch only **worker** subagents via `subagent`. Do not call `gsd_task_complete` from this parent batch — each worker owns its task completion. If a failed task left no summary, call `gsd_summary_save` with `blocker_discovered: true`.",
+    `Dispatch only **worker** subagents via \`subagent\`. ${SYNCHRONOUS_SUBAGENT_DISPATCH} Do not call \`gsd_task_complete\` from this parent batch — each worker owns its task completion. If a failed task left no summary, call \`gsd_summary_save\` with \`blocker_discovered: true\`.`,
   "execute-task":
     "Complete only this task via `gsd_task_complete`. Do not call `gsd_slice_complete`, `gsd_validate_milestone`, or `gsd_complete_milestone` — the orchestrator owns phase transitions.",
   "validate-milestone":
-    "Run shell verification commands through `gsd_exec` — `bash` is not available in this unit, and `gsd_uat_exec` belongs to run-uat. Dispatch `reviewer` subagents in parallel, then persist the verdict via `gsd_validate_milestone`. Do not query `.gsd/gsd.db` directly — use `gsd_milestone_status` and inlined context. Validation reports on the milestone as planned; it does not extend it. Call `gsd_reassess_roadmap` only when validation FAILS and the roadmap must change to fix it — never to add slices or scope to a milestone whose planned work is complete.",
+    `Run shell verification commands through \`gsd_exec\` — \`bash\` is not available in this unit, and \`gsd_uat_exec\` belongs to run-uat. Dispatch \`reviewer\` subagents in parallel. ${SYNCHRONOUS_SUBAGENT_DISPATCH} Persist the verdict via \`gsd_validate_milestone\`. Do not query \`.gsd/gsd.db\` directly — use \`gsd_milestone_status\` and inlined context. Validation reports on the milestone as planned; it does not extend it. Call \`gsd_reassess_roadmap\` only when validation FAILS and the roadmap must change to fix it — never to add slices or scope to a milestone whose planned work is complete.`,
   "complete-milestone":
     "Persist completion only through `gsd_complete_milestone` after verification passes. Do not query `.gsd/gsd.db` directly. Do not write `.gsd/PROJECT.md` or `.gsd/REQUIREMENTS.md` by hand — use `gsd_summary_save` and `gsd_requirement_update`.",
   "replan-slice":
@@ -254,26 +263,29 @@ function guidanceForUnitToolsPolicy(
   sessionProvider?: string,
 ): string | undefined {
   if (unitType === "research-slice" && policy.mode === "planning-dispatch") {
-    return `Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)} for reconnaissance. Do not edit user source files outside \`.gsd/**\`.`;
+    return `Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)} for reconnaissance. ${SYNCHRONOUS_SUBAGENT_DISPATCH} Do not edit user source files outside \`.gsd/**\`.`;
   }
 
   if (unitType === "plan-slice") {
+    // plan-slice's rendered prompt is size-gated (prompt-golden-fixtures
+    // Phase 2 reduction gate), so the shared requirement is carried in
+    // compact form here.
     const dispatch = policy.mode === "planning-dispatch"
-      ? ` Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)} for reconnaissance — not implementation agents.`
+      ? ` Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)} for reconnaissance — not implementation agents. Dispatch synchronously — \`run_in_background: false\` on every call, including the native \`Agent\` tool when it is the only dispatch path.`
       : " Do not dispatch subagents.";
     return `Persist planning through \`gsd_plan_slice\` and \`gsd_plan_task\`.${dispatch} Do not edit user source files outside \`.gsd/**\`. Keep self-verification inside the active worktree: inspect with read-only tools and run any required command through \`gsd_exec\` or \`gsd_exec_search\`, not a direct shell or an out-of-worktree path.`;
   }
 
   if (unitType === "refine-slice") {
     const dispatch = policy.mode === "planning-dispatch"
-      ? ` Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)}.`
+      ? ` Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)}. ${SYNCHRONOUS_SUBAGENT_DISPATCH}`
       : " Do not dispatch subagents.";
     return `Persist refinements through \`gsd_plan_slice\` only.${dispatch} Do not edit user source files outside \`.gsd/**\`.`;
   }
 
   if (unitType === "plan-milestone") {
     const dispatch = policy.mode === "planning-dispatch"
-      ? ` Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)}.`
+      ? ` Dispatch subagents only to ${formatAllowedAgents(policy.allowedSubagents, sessionProvider)}. ${SYNCHRONOUS_SUBAGENT_DISPATCH}`
       : "";
     return `Persist milestone planning through \`gsd_plan_milestone\` / \`gsd_plan_slice\`.${dispatch} Do not edit user source files outside \`.gsd/**\`.`;
   }

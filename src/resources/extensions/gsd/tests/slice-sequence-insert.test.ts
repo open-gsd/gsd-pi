@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { handlePlanMilestone as handlePlanMilestoneWithInvocation } from "../tools/plan-milestone.ts";
 import { internalPlanningInvocation } from "../planning-invocation.ts";
 import { handleReassessRoadmap as handleReassessRoadmapWithInvocation } from "../tools/reassess-roadmap.ts";
-import { migrateHierarchyToDb } from "../md-importer.ts";
+import { migrateHierarchyToDb } from "./helpers/md-importer.ts";
 import {
   closeDatabase,
   getMilestoneSlices,

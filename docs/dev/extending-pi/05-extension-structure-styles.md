@@ -1,6 +1,5 @@
 # Extension Structure & Styles
 
-
 ### Single File (simplest)
 
 ```

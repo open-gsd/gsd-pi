@@ -53,6 +53,61 @@ export function createKernelCheckpointChainTrigger(db: DbAdapter): void {
   `);
 }
 
+/** The plan trigger is the one that accepts a validation Waiver. */
+export function hasCloseoutPlanAttemptTrigger(db: DbAdapter): boolean {
+  return !!db.prepare(`
+    SELECT 1 AS present FROM sqlite_master
+    WHERE type = 'trigger' AND name = 'trg_workflow_closeout_plan_attempt'
+      AND sql LIKE '%workflow_waivers%'
+  `).get();
+}
+
+/**
+ * A Closeout Plan cites a settled Attempt of its lifecycle. The Attempt must
+ * have succeeded, or the lifecycle must hold an active milestone-validation
+ * Waiver: a waived Milestone closes out through the same plan as a validated
+ * one. Not versioned: the trigger holds no data, so every open replaces the
+ * one that has no Waiver branch. Idempotent.
+ */
+export function ensureCloseoutPlanAttemptTrigger(db: DbAdapter): void {
+  if (hasCloseoutPlanAttemptTrigger(db)) return;
+  db.exec(`
+    DROP TRIGGER IF EXISTS trg_workflow_closeout_plan_attempt;
+    CREATE TRIGGER trg_workflow_closeout_plan_attempt
+    BEFORE INSERT ON workflow_closeout_plans
+    WHEN NOT EXISTS (
+      SELECT 1
+      FROM workflow_execution_attempts attempt
+      JOIN workflow_attempt_results result ON result.attempt_id = attempt.attempt_id
+      WHERE attempt.attempt_id = NEW.attempt_id
+        AND attempt.project_id = NEW.project_id
+        AND attempt.lifecycle_id = NEW.lifecycle_id
+        AND attempt.attempt_state = 'settled'
+        AND attempt.settle_project_revision < NEW.project_revision
+        AND attempt.settle_authority_epoch <= NEW.authority_epoch
+        AND result.project_id = NEW.project_id
+        AND result.lifecycle_id = NEW.lifecycle_id
+        AND result.project_revision < NEW.project_revision
+        AND result.authority_epoch <= NEW.authority_epoch
+        AND (
+          result.outcome = 'succeeded' OR EXISTS (
+            SELECT 1 FROM workflow_waivers waiver
+            WHERE waiver.project_id = NEW.project_id
+              AND waiver.lifecycle_id = NEW.lifecycle_id
+              AND waiver.waiver_status = 'active'
+              AND waiver.scope = 'milestone-validation'
+              AND waiver.project_revision < NEW.project_revision
+              AND waiver.authority_epoch <= NEW.authority_epoch
+              AND (waiver.expires_at IS NULL OR waiver.expires_at > strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+          )
+        )
+    )
+    BEGIN
+      SELECT RAISE(ABORT, 'closeout plan requires a causally prior settled attempt');
+    END;
+  `);
+}
+
 /**
  * V35 records desired projection work and immutable import/kernel/closeout
  * facts. Projection delivery is operational and intentionally does not create
@@ -462,28 +517,6 @@ export function createProjectionImportKernelCloseoutFoundationSchemaV35(db: DbAd
         )
     );
 
-    CREATE TRIGGER IF NOT EXISTS trg_workflow_closeout_plan_attempt
-    BEFORE INSERT ON workflow_closeout_plans
-    WHEN NOT EXISTS (
-      SELECT 1
-      FROM workflow_execution_attempts attempt
-      JOIN workflow_attempt_results result ON result.attempt_id = attempt.attempt_id
-      WHERE attempt.attempt_id = NEW.attempt_id
-        AND attempt.project_id = NEW.project_id
-        AND attempt.lifecycle_id = NEW.lifecycle_id
-        AND attempt.attempt_state = 'settled'
-        AND attempt.settle_project_revision < NEW.project_revision
-        AND attempt.settle_authority_epoch <= NEW.authority_epoch
-        AND result.project_id = NEW.project_id
-        AND result.lifecycle_id = NEW.lifecycle_id
-        AND result.outcome = 'succeeded'
-        AND result.project_revision < NEW.project_revision
-        AND result.authority_epoch <= NEW.authority_epoch
-    )
-    BEGIN
-      SELECT RAISE(ABORT, 'closeout plan requires a causally prior settled attempt');
-    END;
-
     CREATE TRIGGER IF NOT EXISTS trg_workflow_closeout_plan_head
     BEFORE INSERT ON workflow_closeout_plans
     WHEN (
@@ -679,4 +712,5 @@ export function createProjectionImportKernelCloseoutFoundationSchemaV35(db: DbAd
       ON workflow_settlement_receipts(project_id, lifecycle_id, closeout_effect_id);
   `);
   createKernelCheckpointChainTrigger(db);
+  ensureCloseoutPlanAttemptTrigger(db);
 }

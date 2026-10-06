@@ -3,7 +3,7 @@
 // gsd_task_settle as the repair; --fix never settles on its own (#1749).
 
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, test } from "node:test";
@@ -17,6 +17,7 @@ import {
 import { claimTaskAttempt } from "../task-execution-domain-operation.ts";
 import { checkEngineHealth } from "../doctor-engine-checks.ts";
 import type { DoctorIssue } from "../doctor-types.ts";
+import { resolveMilestoneFile } from "../paths.ts";
 import type { ExecutionInvocation } from "../execution-invocation.ts";
 
 const tempDirs = new Set<string>();
@@ -147,7 +148,10 @@ test("doctor --fix reports but does not settle the orphaned Attempt", async () =
   await checkEngineHealth(basePath, issues, fixes, { repair: true });
 
   assert.ok(issues.some((issue) => issue.code === "orphaned_running_attempt"));
-  assert.equal(fixes.length, 0);
+  // Repair also renders the missing M001 ROADMAP through Projection Work; no other fix may be applied.
+  assert.deepEqual(fixes, ["delivered 2 Projection Work row(s)", "re-rendered missing projections for M001"]);
+  const roadmapPath = resolveMilestoneFile(basePath, "M001", "ROADMAP");
+  assert.ok(roadmapPath && existsSync(roadmapPath), "the reported re-render wrote the ROADMAP");
   const state = db().prepare(
     "SELECT attempt_state AS state FROM workflow_execution_attempts WHERE attempt_id = :id",
   ).get({ ":id": attemptId }) as { state: string };

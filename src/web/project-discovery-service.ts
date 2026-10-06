@@ -1,7 +1,13 @@
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
+import type { DatabaseSync } from "node:sqlite";
 import type { ProjectDetectionKind, ProjectDetectionSignals } from "./bridge-service.ts";
 import { detectMonorepo, detectProjectKind } from "./bridge-service.ts";
+import { openProjectDatabaseReadOnly } from "./project-db-read.ts";
+import { selectActiveMilestone } from "../resources/extensions/gsd/milestone-readiness.ts";
+import { parseMilestoneSequence, splitH2Sections } from "../resources/extensions/gsd/schemas/project-sequence.ts";
+import { isClosedStatus, isDiscardedMilestoneStatus } from "../resources/extensions/gsd/status-guards.ts";
+import { stripIdPrefix } from "../resources/extensions/gsd/strip-id-prefix.ts";
 
 // ─── Project Discovery ─────────────────────────────────────────────────────
 
@@ -26,13 +32,108 @@ export interface ProjectMetadata {
 const EXCLUDED_DIRS = new Set(["node_modules", ".git"]);
 
 /**
+ * Read milestone counts and the active milestone from a project's
+ * `.gsd/gsd.db`. The picker lists projects that the user did not open, so the
+ * read does not change the project (see `openProjectDatabaseReadOnly`).
+ *
+ * The active milestone comes from `selectActiveMilestone`, the same rule that
+ * state derivation applies. Slice and phase need the full state derivation,
+ * so they stay `null` here.
+ *
+ * Returns `null` when the database cannot be read.
+ */
+function readDatabaseProgress(projectPath: string): ProjectProgressInfo | null {
+  let db: DatabaseSync | undefined;
+  try {
+    const connection = db = openProjectDatabaseReadOnly(projectPath);
+
+    // The picker reads databases of every schema version. A query that names an
+    // absent table or column throws, so each read names only what is there.
+    const columnsOf = (table: string): Set<string> =>
+      new Set(connection.prepare(`PRAGMA table_info(${table})`).all().map((column) => String(column.name)));
+    const milestoneColumns = columnsOf("milestones");
+    const hasSequence = milestoneColumns.has("sequence");
+    const hasDependsOn = milestoneColumns.has("depends_on");
+    const hasArtifacts = columnsOf("artifacts").size > 0;
+
+    // Workflow order: queued milestones (sequence > 0) first, then sequence, then id.
+    const rows = connection.prepare(
+      `SELECT id, title, status${hasDependsOn ? ", depends_on" : ""} FROM milestones ORDER BY ${
+        hasSequence ? "CASE WHEN sequence > 0 THEN 0 ELSE 1 END, sequence, " : ""
+      }id`,
+    ).all();
+
+    const sliceCounts = new Map<string, number>();
+    if (columnsOf("slices").size > 0) {
+      for (const row of connection.prepare("SELECT milestone_id, COUNT(*) AS count FROM slices GROUP BY milestone_id").all()) {
+        sliceCounts.set(String(row.milestone_id), Number(row.count));
+      }
+    }
+    const contextIds = new Set<string>();
+    const draftContextIds = new Set<string>();
+    let projectSequenceIds = new Set<string>();
+    if (hasArtifacts) {
+      for (const row of connection.prepare(
+        "SELECT milestone_id, artifact_type FROM artifacts WHERE milestone_id IS NOT NULL AND slice_id IS NULL AND task_id IS NULL AND artifact_type IN ('CONTEXT', 'CONTEXT-DRAFT')",
+      ).all()) {
+        (row.artifact_type === "CONTEXT" ? contextIds : draftContextIds).add(String(row.milestone_id));
+      }
+      const project = connection.prepare("SELECT full_content FROM artifacts WHERE path = 'PROJECT.md'").get();
+      const { sections } = splitH2Sections(String(project?.full_content ?? ""));
+      projectSequenceIds = new Set(parseMilestoneSequence(sections).map((m) => m.id));
+    }
+
+    // A discarded milestone is a tombstone: it is not counted and not listed.
+    const milestones = rows
+      .filter((row) => !isDiscardedMilestoneStatus(String(row.status)))
+      .map((row) => {
+        const id = String(row.id);
+        const status = String(row.status);
+        return {
+          id,
+          title: stripIdPrefix(String(row.title ?? ""), id),
+          status,
+          dependsOn: JSON.parse(String(row.depends_on ?? "") || "[]") as string[],
+          done: isClosedStatus(status),
+          parked: status === "parked",
+          sliceCount: sliceCounts.get(id) ?? 0,
+          hasContext: contextIds.has(id),
+          hasDraftContext: draftContextIds.has(id),
+        };
+      });
+
+    const active = selectActiveMilestone(milestones, projectSequenceIds)?.milestone;
+    return {
+      activeMilestone: active ? (active.title ? `${active.id}: ${active.title}` : active.id) : null,
+      activeSlice: null,
+      phase: null,
+      milestonesCompleted: milestones.filter((m) => m.done).length,
+      milestonesTotal: milestones.length,
+    };
+  } catch {
+    // No database, no SQLite provider, or no milestones table (before schema V5).
+    return null;
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * Project progress for the picker. The database is the authority; the
+ * `.gsd/STATE.md` projection is read only when the database cannot be read.
+ */
+function readProjectProgress(projectPath: string): ProjectProgressInfo | null {
+  return readDatabaseProgress(projectPath) ?? readStateFileProgress(projectPath);
+}
+
+/**
  * Parse a project's `.gsd/STATE.md` for active milestone, slice, phase,
  * and milestone completion tally.
  *
  * Returns `null` when the file is missing or unreadable.
  * Individual fields return `null` when the corresponding line isn't found.
  */
-function readProjectProgress(projectPath: string): ProjectProgressInfo | null {
+function readStateFileProgress(projectPath: string): ProjectProgressInfo | null {
   try {
     const content = readFileSync(join(projectPath, ".gsd", "STATE.md"), "utf-8");
     const lines = content.split("\n");
@@ -43,19 +144,26 @@ function readProjectProgress(projectPath: string): ProjectProgressInfo | null {
     let milestonesCompleted = 0;
     let milestonesTotal = 0;
 
+    // The renderer writes "None" for an empty active milestone or slice.
+    const field = (line: string, label: string): string | null => {
+      const value = line.replace(label, "").trim();
+      return value && value !== "None" ? value : null;
+    };
+
     for (const line of lines) {
       const trimmed = line.trim();
 
       if (trimmed.startsWith("**Active Milestone:**")) {
-        activeMilestone = trimmed.replace("**Active Milestone:**", "").trim() || null;
+        activeMilestone = field(trimmed, "**Active Milestone:**");
       } else if (trimmed.startsWith("**Active Slice:**")) {
-        activeSlice = trimmed.replace("**Active Slice:**", "").trim() || null;
+        activeSlice = field(trimmed, "**Active Slice:**");
       } else if (trimmed.startsWith("**Phase:**")) {
         phase = trimmed.replace("**Phase:**", "").trim() || null;
       } else if (trimmed.startsWith("- ✅")) {
         milestonesCompleted++;
         milestonesTotal++;
-      } else if (trimmed.startsWith("- 🔄")) {
+      } else if (/^- (🔄|⬜|⏸)/u.test(trimmed)) {
+        // Active, pending and parked milestones all count toward the total.
         milestonesTotal++;
       }
     }

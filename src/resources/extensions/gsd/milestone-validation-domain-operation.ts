@@ -19,6 +19,8 @@ import {
   type ValidateMilestoneWriteResult,
 } from "./db/writers/milestone-validation.js";
 import type { ExecutionInvocation } from "./execution-invocation.js";
+import { insertAssessment } from "./gsd-db.js";
+import { insertMilestoneValidationGates } from "./milestone-validation-gates.js";
 
 export interface MilestoneValidationCriterionInput {
   criterionKey: string;
@@ -59,6 +61,17 @@ export interface ValidateMilestoneInput {
   summary: string;
   output: DomainJsonValue;
   criteria: ValidateMilestoneCriterionInput[];
+  /**
+   * Legacy assessment and quality-gate rows that phase derivation still reads.
+   * They commit inside the same operation so no crash can split them from the
+   * canonical verdict.
+   */
+  legacyAssessment?: {
+    path: string;
+    fullContent: string;
+    status: string;
+    gateSliceId: string;
+  };
 }
 
 interface OperationReceipt {
@@ -73,6 +86,9 @@ interface OperationReceipt {
 
 interface SubjectiveProofRow {
   criterion_id: string;
+  criterion_key: string;
+  requirement_id: string | null;
+  tested_source_revision: string | null;
   human_acceptance_id: string | null;
   disposition: string | null;
 }
@@ -102,6 +118,15 @@ function requireNonBlank(value: string, field: string): string {
   if (normalized.length === 0) throw new Error(`${field} must not be blank`);
   return normalized;
 }
+
+/**
+ * The aggregate content-hash form captureVerificationSourceSnapshot computes:
+ * `sha256:` followed by 64 lowercase hex characters. A bare git SHA (or any
+ * other form) can never equal a computed revision, so evidence tested against
+ * one is rejected at persistence time with the expected format named (#2450)
+ * instead of guaranteeing a downstream validation-source-revision mismatch.
+ */
+const TESTED_SOURCE_REVISION_PATTERN = /^sha256:[0-9a-f]{64}$/;
 
 function operationReceipt(operation: DomainOperationResult): OperationReceipt {
   return {
@@ -348,6 +373,18 @@ function currentRequiredSubjectiveProofs(
 ): SubjectiveProofRow[] {
   return getDb().prepare(`
     SELECT criterion.criterion_id,
+           criterion.criterion_key,
+           criterion.requirement_id,
+           (
+             SELECT json_extract(prepared.payload_json, '$.testedSourceRevision')
+             FROM workflow_domain_events prepared
+             WHERE prepared.project_id = criterion.project_id
+               AND prepared.event_type = 'milestone.subjective-uat.prepared'
+               AND json_extract(prepared.payload_json, '$.criterionId') = criterion.criterion_id
+             ORDER BY prepared.project_revision DESC, prepared.event_index DESC,
+                      prepared.event_id DESC
+             LIMIT 1
+           ) AS tested_source_revision,
            acceptance.human_acceptance_id,
            acceptance.disposition
     FROM workflow_acceptance_criteria criterion
@@ -394,6 +431,13 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     input.testedSourceRevision,
     "testedSourceRevision",
   );
+  if (!TESTED_SOURCE_REVISION_PATTERN.test(testedSourceRevision)) {
+    throw new Error(
+      `testedSourceRevision must be the aggregate content hash the verification gate computes, ` +
+      `formatted "sha256:" followed by 64 lowercase hex characters; got "${testedSourceRevision}" ` +
+      `(a bare git SHA is not a source revision — re-produce the evidence against the current source snapshot)`,
+    );
+  }
   const policyId = requireNonBlank(input.policyId, "policyId");
   const policyVersion = requireNonBlank(input.policyVersion, "policyVersion");
   const rationale = requireNonBlank(input.rationale, "rationale");
@@ -481,6 +525,24 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
     payload,
   }, (context) => {
     written = writeMilestoneValidation(context, writeInput);
+    if (input.legacyAssessment) {
+      insertAssessment({
+        path: input.legacyAssessment.path,
+        milestoneId,
+        sliceId: null,
+        taskId: null,
+        status: input.legacyAssessment.status,
+        scope: "milestone-validation",
+        fullContent: input.legacyAssessment.fullContent,
+        createdAt: written.endedAt,
+      });
+      insertMilestoneValidationGates(
+        milestoneId,
+        input.legacyAssessment.gateSliceId,
+        input.legacyAssessment.status,
+        written.endedAt,
+      );
+    }
     const subjectiveProofs = currentRequiredSubjectiveProofs(
       written.lifecycleId,
       testedSourceRevision,
@@ -490,8 +552,20 @@ export function validateMilestone(input: ValidateMilestoneInput): ValidateMilest
         !proof.human_acceptance_id || proof.disposition !== "accepted"
       );
       if (unsatisfied) {
+        // #2341: name the criterion's key, requirement, and bound source
+        // revision so the blocking criterion can be identified and replaced
+        // (prepare a replacement under its criterionKey, or supersede it by
+        // ID with supersedesCriterionId) instead of surfacing a bare UUID.
+        const requirementClause = unsatisfied.requirement_id
+          ? `, requirement ${unsatisfied.requirement_id}`
+          : "";
+        const revisionClause = unsatisfied.tested_source_revision
+          ? ` for source revision ${unsatisfied.tested_source_revision}`
+          : "";
         throw new Error(
-          `Milestone validation pass requires accepted subjective UAT criterion ${unsatisfied.criterion_id}`,
+          `Milestone validation pass requires accepted subjective UAT criterion ${unsatisfied.criterion_id}` +
+          ` (criterionKey: "${unsatisfied.criterion_key}"${requirementClause})${revisionClause}` +
+          "; prepare a current-source replacement for this criterionKey (or supersede the criterion by ID via supersedesCriterionId) and answer it before passing",
         );
       }
     }

@@ -49,6 +49,8 @@ export const GSD_RUNTIME_PATTERNS = [
   ".gsd/doctor-history.jsonl",
   ".gsd/event-log.jsonl",
   ".gsd/DISCUSSION-MANIFEST.json",
+  ".gsd/.compat.json", // local render baseline; a pulled copy would hide teammates' edits
+  ".gsd/quarantine/",
   ".gsd/milestones/**/*-CONTINUE.md",
   ".gsd/milestones/**/continue.md",
 ] as const;
@@ -63,6 +65,11 @@ const BASELINE_PATTERNS = [
   ".gsd-id",
   ".mcp.json",
   ".bg-shell/",
+  // Workflow-MCP auto-prep (#731) writes .claude/settings.local.json at startup;
+  // keep it out of the fail-closed verification-source scope (#2509), same class
+  // as .mcp.json. Narrow on purpose: durable .claude/ content (skills/, commands/,
+  // settings.json — see workflow-templates/spike.md) is real source and must stay hashed.
+  ".claude/settings.local.json",
 
   // ── OS junk ──
   ".DS_Store",

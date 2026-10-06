@@ -26,9 +26,11 @@ separately proven read-authority cutover.
 5. Return the legacy response during M003. Projection delivery follows the
    committed operation and cannot compensate canonical state backward.
 
-Handlers must use `normalizeLegacyLifecycleStatus` and the exported
-`CanonicalLifecycleStatus` type. Do not duplicate alias tables in tools,
-commands, or orchestration modules.
+Handlers must use the one legacy-to-canonical map in `status-guards.ts`:
+`adoptionLifecycleStatus` at adoption seams (it refuses an unknown legacy
+status and never adopts `in_progress`), `normalizeLegacyLifecycleStatus`
+elsewhere, and the exported `CanonicalLifecycleStatus` type. Do not duplicate
+alias tables in tools, commands, or orchestration modules.
 
 ## S02 planning boundary
 
@@ -48,8 +50,10 @@ commands, or orchestration modules.
   their IDs cannot be reused until the matching reopen command succeeds. Stale
   PLAN cleanup removes only content still owned by the compatibility marker or
   PLAN artifact; a user-modified file is preserved.
-- Restore, hierarchy replacement, milestone discard, and worktree teardown fail
-  closed when they would erase or strand adopted canonical history.
+- Restore, hierarchy replacement, and worktree teardown fail closed when they
+  would erase or strand adopted canonical history. Milestone discard erases
+  nothing: it cancels the milestone and its open descendants in one Domain
+  Operation and keeps the rows as tombstones.
 
 ## Integration boundaries
 
@@ -120,15 +124,17 @@ commands, or orchestration modules.
 
 ### S07 and later boundaries
 
-- Slice completion proves each completed Task's tested source revision, but it
-  does not yet record one integrated Slice source snapshot. Automated UAT runs
+- Slice completion proves each completed Task's tested source revision and
+  stores one hash over those revisions (`testedSourceSetHash`) in the
+  `slice.completed` event, but it does not yet record one integrated Slice
+  source snapshot. Automated UAT runs
   after completion, and its structured result/source identity is not part of
   the `slice.completed` receipt.
 - S07 compares exact legacy responses with normalized canonical state across
   every runtime mode and produces the cutover dossier. It does not switch
   production reads or dependency eligibility to canonical authority.
 - Production read cutover, canonical dependency eligibility, prepared/settled
-  closeout effects, merge/publication settlement, park/unpark/discard,
+  closeout effects, merge/publication settlement,
   projection-worker redesign, legacy cascade deletion, and compatibility
   retirement remain later work. Until then active-Slice selection may still
   recognize legacy `skipped`; the later cutover must consume its current Waiver
@@ -145,6 +151,11 @@ The S07 dossier keeps two evidence planes separate:
 - `live_project` is a read-only snapshot of the canonical project database. It
   proves the 33 scoped repair receipts, current M003 semantic drift, T01-T06
   verification heads, project revision, and Authority Epoch.
+
+> **Historical (2026-10-02):** the checked dossier is a frozen record and the
+> collector CLI below fails closed. Do not run this sequence to regenerate the
+> dossier. See "Dossier status: frozen record" in
+> [`state-db-cutover-milestone-decision.md`](state-db-cutover-milestone-decision.md#dossier-status-frozen-record).
 
 Generate the candidate only from local evidence. First emit normalized capstone
 evidence for the current checkout, then collect the canonical input, then write
@@ -186,7 +197,7 @@ receipt is final authority.
 
 The dossier remains `NO_GO` for read-authority cutover while production reads,
 dependency eligibility, integrated Slice source/UAT identity, closeout and
-merge settlement, park/unpark/discard, Projection Work redesign, legacy cascade
+merge settlement, Projection Work redesign, legacy cascade
 deletion, or compatibility retirement remain deferred. Missing evidence or an
 automatable failure returns to agent-owned repair. Work stops for a person only
 when access/authority is unavailable or a genuinely ambiguous product choice

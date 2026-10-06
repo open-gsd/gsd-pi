@@ -57,9 +57,16 @@ function projectCapture(
   const payloadIds = new Set(entries.flatMap((entry) => (
     entry.payload_id === undefined ? [] : [entry.payload_id]
   )));
+  // A file root whose only entry another interpreter claimed is absent in this view.
+  const retainedPaths = new Set(entries.map((entry) => entry.logical_path));
+  const roots = capture.roots.map((root) => {
+    if (root.observed !== "present" || retainedPaths.has(root.logical_path)) return root;
+    const { physical_identity: _identity, real_path: _realPath, ...declared } = root;
+    return { ...declared, observed: "absent" as const };
+  });
   const value = {
     capture_version: capture.capture_version,
-    roots: capture.roots,
+    roots,
     entries,
     payloads: capture.payloads.filter((payload) => payloadIds.has(payload.payload_id)),
   };

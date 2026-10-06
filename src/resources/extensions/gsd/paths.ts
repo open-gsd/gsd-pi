@@ -184,6 +184,8 @@ export const PLANNING_ARTIFACT_SUFFIXES: readonly string[] = [
   "SUMMARY",
   "RESEARCH",
   "UI-SPEC",
+  "AI-SPEC",
+  "SPEC",
   "VALIDATION",
   "ASSESSMENT",
   "UAT",
@@ -898,7 +900,7 @@ export function resolveMilestonePath(basePath: string, milestoneId: string): str
  * create the milestone directory early, so a queued milestone in normal
  * in-flight planning would otherwise look like an orphan. Use this to decide
  * whether a milestone directory is truly absent (no directory at all) vs merely
- * empty. See doctor-runtime-checks.ts orphan_milestone_db (#1524).
+ * empty.
  */
 export function milestoneDirExists(basePath: string, milestoneId: string): boolean {
   // Flat-phase dirs (and content-bearing legacy dirs) resolve directly.

@@ -52,8 +52,6 @@ import { loadEffectiveGSDPreferences, getIsolationMode } from "./preferences.js"
 import { isolationDegradedFallbackGuidance, worktreeCreationFailedGuidance } from "./guidance.js";
 import { invalidateAllCaches } from "./cache.js";
 import { resolveMilestoneFile } from "./paths.js";
-import { getMilestone, insertMilestone, isDbAvailable, updateMilestoneStatus } from "./gsd-db.js";
-import { isClosedStatus } from "./status-guards.js";
 import type { WorktreeStateProjection } from "./worktree-state-projection.js";
 import { createWorkspace, scopeMilestone } from "./workspace.js";
 // ADR-016 phase 2 / C1 (#5624): file-system + git-CLI leaf primitives
@@ -67,7 +65,7 @@ import {
   autoCommitCurrentBranch,
   getCurrentBranch,
 } from "./worktree.js";
-import { nativeCheckoutBranch } from "./native-git-bridge.js";
+import { nativeBranchExists, nativeCheckoutBranch } from "./native-git-bridge.js";
 // ADR-016 phase 2 / C2 (#5625): lifecycle uses focused auto-worktree
 // modules instead of the legacy compatibility barrel. Branch, entry/path,
 // creation, and teardown primitives are still implementation-level seams for
@@ -86,6 +84,12 @@ import { teardownAutoWorktree } from "./auto-worktree-teardown.js";
 import { inspectUncommittedWorktreeState, isStaleWorktreeRegistrationError } from "./worktree-manager.js";
 import { resolveRoadmapForMilestoneMerge } from "./milestone-merge-roadmap.js";
 import type { MilestoneMergeTransactionRunner } from "./milestone-merge-transaction.js";
+import { isMilestoneBranchMerged } from "./auto-worktree-merge-already-merged.js";
+import { GSDError, GSD_GIT_ERROR } from "./errors.js";
+import {
+  hasPendingCloseoutEffect,
+  settleMilestoneMerge,
+} from "./milestone-closeout-effects.js";
 import {
   pushIntegrationBranchIfAhead,
   type PushIfAheadResult,
@@ -96,28 +100,6 @@ const MERGE_FAILURE_DEDUPE_MS = 60_000;
 
 export function resetRecentWorktreeMergeFailuresForTest(): void {
   recentWorktreeMergeFailures.clear();
-}
-
-function markMilestoneClosedAfterMerge(milestoneId: string, completedAt: string): void {
-  if (!isDbAvailable()) return;
-  try {
-    const existing = getMilestone(milestoneId);
-    if (!existing) {
-      insertMilestone({ id: milestoneId, title: milestoneId, status: "complete" });
-      updateMilestoneStatus(milestoneId, "complete", completedAt);
-      invalidateAllCaches();
-      return;
-    }
-    if (!isClosedStatus(existing.status)) {
-      updateMilestoneStatus(milestoneId, "complete", completedAt);
-      invalidateAllCaches();
-    }
-  } catch (err) {
-    logWarning(
-      "worktree",
-      `Merged ${milestoneId} but failed to mark milestone complete in DB: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
 }
 
 // ─── Types ───────────────────────────────────────────────────────────────
@@ -361,8 +343,7 @@ export interface MergeContext {
   originalBasePath: string;
   /**
    * Current worktree path or project root when in branch mode. Used as the
-   * cwd anchor for the milestone merge transaction and the source for
-   * `Projection.finalizeProjectionForMerge`.
+   * cwd anchor for the milestone merge transaction.
    */
   worktreeBasePath: string;
   milestoneId: string;
@@ -472,20 +453,12 @@ function resolveRoadmapForMerge(
   deps: WorktreeLifecycleDeps,
   searchPaths: string[],
   milestoneId: string,
-  notify: NotifyCtx["notify"],
-) {
-  const resolution = resolveRoadmapForMilestoneMerge(
+): string | null {
+  return resolveRoadmapForMilestoneMerge(
     searchPaths,
     milestoneId,
     (path) => readLifecycleFile(deps, path),
   );
-  if (resolution?.synthesized) {
-    notify(
-      `Synthesized ${milestoneId}-ROADMAP.md from database records for milestone merge.`,
-      "info",
-    );
-  }
-  return resolution;
 }
 
 function currentLifecycleBranch(
@@ -952,9 +925,8 @@ export function _enterMilestoneCore(
       deps.worktreeProjection.projectRootToWorktree(enterScope);
     } catch (projErr) {
       // Non-fatal: projection failures must not block worktree entry.
-      // The pre-dispatch path in auto/phases.ts performs the same projection
-      // on every iteration, so a transient failure here self-heals on the
-      // next loop pass.
+      // The post-unit pipeline refreshes the root projections after every
+      // unit, so a transient failure here self-heals on the next unit.
       debugLog("WorktreeLifecycle", {
         action: "enterMilestone",
         phase: "projection-on-enter",
@@ -1131,36 +1103,17 @@ function _mergeWorktreeModeImpl(
   }
 
   try {
-    // ADR-016: final projection before teardown. Replaces the legacy
-    // syncWorktreeStateBack(originalBase, basePath, milestoneId) call.
-    const finalScope = scopeMilestone(
-      createWorkspace(worktreeBasePath),
-      milestoneId,
-    );
-    const { synced } = deps.worktreeProjection.finalizeProjectionForMerge(
-      finalScope,
-    );
-    if (synced.length > 0) {
-      debugLog("WorktreeLifecycle", {
-        action: "mergeAndExit",
-        milestoneId,
-        phase: "reverse-sync",
-        synced: synced.length,
-      });
-    }
-
     const roadmapSearchPaths = [originalBasePath];
     if (!isSamePathPhysical(worktreeBasePath, originalBasePath)) {
       roadmapSearchPaths.push(worktreeBasePath);
     }
-    const roadmapResolution = resolveRoadmapForMerge(
+    const roadmapContent = resolveRoadmapForMerge(
       deps,
       roadmapSearchPaths,
       milestoneId,
-      notify,
     );
 
-    if (!roadmapResolution) {
+    if (roadmapContent === null) {
       // No roadmap projection and no DB slice records — preserve the branch
       // so product commits are not orphaned (#1573).
       lifecycleTeardownAutoWorktree(deps, originalBasePath, milestoneId, {
@@ -1181,7 +1134,7 @@ function _mergeWorktreeModeImpl(
     const mergeResult = deps.mergeMilestone(
       originalBasePath,
       milestoneId,
-      roadmapResolution.content,
+      roadmapContent,
     );
 
     // #2945 Bug 3: mergeMilestoneToMain performs best-effort worktree
@@ -1323,13 +1276,12 @@ function _mergeBranchModeImpl(
       }
     }
 
-    const roadmapResolution = resolveRoadmapForMerge(
+    const roadmapContent = resolveRoadmapForMerge(
       deps,
       [worktreeBasePath],
       milestoneId,
-      notify,
     );
-    if (!roadmapResolution) {
+    if (roadmapContent === null) {
       debugLog("WorktreeLifecycle", {
         action: "mergeAndExit",
         milestoneId,
@@ -1348,7 +1300,7 @@ function _mergeBranchModeImpl(
     const mergeResult = deps.mergeMilestone(
       worktreeBasePath,
       milestoneId,
-      roadmapResolution.content,
+      roadmapContent,
     );
 
     if (mergeResult.codeFilesChanged) {
@@ -1419,6 +1371,48 @@ function pushIfAheadAtCloseout(
 }
 
 /**
+ * The merge is skipped because the work should already sit on the current
+ * branch. A Closeout Plan that waits for the merge effect would never settle,
+ * so recognize the effect and complete the Milestone — but only when the
+ * milestone branch is gone or merged into the current branch. A branch with
+ * unmerged work keeps the Milestone open. No-op without a plan.
+ */
+function recognizeSkippedMilestoneMerge(
+  deps: WorktreeLifecycleDeps,
+  basePath: string,
+  milestoneId: string,
+): void {
+  if (!hasPendingCloseoutEffect(milestoneId)) return;
+  const milestoneBranch = lifecycleAutoWorktreeBranch(deps, milestoneId);
+  const integrationBranch = currentLifecycleBranch(deps, basePath);
+  if (
+    nativeBranchExists(basePath, milestoneBranch) &&
+    (integrationBranch === milestoneBranch ||
+      !isMilestoneBranchMerged({
+        projectRoot: basePath,
+        milestoneBranch,
+        mainBranch: integrationBranch,
+        previousCwd: process.cwd(),
+      }))
+  ) {
+    throw new GSDError(
+      GSD_GIT_ERROR,
+      `Milestone ${milestoneId} merge was skipped, but ${milestoneBranch} is not merged ` +
+        `(current branch: ${integrationBranch}). The branch is kept and the Milestone stays open. ` +
+        `Merge it manually, or delete the branch if its work is already merged, then run /gsd auto to resume.`,
+    );
+  }
+  settleMilestoneMerge({
+    projectRoot: basePath,
+    milestoneId,
+    milestoneBranch,
+    integrationBranch,
+    recognized: true,
+    codeFilesChanged: true,
+  });
+}
+
+/**
  * Session-less merge entry (ADR-016 phase 2 / A1, issue #5618).
  *
  * Runs the worktree-mode or branch-mode merge body without touching session
@@ -1474,6 +1468,7 @@ export function mergeMilestoneStandalone(
       `Skipping worktree merge for ${milestoneId} — isolation was degraded (worktree creation failed earlier). Work is on the current branch.`,
       "info",
     );
+    recognizeSkippedMilestoneMerge(deps, originalBasePath || worktreeBasePath, milestoneId);
     return {
       merged: false,
       mode: "skipped",
@@ -1526,6 +1521,7 @@ export function mergeMilestoneStandalone(
     // current branch, so skipping the merge also skipped publication and
     // auto_push silently never pushed. Honor it here when the branch is ahead
     // of its upstream; push failure is non-fatal to the closeout.
+    recognizeSkippedMilestoneMerge(deps, originalBasePath || worktreeBasePath, milestoneId);
     const publication = pushIfAheadAtCloseout(deps, originalBasePath, milestoneId);
     return {
       merged: false,
@@ -1941,8 +1937,6 @@ export class WorktreeLifecycle {
 
     // #4764 — record merge completion. Only reaches here when an actual
     // merge ran; failure paths throw out before this point.
-    const mergeCompletedAt = new Date().toISOString();
-    markMilestoneClosedAfterMerge(milestoneId, mergeCompletedAt);
     try {
       emitWorktreeMerged(
         this.s.originalBasePath || this.s.basePath,

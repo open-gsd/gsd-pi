@@ -39,12 +39,38 @@ import {
   insertTask,
   openDatabase,
 } from "../gsd-db.ts";
+import { upsertHookGateVerdict } from "../db/writers/hook-verdicts.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
+import { listQueuedSidecarItems } from "../db/unit-dispatch-sidecars.ts";
+import { settleSidecarItem } from "../db/writers/unit-dispatch-sidecars.ts";
 import {
   adoptOrTransitionLifecycle,
   completeLegacyTaskForVerifiedAttempt,
   readDomainOperationFence,
 } from "../db/writers/lifecycle-commands.ts";
+
+function queuedItems() {
+  return listQueuedSidecarItems();
+}
+
+/** Stand-in for the auto loop: it runs each queued item and closes its row. */
+function drainQueue(): void {
+  for (const item of queuedItems()) settleSidecarItem(item.id);
+}
+
+/** Seed the verdict row a hook records with gsd_hook_verdict_save. */
+function recordGateVerdict(hookName: string, unitId: string, verdict: string): void {
+  const [milestone, slice, task] = unitId.split("/");
+  upsertHookGateVerdict({
+    hookName,
+    unitId,
+    milestoneId: milestone ?? "",
+    sliceId: slice ?? null,
+    taskId: task ?? null,
+    verdict,
+    rationale: `recorded ${verdict} in test`,
+  });
+}
 
 function writePreferences(basePath: string, hookYaml: string): void {
   const content = `---
@@ -189,7 +215,7 @@ test("step mode dispatches a blocking plan-slice hook before any execute-task un
     const result = await postUnitPostVerification(pctx);
 
     assert.equal(result, "continue", "loop continues to run the dispatched hook unit");
-    const queued = session.sidecarQueue;
+    const queued = queuedItems();
     assert.equal(queued.length, 1, "exactly the hook sidecar is enqueued");
     assert.equal(queued[0].kind, "hook");
     assert.equal(queued[0].unitType, "hook/slice-plan-review");
@@ -218,7 +244,7 @@ test("after the blocking hook records a passing verdict, step-mode selection pro
     const { pctx, session } = createStepModeHarness(base, "plan-slice", "M001/S01");
     assert.equal(await postUnitPostVerification(pctx), "continue");
     session.clearCurrentUnit();
-    session.sidecarQueue.length = 0; // the loop drains the enqueued hook dispatch
+    drainQueue(); // the loop drains the enqueued hook dispatch
 
     // The hook unit completes and writes a passing gate artifact.
     writeFileSync(
@@ -226,12 +252,13 @@ test("after the blocking hook records a passing verdict, step-mode selection pro
       "---\nverdict: pass\n---\n\nPlan reviewed. No blocking findings.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     session.currentUnit = { type: "hook/slice-plan-review", id: "M001/S01", startedAt: Date.now() };
 
     const result = await postUnitPostVerification(pctx);
 
     assert.equal(result, "step-wizard", "wizard surfaces so the next unit can be selected");
-    assert.equal(session.sidecarQueue.length, 0, "passing gate is not re-dispatched");
+    assert.equal(queuedItems().length, 0, "passing gate is not re-dispatched");
     assert.equal(getActiveHook(), null, "gate is cleared after a passing verdict");
     assert.equal(consumeGateBlock(), null, "passing gate does not block");
   } finally {
@@ -256,7 +283,7 @@ test("blocking hook failure under step mode pauses instead of exposing task exec
     const { pctx, session, pauseAuto } = createStepModeHarness(base, "plan-slice", "M001/S01");
     assert.equal(await postUnitPostVerification(pctx), "continue");
     session.clearCurrentUnit();
-    session.sidecarQueue.length = 0; // the loop drains the enqueued hook dispatch
+    drainQueue(); // the loop drains the enqueued hook dispatch
 
     // The hook unit completes but its artifact carries no frontmatter verdict;
     // with max_cycles exhausted the gate must block the advance.
@@ -271,7 +298,7 @@ test("blocking hook failure under step mode pauses instead of exposing task exec
 
     assert.equal(result, "stopped", "gate failure pauses instead of returning a step action");
     assert.equal(pauseAuto.mock.callCount(), 1, "auto-mode is paused for manual recovery");
-    assert.equal(session.sidecarQueue.length, 0, "no further unit is dispatched");
+    assert.equal(queuedItems().length, 0, "no further unit is dispatched");
   } finally {
     closeDatabase();
     process.chdir(originalCwd);
@@ -296,7 +323,7 @@ test("non-blocking hooks keep their step-mode behavior and stay skipped", async 
     const result = await postUnitPostVerification(pctx);
 
     assert.equal(result, "step-wizard", "step completes and the wizard surfaces as today");
-    assert.equal(session.sidecarQueue.length, 0, "advisory hook is not dispatched in step mode");
+    assert.equal(queuedItems().length, 0, "advisory hook is not dispatched in step mode");
     assert.equal(getActiveHook(), null, "no hook state is created");
   } finally {
     closeDatabase();
@@ -321,7 +348,7 @@ test("failed gate block persists and resume re-dispatches the blocked hook befor
     const first = createStepModeHarness(base, "plan-slice", "M001/S01");
     assert.equal(await postUnitPostVerification(first.pctx), "continue");
     first.session.clearCurrentUnit();
-    first.session.sidecarQueue.length = 0; // loop drains and runs the hook
+    drainQueue(); // loop drains and runs the hook
 
     // The hook completes without a verdict: the gate blocks and pauses.
     writeFileSync(
@@ -339,15 +366,15 @@ test("failed gate block persists and resume re-dispatches the blocked hook befor
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredHookDispatch(base, resumed.sidecarQueue);
-    reconcileRestoredGateBlock(base, resumed.sidecarQueue);
+    reconcileRestoredHookDispatch(base);
+    reconcileRestoredGateBlock(base);
 
-    assert.equal(resumed.sidecarQueue.length, 1, "the blocked hook is re-dispatched on resume");
-    assert.equal(resumed.sidecarQueue[0].kind, "hook");
-    assert.equal(resumed.sidecarQueue[0].unitType, "hook/slice-plan-review");
+    assert.equal(queuedItems().length, 1, "the blocked hook is re-dispatched on resume");
+    assert.equal(queuedItems()[0].kind, "hook");
+    assert.equal(queuedItems()[0].unitType, "hook/slice-plan-review");
     assert.ok(getActiveHook(), "the gate is re-armed in flight so its completion is re-assessed");
     assert.equal(consumeGateBlock(), null, "the block is superseded by the re-dispatch");
-    resumed.sidecarQueue.length = 0; // loop drains and runs the re-dispatched hook
+    drainQueue(); // loop drains and runs the re-dispatched hook
 
     // The re-run records a passing verdict: selection may finally proceed.
     writeFileSync(
@@ -355,10 +382,11 @@ test("failed gate block persists and resume re-dispatches the blocked hook befor
       "---\nverdict: pass\n---\n\nPlan reviewed. No blocking findings.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     resumed.currentUnit = { type: "hook/slice-plan-review", id: "M001/S01", startedAt: Date.now() };
     const { pctx } = createPctx(base, resumed);
     assert.equal(await postUnitPostVerification(pctx), "step-wizard");
-    assert.equal(resumed.sidecarQueue.length, 0, "passing gate is not re-dispatched");
+    assert.equal(queuedItems().length, 0, "passing gate is not re-dispatched");
     assert.equal(getActiveHook(), null, "gate clears after the re-run passes");
   } finally {
     closeDatabase();
@@ -382,7 +410,7 @@ test("resume with an already-passing gate artifact holds no dispatch and clears 
     const first = createStepModeHarness(base, "plan-slice", "M001/S01");
     assert.equal(await postUnitPostVerification(first.pctx), "continue");
     first.session.clearCurrentUnit();
-    first.session.sidecarQueue.length = 0;
+    drainQueue();
 
     writeFileSync(
       resolveHookArtifactPath(base, "M001/S01", "SLICE-REVIEW.md"),
@@ -399,16 +427,17 @@ test("resume with an already-passing gate artifact holds no dispatch and clears 
       "---\nverdict: pass\n---\n\nPlan reviewed manually during the pause.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     resetHookState();
     restoreHookState(base);
     const resumed = new AutoSession();
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredHookDispatch(base, resumed.sidecarQueue);
-    reconcileRestoredGateBlock(base, resumed.sidecarQueue);
+    reconcileRestoredHookDispatch(base);
+    reconcileRestoredGateBlock(base);
 
-    assert.equal(resumed.sidecarQueue.length, 0, "passing artifact clears the block without a rerun");
+    assert.equal(queuedItems().length, 0, "passing artifact clears the block without a rerun");
     assert.equal(getActiveHook(), null);
     assert.equal(consumeGateBlock(), null);
   } finally {
@@ -434,10 +463,10 @@ test("step mode runs only the blocking hook from a mixed advisory+blocking queue
     const result = await postUnitPostVerification(pctx);
 
     assert.equal(result, "continue");
-    assert.equal(session.sidecarQueue.length, 1, "only the blocking hook dispatches in step mode");
-    assert.equal(session.sidecarQueue[0].unitType, "hook/slice-plan-review");
+    assert.equal(queuedItems().length, 1, "only the blocking hook dispatches in step mode");
+    assert.equal(queuedItems()[0].unitType, "hook/slice-plan-review");
     session.clearCurrentUnit();
-    session.sidecarQueue.length = 0;
+    drainQueue();
 
     // The blocking gate passes; the advisory hook must stay skipped.
     writeFileSync(
@@ -445,9 +474,10 @@ test("step mode runs only the blocking hook from a mixed advisory+blocking queue
       "---\nverdict: pass\n---\n\nPlan reviewed. No blocking findings.\n",
       "utf-8",
     );
+    recordGateVerdict("slice-plan-review", "M001/S01", "pass");
     session.currentUnit = { type: "hook/slice-plan-review", id: "M001/S01", startedAt: Date.now() };
     assert.equal(await postUnitPostVerification(pctx), "step-wizard");
-    assert.equal(session.sidecarQueue.length, 0, "advisory hook remains skipped after the gate passes");
+    assert.equal(queuedItems().length, 0, "advisory hook remains skipped after the gate passes");
     assert.equal(getActiveHook(), null);
   } finally {
     closeDatabase();
@@ -511,9 +541,9 @@ test("resume after gate A blocks still runs queued gate B once A passes", async 
     // plan-slice completes; gate-a (first in queue) dispatches.
     const first = createStepModeHarness(base, "plan-slice", "M001/S01");
     assert.equal(await postUnitPostVerification(first.pctx), "continue");
-    assert.equal(first.session.sidecarQueue[0].unitType, "hook/gate-a");
+    assert.equal(queuedItems()[0].unitType, "hook/gate-a");
     first.session.clearCurrentUnit();
-    first.session.sidecarQueue.length = 0;
+    drainQueue();
 
     // gate-a completes without a verdict; its cycle budget is exhausted, so
     // the gate blocks with gate-b still queued behind it.
@@ -527,11 +557,11 @@ test("resume after gate A blocks still runs queued gate B once A passes", async 
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredHookDispatch(base, resumed.sidecarQueue);
-    reconcileRestoredGateBlock(base, resumed.sidecarQueue);
-    assert.equal(resumed.sidecarQueue.length, 1);
-    assert.equal(resumed.sidecarQueue[0].unitType, "hook/gate-a");
-    resumed.sidecarQueue.length = 0;
+    reconcileRestoredHookDispatch(base);
+    reconcileRestoredGateBlock(base);
+    assert.equal(queuedItems().length, 1);
+    assert.equal(queuedItems()[0].unitType, "hook/gate-a");
+    drainQueue();
 
     // gate-a's re-run passes; gate-b must dispatch next — not be skipped.
     writeFileSync(
@@ -539,12 +569,13 @@ test("resume after gate A blocks still runs queued gate B once A passes", async 
       "---\nverdict: pass\n---\n\nGate A passed.\n",
       "utf-8",
     );
+    recordGateVerdict("gate-a", "M001/S01", "pass");
     resumed.currentUnit = { type: "hook/gate-a", id: "M001/S01", startedAt: Date.now() };
     const { pctx } = createPctx(base, resumed);
     assert.equal(await postUnitPostVerification(pctx), "continue");
-    assert.equal(resumed.sidecarQueue.length, 1, "gate-b runs after gate-a passes");
-    assert.equal(resumed.sidecarQueue[0].unitType, "hook/gate-b");
-    resumed.sidecarQueue.length = 0;
+    assert.equal(queuedItems().length, 1, "gate-b runs after gate-a passes");
+    assert.equal(queuedItems()[0].unitType, "hook/gate-b");
+    drainQueue();
 
     // gate-b passes; selection may finally proceed.
     writeFileSync(
@@ -552,9 +583,10 @@ test("resume after gate A blocks still runs queued gate B once A passes", async 
       "---\nverdict: pass\n---\n\nGate B passed.\n",
       "utf-8",
     );
+    recordGateVerdict("gate-b", "M001/S01", "pass");
     resumed.currentUnit = { type: "hook/gate-b", id: "M001/S01", startedAt: Date.now() };
     assert.equal(await postUnitPostVerification(pctx), "step-wizard");
-    assert.equal(resumed.sidecarQueue.length, 0);
+    assert.equal(queuedItems().length, 0);
     assert.equal(getActiveHook(), null);
   } finally {
     closeDatabase();
@@ -587,6 +619,7 @@ test("resume re-arms an execute-task gate with completion identity and schedules
       "---\nverdict: needs-attention\n---\n\nNeeds human attention.\n",
       "utf-8",
     );
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-attention");
     assert.equal(checkPostUnitHooks("hook/review-gate", "M001/S01/T01", base), null);
     persistHookState(base);
 
@@ -597,13 +630,13 @@ test("resume re-arms an execute-task gate with completion identity and schedules
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredGateBlock(base, resumed.sidecarQueue);
-    assert.equal(resumed.sidecarQueue.length, 1);
-    assert.equal(resumed.sidecarQueue[0].unitType, "hook/review-gate");
+    reconcileRestoredGateBlock(base);
+    assert.equal(queuedItems().length, 1);
+    assert.equal(queuedItems()[0].unitType, "hook/review-gate");
     const rearmed = getActiveHook();
     assert.ok(rearmed, "gate is re-armed in flight");
     assert.ok(rearmed.completionOperationId, "re-armed hook keeps the completion operation id");
-    resumed.sidecarQueue.length = 0;
+    drainQueue();
 
     // The re-run requests rework: the trigger task is reopened for retry
     // instead of throwing on the missing completion identity.
@@ -612,6 +645,7 @@ test("resume re-arms an execute-task gate with completion identity and schedules
       "---\nverdict: needs-rework\n---\n\nRework requested.\n",
       "utf-8",
     );
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-rework");
     resumed.currentUnit = { type: "hook/review-gate", id: "M001/S01/T01", startedAt: Date.now() };
     const retryActiveUnit = mock.fn(async (_unit: { unitType: string; unitId: string }) => {});
     resumed.orchestration = {
@@ -660,25 +694,27 @@ test("resume holds selection when a resolved gate has a blocked sibling", async 
   assert.ok(checkPostUnitHooks("plan-slice", "M001/S01", base));
   for (const artifact of ["GATE-A.md", "GATE-B.md"]) {
     writeFileSync(resolveHookArtifactPath(base, "M001/S01", artifact), "---\nverdict: needs-attention\n---\n");
+    recordGateVerdict(artifact.slice(0, -".md".length).toLowerCase(), "M001/S01", "needs-attention");
   }
   assert.equal(checkPostUnitHooks("hook/gate-a", "M001/S01", base), null);
   persistHookState(base);
   writeFileSync(resolveHookArtifactPath(base, "M001/S01", "GATE-A.md"), "---\nverdict: pass\n---\n");
+  recordGateVerdict("gate-a", "M001/S01", "pass");
   resetHookState();
   restoreHookState(base);
   const resumed = new AutoSession();
   resumed.basePath = base;
   resumed.active = true;
   resumed.stepMode = true;
-  reconcileRestoredGateBlock(base, resumed.sidecarQueue);
+  reconcileRestoredGateBlock(base);
   const { pctx, pauseAuto } = createPctx(base, resumed);
   assert.equal(resumed.currentUnit, null);
   assert.equal(await handlePendingHookOutcome(pctx), "stopped");
   assert.equal(pauseAuto.mock.callCount(), 1);
   resetHookState();
   restoreHookState(base);
-  reconcileRestoredGateBlock(base, resumed.sidecarQueue);
-  assert.equal(resumed.sidecarQueue[0]?.unitType, "hook/gate-b");
+  reconcileRestoredGateBlock(base);
+  assert.equal(queuedItems()[0]?.unitType, "hook/gate-b");
 });
 
 for (const queuedSibling of [false, true]) {
@@ -704,15 +740,20 @@ for (const queuedSibling of [false, true]) {
     seedCompletedTaskLifecycle("gsd-step-gate-rework-op");
 
     writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "REVIEW.md"), "---\nverdict: needs-attention\n---\n");
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-attention");
     if (queuedSibling) {
       assert.ok(checkPostUnitHooks("execute-task", "M001/S01/T01", base));
       writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "FIRST.md"), "---\nverdict: needs-attention\n---\n");
+      recordGateVerdict("first-gate", "M001/S01/T01", "needs-attention");
       assert.equal(checkPostUnitHooks("hook/first-gate", "M001/S01/T01", base), null);
       persistHookState(base);
       writeFileSync(resolveHookArtifactPath(base, "M001/S01/T01", "FIRST.md"), "---\nverdict: pass\n---\n");
+      recordGateVerdict("first-gate", "M001/S01/T01", "pass");
       resetHookState();
       restoreHookState(base);
-      reconcileRestoredGateBlock(base, []);
+      // This dispatch is not part of the assertion.
+      reconcileRestoredGateBlock(base);
+      drainQueue();
     } else {
       assert.equal(checkPostUnitHooks("execute-task", "M001/S01/T01", base), null);
     }
@@ -724,19 +765,20 @@ for (const queuedSibling of [false, true]) {
     resumed.basePath = base;
     resumed.active = true;
     resumed.stepMode = true;
-    reconcileRestoredGateBlock(base, resumed.sidecarQueue);
-    assert.equal(resumed.sidecarQueue.length, 1);
-    assert.equal(resumed.sidecarQueue[0].unitType, "hook/review-gate");
+    reconcileRestoredGateBlock(base);
+    assert.equal(queuedItems().length, 1);
+    assert.equal(queuedItems()[0].unitType, "hook/review-gate");
     const rearmed = getActiveHook();
     assert.ok(rearmed, "gate is re-armed in flight");
     assert.ok(rearmed.completionOperationId, "re-armed hook keeps the completion operation id");
-    resumed.sidecarQueue.length = 0;
+    drainQueue();
 
     writeFileSync(
       resolveHookArtifactPath(base, "M001/S01/T01", "REVIEW.md"),
       "---\nverdict: needs-rework\n---\n\nRework requested.\n",
       "utf-8",
     );
+    recordGateVerdict("review-gate", "M001/S01/T01", "needs-rework");
     resumed.currentUnit = { type: "hook/review-gate", id: "M001/S01/T01", startedAt: Date.now() };
     const retryActiveUnit = mock.fn(async (_unit: { unitType: string; unitId: string }) => {});
     resumed.orchestration = {

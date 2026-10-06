@@ -7,13 +7,15 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, cpSync, rmSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, renameSync, cpSync, rmSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { externalGsdRoot, externalStateAlreadyExistsForProject, isInsideWorktree } from "./repo-identity.js";
 import { getErrorMessage } from "./error-utils.js";
 import { hasGitTrackedGsdFiles } from "./gitignore.js";
 import { GIT_NO_PROMPT_ENV } from "./git-constants.js";
-import { gsdRoot, milestonesDir, resolveGsdRootFile } from "./paths.js";
+import { gsdRoot } from "./paths.js";
+import { openSqliteReadOnly } from "./sqlite-readonly.js";
+import { logWarning } from "./workflow-logger.js";
 
 export interface MigrationResult {
   migrated: boolean;
@@ -222,14 +224,22 @@ export function migrateToExternalState(basePath: string): MigrationResult {
   }
 }
 
+/**
+ * The current state is intact only when its database opens read-only and holds
+ * workflow rows (milestones, decisions, requirements or memories). A
+ * schema-only database and projection files such as STATE.md and milestones/
+ * prove nothing about the authority.
+ */
 export function isCurrentGsdStateIntactForMigratingCleanup(basePath: string): boolean {
   try {
-    const stateFile = resolveGsdRootFile(basePath, "STATE");
-    const milestonesPath = milestonesDir(basePath);
-    const dbPath = join(gsdRoot(basePath), "gsd.db");
-    const hasDbFile = existsSync(dbPath);
-    const hasNonEmptyDb = hasDbFile && statSync(dbPath).size > 0;
-    return existsSync(stateFile) && existsSync(milestonesPath) && hasNonEmptyDb;
+    const { db } = openSqliteReadOnly(join(gsdRoot(basePath), "gsd.db"));
+    try {
+      return ["milestones", "decisions", "requirements", "memories"].some(
+        (table) => db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get() !== undefined,
+      );
+    } finally {
+      db.close();
+    }
   } catch {
     return false;
   }
@@ -264,7 +274,10 @@ export function recoverFailedMigration(basePath: string): boolean {
 
   if (!existsSync(migratingPath)) return false;
   if (existsSync(localGsd)) {
-    if (!isCurrentGsdStateIntactForMigratingCleanup(basePath)) return false;
+    if (!isCurrentGsdStateIntactForMigratingCleanup(basePath)) {
+      logWarning("migration", `kept ${migratingPath}: the database in ${localGsd} holds no workflow rows, so the staged copy may be the only real state. Compare both directories before you delete one.`);
+      return false;
+    }
     if (!isLocalGsdExternalStateJunction(basePath, localGsd)) {
       try {
         const stat = lstatSync(localGsd);

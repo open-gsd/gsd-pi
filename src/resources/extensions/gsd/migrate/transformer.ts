@@ -378,7 +378,9 @@ function deriveDecisions(parsed: PlanningProject): string {
 
   rows.forEach((row, index) => {
     const id = padId('D', index + 1, 3);
-    const esc = (v: string) => v.replace(/\|/g, '\\|');
+    const esc = (v: string) => v
+      .replace(/\|/g, '\\|')
+      .replace(/\r\n|\r|\n/g, '<br>');
     lines.push(`| ${id} | migration | ${esc(row.scope)} | ${esc(row.decision)} | ${esc(row.choice)} | ${esc(row.rationale)} | Yes | human |`);
   });
 

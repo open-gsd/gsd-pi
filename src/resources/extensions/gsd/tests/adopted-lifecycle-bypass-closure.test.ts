@@ -132,27 +132,20 @@ test("adopted upserts preserve Task and Slice status and completion time while u
   );
 });
 
-test("same-status completion timestamp repair remains available when adopted state is aligned", () => {
+test("same-status writes cannot stamp completion time on an adopted closed row", () => {
   fixture();
   db().prepare("UPDATE slices SET status = 'complete' WHERE milestone_id = 'M001' AND id = 'S01'").run();
   db().prepare("UPDATE tasks SET status = 'complete' WHERE milestone_id = 'M001' AND slice_id = 'S01' AND id = 'T01'").run();
   adopt({ itemKind: "slice", milestoneId: "M001", sliceId: "S01" }, "completed");
   adopt({ itemKind: "task", milestoneId: "M001", sliceId: "S01", taskId: "T01" }, "completed");
-  const completedAt = "2026-07-14T01:00:00.000Z";
 
-  updateSliceStatus("M001", "S01", "complete", completedAt);
-  updateTaskStatus("M001", "S01", "T01", "complete", completedAt);
+  updateSliceStatus("M001", "S01", "complete", "2026-07-14T01:00:00.000Z");
+  updateTaskStatus("M001", "S01", "T01", "complete", "2026-07-14T01:00:00.000Z");
 
-  assert.equal(getSlice("M001", "S01")?.completed_at, completedAt);
-  assert.equal(getTask("M001", "S01", "T01")?.completed_at, completedAt);
-
-  updateSliceStatus("M001", "S01", "complete");
-  updateTaskStatus("M001", "S01", "T01", "complete");
-  updateSliceStatus("M001", "S01", "complete", "2026-07-14T02:00:00.000Z");
-  updateTaskStatus("M001", "S01", "T01", "complete", "2026-07-14T02:00:00.000Z");
-
-  assert.equal(getSlice("M001", "S01")?.completed_at, completedAt);
-  assert.equal(getTask("M001", "S01", "T01")?.completed_at, completedAt);
+  assert.equal(getSlice("M001", "S01")?.status, "complete");
+  assert.equal(getTask("M001", "S01", "T01")?.status, "complete");
+  assert.equal(getSlice("M001", "S01")?.completed_at, null);
+  assert.equal(getTask("M001", "S01", "T01")?.completed_at, null);
 });
 
 test("same-status writes cannot stamp completion time on an adopted in-progress task", () => {

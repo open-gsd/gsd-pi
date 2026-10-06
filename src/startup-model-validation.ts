@@ -33,6 +33,20 @@ interface MinimalSettingsManager {
 }
 
 /**
+ * Outcome of validating the configured default model.
+ * `action` reports whether the persisted default was rewritten:
+ *   - "preserved": the configured model (if any) was left untouched.
+ *   - "fell-back": the configured model was unavailable and settings were
+ *     rewritten to a fallback. `from`/`to` carry the previous and new
+ *     `provider/id` defaults (null when unset).
+ */
+export interface ModelValidationResult {
+	action: 'preserved' | 'fell-back'
+	from: string | null
+	to: string | null
+}
+
+/**
  * Validate the configured default model against the registry.
  *
  * If the configured model exists in the registry, this is a no-op — the
@@ -40,15 +54,23 @@ interface MinimalSettingsManager {
  * prior install, or genuinely removed model), a fallback is selected and
  * written to settings.
  *
+ * Returns a {@link ModelValidationResult} so callers can notify the user
+ * when the persisted default was rewritten (#2077 — the rewrite used to be
+ * silent and one-way).
+ *
  * IMPORTANT: Call this AFTER createAgentSession() so that extension-
  * provided models have been registered in the ModelRegistry.
  */
 export function validateConfiguredModel(
-  modelRegistry: MinimalModelRegistry,
-  settingsManager: MinimalSettingsManager,
-): void {
+	modelRegistry: MinimalModelRegistry,
+	settingsManager: MinimalSettingsManager,
+): ModelValidationResult {
   const configuredProvider = settingsManager.getDefaultProvider()
   const configuredModel = settingsManager.getDefaultModel()
+  const from = configuredProvider && configuredModel
+    ? `${configuredProvider}/${configuredModel}`
+    : null
+  const preserved: ModelValidationResult = { action: 'preserved', from: null, to: null }
   const availableModels = modelRegistry.getAvailable()
   const catalogModels = modelRegistry.getAll?.() ?? availableModels
   // Check against availableModels (configured + auth'd) rather than getAll()
@@ -69,10 +91,11 @@ export function validateConfiguredModel(
       ? modelRegistry.isProviderRequestReady?.(configuredProvider)
       : undefined
     if (providerReady !== false) {
-      return
+      return preserved
     }
   }
 
+  let result = preserved
   if (!configuredModel || !configuredExists) {
     // Model not configured at all, or removed from registry — pick a fallback.
     // Only fires when the model is genuinely unknown (not just temporarily unavailable).
@@ -92,10 +115,31 @@ export function validateConfiguredModel(
       availableModels[0]
     if (preferred) {
       settingsManager.setDefaultModelAndProvider(preferred.provider, preferred.id)
+      result = {
+        action: 'fell-back',
+        from,
+        to: `${preferred.provider}/${preferred.id}`,
+      }
     }
   }
 
   if (settingsManager.getDefaultThinkingLevel() !== 'off' && !configuredExists) {
     settingsManager.setDefaultThinkingLevel('off')
   }
+  return result
+}
+
+/**
+ * Format the user-facing warning for a fell-back validation result.
+ * Returns null when nothing needs to be said: preserved results, rewrites
+ * where nothing was previously configured (initial setup, not a downgrade),
+ * and rewrites with no available fallback (settings untouched).
+ */
+export function formatModelFallbackNotice(result: ModelValidationResult): string | null {
+  if (result.action !== 'fell-back' || !result.from || !result.to) return null
+  return (
+    `[gsd] Warning: configured default model ${result.from} is not available; ` +
+    `the saved default was rewritten to ${result.to}. ` +
+    `Restore ${result.from} with /model once it is available again.`
+  )
 }

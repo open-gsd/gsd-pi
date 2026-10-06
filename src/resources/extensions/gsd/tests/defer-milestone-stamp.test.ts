@@ -9,10 +9,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { executeTriageResolutions } from "../triage-resolution.ts";
 import { appendCapture, markCaptureResolved, loadAllCaptures } from "../captures.ts";
+import { closeDatabase, openDatabase } from "../gsd-db.ts";
 
 test("defer captures without milestone ID are stamped as executed (#3542)", async () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-stamp-"));
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  openDatabase(":memory:");
   try {
     appendCapture(base, "Improve error messages");
     const captures = loadAllCaptures(base);
@@ -25,6 +27,7 @@ test("defer captures without milestone ID are stamped as executed (#3542)", asyn
     const cap = after.find(c => c.id === id);
     assert.ok(cap?.executed, "Defer capture should be stamped as executed");
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });

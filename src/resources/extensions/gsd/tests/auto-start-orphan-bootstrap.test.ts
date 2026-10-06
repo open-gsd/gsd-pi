@@ -3,7 +3,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -16,11 +16,13 @@ import {
   validateSessionLock,
 } from "../session-lock.ts";
 import type { InterruptedSessionAssessment } from "../interrupted-session.ts";
+import { saveContextArtifact } from "./helpers/saved-context.ts";
 import {
   closeDatabase,
   insertMilestone,
   openDatabase,
 } from "../gsd-db.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 
 function runGit(base: string, args: string[]): string {
   return execFileSync("git", args, {
@@ -54,6 +56,7 @@ function makeRepoWithUnmergedCompletedMilestone(): string {
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M002", title: "Completed milestone", status: "complete" });
   insertMilestone({ id: "M003", title: "Next milestone", status: "active" });
+  addLegacyCompletionEvidence();
   closeDatabase();
 
   return base;
@@ -133,12 +136,6 @@ function makeRepoWithOnlySiblingStrandedAndLockedActive(): string {
   const base = mkdtempSync(join(tmpdir(), "gsd-locked-no-stranded-bootstrap-"));
   mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
   mkdirSync(join(base, ".gsd", "milestones", "M002"), { recursive: true });
-  // M002 has CONTEXT so bootstrap's pre-planning gate doesn't route to
-  // showSmartEntry and the test reaches the post-lock session-init path.
-  writeFileSync(
-    join(base, ".gsd", "milestones", "M002", "M002-CONTEXT.md"),
-    "# M002 context\n",
-  );
   writeFileSync(
     join(base, ".gsd", "PREFERENCES.md"),
     "---\ngit:\n  isolation: \"none\"\n---\n",
@@ -165,6 +162,10 @@ function makeRepoWithOnlySiblingStrandedAndLockedActive(): string {
   // row; getActiveMilestoneId honors the lock regardless of M001 order.
   insertMilestone({ id: "M001", title: "Sibling milestone", status: "pending" });
   insertMilestone({ id: "M002", title: "Locked milestone", status: "active" });
+  // M002 has a saved CONTEXT row (and no CONTEXT.md) so bootstrap's
+  // pre-planning gate doesn't route to showSmartEntry and the test reaches
+  // the post-lock session-init path.
+  saveContextArtifact("M002");
   closeDatabase();
 
   return base;
@@ -227,6 +228,7 @@ function makeRepoWithRecoveredCleanupAndStrandedMismatch(): string {
   openDatabase(join(base, ".gsd", "gsd.db"));
   insertMilestone({ id: "M001", title: "Completed milestone", status: "complete" });
   insertMilestone({ id: "M002", title: "Stranded milestone", status: "active" });
+  addLegacyCompletionEvidence();
   closeDatabase();
 
   return base;
@@ -1038,6 +1040,63 @@ test("bootstrap adopts stranded active branch before deep project setup", async 
       notifications.every((entry) => entry.level !== "warning" || !entry.message.includes("Stranded work for in-progress milestone M001")),
       "adopting the active milestone should not emit a scary stranded-work warning",
     );
+  } finally {
+    try {
+      closeDatabase();
+    } catch {}
+    process.chdir(previousCwd);
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("bootstrap aborts with authority-missing when workflow history has no database", async () => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-authority-missing-bootstrap-"));
+  mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+  writeFileSync(join(base, ".gsd", "milestones", "M001", "M001-ROADMAP.md"), "# M001: Lost authority\n");
+  writeFileSync(join(base, ".gsd", "PREFERENCES.md"), "---\ngit:\n  isolation: \"none\"\n---\n");
+  runGit(base, ["init"]);
+  runGit(base, ["config", "user.email", "test@test.com"]);
+  runGit(base, ["config", "user.name", "Test"]);
+  writeFileSync(join(base, "README.md"), "# test\n");
+  runGit(base, ["add", "-A"]);
+  runGit(base, ["commit", "-m", "init"]);
+  const previousCwd = process.cwd();
+  const notifications: Array<{ message: string; level?: string }> = [];
+
+  try {
+    const ready = await bootstrapAutoSession(
+      new AutoSession(),
+      makeCtx(notifications) as any,
+      { getThinkingLevel: () => "medium", getActiveTools: () => [], events: { emit: () => {} } } as any,
+      base,
+      false,
+      false,
+      {
+        shouldUseWorktreeIsolation: () => false,
+        registerSigtermHandler: () => {},
+        registerAutoWorkerForSession: () => {},
+        lockBase: () => base,
+        buildLifecycle: () => ({}) as any,
+      },
+      {
+        classification: "none",
+        lock: null,
+        pausedSession: null,
+        state: null,
+        recovery: null,
+        recoveryPrompt: null,
+        recoveryToolCallCount: 0,
+        artifactSatisfied: false,
+        hasResumableDiskState: false,
+        isBootstrapCrash: false,
+      },
+    );
+
+    assert.equal(ready, false);
+    const error = notifications.find((entry) => entry.level === "error");
+    assert.match(error?.message ?? "", /authority-missing: .*\/gsd db restore-backup.*\/gsd recover/s, JSON.stringify(notifications));
+    assert.equal(existsSync(join(base, ".gsd", "gsd.db")), false, "no empty authority may be created");
+    assert.equal(isSessionLockHeld(base), false, "the aborted bootstrap releases its lock");
   } finally {
     try {
       closeDatabase();

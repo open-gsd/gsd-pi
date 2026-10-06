@@ -19,8 +19,6 @@ import {
   closeDatabase,
   insertMilestone,
   insertSlice,
-  insertTask,
-  getMilestoneSlices,
   getSliceTasks,
   getGateResults,
 } from "../gsd-db.ts";
@@ -191,69 +189,6 @@ describe("#2945 Bug 1: ROADMAP table cell corruption by UAT content", () => {
     assert.ok(
       !content.includes("Full UAT"),
       "full_uat_md should not be used when demo is present",
-    );
-  });
-});
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// Bug 2: complete-milestone event replay bypasses task validation
-// ═══════════════════════════════════════════════════════════════════════════════
-
-describe("#2945 Bug 2: workflow-reconcile bypasses task validation for complete_slice", () => {
-  let dbPath: string;
-
-  beforeEach(() => {
-    dbPath = tempDbPath();
-    openDatabase(dbPath);
-  });
-
-  afterEach(() => {
-    cleanupDb(dbPath);
-  });
-
-  test("replaySliceComplete must not mark slice done when tasks are pending", async () => {
-    // Set up: M001 with S01 that has 2 tasks, one pending
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
-    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", status: "complete", title: "Done task" });
-    insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", status: "pending", title: "Pending task" });
-
-    // Import and call replaySliceComplete directly
-    const { replaySliceComplete } = await import("../workflow-reconcile.ts");
-    replaySliceComplete("M001", "S01", new Date().toISOString());
-
-    // The slice should NOT be marked done because T02 is still pending
-    const slices = getMilestoneSlices("M001");
-    const s01 = slices.find(s => s.id === "S01");
-    assert.ok(s01, "S01 should exist");
-    assert.notStrictEqual(
-      s01!.status,
-      "done",
-      "replaySliceComplete must not mark slice as done when tasks are pending",
-    );
-    assert.notStrictEqual(
-      s01!.status,
-      "complete",
-      "replaySliceComplete must not mark slice as complete when tasks are pending",
-    );
-  });
-
-  test("replaySliceComplete marks slice done when all tasks are complete", async () => {
-    insertMilestone({ id: "M001" });
-    insertSlice({ id: "S01", milestoneId: "M001" });
-    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", status: "complete", title: "Done task" });
-    insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", status: "done", title: "Also done" });
-
-    const { replaySliceComplete } = await import("../workflow-reconcile.ts");
-    replaySliceComplete("M001", "S01", new Date().toISOString());
-
-    const slices = getMilestoneSlices("M001");
-    const s01 = slices.find(s => s.id === "S01");
-    assert.ok(s01, "S01 should exist");
-    assert.strictEqual(
-      s01!.status,
-      "done",
-      "replaySliceComplete should mark slice as done when all tasks are complete",
     );
   });
 });

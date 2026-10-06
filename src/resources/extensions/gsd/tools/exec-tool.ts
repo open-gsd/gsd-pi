@@ -1,6 +1,9 @@
 // Project/App: gsd-pi
 // File Purpose: Executor for the gsd_exec MCP tool.
 
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+
 import {
   EXEC_DEFAULTS,
   runExecSandbox,
@@ -13,6 +16,11 @@ import {
   type GSDPreferences,
 } from "../preferences-types.js";
 import { bashReferencesProjectRootOutsideWorktree } from "../worktree-shell-guard.js";
+import { openExistingWorkflowDatabase } from "../db-workspace.js";
+import { recordExecRun } from "../db/writers/exec-runs.js";
+import { loadEffectiveGSDPreferences } from "../preferences.js";
+import { redactSecrets } from "../redact-secrets.js";
+import { readSourceRevisionForRecord } from "../verification-source-integrity.js";
 import { contextModeDisabledResult, type ToolExecutionResult } from "./context-mode-tool-result.js";
 
 export interface ExecToolParams {
@@ -222,9 +230,74 @@ function isToolExecutionResult(value: unknown): value is ToolExecutionResult {
   return typeof value === "object" && value !== null && Array.isArray((value as { content?: unknown }).content);
 }
 
+/** The UAT check a gsd_uat_exec run belongs to. */
+interface UatExecBinding {
+  milestoneId: string;
+  sliceId: string;
+  checkId: string;
+}
+
+/**
+ * Store the run as an exec_runs row. Evidence checks read that row, so a run
+ * outside a GSD project (no workflow database) is not evidence of anything.
+ * Returns the reason when a project database exists and the run is not stored.
+ */
+function recordRun(
+  baseDir: string,
+  result: ExecSandboxResult,
+  script: string,
+  startedAt: Date,
+  uat: UatExecBinding | undefined,
+): string | null {
+  try {
+    const opened = openExistingWorkflowDatabase(baseDir);
+    if (!opened.ok) {
+      if (opened.reason === "missing-gsd-dir" || opened.reason === "missing-database") return null;
+      return opened.error?.message ?? `workflow database ${opened.reason}`;
+    }
+    storeRun(baseDir, result, script, startedAt, uat);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+function storeRun(
+  baseDir: string,
+  result: ExecSandboxResult,
+  script: string,
+  startedAt: Date,
+  uat: UatExecBinding | undefined,
+): void {
+  const hash = createHash("sha256");
+  for (const path of [result.stdout_path, result.stderr_path]) hash.update(readFileSync(path));
+  recordExecRun({
+    id: result.id,
+    runtime: result.runtime,
+    command: redactSecrets(script),
+    cwd: baseDir,
+    exit_code: result.exit_code,
+    signal: result.signal,
+    timedOut: result.timed_out,
+    aborted: result.aborted === true,
+    started_at: startedAt.toISOString(),
+    duration_ms: result.duration_ms,
+    output_hash: `sha256:${hash.digest("hex")}`,
+    // Only a UAT run stores the source revision: reading it hashes every source file.
+    ...(uat
+      ? {
+          kind: "uat_exec",
+          ...uat,
+          sourceRevision: readSourceRevisionForRecord(baseDir, loadEffectiveGSDPreferences(baseDir)?.preferences),
+        }
+      : { kind: "exec" }),
+  });
+}
+
 export async function executeGsdExec(
   params: ExecToolParams,
   deps: ExecToolDeps,
+  uat?: UatExecBinding,
 ): Promise<ToolExecutionResult> {
   if (!isEnabled(deps.preferences)) return contextModeDisabledResult("gsd_exec");
 
@@ -249,8 +322,10 @@ export async function executeGsdExec(
   );
   const run = deps.run ?? runExecSandbox;
 
+  const startedAt = (deps.now ?? (() => new Date()))();
+  let result: ExecSandboxResult;
   try {
-    const result = await run(
+    result = await run(
       {
         runtime,
         script,
@@ -260,7 +335,6 @@ export async function executeGsdExec(
       },
       opts,
     );
-    return formatResult(result);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -269,6 +343,18 @@ export async function executeGsdExec(
       isError: true,
     };
   }
+  const formatted = formatResult(result);
+  const notRecorded = recordRun(deps.baseDir, result, script, startedAt, uat);
+  if (notRecorded === null) return formatted;
+  return {
+    ...formatted,
+    content: [{
+      type: "text",
+      text: `${formatted.content[0]!.text}\n--- warning ---\nThe command ran, but the host did not record this run: ${notRecorded}. ` +
+        "This run is not verification or UAT evidence. Do not run the command again only to get the output.",
+    }],
+    details: { ...formatted.details, run_not_recorded: notRecorded },
+  };
 }
 
 export async function executeUatExec(
@@ -313,6 +399,7 @@ export async function executeUatExec(
       },
     },
     deps,
+    { milestoneId, sliceId, checkId },
   );
   const details = result.details ?? {};
   return {

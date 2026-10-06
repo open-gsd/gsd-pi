@@ -9,6 +9,7 @@ The built-in diagnostic tool validates `.gsd/` integrity:
 ```
 
 It checks:
+
 - File structure and naming conventions
 - Roadmap ↔ slice ↔ task referential integrity
 - Completion state consistency
@@ -98,13 +99,14 @@ Replace the path with the exact global bin directory from your pnpm error messag
 
 ### Auto mode loops on the same unit
 
-**Symptoms:** The same unit (e.g., `research-slice` or `plan-slice`) dispatches repeatedly, then auto mode pauses with an "Artifact still missing..." error after 3 artifact verification retries.
+**Symptoms:** The same unit (e.g., `research-slice` or `plan-slice`) dispatches repeatedly, then auto mode pauses with an "Artifact verification failed..." error after 3 artifact verification retries.
 
 **Causes:**
-- Stale cache after a crash — the in-memory file listing doesn't reflect new artifacts
-- The LLM didn't produce the expected artifact file
 
-**Fix:** Run `/gsd doctor` to repair state, then resume with `/gsd auto`. If the issue persists, check that the expected artifact file exists on disk.
+- Stale cache after a crash — the in-memory state doesn't reflect the recorded result
+- The LLM didn't record the unit's result in the database (for example, it wrote a file directly and did not call the save tool)
+
+**Fix:** Run `/gsd doctor` to repair state, then resume with `/gsd auto`. If the issue persists, read the pause message: it names the result that is missing. A file on disk does not count as the result; see [Artifact Verification Retries](./auto-mode.md#artifact-verification-retries).
 
 ### Auto mode reports that `gsd.db` is locked
 
@@ -132,7 +134,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 
 **Symptoms:** A parallel `reactive-execute` batch finishes with a warning that GSD wrote a reactive blocker and advanced.
 
-**Cause:** The batch exhausted artifact verification retries while one or more dispatched tasks were still missing task summaries. Instead of re-dispatching the same parallel batch forever, GSD writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks. The blocker is not lifecycle authority; follow-up task state comes from the canonical database Attempt/recovery records.
+**Cause:** The batch exhausted artifact verification retries while one or more dispatched tasks were still open in the database with no Attempt Result. Instead of re-dispatching the same parallel batch forever, GSD records a recovery block for the slice and writes `S##-REACTIVE-BLOCKER.md` as a diagnostic that records summary-present and summary-missing tasks. The blocker is not lifecycle authority; follow-up task state comes from the canonical database Attempt/recovery records.
 
 **Fix:** Inspect the blocker file and `/gsd status`. If work is still required, use the appropriate explicit recovery path such as retrying the failed Attempt, reopening a terminal task, or replanning the task before depending on later slice or milestone artifacts.
 
@@ -149,6 +151,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 **Symptoms:** Auto mode reports a unit hard timeout, a finalize timeout, or a post-unit closeout failure. For `failed finalize twice with identical inputs`, follow [Repeated Finalize Failures](auto-mode.md#repeated-finalize-failures).
 
 **What to inspect:**
+
 - `.gsd/runtime/<unit-type>/<unit-id>.json` shows the latest runtime phase, timeout timestamp, recovery attempts, and progress marker. Timeout recovery uses progress kinds such as `idle-recovery-retry`, `hard-recovery-retry`, `finalize-pre-timeout`, `finalize-post-timeout`, and `finalize-success`.
 - `.gsd/journal/` shows the ordered loop events. Look for `unit-end`, then `post-unit-finalize-start`, `post-unit-finalize-end`, and `iteration-end`.
 - `post-unit-finalize-end.status` tells you whether closeout completed, retried, stopped, or failed. `iteration-end.status` and `iteration-end.reason` show the final loop outcome that caused auto mode to continue, retry, pause, or stop.
@@ -179,6 +182,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 **Current behavior:** When isolation is configured as `worktree`, GSD now attempts a safe fallback to milestone `branch` mode instead of hard-failing immediately. Bootstrap also surfaces a specific isolation-degraded notification so the cause is visible.
 
 **Fix:**
+
 - Close editors, terminals, or antivirus tools that may be locking `.gsd-worktrees/*` paths.
 - If the old worktree has salvageable changes, merge it with `/gsd worktree merge <MID>`.
 - If the old worktree is stale and should be discarded, remove it with `/gsd worktree remove <MID>`.
@@ -201,6 +205,7 @@ Stop the process through its terminal or service manager when possible. Use `kil
 **Current behavior:** GSD now fails with a targeted error explaining that file locks blocked cleanup and advising you to close locking tools before retrying.
 
 **Fix:**
+
 - Close apps that might hold file locks (editors, shells in old worktree paths, antivirus/indexers).
 - Retry the command after a short delay.
 
@@ -208,9 +213,10 @@ Stop the process through its terminal or service manager when possible. Use `kil
 
 **Symptoms:** GSD exits during startup with a message like `flat-phase migration failed` or `flat-phase migration required but the workflow database could not be opened`.
 
-**Cause:** The project still has the legacy nested `.gsd/milestones/` layout. On startup, GSD must migrate it to the flat `.gsd/phases/` layout before path resolvers and state checks run. Markdown for milestone, slice, and task identities already known to the database is archived in the migration backup and re-rendered from database authority; it is not imported during startup. An unknown or ambiguous identity, a database hierarchy gap, an unavailable database, a backup/rename/delete failure, or an unverifiable flat-phase render stops startup before GSD can continue against mixed or invented state.
+**Cause:** The project still has the legacy nested `.gsd/milestones/` layout. On startup, GSD must migrate it to the flat `.gsd/phases/` layout before path resolvers and state checks run. Markdown for milestone, slice, and task identities already known to the database is archived in the migration backup and re-rendered from database authority; it is not imported during startup. A database that cannot be opened, a backup/rename/delete failure, or an unverifiable flat-phase render stops startup before GSD can continue against mixed or invented state. Legacy markdown that holds an identity the database lacks, or a missing or empty database beside planned legacy markdown, does not stop startup: GSD starts, changes nothing on disk, and shows one warning that names `/gsd recover`.
 
 **Fix:**
+
 - Make sure you are starting GSD from the project root and that `.gsd/gsd.db*`, `.gsd/`, and `.gsd-backups/` are readable and writable on local disk.
 - Close editors, shells, sync tools, antivirus/indexers, or other processes that may be locking `.gsd/milestones/`, `.gsd/milestones.migrating/`, `.gsd/phases/`, or `.gsd-backups/`.
 - If the database is damaged or missing and rendered markdown is the state you intentionally want to import, use `/gsd recover` after database access is restored, then approve its exact Preview hash. It preserves existing rows absent from markdown and retains a verified pre-import backup; see [Migration from v1](./migration.md#post-migration) for the recovery contract.
@@ -239,6 +245,7 @@ source ~/.zshrc
 **Workaround:** Run `npx @opengsd/gsd-pi@latest` or `$(npm prefix -g)/bin/gsd` directly.
 
 **Common causes:**
+
 - **Homebrew Node** — `/opt/homebrew/bin` should be in PATH but sometimes isn't if Homebrew init is missing from your shell profile
 - **Version manager (nvm, fnm, mise)** — global bin is version-specific; ensure your version manager initializes in your shell config
 - **oh-my-zsh** — the `gitfast` plugin aliases `gsd` to `git svn dcommit`. Check with `alias gsd` and unalias if needed
@@ -246,6 +253,7 @@ source ~/.zshrc
 ### `npm install -g @opengsd/gsd-pi@latest` fails
 
 **Common causes:**
+
 - Missing workspace packages — fixed in a recent release
 - `postinstall` hangs on Linux (Playwright `--with-deps` triggering sudo) — fixed in a recent release
 - Node.js version too old — requires ≥ 22.18.0
@@ -260,11 +268,13 @@ Options:
 1. **Wait and retry** — check [npm for @opengsd/gsd-pi](https://www.npmjs.com/package/@opengsd/gsd-pi) to confirm whether a release has landed, then retry.
 
 2. **Use `npx` instead of a global install** — `npx @opengsd/gsd-pi@latest` fetches the package on demand and may pick up the most recently published version without a local cache:
+
    ```bash
    npx @opengsd/gsd-pi@latest
    ```
 
 3. **Build from source** — clone the repository and build locally:
+
    ```bash
    git clone https://github.com/open-gsd/gsd-pi.git
    cd gsd-pi
@@ -272,6 +282,7 @@ Options:
    pnpm run build
    npm install -g .
    ```
+
    Requires Node.js ≥ 22.18.0 and pnpm. If `pnpm` is not installed: `npm install -g pnpm`.
 
 ### Provider errors during auto mode
@@ -343,6 +354,7 @@ If recovery still fails, repair runtime state instead of manually deleting indiv
 **What happens:** Before most `/gsd` commands run, GSD probes the project root (and the active milestone worktree when present) for unmerged paths, conflict markers (`git diff --check`), and stale merge/rebase state. It auto-heals safe paths (`.gsd/` runtime files and build artifacts), aborts stale merge state when there are no unmerged paths, then blocks if product code conflicts remain.
 
 **Fix:**
+
 - Resolve remaining conflicts in your source files, then run `/gsd doctor`.
 - While conflicts remain, these commands still run: `/gsd doctor`, `/gsd closeout …`, and `/gsd dispatch complete-milestone …`.
 - Re-run your original command after `git status` is clean.
@@ -354,12 +366,14 @@ Auto mode **pauses** on product conflicts after heal; it **stops** when Git stat
 **Symptoms:** Auto mode stops with a pre-merge reason like unresolved Git conflicts or dirty working tree overlap.
 
 **What it means:** Milestone merge preflight now fail-closes before merge when either:
+
 - the repo already has unresolved conflict stages (`git diff --name-only --diff-filter=U` is non-empty), or
 - local dirty files overlap files modified by the milestone branch.
 
 In these states GSD does not auto-stash and does not auto-fix; it stops so you can resolve safely.
 
 **Fix:**
+
 - Resolve conflict markers and stage the resolved files.
 - Commit, stash, or discard overlapping local edits outside GSD.
 - Re-run `/gsd auto` after `git status` is clean (or at least free of overlapping/conflicted paths).
@@ -376,9 +390,10 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 
 **Symptoms:** Auto mode or `/gsd doctor` reports that a milestone recorded an integration branch that no longer exists in git.
 
-**What it means:** The milestone's `.gsd/milestones/<MID>/<MID>-META.json` still points at the branch that was active when the milestone started, but that branch has since been renamed or deleted.
+**What it means:** The integration branch recorded for the milestone in the GSD database (`<MID>-META.json` is a copy of that record) still points at the branch that was active when the milestone started, but that branch has since been renamed or deleted.
 
 **Current behavior:**
+
 - If GSD can deterministically recover to a safe branch, it no longer hard-stops auto mode.
 - Safe fallbacks are:
   - explicit `git.main_branch` when configured and present
@@ -387,6 +402,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 - GSD still blocks when no safe fallback branch can be determined.
 
 **Fix:**
+
 - Run `/gsd doctor fix` to rewrite the stale milestone metadata automatically when the fallback is obvious.
 - If GSD still blocks, recreate the missing branch or update your git preferences so `git.main_branch` points at a real branch.
 
@@ -402,9 +418,9 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 
 **Symptoms:** `/gsd doctor` shows an error with issue code `artifact_file_missing`, a scope such as `project`, `milestone`, `slice`, or `task`, and a file path like `phases/01-foundation/01-CONTEXT.md` or `milestones/M001/M001-ROADMAP.md`.
 
-**What it means:** The canonical database has an `artifacts` row for that path, but the rendered markdown file is missing from disk. In worktree mode, doctor checks both the active worktree-local `.gsd/` projection root and the project `.gsd/` root before reporting the issue, so the error usually means the artifact was deleted, skipped during a failed write, or left dangling by an interrupted migration/rebuild.
+**What it means:** The canonical database has an `artifacts` row for that path, but the rendered markdown file is missing from disk. In worktree mode, doctor checks both the active worktree-local `.gsd/` projection root and the project `.gsd/` root before reporting the issue, so the error usually means the artifact was deleted, skipped during a failed write, or left dangling by an interrupted migration/rebuild. Doctor does not report artifact rows of a discarded milestone, because a discarded milestone has no rendered files.
 
-**Fix:** If the database is still the source of truth, run `/gsd rebuild markdown` to re-render missing artifact projections from the DB, then rerun `/gsd doctor`. If the file represented work that should still exist but rebuild cannot recreate it, restore the file from git/backups or rerun the GSD workflow that generates that artifact. Use `/gsd recover` and its exact Preview-hash approval only when the database is lost or corrupt and the markdown on disk is the source you intentionally want to import; it is not the normal fix for a dangling artifact reference. See [Migration from v1](./migration.md#post-migration) for the recovery contract.
+**Fix:** If the database is still the source of truth, run `/gsd doctor fix`. It renders again the file set of each milestone that has a missing file the milestone render writes; a missing file that the render does not write stays reported. `/gsd rebuild markdown` renders the whole tree from the DB. Then rerun `/gsd doctor`. If the file represented work that should still exist but rebuild cannot recreate it, restore the file from git/backups or rerun the GSD workflow that generates that artifact. Use `/gsd recover` and its exact Preview-hash approval only when the database is lost or corrupt and the markdown on disk is the source you intentionally want to import; it is not the normal fix for a dangling artifact reference. See [Migration from v1](./migration.md#post-migration) for the recovery contract.
 
 ### `/gsd doctor` reports `artifact_db_status_divergence`
 
@@ -412,7 +428,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 
 **What it means:** Runtime will not silently trust an open-task SUMMARY as task completion. After `gsd_task_complete` stages a result, an `in_progress` task's SUMMARY is considered a current staged projection only when its milestone, slice, and task identity and canonical path match; its disk and artifact content are byte-identical; its stamp-stripped content matches the task's database summary; and the latest Attempt is settled and successful at `verify`, or at `route` after a current non-passing host verdict. A mismatched, disk-only, missing-task, missing-Attempt, or failed-executor SUMMARY remains fail-closed and produces this diagnostic.
 
-**Fix:** Review the divergent SUMMARY, then run `/gsd rebuild markdown` to quarantine stale projections and re-render from the authoritative database. Use `/gsd recover` with its exact Preview approval only when markdown should repopulate a lost or corrupt database. Otherwise, repair or rerun the task and rerun `/gsd doctor`.
+**Fix:** Review the divergent SUMMARY, then run `/gsd rebuild markdown` to quarantine stale projections and re-render from the authoritative database. The rebuild keeps `artifacts` rows: when the diagnostic names a SUMMARY artifact row (not only a file on disk), it can remain after the rebuild, and `/gsd recover` is then the only command that replaces that row. One exception: when the diagnostic says that an older release reopened the milestone and the reopen is only in `event-log.jsonl`, run `/gsd doctor --fix` to import the reopen; the row then stops blocking. Use `/gsd recover` with its exact Preview approval only when markdown should repopulate a lost or corrupt database. Otherwise, repair or rerun the task and rerun `/gsd doctor`.
 
 ### `/gsd doctor` reports `artifact_user_content_missing`
 
@@ -428,7 +444,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 
 **What it means:** The ADR-013 memory-store consolidation preflight scanner found legacy knowledge that is not yet represented in the canonical `memories` table. It checks active `decisions` rows for matching `structured_fields.sourceDecisionId` markers and `.gsd/KNOWLEDGE.md` table rows for matching `sourceKnowledgeId` markers. The scanner is read-only and is intended to block destructive cutover until migration coverage is visible.
 
-**Fix:** Run `/gsd doctor` to inspect the counts and sample rows. Before cutover, complete the decisions or KNOWLEDGE.md backfill so the affected rows exist in `memories`; do not delete legacy `DECISIONS.md`, `KNOWLEDGE.md`, or database rows just to silence the warning.
+**Fix:** Run `/gsd doctor` to inspect the counts and sample rows. Decisions are backfilled into `memories` at session start. A `.gsd/KNOWLEDGE.md` row that exists only in the file (for example after a fresh clone or a pull of a teammate's rows) is never imported at session start. Nothing is lost: the row stays in the file, the render keeps it, and sessions still read it. To import these rows, run `/gsd recover`, read the Preview, and approve it with the `--preview=<sha256>` it prints. The Preview lists each Rule, Pattern and Lesson row it imports and each part of the file it does not import. The warning stops when every row is imported. Do not capture the row again with `/gsd knowledge`: that adds a second row with a new id and does not clear the warning. Do not delete legacy `DECISIONS.md`, `KNOWLEDGE.md`, or database rows just to silence the warning.
 
 ### Transient `EBUSY` / `EPERM` / `EACCES` while writing `.gsd/` files
 
@@ -441,6 +457,7 @@ In these states GSD does not auto-stash and does not auto-fix; it stops so you c
 Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLATION` (`os error 32`) as transient. Auto mode routes that typed failure through its existing transient-execution retry budget; other projection failures are not reclassified, and sustained handle contention still surfaces as an error after the budget is exhausted.
 
 **Fix:**
+
 - Re-run the operation; most transient lock races clear quickly.
 - If the error persists, close tools that may be holding the file open and then retry.
 - If repeated failures continue, run `/gsd doctor` to confirm the repo state is still healthy and report the exact path + error code.
@@ -484,11 +501,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** `mcp_servers` reports no servers configured.
 
 **Common causes:**
+
 - No `.mcp.json` or `.gsd/mcp.json` file exists in the current project
 - The config file is malformed JSON
 - The server is configured in a different project directory than the one where you launched GSD
 
 **Fix:**
+
 - Add the server to `.mcp.json` or `.gsd/mcp.json`
 - Verify the file parses as JSON
 - Re-run `mcp_servers(refresh=true)`
@@ -498,11 +517,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** `mcp_discover` fails with a timeout.
 
 **Common causes:**
+
 - The server process starts but never completes the MCP handshake
 - The configured command points to a script that hangs on startup
 - The server is waiting on an unavailable dependency or backend service
 
 **Fix:**
+
 - Run the configured command directly outside GSD and confirm the server actually starts
 - Check that any backend URLs or required services are reachable
 - For local custom servers, verify the implementation is using an MCP SDK or a correct stdio protocol implementation
@@ -512,12 +533,14 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** `mcp_discover` fails immediately with a connection-closed error.
 
 **Common causes:**
+
 - Wrong executable path
 - Wrong script path
 - Missing runtime dependency
 - The server crashes before responding
 
 **Fix:**
+
 - Verify `command` and `args` paths are correct and absolute
 - Run the command manually to catch import/runtime errors
 - Check that the configured interpreter or runtime exists on the machine
@@ -527,12 +550,14 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** A Claude Code-backed unit aborts before the first model turn with `workflow tool surface not ready`, often mentioning `gsd-workflow` as `pending`, `failed`, `disabled`, absent, or missing a required `gsd_*` tool.
 
 **Common causes:**
+
 - Claude Code has not connected the `gsd-workflow` MCP server yet
 - The server's workflow bridge failed during startup
 - `GSD_WORKFLOW_PROJECT_ROOT` points at the wrong project
 - A stale MCP server process is still registered for the project
 
 **Fix:**
+
 - Run `/gsd mcp init` from the project root, restart Claude Code, and retry the unit.
 - Check `/gsd mcp status` and confirm `gsd-workflow` is connected with workflow tools listed.
 - If you maintain MCP config manually, set `GSD_WORKFLOW_PROJECT_ROOT` to the canonical project root and rebuild or reinstall `gsd-mcp-server` after local package changes.
@@ -544,11 +569,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** A discovered MCP tool exists, but calling it fails validation because required fields are missing.
 
 **Common causes:**
+
 - The call shape is wrong
 - The target server's tool schema changed
 - You're calling a stale server definition or stale branch build
 
 **Fix:**
+
 - Re-run `mcp_discover(server="name")` and confirm the exact required argument names
 - Call the tool with `mcp_call(server="name", tool="tool_name", args={...})`
 - If you're developing GSD itself, rebuild after schema changes with `npm run build`
@@ -558,11 +585,13 @@ Native projection-root operations on Windows also identify `ERROR_SHARING_VIOLAT
 **Symptoms:** Running the server command manually seems fine, but GSD can't connect.
 
 **Common causes:**
+
 - The server depends on shell state that GSD doesn't inherit
 - Relative paths only work from a different working directory
 - Required environment variables exist in your shell but not in the MCP config
 
 **Fix:**
+
 - Use absolute paths for `command` and script arguments
 - Set required environment variables in the MCP config's `env` block
 - If needed, set `cwd` explicitly in the server definition
@@ -601,8 +630,8 @@ Then run `/gsd doctor` to refresh projections and `/gsd auto` to restart from cu
 
 If adaptive model routing is producing bad results, clear the routing history:
 
-```bash
-rm .gsd/routing-history.json
+```
+/gsd rate reset
 ```
 
 ### Refresh rendered state
@@ -612,6 +641,8 @@ rm .gsd/routing-history.json
 ```
 
 Doctor checks the authoritative database, refreshes `STATE.md` from derived database state, and fixes detected projection or runtime-file inconsistencies.
+
+`STATE.md` is fully derived from the database. GSD overwrites it after each change, so a hand edit to `STATE.md` is lost and no copy is kept. Change state through GSD commands instead.
 
 ### Recover database hierarchy from markdown
 
@@ -696,6 +727,7 @@ For non-TTY environments (CI, cron, scripted automation), `gsd headless recover`
 GSD auto-detects language servers based on project files (e.g. `package.json` → TypeScript, `Cargo.toml` → Rust, `go.mod` → Go). If no servers are detected, the agent skips LSP features.
 
 **Check status:**
+
 ```
 lsp status
 ```

@@ -207,6 +207,10 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 	);
 }
 
+function isSonnet55Model(modelId: string): boolean {
+	return modelId.includes("sonnet-5-5") || modelId.includes("sonnet-5.5");
+}
+
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
 	model.compat = { ...(model.compat as AnthropicMessagesCompat | undefined), ...compat };
 }
@@ -272,6 +276,15 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 		isAnthropicAdaptiveThinkingModel(model.id)
 	) {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "anthropic-vertex") &&
+		isSonnet55Model(model.id)
+	) {
+		// Sonnet 5.5 rejects the legacy request surface with 400s (#2500):
+		// thinking {type:"disabled"} (use "between_tools"), temperature,
+		// top_p/top_k, and forced tool_choice.
+		mergeAnthropicMessagesCompat(model, { strictRequestParams: true });
 	}
 	if (
 		(model.provider === "minimax" || model.provider === "minimax-cn") &&
@@ -1081,9 +1094,13 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		// Process Kimi For Coding models. models.dev renamed the provider key to
+		// region-scoped "kimi-code-plan-*" entries; the global plan is the one
+		// served at api.kimi.com/coding. Prefer the legacy key if upstream
+		// restores it.
+		const kimiProviderSource = data["kimi-for-coding"] ?? data["kimi-code-plan-global"];
+		if (kimiProviderSource?.models) {
+			const kimiModels = kimiProviderSource.models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);

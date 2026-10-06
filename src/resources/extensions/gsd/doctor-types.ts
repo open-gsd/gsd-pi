@@ -3,6 +3,7 @@ export type DoctorSeverity = "info" | "warning" | "error";
 export type DoctorIssueCode =
   | "invalid_preferences"
   | "missing_roadmap"
+  | "planning_blocked"
   | "missing_tasks_dir"
   | "missing_slice_plan"
   | "all_slices_done_missing_milestone_validation"
@@ -21,8 +22,8 @@ export type DoctorIssueCode =
   | "stale_crash_lock"
   | "stale_paused_session"
   | "stale_parallel_session"
-  | "orphaned_completed_units"
   | "stale_hook_state"
+  | "legacy_hook_state_file"
   | "uat_retry_exhausted"
   | "activity_log_bloat"
   | "state_file_stale"
@@ -62,6 +63,7 @@ export type DoctorIssueCode =
   | "duplicate_task_id"
   | "task_file_not_in_plan"
   | "stale_replan_file"
+  | "orphan_reopen_reason_file"
   | "future_timestamp"
   // Worktree lifecycle checks
   | "worktree_branch_merged"
@@ -84,7 +86,6 @@ export type DoctorIssueCode =
   // Engine health checks (Phase 4)
   | "db_orphaned_task"
   | "db_orphaned_slice"
-  | "db_done_task_no_summary"
   | "artifact_file_missing"
   | "artifact_user_content_missing"
   | "artifact_db_status_divergence"
@@ -97,6 +98,7 @@ export type DoctorIssueCode =
   | "memories_fts_rebuild_missing"
   | "projection_drift"
   | "unresolved_projection_evidence"
+  | "stale_control_publication_intent"
   | "validation_source_revision_mismatch"
   // Orphaned execution Attempts (#1749)
   | "orphaned_running_attempt"
@@ -106,9 +108,30 @@ export type DoctorIssueCode =
   | "orphaned_milestone_lease"
   // Pre-#1659 legacy import remediation (#1661)
   | "lifecycle_projection_wrong_kind"
+  // Durable Projection Work not rendered (ADR-046)
+  | "projection_work_pending"
+  | "projection_work_dead_letter"
+  | "projection_work_unrendered"
+  // OVERRIDES.md block that the database does not hold
+  | "override_file_block_unimported"
+  // CAPTURES.md section that the database does not hold
+  | "capture_file_entry_unimported"
+  // BACKLOG.md item that the database does not hold
+  | "backlog_file_item_unimported"
+  // metrics.json unit runs that the database does not hold
+  | "metrics_ledger_units_unimported"
+  // event-log.jsonl milestone reopen or completion that the database does not hold
+  | "legacy_milestone_event_unimported"
+  | "escalation_legacy_response_unapplied"
+  // Legacy/canonical lifecycle shadow drift (#2440)
+  | "lifecycle_shadow_mismatch"
+  | "lifecycle_missing_shadow"
+  | "lifecycle_unmappable_status"
   // Milestone filesystem/DB drift (#4996)
   | "orphan_milestone_dir"
   | "orphan_milestone_db"
+  // Lifecycle shadow observation loss accounting (#2442)
+  | "lifecycle_shadow_observation_loss"
   // Parent-workspace declared repository checks (#818)
   | "workspace_repo_path_missing"
   | "workspace_repo_not_a_repo";
@@ -116,18 +139,11 @@ export type DoctorIssueCode =
 /**
  * Issue codes that represent global or completion-critical state.
  * These must NOT be auto-fixed when fixLevel is "task" — automated
- * post-task health checks must never delete external project state directories
- * or remove completed-unit keys (which causes state reversion / data loss).
- *
- * orphaned_completed_units: Removing completed-unit keys causes deriveState to
- * consider those tasks incomplete, reverting the user to an earlier slice and
- * effectively discarding all work past that point (#1809). This must only be
- * fixed by an explicit manual doctor run (fixLevel="all").
+ * post-task health checks must never delete external project state directories.
  */
 export const GLOBAL_STATE_CODES = new Set<DoctorIssueCode>([
   "db_locked",
   "orphaned_project_state",
-  "orphaned_completed_units",
 ]);
 
 export interface DoctorIssue {

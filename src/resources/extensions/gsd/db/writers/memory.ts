@@ -187,11 +187,18 @@ export function markMemoryUnitProcessed(
   ).run({ ":key": unitKey, ":file": activityFile, ":at": processedAt }));
 }
 
+/**
+ * The memories rows that the cap and the decay apply to: active rows that are
+ * not KNOWLEDGE Rules. Rules are user-authored and stay until forgotten.
+ * Patterns and Lessons are subject to both, like every other memory.
+ */
+export const CAP_AND_DECAY_ROWS_SQL = "superseded_by IS NULL AND category <> 'rule'";
+
 export function decayMemoriesBefore(cutoffTs: string, now: string): void {
   transaction(() => getDb().prepare(
     `UPDATE memories
      SET confidence = MAX(0.1, confidence - 0.1), updated_at = :now
-     WHERE superseded_by IS NULL
+     WHERE ${CAP_AND_DECAY_ROWS_SQL}
        AND updated_at < :cutoff
        AND confidence > 0.1
        AND (structured_fields IS NULL OR structured_fields NOT LIKE '%"sourceDecisionId"%')`,
@@ -203,7 +210,7 @@ export function supersedeLowestRankedMemories(limit: number, now: string): void 
     `UPDATE memories SET superseded_by = 'CAP_EXCEEDED', updated_at = :now
      WHERE id IN (
        SELECT id FROM memories
-       WHERE superseded_by IS NULL
+       WHERE ${CAP_AND_DECAY_ROWS_SQL}
        ORDER BY (confidence * (1.0 + hit_count * 0.1)) ASC
        LIMIT :limit
      )`,

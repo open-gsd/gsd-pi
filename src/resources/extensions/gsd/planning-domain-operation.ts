@@ -21,7 +21,6 @@ export class PlanningGuardError extends Error {}
 export interface PlanningDomainOperationInput {
   operationType: string;
   invocation: PlanningInvocation;
-  actorId?: string;
   payload: DomainJsonValue;
   event: DomainOperationEventInput;
   projection: DomainOperationProjectionInput;
@@ -39,7 +38,9 @@ export function executePlanningDomainOperation(
   input: PlanningDomainOperationInput,
 ): DomainOperationResult {
   const fence = readDomainOperationFence(input.invocation.idempotencyKey);
-  const actorId = input.invocation.actorId ?? input.actorId;
+  // Provenance comes only from the transport invocation, never from a
+  // model-supplied tool parameter.
+  const actorId = input.invocation.actorId;
   return executeDomainOperation({
     operationType: input.operationType,
     idempotencyKey: input.invocation.idempotencyKey,

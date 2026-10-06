@@ -16,6 +16,10 @@ import { DISPATCH_RULES } from "../auto-dispatch.ts";
 import type { DispatchContext, DispatchAction } from "../auto-dispatch.ts";
 import type { GSDState } from "../types.ts";
 import { createWorkspace, scopeMilestone } from "../workspace.ts";
+import { closeDatabase, insertArtifact, insertMilestone, insertSlice, insertTask, openDatabase } from "../gsd-db.ts";
+import { storeUnitRetry } from "../db/unit-dispatch-retries.ts";
+import { claimTestDispatch } from "./helpers/unit-dispatch.ts";
+import { saveMilestoneFilesAsArtifacts } from "./narrative-artifact-fixture.ts";
 
 // ─── State helpers ────────────────────────────────────────────────────────
 
@@ -41,6 +45,32 @@ function makeCtx(basePath: string, state: GSDState, mid = "M001"): DispatchConte
     state,
     prefs: undefined,
   };
+}
+
+// ─── Database scaffold helpers ────────────────────────────────────────────
+
+/**
+ * Open an in-memory DB with milestone `mid` and the given saved artifact rows.
+ * Dispatch reads these rows; a CONTEXT or RESEARCH file decides nothing.
+ */
+function seedMilestoneArtifacts(
+  t: { after: (fn: () => void) => void },
+  mid: string,
+  artifactTypes: string[],
+): void {
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  insertMilestone({ id: mid, title: "Test Milestone", status: "active" });
+  for (const type of artifactTypes) {
+    insertArtifact({
+      path: `milestones/${mid}/${mid}-${type}.md`,
+      artifact_type: type,
+      milestone_id: mid,
+      slice_id: null,
+      task_id: null,
+      full_content: `# ${type}\n`,
+    });
+  }
 }
 
 // ─── Disk scaffold helpers ────────────────────────────────────────────────
@@ -147,14 +177,12 @@ test("dispatch-rule-coverage: pre-planning, no CONTEXT → discuss-milestone", a
   );
 });
 
-test("dispatch-rule-coverage: pre-planning worktree sees project-root CONTEXT", async (t) => {
+test("dispatch-rule-coverage: pre-planning from a worktree base sees the saved CONTEXT row", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-wt-context-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  seedMilestoneArtifacts(t, "M001", ["CONTEXT"]);
 
-  const projectPhaseDir = join(tmp, ".gsd", "phases", "01-foundation");
-  mkdirSync(projectPhaseDir, { recursive: true });
-  writeFileSync(join(projectPhaseDir, "01-CONTEXT.md"), "# Context\n");
-
+  // The worktree has no CONTEXT file at all: the saved row is the discussion.
   const worktree = join(tmp, ".gsd", "worktrees", "M001");
   mkdirSync(join(worktree, ".gsd", "milestones", "M001"), { recursive: true });
   writeFileSync(
@@ -168,39 +196,31 @@ test("dispatch-rule-coverage: pre-planning worktree sees project-root CONTEXT", 
   assert.ok(rule, "pre-planning missing-context rule should exist");
 
   const result = await rule.match(makeCtx(worktree, makeState({ phase: "pre-planning" })));
-  assert.equal(result, null, "project-root CONTEXT must prevent a second discuss-milestone dispatch");
+  assert.equal(result, null, "the saved CONTEXT row must prevent a second discuss-milestone dispatch");
 });
 
-test("dispatch-rule-coverage: pre-planning worktree sees worktree-only CONTEXT", async (t) => {
-  // Mirror image of the project-root test: discuss-milestone mirrors CONTEXT into
-  // the worktree's own .gsd, and it may not yet exist at the project root (the
-  // worktree→root sync deliberately does not flow markdown projections back).
-  // A project-root-only check would miss it and re-fire discuss-milestone.
+test("dispatch-rule-coverage: pre-planning with only a CONTEXT file dispatches discuss-milestone", async (t) => {
+  // A CONTEXT file with no saved row (in the worktree or at the project root)
+  // is not a finished discussion.
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-wt-only-context-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
-
-  // No CONTEXT at the project root — only the milestone dir exists there.
-  mkdirSync(join(tmp, ".gsd", "phases"), { recursive: true });
-
-  const worktree = join(tmp, ".gsd", "worktrees", "M001");
-  const worktreePhaseDir = join(worktree, ".gsd", "phases", "01-foundation");
-  mkdirSync(worktreePhaseDir, { recursive: true });
-  writeFileSync(join(worktreePhaseDir, "01-CONTEXT.md"), "# WT Context\n");
+  seedMilestoneArtifacts(t, "M001", []);
+  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
 
   const rule = DISPATCH_RULES.find(
     (candidate) => candidate.name === "pre-planning (no context) → discuss-milestone",
   );
   assert.ok(rule, "pre-planning missing-context rule should exist");
 
-  const result = await rule.match(makeCtx(worktree, makeState({ phase: "pre-planning" })));
-  assert.equal(result, null, "worktree-only CONTEXT must prevent a second discuss-milestone dispatch");
+  const result = await rule.match(makeCtx(tmp, makeState({ phase: "pre-planning" })));
+  assert.equal(result?.action === "dispatch" ? result.unitType : null, "discuss-milestone");
 });
 
 test("dispatch-rule-coverage: pre-planning, has CONTEXT, no RESEARCH → research-milestone", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-res-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
-  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
+  seedMilestoneArtifacts(t, "M001", ["CONTEXT"]);
 
   const ctx = makeCtx(tmp, makeState({ phase: "pre-planning" }));
   const match = await findFirstMatch(ctx);
@@ -219,8 +239,7 @@ test("dispatch-rule-coverage: pre-planning, has CONTEXT + RESEARCH → plan-mile
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-plan-m-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
 
-  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
-  writeMilestoneFile(tmp, "M001", "RESEARCH", "# Research\n");
+  seedMilestoneArtifacts(t, "M001", ["CONTEXT", "RESEARCH"]);
 
   const ctx = makeCtx(tmp, makeState({ phase: "pre-planning" }));
   const match = await findFirstMatch(ctx);
@@ -242,6 +261,10 @@ test("dispatch-rule-coverage: plan-milestone refreshes stale session scope", asy
   writeMilestoneFile(tmp, "M001", "CONTEXT", "# Prior Milestone Context\n");
   writeMilestoneFile(tmp, "M002", "CONTEXT", "# Current Milestone Context\n");
   writeMilestoneFile(tmp, "M002", "RESEARCH", "# Current Milestone Research\n");
+  // The prompt takes the narrative from artifact rows.
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  saveMilestoneFilesAsArtifacts(tmp);
 
   const rule = DISPATCH_RULES.find(
     (candidate) => candidate.name === "pre-planning (has research) → plan-milestone",
@@ -381,58 +404,148 @@ test("dispatch-rule-coverage: executing with task plan present → execute-task"
   );
 });
 
-test("dispatch-rule-coverage: executing honors pending verification retry unit", async (t) => {
-  const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-exec-retry-"));
-  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+/**
+ * A database with a claimed dispatch row for the unit, as a unit that ran in
+ * auto-mode has. No AutoSession holds anything about it: the dispatch rules see
+ * what a restarted process sees.
+ */
+function openProjectWithDispatch(
+  t: { after(cb: () => void): void },
+  basePath: string,
+  unitType: string,
+  unitId: string,
+): void {
+  openDatabase(":memory:");
+  t.after(() => closeDatabase());
+  insertMilestone({ id: "M001", title: "Test Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "First Slice" });
+  claimTestDispatch(basePath, { milestoneId: "M001", sliceId: "S01", unitType, unitId });
+}
 
+const COMMIT_REPAIR_RETRY = {
+  unitId: "M001/S01/T01",
+  failureContext: "Git commit failed after task verification. The hook refused the changes.",
+  signature: "git-commit:1:the hook refused the changes",
+  attempt: 1,
+};
+
+for (const { phase, activeTask } of [
+  { phase: "executing", activeTask: { id: "T02", title: "Second Task" } },
+  { phase: "summarizing", activeTask: null },
+] as const) {
+  test(`dispatch-rule-coverage: ${phase} with a stored commit repair retry → the closed execute-task`, async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-commit-repair-"));
+    t.after(() => rmSync(tmp, { recursive: true, force: true }));
+    writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
+    writeSliceFile(tmp, "M001", "S01", "PLAN", "# Plan\n");
+    writeTaskPlan(tmp, "M001", "S01", "T01");
+    writeTaskPlan(tmp, "M001", "S01", "T02");
+    openProjectWithDispatch(t, tmp, "execute-task", "M001/S01/T01");
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First Task", status: "complete" });
+    storeUnitRetry("execute-task", COMMIT_REPAIR_RETRY);
+
+    const match = await findFirstMatch({
+      ...makeCtx(tmp, makeState({ phase, activeSlice: { id: "S01", title: "First Slice" }, activeTask })),
+      prefs: { reactive_execution: { enabled: false } } as DispatchContext["prefs"],
+    });
+    assertMatch(
+      match,
+      { ruleName: "stored retry → execute-task (commit repair)", action: "dispatch", unitType: "execute-task" },
+      `${phase} with a stored commit repair retry`,
+    );
+    assert.equal(
+      match?.result.action === "dispatch" ? match.result.unitId : null,
+      "M001/S01/T01",
+      "state derivation does not select a closed task, so the stored retry must",
+    );
+  });
+}
+
+test("dispatch-rule-coverage: a stored verification retry of the active task does not change the selection", async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-task-retry-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
   writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
   writeSliceFile(tmp, "M001", "S01", "PLAN", "# Plan\n");
   writeTaskPlan(tmp, "M001", "S01", "T01");
-  writeTaskPlan(tmp, "M001", "S01", "T02");
+  openProjectWithDispatch(t, tmp, "execute-task", "M001/S01/T01");
+  storeUnitRetry("execute-task", { unitId: "M001/S01/T01", failureContext: "npm test failed", attempt: 1 });
 
-  const state = makeState({
-    phase: "executing",
-    activeSlice: { id: "S01", title: "First Slice" },
-    activeTask: { id: "T02", title: "Second Task" },
-  });
-  const ctx: DispatchContext = {
-    basePath: tmp,
-    mid: "M001",
-    midTitle: "Test Milestone",
-    state,
+  const match = await findFirstMatch({
+    ...makeCtx(tmp, makeState({
+      phase: "executing",
+      activeSlice: { id: "S01", title: "First Slice" },
+      activeTask: { id: "T01", title: "First Task" },
+    })),
     prefs: { reactive_execution: { enabled: false } } as DispatchContext["prefs"],
-    session: {
-      pendingVerificationRetry: {
-        unitId: "M001/S01/T01",
-        attempt: 2,
-        failureContext: "verification failed",
-      },
-    } as DispatchContext["session"],
-  };
-  const match = await findFirstMatch(ctx);
+  });
   assertMatch(
     match,
-    {
-      ruleName: "executing → execute-task",
-      action: "dispatch",
-      unitType: "execute-task",
-    },
-    "executing pending verification retry",
+    { ruleName: "executing → execute-task", action: "dispatch", unitType: "execute-task" },
+    "executing with a stored verification retry of the active task",
   );
-  assert.equal(
-    match?.result.action === "dispatch" ? match.result.unitId : null,
-    "M001/S01/T01",
-    "executing pending verification retry: should redispatch the retry unit",
+});
+
+for (const { phase, unitType } of [
+  { phase: "executing", unitType: "plan-slice" },
+  { phase: "evaluating-gates", unitType: "refine-slice" },
+] as const) {
+  test(`dispatch-rule-coverage: ${phase} with a stored ${unitType} pre-execution retry → ${unitType}`, async (t) => {
+    const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-stored-retry-"));
+    t.after(() => rmSync(tmp, { recursive: true, force: true }));
+    openProjectWithDispatch(t, tmp, unitType, "M001/S01");
+    storeUnitRetry(unitType, {
+      unitId: "M001/S01",
+      failureContext: "the plan failed its check",
+      signature: "pre-execution:1",
+      attempt: 1,
+    });
+
+    const match = await findFirstMatch(makeCtx(
+      tmp,
+      makeState({
+        phase,
+        activeSlice: { id: "S01", title: "First Slice" },
+        activeTask: { id: "T01", title: "First Task" },
+      }),
+    ));
+    assertMatch(
+      match,
+      { ruleName: "stored retry → plan-slice / refine-slice", action: "dispatch", unitType },
+      `${phase} with a stored ${unitType} retry`,
+    );
+  });
+}
+
+test("dispatch-rule-coverage: a stored artifact retry of the planner does not send an executing slice back", async (t) => {
+  // Only a plan that the pre-execution check refused goes back to the planner.
+  // An artifact retry is for a planner that saved no plan; a slice in the
+  // executing phase has a plan.
+  const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-artifact-retry-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
+  writeSliceFile(tmp, "M001", "S01", "PLAN", "# Plan\n");
+  writeTaskPlan(tmp, "M001", "S01", "T01");
+  openProjectWithDispatch(t, tmp, "plan-slice", "M001/S01");
+  storeUnitRetry("plan-slice", { unitId: "M001/S01", failureContext: "the plan artifact is missing", attempt: 1 });
+
+  const match = await findFirstMatch({
+    ...makeCtx(tmp, makeState({
+      phase: "executing",
+      activeSlice: { id: "S01", title: "First Slice" },
+      activeTask: { id: "T01", title: "First Task" },
+    })),
+    prefs: { reactive_execution: { enabled: false } } as DispatchContext["prefs"],
+  });
+  assertMatch(
+    match,
+    { ruleName: "executing → execute-task", action: "dispatch", unitType: "execute-task" },
+    "executing with a stored artifact retry of the planner",
   );
 });
 
 test("dispatch-rule-coverage: summarizing → complete-slice", async (t) => {
   const tmp = mkdtempSync(join(tmpdir(), "gsd-disp-cov-sum-"));
   t.after(() => rmSync(tmp, { recursive: true, force: true }));
-
-  // Rule "execution-entry phase (no context)" fires for summarizing if CONTEXT
-  // is missing — write it so the summarizing rule wins.
-  writeMilestoneFile(tmp, "M001", "CONTEXT", "# Context\n");
 
   const ctx = makeCtx(
     tmp,

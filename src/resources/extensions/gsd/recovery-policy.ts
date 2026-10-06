@@ -22,6 +22,13 @@ export type HumanBlockerKind =
   | "ambiguous_intent"
   | "subjective_uat"
   | "user_limit";
+/**
+ * Why auto-mode paused. A HumanBlockerKind is a pause for a person (ADR-046
+ * invariant 9). "user_request" is a pause the user asked for. "machine_fixable"
+ * is a failure that ADR-046 does not list as human-only: it still pauses today
+ * and belongs to a Recovery Action.
+ */
+export type AutoPauseBlockerKind = HumanBlockerKind | "user_request" | "machine_fixable";
 export type TaskFailureKind =
   | RecoveryFailureKind
   | "transient-execution"

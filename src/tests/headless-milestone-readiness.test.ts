@@ -18,6 +18,7 @@ import {
   insertMilestone,
   insertSlice,
 } from "../resources/extensions/gsd/gsd-db.ts";
+import { addLegacyCompletionEvidence } from "../resources/extensions/gsd/tests/helpers/legacy-completion-evidence.ts";
 import {
   captureMilestoneExecutionSnapshot,
   isMilestoneExecutableInDb,
@@ -64,6 +65,7 @@ test("not executable when the only milestone is terminal", () => {
     openDatabase(join(base, ".gsd", "gsd.db"));
     insertMilestone({ id: "m1", title: "Done", status: "complete" });
     insertSlice({ id: "S01", milestoneId: "m1", title: "Slice one", status: "complete" });
+    addLegacyCompletionEvidence();
     closeDatabase();
 
     assert.equal(isMilestoneExecutableInDb(base), false);

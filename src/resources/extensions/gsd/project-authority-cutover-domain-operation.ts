@@ -21,26 +21,16 @@ import {
 } from "./db/domain-operation.js";
 import { getDb, getDbPath, readTransaction, SCHEMA_VERSION } from "./db/engine.js";
 import { insertAuthorityCutoverReceipt } from "./db/writers/authority-recovery.js";
-import {
-  LEGACY_IMPORT_APPLICATION_EVENT_TYPE,
-  LEGACY_IMPORT_APPLICATION_OPERATION_TYPE,
-} from "./legacy-import-application.js";
-import {
-  inspectLegacyImportApplicationEvidence,
-  LegacyImportApplicationEvidenceError,
-  type LegacyImportApplicationEvidence,
-} from "./legacy-import-application-evidence.js";
-import { captureCurrentLegacyImportBaseSnapshot } from "./legacy-import-preview-base.js";
+import { countUnadoptedHierarchyRows } from "./lifecycle-backfill-domain-operation.js";
 
 export const PROJECT_AUTHORITY_CONTRACT_VERSION = 1 as const;
-export const PROJECT_AUTHORITY_CUTOVER_EVIDENCE_SCHEMA_VERSION = 1 as const;
+export const PROJECT_AUTHORITY_CUTOVER_EVIDENCE_SCHEMA_VERSION = 2 as const;
 export const PROJECT_AUTHORITY_CUTOVER_CONSENT_SCHEMA_VERSION = 1 as const;
 
 export type ProjectAuthorityCutoverErrorCode =
   | "PROJECT_AUTHORITY_CUTOVER_CONTRACT_INVALID"
   | "PROJECT_AUTHORITY_CUTOVER_SCHEMA_UNSUPPORTED"
-  | "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT"
-  | "PROJECT_AUTHORITY_CUTOVER_RECOVERY_ALREADY_RECORDED"
+  | "PROJECT_AUTHORITY_CUTOVER_COVERAGE_INCOMPLETE"
   | "PROJECT_AUTHORITY_CUTOVER_EVIDENCE_CHANGED"
   | "PROJECT_AUTHORITY_CUTOVER_CONSENT_REQUIRED"
   | "PROJECT_AUTHORITY_CUTOVER_COORDINATION_ACTIVE"
@@ -90,28 +80,6 @@ export interface ProjectAuthorityCutoverEvidence {
   readonly projectId: string;
   readonly projectRootRealpath: string;
   readonly databaseSchemaVersion: number;
-  readonly applicationOperationId: string;
-  readonly applicationIdempotencyKey: string;
-  readonly applicationActorType: string;
-  readonly applicationActorId: string | null;
-  readonly applicationSourceTransport: string;
-  readonly applicationTraceId: string | null;
-  readonly applicationTurnId: string | null;
-  readonly applicationIdentityHash: string;
-  readonly previewInputHash: string;
-  readonly previewId: string;
-  readonly previewHash: string;
-  readonly backupArtifactHash: string;
-  readonly backupId: string;
-  readonly applicationRelevantRowsHash: string;
-  readonly backupRef: string;
-  readonly backupSha256: string;
-  readonly backupByteSize: number;
-  readonly backupSchemaVersion: number;
-  readonly backupProjectRevision: number;
-  readonly backupAuthorityEpoch: number;
-  readonly backupQuickCheck: "ok";
-  readonly backupVerifiedAt: string;
   readonly projectRevision: number;
   readonly authorityEpoch: number;
   readonly evidenceHash: string;
@@ -301,67 +269,10 @@ function currentSchemaVersion(): number {
   return Number(row?.["version"] ?? -1);
 }
 
-function loadCurrentApplication(): {
-  evidence: LegacyImportApplicationEvidence;
-  revision: number;
-  authorityEpoch: number;
-} {
-  const row = getDb().prepare(`
-    SELECT authority.revision, authority.authority_epoch, operation.operation_id
-    FROM project_authority authority
-    JOIN workflow_operations operation
-      ON operation.project_id = authority.project_id
-     AND operation.resulting_revision = authority.revision
-     AND operation.resulting_authority_epoch = authority.authority_epoch
-     AND operation.operation_type = '${LEGACY_IMPORT_APPLICATION_OPERATION_TYPE}'
-    WHERE authority.singleton = 1
-  `).get() as DbRow | undefined;
-  if (
-    !row
-    || typeof row["operation_id"] !== "string"
-    || !Number.isSafeInteger(row["revision"])
-    || !Number.isSafeInteger(row["authority_epoch"])
-  ) {
-    fail(
-      "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT",
-      "authority cutover requires the current canonical head to be one Import Application",
-    );
-  }
-  try {
-    return {
-      evidence: inspectLegacyImportApplicationEvidence(row["operation_id"]),
-      revision: Number(row["revision"]),
-      authorityEpoch: Number(row["authority_epoch"]),
-    };
-  } catch (error) {
-    if (!(error instanceof LegacyImportApplicationEvidenceError)) throw error;
-    fail(
-      "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT",
-      "current Import Application evidence is malformed",
-    );
-  }
-}
-
-function requireNoRecordedRecovery(applicationOperationId: string): void {
-  const row = getDb().prepare(`
-    SELECT
-      EXISTS (
-        SELECT 1 FROM workflow_import_restores
-        WHERE application_operation_id = :application_operation_id
-      ) AS restored,
-      EXISTS (
-        SELECT 1 FROM workflow_import_forward_repairs
-        WHERE application_operation_id = :application_operation_id
-      ) AS repaired
-  `).get({ ":application_operation_id": applicationOperationId });
-  if (row?.["restored"] === 1 || row?.["repaired"] === 1) {
-    fail(
-      "PROJECT_AUTHORITY_CUTOVER_RECOVERY_ALREADY_RECORDED",
-      "Import Application recovery already selected a terminal route",
-    );
-  }
-}
-
+/**
+ * The cutover precondition: every milestone, slice and task has a lifecycle
+ * row. Any Project qualifies, whatever its operation head is.
+ */
 export function inspectProjectAuthorityCutoverEvidence(): ProjectAuthorityCutoverEvidence {
   return readTransaction(() => {
     const schemaVersion = currentSchemaVersion();
@@ -373,46 +284,26 @@ export function inspectProjectAuthorityCutoverEvidence(): ProjectAuthorityCutove
         { expectedSchemaVersion: SCHEMA_VERSION, observedSchemaVersion: schemaVersion },
       );
     }
-    const current = loadCurrentApplication();
-    const application = current.evidence;
-    if (captureCurrentLegacyImportBaseSnapshot().relevant_rows_hash
-      !== application.applicationRelevantRowsHash) {
+    const unadoptedHierarchyRows = countUnadoptedHierarchyRows();
+    if (unadoptedHierarchyRows !== 0) {
       fail(
-        "PROJECT_AUTHORITY_CUTOVER_APPLICATION_NOT_CURRENT",
-        "current canonical rows no longer match the Import Application result",
+        "PROJECT_AUTHORITY_CUTOVER_COVERAGE_INCOMPLETE",
+        "authority cutover requires a lifecycle row for every milestone, slice and task",
+        false,
+        { unadoptedHierarchyRows },
       );
     }
-    const applicationOperationId = application.operationId;
-    requireNoRecordedRecovery(applicationOperationId);
+    const authority = getDb().prepare(`
+      SELECT project_id, project_root_realpath, revision, authority_epoch
+      FROM project_authority WHERE singleton = 1
+    `).get() as DbRow;
     const evidenceWithoutHash = {
       evidenceSchemaVersion: PROJECT_AUTHORITY_CUTOVER_EVIDENCE_SCHEMA_VERSION,
-      projectId: application.projectId,
-      projectRootRealpath: application.projectRootRealpath,
+      projectId: String(authority["project_id"]),
+      projectRootRealpath: String(authority["project_root_realpath"]),
       databaseSchemaVersion: schemaVersion,
-      applicationOperationId,
-      applicationIdempotencyKey: application.idempotencyKey,
-      applicationActorType: application.actorType,
-      applicationActorId: application.actorId,
-      applicationSourceTransport: application.sourceTransport,
-      applicationTraceId: application.traceId,
-      applicationTurnId: application.turnId,
-      applicationIdentityHash: application.applicationIdentityHash,
-      previewInputHash: application.previewInputHash,
-      previewId: application.preview.preview.preview_id,
-      previewHash: application.preview.preview_hash,
-      backupArtifactHash: application.backupArtifactHash,
-      backupId: application.backupId,
-      applicationRelevantRowsHash: application.applicationRelevantRowsHash,
-      backupRef: application.backupRef,
-      backupSha256: application.backupSha256,
-      backupByteSize: application.backupByteSize,
-      backupSchemaVersion: application.backupSchemaVersion,
-      backupProjectRevision: application.backupProjectRevision,
-      backupAuthorityEpoch: application.backupAuthorityEpoch,
-      backupQuickCheck: application.backupQuickCheck,
-      backupVerifiedAt: application.backupVerifiedAt,
-      projectRevision: current.revision,
-      authorityEpoch: current.authorityEpoch,
+      projectRevision: Number(authority["revision"]),
+      authorityEpoch: Number(authority["authority_epoch"]),
     } satisfies Omit<ProjectAuthorityCutoverEvidence, "evidenceHash">;
     return Object.freeze({
       ...evidenceWithoutHash,
@@ -421,11 +312,13 @@ export function inspectProjectAuthorityCutoverEvidence(): ProjectAuthorityCutove
   });
 }
 
-function requireCoordinationIdle(projectRootRealpath: string): void {
+/** Refuses (retryable) while a worker, lease, dispatch or Attempt of this Project is active. */
+export function requireCoordinationIdle(): void {
   const counts = {
     activeWorkers: Number(getDb().prepare(`SELECT COUNT(*) AS count FROM workers
-      WHERE project_root_realpath = :project_root_realpath AND status = 'active'`)
-      .get({ ":project_root_realpath": projectRootRealpath })?.["count"] ?? 0),
+      WHERE status = 'active' AND project_root_realpath = (
+        SELECT project_root_realpath FROM project_authority WHERE singleton = 1
+      )`).get()?.["count"] ?? 0),
     heldLeases: Number(getDb().prepare(
       "SELECT COUNT(*) AS count FROM milestone_leases WHERE status = 'held'",
     ).get()?.["count"] ?? 0),
@@ -489,43 +382,6 @@ function loadAndValidateCutoverReceipt(
   } catch {
     payload = null;
   }
-  const applicationOperationId = payload?.["applicationOperationId"];
-  const application = typeof applicationOperationId === "string"
-    ? getDb().prepare(`
-        SELECT application_operation.project_id,
-               application_operation.resulting_revision,
-               application_operation.resulting_authority_epoch,
-               application_event.payload_json
-        FROM workflow_operations application_operation
-        JOIN workflow_import_applications application
-          ON application.operation_id = application_operation.operation_id
-         AND application.project_id = application_operation.project_id
-         AND application.resulting_project_revision = application_operation.resulting_revision
-         AND application.resulting_authority_epoch = application_operation.resulting_authority_epoch
-        JOIN workflow_domain_events application_event
-          ON application_event.operation_id = application_operation.operation_id
-         AND application_event.event_index = 0
-         AND application_event.event_type = '${LEGACY_IMPORT_APPLICATION_EVENT_TYPE}'
-         AND application_event.project_id = application_operation.project_id
-         AND application_event.project_revision = application_operation.resulting_revision
-         AND application_event.authority_epoch = application_operation.resulting_authority_epoch
-         AND application_event.entity_type = 'legacy-import'
-         AND application_event.entity_id = application.preview_id
-         AND application_event.caused_by_event_id IS NULL
-         AND application_event.created_at = application.applied_at
-        WHERE application_operation.operation_id = :operation_id
-          AND application_operation.operation_type = '${LEGACY_IMPORT_APPLICATION_OPERATION_TYPE}'
-          AND (SELECT COUNT(*) FROM workflow_domain_events application_events
-               WHERE application_events.operation_id = application_operation.operation_id) = 1
-      `).get({ ":operation_id": applicationOperationId })
-    : undefined;
-  let applicationPayloadValue: DbRow | null = null;
-  try {
-    const parsed = JSON.parse(String(application?.["payload_json"]));
-    applicationPayloadValue = isPlainRecord(parsed) ? parsed : null;
-  } catch {
-    applicationPayloadValue = null;
-  }
   const exactAggregate =
     operation.eventIds.length === 1
     && operation.outboxIds.length === 1
@@ -545,8 +401,6 @@ function loadAndValidateCutoverReceipt(
     && events[0]?.["created_at"] === row["cutover_at"]
     && hasExactDataKeys(payload, [
       "authorityContractVersion",
-      "applicationOperationId",
-      "applicationIdentityHash",
       "evidenceHash",
       "consentHash",
       "filesystemStateAuthority",
@@ -557,11 +411,6 @@ function loadAndValidateCutoverReceipt(
     ])
     && payload?.["authorityContractVersion"] === row["authority_contract_version"]
     && payload?.["filesystemStateAuthority"] === "db"
-    && application?.["project_id"] === row["project_id"]
-    && application?.["resulting_revision"] === row["expected_revision"]
-    && application?.["resulting_authority_epoch"] === row["expected_authority_epoch"]
-    && applicationPayloadValue?.["applicationIdentityHash"]
-      === payload?.["applicationIdentityHash"]
     && payload?.["evidenceHash"] === row["evidence_hash"]
     && payload?.["consentHash"] === row["consent_hash"]
     && payload?.["priorRevision"] === row["expected_revision"]
@@ -742,7 +591,7 @@ export function cutoverProjectAuthority(input: unknown): ProjectAuthorityCutover
           },
         );
       }
-      requireCoordinationIdle(observed.projectRootRealpath);
+      requireCoordinationIdle();
       insertAuthorityCutoverReceipt(context, {
         authorityContractVersion: snapshot.authorityContractVersion,
         evidenceHash: snapshot.evidenceHash,
@@ -755,8 +604,6 @@ export function cutoverProjectAuthority(input: unknown): ProjectAuthorityCutover
           entityId: context.projectId,
           payload: {
             authorityContractVersion: snapshot.authorityContractVersion,
-            applicationOperationId: observed.applicationOperationId,
-            applicationIdentityHash: observed.applicationIdentityHash,
             evidenceHash: snapshot.evidenceHash,
             consentHash: snapshot.consentHash,
             filesystemStateAuthority: "db",

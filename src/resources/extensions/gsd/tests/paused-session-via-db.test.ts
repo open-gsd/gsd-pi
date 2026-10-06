@@ -1,9 +1,9 @@
-// gsd-pi + Paused-session via runtime_kv (Phase C pt 2 — paused-session.json migration)
+// gsd-pi + Paused session via the auto_pauses row
 //
-// runtime/paused-session.json is gone. The metadata that the old file
-// stored now lives in runtime_kv (global scope, key PAUSED_SESSION_KV_KEY).
-// readPausedSessionMetadata reads the key; the writer in pauseAuto +
-// the cleanup in stopAuto/startAuto/guided-flow all use the same key.
+// The pause that resume routing reads is the open auto_pauses row of the worker
+// scope. readPausedSessionMetadata reads the row; pauseAuto writes it; a resume
+// or a discard closes it. The runtime_kv key that held the pause before is
+// retired (see pause-row-resume.test.ts for the legacy read).
 //
 // These tests verify the round-trip via the storage layer directly.
 
@@ -14,18 +14,14 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import {
+  _getAdapter,
   openDatabase,
   closeDatabase,
 } from "../gsd-db.ts";
+import { openAutoPause } from "../db/writers/auto-pauses.ts";
 import {
-  setRuntimeKv,
-  getRuntimeKv,
-  deleteRuntimeKv,
-} from "../db/runtime-kv.ts";
-import {
+  clearPausedSession,
   readPausedSessionMetadata,
-  PAUSED_SESSION_KV_KEY,
-  type PausedSessionMetadata,
 } from "../interrupted-session.ts";
 
 function makeBase(): string {
@@ -39,6 +35,13 @@ function cleanup(base: string): void {
   try { rmSync(base, { recursive: true, force: true }); } catch { /* noop */ }
 }
 
+function openPauseCount(): number {
+  const row = _getAdapter()!.prepare(
+    "SELECT count(*) AS open FROM auto_pauses WHERE closed_at IS NULL",
+  ).get() as { open: number };
+  return row.open;
+}
+
 test("readPausedSessionMetadata returns null when no row exists", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
@@ -46,73 +49,77 @@ test("readPausedSessionMetadata returns null when no row exists", (t) => {
   assert.equal(readPausedSessionMetadata(base), null);
 });
 
-test("readPausedSessionMetadata round-trips a real PausedSessionMetadata payload", (t) => {
+test("readPausedSessionMetadata round-trips every field of the pause row", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   openDatabase(join(base, ".gsd", "gsd.db"));
 
-  const meta: PausedSessionMetadata = {
+  const pausedAt = new Date().toISOString();
+  const autoStartTime = Date.now();
+  openAutoPause({
+    blockerKind: "subjective_uat",
+    dispatchId: null,
     milestoneId: "M001",
     worktreePath: "/tmp/wt",
     originalBasePath: base,
-    stepMode: false,
-    pausedAt: new Date().toISOString(),
+    stepMode: true,
+    pausedAt,
     sessionFile: "/tmp/session.jsonl",
     unitType: "plan-slice",
     unitId: "M001/S01",
     activeEngineId: "dev",
-    activeRunDir: null,
-    autoStartTime: Date.now(),
-    milestoneLock: null,
+    activeRunDir: "/tmp/run",
+    autoStartTime,
+    milestoneLock: "M001",
     pauseReason: "Blocked: waiting for UAT",
-    lastPreExecFailure: {
-      unitId: "M001/S01",
-      blockingFindings: ["T01 Verify command uses a pipe"],
-      verdictExcerpt: "status=fail; 1 blocking issue detected",
-    },
-    preExecRetryCount: { "M001/S01": 2 },
-  };
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, meta);
+  });
 
-  const loaded = readPausedSessionMetadata(base);
-  assert.ok(loaded);
-  assert.equal(loaded!.milestoneId, "M001");
-  assert.equal(loaded!.unitType, "plan-slice");
-  assert.equal(loaded!.unitId, "M001/S01");
-  assert.equal(loaded!.sessionFile, "/tmp/session.jsonl");
-  assert.equal(loaded!.pauseReason, "Blocked: waiting for UAT");
-  assert.deepEqual(loaded!.lastPreExecFailure, meta.lastPreExecFailure);
-  assert.deepEqual(loaded!.preExecRetryCount, { "M001/S01": 2 });
+  assert.deepEqual(readPausedSessionMetadata(base), {
+    blockerKind: "subjective_uat",
+    dispatchId: null,
+    milestoneId: "M001",
+    worktreePath: "/tmp/wt",
+    originalBasePath: base,
+    stepMode: true,
+    pausedAt,
+    sessionFile: "/tmp/session.jsonl",
+    unitType: "plan-slice",
+    unitId: "M001/S01",
+    activeEngineId: "dev",
+    activeRunDir: "/tmp/run",
+    autoStartTime,
+    milestoneLock: "M001",
+    pauseReason: "Blocked: waiting for UAT",
+  });
 });
 
-test("readPausedSessionMetadata auto-deletes stale pseudo-milestone pause rows", (t) => {
+test("readPausedSessionMetadata closes a stale pseudo-milestone pause", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   openDatabase(join(base, ".gsd", "gsd.db"));
 
   // discuss-milestone with a non-MID-shaped unitId triggers
-  // isStalePseudoMilestonePause → returns null + deletes the row.
-  const stale: PausedSessionMetadata = {
+  // isStalePseudoMilestonePause → returns null and closes the row.
+  openAutoPause({
+    blockerKind: "user_request",
     milestoneId: "M001",
     unitType: "discuss-milestone",
     unitId: "PROJECT-thing",
     activeEngineId: "dev",
-  };
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, stale);
+  });
 
   assert.equal(readPausedSessionMetadata(base), null);
-  assert.equal(getRuntimeKv("global", "", PAUSED_SESSION_KV_KEY), null,
-    "stale row was deleted by readPausedSessionMetadata");
+  assert.equal(openPauseCount(), 0, "the stale pause was closed by readPausedSessionMetadata");
 });
 
-test("deleteRuntimeKv on PAUSED_SESSION_KV_KEY removes the row idempotently", (t) => {
+test("clearPausedSession closes the pause and is idempotent", (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
   openDatabase(join(base, ".gsd", "gsd.db"));
 
-  setRuntimeKv("global", "", PAUSED_SESSION_KV_KEY, { milestoneId: "M001" });
-  deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
-  deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY); // idempotent — no throw
+  openAutoPause({ blockerKind: "user_request", milestoneId: "M001" });
+  clearPausedSession();
+  clearPausedSession(); // idempotent — no throw
   assert.equal(readPausedSessionMetadata(base), null);
 });
 

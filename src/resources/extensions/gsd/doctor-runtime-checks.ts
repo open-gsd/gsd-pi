@@ -4,8 +4,9 @@ import { basename, dirname, join } from "node:path";
 import type { DoctorIssue, DoctorIssueCode } from "./doctor-types.js";
 import { removeLockDirectory } from "./session-lock.js";
 import { cleanNumberedGsdVariants } from "./repo-identity.js";
-import { milestonesDir, gsdRoot, resolveGsdRootFile, milestoneDirExists } from "./paths.js";
-import { deriveState, isGhostMilestone, isReusableGhostMilestone } from "./state.js";
+import { milestonesDir, gsdRoot } from "./paths.js";
+import { deriveState, invalidateStateCache, isGhostMilestone, isReusableGhostMilestone } from "./state.js";
+import { renderStateContent, renderStateProjection } from "./workflow-projections.js";
 import { saveFile } from "./files.js";
 import { nativeIsRepo, nativeForEachRef, nativeUpdateRef } from "./native-git-bridge.js";
 import { readCrashLock, isLockProcessAlive, clearStaleWorkerLock } from "./crash-recovery.js";
@@ -14,33 +15,26 @@ import { normalizeRealPath } from "./paths.js";
 import { ensureGitignore, isGsdGitignored } from "./gitignore.js";
 import { readAllSessionStatuses, isSessionStale, removeSessionStatus } from "./session-status-io.js";
 import { isCurrentGsdStateIntactForMigratingCleanup, recoverFailedMigration } from "./migrate-external.js";
-import { splitCompletedKey } from "./forensics.js";
 import { findMilestoneIds } from "./milestone-ids.js";
-import { getAllMilestones, isDbAvailable } from "./gsd-db.js";
+import { getAllMilestones, getSliceRunUatAssessment, isDbAvailable } from "./gsd-db.js";
 import { loadEffectiveGSDPreferences } from "./preferences.js";
 import { removeLegacyProjectionTreeSync, removeProjectionTreeSync } from "./atomic-write.js";
 import {
   loadUnboundProjectionEvidence,
   previewUnboundProjectionEvidenceResolution,
+  isControlPublicationIntentName,
+  CONTROL_INTENT_QUARANTINE_MIN_AGE_MS,
 } from "./managed-projection-history.js";
 import {
+  clearPausedSession,
+  closeStaleScopedPauses,
+  findStaleScopedPauses,
   getSupersedingActiveMilestoneId,
-  PAUSED_SESSION_KV_KEY,
-  type PausedSessionMetadata,
+  readStoredPausedSession,
 } from "./interrupted-session.js";
-import { deleteRuntimeKv, getRuntimeKv } from "./db/runtime-kv.js";
+import { deleteUatRetryCounter, listUatRetryCounters, readHookStateJson } from "./db/writers/runtime-control.js";
 
 const MAX_UAT_ATTEMPTS = 3;
-
-function hasAssessmentVerdict(basePath: string, mid: string, sid: string): boolean {
-  const assessmentPath = join(gsdRoot(basePath), "milestones", mid, "slices", sid, `${sid}-ASSESSMENT.md`);
-  if (!existsSync(assessmentPath)) return false;
-  try {
-    return /^\s*verdict\s*:\s*(PASS|FAIL|PARTIAL)\b/im.test(readFileSync(assessmentPath, "utf-8"));
-  } catch {
-    return false;
-  }
-}
 
 export async function checkRuntimeHealth(
   basePath: string,
@@ -82,23 +76,94 @@ export async function checkRuntimeHealth(
     }
   }
 
+  // ── Stale control-publication intents (#2154) ─────────────────────────
+  // Lock-free scan: reads names only, never opens the projection-root
+  // identity lock or replays anything, so it also reports on exactly the
+  // wedged stores where every managed open throws. Only intents past the
+  // supervised-quarantine age are listed: a fresh intent is either an
+  // in-flight publication or drains on the next successful open.
+  try {
+    const journalDir = join(root, "migration", "projection-mutations");
+    const staleIntentNames: string[] = [];
+    let names: string[] = [];
+    try {
+      names = readdirSync(journalDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    for (const name of names.sort()) {
+      if (!isControlPublicationIntentName(name)) continue;
+      const intentPath = join(journalDir, name);
+      let stat;
+      try {
+        stat = lstatSync(intentPath);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        continue;
+      }
+      if (stat.isSymbolicLink() || !stat.isFile()) continue;
+      if (Date.now() - stat.mtimeMs < CONTROL_INTENT_QUARANTINE_MIN_AGE_MS) continue;
+      staleIntentNames.push(name);
+    }
+    for (const name of staleIntentNames) {
+      issues.push({
+        severity: "error",
+        code: "stale_control_publication_intent",
+        scope: "project",
+        unitId: "project",
+        message: `Stale prepared control-publication intent .gsd/migration/projection-mutations/${name} is pending native replay. A pending intent that still completes is drained on the next projection write; if every render fails with "control publication content evidence changed" or "control publication evidence retention is incomplete", quarantine it: with all GSD sessions stopped, move the intent file into .gsd/migration/quarantined-control-publications/ (keep the file; do not delete the journal entry alone). The next GSD operation quarantines it automatically and retries.`,
+        file: `.gsd/migration/projection-mutations/${name}`,
+        fixable: false,
+      });
+    }
+    // Quarantined publications from the supervised reconciliation: listed so
+    // the retained bytes stay reviewable after the wedge is defused.
+    const quarantineDir = join(root, "migration", "quarantined-control-publications");
+    let quarantinedNames: string[] = [];
+    try {
+      quarantinedNames = readdirSync(quarantineDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    for (const name of quarantinedNames.sort()) {
+      // Sidecars end in ".quarantined.json" and are skipped with the
+      // artifact filter; only the quarantined artifacts themselves list.
+      if (!name.endsWith(".quarantined")) continue;
+      issues.push({
+        severity: "warning",
+        code: "stale_control_publication_intent",
+        scope: "project",
+        unitId: "project",
+        message: `Control-publication artifact ${name} was quarantined to .gsd/migration/quarantined-control-publications/${name} after its native replay failed deterministically (#2154). Its bytes and provenance sidecar (${name}.json) are preserved for review; projections regenerate from gsd.db.`,
+        file: `.gsd/migration/quarantined-control-publications/${name}`,
+        fixable: false,
+      });
+    }
+  } catch (error) {
+    issues.push({
+      severity: "warning",
+      code: "stale_control_publication_intent",
+      scope: "project",
+      unitId: "project",
+      message: `Control-publication intent scan could not read .gsd/migration: ${error instanceof Error ? error.message : String(error)}`,
+      file: ".gsd/migration",
+      fixable: false,
+    });
+  }
+
   // ── Stale paused session ──────────────────────────────────────────────
   // A pause is only resumable while it targets the milestone that state
   // derivation currently considers active. Keeping an older milestone in
-  // runtime_kv can otherwise pin every new /gsd auto invocation to work that
+  // the pause row can otherwise pin every new /gsd auto invocation to work that
   // has been superseded in the project queue (#1643).
   try {
-    const pausedSession = getRuntimeKv<PausedSessionMetadata>(
-      "global",
-      "",
-      PAUSED_SESSION_KV_KEY,
-    );
+    const pausedSession = readStoredPausedSession();
     if (pausedSession?.milestoneId) {
       const state = await deriveState(basePath);
       const activeMilestoneId = getSupersedingActiveMilestoneId(pausedSession, state);
       if (activeMilestoneId) {
         if (shouldFix("stale_paused_session")) {
-          deleteRuntimeKv("global", "", PAUSED_SESSION_KV_KEY);
+          clearPausedSession();
           fixesApplied.push(
             `cleared stale paused session for ${pausedSession.milestoneId} (active milestone: ${activeMilestoneId})`,
           );
@@ -115,14 +180,33 @@ export async function checkRuntimeHealth(
         }
       }
     }
+    // The pause of a parallel worker scope whose milestone or slice is closed
+    // or gone: no worker starts for that item again, so no resume closes it.
+    if (shouldFix("stale_paused_session")) {
+      for (const scope of closeStaleScopedPauses()) {
+        fixesApplied.push(`closed stale paused session of worker scope ${scope}`);
+      }
+    } else {
+      for (const scope of findStaleScopedPauses()) {
+        issues.push({
+          severity: "error",
+          code: "stale_paused_session",
+          scope: "project",
+          unitId: scope,
+          message: `Paused auto-mode session of worker scope ${scope} targets a milestone or slice that is closed or no longer exists. No worker resumes it, and the open pause blocks migration.`,
+          file: ".gsd/gsd.db",
+          fixable: true,
+        });
+      }
+    }
   } catch {
     // Non-fatal — paused-session check failed
   }
 
   // ── Stale crash lock ──────────────────────────────────────────────────
-  // Phase C pt 2: the lock state lives in the workers + unit_dispatches
-  // tables now, not auto.lock. readCrashLock synthesizes a LockData from
-  // the DB; isLockProcessAlive is a pure OS PID check.
+  // A crash is decided by the workers + unit_dispatches tables, never by
+  // auto.lock. readCrashLock synthesizes a LockData from the DB;
+  // isLockProcessAlive is a pure OS PID check.
   try {
     const lock = readCrashLock(basePath);
     if (lock) {
@@ -239,54 +323,12 @@ export async function checkRuntimeHealth(
     // Non-fatal — parallel session check failed
   }
 
-  // ── Orphaned completed-units keys ─────────────────────────────────────
-  try {
-    const completedKeysFile = join(root, "completed-units.json");
-    if (existsSync(completedKeysFile)) {
-      const raw = readFileSync(completedKeysFile, "utf-8");
-      const keys: string[] = JSON.parse(raw);
-      const orphaned: string[] = [];
-
-      for (const key of keys) {
-        const parsed = splitCompletedKey(key);
-        if (!parsed) continue;
-        const { unitType, unitId } = parsed;
-
-        // Only validate artifact-producing unit types
-        const { verifyExpectedArtifact } = await import("./auto-recovery.js");
-        if (!verifyExpectedArtifact(unitType, unitId, basePath)) {
-          orphaned.push(key);
-        }
-      }
-
-      if (orphaned.length > 0) {
-        issues.push({
-          severity: "warning",
-          code: "orphaned_completed_units",
-          scope: "project",
-          unitId: "project",
-          message: `${orphaned.length} completed-unit key(s) reference missing artifacts: ${orphaned.slice(0, 3).join(", ")}${orphaned.length > 3 ? "..." : ""}`,
-          file: ".gsd/completed-units.json",
-          fixable: true,
-        });
-
-        if (shouldFix("orphaned_completed_units")) {
-          const orphanedSet = new Set(orphaned);
-          const remaining = keys.filter((key) => !orphanedSet.has(key));
-          await saveFile(completedKeysFile, JSON.stringify(remaining));
-          fixesApplied.push(`removed ${orphaned.length} orphaned completed-unit key(s)`);
-        }
-      }
-    }
-  } catch {
-    // Non-fatal — completed-units check failed
-  }
-
   // ── Stale hook state ──────────────────────────────────────────────────
   try {
-    const hookStateFile = join(root, "hook-state.json");
-    if (existsSync(hookStateFile)) {
-      const raw = readFileSync(hookStateFile, "utf-8");
+    // Hook state is a database row; hook-state.json is its diagnostic copy.
+    const { hookStateScope } = await import("./rule-registry.js");
+    const raw = readHookStateJson(hookStateScope(basePath));
+    if (raw !== null) {
       const state = JSON.parse(raw);
       const hasCycleCounts = state.cycleCounts && typeof state.cycleCounts === "object"
         && Object.keys(state.cycleCounts).length > 0;
@@ -307,17 +349,32 @@ export async function checkRuntimeHealth(
             code: "stale_hook_state",
             scope: "project",
             unitId: "project",
-            message: `hook-state.json has ${Object.keys(state.cycleCounts).length} residual cycle count(s) from a previous session`,
-            file: ".gsd/hook-state.json",
+            message: `hook state has ${Object.keys(state.cycleCounts).length} residual cycle count(s) from a previous session`,
             fixable: true,
           });
 
           if (shouldFix("stale_hook_state")) {
             const { clearPersistedHookState } = await import("./post-unit-hooks.js");
             clearPersistedHookState(basePath);
-            fixesApplied.push("cleared stale hook-state.json");
+            fixesApplied.push("cleared stale hook state");
           }
         }
+      }
+    } else if (existsSync(join(root, "hook-state.json"))) {
+      // No row: the file is from a build that kept hook state in the file. It is never read.
+      issues.push({
+        severity: "info",
+        code: "legacy_hook_state_file",
+        scope: "project",
+        unitId: "project",
+        message: "hook-state.json is left from an older build; hook state is read from the database only",
+        file: ".gsd/hook-state.json",
+        fixable: true,
+      });
+
+      if (shouldFix("legacy_hook_state_file")) {
+        rmSync(join(root, "hook-state.json"), { force: true });
+        fixesApplied.push("removed legacy hook-state.json");
       }
     }
   } catch {
@@ -326,39 +383,26 @@ export async function checkRuntimeHealth(
 
   // ── Exhausted run-uat retry counters ──────────────────────────────────
   try {
-    const runtimeDir = join(root, "runtime");
-    if (existsSync(runtimeDir)) {
-      const uatCounterPattern = /^uat-count-(M\d+)-(S\d+)\.json$/;
-      for (const fileName of readdirSync(runtimeDir)) {
-        const match = fileName.match(uatCounterPattern);
-        if (!match) continue;
-        const [, mid, sid] = match;
-        if (!mid || !sid || hasAssessmentVerdict(basePath, mid, sid)) continue;
+    // The retry counter is a database row (uat_retry_counters).
+    for (const counter of listUatRetryCounters()) {
+      const mid = counter.milestone_id;
+      const sid = counter.slice_id;
+      const count = counter.attempts;
+      // The run-uat verdict is the assessment row; ASSESSMENT.md is not read.
+      if (count < MAX_UAT_ATTEMPTS || getSliceRunUatAssessment(mid, sid)?.status) continue;
 
-        const filePath = join(runtimeDir, fileName);
-        let count = 0;
-        try {
-          const parsed = JSON.parse(readFileSync(filePath, "utf-8"));
-          count = typeof parsed.count === "number" ? parsed.count : 0;
-        } catch {
-          count = MAX_UAT_ATTEMPTS + 1;
-        }
-        if (count < MAX_UAT_ATTEMPTS) continue;
+      issues.push({
+        severity: "warning",
+        code: "uat_retry_exhausted",
+        scope: "slice",
+        unitId: `${mid}/${sid}`,
+        message: `run-uat for ${mid}/${sid} exhausted ${count} attempt(s) without an ASSESSMENT verdict. Reset the retry counter after fixing the underlying UAT/tool issue, then rerun /gsd auto.`,
+        fixable: true,
+      });
 
-        issues.push({
-          severity: "warning",
-          code: "uat_retry_exhausted",
-          scope: "slice",
-          unitId: `${mid}/${sid}`,
-          message: `run-uat for ${mid}/${sid} exhausted ${count} attempt(s) without an ASSESSMENT verdict. Reset the retry counter after fixing the underlying UAT/tool issue, then rerun /gsd auto.`,
-          file: `.gsd/runtime/${fileName}`,
-          fixable: true,
-        });
-
-        if (shouldFix("uat_retry_exhausted")) {
-          rmSync(filePath, { force: true });
-          fixesApplied.push(`reset exhausted run-uat retry counter for ${mid}/${sid}`);
-        }
+      if (shouldFix("uat_retry_exhausted")) {
+        deleteUatRetryCounter(mid, sid);
+        fixesApplied.push(`reset exhausted run-uat retry counter for ${mid}/${sid}`);
       }
     }
   } catch {
@@ -407,11 +451,13 @@ export async function checkRuntimeHealth(
 
   // ── STATE.md health ───────────────────────────────────────────────────
   try {
-    const stateFilePath = resolveGsdRootFile(basePath, "STATE");
-    const milestonesPath = milestonesDir(basePath);
+    const stateFilePath = join(gsdRoot(basePath), "STATE.md");
 
-    if (existsSync(milestonesPath)) {
-      if (!existsSync(stateFilePath)) {
+    if (existsSync(milestonesDir(basePath))) {
+      invalidateStateCache();
+      const freshContent = renderStateContent(await deriveState(basePath));
+      // With no DB there is nothing authoritative to compare against.
+      if (isDbAvailable() && !existsSync(stateFilePath)) {
         issues.push({
           severity: "warning",
           code: "state_file_missing",
@@ -422,44 +468,22 @@ export async function checkRuntimeHealth(
           fixable: true,
         });
 
-        if (shouldFix("state_file_missing")) {
-          const state = await deriveState(basePath);
-          await saveFile(stateFilePath, buildStateMarkdownForCheck(state));
+        if (shouldFix("state_file_missing") && !(await renderStateProjection(basePath)).stale) {
           fixesApplied.push("created STATE.md from derived state");
         }
-      } else {
-        // Check if STATE.md is stale by comparing active milestone/slice/phase
-        const currentContent = readFileSync(stateFilePath, "utf-8");
-        const state = await deriveState(basePath);
-        const freshContent = buildStateMarkdownForCheck(state);
+      } else if (isDbAvailable() && readFileSync(stateFilePath, "utf-8") !== freshContent) {
+        issues.push({
+          severity: "warning",
+          code: "state_file_stale",
+          scope: "project",
+          unitId: "project",
+          message: "STATE.md is stale — its content differs from the database state",
+          file: ".gsd/STATE.md",
+          fixable: true,
+        });
 
-        // Extract key fields for comparison — don't compare full content
-        // since timestamp/formatting differences are normal
-        const extractFields = (content: string) => {
-          const milestone = content.match(/\*\*Active Milestone:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-          const slice = content.match(/\*\*Active Slice:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-          const phase = content.match(/\*\*Phase:\*\*\s*(.+)/)?.[1]?.trim() ?? "";
-          return { milestone, slice, phase };
-        };
-
-        const current = extractFields(currentContent);
-        const fresh = extractFields(freshContent);
-
-        if (current.milestone !== fresh.milestone || current.slice !== fresh.slice || current.phase !== fresh.phase) {
-          issues.push({
-            severity: "warning",
-            code: "state_file_stale",
-            scope: "project",
-            unitId: "project",
-            message: `STATE.md is stale — shows "${current.phase}" but derived state is "${fresh.phase}"`,
-            file: ".gsd/STATE.md",
-            fixable: true,
-          });
-
-          if (shouldFix("state_file_stale")) {
-            await saveFile(stateFilePath, freshContent);
-            fixesApplied.push("rebuilt STATE.md from derived state");
-          }
+        if (shouldFix("state_file_stale") && !(await renderStateProjection(basePath)).stale) {
+          fixesApplied.push("rebuilt STATE.md from derived state");
         }
       }
     }
@@ -824,30 +848,21 @@ export async function checkRuntimeHealth(
     // Non-fatal — orphan milestone directory check failed
   }
 
-  // ── Orphan milestone DB rows (DB present, filesystem missing) ─────────
-  // A milestone row without a corresponding milestone directory can keep
-  // stale milestones "active" and trigger unwanted continuation behavior.
+  // ── Phantom milestone DB rows ─────────────────────────────────────────
+  // A queued row with no saved CONTEXT or CONTEXT-DRAFT row and no Slice rows
+  // is a reservation from gsd_milestone_generate_id that was never planned
+  // (#1524). The rows decide. A missing milestone directory is not evidence:
+  // the directory is a projection and the rebuild renders it again.
   try {
     if (isDbAvailable()) {
       for (const milestone of getAllMilestones()) {
-        // Every milestone status, including `queued`, is subject to the
-        // missing-directory orphan check below. This is a directory-PRESENCE
-        // check (milestoneDirExists), not a content-bearing one: the workflow
-        // prompts create the milestone directory early (often before any
-        // CONTEXT/ROADMAP is written), so a legitimate in-flight queued
-        // milestone with only a scaffold directory (e.g. an empty slices/)
-        // must not be flagged. resolveMilestonePath alone would return null for
-        // such a legacy scaffold dir and produce a false positive during normal
-        // planning. A `queued` phantom left by gsd_milestone_generate_id (no
-        // directory at all) is correctly reported as an orphan to clean up
-        // (#1524).
-        if (!milestoneDirExists(basePath, milestone.id)) {
+        if (isGhostMilestone(basePath, milestone.id)) {
           issues.push({
             severity: "warning",
             code: "orphan_milestone_db",
             scope: "milestone",
             unitId: milestone.id,
-            message: `Orphan milestone DB row: ${milestone.id} — DB row exists but milestone directory is missing from disk. This can cause stale milestone continuation.`,
+            message: `Orphan milestone DB row: ${milestone.id} — the row is queued and has no saved context and no slices. It was reserved and never planned. This can cause stale milestone continuation.`,
             file: `.gsd/gsd.db`,
             fixable: false,
           });
@@ -857,57 +872,4 @@ export async function checkRuntimeHealth(
   } catch {
     // Non-fatal — orphan milestone DB row check failed
   }
-}
-
-/**
- * Build STATE.md markdown content from derived state.
- * Local helper used by checkRuntimeHealth for STATE.md drift detection and repair.
- */
-function buildStateMarkdownForCheck(state: Awaited<ReturnType<typeof deriveState>>): string {
-  const lines: string[] = [];
-  lines.push("# GSD State", "");
-
-  const activeMilestone = state.activeMilestone
-    ? `${state.activeMilestone.id}: ${state.activeMilestone.title}`
-    : "None";
-  const activeSlice = state.activeSlice
-    ? `${state.activeSlice.id}: ${state.activeSlice.title}`
-    : "None";
-
-  lines.push(`**Active Milestone:** ${activeMilestone}`);
-  lines.push(`**Active Slice:** ${activeSlice}`);
-  lines.push(`**Phase:** ${state.phase}`);
-  if (state.requirements) {
-    lines.push(`**Requirements Status:** ${state.requirements.active} active · ${state.requirements.validated} validated · ${state.requirements.deferred} deferred · ${state.requirements.outOfScope} out of scope`);
-  }
-  lines.push("");
-  lines.push("## Milestone Registry");
-
-  for (const entry of state.registry) {
-    const glyph = entry.status === "complete" ? "\u2705" : entry.status === "active" ? "\uD83D\uDD04" : entry.status === "parked" ? "\u23F8\uFE0F" : "\u2B1C";
-    lines.push(`- ${glyph} **${entry.id}:** ${entry.title}`);
-  }
-
-  lines.push("");
-  lines.push("## Recent Decisions");
-  if (state.recentDecisions.length > 0) {
-    for (const decision of state.recentDecisions) lines.push(`- ${decision}`);
-  } else {
-    lines.push("- None recorded");
-  }
-
-  lines.push("");
-  lines.push("## Blockers");
-  if (state.blockers.length > 0) {
-    for (const blocker of state.blockers) lines.push(`- ${blocker}`);
-  } else {
-    lines.push("- None");
-  }
-
-  lines.push("");
-  lines.push("## Next Action");
-  lines.push(state.nextAction || "None");
-  lines.push("");
-
-  return lines.join("\n");
 }

@@ -1,11 +1,10 @@
 // Project/App: gsd-pi
 // File Purpose: Classify milestone readiness from DB status, slices, and artifacts.
 
-import { readFileSync } from "node:fs";
+// This module has no runtime import, so a reader that does not open the
+// workflow database (the web project picker) can apply the same rules.
+
 import type { Phase } from "./types.js";
-import { getMilestone, getMilestoneSlices, isDbAvailable } from "./gsd-db.js";
-import { parseRoadmapSlices } from "./roadmap-slices.js";
-import { logWarning } from "./workflow-logger.js";
 
 export type MilestoneReadinessKind =
   | "queued-shell"
@@ -23,16 +22,17 @@ export interface MilestoneReadiness {
 
 export interface MilestoneReadinessInput {
   status?: string | null;
+  /**
+   * The canonical queued-shell answer of the read interface: the Milestone
+   * lifecycle row is ready with no CONTEXT artifact row and no Slice rows.
+   * Absent for a reader that does not ask the read interface; such a reader
+   * falls back to the legacy `queued` status label.
+   */
+  queuedShell?: boolean;
   hasContext?: boolean;
   hasDraftContext?: boolean;
   hasSummary?: boolean;
   sliceCount?: number;
-}
-
-export interface HandoffReadinessInput {
-  milestoneId: string;
-  contextFile: string | null;
-  roadmapFile: string | null;
 }
 
 export function classifyMilestoneReadiness(input: MilestoneReadinessInput): MilestoneReadiness {
@@ -47,7 +47,13 @@ export function classifyMilestoneReadiness(input: MilestoneReadinessInput): Mile
     return { kind: "terminal", hasContext, hasDraftContext, hasExecutablePlan };
   }
 
-  if (status === "queued" && !hasContext && sliceCount === 0) {
+  // The queued shell. The canonical field of the read interface decides when
+  // it answers; the lifecycle vocabulary has no word for queued, so the
+  // legacy label decides only for a reader with no canonical answer.
+  const queuedShell = (input.queuedShell === true || (input.queuedShell === undefined && status === "queued"))
+    && !hasContext
+    && sliceCount === 0;
+  if (queuedShell) {
     return { kind: "queued-shell", hasContext, hasDraftContext, hasExecutablePlan };
   }
 
@@ -86,31 +92,53 @@ export function describeMilestoneReadinessPhase(
   }
 }
 
-function executablePlanSliceCount(milestoneId: string, roadmapFile: string | null): number {
-  if (isDbAvailable()) {
-    return getMilestoneSlices(milestoneId).length;
-  }
-  if (!roadmapFile) return 0;
-  try {
-    return parseRoadmapSlices(readFileSync(roadmapFile, "utf-8")).length;
-  } catch (e) {
-    logWarning(
-      "guided",
-      `failed to parse roadmap slices for ${milestoneId}: ${(e as Error).message}`,
-    );
-    return 0;
-  }
+export interface ActiveMilestoneCandidate {
+  id: string;
+  status: string;
+  dependsOn: readonly string[];
+  /** The canonical queued-shell answer of the read interface, when the candidate comes from it. */
+  queuedShell?: boolean;
+  /** Complete. Only a done Milestone satisfies its dependents. */
+  done: boolean;
+  parked: boolean;
+  sliceCount: number;
+  hasContext: boolean;
+  hasDraftContext: boolean;
 }
 
-export function assessMilestoneHandoffReadiness(
-  input: HandoffReadinessInput,
-): MilestoneReadiness {
-  const milestone = isDbAvailable() ? getMilestone(input.milestoneId) : null;
-  return classifyMilestoneReadiness({
-    status: milestone?.status,
-    hasContext: input.contextFile != null,
-    sliceCount: executablePlanSliceCount(input.milestoneId, input.roadmapFile),
-  });
+/**
+ * The one rule for the active Milestone. `milestones` are in workflow order
+ * and hold no discarded Milestone. `projectSequenceIds` are the Milestone ids
+ * in the PROJECT artifact roadmap sequence.
+ *
+ * The active Milestone is the first that is not parked, not done, has every
+ * dependency done and is not a queued shell. When there is none, the first
+ * *promotable* queued shell becomes active: one that has draft context
+ * (discuss-milestone was started) or is in the roadmap sequence (a real stage
+ * that is not planned yet). A queued shell that is neither is a phantom left
+ * by gsd_milestone_generate_id; it is never promoted, because that strands the
+ * user on an empty milestone (#1524).
+ */
+export function selectActiveMilestone<T extends ActiveMilestoneCandidate>(
+  milestones: readonly T[],
+  projectSequenceIds: ReadonlySet<string>,
+): { milestone: T; readiness: MilestoneReadiness } | null {
+  const doneIds = new Set(milestones.filter((m) => m.done && !m.parked).map((m) => m.id));
+  let firstPromotableQueuedShell: { milestone: T; readiness: MilestoneReadiness } | null = null;
+
+  for (const milestone of milestones) {
+    if (milestone.parked || milestone.done) continue;
+    if (milestone.dependsOn.some((dep) => !doneIds.has(dep))) continue;
+
+    const readiness = classifyMilestoneReadiness(milestone);
+    if (readiness.kind !== "queued-shell") return { milestone, readiness };
+
+    if (!firstPromotableQueuedShell && (readiness.hasDraftContext || projectSequenceIds.has(milestone.id))) {
+      firstPromotableQueuedShell = { milestone, readiness };
+    }
+  }
+
+  return firstPromotableQueuedShell;
 }
 
 export function formatAcceptedDiscussHandoffMessage(

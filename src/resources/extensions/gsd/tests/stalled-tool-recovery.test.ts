@@ -15,7 +15,7 @@
  * (the fix) and verifies it does not crash.
  */
 
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { verifyExpectedArtifact } from "../auto-recovery.ts";
@@ -67,7 +67,7 @@ function makeRecordingCtx() {
   const pi = makeMockPi();
 
   // Simulate the bug: buildRecoveryContext returns {} (empty object).
-  // basePath is undefined, which causes join(undefined, ".gsd") to throw.
+  // Every field is undefined, so the first use of one throws a TypeError.
   const emptyRctx = {} as RecoveryContext;
 
   let crashed = false;
@@ -75,10 +75,7 @@ function makeRecordingCtx() {
     await recoverTimedOutUnit(ctx, pi, "execute-task", "M001/S01/T01", "idle", emptyRctx);
   } catch (err: any) {
     crashed = true;
-    assert.ok(
-      err.message.includes("path") || err.message.includes("string") || err.code === "ERR_INVALID_ARG_TYPE",
-      `should crash with path/type error, got: ${err.message}`,
-    );
+    assert.ok(err instanceof TypeError, `should crash with a type error, got: ${err.message}`);
   }
   assert.ok(crashed, "should crash when basePath is undefined (reproduces #1855)");
 }
@@ -108,7 +105,7 @@ function makeRecordingCtx() {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     });
 
     assert.equal(result, "recovered");
@@ -148,7 +145,7 @@ function makeRecordingCtx() {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     };
     const result = await recoverTimedOutUnit(ctx, pi, "execute-task", "M001/S01/T01", "idle", recoveryContext);
 
@@ -196,7 +193,7 @@ function makeRecordingCtx() {
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     });
 
     assert.equal(result, "recovered", "invalid existing plan should enter steering recovery");
@@ -236,7 +233,7 @@ test("plan-milestone timeout recovery persists a blocker and pauses", async (t) 
     basePath: base,
     verbose: false,
     currentUnitStartedAt: Date.now(),
-    unitRecoveryCount: new Map(),
+    unclaimedUnitBudgets: new Map(),
   };
 
   assert.equal(await recoverTimedOutUnit(ctx, pi, "plan-milestone", "M001", "idle", recoveryContext), "recovered");
@@ -248,6 +245,47 @@ test("plan-milestone timeout recovery persists a blocker and pauses", async (t) 
   assert.ok(
     ctx.notifications.some((entry: { message: string }) => entry.message.includes("no milestone work was marked complete")),
     "timeout recovery should explain why planning paused",
+  );
+});
+
+test("research-slice timeout recovery pauses and leaves the unit incomplete", async (t) => {
+  const base = mkdtempSync(join(tmpdir(), "gsd-timeout-research-slice-blocked-"));
+  const sliceDir = join(base, ".gsd", "milestones", "M001", "slices", "S01");
+  mkdirSync(sliceDir, { recursive: true });
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Milestone", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Slice", status: "pending" });
+  const ctx = makeRecordingCtx();
+  const pi = makeRecordingPi();
+  const recoveryContext: RecoveryContext = {
+    basePath: base,
+    verbose: false,
+    currentUnitStartedAt: Date.now(),
+    unclaimedUnitBudgets: new Map(),
+  };
+
+  assert.equal(await recoverTimedOutUnit(ctx, pi, "research-slice", "M001/S01", "idle", recoveryContext), "recovered");
+  assert.equal(await recoverTimedOutUnit(ctx, pi, "research-slice", "M001/S01", "idle", recoveryContext), "recovered");
+  assert.equal(
+    await recoverTimedOutUnit(ctx, pi, "research-slice", "M001/S01", "idle", recoveryContext),
+    "paused",
+    "an exhausted research unit must pause, not advance past a blocker file",
+  );
+
+  assert.equal(
+    existsSync(join(sliceDir, "S01-RESEARCH.md")),
+    false,
+    "the blocker must not be written as the RESEARCH projection",
+  );
+  assert.equal(
+    verifyExpectedArtifact("research-slice", "M001/S01", base),
+    false,
+    "a timed-out research unit is not complete",
   );
 });
 
@@ -315,7 +353,7 @@ test("plan-milestone timeout recovery persists a blocker and pauses", async (t) 
       basePath: base,
       verbose: false,
       currentUnitStartedAt: Date.now(),
-      unitRecoveryCount: new Map(),
+      unclaimedUnitBudgets: new Map(),
     };
 
     let crashed = false;

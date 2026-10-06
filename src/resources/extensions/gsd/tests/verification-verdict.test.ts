@@ -18,7 +18,7 @@ function makeResult(overrides: Partial<VerificationResult> = {}): VerificationRe
 }
 
 test("execute-task fails closed when no host-owned checks are discovered", () => {
-  const verdict = decideVerificationVerdict("execute-task", makeResult());
+  const verdict = decideVerificationVerdict(makeResult());
 
   assert.equal(verdict.passed, false);
   assert.equal(verdict.reason, "no-host-checks");
@@ -30,7 +30,6 @@ test("execute-task fails closed when no host-owned checks are discovered", () =>
 
 test("execute-task fails closed when every task-plan Verify command was shell-unsafe (issue #1922)", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({ discoverySource: "task-plan-unsafe" }),
   );
 
@@ -40,27 +39,27 @@ test("execute-task fails closed when every task-plan Verify command was shell-un
   assert.match(verdict.failureContext, /Rewrite the Verify field/);
 });
 
-test("execute-task passes when non-runnable task-plan prose is the verification source", () => {
+test("a prose task-plan Verify with no host-run check is not a pass", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({ discoverySource: "task-plan-prose" }),
   );
 
-  assert.equal(verdict.passed, true);
-  assert.equal(verdict.reason, "passed");
+  assert.equal(verdict.passed, false);
+  assert.equal(verdict.reason, "no-host-checks");
   assert.equal(verdict.retryable, false);
 });
 
-test("non execute-task units preserve no-check pass semantics", () => {
-  const verdict = decideVerificationVerdict("plan-slice", makeResult());
+test("a zero-check result is never a pass, for every discovery source", () => {
+  for (const discoverySource of ["preference", "task-plan", "package-json", "python-project", "node-test-file"] as const) {
+    const verdict = decideVerificationVerdict(makeResult({ discoverySource }));
 
-  assert.equal(verdict.passed, true);
-  assert.equal(verdict.reason, "passed");
+    assert.equal(verdict.passed, false, discoverySource);
+    assert.equal(verdict.reason, "no-host-checks", discoverySource);
+  }
 });
 
 test("execute-task command failure remains retryable verification failure", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "package-json",
@@ -83,7 +82,6 @@ test("execute-task command failure remains retryable verification failure", () =
 
 test("missing verification command pauses for the operator instead of retrying the task (#1943)", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "task-plan",
@@ -107,7 +105,6 @@ test("missing verification command pauses for the operator instead of retrying t
 
 test("shell parse failure is a non-retryable execution fault", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "preference",
@@ -133,7 +130,6 @@ test("shell parse failure is a non-retryable execution fault", () => {
 
 test("blocking runtime errors provide failure context when host checks pass", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "package-json",
@@ -171,7 +167,6 @@ test("blocking runtime errors provide failure context when host checks pass", ()
 
 test("execute-task passes when a discovered host check succeeds", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       discoverySource: "preference",
       checks: [
@@ -192,7 +187,6 @@ test("execute-task passes when a discovered host check succeeds", () => {
 
 test("command-not-found passes via qualifying task evidence when it is the only failure (#2209)", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "task-plan",
@@ -217,7 +211,6 @@ test("command-not-found passes via qualifying task evidence when it is the only 
 
 test("command-not-found still pauses when task evidence is not qualifying (#2209)", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "task-plan",
@@ -241,7 +234,6 @@ test("command-not-found still pauses when task evidence is not qualifying (#2209
 
 test("command-not-found without any task evidence keeps the existing pause (#2209)", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "task-plan",
@@ -263,7 +255,6 @@ test("command-not-found without any task evidence keeps the existing pause (#220
 
 test("a genuine failing check next to command-not-found cannot be laundered into a pass (#2209)", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "task-plan",
@@ -295,7 +286,6 @@ test("a genuine failing check next to command-not-found cannot be laundered into
 
 test("a blocking runtime error next to command-not-found cannot be laundered into a pass (#2209)", () => {
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "task-plan",
@@ -330,7 +320,6 @@ test("a blocking runtime error next to command-not-found cannot be laundered int
 test("command-not-found pause names the unresolved tool in a compound command (#2087)", () => {
   const command = 'uv run pytest tests/ui/test_detail.py -q && grep -q "No filings ingested" detail.py';
   const verdict = decideVerificationVerdict(
-    "execute-task",
     makeResult({
       passed: false,
       discoverySource: "task-plan",
@@ -355,6 +344,8 @@ test("unresolvedCommandToken extracts the missing tool from cmd, bash, and sh st
   assert.equal(unresolvedCommandToken("'grep' is not recognized as an internal or external command,"), "grep");
   assert.equal(unresolvedCommandToken("bash: line 1: rg: command not found"), "rg");
   assert.equal(unresolvedCommandToken("sh: 1: jq: not found"), "jq");
+  assert.equal(unresolvedCommandToken("dash: 12: sed: not found"), "sed");
+  assert.equal(unresolvedCommandToken("sh: 1: C:/Program Files/Git/usr/bin/grep: not found"), "C:/Program Files/Git/usr/bin/grep");
   assert.equal(unresolvedCommandToken("spawnSync cmd ENOENT"), null);
   assert.equal(unresolvedCommandToken(undefined), null);
 });

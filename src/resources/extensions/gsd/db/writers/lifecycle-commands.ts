@@ -64,7 +64,7 @@ export interface LifecycleCommandResult {
 
 export interface LifecycleShadowRepairStepInput extends LifecycleIdentity {
   expectedBeforeStatus: CanonicalLifecycleStatus | null;
-  targetStatus: "in_progress" | "completed";
+  targetStatus: "in_progress" | "completed" | "ready";
   priorRepairOperationId?: string;
 }
 
@@ -567,6 +567,14 @@ export function repairLifecycleShadowStep(
     throw new Error("lifecycle shadow repair current status does not match expected before status");
   }
   const isMissingTerminalAdoption = input.expectedBeforeStatus === null && input.targetStatus === "completed";
+  // #2313: a legacy-open Milestone or Slice whose canonical row is missing
+  // has its authority restored at `ready` — no completion is claimed, so no
+  // terminal completion evidence is required. Descendant parity stays
+  // enforced by the completion guards downstream.
+  const isMissingOpenAdoption =
+    input.expectedBeforeStatus === null &&
+    (input.itemKind === "milestone" || input.itemKind === "slice") &&
+    input.targetStatus === "ready";
   const isReadyTaskAdvance =
     input.expectedBeforeStatus === "ready" &&
     input.itemKind === "task" &&
@@ -579,7 +587,13 @@ export function repairLifecycleShadowStep(
     input.expectedBeforeStatus === "in_progress" &&
     input.itemKind === "task" &&
     input.targetStatus === "completed";
-  if (!isMissingTerminalAdoption && !isReadyTaskAdvance && !isReadySliceCompletion && !isAdvancedTaskCompletion) {
+  if (
+    !isMissingTerminalAdoption &&
+    !isMissingOpenAdoption &&
+    !isReadyTaskAdvance &&
+    !isReadySliceCompletion &&
+    !isAdvancedTaskCompletion
+  ) {
     throw new Error("unsupported lifecycle shadow repair edge");
   }
   if (isAdvancedTaskCompletion) {
@@ -595,7 +609,9 @@ export function repairLifecycleShadowStep(
     ...(input.sliceId ? { sliceId: input.sliceId } : {}),
     ...(input.taskId ? { taskId: input.taskId } : {}),
     lifecycleStatus: input.targetStatus,
-    ...(input.expectedBeforeStatus === null ? { adoptedFromStatus: "completed" as const } : {}),
+    ...(input.expectedBeforeStatus === null && input.targetStatus === "completed"
+      ? { adoptedFromStatus: "completed" as const }
+      : {}),
   });
 }
 
@@ -1029,4 +1045,115 @@ export function settleAttemptWithResult(
     attemptState: "settled",
     outcome: input.outcome,
   };
+}
+
+export interface CancellationWaiverInput {
+  lifecycleId: string;
+  scope: string;
+  rationale: string;
+  grantedByActorType: "user" | "policy";
+  grantedByActorId: string | null;
+  /** When set, the 'waived' cancellation Requirement the Waiver covers; created if missing. */
+  requirement?: { id: string; description: string; source: string };
+}
+
+/** Insert the active Waiver that records why cancelled work no longer needs to run. */
+export function grantCancellationWaiver(
+  context: Readonly<DomainOperationContext>,
+  input: CancellationWaiverInput,
+): string {
+  if (input.requirement) {
+    getDb().prepare(`
+      INSERT OR IGNORE INTO requirements (id, class, status, description, source)
+      VALUES (:id, 'cancellation', 'waived', :description, :source)
+    `).run({
+      ":id": input.requirement.id,
+      ":description": input.requirement.description,
+      ":source": input.requirement.source,
+    });
+  }
+  const waiverId = randomUUID();
+  getDb().prepare(`
+    INSERT INTO workflow_waivers (
+      waiver_id, project_id, lifecycle_id, requirement_id, blocker_id,
+      waiver_status, scope, rationale, granted_by_actor_type,
+      granted_by_actor_id, granted_at,
+      operation_id, project_revision, authority_epoch
+    ) VALUES (
+      :waiver_id, :project_id, :lifecycle_id, :requirement_id, NULL,
+      'active', :scope, :rationale, :actor_type,
+      :actor_id, :granted_at,
+      :operation_id, :project_revision, :authority_epoch
+    )
+  `).run({
+    ":waiver_id": waiverId,
+    ":project_id": context.projectId,
+    ":lifecycle_id": input.lifecycleId,
+    ":requirement_id": input.requirement?.id ?? null,
+    ":scope": input.scope,
+    ":rationale": input.rationale,
+    ":actor_type": input.grantedByActorType,
+    ":actor_id": input.grantedByActorId,
+    ":granted_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+  });
+  return waiverId;
+}
+
+/**
+ * Insert the one Waiver of a legacy row adopted as cancelled. The legacy
+ * status is the only attestation, so the Waiver covers no requirement.
+ * Closeout accepts it by scope and by the adopting operation type
+ * (lifecycle.backfill, import.apply or import.forward_repair); reopen revokes
+ * it by scope.
+ */
+export function grantLegacyAttestedCancellationWaiver(
+  context: Readonly<DomainOperationContext>,
+  input: {
+    lifecycleId: string;
+    itemKind: LifecycleIdentity["itemKind"];
+    milestoneId: string;
+    sliceId: string | null;
+    taskId: string | null;
+    rationale: string;
+    grantedByActorId: string;
+  },
+): string {
+  const scope = input.itemKind === "milestone"
+    ? `milestone:${input.milestoneId}`
+    : input.itemKind === "slice"
+      ? `slice:${input.milestoneId}/${input.sliceId}`
+      : `${input.milestoneId}/${input.sliceId}/${input.taskId} cancellation`;
+  return grantCancellationWaiver(context, {
+    lifecycleId: input.lifecycleId,
+    scope,
+    rationale: input.rationale,
+    grantedByActorType: "policy",
+    grantedByActorId: input.grantedByActorId,
+  });
+}
+
+/** Revoke every active Waiver for one lifecycle and scope. */
+export function revokeActiveWaivers(
+  context: Readonly<DomainOperationContext>,
+  lifecycleId: string,
+  scope: string,
+): void {
+  getDb().prepare(`
+    UPDATE workflow_waivers
+    SET waiver_status = 'revoked', ended_at = :ended_at,
+        ended_operation_id = :operation_id,
+        ended_project_revision = :project_revision,
+        ended_authority_epoch = :authority_epoch
+    WHERE lifecycle_id = :lifecycle_id AND scope = :scope AND waiver_status = 'active'
+  `).run({
+    ":ended_at": new Date().toISOString(),
+    ":operation_id": context.operationId,
+    ":project_revision": context.resultingRevision,
+    ":authority_epoch": context.resultingAuthorityEpoch,
+    ":lifecycle_id": lifecycleId,
+    ":scope": scope,
+  });
 }

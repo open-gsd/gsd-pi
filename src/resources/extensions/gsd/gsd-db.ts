@@ -42,7 +42,7 @@ import {
 } from "./db-decision-requirement-rows.js";
 import { rowToGate } from "./db-gate-rows.js";
 import { rowToArtifact, rowToMilestone, type ArtifactRow, type MilestoneRow } from "./db-milestone-artifact-rows.js";
-import { isClosedStatus, toStatus } from "./status-guards.js";
+import { toStatus } from "./status-guards.js";
 import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "./db-task-slice-rows.js";
 
 // Connection ownership, lifecycle, schema/migrations and transaction
@@ -50,7 +50,6 @@ import { rowToSlice, rowToTask, type SliceRow, type TaskRow } from "./db-task-sl
 // existing `from "./gsd-db.js"` imports keep working.
 export * from "./db/engine.js";
 import { immediateTransaction, transaction, getDb, getDbOrNull, getDbPath } from "./db/engine.js";
-import { assertNoAdoptedLifecycleHistory } from "./db/writers/import-restore.js";
 
 // ─── Single Writer Layer re-exports ──────────────────────────────────────
 // Domain write subsystems live in db/writers/*; re-exported here so callers
@@ -62,6 +61,7 @@ export * from "./db/writers/lifecycle-commands.js";
 export * from "./db/writers/projection-kind-remediation.js";
 export * from "./db/writers/liveness-backstop.js";
 export * from "./db/writers/orphan-milestone-discard.js";
+export * from "./db/writers/artifact-row-prune.js";
 export { executeDomainOperation } from "./db/domain-operation.js";
 export type {
   DomainJsonValue,
@@ -192,17 +192,17 @@ export function upsertRequirement(r: Requirement): void {
 }
 
 export function clearArtifacts(): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   try { transaction(() => getDbOrNull()!.exec("DELETE FROM artifacts")); } catch (e) { logWarning("db", `clearArtifacts failed: ${(e as Error).message}`); }
 }
 
 export function clearDecisions(): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   try { transaction(() => getDbOrNull()!.exec("DELETE FROM decisions")); } catch (e) { logWarning("db", `clearDecisions failed: ${(e as Error).message}`); }
 }
 
 export function clearRequirements(): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   try { transaction(() => getDbOrNull()!.exec("DELETE FROM requirements")); } catch (e) { logWarning("db", `clearRequirements failed: ${(e as Error).message}`); }
 }
 
@@ -753,7 +753,7 @@ export function repairTaskCompletionFromSummary(t: {
 }
 
 export function setTaskBlockerDiscovered(milestoneId: string, sliceId: string, taskId: string, discovered: boolean): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE tasks SET blocker_discovered = :discovered WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
   ).run({ ":discovered": discovered ? 1 : 0, ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
@@ -845,37 +845,11 @@ export function setSliceUatMd(milestoneId: string, sliceId: string, uatMd: strin
 
 // ─── ADR-011 Phase 2 escalation helpers ──────────────────────────────────
 
-/** Set pause-on-escalation state on a completed task. Mutually exclusive with awaiting_review. */
-export function setTaskEscalationPending(
-  milestoneId: string, sliceId: string, taskId: string,
-  artifactPath: string,
-): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `UPDATE tasks
-       SET escalation_pending = 1,
-           escalation_awaiting_review = 0,
-           escalation_artifact_path = :path
-     WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-  ).run({ ":path": artifactPath, ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
-}
-
-/** Set awaiting-review state (artifact exists and requires explicit user review). Mutually exclusive with pending. */
-export function setTaskEscalationAwaitingReview(
-  milestoneId: string, sliceId: string, taskId: string,
-  artifactPath: string,
-): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `UPDATE tasks
-       SET escalation_awaiting_review = 1,
-           escalation_pending = 0,
-           escalation_artifact_path = :path
-     WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-  ).run({ ":path": artifactPath, ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
-}
-
-/** Clear escalation-pending and awaiting-review flags once the user has resolved it. */
+/**
+ * Clear the pause flags of an escalation from before the database stored
+ * escalations. A new escalation does not set these flags: its open question
+ * is the pause.
+ */
 export function clearTaskEscalationFlags(
   milestoneId: string, sliceId: string, taskId: string,
 ): void {
@@ -887,31 +861,6 @@ export function clearTaskEscalationFlags(
      WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
 }
-
-/**
- * Atomically claim a resolved escalation override for injection into a downstream
- * task's prompt. Returns true if this caller claimed it (must inject), false if
- * another caller already claimed it (must skip).
- */
-export function claimEscalationOverride(
-  milestoneId: string, sliceId: string, sourceTaskId: string,
-): boolean {
-  if (!getDbOrNull()!) return false;
-  return immediateTransaction(() => {
-    const now = new Date().toISOString();
-    const result = getDbOrNull()!.prepare(
-      `UPDATE tasks
-         SET escalation_override_applied_at = :now
-       WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid
-         AND escalation_override_applied_at IS NULL
-         AND escalation_artifact_path IS NOT NULL`,
-    ).run({ ":now": now, ":mid": milestoneId, ":sid": sliceId, ":tid": sourceTaskId });
-    // node:sqlite surfaces `changes` on the run result.
-    const changes = (result as { changes?: number }).changes ?? 0;
-    return changes > 0;
-  });
-}
-
 
 /** Set the blocker_source provenance field (used when rejecting an escalation). */
 export function setTaskBlockerSource(
@@ -967,46 +916,16 @@ export function setMilestoneQueueOrder(order: string[]): void {
   });
 }
 
-function getMilestoneStatusForUpdate(milestoneId: string): string | null {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  const row = getDbOrNull()!.prepare("SELECT status FROM milestones WHERE id = :id").get({ ":id": milestoneId });
-  return typeof row?.["status"] === "string" ? row["status"] : null;
-}
-
-function writeMilestoneStatus(milestoneId: string, status: string, completedAt?: string | null): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  getDbOrNull()!.prepare(
-    `UPDATE milestones SET status = :status, completed_at = :completed_at WHERE id = :id`,
-  ).run({ ":status": status, ":completed_at": completedAt ?? null, ":id": milestoneId });
-}
-
 /**
  * Update a milestone's status in the database.
  *
  * Generic status updates may close unadopted milestones, park/unpark open
  * milestones, or advance planned milestones. Adopted milestones close through
  * the canonical operation. Closed milestones reopen through
- * reopenMilestoneStatus(), which is reserved for gsd_milestone_reopen.
+ * gsd_milestone_reopen.
  */
 export function updateMilestoneStatus(milestoneId: string, status: string, completedAt?: string | null, preserveCompletion?: boolean): void {
   applyStatusTransition({ entity: "milestone", milestoneId, status, completedAt, preserveCompletion });
-}
-
-/**
- * Explicit closed -> active transition for gsd_milestone_reopen only.
- */
-export function reopenMilestoneStatus(milestoneId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  immediateTransaction(() => {
-    const currentStatus = getMilestoneStatusForUpdate(milestoneId);
-    if (!currentStatus) {
-      throw new Error(`Cannot reopen missing milestone ${milestoneId}`);
-    }
-    if (!isClosedStatus(currentStatus)) {
-      throw new Error(`Cannot reopen milestone ${milestoneId} from status ${currentStatus}; milestone is not closed.`);
-    }
-    writeMilestoneStatus(milestoneId, "active", null);
-  });
 }
 
 
@@ -1021,21 +940,6 @@ export function reopenMilestoneStatus(milestoneId: string): void {
 
 
 // ─── Slice Dependencies (junction table) ─────────────────────────────────
-
-/** Sync the slice_dependencies junction table from a slice's JSON depends array. */
-export function syncSliceDependencies(milestoneId: string, sliceId: string, depends: string[]): void {
-  if (!getDbOrNull()!) return;
-  immediateTransaction(() => {
-    getDbOrNull()!.prepare(
-      "DELETE FROM slice_dependencies WHERE milestone_id = :mid AND slice_id = :sid",
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    for (const dep of depends) {
-      getDbOrNull()!.prepare(
-        "INSERT OR IGNORE INTO slice_dependencies (milestone_id, slice_id, depends_on_slice_id) VALUES (:mid, :sid, :dep)",
-      ).run({ ":mid": milestoneId, ":sid": sliceId, ":dep": dep });
-    }
-  });
-}
 
 
 // ─── Worktree DB Helpers ──────────────────────────────────────────────────
@@ -1201,23 +1105,27 @@ function toFiniteNumber(raw: unknown): number | undefined {
  * `verify` is prose and every evidence record reports a passing verdict with a
  * zero exit code. Rows with a NULL or non-numeric `exit_code` are reported as
  * `UNKNOWN_VERIFICATION_EXIT_CODE` so they cannot qualify as passing.
+ * With `attemptId`, only the claims that Attempt made are read.
  */
 export function getTaskVerificationEvidence(
   milestoneId: string,
   sliceId: string,
   taskId: string,
+  attemptId?: string,
 ): Array<{ command: string; exitCode: number; verdict: string; durationMs?: number }> {
   if (!getDbOrNull()!) return [];
   const rows = getDbOrNull()!.prepare(
     `SELECT command, exit_code, verdict, duration_ms
      FROM verification_evidence
      WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid
+       AND (:attempt IS NULL OR attempt_ref = :attempt)
        AND created_at = (
          SELECT MAX(created_at) FROM verification_evidence
          WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid
+           AND (:attempt IS NULL OR attempt_ref = :attempt)
        )
      ORDER BY id`,
-  ).all({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }) as Array<Record<string, unknown>>;
+  ).all({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId, ":attempt": attemptId ?? null }) as Array<Record<string, unknown>>;
   return rows.map((row) => {
     const durationMs = toFiniteNumber(row.duration_ms);
     return {
@@ -1337,87 +1245,6 @@ export function deleteVerificationEvidence(milestoneId: string, sliceId: string,
   transaction(() => getDbOrNull()!.prepare(
     `DELETE FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid`,
   ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId }));
-}
-
-export function deleteTask(milestoneId: string, sliceId: string, taskId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => {
-    // Must delete verification_evidence first (FK constraint)
-    getDbOrNull()!!.prepare(
-      `DELETE FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM quality_gates WHERE milestone_id = :mid AND slice_id = :sid AND task_id = :tid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM tasks WHERE milestone_id = :mid AND slice_id = :sid AND id = :tid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId, ":tid": taskId });
-  });
-}
-
-export function deleteSlice(milestoneId: string, sliceId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => {
-    // Cascade-style manual deletion: evidence → tasks → dependencies → slice
-    getDbOrNull()!!.prepare(
-      `DELETE FROM verification_evidence WHERE milestone_id = :mid AND slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM tasks WHERE milestone_id = :mid AND slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slice_dependencies WHERE milestone_id = :mid AND slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slice_dependencies WHERE milestone_id = :mid AND depends_on_slice_id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slices WHERE milestone_id = :mid AND id = :sid`,
-    ).run({ ":mid": milestoneId, ":sid": sliceId });
-  });
-}
-
-export function deleteMilestone(milestoneId: string): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => {
-    assertNoAdoptedLifecycleHistory("deleteMilestone", [milestoneId]);
-    getDbOrNull()!!.prepare(
-      `DELETE FROM verification_evidence WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM quality_gates WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM gate_runs WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM tasks WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slice_dependencies WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM slices WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM replan_history WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM assessments WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM artifacts WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM milestone_commit_attributions WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM milestone_leases WHERE milestone_id = :mid`,
-    ).run({ ":mid": milestoneId });
-    getDbOrNull()!!.prepare(
-      `DELETE FROM milestones WHERE id = :mid`,
-    ).run({ ":mid": milestoneId });
-  });
 }
 
 export function updateSliceFields(milestoneId: string, sliceId: string, fields: {
@@ -1548,7 +1375,7 @@ export function saveGateResult(g: {
 
 
 export function markAllGatesOmitted(milestoneId: string, sliceId: string): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `UPDATE quality_gates SET status = 'complete', verdict = 'omitted', evaluated_at = :now
      WHERE milestone_id = :mid AND slice_id = :sid AND status = 'pending'`,
@@ -1564,7 +1391,7 @@ export function markPendingGatesOmittedForTurn(
   sliceId: string,
   turn: OwnerTurn,
 ): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   const gateIds = [...getGateIdsForTurn(turn)];
   if (gateIds.length === 0) return;
   const placeholders = gateIds.map((_, i) => `:gid${i}`).join(",");
@@ -1597,7 +1424,7 @@ export function insertGateRun(entry: {
   sliceId?: string;
   taskId?: string;
   outcome: "pass" | "fail" | "retry" | "manual-attention";
-  failureClass: "none" | "policy" | "input" | "execution" | "artifact" | "verification" | "closeout" | "git" | "timeout" | "manual-attention" | "unknown";
+  failureClass: "none" | "policy" | "input" | "execution" | "artifact" | "verification" | "closeout" | "git" | "timeout" | "manual-attention" | "refusal" | "unknown";
   rationale?: string;
   findings?: string;
   attempt: number;
@@ -1605,7 +1432,7 @@ export function insertGateRun(entry: {
   retryable: boolean;
   evaluatedAt: string;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `INSERT INTO gate_runs (
       trace_id, turn_id, gate_id, gate_type, unit_type, unit_id, milestone_id, slice_id, task_id,
@@ -1648,7 +1475,7 @@ export function upsertTurnGitTransaction(entry: {
   metadata?: Record<string, unknown>;
   updatedAt: string;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => getDbOrNull()!.prepare(
     `INSERT OR REPLACE INTO turn_git_transactions (
       trace_id, turn_id, unit_type, unit_id, stage, action, push, status, error, metadata_json, updated_at
@@ -1681,7 +1508,7 @@ export function recordMilestoneCommitAttribution(entry: {
   files: string[];
   createdAt: string;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => {
     getDbOrNull()!!.prepare(
       `INSERT OR REPLACE INTO milestone_commit_attributions (
@@ -1737,7 +1564,7 @@ export function insertAuditEvent(entry: {
   ts: string;
   payload: Record<string, unknown>;
 }): void {
-  if (!getDbOrNull()!) return;
+  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
   transaction(() => {
     getDbOrNull()!!.prepare(
       `INSERT OR IGNORE INTO audit_events (
@@ -1818,19 +1645,6 @@ export function deleteArtifactByPath(path: string): void {
   transaction(() => getDbOrNull()!.prepare("DELETE FROM artifacts WHERE path = :path").run({ ":path": path }));
 }
 
-/** Delete artifact rows whose paths share a DB-relative prefix. */
-export function deleteArtifactsByPathPrefix(prefix: string): number {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  return transaction(() => {
-    const likePrefix = `${prefix}%`;
-    const countRow = getDbOrNull()!.prepare(
-      "SELECT COUNT(*) AS count FROM artifacts WHERE path LIKE :prefix",
-    ).get({ ":prefix": likePrefix });
-    getDbOrNull()!.prepare("DELETE FROM artifacts WHERE path LIKE :prefix").run({ ":prefix": likePrefix });
-    return Number(countRow?.["count"] ?? 0);
-  });
-}
-
 /** List artifact rows whose paths share a DB-relative prefix. */
 export function getArtifactsByPathPrefix(prefix: string): ArtifactRow[] {
   if (!getDbOrNull()!) return [];
@@ -1840,85 +1654,22 @@ export function getArtifactsByPathPrefix(prefix: string): ArtifactRow[] {
   return rows.map(rowToArtifact);
 }
 
-/**
- * Legacy destructive hierarchy-reset helper. Explicit recovery does not call
- * this; it applies a verified Import Application without clearing absent rows.
- */
-export function clearEngineHierarchy(): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  immediateTransaction(() => {
-    assertNoAdoptedLifecycleHistory("clearEngineHierarchy");
-    getDbOrNull()!!.exec("DELETE FROM verification_evidence");
-    getDbOrNull()!!.exec("DELETE FROM quality_gates");
-    getDbOrNull()!!.exec("DELETE FROM slice_dependencies");
-    getDbOrNull()!!.exec("DELETE FROM assessments");
-    getDbOrNull()!!.exec("DELETE FROM replan_history");
-    getDbOrNull()!!.exec("DELETE FROM milestone_commit_attributions");
-    getDbOrNull()!!.exec("DELETE FROM tasks");
-    getDbOrNull()!!.exec("DELETE FROM slices");
-    getDbOrNull()!!.exec("DELETE FROM milestone_leases");
-    getDbOrNull()!!.exec("DELETE FROM milestones");
-  });
-}
-
-/**
- * INSERT OR IGNORE a slice during event replay (workflow-reconcile.ts).
- * Strict insert-or-ignore semantics are required here to avoid the
- * `insertSlice` ON CONFLICT path that could downgrade an already-completed
- * slice back to 'pending'.
- */
-export function insertOrIgnoreSlice(args: {
-  milestoneId: string;
-  sliceId: string;
-  title: string;
-  createdAt: string;
-}): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `INSERT OR IGNORE INTO slices (milestone_id, id, title, status, created_at)
-     VALUES (:mid, :sid, :title, 'pending', :ts)`,
-  ).run({
-    ":mid": args.milestoneId,
-    ":sid": args.sliceId,
-    ":title": args.title,
-    ":ts": args.createdAt,
-  }));
-}
-
-/**
- * INSERT OR IGNORE a task during event replay (workflow-reconcile.ts).
- * Same rationale as `insertOrIgnoreSlice`.
- */
-export function insertOrIgnoreTask(args: {
-  milestoneId: string;
-  sliceId: string;
-  taskId: string;
-  title: string;
-  createdAt: string;
-}): void {
-  if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
-    `INSERT OR IGNORE INTO tasks (milestone_id, slice_id, id, title, status, created_at)
-     VALUES (:mid, :sid, :tid, :title, 'pending', :ts)`,
-  ).run({
-    ":mid": args.milestoneId,
-    ":sid": args.sliceId,
-    ":tid": args.taskId,
-    ":title": args.title,
-    ":ts": args.createdAt,
-  }));
+/** Bind the open database to one checkout root (db-workspace enforces the binding). */
+export function setProjectRootBinding(root: string): void {
+  getDb().prepare("UPDATE project_authority SET project_root_realpath = :root WHERE singleton = 1").run({ ":root": root });
 }
 
 /**
  * Stamp the `replan_triggered_at` column on a slice. Used by triage-resolution
- * when a user capture requests a replan so the dispatcher can detect the
- * trigger via DB in addition to the on-disk REPLAN-TRIGGER.md marker.
+ * when a user capture requests a replan. The column is the replan trigger that
+ * the dispatcher reads. Returns false when the slice has no row.
  */
-export function setSliceReplanTriggeredAt(milestoneId: string, sliceId: string, ts: string): void {
+export function setSliceReplanTriggeredAt(milestoneId: string, sliceId: string, ts: string): boolean {
   if (!getDbOrNull()!) throw new GSDError(GSD_STALE_STATE, "gsd-db: No database open");
-  transaction(() => getDbOrNull()!.prepare(
+  const updated = transaction(() => getDbOrNull()!.prepare(
     "UPDATE slices SET replan_triggered_at = :ts WHERE milestone_id = :mid AND id = :sid",
   ).run({ ":ts": ts, ":mid": milestoneId, ":sid": sliceId }));
+  return Number((updated as { changes?: number }).changes ?? 0) === 1;
 }
 
 /**

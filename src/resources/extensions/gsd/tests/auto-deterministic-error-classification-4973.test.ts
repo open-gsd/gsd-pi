@@ -30,6 +30,7 @@ import {
   DETERMINISTIC_POLICY_ERROR_STRINGS,
 } from "../auto-tool-tracking.ts";
 import { AutoSession } from "../auto/session.ts";
+import { usedUnitBudget, useUnitBudget } from "./helpers/unit-budgets.ts";
 import { _setAutoActiveForTest } from "../auto.ts";
 import { escalateTier } from "../model-router.ts";
 import {
@@ -205,8 +206,8 @@ describe("Test 5 — postUnitPreVerification short-circuits on deterministic err
   // This integration test calls postUnitPreVerification with a deterministic error
   // in lastToolInvocationError and asserts that:
   //   1. pendingVerificationRetry is NOT set (no retry dispatched)
-  //   2. the blocker placeholder is written to disk
-  //   3. the function returns "continue" (not "retry" or "dispatched")
+  //   2. the blocker diagnostic is a sidecar, never the unit's projection file
+  //   3. auto-mode pauses: the unit recorded no result and must not be passed
 
   let base = "";
   beforeEach(() => {
@@ -219,7 +220,7 @@ describe("Test 5 — postUnitPreVerification short-circuits on deterministic err
     // is best-effort only so as not to mask assertion failures.
   });
 
-  test("returns 'continue' and writes placeholder for context_write_blocked — no pendingVerificationRetry set", async () => {
+  test("pauses and writes a blocker sidecar for context_write_blocked — no pendingVerificationRetry set", async () => {
     const { postUnitPreVerification } = await import("../auto-post-unit.ts");
 
     const s = new AutoSession();
@@ -228,7 +229,7 @@ describe("Test 5 — postUnitPreVerification short-circuits on deterministic err
     s.currentUnit = { type: "discuss-milestone", id: "M001", startedAt: Date.now() };
     // Set the deterministic error that would be recorded by recordToolInvocationError
     s.lastToolInvocationError = "gsd_summary_save: Error saving artifact: context write blocked";
-    s.verificationRetryCount.set("discuss-milestone:M001", 2);
+    useUnitBudget(s, "discuss-milestone", "M001", 2);
 
     let pauseCalled = false;
     const ctx = {
@@ -249,19 +250,25 @@ describe("Test 5 — postUnitPreVerification short-circuits on deterministic err
 
     const result = await postUnitPreVerification(pctx, { skipSettleDelay: true });
 
-    // Core assertion: deterministic error short-circuits — returns "continue",
-    // no retry, and the placeholder is written so the pipeline can advance.
-    assert.strictEqual(result, "continue", "must return 'continue', not 'retry' or 'dispatched'");
+    // Core assertion: deterministic error short-circuits — no retry, and
+    // auto-mode pauses because the unit recorded no result.
+    assert.strictEqual(result, "dispatched", "must pause, not 'retry' or 'continue'");
+    assert.strictEqual(pauseCalled, true, "a unit with no recorded result must pause auto-mode");
     assert.strictEqual(s.pendingVerificationRetry, null, "pendingVerificationRetry must NOT be set");
-    assert.strictEqual(s.verificationRetryCount.has("discuss-milestone:M001"), false, "deterministic short-circuit clears stale retry count");
+    assert.equal(usedUnitBudget(s, "discuss-milestone", "M001"), 0, "deterministic short-circuit clears stale retry count");
     assert.strictEqual(s.lastToolInvocationError, null, "lastToolInvocationError cleared after handling");
-    assert.strictEqual(pauseCalled, false, "pauseAuto must NOT be called for deterministic errors");
 
-    // The blocker placeholder must exist on disk so the pipeline can advance.
-    const placeholderPath = join(base, ".gsd", "milestones", "M001", "M001-CONTEXT.md");
+    // The blocker diagnostic is a sidecar. It must not be written as CONTEXT.md,
+    // where it would pass for the discussion result.
+    const milestoneDir = join(base, ".gsd", "milestones", "M001");
     assert.ok(
-      existsSync(placeholderPath),
-      `blocker placeholder must be written at ${placeholderPath}`,
+      existsSync(join(milestoneDir, "M001-CONTEXT-RECOVERY-BLOCKER.md")),
+      "blocker diagnostic must be written as a sidecar",
+    );
+    assert.equal(
+      existsSync(join(milestoneDir, "M001-CONTEXT.md")),
+      false,
+      "the blocker must not occupy the CONTEXT projection",
     );
   });
 
@@ -312,7 +319,7 @@ describe("Test 5b — broken isolated worktree short-circuits artifact retry (#5
     s.active = true;
     s.basePath = base;
     s.currentUnit = { type: "research-slice", id: "M003/S03", startedAt: Date.now() };
-    s.verificationRetryCount.set("research-slice:M003/S03", 2);
+    useUnitBudget(s, "research-slice", "M003/S03", 2);
 
     const notifications: string[] = [];
     let pauseCalled = false;
@@ -343,7 +350,7 @@ describe("Test 5b — broken isolated worktree short-circuits artifact retry (#5
     assert.strictEqual(result, "dispatched", "worktree integrity failure must pause instead of retrying");
     assert.strictEqual(pauseCalled, true, "pauseAuto must be called for a broken isolated worktree");
     assert.strictEqual(s.pendingVerificationRetry, null, "pendingVerificationRetry must NOT be set");
-    assert.strictEqual(s.verificationRetryCount.has("research-slice:M003/S03"), false, "stale retry count must be cleared");
+    assert.equal(usedUnitBudget(s, "research-slice", "M003/S03"), 0, "stale retry count must be cleared");
     assert.ok(
       notifications.some((message) => message.includes("Worktree integrity failure") && message.includes(".git missing")),
       `expected worktree integrity notification, got: ${notifications.join("\n")}`,
@@ -362,7 +369,7 @@ describe("Test 5b — broken isolated worktree short-circuits artifact retry (#5
     s.active = true;
     s.basePath = base;
     s.currentUnit = { type: "research-slice", id: "M003/S03", startedAt: Date.now() };
-    s.verificationRetryCount.set("research-slice:M003/S03", 2);
+    useUnitBudget(s, "research-slice", "M003/S03", 2);
 
     const notifications: string[] = [];
     let pauseCalled = false;
@@ -393,7 +400,7 @@ describe("Test 5b — broken isolated worktree short-circuits artifact retry (#5
     assert.strictEqual(result, "dispatched", "worktree integrity failure must pause instead of retrying");
     assert.strictEqual(pauseCalled, true, "pauseAuto must be called for a broken isolated worktree");
     assert.strictEqual(s.pendingVerificationRetry, null, "pendingVerificationRetry must NOT be set");
-    assert.strictEqual(s.verificationRetryCount.has("research-slice:M003/S03"), false, "stale retry count must be cleared");
+    assert.equal(usedUnitBudget(s, "research-slice", "M003/S03"), 0, "stale retry count must be cleared");
     assert.ok(
       notifications.some((message) => message.includes("Worktree integrity failure") && message.includes("git rev-parse")),
       `expected git rev-parse worktree integrity notification, got: ${notifications.join("\n")}`,
@@ -457,32 +464,6 @@ describe("Test 6 — non-deterministic failures use standard retry; tier escalat
     assert.ok(
       prevOrderRetry3 > freshOrderLight,
       "on retry 3, prevOrder(heavy=2) > freshOrder(light=0) — 'heavy' must be retained, not reverted",
-    );
-  });
-
-  test("non-deterministic error: session sets pendingVerificationRetry (standard retry path)", () => {
-    // Simulate what postUnitPreVerification does for a non-deterministic failure:
-    // no lastToolInvocationError → falls into the standard retry path → sets pendingVerificationRetry.
-    const s = new AutoSession();
-    s.currentUnit = { type: "plan-slice", id: "M001:S01", startedAt: Date.now() };
-
-    // Simulate the retry count increment (as postUnitPreVerification does internally)
-    const retryKey = `${s.currentUnit.type}:${s.currentUnit.id}`;
-    const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
-    s.verificationRetryCount.set(retryKey, attempt);
-
-    // Simulate setting pendingVerificationRetry (what the "else" branch does)
-    s.pendingVerificationRetry = {
-      unitId: s.currentUnit.id,
-      failureContext: `Artifact verification failed: expected artifact for ${s.currentUnit.type} "${s.currentUnit.id}" was not found on disk after unit execution (attempt ${attempt}).`,
-      attempt,
-    };
-
-    assert.ok(s.pendingVerificationRetry !== null, "standard retry path sets pendingVerificationRetry");
-    assert.strictEqual(s.pendingVerificationRetry.attempt, 1, "attempt is 1");
-    assert.ok(
-      s.pendingVerificationRetry.failureContext.includes("plan-slice"),
-      "failureContext references the unit type",
     );
   });
 

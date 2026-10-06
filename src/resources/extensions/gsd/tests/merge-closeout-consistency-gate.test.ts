@@ -129,7 +129,9 @@ test("closeout consistency treats deferred slices as inactive", () => {
 test("closeout consistency ignores pending gates of replanned-away (husk) tasks (#2239)", (t) => {
   t.after(() => closeDatabase());
   assert.equal(openDatabase(":memory:"), true);
-  insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+  // A skipped milestone needs no validation, so no validation verdict closes
+  // these gates and the pending-gate check alone decides.
+  insertMilestone({ id: "M001", title: "Milestone One", status: "skipped" });
   insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
   // Real task: evaluated gate rows are complete.
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Real", status: "complete" });
@@ -142,23 +144,18 @@ test("closeout consistency ignores pending gates of replanned-away (husk) tasks 
   // Legacy/imported rows can carry the raw "cancelled" alias.
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T03", title: "Husk cancelled", status: "cancelled" });
   insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q7", scope: "task", taskId: "T03" });
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
 
-  // In-memory DB resolves no artifact base path, so the husk gates have no
-  // evidence and are not evidence-repairable — matching the reported wedge.
+  // The husk gates have no stored evidence and are not evidence-repairable —
+  // matching the reported wedge.
   assert.deepEqual(checkCloseoutConsistencyGate("M001"), { ok: true });
 });
 
 test("closeout consistency still blocks on a slice-scoped gate row that carries a task_id (#2239)", (t) => {
   t.after(() => closeDatabase());
   assert.equal(openDatabase(":memory:"), true);
-  insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+  // A skipped milestone needs no validation, so no validation verdict closes
+  // these gates and the pending-gate check alone decides.
+  insertMilestone({ id: "M001", title: "Milestone One", status: "skipped" });
   insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Real", status: "complete" });
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Husk skipped", status: "skipped" });
@@ -166,13 +163,6 @@ test("closeout consistency still blocks on a slice-scoped gate row that carries 
   // schema permits slice-scoped rows that carry a task_id, and such a row
   // must block even when the referenced task was replanned away.
   insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q8", scope: "slice", taskId: "T02" });
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
 
   const result = checkCloseoutConsistencyGate("M001");
 
@@ -183,18 +173,13 @@ test("closeout consistency still blocks on a slice-scoped gate row that carries 
 test("closeout consistency still blocks on a pending gate owned by a completed task", (t) => {
   t.after(() => closeDatabase());
   assert.equal(openDatabase(":memory:"), true);
-  insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+  // A skipped milestone needs no validation, so no validation verdict closes
+  // these gates and the pending-gate check alone decides.
+  insertMilestone({ id: "M001", title: "Milestone One", status: "skipped" });
   insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Real", status: "complete" });
   // Evaluated-gate row lost: the task ran, but its gate row is still pending.
   insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q5", scope: "task", taskId: "T01" });
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
 
   const result = checkCloseoutConsistencyGate("M001");
 
@@ -205,18 +190,13 @@ test("closeout consistency still blocks on a pending gate owned by a completed t
 test("closeout consistency still blocks on a pending slice-scoped gate", (t) => {
   t.after(() => closeDatabase());
   assert.equal(openDatabase(":memory:"), true);
-  insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+  // A skipped milestone needs no validation, so no validation verdict closes
+  // these gates and the pending-gate check alone decides.
+  insertMilestone({ id: "M001", title: "Milestone One", status: "skipped" });
   insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Real", status: "complete" });
   insertTask({ milestoneId: "M001", sliceId: "S01", id: "T02", title: "Husk skipped", status: "skipped" });
   insertGateRow({ milestoneId: "M001", sliceId: "S01", gateId: "Q8", scope: "slice" });
-  insertAssessment({
-    path: "milestones/M001/M001-VALIDATION.md",
-    milestoneId: "M001",
-    status: "pass",
-    scope: "milestone-validation",
-    fullContent: "verdict: pass",
-  });
 
   const result = checkCloseoutConsistencyGate("M001");
 
@@ -275,4 +255,23 @@ test("closeout consistency persists evidence-backed gate closures before checkin
   assert.equal(result.ok, false);
   if (!result.ok) assert.equal(result.reason, "quality-gate-pending");
   assert.equal(getGateResults("M001", "S01").find((gate) => gate.gate_id === "Q3")?.status, "complete");
+});
+
+test("validation-absent recovery names the dispatchable validation form (#2433)", (t) => {
+  t.after(() => closeDatabase());
+  try {
+    assert.equal(openDatabase(":memory:"), true);
+    insertMilestone({ id: "M001", title: "Milestone One", status: "complete" });
+    insertSlice({ milestoneId: "M001", id: "S01", title: "Done", status: "complete" });
+    insertTask({ milestoneId: "M001", sliceId: "S01", id: "T01", title: "Done", status: "complete" });
+
+    const result = checkCloseoutConsistencyGate("M001");
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, "validation-not-pass");
+    const formatted = formatCloseoutConsistencyBlock(result);
+    assert.match(formatted, /\/gsd dispatch validate M001/);
+    assert.doesNotMatch(formatted, /validate-milestone/);
+  } finally {
+    closeDatabase();
+  }
 });

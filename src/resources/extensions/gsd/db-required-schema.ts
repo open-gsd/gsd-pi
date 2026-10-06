@@ -6,6 +6,64 @@ import {
   createLivenessBackstopSchema,
   hasLivenessBackstopSchema,
 } from "./db-liveness-backstop-schema.js";
+import {
+  createUnitDispatchBudgetSchema,
+  hasUnitDispatchBudgetSchema,
+} from "./db-unit-dispatch-budget-schema.js";
+import {
+  createRuntimeControlSchema,
+  hasRuntimeControlSchema,
+} from "./db-runtime-control-schema.js";
+import {
+  createUnitDispatchSidecarSchema,
+  hasUnitDispatchSidecarSchema,
+} from "./db-unit-dispatch-sidecar-schema.js";
+import {
+  createIntegrationBranchSchema,
+  hasIntegrationBranchSchema,
+} from "./db-integration-branch-schema.js";
+import {
+  createUnitDispatchRetrySchema,
+  hasUnitDispatchRetrySchema,
+} from "./db-unit-dispatch-retry-schema.js";
+import { createExecRunSchema, hasExecRunSchema } from "./db-exec-run-schema.js";
+import {
+  ensureVerificationEvidenceDedupIndex,
+  hasVerificationEvidenceDedupIndex,
+} from "./db-verification-evidence-schema.js";
+import {
+  createCustomWorkflowSchema,
+  hasCustomWorkflowSchema,
+} from "./db-custom-workflow-schema.js";
+import {
+  createUnitMetricsSchema,
+  hasUnitMetricsSchema,
+} from "./db-unit-metrics-schema.js";
+import {
+  createUnitDispatchStageSchema,
+  hasUnitDispatchStageSchema,
+} from "./db-unit-dispatch-stage-schema.js";
+import {
+  createAutoPauseSchema,
+  hasAutoPauseSchema,
+} from "./db-auto-pause-schema.js";
+import {
+  createAutoPauseBlockerColumn,
+  hasAutoPauseBlockerColumn,
+} from "./db-auto-pause-blocker-schema.js";
+import {
+  createProjectMilestoneSequenceSchema,
+  hasProjectMilestoneSequenceSchema,
+} from "./db-project-milestone-sequence-schema.js";
+import { createWriteGateSchema, hasWriteGateSchema } from "./db-write-gate-schema.js";
+import {
+  createRemoteQuestionPromptSchema,
+  hasRemoteQuestionPromptSchema,
+} from "./db-remote-question-prompt-schema.js";
+import {
+  createDecisionStatementImpactSchema,
+  hasDecisionStatementImpactSchema,
+} from "./db-decision-statement-impact-schema.js";
 
 interface RequiredSchemaFeature {
   readonly id: string;
@@ -18,6 +76,86 @@ const REQUIRED_SCHEMA_FEATURES = [
     id: "liveness-backstop",
     isPresent: hasLivenessBackstopSchema,
     create: createLivenessBackstopSchema,
+  },
+  {
+    id: "unit-dispatch-budgets",
+    isPresent: hasUnitDispatchBudgetSchema,
+    create: createUnitDispatchBudgetSchema,
+  },
+  {
+    id: "runtime-control",
+    isPresent: hasRuntimeControlSchema,
+    create: createRuntimeControlSchema,
+  },
+  {
+    id: "unit-dispatch-sidecars",
+    isPresent: hasUnitDispatchSidecarSchema,
+    create: createUnitDispatchSidecarSchema,
+  },
+  {
+    id: "integration-branch",
+    isPresent: hasIntegrationBranchSchema,
+    create: createIntegrationBranchSchema,
+  },
+  {
+    id: "unit-dispatch-retries",
+    isPresent: hasUnitDispatchRetrySchema,
+    create: createUnitDispatchRetrySchema,
+  },
+  {
+    id: "exec-runs",
+    isPresent: hasExecRunSchema,
+    create: createExecRunSchema,
+  },
+  {
+    id: "verification-evidence-attempt",
+    isPresent: hasVerificationEvidenceDedupIndex,
+    create: ensureVerificationEvidenceDedupIndex,
+  },
+  {
+    id: "custom-workflow-runs",
+    isPresent: hasCustomWorkflowSchema,
+    create: createCustomWorkflowSchema,
+  },
+  {
+    id: "unit-metrics",
+    isPresent: hasUnitMetricsSchema,
+    create: createUnitMetricsSchema,
+  },
+  {
+    id: "unit-dispatch-stages",
+    isPresent: hasUnitDispatchStageSchema,
+    create: createUnitDispatchStageSchema,
+  },
+  {
+    id: "auto-pauses",
+    isPresent: hasAutoPauseSchema,
+    create: createAutoPauseSchema,
+  },
+  {
+    id: "auto-pause-blocker-link",
+    isPresent: hasAutoPauseBlockerColumn,
+    create: createAutoPauseBlockerColumn,
+  },
+  {
+    id: "project-milestone-sequence",
+    isPresent: hasProjectMilestoneSequenceSchema,
+    create: createProjectMilestoneSequenceSchema,
+  },
+  {
+    id: "write-gate-state",
+    isPresent: hasWriteGateSchema,
+    create: createWriteGateSchema,
+  },
+  {
+    id: "remote-question-prompts",
+    isPresent: hasRemoteQuestionPromptSchema,
+    create: createRemoteQuestionPromptSchema,
+  },
+  {
+    id: "decision-statement-impacts",
+    isPresent: hasDecisionStatementImpactSchema,
+    create: createDecisionStatementImpactSchema,
   },
 ] as const satisfies readonly RequiredSchemaFeature[];
 

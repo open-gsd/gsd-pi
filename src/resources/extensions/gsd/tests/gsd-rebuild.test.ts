@@ -23,6 +23,7 @@ import { saveDecisionToDb, saveRequirementToDb } from "../db-writer.ts";
 import { computeProjectionSha, readCompatMarker } from "../compat/compat-marker.ts";
 import {
   closeDatabase,
+  getArtifact,
   getTask,
   insertArtifact,
   insertMilestone,
@@ -31,7 +32,11 @@ import {
   openDatabase,
   setSliceSummaryMd,
 } from "../gsd-db.ts";
-import { invalidateStateCache } from "../state.ts";
+import { deriveState, invalidateStateCache } from "../state.ts";
+import {
+  describeArtifactDbDriftBlocker,
+  detectArtifactDbDrift,
+} from "../state-reconciliation/drift/artifact-db.ts";
 
 type Note = { message: string; kind: string };
 
@@ -132,6 +137,76 @@ test("handleRebuild quarantines stale completion projections without mutating DB
   } finally {
     cleanup(base);
   }
+});
+
+test("handleRebuild keeps the SUMMARY artifact row when it quarantines the file on disk", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  seedOpenTask();
+  const artifactPath = "milestones/M001/slices/S01/tasks/T01-SUMMARY.md";
+  insertArtifact({
+    path: artifactPath,
+    artifact_type: "SUMMARY",
+    milestone_id: "M001",
+    slice_id: "S01",
+    task_id: "T01",
+    full_content: "# T01 Summary\n\nStored in the DB.\n",
+  });
+  const summaryPath = join(base, ".gsd", artifactPath);
+  writeFileSync(summaryPath, "# T01 Summary\n\nHand-edited on disk.\n", "utf-8");
+
+  const { ctx } = makeCtx();
+  await handleRebuild(ctx, base, "markdown");
+
+  const quarantined = listFiles(join(base, ".gsd", "quarantine", "projections"));
+  assert.equal(quarantined.length, 1, "the disk file is moved to quarantine");
+  assert.equal(
+    getArtifact(artifactPath)?.full_content,
+    "# T01 Summary\n\nStored in the DB.\n",
+    "a file on disk must not make rebuild delete DB content",
+  );
+
+  // The kept row is still an unproven completion claim on an open task, so
+  // the drift stays fail-closed. The blocker must not send the user back to
+  // the rebuild that cannot clear it.
+  invalidateStateCache();
+  const state = await deriveState(base);
+  const drifts = detectArtifactDbDrift(state, { basePath: base, state });
+  assert.deepEqual(
+    drifts.map((drift) => drift.kind === "artifact-db-status-divergence" ? drift.reason : drift.kind),
+    ["task S01/T01 has SUMMARY artifact while DB status is pending"],
+  );
+  const blocker = describeArtifactDbDriftBlocker(drifts[0]!, { basePath: base, state }) ?? "";
+  assert.match(blocker, /keeps that row, so this blocker can remain after a rebuild/);
+  assert.match(blocker, /`\/gsd recover` with exact Preview approval/);
+  assert.doesNotMatch(blocker, /Run `\/gsd rebuild markdown`/);
+});
+
+test("a SUMMARY file on disk with no artifact row still points at /gsd rebuild markdown", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  seedOpenTask();
+  writeFileSync(
+    join(base, ".gsd", "milestones", "M001", "slices", "S01", "tasks", "T01-SUMMARY.md"),
+    "# T01 Summary\n\nDisk-only completion.\n",
+    "utf-8",
+  );
+
+  const state = await deriveState(base);
+  const drifts = detectArtifactDbDrift(state, { basePath: base, state });
+  assert.equal(drifts.length, 1);
+  assert.match(
+    describeArtifactDbDriftBlocker(drifts[0]!, { basePath: base, state }) ?? "",
+    /Run `\/gsd rebuild markdown` after review to quarantine stale projections/,
+  );
+
+  const { ctx } = makeCtx();
+  await handleRebuild(ctx, base, "markdown");
+  invalidateStateCache();
+  const after = await deriveState(base);
+  assert.deepEqual(detectArtifactDbDrift(after, { basePath: base, state: after }), [], "the rebuild clears a file-only drift");
 });
 
 test("handleRebuild re-renders missing task summary projections from DB", async () => {
@@ -321,6 +396,29 @@ test("trusted marker baselines do not misclassify pending DB renders", async (t)
   assert.equal(existsSync(join(base, ".gsd", "quarantine", "projections")), false);
 });
 
+test("the external-edit observer never moves an edited STATE.md", async (t) => {
+  const base = makeBase();
+  t.after(() => cleanup(base));
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  seedOpenTask();
+  const { ctx } = makeCtx();
+  await handleRebuild(ctx, base, "markdown");
+  const statePath = join(base, ".gsd", "STATE.md");
+  const rendered = readFileSync(statePath, "utf-8");
+  const markerPath = join(base, ".gsd", ".compat.json");
+  const marker = JSON.parse(readFileSync(markerPath, "utf-8"));
+  marker.projections["STATE.md"] = { sha: computeProjectionSha(rendered), entities: [] };
+  writeFileSync(markerPath, JSON.stringify(marker, null, 2));
+  const edited = "# GSD State\n\nExternal edit\n";
+  writeFileSync(statePath, edited);
+
+  const observation = await preserveProjectionChanges(base);
+
+  assert.deepEqual(observation.preserved.map((entry) => entry.sourcePath), []);
+  assert.equal(readFileSync(statePath, "utf-8"), edited);
+  assert.equal(existsSync(join(base, ".gsd", "quarantine", "projections")), false);
+});
+
 test("projection writer preserves edited bytes at the mutation boundary", async (t) => {
   const base = makeBase();
   t.after(() => cleanup(base));
@@ -432,7 +530,7 @@ test("unbaselined root requirement writes preserve existing bytes", async (t) =>
   assert.deepEqual(readFileSync(quarantined[0]!), editedBytes);
 });
 
-test("handleRebuild database target is reserved and does not import markdown", async () => {
+test("handleRebuild has no database target: it shows usage and does not import markdown", async () => {
   const base = makeBase();
   try {
     openDatabase(join(base, ".gsd", "gsd.db"));
@@ -453,13 +551,14 @@ test("handleRebuild database target is reserved and does not import markdown", a
     const { ctx, notes } = makeCtx();
     await handleRebuild(ctx, base, "database");
 
-    assert.equal(existsSync(summaryPath), true, "reserved DB rebuild must not move projection files");
+    assert.equal(existsSync(summaryPath), true, "an unknown rebuild target must not move projection files");
     const task = getTask("M001", "S01", "T01");
-    assert.equal(task?.status, "pending", "reserved DB rebuild must not mutate task status");
-    assert.equal(task?.full_summary_md, "", "reserved DB rebuild must not import markdown");
-    assert.match(notes.at(-1)?.message ?? "", /reserved/);
-    assert.match(notes.at(-1)?.message ?? "", /\/gsd recover/);
-    assert.equal(notes.at(-1)?.kind, "warning");
+    assert.equal(task?.status, "pending", "an unknown rebuild target must not mutate task status");
+    assert.equal(task?.full_summary_md, "", "an unknown rebuild target must not import markdown");
+    assert.equal(notes.length, 1);
+    assert.match(notes[0]?.message ?? "", /^Usage:\n {2}\/gsd rebuild markdown /);
+    assert.doesNotMatch(notes[0]?.message ?? "", /database/i);
+    assert.equal(notes[0]?.kind, "warning");
   } finally {
     cleanup(base);
   }

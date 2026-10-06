@@ -27,7 +27,7 @@ import { SchemaTooNewError } from "../resources/extensions/gsd/db/engine.ts";
 import { deriveState } from "../resources/extensions/gsd/state.ts";
 
 const V51_MESSAGE =
-  "gsd.db schema is v51, newer than the v50 this gsd-pi supports. " +
+  "gsd.db schema is v52, newer than the v51 this gsd-pi supports. " +
   "Update gsd-pi (npm i -g @opengsd/gsd-pi) before opening this project.";
 
 test("headless-query opens the DB before deriveState (#4123)", async () => {
@@ -77,7 +77,7 @@ test("SchemaTooNewError from deriveState exits non-zero with the exact engine me
     {
       openProjectDbIfPresent: async () => {},
       deriveState: async () => {
-        throw new SchemaTooNewError(51, 50);
+        throw new SchemaTooNewError(52, 51);
       },
       resolveDispatch: async () => {
         throw new Error("resolveDispatch should not run after a refused deriveState");
@@ -132,7 +132,7 @@ function makeNewerSchemaProject(version: number): string {
 }
 
 test("newer-schema fixture: real deriveState refuses, and the CLI boundary exits non-zero with the exact message", async () => {
-  const base = makeNewerSchemaProject(51);
+  const base = makeNewerSchemaProject(52);
   try {
     // Real read seam: engine refuse-newer → db-workspace "schema-too-new"
     // result → state/derive/db-open loud throw.

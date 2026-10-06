@@ -27,6 +27,7 @@
 | `/gsd debug --diagnose` | Inspect malformed artifacts and session health (`--diagnose [<slug> \| <issue text>]`) |
 | `/gsd dispatch` | Dispatch a specific phase directly (research, plan, execute, complete, validate, reassess, uat, replan) |
 | `/gsd verdict <pass\|needs-attention\|needs-remediation>` | Override an unadopted compatibility milestone's recorded validation verdict with an explicit rationale; adopted milestones must rerun canonical validation with current evidence |
+| `/gsd uat-answer <accept\|reject> --rationale "..."` | Answer an open subjective UAT question. Only this command records Human Acceptance; the agent has no tool for it. It records an answer only when you type it in the terminal UI: an RPC or headless session (`gsd headless`, the MCP `gsd_execute` tool, the web UI) can list the open questions but cannot answer. Run it with no arguments to list the open questions; add `--question <id>` when more than one is open |
 | `/gsd history` | View execution history (supports `--cost`, `--phase`, `--model` filters) |
 | `/gsd usage` | Show current LLM context-window usage and session token totals |
 | `/gsd session-report` | Show session cost, tokens, and work summary (`--json`, `--save`) |
@@ -41,12 +42,12 @@
 | `/gsd report --html --all` | Generate retrospective reports for all milestones at once |
 | `/gsd update` | Update GSD in-session; `--models` refreshes models and pricing without a restart |
 | `/gsd upgrade` | Alias for `/gsd update` |
-| `/gsd knowledge` | Add persistent project knowledge. Rules remain manually maintained in `KNOWLEDGE.md`; patterns and lessons are memory-backed and projected into the file on the next session start. |
+| `/gsd knowledge` | Add persistent project knowledge. Rules, patterns and lessons are stored as memories with a K/P/L id; `KNOWLEDGE.md` is rendered from the database after each capture and on rebuild. |
 | `/gsd memory` | Query and forget project memories |
 | `/gsd eval-review <sliceId>` | Audit a slice's AI evaluation strategy and write a scored `<sliceId>-EVAL-REVIEW.md`. Flags: `--force` overwrites; `--show` prints the existing audit. See [eval-review](eval-review.md). |
-| `/gsd extract-learnings <MID>` | Extract structured Decisions, Lessons, Patterns, and Surprises from a completed milestone — writes `<MID>-LEARNINGS.md` audit trail, persists durable knowledge through the memory/decision stores, and projects reviewable knowledge into `.gsd/KNOWLEDGE.md` on the next session start. Runs automatically at milestone completion. |
+| `/gsd extract-learnings <MID>` | Extract structured Decisions, Lessons, Patterns, and Surprises from a completed milestone — writes `<MID>-LEARNINGS.md` audit trail, persists durable knowledge through the memory/decision stores, and renders each captured Pattern and Lesson into `.gsd/KNOWLEDGE.md`. Runs automatically at milestone completion. |
 | `/gsd fast` | Toggle service tier for supported models (prioritized API routing) |
-| `/gsd rate` | Rate last unit's model tier (over/ok/under) — improves adaptive routing |
+| `/gsd rate` | Rate last unit's model tier (over/ok/under) or reset the routing history — improves adaptive routing |
 | `/gsd changelog` | Show categorized release notes |
 | `/gsd logs` | Browse activity logs, debug logs, and metrics |
 | `/gsd remote` | Control remote auto-mode |
@@ -103,11 +104,14 @@ After writing the file, GSD attempts to open it in a browser using the local pla
 | `/gsd skill-health --stale N` | Show skills unused for N+ days |
 | `/gsd hooks` | Show configured post-unit and pre-dispatch hooks |
 | `/gsd run-hook` | Manually trigger a specific hook |
-| `/gsd migrate` | Migrate a v1 `.planning` directory to `.gsd` format |
+| `/gsd migrate` | Preview the migration of a v1 `.planning` directory to `.gsd` format, then approve the exact hash shown with `/gsd migrate --preview=<sha256>` |
 | `/gsd recover` | Preview an explicit legacy markdown import, then approve the exact hash shown with `/gsd recover --preview=<sha256>` |
 | `/gsd recover <recoveryActionId>` | Resume one repaired Task recovery abort or remediation after supplying repair and verification evidence |
 | `/gsd rebuild markdown` | Preserve externally edited modeled projections under `.gsd/quarantine/projections/`, then rebuild from the canonical database without importing markdown |
-| `/gsd rebuild database` | Reserved for DB-native rebuilds; does not import markdown projections |
+| `/gsd db bind` | Make this checkout the one the project database belongs to, after the bound checkout was moved or deleted; see [Working in Teams](working-in-teams.md#2-know-what-is-shared) |
+| `/gsd db start-empty` | Start from an empty database on purpose, when GSD refuses a fresh clone with `authority-missing` and you do not want to import the tracked markdown with `/gsd recover`. The choice is stored in the database. No file is changed; see [Working in Teams](working-in-teams.md#importing-committed-planning-changes) |
+| `/gsd db adopt` | Preview the one-time lifecycle backfill for a database made by an older GSD: each milestone, slice and task row with no lifecycle row, and the rule that will adopt it. Unknown statuses are listed and block the run. Rows that are open work under a milestone or slice that is already completed are listed and will be adopted as cancelled. Rows already adopted as cancelled with no Waiver are counted, and so are completions that an import adopted and that have no stored `unverified-legacy` evidence marker yet. While the Restore Window of the last import is open, the markers wait: when they are the only pending work, the preview says so, and `--apply` writes nothing, so the import can still be restored. When rows with no lifecycle row or adopted cancellations with no Waiver are also pending, the preview states that `--apply` closes the Restore Window of the import. With the environment variable `GSD_AUTHORITY_CUTOVER=1`, GSD runs this backfill by itself the first time it opens a database made by an older GSD, and then advances the Authority Epoch. This is opt-in for now. That run changes nothing and lists the rows when a row has an unknown status, when a completion has no evidence, or when open work is under a completed or skipped milestone or slice. Use the command then: fix each unknown status, read the preview, and run `--apply`. The next open advances the Authority Epoch. |
+| `/gsd db adopt --apply` | Write a verified backup beside the database, then adopt every such row in one operation. Skipped and deferred rows, and open rows under a completed parent, become cancelled with a Waiver; a row already adopted as cancelled with no Waiver gets one; a completion that an import adopted gets its `unverified-legacy` evidence marker and stays completed; while the Restore Window of the last import is open and the markers are the only pending work, nothing is written; with other pending work the operation runs and closes that Restore Window; a completion with no evidence becomes open work again, except under a completed parent, where it stays completed as unverified legacy and is listed. Roll back with `/gsd db restore-backup`; a backup taken before the Authority Epoch advanced is refused |
 | `/gsd language <language\|off\|clear>` | Set or clear the global response language |
 
 Use `/gsd run-hook <hook-name> <unit-type> <unit-id>` to trigger a configured hook. Run `/gsd run-hook` without arguments for the supported unit types. The ID must match the selected type's scope: for example, `review complete-milestone M001`, `review plan-slice M001/S01`, or `review execute-task M001/S01/T01` after `/gsd run-hook`. Unique milestone IDs such as `M001-abc123` also work, including within slice and task IDs. Unsupported unit types are rejected with the supported-type list; an invalid ID reports the expected format for its type before the hook is triggered.
@@ -120,15 +124,15 @@ The two `/gsd recover` forms serve different recovery domains. Use the no-argume
 |---------|-------------|
 | `/gsd new-project [--deep]` | Bootstrap a new project; `--deep` enables staged project-level discovery |
 | `/gsd new-milestone [--deep]` | Create a new milestone; `--deep` opts the project into deep planning mode |
-| `/gsd skip` | Prevent a unit from auto-mode dispatch |
-| `/gsd undo` | Revert last completed unit |
+| `/gsd skip` | Cancel a slice or task with a Waiver so auto-mode does not dispatch it |
+| `/gsd undo` | Show the exact effect of an undo of the last completed unit recorded in the database; `/gsd undo --force` then reopens that task, slice, or milestone and stages a revert of its git commits. A unit of any other type is refused |
 | `/gsd undo-task` | Reopen a terminal task through canonical DB recovery authority, then refresh projections |
 | `/gsd reset-slice` | Reopen the full terminal slice and every terminal task in one guarded database operation, preserve prior execution history, then refresh readable status |
 | `/gsd park` | Park a milestone — skip without deleting |
 | `/gsd unpark` | Reactivate a parked milestone |
-| `/gsd discard <milestone-id>` | Confirm and permanently discard one milestone without entering the smart-entry flow |
-| `/gsd rethink` | Conversational project reorganization — reorder, park, discard unadopted work, or add milestones |
-| Discard milestone | Available via `/gsd` wizard → "Milestone actions" → "Discard"; milestones with adopted canonical lifecycle history must be parked instead |
+| `/gsd discard <milestone-id>` | Confirm and discard one milestone: it is cancelled in the database (kept as a tombstone) and its files are removed |
+| `/gsd rethink` | Conversational project reorganization — reorder, park, discard, or add milestones |
+| Discard milestone | Available via `/gsd` wizard → "Milestone actions" → "Discard"; completed or closed milestones are refused |
 
 Milestone and slice titles created during planning must not contain forward slash (`/`), en dash, or em dash characters. GSD reserves those characters as state-document delimiters, so `plan-milestone` rejects titles that include them.
 
@@ -244,7 +248,7 @@ one of four execution modes:
 | Mode              | What it does                                                                              |
 |-------------------|-------------------------------------------------------------------------------------------|
 | `oneshot`         | Prompt-only, no state, no branch. For reviews, triage, changelog generation.              |
-| `yaml-step`       | Full engine with GRAPH.yaml, iterate, and shell-verify. For fan-out batch work.           |
+| `yaml-step`       | Full engine with step rows in the database, iterate, and shell-verify. For fan-out batch work. |
 | `markdown-phase`  | Multi-phase with STATE.json + phase-approval gates. For release, performance audit.       |
 | `auto-milestone`  | Hooks into the full `/gsd auto` pipeline. Reserved for `full-project`.                    |
 
@@ -272,6 +276,20 @@ backwards compatibility.
 | `/gsd workflow validate <name>` | Validate a YAML definition |
 | `/gsd workflow pause` | Pause custom workflow auto-mode |
 | `/gsd workflow resume` | Resume paused custom workflow auto-mode |
+| `/gsd workflow resume <name>/<timestamp>` | Resume a YAML run by the name and timestamp that `/gsd workflow list` shows, also after a crash |
+| `/gsd workflow approve <name>/<timestamp> <step>` | Approve a step that paused for your review (a `human-review` or `prompt-verify` step), then resume the run |
+
+A YAML run is stored in the project database. `DEFINITION.yaml`, `GRAPH.yaml`
+and `PARAMS.json` in `.gsd/workflow-runs/<name>/<timestamp>/` are renders of
+it: GSD writes them again after each step and does not read your edits. A run
+directory from an older release has no database rows: `/gsd workflow list`
+shows it as not imported, and GSD imports it before it runs the next step.
+
+A step with a `human-review` or `prompt-verify` policy pauses the run after it
+runs. Review its output, approve it with
+`/gsd workflow approve <name>/<timestamp> <step>`, and resume the run. The
+approval is stored with the run; the step does not run again. A step that
+failed a check cannot be approved: resume the run and the step runs again.
 
 ### Bundled plugins
 
@@ -431,7 +449,7 @@ The following commands are sent directly in your **Telegram chat** to a configur
 | `gsd install <source> [-l\|--local]` | Install a package from npm, git, a URL, or a local path (e.g. `gsd install npm:@foo/bar`). The default scope is user-wide; `--local` installs into the current project and registers its extensions as project entries. |
 | `gsd remove <source> [-l\|--local]` | Remove a package from the matching user or project scope and unregister its extensions. Use `--local` for a project-local install. |
 | `gsd list` | List installed user/project packages, followed by separate user/project extension sections. |
-| `gsd graph <subcommand>` | Build, query, status, or diff the project knowledge graph built from `.gsd/` artifacts |
+| `gsd graph <subcommand>` | Build, query, status, or diff the project knowledge graph. The build reads the workflow database, and the `.gsd/` artifacts only when the project has no database |
 | `gsd quick <task>` | Execute a quick task without a TUI (alias for `gsd headless quick <task>`) |
 | `gsd headless --json` | Structured JSONL event stream to stdout for scripting, CI, and troubleshooting (alias: `--output-format stream-json`) |
 | `gsd headless new-milestone` | Create a new milestone from a context file (headless — no TUI required) |
@@ -496,7 +514,9 @@ Any `/gsd` subcommand works as a positional argument — `gsd headless status`, 
 
 ### `gsd headless discard-milestone`
 
-Deletes one or more DB-only orphan milestone reservations without starting an RPC session or running projection reconciliation. The mandatory `--orphan-only` guard preflights the complete set and refuses if any target has hierarchy or artifact rows, planning content, a disk projection, queue/dependency references, a worktree or milestone branch, or an active lease/dispatch/worker. No target is deleted unless every target passes; successful deletion occurs in one transaction.
+Deletes one or more DB-only orphan milestone reservations without starting an RPC session or running projection reconciliation. The mandatory `--orphan-only` guard preflights the complete set and refuses if any target has a lifecycle row, hierarchy or artifact rows, planning content, a disk projection, queue/dependency references, a worktree or milestone branch, or an active lease/dispatch/worker. No target is deleted unless every target passes; successful deletion occurs in one transaction.
+
+A milestone that `gsd_milestone_generate_id` or a saved PROJECT Milestone Sequence registers gets a lifecycle row at registration. Lifecycle rows are durable history, so this command refuses such a milestone. Use `/gsd discard <milestone-id>` for it: the milestone is cancelled and stays in the database as a tombstone. This command deletes only reservations that have no lifecycle row, which are rows registered by an earlier version.
 
 ```bash
 gsd headless discard-milestone M015 --orphan-only
@@ -513,7 +533,7 @@ Non-TTY equivalent of the no-argument `/gsd recover` database-import preview and
 gsd headless recover
 ```
 
-The first call prints the sealed Import Preview and exits without applying the import. Review that output, then rerun with the exact `--preview=<preview-hash>` value it prints. That approved run performs the Import Application and assessment.
+The first call prints the sealed Import Preview and exits without applying the import. Review that output, then rerun with the exact `--preview=<preview-hash>` value it prints. That approved run performs the Import Application and assessment. If the Preview has an item that needs a decision, the run exits `1` and applies nothing; see [Migration from v1](./migration.md#post-migration) for the `--choice` options that resolve it.
 
 If assessment recommends destructive restore, rerun with the printed `--application=<operation-id> --restore --consent=proceed:destructive-database-restore:<evidence-hash>` values. Restore is permanently unavailable after any later canonical write or Authority Epoch cutover; follow the printed `--application=<operation-id> --forward-repair` route instead. When Forward Repair reports genuine overlap, supply one printed evidence-bound `--choice` for each target.
 
@@ -576,9 +596,9 @@ MCP mode also exposes the GSD workflow adapter tools used by headless runtimes:
 - Project state and read-only tools: `gsd_query`, `gsd_progress`, `gsd_roadmap`, `gsd_history`, `gsd_doctor`, `gsd_captures`, `gsd_knowledge`, `gsd_graph`
 - Interactive form tool: `ask_user_questions`
 
-For an auto-mode run, call `gsd_execute` first with an absolute `projectDir`. It returns a `sessionId`; poll `gsd_status` with that `sessionId` until the run finishes, then call `gsd_result` for accumulated output or `gsd_cancel` to stop it. If a client loses the `sessionId`, `gsd_status` can fall back to `projectDir`, or omit both fields only when this MCP server tracks exactly one session. Read-only project tools do not require an active session. With the GSD runtime bridge available, `gsd_progress` reads the project-root database and may run pending migrations and synchronize milestone queue order, matching `gsd headless status`. It uses the `STATE.md` projection only when the database is missing or cannot be opened; failures after a successful open are returned as errors. Without the bridge, the standalone MCP package keeps its projection-reader behavior. The other read-only project tools continue to read `.gsd/` projections directly.
+For an auto-mode run, call `gsd_execute` first with an absolute `projectDir`. It returns a `sessionId`; poll `gsd_status` with that `sessionId` until the run finishes, then call `gsd_result` for accumulated output or `gsd_cancel` to stop it. If a client loses the `sessionId`, `gsd_status` can fall back to `projectDir`, or omit both fields only when this MCP server tracks exactly one session. Read-only project tools do not require an active session. With the GSD runtime bridge available, `gsd_progress` reads the project-root database and may run pending migrations and synchronize milestone queue order, matching `gsd headless status`. It uses the `STATE.md` projection only when the database is missing or cannot be opened; failures after a successful open are returned as errors. Without the bridge, the standalone MCP package keeps its projection-reader behavior. `gsd_query`, `gsd_roadmap`, `gsd_doctor`, `gsd_captures`, `gsd_knowledge`, `gsd_history` and the `gsd_graph` build follow the same database-first rule, and a result from the projection fallback says so in `readMetadata`. The graph build still reads LEARNINGS files for learning nodes.
 
-The integration CLI `gsd read progress --json --project <path>` follows the same database-first and projection-fallback contract as `gsd_progress`.
+The integration CLI commands `gsd read progress --json --project <path>` and `gsd read roadmap --json --project <path>` follow the same database-first and projection-fallback contract as `gsd_progress` and `gsd_roadmap`.
 
 ## In-Session Update
 

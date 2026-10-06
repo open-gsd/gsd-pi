@@ -10,7 +10,7 @@ You are running the GSD **pause-work** workflow — create a context handoff whe
 
 2. **Capture open threads.** Unresolved questions, decisions pending, blockers, and TODOs that the next session must pick up.
 
-3. **Write the handoff.** Persist a `HANDOFF.md` (or append to the slice's running notes) in `.gsd/` with: state snapshot, in-flight work, open threads, and the explicit resume instruction ("next: resume <slice/task>, do <X>").
+3. **Save the handoff.** Call `gsd_checkpoint_save` with the active `milestoneId` (plus `sliceId` and `taskId` when one is active) and `kind: "handoff"`: `confirmedContext` is the state snapshot and in-flight work, `unresolved` is the open threads, and `nextAction` is the explicit resume instruction ("resume <slice/task>, do <X>"). The checkpoint is a database row; do not write `HANDOFF.md` or `continue.md`.
 
 4. **Pause cleanly.** Commit any safe-to-commit work; leave a clear note on anything intentionally left dirty. Trigger the gsd-pi pause (`/gsd pause`) so auto-mode stops.
 

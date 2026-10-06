@@ -2,9 +2,9 @@
 // File Purpose: Read-only exact-head restore eligibility and recommendation contract.
 
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, test } from "node:test";
 
@@ -24,9 +24,13 @@ import {
   type LegacyImportPreviewArtifact,
 } from "../legacy-import-preview.ts";
 import {
+  _setLegacyImportBaseSnapshotSchemaVersionForTest,
   captureCurrentLegacyImportBaseSnapshot,
+  legacyImportBaseSnapshotAtVersion,
   type LegacyImportBaseSnapshot,
 } from "../legacy-import-preview-base.ts";
+import { inspectLegacyImportApplicationEvidence } from "../legacy-import-application-evidence.ts";
+import { verifyLegacyImportApplicationResult } from "../legacy-import-application-result.ts";
 import {
   _setLegacyImportRestoreAssessmentBoundaryForTest,
   assessLegacyImportRestore,
@@ -41,12 +45,14 @@ import {
 import { SCHEMA_VERSION } from "../db/engine.ts";
 import type { LegacyImportForwardRepairPlan } from "../legacy-import-forward-repair-plan.ts";
 import { _getAdapter, closeDatabase, openDatabase } from "../gsd-db.ts";
+import { openWorkflowDatabase } from "../db-workspace.ts";
 import {
   cutoverProjectAuthority,
   inspectProjectAuthorityCutoverEvidence,
   PROJECT_AUTHORITY_CONTRACT_VERSION,
   PROJECT_AUTHORITY_CUTOVER_CONSENT_SCHEMA_VERSION,
 } from "../project-authority-cutover-domain-operation.ts";
+import { setAuthorityCutoverFlag } from "./helpers/authority-cutover-flag.ts";
 import { createLegacyImportCorpusSourceRoots } from "./helpers/legacy-import-corpus.ts";
 
 const CORPUS_ROOT = fileURLToPath(new URL("./__fixtures__/legacy-import-corpus/v1/", import.meta.url));
@@ -77,13 +83,16 @@ function rows(sql: string): Array<Record<string, unknown>> {
   return db().prepare(sql).all();
 }
 
-function prepareCase(apply = true): PreparedCase {
+function prepareCase(apply = true, inProjectGsd = false, knowledgeRow = false): PreparedCase {
   sequence += 1;
   const workspace = mkdtempSync(join(tmpdir(), "gsd-restore-assessment-"));
   tempDirectories.add(workspace);
   const source = join(workspace, "source");
   const backupDirectory = join(workspace, "backups");
-  const databasePath = join(workspace, "canonical.sqlite");
+  const databasePath = inProjectGsd
+    ? join(workspace, "project", ".gsd", "gsd.db")
+    : join(workspace, "canonical.sqlite");
+  if (inProjectGsd) mkdirSync(dirname(databasePath), { recursive: true });
   cpSync(join(CORPUS_ROOT, "gsd-nested", "source"), source, {
     recursive: true,
     dereference: false,
@@ -91,6 +100,16 @@ function prepareCase(apply = true): PreparedCase {
   });
   mkdirSync(backupDirectory);
   assert.equal(openDatabase(databasePath), true);
+  if (knowledgeRow) {
+    db().prepare(`INSERT INTO memories (
+        id, category, content, confidence, created_at, updated_at, scope, tags, structured_fields
+      ) VALUES (
+        'knowledge-k001', 'rule', 'Use tabs', 0.85, '2026-01-01T00:00:00.000Z',
+        '2026-01-01T00:00:00.000Z', 'project', '[]', :structured_fields
+      )`).run({
+      ":structured_fields": JSON.stringify({ sourceKnowledgeTable: "rules", rule: "Use tabs", sourceKnowledgeId: "K001" }),
+    });
+  }
   const roots = createLegacyImportCorpusSourceRoots(source);
   const previewInput = { roots };
   const base = captureCurrentLegacyImportBaseSnapshot();
@@ -252,6 +271,7 @@ function assertDeepFrozen(value: unknown, seen = new Set<object>()): void {
 }
 
 afterEach(() => {
+  _setLegacyImportBaseSnapshotSchemaVersionForTest();
   _setLegacyImportRestoreAssessmentBoundaryForTest(null);
   closeDatabase();
   for (const directory of tempDirectories) rmSync(directory, { recursive: true, force: true });
@@ -282,6 +302,37 @@ test("uncommitted Application needs only transaction rollback", () => {
   assert.equal(result.reasonCode, "APPLICATION_NOT_COMMITTED");
   assert.equal(result.recommendation.recommendedOptionId, "let-transaction-rollback");
   assert.equal(result.recommendation.question, null);
+});
+
+test("an Application of base snapshot schema 1 is compared without the knowledge rows that schema 2 added", () => {
+  // An earlier build made the Preview, the backup and the Application.
+  _setLegacyImportBaseSnapshotSchemaVersionForTest(1);
+  const prepared = prepareCase(true, false, true);
+  _setLegacyImportBaseSnapshotSchemaVersionForTest();
+  const current = captureCurrentLegacyImportBaseSnapshot();
+  assert.equal(current.snapshot_schema_version, 2);
+  assert.equal(prepared.base.snapshot_schema_version, 1);
+  assert.ok(current.rows.some((entry) => entry.row_set === "knowledge_memories"));
+  const application = inspectLegacyImportApplicationEvidence(
+    String(row("SELECT operation_id FROM workflow_import_applications").operation_id),
+  );
+  assert.notEqual(current.relevant_rows_hash, application.applicationRelevantRowsHash);
+  assert.equal(
+    legacyImportBaseSnapshotAtVersion(current, 1).relevant_rows_hash,
+    application.applicationRelevantRowsHash,
+  );
+
+  // Nothing changed after the Application: restore is offered, not refused.
+  const consentRequired = assessLegacyImportRestore(assessmentInput(prepared));
+  assert.equal(consentRequired.decision, "restore-consent-required");
+  assert.equal(consentRequired.facts.expectedRelevantRowsHash, consentRequired.facts.observedRelevantRowsHash);
+  verifyLegacyImportApplicationResult(application);
+
+  // A changed canonical row is still refused.
+  db().prepare("UPDATE milestones SET title = 'Changed outside a Domain Operation'").run();
+  const changed = assessLegacyImportRestore(assessmentInput(prepared));
+  assert.equal(changed.decision, "refused");
+  assert.equal(changed.reasonCode, "APPLICATION_STATE_CHANGED");
 });
 
 test("exact head recommends restore, requires bound Consent, and remains read-only", () => {
@@ -325,6 +376,53 @@ test("exact head recommends restore, requires bound Consent, and remains read-on
   assert.equal(eligible.recommendation.question, null);
   assert.deepEqual(durableSnapshot(), before);
   assert.equal(hashLegacyImportValue([...readFileSync(prepared.backup.backup_ref)]), backupBytes);
+});
+
+test("an Import Application recorded before checkout binding stays restorable after bind and rebind", () => {
+  const prepared = prepareCase(true, true);
+  assert.equal(prepared.backup.project_root_realpath, "", "the backup was taken while the database was unbound");
+  closeDatabase();
+  const projectRoot = dirname(dirname(prepared.databasePath));
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+  assert.equal(row("SELECT project_root_realpath FROM project_authority").project_root_realpath, realpathSync(projectRoot));
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
+
+  // /gsd db bind moves the binding; the retained Application keeps its restore path.
+  db().prepare("UPDATE project_authority SET project_root_realpath = '/moved/checkout'").run();
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
+});
+
+test("an open leaves the Restore Window open; the open after later accepted work cuts the project over", (t) => {
+  t.after(setAuthorityCutoverFlag("1"));
+  const prepared = prepareCase(true, true);
+  closeDatabase();
+  const projectRoot = dirname(dirname(prepared.databasePath));
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+  assert.deepEqual(row("SELECT revision, authority_epoch FROM project_authority"), { revision: 1, authority_epoch: 0 });
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).decision, "restore-consent-required");
+
+  executeDomainOperation({
+    operationType: "milestone.describe",
+    idempotencyKey: "restore-assessment/later-work-before-open",
+    expectedRevision: 1,
+    expectedAuthorityEpoch: 0,
+    actorType: "agent",
+    sourceTransport: "internal",
+    payload: { accepted: true },
+  }, () => ({
+    events: [{
+      eventType: "milestone.described",
+      entityType: "milestone",
+      entityId: "M001",
+      payload: { accepted: true },
+      destinations: ["projection"],
+    }],
+    projections: [{ projectionKey: "milestone/m001", projectionKind: "state", rendererVersion: "1" }],
+  }));
+  closeDatabase();
+  assert.equal(openWorkflowDatabase(projectRoot).ok, true);
+  assert.equal(row("SELECT authority_epoch FROM project_authority").authority_epoch, 1);
+  assert.equal(assessLegacyImportRestore(assessmentInput(prepared)).reasonCode, "AUTHORITY_CUTOVER_COMMITTED");
 });
 
 test("later canonical work permanently recommends Forward Repair before coordination", () => {

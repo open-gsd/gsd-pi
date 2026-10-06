@@ -21,12 +21,12 @@
 import type { Api, Model } from "@gsd/pi-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@gsd/pi-coding-agent";
 import type { GitServiceImpl } from "../git-service.js";
-import type { CaptureEntry } from "../captures.js";
 import { SourceObservationStore, supportsSourceObservationsForUnit } from "../source-observations.js";
 import type { BudgetAlertLevel } from "../auto-budget.js";
 import type { AutoOrchestrationModule } from "./contracts.js";
 import { resolveWorktreeProjectRoot } from "../worktree-root.js";
 import { normalizeRealPath } from "../paths.js";
+import { noteGlobalIdleWatchdogUnitStarted } from "./global-idle-watchdog.js";
 import type { MilestoneScope } from "../workspace.js";
 import type { RootDirtySnapshot } from "../root-write-leak-guard.js";
 import type { MilestoneSettlementOutcome } from "../milestone-settlement.js";
@@ -75,6 +75,7 @@ export interface PendingOrchestrationDispatch {
  * A typed item enqueued by postUnitPostVerification for the main loop to
  * drain via the standard runUnit path. Replaces inline dispatch
  * (pi.sendMessage / s.cmdCtx.newSession()) for hooks, triage, and quick-tasks.
+ * The queue is the unit_dispatch_sidecars table (db/unit-dispatch-sidecars.ts).
  */
 export interface SidecarItem {
   kind: "hook" | "triage" | "quick-task";
@@ -83,17 +84,8 @@ export interface SidecarItem {
   prompt: string;
   /** Model override for hook units (e.g. "anthropic/claude-3-5-sonnet"). */
   model?: string;
-  /** Capture ID for quick-task items (already marked executed at enqueue time). */
+  /** Capture ID for quick-task items. */
   captureId?: string;
-}
-
-export interface PreExecFailure {
-  /** Milestone/slice that failed (e.g. "M001/S02"). */
-  unitId: string;
-  /** Verbatim blocking check strings from the failed gate run. */
-  blockingFindings: string[];
-  /** Condensed gate verdict excerpt for context (status + rationale). */
-  verdictExcerpt: string;
 }
 
 // ─── Constants ───────────────────────────────────────────────────────────────
@@ -147,7 +139,6 @@ export class AutoSession {
   // ── Dispatch counters ────────────────────────────────────────────────────
   readonly unitDispatchCount = new Map<string, number>();
   readonly unitLifetimeDispatches = new Map<string, number>();
-  readonly unitRecoveryCount = new Map<string, number>();
 
   // ── Timers ───────────────────────────────────────────────────────────────
   unitTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
@@ -179,6 +170,8 @@ export class AutoSession {
   autoModeStartThinkingLevel: ThinkingLevelSnapshot | null = null;
   originalThinkingLevel: ThinkingLevelSnapshot | null = null;
   lastBudgetAlertLevel: BudgetAlertLevel = 0;
+  /** True after the budget guard looked for metrics.json spend that the database does not hold. */
+  uncountedLedgerSpendNotified = false;
 
   // ── Recovery ─────────────────────────────────────────────────────────────
   pendingCrashRecovery: string | null = null;
@@ -196,51 +189,27 @@ export class AutoSession {
    * journal, the dispatch ledger, and the operator.
    */
   lastSafetyBlockRecovery: { recoveryActionId?: string; resumeInstruction: string } | null = null;
+  /**
+   * Verification retry counts of custom-engine steps; each count is stored on
+   * the step's custom_workflow_steps row (verify_retries). A dev-engine unit
+   * keeps its count on its dispatch row (budget kind `verification`).
+   */
   readonly verificationRetryCount = new Map<string, number>();
-  readonly verificationRetryFailureHashes = new Map<string, string>();
-  readonly exhaustedVerificationUnits = new Set<string>();
-  readonly zeroToolRetryCount = new Map<string, number>();
+  /**
+   * Budget counts for units that run with no unit_dispatches row (custom-engine
+   * steps, no database). A unit with a dispatch row keeps its counts on that
+   * row instead — see db/unit-dispatch-budgets.ts (ADR-048).
+   */
+  readonly unclaimedUnitBudgets = new Map<string, number>();
   pausedSessionFile: string | null = null;
-  pausedUnitType: string | null = null;
-  pausedUnitId: string | null = null;
+  /** The dispatch row the open pause links to (auto_pauses.dispatch_id). */
+  pausedDispatchId: number | null = null;
   resourceVersionOnStart: string | null = null;
-  lastStateRebuildAt = 0;
-
-  // ── Sidecar queue ─────────────────────────────────────────────────────
-  sidecarQueue: SidecarItem[] = [];
-
-  // ── Pre-exec gate failure context (#4551) ───────────────────────────
-  /**
-   * Persisted when a pre-execution gate fails on a plan-slice or refine-slice
-   * unit. The planning → plan-slice dispatch rule reads this field and injects
-   * the failure details into the next re-dispatch prompt so the LLM can fix the
-   * specific issues instead of producing an identical plan.
-   *
-   * Cleared after it has been consumed (injected into the prompt) to avoid
-   * stale context bleeding into unrelated slices.
-   */
-  lastPreExecFailure: PreExecFailure | null = null;
-  /**
-   * Tracks how many consecutive times each slice unit has failed pre-execution
-   * checks. Keyed by unitId (e.g. "M001/S01"). Used to break the infinite
-   * plan-slice → pre-exec fail → re-dispatch loop when the planner cannot fix
-   * the issues after MAX_PRE_EXEC_RETRIES re-attempts.
-   */
-  readonly preExecRetryCount: Map<string, number> = new Map();
-  /**
-   * Tracks how many times each slice unit has been re-dispatched to plan-slice
-   * because task plan files were missing. Keyed by unitId (e.g. "M001/S01").
-   * Separate from preExecRetryCount so pre-exec gate failures do not block or
-   * conflate with missing-task-plan recovery.
-   */
-  readonly missingTaskPlanRetryCount: Map<string, number> = new Map();
 
   // ── Tool invocation errors (#2883) ──────────────────────────────────
   /** Set when a GSD tool execution ends with isError due to malformed/truncated
    *  JSON arguments. Checked by postUnitPreVerification to break retry loops. */
   lastToolInvocationError: string | null = null;
-  /** Consecutive tool-unavailable retries for the current unit (MCP startup race). */
-  toolUnavailableRetries = 0;
   /** Agent-end messages from the just-finished unit, consumed during finalize. */
   lastUnitAgentEndMessages: unknown[] | null = null;
   /** Set when turn-level git action fails during closeout. */
@@ -279,7 +248,6 @@ export class AutoSession {
   autoStartTime = 0;
   lastPromptCharCount: number | undefined;
   lastBaselineCharCount: number | undefined;
-  pendingQuickTasks: CaptureEntry[] = [];
   /** Timestamp of the last LLM request dispatch (ms since epoch). Used for proactive rate limiting. */
   lastRequestTimestamp = 0;
 
@@ -297,7 +265,6 @@ export class AutoSession {
   // ── Orchestration seam ───────────────────────────────────────────────────
   orchestration: AutoOrchestrationModule | null = null;
   pendingOrchestrationDispatch: PendingOrchestrationDispatch | null = null;
-  pendingVerificationRetryDispatch: PendingOrchestrationDispatch | null = null;
 
   // ── Loop promise state ──────────────────────────────────────────────────
   // Per-unit resolve function and session-switch guard live at module level
@@ -319,6 +286,11 @@ export class AutoSession {
 
   setCurrentUnit(unit: CurrentUnit): void {
     this.currentUnit = unit;
+    // A unit just appeared: the session-level idle watchdog (#2373) re-arms
+    // exactly here — covering every unit appearance path, including resumed
+    // host-verification contexts that never run startUnitSupervision. No-op
+    // when the watchdog is not running for this session.
+    noteGlobalIdleWatchdogUnitStarted(this);
     if (!supportsSourceObservationsForUnit(unit.type)) {
       this.sourceObservations.clear();
       return;
@@ -390,7 +362,6 @@ export class AutoSession {
     // Dispatch
     this.unitDispatchCount.clear();
     this.unitLifetimeDispatches.clear();
-    this.unitRecoveryCount.clear();
 
     // Unit
     this.clearCurrentUnit();
@@ -411,6 +382,7 @@ export class AutoSession {
     this.autoModeStartThinkingLevel = null;
     this.originalThinkingLevel = null;
     this.lastBudgetAlertLevel = 0;
+    this.uncountedLedgerSpendNotified = false;
 
     // Recovery
     this.pendingCrashRecovery = null;
@@ -418,29 +390,19 @@ export class AutoSession {
     this.lastTaskRecoveryAbortId = null;
     this.lastSafetyBlockRecovery = null;
     this.verificationRetryCount.clear();
-    this.verificationRetryFailureHashes.clear();
-    this.exhaustedVerificationUnits.clear();
-    this.zeroToolRetryCount.clear();
+    this.unclaimedUnitBudgets.clear();
     this.pausedSessionFile = null;
-    this.pausedUnitType = null;
-    this.pausedUnitId = null;
+    this.pausedDispatchId = null;
     this.resourceVersionOnStart = null;
-    this.lastStateRebuildAt = 0;
 
     // Metrics
     this.autoStartTime = 0;
     this.lastPromptCharCount = undefined;
     this.lastBaselineCharCount = undefined;
-    this.pendingQuickTasks = [];
     this.lastRequestTimestamp = 0;
-    this.sidecarQueue = [];
     this.rewriteAttemptCount = 0;
     this.consecutiveCompleteBootstraps = 0;
-    this.lastPreExecFailure = null;
-    this.preExecRetryCount.clear();
-    this.missingTaskPlanRetryCount.clear();
     this.lastToolInvocationError = null;
-    this.toolUnavailableRetries = 0;
     this.lastUnitAgentEndMessages = null;
     this.lastGitActionFailure = null;
     this.lastGitActionStatus = null;
@@ -461,7 +423,6 @@ export class AutoSession {
     // Orchestration seam
     this.orchestration = null;
     this.pendingOrchestrationDispatch = null;
-    this.pendingVerificationRetryDispatch = null;
 
     // Loop promise state lives in auto-loop.ts module scope
   }

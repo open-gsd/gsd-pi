@@ -1,7 +1,7 @@
 // gsd-pi — Auto-worktree cleanup helpers.
 //
 // Owns shared cleanup primitives used by teardown and merge cleanup paths:
-// same-file DB reconciliation checks, transient project-root state removal,
+// the worktree-local DB check, transient project-root state removal,
 // git pathspec conversion for externally-rooted .gsd paths, and expected
 // unlink error classification.
 
@@ -9,7 +9,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, realpathSync, unlinkSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
 
-import { gsdRoot } from "./paths.js";
+import { gsdRoot, normalizeRealPath } from "./paths.js";
 import { milestoneMetaPath } from "./git-service.js";
 import { logWarning } from "./workflow-logger.js";
 
@@ -27,13 +27,40 @@ export function _isSamePath(a: string, b: string): boolean {
   return isSamePath(a, b);
 }
 
-export function _shouldReconcileWorktreeDb(
+/**
+ * True when the worktree holds its own gsd.db, a file other than the project
+ * database. Worktrees share the project database, so such a file comes from
+ * an older release, a manual copy, or a git-tracked gsd.db.
+ */
+export function _hasWorktreeLocalDb(
   worktreeDbPath: string,
   mainDbPath: string,
   pathExists: (path: string) => boolean = existsSync,
   samePath: (a: string, b: string) => boolean = isSamePath,
 ): boolean {
   return pathExists(worktreeDbPath) && !samePath(worktreeDbPath, mainDbPath);
+}
+
+/**
+ * The path where a worktree holds a gsd.db of its own, or null when the
+ * worktree `.gsd` resolves outside the worktree directory. That layout is
+ * shared external state: a gsd.db there is project state, not a worktree-local
+ * file, also when the project `.gsd` no longer points at the same directory.
+ */
+export function worktreeOwnDbPath(worktreeRoot: string): string | null {
+  const ownGsd = join(normalizeRealPath(worktreeRoot), ".gsd");
+  return normalizeRealPath(ownGsd) === ownGsd ? join(ownGsd, "gsd.db") : null;
+}
+
+/**
+ * The stop message for a worktree-local gsd.db. GSD never merges such a file
+ * into the project database on its own: the operator imports it explicitly.
+ */
+export function worktreeLocalDbInstruction(worktreeDbPath: string, worktreeName: string): string {
+  return `worktree-local database found at ${worktreeDbPath}. ` +
+    `GSD does not merge it into the project database automatically. ` +
+    `Run /worktree import-db ${worktreeName} to preview and import its rows, ` +
+    `or delete the file when its rows are not needed.`;
 }
 
 export function _isExpectedWorktreeUnlinkError(
@@ -88,12 +115,11 @@ export function clearProjectRootStateFiles(
   milestoneId: string,
 ): void {
   const gsdDir = gsdRoot(basePath);
-  // Phase C pt 2: auto.lock removed from this list — the file is gone
-  // (migrated to the workers + unit_dispatches + runtime_kv tables). The
-  // remaining transient files (STATE.md, {MID}-META.json) are still
-  // worth removing on teardown.
+  // auto.lock is not in this list: the session lock owns that file and
+  // releases it. The remaining transient file ({MID}-META.json) is still
+  // worth removing on teardown. STATE.md is a DB projection and is never
+  // deleted here.
   const transientFiles = [
-    join(gsdDir, "STATE.md"),
     // Integration-branch META now lives flat at .gsd/<MID>-META.json (ADR-045).
     milestoneMetaPath(basePath, milestoneId),
     // Legacy location — still cleaned for pre-migration trees.

@@ -126,29 +126,3 @@ test("auto-dispatch uses discuss-headless prompt for needs-discussion when GSD_H
   assert.match(result.prompt, /This is a \*\*headless\*\* flow/);
   assert.doesNotMatch(result.prompt, /\*\*Structured questions available: true\*\*/);
 });
-
-test("auto-dispatch pauses after execution-entry discuss-milestone recovery", async (t) => {
-  const tmp = makeTestBase(t, "gsd-discuss-milestone-executing-");
-
-  unsetGsdHeadless(t);
-
-  const result = await resolveDispatch(makeContext(tmp, "executing", "true"));
-
-  assert.equal(result.action, "dispatch");
-  assert.equal(result.unitType, "discuss-milestone");
-  assert.equal(result.pauseAfterDispatch, true);
-});
-
-test("auto-dispatch uses discuss-headless prompt for executing when GSD_HEADLESS is set", async (t) => {
-  const tmp = makeTestBase(t, "gsd-discuss-milestone-headless-");
-
-  setGsdHeadless(t);
-
-  const result = await resolveDispatch(makeContext(tmp, "executing", "true"));
-
-  assert.equal(result.action, "dispatch");
-  assert.equal(result.unitType, "discuss-milestone");
-  assert.equal(result.pauseAfterDispatch, false);
-  assert.match(result.prompt, /This is a \*\*headless\*\* flow/);
-  assert.doesNotMatch(result.prompt, /\*\*Structured questions available: true\*\*/);
-});

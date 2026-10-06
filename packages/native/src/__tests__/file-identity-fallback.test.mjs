@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { lstatSync, mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -121,4 +122,65 @@ test("projection root lock permits root writes, excludes a second owner, and rea
     lock = acquireProjectionRootIdentityLock(root, stat.dev.toString(), stat.ino.toString());
     assert.equal(lock.readFile("PROJECT.md").toString(), "# Project\n", `acquisition ${acquisition}`);
   }
+});
+
+// The tree digest the native removal guard recomputes: every node contributes
+// its path relative to the tree root and its kind, files add their bytes.
+function projectionTreeDigest(lock, treePath) {
+  const hash = createHash("sha256");
+  const visit = (path, relativePath) => {
+    const kind = lock.pathKind(path);
+    hash.update(`${relativePath}\0${kind}\0`);
+    if (kind === "file") {
+      hash.update(lock.readFile(path));
+      hash.update("\0");
+      return;
+    }
+    for (const name of lock.listDirectory(path)) {
+      visit(`${path}/${name}`, relativePath.length === 0 ? name : `${relativePath}/${name}`);
+    }
+  };
+  visit(treePath, "");
+  return `sha256:${hash.digest("hex")}`;
+}
+
+// The removal claims the tree root with an exclusive handle and then publishes
+// its deletion manifest by renaming inside that same directory. On Windows a
+// rename that makes the kernel open the claimed directory collides with the
+// claim itself (ERROR_SHARING_VIOLATION / os error 32) on every attempt.
+// The tree is nested, with a top-level file that sorts before the directory:
+// the manifest is read back in its canonical order (deepest first), so the
+// entries written must use that order too or the commit check rejects them.
+test("replayable tree deletion removes a nested tree it holds exclusively", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "gsd-native-projection-tree-delete-"));
+  const previousNativePreference = process.env.GSD_NATIVE_PREFER_LOCAL;
+  let lock;
+  t.after(() => {
+    try {
+      lock?.close();
+    } finally {
+      if (previousNativePreference === undefined) {
+        delete process.env.GSD_NATIVE_PREFER_LOCAL;
+      } else {
+        process.env.GSD_NATIVE_PREFER_LOCAL = previousNativePreference;
+      }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+  const stat = lstatSync(root, { bigint: true });
+  process.env.GSD_NATIVE_PREFER_LOCAL = "1";
+  const { acquireProjectionRootIdentityLock } = require("../../dist/file-identity");
+  lock = acquireProjectionRootIdentityLock(root, stat.dev.toString(), stat.ino.toString());
+
+  const tree = "phases/01-m001";
+  lock.createDirectory(`${tree}/slices`);
+  lock.writeFile(`${tree}/ROADMAP.md`, Buffer.from("# Roadmap\n"));
+  lock.writeFile(`${tree}/slices/S01-PLAN.md`, Buffer.from("# Plan\n"));
+  lock.writeFile("phases/KEEP.md", Buffer.from("# Sibling\n"));
+
+  const identity = lock.pathIdentity(tree);
+  lock.removeFileViaGuardExact(tree, identity, tree, true, projectionTreeDigest(lock, tree), true);
+
+  assert.equal(lock.pathExists(tree), false, "the claimed tree is gone");
+  assert.equal(lock.readFile("phases/KEEP.md").toString(), "# Sibling\n", "a sibling outside the tree is untouched");
 });

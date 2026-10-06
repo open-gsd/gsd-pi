@@ -24,7 +24,7 @@ import type { PublishVerifiedTaskCompletionInput } from "../task-completion-comp
 import { internalExecutionInvocation } from "../execution-invocation.js";
 import type { TaskTechnicalVerdictSnapshot } from "../task-verification-domain-operation.js";
 import { describeHostVerificationRationale } from "../verification-verdict.js";
-import type { UnitPhaseResult } from "./workflow-unit-dispatch.js";
+import type { UnitPhaseResult } from "./types.js";
 
 export interface TaskExecutionCutoverInput {
   unitType: string;
@@ -48,6 +48,16 @@ export interface TaskExecutionCutoverDeps {
     "recoveryActionId" | "action" | "recoveryOwner" | "resumeAuthorized" | "resumeEligibility"
   > | null;
   readTaskTechnicalVerdict(attemptId: string): TaskTechnicalVerdictSnapshot | null;
+  /** #2416 grace bound: whether the grace was already granted for the Attempt. */
+  readGrantedResumeGrace?(attemptId: string): boolean;
+  /** #2416 grace bound: record that the grace was granted for the Attempt. */
+  markResumeGraceGranted?(attemptId: string): void;
+  /**
+   * Fencing token of the lease currently held by this worker for the
+   * milestone, or null when no validly held lease can be read. Optional so
+   * non-loop callers and tests keep the session-cached token behavior.
+   */
+  resolveHeldMilestoneLeaseToken?(milestoneId: string, workerId: string): number | null;
   claimTaskAttempt(input: ClaimTaskAttemptInput): ClaimTaskAttemptReceipt;
   settleTaskAttempt(input: SettleTaskAttemptInput): SettleTaskAttemptReceipt;
   routeTaskFailure(input: RouteFailureInput): TaskRecoveryReceipt;
@@ -420,6 +430,26 @@ function isNewlyRecordedBlocker(
     attempt.resultFailureClass === "blocker-discovered";
 }
 
+/**
+ * #2416: the running Attempt is the direct successor claimed by an authorized
+ * recovery resume — its predecessor's abort route still carries the
+ * already-resumed marker. The resume's one-shot successor authorization is
+ * consumed by the claim itself, so settling this Attempt as
+ * missing-executor-result on its first reconcile pass would convert a
+ * resumable state into a terminal lifecycle-progression route with the
+ * authorization already spent, stranding the task (no running Attempt to
+ * close, no re-issuable recovery action).
+ */
+function isResumedSuccessorClaim(
+  attempt: TaskExecutionAttemptSnapshot,
+  deps: TaskExecutionCutoverDeps,
+): boolean {
+  if (!attempt.retryOfAttemptId) return false;
+  const predecessorRoute = deps.readTaskRecoveryRoute(attempt.retryOfAttemptId);
+  return predecessorRoute?.recoveryOwner === "agent"
+    && predecessorRoute.action === "abort"
+    && predecessorRoute.resumeEligibility?.failedGuard === "already-resumed";
+}
 function reconcileNext(
   input: TaskExecutionCutoverInput,
   attemptId: string,
@@ -453,6 +483,26 @@ function reconcileNext(
     throw new Error("execute-task next requires a succeeded Result at the verify stage");
   }
 
+  // #2416 grace window: a just-claimed resumed successor whose executor turn
+  // ended without staging a succeeded Result has had no reconcile judgment
+  // yet. Leave it running and re-dispatch instead of settling it
+  // missing-executor-result; the next pass's same-session interrupt yields a
+  // bounded, repairable stale-worker recovery rather than a terminal
+  // lifecycle-progression route over a consumed authorization. The grace is
+  // bounded to one pass per Attempt with a durable attempt-scoped marker, so
+  // a same-dispatch claim replay re-enters the ordinary settlement instead of
+  // looping the grace.
+  if (
+    attempt
+    && isResumedSuccessorClaim(attempt, deps)
+    && deps.readGrantedResumeGrace
+    && deps.markResumeGraceGranted
+    && deps.readGrantedResumeGrace(attempt.attemptId) !== true
+  ) {
+    deps.markResumeGraceGranted(attempt.attemptId);
+    return { action: "retry", reason: "task-recovery-resumed-claim-grace" };
+  }
+
   const recovery = settleRunningAttempt(
     input,
     attemptId,
@@ -478,6 +528,18 @@ export async function runWithTaskExecutionAttempt(
   }
   const terminalAbort = deps.readTerminalTaskRecoveryAbort(task);
   if (terminalAbort) return taskRecoveryAbortResult(terminalAbort.recoveryActionId);
+  // #2443: re-read the currently held lease token immediately before the
+  // claim path. The session-cached token can lag the database once the lease
+  // TTL (60s) elapses during a long unit turn + finalize, and an Attempt
+  // claimed under a stale token aborts on every later state transition
+  // (attempt fencing trigger), orphaning the task in_progress with the
+  // artifact already on disk. When a validly held token resolves, the
+  // interrupt settlement and the claim carry it; when nothing valid is held,
+  // the cached token is kept so the claim fails closed exactly as before.
+  const heldLeaseToken = deps.resolveHeldMilestoneLeaseToken?.(task.milestoneId, identity.workerId);
+  const claimIdentity = typeof heldLeaseToken === "number" && heldLeaseToken > 0
+    ? { ...identity, milestoneLeaseToken: heldLeaseToken }
+    : identity;
   let claim: ClaimTaskAttemptReceipt | undefined;
   let result: UnitPhaseResult;
   try {
@@ -486,7 +548,7 @@ export async function runWithTaskExecutionAttempt(
       if (isClaimReplay(predecessor, identity)) {
         retryOfAttemptId = predecessor.retryOfAttemptId;
       } else {
-        const recovery = interruptStaleAttempt(input, predecessor, identity, deps);
+        const recovery = interruptStaleAttempt(input, predecessor, claimIdentity, deps);
         const decision = applyRecoveryDecision(recovery);
         if (decision.action === "break" || recovery.status === "committed") return decision;
         retryOfAttemptId = predecessor.attemptId;
@@ -558,15 +620,15 @@ export async function runWithTaskExecutionAttempt(
     }
     claim = deps.claimTaskAttempt({
       invocation: internalExecutionInvocation(
-        `internal:auto:attempt.claim:${identity.dispatchId}`,
+        `internal:auto:attempt.claim:${claimIdentity.dispatchId}`,
         {
-          actorId: identity.workerId,
+          actorId: claimIdentity.workerId,
         },
       ),
       task,
-      workerId: identity.workerId,
-      milestoneLeaseToken: identity.milestoneLeaseToken,
-      coordinationDispatchId: identity.dispatchId,
+      workerId: claimIdentity.workerId,
+      milestoneLeaseToken: claimIdentity.milestoneLeaseToken,
+      coordinationDispatchId: claimIdentity.dispatchId,
       ...(retryOfAttemptId ? { retryOfAttemptId } : {}),
     });
 

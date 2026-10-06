@@ -141,6 +141,7 @@ function validateMilestoneParams() {
 test("complete-task writes SUMMARY under the active worktree projection", async (t) => {
   const { projectRoot, worktreeRoot } = makeFixture(t);
   seedMilestoneAndSlice();
+  insertTask({ id: "T01", sliceId: SID, milestoneId: MID, status: "pending", title: "Task" });
   insertTask({ id: "T02", sliceId: SID, milestoneId: MID, status: "pending", title: "Other task" });
 
   const result = await handleCompleteTask(completeTaskParams(), worktreeRoot);

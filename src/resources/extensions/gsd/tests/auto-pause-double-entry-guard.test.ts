@@ -31,7 +31,7 @@ test("pauseAuto sets s.active = false synchronously before first await (blocks c
     // must already be false at this point. In the old code it was only set at the very
     // end of the async chain, leaving the door open for a second concurrent call to
     // pass the guard and execute the full pause body.
-    const firstPause = pauseAuto();
+    const firstPause = pauseAuto(undefined, undefined, "user_request");
 
     assert.equal(
       isAutoActive(),
@@ -42,7 +42,7 @@ test("pauseAuto sets s.active = false synchronously before first await (blocks c
     // A concurrent second call must see s.active = false and return immediately.
     // If the old code were in place this would run the full pause body a second time,
     // overwriting the lifecycle outcome with "Paused by user request."
-    const secondPause = pauseAuto();
+    const secondPause = pauseAuto(undefined, undefined, "user_request");
 
     await Promise.all([firstPause, secondPause].map((p) => p.catch(() => {})));
 
@@ -69,7 +69,7 @@ test("pauseAuto marks paused and cancels the in-flight unit before first await",
   });
 
   try {
-    const pausePromise = pauseAuto();
+    const pausePromise = pauseAuto(undefined, undefined, "user_request");
 
     assert.equal(autoSession.paused, true);
     assert.deepEqual(cancelledResult, { status: "cancelled" });
@@ -148,7 +148,7 @@ test("pauseAuto ignores stale pre-dispatch pause once a new unit is active", asy
   };
 
   try {
-    await pauseAuto(undefined, undefined, undefined, { expectedCurrentUnit: null });
+    await pauseAuto(undefined, undefined, "machine_fixable", undefined, { expectedCurrentUnit: null });
 
     assert.equal(autoSession.active, true);
     assert.equal(autoSession.paused, false);
@@ -172,7 +172,7 @@ test("pauseAuto ignores stale pause for a superseded unit identity", async () =>
   };
 
   try {
-    await pauseAuto(undefined, undefined, undefined, {
+    await pauseAuto(undefined, undefined, "machine_fixable", undefined, {
       expectedCurrentUnit: {
         type: "plan-slice",
         id: "M011/S04",
@@ -203,7 +203,7 @@ test("pauseAuto still pauses when the expected unit identity matches", async () 
   const expectedCurrentUnit = capturePauseAutoUnitIdentity();
 
   try {
-    await pauseAuto(undefined, undefined, undefined, { expectedCurrentUnit });
+    await pauseAuto(undefined, undefined, "machine_fixable", undefined, { expectedCurrentUnit });
 
     assert.equal(autoSession.active, false);
     assert.equal(autoSession.paused, true);

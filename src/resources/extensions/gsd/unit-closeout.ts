@@ -26,6 +26,7 @@
 import { appendNotification, type NotifySeverity } from "./notification-store.js";
 import { readStringField } from "./auto-unit-tool-scope.js";
 import { MILESTONE_BRANCH_PREFIX } from "./branch-patterns.js";
+import { hasPendingCloseoutEffect } from "./milestone-closeout-effects.js";
 import { nativeGetCurrentBranch } from "./native-git-bridge.js";
 import { getIsolationMode } from "./preferences.js";
 import { autoCommitCurrentBranch } from "./worktree.js";
@@ -114,9 +115,13 @@ export function closeUnit(request: UnitCloseoutRequest, deps: UnitCloseoutDeps =
       const branch = deps.currentBranch(request.basePath);
       if (branch?.startsWith(MILESTONE_BRANCH_PREFIX)) {
         gitVerdict = "milestone-branch";
-        notice =
-          `Milestone ${request.unitId} completed on ${branch}. ` +
-          `Merge it to the integration branch with the worktree tooling (/gsd worktree merge).`;
+        // A prepared Closeout Plan keeps the milestone open until the system
+        // merge records its receipt; a manual merge would leave it open.
+        notice = hasPendingCloseoutEffect(request.unitId)
+          ? `Milestone ${request.unitId} closeout is prepared on ${branch}. ` +
+            `It completes when the branch is merged: run /gsd dispatch complete-milestone ${request.unitId}.`
+          : `Milestone ${request.unitId} completed on ${branch}. ` +
+            `Merge it to the integration branch with the worktree tooling (/gsd worktree merge).`;
         deps.notify(notice, "info");
       } else {
         gitVerdict = "isolation-bypassed";

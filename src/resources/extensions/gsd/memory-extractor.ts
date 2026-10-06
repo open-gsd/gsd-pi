@@ -15,6 +15,9 @@ import {
   decayStaleMemories,
 } from './memory-store.js';
 import type { MemoryAction } from './memory-store.js';
+import { requeueProjectionWork } from './db/writers/projection-work-delivery.js';
+import { MARKDOWN_PROJECTION_KIND } from './projection-identity.js';
+import { logWarning } from './workflow-logger.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -417,11 +420,28 @@ export async function extractMemoriesFromUnit(
     });
 
     decayStaleMemories(20);
+    enqueueKnowledgeRefresh();
     markUnitProcessed(unitKey, activityFile);
   } catch {
     // Non-fatal — memory extraction failure should never affect auto-mode
   } finally {
     _extracting = false;
+  }
+}
+
+/**
+ * Enqueue the KNOWLEDGE.md render for the Projection Worker after the cap and
+ * the decay of a unit closeout. The closeout never writes the file itself.
+ * The memory changes are already committed, so a failed enqueue is a warning.
+ */
+export function enqueueKnowledgeRefresh(requeue: typeof requeueProjectionWork = requeueProjectionWork): void {
+  try {
+    requeue([{ projectionKey: 'knowledge', projectionKind: MARKDOWN_PROJECTION_KIND }]);
+  } catch (err) {
+    logWarning(
+      'projection',
+      `memories committed, render not enqueued: KNOWLEDGE.md refresh failed to enqueue: ${(err as Error).message}`,
+    );
   }
 }
 

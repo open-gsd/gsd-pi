@@ -20,39 +20,16 @@ This is equivalent to manually setting `unique_milestone_ids: true`, `git.push_b
 
 Alternatively, you can configure each setting individually without using a mode (see [Git Strategy](git-strategy.md) for details).
 
-### 2. Configure `.gitignore`
+### 2. Know What Is Shared
 
-Share planning artifacts (milestones, roadmaps, decisions) while keeping runtime files local:
+The workflow database (`gsd.db`) is the only authority for milestones, slices, tasks, decisions, and requirements. It is never committed. Every checkout has its own database:
 
-```bash
-# ── GSD: Runtime / Ephemeral (per-developer, per-session) ──────
-.gsd/completed-units.json
-.gsd/STATE.md
-.gsd/gsd.db*
-.gsd/state-manifest.json
-.gsd/state.json
-.gsd/metrics.json
-.gsd/activity/
-.gsd/runtime/
-.gsd/worktrees/
-.gsd-worktrees/
-.gsd-backups/
-.gsd/phases/**/continue.md
-.gsd/phases/**/*-CONTINUE.md
-.gsd/milestones/**/continue.md
-.gsd/milestones/**/*-CONTINUE.md
-```
+- The database records the checkout root it belongs to. A second clone that resolves to the same state directory (for example two clones of one remote on one machine) is refused with `checkout-unbound`. Give the second clone its own state with `GSD_PROJECT_ID`, or, when the old checkout was moved or deleted, run `/gsd db bind` in the new one.
+- A `gsd.db` copied from another checkout is refused the same way.
 
-**What gets shared** (committed to git):
-- `.gsd/PREFERENCES.md` — project preferences
-- `.gsd/PROJECT.md` — living project description
-- `.gsd/REQUIREMENTS.md` — requirement contract
-- `.gsd/DECISIONS.md` — architectural decisions
-- `.gsd/phases/` — flat-phase roadmaps, plans, summaries, and research
-- `.gsd/milestones/` — legacy milestone artifacts, if the project has not migrated yet
+Markdown under `.gsd/` (PROJECT.md, REQUIREMENTS.md, DECISIONS.md, `phases/`, `milestones/`) is a projection of the database: an export for reading and review, not shared authority. By default `.gsd` lives outside the repository and is ignored, so nothing is committed.
 
-**What stays local** (gitignored):
-- Database files, metrics, state projections, runtime records, worktrees, activity logs, and migration backups under `.gsd-backups/`. Stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the flat-phase `.gsd/phases/` migration is complete.
+If your team commits the `.gsd/` markdown (a real `.gsd/` directory with tracked files), GSD keeps its runtime files out of git for you: it adds them to `.gitignore` and leaves them out of its own commits. This includes the database, the render baseline `.gsd/.compat.json`, and `.gsd/quarantine/`.
 
 ### 3. Commit the Preferences
 
@@ -61,25 +38,26 @@ git add .gsd/PREFERENCES.md
 git commit -m "chore: enable GSD team workflow"
 ```
 
-## `commit_docs: false`
+## Importing Committed Planning Changes
 
-For teams where only some members use GSD, or when company policy requires a clean repo:
+Committed markdown enters your database only through an explicit import:
 
-```yaml
-git:
-  commit_docs: false
-```
+- **Fresh clone.** A clone that has tracked `.gsd/` milestone markdown and no database, or an empty one, is refused with `authority-missing` in auto, guided, headless, and MCP writes. The same applies to a clone that has only a tracked `PROJECT.md`, `DECISIONS.md`, or `REQUIREMENTS.md` and a database with no workflow rows. Run `/gsd recover` to review the Import Preview and apply it. GSD never starts an empty database beside these projections on its own. To start without the earlier history on purpose, run `/gsd db start-empty`: the choice is stored in the database, and no file is changed. A milestone directory that the database does not know still stops dispatch until you delete it, rename it, or import it.
+- **Pull, merge, rebase, or branch switch.** When a tracked projection changes outside GSD, auto mode, guided flow, and `/gsd dispatch` stop before the next dispatch with one "Projection files changed outside GSD" message. Choose one:
+  - keep the change: review it, then run `/gsd recover` to import it through Import Preview;
+  - discard the change: run `/gsd rebuild markdown`. The changed bytes are kept under `.gsd/quarantine/`.
 
-This adds `.gsd/` to `.gitignore` entirely and keeps all artifacts local. The developer gets the benefits of structured planning without affecting teammates who don't use GSD.
+No dispatch runs on the old database content until you choose.
 
 ## Migrating an Existing Project
 
 If you have an existing project with `.gsd/` blanket-ignored:
 
 1. Ensure no milestones are in progress (clean state)
-2. Update `.gitignore` to use the selective pattern above
+2. Stop ignoring the `.gsd/` markdown you want to share; GSD keeps its runtime files ignored
 3. Add `unique_milestone_ids: true` to `.gsd/PREFERENCES.md`
 4. Optionally rename existing milestones to use unique IDs:
+
    ```
    I have turned on unique milestone ids, please update all old milestone
    ids to use this new format e.g. M001-abc123 where abc123 is a random
@@ -87,6 +65,7 @@ If you have an existing project with `.gsd/` blanket-ignored:
    .gsd file contents, file names and directory names. Validate your work
    once done to ensure referential integrity.
    ```
+
 5. Commit
 
 ## Plan Review Workflow
@@ -95,7 +74,7 @@ Teams configured to track planning artifacts in git (i.e. with `mode: team` and 
 
 1. **Plan PR** — developer runs `/gsd discuss` on `main`, which writes flat-phase planning artifacts to `.gsd/phases/<NN-slug>/` (phase files `<NN>-CONTEXT.md` and `<NN>-ROADMAP.md`) and updates the top-level `.gsd/REQUIREMENTS.md` and `.gsd/DECISIONS.md`. Legacy projects may still resolve to `.gsd/milestones/<MID>/<MID>-*.md` until migration. The developer commits these and opens a docs-only PR.
 2. **Review** — the team reviews scope, risks, slice breakdown, and definition of done directly in GitHub. No code to review yet, just the plan.
-3. **Code PR** — after the plan PR is merged, the developer pulls `main` and runs `/gsd auto`. GSD creates a worktree and executes against the approved plan. The result is a second PR with the actual implementation.
+3. **Code PR** — after the plan PR is merged, the developer pulls `main`, imports the approved plan with `/gsd recover` (see [Importing Committed Planning Changes](#importing-committed-planning-changes)), and runs `/gsd auto`. GSD creates a worktree and executes against the imported plan. The result is a second PR with the actual implementation.
 
 `/gsd discuss` does not auto-commit — the developer controls when and how planning artifacts are committed.
 
@@ -107,7 +86,7 @@ Teams configured to track planning artifacts in git (i.e. with `mode: team` and 
 
 ### Steering during execution
 
-If the developer uses `/gsd steer` from within the auto-mode worktree, those adjustments remain local to that worktree and write to `.gsd/OVERRIDES.md` in the worktree — they don't modify the approved plan docs on `main`. These changes will appear in the code PR diff alongside the implementation. Running `/gsd steer` outside the worktree modifies whichever checkout it is run from.
+`/gsd steer` records the override in the project database, which the project root and every worktree share. `.gsd/OVERRIDES.md` is rendered from the database. Edits to an override that GSD rendered are not read back. An override block that the database does not hold (written by an older release, by hand, or committed by a teammate) stays in the file but is not active: `/gsd doctor` reports it, and `/gsd doctor --fix` imports it. The override does not modify the approved plan docs on `main`; the plan changes that the rewrite unit makes appear in the code PR diff alongside the implementation.
 
 ### Automated gates
 

@@ -14,7 +14,6 @@ import { MILESTONE_ID_RE } from "./milestone-ids.js";
 import { clearParseCache } from "./files.js";
 import {
   isDbAvailable,
-  getDb,
   getTask,
   getSlice,
   getSliceTasks,
@@ -22,8 +21,6 @@ import {
   insertGateRun,
   getMilestone,
   immediateTransaction,
-  updateMilestoneStatus,
-  getCompletedMilestoneTaskFileHints,
   getMilestoneCommitAttributionShas,
   recordMilestoneCommitAttribution,
 } from "./gsd-db.js";
@@ -32,7 +29,7 @@ import { invalidateStateCache, isValidationTerminal } from "./state.js";
 import { getErrorMessage } from "./error-utils.js";
 import { logWarning, logError } from "./workflow-logger.js";
 import { readIntegrationBranch } from "./git-service.js";
-import { isClosedStatus } from "./status-guards.js";
+import { readMilestone } from "./db/lifecycle-read.js";
 import {
   resolveSlicePath,
   resolveSliceFile,
@@ -45,10 +42,7 @@ import {
   resolveGsdRootFile,
   normalizeRealPath,
 } from "./paths.js";
-import {
-  existsSync,
-  mkdirSync,
-} from "node:fs";
+import { existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 
 import { LAYOUT_SEGMENTS } from "./layout-policy.js";
@@ -62,7 +56,7 @@ import { hasVerdict } from "./verdict-parser.js";
 import { validateArtifact } from "./schemas/validate.js";
 import { getProjectResearchStatus } from "./project-research-policy.js";
 import { isGsdWorktreePath } from "./worktree-root.js";
-import { atomicWriteSync } from "./atomic-write.js";
+import { atomicWriteSync, createProjectionDirectorySync } from "./atomic-write.js";
 import { resolveCanonicalMilestoneRoot } from "./worktree-manager.js";
 import { resolveWorktreeProjectRoot } from "./worktree-root.js";
 import { hasImplementationArtifacts } from "./milestone-implementation-evidence.js";
@@ -72,10 +66,6 @@ import {
   readTerminalTaskRecoveryAbort,
   resolveArtifactVerificationBase,
 } from "./artifact-verification.js";
-import {
-  proveMilestoneCloseout,
-  type CloseoutProofFailureReason,
-} from "./milestone-closeout-proof.js";
 import { isMilestoneLifecycleAdopted } from "./db/milestone-closeout-readiness.js";
 import { compareLifecycleShadow } from "./db/lifecycle-shadow-comparison.js";
 import { readCurrentMilestoneCompletionReceipt } from "./milestone-lifecycle-domain-operation.js";
@@ -91,26 +81,7 @@ export {
   verifyExpectedArtifact,
   diagnoseWorktreeIntegrityFailure,
   resolveArtifactVerificationBase,
-  _setRoadmapParserFnForTests,
 } from "./artifact-verification.js";
-
-/**
- * Optional override for the detached GitHub milestone finalize invoked after DB
- * closeout in refreshRecoveryDbForArtifact. Production leaves this null so the
- * real finalizeMilestoneGitHubSync runs; tests inject a throwing function to
- * deterministically exercise the best-effort catch (auto-recovery.ts:232),
- * which otherwise needs a real GitHub remote + network failure.
- * @internal
- */
-let _githubFinalizeFn: ((basePath: string, mid: string) => void | Promise<void>) | null = null;
-
-export function _setGithubFinalizeFnForTests(
-  fn: ((basePath: string, mid: string) => void | Promise<void>) | null,
-): () => void {
-  const previous = _githubFinalizeFn;
-  _githubFinalizeFn = fn;
-  return () => { _githubFinalizeFn = previous; };
-}
 
 // ─── Recovery DB refresh ──────────────────────────────────────────────────────
 
@@ -124,19 +95,6 @@ export function _setGithubFinalizeFnForTests(
 export type ArtifactRecoveryDbRefreshResult =
   | { ok: true; advanced?: boolean; reason?: string; message?: string }
   | { ok: false; fatal: boolean; message: string; reason: string };
-
-function closeoutProofRecoveryReason(reason: CloseoutProofFailureReason): string {
-  switch (reason) {
-    case "slice-missing":
-      return "complete-milestone-slices-missing";
-    case "summary-artifact-missing":
-      return "complete-milestone-summary-missing";
-    case "summary-artifact-failed":
-      return "complete-milestone-summary-failed";
-    default:
-      return `complete-milestone-${reason}`;
-  }
-}
 
 function adoptedMilestoneRecoveryResult(
   milestoneId: string,
@@ -195,7 +153,12 @@ export function refreshRecoveryDbForArtifact(
         message: `Stuck recovery cannot confirm canonical Task Attempt readiness for execute-task ${unitId} because the workflow DB is unavailable.`,
       };
     }
-    return { ok: true };
+    return {
+      ok: false,
+      fatal: false,
+      reason: "db-unavailable",
+      message: `Stuck recovery cannot confirm canonical state for ${unitType} ${unitId} because the workflow DB is unavailable.`,
+    };
   }
 
   if (unitType === "execute-task") {
@@ -308,67 +271,18 @@ export function refreshRecoveryDbForArtifact(
       if (isMilestoneLifecycleAdopted(mid)) {
         return adoptedMilestoneRecoveryResult(mid, milestone.status);
       }
-      return isClosedStatus(milestone.status) ? { ok: true } : null;
+      return readMilestone(mid)?.closed ? { ok: true } : null;
     });
     if (observedResult) return observedResult;
 
-    const artifactBasePath = resolveArtifactVerificationBase(unitId, basePath);
-    const closeoutProof = proveMilestoneCloseout(mid, {
-      allowOpenMilestone: true,
-      summaryArtifactBasePath: artifactBasePath,
-      implementationEvidence: {
-        basePath,
-        requirement: "present",
-      },
-    });
-    if (!closeoutProof.ok) {
-      if (closeoutProof.reason === "implementation-evidence-missing") {
-        return {
-          ok: false,
-          fatal: true,
-          reason: "complete-milestone-implementation-missing",
-          message: `Stuck recovery found complete-milestone ${unitId} artifacts, but implementation evidence is not present.`,
-        };
-      }
-      return {
-        ok: false,
-        fatal: true,
-        reason: closeoutProofRecoveryReason(closeoutProof.reason),
-        message: `Stuck recovery found complete-milestone ${unitId} artifacts, but ${closeoutProof.message}`,
-      };
-    }
-
-    const concurrentResult = immediateTransaction<ArtifactRecoveryDbRefreshResult | null>(() => {
-      const currentMilestone = getMilestone(mid);
-      if (!currentMilestone) {
-        return {
-          ok: false,
-          fatal: true,
-          reason: "complete-milestone-artifact-db-missing",
-          message: `Stuck recovery found complete-milestone ${unitId} artifacts, but the DB milestone disappeared before compatibility closeout.`,
-        };
-      }
-      if (isMilestoneLifecycleAdopted(mid)) {
-        return adoptedMilestoneRecoveryResult(mid, currentMilestone.status);
-      }
-      if (isClosedStatus(currentMilestone.status)) return { ok: true };
-      updateMilestoneStatus(mid, "complete", new Date().toISOString());
-      return null;
-    });
-    if (concurrentResult) return concurrentResult;
-    // Detached GitHub sync — best-effort. Test seam: when
-    // _githubFinalizeFn is injected, route through it so the catch
-    // (:232) is deterministically reachable (otherwise it needs a real
-    // GitHub remote + network failure). Production leaves it null. The
-    // seam is wrapped so a synchronous throw becomes a rejected promise,
-    // matching the real import-then-call deferred semantics.
-    const finalizePromise = _githubFinalizeFn
-      ? new Promise<void>((resolve) => { resolve(_githubFinalizeFn!(basePath, mid)); })
-      : import("../github-sync/sync.js").then(({ finalizeMilestoneGitHubSync }) => finalizeMilestoneGitHubSync(basePath, mid));
-    void finalizePromise.catch((err) => {
-      logWarning("recovery", `GitHub milestone finalize failed after DB closeout: ${getErrorMessage(err)}`);
-    });
-    return { ok: true };
+    // An open Milestone is never completed from artifacts. Completion is the
+    // milestone.complete Domain Operation, with its own proof and receipts.
+    return {
+      ok: false,
+      fatal: true,
+      reason: "complete-milestone-canonical-command-required",
+      message: `Stuck recovery cannot complete Milestone ${mid} from artifacts; dispatch the normal completion command.`,
+    };
   }
 
   return { ok: true };
@@ -420,7 +334,7 @@ export function writeReactiveExecuteBlocker(
   const summaryMissing = batchIds.filter((tid) => !hasSummary(tid));
 
   const dir = dirname(blockerPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) createProjectionDirectorySync(dir);
   const content = [
     "# BLOCKER — reactive-execute batch recovery",
     "",
@@ -440,6 +354,7 @@ export function writeReactiveExecuteBlocker(
 
   clearPathCache();
   clearParseCache();
+  if (!recordUnitRecoveryBlock("reactive-execute", unitId, reason, blockerPath)) return null;
 
   return {
     blockerPath,
@@ -450,27 +365,55 @@ export function writeReactiveExecuteBlocker(
 }
 
 /**
- * Whether a milestone already has canonical Domain-Operation lifecycle
- * history. Adopted milestones must not have a fabricated blocker slice
- * inserted to paper over a stuck plan-milestone unit (fail-closed).
+ * Record the terminal outcome of a unit whose recovery ended without a result:
+ * one manual-attention gate run. Dispatch and verification read this row
+ * (hasUnitRecoveryBlock, getPlanMilestoneRecoveryBlock); the blocker file is a
+ * diagnostic only. Returns whether the row was written.
  */
-function hasAdoptedMilestoneHistory(milestoneId: string): boolean {
-  return Boolean(getDb().prepare(`
-    SELECT 1 AS adopted
-    FROM workflow_item_lifecycles
-    WHERE item_kind = 'milestone'
-      AND milestone_id = :milestone_id
-      AND slice_id IS NULL
-      AND task_id IS NULL
-  `).get({ ":milestone_id": milestoneId }));
+function recordUnitRecoveryBlock(
+  unitType: string,
+  unitId: string,
+  reason: string,
+  blockerArtifactPath: string,
+): boolean {
+  if (!isDbAvailable()) return false;
+  const { milestone: mid, slice: sid } = parseUnitId(unitId);
+  const recordedAt = new Date().toISOString();
+  try {
+    insertGateRun({
+      traceId: `auto-recovery:${mid || unitId}`,
+      turnId: `${unitType}:${unitId}:${recordedAt}`,
+      gateId: `${unitType}-recovery`,
+      gateType: "policy",
+      unitType,
+      unitId,
+      ...(mid ? { milestoneId: mid } : {}),
+      ...(sid ? { sliceId: sid } : {}),
+      outcome: "manual-attention",
+      failureClass: "manual-attention",
+      rationale: reason,
+      findings: `Diagnostic artifact: ${blockerArtifactPath}`,
+      attempt: 1,
+      maxAttempts: 1,
+      retryable: false,
+      evaluatedAt: recordedAt,
+    });
+    invalidateStateCache();
+    return true;
+  } catch (e) {
+    logWarning("recovery", `recovery blocker persistence failed for ${unitType} ${unitId}: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
 }
 
 /**
- * Write a placeholder artifact so recovery can surface a stuck unit.
- * Task and slice-plan completion projections use diagnostic sidecars
- * instead of canonical artifact paths.
-
- * Returns the relative path written, or null if the path couldn't be resolved.
+ * Record a stuck unit: a manual-attention gate run in the database and a
+ * diagnostic sidecar file. The sidecar never has the name of the unit's
+ * projection file, so no file can pass for the unit's result and the unit
+ * stays incomplete.
+ *
+ * Returns the relative path written, or null if the path couldn't be resolved
+ * or the gate run was not recorded: a sidecar file alone is not a recorded block.
  */
 export function writeBlockerPlaceholder(
   unitType: string,
@@ -481,21 +424,17 @@ export function writeBlockerPlaceholder(
   const artifactBase = resolveArtifactVerificationBase(unitId, base);
   const canonicalArtifactPath = resolveExpectedArtifactPath(unitType, unitId, artifactBase);
   if (!canonicalArtifactPath) return null;
-  const blockerArtifactPath = unitType === "execute-task" || unitType === "complete-milestone"
-    ? canonicalArtifactPath.replace(/-SUMMARY\.md$/u, "-RECOVERY-BLOCKER.md")
-    : unitType === "plan-slice"
-      ? canonicalArtifactPath.replace(/-PLAN\.md$/u, "-RECOVERY-BLOCKER.md")
-      : unitType === "validate-milestone"
-        ? canonicalArtifactPath.replace(/-VALIDATION\.md$/u, "-RECOVERY-BLOCKER.md")
-        : canonicalArtifactPath;
-  // DB-backed Task, slice-plan, milestone-validation, and milestone-summary
-  // blockers must never occupy their canonical projections.
-  if (
-    (unitType === "execute-task" || unitType === "plan-slice" || unitType === "validate-milestone" || unitType === "complete-milestone") &&
-    blockerArtifactPath === canonicalArtifactPath
-  ) return null;
+  // Sentinel paths (PARALLEL-BLOCKER, PROJECT-RESEARCH-BLOCKER) are already
+  // sidecars. Every other path is a projection and gets a sidecar name.
+  const blockerArtifactPath = canonicalArtifactPath.endsWith("-BLOCKER.md")
+    ? canonicalArtifactPath
+    : canonicalArtifactPath.replace(
+      SHORT_SIDECAR_UNIT_TYPES.has(unitType) ? /-(?:SUMMARY|PLAN|VALIDATION)\.md$/u : /\.md$/u,
+      "-RECOVERY-BLOCKER.md",
+    );
+  if (!blockerArtifactPath.endsWith("-BLOCKER.md")) return null;
   const dir = dirname(blockerArtifactPath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  if (!existsSync(dir)) createProjectionDirectorySync(dir);
   const recoveryLine = unitType === "research-project"
     ? "This placeholder was written by auto-mode so the project research gate can stop fail-closed."
     : unitType === "plan-milestone"
@@ -504,64 +443,34 @@ export function writeBlockerPlaceholder(
         ? "This diagnostic does not complete slice planning; auto-mode must remain paused until a valid plan is persisted."
         : unitType === "validate-milestone" || unitType === "complete-milestone"
           ? "This diagnostic is not a canonical result; no validation verdict or milestone completion was recorded."
-          : "This placeholder was written by auto-mode so the pipeline can advance.";
+          : "This diagnostic is not the unit's result; the unit stays incomplete until its save tool records one.";
   const content = [
     `# BLOCKER — auto-mode recovery failed`,
     ``,
-    `Unit \`${unitType}\` for \`${unitId}\` failed to produce this artifact after idle recovery exhausted all retries.`,
+    `Unit \`${unitType}\` for \`${unitId}\` failed to record its result after recovery exhausted all retries.`,
     ``,
     `**Reason**: ${reason}`,
     ``,
     recoveryLine,
-    `Review and replace this file before relying on downstream artifacts.`,
   ].join("\n");
   atomicWriteSync(blockerArtifactPath, content, "utf-8");
 
-  // #4414: Clear caches so subsequent dispatch guards (e.g.
-  // resolveMilestoneFile) see the placeholder file. Without this, the
-  // cached directory listing is stale and the dispatch rule re-fires,
-  // producing an infinite loop despite the placeholder being on disk.
-  // Matches the pattern used in verifyExpectedArtifact above.
   clearPathCache();
   clearParseCache();
 
   // A failed milestone plan must stop durably without fabricating a completed
   // slice. The recovery gate remains authoritative while the milestone has no
   // real slices; a later successful plan supersedes it by creating those rows.
-  if (isDbAvailable()) {
-    const { milestone: mid } = parseUnitId(unitId);
-    if (unitType === "plan-milestone" && mid) {
-      const recordedAt = new Date().toISOString();
-      try {
-        insertGateRun({
-          traceId: `auto-recovery:${mid}`,
-          turnId: `plan-milestone:${mid}:${recordedAt}`,
-          gateId: "plan-milestone-recovery",
-          gateType: "policy",
-          unitType,
-          unitId,
-          milestoneId: mid,
-          outcome: "manual-attention",
-          failureClass: "manual-attention",
-          rationale: reason,
-          findings: `Diagnostic artifact: ${blockerArtifactPath}`,
-          attempt: 1,
-          maxAttempts: 1,
-          retryable: false,
-          evaluatedAt: recordedAt,
-        });
-        invalidateStateCache();
-      } catch (e) {
-        logWarning("recovery", `planning blocker persistence failed for plan-milestone recovery: ${e instanceof Error ? e.message : String(e)}`);
-      }
-    }
+  // A Task outcome is already held by its Attempt, Result and Recovery rows.
+  // The project research gate reads its blocker file, so that file is the block.
+  if (
+    unitType !== "execute-task" &&
+    !recordUnitRecoveryBlock(unitType, unitId, reason, blockerArtifactPath) &&
+    unitType !== "research-project"
+  ) {
+    return null;
   }
 
-  // Sidecar diagnostics report the file actually written; placeholders that
-  // occupy their canonical path keep the expected-artifact description.
-  if (blockerArtifactPath === canonicalArtifactPath) {
-    return diagnoseExpectedArtifact(unitType, unitId, base);
-  }
   const writtenRel = relative(base, blockerArtifactPath);
   // Milestone resolvers realpath-anchor their results, so when base sits
   // behind a symlink (e.g. /tmp) re-anchor the relative path to the real base.
@@ -569,6 +478,14 @@ export function writeBlockerPlaceholder(
     ? relative(normalizeRealPath(base), blockerArtifactPath)
     : writtenRel;
 }
+
+/** Unit types whose sidecar replaces the projection suffix (`T01-RECOVERY-BLOCKER.md`). */
+const SHORT_SIDECAR_UNIT_TYPES: ReadonlySet<string> = new Set([
+  "execute-task",
+  "complete-milestone",
+  "plan-slice",
+  "validate-milestone",
+]);
 
 // ─── Merge State Reconciliation ───────────────────────────────────────────────
 // Body relocated to state-reconciliation/drift/merge-state.ts (ADR-017 #5701).

@@ -556,6 +556,8 @@ const INSTRUCTION_RESULT_ACTIONS: ReadonlySet<string> = new Set([
   "create-decision-memory",
   "update-decision-memory",
   "delete-decision-memory",
+  "create-knowledge-memory",
+  "update-knowledge-memory",
   "replace-slice-dependencies",
   "delete-slice-dependencies",
   "adopt-lifecycle",

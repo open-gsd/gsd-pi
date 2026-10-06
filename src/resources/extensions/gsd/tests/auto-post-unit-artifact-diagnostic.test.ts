@@ -9,6 +9,7 @@ import {
 } from "../auto-post-unit.ts";
 import { resolveExpectedArtifactPath } from "../auto-recovery.ts";
 import { _clearGsdRootCache, clearPathCache } from "../paths.ts";
+import { closeDatabase, hasUnitRecoveryBlock, openDatabase } from "../gsd-db.ts";
 
 test("missing execute-task artifact includes completion contract and completion-tool hint", () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-artifact-diag-"));
@@ -17,7 +18,7 @@ test("missing execute-task artifact includes completion contract and completion-
 
   const msg = _describeArtifactVerificationFailureForTest("execute-task", "M001/S01/T01", base);
   assert.match(msg, /was not found on disk after unit execution/);
-  assert.match(msg, /Task T01 marked \[x\].*summary written/i);
+  assert.match(msg, /Task T01 completed in the database through gsd_task_complete/);
   assert.match(msg, /No completion tool call detected \(`gsd_task_complete`\/alias\)/);
 });
 
@@ -58,6 +59,7 @@ test("parallel research cost spike writes durable PARALLEL-BLOCKER", () => {
   const base = mkdtempSync(join(tmpdir(), "gsd-parallel-cost-blocker-"));
   try {
     mkdirSync(join(base, ".gsd", "milestones", "M001"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
     const blocker = maybeWriteParallelResearchCostSpikeBlocker(
       "research-slice",
       "M001/parallel-research",
@@ -71,7 +73,9 @@ test("parallel research cost spike writes durable PARALLEL-BLOCKER", () => {
     assert.ok(expected);
     assert.equal(existsSync(expected!), true);
     assert.match(readFileSync(expected!, "utf-8"), /cost spike detected \(3\.73 vs avg 1\.02\)/);
+    assert.equal(hasUnitRecoveryBlock("research-slice", "M001/parallel-research"), true);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });

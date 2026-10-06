@@ -69,11 +69,38 @@ function replaceTabs(text: string): string {
 }
 
 /**
+ * Collapse carriage-return runs to the last frame: progress bars emit
+ * "frame1\rframe2\rframe3" where each frame overwrites the previous one, so the
+ * rendered text is "frame3". Deleting the \r characters instead concatenated
+ * every frame into one giant line that the wrapper exploded into thousands of
+ * visual rows (#2370). CRLF pairs (\r\n) are not frame resets, so a line-final
+ * \r before the newline only strips itself, and trailing \r characters keep the
+ * frame they follow (moving the cursor does not erase it). Implemented as a
+ * linear scan — a backtracking regex is quadratic on long CR-free lines, which
+ * are exactly the oversized outputs this file caps.
+ */
+function collapseCarriageReturnFrames(text: string): string {
+	if (!text.includes("\r")) return text;
+	const lines = text.split("\n");
+	for (let i = 0; i < lines.length; i++) {
+		let line = lines[i];
+		let lastCr = line.lastIndexOf("\r");
+		if (lastCr < 0) continue;
+		while (lastCr === line.length - 1) {
+			line = line.slice(0, -1);
+			lastCr = line.lastIndexOf("\r");
+		}
+		lines[i] = lastCr < 0 ? line : line.slice(lastCr + 1);
+	}
+	return lines.join("\n");
+}
+
+/**
  * Normalize control characters for terminal preview rendering.
  * Keep tool arguments unchanged, sanitize only display text.
  */
 function normalizeDisplayText(text: string): string {
-	return text.replace(/\r/g, "");
+	return collapseCarriageReturnFrames(text);
 }
 
 /** Safely coerce value to string for display. Returns null if invalid type. */
@@ -115,6 +142,71 @@ function prettifyToolName(name: string, label?: string): string {
 const COMPACT_ARG_VALUE_LIMIT = 60;
 const GENERIC_OUTPUT_PREVIEW_LINES = 10;
 const GENERIC_ARGS_JSON_PREVIEW_LINES = 10;
+/**
+ * Shared cap on the lines a tool card body shows in the TUI when expanded.
+ * Mirrors the read tool's TUI limit (READ_TUI_EXPANDED_MAX_LINES) so one large
+ * tool result cannot flood the terminal (#2370). Oversized output renders as a
+ * head+tail window with an elided-lines note.
+ */
+export const TOOL_TUI_EXPANDED_MAX_LINES = 50;
+
+type ToolOutputDisplayWindow = { displayLines: string[]; hint: string };
+
+/**
+ * Build the visible lines + trailing hint for a tool output body. Collapsed
+ * cards keep the first `collapsedMaxLines` lines plus the expand hint; expanded
+ * cards show a head+tail window of at most TOOL_TUI_EXPANDED_MAX_LINES lines
+ * (with a muted "N middle lines hidden" note) so a huge result cannot flood the
+ * terminal. `collapsedTotalLines` preserves the write tool's collapsed hint
+ * wording, which also reports the total line count.
+ */
+function buildToolOutputDisplayWindow(
+	lines: string[],
+	collapsedMaxLines: number,
+	expanded: boolean,
+	collapsedTotalLines?: number,
+): ToolOutputDisplayWindow {
+	if (!expanded) {
+		const displayLines = lines.slice(0, collapsedMaxLines);
+		const remaining = lines.length - displayLines.length;
+		const totalSuffix = collapsedTotalLines !== undefined ? `, ${collapsedTotalLines} total` : "";
+		return {
+			displayLines,
+			hint:
+				remaining > 0
+					? `${theme.fg("muted", `\n... (${remaining} more lines${totalSuffix},`)} ${keyHint("expandTools", "to expand")})`
+					: "",
+		};
+	}
+	return capExpandedToolOutputLines(lines);
+}
+
+/**
+ * Cap an expanded output body at TOOL_TUI_EXPANDED_MAX_LINES lines using a
+ * head+tail window. Bodies at or under the cap are returned unchanged.
+ */
+function capExpandedToolOutputLines(lines: string[]): ToolOutputDisplayWindow {
+	if (lines.length <= TOOL_TUI_EXPANDED_MAX_LINES) {
+		return { displayLines: lines, hint: "" };
+	}
+	const half = Math.floor(TOOL_TUI_EXPANDED_MAX_LINES / 2);
+	const elidedMiddle = lines.length - half * 2;
+	return {
+		displayLines: [...lines.slice(0, half), ...lines.slice(lines.length - half)],
+		hint: theme.fg("muted", `\n... (${elidedMiddle} middle lines hidden from display)`),
+	};
+}
+
+/**
+ * Error bodies render in both collapse modes (an error card is never compact),
+ * so they always get the expanded head+tail window.
+ */
+function capErrorDisplayText(text: string): string {
+	const trimmed = text.trim();
+	if (!trimmed) return "";
+	const { displayLines, hint } = capExpandedToolOutputLines(trimmed.split("\n"));
+	return displayLines.join("\n") + hint;
+}
 
 export type ToolExecutionPhase = {
 	label: string;
@@ -588,6 +680,14 @@ export class ToolExecutionComponent extends Container {
 			return;
 		}
 
+		// Carriage-return frame collapse reaches backward into the cached prefix,
+		// so normalizing an append-only delta would diverge from a fresh
+		// normalization of the whole content. Rebuild instead (#2370).
+		if (fileContent.includes("\r")) {
+			this.rebuildWriteHighlightCacheFull(rawPath, fileContent);
+			return;
+		}
+
 		if (!this.writeHighlightCache) {
 			this.rebuildWriteHighlightCacheFull(rawPath, fileContent);
 			return;
@@ -1056,16 +1156,20 @@ export class ToolExecutionComponent extends Container {
 						customRendererHasContent = true;
 					}
 				} catch {
-					// Fall back to showing raw output on error
-					const output = this.getTextOutput();
+					// Fall back to showing raw output on error, capped like every
+					// other expanded body (#2370)
+					const { displayLines, hint } = capExpandedToolOutputLines(this.getTextOutput().split("\n"));
+					const output = displayLines.join("\n") + hint;
 					if (output) {
 						this.contentBox.addChild(new Text(theme.fg("toolOutput", output), 0, 0));
 						customRendererHasContent = true;
 					}
 				}
 			} else if (this.result) {
-				// Has result but no custom renderResult
-				const output = this.getTextOutput();
+				// Has result but no custom renderResult — capped like every other
+				// expanded body (#2370)
+				const { displayLines, hint } = capExpandedToolOutputLines(this.getTextOutput().split("\n"));
+				const output = displayLines.join("\n") + hint;
 				if (output) {
 					this.contentBox.addChild(new Text(theme.fg("toolOutput", output), 0, 0));
 					customRendererHasContent = true;
@@ -1168,11 +1272,16 @@ export class ToolExecutionComponent extends Container {
 			const output = this.getTextOutput().trim();
 
 			if (output) {
-				// Style each line for the output
-				const styledOutput = output
-					.split("\n")
-					.map((line) => theme.fg("toolOutput", line))
-					.join("\n");
+				// Style each line for the output. Expanded bodies share the read
+				// tool's display cap: huge output is windowed head+tail so the card
+				// cannot flood the terminal (#2370). Collapsed bodies stay uncapped
+				// here — truncateToVisualLines already bounds them below.
+				const outputLines = output.split("\n");
+				const { displayLines, hint } = this.expanded
+					? capExpandedToolOutputLines(outputLines)
+					: { displayLines: outputLines, hint: "" };
+				const styledOutput =
+					displayLines.map((line) => theme.fg("toolOutput", line)).join("\n") + hint;
 
 				if (this.expanded) {
 					this.contentBox.addChild(new Text(styledOutput, 0, 0));
@@ -1238,7 +1347,7 @@ export class ToolExecutionComponent extends Container {
 
 		const displayReason = this.result.isError ? getDisplayReason(this.result.details) : undefined;
 		if (displayReason) {
-			return sanitizeBinaryOutput(stripAnsi(displayReason)).replace(/\r/g, "");
+			return collapseCarriageReturnFrames(sanitizeBinaryOutput(stripAnsi(displayReason)));
 		}
 
 		const textBlocks = this.result.content?.filter((c: any) => c.type === "text") || [];
@@ -1247,7 +1356,7 @@ export class ToolExecutionComponent extends Container {
 		let output = textBlocks
 			.map((c: any) => {
 				// Use sanitizeBinaryOutput to handle binary data that crashes string-width
-				return sanitizeBinaryOutput(stripAnsi(c.text || "")).replace(/\r/g, "");
+				return collapseCarriageReturnFrames(sanitizeBinaryOutput(stripAnsi(c.text || "")));
 			})
 			.join("\n");
 
@@ -1286,7 +1395,7 @@ export class ToolExecutionComponent extends Container {
 
 			if (this.result) {
 				if (this.result.isError) {
-					const errorText = this.getTextOutput().trim() || "read failed";
+					const errorText = capErrorDisplayText(this.getTextOutput()) || "read failed";
 					text += `\n\n${theme.fg("error", errorText)}`;
 					return text;
 				}
@@ -1376,24 +1485,17 @@ export class ToolExecutionComponent extends Container {
 					this.writeHighlightCache = undefined;
 				}
 
-				const totalLines = lines.length;
-				const maxLines = this.expanded ? lines.length : 10;
-				const displayLines = lines.slice(0, maxLines);
-				const remaining = lines.length - maxLines;
+				const { displayLines, hint } = buildToolOutputDisplayWindow(lines, 10, this.expanded, lines.length);
 
 				text +=
 					"\n\n" +
-					displayLines.map((line: string) => (lang ? line : theme.fg("toolOutput", replaceTabs(line)))).join("\n");
-				if (remaining > 0) {
-					text +=
-						theme.fg("muted", `\n... (${remaining} more lines, ${totalLines} total,`) +
-						` ${keyHint("expandTools", "to expand")})`;
-				}
+					displayLines.map((line: string) => (lang ? line : theme.fg("toolOutput", replaceTabs(line)))).join("\n") +
+					hint;
 			}
 
 			// Show error if tool execution failed
 			if (this.result?.isError) {
-				const errorText = this.getTextOutput();
+				const errorText = capErrorDisplayText(this.getTextOutput());
 				if (errorText) {
 					text += `\n\n${theme.fg("error", errorText)}`;
 				}
@@ -1417,7 +1519,7 @@ export class ToolExecutionComponent extends Container {
 
 			if (this.result?.isError) {
 				// Show error from result
-				const errorText = this.getTextOutput();
+				const errorText = capErrorDisplayText(this.getTextOutput());
 				if (errorText) {
 					text += `\n\n${theme.fg("error", errorText)}`;
 				}
@@ -1446,7 +1548,7 @@ export class ToolExecutionComponent extends Container {
 
 			if (this.result) {
 				if (this.result.isError) {
-					const errorText = this.getTextOutput().trim() || "ls failed";
+					const errorText = capErrorDisplayText(this.getTextOutput()) || "ls failed";
 					text += `\n\n${theme.fg("error", errorText)}`;
 					return text;
 				}
@@ -1454,14 +1556,9 @@ export class ToolExecutionComponent extends Container {
 				const output = this.getTextOutput().trim();
 				if (output) {
 					const lines = output.split("\n");
-					const maxLines = this.expanded ? lines.length : 20;
-					const displayLines = lines.slice(0, maxLines);
-					const remaining = lines.length - maxLines;
+					const { displayLines, hint } = buildToolOutputDisplayWindow(lines, 20, this.expanded);
 
-					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}`;
-					if (remaining > 0) {
-						text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("expandTools", "to expand")})`;
-					}
+					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}${hint}`;
 				}
 
 				const entryLimit = this.result.details?.entryLimitReached;
@@ -1494,7 +1591,7 @@ export class ToolExecutionComponent extends Container {
 
 			if (this.result) {
 				if (this.result.isError) {
-					const errorText = this.getTextOutput().trim() || "find failed";
+					const errorText = capErrorDisplayText(this.getTextOutput()) || "find failed";
 					text += `\n\n${theme.fg("error", errorText)}`;
 					return text;
 				}
@@ -1502,14 +1599,9 @@ export class ToolExecutionComponent extends Container {
 				const output = this.getTextOutput().trim();
 				if (output) {
 					const lines = output.split("\n");
-					const maxLines = this.expanded ? lines.length : 20;
-					const displayLines = lines.slice(0, maxLines);
-					const remaining = lines.length - maxLines;
+					const { displayLines, hint } = buildToolOutputDisplayWindow(lines, 20, this.expanded);
 
-					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}`;
-					if (remaining > 0) {
-						text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("expandTools", "to expand")})`;
-					}
+					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}${hint}`;
 				}
 
 				const resultLimit = this.result.details?.resultLimitReached;
@@ -1546,7 +1638,7 @@ export class ToolExecutionComponent extends Container {
 
 			if (this.result) {
 				if (this.result.isError) {
-					const errorText = this.getTextOutput().trim() || "grep failed";
+					const errorText = capErrorDisplayText(this.getTextOutput()) || "grep failed";
 					text += `\n\n${theme.fg("error", errorText)}`;
 					return text;
 				}
@@ -1554,14 +1646,9 @@ export class ToolExecutionComponent extends Container {
 				const output = this.getTextOutput().trim();
 				if (output) {
 					const lines = output.split("\n");
-					const maxLines = this.expanded ? lines.length : 15;
-					const displayLines = lines.slice(0, maxLines);
-					const remaining = lines.length - maxLines;
+					const { displayLines, hint } = buildToolOutputDisplayWindow(lines, 15, this.expanded);
 
-					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}`;
-					if (remaining > 0) {
-						text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("expandTools", "to expand")})`;
-					}
+					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}${hint}`;
 				}
 
 				const matchLimit = this.result.details?.matchLimitReached;
@@ -1591,14 +1678,9 @@ export class ToolExecutionComponent extends Container {
 				const output = this.getTextOutput().trim();
 				if (output) {
 					const lines = output.split("\n");
-					const maxLines = this.expanded ? lines.length : 10;
-					const displayLines = lines.slice(0, maxLines);
-					const remaining = lines.length - maxLines;
+					const { displayLines, hint } = buildToolOutputDisplayWindow(lines, 10, this.expanded);
 
-					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}`;
-					if (remaining > 0) {
-						text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("expandTools", "to expand")})`;
-					}
+					text += `\n\n${displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n")}${hint}`;
 				}
 			}
 		} else {
@@ -1618,14 +1700,13 @@ export class ToolExecutionComponent extends Container {
 				const output = this.getTextOutput().trim();
 				if (output) {
 					const lines = output.split("\n");
-					const maxLines = this.expanded ? lines.length : GENERIC_OUTPUT_PREVIEW_LINES;
-					const displayLines = lines.slice(0, maxLines);
-					const remaining = lines.length - maxLines;
-					const outputText = displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n");
+					const { displayLines, hint } = buildToolOutputDisplayWindow(
+						lines,
+						GENERIC_OUTPUT_PREVIEW_LINES,
+						this.expanded,
+					);
+					const outputText = displayLines.map((line: string) => theme.fg("toolOutput", line)).join("\n") + hint;
 					text += `${text ? "\n\n" : ""}${outputText}`;
-					if (remaining > 0) {
-						text += `${theme.fg("muted", `\n... (${remaining} more lines,`)} ${keyHint("expandTools", "to expand")})`;
-					}
 				}
 			}
 		}

@@ -17,7 +17,7 @@ You are running the GSD **execute-phase** workflow — execute all tasks in a mi
 
 2. **Execute wave-by-wave.** Within a wave, independent tasks can run in parallel (bounded by `--wave`). Each task: implement → run its verification → record outcome. `--gaps-only` restricts to tasks with incomplete verification.
 
-3. **Per-task guarantees.** Each completed task gets an atomic commit and an updated SUMMARY. Failing verification blocks that task's completion (do not mark it done).
+3. **Per-task guarantees.** Each completed task gets an atomic commit and is completed with `gsd_task_complete`, which renders its SUMMARY. Failing verification blocks that task's completion (do not mark it done).
 
 4. **Between waves**, confirm if `--interactive`, then proceed to the next wave respecting dependencies.
 

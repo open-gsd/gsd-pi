@@ -1,7 +1,7 @@
 // Project/App: gsd-pi
 // File Purpose: Auto-loop unit execution phase.
 
-import { importExtensionModule } from "@gsd/pi-coding-agent";
+import { importExtensionModule, setBeforeAgentStartContext } from "@gsd/pi-coding-agent";
 import type { SidecarItem, AutoSession } from "./session.js";
 import { resetEvidence, loadEvidenceFromDisk } from "../safety/evidence-collector.js";
 import { captureRootDirtySnapshot } from "../root-write-leak-guard.js";
@@ -22,15 +22,17 @@ import {
   buildLoopRemediationSteps,
   refreshRecoveryDbForArtifact,
 } from "../auto-recovery.js";
-import { writeUnitRuntimeRecord } from "../unit-runtime.js";
+import { recordUnitEnd, writeUnitRuntimeRecord } from "../unit-runtime.js";
 import { isDbAvailable, getTask, getGateResults } from "../gsd-db.js";
 import { getGateIdsForTurn } from "../gate-registry.js";
 import { getLatestForUnit } from "../db/unit-dispatches.js";
+import { readUnitBudget, resetUnitBudget, spendUnitBudget } from "../db/unit-dispatch-budgets.js";
+import { readStoredUnitRetry } from "../db/unit-dispatch-retries.js";
 import { markWorkerStopping } from "../db/auto-workers.js";
 import { releaseMilestoneLease } from "../db/milestone-leases.js";
 import type { MinimalModelRegistry } from "../context-budget.js";
 import { parseUnitId } from "../unit-id.js";
-import { createCheckpoint, cleanupCheckpoint, rollbackToCheckpoint } from "../safety/git-checkpoint.js";
+import { createCheckpoint, cleanupCheckpoint, rollbackToCheckpointAndRebuild } from "../safety/git-checkpoint.js";
 import { resolveSafetyHarnessConfig } from "../safety/safety-harness.js";
 import { getUnitWorkflowDispatchReadinessErrorForModel } from "../tool-contract.js";
 import { prepareWorkflowMcpForProject } from "../workflow-mcp-auto-prep.js";
@@ -43,7 +45,7 @@ import { classifyError, isTransient } from "../error-classifier.js";
 import { setCurrentPhase, clearCurrentPhase } from "../../shared/gsd-phase-state.js";
 import { setAutoActiveStatus } from "../auto-dashboard.js";
 import { runUnit } from "./run-unit.js";
-import { verificationRetryKey } from "./verification-retry-policy.js";
+import { setVerificationRetry, verificationBudget } from "./verification-retry-state.js";
 import { validateSourceWriteWorktreeSafety } from "./worktree-safety-phase.js";
 import { isTaskExecutionReadyForHostVerification } from "./task-execution-cutover.js";
 import {
@@ -52,7 +54,6 @@ import {
   emitCancelledUnitEnd,
   _buildCancelledUnitStopReason,
   _isPauseOriginCancelledResult,
-  rememberRetryDispatch,
 } from "./phase-helpers.js";
 import type { IterationContext, IterationData, LoopState, PhaseResult } from "./types.js";
 import { MAX_RECOVERY_CHARS } from "./types.js";
@@ -96,11 +97,11 @@ export const _classifyZeroToolProviderMessageForTest = classifyZeroToolProviderM
 export const _zeroToolPseudoToolCallSnippetForTest = zeroToolPseudoToolCallSnippet;
 
 export function resolveDispatchRecoveryAttempts(
-  unitRecoveryCount: Map<string, number>,
+  unclaimedUnitBudgets: Map<string, number>,
   unitType: string,
   unitId: string,
 ): number | undefined {
-  return (unitRecoveryCount.get(`${unitType}/${unitId}`) ?? 0) > 0
+  return readUnitBudget(unclaimedUnitBudgets, { unitType, unitId, kind: "timeout-recovery" }) > 0
     ? 0
     : undefined;
 }
@@ -279,9 +280,12 @@ export async function runUnitPhase(
     }
   }
 
-  if (s.pendingVerificationRetry && s.pendingVerificationRetry.unitId === unitId) {
-    const retryCtx = s.pendingVerificationRetry;
-    s.pendingVerificationRetry = null;
+  // The retry context of this process, or the one stored on the dispatch row
+  // of the unit (ADR-048) when a restart lost the session.
+  const sessionRetry = s.pendingVerificationRetry?.unitId === unitId ? s.pendingVerificationRetry : null;
+  if (sessionRetry) s.pendingVerificationRetry = null;
+  const retryCtx = sessionRetry ?? readStoredUnitRetry(unitType, unitId);
+  if (retryCtx) {
     const capped =
       retryCtx.failureContext.length > MAX_RECOVERY_CHARS
         ? retryCtx.failureContext.slice(0, MAX_RECOVERY_CHARS) +
@@ -443,7 +447,7 @@ export async function runUnitPhase(
       const pauseMsg =
         "GSD workflow MCP config has been written. Restart Claude Code (or reload MCP servers), then run /gsd auto to continue.";
       ctx.ui.notify(pauseMsg, "warning");
-      await deps.pauseAuto(ctx, pi, {
+      await deps.pauseAuto(ctx, pi, "missing_access", {
         category: "provider",
         isTransient: true,
         message: pauseMsg,
@@ -476,10 +480,12 @@ export async function runUnitPhase(
     turnId: `iter-${ic.iteration}`,
     causedBy: "unit-start",
   });
+  // #1997: expose the dispatch context on before_agent_start events for the
+  // unit's agent turns; cleared again when the phase is cleared/deactivated.
+  // `phase` mirrors the value tracked by gsd-phase-state, whose canonical
+  // dispatch-phase identifier is the unit type (see setCurrentPhase above).
+  setBeforeAgentStartContext({ unitType, phase: unitType });
   s.lastToolInvocationError = null; // #2883: clear stale error from previous unit
-  if (nextDispatchCount <= 1) {
-    s.toolUnavailableRetries = 0;
-  }
   const unitStartSeq = ic.nextSeq();
   deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: unitStartSeq, eventType: "unit-start", data: { unitType, unitId } });
   deps.captureAvailableSkills();
@@ -495,7 +501,7 @@ export async function runUnitPhase(
       lastProgressAt: unitStartedAt,
       progressCount: 0,
       lastProgressKind: "dispatch",
-      recoveryAttempts: resolveDispatchRecoveryAttempts(s.unitRecoveryCount, unitType, unitId),
+      recoveryAttempts: resolveDispatchRecoveryAttempts(s.unclaimedUnitBudgets, unitType, unitId),
     },
   );
 
@@ -518,7 +524,7 @@ export async function runUnitPhase(
       basePath: s.basePath,
       verbose: s.verbose,
       currentUnitStartedAt: s.currentUnit?.startedAt ?? Date.now(),
-      unitRecoveryCount: s.unitRecoveryCount,
+      unclaimedUnitBudgets: s.unclaimedUnitBudgets,
     }),
     pauseAuto: deps.pauseAuto,
   });
@@ -578,7 +584,7 @@ export async function runUnitPhase(
       isTransient: true,
     });
     s.clearCurrentUnit();
-    await deps.pauseAuto(ctx, pi);
+    await deps.pauseAuto(ctx, pi, "machine_fixable");
     return { action: "break", reason: "ghost-completion" };
   }
 
@@ -687,7 +693,7 @@ export async function runUnitPhase(
         await pauseAutoForProviderError(
           ctx.ui,
           detail,
-          () => deps.pauseAuto(ctx, pi),
+          () => deps.pauseAuto(ctx, pi, "external_dependency"),
           {
             isRateLimit: false,
             isTransient,
@@ -744,7 +750,7 @@ export async function runUnitPhase(
         await pauseAutoForProviderError(
           ctx.ui,
           errorDetail,
-          () => deps.pauseAuto(ctx, pi),
+          () => deps.pauseAuto(ctx, pi, "external_dependency"),
           {
             isRateLimit: false,
             isTransient: allowAutoResume,
@@ -773,7 +779,7 @@ export async function runUnitPhase(
         "warning",
       );
       debugLog("autoLoop", { phase: "unit-hard-timeout-pause", unitType, unitId });
-      await deps.pauseAuto(ctx, pi);
+      await deps.pauseAuto(ctx, pi, "machine_fixable");
       await deps.autoCommitUnit?.(s.basePath, unitType, unitId, ctx);
       await emitCancelledUnitEnd(ic, unitType, unitId, unitStartSeq, unitResult.errorContext);
       return { action: "break", reason: "unit-hard-timeout" };
@@ -787,7 +793,7 @@ export async function runUnitPhase(
         "warning",
       );
       debugLog("autoLoop", { phase: "session-start-transient-pause", unitType, unitId, category: errorCategory });
-      await deps.pauseAuto(ctx, pi);
+      await deps.pauseAuto(ctx, pi, "machine_fixable");
       await deps.autoCommitUnit?.(s.basePath, unitType, unitId, ctx);
       await emitCancelledUnitEnd(ic, unitType, unitId, unitStartSeq, unitResult.errorContext);
       return { action: "break", reason: "session-timeout" };
@@ -796,7 +802,6 @@ export async function runUnitPhase(
       unitResult.errorContext?.isTransient &&
       errorCategory === "aborted"
     ) {
-      rememberRetryDispatch(s, { type: unitType, id: unitId }, iterData);
       writeUnitRuntimeRecord(s.basePath, unitType, unitId, s.currentUnit?.startedAt ?? Date.now(), {
         phase: "paused",
         lastProgressAt: Date.now(),
@@ -807,7 +812,7 @@ export async function runUnitPhase(
         "warning",
       );
       debugLog("autoLoop", { phase: "unit-aborted-transient-pause", unitType, unitId, category: errorCategory });
-      await deps.pauseAuto(ctx, pi, unitResult.errorContext);
+      await deps.pauseAuto(ctx, pi, "user_request", unitResult.errorContext);
       await deps.autoCommitUnit?.(s.basePath, unitType, unitId, ctx);
       await emitCancelledUnitEnd(ic, unitType, unitId, unitStartSeq, unitResult.errorContext);
       return { action: "break", reason: "unit-aborted-pause" };
@@ -881,7 +886,7 @@ export async function runUnitPhase(
             `${unitType} ${unitId} completed with 0 tool calls - provider serialization drift: model emitted pseudo-tool-call text. Snippet: ${pseudoToolCallSnippet}`,
             "error",
           );
-          await deps.pauseAuto(ctx, pi);
+          await deps.pauseAuto(ctx, pi, "machine_fixable");
           return { action: "break", reason: "zero-tool-serialization-drift" };
         }
         const providerErrorClass = classifyZeroToolProviderMessage(lastAssistantMessage);
@@ -890,7 +895,7 @@ export async function runUnitPhase(
           await pauseAutoForProviderError(
             ctx.ui,
             ` for ${unitType} ${unitId}`,
-            () => deps.pauseAuto(ctx, pi),
+            () => deps.pauseAuto(ctx, pi, "external_dependency"),
             {
               isRateLimit: providerErrorClass.kind === "rate-limit",
               isTransient: true,
@@ -920,8 +925,8 @@ export async function runUnitPhase(
             unitId,
           });
         } else {
-          const zeroToolKey = `${unitType}/${unitId}`;
-          const attempt = (s.zeroToolRetryCount.get(zeroToolKey) ?? 0) + 1;
+          const zeroToolBudget = { unitType, unitId, kind: "zero-tool" } as const;
+          const attempt = spendUnitBudget(s.unclaimedUnitBudgets, zeroToolBudget);
           debugLog("runUnitPhase", {
             phase: "zero-tool-calls",
             unitType,
@@ -930,15 +935,14 @@ export async function runUnitPhase(
             warning: "Unit completed with 0 tool calls — likely context exhaustion, marking as failed",
           });
           if (attempt > MAX_ZERO_TOOL_RETRIES) {
-            s.zeroToolRetryCount.delete(zeroToolKey);
+            resetUnitBudget(s.unclaimedUnitBudgets, zeroToolBudget);
             ctx.ui.notify(
               `${unitType} ${unitId} completed with 0 tool calls — context exhaustion, pausing auto-mode after ${MAX_ZERO_TOOL_RETRIES} retry.`,
               "error",
             );
-            await deps.pauseAuto(ctx, pi);
+            await deps.pauseAuto(ctx, pi, "machine_fixable");
             return { action: "break", reason: "zero-tool-calls-exhausted" };
           }
-          s.zeroToolRetryCount.set(zeroToolKey, attempt);
           ctx.ui.notify(
             `${unitType} ${unitId} completed with 0 tool calls — context exhaustion, will retry (attempt ${attempt}/${MAX_ZERO_TOOL_RETRIES})`,
             "warning",
@@ -956,7 +960,10 @@ export async function runUnitPhase(
     }
   }
 
-  const skipArtifactVerification = unitType.startsWith("hook/") || unitType === "custom-step";
+  // A rewrite-docs unit writes no artifact. Its completed turn is the
+  // completion; the host resolves the overrides later, in postUnitPreVerification.
+  const skipArtifactVerification = unitType.startsWith("hook/") || unitType === "custom-step" ||
+    (unitType === "rewrite-docs" && unitResult.status === "completed");
   let artifactVerified =
     skipArtifactVerification ||
     isTaskExecutionReadyForHostVerification(unitType, unitId) ||
@@ -983,8 +990,8 @@ export async function runUnitPhase(
   }
   if (artifactVerified) {
     s.unitDispatchCount.delete(dispatchKey);
-    s.unitRecoveryCount.delete(`${unitType}/${unitId}`);
-    s.zeroToolRetryCount.delete(dispatchKey);
+    resetUnitBudget(s.unclaimedUnitBudgets, { unitType, unitId, kind: "timeout-recovery" });
+    resetUnitBudget(s.unclaimedUnitBudgets, { unitType, unitId, kind: "zero-tool" });
   }
 
   // Write phase handoff anchor after successful research/planning completion
@@ -1012,12 +1019,17 @@ export async function runUnitPhase(
       : !artifactVerified && unitResult.status === "completed"
         ? "no-artifact"
         : unitResult.status;
+  recordUnitEnd(s.basePath, unitType, unitId, {
+    status: unitEndStatus,
+    artifactVerified,
+    ...(unitResult.errorContext ? { error: unitResult.errorContext.message } : {}),
+  });
   deps.emitJournalEvent({ ts: new Date().toISOString(), flowId: ic.flowId, seq: ic.nextSeq(), eventType: "unit-end", data: { unitType, unitId, status: unitEndStatus, artifactVerified, ...(unitResult.errorContext ? { errorContext: unitResult.errorContext } : {}) }, causedBy: { flowId: ic.flowId, seq: unitStartSeq } });
 
   // ── Safety harness: checkpoint cleanup or rollback ──
   if (s.checkpointSha) {
     if (unitResult.status === "error" && safetyConfig.auto_rollback) {
-      const rolled = rollbackToCheckpoint(s.basePath, unitId, s.checkpointSha);
+      const rolled = await rollbackToCheckpointAndRebuild(s.basePath, unitId, s.checkpointSha);
       if (rolled) {
         ctx.ui.notify(`Rolled back to pre-unit checkpoint for ${unitId}`, "info");
         debugLog("runUnitPhase", { phase: "checkpoint-rollback", unitId });
@@ -1069,15 +1081,12 @@ export async function runUnitPhase(
       ? `${String(failedToolResult.toolName)} returned an error`
       : null);
     if (toolError) {
-      const retryKey = verificationRetryKey(unitType, unitId);
-      const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
-      s.verificationRetryCount.set(retryKey, attempt);
-      s.pendingVerificationRetry = {
+      const attempt = spendUnitBudget(s.unclaimedUnitBudgets, verificationBudget(unitType, unitId));
+      setVerificationRetry(s, unitType, {
         unitId,
         failureContext: `gsd_slice_complete failed without writing the slice completion artifacts:\n\n${toolError}`,
         attempt,
-      };
-      rememberRetryDispatch(s, { type: unitType, id: unitId }, iterData);
+      });
       ctx.ui.notify(
         `complete-slice ${unitId} returned a tool error without writing its artifacts. Retrying with the tool error context.`,
         "warning",
@@ -1098,20 +1107,13 @@ export async function runUnitPhase(
   // corrective context naming the missing gate ids, mirroring the
   // complete-slice no-artifact retry above.
   if (unitEndStatus === "no-artifact" && unitType === "gate-evaluate" && missingGateIds.length > 0) {
-    const retryKey = verificationRetryKey(unitType, unitId);
-    const attempt = (s.verificationRetryCount.get(retryKey) ?? 0) + 1;
-    s.verificationRetryCount.set(retryKey, attempt);
+    const attempt = spendUnitBudget(s.unclaimedUnitBudgets, verificationBudget(unitType, unitId));
     const missing = missingGateIds.join(", ");
     const failureContext =
       `gate-evaluate ${unitId} ended without a persisted verdict for: ${missing}. ` +
       `Dispatch gate evaluations synchronously (subagent with run_in_background: false) and call ` +
       `gsd_save_gate_result for every gate still missing a verdict (${missing}) before finishing.`;
-    s.pendingVerificationRetry = {
-      unitId,
-      failureContext,
-      attempt,
-    };
-    rememberRetryDispatch(s, { type: unitType, id: unitId }, iterData);
+    setVerificationRetry(s, unitType, { unitId, failureContext, attempt });
     ctx.ui.notify(
       `gate-evaluate ${unitId} did not persist verdicts for: ${missing}. Retrying with the missing-gate context.`,
       "warning",

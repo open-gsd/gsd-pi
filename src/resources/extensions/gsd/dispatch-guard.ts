@@ -1,10 +1,10 @@
 // GSD Dispatch Guard — prevents out-of-order slice dispatch
 
 import { parseUnitId } from "./unit-id.js";
-import { isDbAvailable, getAllMilestones, getMilestoneSliceSummaries, getMilestone } from "./gsd-db.js";
-import { isSkippedForDispatch } from "./status-guards.js";
+import { isDbAvailable } from "./gsd-db.js";
+import { readMilestone, readMilestones, readMilestoneSlices } from "./db/lifecycle-read.js";
 import { MILESTONE_ID_RE } from "./milestone-ids.js";
-import type { LoopState } from "./auto/types.js";
+import { sliceAwaitsUatVerdict } from "./uat-dispatch.js";
 
 const SLICE_DISPATCH_TYPES = new Set([
   "research-slice",
@@ -14,55 +14,8 @@ const SLICE_DISPATCH_TYPES = new Set([
   "complete-slice",
 ]);
 
-const CONSECUTIVE_SAME_UNIT_CAP = 5;
-
-type ConsecutiveDispatchState = Pick<
-  LoopState,
-  "consecutiveDispatchCount" | "lastDispatchedKey" | "lastDispatchPhase"
->;
-
-/**
- * Prevent repeated dispatches of the same unit within the same phase.
- *
- * Applies to all unit types. The first dispatch for a unit/phase pair starts
- * a counter, phase changes reset tracking, and dispatch is blocked once the
- * counter reaches `CONSECUTIVE_SAME_UNIT_CAP` (5). This remains a last-resort
- * local safety net; the DB-persisted liveness backstop normally trips first
- * when repeated dispatches produce identical non-advancing outcomes.
- *
- * Side effects: mutates `state.consecutiveDispatchCount`,
- * `state.lastDispatchedKey`, and `state.lastDispatchPhase`.
- *
- * Returns `null` when dispatch is allowed, or a blocker message (including
- * guidance to run `/gsd resume`) when the cap is reached.
- */
-export function getConsecutiveDispatchBlocker(
-  state: ConsecutiveDispatchState,
-  phase: string,
-  unitType: string,
-  unitId: string,
-): string | null {
-  if (!state.consecutiveDispatchCount) state.consecutiveDispatchCount = new Map<string, number>();
-
-  const key = `${unitType}:${unitId}`;
-  const phaseChanged = state.lastDispatchPhase !== phase;
-  if (phaseChanged) {
-    state.consecutiveDispatchCount.clear();
-  }
-
-  const count = state.consecutiveDispatchCount.get(key) ?? 0;
-  if (count >= CONSECUTIVE_SAME_UNIT_CAP) {
-    return `Cannot dispatch ${unitType} ${unitId}: dispatched ${count} consecutive times; same-unit repeat cap reached. Resolve via /gsd resume.`;
-  }
-
-  state.consecutiveDispatchCount.set(key, count + 1);
-  state.lastDispatchedKey = key;
-  state.lastDispatchPhase = phase;
-  return null;
-}
-
 export function getPriorSliceCompletionBlocker(
-  _base: string,
+  base: string,
   _mainBranch: string,
   unitType: string,
   unitId: string,
@@ -73,7 +26,7 @@ export function getPriorSliceCompletionBlocker(
   if (!MILESTONE_ID_RE.test(targetMid) || !SLICE_DISPATCH_TYPES.has(unitType)) return null;
   if (!targetSid) return `Cannot dispatch ${unitType} ${unitId}: slice identity is missing.`;
 
-  const allMilestones = getAllMilestones();
+  const allMilestones = readMilestones();
   const milestoneById = new Map(allMilestones.map((milestone) => [milestone.id, milestone]));
 
   const milestoneLock = process.env.GSD_MILESTONE_LOCK;
@@ -91,9 +44,9 @@ export function getPriorSliceCompletionBlocker(
     if (!milestoneRow) {
       return `Cannot dispatch ${unitType} ${unitId}: milestone ${mid} is missing from the workflow DB.`;
     }
-    if (isSkippedForDispatch(milestoneRow.status)) continue;
+    if (milestoneRow.done || milestoneRow.parked || milestoneRow.discarded) continue;
 
-    const slices = getMilestoneSliceSummaries(mid);
+    const slices = readMilestoneSlices(mid);
     if (slices.length === 0) {
       // An earlier milestone with no slice rows is a placeholder; it cannot
       // have incomplete slices, so it never gates the target milestone.
@@ -120,6 +73,11 @@ export function getPriorSliceCompletionBlocker(
       return `Cannot dispatch ${unitType} ${unitId}: slice ${targetMid}/${targetSid} is missing from the workflow DB.`;
     }
 
+    // complete-slice starts no new work on the dependency, and its dispatch
+    // rule comes before run-uat. A UAT hold on it would stop auto-mode with no
+    // unit to dispatch, so the hold applies only to the other slice units.
+    const holdsForUat = unitType !== "complete-slice";
+
     if (targetSlice.depends.length > 0) {
       const sliceMap = new Map(slices.map((slice) => [slice.id, slice]));
       for (const depId of targetSlice.depends) {
@@ -127,8 +85,11 @@ export function getPriorSliceCompletionBlocker(
         if (!dependency) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} is missing from the workflow DB.`;
         }
-        if (!dependency.done) {
+        if (!dependency.satisfiesDependents) {
           return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} is not complete.`;
+        }
+        if (holdsForUat && sliceAwaitsUatVerdict(base, targetMid, depId)) {
+          return `Cannot dispatch ${unitType} ${unitId}: dependency slice ${targetMid}/${depId} has no UAT verdict.`;
         }
       }
     } else {
@@ -155,6 +116,12 @@ export function getPriorSliceCompletionBlocker(
       if (incomplete) {
         return `Cannot dispatch ${unitType} ${unitId}: earlier slice ${targetMid}/${incomplete.id} is not complete.`;
       }
+      const awaitsUat = holdsForUat && slices
+        .slice(0, targetIndex)
+        .find((slice) => !reverseDependents.has(slice.id) && sliceAwaitsUatVerdict(base, targetMid, slice.id));
+      if (awaitsUat) {
+        return `Cannot dispatch ${unitType} ${unitId}: earlier slice ${targetMid}/${awaitsUat.id} has no UAT verdict.`;
+      }
     }
   }
 
@@ -167,7 +134,7 @@ export function getDispatchAuthorityBlocker(unitType: string, unitId: string): s
   if (!isDbAvailable()) {
     return `Cannot dispatch ${unitType} ${unitId}: workflow DB is unavailable.`;
   }
-  return getMilestone(milestone)
+  return readMilestone(milestone)
     ? null
     : `Cannot dispatch ${unitType} ${unitId}: milestone ${milestone} is missing from the workflow DB.`;
 }

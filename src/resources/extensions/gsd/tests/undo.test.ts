@@ -5,13 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
+  describeLastCompletedUnit,
   extractCommitShas,
   findCommitsForUnit,
   handleUndo,
   handleUndoTask,
   handleResetSlice,
-  parseActivityLogFilename,
-  uncheckTaskInPlan,
+  undoLastCompletedUnit,
 } from "../undo.ts";
 import {
   _getAdapter,
@@ -22,7 +22,9 @@ import {
   insertTask,
   getTask,
   getSlice,
+  getMilestone,
 } from "../gsd-db.ts";
+import { addLegacyCompletionEvidence } from "./helpers/legacy-completion-evidence.ts";
 import { executeDomainOperation } from "../db/domain-operation.ts";
 import {
   adoptOrTransitionLifecycle,
@@ -35,62 +37,87 @@ function makeTempDir(prefix: string): string {
   return mkdtempSync(join(tmpdir(), `${prefix}-`));
 }
 
-test("handleUndo without --force only warns and leaves completed units intact", async () => {
+/** Record a completed Unit in the dispatch ledger, the source /gsd undo reads. */
+function recordCompletedDispatch(unit: {
+  unitType: string;
+  unitId: string;
+  milestoneId: string;
+  sliceId?: string;
+  taskId?: string;
+  endedAt: string;
+}): void {
+  const db = _getAdapter();
+  assert.ok(db);
+  db.prepare(`
+    INSERT OR IGNORE INTO workers (
+      worker_id, host, pid, started_at, version, last_heartbeat_at, status, project_root_realpath
+    ) VALUES ('undo-worker', 'test-host', 1, '2026-07-13T00:00:00.000Z', 'test',
+      '2026-07-13T00:00:00.000Z', 'active', '/tmp/project')
+  `).run();
+  db.prepare(`
+    INSERT INTO unit_dispatches (
+      trace_id, worker_id, milestone_lease_token, milestone_id, slice_id, task_id,
+      unit_type, unit_id, status, attempt_n, started_at, ended_at
+    ) VALUES (
+      :trace_id, 'undo-worker', 1, :milestone_id, :slice_id, :task_id,
+      :unit_type, :unit_id, 'completed', 1, :ended_at, :ended_at
+    )
+  `).run({
+    ":trace_id": `trace-${unit.unitId}`,
+    ":milestone_id": unit.milestoneId,
+    ":slice_id": unit.sliceId ?? null,
+    ":task_id": unit.taskId ?? null,
+    ":unit_type": unit.unitType,
+    ":unit_id": unit.unitId,
+    ":ended_at": unit.endedAt,
+  });
+}
+
+test("handleUndo without --force only warns and leaves the task closed", async () => {
   const base = makeTempDir("gsd-undo-confirm");
   try {
-    mkdirSync(join(base, ".gsd"), { recursive: true });
-    mkdirSync(join(base, ".gsd", "activity"), { recursive: true });
-    writeFileSync(
-      join(base, ".gsd", "completed-units.json"),
-      JSON.stringify(["execute-task/M001/S01/T01"]),
-      "utf-8",
-    );
-    writeFileSync(
-      join(base, ".gsd", "activity", "001-execute-task-M001-S01-T01.jsonl"),
-      "",
-      "utf-8",
-    );
+    setupTaskFixture(base);
+    recordCompletedDispatch({
+      unitType: "execute-task", unitId: "M001/S01/T01",
+      milestoneId: "M001", sliceId: "S01", taskId: "T01", endedAt: "2026-07-13T01:00:00.000Z",
+    });
 
-    const notifications: Array<{ message: string; level: string }> = [];
-    const ctx = {
-      ui: {
-        notify(message: string, level: string) {
-          notifications.push({ message, level });
-        },
-      },
-    };
-
-    await handleUndo("", ctx as any, {} as any, base);
+    const { notifications, ctx } = makeCtx();
+    await handleUndo("", ctx, {} as any, base);
 
     assert.equal(notifications.length, 1);
     assert.equal(notifications[0]?.level, "warning");
+    assert.match(notifications[0]?.message ?? "", /Will undo: execute-task \(M001\/S01\/T01\)/);
     assert.match(notifications[0]?.message ?? "", /Run \/gsd undo --force to confirm\./);
-    assert.deepEqual(
-      JSON.parse(readFileSync(join(base, ".gsd", "completed-units.json"), "utf-8")),
-      ["execute-task/M001/S01/T01"],
-    );
+    assert.equal(getTask("M001", "S01", "T01")?.status, "complete");
+    assert.equal(canonicalTaskHistory().reopenOperations, 0);
   } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-test("handleUndo execute-task with --force reopens the task row and re-renders plan", async () => {
-  const base = makeTempDir("gsd-undo-execute-task");
+test("handleUndo selects the last completed unit from the DB ledger, not activity file names", async () => {
+  const base = makeTempDir("gsd-undo-ledger");
   try {
     setupTaskFixture(base);
+    // The newest activity log names a different unit; the ledger is authoritative.
     mkdirSync(join(base, ".gsd", "activity"), { recursive: true });
-    writeFileSync(
-      join(base, ".gsd", "activity", "001-execute-task-M001-S01-T01.jsonl"),
-      "",
-      "utf-8",
-    );
+    writeFileSync(join(base, ".gsd", "activity", "009-plan-slice-M001-S02.jsonl"), "", "utf-8");
+    recordCompletedDispatch({
+      unitType: "execute-task", unitId: "M001/S01/T02",
+      milestoneId: "M001", sliceId: "S01", taskId: "T02", endedAt: "2026-07-13T01:00:00.000Z",
+    });
+    recordCompletedDispatch({
+      unitType: "execute-task", unitId: "M001/S01/T01",
+      milestoneId: "M001", sliceId: "S01", taskId: "T01", endedAt: "2026-07-13T02:00:00.000Z",
+    });
 
     const before = canonicalTaskHistory();
     const { notifications, ctx } = makeCtx();
     await handleUndo("--force", ctx, {} as any, base);
 
-    const task = getTask("M001", "S01", "T01");
-    assert.equal(task?.status, "pending");
+    assert.equal(getTask("M001", "S01", "T01")?.status, "pending");
     const after = canonicalTaskHistory();
     assert.equal(after.lifecycleId, before.lifecycleId);
     assert.equal(after.lifecycleStatus, "ready");
@@ -102,35 +129,254 @@ test("handleUndo execute-task with --force reopens the task row and re-renders p
       "utf-8",
     );
     assert.match(planContent, /\[ \] \*\*T01\*\*:/);
+    assert.equal(existsSync(join(base, ".gsd", "phases", "01-test", "tasks", "T01-SUMMARY.md")), false);
 
     assert.equal(notifications[0]?.level, "success");
-    assert.match(notifications[0]?.message ?? "", /Unchecked task in PLAN/);
+    assert.match(notifications[0]?.message ?? "", /Undone: execute-task \(M001\/S01\/T01\)/);
+    assert.match(notifications[0]?.message ?? "", /Reopened task M001\/S01\/T01 in the database/);
   } finally {
     closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
 
-test("uncheckTaskInPlan flips a checked task back to unchecked", () => {
-  const base = makeTempDir("gsd-undo-plan");
+test("handleUndo complete-slice reopens the slice in the DB for a suffixed milestone id", async () => {
+  const base = makeTempDir("gsd-undo-complete-slice");
   try {
-    const sliceDir = join(base, ".gsd", "phases", "01-test");
-    mkdirSync(sliceDir, { recursive: true });
-    const planFile = join(sliceDir, "S01-PLAN.md");
-    writeFileSync(
-      planFile,
-      [
-        "# Slice Plan",
-        "",
-        "- [x] **T01**: Ship the feature",
-        "- [ ] **T02**: Follow-up",
-      ].join("\n"),
-      "utf-8",
-    );
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001-abc123", title: "Test", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001-abc123", title: "Test Slice", status: "complete", risk: "low", depends: [] });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001-abc123", title: "First task", status: "complete" });
+    recordCompletedDispatch({
+      unitType: "complete-slice", unitId: "M001-abc123/S01",
+      milestoneId: "M001-abc123", sliceId: "S01", endedAt: "2026-07-13T01:00:00.000Z",
+    });
+    invalidateAllCaches();
 
-    assert.equal(uncheckTaskInPlan(base, "M001", "S01", "T01"), true);
-    assert.match(readFileSync(planFile, "utf-8"), /- \[ \] \*\*T01\*\*: Ship the feature/);
+    const { notifications, ctx } = makeCtx();
+    await handleUndo("--force", ctx, {} as any, base);
+
+    assert.equal(notifications.at(-1)?.level, "success", notifications.at(-1)?.message);
+    assert.match(notifications.at(-1)?.message ?? "", /Undone: complete-slice \(M001-abc123\/S01\)/);
+    assert.equal(getSlice("M001-abc123", "S01")?.status, "in_progress");
+    assert.equal(getTask("M001-abc123", "S01", "T01")?.status, "pending");
+    const reopen = _getAdapter()!.prepare(`
+      SELECT COUNT(*) AS count FROM workflow_operations WHERE operation_type = 'slice.reopen'
+    `).get() as Record<string, unknown>;
+    assert.equal(Number(reopen["count"]), 1);
+
+    // A second undo finds the slice already open and changes nothing.
+    await handleUndo("--force", ctx, {} as any, base);
+    assert.equal(notifications.at(-1)?.level, "warning");
+    assert.match(notifications.at(-1)?.message ?? "", /already open/);
   } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("handleUndo complete-slice confirm text states the task reset and the cleared summary", async (t) => {
+  const base = makeTempDir("gsd-undo-slice-consent");
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "active" });
+  insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "complete", risk: "low", depends: [] });
+  insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First task", status: "complete" });
+  insertTask({ id: "T02", sliceId: "S01", milestoneId: "M001", title: "Second task", status: "complete" });
+  recordCompletedDispatch({
+    unitType: "complete-slice", unitId: "M001/S01",
+    milestoneId: "M001", sliceId: "S01", endedAt: "2026-07-13T01:00:00.000Z",
+  });
+  invalidateAllCaches();
+
+  const { notifications, ctx } = makeCtx();
+  await handleUndo("", ctx, {} as any, base);
+
+  const message = notifications[0]?.message ?? "";
+  assert.match(message, /Will undo: complete-slice \(M001\/S01\)/);
+  assert.match(message, /Reset 2 task\(s\) of the slice to pending/);
+  assert.match(message, /Clear the slice summary and UAT in the database/);
+  assert.equal(getSlice("M001", "S01")?.status, "complete");
+  assert.equal(getTask("M001", "S01", "T02")?.status, "complete");
+});
+
+test("handleUndo complete-milestone reopens only the milestone and keeps slices, tasks and summaries", async (t) => {
+  const base = makeTempDir("gsd-undo-complete-milestone");
+  t.after(() => {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  });
+  mkdirSync(join(base, ".gsd"), { recursive: true });
+  openDatabase(join(base, ".gsd", "gsd.db"));
+  insertMilestone({ id: "M001", title: "Test", status: "complete" });
+  const items: LifecycleIdentity[] = [{ itemKind: "milestone", milestoneId: "M001" }];
+  for (const sid of ["S01", "S02"]) {
+    insertSlice({ id: sid, milestoneId: "M001", title: `Slice ${sid}`, status: "complete", risk: "low", depends: [] });
+    items.push({ itemKind: "slice", milestoneId: "M001", sliceId: sid });
+    for (const tid of ["T01", "T02"]) {
+      insertTask({ id: tid, sliceId: sid, milestoneId: "M001", title: `Task ${tid}`, status: "complete" });
+      items.push({ itemKind: "task", milestoneId: "M001", sliceId: sid, taskId: tid });
+    }
+  }
+  _getAdapter()!.exec("UPDATE slices SET full_summary_md = 'Slice summary', full_uat_md = 'Slice UAT'");
+  // Adopt the canonical lifecycle: the adopted reopen is the path that clears
+  // slice summaries when the completed hierarchy is not kept.
+  const fence = readDomainOperationFence();
+  executeDomainOperation({
+    operationType: "test.undo.milestone.completed",
+    idempotencyKey: "test:undo:fixture:milestone-completed",
+    expectedRevision: fence.revision,
+    expectedAuthorityEpoch: fence.authorityEpoch,
+    actorType: "test",
+    sourceTransport: "test",
+    payload: {},
+  }, (context) => {
+    for (const item of items) {
+      adoptOrTransitionLifecycle(context, { ...item, lifecycleStatus: "completed", adoptedFromStatus: "completed" });
+    }
+    return {
+      events: [{
+        eventType: "test.undo.milestone.completed",
+        entityType: "milestone",
+        entityId: "M001",
+        payload: {},
+        destinations: ["test"],
+      }],
+      projections: [{
+        projectionKey: "test/undo/milestone/completed",
+        projectionKind: "test",
+        rendererVersion: "1",
+      }],
+    };
+  });
+  recordCompletedDispatch({
+    unitType: "complete-milestone", unitId: "M001",
+    milestoneId: "M001", endedAt: "2026-07-13T01:00:00.000Z",
+  });
+  invalidateAllCaches();
+
+  const info = await describeLastCompletedUnit(base);
+  assert.deepEqual(info.effects, [
+    "Reopen milestone M001 in the database; its slices and tasks stay complete",
+    "Delete the milestone summary file",
+  ]);
+
+  const { notifications, ctx } = makeCtx();
+  await handleUndo("--force", ctx, {} as any, base);
+
+  assert.equal(notifications.at(-1)?.level, "success", notifications.at(-1)?.message);
+  assert.match(notifications.at(-1)?.message ?? "", /Reopened milestone M001 in the database/);
+  assert.equal(getMilestone("M001")?.status, "active");
+  for (const sid of ["S01", "S02"]) {
+    const slice = getSlice("M001", sid);
+    assert.equal(slice?.status, "complete");
+    assert.equal(slice?.full_summary_md, "Slice summary");
+    assert.equal(slice?.full_uat_md, "Slice UAT");
+    for (const tid of ["T01", "T02"]) {
+      assert.equal(getTask("M001", sid, tid)?.status, "complete");
+    }
+  }
+});
+
+test("handleUndo refuses a unit with no reopen operation instead of reporting success", async () => {
+  const base = makeTempDir("gsd-undo-unsupported");
+  try {
+    setupTaskFixture(base);
+    recordCompletedDispatch({
+      unitType: "plan-slice", unitId: "M001/S01",
+      milestoneId: "M001", sliceId: "S01", endedAt: "2026-07-13T01:00:00.000Z",
+    });
+
+    const { notifications, ctx } = makeCtx();
+    await handleUndo("--force", ctx, {} as any, base);
+
+    assert.equal(notifications[0]?.level, "warning");
+    assert.match(notifications[0]?.message ?? "", /Cannot undo plan-slice \(M001\/S01\)/);
+    assert.equal(getTask("M001", "S01", "T01")?.status, "complete");
+    assert.equal(canonicalTaskHistory().reopenOperations, 0);
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("undo preview reports an unreadable database instead of an empty ledger", async () => {
+  const base = makeTempDir("gsd-undo-no-db");
+  try {
+    closeDatabase();
+    invalidateAllCaches();
+
+    await assert.rejects(describeLastCompletedUnit(base), /GSD database is not available/);
+
+    const { notifications, ctx } = makeCtx();
+    await handleUndo("", ctx, {} as any, base);
+    assert.equal(notifications.length, 1);
+    assert.equal(notifications[0]?.level, "warning");
+    assert.match(notifications[0]?.message ?? "", /GSD database is not available/);
+    assert.doesNotMatch(notifications[0]?.message ?? "", /no completed unit is recorded/);
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("handleUndo reports a refused task reopen as a failure result", async () => {
+  const base = makeTempDir("gsd-undo-task-refused");
+  try {
+    setupTaskFixture(base);
+    // The legacy row no longer matches the canonical lifecycle head.
+    _getAdapter()!.prepare("UPDATE tasks SET status = 'skipped' WHERE id = 'T01'").run();
+    recordCompletedDispatch({
+      unitType: "execute-task", unitId: "M001/S01/T01",
+      milestoneId: "M001", sliceId: "S01", taskId: "T01", endedAt: "2026-07-13T01:00:00.000Z",
+    });
+    invalidateAllCaches();
+
+    const result = await undoLastCompletedUnit(base);
+    assert.equal(result.success, false);
+    assert.match(result.message, /^Cannot undo execute-task \(M001\/S01\/T01\): /);
+
+    const { notifications, ctx } = makeCtx();
+    await handleUndo("--force", ctx, {} as any, base);
+    assert.equal(notifications[0]?.level, "warning");
+    assert.equal(getTask("M001", "S01", "T01")?.status, "skipped");
+    assert.equal(canonicalTaskHistory().reopenOperations, 0);
+  } finally {
+    closeDatabase();
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("undoLastCompletedUnit opens the project DB itself, as web undo calls it", async () => {
+  const base = makeTempDir("gsd-undo-web");
+  try {
+    mkdirSync(join(base, ".gsd"), { recursive: true });
+    openDatabase(join(base, ".gsd", "gsd.db"));
+    insertMilestone({ id: "M001", title: "Test", status: "active" });
+    insertSlice({ id: "S01", milestoneId: "M001", title: "Test Slice", status: "complete", risk: "low", depends: [] });
+    insertTask({ id: "T01", sliceId: "S01", milestoneId: "M001", title: "First task", status: "complete" });
+    recordCompletedDispatch({
+      unitType: "complete-slice", unitId: "M001/S01",
+      milestoneId: "M001", sliceId: "S01", endedAt: "2026-07-13T01:00:00.000Z",
+    });
+    addLegacyCompletionEvidence();
+    closeDatabase();
+    invalidateAllCaches();
+
+    const info = await describeLastCompletedUnit(base);
+    assert.equal(info.lastUnitKey, "complete-slice/M001/S01");
+    assert.equal(info.completedCount, 1);
+
+    const result = await undoLastCompletedUnit(base);
+    assert.equal(result.success, true, result.message);
+    assert.equal(getSlice("M001", "S01")?.status, "in_progress");
+  } finally {
+    closeDatabase();
     rmSync(base, { recursive: true, force: true });
   }
 });
@@ -196,48 +442,6 @@ test("extractCommitShas ignores malformed commit tokens", () => {
   ].join("\n");
 
   assert.deepEqual(extractCommitShas(content), ["1234567"]);
-});
-
-test("parseActivityLogFilename splits hyphenated unit types from their IDs", () => {
-  // Task-level: unit type and ID both contain hyphens.
-  assert.deepEqual(parseActivityLogFilename("001-execute-task-M001-S01-T01.jsonl"), {
-    unitType: "execute-task",
-    unitId: "M001-S01-T01",
-  });
-  // Variant must win over its shorter prefix ("execute-task").
-  assert.deepEqual(parseActivityLogFilename("002-execute-task-simple-M001-S02-T03.jsonl"), {
-    unitType: "execute-task-simple",
-    unitId: "M001-S02-T03",
-  });
-  // Milestone- and slice-shaped IDs.
-  assert.deepEqual(parseActivityLogFilename("003-research-milestone-M001.jsonl"), {
-    unitType: "research-milestone",
-    unitId: "M001",
-  });
-  assert.deepEqual(parseActivityLogFilename("004-plan-slice-M001-S01.jsonl"), {
-    unitType: "plan-slice",
-    unitId: "M001-S01",
-  });
-});
-
-test("parseActivityLogFilename accepts non-milestone-shaped unit IDs", () => {
-  // Regression (#1057): project-level units use IDs that do not start with
-  // "M<digit>". A milestone-shaped regex made /gsd undo bail out with
-  // "could not parse latest activity log" when one of these was most recent.
-  assert.deepEqual(parseActivityLogFilename("005-discuss-project-PROJECT.jsonl"), {
-    unitType: "discuss-project",
-    unitId: "PROJECT",
-  });
-  assert.deepEqual(parseActivityLogFilename("006-workflow-preferences-WORKFLOW-PREFS.jsonl"), {
-    unitType: "workflow-preferences",
-    unitId: "WORKFLOW-PREFS",
-  });
-});
-
-test("parseActivityLogFilename returns null for unrecognized names", () => {
-  assert.equal(parseActivityLogFilename("007-not-a-real-unit-M001.jsonl"), null);
-  assert.equal(parseActivityLogFilename("no-sequence-prefix.jsonl"), null);
-  assert.equal(parseActivityLogFilename("001-execute-task-M001-S01-T01.txt"), null);
 });
 
 // ─── handleUndoTask tests ────────────────────────────────────────────────────

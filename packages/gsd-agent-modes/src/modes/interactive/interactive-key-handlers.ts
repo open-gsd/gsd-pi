@@ -184,7 +184,88 @@ export function handleCtrlD(host: InteractiveModeDelegateHost): void {
 	 * Emits shutdown event to extensions, then exits.
 	 */
 
-export async function shutdown(host: InteractiveModeDelegateHost): Promise<void> {
+/**
+ * Send a signal to every pid, swallowing per-pid failures (races with a pid
+ * exiting mid-sweep are expected).
+ */
+function killAll(pids: number[], signal: "SIGTERM" | "SIGKILL"): void {
+	for (const childPid of pids) {
+		try { process.kill(childPid, signal); } catch {}
+	}
+}
+
+/**
+ * Snapshot the descendant pid set for the orphan sweep. Degrades to an empty
+ * snapshot when the native enumeration is unavailable (GSD_NATIVE_DISABLE,
+ * unbuilt addon) — shutdown must never fail to start because of it.
+ */
+function defaultCaptureDescendants(): number[] {
+	try {
+		return listDescendants(process.pid);
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Best-effort terminal restore before a forced exit: the graceful path's
+ * host.stop() never ran (or threw midway), so Kitty/modifyOtherKeys,
+ * bracketed-paste, mouse, and raw mode may still be enabled, and the cursor
+ * may stay hidden (terminal.stop() does not restore visibility — TUI.stop()
+ * does that separately). Both steps are synchronous, idempotent, and their
+ * writes are pipe-closed-guarded, so neither can hang or skip the other.
+ */
+function guardedTerminalCleanup(host: InteractiveModeDelegateHost): void {
+	const terminal = host.ui?.terminal;
+	if (!terminal) return;
+	try {
+		terminal.stop?.();
+	} catch {}
+	try {
+		terminal.showCursor?.();
+	} catch {}
+}
+
+/**
+ * SIGKILL the captured descendant set — the watchdog's terminal-outcome twin
+ * of the graceful sweep below. Past the hard deadline the graceful sweep
+ * never ran (or stalled mid-way), so quit must still stay orphan-free.
+ */
+function forceKillDescendants(pids: number[]): void {
+	try {
+		killAll(pids, "SIGKILL");
+	} catch {}
+}
+
+/**
+ * Hard deadline for the whole graceful teardown (#2515). Every step below
+ * awaits work with no internal deadline: extension session_shutdown handlers
+ * are awaited by runner.emit() indefinitely (it catches throws, not hangs),
+ * and a wedged settings flush or parallel-worker stop hangs the same way.
+ * shutdown() is the only path between a latched render loop (stdout write
+ * failed — the TUI stops rendering for good) and process.exit; when it hangs,
+ * the process stays alive with stdin paused and raw mode still on — keys are
+ * dead, Ctrl+C/Ctrl+D do nothing, and only an external kill works.
+ *
+ * The value is derived from the path's worst supported legitimate teardown
+ * (preferences clamp parallel max_workers to 4): 4 × stopParallel's 3s+250ms
+ * sequential stop windows (13s) + 1s drainInput + 500ms descendant-kill grace
+ * ≈ 14.5s, so 15s never trips a healthy quit — and a forced exit still runs
+ * the descendant SIGKILL sweep.
+ *
+ * exit_process only: stop_ui tears the TUI down inside an embedding process
+ * and must never terminate that process.
+ */
+export const SHUTDOWN_HARD_EXIT_MS = 15_000;
+
+export async function shutdown(
+		host: InteractiveModeDelegateHost,
+		opts?: {
+			hardExitMs?: number;
+			/** Test seam: override the descendant enumeration. */
+			listDescendants?: () => number[];
+		},
+	): Promise<void> {
 		const shutdownBehavior = host.options.shutdownBehavior ?? "exit_process";
 		if (shutdownBehavior === "ignore") {
 			host.showStatus("Quit is unavailable in the browser-attached terminal");
@@ -194,44 +275,68 @@ export async function shutdown(host: InteractiveModeDelegateHost): Promise<void>
 		if (host.isShuttingDown) return;
 		host.isShuttingDown = true;
 
-		// Flush any queued settings writes before shutdown
-		await host.settingsManager.flush();
+		// Captured once so the forced path SIGKILLs exactly the set the graceful
+		// sweep signaled: a child that exits during the SIGTERM grace window is
+		// reparented and invisible to a fresh enumeration, so a re-scan at
+		// watchdog time would miss it and quit would orphan it.
+		const captureDescendants = opts?.listDescendants ?? defaultCaptureDescendants;
+		const teardownPids = shutdownBehavior === "exit_process" ? captureDescendants() : [];
 
-		// Emit shutdown event to extensions
-		const extensionRunner = host.session.extensionRunner;
-		if (extensionRunner?.hasHandlers("session_shutdown")) {
-			await extensionRunner.emit({
-				type: "session_shutdown",
-				reason: "quit",
-			});
-		}
+		// Referenced on purpose — it must stay able to fire even if the loop
+		// goes quiet while a teardown step hangs.
+		const hardExitTimer = shutdownBehavior === "exit_process"
+			? setTimeout(() => {
+				guardedTerminalCleanup(host);
+				forceKillDescendants(teardownPids);
+				process.exit(0);
+			}, opts?.hardExitMs ?? SHUTDOWN_HARD_EXIT_MS)
+			: undefined;
 
-		// Wait for any pending renders to complete
-		// requestRender() uses process.nextTick(), so we wait one tick
-		await new Promise((resolve) => process.nextTick(resolve));
-
-		// Drain any in-flight Kitty key release events before stopping.
-		// This prevents escape sequences from leaking to the parent shell over slow SSH.
-		await host.ui.terminal.drainInput(1000);
-
-		host.stop();
-		if (shutdownBehavior === "stop_ui") {
-			return;
-		}
-
-		// Kill ALL descendant processes to prevent orphans (next-server, pnpm dev, etc.)
 		try {
-			const descendants = listDescendants(process.pid);
-			for (const childPid of descendants) {
-				try { process.kill(childPid, "SIGTERM"); } catch {}
+			// Flush any queued settings writes before shutdown
+			await host.settingsManager.flush();
+
+			// Emit shutdown event to extensions
+			const extensionRunner = host.session.extensionRunner;
+			if (extensionRunner?.hasHandlers("session_shutdown")) {
+				await extensionRunner.emit({
+					type: "session_shutdown",
+					reason: "quit",
+				});
 			}
-			if (descendants.length > 0) {
-				await new Promise(resolve => setTimeout(resolve, 500));
-				for (const childPid of descendants) {
-					try { process.kill(childPid, "SIGKILL"); } catch {}
+
+			// Wait for any pending renders to complete
+			// requestRender() uses process.nextTick(), so we wait one tick
+			await new Promise((resolve) => process.nextTick(resolve));
+
+			// Drain any in-flight Kitty key release events before stopping.
+			// This prevents escape sequences from leaking to the parent shell over slow SSH.
+			await host.ui.terminal.drainInput(1000);
+
+			host.stop();
+			if (shutdownBehavior === "stop_ui") {
+				return;
+			}
+
+			// Kill ALL descendant processes to prevent orphans (next-server, pnpm dev, etc.)
+			try {
+				killAll(teardownPids, "SIGTERM");
+				if (teardownPids.length > 0) {
+					await new Promise(resolve => setTimeout(resolve, 500));
+					killAll(teardownPids, "SIGKILL");
 				}
-			}
-		} catch {}
+			} catch {}
+		} catch (err) {
+			if (shutdownBehavior !== "exit_process") throw err;
+			// A throwing teardown step must not leave the process wedged without
+			// a terminal outcome (#2515): a rejection alone only sets exitCode —
+			// active handles keep the frozen process alive.
+			guardedTerminalCleanup(host);
+			forceKillDescendants(teardownPids);
+			process.exit(0);
+		} finally {
+			clearTimeout(hardExitTimer);
+		}
 
 		process.exit(0);
 	}

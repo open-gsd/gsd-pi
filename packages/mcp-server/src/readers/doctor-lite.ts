@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Jeremy McSpadden <jeremy@fluxlabs.net>
 
 import { existsSync, readFileSync } from 'node:fs';
+import type { ProjectProgressReadMetadata } from '@opengsd/contracts';
 import {
   resolveGsdRoot,
   resolveRootFile,
@@ -12,6 +13,7 @@ import {
   resolveSliceFile,
   findTaskFiles,
 } from './paths.js';
+import { parseRoadmapTable } from './roadmap.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -32,7 +34,13 @@ export interface DoctorResult {
   ok: boolean;
   issues: DoctorIssue[];
   counts: { error: number; warning: number; info: number };
+  readMetadata?: ProjectProgressReadMetadata;
 }
+
+const PROJECTION_READ_METADATA: ProjectProgressReadMetadata = {
+  source: 'projection',
+  authority: 'projection-fallback',
+};
 
 // ---------------------------------------------------------------------------
 // Check implementations
@@ -113,11 +121,25 @@ function checkMilestoneLevel(gsdRoot: string, mid: string, issues: DoctorIssue[]
     }
   }
 
-  // Check if all slices done but no SUMMARY
+  // Check if all slices done but no SUMMARY. The slice inventory is the union
+  // of filesystem slices and ROADMAP-table rows — a slice declared in the
+  // roadmap but not yet planned has no files and must not be skipped, or a
+  // half-planned milestone reads as fully complete.
   if (sliceIds.length > 0) {
-    const allDone = sliceIds.every((sid) => {
+    const knownSliceIds = new Set(sliceIds);
+    const roadmapPath = resolveMilestoneFile(gsdRoot, mid, 'ROADMAP');
+    if (roadmapPath && existsSync(roadmapPath)) {
+      for (const entry of parseRoadmapTable(readFileSync(roadmapPath, 'utf-8'))) {
+        knownSliceIds.add(entry.id);
+      }
+    }
+    const allDone = Array.from(knownSliceIds).every((sid) => {
       const tasks = findTaskFiles(gsdRoot, mid, sid);
-      return tasks.length > 0 && tasks.every((t) => t.hasSummary);
+      // Flat-phase inventories carry the plan checkbox state in `done`;
+      // an explicit unchecked box means staged-not-verified.
+      return tasks.length > 0 && tasks.every((t) =>
+        t.done === true ? true : t.done === false ? false : t.hasSummary,
+      );
     });
     const summaryPath = resolveMilestoneFile(gsdRoot, mid, 'SUMMARY');
     if (allDone && (!summaryPath || !existsSync(summaryPath))) {
@@ -195,6 +217,7 @@ export function runDoctorLite(projectDir: string, scope?: string): DoctorResult 
         message: 'No .gsd/ directory found — project not initialized',
       }],
       counts: { error: 0, warning: 0, info: 1 },
+      readMetadata: PROJECTION_READ_METADATA,
     };
   }
 
@@ -221,5 +244,5 @@ export function runDoctorLite(projectDir: string, scope?: string): DoctorResult 
     info: issues.filter((i) => i.severity === 'info').length,
   };
 
-  return { ok: counts.error === 0, issues, counts };
+  return { ok: counts.error === 0, issues, counts, readMetadata: PROJECTION_READ_METADATA };
 }

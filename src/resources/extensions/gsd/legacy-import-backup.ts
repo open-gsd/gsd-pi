@@ -41,6 +41,7 @@ import {
   captureLegacyImportBaseSnapshot,
   captureCurrentLegacyImportBaseSnapshot,
   createLegacyImportBaseSnapshotSource,
+  legacyImportBaseSnapshotAtVersion,
   LegacyImportBaseSnapshotError,
   type LegacyImportBaseSnapshot,
 } from "./legacy-import-preview-base.js";
@@ -2221,10 +2222,10 @@ function runIndependentVerification(
       requireSchemaAnchors(db);
       let independentBase: LegacyImportBaseSnapshot;
       try {
-        independentBase = captureLegacyImportBaseSnapshot({
+        independentBase = legacyImportBaseSnapshotAtVersion(captureLegacyImportBaseSnapshot({
           readTransaction: (fn) => fn(),
           source: createLegacyImportBaseSnapshotSource(db),
-        });
+        }), expectedBase.snapshot_schema_version);
       } catch (error) {
         verificationFail(
           "LEGACY_IMPORT_BACKUP_SCHEMA_INVALID",

@@ -123,6 +123,8 @@ If both files exist, server names are merged and the first definition found wins
 - `.mcp.json` for repo-shared MCP configuration you may want to commit
 - `.gsd/mcp.json` for local-only MCP configuration you do **not** want to share
 
+For existing GSD projects, GSD also auto-prepares the repo-shared `.mcp.json` on session startup. The auto-prep runs regardless of the selected model provider, but only when the project root already contains `.gsd/`; non-GSD repositories are left untouched. It writes the managed `gsd-workflow` entry and, unless `GSD_BROWSER_MCP_ENABLED=0`, the managed `gsd-browser` entry for external MCP clients such as Claude Code.
+
 ### Supported transports
 
 | Transport | Config shape | Use when |
@@ -219,7 +221,7 @@ Recommended verification order:
 - If a server depends on machine-local paths, personal services, or local-only secrets, prefer `.gsd/mcp.json`.
 - For the built-in `gsd-workflow` server, set `GSD_WORKFLOW_PROJECT_ROOT` to the canonical project root when launching from a worktree or wrapper. The packaged server uses it for workflow tool paths and the per-project stale-process registry at `$GSD_HOME/mcp-instances.json`.
 - The packaged `gsd-workflow` MCP server exposes canonical workflow tool names by default. Set `GSD_MCP_ADVERTISE_ALIASES=1` only for clients that still call legacy alias names. Native in-process GSD tools use `GSD_ADVERTISE_TOOL_ALIASES=1` instead.
-- Custom clients calling `gsd_plan_milestone`, `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, `gsd_replan_task`, `gsd_reassess_roadmap`, or `gsd_task_recovery_resume` must send a nonblank private `_meta["io.opengsd/idempotency-key"]` value and reuse it for retries. This is transport metadata, not a public tool parameter; missing identity fails before mutation.
+- Custom clients calling `gsd_plan_milestone`, `gsd_plan_slice`, `gsd_plan_task`, `gsd_replan_slice`, `gsd_replan_task`, `gsd_reassess_roadmap`, `gsd_decision_save` (alias `gsd_save_decision`), `gsd_requirement_save`, `gsd_requirement_update`, `gsd_save_gate_result`, `gsd_rework_brief_save`, `gsd_capture_thought`, `gsd_summary_save` (alias `gsd_save_summary`), `gsd_uat_result_save`, or `gsd_task_recovery_resume` must send a nonblank private `_meta["io.opengsd/idempotency-key"]` value and reuse it for retries. This is transport metadata, not a public tool parameter; missing identity fails before mutation.
 - Claude Code sessions that require GSD workflow tools are fail-closed: GSD preflights the same inline `mcpServers.gsd-workflow` entry passed to the Claude SDK, and if `gsd-workflow` is absent, still pending, failed, disabled, missing required tools at startup, or cannot be probed, GSD aborts the unit before the first model turn and retries instead of allowing tool calls against an incomplete surface. Timeout diagnostics include the last MCP probe error when available.
 
 ### Per-Model MCP Filtering
@@ -516,11 +518,11 @@ planning_depth: deep
 | Value | Behavior |
 |-------|----------|
 | `light` | Default. Uses the normal milestone discussion flow that writes milestone context and roadmap artifacts. |
-| `deep` | Runs staged project discovery first: workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, a research decision marker, and optional project research before milestone planning. |
+| `deep` | Runs staged project discovery first: workflow preferences, `.gsd/PROJECT.md`, `.gsd/REQUIREMENTS.md`, and optional project research before milestone planning. |
 
 Enable deep mode for the current project with `/gsd new-project --deep` or `/gsd new-milestone --deep`; both write `planning_depth: deep` to `.gsd/PREFERENCES.md`. You can also set it manually in project or global preferences.
 
-In deep mode, `research-decision` writes `.gsd/runtime/research-decision.json` with `research` or `skip`. A `research` decision dispatches `research-project`, which writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`; a `skip` decision proceeds directly to milestone work.
+In deep mode, the research decision (`research` or `skip`) is recorded in the database with `gsd_research_decision_save`. Ask for research during the project or requirements discussion to record `research`; no decision means `skip`, and a `.gsd/runtime/research-decision.json` file from an older version is not read. A `research` decision dispatches `research-project`, which writes `.gsd/research/STACK.md`, `FEATURES.md`, `ARCHITECTURE.md`, and `PITFALLS.md`; a `skip` decision proceeds directly to milestone work.
 
 ### `workspace`
 
@@ -551,7 +553,7 @@ workspace:
 
 ### `reactive_execution`
 
-Controls automatic parallel task dispatch inside a slice. This is enabled by default and only dispatches when task-plan IO annotations produce a non-ambiguous graph with enough ready, non-conflicting tasks.
+Controls automatic parallel task dispatch inside a slice. This is enabled by default and only dispatches when the planned inputs and expected output on the task rows produce a non-ambiguous graph with enough ready, non-conflicting tasks. A task that has a lifecycle row (every task that `gsd_plan_slice` plans) is not put in a parallel batch; see [Reactive Task Execution](./auto-mode.md#reactive-task-execution).
 
 ```yaml
 reactive_execution:
@@ -608,6 +610,7 @@ auto_supervisor:
   idle_timeout_minutes: 10    # detect stalls
   hard_timeout_minutes: 30    # pause auto mode
   stalled_tool_timeout_minutes: 5  # recover a tool that hangs mid-call (default: 5)
+  global_idle_timeout_minutes: 0   # notify when no unit is in flight this long (default: 0 = off)
 ```
 
 Long-running coordination tools (`subagent` and its `Task` alias) and bounded execution
@@ -619,6 +622,11 @@ limits: `gsd_exec` and `gsd_uat_exec` use the 600-second exec sandbox clamp;
 and `bg_shell` has bounded per-action timeouts. All exempt tools remain subject to
 `hard_timeout_minutes` and do not re-arm that timeout. Other non-interactive tools
 remain subject to the stalled-tool budget.
+
+`global_idle_timeout_minutes` (#2373) watches the whole session rather than a unit:
+if auto mode is active but no unit has been in flight for this many minutes, it
+emits one notification per idle period. It is notification-only — nothing is
+dispatched, retried, or changed. The default `0` disables it.
 
 ### `min_request_interval_ms`
 
@@ -849,7 +857,6 @@ git:
   main_branch: main           # primary branch name
   merge_strategy: squash      # how worktree branches merge: "squash" or "merge"
   isolation: none             # git isolation: "none" (default), "worktree", or "branch"
-  commit_docs: true           # commit .gsd/ artifacts to git (set false to keep local)
   manage_gitignore: true      # set false to prevent GSD from modifying .gitignore
   worktree_post_create: .gsd/hooks/post-worktree-create  # script to run after worktree creation
   auto_pr: false              # create a PR on milestone completion (requires push_branches)
@@ -867,7 +874,6 @@ git:
 | `main_branch` | string | `"main"` | Primary branch name |
 | `merge_strategy` | string | `"squash"` | How worktree branches merge: `"squash"` (combine all commits) or `"merge"` (preserve individual commits) |
 | `isolation` | string | `"none"` | Auto-mode isolation: `"none"` (no isolation — commits on current branch, no worktree or milestone branch), `"worktree"` (separate directory), or `"branch"` (work in project root — useful for submodule-heavy repos). `worktree` requires a committed `HEAD`; zero-commit repos temporarily run as `none` until the first commit exists |
-| `commit_docs` | boolean | `true` | Commit `.gsd/` planning artifacts to git. Set `false` to keep local-only |
 | `manage_gitignore` | boolean | `true` | When `false`, GSD will not modify `.gitignore` at all — no baseline patterns, no self-healing. Use if you manage your own `.gitignore` |
 | `worktree_post_create` | string | (none) | Script to run after worktree creation. Receives `SOURCE_DIR` and `WORKTREE_DIR` env vars |
 | `auto_pr` | boolean | `false` | Automatically create a pull request when a milestone completes. Requires `auto_push: true` and `gh` CLI installed and authenticated |
@@ -898,6 +904,18 @@ ln -sf "$SOURCE_DIR/assets" "$WORKTREE_DIR/assets"
 ```
 
 The path can be absolute or relative to the project root. The script runs with a 30-second timeout. Failure is non-fatal — GSD logs a warning and continues.
+
+#### `.gsd/worktree-files.json`
+
+Declarative alternative to the post-create hook for plain file copies: a JSON array of repo-relative paths copied from the main checkout into each new worktree right after creation. Useful for gitignored-but-required files that `git worktree add` never populates (for example Rails' `config/master.key` alongside the tracked `config/credentials.yml.enc`).
+
+```json
+["config/master.key", ".env.local"]
+```
+
+- Absent or empty file → no behavior change.
+- Paths must stay inside the repository; missing sources are warned and skipped.
+- Copies are logged as warnings for auditability. GSD never copies secrets on its own — every path here is an explicit repo-owner choice.
 
 #### `git.auto_pr`
 
@@ -1148,7 +1166,7 @@ custom_instructions:
   - "Prefer functional patterns over classes"
 ```
 
-For project-specific knowledge, use the GSD knowledge and memory surfaces instead. `.gsd/KNOWLEDGE.md` is a hybrid projection: manually maintained Rules stay in the file, while generated Patterns and Lessons are backed by the `memories` table and rendered back into the file for review. Add durable operating rules with `/gsd knowledge rule <description>`; agent-discovered patterns and lessons are stored as memories and selected for prompt injection automatically.
+For project-specific knowledge, use the GSD knowledge and memory surfaces instead. `.gsd/KNOWLEDGE.md` is rendered from the database: Rules, Patterns and Lessons are `memories` rows, and the file is rendered from them after each capture for review. Add durable operating rules with `/gsd knowledge rule <description>`; agent-discovered patterns and lessons are stored as memories and selected for prompt injection automatically.
 
 ### `RUNTIME.md` — Runtime Context
 
@@ -1310,7 +1328,6 @@ git:
   auto_push: true
   merge_strategy: squash
   isolation: none             # "none" (default), "worktree", or "branch"
-  commit_docs: true
 
 # Skills
 skill_discovery: suggest

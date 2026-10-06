@@ -42,6 +42,7 @@ Once you have a milestone and roadmap, let GSD take the wheel:
 ```
 
 GSD autonomously:
+
 1. **Plans** each slice — scouts the codebase, researches docs, decomposes into tasks
 2. **Executes** each task — writes code in a fresh AI session
 3. **Completes** the slice — writes summaries, commits with meaningful messages
@@ -106,7 +107,7 @@ GSD keeps authoritative runtime state in the project-root SQLite database and re
   PROJECT.md          — what the project is
   REQUIREMENTS.md     — requirement contract
   DECISIONS.md        — projection of architectural decisions from memory store
-  KNOWLEDGE.md        — manual Rules plus memory-backed Patterns/Lessons
+  KNOWLEDGE.md        — Rules, Patterns and Lessons rendered from the database
   STATE.md            — quick-glance status rendered from the database
   phases/
     01-foundation/
@@ -120,11 +121,9 @@ GSD keeps authoritative runtime state in the project-root SQLite database and re
 
 Flat-phase task summaries use `S##-T##-SUMMARY.md` so identical task IDs in different slices do not collide. GSD still resolves older flat `T##-SUMMARY.md` task summaries when reading legacy projects.
 
-GSD may also create sibling runtime directories next to `.gsd/`: `.gsd-worktrees/` for isolated milestone checkouts and `.gsd-backups/` for migration snapshots. Keep those directories local and gitignored; stale `.gsd-backups/migrate-*` snapshots are pruned after 30 days once the project has completed the flat-phase `.gsd/phases/` migration.
+GSD may also create sibling runtime directories next to `.gsd/`: `.gsd-worktrees/` for isolated milestone checkouts and `.gsd-backups/` for migration snapshots. Keep those directories local and gitignored. GSD does not delete `.gsd-backups/migrate-*` snapshots; remove them yourself when you no longer need the pre-migration copy.
 
-`KNOWLEDGE.md` has a split source of truth. Rules stay in the file and are visible immediately. Patterns and lessons added through `/gsd knowledge` are persisted to the `memories` table, then rendered into `KNOWLEDGE.md` the next time a GSD session starts, so they will not appear in the file immediately.
-
-Existing pattern and lesson rows are backfilled into `memories` during that startup path. The Patterns and Lessons sections in `KNOWLEDGE.md` are generated projections, so manual edits to those generated sections may be overwritten on regeneration.
+`KNOWLEDGE.md` is rendered from the database. Rules, patterns and lessons added through `/gsd knowledge` are saved to the `memories` table and appear in the file at once. Manual edits to a row that the database holds are overwritten on the next render. See [Project Structure](../core-concepts/project-structure.md#adding-knowledge).
 
 ## Next Steps
 

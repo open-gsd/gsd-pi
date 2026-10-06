@@ -59,7 +59,8 @@ import { _setAutoActiveForTest } from "../../gsd/auto.ts";
 import { autoSession } from "../../gsd/auto-runtime-state.ts";
 import { getInFlightToolCount, hasInteractiveToolInFlight, clearInFlightTools, isInteractiveElicitationInFlight } from "../../gsd/auto-tool-tracking.ts";
 import { clearMcpConfigCache } from "../../mcp-client/manager.ts";
-import { UNIT_TOOL_CONTRACTS } from "../../gsd/unit-tool-contracts.ts";
+import { UNIT_TOOL_CONTRACTS, getRequiredWorkflowToolsForUnit } from "../../gsd/unit-tool-contracts.ts";
+import { getActiveWorkers, resetWorkerRegistry } from "../../subagent/worker-registry.ts";
 
 // ---------------------------------------------------------------------------
 // Env helpers — `GSD_WORKFLOW_MCP_*` save/restore
@@ -287,9 +288,479 @@ describe("stream-adapter — Claude Code internal sub-turns (#337)", () => {
 	});
 });
 
+describe("stream-adapter — content-index continuity across SDK sub-messages (#2538)", () => {
+	// Streams one GSD turn laid out as two SDK assistant sub-messages separated
+	// by the synthetic user tool-result boundary: [text A, tool1] then
+	// [text B, tool2]. tool2 lives in a sub-message whose builder restarts at
+	// index 0, so both its stream events and its synthetic completion depend on
+	// the shifted index.
+	function* subMessageScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		// -- sub-message 1: text A + tool --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Alpha analysis." } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"command\":\"echo hi\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		// -- synthetic user boundary (resets the builder) --
+		yield {
+			type: "user",
+			uuid: "user-1",
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{
+					type: "tool_result",
+					tool_use_id: "tool-1",
+					content: "out-1",
+					is_error: false,
+				}],
+			},
+		};
+		// -- sub-message 2: text B + tool2 (fresh builder, local indices restart) --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Bravo summary." } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "Read", input: {} } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"file_path\":\"b.txt\"}" } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p2");
+		yield {
+			type: "user",
+			uuid: "user-2",
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{
+					type: "tool_result",
+					tool_use_id: "tool-2",
+					content: "out-2",
+					is_error: false,
+				}],
+			},
+		};
+		// -- sub-message 3: text C --
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p3");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p3");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Charlie wrap-up." } }, "p3");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p3");
+		yield makeSdkSuccessResult("done");
+	}
+
+	function makeTurnPartial(): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [],
+			api: "anthropic-messages",
+			provider: "claude-code",
+			model: "claude-sonnet-4-6",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+	}
+
+	test("streamed event indices grow monotonically across sub-message boundaries", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: subMessageScenario,
+			} as any,
+		);
+
+		// Apply events the way pi-agent-core's agent loop applies them to its
+		// single turn partial: every event is written at
+		// `partial.content[event.contentIndex]` (provider-partial lookup and
+		// streaming tool-JSON accumulation are omitted — neither affects index
+		// routing).
+		const partial = makeTurnPartial();
+		const startIndices: string[] = [];
+		for await (const event of stream) {
+			switch (event.type) {
+				case "text_start":
+					partial.content[event.contentIndex] = { type: "text", text: "" };
+					startIndices.push(`text@${event.contentIndex}`);
+					break;
+				case "text_delta":
+					(partial.content[event.contentIndex] as any).text += event.delta;
+					break;
+				case "text_end":
+					(partial.content[event.contentIndex] as any).text = event.content;
+					break;
+				case "toolcall_start":
+					partial.content[event.contentIndex] = { type: "toolCall", id: "", name: "", arguments: {} };
+					startIndices.push(`toolcall@${event.contentIndex}`);
+					break;
+				case "toolcall_end":
+					partial.content[event.contentIndex] = { ...event.toolCall };
+					break;
+				case "done":
+				case "error":
+					break;
+				default:
+					break;
+			}
+		}
+
+		// Pre-fix, each fresh builder restarted at 0: text B landed on index 0
+		// overwriting text A, tool2 landed on index 1 overwriting tool1, and
+		// text C overwrote text B.
+		assert.deepEqual(startIndices, ["text@0", "toolcall@1", "text@2", "toolcall@3", "text@4"]);
+		assert.deepEqual(
+			partial.content.filter((block) => block.type === "text").map((block: any) => block.text),
+			["Alpha analysis.", "Bravo summary.", "Charlie wrap-up."],
+		);
+	});
+
+	test("synthetic toolcall_end lands on the tool's shifted slot in the turn partial", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: subMessageScenario,
+			} as any,
+		);
+
+		const partial = makeTurnPartial();
+		let finalMessage: AssistantMessage | undefined;
+		const toolcallEndIndices: number[] = [];
+		for await (const event of stream) {
+			switch (event.type) {
+				case "text_start":
+					partial.content[event.contentIndex] = { type: "text", text: "" };
+					break;
+				case "text_delta":
+					(partial.content[event.contentIndex] as any).text += event.delta;
+					break;
+				case "text_end":
+					(partial.content[event.contentIndex] as any).text = event.content;
+					break;
+				case "toolcall_start":
+					partial.content[event.contentIndex] = { type: "toolCall", id: "", name: "", arguments: {} };
+					break;
+				case "toolcall_end":
+					partial.content[event.contentIndex] = { ...event.toolCall };
+					toolcallEndIndices.push(event.contentIndex);
+					break;
+				case "done":
+					finalMessage = event.message;
+					break;
+				default:
+					break;
+			}
+		}
+
+		// The real-time synthetic completions (pushed at each synthetic-user
+		// boundary) must hit each tool's slot in the TURN partial — the shifted
+		// indices, not the builder-local ones — and carry the attached external
+		// results.
+		const tool1Slot = partial.content[1] as any;
+		assert.equal(tool1Slot?.type, "toolCall");
+		assert.equal(tool1Slot?.id, "tool-1");
+		assert.equal(tool1Slot?.externalResult?.content?.[0]?.text, "out-1");
+		const tool2Slot = partial.content[3] as any;
+		assert.equal(tool2Slot?.type, "toolCall");
+		assert.equal(tool2Slot?.id, "tool-2");
+		assert.equal(tool2Slot?.externalResult?.content?.[0]?.text, "out-2");
+		// Streaming end + synthetic completion per tool, both at the shifted
+		// turn-partial index (pre-fix both tool2 events landed on 1).
+		assert.deepEqual(toolcallEndIndices, [1, 1, 3, 3]);
+
+		// Final-message assembly is untouched by the index shift itself; the
+		// final content is chronological (#2540): each block in stream order.
+		assert.deepEqual(
+			finalMessage?.content.map((block) => block.type === "toolCall" ? `tool:${block.id}` : (block as any).text),
+			["Alpha analysis.", "tool:tool-1", "Bravo summary.", "tool:tool-2", "Charlie wrap-up."],
+		);
+	});
+});
+
+describe("stream-adapter — start partial carries the streamed blocks (#2539)", () => {
+	// Same turn layout as the #2538 scenario: [text A, tool1] → synthetic-user
+	// boundary → [text B, tool2] → boundary → [text C].
+	function* startPartialScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		const boundary = (uuid: string, toolUseId: string, content: string) => ({
+			type: "user",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+			},
+		});
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Alpha analysis." } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"command\":\"echo hi\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		yield boundary("user-1", "tool-1", "out-1");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Bravo summary." } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "Read", input: {} } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"file_path\":\"b.txt\"}" } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p2");
+		yield boundary("user-2", "tool-2", "out-2");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p3");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p3");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Charlie wrap-up." } }, "p3");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p3");
+		yield makeSdkSuccessResult("done");
+	}
+
+	test("toolcall_start blocks built from the start partial carry real ids and names", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: startPartialScenario,
+			} as any,
+		);
+
+		// Apply events exactly the way pi-agent-core's agent loop does: the
+		// `start` event's partial is the provider's live message, and each
+		// `toolcall_start` block is built from it at `event.contentIndex`.
+		let providerPartial: AssistantMessage | null = null;
+		let partial: AssistantMessage | null = null;
+		let turnResult: AssistantMessage | null = null;
+		const startedTools: Array<{ id: string; name: string }> = [];
+		for await (const event of stream) {
+			switch (event.type) {
+				case "start":
+					providerPartial = event.partial;
+					partial = { ...event.partial, content: event.partial.content.map((block) => ({ ...block })) };
+					break;
+				case "text_start":
+					if (partial) partial.content[event.contentIndex] = { type: "text", text: "" };
+					break;
+				case "text_delta":
+					if (partial) {
+						const block = partial.content[event.contentIndex];
+						if (block?.type === "text") block.text += event.delta;
+					}
+					break;
+				case "toolcall_start": {
+					const streamedBlock = providerPartial?.content[event.contentIndex];
+					const built = streamedBlock?.type === "toolCall"
+						? { ...streamedBlock, arguments: {} }
+						: { type: "toolCall" as const, id: "", name: "", arguments: {} };
+					if (partial) partial.content[event.contentIndex] = built;
+					startedTools.push({ id: built.id, name: built.name });
+					break;
+				}
+				case "done":
+					turnResult = event.message;
+					break;
+				case "error":
+					assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+					break;
+				default:
+					break;
+			}
+		}
+
+		// The turn must complete cleanly — identity at toolcall_start is the
+		// contract, not an error-path artifact.
+		assert.ok(turnResult, "stream must end with a successful done event");
+		// Pre-fix the start partial stayed empty, so both lookups missed and
+		// every tool started as { id: "", name: "" } — rendered "unknown" and
+		// colliding on the empty id in the TUI's pending-tool map.
+		assert.deepEqual(startedTools, [
+			{ id: "tool-1", name: "Bash" },
+			{ id: "tool-2", name: "Read" },
+		]);
+	});
+
+	test("start partial mirrors the full streamed layout across sub-message boundaries", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: startPartialScenario,
+			} as any,
+		);
+
+		let providerPartial: AssistantMessage | null = null;
+		let completed = false;
+		for await (const event of stream) {
+			if (event.type === "start") providerPartial = event.partial;
+			if (event.type === "done") completed = true;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+		assert.ok(completed, "stream must end with a successful done event");
+
+		// The provider partial is the live message: it must hold every streamed
+		// block at its (shifted) turn index, in stream order.
+		assert.deepEqual(
+			providerPartial?.content.map((block) =>
+				block.type === "text" ? block.text : block.type === "toolCall" ? `tool:${block.id}` : block.type
+			),
+			["Alpha analysis.", "tool:tool-1", "Bravo summary.", "tool:tool-2", "Charlie wrap-up."],
+		);
+		const tool2 = providerPartial?.content[3] as any;
+		assert.deepEqual(tool2?.arguments, { file_path: "b.txt" });
+	});
+});
+
 // ---------------------------------------------------------------------------
 // Bug #2859 — stateless provider regression tests
 // ---------------------------------------------------------------------------
+
+describe("stream-adapter — final message preserves streamed block order (#2540)", () => {
+	// Same turn layout as the #2538 scenario: [text A, tool1] → synthetic-user
+	// boundary → [text B, tool2] → boundary → [text C].
+	function* interleavedScenario(): Generator<any> {
+		const streamEvent = (event: any, uuid: string) => ({
+			type: "stream_event",
+			event,
+			parent_tool_use_id: null,
+			uuid,
+			session_id: "session-1",
+		});
+		const boundary = (uuid: string, toolUseId: string, content: string) => ({
+			type: "user",
+			uuid,
+			session_id: "session-1",
+			parent_tool_use_id: null,
+			message: {
+				role: "user",
+				content: [{ type: "tool_result", tool_use_id: toolUseId, content, is_error: false }],
+			},
+		});
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Alpha analysis." } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p1");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-1", name: "Bash", input: {} } }, "p1");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"command\":\"echo hi\"}" } }, "p1");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p1");
+		yield boundary("user-1", "tool-1", "out-1");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Bravo summary." } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p2");
+		yield streamEvent({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "tool-2", name: "Read", input: {} } }, "p2");
+		yield streamEvent({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: "{\"file_path\":\"b.txt\"}" } }, "p2");
+		yield streamEvent({ type: "content_block_stop", index: 1 }, "p2");
+		yield boundary("user-2", "tool-2", "out-2");
+		yield streamEvent({ type: "message_start", message: { model: "claude-sonnet-4-6" } }, "p3");
+		yield streamEvent({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, "p3");
+		yield streamEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Charlie wrap-up." } }, "p3");
+		yield streamEvent({ type: "content_block_stop", index: 0 }, "p3");
+		yield makeSdkSuccessResult("done");
+	}
+
+	function streamedOrder(finalMessage: AssistantMessage): string[] {
+		return finalMessage.content.map((block) =>
+			block.type === "toolCall" ? `tool:${(block as any).id}` : (block as any).text
+		);
+	}
+
+	test("final message keeps the interleaved text/tool order the turn streamed in", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: interleavedScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		for await (const event of stream) {
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		// Pre-fix buildFinalAssistantContent merged all tool blocks first and
+		// appended prose after, so the persisted message — and the TUI's
+		// message_end rebuild — re-laid the turn as "all tools, then all text":
+		// ["tool:tool-1", "tool:tool-2", "Alpha analysis.", "Bravo summary.",
+		// "Charlie wrap-up."]. The final message must match the streamed order
+		// instead, or the rebuild moves blocks the TUI already rendered.
+		assert.deepEqual(streamedOrder(finalMessage!), [
+			"Alpha analysis.",
+			"tool:tool-1",
+			"Bravo summary.",
+			"tool:tool-2",
+			"Charlie wrap-up.",
+		]);
+	});
+
+	test("external results stay attached and tool blocks keep their identity after reordering", async () => {
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Interleave." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: interleavedScenario,
+			} as any,
+		);
+
+		let finalMessage: AssistantMessage | undefined;
+		const completedToolRefs: AssistantMessage["content"] = [];
+		for await (const event of stream) {
+			if (event.type === "toolcall_end") completedToolRefs.push(event.toolCall);
+			if (event.type === "done") finalMessage = event.message;
+			if (event.type === "error") {
+				assert.fail(`stream errored: ${JSON.stringify(event.error)}`);
+			}
+		}
+
+		const tools = finalMessage!.content.filter((block) => block.type === "toolCall") as any[];
+		assert.deepEqual(
+			tools.map((block) => [block.id, block.arguments?.command ?? block.arguments?.file_path, block.externalResult?.content?.[0]?.text]),
+			[
+				["tool-1", "echo hi", "out-1"],
+				["tool-2", "b.txt", "out-2"],
+			],
+		);
+		// Reordering must not rebuild blocks: the TUI matches pending tool
+		// components against the streamed block objects, so each synthetic
+		// toolcall_end's block must be the exact object in the final content.
+		assert.ok(completedToolRefs.length >= 2);
+		for (const ref of completedToolRefs) {
+			assert.ok(finalMessage!.content.includes(ref), "completed tool block kept its identity");
+		}
+	});
+});
 
 describe("stream-adapter — full context prompt (#2859)", () => {
 	test("buildPromptFromContext includes all user and assistant messages, not just the last user message", () => {
@@ -940,6 +1411,189 @@ describe("stream-adapter — Claude Code external tool results", () => {
 		);
 	});
 
+	test("attaches the last main-loop per-call usage as liveContextTokens (#2358, #2359)", async () => {
+		// The terminal result.usage is cumulative across the SDK's internal
+		// tool-use loop; each assistant event carries its own call's usage.
+		// The final message must expose the last MAIN-LOOP event's
+		// input + cacheRead + cacheWrite as liveContextTokens (subagent
+		// events have their own context and must be ignored), while the
+		// mapUsage-derived cumulative fields keep their existing contract.
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Do the thing." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					// Earlier main-loop call of the internal loop.
+					yield {
+						type: "assistant",
+						uuid: "assistant-main-1",
+						session_id: "session-1",
+						parent_tool_use_id: null,
+						message: {
+							id: "msg-main-1",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "intermediate text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "tool_use" as const,
+							usage: {
+								input_tokens: 10,
+								output_tokens: 20,
+								cache_read_input_tokens: 30,
+								cache_creation_input_tokens: 40,
+							},
+						},
+					};
+					// Last main-loop call — its per-call usage is the live
+					// end-of-turn context (#2359 real-turn numbers).
+					yield {
+						type: "assistant",
+						uuid: "assistant-main-2",
+						session_id: "session-1",
+						parent_tool_use_id: null,
+						message: {
+							id: "msg-main-2",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "final text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "end_turn" as const,
+							usage: {
+								input_tokens: 2,
+								output_tokens: 5_567,
+								cache_read_input_tokens: 168_082,
+								cache_creation_input_tokens: 4_005,
+							},
+						},
+					};
+					// Subagent call AFTER the last main-loop event — its own
+					// (smaller) context must be ignored despite arriving last.
+					yield {
+						type: "assistant",
+						uuid: "assistant-sub-1",
+						session_id: "session-1",
+						parent_tool_use_id: "tool-task-1",
+						message: {
+							id: "msg-sub-1",
+							type: "message" as const,
+							role: "assistant" as const,
+							content: [{ type: "text", text: "subagent text" }],
+							model: "claude-sonnet-4-6",
+							stop_reason: "end_turn" as const,
+							usage: {
+								input_tokens: 1,
+								output_tokens: 2,
+								cache_read_input_tokens: 3,
+								cache_creation_input_tokens: 4,
+							},
+						},
+					};
+					// Terminal result usage — cumulative across the loop.
+					yield {
+						...makeSdkSuccessResult("done"),
+						usage: {
+							input_tokens: 19_328,
+							output_tokens: 5_567,
+							cache_read_input_tokens: 476_140,
+							cache_creation_input_tokens: 335_600,
+						},
+					};
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const done = events.find((event) => event.type === "done");
+		assert.ok(done, "expected a terminal done event");
+		const message = done.message as AssistantMessage;
+		assert.equal(message.usage.liveContextTokens, 172_089);
+		assert.equal(message.usage.input, 19_328);
+		assert.equal(message.usage.output, 5_567);
+		assert.equal(message.usage.totalTokens, 360_495);
+	});
+
+	test("readiness retry does not inherit the previous attempt's assistant usage", async () => {
+		// The per-call usage capture resets per sdkAttemptLoop attempt: if a
+		// readiness retry starts a new SDK session whose attempt reaches a
+		// result without any main-loop assistant event, the final message must
+		// not carry the abandoned attempt's measurement.
+		let queryCalls = 0;
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-retry-usage-"));
+		const context: Context = {
+			systemPrompt: "UNIT: Run UAT",
+			messages: [{ role: "user", content: "Run UAT." } as Message],
+		};
+		_setAutoActiveForTest(true);
+		autoSession.currentUnit = { type: "run-uat", id: "M001/S001", startedAt: 0, workspaceRoot: cwd } as never;
+		try {
+			const stream = streamViaClaudeCode(
+				{ id: "claude-sonnet-4-6" } as any,
+				context,
+				{
+					cwd,
+					_skipWorkflowMcpPreflightForTest: true,
+					async *_sdkQueryForTest() {
+						queryCalls += 1;
+						if (queryCalls === 1) {
+							// Abandoned attempt: a main-loop assistant event whose
+							// per-call usage (sum 80) must NOT leak into attempt 2.
+							yield {
+								type: "assistant",
+								uuid: "assistant-attempt-1",
+								session_id: "session-1",
+								parent_tool_use_id: null,
+								message: {
+									id: "msg-attempt-1",
+									type: "message" as const,
+									role: "assistant" as const,
+									content: [{ type: "text", text: "stale attempt text" }],
+									model: "claude-sonnet-4-6",
+									stop_reason: "end_turn" as const,
+									usage: {
+										input_tokens: 10,
+										output_tokens: 20,
+										cache_read_input_tokens: 30,
+										cache_creation_input_tokens: 40,
+									},
+								},
+							};
+							// Same failing-init shape as the readiness-retry regression
+							// above — this init triggers the retry.
+							yield {
+								type: "system",
+								subtype: "init",
+								tools: ["Read"],
+								mcp_servers: [{ name: "gsd-workflow", status: "connected" }],
+							};
+							return;
+						}
+
+						// Retry attempt reaches a result with no assistant events.
+						yield makeSdkSuccessResult("fresh retry result");
+					},
+				} as any,
+			);
+
+			const message = await stream.result();
+
+			assert.equal(queryCalls, 2);
+			assert.equal(
+				(message.usage as AssistantMessage["usage"]).liveContextTokens,
+				undefined,
+				"result without assistant events must not inherit the abandoned attempt's usage",
+			);
+		} finally {
+			autoSession.currentUnit = null;
+			_setAutoActiveForTest(false);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+
 	test("closes an in-flight interview when ask_user_questions reports timed_out first", async (t) => {
 		const notifications: Array<{ message: string; type?: string }> = [];
 		let elicitationPromise: Promise<unknown> | undefined;
@@ -1526,6 +2180,154 @@ describe("claude-code-cli — Claude Fable 5 Opus-tier support", () => {
 		const options = buildSdkOptions("claude-haiku-4-5", "test prompt", undefined, { reasoning: "xhigh" });
 		assert.equal(options.effort, "high", "xhigh must clamp to high for non-Opus-tier models");
 		assert.deepEqual(options.betas, [], "Haiku must not enable the 1M-context beta");
+	});
+});
+
+// #2437 — catalog model metadata drives additive thinking checks: a catalog
+// compat flag can enable adaptive thinking for ids the id-heuristic does not
+// know yet, and a catalog thinkingLevelMap entry wins over the legacy effort map.
+describe("stream-adapter — catalog model metadata (#2437)", () => {
+	test("compat.forceAdaptiveThinking enables adaptive thinking for ids the heuristic does not know", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{ reasoning: "high" },
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { high: "high" } },
+		);
+		assert.equal(options.effort, "high", "catalog-backed model must map effort");
+		assert.deepEqual(options.thinking, { type: "adaptive" }, "catalog compat must force adaptive thinking");
+	});
+
+	test("xhigh resolves via the catalog thinkingLevelMap over the legacy effort map", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{ reasoning: "xhigh" },
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: "xhigh" } },
+		);
+		assert.equal(options.effort, "xhigh", "catalog thinkingLevelMap entry must win");
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	test("legacy id-heuristic behavior is unchanged when no metadata is passed", () => {
+		const options = buildSdkOptions("claude-opus-4-6", "test", undefined, { reasoning: "xhigh" });
+		assert.equal(options.effort, "max", "legacy xhigh clamp for opus-4-6 must persist");
+	});
+
+	test("unknown id without catalog compat stays non-adaptive", () => {
+		const options = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "high" });
+		assert.equal("effort" in options, false);
+		assert.equal("thinking" in options, false);
+	});
+
+	test("streamViaClaudeCode forwards model metadata into the sdk options", async (t) => {
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-metadata-"));
+		t.after(() => rmSync(cwd, { recursive: true, force: true }));
+		let capturedOptions: Record<string, unknown> | undefined;
+		const stream = streamViaClaudeCode(
+			{
+				id: "claude-opus-9",
+				compat: { forceAdaptiveThinking: true },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			} as any,
+			{ messages: [{ role: "user", content: "Hi." } as Message] },
+			{
+				cwd,
+				reasoning: "xhigh",
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest(args: {
+					prompt: string | AsyncIterable<unknown>;
+					options?: Record<string, unknown>;
+				}) {
+					capturedOptions = args.options;
+					yield makeSdkSuccessResult("ok");
+				},
+			} as any,
+		);
+		await stream.result();
+		assert.equal(capturedOptions?.effort, "xhigh", "model metadata must reach the sdk effort option");
+		assert.deepEqual(capturedOptions?.thinking, { type: "adaptive" });
+	});
+
+	test("metadata-only adaptive model with reasoning omitted still disables thinking explicitly", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{},
+			{ compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: "xhigh" } },
+		);
+		assert.equal("effort" in options, false, "no effort when reasoning is off");
+		assert.deepEqual(options.thinking, { type: "disabled" }, "thinking must be explicitly disabled");
+	});
+
+	// #2500 — Sonnet 5.5 400s on thinking:{type:"disabled"}; its off switch is
+	// {type:"between_tools"}, flagged via catalog compat.strictRequestParams.
+	test("strict-param catalog model (Sonnet 5.5) maps thinking-off to between_tools and emits no rejected params", () => {
+		const options = buildSdkOptions(
+			"claude-sonnet-5-5",
+			"test prompt",
+			undefined,
+			{},
+			{
+				compat: { forceAdaptiveThinking: true, strictRequestParams: true },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			},
+		);
+		assert.equal("effort" in options, false, "no effort when reasoning is off");
+		assert.deepEqual(
+			options.thinking,
+			{ type: "between_tools" },
+			"Sonnet 5.5 rejects {type:\"disabled\"}; off must map to between_tools",
+		);
+		assert.equal("temperature" in options, false, "Sonnet 5.5 rejects temperature");
+		assert.equal("top_p" in options, false, "Sonnet 5.5 rejects top_p");
+		assert.equal("top_k" in options, false, "Sonnet 5.5 rejects top_k");
+		assert.equal("tool_choice" in options, false, "Sonnet 5.5 rejects forced tool_choice");
+	});
+
+	test("non-strict adaptive model keeps the legacy disabled off switch", () => {
+		const options = buildSdkOptions(
+			"claude-opus-9",
+			"test prompt",
+			undefined,
+			{},
+			{
+				compat: { forceAdaptiveThinking: true, strictRequestParams: false },
+				thinkingLevelMap: { xhigh: "xhigh" },
+			},
+		);
+		assert.deepEqual(options.thinking, { type: "disabled" }, "legacy models must keep {type:\"disabled\"}");
+	});
+
+	test("forceAdaptiveThinking: false does not disable the id-heuristic path (additive only)", () => {
+		const options = buildSdkOptions(
+			"claude-opus-4-6",
+			"test prompt",
+			undefined,
+			{ reasoning: "high" },
+			{ compat: { forceAdaptiveThinking: false } },
+		);
+		assert.equal(options.effort, "high", "heuristic-supported model must keep mapping effort");
+		assert.deepEqual(options.thinking, { type: "adaptive" });
+	});
+
+	test("missing, null, and non-effort thinkingLevelMap entries fall back to the legacy effort map", () => {
+		const metadata = { compat: { forceAdaptiveThinking: true }, thinkingLevelMap: { xhigh: null, high: "off-the-scale" } };
+		const nullMapped = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "xhigh" }, metadata);
+		assert.equal(nullMapped.effort, "high", "null catalog entry must fall through to the legacy map default");
+		const invalidMapped = buildSdkOptions("claude-opus-9", "test", undefined, { reasoning: "high" }, metadata);
+		assert.equal(invalidMapped.effort, "high", "non-effort catalog value must fall through to the legacy map");
+		const unmapped = buildSdkOptions(
+			"claude-opus-9",
+			"test",
+			undefined,
+			{ reasoning: "medium" },
+			{ compat: { forceAdaptiveThinking: true } },
+		);
+		assert.equal(unmapped.effort, "medium", "missing catalog entry must fall through to the legacy map");
 	});
 });
 
@@ -4769,14 +5571,18 @@ describe("stream-adapter — interactive legacy gsd-core skill guard (#2369)", (
 		hookSpecificOutput?: { permissionDecision?: "allow" | "deny" | "ask"; permissionDecisionReason?: string };
 	};
 
+	function hasSkillHook(options: Record<string, unknown>): boolean {
+		const hooks = options.hooks as { PreToolUse?: Array<{ matcher?: string }> } | undefined;
+		return hooks?.PreToolUse?.some((entry) => entry.matcher === "Skill") ?? false;
+	}
+
 	async function invokeSkillHook(options: Record<string, unknown>, skillName: string): Promise<PreToolUseDecision> {
 		const hooks = options.hooks as
 			| { PreToolUse?: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<PreToolUseDecision>> }> }
 			| undefined;
-		const matchers = hooks?.PreToolUse;
-		assert.ok(Array.isArray(matchers) && matchers.length > 0, "expected a registered PreToolUse hook matcher");
-		assert.equal(matchers[0].matcher, "Skill");
-		return matchers[0].hooks[0]({
+		const skillMatcher = hooks?.PreToolUse?.find((entry) => entry.matcher === "Skill");
+		assert.ok(skillMatcher, "expected a registered PreToolUse Skill hook matcher");
+		return skillMatcher.hooks[0]({
 			hook_event_name: "PreToolUse",
 			tool_name: "Skill",
 			tool_input: { skill: skillName },
@@ -4808,13 +5614,532 @@ describe("stream-adapter — interactive legacy gsd-core skill guard (#2369)", (
 			cwd: join(scratch, "project"),
 			gsdPhase: "plan-milestone",
 		});
-		assert.equal(options.hooks, undefined);
+		assert.equal(hasSkillHook(options), false);
 		assert.ok((options.disallowedTools as string[]).includes("Skill"));
 	});
 
 	test("GSD_CLAUDE_CODE_LEGACY_SKILL_FILTER=0 removes the guard", () => {
 		pushEnv("GSD_CLAUDE_CODE_LEGACY_SKILL_FILTER", "0");
 		const options = buildInteractiveOptions();
-		assert.equal(options.hooks, undefined);
+		assert.equal(hasSkillHook(options), false);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Projection write guard — Claude Code pre-executes Write/Edit/Bash, so the
+// native tool_call guard never fires. The PreToolUse hook is the guard.
+// ---------------------------------------------------------------------------
+
+describe("stream-adapter — projection write guard", () => {
+	type Decision = {
+		hookSpecificOutput?: { permissionDecision?: "allow" | "deny" | "ask"; permissionDecisionReason?: string };
+	};
+
+	async function preToolUse(
+		toolName: string,
+		toolInput: Record<string, unknown>,
+		gsdPhase?: string,
+	): Promise<Decision> {
+		const options = buildSdkOptions("claude-sonnet-4-20250514", "test", undefined, {
+			cwd: "/tmp/project",
+			...(gsdPhase ? { gsdPhase } : {}),
+		});
+		const hooks = options.hooks as
+			| { PreToolUse?: Array<{ matcher?: string; hooks: Array<(input: unknown) => Promise<Decision>> }> }
+			| undefined;
+		const entry = hooks?.PreToolUse?.find((candidate) =>
+			new RegExp(`^(?:${candidate.matcher})$`).test(toolName));
+		assert.ok(entry, `expected a PreToolUse hook that matches ${toolName}`);
+		return entry.hooks[0]({
+			hook_event_name: "PreToolUse",
+			tool_name: toolName,
+			tool_input: toolInput,
+			tool_use_id: "tu_projection_1",
+		});
+	}
+
+	const roadmap = "/tmp/project/.gsd/milestones/M001/M001-ROADMAP.md";
+
+	for (const [toolName, toolInput] of [
+		["Write", { file_path: roadmap, content: "x" }],
+		["Edit", { file_path: roadmap, old_string: "a", new_string: "b" }],
+		["MultiEdit", { file_path: roadmap, edits: [] }],
+		["Bash", { command: `echo "- [x] S01" >> ${roadmap}` }],
+	] as const) {
+		test(`denies ${toolName} on a managed projection and names the tool, in interactive and auto runs`, async () => {
+			for (const gsdPhase of [undefined, "execute-task"]) {
+				const decision = await preToolUse(toolName, toolInput, gsdPhase);
+				assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");
+				assert.match(decision.hookSpecificOutput?.permissionDecisionReason ?? "", /gsd_plan_milestone/);
+			}
+		});
+	}
+
+	test("denies writes to the root renders OVERRIDES.md and QUEUE-ORDER.json and names the owner", async () => {
+		const overrides = await preToolUse("Edit", {
+			file_path: "/tmp/project/.gsd/OVERRIDES.md", old_string: "a", new_string: "b",
+		});
+		const queueOrder = await preToolUse("Bash", { command: "echo '[]' > .gsd/QUEUE-ORDER.json" });
+		assert.equal(overrides.hookSpecificOutput?.permissionDecision, "deny");
+		assert.match(overrides.hookSpecificOutput?.permissionDecisionReason ?? "", /\/gsd steer/);
+		assert.equal(queueOrder.hookSpecificOutput?.permissionDecision, "deny");
+		assert.match(queueOrder.hookSpecificOutput?.permissionDecisionReason ?? "", /gsd_milestone_reorder/);
+	});
+
+	test("denies a write to STATE.md", async () => {
+		const decision = await preToolUse("Write", { file_path: "/tmp/project/.gsd/STATE.md", content: "x" });
+		assert.equal(decision.hookSpecificOutput?.permissionDecision, "deny");
+	});
+
+	test("allows source files and a bash read of a projection", async () => {
+		const write = await preToolUse("Write", { file_path: "/tmp/project/src/app.ts", content: "x" });
+		const read = await preToolUse("Bash", { command: `cat ${roadmap}` });
+		assert.notEqual(write.hookSpecificOutput?.permissionDecision, "deny");
+		assert.notEqual(read.hookSpecificOutput?.permissionDecision, "deny");
+	});
+});
+
+// ---------------------------------------------------------------------------
+// #2534 — background task results keep the turn open
+// ---------------------------------------------------------------------------
+
+function makeSdkResult(
+	uuid: string,
+	sessionId: string,
+	overrides: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> {
+	return {
+		type: "result",
+		subtype: "success",
+		uuid,
+		session_id: sessionId,
+		duration_ms: 1,
+		duration_api_ms: 1,
+		is_error: false,
+		num_turns: 1,
+		result: "done",
+		stop_reason: "end_turn",
+		total_cost_usd: 0,
+		usage: {
+			input_tokens: 0,
+			output_tokens: 0,
+			cache_read_input_tokens: 0,
+			cache_creation_input_tokens: 0,
+		},
+		...overrides,
+	};
+}
+
+function makeSdkSystem(subtype: string, sessionId: string, extra: Record<string, unknown> = {}): Record<string, unknown> {
+	return { type: "system", subtype, uuid: `sys-${subtype}`, session_id: sessionId, ...extra };
+}
+
+describe("stream-adapter — background task results (#2534)", () => {
+	test("keeps the turn open after a result while background tasks are pending and ends at the follow-up turn's result", async () => {
+		const sid = "session-2534a";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch agents and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "Waiting on the agents." } }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: "p1", session_id: sid };
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: rewrite docs" });
+					// First result: background task still pending — not terminal.
+					yield makeSdkResult("r1", sid, { result: "Waiting on the agents.", total_cost_usd: 0.01 });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" });
+					// Follow-up turn the CLI runs for the notification.
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "FINISHED" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					// Terminal result: nothing pending. total_cost_usd is cumulative.
+					yield makeSdkResult("r2", sid, { result: "FINISHED", total_cost_usd: 0.03, num_turns: 2 });
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1, "exactly one done event");
+		assert.equal(events.some((event) => event.type === "error"), false);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.ok(texts.includes("Waiting on the agents."), "the finished turn's text must survive");
+		assert.ok(texts.includes("FINISHED"), "the follow-up turn's text must be included");
+		assert.equal(
+			texts.filter((text: string) => text === "Waiting on the agents.").length,
+			1,
+			"the deferred result text must not be duplicated",
+		);
+		assert.equal(done[0].message.usage.cost.total, 0.03, "usage must come from the LAST (cumulative) result");
+	});
+
+	test("surfaces a waiting status while background tasks settle and clears it at the terminal result", async () => {
+		const sid = "session-2534b";
+		const statuses: string[] = [];
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				extensionUIContext: {
+					setStatus(key: string, value: string) {
+						if (key === "gsd-step") statuses.push(value);
+					},
+				},
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-2", description: "Agent: y" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "failed", output_file: "/tmp/out-1", summary: "boom" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-2", status: "completed", output_file: "/tmp/out-2", summary: "done" });
+					// The follow-up turn produced no streamed content of its own; its
+					// only output is the terminal result text.
+					yield makeSdkResult("r2", sid, { result: "FINISHED" });
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false);
+		assert.ok(
+			statuses.includes("Waiting for 2 background task(s) to finish (Esc stops them)"),
+			`waiting status must count both tasks; got ${JSON.stringify(statuses)}`,
+		);
+		assert.ok(statuses.includes("Waiting for 1 background task(s) to finish (Esc stops them)"));
+		assert.ok(statuses.includes("Background tasks finished; continuing the turn"));
+		assert.equal(statuses[statuses.length - 1], "", "status must be cleared at the terminal result");
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.deepEqual(texts, ["WAITING", "FINISHED"]);
+	});
+
+	test("reports output from multiple deferred turns when the stream ends after both settle", async () => {
+		const sid = "session-2534b2";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-2", description: "Agent: y" });
+					// A complete assistant message that never built a partial: its text
+					// must be captured once at the deferral, not re-appended later as
+					// the scalar fallback.
+					yield { type: "assistant", uuid: "a1", session_id: sid, parent_tool_use_id: null, message: { id: "msg-1", type: "message", role: "assistant", model: "claude-sonnet-4-6", content: [{ type: "text", text: "WAITING-ONE" }], stop_reason: "end_turn", usage: { input_tokens: 1, output_tokens: 1, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 } } };
+					// First deferral (two tasks pending).
+					yield makeSdkResult("r1", sid, { result: "WAITING-ONE" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/o1", summary: "done" });
+					// Follow-up turn starts, then defers again on the remaining task.
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield makeSdkResult("r2", sid, { result: "WAITING-TWO" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-2", status: "completed", output_file: "/tmp/o2", summary: "done" });
+					// The CLI exits after delivering the last notification without
+					// needing another model turn.
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false, "a settled multi-deferral turn must not report stream-exhausted");
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.deepEqual(texts, ["WAITING-ONE", "WAITING-TWO"]);
+	});
+
+	test("closes the SDK query when an error result lands with background tasks still pending", async () => {
+		const sid = "session-2534c";
+		let closeCalls = 0;
+		const messages: Record<string, unknown>[] = [
+			makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" }),
+			makeSdkResult("r1", sid, {
+				subtype: "error_during_execution",
+				is_error: true,
+				errors: ["boom"],
+				result: undefined,
+			}),
+		];
+		const queryResult = {
+			close() {
+				closeCalls += 1;
+			},
+			[Symbol.asyncIterator]() {
+				let index = 0;
+				return {
+					next: async () =>
+						index < messages.length
+							? { value: messages[index++], done: false }
+							: { value: undefined, done: true },
+				};
+			},
+		};
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: () => queryResult,
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), true, "the error result must surface");
+		assert.equal(closeCalls, 1, "the underlying query must be closed so pending tasks stop");
+	});
+
+	test("treats non-success result subtypes as terminal even when is_error is false", async () => {
+		// The SDK can emit error_max_turns / error_max_budget_usd results with
+		// is_error: false; deferring on those would keep the process alive after a
+		// failed turn. Only success results may be deferred.
+		const sid = "session-2534c2";
+		let closeCalls = 0;
+		const messages: Record<string, unknown>[] = [
+			makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" }),
+			makeSdkResult("r1", sid, {
+				subtype: "error_max_turns",
+				is_error: false,
+				errors: ["max turns reached"],
+				result: undefined,
+			}),
+		];
+		const queryResult = {
+			close() {
+				closeCalls += 1;
+			},
+			[Symbol.asyncIterator]() {
+				let index = 0;
+				return {
+					next: async () =>
+						index < messages.length
+							? { value: messages[index++], done: false }
+							: { value: undefined, done: true },
+				};
+			},
+		};
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				_sdkQueryForTest: () => queryResult,
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(closeCalls, 1, "a non-success result must not be deferred while tasks are pending");
+		assert.equal(events.filter((event) => event.type === "done").length, 1);
+	});
+
+	test("reports deferred turn output when the stream ends with tasks still pending", async () => {
+		const sid = "session-2534d";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					// Stream ends (CLI killed the pending task on exit) — no follow-up
+					// turn, no terminal result.
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1, "a deferred result must end as done, not stream-exhausted");
+		assert.equal(events.some((event) => event.type === "error"), false);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.ok(texts.includes("WAITING"), "the deferred turn's result text must be reported");
+		assert.ok(
+			texts.some((text: string) => text.includes("background task(s) were still running")),
+			"undelivered background tasks must be surfaced",
+		);
+	});
+
+	test("keeps stream-exhausted semantics when a started follow-up turn never finishes", async () => {
+		const sid = "session-2534e";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Go." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" });
+					// The follow-up turn starts (its own init) and streams partially,
+					// then the process dies without producing its `result`.
+					yield makeSdkSystem("init", sid, { tools: ["Read"] });
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial follow-u" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					// EOF without the follow-up turn's result.
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.filter((event) => event.type === "done").length, 0, "an interrupted follow-up turn must not complete cleanly");
+		const errors = events.filter((event) => event.type === "error");
+		assert.equal(errors.length, 1);
+		assert.equal(errors[0].error?.errorMessage, "stream_exhausted_without_result");
+	});
+
+	test("runs the tool-surface readiness gate on the first init only when a follow-up turn re-inits", async (t) => {
+		const cwd = mkdtempSync(join(tmpdir(), "claude-sdk-bg-init-gate-"));
+		t.after(() => rmSync(cwd, { recursive: true, force: true }));
+		const context: Context = {
+			systemPrompt: "UNIT: Run UAT",
+			messages: [{ role: "user", content: "Run UAT." } as Message],
+		};
+		_setAutoActiveForTest(true);
+		autoSession.currentUnit = { type: "run-uat", id: "M001/S001", startedAt: 0, workspaceRoot: cwd } as never;
+		t.after(() => {
+			autoSession.currentUnit = null;
+			_setAutoActiveForTest(false);
+		});
+		const requiredTools = getRequiredWorkflowToolsForUnit("run-uat")
+			.map((tool) => `mcp__gsd-workflow__${tool}`);
+		const sid = "session-2534f";
+		let queryCalls = 0;
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			context,
+			{
+				cwd,
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					queryCalls += 1;
+					yield {
+						type: "system",
+						subtype: "init",
+						tools: requiredTools,
+						mcp_servers: [{ name: "gsd-workflow", status: "connected" }],
+					};
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", description: "Agent: x" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					// Follow-up turn re-inits with an empty tool surface; the gate
+					// must not re-run (it would abort and re-run the whole prompt).
+					yield {
+						type: "system",
+						subtype: "init",
+						tools: [],
+						mcp_servers: [{ name: "gsd-workflow", status: "connected" }],
+					};
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/out", summary: "done" });
+					yield { type: "stream_event", event: { type: "message_start", message: { model: "claude-sonnet-4-6" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "FINISHED" } }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield { type: "stream_event", event: { type: "content_block_stop", index: 0 }, parent_tool_use_id: null, uuid: "p2", session_id: sid };
+					yield makeSdkResult("r2", sid, { result: "FINISHED" });
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(queryCalls, 1, "a follow-up-turn init must not restart the SDK query");
+		assert.equal(events.some((event) => event.type === "error"), false);
+		const done = events.filter((event) => event.type === "done");
+		assert.equal(done.length, 1);
+		const texts = done[0].message.content
+			.filter((block: any) => block.type === "text")
+			.map((block: any) => block.text);
+		assert.ok(texts.includes("FINISHED"), "the follow-up turn's output must reach the user");
+	});
+
+	test("surfaces native background tasks in the worker registry for the dashboard (#2533)", async (t) => {
+		resetWorkerRegistry();
+		t.after(() => resetWorkerRegistry());
+		const sid = "session-2533";
+		const stream = streamViaClaudeCode(
+			{ id: "claude-sonnet-4-6" } as any,
+			{ messages: [{ role: "user", content: "Dispatch agents and wait." } as Message] },
+			{
+				_skipWorkflowMcpPreflightForTest: true,
+				async *_sdkQueryForTest() {
+					yield makeSdkSystem("task_started", sid, { task_id: "task-1", task_type: "local_agent", description: "Agent: rewrite docs" });
+					yield makeSdkSystem("task_started", sid, { task_id: "task-2", task_type: "local_bash", description: "Bash: run tests" });
+					yield makeSdkResult("r1", sid, { result: "WAITING" });
+					// task-1 completes; task-2's process dies before any notification
+					// arrives — the attempt-end cleanup must settle its row.
+					yield makeSdkSystem("task_notification", sid, { task_id: "task-1", status: "completed", output_file: "/tmp/o1", summary: "done" });
+					yield makeSdkResult("r2", sid, { result: "FINISHED" });
+				},
+			} as any,
+		);
+
+		const events: any[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+
+		assert.equal(events.some((event) => event.type === "error"), false);
+		const workers = getActiveWorkers();
+		assert.equal(workers.length, 2, "both native tasks must be visible as worker rows");
+		assert.deepEqual(
+			workers.map((worker) => worker.agent).sort(),
+			["local_agent", "local_bash"],
+		);
+		for (const worker of workers) {
+			assert.equal(worker.batchSize, 2, "the batch header total must grow with the fan-out");
+		}
+		const completed = workers.find((worker) => worker.task === "Agent: rewrite docs");
+		assert.equal(completed?.status, "completed");
+		const unsettled = workers.find((worker) => worker.task === "Bash: run tests");
+		assert.equal(
+			unsettled?.status,
+			"failed",
+			"a task whose notification never arrived must not linger as running",
+		);
 	});
 });

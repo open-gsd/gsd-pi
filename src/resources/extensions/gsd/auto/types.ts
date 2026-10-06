@@ -84,6 +84,13 @@ export type PhaseResult<T = void> =
   | { action: "retry"; reason: string; data?: T }
   | { action: "next"; data: T }
 
+/** The result of running one unit through the unit phase. */
+export type UnitPhaseResult = PhaseResult<{
+  unitStartedAt?: number;
+  requestDispatchedAt?: number;
+  retryAfterMs?: number;
+}>;
+
 export interface IterationContext {
   ctx: ExtensionContext;
   pi: ExtensionAPI;
@@ -100,19 +107,10 @@ export interface IterationContext {
 export interface LoopState {
   /** Consecutive finalize timeout count — stops auto-mode after threshold. */
   consecutiveFinalizeTimeouts: number;
-  consecutiveDispatchCount?: Map<string, number>;
-  lastDispatchedKey?: string | null;
-  lastDispatchPhase?: string | null;
 }
 
 /** Max consecutive finalize timeouts before hard-stopping auto-mode. */
 export const MAX_FINALIZE_TIMEOUTS = 3;
-
-export interface PreDispatchData {
-  state: GSDState;
-  mid: string;
-  midTitle: string;
-}
 
 export interface IterationData {
   unitType: string;
@@ -127,6 +125,4 @@ export interface IterationData {
   previousTier: string | undefined;
   /** Model override from pre-dispatch hooks (applied after standard model selection). */
   hookModelOverride?: string;
-  /** Internal planning-only preparation that must not reconcile a custom-engine step. */
-  customEnginePreparation?: "task-replan";
 }

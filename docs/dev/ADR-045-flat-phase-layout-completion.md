@@ -3,9 +3,9 @@
 
 # ADR-045: Flat-Phase Layout Migration Completion
 
-> **Disposition under [ADR-046](ADR-046-database-authoritative-workflow-lifecycle.md): Superseded before adoption.** Readable layout compatibility remains an explicit import, export, and projection concern. Startup layout detection, automatic filesystem migration, and either on-disk layout influencing runtime authority are superseded by database-only reads and one-way projections.
+> **Disposition under [ADR-046](ADR-046-database-authoritative-workflow-lifecycle.md): Amended (2026-10-02).** Readable layout compatibility remains an explicit import, export, and projection concern, and flat-phase projection layout work continues. Startup layout detection, automatic filesystem migration, and either on-disk layout influencing runtime authority are superseded by database-only reads and one-way projections.
 
-**Status:** Proposed — maintainer decision required before any code follows
+**Status:** Amended by ADR-046 (see the notice above). Was: Proposed — maintainer decision required before any code follows
 **Date:** 2026-07-07
 **Author:** GSD architecture review
 **Related:** ADR-017 (state reconciliation, drift-driven), ADR-035 (projection dirty scope), `CONTEXT.md` Drift / Drift catalog / Worktree State Projection terms, and issues [#852](https://github.com/open-gsd/gsd-pi/issues/852), [#1303](https://github.com/open-gsd/gsd-pi/issues/1303), [#1305](https://github.com/open-gsd/gsd-pi/issues/1305), [#1313](https://github.com/open-gsd/gsd-pi/issues/1313), [#1316](https://github.com/open-gsd/gsd-pi/issues/1316)

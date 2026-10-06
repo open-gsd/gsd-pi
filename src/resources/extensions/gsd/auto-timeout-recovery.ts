@@ -13,9 +13,11 @@ import {
 } from "./unit-runtime.js";
 import {
   diagnoseExpectedArtifact,
+  resolveExpectedArtifactPath,
   verifyExpectedArtifact,
   writeBlockerPlaceholder,
 } from "./auto-recovery.js";
+import { blockedWriteReason } from "./write-intercept.js";
 
 import { bumpAndResolveSynthetic } from "./auto/resolve.js";
 import { finalizeProjectResearchTimeout } from "./project-research-policy.js";
@@ -24,12 +26,14 @@ import { getInFlightToolCount } from "./auto-tool-tracking.js";
 import { parseUnitId } from "./unit-id.js";
 import { readLatestTaskAttempt } from "./task-execution-domain-operation.js";
 import { isDbAvailable } from "./gsd-db.js";
+import { resetUnitBudget, spendUnitBudget } from "./db/unit-dispatch-budgets.js";
 
 export interface RecoveryContext {
   basePath: string;
   verbose: boolean;
   currentUnitStartedAt: number;
-  unitRecoveryCount: Map<string, number>;
+  /** Budget counts of units with no dispatch row (db/unit-dispatch-budgets.ts). */
+  unclaimedUnitBudgets: Map<string, number>;
 }
 
 export async function recoverTimedOutUnit(
@@ -47,15 +51,16 @@ export async function recoverTimedOutUnit(
   // Each advance branch calls `bumpAndResolveSynthetic` to bump+resolve
   // atomically. Search for that helper to find all supersede sites.
 
-  const { basePath, verbose, currentUnitStartedAt, unitRecoveryCount } = rctx;
+  const { basePath, verbose, currentUnitStartedAt, unclaimedUnitBudgets } = rctx;
 
   const runtime = readUnitRuntimeRecord(basePath, unitType, unitId);
   const recoveryAttempts = runtime?.recoveryAttempts ?? 0;
   const maxRecoveryAttempts = reason === "idle" ? 2 : 1;
 
-  const recoveryKey = `${unitType}/${unitId}`;
-  const attemptNumber = (unitRecoveryCount.get(recoveryKey) ?? 0) + 1;
-  unitRecoveryCount.set(recoveryKey, attemptNumber);
+  // ADR-048: the count is on the unit's dispatch row, so a restart keeps the
+  // backoff of the last process.
+  const recoveryBudget = { unitType, unitId, kind: "timeout-recovery" } as const;
+  const attemptNumber = spendUnitBudget(unclaimedUnitBudgets, recoveryBudget);
 
   if (attemptNumber > 1) {
     // Exponential backoff: 2^(n-1) seconds, capped at 30s
@@ -68,7 +73,7 @@ export async function recoverTimedOutUnit(
   }
 
   if (unitType === "execute-task") {
-    const status = await inspectExecuteTaskDurability(basePath, unitId);
+    const status = inspectExecuteTaskDurability(unitId);
     if (!status) return "paused";
 
     writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnitStartedAt, {
@@ -89,7 +94,7 @@ export async function recoverTimedOutUnit(
         `${reason === "idle" ? "Idle" : "Timeout"} recovery: ${unitType} ${unitId} already completed. Continuing auto-mode. (attempt ${attemptNumber})`,
         "info",
       );
-      unitRecoveryCount.delete(recoveryKey);
+      resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
       bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
       return "recovered";
     }
@@ -115,8 +120,7 @@ export async function recoverTimedOutUnit(
             `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts}.`,
             `Current durability status: ${formatExecuteTaskRecoveryStatus(status)}.`,
             "You MUST finish the durable output NOW, even if incomplete.",
-            "Write the task summary with whatever you have accomplished so far.",
-            "Mark the task [x] in the plan. Commit your work.",
+            "Call `gsd_task_complete` with whatever you have accomplished so far. Commit your work.",
             "A partial summary is infinitely better than no summary.",
           ]
         : [
@@ -126,7 +130,8 @@ export async function recoverTimedOutUnit(
             `Current durability status: ${formatExecuteTaskRecoveryStatus(status)}.`,
             "Do not keep exploring.",
             "Immediately finish the required durable output for this unit.",
-            "If full completion is impossible, write the partial artifact/state needed for recovery and make the blocker explicit.",
+            "If full completion is impossible, call `gsd_task_complete` with what is done and state the blocker in the summary.",
+            "Do not edit the plan or summary files; they are rendered from the database.",
           ];
 
       const recoveryTrigger = getInFlightToolCount() === 0;
@@ -167,7 +172,7 @@ export async function recoverTimedOutUnit(
         `${unitType} ${unitId} ended after ${maxRecoveryAttempts} recovery attempts (${diagnostic}). Diagnostic artifacts were written; durable Task recovery will decide the next action. (attempt ${attemptNumber})`,
         "warning",
       );
-      unitRecoveryCount.delete(recoveryKey);
+      resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
       bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
       return "recovered";
     }
@@ -204,7 +209,7 @@ export async function recoverTimedOutUnit(
         ? `Project research ${reason} timeout: wrote blocker files for missing dimensions and advancing with partial research.`
         : `Project research ${reason} timeout: wrote PROJECT-RESEARCH-BLOCKER.md and stopping fail-closed.`;
     ctx.ui.notify(message, outcome.kind === "global-blocker" ? "error" : "warning");
-    unitRecoveryCount.delete(recoveryKey);
+    resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
     bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
     return "recovered";
   }
@@ -219,7 +224,7 @@ export async function recoverTimedOutUnit(
       `${reason === "idle" ? "Idle" : "Timeout"} recovery: ${unitType} ${unitId} durable outcome verified. Advancing. (attempt ${attemptNumber})`,
       "info",
     );
-    unitRecoveryCount.delete(recoveryKey);
+    resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
     bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
     return "recovered";
   }
@@ -237,6 +242,11 @@ export async function recoverTimedOutUnit(
       harnessAbort: undefined,
     });
 
+    // A projection is saved through its tool; name the tool, not the file.
+    const artifactPath = resolveExpectedArtifactPath(unitType, unitId, basePath);
+    const projectionRule = artifactPath ? blockedWriteReason(artifactPath) : null;
+    const saveRule = projectionRule ? [projectionRule] : [];
+
     const steeringLines = unitType === "validate-milestone"
       ? [
           `**${isEscalation ? "FINAL " : ""}${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — persist the canonical validation now.**`,
@@ -249,14 +259,15 @@ export async function recoverTimedOutUnit(
         ]
       : isEscalation
         ? [
-            `**FINAL ${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — last chance before skip.**`,
+            `**FINAL ${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — last chance before auto-mode pauses.**`,
             `You are still executing ${unitType} ${unitId}.`,
-            `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts} — next failure skips this unit.`,
+            `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts} — next failure pauses auto-mode on this unit.`,
             `Expected durable output: ${expected}.`,
-            "You MUST write the artifact file NOW, even if incomplete.",
-            "Write whatever you have — partial research, preliminary findings, best-effort analysis.",
+            "You MUST save the durable output NOW, even if incomplete.",
+            "Save whatever you have — partial research, preliminary findings, best-effort analysis.",
             "A partial artifact is infinitely better than no artifact.",
-            "If you are truly blocked, write the file with a BLOCKER section explaining why.",
+            "If you are truly blocked, save it with a BLOCKER section explaining why.",
+            ...saveRule,
           ]
         : [
             `**${reason === "idle" ? "IDLE" : "HARD TIMEOUT"} RECOVERY — stay in auto-mode.**`,
@@ -264,8 +275,9 @@ export async function recoverTimedOutUnit(
             `Recovery attempt ${recoveryAttempts + 1} of ${maxRecoveryAttempts}.`,
             `Expected durable output: ${expected}.`,
             "Stop broad exploration.",
-            "Write the required artifact now.",
-            "If blocked, write the partial artifact and explicitly record the blocker instead of going silent.",
+            "Save the required output now.",
+            "If blocked, save the partial output and explicitly record the blocker instead of going silent.",
+            ...saveRule,
           ];
 
     const recoveryTrigger = getInFlightToolCount() === 0;
@@ -311,38 +323,40 @@ export async function recoverTimedOutUnit(
     return "paused";
   }
 
-  // Retries exhausted — surface a blocker instead of silently stalling.
-  // Milestone planning pauses fail-closed; legacy units retain their existing
-  // placeholder-and-advance behavior.
+  // Retries exhausted. The unit recorded no result, so it is not complete:
+  // record the outcome in the database, write a diagnostic sidecar and pause
+  // for repair. A blocker file never stands in for the unit's result. Only the
+  // aggregate parallel-research unit advances, because dispatch reads its
+  // recorded block and falls back to per-slice research.
   const placeholder = writeBlockerPlaceholder(
     unitType, unitId, basePath,
-    `${reason} recovery exhausted ${maxRecoveryAttempts} attempts without producing the artifact.`,
+    `${reason} recovery exhausted ${maxRecoveryAttempts} attempts without recording a result.`,
   );
 
   if (placeholder) {
-    const planningBlocked = unitType === "plan-milestone";
+    const fallsBack = unitType === "research-slice" && unitId.endsWith("/parallel-research");
     writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnitStartedAt, {
-      phase: planningBlocked ? "paused" : "skipped",
+      phase: fallsBack ? "skipped" : "paused",
       recoveryAttempts: recoveryAttempts + 1,
       lastRecoveryReason: reason,
     });
-    if (planningBlocked) {
+    if (fallsBack) {
+      ctx.ui.notify(
+        `${unitType} ${unitId} skipped after ${maxRecoveryAttempts} recovery attempts. Diagnostic written to ${placeholder}. Falling back to per-slice research. (attempt ${attemptNumber})`,
+        "warning",
+      );
+    } else {
       ctx.ui.notify(
         `${unitType} ${unitId} blocked after ${maxRecoveryAttempts} recovery attempts. Diagnostic written to ${placeholder}; no milestone work was marked complete. Pausing for repair. (attempt ${attemptNumber})`,
         "error",
       );
-    } else {
-      ctx.ui.notify(
-        `${unitType} ${unitId} skipped after ${maxRecoveryAttempts} recovery attempts. Blocker placeholder written to ${placeholder}. Advancing pipeline. (attempt ${attemptNumber})`,
-        "warning",
-      );
     }
-    unitRecoveryCount.delete(recoveryKey);
+    resetUnitBudget(unclaimedUnitBudgets, recoveryBudget);
     bumpAndResolveSynthetic(`timeout-recovery:${reason}:${unitType}/${unitId}`);
-    return planningBlocked ? "paused" : "recovered";
+    return fallsBack ? "recovered" : "paused";
   }
 
-  // Fallback: couldn't resolve artifact path — pause as before.
+  // Fallback: no block was recorded (unresolvable path or no gate row) — pause.
   writeUnitRuntimeRecord(basePath, unitType, unitId, currentUnitStartedAt, {
     phase: "paused",
     recoveryAttempts: recoveryAttempts + 1,

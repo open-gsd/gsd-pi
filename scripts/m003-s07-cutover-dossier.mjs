@@ -102,13 +102,6 @@ export const COMMAND_INVENTORY = Object.freeze([
     verdict: "required",
   },
   {
-    id: "semantic-shadow-no-cutover",
-    command: "pnpm run gate:semantic-shadow-no-cutover",
-    stage: "observed",
-    verdict: "pass",
-    exitCode: 0,
-  },
-  {
     id: "authority-baseline",
     command: "pnpm run baseline:workflow-authority",
     stage: "observed",

@@ -1,6 +1,6 @@
 **Working directory:** `{{workingDirectory}}`. All file reads, writes, and shell commands MUST operate relative to this directory. Do NOT `cd` to any other directory.
 
-Discuss milestone {{milestoneId}} ("{{milestoneTitle}}"). Identify real gray areas, ask about them, then write `{{milestoneId}}-CONTEXT.md` in the milestone directory with the **Context** template below. If a `GSD Skill Preferences` block exists, use it to choose skills; artifact rules still apply.
+Discuss milestone {{milestoneId}} ("{{milestoneTitle}}"). Identify real gray areas, ask about them, then save the milestone context with `gsd_summary_save` (`artifact_type: "CONTEXT"`) using the **Context** template below. If a `GSD Skill Preferences` block exists, use it to choose skills; artifact rules still apply.
 
 **Structured questions available: {{structuredQuestionsAvailable}}**
 
@@ -24,6 +24,7 @@ Before asking, read `.gsd/PROJECT.md` and find `## Project Shape` -> `**Complexi
 ### Before your first question round
 
 Ground your questions in the **preloaded context above** (milestone roadmap/context/research, the decisions register, prior-milestone summaries) plus any Preparation Context snapshot — those are authoritative. **Do not survey the codebase** with `rg`/`find`/`scout` before asking; the preloaded files are marked do-not-re-read. Read a specific file only when a question's answer genuinely hinges on it.
+
 - Identify the 3-5 behavioral or architectural unknowns that materially change what gets built.
 - Use `resolve_library` / `get_library_docs` for unfamiliar libraries; prefer them over web search.
 
@@ -32,6 +33,7 @@ Ground your questions in the **preloaded context above** (milestone roadmap/cont
 ### Question rounds
 
 Ask **1–3 questions per round**. Target one focus at a time:
+
 - **What**: concrete enough to explain to a stranger.
 - **Why**: problem solved or desire fulfilled.
 - **Who**: user, team, or themselves.
@@ -68,6 +70,7 @@ After each answer round, decide whether the context would be strong enough.
 Start open and follow the user's language. Challenge vague phrases with specifics. Default to experience/outcome questions, but ask implementation questions when choices materially affect scope, proof, compliance, integration, deployment, or irreversible architecture. Use position-first framing when useful: "I'd lean toward X because Y — does that match your thinking?" Ask what would disappoint them and what they explicitly do not want.
 
 **Anti-patterns — never do these:**
+
 - Checklist walking through predetermined topics regardless of what the user said
 - Canned generic questions that could apply to any project
 - Corporate speak ("What are your key success metrics?")
@@ -92,6 +95,7 @@ Before the wrap-up gate, verify coverage:
 **Then confirm:**
 
 **If `{{structuredQuestionsAvailable}}` is `true`:** use `ask_user_questions` with:
+
 - header: "Depth Check"
 - question: "Did I capture the depth right?"
 - options: "Yes, you got it (Recommended)", "Not quite — let me clarify"
